@@ -5,7 +5,7 @@ import type { LogEntry, StatsResult } from './types.js';
 export interface LogStore {
   init(): Promise<void>;
   insertBatch(entries: LogEntry[]): Promise<void>;
-  queryLogs(limit: number, keyName?: string): Promise<LogEntry[]>;
+  queryLogs(limit: number, filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' }): Promise<LogEntry[]>;
   stats(date: string): Promise<StatsResult>;
   close?(): Promise<void>;
 }
@@ -20,6 +20,8 @@ export class SQLiteLogStore implements LogStore {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           proxy_key_name TEXT NOT NULL,
           client_ip TEXT,
+          client_protocol TEXT,
+          upstream_protocol TEXT,
           request_model TEXT,
           actual_model TEXT,
           upstream_name TEXT,
@@ -35,22 +37,29 @@ export class SQLiteLogStore implements LogStore {
       CREATE INDEX IF NOT EXISTS idx_logs_key ON request_logs(proxy_key_name);
       CREATE INDEX IF NOT EXISTS idx_logs_time ON request_logs(created_at);
     `);
+
+    // Backwards-compat migration: pre-existing dbs lack the protocol columns.
+    addColumnIfMissing(this.db, 'request_logs', 'client_protocol', 'TEXT');
+    addColumnIfMissing(this.db, 'request_logs', 'upstream_protocol', 'TEXT');
   }
 
   async insertBatch(entries: LogEntry[]): Promise<void> {
     if (!this.db || entries.length === 0) return;
     const stmt = this.db.prepare(`
       INSERT INTO request_logs (
-        proxy_key_name, client_ip, request_model, actual_model, upstream_name,
+        proxy_key_name, client_ip, client_protocol, upstream_protocol,
+        request_model, actual_model, upstream_name,
         status_code, error_message, request_tokens, response_tokens, total_tokens,
         duration_ms, is_streaming
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertMany = this.db.transaction((rows: LogEntry[]) => {
       for (const row of rows) {
         stmt.run(
           row.proxy_key_name,
           row.client_ip,
+          row.client_protocol,
+          row.upstream_protocol,
           row.request_model,
           row.actual_model,
           row.upstream_name,
@@ -67,14 +76,23 @@ export class SQLiteLogStore implements LogStore {
     insertMany(entries);
   }
 
-  async queryLogs(limit: number, keyName?: string): Promise<LogEntry[]> {
+  async queryLogs(
+    limit: number,
+    filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' }
+  ): Promise<LogEntry[]> {
     if (!this.db) return [];
     let sql = 'SELECT * FROM request_logs';
     const params: any[] = [];
-    if (keyName) {
-      sql += ' WHERE proxy_key_name = ?';
-      params.push(keyName);
+    const where: string[] = [];
+    if (filter?.keyName) {
+      where.push('proxy_key_name = ?');
+      params.push(filter.keyName);
     }
+    if (filter?.protocol) {
+      where.push('(client_protocol = ? OR upstream_protocol = ?)');
+      params.push(filter.protocol, filter.protocol);
+    }
+    if (where.length > 0) sql += ' WHERE ' + where.join(' AND ');
     sql += ' ORDER BY created_at DESC LIMIT ?';
     params.push(limit);
     const rows = this.db.prepare(sql).all(...params) as any[];
@@ -82,6 +100,8 @@ export class SQLiteLogStore implements LogStore {
       id: r.id,
       proxy_key_name: r.proxy_key_name,
       client_ip: r.client_ip,
+      client_protocol: r.client_protocol ?? null,
+      upstream_protocol: r.upstream_protocol ?? null,
       request_model: r.request_model,
       actual_model: r.actual_model,
       upstream_name: r.upstream_name,
@@ -122,6 +142,17 @@ export class SQLiteLogStore implements LogStore {
   async close(): Promise<void> {
     this.db?.close();
   }
+}
+
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  type: string
+): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 export async function logStoreFromConfig(_configPath?: string): Promise<LogStore> {

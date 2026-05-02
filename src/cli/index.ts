@@ -133,12 +133,20 @@ program
   .description('Query request logs')
   .option('-t, --tail <n>', 'Number of recent logs', '20')
   .option('-k, --key <name>', 'Filter by proxy key name')
+  .option('--protocol <protocol>', 'Filter by protocol (anthropic|openai)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
     const { logStoreFromConfig } = await import('../logger/store.js');
     const store = await logStoreFromConfig(options.config);
     const limit = parseInt(options.tail, 10);
-    const logs = await store.queryLogs(limit, options.key);
+    if (options.protocol && options.protocol !== 'anthropic' && options.protocol !== 'openai') {
+      console.error('--protocol must be "anthropic" or "openai"');
+      process.exit(1);
+    }
+    const logs = await store.queryLogs(limit, {
+      keyName: options.key,
+      protocol: options.protocol,
+    });
     if (logs.length === 0) {
       console.log('No logs found.');
       return;
@@ -147,6 +155,8 @@ program
       logs.map((l) => ({
         id: l.id,
         key: l.proxy_key_name,
+        cp: l.client_protocol ?? '-',
+        up: l.upstream_protocol ?? '-',
         model: l.request_model,
         upstream: l.upstream_name,
         status: l.status_code,

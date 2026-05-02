@@ -1,9 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ConfigStore } from '../config/store.js';
 import { selectUpstreams } from '../router/upstream.js';
-import { AnthropicAdapter } from '../protocol/anthropic.js';
-import type { ProtocolAdapter } from '../protocol/adapter.js';
-import { authenticateProxyKey, sendAuthError, sendNoUpstreamError } from './auth.js';
+import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
+import { authenticateProxyKey } from './auth.js';
 import type { LogEntry } from '../logger/types.js';
 
 function getClientIp(req: IncomingMessage): string {
@@ -21,9 +20,44 @@ function collectBody(req: IncomingMessage): Promise<Buffer> {
   });
 }
 
-function pickAdapter(protocol: string): ProtocolAdapter {
-  if (protocol === 'anthropic') return new AnthropicAdapter();
-  throw new Error(`Unsupported protocol: ${protocol}`);
+function clientProtocolFromPath(path: string): Protocol | null {
+  // Anthropic: /v1/messages (canonical)
+  // OpenAI: /v1/chat/completions (canonical)
+  if (path.startsWith('/v1/messages')) return 'anthropic';
+  if (path.startsWith('/v1/chat/completions')) return 'openai';
+  return null;
+}
+
+function writeProtocolError(
+  res: ServerResponse,
+  clientProto: Protocol,
+  statusCode: number,
+  errorType: string,
+  message: string
+): void {
+  const body =
+    clientProto === 'anthropic'
+      ? { type: 'error', error: { type: errorType, message } }
+      : { error: { message, type: errorType, code: null } };
+  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
+
+function extractNonStreamUsage(
+  upstreamProto: Protocol,
+  body: any
+): { inputTokens?: number; outputTokens?: number } {
+  if (!body || typeof body !== 'object') return {};
+  if (upstreamProto === 'anthropic') {
+    return {
+      inputTokens: body.usage?.input_tokens,
+      outputTokens: body.usage?.output_tokens,
+    };
+  }
+  return {
+    inputTokens: body.usage?.prompt_tokens,
+    outputTokens: body.usage?.completion_tokens,
+  };
 }
 
 export async function proxyHandler(
@@ -34,9 +68,17 @@ export async function proxyHandler(
 ): Promise<void> {
   const startTime = Date.now();
 
+  const reqPath = req.url || '/';
+  const clientProto = clientProtocolFromPath(reqPath);
+  if (!clientProto) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'Not found', type: 'not_found_error', code: null } }));
+    return;
+  }
+
   const auth = authenticateProxyKey(store, req);
   if (!auth.ok) {
-    sendAuthError(res);
+    writeProtocolError(res, clientProto, 401, 'authentication_error', 'Invalid proxy key');
     return;
   }
   const proxyKeyName = auth.keyName;
@@ -56,73 +98,86 @@ export async function proxyHandler(
   const candidates = model ? selectUpstreams(model, config.upstreams) : [];
 
   if (candidates.length === 0) {
-    sendNoUpstreamError(res);
+    writeProtocolError(res, clientProto, 404, 'not_found_error', 'No available upstream for the requested model');
     enqueue({
       proxy_key_name: proxyKeyName,
       client_ip: getClientIp(req),
-      request_model: model,
+      client_protocol: clientProto,
+      upstream_protocol: null,
+      request_model: model ?? null,
+      actual_model: null,
+      upstream_name: null,
       status_code: 404,
+      error_message: 'No available upstream',
+      request_tokens: null,
+      response_tokens: null,
+      total_tokens: null,
       duration_ms: Date.now() - startTime,
       is_streaming: false,
-    } as LogEntry);
+    });
     return;
   }
 
   const isStreaming = parsedBody?.stream === true;
 
   for (let i = 0; i < candidates.length; i++) {
-    const upstream = candidates[i].upstream;
-    const adapter = pickAdapter(upstream.protocol);
-    const actualModel = adapter.extractModel(parsedBody) || model;
+    const { upstream, resolvedModel } = candidates[i];
+    const bridge = pickBridge(clientProto, upstream.protocol);
 
     const tryStart = Date.now();
     const result = await trySingleUpstream({
       req,
       res,
-      bodyBuffer,
+      parsedBody,
+      resolvedModel,
       upstream,
-      adapter,
+      bridge,
       isStreaming,
     });
 
     if (result.ok) {
-      if (isStreaming && result.logPromise) {
-        result.logPromise.then((usage) => {
+      if (isStreaming && result.usagePromise) {
+        result.usagePromise.then((usage) => {
           enqueue({
             proxy_key_name: proxyKeyName,
             client_ip: getClientIp(req),
+            client_protocol: clientProto,
+            upstream_protocol: upstream.protocol,
             request_model: model,
-            actual_model: actualModel,
+            actual_model: resolvedModel,
             upstream_name: upstream.name,
             status_code: result.statusCode ?? 200,
-            request_tokens: usage.inputTokens,
-            response_tokens: usage.outputTokens,
+            error_message: null,
+            request_tokens: usage.inputTokens ?? null,
+            response_tokens: usage.outputTokens ?? null,
             total_tokens:
               usage.inputTokens !== undefined && usage.outputTokens !== undefined
                 ? usage.inputTokens + usage.outputTokens
-                : undefined,
+                : null,
             duration_ms: Date.now() - startTime,
             is_streaming: true,
-          } as LogEntry);
+          });
         });
       } else if (!isStreaming) {
         enqueue({
           proxy_key_name: proxyKeyName,
           client_ip: getClientIp(req),
+          client_protocol: clientProto,
+          upstream_protocol: upstream.protocol,
           request_model: model,
-          actual_model: actualModel,
+          actual_model: resolvedModel,
           upstream_name: upstream.name,
           status_code: result.statusCode ?? 200,
-          error_message: result.errorMessage,
-          request_tokens: result.usage?.inputTokens,
-          response_tokens: result.usage?.outputTokens,
+          error_message: null,
+          request_tokens: result.usage?.inputTokens ?? null,
+          response_tokens: result.usage?.outputTokens ?? null,
           total_tokens:
             result.usage?.inputTokens !== undefined && result.usage?.outputTokens !== undefined
               ? result.usage.inputTokens + result.usage.outputTokens
-              : undefined,
+              : null,
           duration_ms: Date.now() - startTime,
           is_streaming: false,
-        } as LogEntry);
+        });
       }
       return;
     }
@@ -134,19 +189,25 @@ export async function proxyHandler(
     enqueue({
       proxy_key_name: proxyKeyName,
       client_ip: getClientIp(req),
+      client_protocol: clientProto,
+      upstream_protocol: upstream.protocol,
       request_model: model,
-      actual_model: actualModel,
+      actual_model: resolvedModel,
       upstream_name: upstream.name,
       status_code: status,
-      error_message: result.errorMessage,
+      error_message: result.errorMessage ?? null,
+      request_tokens: null,
+      response_tokens: null,
+      total_tokens: null,
       duration_ms: duration,
       is_streaming: isStreaming,
-    } as LogEntry);
+    });
 
     if (!shouldRetry) {
       if (!res.headersSent) {
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: result.errorMessage || 'Upstream error' } }));
+        const err = bridge.wrapError(status, result.errorMessage || 'Upstream error');
+        res.writeHead(status, { 'Content-Type': err.contentType });
+        res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
       }
       return;
     }
@@ -155,8 +216,10 @@ export async function proxyHandler(
   }
 
   if (!res.headersSent) {
-    res.writeHead(502, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'All upstreams failed' } }));
+    const lastBridge = pickBridge(clientProto, candidates[candidates.length - 1].upstream.protocol);
+    const err = lastBridge.wrapError(502, 'All upstreams failed');
+    res.writeHead(502, { 'Content-Type': err.contentType });
+    res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
   }
 }
 
@@ -166,24 +229,42 @@ interface TryResult {
   statusCode?: number;
   usage?: { inputTokens?: number; outputTokens?: number };
   errorMessage?: string;
-  logPromise?: Promise<{ inputTokens?: number; outputTokens?: number }>;
+  usagePromise?: Promise<{ inputTokens?: number; outputTokens?: number }>;
 }
 
 async function trySingleUpstream(options: {
   req: IncomingMessage;
   res: ServerResponse;
-  bodyBuffer: Buffer;
-  upstream: { name: string; baseUrl: string; apiKey: string; protocol: string };
-  adapter: ProtocolAdapter;
+  parsedBody: any;
+  resolvedModel: string;
+  upstream: { name: string; baseUrl: string; apiKey: string; protocol: Protocol };
+  bridge: Bridge;
   isStreaming: boolean;
 }): Promise<TryResult> {
-  const { req, res, bodyBuffer, upstream, adapter, isStreaming } = options;
+  const { req, res, parsedBody, resolvedModel, upstream, bridge, isStreaming } = options;
 
-  const upstreamUrl = new URL(`${upstream.baseUrl.replace(/\/$/, '')}${req.url || '/'}`);
+  const clientPath = req.url || '/';
+  const upstreamPath = bridge.rewriteUrlPath(clientPath);
+  const upstreamUrl = new URL(`${upstream.baseUrl.replace(/\/$/, '')}${upstreamPath}`);
+
+  const transformedBody = bridge.transformRequest(parsedBody ?? {});
+  if (transformedBody && typeof transformedBody === 'object') {
+    transformedBody.model = resolvedModel;
+  }
+  const upstreamBodyBytes = Buffer.from(JSON.stringify(transformedBody), 'utf-8');
+
   const upstreamHeaders = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
-    if (key === 'host' || key === 'authorization' || key === 'x-api-key') continue;
+    if (
+      key === 'host' ||
+      key === 'authorization' ||
+      key === 'x-api-key' ||
+      key === 'content-length' ||
+      key === 'content-encoding' ||
+      key === 'accept-encoding'
+    )
+      continue;
     if (Array.isArray(value)) {
       for (const v of value) upstreamHeaders.append(key, v);
     } else {
@@ -192,18 +273,16 @@ async function trySingleUpstream(options: {
   }
   upstreamHeaders.set('authorization', `Bearer ${upstream.apiKey}`);
   upstreamHeaders.set('host', upstreamUrl.host);
-  upstreamHeaders.set('accept', req.headers.accept || 'application/json');
-  upstreamHeaders.set('content-type', req.headers['content-type'] || 'application/json');
-
-  const requestInit = adapter.transformRequest({
-    method: req.method,
-    headers: upstreamHeaders,
-    body: bodyBuffer.length > 0 ? bodyBuffer : undefined,
-  });
+  upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
+  upstreamHeaders.set('content-type', 'application/json');
 
   let upstreamRes: Response;
   try {
-    upstreamRes = await fetch(upstreamUrl.toString(), requestInit as RequestInit);
+    upstreamRes = await fetch(upstreamUrl.toString(), {
+      method: req.method ?? 'POST',
+      headers: upstreamHeaders,
+      body: upstreamBodyBytes,
+    });
   } catch (err: any) {
     return { ok: false, shouldRetry: true, statusCode: 502, errorMessage: err.message };
   }
@@ -211,9 +290,12 @@ async function trySingleUpstream(options: {
   if (upstreamRes.status >= 400 && upstreamRes.status < 500) {
     let message = 'Upstream returned client error';
     try {
-      const cloned = upstreamRes.clone();
-      const errBody: any = await cloned.json();
-      message = errBody?.error?.message || message;
+      const errBody: any = await upstreamRes.clone().json();
+      message =
+        errBody?.error?.message ??
+        errBody?.error ??
+        message;
+      if (typeof message !== 'string') message = JSON.stringify(message);
     } catch {}
     return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };
   }
@@ -221,80 +303,52 @@ async function trySingleUpstream(options: {
   if (upstreamRes.status >= 500) {
     let message = 'Upstream returned server error';
     try {
-      const cloned = upstreamRes.clone();
-      const errBody: any = await cloned.json();
-      message = errBody?.error?.message || message;
+      const errBody: any = await upstreamRes.clone().json();
+      message = errBody?.error?.message ?? message;
     } catch {}
     return { ok: false, shouldRetry: true, statusCode: upstreamRes.status, errorMessage: message };
   }
 
-  const responseHeaders: Record<string, string> = {};
-  upstreamRes.headers.forEach((value, key) => {
-    responseHeaders[key] = value;
-  });
-
   if (!isStreaming) {
-    const cloned = upstreamRes.clone();
-    const resBody: any = await cloned.json().catch(() => ({}));
-    const usage = adapter.extractUsage(resBody);
-
-    res.writeHead(upstreamRes.status, responseHeaders);
-    const finalRes = await adapter.transformResponse(upstreamRes);
-    const buf = Buffer.from(await finalRes.arrayBuffer());
-    res.end(buf);
-
-    return { ok: true, statusCode: upstreamRes.status, usage, errorMessage: resBody?.error?.message };
+    let upstreamJson: any;
+    try {
+      upstreamJson = await upstreamRes.json();
+    } catch (err: any) {
+      return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: 'Invalid upstream JSON' };
+    }
+    const usage = extractNonStreamUsage(upstream.protocol, upstreamJson);
+    const transformed = bridge.transformResponse(upstreamJson);
+    res.writeHead(upstreamRes.status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(transformed));
+    return { ok: true, statusCode: upstreamRes.status, usage };
   }
 
   if (!upstreamRes.body) {
-    res.writeHead(upstreamRes.status, responseHeaders);
+    res.writeHead(upstreamRes.status, { 'Content-Type': 'text/event-stream' });
     res.end();
     return { ok: true, statusCode: upstreamRes.status };
   }
 
-  const [clientStream, logStream] = upstreamRes.body.tee();
-  const logPromise = parseStreamForUsage(logStream, adapter);
+  const { clientStream, usage } = bridge.transformStream(upstreamRes.body);
 
-  res.writeHead(upstreamRes.status, responseHeaders);
+  res.writeHead(upstreamRes.status, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
   const reader = clientStream.getReader();
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      res.write(value);
+      if (value) res.write(value);
     }
+  } catch {
+    // upstream/client disconnect; usage promise will still settle
   } finally {
     reader.releaseLock();
     res.end();
   }
 
-  return { ok: true, statusCode: upstreamRes.status, logPromise };
-}
-
-async function parseStreamForUsage(
-  stream: ReadableStream<Uint8Array>,
-  adapter: ProtocolAdapter
-): Promise<{ inputTokens?: number; outputTokens?: number }> {
-  const decoder = new TextDecoder('utf-8');
-  const reader = stream.getReader();
-  let buffer = '';
-  const events: string[] = [];
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
-      for (const part of parts) {
-        if (part.trim()) events.push(part.trim());
-      }
-    }
-    if (buffer.trim()) events.push(buffer.trim());
-  } finally {
-    reader.releaseLock();
-  }
-
-  return adapter.extractStreamUsage(events);
+  return { ok: true, statusCode: upstreamRes.status, usagePromise: usage };
 }

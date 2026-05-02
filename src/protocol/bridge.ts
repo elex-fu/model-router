@@ -39,12 +39,10 @@ export interface Bridge {
 
 import { PassthroughAnthropicBridge } from './passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from './passthrough-openai.js';
+import { AnthToOpenAIBridge } from './anth-to-openai.js';
+import { OpenAIToAnthBridge } from './openai-to-anth.js';
 
-/**
- * Pick the bridge for a given (clientProto, upstreamProto) pair.
- * Phase 3 only registers the passthrough bridges; cross-protocol bridges
- * land in Phase 4 (a→o) and Phase 5 (o→a).
- */
+/** Pick the bridge for a given (clientProto, upstreamProto) pair. */
 export function pickBridge(clientProto: Protocol, upstreamProto: Protocol): Bridge {
   if (clientProto === 'anthropic' && upstreamProto === 'anthropic') {
     return new PassthroughAnthropicBridge();
@@ -52,7 +50,11 @@ export function pickBridge(clientProto: Protocol, upstreamProto: Protocol): Brid
   if (clientProto === 'openai' && upstreamProto === 'openai') {
     return new PassthroughOpenAiBridge();
   }
-  throw new Error(
-    `Bridge for ${clientProto} → ${upstreamProto} is not implemented yet (Phase 4/5)`
-  );
+  if (clientProto === 'anthropic' && upstreamProto === 'openai') {
+    return new AnthToOpenAIBridge();
+  }
+  if (clientProto === 'openai' && upstreamProto === 'anthropic') {
+    return new OpenAIToAnthBridge();
+  }
+  throw new Error(`Unsupported bridge: ${clientProto} → ${upstreamProto}`);
 }

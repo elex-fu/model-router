@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { pickBridge } from '../../src/protocol/bridge.js';
 import { PassthroughAnthropicBridge } from '../../src/protocol/passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from '../../src/protocol/passthrough-openai.js';
+import { AnthToOpenAIBridge } from '../../src/protocol/anth-to-openai.js';
+import { OpenAIToAnthBridge } from '../../src/protocol/openai-to-anth.js';
 
 test('pickBridge(anthropic, anthropic) returns PassthroughAnthropicBridge', () => {
   const b = pickBridge('anthropic', 'anthropic');
@@ -18,10 +20,16 @@ test('pickBridge(openai, openai) returns PassthroughOpenAiBridge', () => {
   assert.equal(b.upstreamProto, 'openai');
 });
 
-test('pickBridge(anthropic, openai) throws not-implemented', () => {
-  assert.throws(() => pickBridge('anthropic', 'openai'), /not implemented/);
+test('pickBridge(anthropic, openai) returns AnthToOpenAIBridge', () => {
+  const b = pickBridge('anthropic', 'openai');
+  assert.ok(b instanceof AnthToOpenAIBridge);
+  assert.equal(b.clientProto, 'anthropic');
+  assert.equal(b.upstreamProto, 'openai');
 });
 
-test('pickBridge(openai, anthropic) throws not-implemented', () => {
-  assert.throws(() => pickBridge('openai', 'anthropic'), /not implemented/);
+test('pickBridge(openai, anthropic) returns OpenAIToAnthBridge', () => {
+  const b = pickBridge('openai', 'anthropic');
+  assert.ok(b instanceof OpenAIToAnthBridge);
+  assert.equal(b.clientProto, 'openai');
+  assert.equal(b.upstreamProto, 'anthropic');
 });

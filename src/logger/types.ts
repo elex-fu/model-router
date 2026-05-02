@@ -2,6 +2,8 @@ export interface LogEntry {
   id?: number;
   proxy_key_name: string;
   client_ip: string | null;
+  client_protocol: 'anthropic' | 'openai' | null;
+  upstream_protocol: 'anthropic' | 'openai' | null;
   request_model: string | null;
   actual_model: string | null;
   upstream_name: string | null;
