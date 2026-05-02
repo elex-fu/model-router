@@ -13,6 +13,7 @@ export interface UpstreamConfig {
   apiKey: string;
   models: string[];
   enabled: boolean;
+  modelMap?: Record<string, string>;
 }
 
 export interface ServerConfig {
@@ -29,7 +30,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   server: {
-    port: 8080,
+    port: 15005,
     logFlushIntervalMs: 5000,
     logBatchSize: 100,
   },
