@@ -1,0 +1,12 @@
+{
+  "id": "chatcmpl-2",
+  "model": "gpt-4o",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "this got truncated mid sen" },
+      "finish_reason": "length"
+    }
+  ],
+  "usage": { "prompt_tokens": 5, "completion_tokens": 100 }
+}

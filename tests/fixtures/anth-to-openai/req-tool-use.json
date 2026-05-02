@@ -1,0 +1,35 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "what is the weather?" }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "let me check" },
+        {
+          "type": "tool_use",
+          "id": "toolu_abc",
+          "name": "get_weather",
+          "input": { "city": "Tokyo" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_abc",
+          "content": "sunny, 72F"
+        },
+        { "type": "text", "text": "thanks, summarize?" }
+      ]
+    }
+  ]
+}
