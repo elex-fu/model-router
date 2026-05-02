@@ -91,4 +91,45 @@ export class ConfigStore {
     this.save(config);
     return true;
   }
+
+  getUpstream(name: string): UpstreamConfig | undefined {
+    const config = this.load();
+    return config.upstreams.find((u) => u.name === name);
+  }
+
+  updateUpstream(name: string, patch: Partial<UpstreamConfig>): void {
+    const config = this.load();
+    const idx = config.upstreams.findIndex((u) => u.name === name);
+    if (idx === -1) {
+      throw new Error(`Upstream "${name}" does not exist.`);
+    }
+    const current = config.upstreams[idx]!;
+    config.upstreams[idx] = { ...current, ...patch, name: current.name };
+    this.save(config);
+  }
+
+  setModelMapEntry(upstreamName: string, pattern: string, target: string): void {
+    const config = this.load();
+    const upstream = config.upstreams.find((u) => u.name === upstreamName);
+    if (!upstream) {
+      throw new Error(`Upstream "${upstreamName}" does not exist.`);
+    }
+    if (!upstream.modelMap) {
+      upstream.modelMap = {};
+    }
+    upstream.modelMap[pattern] = target;
+    this.save(config);
+  }
+
+  deleteModelMapEntry(upstreamName: string, pattern: string): void {
+    const config = this.load();
+    const upstream = config.upstreams.find((u) => u.name === upstreamName);
+    if (!upstream) {
+      throw new Error(`Upstream "${upstreamName}" does not exist.`);
+    }
+    if (upstream.modelMap && pattern in upstream.modelMap) {
+      delete upstream.modelMap[pattern];
+      this.save(config);
+    }
+  }
 }
