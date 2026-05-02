@@ -1,0 +1,15 @@
+{
+  "model": "gpt-4o-2024",
+  "max_tokens": 512,
+  "temperature": 0.5,
+  "top_p": 0.95,
+  "stop": ["END"],
+  "stream": false,
+  "user": "u_42",
+  "messages": [
+    { "role": "system", "content": "you are helpful" },
+    { "role": "user", "content": "hello" },
+    { "role": "assistant", "content": "hi there!" },
+    { "role": "user", "content": "tell me a joke" }
+  ]
+}
