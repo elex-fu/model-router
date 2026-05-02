@@ -89,7 +89,28 @@ client = OpenAI(
 )
 ```
 
-代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` → OpenAI；其它 path 返回 404。
+代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` → OpenAI；其它 path 返回 404。代理鉴权同时接受 `x-api-key: <key>` 与 `Authorization: Bearer <key>`。
+
+#### 流式响应
+
+两种协议均支持 `stream: true`，SSE 事件链在桥接两端按目标协议正确还原。
+
+```bash
+curl -N -X POST http://127.0.0.1:15005/v1/messages \
+  -H "x-api-key: mrk_xxxxxxxxxxxxxxxxxxxx" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+收到的事件序列示例(Anthropic 格式)：
+```
+event:message_start    →  message 元数据 + input_tokens
+event:content_block_start
+event:content_block_delta  ×N
+event:content_block_stop
+event:message_delta    →  stop_reason + 完整 usage
+event:message_stop
+```
 
 ## CLI 命令详解
 
@@ -190,10 +211,12 @@ model-router logs --protocol openai
 输出列说明:
 - `cp` — clientProtocol (`anthropic` / `openai` / `-`)
 - `up` — upstreamProtocol (`anthropic` / `openai` / `-`)
-- `model` — 客户端请求的 model
+- `model` — 客户端请求的 model (即 `request_model`)
 - `upstream` — 实际命中的 upstream 名字
 - `status` — HTTP 状态码
 - `input` / `output` — 输入/输出 tokens
+
+> SQLite 表 `request_logs` 还存有 `actual_model`(modelMap 重写后实际发给 upstream 的 model)、`is_streaming`、`error_message` 等列,可用 `sqlite3 ~/.model-router/logs.sqlite` 直接查询审计。
 
 ### 统计查询
 
@@ -298,7 +321,9 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 
 ### 心跳健康检查
 
-启动后每分钟检查一次每个 upstream 的可用性。连续失败 3 次会自动 `enabled=false` 摘流量,恢复成功 1 次自动重新启用。
+启动后立即跑一轮、之后每分钟检查一次每个 upstream 的可用性。连续失败 3 次会自动 `enabled=false` 摘流量,恢复成功 1 次自动重新启用。
+
+> 探测使用 `models[0]` 拼一条 `max_tokens=5` 的 anthropic 风格请求 (5 秒超时),所以仅对 `models[]` 至少有一项的上游生效;纯 `modelMap` 上游可改用 `model-router test <name>` 手动探活。
 
 ### modelMap glob 匹配
 
@@ -331,9 +356,23 @@ npm run build
 # 运行编译后版本
 npm start
 
-# 测试
+# 测试 (94 个用例:配置/路由/4 种桥接/SSE 状态机/集成端到端)
 npm test
 ```
+
+测试覆盖:
+
+| 模块                          | 用例数 | 说明                                                        |
+|-------------------------------|--------|-------------------------------------------------------------|
+| `tests/config/`               | 14     | ConfigStore CRUD + modelMap 字段                             |
+| `tests/router/select.test.ts` | 8      | 精确/glob/`models[]` 透传/enabled 过滤/multi-upstream 选择    |
+| `tests/protocol/glob.test.ts` | 10     | glob 通配符 (`*` `?`) 边界                                   |
+| `tests/protocol/bridge.test.ts` | 4    | `pickBridge` 矩阵 4 种组合                                   |
+| `tests/protocol/passthrough-*.test.ts` | 10 | a→a / o→o 透传 + SSE tee                              |
+| `tests/protocol/anth-to-openai.test.ts` | 16 | Anthropic↔OpenAI 单向(请求/响应/流式)                      |
+| `tests/protocol/openai-to-anth.test.ts` | 16 | OpenAI↔Anthropic 反向(请求/响应/流式)                      |
+| `tests/protocol/sse.test.ts`  | 6      | SSE 解析/写入/CRLF/multi-line                                |
+| `tests/integration/proxy.test.ts` | 10  | 端到端 4 种 client/upstream 组合 + 鉴权 + failover + 4xx 不重试 |
 
 ## 注意事项
 
