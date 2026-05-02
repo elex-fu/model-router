@@ -71,7 +71,7 @@ export async function proxyHandler(
   const isStreaming = parsedBody?.stream === true;
 
   for (let i = 0; i < candidates.length; i++) {
-    const upstream = candidates[i];
+    const upstream = candidates[i].upstream;
     const adapter = pickAdapter(upstream.protocol);
     const actualModel = adapter.extractModel(parsedBody) || model;
 
