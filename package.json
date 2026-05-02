@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli/index.ts",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "test": "node --test --import tsx --test-reporter=spec 'tests/**/*.test.ts'"
   },
   "keywords": [
     "ai",
