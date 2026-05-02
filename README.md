@@ -1,15 +1,16 @@
 # model-router
 
-轻量级 AI 模型代理服务，统一代理 Claude Code CLI 的模型请求，支持多 Key 路由、异步日志记录与统计查询。
+轻量级 AI 模型代理服务，统一接入 Claude Code、OpenAI SDK 等客户端，支持 Anthropic ↔ OpenAI 双向协议桥接、多 Key 路由、modelMap 模型重写、异步日志记录与统计查询。
 
 ## 特性
 
-- **透明代理**：直接透传 Anthropic 协议请求到上游 Kimi Code API，无需协议转换
-- **多 Key 路由**：按请求模型随机选择可用 upstream key
-- **代理 Key 鉴权**：为不同使用方分配独立的代理 key
-- **异步日志记录**：旁路记录请求来源、模型、token、耗时等信息到本地 SQLite
-- **纯 CLI 管理**：通过命令行完成 key、upstream、日志、统计管理
-- **轻量部署**：单进程 + SQLite，本地开发与服务端低资源运行
+- **双向协议桥接**：客户端可走 Anthropic（`/v1/messages`）或 OpenAI（`/v1/chat/completions`）协议，上游可选 Anthropic 或 OpenAI；4 种 client/upstream 组合（`a→a` `o→o` `a→o` `o→a`）全部可用
+- **modelMap 模型重写**：在 upstream 上配置 `pattern → realModel` 映射，支持精确匹配 + glob 通配（`*`、`?`），可让客户端用任意名字调用上游
+- **多 Key 路由 + 故障降级**：同一 model 可挂多个 upstream，失败自动随机降级
+- **代理 Key 鉴权**：为不同使用方分配独立的代理 key，认证错误按客户端协议返回
+- **流式 + 非流式全程支持**：SSE 状态机在桥接两端正确还原 `tool_use`、`tool_calls`、`finish_reason`、usage 计数
+- **异步日志记录**：每条请求记录 `client_protocol` / `upstream_protocol` / 模型 / token / 耗时,本地 SQLite
+- **纯 CLI 管理**:命令行管理 key、upstream、modelMap、日志、统计，并附带 upstream 探活命令
 
 ## 快速开始
 
@@ -29,209 +30,189 @@ npm link
 model-router key:create my-device
 ```
 
-输出示例：
+输出：
 ```
 Created proxy key: my-device
 Key: mrk_xxxxxxxxxxxxxxxxxxxx
 ```
 
-### 添加上游 Kimi API
+### 添加上游
+
+#### Anthropic 协议上游(Kimi 等)
 
 ```bash
-model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-your-kimi-key --models kimi-k2-5
+model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-your-kimi-key \
+  --models kimi-k2-5
 ```
 
-### 启动代理服务
+#### OpenAI 协议上游
 
 ```bash
-model-router start --port 8080
+model-router upstream:add deepseek-1 deepseek openai https://api.deepseek.com sk-your-ds-key \
+  --models deepseek-chat
 ```
 
-### 配置 Claude Code CLI
-
-设置环境变量后启动 `claude`：
+#### 带 modelMap：让客户端用 Claude 名字调用 OpenAI 上游
 
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+model-router upstream:add ds-bridge deepseek openai https://api.deepseek.com sk-your-ds-key \
+  --map "claude-sonnet-4-5=deepseek-chat,claude-haiku*=deepseek-chat"
+```
+
+之后 Claude Code 发出 `claude-sonnet-4-5` 请求会被代理改写为 `deepseek-chat` 转发给 DeepSeek，响应再被改写回 Anthropic 格式返回。
+
+### 启动代理
+
+```bash
+# 默认端口 15005
+model-router start
+
+# 指定端口
+model-router start --port 15005
+```
+
+### 客户端配置
+
+#### Claude Code CLI(Anthropic 协议)
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:15005"
 export ANTHROPIC_API_KEY="mrk_xxxxxxxxxxxxxxxxxxxx"
 claude
 ```
 
-> Claude Code CLI 会在 `ANTHROPIC_BASE_URL` 后自动拼接 `/v1/messages` 等路径。代理层会接管 `/v1/*` 请求并透传给上游。
+#### OpenAI SDK(OpenAI 协议)
+```python
+from openai import OpenAI
+client = OpenAI(
+    base_url="http://127.0.0.1:15005/v1",
+    api_key="mrk_xxxxxxxxxxxxxxxxxxxx",
+)
+```
+
+代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` → OpenAI；其它 path 返回 404。
 
 ## CLI 命令详解
 
 ### 服务启动
 
 ```bash
-# 默认端口 8080，使用默认配置文件 ~/.model-router/config.json
+# 默认端口 15005,默认配置 ~/.model-router/config.json
 model-router start
 
 # 指定端口
-model-router start --port 8080
+model-router start --port 18080
 
 # 指定自定义配置文件
-model-router start --port 8080 --config /etc/model-router/config.json
+model-router start --port 15005 --config /etc/model-router/config.json
 ```
-
-启动后，代理将监听指定端口，每分钟执行一次 upstream 心跳检查，并在后台异步写入请求日志。
 
 ### Key 管理
 
-代理 Key 是给**使用方**（如 Claude Code CLI）接入时使用的凭证，与上游 Kimi API Key 不同。
-
-#### 创建 Key
 ```bash
+# 创建
 model-router key:create my-device
-```
-输出示例：
-```
-Created proxy key: my-device
-Key: mrk_xxxxxxxxxxxxxxxxxxxx
-```
 
-#### 列出所有 Key
-```bash
+# 列出
 model-router key:list
-```
-输出示例：
-```
-┌─────────┬──────────────────────────┬─────────┬──────────────────────────┐
-│ (index) │ name                     │ key     │ enabled │ createdAt                │
-├─────────┼──────────────────────────┼─────────┼──────────────────────────┤
-│ 0       │ 'my-device'              │ 'mrk_xxxxxxxxxxxxxxxxxxxx' │ true    │ '2026-04-02T10:00:00Z' │
-└─────────┴──────────────────────────┴─────────┴──────────────────────────┘
-```
 
-#### 删除 Key
-```bash
+# 删除
 model-router key:delete my-device
 ```
 
 ### 上游管理
 
-上游（upstream）是实际的模型提供商 API。你可以为同一个模型添加多个 upstream，代理会自动按可用性随机选择并在失败时降级。
-
-#### 添加单个 upstream
 ```bash
-model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-your-kimi-key --models kimi-k2-5
-```
+# 添加(协议必须为 anthropic 或 openai)
+model-router upstream:add <name> <provider> <protocol> <baseUrl> <apiKey> \
+  --models m1,m2 \
+  --map "pattern1=target1,pattern2=target2"
 
-#### 添加多个模型
-```bash
-model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-your-kimi-key --models kimi-k2-5,moonshot-v1-8k
-```
-
-#### 列出所有 upstream
-```bash
+# 列出
 model-router upstream:list
-```
-输出示例：
-```
-┌─────────┬──────┬───────────┬─────────────────────────┬─────────────────┬─────────┐
-│ (index) │ name │ provider  │ protocol │ baseUrl                    │ models    │ enabled │
-├─────────┼──────┼───────────┼─────────────────────────┼─────────────────┼─────────┤
-│ 0       │ 'kimi-1' │ 'kimi'  │ 'anthropic' │ 'https://api.kimi.com/coding' │ 'kimi-k2-5' │ true    │
-└─────────┴──────┴───────────┴─────────────────────────┴─────────────────┴─────────┘
+
+# 删除
+model-router upstream:delete <name>
 ```
 
-#### 删除 upstream
+`upstream:list` 输出包含 `modelMap` 列(条目数)。
+
+### modelMap 管理
+
+modelMap 用于把客户端请求的 model 重写为 upstream 真正的 model 名;条目为 `pattern → target`,匹配优先级：
+
+1. **精确匹配** — `modelMap` 中存在完全相等的 key
+2. **Glob 匹配** — 按 `Object.entries` 顺序找到第一个匹配 (`*` 任意字符串、`?` 单字符)
+3. **`models[]` 透传** — 如果都不命中而 `models[]` 包含该 model,直接透传
+
 ```bash
-model-router upstream:delete kimi-1
+# 添加/更新条目
+model-router upstream:map:set ds-bridge "claude-sonnet-4-5" "deepseek-chat"
+model-router upstream:map:set ds-bridge "claude-haiku*"     "deepseek-chat"
+
+# 删除条目
+model-router upstream:map:delete ds-bridge "claude-haiku*"
+
+# 列出条目
+model-router upstream:map:list ds-bridge
+```
+
+### 探活测试
+
+向 upstream 发送一个最小化 `max_tokens=1` 的探活请求,验证 baseUrl + apiKey + 选定 model 是否可用。
+
+```bash
+# 自动从 models[] 或 modelMap 中挑一个 model
+model-router test ds-bridge
+
+# 显式指定 model
+model-router test ds-bridge --model deepseek-chat
 ```
 
 ### 日志查询
 
-所有经过代理的请求都会异步写入本地 SQLite（`~/.model-router/logs.sqlite`），可以通过 CLI 查询。
+每条请求都会异步写入 `~/.model-router/logs.sqlite`,包含 client/upstream 协议、模型、token、耗时。
 
-#### 查看最近日志
 ```bash
-# 默认显示最近 20 条
+# 最近 20 条
 model-router logs
 
-# 指定条数
+# 最近 50 条
 model-router logs --tail 50
+
+# 按 proxy key 过滤
+model-router logs --key my-device
+
+# 按协议过滤(client_protocol 或 upstream_protocol 任一命中)
+model-router logs --protocol anthropic
+model-router logs --protocol openai
 ```
 
-#### 按 proxy key 过滤
-```bash
-model-router logs --tail 20 --key my-device
-```
-
-输出示例：
-```
-┌─────────┬────┬───────────┬─────────────┬──────────┬────────┬───────┬────────┬───────┬───────────────────────┐
-│ (index) │ id │ key       │ model       │ upstream │ status │ input │ output │ ms    │ created               │
-├─────────┼────┼───────────┼─────────────┼──────────┼────────┼───────┼────────┼───────┼───────────────────────┤
-│ 0       │ 10 │ 'my-device' │ 'kimi-k2-5' │ 'kimi-1' │ 200    │ 12    │ 16     │ 13207 │ '2026-04-02 10:05:18' │
-│ 1       │ 9  │ 'my-device' │ 'kimi-k2-5' │ 'kimi-2' │ 200    │ 16    │ 7      │ 7050  │ '2026-04-02 10:05:23' │
-└─────────┴────┴───────────┴─────────────┴──────────┴────────┴───────┴────────┴───────┴───────────────────────┘
-```
+输出列说明:
+- `cp` — clientProtocol (`anthropic` / `openai` / `-`)
+- `up` — upstreamProtocol (`anthropic` / `openai` / `-`)
+- `model` — 客户端请求的 model
+- `upstream` — 实际命中的 upstream 名字
+- `status` — HTTP 状态码
+- `input` / `output` — 输入/输出 tokens
 
 ### 统计查询
 
-#### 查看今日统计
 ```bash
+# 今日
 model-router stats
+
+# 指定日期
+model-router stats --date 2026-05-02
 ```
-
-#### 查看指定日期
-```bash
-model-router stats --date 2026-04-01
-```
-
-输出示例：
-```
-Statistics for 2026-04-02:
-┌───────────────────┬────────┐
-│ (index)           │ Values │
-├───────────────────┼────────┤
-│ totalRequests     │ 42     │
-│ totalInputTokens  │ 512    │
-│ totalOutputTokens │ 2048   │
-│ avgLatencyMs      │ 8543   │
-└───────────────────┴────────┘
-```
-
-### 完整使用示例
-
-#### 场景：添加两个 Kimi key 并启动代理
-
-```bash
-# 1. 创建代理 key
-model-router key:create my-macbook
-
-# 2. 添加两个 Kimi upstream（自动负载均衡 + 故障降级）
-model-router upstream:add kimi-primary kimi anthropic https://api.kimi.com/coding sk-kimi-key-1 --models kimi-k2-5
-model-router upstream:add kimi-backup  kimi anthropic https://api.kimi.com/coding sk-kimi-key-2 --models kimi-k2-5
-
-# 3. 启动代理
-model-router start --port 8080
-
-# 4. 配置 Claude Code CLI 环境变量
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
-export ANTHROPIC_API_KEY="mrk_xxxxxxxxxxxxxxxxxxxx"
-
-# 5. 启动 claude
-claude
-```
-
-#### 场景：切换自定义配置文件路径
-
-```bash
-model-router start --port 8080 --config /Users/shared/.model-router/config.json
-```
-
-> 通过 `--config` 指定的配置文件中同样可以按需定义 `server` / `proxyKeys` / `upstreams` 字段。
 
 ## 配置文件
 
-默认路径：`~/.model-router/config.json`
+默认路径:`~/.model-router/config.json`
 
 ```json
 {
   "server": {
-    "port": 8080,
+    "port": 15005,
     "logFlushIntervalMs": 5000,
     "logBatchSize": 100
   },
@@ -240,7 +221,7 @@ model-router start --port 8080 --config /Users/shared/.model-router/config.json
       "name": "my-device",
       "key": "mrk_xxxxxxxxxxxxxxxxxxxx",
       "enabled": true,
-      "createdAt": "2026-04-02T10:00:00Z"
+      "createdAt": "2026-05-02T10:00:00Z"
     }
   ],
   "upstreams": [
@@ -249,83 +230,117 @@ model-router start --port 8080 --config /Users/shared/.model-router/config.json
       "provider": "kimi",
       "protocol": "anthropic",
       "baseUrl": "https://api.kimi.com/coding",
-      "apiKey": "sk-your-kimi-key",
+      "apiKey": "sk-kimi-key",
       "models": ["kimi-k2-5"],
+      "enabled": true
+    },
+    {
+      "name": "ds-bridge",
+      "provider": "deepseek",
+      "protocol": "openai",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKey": "sk-ds-key",
+      "models": [],
+      "modelMap": {
+        "claude-sonnet-4-5": "deepseek-chat",
+        "claude-haiku*": "deepseek-chat"
+      },
       "enabled": true
     }
   ]
 }
 ```
 
-## 架构说明
+## 架构
 
 ```
-Claude Code CLI
-        ↓ Anthropic Protocol
-   ┌─────────────┐
-   │  Proxy Auth │  校验 proxyKey
-   └──────┬──────┘
-          ↓
-   ┌─────────────┐
-   │   Router    │  按 model 匹配 + 随机选 upstream
-   └──────┬──────┘
-          ↓
-   ┌─────────────┐
-   │   Adapter   │  当前：AnthropicAdapter（透明转发）
-   │   Layer     │  未来可扩展 OpenAIAdapter 等协议转换
-   └──────┬──────┘
-          ↓
-        Upstream API
-          ↑
-   ┌─────────────┐
-   │ Async Logger│  内存队列 → SQLite
-   │  (旁路记录) │
-   └─────────────┘
-```
-
-## 开发
-
-```bash
-# 开发模式直接运行
-npm run dev -- start --port 8080
-
-# 编译
-npm run build
-
-# 运行编译后版本
-npm start
+Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
+        ↓
+┌─────────────────────┐
+│  Path → clientProto │  /v1/messages → anthropic
+│                     │  /v1/chat/completions → openai
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│       Auth          │  代理 key 校验,错误按 clientProto 包装
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│  Router (modelMap)  │  匹配候选 upstream,resolvedModel
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│   pickBridge(       │  4 种组合:
+│    clientProto,     │   • PassthroughAnthropicBridge (a→a)
+│    upstreamProto)   │   • PassthroughOpenAiBridge    (o→o)
+│                     │   • AnthToOpenAIBridge         (a→o)
+│                     │   • OpenAIToAnthBridge         (o→a)
+│  rewriteUrlPath     │
+│  transformRequest   │
+│  transformResponse  │
+│  transformStream    │
+│  wrapError          │
+└──────────┬──────────┘
+           ↓
+       Upstream API
+           ↑
+┌─────────────────────┐
+│   Async Logger      │  内存队列 → SQLite
+│   (cp / up / ...)   │
+└─────────────────────┘
 ```
 
 ## 高级特性
 
 ### 失败自动降级
 
-当某个 upstream 返回 `5xx` 或网络不可达时，代理会**自动按随机顺序尝试其他可用 upstream**，直到成功或全部耗尽。`4xx` 错误不重试（因为属于客户端参数问题）。每次尝试都会独立记录日志。
+当 upstream 返回 `5xx` 或网络不可达时,代理会按随机顺序尝试其他可用 upstream,直到成功或全部耗尽。`4xx` 错误不重试。每次尝试都按 client 协议包装错误,并独立记录日志。
 
 ### 心跳健康检查
 
-服务启动后，会每分钟检查一次每个 upstream 的可用性（发送极简请求）。
+启动后每分钟检查一次每个 upstream 的可用性。连续失败 3 次会自动 `enabled=false` 摘流量,恢复成功 1 次自动重新启用。
 
-- **连续失败 3 次**：自动将该 upstream 在配置文件中标记为 `enabled: false`，不再参与路由
-- **恢复成功 1 次**：自动将该 upstream 重新标记为 `enabled: true`
+### modelMap glob 匹配
+
+```
+"claude-sonnet-*"   → "deepseek-chat"   # 匹配 claude-sonnet-4-5、claude-sonnet-3
+"claude-?-haiku"    → "deepseek-chat"   # 匹配 claude-3-haiku、claude-4-haiku
+"gpt-*"             → "deepseek-chat"   # 匹配所有 gpt-* 请求
+```
+
+精确匹配优先于 glob;多个 glob 都命中时按 `Object.entries` 顺序(插入顺序)取第一个。
 
 ## upstream baseUrl 说明
 
-`baseUrl` 支持带或不带尾部斜杠。例如以下两种写法等价：
+`baseUrl` 支持带或不带尾部斜杠,代理在拼接 `/v1/messages` / `/v1/chat/completions` 时会处理一致:
 
 ```bash
-model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-your-key --models kimi-k2-5
-model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding/ sk-your-key --models kimi-k2-5
+model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-key --models kimi-k2-5
+model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding/ sk-key --models kimi-k2-5
 ```
 
-代理在转发到 `/v1/messages` 等路径时会自动正确拼接，不会丢失 `/coding` 路径。
+## 开发
+
+```bash
+# 开发模式直接运行
+npm run dev -- start --port 15005
+
+# 编译
+npm run build
+
+# 运行编译后版本
+npm start
+
+# 测试
+npm test
+```
 
 ## 注意事项
 
-- 当前仅支持 `anthropic` 协议 upstream（Kimi Code 已原生兼容）
-- 日志存储在 `~/.model-router/logs.sqlite`
-- 进程退出时会自动 flush 未写入的日志
-- **API Key 安全**：妥善保管 upstream key，避免在公开场合泄露
+- 默认端口 `15005`,如有冲突可用 `--port` 覆盖
+- 日志存储在 `~/.model-router/logs.sqlite`,进程退出会自动 flush 未写入日志
+- **API Key 安全**:妥善保管 upstream key 与代理 key
+- 协议字段必须为 `anthropic` 或 `openai`,否则 `upstream:add` 会拒绝
 
 ## License
 
