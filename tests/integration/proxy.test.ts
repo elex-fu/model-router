@@ -455,35 +455,37 @@ test('integration: openai→anth non-streaming — body shape converted', async 
 // ---------------------------------------------------------------------------
 
 test('integration: failover — first upstream 503, second succeeds', async () => {
-  const u1 = await startMockUpstream(() => ({
-    status: 503,
-    body: { error: { message: 'overloaded' } },
-  }));
-  const u2 = await startMockUpstream(() => ({
-    status: 200,
-    body: {
-      id: 'msg_ok',
-      type: 'message',
-      role: 'assistant',
-      model: 'claude-actual',
-      content: [{ type: 'text', text: 'fallback' }],
-      stop_reason: 'end_turn',
-      usage: { input_tokens: 1, output_tokens: 1 },
-    },
-  }));
+  // One mock acts as both upstreams; first call returns 503, second returns
+  // 200. This makes the test deterministic regardless of selectUpstreams's
+  // shuffle order — whichever candidate the proxy tries first gets the 503,
+  // the other gets the 200.
+  let callIdx = 0;
+  const upstream = await startMockUpstream(() => {
+    callIdx++;
+    if (callIdx === 1) {
+      return { status: 503, body: { error: { message: 'overloaded' } } };
+    }
+    return {
+      status: 200,
+      body: {
+        id: 'msg_ok',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-actual',
+        content: [{ type: 'text', text: 'fallback' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    };
+  });
 
-  // Both upstreams match the same model. selectUpstreams shuffles order, so
-  // we configure both to be valid and rely on the failover loop to handle
-  // whichever order the shuffle returns. To make the test deterministic we
-  // only assert that the request eventually succeeds and that *both* upstreams
-  // received exactly one call.
   const proxy = await startProxy(
     baseConfig([
       {
         name: 'u1',
         provider: 'anthropic',
         protocol: 'anthropic',
-        baseUrl: u1.baseUrl,
+        baseUrl: upstream.baseUrl,
         apiKey: 'k1',
         models: ['claude'],
         enabled: true,
@@ -492,7 +494,7 @@ test('integration: failover — first upstream 503, second succeeds', async () =
         name: 'u2',
         provider: 'anthropic',
         protocol: 'anthropic',
-        baseUrl: u2.baseUrl,
+        baseUrl: upstream.baseUrl,
         apiKey: 'k2',
         models: ['claude'],
         enabled: true,
@@ -511,17 +513,14 @@ test('integration: failover — first upstream 503, second succeeds', async () =
     assert.equal(res.status, 200);
     const json: any = await res.json();
     assert.equal(json.id, 'msg_ok');
-    // Total calls across both upstreams should be 2 (one failed retry + one success)
-    assert.equal(u1.calls.length + u2.calls.length, 2);
-    // Two log entries: one fail (5xx) + one success
+    assert.equal(upstream.calls.length, 2);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(proxy.logs.length, 2);
     const statuses = proxy.logs.map((l) => l.status_code).sort();
     assert.deepEqual(statuses, [200, 503]);
   } finally {
     await proxy.close();
-    await u1.close();
-    await u2.close();
+    await upstream.close();
   }
 });
 

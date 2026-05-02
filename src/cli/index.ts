@@ -72,6 +72,7 @@ program
   .command('upstream:add <name> <provider> <protocol> <baseUrl> <apiKey>')
   .description('Add a new upstream')
   .option('-m, --models <models>', 'Comma-separated list of models')
+  .option('--map <entries>', 'Comma-separated modelMap entries: pattern=target,...')
   .option('-c, --config <path>', 'Path to config file')
   .action((name, provider, protocol, baseUrl, apiKey, options) => {
     const store = getStore(options);
@@ -79,6 +80,26 @@ program
     if (protocol !== 'anthropic' && protocol !== 'openai') {
       console.error('Protocol must be "anthropic" or "openai"');
       process.exit(1);
+    }
+    let modelMap: Record<string, string> | undefined;
+    if (options.map) {
+      modelMap = {};
+      for (const entry of String(options.map).split(',')) {
+        const trimmed = entry.trim();
+        if (!trimmed) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq === -1) {
+          console.error(`Invalid --map entry "${trimmed}", expected pattern=target`);
+          process.exit(1);
+        }
+        const pattern = trimmed.slice(0, eq).trim();
+        const target = trimmed.slice(eq + 1).trim();
+        if (!pattern || !target) {
+          console.error(`Invalid --map entry "${trimmed}", pattern and target required`);
+          process.exit(1);
+        }
+        modelMap[pattern] = target;
+      }
     }
     store.addUpstream({
       name,
@@ -88,6 +109,7 @@ program
       apiKey,
       models,
       enabled: true,
+      ...(modelMap ? { modelMap } : {}),
     });
     console.log(`Created upstream: ${name}`);
   });
@@ -111,6 +133,7 @@ program
         protocol: u.protocol,
         baseUrl: u.baseUrl,
         models: u.models.join(', '),
+        modelMap: u.modelMap ? Object.keys(u.modelMap).length : 0,
         enabled: u.enabled,
       }))
     );
@@ -125,6 +148,124 @@ program
     const store = getStore(options);
     store.deleteUpstream(name);
     console.log(`Deleted upstream: ${name}`);
+  });
+
+// upstream map set
+program
+  .command('upstream:map:set <upstream> <pattern> <target>')
+  .description('Add or update a modelMap entry on an upstream')
+  .option('-c, --config <path>', 'Path to config file')
+  .action((upstream, pattern, target, options) => {
+    const store = getStore(options);
+    store.setModelMapEntry(upstream, pattern, target);
+    console.log(`Set ${upstream}: ${pattern} → ${target}`);
+  });
+
+// upstream map delete
+program
+  .command('upstream:map:delete <upstream> <pattern>')
+  .description('Delete a modelMap entry on an upstream')
+  .option('-c, --config <path>', 'Path to config file')
+  .action((upstream, pattern, options) => {
+    const store = getStore(options);
+    store.deleteModelMapEntry(upstream, pattern);
+    console.log(`Deleted ${upstream}: ${pattern}`);
+  });
+
+// upstream map list
+program
+  .command('upstream:map:list <upstream>')
+  .description('List modelMap entries for an upstream')
+  .option('-c, --config <path>', 'Path to config file')
+  .action((upstream, options) => {
+    const store = getStore(options);
+    const u = store.getUpstream(upstream);
+    if (!u) {
+      console.error(`Upstream "${upstream}" not found`);
+      process.exit(1);
+    }
+    const map = u.modelMap ?? {};
+    const entries = Object.entries(map);
+    if (entries.length === 0) {
+      console.log(`No modelMap entries for ${upstream}.`);
+      return;
+    }
+    console.table(entries.map(([pattern, target]) => ({ pattern, target })));
+  });
+
+// test (connectivity)
+program
+  .command('test <upstream>')
+  .description('Send a minimal probe request to verify an upstream is reachable')
+  .option('-c, --config <path>', 'Path to config file')
+  .option('--model <model>', 'Override the model used in the probe')
+  .action(async (upstreamName, options) => {
+    const store = getStore(options);
+    const u = store.getUpstream(upstreamName);
+    if (!u) {
+      console.error(`Upstream "${upstreamName}" not found`);
+      process.exit(1);
+    }
+    const probeModel: string =
+      options.model ??
+      u.models[0] ??
+      (u.modelMap ? Object.values(u.modelMap)[0] : undefined);
+    if (!probeModel) {
+      console.error(
+        `Upstream "${upstreamName}" has no models or modelMap; pass --model <name> to probe`
+      );
+      process.exit(1);
+    }
+
+    const url =
+      u.protocol === 'anthropic'
+        ? `${u.baseUrl.replace(/\/$/, '')}/v1/messages`
+        : `${u.baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
+    const body =
+      u.protocol === 'anthropic'
+        ? {
+            model: probeModel,
+            max_tokens: 1,
+            messages: [{ role: 'user', content: 'ping' }],
+          }
+        : {
+            model: probeModel,
+            max_tokens: 1,
+            messages: [{ role: 'user', content: 'ping' }],
+          };
+
+    const start = Date.now();
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${u.apiKey}`,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      const ms = Date.now() - start;
+      let snippet: any = null;
+      try {
+        snippet = await res.json();
+      } catch {
+        snippet = await res.text().catch(() => '');
+      }
+      console.log(
+        `${upstreamName} ${u.baseUrl} model=${probeModel}: ${res.status} in ${ms}ms`
+      );
+      if (res.status >= 400) {
+        console.log(JSON.stringify(snippet, null, 2));
+        process.exit(1);
+      } else {
+        console.log('OK');
+      }
+    } catch (err: any) {
+      const ms = Date.now() - start;
+      console.error(`${upstreamName} ${u.baseUrl}: network error after ${ms}ms — ${err.message}`);
+      process.exit(1);
+    }
   });
 
 // logs
