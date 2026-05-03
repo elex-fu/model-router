@@ -3,6 +3,12 @@ export interface ProxyKey {
   key: string;
   enabled: boolean;
   createdAt: string;
+  description?: string;
+  expiresAt?: string;
+  allowedUpstreams?: string[];
+  allowedModels?: string[];
+  rpm?: number;
+  dailyTokens?: number;
 }
 
 export interface UpstreamConfig {
