@@ -377,9 +377,140 @@ npm test
 ## 注意事项
 
 - 默认端口 `15005`,如有冲突可用 `--port` 覆盖
+- 默认绑定 `127.0.0.1`,需要对外暴露请显式 `--bind 0.0.0.0`(推荐放反代后)
 - 日志存储在 `~/.model-router/logs.sqlite`,进程退出会自动 flush 未写入日志
-- **API Key 安全**:妥善保管 upstream key 与代理 key
+- **API Key 安全**:妥善保管 upstream key 与代理 key;`key:list` / `upstream:list` 默认 mask,加 `--show-secrets` 才显示完整值
 - 协议字段必须为 `anthropic` 或 `openai`,否则 `upstream:add` 会拒绝
+
+## 多用户与运营
+
+### 配额与限流
+
+每个代理 key 可独立设置请求频率与每日 token 配额:
+
+```bash
+# 创建 key 时配置
+model-router key:create alice \
+  --rpm 30 \
+  --daily-tokens 2000000 \
+  --upstreams kimi-code,ds-bridge \
+  --models 'claude-sonnet-*'
+
+# 后续调整
+model-router key:update alice --rpm 60
+model-router key:update alice --daily-tokens 5000000
+```
+
+超出 RPM 或日 token 时,代理直接返回 `429`(按客户端协议包装为 `rate_limit_error` / `rate_limit_exceeded`),不命中任何上游。
+
+### 用量统计
+
+```bash
+# 单个 key 7 天用量
+model-router stats:key alice --since 7d
+
+# 全部 key 排行
+model-router stats:keys --since 7d
+
+# 列出所有 key,带 used_today / last_used 列(secret 默认 mask)
+model-router key:list
+```
+
+### 维护
+
+```bash
+# 清理 90 天前的请求日志
+model-router maintenance:purge --older-than 90d
+
+# 回收 SQLite 空间
+model-router maintenance:vacuum
+```
+
+## 对外部署
+
+### 推荐姿势:反代 + daemon
+
+1. `--bind 127.0.0.1`(默认)只允许本机访问
+2. Caddy / nginx 在前,负责 TLS、限速、访问日志
+3. `--daemon` 让服务后台运行;`--pid-file` / `--log-file` 控制 PID 与日志路径
+
+启动:
+
+```bash
+model-router start \
+  --bind 127.0.0.1 \
+  --port 15005 \
+  --max-body-size 4mb \
+  --daemon \
+  --log-file /var/log/model-router.log \
+  --pid-file /var/run/model-router.pid
+```
+
+管理:
+
+```bash
+model-router status --pid-file /var/run/model-router.pid
+model-router stop   --pid-file /var/run/model-router.pid
+```
+
+### Caddy 反代示例
+
+```caddyfile
+api.example.com {
+  reverse_proxy 127.0.0.1:15005
+}
+```
+
+### nginx 反代示例
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name api.example.com;
+
+  ssl_certificate     /etc/ssl/certs/api.crt;
+  ssl_certificate_key /etc/ssl/private/api.key;
+
+  client_max_body_size 8m;
+
+  location / {
+    proxy_pass http://127.0.0.1:15005;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;          # 流式响应必须关
+    proxy_read_timeout 600s;
+  }
+}
+```
+
+### systemd unit 示例(用户态)
+
+`~/.config/systemd/user/model-router.service`:
+
+```ini
+[Unit]
+Description=model-router proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/model-router start --bind 127.0.0.1 --port 15005
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+启用:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now model-router
+journalctl --user -u model-router -f
+```
+
+> **不要直接 `--bind 0.0.0.0`** 暴露未加 TLS 的代理:任何嗅探到端口的人都能消耗你的上游配额。
 
 ## License
 
