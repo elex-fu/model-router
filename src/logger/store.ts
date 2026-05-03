@@ -7,14 +7,17 @@ export interface LogStore {
   insertBatch(entries: LogEntry[]): Promise<void>;
   queryLogs(limit: number, filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' }): Promise<LogEntry[]>;
   stats(date: string): Promise<StatsResult>;
+  todayTokensByKey(date: string): Promise<Array<{ keyName: string; tokensUsed: number }>>;
   close?(): Promise<void>;
 }
 
 export class SQLiteLogStore implements LogStore {
   private db?: Database.Database;
 
+  constructor(private readonly dbPath: string = DEFAULT_DB_PATH) {}
+
   async init(): Promise<void> {
-    this.db = new Database(DEFAULT_DB_PATH);
+    this.db = new Database(this.dbPath);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS request_logs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +140,22 @@ export class SQLiteLogStore implements LogStore {
       totalOutputTokens: row.totalOutputTokens,
       avgLatencyMs: Math.round(row.avgLatencyMs),
     };
+  }
+
+  async todayTokensByKey(
+    date: string
+  ): Promise<Array<{ keyName: string; tokensUsed: number }>> {
+    if (!this.db) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT proxy_key_name AS keyName,
+                COALESCE(SUM(COALESCE(request_tokens, 0) + COALESCE(response_tokens, 0)), 0) AS tokensUsed
+         FROM request_logs
+         WHERE DATE(created_at) = ?
+         GROUP BY proxy_key_name`
+      )
+      .all(date) as Array<{ keyName: string; tokensUsed: number }>;
+    return rows;
   }
 
   async close(): Promise<void> {
