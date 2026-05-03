@@ -1,4 +1,4 @@
-import type { UpstreamConfig } from '../config/types.js';
+import type { UpstreamConfig, ProxyKey } from '../config/types.js';
 import { matchGlob } from '../protocol/glob.js';
 
 export interface UpstreamMatch {
@@ -43,10 +43,23 @@ function resolveModel(model: string, upstream: UpstreamConfig): string | null {
   return null;
 }
 
-export function selectUpstreams(model: string, upstreams: UpstreamConfig[]): UpstreamMatch[] {
+export function selectUpstreams(
+  model: string,
+  upstreams: UpstreamConfig[],
+  key?: ProxyKey
+): UpstreamMatch[] {
   const matches: UpstreamMatch[] = [];
   for (const upstream of upstreams) {
     if (!upstream.enabled) continue;
+    if (key) {
+      const allowedUps = key.allowedUpstreams;
+      if (allowedUps && allowedUps.length > 0 && !allowedUps.includes(upstream.name)) continue;
+      const allowedModels = key.allowedModels;
+      if (allowedModels && allowedModels.length > 0) {
+        const modelOk = allowedModels.some((p) => p === model || matchGlob(p, model));
+        if (!modelOk) continue;
+      }
+    }
     const resolved = resolveModel(model, upstream);
     if (resolved !== null) {
       matches.push({ upstream, resolvedModel: resolved });
