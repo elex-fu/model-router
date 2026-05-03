@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { proxyHandler } from './proxy.js';
 import { HealthMonitor } from '../health/monitor.js';
 import { KeyLimiter } from '../limit/limiter.js';
+import { IpAuthBlocker } from '../limit/ipBlocker.js';
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -39,6 +40,8 @@ export async function startServer(
   const usage = await logStore.todayTokensByKey(today);
   limiter.hydrate(usage);
 
+  const ipBlocker = new IpAuthBlocker();
+
   const healthMonitor = new HealthMonitor(store);
   healthMonitor.start();
 
@@ -46,6 +49,7 @@ export async function startServer(
     proxyHandler(req, res, store, (entry) => logQueue.enqueue(entry), {
       limiter,
       maxBodyBytes,
+      ipBlocker,
       healthCheck: async () => {
         await logStore.ping();
         return true;

@@ -4,6 +4,7 @@ import { selectUpstreams } from '../router/upstream.js';
 import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
 import { authenticateProxyKey } from './auth.js';
 import { KeyLimiter, type ReserveResult } from '../limit/limiter.js';
+import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { redactSecrets } from '../limit/redact.js';
 import type { LogEntry } from '../logger/types.js';
 
@@ -11,6 +12,7 @@ export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
   maxBodyBytes?: number;
   healthCheck?: () => Promise<boolean>;
+  ipBlocker?: IpAuthBlocker;
 }
 
 function getClientIp(req: IncomingMessage): string {
@@ -140,11 +142,29 @@ export async function proxyHandler(
     return;
   }
 
+  const clientIp = getClientIp(req);
+  if (options.ipBlocker) {
+    const block = options.ipBlocker.check(clientIp);
+    if (block.blocked) {
+      const retryAfterSec = Math.max(1, Math.ceil((block.retryAfterMs ?? 60_000) / 1000));
+      const blockBridge = pickBridge(clientProto, clientProto);
+      const errEnv = blockBridge.wrapError(429, 'Too many failed authentication attempts');
+      res.writeHead(429, {
+        'Content-Type': errEnv.contentType,
+        'Retry-After': String(retryAfterSec),
+      });
+      res.end(typeof errEnv.body === 'string' ? errEnv.body : JSON.stringify(errEnv.body));
+      return;
+    }
+  }
+
   const auth = authenticateProxyKey(store, req);
   if (!auth.ok) {
+    options.ipBlocker?.recordFailure(clientIp);
     writeProtocolError(res, clientProto, 401, 'authentication_error', 'Invalid proxy key');
     return;
   }
+  options.ipBlocker?.clearSuccess(clientIp);
   const proxyKey = auth.key;
   const proxyKeyName = proxyKey.name;
   const clientBridge = pickBridge(clientProto, clientProto);
