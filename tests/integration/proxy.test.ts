@@ -580,3 +580,203 @@ test('integration: upstream 4xx is forwarded as bridge-wrapped error, no retry',
     await upstream.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// ProxyKey whitelist + expiresAt
+// ---------------------------------------------------------------------------
+
+function configWithKey(
+  key: Partial<import('../../src/config/types.js').ProxyKey>,
+  upstreams: Config['upstreams']
+): Config {
+  return {
+    server: { port: 0, logFlushIntervalMs: 100, logBatchSize: 10 },
+    proxyKeys: [
+      {
+        name: 'alice',
+        key: 'mrk_alice',
+        enabled: true,
+        createdAt: '2026-05-03T00:00:00Z',
+        ...key,
+      },
+    ],
+    upstreams,
+  };
+}
+
+test('integration: key with allowedUpstreams blocks non-whitelisted upstream → 404', async () => {
+  const upstream = await startMockUpstream(() => ({ status: 200, body: {} }));
+  const proxy = await startProxy(
+    configWithKey({ allowedUpstreams: ['kimi-only'] }, [
+      {
+        name: 'ds-bridge',
+        provider: 'deepseek',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude-sonnet-4-5'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer mrk_alice',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] }),
+    });
+    assert.equal(res.status, 404);
+    const json: any = await res.json();
+    assert.equal(json.error.type, 'not_found_error');
+    assert.match(json.error.message, /not allowed for this proxy key/i);
+    // Upstream must not have been called.
+    assert.equal(upstream.calls.length, 0);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: key with allowedModels blocks non-whitelisted model → 404', async () => {
+  const upstream = await startMockUpstream(() => ({ status: 200, body: {} }));
+  const proxy = await startProxy(
+    configWithKey({ allowedModels: ['claude-haiku-*'] }, [
+      {
+        name: 'kimi-code',
+        provider: 'kimi',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude-sonnet-4-5'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer mrk_alice',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [] }),
+    });
+    assert.equal(res.status, 404);
+    const json: any = await res.json();
+    assert.match(json.error.message, /not allowed for this proxy key/i);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: key with allowedModels hit reaches upstream → 200', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_ok',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-sonnet-4-5',
+      content: [{ type: 'text', text: 'hi' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const proxy = await startProxy(
+    configWithKey({ allowedModels: ['claude-sonnet-*'] }, [
+      {
+        name: 'kimi-code',
+        provider: 'kimi',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude-sonnet-4-5'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer mrk_alice',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: expired key → 401 authentication_error', async () => {
+  const proxy = await startProxy(
+    configWithKey(
+      { expiresAt: '2020-01-01T00:00:00Z' },
+      []
+    )
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer mrk_alice',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [] }),
+    });
+    assert.equal(res.status, 401);
+    const json: any = await res.json();
+    assert.equal(json.error.type, 'authentication_error');
+  } finally {
+    await proxy.close();
+  }
+});
+
+test('integration: key with future expiresAt still authenticates', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_ok',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude',
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const proxy = await startProxy(
+    configWithKey({ expiresAt: '2999-12-31T23:59:59Z' }, [
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer mrk_alice',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});

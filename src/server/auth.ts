@@ -1,10 +1,11 @@
 import type { IncomingMessage } from 'node:http';
 import type { ConfigStore } from '../config/store.js';
+import type { ProxyKey } from '../config/types.js';
 
 export function authenticateProxyKey(
   store: ConfigStore,
   req: IncomingMessage
-): { ok: true; keyName: string } | { ok: false } {
+): { ok: true; key: ProxyKey } | { ok: false } {
   let raw = req.headers['x-api-key'] || req.headers['authorization'];
   if (Array.isArray(raw)) {
     raw = raw[0];
@@ -22,6 +23,9 @@ export function authenticateProxyKey(
   if (!proxyKey || !proxyKey.enabled) {
     return { ok: false };
   }
+  if (proxyKey.expiresAt && Date.now() >= Date.parse(proxyKey.expiresAt)) {
+    return { ok: false };
+  }
 
-  return { ok: true, keyName: proxyKey.name };
+  return { ok: true, key: proxyKey };
 }

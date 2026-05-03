@@ -81,7 +81,8 @@ export async function proxyHandler(
     writeProtocolError(res, clientProto, 401, 'authentication_error', 'Invalid proxy key');
     return;
   }
-  const proxyKeyName = auth.keyName;
+  const proxyKey = auth.key;
+  const proxyKeyName = proxyKey.name;
 
   const bodyBuffer = await collectBody(req);
   let parsedBody: any = null;
@@ -95,10 +96,15 @@ export async function proxyHandler(
 
   const config = store.load();
   const model = parsedBody?.model;
-  const candidates = model ? selectUpstreams(model, config.upstreams) : [];
+  const candidates = model ? selectUpstreams(model, config.upstreams, proxyKey) : [];
 
   if (candidates.length === 0) {
-    writeProtocolError(res, clientProto, 404, 'not_found_error', 'No available upstream for the requested model');
+    const modelExistsForAnyUpstream =
+      model !== undefined && selectUpstreams(model, config.upstreams).length > 0;
+    const errMessage = modelExistsForAnyUpstream
+      ? 'Model not allowed for this proxy key'
+      : 'No available upstream for the requested model';
+    writeProtocolError(res, clientProto, 404, 'not_found_error', errMessage);
     enqueue({
       proxy_key_name: proxyKeyName,
       client_ip: getClientIp(req),
@@ -108,7 +114,7 @@ export async function proxyHandler(
       actual_model: null,
       upstream_name: null,
       status_code: 404,
-      error_message: 'No available upstream',
+      error_message: errMessage,
       request_tokens: null,
       response_tokens: null,
       total_tokens: null,
