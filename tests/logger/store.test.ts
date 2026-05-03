@@ -248,3 +248,17 @@ test('keyActivitySummary: lastUsed reflects all-time max not just today', async 
     t.cleanup();
   }
 });
+
+test('init sets WAL mode', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const db = (store as any).db;
+    const mode = db.pragma('journal_mode', { simple: true });
+    assert.equal(mode, 'wal');
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});

@@ -24,6 +24,8 @@ export class SQLiteLogStore implements LogStore {
 
   async init(): Promise<void> {
     this.db = new Database(this.dbPath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = NORMAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS request_logs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
