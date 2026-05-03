@@ -20,9 +20,11 @@ program
   .option('-p, --port <port>', 'Server port', parseInt)
   .option('-b, --bind <address>', 'Address to bind (default: 127.0.0.1)')
   .option('--max-body-size <size>', 'Max request body size (e.g. 4mb, 1024)')
+  .option('--daemon', 'Run in background; requires --pid-file (and usually --log-file)')
+  .option('--log-file <path>', 'Daemon stdout/stderr log file')
+  .option('--pid-file <path>', 'Daemon PID file')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
-    const { startServer } = await import('../server/index.js');
     let maxBodyBytes: number | undefined;
     if (options.maxBodySize) {
       const { parseByteSize } = await import('./size.js');
@@ -33,10 +35,86 @@ program
         process.exit(1);
       }
     }
+    if (options.daemon) {
+      if (!options.pidFile) {
+        console.error('--daemon requires --pid-file');
+        process.exit(1);
+      }
+      const { spawnDaemon, readPidFile, isProcessRunning } = await import('./daemon.js');
+      const existing = readPidFile(options.pidFile);
+      if (existing && isProcessRunning(existing)) {
+        console.error(`Already running with pid ${existing} (pid-file: ${options.pidFile})`);
+        process.exit(1);
+      }
+      const childArgs = ['start'];
+      if (options.port !== undefined) childArgs.push('--port', String(options.port));
+      if (options.bind) childArgs.push('--bind', options.bind);
+      if (options.maxBodySize) childArgs.push('--max-body-size', options.maxBodySize);
+      if (options.config) childArgs.push('--config', options.config);
+      const pid = spawnDaemon({
+        args: childArgs,
+        logFile: options.logFile,
+        pidFile: options.pidFile,
+      });
+      console.log(`model-router started in background (pid ${pid})`);
+      return;
+    }
+    const { startServer } = await import('../server/index.js');
     await startServer(options.port, options.config, {
       bindAddress: options.bind,
       maxBodyBytes,
     });
+  });
+
+// stop
+program
+  .command('stop')
+  .description('Stop a running daemon by sending SIGTERM to the pid file process')
+  .requiredOption('--pid-file <path>', 'Daemon PID file')
+  .action(async (options) => {
+    const { readPidFile, isProcessRunning } = await import('./daemon.js');
+    const pid = readPidFile(options.pidFile);
+    if (pid === null) {
+      console.error(`pid file not found or unreadable: ${options.pidFile}`);
+      process.exit(1);
+    }
+    if (!isProcessRunning(pid)) {
+      console.log(`No running process for pid ${pid}; removing stale pid file.`);
+      try {
+        const fs = await import('node:fs');
+        fs.unlinkSync(options.pidFile);
+      } catch {
+        // best-effort
+      }
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+      console.log(`Sent SIGTERM to pid ${pid}`);
+    } catch (err: any) {
+      console.error(`Failed to signal pid ${pid}: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+// status
+program
+  .command('status')
+  .description('Check whether a daemon recorded in the pid file is running')
+  .requiredOption('--pid-file <path>', 'Daemon PID file')
+  .action(async (options) => {
+    const { readPidFile, isProcessRunning } = await import('./daemon.js');
+    const pid = readPidFile(options.pidFile);
+    if (pid === null) {
+      console.log('not running (no pid file)');
+      process.exit(1);
+    }
+    if (isProcessRunning(pid)) {
+      console.log(`running (pid ${pid})`);
+    } else {
+      console.log(`not running (stale pid ${pid})`);
+      process.exit(1);
+    }
   });
 
 // key create
