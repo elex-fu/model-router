@@ -68,6 +68,8 @@ export async function startServer(
     healthMonitor.stop();
     logQueue.stop();
     await logStore.close?.();
+    const { cleanupPidFile } = await import('../cli/daemon.js');
+    cleanupPidFile(process.env.MODEL_ROUTER_PID_FILE);
     server.close(() => {
       process.exit(0);
     });

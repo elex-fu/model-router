@@ -8,6 +8,7 @@ import {
   readPidFile,
   isProcessRunning,
   writePidFile,
+  cleanupPidFile,
 } from '../../src/cli/daemon.js';
 
 function tmpPath(): string {
@@ -69,4 +70,25 @@ test('isProcessRunning: nonexistent pid returns false', () => {
     }
   }
   assert.ok(found, 'expected at least one nonexistent pid');
+});
+
+test('cleanupPidFile: removes existing file', () => {
+  const p = tmpPath();
+  fs.writeFileSync(p, '12345');
+  assert.ok(fs.existsSync(p));
+  cleanupPidFile(p);
+  assert.equal(fs.existsSync(p), false);
+});
+
+test('cleanupPidFile: undefined path is no-op', () => {
+  // Should not throw or do anything
+  cleanupPidFile(undefined);
+  cleanupPidFile(null as any);
+  cleanupPidFile('');
+});
+
+test('cleanupPidFile: missing file is silently ignored', () => {
+  const p = tmpPath();
+  // file does not exist
+  cleanupPidFile(p);
 });

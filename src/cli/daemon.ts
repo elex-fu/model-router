@@ -37,6 +37,15 @@ export function isProcessRunning(pid: number): boolean {
   }
 }
 
+export function cleanupPidFile(filePath: string | null | undefined): void {
+  if (!filePath) return;
+  try {
+    fs.unlinkSync(filePath);
+  } catch {
+    // best-effort: missing file or permission error -- ignore
+  }
+}
+
 export interface SpawnDaemonOptions {
   args: string[];
   logFile?: string;
@@ -63,7 +72,7 @@ export function spawnDaemon(options: SpawnDaemonOptions): number {
     cwd,
     detached: true,
     stdio: ['ignore', stdout, stderr],
-    env: { ...process.env, MODEL_ROUTER_DAEMON_CHILD: '1' },
+    env: { ...process.env, MODEL_ROUTER_DAEMON_CHILD: '1', MODEL_ROUTER_PID_FILE: pidFile },
   });
   if (child.pid === undefined) {
     throw new Error('failed to spawn daemon child');
