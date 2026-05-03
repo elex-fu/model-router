@@ -13,6 +13,7 @@ export interface LogStore {
   keyActivitySummary(today: string): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>>;
   purgeOlderThan(days: number): Promise<number>;
   vacuum(): Promise<void>;
+  ping(): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -280,6 +281,11 @@ export class SQLiteLogStore implements LogStore {
   async vacuum(): Promise<void> {
     if (!this.db) return;
     this.db.exec('VACUUM');
+  }
+
+  async ping(): Promise<void> {
+    if (!this.db) throw new Error('database not initialized');
+    this.db.prepare('SELECT 1').get();
   }
 
   async close(): Promise<void> {

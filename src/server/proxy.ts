@@ -10,6 +10,7 @@ import type { LogEntry } from '../logger/types.js';
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
   maxBodyBytes?: number;
+  healthCheck?: () => Promise<boolean>;
 }
 
 function getClientIp(req: IncomingMessage): string {
@@ -105,6 +106,33 @@ export async function proxyHandler(
   const maxBodyBytes = options.maxBodyBytes ?? Number.POSITIVE_INFINITY;
 
   const reqPath = req.url || '/';
+
+  if (reqPath === '/healthz' || reqPath.startsWith('/healthz?')) {
+    const method = req.method ?? 'GET';
+    if (method !== 'GET' && method !== 'HEAD') {
+      res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET, HEAD' });
+      res.end(JSON.stringify({ error: { message: 'Method not allowed' } }));
+      return;
+    }
+    let dbOk = true;
+    if (options.healthCheck) {
+      try {
+        dbOk = await options.healthCheck();
+      } catch {
+        dbOk = false;
+      }
+    }
+    const status = dbOk ? 200 : 503;
+    const body = dbOk ? { status: 'ok', db: 'ok' } : { status: 'degraded', db: 'error' };
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    if (method === 'HEAD') {
+      res.end();
+    } else {
+      res.end(JSON.stringify(body));
+    }
+    return;
+  }
+
   const clientProto = clientProtocolFromPath(reqPath);
   if (!clientProto) {
     res.writeHead(404, { 'Content-Type': 'application/json' });

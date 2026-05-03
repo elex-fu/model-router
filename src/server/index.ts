@@ -46,6 +46,10 @@ export async function startServer(
     proxyHandler(req, res, store, (entry) => logQueue.enqueue(entry), {
       limiter,
       maxBodyBytes,
+      healthCheck: async () => {
+        await logStore.ping();
+        return true;
+      },
     });
   });
 
