@@ -10,6 +10,8 @@
 - **代理 Key 鉴权**：为不同使用方分配独立的代理 key，认证错误按客户端协议返回
 - **流式 + 非流式全程支持**：SSE 状态机在桥接两端正确还原 `tool_use`、`tool_calls`、`finish_reason`、usage 计数
 - **异步日志记录**：每条请求记录 `client_protocol` / `upstream_protocol` / 模型 / token / 耗时,本地 SQLite
+- **健康检查端点**：`GET /healthz` 返回 200 + `{status:"ok",db:"ok"}`，反代 / 监控可直接探活；DB 不可达时返回 503
+- **认证防爆破**：同一 IP 在 5 分钟内连续 10 次认证失败后，后续请求直接 429，成功一次自动清零
 - **纯 CLI 管理**:命令行管理 key、upstream、modelMap、日志、统计，并附带 upstream 探活命令
 
 ## 快速开始
@@ -509,6 +511,74 @@ systemctl --user daemon-reload
 systemctl --user enable --now model-router
 journalctl --user -u model-router -f
 ```
+
+### macOS launchd plist 示例(用户态)
+
+`~/Library/LaunchAgents/com.modelrouter.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.modelrouter</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/model-router</string>
+    <string>start</string>
+    <string>--bind</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>15005</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/model-router.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/model-router.err</string>
+</dict>
+</plist>
+```
+
+启用:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.modelrouter.plist
+launchctl list | grep modelrouter
+# 停服:
+launchctl unload ~/Library/LaunchAgents/com.modelrouter.plist
+```
+
+### 健康检查与反代探活
+
+代理暴露 `GET /healthz`(无鉴权,不计入日志),返回 `{"status":"ok","db":"ok"}` 表示进程正常且 SQLite 可读。Caddy / nginx / 上层 LB 均可直接拿来做 health check。SQLite 损坏或 fd 耗尽时会变成 503。
+
+### 日志轮转
+
+`--log-file` 指定的文件会持续追加,生产环境建议接管轮转:
+
+```
+# /etc/logrotate.d/model-router
+/var/log/model-router.log {
+  daily
+  rotate 7
+  missingok
+  notifempty
+  copytruncate     # 用 copytruncate 才不会让 daemon 写到已删除的 fd
+  compress
+}
+```
+
+> 不建议用 `move + create`(daemon 仍写老 fd);如果一定要切割,需配合 `model-router stop && start` 重启。
+
+### 优雅关闭与超时
+
+收到 `SIGTERM` / `SIGINT` 后,代理执行: 停止健康监控 → 排空日志队列 → 关闭 SQLite → 清理 PID 文件 → `server.close()`。`server.close()` 会等待所有进行中的请求处理完成。如果上游响应卡住,关闭可能会被拖延;launchctl/systemd 默认会在 30 秒后强制 SIGKILL,这是可以接受的兜底。
 
 > **不要直接 `--bind 0.0.0.0`** 暴露未加 TLS 的代理:任何嗅探到端口的人都能消耗你的上游配额。
 
