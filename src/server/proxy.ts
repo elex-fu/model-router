@@ -15,7 +15,10 @@ export interface ProxyHandlerOptions {
   healthCheck?: () => Promise<boolean>;
   ipBlocker?: IpAuthBlocker;
   trustProxy?: boolean;
+  streamIdleTimeoutMs?: number;
 }
+
+const DEFAULT_STREAM_IDLE_MS = 60_000;
 
 class BodyTooLargeError extends Error {
   readonly code = 'BODY_TOO_LARGE';
@@ -268,27 +271,64 @@ export async function proxyHandler(
   }
 
   const isStreaming = parsedBody?.stream === true;
+  const streamIdleTimeoutMs = options.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_MS;
 
-  for (let i = 0; i < candidates.length; i++) {
-    const { upstream, resolvedModel } = candidates[i];
-    const bridge = pickBridge(clientProto, upstream.protocol);
+  const abortController = new AbortController();
+  const onClientAbort = () => abortController.abort();
+  req.on('close', onClientAbort);
+  res.on('close', onClientAbort);
 
-    const tryStart = Date.now();
-    const result = await trySingleUpstream({
-      req,
-      res,
-      parsedBody,
-      resolvedModel,
-      upstream,
-      bridge,
-      isStreaming,
-    });
+  try {
+    for (let i = 0; i < candidates.length; i++) {
+      const { upstream, resolvedModel } = candidates[i];
+      const bridge = pickBridge(clientProto, upstream.protocol);
 
-    if (result.ok) {
-      if (isStreaming && result.usagePromise) {
-        result.usagePromise.then((usage) => {
+      const tryStart = Date.now();
+      const result = await trySingleUpstream({
+        req,
+        res,
+        parsedBody,
+        resolvedModel,
+        upstream,
+        bridge,
+        isStreaming,
+        signal: abortController.signal,
+        streamIdleTimeoutMs,
+      });
+
+      if (result.ok) {
+        if (isStreaming && result.usagePromise) {
+          result.usagePromise.then((usage) => {
+            if (limiter) {
+              limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
+            }
+            enqueue({
+              proxy_key_name: proxyKeyName,
+              client_ip: clientIp,
+              client_protocol: clientProto,
+              upstream_protocol: upstream.protocol,
+              request_model: model,
+              actual_model: resolvedModel,
+              upstream_name: upstream.name,
+              status_code: result.statusCode ?? 200,
+              error_message: null,
+              request_tokens: usage.inputTokens ?? null,
+              response_tokens: usage.outputTokens ?? null,
+              total_tokens:
+                usage.inputTokens !== undefined && usage.outputTokens !== undefined
+                  ? usage.inputTokens + usage.outputTokens
+                  : null,
+              duration_ms: Date.now() - startTime,
+              is_streaming: true,
+            });
+          }).catch(() => {});
+        } else if (!isStreaming) {
           if (limiter) {
-            limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
+            limiter.recordUsage(
+              proxyKeyName,
+              result.usage?.inputTokens ?? 0,
+              result.usage?.outputTokens ?? 0
+            );
           }
           enqueue({
             proxy_key_name: proxyKeyName,
@@ -300,85 +340,61 @@ export async function proxyHandler(
             upstream_name: upstream.name,
             status_code: result.statusCode ?? 200,
             error_message: null,
-            request_tokens: usage.inputTokens ?? null,
-            response_tokens: usage.outputTokens ?? null,
+            request_tokens: result.usage?.inputTokens ?? null,
+            response_tokens: result.usage?.outputTokens ?? null,
             total_tokens:
-              usage.inputTokens !== undefined && usage.outputTokens !== undefined
-                ? usage.inputTokens + usage.outputTokens
+              result.usage?.inputTokens !== undefined && result.usage?.outputTokens !== undefined
+                ? result.usage.inputTokens + result.usage.outputTokens
                 : null,
             duration_ms: Date.now() - startTime,
-            is_streaming: true,
+            is_streaming: false,
           });
-        });
-      } else if (!isStreaming) {
-        if (limiter) {
-          limiter.recordUsage(
-            proxyKeyName,
-            result.usage?.inputTokens ?? 0,
-            result.usage?.outputTokens ?? 0
-          );
         }
-        enqueue({
-          proxy_key_name: proxyKeyName,
-          client_ip: clientIp,
-          client_protocol: clientProto,
-          upstream_protocol: upstream.protocol,
-          request_model: model,
-          actual_model: resolvedModel,
-          upstream_name: upstream.name,
-          status_code: result.statusCode ?? 200,
-          error_message: null,
-          request_tokens: result.usage?.inputTokens ?? null,
-          response_tokens: result.usage?.outputTokens ?? null,
-          total_tokens:
-            result.usage?.inputTokens !== undefined && result.usage?.outputTokens !== undefined
-              ? result.usage.inputTokens + result.usage.outputTokens
-              : null,
-          duration_ms: Date.now() - startTime,
-          is_streaming: false,
-        });
+        return;
       }
-      return;
+
+      const duration = Date.now() - tryStart;
+      const shouldRetry = result.shouldRetry ?? false;
+      const status = result.statusCode ?? 502;
+
+      enqueue({
+        proxy_key_name: proxyKeyName,
+        client_ip: clientIp,
+        client_protocol: clientProto,
+        upstream_protocol: upstream.protocol,
+        request_model: model,
+        actual_model: resolvedModel,
+        upstream_name: upstream.name,
+        status_code: status,
+        error_message: redactSecrets(result.errorMessage ?? null),
+        request_tokens: null,
+        response_tokens: null,
+        total_tokens: null,
+        duration_ms: duration,
+        is_streaming: isStreaming,
+      });
+
+      if (!shouldRetry) {
+        if (!res.headersSent) {
+          const err = bridge.wrapError(status, result.errorMessage || 'Upstream error');
+          res.writeHead(status, { 'Content-Type': err.contentType });
+          res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
+        }
+        return;
+      }
+
+      if (i < candidates.length - 1) continue;
     }
 
-    const duration = Date.now() - tryStart;
-    const shouldRetry = result.shouldRetry ?? false;
-    const status = result.statusCode ?? 502;
-
-    enqueue({
-      proxy_key_name: proxyKeyName,
-      client_ip: clientIp,
-      client_protocol: clientProto,
-      upstream_protocol: upstream.protocol,
-      request_model: model,
-      actual_model: resolvedModel,
-      upstream_name: upstream.name,
-      status_code: status,
-      error_message: redactSecrets(result.errorMessage ?? null),
-      request_tokens: null,
-      response_tokens: null,
-      total_tokens: null,
-      duration_ms: duration,
-      is_streaming: isStreaming,
-    });
-
-    if (!shouldRetry) {
-      if (!res.headersSent) {
-        const err = bridge.wrapError(status, result.errorMessage || 'Upstream error');
-        res.writeHead(status, { 'Content-Type': err.contentType });
-        res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
-      }
-      return;
+    if (!res.headersSent) {
+      const lastBridge = pickBridge(clientProto, candidates[candidates.length - 1].upstream.protocol);
+      const err = lastBridge.wrapError(502, 'All upstreams failed');
+      res.writeHead(502, { 'Content-Type': err.contentType });
+      res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
     }
-
-    if (i < candidates.length - 1) continue;
-  }
-
-  if (!res.headersSent) {
-    const lastBridge = pickBridge(clientProto, candidates[candidates.length - 1].upstream.protocol);
-    const err = lastBridge.wrapError(502, 'All upstreams failed');
-    res.writeHead(502, { 'Content-Type': err.contentType });
-    res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
+  } finally {
+    req.off('close', onClientAbort);
+    res.off('close', onClientAbort);
   }
 }
 
@@ -399,8 +415,31 @@ async function trySingleUpstream(options: {
   upstream: { name: string; baseUrl: string; apiKey: string; protocol: Protocol };
   bridge: Bridge;
   isStreaming: boolean;
+  signal: AbortSignal;
+  streamIdleTimeoutMs: number;
 }): Promise<TryResult> {
-  const { req, res, parsedBody, resolvedModel, upstream, bridge, isStreaming } = options;
+  const {
+    req,
+    res,
+    parsedBody,
+    resolvedModel,
+    upstream,
+    bridge,
+    isStreaming,
+    signal: parentSignal,
+    streamIdleTimeoutMs,
+  } = options;
+
+  const localCtl = new AbortController();
+  const onParentAbort = () => localCtl.abort();
+  if (parentSignal.aborted) {
+    localCtl.abort();
+  } else {
+    parentSignal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  const cleanupSignal = () => {
+    parentSignal.removeEventListener('abort', onParentAbort);
+  };
 
   const clientPath = req.url || '/';
   const upstreamPath = bridge.rewriteUrlPath(clientPath);
@@ -441,9 +480,17 @@ async function trySingleUpstream(options: {
       method: req.method ?? 'POST',
       headers: upstreamHeaders,
       body: upstreamBodyBytes,
+      signal: localCtl.signal,
     });
   } catch (err: any) {
-    return { ok: false, shouldRetry: true, statusCode: 502, errorMessage: err.message };
+    cleanupSignal();
+    const aborted = parentSignal.aborted;
+    return {
+      ok: false,
+      shouldRetry: !aborted,
+      statusCode: aborted ? 499 : 502,
+      errorMessage: aborted ? 'client_disconnect' : err.message,
+    };
   }
 
   if (upstreamRes.status >= 400 && upstreamRes.status < 500) {
@@ -456,6 +503,7 @@ async function trySingleUpstream(options: {
         message;
       if (typeof message !== 'string') message = JSON.stringify(message);
     } catch {}
+    cleanupSignal();
     return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };
   }
 
@@ -465,6 +513,7 @@ async function trySingleUpstream(options: {
       const errBody: any = await upstreamRes.clone().json();
       message = errBody?.error?.message ?? message;
     } catch {}
+    cleanupSignal();
     return { ok: false, shouldRetry: true, statusCode: upstreamRes.status, errorMessage: message };
   }
 
@@ -473,18 +522,27 @@ async function trySingleUpstream(options: {
     try {
       upstreamJson = await upstreamRes.json();
     } catch (err: any) {
-      return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: 'Invalid upstream JSON' };
+      cleanupSignal();
+      const aborted = parentSignal.aborted;
+      return {
+        ok: false,
+        shouldRetry: false,
+        statusCode: aborted ? 499 : 502,
+        errorMessage: aborted ? 'client_disconnect' : 'Invalid upstream JSON',
+      };
     }
     const usage = extractNonStreamUsage(upstream.protocol, upstreamJson);
     const transformed = bridge.transformResponse(upstreamJson);
     res.writeHead(upstreamRes.status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(transformed));
+    cleanupSignal();
     return { ok: true, statusCode: upstreamRes.status, usage };
   }
 
   if (!upstreamRes.body) {
     res.writeHead(upstreamRes.status, { 'Content-Type': 'text/event-stream' });
     res.end();
+    cleanupSignal();
     return { ok: true, statusCode: upstreamRes.status };
   }
 
@@ -495,18 +553,25 @@ async function trySingleUpstream(options: {
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
   });
+
   const reader = clientStream.getReader();
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('idle_timeout')), streamIdleTimeoutMs)
+        ),
+      ]);
       if (done) break;
       if (value) res.write(value);
     }
   } catch {
-    // upstream/client disconnect; usage promise will still settle
+    // upstream/client disconnect or idle timeout; usage promise will still settle
   } finally {
     reader.releaseLock();
     res.end();
+    cleanupSignal();
   }
 
   return { ok: true, statusCode: upstreamRes.status, usagePromise: usage };
