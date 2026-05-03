@@ -37,6 +37,20 @@ export async function startServer(
   const logQueue = new LogQueue(logStore, config.server.logFlushIntervalMs, config.server.logBatchSize);
   logQueue.start();
 
+  let purgeTimer: NodeJS.Timeout | undefined;
+  if (config.server.logRetentionDays && config.server.logRetentionDays > 0) {
+    const runPurge = async () => {
+      try {
+        const deleted = await logStore.purgeOlderThan(config.server.logRetentionDays!);
+        if (deleted > 0) console.log(`Purged ${deleted} log rows older than ${config.server.logRetentionDays} days`);
+      } catch (e: any) {
+        console.error('Log purge failed:', e.message);
+      }
+    };
+    await runPurge();
+    purgeTimer = setInterval(runPurge, 24 * 60 * 60 * 1000);
+  }
+
   const limiter = new KeyLimiter();
   const today = new Date().toISOString().slice(0, 10);
   const usage = await logStore.todayTokensByKey(today);
@@ -68,6 +82,7 @@ export async function startServer(
 
   const gracefulShutdown = async () => {
     console.log('\nShutting down gracefully...');
+    if (purgeTimer) clearInterval(purgeTimer);
     healthMonitor.stop();
     logQueue.stop();
     await logStore.close?.();

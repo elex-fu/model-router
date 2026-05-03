@@ -32,3 +32,7 @@ test('UpstreamConfig modelMap is optional', () => {
   };
   assert.equal(upstream.modelMap, undefined);
 });
+
+test('DEFAULT_CONFIG.server.logRetentionDays is 30', () => {
+  assert.equal(DEFAULT_CONFIG.server.logRetentionDays, 30);
+});

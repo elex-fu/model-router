@@ -27,6 +27,7 @@ export interface ServerConfig {
   bindAddress: string;
   logFlushIntervalMs: number;
   logBatchSize: number;
+  logRetentionDays?: number;
 }
 
 export interface Config {
@@ -41,6 +42,7 @@ export const DEFAULT_CONFIG: Config = {
     bindAddress: '127.0.0.1',
     logFlushIntervalMs: 5000,
     logBatchSize: 100,
+    logRetentionDays: 30,
   },
   proxyKeys: [],
   upstreams: [],
