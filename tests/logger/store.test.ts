@@ -198,3 +198,53 @@ test('vacuum: runs without error on a non-empty db', async () => {
     t.cleanup();
   }
 });
+
+test('keyActivitySummary: returns usedToday and lastUsed per key', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const dbAny = (store as any).db;
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens) VALUES ('alice', 0, datetime('now', '-2 days'), 200, 100, 50)"
+      )
+      .run();
+    await store.insertBatch([
+      logEntry({ proxy_key_name: 'alice', request_tokens: 30, response_tokens: 20 }),
+      logEntry({ proxy_key_name: 'bob', request_tokens: 5, response_tokens: 5 }),
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await store.keyActivitySummary(today);
+    const byName = new Map(rows.map((r) => [r.keyName, r]));
+    assert.equal(byName.get('alice')?.usedToday, 50);
+    assert.ok(byName.get('alice')?.lastUsed);
+    assert.equal(byName.get('bob')?.usedToday, 10);
+    assert.ok(byName.get('bob')?.lastUsed);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('keyActivitySummary: lastUsed reflects all-time max not just today', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const dbAny = (store as any).db;
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code) VALUES ('charlie', 0, datetime('now', '-30 days'), 200)"
+      )
+      .run();
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await store.keyActivitySummary(today);
+    const charlie = rows.find((r) => r.keyName === 'charlie');
+    assert.ok(charlie?.lastUsed);
+    assert.equal(charlie?.usedToday, 0);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});

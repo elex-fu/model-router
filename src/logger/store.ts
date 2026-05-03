@@ -10,6 +10,7 @@ export interface LogStore {
   todayTokensByKey(date: string): Promise<Array<{ keyName: string; tokensUsed: number }>>;
   statsByKey(keyName: string, fromDate: string, toDate: string): Promise<Omit<KeyStats, 'keyName'>>;
   statsAllKeys(fromDate: string, toDate: string): Promise<KeyStats[]>;
+  keyActivitySummary(today: string): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>>;
   purgeOlderThan(days: number): Promise<number>;
   vacuum(): Promise<void>;
   close?(): Promise<void>;
@@ -252,6 +253,28 @@ export class SQLiteLogStore implements LogStore {
       .prepare(`DELETE FROM request_logs WHERE created_at < datetime('now', ?)`)
       .run(`-${days} days`);
     return Number(result.changes) || 0;
+  }
+
+  async keyActivitySummary(
+    today: string
+  ): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>> {
+    if (!this.db) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT proxy_key_name AS keyName,
+                COALESCE(SUM(CASE WHEN DATE(created_at) = ?
+                                  THEN COALESCE(request_tokens, 0) + COALESCE(response_tokens, 0)
+                                  ELSE 0 END), 0) AS usedToday,
+                MAX(created_at) AS lastUsed
+         FROM request_logs
+         GROUP BY proxy_key_name`
+      )
+      .all(today) as Array<{ keyName: string; usedToday: number; lastUsed: string | null }>;
+    return rows.map((r) => ({
+      keyName: r.keyName,
+      usedToday: Number(r.usedToday) || 0,
+      lastUsed: r.lastUsed ?? null,
+    }));
   }
 
   async vacuum(): Promise<void> {

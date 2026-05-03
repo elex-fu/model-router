@@ -136,27 +136,45 @@ program
 // key list
 program
   .command('key:list')
-  .description('List all proxy keys')
+  .description('List all proxy keys (secrets masked by default)')
+  .option('--show-secrets', 'Show full key strings (unsafe)')
   .option('-c, --config <path>', 'Path to config file')
-  .action((options) => {
+  .action(async (options) => {
     const store = getStore(options);
     const keys = store.listProxyKeys();
     if (keys.length === 0) {
       console.log('No proxy keys found.');
       return;
     }
+    const { maskSecret } = await import('./mask.js');
+    const { logStoreFromConfig } = await import('../logger/store.js');
+    const today = new Date().toISOString().slice(0, 10);
+    let activity = new Map<string, { usedToday: number; lastUsed: string | null }>();
+    try {
+      const logStore = await logStoreFromConfig(options.config);
+      const rows = await logStore.keyActivitySummary(today);
+      activity = new Map(rows.map((r) => [r.keyName, { usedToday: r.usedToday, lastUsed: r.lastUsed }]));
+      await logStore.close?.();
+    } catch {
+      // log db absent or unreadable — show config columns only
+    }
     console.table(
-      keys.map((k) => ({
-        name: k.name,
-        key: k.key,
-        enabled: k.enabled,
-        expires: k.expiresAt ?? '-',
-        upstreams: k.allowedUpstreams?.join(',') ?? '*',
-        models: k.allowedModels?.join(',') ?? '*',
-        rpm: k.rpm ?? '-',
-        daily_tokens: k.dailyTokens ?? '-',
-        createdAt: k.createdAt,
-      }))
+      keys.map((k) => {
+        const a = activity.get(k.name);
+        return {
+          name: k.name,
+          key: options.showSecrets ? k.key : maskSecret(k.key),
+          enabled: k.enabled,
+          expires: k.expiresAt ?? '-',
+          upstreams: k.allowedUpstreams?.join(',') ?? '*',
+          models: k.allowedModels?.join(',') ?? '*',
+          rpm: k.rpm ?? '-',
+          daily_tokens: k.dailyTokens ?? '-',
+          used_today: a?.usedToday ?? 0,
+          last_used: a?.lastUsed ?? '-',
+          createdAt: k.createdAt,
+        };
+      })
     );
   });
 
@@ -221,21 +239,24 @@ program
 // upstream list
 program
   .command('upstream:list')
-  .description('List all upstreams')
+  .description('List all upstreams (apiKey masked by default)')
+  .option('--show-secrets', 'Show full apiKey strings (unsafe)')
   .option('-c, --config <path>', 'Path to config file')
-  .action((options) => {
+  .action(async (options) => {
     const store = getStore(options);
     const upstreams = store.listUpstreams();
     if (upstreams.length === 0) {
       console.log('No upstreams found.');
       return;
     }
+    const { maskSecret } = await import('./mask.js');
     console.table(
       upstreams.map((u) => ({
         name: u.name,
         provider: u.provider,
         protocol: u.protocol,
         baseUrl: u.baseUrl,
+        apiKey: options.showSecrets ? u.apiKey : maskSecret(u.apiKey),
         models: u.models.join(', '),
         modelMap: u.modelMap ? Object.keys(u.modelMap).length : 0,
         enabled: u.enabled,
