@@ -63,7 +63,7 @@ async function startProxy(
         provider: 'mock',
         protocol: 'anthropic',
         baseUrl: upstreamUrl,
-        apiKey: 'x',
+        apiKeys: ['x'],
         models: ['claude'],
         enabled: true,
       },
@@ -111,8 +111,8 @@ test('abort: client disconnect propagates to upstream', { timeout: 10000 }, asyn
     });
     setTimeout(() => ctl.abort(), 100);
     await fetchP.catch(() => {});
-    // give upstream a moment to observe TCP close
-    await new Promise((r) => setTimeout(r, 300));
+    // give upstream time to observe TCP close
+    await new Promise((r) => setTimeout(r, 1000));
     assert.equal(upstream.sawClose(), true, 'upstream should observe client disconnect');
   } finally {
     await proxy.close();

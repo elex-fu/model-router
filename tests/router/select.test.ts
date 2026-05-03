@@ -9,7 +9,7 @@ function makeUpstream(overrides: Partial<UpstreamConfig>): UpstreamConfig {
     provider: 'test',
     protocol: 'anthropic',
     baseUrl: 'https://example.com',
-    apiKey: 'k',
+    apiKeys: ['k'],
     models: [],
     enabled: true,
     ...overrides,

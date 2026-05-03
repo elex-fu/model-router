@@ -412,7 +412,7 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; apiKey: string; protocol: Protocol };
+  upstream: { name: string; baseUrl: string; apiKeys: string[]; protocol: Protocol };
   bridge: Bridge;
   isStreaming: boolean;
   signal: AbortSignal;
@@ -469,7 +469,7 @@ async function trySingleUpstream(options: {
       upstreamHeaders.set(key, value);
     }
   }
-  upstreamHeaders.set('authorization', `Bearer ${upstream.apiKey}`);
+  upstreamHeaders.set('authorization', `Bearer ${upstream.apiKeys[0]}`);
   upstreamHeaders.set('host', upstreamUrl.host);
   upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
   upstreamHeaders.set('content-type', 'application/json');

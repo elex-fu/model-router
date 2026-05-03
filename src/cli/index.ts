@@ -287,12 +287,12 @@ program
 
 // upstream add
 program
-  .command('upstream:add <name> <provider> <protocol> <baseUrl> <apiKey>')
+  .command('upstream:add <name> <provider> <protocol> <baseUrl> <apiKeys>')
   .description('Add a new upstream')
   .option('-m, --models <models>', 'Comma-separated list of models')
   .option('--map <entries>', 'Comma-separated modelMap entries: pattern=target,...')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, provider, protocol, baseUrl, apiKey, options) => {
+  .action((name, provider, protocol, baseUrl, apiKeys, options) => {
     const store = getStore(options);
     const models = options.models ? String(options.models).split(',').map((s: string) => s.trim()) : [];
     if (protocol !== 'anthropic' && protocol !== 'openai') {
@@ -324,7 +324,7 @@ program
       provider,
       protocol,
       baseUrl,
-      apiKey,
+      apiKeys: apiKeys.split(',').map((s: string) => s.trim()).filter(Boolean),
       models,
       enabled: true,
       ...(modelMap ? { modelMap } : {}),
@@ -335,8 +335,8 @@ program
 // upstream list
 program
   .command('upstream:list')
-  .description('List all upstreams (apiKey masked by default)')
-  .option('--show-secrets', 'Show full apiKey strings (unsafe)')
+  .description('List all upstreams (apiKeys masked by default)')
+  .option('--show-secrets', 'Show full apiKeys strings (unsafe)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
     const store = getStore(options);
@@ -352,7 +352,7 @@ program
         provider: u.provider,
         protocol: u.protocol,
         baseUrl: u.baseUrl,
-        apiKey: options.showSecrets ? u.apiKey : maskSecret(u.apiKey),
+        keys: options.showSecrets ? u.apiKeys.join(', ') : u.apiKeys.map((k: string) => maskSecret(k)).join(', '),
         models: u.models.join(', '),
         modelMap: u.modelMap ? Object.keys(u.modelMap).length : 0,
         enabled: u.enabled,
@@ -460,7 +460,7 @@ program
       const res = await fetch(url, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${u.apiKey}`,
+          authorization: `Bearer ${u.apiKeys[0]}`,
           'content-type': 'application/json',
           accept: 'application/json',
         },

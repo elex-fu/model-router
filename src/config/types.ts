@@ -16,7 +16,7 @@ export interface UpstreamConfig {
   provider: string;
   protocol: 'anthropic' | 'openai';
   baseUrl: string;
-  apiKey: string;
+  apiKeys: string[];
   models: string[];
   enabled: boolean;
   modelMap?: Record<string, string>;

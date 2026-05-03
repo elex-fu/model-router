@@ -12,7 +12,7 @@ test('UpstreamConfig accepts optional modelMap', () => {
     provider: 'moonshot',
     protocol: 'anthropic',
     baseUrl: 'https://api.moonshot.cn',
-    apiKey: 'sk-x',
+    apiKeys: ['sk-x'],
     models: ['claude-sonnet-4-20250514'],
     enabled: true,
     modelMap: { 'claude-*': 'kimi-k2-turbo' },
@@ -26,7 +26,7 @@ test('UpstreamConfig modelMap is optional', () => {
     provider: 'moonshot',
     protocol: 'anthropic',
     baseUrl: 'https://api.moonshot.cn',
-    apiKey: 'sk-x',
+    apiKeys: ['sk-x'],
     models: [],
     enabled: true,
   };

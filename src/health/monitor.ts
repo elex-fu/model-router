@@ -51,7 +51,7 @@ export class HealthMonitor {
       const res = await fetch(url, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${upstream.apiKey}`,
+          authorization: `Bearer ${upstream.apiKeys[0]}`,
           'content-type': 'application/json',
           accept: 'application/json',
         },
