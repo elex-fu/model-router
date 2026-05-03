@@ -428,4 +428,75 @@ program
     console.table(stats);
   });
 
+// stats:key <name> [--since 7d|YYYY-MM-DD]
+program
+  .command('stats:key <name>')
+  .description("Show one proxy key's stats over a date range (default: today only)")
+  .option('--since <since>', 'Range start: "Nd" (e.g. 7d) or YYYY-MM-DD')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (name, options) => {
+    const { logStoreFromConfig } = await import('../logger/store.js');
+    const { resolveSinceRange } = await import('./since.js');
+    const today = new Date().toISOString().slice(0, 10);
+    let range;
+    try {
+      range = resolveSinceRange(options.since, today);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    const store = await logStoreFromConfig(options.config);
+    const stats = await store.statsByKey(name, range.fromDate, range.toDate);
+    console.log(`Stats for "${name}" (${range.fromDate} → ${range.toDate}):`);
+    console.table({
+      requests: stats.requests,
+      errors: stats.errors,
+      rate_limited: stats.rateLimited,
+      input_tokens: stats.inputTokens,
+      output_tokens: stats.outputTokens,
+      total_tokens: stats.totalTokens,
+      avg_latency_ms: stats.avgLatencyMs,
+      last_seen: stats.lastSeen ?? '-',
+    });
+  });
+
+// stats:keys [--since 7d|YYYY-MM-DD]
+program
+  .command('stats:keys')
+  .description('Show stats for all proxy keys over a date range (default: today only)')
+  .option('--since <since>', 'Range start: "Nd" (e.g. 7d) or YYYY-MM-DD')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (options) => {
+    const { logStoreFromConfig } = await import('../logger/store.js');
+    const { resolveSinceRange } = await import('./since.js');
+    const today = new Date().toISOString().slice(0, 10);
+    let range;
+    try {
+      range = resolveSinceRange(options.since, today);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    const store = await logStoreFromConfig(options.config);
+    const rows = await store.statsAllKeys(range.fromDate, range.toDate);
+    if (rows.length === 0) {
+      console.log(`No activity between ${range.fromDate} and ${range.toDate}.`);
+      return;
+    }
+    console.log(`Stats by key (${range.fromDate} → ${range.toDate}):`);
+    console.table(
+      rows.map((r) => ({
+        key: r.keyName,
+        requests: r.requests,
+        errors: r.errors,
+        rate_limited: r.rateLimited,
+        input: r.inputTokens,
+        output: r.outputTokens,
+        total: r.totalTokens,
+        avg_ms: r.avgLatencyMs,
+        last_seen: r.lastSeen ?? '-',
+      }))
+    );
+  });
+
 program.parse(process.argv);
