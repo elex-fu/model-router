@@ -10,6 +10,7 @@ import { ConfigStore } from '../../src/config/store.js';
 import { proxyHandler } from '../../src/server/proxy.js';
 import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
+import { KeyLimiter } from '../../src/limit/limiter.js';
 
 interface MockCall {
   method: string;
@@ -80,7 +81,10 @@ interface ProxyHarness {
   configPath: string;
 }
 
-async function startProxy(config: Config): Promise<ProxyHarness> {
+async function startProxy(
+  config: Config,
+  options: { limiter?: KeyLimiter; maxBodyBytes?: number } = {}
+): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   const configPath = path.join(tmpDir, 'config.json');
@@ -91,7 +95,7 @@ async function startProxy(config: Config): Promise<ProxyHarness> {
     logs.push(entry);
   };
   const server = http.createServer((req, res) => {
-    proxyHandler(req, res, store, enqueue).catch((err) => {
+    proxyHandler(req, res, store, enqueue, options).catch((err) => {
       if (!res.headersSent) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: { message: String(err) } }));
@@ -775,6 +779,208 @@ test('integration: key with future expiresAt still authenticates', async () => {
       body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
     });
     assert.equal(res.status, 200);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Slice 2: KeyLimiter + body size + redact
+// ---------------------------------------------------------------------------
+
+function alwaysOkAnthroUpstream() {
+  return startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_ok',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude',
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5 },
+    },
+  }));
+}
+
+test('integration: rpm exceeded → 429 rate_limit_error + Retry-After header', async () => {
+  const upstream = await alwaysOkAnthroUpstream();
+  const limiter = new KeyLimiter();
+  const proxy = await startProxy(
+    configWithKey({ rpm: 1 }, [
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { limiter }
+  );
+  try {
+    const ok = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mrk_alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(ok.status, 200);
+
+    const blocked = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mrk_alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'again' }] }),
+    });
+    assert.equal(blocked.status, 429);
+    assert.ok(blocked.headers.get('retry-after'));
+    const json: any = await blocked.json();
+    assert.equal(json.type, 'error');
+    assert.equal(json.error.type, 'rate_limit_error');
+
+    const lastLog = proxy.logs[proxy.logs.length - 1];
+    assert.equal(lastLog.status_code, 429);
+    assert.equal(lastLog.error_message, 'rpm_exceeded');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: dailyTokens exhausted → 429 rate_limit_error', async () => {
+  const upstream = await alwaysOkAnthroUpstream();
+  const limiter = new KeyLimiter();
+  // pre-seed usage so the very first reserve sees exhausted
+  limiter.hydrate([{ keyName: 'alice', tokensUsed: 100 }]);
+  const proxy = await startProxy(
+    configWithKey({ dailyTokens: 100 }, [
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { limiter }
+  );
+  try {
+    const blocked = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mrk_alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'x' }] }),
+    });
+    assert.equal(blocked.status, 429);
+    const json: any = await blocked.json();
+    assert.equal(json.error.type, 'rate_limit_error');
+    const lastLog = proxy.logs[proxy.logs.length - 1];
+    assert.equal(lastLog.error_message, 'daily_tokens_exceeded');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: successful request records usage to limiter', async () => {
+  const upstream = await alwaysOkAnthroUpstream();
+  const limiter = new KeyLimiter();
+  const proxy = await startProxy(
+    configWithKey({ dailyTokens: 1000 }, [
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { limiter }
+  );
+  try {
+    const ok = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mrk_alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(ok.status, 200);
+    // mock returns input_tokens=10 + output_tokens=5
+    assert.equal(limiter.getUsage('alice')?.dailyTokensUsed, 15);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: body over max-body-size → 413', async () => {
+  const upstream = await alwaysOkAnthroUpstream();
+  const proxy = await startProxy(
+    configWithKey({}, [
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { maxBodyBytes: 256 }
+  );
+  try {
+    const big = 'x'.repeat(2048);
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mrk_alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: big }] }),
+    });
+    assert.equal(res.status, 413);
+    const json: any = await res.json();
+    assert.equal(json.type, 'error');
+    const lastLog = proxy.logs[proxy.logs.length - 1];
+    assert.equal(lastLog.status_code, 413);
+    assert.equal(lastLog.error_message, 'body_too_large');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: error_message redacts upstream sk- key fragments', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 401,
+    body: { error: { message: 'Invalid API key sk-leaked-AAA12345 detected', type: 'auth' } },
+  }));
+  const proxy = await startProxy(
+    configWithKey({}, [
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'k',
+        models: ['claude'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer mrk_alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'x' }] }),
+    });
+    assert.equal(res.status, 401);
+    const lastLog = proxy.logs[proxy.logs.length - 1];
+    assert.ok(lastLog.error_message);
+    assert.ok(!lastLog.error_message!.includes('sk-leaked'));
+    assert.ok(lastLog.error_message!.includes('sk-***'));
   } finally {
     await proxy.close();
     await upstream.close();

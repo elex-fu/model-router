@@ -3,7 +3,14 @@ import { ConfigStore } from '../config/store.js';
 import { selectUpstreams } from '../router/upstream.js';
 import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
 import { authenticateProxyKey } from './auth.js';
+import { KeyLimiter, type ReserveResult } from '../limit/limiter.js';
+import { redactSecrets } from '../limit/redact.js';
 import type { LogEntry } from '../logger/types.js';
+
+export interface ProxyHandlerOptions {
+  limiter?: KeyLimiter;
+  maxBodyBytes?: number;
+}
 
 function getClientIp(req: IncomingMessage): string {
   const forwarded = req.headers['x-forwarded-for'];
@@ -11,18 +18,38 @@ function getClientIp(req: IncomingMessage): string {
   return req.socket.remoteAddress || '';
 }
 
-function collectBody(req: IncomingMessage): Promise<Buffer> {
+class BodyTooLargeError extends Error {
+  readonly code = 'BODY_TOO_LARGE';
+}
+
+function collectBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    let total = 0;
+    let oversized = false;
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        if (!oversized) {
+          oversized = true;
+          chunks.length = 0;
+        }
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (oversized) {
+        reject(new BodyTooLargeError(`request body exceeds ${maxBytes} bytes`));
+      } else {
+        resolve(Buffer.concat(chunks));
+      }
+    });
     req.on('error', reject);
   });
 }
 
 function clientProtocolFromPath(path: string): Protocol | null {
-  // Anthropic: /v1/messages (canonical)
-  // OpenAI: /v1/chat/completions (canonical)
   if (path.startsWith('/v1/messages')) return 'anthropic';
   if (path.startsWith('/v1/chat/completions')) return 'openai';
   return null;
@@ -60,13 +87,22 @@ function extractNonStreamUsage(
   };
 }
 
+function rateLimitMessage(reason: ReserveResult['reason']): string {
+  if (reason === 'rpm_exceeded') return 'Requests per minute limit exceeded';
+  if (reason === 'daily_tokens_exceeded') return 'Daily token quota exceeded';
+  return 'Rate limit exceeded';
+}
+
 export async function proxyHandler(
   req: IncomingMessage,
   res: ServerResponse,
   store: ConfigStore,
-  enqueue: (entry: LogEntry) => void
+  enqueue: (entry: LogEntry) => void,
+  options: ProxyHandlerOptions = {}
 ): Promise<void> {
   const startTime = Date.now();
+  const limiter = options.limiter;
+  const maxBodyBytes = options.maxBodyBytes ?? Number.POSITIVE_INFINITY;
 
   const reqPath = req.url || '/';
   const clientProto = clientProtocolFromPath(reqPath);
@@ -83,8 +119,39 @@ export async function proxyHandler(
   }
   const proxyKey = auth.key;
   const proxyKeyName = proxyKey.name;
+  const clientBridge = pickBridge(clientProto, clientProto);
 
-  const bodyBuffer = await collectBody(req);
+  let bodyBuffer: Buffer;
+  try {
+    bodyBuffer = await collectBody(req, maxBodyBytes);
+  } catch (err: any) {
+    if (err instanceof BodyTooLargeError) {
+      const errEnv = clientBridge.wrapError(413, 'Request body too large');
+      if (!res.headersSent) {
+        res.writeHead(413, { 'Content-Type': errEnv.contentType });
+        res.end(typeof errEnv.body === 'string' ? errEnv.body : JSON.stringify(errEnv.body));
+      }
+      enqueue({
+        proxy_key_name: proxyKeyName,
+        client_ip: getClientIp(req),
+        client_protocol: clientProto,
+        upstream_protocol: null,
+        request_model: null,
+        actual_model: null,
+        upstream_name: null,
+        status_code: 413,
+        error_message: 'body_too_large',
+        request_tokens: null,
+        response_tokens: null,
+        total_tokens: null,
+        duration_ms: Date.now() - startTime,
+        is_streaming: false,
+      });
+      return;
+    }
+    throw err;
+  }
+
   let parsedBody: any = null;
   try {
     if (bodyBuffer.length > 0) {
@@ -96,6 +163,38 @@ export async function proxyHandler(
 
   const config = store.load();
   const model = parsedBody?.model;
+
+  if (limiter) {
+    const reserved = limiter.reserveRequest(proxyKeyName, proxyKey);
+    if (!reserved.allowed) {
+      const message = rateLimitMessage(reserved.reason);
+      const retryAfterSec = Math.max(1, Math.ceil((reserved.retryAfterMs ?? 60_000) / 1000));
+      const errEnv = clientBridge.wrapError(429, message);
+      res.writeHead(429, {
+        'Content-Type': errEnv.contentType,
+        'Retry-After': String(retryAfterSec),
+      });
+      res.end(typeof errEnv.body === 'string' ? errEnv.body : JSON.stringify(errEnv.body));
+      enqueue({
+        proxy_key_name: proxyKeyName,
+        client_ip: getClientIp(req),
+        client_protocol: clientProto,
+        upstream_protocol: null,
+        request_model: model ?? null,
+        actual_model: null,
+        upstream_name: null,
+        status_code: 429,
+        error_message: reserved.reason ?? 'rate_limited',
+        request_tokens: null,
+        response_tokens: null,
+        total_tokens: null,
+        duration_ms: Date.now() - startTime,
+        is_streaming: false,
+      });
+      return;
+    }
+  }
+
   const candidates = model ? selectUpstreams(model, config.upstreams, proxyKey) : [];
 
   if (candidates.length === 0) {
@@ -144,6 +243,9 @@ export async function proxyHandler(
     if (result.ok) {
       if (isStreaming && result.usagePromise) {
         result.usagePromise.then((usage) => {
+          if (limiter) {
+            limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
+          }
           enqueue({
             proxy_key_name: proxyKeyName,
             client_ip: getClientIp(req),
@@ -165,6 +267,13 @@ export async function proxyHandler(
           });
         });
       } else if (!isStreaming) {
+        if (limiter) {
+          limiter.recordUsage(
+            proxyKeyName,
+            result.usage?.inputTokens ?? 0,
+            result.usage?.outputTokens ?? 0
+          );
+        }
         enqueue({
           proxy_key_name: proxyKeyName,
           client_ip: getClientIp(req),
@@ -201,7 +310,7 @@ export async function proxyHandler(
       actual_model: resolvedModel,
       upstream_name: upstream.name,
       status_code: status,
-      error_message: result.errorMessage ?? null,
+      error_message: redactSecrets(result.errorMessage ?? null),
       request_tokens: null,
       response_tokens: null,
       total_tokens: null,
