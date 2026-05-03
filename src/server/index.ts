@@ -5,6 +5,7 @@ import { proxyHandler } from './proxy.js';
 import { HealthMonitor } from '../health/monitor.js';
 import { KeyLimiter } from '../limit/limiter.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
+import { KeyPool } from './keyPool.js';
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -58,12 +59,20 @@ export async function startServer(
 
   const ipBlocker = new IpAuthBlocker();
 
-  const healthMonitor = new HealthMonitor(store);
+  const keyPool = new KeyPool();
+  for (const upstream of config.upstreams) {
+    if (upstream.apiKeys.length > 0) {
+      keyPool.register(upstream.name, upstream.apiKeys);
+    }
+  }
+
+  const healthMonitor = new HealthMonitor(store, keyPool);
   healthMonitor.start();
 
   const server = http.createServer((req, res) => {
     proxyHandler(req, res, store, (entry) => logQueue.enqueue(entry), {
       limiter,
+      keyPool,
       maxBodyBytes,
       ipBlocker,
       trustProxy,
