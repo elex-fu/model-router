@@ -520,4 +520,37 @@ program
     );
   });
 
+// maintenance:purge --older-than 90d
+program
+  .command('maintenance:purge')
+  .description('Delete request logs older than the given window')
+  .option('--older-than <days>', 'Threshold like "90d" or "90"', '90d')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (options) => {
+    const m = /^(\d+)d?$/.exec(options.olderThan);
+    if (!m) {
+      console.error(`invalid --older-than: ${options.olderThan} (expected "Nd" or "N")`);
+      process.exit(1);
+    }
+    const days = Number(m[1]);
+    const { logStoreFromConfig } = await import('../logger/store.js');
+    const store = await logStoreFromConfig(options.config);
+    const deleted = await store.purgeOlderThan(days);
+    await store.close?.();
+    console.log(`Deleted ${deleted} log row(s) older than ${days} days.`);
+  });
+
+// maintenance:vacuum
+program
+  .command('maintenance:vacuum')
+  .description('Reclaim space in the request log database')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (options) => {
+    const { logStoreFromConfig } = await import('../logger/store.js');
+    const store = await logStoreFromConfig(options.config);
+    await store.vacuum();
+    await store.close?.();
+    console.log('Vacuum complete.');
+  });
+
 program.parse(process.argv);
