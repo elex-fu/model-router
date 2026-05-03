@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { ConfigStore } from '../config/store.js';
 import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { generateProxyKey } from '../utils/generate-key.js';
+import { parseCreateOptions, applyUpdateOptions } from './key-options.js';
 
 const program = new Command();
 
@@ -27,18 +28,109 @@ program
 program
   .command('key:create <name>')
   .description('Create a new proxy key')
+  .option('--description <text>', 'Free-form note (e.g., user email or purpose)')
+  .option('--upstreams <list>', 'Comma-separated upstream whitelist (empty = all)')
+  .option('--models <list>', 'Comma-separated model whitelist, glob OK (empty = all)')
+  .option('--rpm <n>', 'Max requests per minute (0 = blocked, omit = unlimited)')
+  .option('--daily-tokens <n>', 'Max input+output tokens per local day')
+  .option('--expires <iso>', 'ISO 8601 timestamp; omit = never expires')
   .option('-c, --config <path>', 'Path to config file')
   .action((name, options) => {
     const store = getStore(options);
     const key = generateProxyKey();
+    let patch: Partial<import('../config/types.js').ProxyKey>;
+    try {
+      patch = parseCreateOptions(options);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
     store.addProxyKey({
       name,
       key,
       enabled: true,
       createdAt: new Date().toISOString(),
+      ...patch,
     });
     console.log(`Created proxy key: ${name}`);
     console.log(`Key: ${key}`);
+  });
+
+// key update
+program
+  .command('key:update <name>')
+  .description('Update an existing proxy key')
+  .option('--description <text>', 'Set description')
+  .option('--upstreams <list>', 'Replace upstream whitelist (empty = clear)')
+  .option('--add-upstream <name>', 'Add one upstream to the whitelist')
+  .option('--remove-upstream <name>', 'Remove one upstream from the whitelist')
+  .option('--models <list>', 'Replace model whitelist (empty = clear)')
+  .option('--add-model <pattern>', 'Add one model pattern to the whitelist')
+  .option('--remove-model <pattern>', 'Remove one model pattern from the whitelist')
+  .option('--rpm <n>', 'Set RPM limit (0 = blocked)')
+  .option('--daily-tokens <n>', 'Set daily token limit (0 = blocked)')
+  .option('--expires <iso>', `Set expiry; literal "never" clears it`)
+  .option('-c, --config <path>', 'Path to config file')
+  .action((name, options) => {
+    const store = getStore(options);
+    const existing = store.getProxyKeyByName(name);
+    if (!existing) {
+      console.error(`Proxy key "${name}" not found`);
+      process.exit(1);
+    }
+    let patch: Partial<import('../config/types.js').ProxyKey>;
+    try {
+      patch = applyUpdateOptions(options, existing);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    store.updateProxyKey(name, patch);
+    console.log(`Updated proxy key: ${name}`);
+  });
+
+// key rotate
+program
+  .command('key:rotate <name>')
+  .description('Generate a new key string for the named proxy key (old key invalidated immediately)')
+  .option('-c, --config <path>', 'Path to config file')
+  .action((name, options) => {
+    const store = getStore(options);
+    if (!store.getProxyKeyByName(name)) {
+      console.error(`Proxy key "${name}" not found`);
+      process.exit(1);
+    }
+    const newKey = generateProxyKey();
+    store.rotateProxyKey(name, newKey);
+    console.log(`Rotated proxy key: ${name}`);
+    console.log(`New key: ${newKey}`);
+  });
+
+// key enable / disable
+program
+  .command('key:enable <name>')
+  .description('Enable a proxy key')
+  .option('-c, --config <path>', 'Path to config file')
+  .action((name, options) => {
+    const store = getStore(options);
+    if (!store.setProxyKeyEnabled(name, true)) {
+      console.error(`Proxy key "${name}" not found`);
+      process.exit(1);
+    }
+    console.log(`Enabled proxy key: ${name}`);
+  });
+
+program
+  .command('key:disable <name>')
+  .description('Disable a proxy key')
+  .option('-c, --config <path>', 'Path to config file')
+  .action((name, options) => {
+    const store = getStore(options);
+    if (!store.setProxyKeyEnabled(name, false)) {
+      console.error(`Proxy key "${name}" not found`);
+      process.exit(1);
+    }
+    console.log(`Disabled proxy key: ${name}`);
   });
 
 // key list
@@ -53,7 +145,19 @@ program
       console.log('No proxy keys found.');
       return;
     }
-    console.table(keys.map((k) => ({ name: k.name, key: k.key, enabled: k.enabled, createdAt: k.createdAt })));
+    console.table(
+      keys.map((k) => ({
+        name: k.name,
+        key: k.key,
+        enabled: k.enabled,
+        expires: k.expiresAt ?? '-',
+        upstreams: k.allowedUpstreams?.join(',') ?? '*',
+        models: k.allowedModels?.join(',') ?? '*',
+        rpm: k.rpm ?? '-',
+        daily_tokens: k.dailyTokens ?? '-',
+        createdAt: k.createdAt,
+      }))
+    );
   });
 
 // key delete
