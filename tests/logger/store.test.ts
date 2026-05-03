@@ -89,3 +89,112 @@ test('todayTokensByKey: treats null tokens as zero', async () => {
     t.cleanup();
   }
 });
+
+test('statsByKey: counts requests, errors, rate_limited, tokens, latency', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    await store.insertBatch([
+      logEntry({ proxy_key_name: 'alice', status_code: 200, duration_ms: 100, request_tokens: 50, response_tokens: 30 }),
+      logEntry({ proxy_key_name: 'alice', status_code: 200, duration_ms: 200, request_tokens: 10, response_tokens: 5 }),
+      logEntry({ proxy_key_name: 'alice', status_code: 500, duration_ms: 50, request_tokens: 0, response_tokens: 0 }),
+      logEntry({ proxy_key_name: 'alice', status_code: 429, duration_ms: 5, request_tokens: 0, response_tokens: 0 }),
+      logEntry({ proxy_key_name: 'bob', status_code: 200, duration_ms: 1, request_tokens: 1, response_tokens: 1 }),
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await store.statsByKey('alice', today, today);
+    assert.equal(stats.requests, 4);
+    assert.equal(stats.errors, 1);
+    assert.equal(stats.rateLimited, 1);
+    assert.equal(stats.inputTokens, 60);
+    assert.equal(stats.outputTokens, 35);
+    assert.equal(stats.totalTokens, 95);
+    assert.ok(stats.avgLatencyMs > 0);
+    assert.ok(stats.lastSeen);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('statsByKey: returns zeros when key has no logs in range', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await store.statsByKey('ghost', today, today);
+    assert.equal(stats.requests, 0);
+    assert.equal(stats.totalTokens, 0);
+    assert.equal(stats.lastSeen, null);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('statsAllKeys: returns one row per key, ordered by total tokens desc', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    await store.insertBatch([
+      logEntry({ proxy_key_name: 'low', request_tokens: 1, response_tokens: 0 }),
+      logEntry({ proxy_key_name: 'high', request_tokens: 1000, response_tokens: 1000 }),
+      logEntry({ proxy_key_name: 'mid', request_tokens: 100, response_tokens: 50 }),
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await store.statsAllKeys(today, today);
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0].keyName, 'high');
+    assert.equal(rows[1].keyName, 'mid');
+    assert.equal(rows[2].keyName, 'low');
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('purgeOlderThan: deletes logs older than N days, keeps recent', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    // direct SQL for timestamp control
+    const dbAny = (store as any).db;
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, duration_ms) VALUES ('old', 0, datetime('now', '-100 days'), 200, 1)"
+      )
+      .run();
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, duration_ms) VALUES ('young', 0, datetime('now', '-1 days'), 200, 1)"
+      )
+      .run();
+    const deleted = await store.purgeOlderThan(90);
+    assert.equal(deleted, 1);
+    const remaining = await store.queryLogs(10);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].proxy_key_name, 'young');
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('vacuum: runs without error on a non-empty db', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    await store.insertBatch([logEntry()]);
+    await store.vacuum();
+    const rows = await store.queryLogs(10);
+    assert.equal(rows.length, 1);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});

@@ -23,3 +23,15 @@ export interface StatsResult {
   totalOutputTokens: number;
   avgLatencyMs: number;
 }
+
+export interface KeyStats {
+  keyName: string;
+  requests: number;
+  errors: number;
+  rateLimited: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  avgLatencyMs: number;
+  lastSeen: string | null;
+}

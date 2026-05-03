@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { DEFAULT_DB_PATH } from '../utils/paths.js';
-import type { LogEntry, StatsResult } from './types.js';
+import type { KeyStats, LogEntry, StatsResult } from './types.js';
 
 export interface LogStore {
   init(): Promise<void>;
@@ -8,6 +8,10 @@ export interface LogStore {
   queryLogs(limit: number, filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' }): Promise<LogEntry[]>;
   stats(date: string): Promise<StatsResult>;
   todayTokensByKey(date: string): Promise<Array<{ keyName: string; tokensUsed: number }>>;
+  statsByKey(keyName: string, fromDate: string, toDate: string): Promise<Omit<KeyStats, 'keyName'>>;
+  statsAllKeys(fromDate: string, toDate: string): Promise<KeyStats[]>;
+  purgeOlderThan(days: number): Promise<number>;
+  vacuum(): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -156,6 +160,103 @@ export class SQLiteLogStore implements LogStore {
       )
       .all(date) as Array<{ keyName: string; tokensUsed: number }>;
     return rows;
+  }
+
+  async statsByKey(
+    keyName: string,
+    fromDate: string,
+    toDate: string
+  ): Promise<Omit<KeyStats, 'keyName'>> {
+    if (!this.db) {
+      return {
+        requests: 0,
+        errors: 0,
+        rateLimited: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        avgLatencyMs: 0,
+        lastSeen: null,
+      };
+    }
+    const row = this.db
+      .prepare(
+        `SELECT
+            COUNT(*) AS requests,
+            COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code <> 429 THEN 1 ELSE 0 END), 0) AS errors,
+            COALESCE(SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END), 0) AS rateLimited,
+            COALESCE(SUM(COALESCE(request_tokens, 0)), 0) AS inputTokens,
+            COALESCE(SUM(COALESCE(response_tokens, 0)), 0) AS outputTokens,
+            COALESCE(AVG(duration_ms), 0) AS avgLatencyMs,
+            MAX(created_at) AS lastSeen
+         FROM request_logs
+         WHERE proxy_key_name = ?
+           AND DATE(created_at) >= ?
+           AND DATE(created_at) <= ?`
+      )
+      .get(keyName, fromDate, toDate) as any;
+    const inputTokens = Number(row.inputTokens) || 0;
+    const outputTokens = Number(row.outputTokens) || 0;
+    return {
+      requests: Number(row.requests) || 0,
+      errors: Number(row.errors) || 0,
+      rateLimited: Number(row.rateLimited) || 0,
+      inputTokens,
+      outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      avgLatencyMs: Math.round(Number(row.avgLatencyMs) || 0),
+      lastSeen: row.lastSeen ?? null,
+    };
+  }
+
+  async statsAllKeys(fromDate: string, toDate: string): Promise<KeyStats[]> {
+    if (!this.db) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT
+            proxy_key_name AS keyName,
+            COUNT(*) AS requests,
+            COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code <> 429 THEN 1 ELSE 0 END), 0) AS errors,
+            COALESCE(SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END), 0) AS rateLimited,
+            COALESCE(SUM(COALESCE(request_tokens, 0)), 0) AS inputTokens,
+            COALESCE(SUM(COALESCE(response_tokens, 0)), 0) AS outputTokens,
+            COALESCE(AVG(duration_ms), 0) AS avgLatencyMs,
+            MAX(created_at) AS lastSeen
+         FROM request_logs
+         WHERE DATE(created_at) >= ?
+           AND DATE(created_at) <= ?
+         GROUP BY proxy_key_name
+         ORDER BY (COALESCE(SUM(COALESCE(request_tokens, 0)), 0) + COALESCE(SUM(COALESCE(response_tokens, 0)), 0)) DESC`
+      )
+      .all(fromDate, toDate) as any[];
+    return rows.map((row) => {
+      const inputTokens = Number(row.inputTokens) || 0;
+      const outputTokens = Number(row.outputTokens) || 0;
+      return {
+        keyName: row.keyName,
+        requests: Number(row.requests) || 0,
+        errors: Number(row.errors) || 0,
+        rateLimited: Number(row.rateLimited) || 0,
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        avgLatencyMs: Math.round(Number(row.avgLatencyMs) || 0),
+        lastSeen: row.lastSeen ?? null,
+      };
+    });
+  }
+
+  async purgeOlderThan(days: number): Promise<number> {
+    if (!this.db) return 0;
+    const result = this.db
+      .prepare(`DELETE FROM request_logs WHERE created_at < datetime('now', ?)`)
+      .run(`-${days} days`);
+    return Number(result.changes) || 0;
+  }
+
+  async vacuum(): Promise<void> {
+    if (!this.db) return;
+    this.db.exec('VACUUM');
   }
 
   async close(): Promise<void> {
