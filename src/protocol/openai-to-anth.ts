@@ -430,10 +430,11 @@ export class OpenAIToAnthBridge implements Bridge {
     return { clientStream, usage };
   }
 
-  wrapError(_statusCode: number, message: string): BridgeError {
+  wrapError(statusCode: number, message: string): BridgeError {
+    const errorType = statusCode === 429 ? 'rate_limit_exceeded' : 'api_error';
     return {
       body: {
-        error: { message, type: 'api_error', code: null },
+        error: { message, type: errorType, code: null },
       },
       contentType: 'application/json',
     };

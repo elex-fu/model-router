@@ -79,6 +79,15 @@ test('anth-to-openai: wrapError produces anthropic envelope', () => {
   });
 });
 
+test('anth-to-openai: wrapError(429) emits rate_limit_error', () => {
+  const b = new AnthToOpenAIBridge();
+  const err = b.wrapError(429, 'rpm exceeded');
+  assert.deepEqual(err.body, {
+    type: 'error',
+    error: { type: 'rate_limit_error', message: 'rpm exceeded' },
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Group 1: Request transform
 // ---------------------------------------------------------------------------

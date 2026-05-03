@@ -78,6 +78,14 @@ test('openai-to-anth: wrapError produces openai envelope', () => {
   });
 });
 
+test('openai-to-anth: wrapError(429) emits rate_limit_exceeded', () => {
+  const b = new OpenAIToAnthBridge();
+  const err = b.wrapError(429, 'daily tokens exhausted');
+  assert.deepEqual(err.body, {
+    error: { message: 'daily tokens exhausted', type: 'rate_limit_exceeded', code: null },
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Group 1: Request transform
 // ---------------------------------------------------------------------------

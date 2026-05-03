@@ -126,3 +126,11 @@ test('passthrough-openai: wrapError produces openai envelope', () => {
     error: { message: 'upstream gone', type: 'server_error', code: null },
   });
 });
+
+test('passthrough-openai: wrapError(429) emits rate_limit_exceeded type', () => {
+  const b = new PassthroughOpenAiBridge();
+  const err = b.wrapError(429, 'daily tokens exhausted');
+  assert.deepEqual(err.body, {
+    error: { message: 'daily tokens exhausted', type: 'rate_limit_exceeded', code: null },
+  });
+});

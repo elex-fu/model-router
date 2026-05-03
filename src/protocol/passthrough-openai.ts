@@ -66,12 +66,13 @@ export class PassthroughOpenAiBridge implements Bridge {
     return { clientStream: toClient, usage };
   }
 
-  wrapError(_statusCode: number, message: string): BridgeError {
+  wrapError(statusCode: number, message: string): BridgeError {
+    const errorType = statusCode === 429 ? 'rate_limit_exceeded' : 'server_error';
     return {
       body: {
         error: {
           message,
-          type: 'server_error',
+          type: errorType,
           code: null,
         },
       },

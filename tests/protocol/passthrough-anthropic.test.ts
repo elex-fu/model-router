@@ -132,3 +132,12 @@ test('passthrough-anthropic: wrapError produces anthropic envelope', () => {
     error: { type: 'api_error', message: 'boom' },
   });
 });
+
+test('passthrough-anthropic: wrapError(429) emits rate_limit_error type', () => {
+  const b = new PassthroughAnthropicBridge();
+  const err = b.wrapError(429, 'rpm exceeded');
+  assert.deepEqual(err.body, {
+    type: 'error',
+    error: { type: 'rate_limit_error', message: 'rpm exceeded' },
+  });
+});

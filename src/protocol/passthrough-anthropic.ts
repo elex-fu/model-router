@@ -66,11 +66,12 @@ export class PassthroughAnthropicBridge implements Bridge {
     return { clientStream: toClient, usage };
   }
 
-  wrapError(_statusCode: number, message: string): BridgeError {
+  wrapError(statusCode: number, message: string): BridgeError {
+    const errorType = statusCode === 429 ? 'rate_limit_error' : 'api_error';
     return {
       body: {
         type: 'error',
-        error: { type: 'api_error', message },
+        error: { type: errorType, message },
       },
       contentType: 'application/json',
     };
