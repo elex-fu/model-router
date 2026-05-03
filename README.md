@@ -6,7 +6,8 @@
 
 - **双向协议桥接**：客户端可走 Anthropic（`/v1/messages`）或 OpenAI（`/v1/chat/completions`）协议，上游可选 Anthropic 或 OpenAI；4 种 client/upstream 组合（`a→a` `o→o` `a→o` `o→a`）全部可用
 - **modelMap 模型重写**：在 upstream 上配置 `pattern → realModel` 映射，支持精确匹配 + glob 通配（`*`、`?`），可让客户端用任意名字调用上游
-- **多 Key 路由 + 故障降级**：同一 model 可挂多个 upstream，失败自动随机降级
+- **同 upstream 多 Key 自动调度**：每个 upstream 支持配置多个 API Key，请求时随机调度；某个 Key 连续失败 3 次后自动冷却 5 分钟，同 upstream 内兜底切换到其它 Key
+- **多 upstream 故障降级**：同一 model 可挂多个 upstream，失败自动随机降级到其它 upstream
 - **代理 Key 鉴权**：为不同使用方分配独立的代理 key，认证错误按客户端协议返回
 - **流式 + 非流式全程支持**：SSE 状态机在桥接两端正确还原 `tool_use`、`tool_calls`、`finish_reason`、usage 计数
 - **异步日志记录**：每条请求记录 `client_protocol` / `upstream_protocol` / 模型 / token / 耗时,本地 SQLite
@@ -57,6 +58,15 @@ model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-y
 model-router upstream:add deepseek-1 deepseek openai https://api.deepseek.com sk-your-ds-key \
   --models deepseek-chat
 ```
+
+#### 同 upstream 配置多 Key（逗号分隔）
+
+```bash
+model-router upstream:add kimi-code kimi anthropic https://api.kimi.com/coding sk-a,sk-b,sk-c \
+  --models kimi-k2-5
+```
+
+请求时会随机从 `sk-a`、`sk-b`、`sk-c` 中选一个；某个 Key 连续失败 3 次后冷却 5 分钟，自动切换到同 upstream 的其它 Key。
 
 #### 带 modelMap：让客户端用 Claude 名字调用 OpenAI 上游
 
@@ -164,8 +174,8 @@ model-router key:delete my-device
 ### 上游管理
 
 ```bash
-# 添加(协议必须为 anthropic 或 openai)
-model-router upstream:add <name> <provider> <protocol> <baseUrl> <apiKey> \
+# 添加(协议必须为 anthropic 或 openai, apiKeys 支持逗号分隔多 Key)
+model-router upstream:add <name> <provider> <protocol> <baseUrl> <apiKeys> \
   --models m1,m2 \
   --map "pattern1=target1,pattern2=target2"
 
@@ -176,7 +186,7 @@ model-router upstream:list
 model-router upstream:delete <name>
 ```
 
-`upstream:list` 输出包含 `modelMap` 列(条目数)。
+`upstream:list` 输出包含 `keys` 列(Key 数量，默认 mask) 与 `modelMap` 列(条目数)。
 
 ### modelMap 管理
 
@@ -276,7 +286,7 @@ model-router stats --date 2026-05-02
       "provider": "kimi",
       "protocol": "anthropic",
       "baseUrl": "https://api.kimi.com/coding",
-      "apiKey": "sk-kimi-key",
+      "apiKeys": ["sk-kimi-key"],
       "models": ["kimi-k2-5"],
       "enabled": true
     },
@@ -285,7 +295,7 @@ model-router stats --date 2026-05-02
       "provider": "deepseek",
       "protocol": "openai",
       "baseUrl": "https://api.deepseek.com",
-      "apiKey": "sk-ds-key",
+      "apiKeys": ["sk-ds-key"],
       "models": [],
       "modelMap": {
         "claude-sonnet-4-5": "deepseek-chat",
@@ -353,10 +363,17 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
+│  KeyPool (同 upstream 多 Key 调度)                          │
+│  • 随机选择可用 Key                                         │
+│  • Key 连续 3 次失败 → 冷却 5 分钟                          │
+│  • 同 upstream 内兜底切换其它 Key                           │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
 │  Upstream fetch (带 AbortSignal)                            │
 │  • 客户端断开 → 自动取消上游请求                            │
 │  • SSE 流 60s idle → 自动关闭连接                           │
-│  • 5xx / 网络错误 → failover 重试下一 upstream              │
+│  • 5xx / 网络错误 → key 级重试 → upstream 级 failover       │
 └────────────────────────┬────────────────────────────────────┘
                          ↓
        Upstream API
@@ -370,6 +387,17 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 ```
 
 ## 高级特性
+
+### 同 upstream 多 Key 调度
+
+每个 upstream 的 `apiKeys` 支持配置多个 Key。代理在每次请求时：
+
+1. **随机调度** — 从该 upstream 的可用 Key 中随机挑选一个发送请求
+2. **Key 级失败兜底** — 若某个 Key 返回 `5xx` 或网络错误，立即在同 upstream 内尝试下一个可用 Key；`4xx` 错误不重试（视为配置/权限问题）
+3. **冷却避障** — 某个 Key 连续失败 3 次后，自动进入 5 分钟冷却期，期间不再被选中；成功后立即解除冷却
+4. **Upstream 级 failover** — 若同 upstream 的所有 Key 都失败，再降级到下一个 upstream 候选
+
+多 Key 调度让同一 upstream 的配额可以充分利用，同时单 Key 异常不会影响整体可用性。
 
 ### 失败自动降级
 
@@ -399,9 +427,12 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 
 ### 心跳健康检查
 
-启动后立即跑一轮、之后每分钟检查一次每个 upstream 的可用性。连续失败 3 次会自动 `enabled=false` 摘流量,恢复成功 1 次自动重新启用。
+启动后立即跑一轮、之后每分钟检查一次每个 upstream 的可用性。健康检查会遍历 upstream 的所有 Key 逐一探活：
 
-> 探测使用 `models[0]` 拼一条 `max_tokens=5` 的 anthropic 风格请求 (5 秒超时),所以仅对 `models[]` 至少有一项的上游生效;纯 `modelMap` 上游可改用 `model-router test <name>` 手动探活。
+- 任意 Key 成功 → upstream 保持/恢复启用，并对该 Key 调用 `markSuccess` 清零失败计数
+- **所有 Key 都失败** → 记为一次"全部失败"轮次；连续 3 轮全部失败才会自动 `enabled=false` 摘流量
+
+> 健康检查**不**调用 `markFailure`，避免探活误杀正常 Key。探测使用 `models[0]` 拼一条 `max_tokens=5` 的请求 (5 秒超时)，所以仅对 `models[]` 至少有一项的上游生效；纯 `modelMap` 上游可改用 `model-router test <name>` 手动探活。
 
 ### modelMap glob 匹配
 
@@ -420,6 +451,8 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 ```bash
 model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-key --models kimi-k2-5
 model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding/ sk-key --models kimi-k2-5
+# 多 Key
+model-router upstream:add kimi-1 kimi anthropic https://api.kimi.com/coding sk-a,sk-b --models kimi-k2-5
 ```
 
 ## 开发
@@ -434,7 +467,7 @@ npm run build
 # 运行编译后版本
 npm start
 
-# 测试 (230 个用例:配置/路由/4 种桥接/SSE 状态机/集成端到端/客户端断开/防爆破/WAL)
+# 测试 (250 个用例:配置/路由/KeyPool/4 种桥接/SSE 状态机/集成端到端/客户端断开/防爆破/WAL/健康检查)
 npm test
 ```
 
@@ -450,11 +483,13 @@ npm test
 | `tests/protocol/anth-to-openai.test.ts` | 16 | Anthropic↔OpenAI 单向(请求/响应/流式)                      |
 | `tests/protocol/openai-to-anth.test.ts` | 16 | OpenAI↔Anthropic 反向(请求/响应/流式)                      |
 | `tests/protocol/sse.test.ts`  | 6      | SSE 解析/写入/CRLF/multi-line                                |
-| `tests/integration/proxy.test.ts` | 10  | 端到端 4 种 client/upstream 组合 + 鉴权 + failover + 4xx 不重试 |
+| `tests/integration/proxy.test.ts` | 13  | 端到端 4 种 client/upstream 组合 + 鉴权 + failover + 4xx 不重试 + 多 Key 调度 |
 | `tests/server/abort.integration.test.ts` | 2 | 客户端断开传播 + SSE idle timeout                          |
 | `tests/server/healthz.test.ts` | 6      | /healthz 状态码/方法/DB 探活                                 |
 | `tests/server/clientIp.test.ts` | 8     | XFF 信任开关 8 种场景                                        |
 | `tests/server/ipBlocker.integration.test.ts` | 4 | IP 防爆破 4 种场景                                    |
+| `tests/server/keyPool.test.ts` | 11     | Key 随机选择/失败计数/冷却/恢复/getAvailableKeys             |
+| `tests/health/monitor.test.ts` | 6      | 健康检查: 单 Key/多 Key/全部失败禁用/恢复/无 keyPool 兼容     |
 | `tests/limit/limiter.test.ts` | 8      | RPM / 日 token 配额 / UTC 午夜重置                           |
 | `tests/logger/store.test.ts`  | 10     | SQLite CRUD + 统计查询 + WAL 模式验证                        |
 
