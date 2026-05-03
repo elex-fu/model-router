@@ -4,6 +4,7 @@ import { selectUpstreams } from '../router/upstream.js';
 import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
 import { authenticateProxyKey } from './auth.js';
 import { KeyLimiter, type ReserveResult } from '../limit/limiter.js';
+import { KeyPool } from './keyPool.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { redactSecrets } from '../limit/redact.js';
 import { getClientIp } from './clientIp.js';
@@ -11,6 +12,7 @@ import type { LogEntry } from '../logger/types.js';
 
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
+  keyPool?: KeyPool;
   maxBodyBytes?: number;
   healthCheck?: () => Promise<boolean>;
   ipBlocker?: IpAuthBlocker;
@@ -283,24 +285,62 @@ export async function proxyHandler(
       const { upstream, resolvedModel } = candidates[i];
       const bridge = pickBridge(clientProto, upstream.protocol);
 
-      const tryStart = Date.now();
-      const result = await trySingleUpstream({
-        req,
-        res,
-        parsedBody,
-        resolvedModel,
-        upstream,
-        bridge,
-        isStreaming,
-        signal: abortController.signal,
-        streamIdleTimeoutMs,
-      });
+      let keysForUpstream = options.keyPool?.getAvailableKeys(upstream.name) ?? upstream.apiKeys;
+      if (keysForUpstream.length === 0) continue;
+      for (let k = keysForUpstream.length - 1; k > 0; k--) {
+        const j = Math.floor(Math.random() * (k + 1));
+        [keysForUpstream[k], keysForUpstream[j]] = [keysForUpstream[j], keysForUpstream[k]];
+      }
 
-      if (result.ok) {
-        if (isStreaming && result.usagePromise) {
-          result.usagePromise.then((usage) => {
+      for (const key of keysForUpstream) {
+        const tryStart = Date.now();
+        const result = await trySingleUpstream({
+          req,
+          res,
+          parsedBody,
+          resolvedModel,
+          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol },
+          apiKey: key,
+          bridge,
+          isStreaming,
+          signal: abortController.signal,
+          streamIdleTimeoutMs,
+        });
+
+        if (result.ok) {
+          options.keyPool?.markSuccess(upstream.name, key);
+          if (isStreaming && result.usagePromise) {
+            result.usagePromise.then((usage) => {
+              if (limiter) {
+                limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
+              }
+              enqueue({
+                proxy_key_name: proxyKeyName,
+                client_ip: clientIp,
+                client_protocol: clientProto,
+                upstream_protocol: upstream.protocol,
+                request_model: model,
+                actual_model: resolvedModel,
+                upstream_name: upstream.name,
+                status_code: result.statusCode ?? 200,
+                error_message: null,
+                request_tokens: usage.inputTokens ?? null,
+                response_tokens: usage.outputTokens ?? null,
+                total_tokens:
+                  usage.inputTokens !== undefined && usage.outputTokens !== undefined
+                    ? usage.inputTokens + usage.outputTokens
+                    : null,
+                duration_ms: Date.now() - startTime,
+                is_streaming: true,
+              });
+            }).catch(() => {});
+          } else if (!isStreaming) {
             if (limiter) {
-              limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
+              limiter.recordUsage(
+                proxyKeyName,
+                result.usage?.inputTokens ?? 0,
+                result.usage?.outputTokens ?? 0
+              );
             }
             enqueue({
               proxy_key_name: proxyKeyName,
@@ -312,75 +352,52 @@ export async function proxyHandler(
               upstream_name: upstream.name,
               status_code: result.statusCode ?? 200,
               error_message: null,
-              request_tokens: usage.inputTokens ?? null,
-              response_tokens: usage.outputTokens ?? null,
+              request_tokens: result.usage?.inputTokens ?? null,
+              response_tokens: result.usage?.outputTokens ?? null,
               total_tokens:
-                usage.inputTokens !== undefined && usage.outputTokens !== undefined
-                  ? usage.inputTokens + usage.outputTokens
+                result.usage?.inputTokens !== undefined && result.usage?.outputTokens !== undefined
+                  ? result.usage.inputTokens + result.usage.outputTokens
                   : null,
               duration_ms: Date.now() - startTime,
-              is_streaming: true,
+              is_streaming: false,
             });
-          }).catch(() => {});
-        } else if (!isStreaming) {
-          if (limiter) {
-            limiter.recordUsage(
-              proxyKeyName,
-              result.usage?.inputTokens ?? 0,
-              result.usage?.outputTokens ?? 0
-            );
           }
-          enqueue({
-            proxy_key_name: proxyKeyName,
-            client_ip: clientIp,
-            client_protocol: clientProto,
-            upstream_protocol: upstream.protocol,
-            request_model: model,
-            actual_model: resolvedModel,
-            upstream_name: upstream.name,
-            status_code: result.statusCode ?? 200,
-            error_message: null,
-            request_tokens: result.usage?.inputTokens ?? null,
-            response_tokens: result.usage?.outputTokens ?? null,
-            total_tokens:
-              result.usage?.inputTokens !== undefined && result.usage?.outputTokens !== undefined
-                ? result.usage.inputTokens + result.usage.outputTokens
-                : null,
-            duration_ms: Date.now() - startTime,
-            is_streaming: false,
-          });
+          return;
         }
-        return;
-      }
 
-      const duration = Date.now() - tryStart;
-      const shouldRetry = result.shouldRetry ?? false;
-      const status = result.statusCode ?? 502;
+        options.keyPool?.markFailure(upstream.name, key);
 
-      enqueue({
-        proxy_key_name: proxyKeyName,
-        client_ip: clientIp,
-        client_protocol: clientProto,
-        upstream_protocol: upstream.protocol,
-        request_model: model,
-        actual_model: resolvedModel,
-        upstream_name: upstream.name,
-        status_code: status,
-        error_message: redactSecrets(result.errorMessage ?? null),
-        request_tokens: null,
-        response_tokens: null,
-        total_tokens: null,
-        duration_ms: duration,
-        is_streaming: isStreaming,
-      });
+        const duration = Date.now() - tryStart;
+        const shouldRetry = result.shouldRetry ?? false;
+        const status = result.statusCode ?? 502;
 
-      if (!shouldRetry) {
-        if (!res.headersSent) {
-          const err = bridge.wrapError(status, result.errorMessage || 'Upstream error');
-          res.writeHead(status, { 'Content-Type': err.contentType });
-          res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
+        enqueue({
+          proxy_key_name: proxyKeyName,
+          client_ip: clientIp,
+          client_protocol: clientProto,
+          upstream_protocol: upstream.protocol,
+          request_model: model,
+          actual_model: resolvedModel,
+          upstream_name: upstream.name,
+          status_code: status,
+          error_message: redactSecrets(result.errorMessage ?? null),
+          request_tokens: null,
+          response_tokens: null,
+          total_tokens: null,
+          duration_ms: duration,
+          is_streaming: isStreaming,
+        });
+
+        if (!shouldRetry) {
+          if (!res.headersSent) {
+            const err = bridge.wrapError(status, result.errorMessage || 'Upstream error');
+            res.writeHead(status, { 'Content-Type': err.contentType });
+            res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
+          }
+          return;
         }
-        return;
+
+        // Try next key for same upstream
       }
 
       if (i < candidates.length - 1) continue;
@@ -412,7 +429,8 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; apiKeys: string[]; protocol: Protocol };
+  upstream: { name: string; baseUrl: string; protocol: Protocol };
+  apiKey: string;
   bridge: Bridge;
   isStreaming: boolean;
   signal: AbortSignal;
@@ -424,6 +442,7 @@ async function trySingleUpstream(options: {
     parsedBody,
     resolvedModel,
     upstream,
+    apiKey,
     bridge,
     isStreaming,
     signal: parentSignal,
@@ -469,7 +488,7 @@ async function trySingleUpstream(options: {
       upstreamHeaders.set(key, value);
     }
   }
-  upstreamHeaders.set('authorization', `Bearer ${upstream.apiKeys[0]}`);
+  upstreamHeaders.set('authorization', `Bearer ${apiKey}`);
   upstreamHeaders.set('host', upstreamUrl.host);
   upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
   upstreamHeaders.set('content-type', 'application/json');

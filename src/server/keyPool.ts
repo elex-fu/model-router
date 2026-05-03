@@ -57,4 +57,11 @@ export class KeyPool {
       }
     }
   }
+
+  getAvailableKeys(upstreamName: string): string[] {
+    const states = this.states.get(upstreamName);
+    if (!states) return [];
+    const now = Date.now();
+    return states.filter((s) => s.cooledUntil <= now).map((s) => s.key);
+  }
 }

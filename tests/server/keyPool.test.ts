@@ -102,3 +102,17 @@ test('pick returns null when no keys registered', () => {
   pool.register('up1', []);
   assert.equal(pool.pick('up1'), null);
 });
+
+test('getAvailableKeys returns all uncooled keys', () => {
+  const pool = new KeyPool({ cooldownMs: 60_000 });
+  pool.register('up1', ['k1', 'k2', 'k3']);
+  pool.markFailure('up1', 'k1');
+  pool.markFailure('up1', 'k1');
+  pool.markFailure('up1', 'k1');
+  assert.deepEqual(pool.getAvailableKeys('up1'), ['k2', 'k3']);
+});
+
+test('getAvailableKeys returns empty for unregistered upstream', () => {
+  const pool = new KeyPool();
+  assert.deepEqual(pool.getAvailableKeys('up1'), []);
+});

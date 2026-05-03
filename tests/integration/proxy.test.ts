@@ -11,6 +11,7 @@ import { proxyHandler } from '../../src/server/proxy.js';
 import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
 import { KeyLimiter } from '../../src/limit/limiter.js';
+import { KeyPool } from '../../src/server/keyPool.js';
 
 interface MockCall {
   method: string;
@@ -83,7 +84,7 @@ interface ProxyHarness {
 
 async function startProxy(
   config: Config,
-  options: { limiter?: KeyLimiter; maxBodyBytes?: number } = {}
+  options: { limiter?: KeyLimiter; maxBodyBytes?: number; keyPool?: KeyPool } = {}
 ): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -982,6 +983,199 @@ test('integration: error_message redacts upstream sk- key fragments', async () =
     assert.ok(!lastLog.error_message!.includes('sk-leaked'));
     assert.ok(lastLog.error_message!.includes('sk-***'));
   } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Multi-key scheduling
+// ---------------------------------------------------------------------------
+
+test('integration: multi-key — first key 500, second key succeeds', async () => {
+  const upstream = await startMockUpstream((call) => {
+    if (call.headers.authorization === 'Bearer key-a') {
+      return { status: 500, body: { error: { message: 'down' } } };
+    }
+    return {
+      status: 200,
+      body: {
+        id: 'msg_ok',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    };
+  });
+
+  const keyPool = new KeyPool({ cooldownMs: 60_000 });
+  keyPool.register('u1', ['key-a', 'key-b']);
+
+  const originalRandom = Math.random;
+  Math.random = () => 0.99; // no swap in Fisher-Yates → key-a first
+
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-a', 'key-b'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { keyPool }
+  );
+
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-test-12345',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    const json: any = await res.json();
+    assert.equal(json.id, 'msg_ok');
+
+    assert.equal(upstream.calls.length, 2);
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer key-a');
+    assert.equal(upstream.calls[1].headers.authorization, 'Bearer key-b');
+
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(proxy.logs.length, 2);
+    assert.equal(proxy.logs[0].status_code, 500);
+    assert.equal(proxy.logs[1].status_code, 200);
+  } finally {
+    Math.random = originalRandom;
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: multi-key — 4xx does not retry next key', async () => {
+  let calls = 0;
+  const upstream = await startMockUpstream(() => {
+    calls++;
+    return { status: 401, body: { error: { message: 'bad key' } } };
+  });
+
+  const keyPool = new KeyPool({ cooldownMs: 60_000 });
+  keyPool.register('u1', ['key-a', 'key-b']);
+
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-a', 'key-b'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { keyPool }
+  );
+
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-test-12345',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 401);
+    assert.equal(calls, 1);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: multi-key — both keys 500, upstream-level failover', async () => {
+  const upstream = await startMockUpstream((call) => {
+    if (call.headers.authorization === 'Bearer key-c') {
+      return {
+        status: 200,
+        body: {
+          id: 'msg_ok',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude',
+          content: [{ type: 'text', text: 'fallback' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      };
+    }
+    return { status: 500, body: { error: { message: 'down' } } };
+  });
+
+  const keyPool = new KeyPool({ cooldownMs: 60_000 });
+  keyPool.register('u1', ['key-a', 'key-b']);
+  keyPool.register('u2', ['key-c']);
+
+  const originalRandom = Math.random;
+  Math.random = () => 0.99; // no swap → key-a first for u1
+
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-a', 'key-b'],
+        models: ['claude'],
+        enabled: true,
+      },
+      {
+        name: 'u2',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-c'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { keyPool }
+  );
+
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-test-12345',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    const json: any = await res.json();
+    assert.equal(json.id, 'msg_ok');
+
+    assert.equal(upstream.calls.length, 3);
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer key-a');
+    assert.equal(upstream.calls[1].headers.authorization, 'Bearer key-b');
+    assert.equal(upstream.calls[2].headers.authorization, 'Bearer key-c');
+
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(proxy.logs.length, 3);
+    const statuses = proxy.logs.map((l) => l.status_code).sort();
+    assert.deepEqual(statuses, [200, 500, 500]);
+  } finally {
+    Math.random = originalRandom;
     await proxy.close();
     await upstream.close();
   }
