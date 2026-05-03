@@ -96,3 +96,151 @@ test('ConfigStore.load tolerates legacy proxyKeys without new fields', () => {
     fs.rmSync(p, { force: true });
   }
 });
+
+test('ConfigStore.getProxyKeyByName returns key including disabled', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    store.addProxyKey({
+      name: 'disabled-one',
+      key: 'mrk_disabled',
+      enabled: false,
+      createdAt: '2026-05-03T00:00:00Z',
+    });
+    const k = store.getProxyKeyByName('disabled-one');
+    assert.ok(k);
+    assert.equal(k!.enabled, false);
+    assert.equal(store.getProxyKeyByName('does-not-exist'), undefined);
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});
+
+test('ConfigStore.getProxyKeyByKey returns key regardless of enabled flag', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    store.addProxyKey({
+      name: 'disabled-one',
+      key: 'mrk_disabled',
+      enabled: false,
+      createdAt: '2026-05-03T00:00:00Z',
+    });
+    const k = store.getProxyKeyByKey('mrk_disabled');
+    assert.ok(k);
+    assert.equal(k!.enabled, false);
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});
+
+test('ConfigStore.updateProxyKey merges patch fields', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    store.addProxyKey({
+      name: 'alice',
+      key: 'mrk_alice',
+      enabled: true,
+      createdAt: '2026-05-03T00:00:00Z',
+      rpm: 30,
+      allowedUpstreams: ['u1'],
+    });
+    store.updateProxyKey('alice', {
+      rpm: 60,
+      description: 'alice@team.com',
+      allowedUpstreams: ['u1', 'u2'],
+    });
+    const k = store.getProxyKeyByName('alice');
+    assert.ok(k);
+    assert.equal(k!.rpm, 60);
+    assert.equal(k!.description, 'alice@team.com');
+    assert.deepEqual(k!.allowedUpstreams, ['u1', 'u2']);
+    assert.equal(k!.key, 'mrk_alice');
+    assert.equal(k!.name, 'alice');
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});
+
+test('ConfigStore.updateProxyKey can clear optional fields with undefined', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    store.addProxyKey({
+      name: 'alice',
+      key: 'mrk_alice',
+      enabled: true,
+      createdAt: '2026-05-03T00:00:00Z',
+      expiresAt: '2026-12-31T00:00:00Z',
+      allowedUpstreams: ['u1'],
+    });
+    store.updateProxyKey('alice', {
+      expiresAt: undefined,
+      allowedUpstreams: undefined,
+    });
+    const k = store.getProxyKeyByName('alice');
+    assert.equal(k!.expiresAt, undefined);
+    assert.equal(k!.allowedUpstreams, undefined);
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});
+
+test('ConfigStore.updateProxyKey throws for unknown name', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    assert.throws(() => store.updateProxyKey('nope', { rpm: 10 }), /nope/);
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});
+
+test('ConfigStore.rotateProxyKey replaces key, preserves metadata', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    store.addProxyKey({
+      name: 'alice',
+      key: 'mrk_old',
+      enabled: true,
+      createdAt: '2026-05-03T00:00:00Z',
+      rpm: 30,
+      allowedUpstreams: ['u1'],
+      description: 'alice',
+    });
+    store.rotateProxyKey('alice', 'mrk_new');
+    const k = store.getProxyKeyByName('alice');
+    assert.ok(k);
+    assert.equal(k!.key, 'mrk_new');
+    assert.equal(k!.rpm, 30);
+    assert.deepEqual(k!.allowedUpstreams, ['u1']);
+    assert.equal(k!.description, 'alice');
+    // Old key string no longer authenticates.
+    assert.equal(store.getProxyKeyByKey('mrk_old'), undefined);
+    assert.equal(store.getProxyKeyByKey('mrk_new')?.name, 'alice');
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});
+
+test('ConfigStore.setProxyKeyEnabled toggles flag and persists', () => {
+  const p = tmpConfigPath();
+  try {
+    const store = new ConfigStore(p);
+    store.addProxyKey({
+      name: 'alice',
+      key: 'mrk_alice',
+      enabled: true,
+      createdAt: '2026-05-03T00:00:00Z',
+    });
+    assert.equal(store.setProxyKeyEnabled('alice', false), true);
+    assert.equal(store.getProxyKeyByName('alice')!.enabled, false);
+    assert.equal(store.setProxyKeyEnabled('alice', true), true);
+    assert.equal(store.getProxyKeyByName('alice')!.enabled, true);
+    assert.equal(store.setProxyKeyEnabled('nope', true), false);
+  } finally {
+    fs.rmSync(p, { force: true });
+  }
+});

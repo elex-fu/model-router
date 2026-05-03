@@ -41,7 +41,12 @@ export class ConfigStore {
 
   getProxyKeyByKey(key: string): ProxyKey | undefined {
     const config = this.load();
-    return config.proxyKeys.find((k) => k.key === key && k.enabled);
+    return config.proxyKeys.find((k) => k.key === key);
+  }
+
+  getProxyKeyByName(name: string): ProxyKey | undefined {
+    const config = this.load();
+    return config.proxyKeys.find((k) => k.name === name);
   }
 
   addProxyKey(key: ProxyKey): void {
@@ -51,6 +56,37 @@ export class ConfigStore {
     }
     config.proxyKeys.push(key);
     this.save(config);
+  }
+
+  updateProxyKey(name: string, patch: Partial<ProxyKey>): void {
+    const config = this.load();
+    const idx = config.proxyKeys.findIndex((k) => k.name === name);
+    if (idx === -1) {
+      throw new Error(`Proxy key "${name}" does not exist.`);
+    }
+    const current = config.proxyKeys[idx]!;
+    const merged: ProxyKey = { ...current, ...patch, name: current.name };
+    for (const field of ['description', 'expiresAt', 'allowedUpstreams', 'allowedModels', 'rpm', 'dailyTokens'] as const) {
+      if (Object.prototype.hasOwnProperty.call(patch, field) && patch[field] === undefined) {
+        delete merged[field];
+      }
+    }
+    config.proxyKeys[idx] = merged;
+    this.save(config);
+  }
+
+  rotateProxyKey(name: string, newKey: string): void {
+    this.updateProxyKey(name, { key: newKey });
+  }
+
+  setProxyKeyEnabled(name: string, enabled: boolean): boolean {
+    const config = this.load();
+    const k = config.proxyKeys.find((kk) => kk.name === name);
+    if (!k) return false;
+    if (k.enabled === enabled) return true;
+    k.enabled = enabled;
+    this.save(config);
+    return true;
   }
 
   deleteProxyKey(name: string): void {

@@ -19,7 +19,7 @@ export function authenticateProxyKey(
   }
 
   const proxyKey = store.getProxyKeyByKey(apiKey);
-  if (!proxyKey) {
+  if (!proxyKey || !proxyKey.enabled) {
     return { ok: false };
   }
 
