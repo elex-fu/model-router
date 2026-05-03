@@ -12,6 +12,10 @@
 - **异步日志记录**：每条请求记录 `client_protocol` / `upstream_protocol` / 模型 / token / 耗时,本地 SQLite
 - **健康检查端点**：`GET /healthz` 返回 200 + `{status:"ok",db:"ok"}`，反代 / 监控可直接探活；DB 不可达时返回 503
 - **认证防爆破**：同一 IP 在 5 分钟内连续 10 次认证失败后，后续请求直接 429，成功一次自动清零
+- **X-Forwarded-For 信任开关**：`--trust-proxy` 仅在置于可信反代后开启，防止 IP 伪造绕过防爆破；默认直接取 socket 地址
+- **连接防泄漏**：客户端断开时自动中止上游 fetch；SSE 流 60s 无数据自动关闭，防止僵尸连接堆积
+- **SQLite WAL**：`PRAGMA journal_mode=WAL` 提升并发写入吞吐量，读写互不阻塞
+- **自动日志清理**：按 `server.logRetentionDays`（默认 30 天）自动清理旧日志，启动即执行并每 24h 轮询
 - **纯 CLI 管理**:命令行管理 key、upstream、modelMap、日志、统计，并附带 upstream 探活命令
 
 ## 快速开始
@@ -71,6 +75,12 @@ model-router start
 
 # 指定端口
 model-router start --port 15005
+
+# 置于可信反代后，开启 XFF 信任（影响 IP 防爆破与日志中的 client_ip）
+model-router start --trust-proxy
+
+# daemon 后台运行
+model-router start --daemon --log-file /var/log/model-router.log
 ```
 
 ### 客户端配置
@@ -127,6 +137,15 @@ model-router start --port 18080
 
 # 指定自定义配置文件
 model-router start --port 15005 --config /etc/model-router/config.json
+
+# 限制最大请求体 (默认 4MB)
+model-router start --max-body-size 8mb
+
+# 信任 X-Forwarded-For（仅当在可信反代后开启）
+model-router start --trust-proxy
+
+# 后台运行并指定日志/PID 文件
+model-router start --daemon --log-file /var/log/model-router.log --pid-file /var/run/model-router.pid
 ```
 
 ### Key 管理
@@ -238,8 +257,10 @@ model-router stats --date 2026-05-02
 {
   "server": {
     "port": 15005,
+    "bindAddress": "127.0.0.1",
     "logFlushIntervalMs": 5000,
-    "logBatchSize": 100
+    "logBatchSize": 100,
+    "logRetentionDays": 30
   },
   "proxyKeys": [
     {
@@ -281,38 +302,71 @@ model-router stats --date 2026-05-02
 ```
 Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
         ↓
-┌─────────────────────┐
-│  Path → clientProto │  /v1/messages → anthropic
-│                     │  /v1/chat/completions → openai
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│       Auth          │  代理 key 校验,错误按 clientProto 包装
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│  Router (modelMap)  │  匹配候选 upstream,resolvedModel
-└──────────┬──────────┘
-           ↓
-┌─────────────────────┐
-│   pickBridge(       │  4 种组合:
-│    clientProto,     │   • PassthroughAnthropicBridge (a→a)
-│    upstreamProto)   │   • PassthroughOpenAiBridge    (o→o)
-│                     │   • AnthToOpenAIBridge         (a→o)
-│                     │   • OpenAIToAnthBridge         (o→a)
-│  rewriteUrlPath     │
-│  transformRequest   │
-│  transformResponse  │
-│  transformStream    │
-│  wrapError          │
-└──────────┬──────────┘
-           ↓
+┌─────────────────────────────────────────────────────────────┐
+│  HTTP Server (bindAddress:port)                             │
+│  • maxBodyBytes 拦截超大请求体 → 413                        │
+│  • GET /healthz → 200/503 (无鉴权)                          │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Path → clientProto                                         │
+│  /v1/messages → anthropic    /v1/chat/completions → openai  │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  getClientIp(req, trustProxy)                               │
+│  trustProxy=false → socket.remoteAddress                    │
+│  trustProxy=true  → X-Forwarded-For 第一跳                  │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  IpAuthBlocker                                              │
+│  同一 IP 5min/10 次认证失败 → 429 (预鉴权门)                │
+│  成功一次自动清零                                           │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Auth (代理 Key 校验)                                       │
+│  支持 Authorization: Bearer <key> 或 x-api-key: <key>       │
+│  错误按 clientProto 包装 (anthropic/openai 格式)            │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  KeyLimiter (RPM + 日 Token 配额)                           │
+│  超限直接 429，不命中上游                                   │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Router (modelMap + upstream 选择)                          │
+│  精确匹配 → glob 匹配 → models[] 透传                       │
+│  同一 model 多 upstream 候选，随机排序                      │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│   pickBridge(clientProto, upstreamProto)                    │
+│   • PassthroughAnthropicBridge (a→a)                        │
+│   • PassthroughOpenAiBridge    (o→o)                        │
+│   • AnthToOpenAIBridge         (a→o)                        │
+│   • OpenAIToAnthBridge         (o→a)                        │
+│   rewriteUrlPath / transformRequest / transformResponse     │
+│   transformStream (SSE 协议转换 + usage 提取)                │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Upstream fetch (带 AbortSignal)                            │
+│  • 客户端断开 → 自动取消上游请求                            │
+│  • SSE 流 60s idle → 自动关闭连接                           │
+│  • 5xx / 网络错误 → failover 重试下一 upstream              │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
        Upstream API
-           ↑
-┌─────────────────────┐
-│   Async Logger      │  内存队列 → SQLite
-│   (cp / up / ...)   │
-└─────────────────────┘
+                         ↑
+┌─────────────────────────────────────────────────────────────┐
+│  Async Logger                                               │
+│  内存队列 → SQLite (WAL 模式)                               │
+│  字段: client/upstream 协议、模型、token、耗时、状态码      │
+│  自动按 logRetentionDays 清理旧日志                         │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## 高级特性
@@ -320,6 +374,28 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 ### 失败自动降级
 
 当 upstream 返回 `5xx` 或网络不可达时,代理会按随机顺序尝试其他可用 upstream,直到成功或全部耗尽。`4xx` 错误不重试。每次尝试都按 client 协议包装错误,并独立记录日志。
+
+### 连接生命周期与防泄漏
+
+每个请求分配独立的 `AbortController`：
+- **客户端断开** (`req/res` 的 `close` 事件) → 立即取消上游 `fetch`，避免上游继续消耗 token
+- **SSE idle timeout** → 流式响应若 60s 无数据块到达，自动关闭连接并结束响应，防止僵尸 SSE 挂死
+- **非流式 body 读取** → `fetch` signal 同样覆盖响应 body 消费阶段，客户端中途断连即停
+
+> 上游侧的 TCP 关闭由 `fetch` 的 `AbortSignal` 驱动；对于使用 `tee()` 做 SSE 解析的 bridge，客户端取消会级联终止消费端 reader，不会阻塞在 stalled stream 上。
+
+### SQLite WAL 模式
+
+日志库默认启用 `PRAGMA journal_mode = WAL; synchronous = NORMAL`：
+- 写入不阻塞读取，高并发场景下查询日志/统计不会卡死请求写入
+- 崩溃恢复更快，性能显著优于默认 `DELETE` journal
+
+### 自动日志清理
+
+启动时立即执行一次，随后每 24 小时轮询：
+- 按 `config.server.logRetentionDays` 删除过期 `request_logs`（默认 30 天）
+- 可通过 `server.logRetentionDays = 0` 关闭自动清理，改用 `model-router maintenance:purge --older-than Nd` 手动运维
+- shutdown 时自动清除定时器
 
 ### 心跳健康检查
 
@@ -358,7 +434,7 @@ npm run build
 # 运行编译后版本
 npm start
 
-# 测试 (94 个用例:配置/路由/4 种桥接/SSE 状态机/集成端到端)
+# 测试 (230 个用例:配置/路由/4 种桥接/SSE 状态机/集成端到端/客户端断开/防爆破/WAL)
 npm test
 ```
 
@@ -366,7 +442,7 @@ npm test
 
 | 模块                          | 用例数 | 说明                                                        |
 |-------------------------------|--------|-------------------------------------------------------------|
-| `tests/config/`               | 14     | ConfigStore CRUD + modelMap 字段                             |
+| `tests/config/`               | 15     | ConfigStore CRUD + modelMap 字段 + 默认配置                  |
 | `tests/router/select.test.ts` | 8      | 精确/glob/`models[]` 透传/enabled 过滤/multi-upstream 选择    |
 | `tests/protocol/glob.test.ts` | 10     | glob 通配符 (`*` `?`) 边界                                   |
 | `tests/protocol/bridge.test.ts` | 4    | `pickBridge` 矩阵 4 种组合                                   |
@@ -375,12 +451,19 @@ npm test
 | `tests/protocol/openai-to-anth.test.ts` | 16 | OpenAI↔Anthropic 反向(请求/响应/流式)                      |
 | `tests/protocol/sse.test.ts`  | 6      | SSE 解析/写入/CRLF/multi-line                                |
 | `tests/integration/proxy.test.ts` | 10  | 端到端 4 种 client/upstream 组合 + 鉴权 + failover + 4xx 不重试 |
+| `tests/server/abort.integration.test.ts` | 2 | 客户端断开传播 + SSE idle timeout                          |
+| `tests/server/healthz.test.ts` | 6      | /healthz 状态码/方法/DB 探活                                 |
+| `tests/server/clientIp.test.ts` | 8     | XFF 信任开关 8 种场景                                        |
+| `tests/server/ipBlocker.integration.test.ts` | 4 | IP 防爆破 4 种场景                                    |
+| `tests/limit/limiter.test.ts` | 8      | RPM / 日 token 配额 / UTC 午夜重置                           |
+| `tests/logger/store.test.ts`  | 10     | SQLite CRUD + 统计查询 + WAL 模式验证                        |
 
 ## 注意事项
 
 - 默认端口 `15005`,如有冲突可用 `--port` 覆盖
 - 默认绑定 `127.0.0.1`,需要对外暴露请显式 `--bind 0.0.0.0`(推荐放反代后)
-- 日志存储在 `~/.model-router/logs.sqlite`,进程退出会自动 flush 未写入日志
+- **XFF 安全**: 仅在可信反代后开启 `--trust-proxy`；直接暴露到公网时保持默认（取 socket IP），否则攻击者可伪造 `X-Forwarded-For` 绕过 IP 防爆破
+- 日志存储在 `~/.model-router/logs.sqlite`(WAL 模式),进程退出会自动 flush 未写入日志；默认保留 30 天，可在配置中调整 `logRetentionDays`
 - **API Key 安全**:妥善保管 upstream key 与代理 key;`key:list` / `upstream:list` 默认 mask,加 `--show-secrets` 才显示完整值
 - 协议字段必须为 `anthropic` 或 `openai`,否则 `upstream:add` 会拒绝
 
@@ -420,13 +503,17 @@ model-router key:list
 
 ### 维护
 
+自动清理已按 `server.logRetentionDays` 每日运行，以下命令用于手动运维或临时调整：
+
 ```bash
-# 清理 90 天前的请求日志
+# 手动清理指定天数前的请求日志
 model-router maintenance:purge --older-than 90d
 
-# 回收 SQLite 空间
+# 回收 SQLite 空间（清理后执行可缩小文件体积）
 model-router maintenance:vacuum
 ```
+
+> `maintenance:purge` 与自动清理共用同一 `purgeOlderThan` 实现，可放心在运行中的服务上手动执行（WAL 模式下读写互不阻塞）。
 
 ## 对外部署
 
@@ -434,7 +521,8 @@ model-router maintenance:vacuum
 
 1. `--bind 127.0.0.1`(默认)只允许本机访问
 2. Caddy / nginx 在前,负责 TLS、限速、访问日志
-3. `--daemon` 让服务后台运行;`--pid-file` / `--log-file` 控制 PID 与日志路径
+3. `--trust-proxy` 仅在反代后开启，让代理从 `X-Forwarded-For` 读取真实客户端 IP（用于防爆破与日志审计）
+4. `--daemon` 让服务后台运行;`--pid-file` / `--log-file` 控制 PID 与日志路径
 
 启动:
 
@@ -443,10 +531,13 @@ model-router start \
   --bind 127.0.0.1 \
   --port 15005 \
   --max-body-size 4mb \
+  --trust-proxy \
   --daemon \
   --log-file /var/log/model-router.log \
   --pid-file /var/run/model-router.pid
 ```
+
+> `--daemon` 会以当前 CLI 参数生成子进程，因此 `--trust-proxy`、`--bind`、`--max-body-size` 等 flag 会被自动继承到后台服务。
 
 管理:
 
@@ -496,7 +587,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/model-router start --bind 127.0.0.1 --port 15005
+ExecStart=/usr/local/bin/model-router start --bind 127.0.0.1 --port 15005 --trust-proxy
 Restart=on-failure
 RestartSec=5
 
@@ -532,6 +623,7 @@ journalctl --user -u model-router -f
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>15005</string>
+    <string>--trust-proxy</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -578,7 +670,7 @@ launchctl unload ~/Library/LaunchAgents/com.modelrouter.plist
 
 ### 优雅关闭与超时
 
-收到 `SIGTERM` / `SIGINT` 后,代理执行: 停止健康监控 → 排空日志队列 → 关闭 SQLite → 清理 PID 文件 → `server.close()`。`server.close()` 会等待所有进行中的请求处理完成。如果上游响应卡住,关闭可能会被拖延;launchctl/systemd 默认会在 30 秒后强制 SIGKILL,这是可以接受的兜底。
+收到 `SIGTERM` / `SIGINT` 后,代理执行: 清除日志清理定时器 → 停止健康监控 → 排空日志队列 → 关闭 SQLite → 清理 PID 文件 → `server.close()`。`server.close()` 会等待所有进行中的请求处理完成。SSE idle timeout（60s）和客户端断开传播机制确保 stalled stream 不会无限阻塞关闭流程。
 
 > **不要直接 `--bind 0.0.0.0`** 暴露未加 TLS 的代理:任何嗅探到端口的人都能消耗你的上游配额。
 
