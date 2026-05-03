@@ -21,7 +21,7 @@ const RPM_WINDOW_MS = 60_000;
 
 function defaultNextDailyReset(now: number): number {
   const d = new Date(now);
-  d.setHours(24, 0, 0, 0);
+  d.setUTCHours(24, 0, 0, 0);
   return d.getTime();
 }
 

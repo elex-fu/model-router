@@ -185,3 +185,25 @@ test('separate keys have isolated usage state', () => {
   // bob is unaffected
   assert.equal(limiter.reserveRequest('bob', bobKey).allowed, true);
 });
+
+test('default nextDailyReset is UTC midnight, not local midnight', () => {
+  // 2026-05-03T12:00:00Z -- the next UTC midnight is 2026-05-04T00:00:00Z
+  const noon = Date.parse('2026-05-03T12:00:00Z');
+  const expected = Date.parse('2026-05-04T00:00:00Z');
+  const limiter = new KeyLimiter({ now: () => noon });
+  const key = makeKey({ dailyTokens: 1000 });
+  limiter.reserveRequest('alice', key);
+  const usage = limiter.getUsage('alice');
+  assert.equal(usage?.dailyResetAt, expected);
+});
+
+test('default nextDailyReset advances exactly 24h on UTC midnight tick', () => {
+  // Right at UTC midnight the reset should be 24h ahead — not "today".
+  const midnight = Date.parse('2026-05-03T00:00:00Z');
+  const expected = Date.parse('2026-05-04T00:00:00Z');
+  const limiter = new KeyLimiter({ now: () => midnight });
+  const key = makeKey({ dailyTokens: 1000 });
+  limiter.reserveRequest('alice', key);
+  const usage = limiter.getUsage('alice');
+  assert.equal(usage?.dailyResetAt, expected);
+});
