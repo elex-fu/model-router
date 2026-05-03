@@ -24,6 +24,7 @@ export interface UpstreamConfig {
 
 export interface ServerConfig {
   port: number;
+  bindAddress: string;
   logFlushIntervalMs: number;
   logBatchSize: number;
 }
@@ -37,6 +38,7 @@ export interface Config {
 export const DEFAULT_CONFIG: Config = {
   server: {
     port: 15005,
+    bindAddress: '127.0.0.1',
     logFlushIntervalMs: 5000,
     logBatchSize: 100,
   },

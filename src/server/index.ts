@@ -9,6 +9,7 @@ const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
 export interface StartServerOptions {
   port?: number;
+  bindAddress?: string;
   configPath?: string;
   maxBodyBytes?: number;
 }
@@ -22,6 +23,7 @@ export async function startServer(
   const store = new ConfigStore(configPath);
   const config = store.load();
   const port = portArg ?? options.port ?? config.server.port;
+  const bindAddress = options.bindAddress ?? config.server.bindAddress;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
   const { LogQueue } = await import('../logger/queue.js');
@@ -47,10 +49,10 @@ export async function startServer(
     });
   });
 
-  server.listen(port, () => {
+  server.listen(port, bindAddress, () => {
     const addr = server.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : port;
-    console.log(`model-router proxy listening on http://127.0.0.1:${actualPort}`);
+    console.log(`model-router proxy listening on http://${bindAddress}:${actualPort}`);
   });
 
   const gracefulShutdown = async () => {

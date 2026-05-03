@@ -171,3 +171,34 @@ test('deleteModelMapEntry throws for unknown upstream', () => {
   const store = new ConfigStore(tmpFile);
   assert.throws(() => store.deleteModelMapEntry('nope', 'foo'), /nope/);
 });
+
+test('save() chmods config file to 0600 (owner read/write only)', () => {
+  if (process.platform === 'win32') return;
+  const store = new ConfigStore(tmpFile);
+  store.addUpstream(makeUpstream());
+  const stats = fs.statSync(tmpFile);
+  const mode = stats.mode & 0o777;
+  assert.equal(mode, 0o600);
+});
+
+test('default config has bindAddress 127.0.0.1', () => {
+  const store = new ConfigStore(tmpFile);
+  const config = store.load();
+  assert.equal(config.server.bindAddress, '127.0.0.1');
+});
+
+test('legacy config without bindAddress merges to 127.0.0.1 default', () => {
+  fs.writeFileSync(
+    tmpFile,
+    JSON.stringify({
+      server: { port: 9999, logFlushIntervalMs: 1000, logBatchSize: 50 },
+      proxyKeys: [],
+      upstreams: [],
+    }),
+    'utf-8'
+  );
+  const store = new ConfigStore(tmpFile);
+  const config = store.load();
+  assert.equal(config.server.bindAddress, '127.0.0.1');
+  assert.equal(config.server.port, 9999);
+});

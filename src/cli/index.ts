@@ -18,10 +18,25 @@ program
   .command('start')
   .description('Start the proxy server')
   .option('-p, --port <port>', 'Server port', parseInt)
+  .option('-b, --bind <address>', 'Address to bind (default: 127.0.0.1)')
+  .option('--max-body-size <size>', 'Max request body size (e.g. 4mb, 1024)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
     const { startServer } = await import('../server/index.js');
-    await startServer(options.port, options.config);
+    let maxBodyBytes: number | undefined;
+    if (options.maxBodySize) {
+      const { parseByteSize } = await import('./size.js');
+      try {
+        maxBodyBytes = parseByteSize(options.maxBodySize);
+      } catch (err: any) {
+        console.error(err.message);
+        process.exit(1);
+      }
+    }
+    await startServer(options.port, options.config, {
+      bindAddress: options.bind,
+      maxBodyBytes,
+    });
   });
 
 // key create

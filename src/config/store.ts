@@ -25,12 +25,20 @@ export class ConfigStore {
       fs.mkdirSync(dir, { recursive: true });
     }
     fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf-8');
+    if (process.platform !== 'win32') {
+      try {
+        fs.chmodSync(this.configPath, 0o600);
+      } catch {
+        // best-effort: filesystems without permission bits ignore this
+      }
+    }
   }
 
   private mergeDefaults(partial: Partial<Config>): Config {
     return {
       server: {
         port: partial.server?.port ?? DEFAULT_CONFIG.server.port,
+        bindAddress: partial.server?.bindAddress ?? DEFAULT_CONFIG.server.bindAddress,
         logFlushIntervalMs: partial.server?.logFlushIntervalMs ?? DEFAULT_CONFIG.server.logFlushIntervalMs,
         logBatchSize: partial.server?.logBatchSize ?? DEFAULT_CONFIG.server.logBatchSize,
       },
