@@ -20,6 +20,7 @@ program
   .option('-p, --port <port>', 'Server port', parseInt)
   .option('-b, --bind <address>', 'Address to bind (default: 127.0.0.1)')
   .option('--max-body-size <size>', 'Max request body size (e.g. 4mb, 1024)')
+  .option('--trust-proxy', 'Honor X-Forwarded-For (only when behind a trusted reverse proxy)')
   .option('--daemon', 'Run in background; requires --pid-file (and usually --log-file)')
   .option('--log-file <path>', 'Daemon stdout/stderr log file')
   .option('--pid-file <path>', 'Daemon PID file')
@@ -50,6 +51,7 @@ program
       if (options.port !== undefined) childArgs.push('--port', String(options.port));
       if (options.bind) childArgs.push('--bind', options.bind);
       if (options.maxBodySize) childArgs.push('--max-body-size', options.maxBodySize);
+      if (options.trustProxy) childArgs.push('--trust-proxy');
       if (options.config) childArgs.push('--config', options.config);
       const pid = spawnDaemon({
         args: childArgs,
@@ -63,6 +65,7 @@ program
     await startServer(options.port, options.config, {
       bindAddress: options.bind,
       maxBodyBytes,
+      trustProxy: options.trustProxy,
     });
   });
 

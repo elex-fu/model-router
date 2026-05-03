@@ -6,6 +6,7 @@ import { authenticateProxyKey } from './auth.js';
 import { KeyLimiter, type ReserveResult } from '../limit/limiter.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { redactSecrets } from '../limit/redact.js';
+import { getClientIp } from './clientIp.js';
 import type { LogEntry } from '../logger/types.js';
 
 export interface ProxyHandlerOptions {
@@ -13,12 +14,7 @@ export interface ProxyHandlerOptions {
   maxBodyBytes?: number;
   healthCheck?: () => Promise<boolean>;
   ipBlocker?: IpAuthBlocker;
-}
-
-function getClientIp(req: IncomingMessage): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return req.socket.remoteAddress || '';
+  trustProxy?: boolean;
 }
 
 class BodyTooLargeError extends Error {
@@ -142,7 +138,7 @@ export async function proxyHandler(
     return;
   }
 
-  const clientIp = getClientIp(req);
+  const clientIp = getClientIp(req, options.trustProxy ?? false);
   if (options.ipBlocker) {
     const block = options.ipBlocker.check(clientIp);
     if (block.blocked) {
@@ -181,7 +177,7 @@ export async function proxyHandler(
       }
       enqueue({
         proxy_key_name: proxyKeyName,
-        client_ip: getClientIp(req),
+        client_ip: clientIp,
         client_protocol: clientProto,
         upstream_protocol: null,
         request_model: null,
@@ -225,7 +221,7 @@ export async function proxyHandler(
       res.end(typeof errEnv.body === 'string' ? errEnv.body : JSON.stringify(errEnv.body));
       enqueue({
         proxy_key_name: proxyKeyName,
-        client_ip: getClientIp(req),
+        client_ip: clientIp,
         client_protocol: clientProto,
         upstream_protocol: null,
         request_model: model ?? null,
@@ -254,7 +250,7 @@ export async function proxyHandler(
     writeProtocolError(res, clientProto, 404, 'not_found_error', errMessage);
     enqueue({
       proxy_key_name: proxyKeyName,
-      client_ip: getClientIp(req),
+      client_ip: clientIp,
       client_protocol: clientProto,
       upstream_protocol: null,
       request_model: model ?? null,
@@ -296,7 +292,7 @@ export async function proxyHandler(
           }
           enqueue({
             proxy_key_name: proxyKeyName,
-            client_ip: getClientIp(req),
+            client_ip: clientIp,
             client_protocol: clientProto,
             upstream_protocol: upstream.protocol,
             request_model: model,
@@ -324,7 +320,7 @@ export async function proxyHandler(
         }
         enqueue({
           proxy_key_name: proxyKeyName,
-          client_ip: getClientIp(req),
+          client_ip: clientIp,
           client_protocol: clientProto,
           upstream_protocol: upstream.protocol,
           request_model: model,
@@ -351,7 +347,7 @@ export async function proxyHandler(
 
     enqueue({
       proxy_key_name: proxyKeyName,
-      client_ip: getClientIp(req),
+      client_ip: clientIp,
       client_protocol: clientProto,
       upstream_protocol: upstream.protocol,
       request_model: model,

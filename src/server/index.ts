@@ -13,6 +13,7 @@ export interface StartServerOptions {
   bindAddress?: string;
   configPath?: string;
   maxBodyBytes?: number;
+  trustProxy?: boolean;
 }
 
 export async function startServer(
@@ -26,6 +27,7 @@ export async function startServer(
   const port = portArg ?? options.port ?? config.server.port;
   const bindAddress = options.bindAddress ?? config.server.bindAddress;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const trustProxy = options.trustProxy ?? false;
 
   const { LogQueue } = await import('../logger/queue.js');
   const { SQLiteLogStore } = await import('../logger/store.js');
@@ -50,6 +52,7 @@ export async function startServer(
       limiter,
       maxBodyBytes,
       ipBlocker,
+      trustProxy,
       healthCheck: async () => {
         await logStore.ping();
         return true;
