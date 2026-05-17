@@ -182,6 +182,7 @@ export class AnthToOpenAIBridge implements Bridge {
       toolCallOrder: number[]; // insertion order of openai indices
       inputTokens?: number;
       outputTokens?: number;
+      cacheReadTokens?: number;
       finished: boolean;
     };
 
@@ -228,6 +229,10 @@ export class AnthToOpenAIBridge implements Bridge {
               }
               if (chunk.usage.completion_tokens !== undefined) {
                 state.outputTokens = chunk.usage.completion_tokens;
+              }
+              const details = chunk.usage.prompt_tokens_details;
+              if (details && typeof details === 'object' && details.cached_tokens !== undefined) {
+                state.cacheReadTokens = details.cached_tokens;
               }
             }
 
@@ -394,6 +399,7 @@ export class AnthToOpenAIBridge implements Bridge {
           resolveUsage({
             inputTokens: state.inputTokens,
             outputTokens: state.outputTokens,
+            cacheReadTokens: state.cacheReadTokens,
           });
         } catch (err) {
           try {

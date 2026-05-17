@@ -37,6 +37,8 @@ export class PassthroughAnthropicBridge implements Bridge {
     const usage: Promise<BridgeUsage> = (async () => {
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
+      let cacheReadTokens: number | undefined;
+      let cacheCreationTokens: number | undefined;
 
       for await (const ev of parseSseStream(toParser)) {
         const data = ev.data;
@@ -54,13 +56,17 @@ export class PassthroughAnthropicBridge implements Bridge {
           if (u?.output_tokens !== undefined && outputTokens === undefined) {
             outputTokens = u.output_tokens;
           }
+          if (u?.cache_read_input_tokens !== undefined) cacheReadTokens = u.cache_read_input_tokens;
+          if (u?.cache_creation_input_tokens !== undefined) cacheCreationTokens = u.cache_creation_input_tokens;
         } else if (json?.type === 'message_delta') {
           const u = json.usage;
           if (u?.output_tokens !== undefined) outputTokens = u.output_tokens;
+          if (u?.cache_read_input_tokens !== undefined) cacheReadTokens = u.cache_read_input_tokens;
+          if (u?.cache_creation_input_tokens !== undefined) cacheCreationTokens = u.cache_creation_input_tokens;
         }
       }
 
-      return { inputTokens, outputTokens };
+      return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
     })();
 
     return { clientStream: toClient, usage };

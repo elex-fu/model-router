@@ -43,6 +43,7 @@ export class PassthroughOpenAiBridge implements Bridge {
     const usage: Promise<BridgeUsage> = (async () => {
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
+      let cacheReadTokens: number | undefined;
 
       for await (const ev of parseSseStream(toParser)) {
         const data = ev.data;
@@ -57,10 +58,14 @@ export class PassthroughOpenAiBridge implements Bridge {
         if (u && typeof u === 'object') {
           if (u.prompt_tokens !== undefined) inputTokens = u.prompt_tokens;
           if (u.completion_tokens !== undefined) outputTokens = u.completion_tokens;
+          const details = u.prompt_tokens_details;
+          if (details && typeof details === 'object' && details.cached_tokens !== undefined) {
+            cacheReadTokens = details.cached_tokens;
+          }
         }
       }
 
-      return { inputTokens, outputTokens };
+      return { inputTokens, outputTokens, cacheReadTokens };
     })();
 
     return { clientStream: toClient, usage };

@@ -66,7 +66,7 @@ test('passthrough-openai: stream tee delivers identical bytes to client', async 
   assert.deepEqual(Array.from(got), Array.from(original));
 
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 10, outputTokens: 20 });
+  assert.deepEqual(u, { inputTokens: 10, outputTokens: 20, cacheReadTokens: undefined });
 });
 
 test('passthrough-openai: usage from final chunk', async () => {
@@ -93,7 +93,7 @@ test('passthrough-openai: usage from final chunk', async () => {
   const { clientStream, usage } = bridge.transformStream(streamOf(finalizeStream(events)));
   await readAll(clientStream);
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 7, outputTokens: 13 });
+  assert.deepEqual(u, { inputTokens: 7, outputTokens: 13, cacheReadTokens: undefined });
 });
 
 test('passthrough-openai: no usage chunk → both undefined', async () => {

@@ -79,17 +79,23 @@ function writeProtocolError(
 function extractNonStreamUsage(
   upstreamProto: Protocol,
   body: any
-): { inputTokens?: number; outputTokens?: number } {
+): { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number } {
   if (!body || typeof body !== 'object') return {};
   if (upstreamProto === 'anthropic') {
+    const usage = body.usage ?? {};
     return {
-      inputTokens: body.usage?.input_tokens,
-      outputTokens: body.usage?.output_tokens,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      cacheReadTokens: usage.cache_read_input_tokens,
+      cacheCreationTokens: usage.cache_creation_input_tokens,
     };
   }
+  const usage = body.usage ?? {};
+  const promptDetails = usage.prompt_tokens_details ?? {};
   return {
-    inputTokens: body.usage?.prompt_tokens,
-    outputTokens: body.usage?.completion_tokens,
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    cacheReadTokens: promptDetails.cached_tokens,
   };
 }
 
@@ -195,6 +201,9 @@ export async function proxyHandler(
         request_tokens: null,
         response_tokens: null,
         total_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        first_token_ms: null,
         duration_ms: Date.now() - startTime,
         is_streaming: false,
       });
@@ -239,6 +248,9 @@ export async function proxyHandler(
         request_tokens: null,
         response_tokens: null,
         total_tokens: null,
+        cache_read_tokens: null,
+        cache_creation_tokens: null,
+        first_token_ms: null,
         duration_ms: Date.now() - startTime,
         is_streaming: false,
       });
@@ -268,6 +280,9 @@ export async function proxyHandler(
       request_tokens: null,
       response_tokens: null,
       total_tokens: null,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+      first_token_ms: null,
       duration_ms: Date.now() - startTime,
       is_streaming: false,
     });
@@ -332,6 +347,9 @@ export async function proxyHandler(
                   usage.inputTokens !== undefined && usage.outputTokens !== undefined
                     ? usage.inputTokens + usage.outputTokens
                     : null,
+                cache_read_tokens: usage.cacheReadTokens ?? null,
+                cache_creation_tokens: usage.cacheCreationTokens ?? null,
+                first_token_ms: result.firstTokenMs ?? null,
                 duration_ms: Date.now() - startTime,
                 is_streaming: true,
               });
@@ -360,6 +378,9 @@ export async function proxyHandler(
                 result.usage?.inputTokens !== undefined && result.usage?.outputTokens !== undefined
                   ? result.usage.inputTokens + result.usage.outputTokens
                   : null,
+              cache_read_tokens: result.usage?.cacheReadTokens ?? null,
+              cache_creation_tokens: result.usage?.cacheCreationTokens ?? null,
+              first_token_ms: null,
               duration_ms: Date.now() - startTime,
               is_streaming: false,
             });
@@ -386,6 +407,9 @@ export async function proxyHandler(
           request_tokens: null,
           response_tokens: null,
           total_tokens: null,
+          cache_read_tokens: null,
+          cache_creation_tokens: null,
+          first_token_ms: null,
           duration_ms: duration,
           is_streaming: isStreaming,
         });
@@ -421,9 +445,10 @@ interface TryResult {
   ok: boolean;
   shouldRetry?: boolean;
   statusCode?: number;
-  usage?: { inputTokens?: number; outputTokens?: number };
+  usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
   errorMessage?: string;
-  usagePromise?: Promise<{ inputTokens?: number; outputTokens?: number }>;
+  usagePromise?: Promise<{ inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number }>;
+  firstTokenMs?: number;
 }
 
 async function trySingleUpstream(options: {
@@ -635,6 +660,8 @@ async function trySingleUpstream(options: {
   });
 
   const reader = clientStream.getReader();
+  let firstTokenMs: number | undefined;
+  const streamStart = Date.now();
   try {
     while (true) {
       const { done, value } = await Promise.race([
@@ -644,7 +671,12 @@ async function trySingleUpstream(options: {
         ),
       ]);
       if (done) break;
-      if (value) res.write(value);
+      if (value) {
+        if (firstTokenMs === undefined) {
+          firstTokenMs = Date.now() - streamStart;
+        }
+        res.write(value);
+      }
     }
   } catch {
     // upstream/client disconnect or idle timeout; usage promise will still settle
@@ -654,5 +686,5 @@ async function trySingleUpstream(options: {
     cleanupSignal();
   }
 
-  return { ok: true, statusCode: upstreamRes.status, usagePromise: usage };
+  return { ok: true, statusCode: upstreamRes.status, usagePromise: usage, firstTokenMs };
 }

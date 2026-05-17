@@ -250,6 +250,8 @@ export class OpenAIToAnthBridge implements Bridge {
       nextOaIndex: number;
       inputTokens?: number;
       outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
       finishReason: string | null;
       finished: boolean;
     };
@@ -306,6 +308,8 @@ export class OpenAIToAnthBridge implements Bridge {
               if (u && typeof u === 'object') {
                 if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
                 if (u.output_tokens !== undefined) state.outputTokens = u.output_tokens;
+                if (u.cache_read_input_tokens !== undefined) state.cacheReadTokens = u.cache_read_input_tokens;
+                if (u.cache_creation_input_tokens !== undefined) state.cacheCreationTokens = u.cache_creation_input_tokens;
               }
               if (!state.roleEmitted) {
                 emitChunk({ role: 'assistant', content: '' });
@@ -388,6 +392,8 @@ export class OpenAIToAnthBridge implements Bridge {
               if (u && typeof u === 'object') {
                 if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
                 if (u.output_tokens !== undefined) state.outputTokens = u.output_tokens;
+                if (u.cache_read_input_tokens !== undefined) state.cacheReadTokens = u.cache_read_input_tokens;
+                if (u.cache_creation_input_tokens !== undefined) state.cacheCreationTokens = u.cache_creation_input_tokens;
               }
               if (typeof d.stop_reason === 'string') {
                 state.finishReason = mapStopReasonToFinishReason(d.stop_reason);
@@ -415,6 +421,8 @@ export class OpenAIToAnthBridge implements Bridge {
           resolveUsage({
             inputTokens: state.inputTokens,
             outputTokens: state.outputTokens,
+            cacheReadTokens: state.cacheReadTokens,
+            cacheCreationTokens: state.cacheCreationTokens,
           });
         } catch (err) {
           try {

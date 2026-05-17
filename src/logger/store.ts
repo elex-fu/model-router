@@ -11,10 +11,23 @@ export interface LogStore {
   statsByKey(keyName: string, fromDate: string, toDate: string): Promise<Omit<KeyStats, 'keyName'>>;
   statsAllKeys(fromDate: string, toDate: string): Promise<KeyStats[]>;
   keyActivitySummary(today: string): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>>;
+  rollupDaily(date: string): Promise<void>;
+  queryRollups(fromDate: string, toDate: string): Promise<DailyRollup[]>;
   purgeOlderThan(days: number): Promise<number>;
   vacuum(): Promise<void>;
   ping(): Promise<void>;
   close?(): Promise<void>;
+}
+
+export interface DailyRollup {
+  date: string;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  avgLatencyMs: number;
+  avgFirstTokenMs: number;
 }
 
 export class SQLiteLogStore implements LogStore {
@@ -41,17 +54,34 @@ export class SQLiteLogStore implements LogStore {
           request_tokens INTEGER,
           response_tokens INTEGER,
           total_tokens INTEGER,
+          cache_read_tokens INTEGER,
+          cache_creation_tokens INTEGER,
+          first_token_ms INTEGER,
           duration_ms INTEGER,
           is_streaming BOOLEAN NOT NULL,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
       CREATE INDEX IF NOT EXISTS idx_logs_key ON request_logs(proxy_key_name);
       CREATE INDEX IF NOT EXISTS idx_logs_time ON request_logs(created_at);
+
+      CREATE TABLE IF NOT EXISTS usage_daily_rollups (
+          date TEXT PRIMARY KEY,
+          total_requests INTEGER NOT NULL DEFAULT 0,
+          total_input_tokens INTEGER NOT NULL DEFAULT 0,
+          total_output_tokens INTEGER NOT NULL DEFAULT 0,
+          total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+          avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+          avg_first_token_ms INTEGER NOT NULL DEFAULT 0
+      );
     `);
 
-    // Backwards-compat migration: pre-existing dbs lack the protocol columns.
+    // Backwards-compat migrations for pre-existing dbs.
     addColumnIfMissing(this.db, 'request_logs', 'client_protocol', 'TEXT');
     addColumnIfMissing(this.db, 'request_logs', 'upstream_protocol', 'TEXT');
+    addColumnIfMissing(this.db, 'request_logs', 'cache_read_tokens', 'INTEGER');
+    addColumnIfMissing(this.db, 'request_logs', 'cache_creation_tokens', 'INTEGER');
+    addColumnIfMissing(this.db, 'request_logs', 'first_token_ms', 'INTEGER');
   }
 
   async insertBatch(entries: LogEntry[]): Promise<void> {
@@ -61,8 +91,9 @@ export class SQLiteLogStore implements LogStore {
         proxy_key_name, client_ip, client_protocol, upstream_protocol,
         request_model, actual_model, upstream_name,
         status_code, error_message, request_tokens, response_tokens, total_tokens,
+        cache_read_tokens, cache_creation_tokens, first_token_ms,
         duration_ms, is_streaming
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertMany = this.db.transaction((rows: LogEntry[]) => {
       for (const row of rows) {
@@ -79,6 +110,9 @@ export class SQLiteLogStore implements LogStore {
           row.request_tokens,
           row.response_tokens,
           row.total_tokens,
+          row.cache_read_tokens,
+          row.cache_creation_tokens,
+          row.first_token_ms,
           row.duration_ms,
           row.is_streaming ? 1 : 0
         );
@@ -121,6 +155,9 @@ export class SQLiteLogStore implements LogStore {
       request_tokens: r.request_tokens,
       response_tokens: r.response_tokens,
       total_tokens: r.total_tokens,
+      cache_read_tokens: r.cache_read_tokens,
+      cache_creation_tokens: r.cache_creation_tokens,
+      first_token_ms: r.first_token_ms,
       duration_ms: r.duration_ms,
       is_streaming: Boolean(r.is_streaming),
       created_at: r.created_at,
@@ -129,7 +166,7 @@ export class SQLiteLogStore implements LogStore {
 
   async stats(date: string): Promise<StatsResult> {
     if (!this.db) {
-      return { totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, avgLatencyMs: 0 };
+      return { totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, avgLatencyMs: 0, totalCacheReadTokens: 0, totalCacheCreationTokens: 0 };
     }
     const row = this.db
       .prepare(
@@ -137,6 +174,8 @@ export class SQLiteLogStore implements LogStore {
           COUNT(*) AS totalRequests,
           COALESCE(SUM(request_tokens), 0) AS totalInputTokens,
           COALESCE(SUM(response_tokens), 0) AS totalOutputTokens,
+          COALESCE(SUM(cache_read_tokens), 0) AS totalCacheReadTokens,
+          COALESCE(SUM(cache_creation_tokens), 0) AS totalCacheCreationTokens,
           COALESCE(AVG(duration_ms), 0) AS avgLatencyMs
         FROM request_logs
         WHERE DATE(created_at) = ?`
@@ -146,6 +185,8 @@ export class SQLiteLogStore implements LogStore {
       totalRequests: row.totalRequests,
       totalInputTokens: row.totalInputTokens,
       totalOutputTokens: row.totalOutputTokens,
+      totalCacheReadTokens: row.totalCacheReadTokens,
+      totalCacheCreationTokens: row.totalCacheCreationTokens,
       avgLatencyMs: Math.round(row.avgLatencyMs),
     };
   }
@@ -248,6 +289,68 @@ export class SQLiteLogStore implements LogStore {
         lastSeen: row.lastSeen ?? null,
       };
     });
+  }
+
+  async rollupDaily(date: string): Promise<void> {
+    if (!this.db) return;
+    this.db.exec(`
+      INSERT INTO usage_daily_rollups (
+        date, total_requests, total_input_tokens, total_output_tokens,
+        total_cache_read_tokens, total_cache_creation_tokens,
+        avg_latency_ms, avg_first_token_ms
+      )
+      SELECT
+        DATE(created_at) AS date,
+        COUNT(*) AS total_requests,
+        COALESCE(SUM(request_tokens), 0) AS total_input_tokens,
+        COALESCE(SUM(response_tokens), 0) AS total_output_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens,
+        COALESCE(SUM(cache_creation_tokens), 0) AS total_cache_creation_tokens,
+        COALESCE(AVG(duration_ms), 0) AS avg_latency_ms,
+        COALESCE(AVG(first_token_ms), 0) AS avg_first_token_ms
+      FROM request_logs
+      WHERE DATE(created_at) = ?
+      GROUP BY DATE(created_at)
+      ON CONFLICT(date) DO UPDATE SET
+        total_requests = excluded.total_requests,
+        total_input_tokens = excluded.total_input_tokens,
+        total_output_tokens = excluded.total_output_tokens,
+        total_cache_read_tokens = excluded.total_cache_read_tokens,
+        total_cache_creation_tokens = excluded.total_cache_creation_tokens,
+        avg_latency_ms = excluded.avg_latency_ms,
+        avg_first_token_ms = excluded.avg_first_token_ms;
+    `);
+    this.db.prepare(`DELETE FROM request_logs WHERE DATE(created_at) = ?`).run(date);
+  }
+
+  async queryRollups(fromDate: string, toDate: string): Promise<DailyRollup[]> {
+    if (!this.db) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT
+          date,
+          total_requests AS totalRequests,
+          total_input_tokens AS totalInputTokens,
+          total_output_tokens AS totalOutputTokens,
+          total_cache_read_tokens AS totalCacheReadTokens,
+          total_cache_creation_tokens AS totalCacheCreationTokens,
+          avg_latency_ms AS avgLatencyMs,
+          avg_first_token_ms AS avgFirstTokenMs
+        FROM usage_daily_rollups
+        WHERE date >= ? AND date <= ?
+        ORDER BY date DESC`
+      )
+      .all(fromDate, toDate) as any[];
+    return rows.map((r) => ({
+      date: r.date,
+      totalRequests: Number(r.totalRequests) || 0,
+      totalInputTokens: Number(r.totalInputTokens) || 0,
+      totalOutputTokens: Number(r.totalOutputTokens) || 0,
+      totalCacheReadTokens: Number(r.totalCacheReadTokens) || 0,
+      totalCacheCreationTokens: Number(r.totalCacheCreationTokens) || 0,
+      avgLatencyMs: Math.round(Number(r.avgLatencyMs) || 0),
+      avgFirstTokenMs: Math.round(Number(r.avgFirstTokenMs) || 0),
+    }));
   }
 
   async purgeOlderThan(days: number): Promise<number> {

@@ -12,6 +12,9 @@ export interface LogEntry {
   request_tokens: number | null;
   response_tokens: number | null;
   total_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  first_token_ms: number | null;
   duration_ms: number | null;
   is_streaming: boolean;
   created_at?: string;
@@ -22,6 +25,8 @@ export interface StatsResult {
   totalInputTokens: number;
   totalOutputTokens: number;
   avgLatencyMs: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
 }
 
 export interface KeyStats {

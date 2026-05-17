@@ -109,8 +109,9 @@ function shouldRemoveTopLevelThinking(body: any): boolean {
   }
 
   // No thinking blocks in conversation → upstream likely rejects the thinking
-  // parameter outright (e.g. Kimi). Remove it.
-  return true;
+  // parameter outright (e.g. Kimi). Only strip 'enabled' thinking here;
+  // 'adaptive' is softer and upstreams may still accept it.
+  return thinkingType === 'enabled';
 }
 
 /** Original cc-switch-aligned logic for tool_use + missing thinking prefix. */

@@ -68,7 +68,7 @@ test('passthrough-anthropic: stream tee delivers identical bytes to client', asy
   assert.deepEqual(Array.from(got), Array.from(original));
 
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 11, outputTokens: 7 });
+  assert.deepEqual(u, { inputTokens: 11, outputTokens: 7, cacheReadTokens: undefined, cacheCreationTokens: undefined });
 });
 
 test('passthrough-anthropic: usage from message_start only (no message_delta)', async () => {
@@ -120,7 +120,7 @@ test('passthrough-anthropic: last message_delta wins for output_tokens', async (
   const { clientStream, usage } = bridge.transformStream(streamOf(bytes));
   await readAll(clientStream);
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 100, outputTokens: 42 });
+  assert.deepEqual(u, { inputTokens: 100, outputTokens: 42, cacheReadTokens: undefined, cacheCreationTokens: undefined });
 });
 
 test('passthrough-anthropic: wrapError produces anthropic envelope', () => {

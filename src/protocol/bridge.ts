@@ -3,6 +3,8 @@ export type Protocol = 'anthropic' | 'openai';
 export interface BridgeUsage {
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 export interface BridgeStreamResult {
