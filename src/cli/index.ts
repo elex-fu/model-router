@@ -575,40 +575,37 @@ program
       }
 
       if (options.stream) {
-        const reader = res.body?.getReader();
-        if (!reader) {
+        if (!res.body) {
           console.error('No response body');
           process.exit(1);
         }
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() ?? '';
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith('data: ')) continue;
-            const data = trimmed.slice(6);
-            if (data === '[DONE]') continue;
-            try {
-              const chunk = JSON.parse(data);
-              if (protocol === 'anthropic') {
-                if (chunk.type === 'content_block_delta' && chunk.delta?.text) {
-                  process.stdout.write(chunk.delta.text);
-                }
-              } else {
-                const delta = chunk.choices?.[0]?.delta?.content;
-                if (delta) process.stdout.write(delta);
-              }
-            } catch {
-              // ignore non-JSON lines
+        const { parseSseStream } = await import('../protocol/sse.js');
+        let wroteAny = false;
+        for await (const ev of parseSseStream(res.body)) {
+          if (!ev.data || ev.data === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(ev.data);
+            if (chunk.type === 'error') {
+              console.error('\nStream error:', JSON.stringify(chunk.error ?? chunk));
+              process.exit(1);
             }
+            let text: string | undefined;
+            if (protocol === 'anthropic') {
+              text = chunk.delta?.text ?? chunk.delta?.content;
+            } else {
+              text = chunk.choices?.[0]?.delta?.content;
+            }
+            if (text) {
+              process.stdout.write(text);
+              wroteAny = true;
+            }
+          } catch {
+            // ignore parse errors
           }
         }
-        console.log('');
+        if (!wroteAny) {
+          console.log('(no content received in stream)');
+        }
         console.log(`\n✓ Streaming complete (${Date.now() - start}ms)`);
       } else {
         const data = (await res.json()) as any;
