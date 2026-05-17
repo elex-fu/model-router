@@ -185,7 +185,6 @@ function injectThinking(body: any, model: string): void {
   if (m.includes('opus-4-7') || m.includes('opus-4-6') || m.includes('sonnet-4-6')) {
     body.thinking = { type: 'adaptive' };
     body.output_config = { effort: 'max' };
-    appendBeta(body, 'context-1m-2025-08-07');
     return;
   }
 
@@ -202,17 +201,6 @@ function injectThinking(body: any, model: string): void {
     // Keep adaptive as-is
   } else {
     body.thinking = { type: 'enabled', budget_tokens: budgetTarget };
-  }
-  appendBeta(body, 'interleaved-thinking-2025-05-14');
-}
-
-function appendBeta(body: any, beta: string): void {
-  const existing = body.anthropic_beta;
-  if (Array.isArray(existing)) {
-    if (existing.some((v: any) => v === beta)) return;
-    existing.push(beta);
-  } else {
-    body.anthropic_beta = [beta];
   }
 }
 

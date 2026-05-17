@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isThinkingSignatureError, rectifyAnthropicRequest } from '../../src/server/rectifier.js';
+import {
+  isThinkingSignatureError,
+  rectifyAnthropicRequest,
+  isThinkingBudgetError,
+  rectifyThinkingBudget,
+} from '../../src/server/rectifier.js';
 
 test('detects invalid signature in thinking block', () => {
   assert.ok(isThinkingSignatureError("Invalid `signature` in `thinking` block"));
@@ -146,4 +151,51 @@ test('rectify does not mutate original body', () => {
   const original = JSON.stringify(body);
   rectifyAnthropicRequest(body);
   assert.equal(JSON.stringify(body), original);
+});
+
+test('detects thinking budget error', () => {
+  assert.ok(
+    isThinkingBudgetError('thinking budget_tokens must be at least 1024')
+  );
+  assert.ok(
+    isThinkingBudgetError('budget_tokens for thinking type must be >= 1024')
+  );
+});
+
+test('does not trigger budget error on unrelated messages', () => {
+  assert.ok(!isThinkingBudgetError('invalid request'));
+  assert.ok(!isThinkingBudgetError('budget_tokens must be positive'));
+  assert.ok(!isThinkingBudgetError('thinking signature invalid'));
+});
+
+test('rectifyThinkingBudget creates thinking when missing', () => {
+  const body = { model: 'claude-test', messages: [] };
+  const result = rectifyThinkingBudget(body);
+  assert.ok(result.applied);
+  assert.equal(result.body.thinking.type, 'enabled');
+  assert.equal(result.body.thinking.budget_tokens, 32000);
+});
+
+test('rectifyThinkingBudget raises budget and max_tokens', () => {
+  const body = {
+    model: 'claude-test',
+    thinking: { type: 'enabled', budget_tokens: 512 },
+    max_tokens: 1024,
+    messages: [],
+  };
+  const result = rectifyThinkingBudget(body);
+  assert.ok(result.applied);
+  assert.equal(result.body.thinking.budget_tokens, 32000);
+  assert.equal(result.body.max_tokens, 64000);
+});
+
+test('rectifyThinkingBudget leaves large max_tokens alone', () => {
+  const body = {
+    model: 'claude-test',
+    thinking: { type: 'enabled', budget_tokens: 512 },
+    max_tokens: 100000,
+    messages: [],
+  };
+  const result = rectifyThinkingBudget(body);
+  assert.equal(result.body.max_tokens, 100000);
 });

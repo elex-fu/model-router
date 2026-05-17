@@ -10,7 +10,12 @@ import { redactSecrets } from '../limit/redact.js';
 import { getClientIp } from './clientIp.js';
 import type { LogEntry } from '../logger/types.js';
 import { preprocessRequest } from './preprocess.js';
-import { isThinkingSignatureError, rectifyAnthropicRequest } from './rectifier.js';
+import {
+  isThinkingSignatureError,
+  rectifyAnthropicRequest,
+  isThinkingBudgetError,
+  rectifyThinkingBudget,
+} from './rectifier.js';
 
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
@@ -97,6 +102,44 @@ export function extractNonStreamUsage(
     outputTokens: usage.completion_tokens,
     cacheReadTokens: promptDetails.cached_tokens,
   };
+}
+
+/**
+ * Inject Anthropic-specific headers for Anthropic upstreams.
+ * - anthropic-version: 2023-06-01 (if not already set)
+ * - anthropic-beta: ensures claude-code-20250219 + thinking betas based on model
+ */
+export function injectAnthropicHeaders(headers: Headers, model: string): void {
+  if (!headers.has('anthropic-version')) {
+    headers.set('anthropic-version', '2023-06-01');
+  }
+
+  const existing = headers.get('anthropic-beta') ?? '';
+  const betas = new Set(existing.split(',').map((b) => b.trim()).filter(Boolean));
+  betas.add('claude-code-20250219');
+
+  const m = (model || '').toLowerCase();
+  if (m.includes('opus-4-7') || m.includes('opus-4-6') || m.includes('sonnet-4-6')) {
+    betas.add('context-1m-2025-08-07');
+  } else if (!m.includes('haiku')) {
+    betas.add('interleaved-thinking-2025-05-14');
+  }
+
+  headers.set('anthropic-beta', Array.from(betas).join(', '));
+}
+
+/** Strip thinking-related beta flags from anthropic-beta header (for rectifier retry). */
+export function stripThinkingBetasFromHeaders(headers: Headers): void {
+  const existing = headers.get('anthropic-beta') ?? '';
+  const betas = existing
+    .split(',')
+    .map((b) => b.trim())
+    .filter((b) => b && b !== 'interleaved-thinking-2025-05-14' && b !== 'context-1m-2025-08-07');
+  if (betas.length === 0) {
+    headers.delete('anthropic-beta');
+  } else {
+    headers.set('anthropic-beta', betas.join(', '));
+  }
 }
 
 function rateLimitMessage(reason: ReserveResult['reason']): string {
@@ -520,6 +563,9 @@ async function trySingleUpstream(options: {
   upstreamHeaders.set('host', upstreamUrl.host);
   upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
   upstreamHeaders.set('content-type', 'application/json');
+  if (upstream.protocol === 'anthropic') {
+    injectAnthropicHeaders(upstreamHeaders, resolvedModel);
+  }
 
   let upstreamRes: Response;
   try {
@@ -551,61 +597,77 @@ async function trySingleUpstream(options: {
       if (typeof message !== 'string') message = JSON.stringify(message);
     } catch {}
 
-    // Thinking signature rectifier: strip thinking blocks and retry once
+    // Thinking rectifiers: try signature rectifier first, then budget rectifier
+    let rectifiedBody: any = null;
+    let isSignatureRetry = false;
+
     if (upstream.protocol === 'anthropic' && isThinkingSignatureError(message)) {
       const rectified = rectifyAnthropicRequest(preprocessedBody);
       if (rectified.applied) {
-        const retryBody = bridge.transformRequest(rectified.body);
-        if (retryBody && typeof retryBody === 'object') {
-          retryBody.model = resolvedModel;
-        }
-        const retryBytes = Buffer.from(JSON.stringify(retryBody), 'utf-8');
-        let retryRes: Response;
-        try {
-          retryRes = await fetch(upstreamUrl.toString(), {
-            method: req.method ?? 'POST',
-            headers: upstreamHeaders,
-            body: retryBytes,
-            signal: localCtl.signal,
-          });
-        } catch (err: any) {
-          cleanupSignal();
-          const aborted = parentSignal.aborted;
-          return {
-            ok: false,
-            shouldRetry: !aborted,
-            statusCode: aborted ? 499 : 502,
-            errorMessage: aborted ? 'client_disconnect' : err.message,
-          };
-        }
-
-        if (retryRes.status >= 400 && retryRes.status < 500) {
-          let retryMessage = 'Upstream returned client error';
-          try {
-            const errBody: any = await retryRes.clone().json();
-            retryMessage = errBody?.error?.message ?? errBody?.error ?? retryMessage;
-            if (typeof retryMessage !== 'string') retryMessage = JSON.stringify(retryMessage);
-          } catch {}
-          cleanupSignal();
-          return { ok: false, shouldRetry: false, statusCode: retryRes.status, errorMessage: retryMessage };
-        }
-
-        if (retryRes.status >= 500) {
-          let retryMessage = 'Upstream returned server error';
-          try {
-            const errBody: any = await retryRes.clone().json();
-            retryMessage = errBody?.error?.message ?? retryMessage;
-          } catch {}
-          cleanupSignal();
-          return { ok: false, shouldRetry: true, statusCode: retryRes.status, errorMessage: retryMessage };
-        }
-
-        // Retry succeeded – fall through to normal success handling
-        upstreamRes = retryRes;
-      } else {
-        cleanupSignal();
-        return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };
+        rectifiedBody = rectified.body;
+        isSignatureRetry = true;
       }
+    } else if (upstream.protocol === 'anthropic' && isThinkingBudgetError(message)) {
+      const rectified = rectifyThinkingBudget(preprocessedBody);
+      if (rectified.applied) {
+        rectifiedBody = rectified.body;
+      }
+    }
+
+    if (rectifiedBody) {
+      const retryBody = bridge.transformRequest(rectifiedBody);
+      if (retryBody && typeof retryBody === 'object') {
+        retryBody.model = resolvedModel;
+      }
+      const retryBytes = Buffer.from(JSON.stringify(retryBody), 'utf-8');
+
+      // For signature rectifier, strip thinking betas from headers before retry
+      if (isSignatureRetry) {
+        stripThinkingBetasFromHeaders(upstreamHeaders);
+      }
+
+      let retryRes: Response;
+      try {
+        retryRes = await fetch(upstreamUrl.toString(), {
+          method: req.method ?? 'POST',
+          headers: upstreamHeaders,
+          body: retryBytes,
+          signal: localCtl.signal,
+        });
+      } catch (err: any) {
+        cleanupSignal();
+        const aborted = parentSignal.aborted;
+        return {
+          ok: false,
+          shouldRetry: !aborted,
+          statusCode: aborted ? 499 : 502,
+          errorMessage: aborted ? 'client_disconnect' : err.message,
+        };
+      }
+
+      if (retryRes.status >= 400 && retryRes.status < 500) {
+        let retryMessage = 'Upstream returned client error';
+        try {
+          const errBody: any = await retryRes.clone().json();
+          retryMessage = errBody?.error?.message ?? errBody?.error ?? retryMessage;
+          if (typeof retryMessage !== 'string') retryMessage = JSON.stringify(retryMessage);
+        } catch {}
+        cleanupSignal();
+        return { ok: false, shouldRetry: false, statusCode: retryRes.status, errorMessage: retryMessage };
+      }
+
+      if (retryRes.status >= 500) {
+        let retryMessage = 'Upstream returned server error';
+        try {
+          const errBody: any = await retryRes.clone().json();
+          retryMessage = errBody?.error?.message ?? retryMessage;
+        } catch {}
+        cleanupSignal();
+        return { ok: false, shouldRetry: true, statusCode: retryRes.status, errorMessage: retryMessage };
+      }
+
+      // Retry succeeded – fall through to normal success handling
+      upstreamRes = retryRes;
     } else {
       cleanupSignal();
       return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };

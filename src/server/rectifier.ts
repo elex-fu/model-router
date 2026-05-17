@@ -36,6 +36,39 @@ export function isThinkingSignatureError(message: string): boolean {
   );
 }
 
+/** Detect whether an upstream error is a thinking budget constraint error. */
+export function isThinkingBudgetError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('budget_tokens') &&
+    lower.includes('thinking') &&
+    lower.includes('1024')
+  );
+}
+
+/**
+ * Fix thinking budget constraints by raising budget_tokens to at least 32000
+ * and ensuring max_tokens is large enough.
+ */
+export function rectifyThinkingBudget(body: any): RectifyResult {
+  const cloned = structuredClone(body);
+  const THINKING_BUDGET = 32000;
+  const MAX_TOKENS_FLOOR = 32001;
+
+  if (!cloned.thinking || typeof cloned.thinking !== 'object') {
+    cloned.thinking = { type: 'enabled' };
+  } else {
+    cloned.thinking = { ...cloned.thinking, type: 'enabled' };
+  }
+  cloned.thinking.budget_tokens = THINKING_BUDGET;
+
+  if (typeof cloned.max_tokens === 'number' && cloned.max_tokens < MAX_TOKENS_FLOOR) {
+    cloned.max_tokens = 64000;
+  }
+
+  return { applied: true, body: cloned };
+}
+
 /**
  * Remove thinking/redacted_thinking blocks and stray signature fields from
  * an Anthropic-format request body.
@@ -72,12 +105,6 @@ export function rectifyAnthropicRequest(body: any): RectifyResult {
   if (shouldRemoveTopLevelThinking(cloned)) {
     delete cloned.thinking;
     delete cloned.output_config;
-    if (Array.isArray(cloned.anthropic_beta)) {
-      cloned.anthropic_beta = cloned.anthropic_beta.filter(
-        (b: any) => b !== 'interleaved-thinking-2025-05-14' && b !== 'context-1m-2025-08-07'
-      );
-      if (cloned.anthropic_beta.length === 0) delete cloned.anthropic_beta;
-    }
     applied = true;
   }
 

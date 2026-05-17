@@ -104,7 +104,7 @@ test('anthropic upstream: injects enabled thinking for non-haiku non-opus/sonnet
   const out = preprocessRequest(body, 'anthropic', 'claude-sonnet-4-5');
   assert.equal(out.thinking.type, 'enabled');
   assert.equal(out.thinking.budget_tokens, 8191);
-  assert.ok(out.anthropic_beta.includes('interleaved-thinking-2025-05-14'));
+  assert.equal(out.anthropic_beta, undefined);
 });
 
 test('anthropic upstream: injects adaptive thinking for sonnet-4-6', () => {
@@ -115,7 +115,7 @@ test('anthropic upstream: injects adaptive thinking for sonnet-4-6', () => {
   const out = preprocessRequest(body, 'anthropic', 'claude-sonnet-4-6');
   assert.equal(out.thinking.type, 'adaptive');
   assert.equal(out.output_config.effort, 'max');
-  assert.ok(out.anthropic_beta.includes('context-1m-2025-08-07'));
+  assert.equal(out.anthropic_beta, undefined);
 });
 
 test('anthropic upstream: skips thinking for haiku', () => {
