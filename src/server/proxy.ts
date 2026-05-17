@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Agent } from 'undici';
 import { ConfigStore } from '../config/store.js';
 import { selectUpstreams } from '../router/upstream.js';
 import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
@@ -25,9 +26,18 @@ export interface ProxyHandlerOptions {
   ipBlocker?: IpAuthBlocker;
   trustProxy?: boolean;
   streamIdleTimeoutMs?: number;
+  /** Internal: round-robin index tracking per upstream. */
+  _keyRoundRobin?: Map<string, number>;
 }
 
 const DEFAULT_STREAM_IDLE_MS = 60_000;
+
+/** Shared undici Agent with longer keep-alive for upstream connections. */
+const upstreamAgent = new Agent({
+  connect: { timeout: 30_000 },
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+});
 
 class BodyTooLargeError extends Error {
   readonly code = 'BODY_TOO_LARGE';
@@ -35,6 +45,29 @@ class BodyTooLargeError extends Error {
 
 function collectBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    const contentLength = parseInt(req.headers['content-length'] || '', 10);
+    if (!Number.isNaN(contentLength) && contentLength > maxBytes) {
+      req.on('data', () => {});
+      req.on('end', () => {
+        reject(new BodyTooLargeError(`request body exceeds ${maxBytes} bytes`));
+      });
+      req.on('error', reject);
+      return;
+    }
+
+    if (!Number.isNaN(contentLength) && contentLength > 0) {
+      const buf = Buffer.allocUnsafe(contentLength);
+      let offset = 0;
+      req.on('data', (chunk: Buffer) => {
+        offset += chunk.copy(buf, offset);
+      });
+      req.on('end', () => {
+        resolve(buf.subarray(0, offset));
+      });
+      req.on('error', reject);
+      return;
+    }
+
     const chunks: Buffer[] = [];
     let total = 0;
     let oversized = false;
@@ -345,14 +378,17 @@ export async function proxyHandler(
       const { upstream, resolvedModel } = candidates[i];
       const bridge = pickBridge(clientProto, upstream.protocol);
 
-      let keysForUpstream = options.keyPool?.getAvailableKeys(upstream.name) ?? upstream.apiKeys;
-      if (keysForUpstream.length === 0) continue;
-      for (let k = keysForUpstream.length - 1; k > 0; k--) {
-        const j = Math.floor(Math.random() * (k + 1));
-        [keysForUpstream[k], keysForUpstream[j]] = [keysForUpstream[j], keysForUpstream[k]];
-      }
+      const rawKeys = options.keyPool?.getAvailableKeys(upstream.name) ?? upstream.apiKeys;
+      if (rawKeys.length === 0) continue;
+      const keysForUpstream = rawKeys.slice();
 
-      for (const key of keysForUpstream) {
+      const rr = options._keyRoundRobin ?? new Map();
+      options._keyRoundRobin = rr;
+      const startIdx = rr.get(upstream.name) ?? 0;
+      rr.set(upstream.name, (startIdx + 1) % keysForUpstream.length);
+
+      for (let k = 0; k < keysForUpstream.length; k++) {
+        const key = keysForUpstream[(startIdx + k) % keysForUpstream.length];
         const tryStart = Date.now();
         const result = await trySingleUpstream({
           req,
@@ -578,6 +614,7 @@ async function trySingleUpstream(options: {
       headers: upstreamHeaders,
       body: upstreamBodyBytes,
       signal: localCtl.signal,
+      dispatcher: upstreamAgent,
     });
   } catch (err: any) {
     cleanupSignal();

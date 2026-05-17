@@ -4,6 +4,9 @@ import { type Config, type ProxyKey, type UpstreamConfig, DEFAULT_CONFIG } from 
 
 export class ConfigStore {
   private configPath: string;
+  private cachedConfig: Config | null = null;
+  private cachedMtimeMs = 0;
+  private cachedSize = 0;
 
   constructor(configPath: string) {
     this.configPath = configPath;
@@ -14,9 +17,21 @@ export class ConfigStore {
       this.save(DEFAULT_CONFIG);
       return structuredClone(DEFAULT_CONFIG);
     }
+    const stat = fs.statSync(this.configPath);
+    if (
+      this.cachedConfig !== null &&
+      stat.mtimeMs === this.cachedMtimeMs &&
+      stat.size === this.cachedSize
+    ) {
+      return this.cachedConfig;
+    }
     const raw = fs.readFileSync(this.configPath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<Config>;
-    return this.mergeDefaults(parsed);
+    const config = this.mergeDefaults(parsed);
+    this.cachedConfig = config;
+    this.cachedMtimeMs = stat.mtimeMs;
+    this.cachedSize = stat.size;
+    return config;
   }
 
   save(config: Config): void {
@@ -32,6 +47,10 @@ export class ConfigStore {
         // best-effort: filesystems without permission bits ignore this
       }
     }
+    const stat = fs.statSync(this.configPath);
+    this.cachedConfig = config;
+    this.cachedMtimeMs = stat.mtimeMs;
+    this.cachedSize = stat.size;
   }
 
   private mergeDefaults(partial: Partial<Config>): Config {

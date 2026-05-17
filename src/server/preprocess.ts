@@ -10,7 +10,7 @@ import type { Protocol } from '../protocol/bridge.js';
  */
 export function preprocessRequest(body: any, upstreamProtocol: Protocol, resolvedModel: string): any {
   if (!body || typeof body !== 'object') return body;
-  const cloned = structuredClone(body);
+  const cloned = JSON.parse(JSON.stringify(body));
 
   filterPrivateParams(cloned);
   sanitizeOrphanToolResults(cloned);
