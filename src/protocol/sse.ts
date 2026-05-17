@@ -4,6 +4,28 @@ export interface SseEvent {
 }
 
 /**
+ * UTF-8 safe decoder that buffers incomplete multi-byte sequences across chunks.
+ *
+ * Uses TextDecoder with stream mode internally, which buffers trailing
+ * continuation bytes automatically. The wrapper makes the behaviour explicit
+ * and provides a dedicated flush path for the final chunk.
+ */
+class Utf8SafeDecoder {
+  private decoder = new TextDecoder('utf-8', { fatal: false });
+
+  decode(chunk: Uint8Array): string {
+    // stream: true keeps incomplete multi-byte chars in the decoder's internal
+    // state so they are emitted with the next chunk instead of being replaced
+    // by U+FFFD.
+    return this.decoder.decode(chunk, { stream: true });
+  }
+
+  flush(): string {
+    return this.decoder.decode();
+  }
+}
+
+/**
  * Parse an SSE byte stream into a sequence of events.
  *
  * - Splits the byte stream on blank lines (event boundary).
@@ -12,19 +34,20 @@ export interface SseEvent {
  * - Concatenates multiple `data:` lines with `\n` (per SSE spec).
  * - Ignores comment lines (lines starting with `:`).
  * - Tolerates `\r\n` and trailing whitespace.
+ * - Handles multi-byte UTF-8 characters split across chunk boundaries safely.
  */
 export async function* parseSseStream(
   stream: ReadableStream<Uint8Array>
 ): AsyncIterable<SseEvent> {
   const reader = stream.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new Utf8SafeDecoder();
   let buffer = '';
 
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value);
 
       // Normalise CRLF to LF for splitting.
       let idx: number;
@@ -37,7 +60,7 @@ export async function* parseSseStream(
       }
     }
     // Flush remaining buffer.
-    buffer += decoder.decode();
+    buffer += decoder.flush();
     if (buffer.trim().length > 0) {
       const ev = parseEventBlock(buffer);
       if (ev) yield ev;

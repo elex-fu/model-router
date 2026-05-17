@@ -9,6 +9,8 @@ import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { redactSecrets } from '../limit/redact.js';
 import { getClientIp } from './clientIp.js';
 import type { LogEntry } from '../logger/types.js';
+import { preprocessRequest } from './preprocess.js';
+import { isThinkingSignatureError, rectifyAnthropicRequest } from './rectifier.js';
 
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
@@ -464,7 +466,8 @@ async function trySingleUpstream(options: {
   const upstreamPath = bridge.rewriteUrlPath(clientPath);
   const upstreamUrl = new URL(`${upstream.baseUrl.replace(/\/$/, '')}${upstreamPath}`);
 
-  const transformedBody = bridge.transformRequest(parsedBody ?? {});
+  const preprocessedBody = preprocessRequest(parsedBody ?? {}, upstream.protocol, resolvedModel);
+  const transformedBody = bridge.transformRequest(preprocessedBody);
   if (transformedBody && typeof transformedBody === 'object') {
     transformedBody.model = resolvedModel;
   }
@@ -522,8 +525,66 @@ async function trySingleUpstream(options: {
         message;
       if (typeof message !== 'string') message = JSON.stringify(message);
     } catch {}
-    cleanupSignal();
-    return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };
+
+    // Thinking signature rectifier: strip thinking blocks and retry once
+    if (upstream.protocol === 'anthropic' && isThinkingSignatureError(message)) {
+      const rectified = rectifyAnthropicRequest(preprocessedBody);
+      if (rectified.applied) {
+        const retryBody = bridge.transformRequest(rectified.body);
+        if (retryBody && typeof retryBody === 'object') {
+          retryBody.model = resolvedModel;
+        }
+        const retryBytes = Buffer.from(JSON.stringify(retryBody), 'utf-8');
+        let retryRes: Response;
+        try {
+          retryRes = await fetch(upstreamUrl.toString(), {
+            method: req.method ?? 'POST',
+            headers: upstreamHeaders,
+            body: retryBytes,
+            signal: localCtl.signal,
+          });
+        } catch (err: any) {
+          cleanupSignal();
+          const aborted = parentSignal.aborted;
+          return {
+            ok: false,
+            shouldRetry: !aborted,
+            statusCode: aborted ? 499 : 502,
+            errorMessage: aborted ? 'client_disconnect' : err.message,
+          };
+        }
+
+        if (retryRes.status >= 400 && retryRes.status < 500) {
+          let retryMessage = 'Upstream returned client error';
+          try {
+            const errBody: any = await retryRes.clone().json();
+            retryMessage = errBody?.error?.message ?? errBody?.error ?? retryMessage;
+            if (typeof retryMessage !== 'string') retryMessage = JSON.stringify(retryMessage);
+          } catch {}
+          cleanupSignal();
+          return { ok: false, shouldRetry: false, statusCode: retryRes.status, errorMessage: retryMessage };
+        }
+
+        if (retryRes.status >= 500) {
+          let retryMessage = 'Upstream returned server error';
+          try {
+            const errBody: any = await retryRes.clone().json();
+            retryMessage = errBody?.error?.message ?? retryMessage;
+          } catch {}
+          cleanupSignal();
+          return { ok: false, shouldRetry: true, statusCode: retryRes.status, errorMessage: retryMessage };
+        }
+
+        // Retry succeeded – fall through to normal success handling
+        upstreamRes = retryRes;
+      } else {
+        cleanupSignal();
+        return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };
+      }
+    } else {
+      cleanupSignal();
+      return { ok: false, shouldRetry: false, statusCode: upstreamRes.status, errorMessage: message };
+    }
   }
 
   if (upstreamRes.status >= 500) {
