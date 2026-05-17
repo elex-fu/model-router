@@ -76,7 +76,7 @@ function writeProtocolError(
   res.end(JSON.stringify(body));
 }
 
-function extractNonStreamUsage(
+export function extractNonStreamUsage(
   upstreamProto: Protocol,
   body: any
 ): { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number } {

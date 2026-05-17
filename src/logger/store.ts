@@ -293,7 +293,7 @@ export class SQLiteLogStore implements LogStore {
 
   async rollupDaily(date: string): Promise<void> {
     if (!this.db) return;
-    this.db.exec(`
+    this.db.prepare(`
       INSERT INTO usage_daily_rollups (
         date, total_requests, total_input_tokens, total_output_tokens,
         total_cache_read_tokens, total_cache_creation_tokens,
@@ -319,7 +319,7 @@ export class SQLiteLogStore implements LogStore {
         total_cache_creation_tokens = excluded.total_cache_creation_tokens,
         avg_latency_ms = excluded.avg_latency_ms,
         avg_first_token_ms = excluded.avg_first_token_ms;
-    `);
+    `).run(date);
     this.db.prepare(`DELETE FROM request_logs WHERE DATE(created_at) = ?`).run(date);
   }
 

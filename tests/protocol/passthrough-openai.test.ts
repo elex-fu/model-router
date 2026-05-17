@@ -127,6 +127,36 @@ test('passthrough-openai: wrapError produces openai envelope', () => {
   });
 });
 
+test('passthrough-openai: stream parses cached_tokens from prompt_tokens_details', async () => {
+  const events: SseEvent[] = [
+    {
+      data: JSON.stringify({
+        id: 'c-cache',
+        choices: [{ index: 0, delta: { content: 'hi' } }],
+      }),
+    },
+    {
+      data: JSON.stringify({
+        id: 'c-cache',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 50,
+          prompt_tokens_details: { cached_tokens: 80 },
+        },
+      }),
+    },
+    { data: '[DONE]' },
+  ];
+  const bridge = new PassthroughOpenAiBridge();
+  const { clientStream, usage } = bridge.transformStream(streamOf(finalizeStream(events)));
+  await readAll(clientStream);
+  const u = await usage;
+  assert.equal(u.inputTokens, 100);
+  assert.equal(u.outputTokens, 50);
+  assert.equal(u.cacheReadTokens, 80);
+});
+
 test('passthrough-openai: wrapError(429) emits rate_limit_exceeded type', () => {
   const b = new PassthroughOpenAiBridge();
   const err = b.wrapError(429, 'daily tokens exhausted');

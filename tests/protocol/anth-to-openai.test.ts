@@ -382,7 +382,7 @@ test('stream: pure text — full anthropic event sequence + usage', async () => 
   assert.equal(mDelta.usage.output_tokens, 4);
 
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 3, outputTokens: 4 });
+  assert.deepEqual(u, { inputTokens: 3, outputTokens: 4, cacheReadTokens: undefined });
 });
 
 test('stream: tool_calls — args accumulate across chunks', async () => {
@@ -478,7 +478,7 @@ test('stream: tool_calls — args accumulate across chunks', async () => {
   assert.equal(mDelta.usage.output_tokens, 5);
 
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 9, outputTokens: 5 });
+  assert.deepEqual(u, { inputTokens: 9, outputTokens: 5, cacheReadTokens: undefined });
 });
 
 test('stream: text then tool_calls — text block stops before tool_use opens', async () => {
@@ -564,7 +564,7 @@ test('stream: truncated by length → stop_reason max_tokens', async () => {
   assert.equal(mDelta.usage.output_tokens, 50);
 
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 2, outputTokens: 50 });
+  assert.deepEqual(u, { inputTokens: 2, outputTokens: 50, cacheReadTokens: undefined });
 });
 
 test('stream: usage promise resolves even with no usage chunk', async () => {

@@ -30,6 +30,9 @@ function logEntry(overrides: Partial<LogEntry> = {}): LogEntry {
     request_tokens: 100,
     response_tokens: 50,
     total_tokens: 150,
+    cache_read_tokens: null,
+    cache_creation_tokens: null,
+    first_token_ms: null,
     duration_ms: 80,
     is_streaming: false,
     ...overrides,
@@ -257,6 +260,101 @@ test('init sets WAL mode', async () => {
     const db = (store as any).db;
     const mode = db.pragma('journal_mode', { simple: true });
     assert.equal(mode, 'wal');
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('stats: includes cache token aggregates', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    await store.insertBatch([
+      logEntry({ cache_read_tokens: 80, cache_creation_tokens: 20 }),
+      logEntry({ cache_read_tokens: 30, cache_creation_tokens: 10 }),
+    ]);
+    const s = await store.stats(today);
+    assert.equal(s.totalCacheReadTokens, 110);
+    assert.equal(s.totalCacheCreationTokens, 30);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('queryLogs: returns cache and first_token fields', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    await store.insertBatch([
+      logEntry({ cache_read_tokens: 50, cache_creation_tokens: 10, first_token_ms: 120 }),
+    ]);
+    const rows = await store.queryLogs(10);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].cache_read_tokens, 50);
+    assert.equal(rows[0].cache_creation_tokens, 10);
+    assert.equal(rows[0].first_token_ms, 120);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('rollupDaily: aggregates and moves data to rollups table', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    await store.insertBatch([
+      logEntry({ request_tokens: 100, response_tokens: 50, duration_ms: 100, first_token_ms: 50 }),
+      logEntry({ request_tokens: 200, response_tokens: 100, duration_ms: 200, first_token_ms: 150 }),
+    ]);
+    await store.rollupDaily(today);
+
+    const rollups = await store.queryRollups(today, today);
+    assert.equal(rollups.length, 1);
+    const r = rollups[0];
+    assert.equal(r.totalRequests, 2);
+    assert.equal(r.totalInputTokens, 300);
+    assert.equal(r.totalOutputTokens, 150);
+    assert.equal(r.avgLatencyMs, 150);
+    assert.equal(r.avgFirstTokenMs, 100);
+
+    // Original logs for that day should be deleted
+    const remaining = await store.queryLogs(10);
+    assert.equal(remaining.length, 0);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('rollupDaily: updates existing rollup on conflict', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    await store.insertBatch([
+      logEntry({ request_tokens: 10, response_tokens: 5, duration_ms: 50, first_token_ms: 20 }),
+    ]);
+    await store.rollupDaily(today);
+
+    // Insert more logs for same day and rollup again
+    await store.insertBatch([
+      logEntry({ request_tokens: 20, response_tokens: 10, duration_ms: 100, first_token_ms: 40 }),
+    ]);
+    await store.rollupDaily(today);
+
+    const rollups = await store.queryRollups(today, today);
+    assert.equal(rollups.length, 1);
+    assert.equal(rollups[0].totalRequests, 1); // only the second batch remains before rollup
+    assert.equal(rollups[0].totalInputTokens, 20);
   } finally {
     await store.close?.();
     t.cleanup();

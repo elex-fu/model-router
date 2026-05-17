@@ -133,6 +133,76 @@ test('passthrough-anthropic: wrapError produces anthropic envelope', () => {
   });
 });
 
+test('passthrough-anthropic: stream parses cache tokens from message_start', async () => {
+  const events: SseEvent[] = [
+    {
+      event: 'message_start',
+      data: JSON.stringify({
+        type: 'message_start',
+        message: {
+          id: 'm-cache',
+          usage: {
+            input_tokens: 100,
+            output_tokens: 1,
+            cache_read_input_tokens: 80,
+            cache_creation_input_tokens: 20,
+          },
+        },
+      }),
+    },
+    {
+      event: 'message_delta',
+      data: JSON.stringify({
+        type: 'message_delta',
+        usage: { output_tokens: 50 },
+      }),
+    },
+    { event: 'message_stop', data: JSON.stringify({ type: 'message_stop' }) },
+  ];
+  const bridge = new PassthroughAnthropicBridge();
+  const { clientStream, usage } = bridge.transformStream(streamOf(finalizeStream(events)));
+  await readAll(clientStream);
+  const u = await usage;
+  assert.equal(u.inputTokens, 100);
+  assert.equal(u.outputTokens, 50);
+  assert.equal(u.cacheReadTokens, 80);
+  assert.equal(u.cacheCreationTokens, 20);
+});
+
+test('passthrough-anthropic: stream cache tokens can update on message_delta', async () => {
+  const events: SseEvent[] = [
+    {
+      event: 'message_start',
+      data: JSON.stringify({
+        type: 'message_start',
+        message: {
+          id: 'm-cache2',
+          usage: { input_tokens: 10, cache_read_input_tokens: 5 },
+        },
+      }),
+    },
+    {
+      event: 'message_delta',
+      data: JSON.stringify({
+        type: 'message_delta',
+        usage: {
+          output_tokens: 20,
+          cache_read_input_tokens: 15,
+          cache_creation_input_tokens: 3,
+        },
+      }),
+    },
+  ];
+  const bridge = new PassthroughAnthropicBridge();
+  const { clientStream, usage } = bridge.transformStream(streamOf(finalizeStream(events)));
+  await readAll(clientStream);
+  const u = await usage;
+  assert.equal(u.inputTokens, 10);
+  assert.equal(u.outputTokens, 20);
+  assert.equal(u.cacheReadTokens, 15);
+  assert.equal(u.cacheCreationTokens, 3);
+});
+
 test('passthrough-anthropic: wrapError(429) emits rate_limit_error type', () => {
   const b = new PassthroughAnthropicBridge();
   const err = b.wrapError(429, 'rpm exceeded');
