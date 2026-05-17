@@ -20,6 +20,12 @@
   ],
   "author": "",
   "license": "MIT",
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "package.json"
+  ],
   "dependencies": {
     "better-sqlite3": "^12.0.0",
     "commander": "^13.0.0"

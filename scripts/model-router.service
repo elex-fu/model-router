@@ -1,0 +1,50 @@
+[Unit]
+Description=model-router AI proxy service
+Documentation=https://github.com/lex/model-router#readme
+After=network.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_USER__
+WorkingDirectory=__PROJECT_ROOT__
+
+# Environment
+Environment="NODE_ENV=production"
+Environment="HOME=__DATA_DIR__"
+
+# Executable
+ExecStart=__PREFIX__/bin/model-router start --config __CONFIG_DIR__/config.json --bind 127.0.0.1 --port 15005
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=model-router
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=__DATA_DIR__
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target
