@@ -35,15 +35,28 @@ export class ConfigStore {
   }
 
   private mergeDefaults(partial: Partial<Config>): Config {
+    const upstreams = (Array.isArray(partial.upstreams) ? partial.upstreams : []).map((u) => {
+      const migrated = { ...u } as UpstreamConfig & { apiKey?: string };
+      if (!Array.isArray(migrated.apiKeys) && migrated.apiKey) {
+        migrated.apiKeys = [migrated.apiKey];
+        delete migrated.apiKey;
+      }
+      if (!Array.isArray(migrated.apiKeys)) {
+        migrated.apiKeys = [];
+      }
+      return migrated;
+    });
+
     return {
       server: {
         port: partial.server?.port ?? DEFAULT_CONFIG.server.port,
         bindAddress: partial.server?.bindAddress ?? DEFAULT_CONFIG.server.bindAddress,
         logFlushIntervalMs: partial.server?.logFlushIntervalMs ?? DEFAULT_CONFIG.server.logFlushIntervalMs,
         logBatchSize: partial.server?.logBatchSize ?? DEFAULT_CONFIG.server.logBatchSize,
+        logRetentionDays: partial.server?.logRetentionDays ?? DEFAULT_CONFIG.server.logRetentionDays,
       },
       proxyKeys: Array.isArray(partial.proxyKeys) ? partial.proxyKeys : [],
-      upstreams: Array.isArray(partial.upstreams) ? partial.upstreams : [],
+      upstreams,
     };
   }
 

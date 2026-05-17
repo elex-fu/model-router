@@ -187,6 +187,34 @@ test('default config has bindAddress 127.0.0.1', () => {
   assert.equal(config.server.bindAddress, '127.0.0.1');
 });
 
+test('legacy upstream with apiKey string is migrated to apiKeys array', () => {
+  fs.writeFileSync(
+    tmpFile,
+    JSON.stringify({
+      server: { port: 15005, logFlushIntervalMs: 5000, logBatchSize: 100 },
+      proxyKeys: [],
+      upstreams: [
+        {
+          name: 'legacy',
+          provider: 'kimi',
+          protocol: 'anthropic',
+          baseUrl: 'https://api.kimi.com',
+          apiKey: 'sk-old',
+          models: ['kimi-k2'],
+          enabled: true,
+        },
+      ],
+    }),
+    'utf-8',
+  );
+
+  const store = new ConfigStore(tmpFile);
+  const config = store.load();
+  assert.equal(config.upstreams.length, 1);
+  assert.deepEqual(config.upstreams[0]!.apiKeys, ['sk-old']);
+  assert.equal((config.upstreams[0] as any).apiKey, undefined);
+});
+
 test('legacy config without bindAddress merges to 127.0.0.1 default', () => {
   fs.writeFileSync(
     tmpFile,
