@@ -359,7 +359,7 @@ export async function proxyHandler(
           res,
           parsedBody,
           resolvedModel,
-          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol },
+          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode },
           apiKey: key,
           bridge,
           isStreaming,
@@ -499,7 +499,7 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; protocol: Protocol };
+  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key' };
   apiKey: string;
   bridge: Bridge;
   isStreaming: boolean;
@@ -559,7 +559,11 @@ async function trySingleUpstream(options: {
       upstreamHeaders.set(key, value);
     }
   }
-  upstreamHeaders.set('authorization', `Bearer ${apiKey}`);
+  if (upstream.authMode === 'x-api-key') {
+    upstreamHeaders.set('x-api-key', apiKey);
+  } else {
+    upstreamHeaders.set('authorization', `Bearer ${apiKey}`);
+  }
   upstreamHeaders.set('host', upstreamUrl.host);
   upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
   upstreamHeaders.set('content-type', 'application/json');

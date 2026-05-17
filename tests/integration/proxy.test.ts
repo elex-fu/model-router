@@ -188,6 +188,91 @@ test('integration: 401 openai envelope on bad auth (/v1/chat/completions)', asyn
   }
 });
 
+test('integration: default authMode sends Authorization Bearer header', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude',
+      content: [{ type: 'text', text: 'hi' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['up-key'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer up-key');
+    assert.equal(upstream.calls[0].headers['x-api-key'], undefined);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: authMode x-api-key sends x-api-key header', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude',
+      content: [{ type: 'text', text: 'hi' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['up-key'],
+        models: ['claude'],
+        enabled: true,
+        authMode: 'x-api-key',
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].headers['x-api-key'], 'up-key');
+    assert.equal(upstream.calls[0].headers.authorization, undefined);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
 test('integration: 404 with anthropic envelope when no upstream matches model', async () => {
   const proxy = await startProxy(baseConfig([]));
   try {

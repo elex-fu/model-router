@@ -156,6 +156,56 @@ test('openai upstream: strips thinking and cache_control', () => {
   assert.equal(out.system[0].cache_control, undefined);
 });
 
+test('strips leading billing header from string system prompt', () => {
+  const body = {
+    model: 'claude-test',
+    system: 'x-anthropic-billing-header: cc_version=1.0; cch=abc123\nYou are helpful',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  };
+  const out = preprocessRequest(body, 'anthropic', 'claude-test');
+  // injectCacheControl converts string system to array
+  assert.ok(Array.isArray(out.system));
+  assert.equal(out.system[0].text, 'You are helpful');
+});
+
+test('strips leading billing header from array system prompt text blocks', () => {
+  const body = {
+    model: 'claude-test',
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_version=1.0; cch=abc123\r\nYou are helpful' },
+      { type: 'text', text: 'no header here' },
+    ],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  };
+  const out = preprocessRequest(body, 'anthropic', 'claude-test');
+  assert.equal(out.system[0].text, 'You are helpful');
+  assert.equal(out.system[1].text, 'no header here');
+});
+
+test('leaves system prompt unchanged when no billing header present', () => {
+  const body = {
+    model: 'claude-test',
+    system: 'You are helpful',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  };
+  const out = preprocessRequest(body, 'anthropic', 'claude-test');
+  // injectCacheControl converts string system to array
+  assert.ok(Array.isArray(out.system));
+  assert.equal(out.system[0].text, 'You are helpful');
+});
+
+test('returns empty string when system prompt is only billing header', () => {
+  const body = {
+    model: 'claude-test',
+    system: 'x-anthropic-billing-header: cc_version=1.0; cch=abc123',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  };
+  const out = preprocessRequest(body, 'anthropic', 'claude-test');
+  // injectCacheControl converts string system to array
+  assert.ok(Array.isArray(out.system));
+  assert.equal(out.system[0].text, '');
+});
+
 test('does not mutate original body', () => {
   const body = { model: 'claude-test', _private: 'x', messages: [] };
   const original = JSON.stringify(body);

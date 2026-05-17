@@ -20,6 +20,8 @@ export interface UpstreamConfig {
   models: string[];
   enabled: boolean;
   modelMap?: Record<string, string>;
+  /** Auth mode for upstream requests. Default is 'bearer'. */
+  authMode?: 'bearer' | 'x-api-key';
 }
 
 export interface ServerConfig {

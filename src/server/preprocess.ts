@@ -14,6 +14,7 @@ export function preprocessRequest(body: any, upstreamProtocol: Protocol, resolve
 
   filterPrivateParams(cloned);
   sanitizeOrphanToolResults(cloned);
+  stripBillingHeaders(cloned);
 
   if (upstreamProtocol === 'anthropic') {
     injectCacheControl(cloned);
@@ -38,6 +39,37 @@ function filterPrivateParams(obj: any): void {
       continue;
     }
     filterPrivateParams(obj[key]);
+  }
+}
+
+const BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
+
+/** Strip leading x-anthropic-billing-header line from system prompt text. */
+function stripLeadingBillingHeader(text: string): string {
+  if (!text.startsWith(BILLING_HEADER_PREFIX)) return text;
+  const idx = text.search(/\r?\n|\r/);
+  if (idx === -1) return '';
+  let rest = text.slice(idx);
+  if (rest.startsWith('\r\n')) {
+    rest = rest.slice(2);
+  } else {
+    rest = rest.slice(1);
+  }
+  return rest;
+}
+
+/** Strip billing headers from system prompt to preserve prefix cache. */
+function stripBillingHeaders(body: any): void {
+  if (typeof body.system === 'string') {
+    body.system = stripLeadingBillingHeader(body.system);
+    return;
+  }
+  if (Array.isArray(body.system)) {
+    for (const block of body.system) {
+      if (block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string') {
+        block.text = stripLeadingBillingHeader(block.text);
+      }
+    }
   }
 }
 
