@@ -489,6 +489,146 @@ program
     }
   });
 
+// chat
+program
+  .command('chat <model> [message]')
+  .description('Send a chat request through the local proxy to verify end-to-end routing')
+  .option('--stream', 'Use streaming mode')
+  .option('--protocol <protocol>', 'Client protocol (anthropic|openai)', 'anthropic')
+  .option('--key <key>', 'Proxy key to use (defaults to first enabled key)')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (model, message, options) => {
+    const store = getStore(options);
+    const cfg = store.load();
+    const bind = cfg.server.bindAddress ?? '127.0.0.1';
+    const port = cfg.server.port ?? 15005;
+    const baseUrl = `http://${bind}:${port}`;
+
+    const protocol = options.protocol;
+    if (protocol !== 'anthropic' && protocol !== 'openai') {
+      console.error('--protocol must be "anthropic" or "openai"');
+      process.exit(1);
+    }
+
+    let proxyKey: string = options.key;
+    if (!proxyKey) {
+      const keys = store.listProxyKeys().filter((k) => k.enabled);
+      if (keys.length === 0) {
+        console.error('No enabled proxy keys found. Create one with key:create or pass --key');
+        process.exit(1);
+      }
+      proxyKey = keys[0].key;
+    } else {
+      const found = store.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
+      if (!found) {
+        console.error(`Proxy key "${options.key}" not found`);
+        process.exit(1);
+      }
+      proxyKey = found.key;
+    }
+
+    const userMessage = message ?? 'Hello, can you hear me?';
+    const url = protocol === 'anthropic'
+      ? `${baseUrl}/v1/messages`
+      : `${baseUrl}/v1/chat/completions`;
+
+    const body = protocol === 'anthropic'
+      ? {
+          model,
+          max_tokens: 256,
+          messages: [{ role: 'user', content: userMessage }],
+          stream: !!options.stream,
+        }
+      : {
+          model,
+          messages: [{ role: 'user', content: userMessage }],
+          stream: !!options.stream,
+        };
+
+    console.log(`→ ${protocol.toUpperCase()} ${url}`);
+    console.log(`  model: ${model}`);
+    console.log(`  message: "${userMessage}"`);
+    console.log(`  stream: ${!!options.stream}`);
+    console.log('');
+
+    const start = Date.now();
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': proxyKey,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.error(`HTTP ${res.status} (${Date.now() - start}ms)`);
+        try {
+          const err = JSON.parse(text);
+          console.error(JSON.stringify(err, null, 2));
+        } catch {
+          console.error(text);
+        }
+        process.exit(1);
+      }
+
+      if (options.stream) {
+        const reader = res.body?.getReader();
+        if (!reader) {
+          console.error('No response body');
+          process.exit(1);
+        }
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') continue;
+            try {
+              const chunk = JSON.parse(data);
+              if (protocol === 'anthropic') {
+                if (chunk.type === 'content_block_delta' && chunk.delta?.text) {
+                  process.stdout.write(chunk.delta.text);
+                }
+              } else {
+                const delta = chunk.choices?.[0]?.delta?.content;
+                if (delta) process.stdout.write(delta);
+              }
+            } catch {
+              // ignore non-JSON lines
+            }
+          }
+        }
+        console.log('');
+        console.log(`\n✓ Streaming complete (${Date.now() - start}ms)`);
+      } else {
+        const data = (await res.json()) as any;
+        const ms = Date.now() - start;
+        if (protocol === 'anthropic') {
+          const text = data.content?.map((b: { text?: string }) => b.text).join('') ?? '';
+          console.log(text);
+          console.log(`\n✓ ${ms}ms | usage: ${JSON.stringify(data.usage ?? {})}`);
+        } else {
+          const text = data.choices?.[0]?.message?.content ?? '';
+          console.log(text);
+          console.log(`\n✓ ${ms}ms | usage: ${JSON.stringify(data.usage ?? {})}`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`Request failed: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
 // logs
 program
   .command('logs')
