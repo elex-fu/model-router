@@ -360,3 +360,80 @@ test('rollupDaily: updates existing rollup on conflict', async () => {
     t.cleanup();
   }
 });
+
+test('dailyUsage: aggregates by day across date range', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const dbAny = (store as any).db;
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('alice', 0, datetime('now', '-2 days'), 200, 100, 50, 80, 20, 100)"
+      )
+      .run();
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('alice', 0, datetime('now', '-1 days'), 200, 200, 100, 30, 10, 200)"
+      )
+      .run();
+    dbAny
+      .prepare(
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('bob', 0, datetime('now', '-1 days'), 200, 50, 25, 10, 5, 50)"
+      )
+      .run();
+
+    const today = new Date().toISOString().slice(0, 10);
+    const from = new Date();
+    from.setUTCDate(from.getUTCDate() - 3);
+    const fromDate = from.toISOString().slice(0, 10);
+    const rows = await store.dailyUsage(fromDate, today);
+    assert.equal(rows.length, 2);
+    // Most recent day first (-1 days)
+    assert.equal(rows[0].requests, 2); // alice + bob
+    assert.equal(rows[0].inputTokens, 250);
+    assert.equal(rows[0].outputTokens, 125);
+    // -2 days
+    assert.equal(rows[1].requests, 1);
+    assert.equal(rows[1].inputTokens, 100);
+    assert.equal(rows[1].outputTokens, 50);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('dailyUsage: filters by key name', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    await store.insertBatch([
+      logEntry({ proxy_key_name: 'alice', request_tokens: 100, response_tokens: 50 }),
+      logEntry({ proxy_key_name: 'bob', request_tokens: 200, response_tokens: 100 }),
+    ]);
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await store.dailyUsage(today, today, 'alice');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].requests, 1);
+    assert.equal(rows[0].inputTokens, 100);
+    assert.equal(rows[0].outputTokens, 50);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
+test('dailyUsage: returns empty array when no data', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await store.dailyUsage(today, today);
+    assert.deepEqual(rows, []);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});

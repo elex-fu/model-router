@@ -40,3 +40,14 @@ export interface KeyStats {
   avgLatencyMs: number;
   lastSeen: string | null;
 }
+
+export interface DailyUsage {
+  date: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  avgLatencyMs: number;
+}

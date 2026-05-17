@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { DEFAULT_DB_PATH } from '../utils/paths.js';
-import type { KeyStats, LogEntry, StatsResult } from './types.js';
+import type { DailyUsage, KeyStats, LogEntry, StatsResult } from './types.js';
 
 export interface LogStore {
   init(): Promise<void>;
@@ -11,6 +11,7 @@ export interface LogStore {
   statsByKey(keyName: string, fromDate: string, toDate: string): Promise<Omit<KeyStats, 'keyName'>>;
   statsAllKeys(fromDate: string, toDate: string): Promise<KeyStats[]>;
   keyActivitySummary(today: string): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>>;
+  dailyUsage(fromDate: string, toDate: string, keyName?: string): Promise<DailyUsage[]>;
   rollupDaily(date: string): Promise<void>;
   queryRollups(fromDate: string, toDate: string): Promise<DailyRollup[]>;
   purgeOlderThan(days: number): Promise<number>;
@@ -289,6 +290,43 @@ export class SQLiteLogStore implements LogStore {
         lastSeen: row.lastSeen ?? null,
       };
     });
+  }
+
+  async dailyUsage(fromDate: string, toDate: string, keyName?: string): Promise<DailyUsage[]> {
+    if (!this.db) return [];
+    const where: string[] = ['DATE(created_at) >= ?', 'DATE(created_at) <= ?'];
+    const params: any[] = [fromDate, toDate];
+    if (keyName) {
+      where.push('proxy_key_name = ?');
+      params.push(keyName);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT
+          DATE(created_at) AS date,
+          COUNT(*) AS requests,
+          COALESCE(SUM(request_tokens), 0) AS inputTokens,
+          COALESCE(SUM(response_tokens), 0) AS outputTokens,
+          COALESCE(SUM(COALESCE(request_tokens, 0) + COALESCE(response_tokens, 0)), 0) AS totalTokens,
+          COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+          COALESCE(SUM(cache_creation_tokens), 0) AS cacheCreationTokens,
+          COALESCE(AVG(duration_ms), 0) AS avgLatencyMs
+        FROM request_logs
+        WHERE ${where.join(' AND ')}
+        GROUP BY DATE(created_at)
+        ORDER BY DATE(created_at) DESC`
+      )
+      .all(...params) as any[];
+    return rows.map((r) => ({
+      date: r.date,
+      requests: Number(r.requests) || 0,
+      inputTokens: Number(r.inputTokens) || 0,
+      outputTokens: Number(r.outputTokens) || 0,
+      totalTokens: Number(r.totalTokens) || 0,
+      cacheReadTokens: Number(r.cacheReadTokens) || 0,
+      cacheCreationTokens: Number(r.cacheCreationTokens) || 0,
+      avgLatencyMs: Math.round(Number(r.avgLatencyMs) || 0),
+    }));
   }
 
   async rollupDaily(date: string): Promise<void> {

@@ -753,6 +753,61 @@ program
     );
   });
 
+// usage [--since 7d|YYYY-MM-DD] [--key <name>]
+program
+  .command('usage')
+  .description('Show daily token usage over a date range (default: today only)')
+  .option('--since <since>', 'Range start: "Nd" (e.g. 7d) or YYYY-MM-DD')
+  .option('-k, --key <name>', 'Filter by proxy key name')
+  .option('-c, --config <path>', 'Path to config file')
+  .action(async (options) => {
+    const { logStoreFromConfig } = await import('../logger/store.js');
+    const { resolveSinceRange } = await import('./since.js');
+    const today = new Date().toISOString().slice(0, 10);
+    let range;
+    try {
+      range = resolveSinceRange(options.since, today);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    const store = await logStoreFromConfig(options.config);
+    const rows = await store.dailyUsage(range.fromDate, range.toDate, options.key);
+    if (rows.length === 0) {
+      console.log(`No usage data between ${range.fromDate} and ${range.toDate}.`);
+      return;
+    }
+    const totalInput = rows.reduce((sum, r) => sum + r.inputTokens, 0);
+    const totalOutput = rows.reduce((sum, r) => sum + r.outputTokens, 0);
+    const totalCacheRead = rows.reduce((sum, r) => sum + r.cacheReadTokens, 0);
+    const totalCacheCreation = rows.reduce((sum, r) => sum + r.cacheCreationTokens, 0);
+
+    const title = options.key
+      ? `Daily usage for "${options.key}" (${range.fromDate} → ${range.toDate})`
+      : `Daily usage (${range.fromDate} → ${range.toDate})`;
+    console.log(title);
+    console.table(
+      rows.map((r) => ({
+        date: r.date,
+        requests: r.requests,
+        input: r.inputTokens,
+        output: r.outputTokens,
+        total: r.totalTokens,
+        cache_read: r.cacheReadTokens,
+        cache_creation: r.cacheCreationTokens,
+        avg_ms: r.avgLatencyMs,
+      }))
+    );
+    console.log(
+      `Summary: ${totalInput.toLocaleString()} input + ${totalOutput.toLocaleString()} output = ${(totalInput + totalOutput).toLocaleString()} total tokens`
+    );
+    if (totalCacheRead > 0 || totalCacheCreation > 0) {
+      console.log(
+        `Cache: ${totalCacheRead.toLocaleString()} read + ${totalCacheCreation.toLocaleString()} creation`
+      );
+    }
+  });
+
 // maintenance:purge --older-than 90d
 program
   .command('maintenance:purge')
