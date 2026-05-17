@@ -71,6 +71,13 @@ export function rectifyAnthropicRequest(body: any): RectifyResult {
 
   if (shouldRemoveTopLevelThinking(cloned)) {
     delete cloned.thinking;
+    delete cloned.output_config;
+    if (Array.isArray(cloned.anthropic_beta)) {
+      cloned.anthropic_beta = cloned.anthropic_beta.filter(
+        (b: any) => b !== 'interleaved-thinking-2025-05-14' && b !== 'context-1m-2025-08-07'
+      );
+      if (cloned.anthropic_beta.length === 0) delete cloned.anthropic_beta;
+    }
     applied = true;
   }
 
@@ -79,12 +86,38 @@ export function rectifyAnthropicRequest(body: any): RectifyResult {
 
 function shouldRemoveTopLevelThinking(body: any): boolean {
   const thinkingType = body?.thinking?.type;
-  if (thinkingType !== 'enabled') return false;
+  if (thinkingType !== 'enabled' && thinkingType !== 'adaptive') return false;
 
   const messages = body?.messages;
   if (!Array.isArray(messages)) return false;
 
-  // Find last assistant message
+  // Check if any assistant message contains thinking/redacted_thinking blocks.
+  // If the conversation already has thinking blocks, keep top-level thinking
+  // and let block-level cleanup handle the issue.
+  const hasThinkingBlocks = messages.some((msg: any) => {
+    if (msg?.role !== 'assistant') return false;
+    const content = msg.content;
+    if (!Array.isArray(content)) return false;
+    return content.some(
+      (b: any) => b?.type === 'thinking' || b?.type === 'redacted_thinking'
+    );
+  });
+  if (hasThinkingBlocks) {
+    // If there are thinking blocks but the last assistant doesn't start with one,
+    // or there's a tool_use mismatch, we still need to remove top-level thinking.
+    return shouldRemoveTopLevelThinkingLegacy(body, messages);
+  }
+
+  // No thinking blocks in conversation → upstream likely rejects the thinking
+  // parameter outright (e.g. Kimi). Remove it.
+  return true;
+}
+
+/** Original cc-switch-aligned logic for tool_use + missing thinking prefix. */
+function shouldRemoveTopLevelThinkingLegacy(body: any, messages: any[]): boolean {
+  const thinkingType = body?.thinking?.type;
+  if (thinkingType !== 'enabled') return false;
+
   let lastAssistant: any = null;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]?.role === 'assistant') {
@@ -102,9 +135,6 @@ function shouldRemoveTopLevelThinking(body: any): boolean {
     firstBlockType === 'thinking' || firstBlockType === 'redacted_thinking';
   if (hasThinkingPrefix) return false;
 
-  // Only remove if there are tool_use blocks (the common failure case)
-  const hasToolUse = content.some(
-    (b: any) => b?.type === 'tool_use'
-  );
+  const hasToolUse = content.some((b: any) => b?.type === 'tool_use');
   return hasToolUse;
 }
