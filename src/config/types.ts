@@ -11,6 +11,13 @@ export interface ProxyKey {
   dailyTokens?: number;
 }
 
+export interface OAuthConfig {
+  tokenUrl: string;
+  clientId: string;
+  clientSecret: string;
+  scope?: string;
+}
+
 export interface UpstreamConfig {
   name: string;
   provider: string;
@@ -24,6 +31,10 @@ export interface UpstreamConfig {
   authMode?: 'bearer' | 'x-api-key';
   /** Enable Copilot-specific optimizations (thinking strip, tool merge, warmup downgrade). */
   copilotOptimized?: boolean;
+  /** Pass the client's Authorization header through to the upstream instead of using configured apiKeys. */
+  passThroughAuth?: boolean;
+  /** OAuth client-credentials config for dynamic upstream token resolution. */
+  oauth?: OAuthConfig;
 }
 
 export interface ServerConfig {

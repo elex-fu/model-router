@@ -12,12 +12,14 @@ import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
 import { KeyLimiter } from '../../src/limit/limiter.js';
 import { KeyPool } from '../../src/server/keyPool.js';
+import { OAuthTokenResolver } from '../../src/server/oauth.js';
 
 interface MockCall {
   method: string;
   url: string;
   headers: Record<string, string>;
   body: any;
+  rawBody: string;
 }
 
 interface MockUpstream {
@@ -50,6 +52,7 @@ async function startMockUpstream(responder: MockResponder): Promise<MockUpstream
       url: req.url ?? '/',
       headers,
       body: parsed,
+      rawBody: raw,
     };
     calls.push(call);
     const out = await responder(call);
@@ -84,7 +87,7 @@ interface ProxyHarness {
 
 async function startProxy(
   config: Config,
-  options: { limiter?: KeyLimiter; maxBodyBytes?: number; keyPool?: KeyPool } = {}
+  options: { limiter?: KeyLimiter; maxBodyBytes?: number; keyPool?: KeyPool; oauthResolver?: OAuthTokenResolver } = {}
 ): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -1263,5 +1266,220 @@ test('integration: multi-key — both keys 500, upstream-level failover', async 
     Math.random = originalRandom;
     await proxy.close();
     await upstream.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Responses API (Codex CLI)
+// ---------------------------------------------------------------------------
+
+test('integration: /v1/responses routes as openai protocol', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'resp_1',
+      model: 'gpt-5.4',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'openai',
+        protocol: 'openai',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['up-key'],
+        models: ['gpt-5.4'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'hello' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].url, '/v1/responses');
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer up-key');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: /v1/responses/compact routes as openai protocol', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'resp_1',
+      model: 'gpt-5.4',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'openai',
+        protocol: 'openai',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['up-key'],
+        models: ['gpt-5.4'],
+        enabled: true,
+      },
+    ])
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/responses/compact`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'hello' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].url, '/v1/responses/compact');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: passThroughAuth forwards client Authorization header', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'resp_1',
+      model: 'gpt-5.4',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const cfg = baseConfig([
+    {
+      name: 'u1',
+      provider: 'openai',
+      protocol: 'openai',
+      baseUrl: upstream.baseUrl,
+      apiKeys: [],
+      models: ['gpt-5.4'],
+      enabled: true,
+      passThroughAuth: true,
+    },
+  ]);
+  // Proxy key equals the OAuth token so Codex CLI can authenticate
+  cfg.proxyKeys[0].key = 'client-oauth-token';
+  const proxy = await startProxy(cfg);
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer client-oauth-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'hello' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer client-oauth-token');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: passThroughAuth with x-api-key authMode strips Bearer prefix', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'resp_1',
+      model: 'gpt-5.4',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const cfg = baseConfig([
+    {
+      name: 'u1',
+      provider: 'openai',
+      protocol: 'openai',
+      baseUrl: upstream.baseUrl,
+      apiKeys: [],
+      models: ['gpt-5.4'],
+      enabled: true,
+      passThroughAuth: true,
+      authMode: 'x-api-key',
+    },
+  ]);
+  cfg.proxyKeys[0].key = 'client-oauth-token';
+  const proxy = await startProxy(cfg);
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer client-oauth-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'hello' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].headers['x-api-key'], 'client-oauth-token');
+    assert.equal(upstream.calls[0].headers.authorization, undefined);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: oauth config resolves token dynamically', async () => {
+  const tokenServer = await startMockUpstream((req) => {
+    const params = new URLSearchParams(req.rawBody);
+    assert.equal(params.get('grant_type'), 'client_credentials');
+    assert.equal(params.get('client_id'), 'cid');
+    assert.equal(params.get('client_secret'), 'csec');
+    return { status: 200, body: { access_token: 'dynamic-tok', expires_in: 3600 } };
+  });
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'resp_1',
+      model: 'gpt-5.4',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const oauthResolver = new OAuthTokenResolver();
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'openai',
+        protocol: 'openai',
+        baseUrl: upstream.baseUrl,
+        apiKeys: [],
+        models: ['gpt-5.4'],
+        enabled: true,
+        oauth: {
+          tokenUrl: `${tokenServer.baseUrl}/token`,
+          clientId: 'cid',
+          clientSecret: 'csec',
+        },
+      },
+    ]),
+    { oauthResolver }
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.4', input: 'hello' }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer dynamic-tok');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+    await tokenServer.close();
   }
 });

@@ -5,13 +5,15 @@ import type { ProxyKey } from '../config/types.js';
 export function authenticateProxyKey(
   store: ConfigStore,
   req: IncomingMessage
-): { ok: true; key: ProxyKey } | { ok: false } {
+): { ok: true; key: ProxyKey; rawAuth?: string } | { ok: false } {
   let raw = req.headers['x-api-key'] || req.headers['authorization'];
   if (Array.isArray(raw)) {
     raw = raw[0];
   }
   let apiKey = '';
+  let rawAuth: string | undefined;
   if (typeof raw === 'string') {
+    rawAuth = raw;
     if (raw.startsWith('Bearer ')) {
       apiKey = raw.slice(7);
     } else {
@@ -27,5 +29,5 @@ export function authenticateProxyKey(
     return { ok: false };
   }
 
-  return { ok: true, key: proxyKey };
+  return { ok: true, key: proxyKey, rawAuth };
 }

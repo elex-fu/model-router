@@ -19,6 +19,8 @@ import {
   rectifyThinkingBudget,
 } from './rectifier.js';
 import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
+import { OAuthTokenResolver } from './oauth.js';
+import type { OAuthConfig } from '../config/types.js';
 
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
@@ -29,6 +31,7 @@ export interface ProxyHandlerOptions {
   trustProxy?: boolean;
   streamIdleTimeoutMs?: number;
   circuitBreaker?: CircuitBreaker;
+  oauthResolver?: OAuthTokenResolver;
   /** Internal: round-robin index tracking per upstream. */
   _keyRoundRobin?: Map<string, number>;
 }
@@ -99,6 +102,7 @@ function collectBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 function clientProtocolFromPath(path: string): Protocol | null {
   if (path.startsWith('/v1/messages')) return 'anthropic';
   if (path.startsWith('/v1/chat/completions')) return 'openai';
+  if (path.startsWith('/v1/responses')) return 'openai';
   return null;
 }
 
@@ -255,6 +259,7 @@ export async function proxyHandler(
   options.ipBlocker?.clearSuccess(clientIp);
   const proxyKey = auth.key;
   const proxyKeyName = proxyKey.name;
+  const clientAuth = auth.rawAuth;
   const clientBridge = pickBridge(clientProto, clientProto);
 
   let bodyBuffer: Buffer;
@@ -388,33 +393,39 @@ export async function proxyHandler(
       }
 
       const rawKeys = options.keyPool?.getAvailableKeys(upstream.name) ?? upstream.apiKeys;
-      if (rawKeys.length === 0) continue;
+      const usesClientAuth = upstream.passThroughAuth || !!upstream.oauth;
+      if (rawKeys.length === 0 && !usesClientAuth) continue;
       const keysForUpstream = rawKeys.slice();
 
       const rr = options._keyRoundRobin ?? new Map();
       options._keyRoundRobin = rr;
+      const keyCount = usesClientAuth ? 1 : keysForUpstream.length;
       const startIdx = rr.get(upstream.name) ?? 0;
-      rr.set(upstream.name, (startIdx + 1) % keysForUpstream.length);
+      rr.set(upstream.name, (startIdx + 1) % Math.max(keyCount, 1));
 
-      for (let k = 0; k < keysForUpstream.length; k++) {
-        const key = keysForUpstream[(startIdx + k) % keysForUpstream.length];
+      for (let k = 0; k < keyCount; k++) {
+        const key = usesClientAuth ? '' : keysForUpstream[(startIdx + k) % keysForUpstream.length];
         const tryStart = Date.now();
         const result = await trySingleUpstream({
           req,
           res,
           parsedBody,
           resolvedModel,
-          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode, copilotOptimized: upstream.copilotOptimized },
+          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode, copilotOptimized: upstream.copilotOptimized, passThroughAuth: upstream.passThroughAuth, oauth: upstream.oauth },
           apiKey: key,
+          clientAuth,
           bridge,
           isStreaming,
           signal: abortController.signal,
           streamIdleTimeoutMs,
+          oauthResolver: options.oauthResolver,
         });
 
         if (result.ok) {
           options.circuitBreaker?.reportSuccess(upstream.name);
-          options.keyPool?.markSuccess(upstream.name, key);
+          if (!usesClientAuth) {
+            options.keyPool?.markSuccess(upstream.name, key);
+          }
           if (isStreaming && result.usagePromise) {
             result.usagePromise.then((usage) => {
               if (limiter) {
@@ -477,7 +488,9 @@ export async function proxyHandler(
           return;
         }
 
-        options.keyPool?.markFailure(upstream.name, key);
+        if (!usesClientAuth) {
+          options.keyPool?.markFailure(upstream.name, key);
+        }
 
         const duration = Date.now() - tryStart;
         const shouldRetry = result.shouldRetry ?? false;
@@ -551,12 +564,14 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key'; copilotOptimized?: boolean };
+  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key'; copilotOptimized?: boolean; passThroughAuth?: boolean; oauth?: OAuthConfig };
   apiKey: string;
+  clientAuth?: string;
   bridge: Bridge;
   isStreaming: boolean;
   signal: AbortSignal;
   streamIdleTimeoutMs: number;
+  oauthResolver?: OAuthTokenResolver;
 }): Promise<TryResult> {
   const {
     req,
@@ -565,10 +580,12 @@ async function trySingleUpstream(options: {
     resolvedModel,
     upstream,
     apiKey,
+    clientAuth,
     bridge,
     isStreaming,
     signal: parentSignal,
     streamIdleTimeoutMs,
+    oauthResolver,
   } = options;
 
   const localCtl = new AbortController();
@@ -617,11 +634,32 @@ async function trySingleUpstream(options: {
   if (upstream.copilotOptimized) {
     optimizeCopilotHeaders(preprocessedBody, upstreamHeaders);
   }
-  if (upstream.authMode === 'x-api-key') {
+
+  if (upstream.passThroughAuth && clientAuth) {
+    if (upstream.authMode === 'x-api-key') {
+      const token = clientAuth.startsWith('Bearer ') ? clientAuth.slice(7) : clientAuth;
+      upstreamHeaders.set('x-api-key', token);
+    } else {
+      upstreamHeaders.set('authorization', clientAuth.startsWith('Bearer ') ? clientAuth : `Bearer ${clientAuth}`);
+    }
+  } else if (upstream.oauth && oauthResolver) {
+    try {
+      const token = await oauthResolver.resolve(upstream.oauth);
+      if (upstream.authMode === 'x-api-key') {
+        upstreamHeaders.set('x-api-key', token);
+      } else {
+        upstreamHeaders.set('authorization', `Bearer ${token}`);
+      }
+    } catch (err: any) {
+      cleanupSignal();
+      return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: `OAuth resolution failed: ${err.message}` };
+    }
+  } else if (upstream.authMode === 'x-api-key') {
     upstreamHeaders.set('x-api-key', apiKey);
   } else {
     upstreamHeaders.set('authorization', `Bearer ${apiKey}`);
   }
+
   upstreamHeaders.set('host', upstreamUrl.host);
   upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
   upstreamHeaders.set('content-type', 'application/json');

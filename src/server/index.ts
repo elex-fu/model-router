@@ -7,6 +7,7 @@ import { KeyLimiter } from '../limit/limiter.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { KeyPool } from './keyPool.js';
 import { CircuitBreaker } from './circuitBreaker.js';
+import { OAuthTokenResolver } from './oauth.js';
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -71,6 +72,7 @@ export async function startServer(
   healthMonitor.start();
 
   const circuitBreaker = new CircuitBreaker();
+  const oauthResolver = new OAuthTokenResolver();
 
   const server = http.createServer((req, res) => {
     proxyHandler(req, res, store, (entry) => logQueue.enqueue(entry), {
@@ -80,6 +82,7 @@ export async function startServer(
       ipBlocker,
       trustProxy,
       circuitBreaker,
+      oauthResolver,
       healthCheck: async () => {
         await logStore.ping();
         return true;
