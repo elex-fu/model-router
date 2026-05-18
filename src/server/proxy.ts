@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Agent } from 'undici';
 import { ConfigStore } from '../config/store.js';
+import { CircuitBreaker } from './circuitBreaker.js';
 import { selectUpstreams } from '../router/upstream.js';
 import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
 import { authenticateProxyKey } from './auth.js';
@@ -26,6 +27,7 @@ export interface ProxyHandlerOptions {
   ipBlocker?: IpAuthBlocker;
   trustProxy?: boolean;
   streamIdleTimeoutMs?: number;
+  circuitBreaker?: CircuitBreaker;
   /** Internal: round-robin index tracking per upstream. */
   _keyRoundRobin?: Map<string, number>;
 }
@@ -378,6 +380,12 @@ export async function proxyHandler(
       const { upstream, resolvedModel } = candidates[i];
       const bridge = pickBridge(clientProto, upstream.protocol);
 
+      if (options.circuitBreaker && !options.circuitBreaker.allow(upstream.name)) {
+        if (i < candidates.length - 1) continue;
+        // All candidates have open circuits — fall through to final 502
+        break;
+      }
+
       const rawKeys = options.keyPool?.getAvailableKeys(upstream.name) ?? upstream.apiKeys;
       if (rawKeys.length === 0) continue;
       const keysForUpstream = rawKeys.slice();
@@ -404,6 +412,7 @@ export async function proxyHandler(
         });
 
         if (result.ok) {
+          options.circuitBreaker?.reportSuccess(upstream.name);
           options.keyPool?.markSuccess(upstream.name, key);
           if (isStreaming && result.usagePromise) {
             result.usagePromise.then((usage) => {
@@ -472,6 +481,12 @@ export async function proxyHandler(
         const duration = Date.now() - tryStart;
         const shouldRetry = result.shouldRetry ?? false;
         const status = result.statusCode ?? 502;
+
+        if (shouldRetry) {
+          options.circuitBreaker?.reportFailure(upstream.name);
+        } else {
+          options.circuitBreaker?.neutralRelease(upstream.name);
+        }
 
         enqueue({
           proxy_key_name: proxyKeyName,
