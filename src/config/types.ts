@@ -22,6 +22,8 @@ export interface UpstreamConfig {
   modelMap?: Record<string, string>;
   /** Auth mode for upstream requests. Default is 'bearer'. */
   authMode?: 'bearer' | 'x-api-key';
+  /** Enable Copilot-specific optimizations (thinking strip, tool merge, warmup downgrade). */
+  copilotOptimized?: boolean;
 }
 
 export interface ServerConfig {

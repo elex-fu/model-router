@@ -18,6 +18,7 @@ import {
   isThinkingBudgetError,
   rectifyThinkingBudget,
 } from './rectifier.js';
+import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
 
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
@@ -403,7 +404,7 @@ export async function proxyHandler(
           res,
           parsedBody,
           resolvedModel,
-          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode },
+          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode, copilotOptimized: upstream.copilotOptimized },
           apiKey: key,
           bridge,
           isStreaming,
@@ -550,7 +551,7 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key' };
+  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key'; copilotOptimized?: boolean };
   apiKey: string;
   bridge: Bridge;
   isStreaming: boolean;
@@ -586,6 +587,9 @@ async function trySingleUpstream(options: {
   const upstreamUrl = new URL(`${upstream.baseUrl.replace(/\/$/, '')}${upstreamPath}`);
 
   const preprocessedBody = preprocessRequest(parsedBody ?? {}, upstream.protocol, resolvedModel);
+  if (upstream.copilotOptimized) {
+    optimizeCopilotBody(preprocessedBody);
+  }
   const transformedBody = bridge.transformRequest(preprocessedBody);
   if (transformedBody && typeof transformedBody === 'object') {
     transformedBody.model = resolvedModel;
@@ -609,6 +613,9 @@ async function trySingleUpstream(options: {
     } else {
       upstreamHeaders.set(key, value);
     }
+  }
+  if (upstream.copilotOptimized) {
+    optimizeCopilotHeaders(preprocessedBody, upstreamHeaders);
   }
   if (upstream.authMode === 'x-api-key') {
     upstreamHeaders.set('x-api-key', apiKey);
