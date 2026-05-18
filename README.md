@@ -5,10 +5,14 @@
 ## 特性
 
 - **双向协议桥接**：客户端可走 Anthropic（`/v1/messages`）或 OpenAI（`/v1/chat/completions`）协议，上游可选 Anthropic 或 OpenAI；4 种 client/upstream 组合（`a→a` `o→o` `a→o` `o→a`）全部可用
+- **OpenAI Responses API**：支持 `/v1/responses` 与 `/v1/responses/compact`，兼容 Codex CLI
 - **modelMap 模型重写**：在 upstream 上配置 `pattern → realModel` 映射，支持精确匹配 + glob 通配（`*`、`?`），可让客户端用任意名字调用上游
-- **同 upstream 多 Key 自动调度**：每个 upstream 支持配置多个 API Key，请求时随机调度；某个 Key 连续失败 3 次后自动冷却 5 分钟，同 upstream 内兜底切换到其它 Key
-- **多 upstream 故障降级**：同一 model 可挂多个 upstream，失败自动随机降级到其它 upstream
+- **同 upstream 多 Key 自动调度**：每个 upstream 支持配置多个 API Key，请求时轮询调度；某个 Key 连续失败 3 次后自动冷却 5 分钟，同 upstream 内兜底切换到其它 Key
+- **多 upstream 故障降级 + 熔断器**：同一 model 可挂多个 upstream，失败自动降级到其它 upstream；每个 upstream 独立 Circuit Breaker（Closed/Open/HalfOpen），防止故障扩散
 - **代理 Key 鉴权**：为不同使用方分配独立的代理 key，认证错误按客户端协议返回
+- **上游认证策略区分**：支持 `Authorization: Bearer`（默认）与 `x-api-key` 两种上游鉴权模式，以及 OAuth 动态令牌解析与透传
+- **Copilot 请求优化**：上游启用 `copilotOptimized` 后，自动执行请求分类、thinking 块剥离、tool_result 合并、warmup 模型降级、确定性 ID 注入
+- **System Prompt 计费头清洗**：自动剥离 Claude Code CLI 注入的 `x-anthropic-billing-header` 前缀，避免 upstream 400
 - **流式 + 非流式全程支持**：SSE 状态机在桥接两端正确还原 `tool_use`、`tool_calls`、`finish_reason`、usage 计数
 - **异步日志记录**：每条请求记录 `client_protocol` / `upstream_protocol` / 模型 / token / 耗时,本地 SQLite
 - **健康检查端点**：`GET /healthz` 返回 200 + `{status:"ok",db:"ok"}`，反代 / 监控可直接探活；DB 不可达时返回 503
@@ -66,7 +70,7 @@ model-router upstream:add kimi-code kimi anthropic https://api.kimi.com/coding s
   --models kimi-k2-5
 ```
 
-请求时会随机从 `sk-a`、`sk-b`、`sk-c` 中选一个；某个 Key 连续失败 3 次后冷却 5 分钟，自动切换到同 upstream 的其它 Key。
+请求时会轮询从 `sk-a`、`sk-b`、`sk-c` 中选一个；某个 Key 连续失败 3 次后冷却 5 分钟，自动切换到同 upstream 的其它 Key。
 
 #### 带 modelMap：让客户端用 Claude 名字调用 OpenAI 上游
 
@@ -76,6 +80,66 @@ model-router upstream:add ds-bridge deepseek openai https://api.deepseek.com sk-
 ```
 
 之后 Claude Code 发出 `claude-sonnet-4-5` 请求会被代理改写为 `deepseek-chat` 转发给 DeepSeek，响应再被改写回 Anthropic 格式返回。
+
+#### 上游认证策略区分
+
+默认使用 `Authorization: Bearer <apiKey>` 访问上游。部分第三方服务使用 `x-api-key`：
+
+```bash
+model-router upstream:add kimi-2 kimi anthropic https://api.kimi.com/coding sk-key \
+  --models kimi-k2-5 --auth-mode x-api-key
+```
+
+#### Codex CLI OAuth 透传
+
+若 upstream 是 OpenAI 官方（Codex CLI 需要 OAuth token 直达上游），配置 `passThroughAuth`：
+
+```bash
+model-router upstream:add openai-official openai openai https://api.openai.com "" \
+  --models gpt-5.4 --pass-through-auth
+```
+
+此时模型路由不再使用配置的 `apiKeys`，而是把客户端发来的 `Authorization` 头原样转发给 OpenAI。
+
+#### 动态 OAuth 令牌解析
+
+第三方上游若采用 OAuth client_credentials 签发临时 token，可配置动态解析：
+
+```json
+{
+  "name": "azure-codex",
+  "provider": "azure",
+  "protocol": "openai",
+  "baseUrl": "https://my-resource.openai.azure.com/openai",
+  "apiKeys": [],
+  "models": ["gpt-5.4"],
+  "enabled": true,
+  "authMode": "bearer",
+  "oauth": {
+    "tokenUrl": "https://login.microsoftonline.com/tenant-id/oauth2/v2.0/token",
+    "clientId": "my-client-id",
+    "clientSecret": "my-client-secret",
+    "scope": "https://cognitiveservices.azure.com/.default"
+  }
+}
+```
+
+代理会在 token 过期前自动刷新，并按 `authMode` 注入到上游请求头。
+
+#### Copilot 请求优化
+
+若上游用于 GitHub Copilot 场景，启用 `copilotOptimized` 以自动执行以下优化：
+
+- **请求分类**：识别 warmup、compact、subagent、user-initiated 请求
+- **thinking 块剥离**：从 assistant messages 中移除 `thinking` / `redacted_thinking`，避免 Copilot 400
+- **tool_result 合并**：将相邻的 `[tool_result, text]` 合并为单个 tool_result，减少消息数
+- **warmup 模型降级**：warmup 请求自动降级到 `gpt-4o-mini`，降低计费
+- **确定性 ID 注入**：基于 session_id + 最后用户内容生成确定性 `x-request-id` / `x-interaction-id`，用于 Copilot 计费去重
+
+```bash
+model-router upstream:add copilot-1 copilot openai https://api.githubcopilot.com sk-key \
+  --models gpt-4o --copilot-optimized
+```
 
 ### 启动代理
 
@@ -102,6 +166,15 @@ export ANTHROPIC_API_KEY="mrk_xxxxxxxxxxxxxxxxxxxx"
 claude
 ```
 
+#### Codex CLI(OpenAI Responses API)
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:15005"
+# 将 Codex CLI 的 OAuth token 注册为 model-router 代理 key
+codex
+```
+
+Codex CLI 使用 `/v1/responses` 端点。如需将 OAuth token 透传给 OpenAI 官方 upstream，在 upstream 配置中启用 `passThroughAuth: true`，此时客户端的 `Authorization` 头会直接转发到上游。
+
 #### OpenAI SDK(OpenAI 协议)
 ```python
 from openai import OpenAI
@@ -111,7 +184,7 @@ client = OpenAI(
 )
 ```
 
-代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` → OpenAI；其它 path 返回 404。代理鉴权同时接受 `x-api-key: <key>` 与 `Authorization: Bearer <key>`。
+代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` / `/v1/responses*` → OpenAI；其它 path 返回 404。代理鉴权同时接受 `x-api-key: <key>` 与 `Authorization: Bearer <key>`。
 
 #### 流式响应
 
@@ -310,17 +383,20 @@ model-router stats --date 2026-05-02
 ## 架构
 
 ```
-Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
+Client (Anthropic /v1/messages | OpenAI /v1/chat/completions | Codex /v1/responses)
         ↓
 ┌─────────────────────────────────────────────────────────────┐
 │  HTTP Server (bindAddress:port)                             │
 │  • maxBodyBytes 拦截超大请求体 → 413                        │
 │  • GET /healthz → 200/503 (无鉴权)                          │
+│  • ConfigStore 内存缓存 (mtime 校验，避免每请求读盘)        │
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │  Path → clientProto                                         │
-│  /v1/messages → anthropic    /v1/chat/completions → openai  │
+│  /v1/messages → anthropic                                   │
+│  /v1/chat/completions → openai                              │
+│  /v1/responses* → openai                                    │
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -353,6 +429,14 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
+│  CircuitBreaker (per-upstream)                              │
+│  • Closed → Open: 连续失败达阈值                            │
+│  • Open → HalfOpen: 恢复超时后允许单次探测                  │
+│  • HalfOpen → Closed: 探测成功达阈值                        │
+│  • 4xx 错误 neutralRelease，不计入熔断                      │
+└────────────────────────┬────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────────┐
 │   pickBridge(clientProto, upstreamProto)                    │
 │   • PassthroughAnthropicBridge (a→a)                        │
 │   • PassthroughOpenAiBridge    (o→o)                        │
@@ -360,20 +444,25 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 │   • OpenAIToAnthBridge         (o→a)                        │
 │   rewriteUrlPath / transformRequest / transformResponse     │
 │   transformStream (SSE 协议转换 + usage 提取)                │
+│   • preprocess: cache_control 注入 / thinking 注入          │
+│   • rectifier: thinking 签名修复 / budget 修复              │
+│   • copilotOptimizer: thinking 剥离 / tool 合并 / warmup降级 │
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
 │  KeyPool (同 upstream 多 Key 调度)                          │
-│  • 随机选择可用 Key                                         │
+│  • 轮询选择可用 Key (round-robin)                           │
 │  • Key 连续 3 次失败 → 冷却 5 分钟                          │
 │  • 同 upstream 内兜底切换其它 Key                           │
 └────────────────────────┬────────────────────────────────────┘
                          ↓
 ┌─────────────────────────────────────────────────────────────┐
-│  Upstream fetch (带 AbortSignal)                            │
+│  Upstream fetch (undici Agent + keep-alive)                 │
+│  • 连接池复用，减少 TCP 握手延迟                            │
 │  • 客户端断开 → 自动取消上游请求                            │
 │  • SSE 流 60s idle → 自动关闭连接                           │
 │  • 5xx / 网络错误 → key 级重试 → upstream 级 failover       │
+│  • authMode: bearer / x-api-key / oauth / passThrough       │
 └────────────────────────┬────────────────────────────────────┘
                          ↓
        Upstream API
@@ -392,16 +481,24 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 
 每个 upstream 的 `apiKeys` 支持配置多个 Key。代理在每次请求时：
 
-1. **随机调度** — 从该 upstream 的可用 Key 中随机挑选一个发送请求
+1. **轮询调度** — 从该 upstream 的可用 Key 中按 round-robin 顺序挑选，保证负载均衡
 2. **Key 级失败兜底** — 若某个 Key 返回 `5xx` 或网络错误，立即在同 upstream 内尝试下一个可用 Key；`4xx` 错误不重试（视为配置/权限问题）
 3. **冷却避障** — 某个 Key 连续失败 3 次后，自动进入 5 分钟冷却期，期间不再被选中；成功后立即解除冷却
 4. **Upstream 级 failover** — 若同 upstream 的所有 Key 都失败，再降级到下一个 upstream 候选
 
 多 Key 调度让同一 upstream 的配额可以充分利用，同时单 Key 异常不会影响整体可用性。
 
-### 失败自动降级
+### 失败自动降级与熔断器
 
-当 upstream 返回 `5xx` 或网络不可达时,代理会按随机顺序尝试其他可用 upstream,直到成功或全部耗尽。`4xx` 错误不重试。每次尝试都按 client 协议包装错误,并独立记录日志。
+当 upstream 返回 `5xx` 或网络不可达时，代理会按随机顺序尝试其他可用 upstream，直到成功或全部耗尽。`4xx` 错误不重试。每次尝试都按 client 协议包装错误，并独立记录日志。
+
+每个 upstream 拥有独立的 **Circuit Breaker**，状态机如下：
+
+- **Closed**（正常）：请求正常通过；连续失败达 `failureThreshold`（默认 5 次）后转入 Open
+- **Open**（熔断）：所有请求直接跳过该 upstream；经过 `recoveryTimeoutMs`（默认 30s）后转入 HalfOpen
+- **HalfOpen**（探测）：允许一次试探请求；成功达 `successThreshold`（默认 2 次）后关闭，失败则重新 Open
+
+客户端侧错误（4xx）通过 `neutralRelease` 处理，不计入熔断失败计数，避免正常请求触发误熔断。
 
 ### 连接生命周期与防泄漏
 
@@ -444,6 +541,58 @@ Client (Anthropic /v1/messages | OpenAI /v1/chat/completions)
 
 精确匹配优先于 glob;多个 glob 都命中时按 `Object.entries` 顺序(插入顺序)取第一个。
 
+### Copilot 请求优化
+
+在 upstream 上启用 `copilotOptimized: true` 后，代理会在请求转发前自动执行以下优化（全部面向 Copilot 场景设计）：
+
+| 优化项 | 说明 |
+|--------|------|
+| **请求分类** | 识别 warmup（极短用户消息）、compact（消息数>20）、subagent（system 含 subagent 关键字）、user-initiated |
+| **thinking 块剥离** | 从 assistant messages 中移除 `thinking` / `redacted_thinking` 块；Copilot  upstream 会拒绝这些块 |
+| **tool_result 合并** | 将相邻的 `[tool_result, text]` 合并为单个 tool_result（内容拼接），减少消息数 |
+| **warmup 模型降级** | 识别为 warmup 的请求自动将模型降级为 `gpt-4o-mini`（可配置），降低计费 |
+| **确定性 ID 注入** | 基于 `x-claude-code-session-id` + 最后用户内容生成确定性 UUID，注入 `x-request-id` 与 `x-interaction-id`，用于 Copilot 计费去重 |
+
+### 上游认证策略
+
+代理支持四种上游认证模式，通过 `authMode` / `passThroughAuth` / `oauth` 配置：
+
+1. **`authMode: 'bearer'`（默认）** — 使用 `Authorization: Bearer <apiKey>` 访问上游
+2. **`authMode: 'x-api-key'`** — 使用 `x-api-key: <apiKey>` 访问上游
+3. **`passThroughAuth: true`** — 将客户端的原始 `Authorization` 头直接转发给上游；适用于 Codex CLI OAuth token 直达 OpenAI 官方的场景
+4. **`oauth: { tokenUrl, clientId, clientSecret, scope? }`** — 代理自动通过 client_credentials 流程获取 access_token，缓存并按 `authMode` 注入；token 过期前自动刷新
+
+### Anthropic 协议增强
+
+面向 Anthropic upstream 时，代理自动注入以下协议头：
+
+- **`anthropic-version: 2023-06-01`**（若客户端未指定）
+- **`anthropic-beta`** — 包含 `claude-code-20250219`，并根据模型追加 `interleaved-thinking-2025-05-14` 或 `context-1m-2025-08-07`
+
+同时在请求体预处理阶段：
+- 为长对话自动注入 `cache_control` breakpoints（最多 4 个）
+- 为支持 thinking 的模型自动注入 `thinking` 块（enabled 或 adaptive 模式）
+- **Thinking Budget Rectifier** — 若 upstream 返回 thinking 签名错误或 budget 错误，代理会自动修正请求并重试一次，无需客户端介入
+
+### System Prompt 计费头清洗
+
+Claude Code CLI 会在 system prompt 开头注入 `x-anthropic-billing-header: cc_version=...; cch=<rotating>`，部分第三方 upstream 会将这行文本当作有效 prompt 内容处理，导致异常计费或 400 错误。
+
+代理在预处理阶段自动检测并剥离该前缀：
+- 支持字符串 system prompt 与 TextBlock 数组
+- 仅剥离开头的计费头行，保留后续内容
+- 若 system prompt 仅有计费头，结果为空字符串
+
+### 性能优化
+
+代理在以下环节做了针对性性能优化：
+
+- **undici Agent 连接池** — 上游 fetch 复用 TCP 连接，`keepAliveTimeout: 30s`，减少重复握手延迟
+- **ConfigStore 内存缓存** — 配置文件按 `mtime + size` 缓存，避免每个请求都同步读盘
+- **round-robin Key 调度** — 替代每请求的 Fisher-Yates 洗牌，降低 CPU 开销
+- **Body 预分配** — 有 `Content-Length` 时直接 `Buffer.allocUnsafe` 预分配，避免 `Buffer.concat` 的 O(n²) 累积
+- **同协议透传短路** — `a→a` / `o→o` 时跳过无意义的 JSON parse/stringify，直接透传 Buffer
+
 ## upstream baseUrl 说明
 
 `baseUrl` 支持带或不带尾部斜杠,代理在拼接 `/v1/messages` / `/v1/chat/completions` 时会处理一致:
@@ -467,11 +616,11 @@ npm run build
 # 运行编译后版本
 npm start
 
-# 测试 (250 个用例:配置/路由/KeyPool/4 种桥接/SSE 状态机/集成端到端/客户端断开/防爆破/WAL/健康检查)
+# 测试 (352 个用例:配置/路由/KeyPool/桥接/SSE/集成/断开/防爆破/WAL/健康检查/熔断器/OAuth/Copilot)
 npm test
 ```
 
-测试覆盖:
+测试覆盖（共 352 个用例）：
 
 | 模块                          | 用例数 | 说明                                                        |
 |-------------------------------|--------|-------------------------------------------------------------|
@@ -483,12 +632,18 @@ npm test
 | `tests/protocol/anth-to-openai.test.ts` | 16 | Anthropic↔OpenAI 单向(请求/响应/流式)                      |
 | `tests/protocol/openai-to-anth.test.ts` | 16 | OpenAI↔Anthropic 反向(请求/响应/流式)                      |
 | `tests/protocol/sse.test.ts`  | 6      | SSE 解析/写入/CRLF/multi-line                                |
-| `tests/integration/proxy.test.ts` | 13  | 端到端 4 种 client/upstream 组合 + 鉴权 + failover + 4xx 不重试 + 多 Key 调度 |
+| `tests/integration/proxy.test.ts` | 35  | 端到端 4 种桥接 + 鉴权 + authMode + passThroughAuth + OAuth + failover + 多 Key 调度 + Responses API |
 | `tests/server/abort.integration.test.ts` | 2 | 客户端断开传播 + SSE idle timeout                          |
 | `tests/server/healthz.test.ts` | 6      | /healthz 状态码/方法/DB 探活                                 |
 | `tests/server/clientIp.test.ts` | 8     | XFF 信任开关 8 种场景                                        |
 | `tests/server/ipBlocker.integration.test.ts` | 4 | IP 防爆破 4 种场景                                    |
-| `tests/server/keyPool.test.ts` | 11     | Key 随机选择/失败计数/冷却/恢复/getAvailableKeys             |
+| `tests/server/keyPool.test.ts` | 11     | Key 轮询/失败计数/冷却/恢复/getAvailableKeys                 |
+| `tests/server/circuitBreaker.test.ts` | 8 | Closed/Open/HalfOpen 状态转换 + neutralRelease + 隔离性     |
+| `tests/server/copilotOptimizer.test.ts` | 12 | 请求分类 / thinking 剥离 / tool 合并 / warmup 降级 / 确定性 ID |
+| `tests/server/oauth.test.ts`  | 7      | OAuth client_credentials / 缓存 / 刷新 / 错误处理              |
+| `tests/server/preprocess.test.ts` | 20 | cache_control 注入 / thinking 注入 / billing header 清洗      |
+| `tests/server/rectifier.test.ts` | 25 | thinking 签名检测与修复 / budget 错误检测与修复              |
+| `tests/server/proxy-usage.test.ts` | 5  | extractNonStreamUsage / injectAnthropicHeaders / stripThinkingBetas |
 | `tests/health/monitor.test.ts` | 6      | 健康检查: 单 Key/多 Key/全部失败禁用/恢复/无 keyPool 兼容     |
 | `tests/limit/limiter.test.ts` | 8      | RPM / 日 token 配额 / UTC 午夜重置                           |
 | `tests/logger/store.test.ts`  | 10     | SQLite CRUD + 统计查询 + WAL 模式验证                        |
