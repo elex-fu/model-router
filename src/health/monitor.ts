@@ -3,7 +3,7 @@ import type { UpstreamConfig } from '../config/types.js';
 import type { KeyPool } from '../server/keyPool.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
-const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const HEALTH_CHECK_TIMEOUT_MS = 15_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 export class HealthMonitor {

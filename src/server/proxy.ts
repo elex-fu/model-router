@@ -36,7 +36,7 @@ export interface ProxyHandlerOptions {
   _keyRoundRobin?: Map<string, number>;
 }
 
-const DEFAULT_STREAM_IDLE_MS = 60_000;
+const DEFAULT_STREAM_IDLE_MS = 300_000;
 
 /** Shared undici Agent with longer keep-alive for upstream connections. */
 const upstreamAgent = new Agent({
