@@ -295,8 +295,9 @@ program
   .action((name, provider, protocol, baseUrl, apiKeys, options) => {
     const store = getStore(options);
     const models = options.models ? String(options.models).split(',').map((s: string) => s.trim()) : [];
-    if (protocol !== 'anthropic' && protocol !== 'openai') {
-      console.error('Protocol must be "anthropic" or "openai"');
+    const validProtocols = ['anthropic', 'openai', 'gemini', 'responses'];
+    if (!validProtocols.includes(protocol)) {
+      console.error('Protocol must be "anthropic", "openai", "gemini", or "responses"');
       process.exit(1);
     }
     let modelMap: Record<string, string> | undefined;
