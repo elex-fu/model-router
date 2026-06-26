@@ -32,8 +32,6 @@ export interface ProxyHandlerOptions {
   streamIdleTimeoutMs?: number;
   circuitBreaker?: CircuitBreaker;
   oauthResolver?: OAuthTokenResolver;
-  /** Internal: round-robin index tracking per upstream. */
-  _keyRoundRobin?: Map<string, number>;
 }
 
 const DEFAULT_STREAM_IDLE_MS = 300_000;
@@ -397,14 +395,15 @@ export async function proxyHandler(
       if (rawKeys.length === 0 && !usesClientAuth) continue;
       const keysForUpstream = rawKeys.slice();
 
-      const rr = options._keyRoundRobin ?? new Map();
-      options._keyRoundRobin = rr;
       const keyCount = usesClientAuth ? 1 : keysForUpstream.length;
-      const startIdx = rr.get(upstream.name) ?? 0;
-      rr.set(upstream.name, (startIdx + 1) % Math.max(keyCount, 1));
 
       for (let k = 0; k < keyCount; k++) {
-        const key = usesClientAuth ? '' : keysForUpstream[(startIdx + k) % keysForUpstream.length];
+        const key = usesClientAuth
+          ? ''
+          : options.keyPool
+            ? options.keyPool.pick(upstream.name) ?? undefined
+            : keysForUpstream[k % keysForUpstream.length];
+        if (!usesClientAuth && !key) break;
         const tryStart = Date.now();
         const result = await trySingleUpstream({
           req,
