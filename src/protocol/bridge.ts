@@ -1,4 +1,4 @@
-export type Protocol = 'anthropic' | 'openai';
+export type Protocol = 'anthropic' | 'openai' | 'gemini' | 'responses';
 
 export interface BridgeUsage {
   inputTokens?: number;

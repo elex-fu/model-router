@@ -419,6 +419,7 @@ export async function proxyHandler(
             ? options.keyPool.pick(upstream.name) ?? undefined
             : keysForUpstream[k % keysForUpstream.length];
         if (!usesClientAuth && !key) break;
+        const apiKey = key ?? '';
         const tryStart = Date.now();
         const result = await trySingleUpstream({
           req,
@@ -426,7 +427,7 @@ export async function proxyHandler(
           parsedBody,
           resolvedModel,
           upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode, copilotOptimized: upstream.copilotOptimized, passThroughAuth: upstream.passThroughAuth, oauth: upstream.oauth },
-          apiKey: key,
+          apiKey,
           clientAuth,
           bridge,
           isStreaming,
@@ -439,7 +440,7 @@ export async function proxyHandler(
         if (result.ok) {
           options.circuitBreaker?.reportSuccess(upstream.name);
           if (!usesClientAuth) {
-            options.keyPool?.markSuccess(upstream.name, key);
+            options.keyPool?.markSuccess(upstream.name, apiKey);
           }
           if (isStreaming && result.usagePromise) {
             result.usagePromise.then((usage) => {
@@ -504,7 +505,7 @@ export async function proxyHandler(
         }
 
         if (!usesClientAuth) {
-          options.keyPool?.markFailure(upstream.name, key);
+          options.keyPool?.markFailure(upstream.name, apiKey);
         }
 
         const duration = Date.now() - tryStart;

@@ -18,10 +18,12 @@ export interface OAuthConfig {
   scope?: string;
 }
 
+export type Protocol = 'anthropic' | 'openai' | 'gemini' | 'responses';
+
 export interface UpstreamConfig {
   name: string;
   provider: string;
-  protocol: 'anthropic' | 'openai';
+  protocol: Protocol;
   baseUrl: string;
   apiKeys: string[];
   models: string[];

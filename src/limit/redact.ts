@@ -8,7 +8,7 @@ const SECRET_PATTERNS = [
 
 export function redactSecrets<T extends string | null | undefined>(value: T): T {
   if (typeof value !== 'string') return value;
-  let result = value;
+  let result: string = value;
   for (const { re, replacement } of SECRET_PATTERNS) {
     result = result.replace(re, replacement);
   }
