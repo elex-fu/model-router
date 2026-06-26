@@ -91,6 +91,8 @@ export async function startServer(
       trustProxy,
       circuitBreaker,
       oauthResolver,
+      maxRetries: config.server.maxRetries,
+      requestTimeoutMs: config.server.requestTimeoutMs,
       healthCheck: async () => {
         await logStore.ping();
         return true;

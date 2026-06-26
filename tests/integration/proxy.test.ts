@@ -87,7 +87,7 @@ interface ProxyHarness {
 
 async function startProxy(
   config: Config,
-  options: { limiter?: KeyLimiter; maxBodyBytes?: number; keyPool?: KeyPool; oauthResolver?: OAuthTokenResolver } = {}
+  options: { limiter?: KeyLimiter; maxBodyBytes?: number; keyPool?: KeyPool; oauthResolver?: OAuthTokenResolver; maxRetries?: number; requestTimeoutMs?: number } = {}
 ): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -1425,6 +1425,94 @@ test('integration: passThroughAuth with x-api-key authMode strips Bearer prefix'
     assert.equal(upstream.calls.length, 1);
     assert.equal(upstream.calls[0].headers['x-api-key'], 'client-oauth-token');
     assert.equal(upstream.calls[0].headers.authorization, undefined);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: maxRetries limits total attempts across upstreams and keys', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 500,
+    body: { error: { message: 'down' } },
+  }));
+
+  const keyPool = new KeyPool({ cooldownMs: 60_000 });
+  keyPool.register('u1', ['key-a', 'key-b']);
+  keyPool.register('u2', ['key-c']);
+
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-a', 'key-b'],
+        models: ['claude'],
+        enabled: true,
+      },
+      {
+        name: 'u2',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-c'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { keyPool, maxRetries: 2 }
+  );
+
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-test-12345',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 502);
+    assert.equal(upstream.calls.length, 2);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: requestTimeoutMs aborts slow upstreams', async () => {
+  const upstream = await startMockUpstream(async () => {
+    await new Promise((r) => setTimeout(r, 500));
+    return { status: 200, body: { id: 'msg_late', content: [{ type: 'text', text: 'late' }] } };
+  });
+
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-a'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { requestTimeoutMs: 50 }
+  );
+
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-test-12345',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 502);
   } finally {
     await proxy.close();
     await upstream.close();

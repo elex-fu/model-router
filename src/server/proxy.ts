@@ -32,6 +32,8 @@ export interface ProxyHandlerOptions {
   streamIdleTimeoutMs?: number;
   circuitBreaker?: CircuitBreaker;
   oauthResolver?: OAuthTokenResolver;
+  maxRetries?: number;
+  requestTimeoutMs?: number;
 }
 
 const DEFAULT_STREAM_IDLE_MS = 300_000;
@@ -373,6 +375,8 @@ export async function proxyHandler(
 
   const isStreaming = parsedBody?.stream === true;
   const streamIdleTimeoutMs = options.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_MS;
+  const maxRetries = options.maxRetries ?? 3;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
 
   const abortController = new AbortController();
   const onClientAbort = () => abortController.abort();
@@ -380,6 +384,7 @@ export async function proxyHandler(
   res.on('close', onClientAbort);
 
   try {
+    let totalAttempts = 0;
     for (let i = 0; i < candidates.length; i++) {
       const { upstream, resolvedModel } = candidates[i];
       const bridge = pickBridge(clientProto, upstream.protocol);
@@ -398,6 +403,16 @@ export async function proxyHandler(
       const keyCount = usesClientAuth ? 1 : keysForUpstream.length;
 
       for (let k = 0; k < keyCount; k++) {
+        if (totalAttempts >= maxRetries) {
+          if (!res.headersSent) {
+            const err = bridge.wrapError(502, 'Max retries exceeded');
+            res.writeHead(502, { 'Content-Type': err.contentType });
+            res.end(typeof err.body === 'string' ? err.body : JSON.stringify(err.body));
+          }
+          return;
+        }
+        totalAttempts += 1;
+
         const key = usesClientAuth
           ? ''
           : options.keyPool
@@ -417,6 +432,7 @@ export async function proxyHandler(
           isStreaming,
           signal: abortController.signal,
           streamIdleTimeoutMs,
+          requestTimeoutMs,
           oauthResolver: options.oauthResolver,
         });
 
@@ -570,6 +586,7 @@ async function trySingleUpstream(options: {
   isStreaming: boolean;
   signal: AbortSignal;
   streamIdleTimeoutMs: number;
+  requestTimeoutMs: number;
   oauthResolver?: OAuthTokenResolver;
 }): Promise<TryResult> {
   const {
@@ -584,18 +601,29 @@ async function trySingleUpstream(options: {
     isStreaming,
     signal: parentSignal,
     streamIdleTimeoutMs,
+    requestTimeoutMs,
     oauthResolver,
   } = options;
 
   const localCtl = new AbortController();
+  const timeoutCtl = new AbortController();
+  const timeout = setTimeout(() => timeoutCtl.abort(), requestTimeoutMs);
   const onParentAbort = () => localCtl.abort();
+  const onTimeoutAbort = () => localCtl.abort();
   if (parentSignal.aborted) {
     localCtl.abort();
   } else {
     parentSignal.addEventListener('abort', onParentAbort, { once: true });
   }
+  if (timeoutCtl.signal.aborted) {
+    localCtl.abort();
+  } else {
+    timeoutCtl.signal.addEventListener('abort', onTimeoutAbort, { once: true });
+  }
   const cleanupSignal = () => {
+    clearTimeout(timeout);
     parentSignal.removeEventListener('abort', onParentAbort);
+    timeoutCtl.signal.removeEventListener('abort', onTimeoutAbort);
   };
 
   const clientPath = req.url || '/';

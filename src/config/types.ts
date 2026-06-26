@@ -43,6 +43,8 @@ export interface ServerConfig {
   logFlushIntervalMs: number;
   logBatchSize: number;
   logRetentionDays?: number;
+  maxRetries?: number;
+  requestTimeoutMs?: number;
 }
 
 export interface Config {
@@ -58,6 +60,8 @@ export const DEFAULT_CONFIG: Config = {
     logFlushIntervalMs: 5000,
     logBatchSize: 100,
     logRetentionDays: 30,
+    maxRetries: 3,
+    requestTimeoutMs: 120_000,
   },
   proxyKeys: [],
   upstreams: [],
