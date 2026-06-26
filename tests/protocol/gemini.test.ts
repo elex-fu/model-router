@@ -6,6 +6,7 @@ import {
   geminiToAnthropicResponse,
   geminiStreamToAnthropicStream,
 } from '../../src/protocol/gemini.js';
+import { GeminiShadowStore } from '../../src/protocol/gemini-shadow.js';
 
 test('anthropicToGeminiRequest maps simple text message', () => {
   const { payload } = anthropicToGeminiRequest(
@@ -134,29 +135,45 @@ test('geminiToAnthropicResponse handles non-STOP finishReason', () => {
 });
 
 test('geminiStreamToAnthropicStream maps text delta', () => {
-  const result = geminiStreamToAnthropicStream({
-    candidates: [{ content: { parts: [{ text: 'hi' }] } }],
-  });
-  assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].type, 'content_block_delta');
-  assert.equal(result.events[0].delta.text, 'hi');
+  const store = new GeminiShadowStore();
+  const events = geminiStreamToAnthropicStream('data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}', store);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'content_block_delta');
+  assert.equal(events[0].delta.type, 'text_delta');
+  assert.equal(events[0].delta.text, 'hi');
 });
 
-test('geminiStreamToAnthropicStream maps functionCall delta', () => {
-  const result = geminiStreamToAnthropicStream({
-    candidates: [{ content: { parts: [{ functionCall: { name: 'fn', args: {} } }] } }],
-  });
-  assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].type, 'content_block_delta');
+test('geminiStreamToAnthropicStream maps functionCall to tool_use events', () => {
+  const store = new GeminiShadowStore();
+  const events = geminiStreamToAnthropicStream('data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"NYC"}}}]}}]}', store);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].type, 'content_block_start');
+  assert.equal(events[0].content_block.type, 'tool_use');
+  assert.equal(events[0].content_block.name, 'get_weather');
+  assert.equal(events[1].type, 'content_block_delta');
+  assert.equal(events[1].delta.type, 'input_json_delta');
+  assert.ok(events[1].delta.partial_json.includes('NYC'));
 });
 
-test('geminiStreamToAnthropicStream includes usage on final chunk', () => {
-  const result = geminiStreamToAnthropicStream({
-    candidates: [{ content: { parts: [{ text: 'done' }] } }],
-    usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1 },
-  });
-  assert.equal(result.events.length, 2);
-  assert.equal(result.events[1].type, 'message_stop');
-  assert.equal(result.events[1].usage.input_tokens, 3);
-  assert.equal(result.events[1].usage.output_tokens, 1);
+test('geminiStreamToAnthropicStream ignores non-data lines', () => {
+  const store = new GeminiShadowStore();
+  const events = geminiStreamToAnthropicStream(': keep-alive', store);
+  assert.equal(events.length, 0);
+});
+
+test('geminiStreamToAnthropicStream ignores empty data', () => {
+  const store = new GeminiShadowStore();
+  const events = geminiStreamToAnthropicStream('data: ', store);
+  assert.equal(events.length, 0);
+});
+
+test('geminiStreamToAnthropicStream tool IDs are stable via shadow store', () => {
+  const store = new GeminiShadowStore();
+  const line = 'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"fn","args":{}}}]}}]}';
+  geminiStreamToAnthropicStream(line, store);
+  const snapshot = store.snapshot();
+  const ids = Object.keys(snapshot);
+  assert.equal(ids.length, 1);
+  assert.ok(ids[0].startsWith('toolu_'));
+  assert.equal(snapshot[ids[0]].name, 'fn');
 });

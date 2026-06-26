@@ -1,4 +1,4 @@
-import { parseSseStream, writeSseEvent } from './sse.js';
+import { GeminiShadowStore } from './gemini-shadow.js';
 
 export interface GeminiContent {
   role?: 'user' | 'model';
@@ -91,51 +91,37 @@ export function geminiToAnthropicResponse(body: any): any {
   };
 }
 
-export function geminiStreamToAnthropicStream(line: any): any {
-  const candidate = line.candidates?.[0];
+export function geminiStreamToAnthropicStream(
+  line: string,
+  store: GeminiShadowStore
+): any[] {
+  const events: any[] = [];
+  if (!line.startsWith('data:')) return events;
+  const data = line.slice(5).trim();
+  if (!data) return events;
+  let parsed: any;
+  try { parsed = JSON.parse(data); } catch { return events; }
+
+  const candidate = parsed.candidates?.[0];
   const parts = candidate?.content?.parts ?? [];
-  const contentBlocks: any[] = [];
+
   for (const part of parts) {
     if (part.text) {
-      contentBlocks.push({ type: 'text', text: part.text });
+      events.push({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: part.text } });
     }
     if (part.functionCall) {
-      contentBlocks.push({
-        type: 'tool_use',
-        id: `toolu_${Math.random().toString(36).slice(2)}`,
-        name: part.functionCall.name,
-        input: part.functionCall.args ?? {},
+      const id = `toolu_${Math.random().toString(36).slice(2)}`;
+      store.remember(id, part.functionCall.name, part.functionCall.args ?? {});
+      events.push({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id, name: part.functionCall.name, input: {} } });
+      events.push({
+        type: 'content_block_delta',
+        index: 1,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify(part.functionCall.args ?? {}),
+        },
       });
     }
   }
-
-  const event: any = {
-    type: 'content_block_delta',
-    index: 0,
-    delta: {},
-  };
-
-  if (contentBlocks.length === 1 && contentBlocks[0].type === 'text') {
-    event.delta = { type: 'text_delta', text: contentBlocks[0].text };
-  } else if (contentBlocks.length > 0) {
-    event.delta = { type: 'content_block_delta', content_blocks: contentBlocks };
-  }
-
-  // If this is the final chunk with usage metadata, emit a message_stop style event
-  if (line.usageMetadata) {
-    return {
-      events: [
-        event,
-        {
-          type: 'message_stop',
-          usage: {
-            input_tokens: line.usageMetadata.promptTokenCount ?? 0,
-            output_tokens: line.usageMetadata.candidatesTokenCount ?? 0,
-          },
-        },
-      ],
-    };
-  }
-
-  return { events: [event] };
+  return events;
 }
