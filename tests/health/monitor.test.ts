@@ -188,3 +188,77 @@ test('with keyPool: falls back to upstream.apiKeys when pool empty for upstream'
     monitor.stop();
   }
 });
+
+test('probes anthropic upstream at /v1/messages with Bearer auth', async () => {
+  const store = mockStore([
+    { name: 'u1', protocol: 'anthropic', baseUrl: 'http://localhost:1', apiKeys: ['k1'], models: ['m1'], enabled: true },
+  ]);
+  const monitor = new HealthMonitor(store as any);
+
+  const originalFetch = global.fetch;
+  let capturedUrl = '';
+  let capturedInit: any;
+  global.fetch = async (url: any, init: any) => {
+    capturedUrl = String(url);
+    capturedInit = init;
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+
+  try {
+    await (monitor as any).checkUpstream(store.listUpstreams()[0]);
+    assert.ok(capturedUrl.endsWith('/v1/messages'));
+    assert.equal(capturedInit.headers?.authorization, 'Bearer k1');
+    assert.equal(capturedInit.method, 'POST');
+  } finally {
+    global.fetch = originalFetch;
+    monitor.stop();
+  }
+});
+
+test('probes openai upstream at /v1/chat/completions with Bearer auth', async () => {
+  const store = mockStore([
+    { name: 'u1', protocol: 'openai', baseUrl: 'http://localhost:1', apiKeys: ['k1'], models: ['m1'], enabled: true },
+  ]);
+  const monitor = new HealthMonitor(store as any);
+
+  const originalFetch = global.fetch;
+  let capturedUrl = '';
+  let capturedInit: any;
+  global.fetch = async (url: any, init: any) => {
+    capturedUrl = String(url);
+    capturedInit = init;
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+
+  try {
+    await (monitor as any).checkUpstream(store.listUpstreams()[0]);
+    assert.ok(capturedUrl.endsWith('/v1/chat/completions'));
+    assert.equal(capturedInit.headers?.authorization, 'Bearer k1');
+  } finally {
+    global.fetch = originalFetch;
+    monitor.stop();
+  }
+});
+
+test('probes with x-api-key header when authMode is x-api-key', async () => {
+  const store = mockStore([
+    { name: 'u1', protocol: 'openai', baseUrl: 'http://localhost:1', apiKeys: ['k1'], models: ['m1'], enabled: true, authMode: 'x-api-key' },
+  ]);
+  const monitor = new HealthMonitor(store as any);
+
+  const originalFetch = global.fetch;
+  let capturedInit: any;
+  global.fetch = async (_url: any, init: any) => {
+    capturedInit = init;
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+
+  try {
+    await (monitor as any).checkUpstream(store.listUpstreams()[0]);
+    assert.equal(capturedInit.headers?.authorization, undefined);
+    assert.equal(capturedInit.headers?.['x-api-key'], 'k1');
+  } finally {
+    global.fetch = originalFetch;
+    monitor.stop();
+  }
+});

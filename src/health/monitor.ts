@@ -6,6 +6,53 @@ const HEALTH_CHECK_INTERVAL_MS = 60_000;
 const HEALTH_CHECK_TIMEOUT_MS = 15_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 
+interface HealthProbe {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string;
+}
+
+function buildHealthProbe(upstream: UpstreamConfig, model: string): HealthProbe {
+  const base = upstream.baseUrl.replace(/\/$/, '');
+  const protocol = upstream.protocol || 'anthropic';
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    accept: 'application/json',
+  };
+
+  if (protocol === 'anthropic') {
+    return {
+      url: `${base}/v1/messages`,
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: '1' }],
+        max_tokens: 5,
+      }),
+    };
+  }
+
+  return {
+    url: `${base}/v1/chat/completions`,
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: '1' }],
+      max_tokens: 5,
+    }),
+  };
+}
+
+function authHeader(upstream: UpstreamConfig, key: string): Record<string, string> {
+  if (upstream.authMode === 'x-api-key') {
+    return { 'x-api-key': key };
+  }
+  return { authorization: `Bearer ${key}` };
+}
+
 export class HealthMonitor {
   private store: ConfigStore;
   private keyPool?: KeyPool;
@@ -44,12 +91,7 @@ export class HealthMonitor {
     if (keys.length === 0) keys = upstream.apiKeys;
     if (keys.length === 0) return;
 
-    const url = `${upstream.baseUrl.replace(/\/$/, '')}/v1/messages`;
-    const body = JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: '1' }],
-      max_tokens: 5,
-    });
+    const probe = buildHealthProbe(upstream, model);
 
     let anyOk = false;
     let lastError = '';
@@ -59,14 +101,11 @@ export class HealthMonitor {
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${key}`,
-            'content-type': 'application/json',
-            accept: 'application/json',
-          },
-          body,
+        const headers = { ...probe.headers, ...authHeader(upstream, key) };
+        const res = await fetch(probe.url, {
+          method: probe.method,
+          headers,
+          body: probe.body,
           signal: controller.signal,
         });
         clearTimeout(timeout);
