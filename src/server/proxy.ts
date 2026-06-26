@@ -102,7 +102,8 @@ function collectBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 function clientProtocolFromPath(path: string): Protocol | null {
   if (path.startsWith('/v1/messages')) return 'anthropic';
   if (path.startsWith('/v1/chat/completions')) return 'openai';
-  if (path.startsWith('/v1/responses')) return 'openai';
+  if (path.startsWith('/v1/responses')) return 'responses';
+  if (path.startsWith('/v1beta/')) return 'gemini';
   return null;
 }
 
