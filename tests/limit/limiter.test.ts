@@ -155,6 +155,37 @@ test('hydrate: seeds dailyTokensUsed from prior persisted totals', () => {
   assert.equal(limiter.getUsage('bob')?.dailyTokensUsed, 9999);
 });
 
+test('hydrate: seeds rpm window from prior persisted timestamps', () => {
+  const c = clock(1_000_000);
+  const limiter = new KeyLimiter({ now: c.now });
+  limiter.hydrate([
+    {
+      keyName: 'alice',
+      tokensUsed: 100,
+      rpmWindow: [c.now() - 10_000, c.now() - 5_000, c.now() - 70_000],
+    },
+  ]);
+  const usage = limiter.getUsage('alice')!;
+  assert.equal(usage.dailyTokensUsed, 100);
+  assert.deepEqual(usage.rpmWindow.length, 2);
+  assert.ok(usage.rpmWindow.every((ts) => ts > c.now() - 60_000));
+});
+
+test('hydrate: hydrated rpm window counts toward subsequent rpm checks', () => {
+  const c = clock(1_000_000);
+  const limiter = new KeyLimiter({ now: c.now });
+  limiter.hydrate([
+    {
+      keyName: 'alice',
+      tokensUsed: 0,
+      rpmWindow: [c.now() - 10_000, c.now() - 5_000],
+    },
+  ]);
+  const key = makeKey({ rpm: 2 });
+  assert.equal(limiter.reserveRequest('alice', key).allowed, false);
+  assert.equal(limiter.reserveRequest('alice', key).reason, 'rpm_exceeded');
+});
+
 test('hydrate: hydrated tokens count toward subsequent dailyTokens checks', () => {
   const c = clock(1_000_000);
   const limiter = new KeyLimiter({ now: c.now });

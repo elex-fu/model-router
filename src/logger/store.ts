@@ -8,6 +8,7 @@ export interface LogStore {
   queryLogs(limit: number, filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' }): Promise<LogEntry[]>;
   stats(date: string): Promise<StatsResult>;
   todayTokensByKey(date: string): Promise<Array<{ keyName: string; tokensUsed: number }>>;
+  recentRequestsByKey(keyName: string, sinceMs: number): Promise<number[]>;
   statsByKey(keyName: string, fromDate: string, toDate: string): Promise<Omit<KeyStats, 'keyName'>>;
   statsAllKeys(fromDate: string, toDate: string): Promise<KeyStats[]>;
   keyActivitySummary(today: string): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>>;
@@ -93,8 +94,8 @@ export class SQLiteLogStore implements LogStore {
         request_model, actual_model, upstream_name,
         status_code, error_message, request_tokens, response_tokens, total_tokens,
         cache_read_tokens, cache_creation_tokens, first_token_ms,
-        duration_ms, is_streaming
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        duration_ms, is_streaming, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertMany = this.db.transaction((rows: LogEntry[]) => {
       for (const row of rows) {
@@ -115,7 +116,8 @@ export class SQLiteLogStore implements LogStore {
           row.cache_creation_tokens,
           row.first_token_ms,
           row.duration_ms,
-          row.is_streaming ? 1 : 0
+          row.is_streaming ? 1 : 0,
+          row.created_at ?? new Date().toISOString()
         );
       }
     });
@@ -206,6 +208,16 @@ export class SQLiteLogStore implements LogStore {
       )
       .all(date) as Array<{ keyName: string; tokensUsed: number }>;
     return rows;
+  }
+
+  async recentRequestsByKey(keyName: string, sinceMs: number): Promise<number[]> {
+    if (!this.db) return [];
+    const since = new Date(sinceMs).toISOString();
+    const stmt = this.db.prepare(
+      `SELECT created_at FROM request_logs WHERE proxy_key_name = ? AND datetime(created_at) > datetime(?) ORDER BY created_at ASC`
+    );
+    const rows = stmt.all(keyName, since) as Array<{ created_at: string }>;
+    return rows.map((r) => new Date(r.created_at).getTime());
   }
 
   async statsByKey(

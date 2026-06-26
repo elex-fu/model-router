@@ -76,11 +76,15 @@ export class KeyLimiter {
     state.dailyTokensUsed += (inputTokens || 0) + (outputTokens || 0);
   }
 
-  hydrate(usage: Iterable<{ keyName: string; tokensUsed: number }>): void {
+  hydrate(usage: Iterable<{ keyName: string; tokensUsed: number; rpmWindow?: number[] }>): void {
     const t = this.now();
-    for (const { keyName, tokensUsed } of usage) {
+    for (const { keyName, tokensUsed, rpmWindow } of usage) {
       const state = this.ensureState(keyName, t);
       state.dailyTokensUsed = tokensUsed;
+      if (rpmWindow) {
+        const cutoff = t - RPM_WINDOW_MS;
+        state.rpmWindow = rpmWindow.filter((ts) => ts > cutoff);
+      }
     }
   }
 

@@ -57,7 +57,15 @@ export async function startServer(
   const limiter = new KeyLimiter();
   const today = new Date().toISOString().slice(0, 10);
   const usage = await logStore.todayTokensByKey(today);
-  limiter.hydrate(usage);
+  const sinceMs = Date.now() - 60_000;
+  const hydrated = await Promise.all(
+    usage.map(async (u) => ({
+      keyName: u.keyName,
+      tokensUsed: u.tokensUsed,
+      rpmWindow: await logStore.recentRequestsByKey(u.keyName, sinceMs),
+    }))
+  );
+  limiter.hydrate(hydrated);
 
   const ipBlocker = new IpAuthBlocker();
 

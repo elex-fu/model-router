@@ -93,6 +93,26 @@ test('todayTokensByKey: treats null tokens as zero', async () => {
   }
 });
 
+test('recentRequestsByKey: returns timestamps within window', async () => {
+  const t = tmpDb();
+  const store = new SQLiteLogStore(t.path);
+  await store.init();
+  try {
+    const now = Date.now();
+    await store.insertBatch([
+      logEntry({ proxy_key_name: 'alice', created_at: new Date(now - 90_000).toISOString() }),
+      logEntry({ proxy_key_name: 'alice', created_at: new Date(now - 30_000).toISOString() }),
+      logEntry({ proxy_key_name: 'bob', created_at: new Date(now - 30_000).toISOString() }),
+    ]);
+    const rows = await store.recentRequestsByKey('alice', now - 60_000);
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0] >= now - 60_000);
+  } finally {
+    await store.close?.();
+    t.cleanup();
+  }
+});
+
 test('statsByKey: counts requests, errors, rate_limited, tokens, latency', async () => {
   const t = tmpDb();
   const store = new SQLiteLogStore(t.path);
