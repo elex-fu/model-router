@@ -1,4 +1,7 @@
 import { GeminiShadowStore } from './gemini-shadow.js';
+import type { BaseBridge } from './bridge.js';
+import type { BridgeStreamResult, BridgeError, BridgeUsage } from './bridge.js';
+import { parseSseStream } from './sse.js';
 
 export interface GeminiContent {
   role?: 'user' | 'model';
@@ -89,6 +92,91 @@ export function geminiToAnthropicResponse(body: any): any {
     },
     stop_reason: candidate?.finishReason === 'STOP' ? 'end_turn' : 'stop_sequence',
   };
+}
+
+export class AnthToGeminiBridge implements BaseBridge {
+  readonly clientProto = 'anthropic' as const;
+  readonly upstreamProto = 'gemini' as const;
+
+  rewriteUrlPath(_clientPath: string): string {
+    return '/v1beta/models/model:generateContent';
+  }
+
+  transformRequest(body: any): any {
+    const model = body.model ?? 'gemini-2.5-pro';
+    const { payload } = anthropicToGeminiRequest(body, model);
+    return payload;
+  }
+
+  transformResponse(body: any): any {
+    return geminiToAnthropicResponse(body);
+  }
+
+  transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
+    const [toClient, toParser] = upstreamStream.tee();
+    const store = new GeminiShadowStore();
+    const usage: Promise<BridgeUsage> = (async () => {
+      let inputTokens: number | undefined;
+      let outputTokens: number | undefined;
+      for await (const ev of parseSseStream(toParser)) {
+        const data = ev.data;
+        if (!data || data === '[DONE]') continue;
+        let json: any;
+        try { json = JSON.parse(data); } catch { continue; }
+        if (json?.usageMetadata?.promptTokenCount !== undefined) inputTokens = json.usageMetadata.promptTokenCount;
+        if (json?.usageMetadata?.candidatesTokenCount !== undefined) outputTokens = json.usageMetadata.candidatesTokenCount;
+      }
+      return { inputTokens, outputTokens };
+    })();
+
+    const encoder = new TextEncoder();
+    const transform = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        const text = new TextDecoder().decode(chunk);
+        for (const line of text.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          for (const event of geminiStreamToAnthropicStream(trimmed, store)) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          }
+        }
+      },
+    });
+
+    return { clientStream: toClient.pipeThrough(transform), usage };
+  }
+
+  wrapError(statusCode: number, message: string): BridgeError {
+    const errorType = statusCode === 429 ? 'rate_limit_error' : 'api_error';
+    return { body: { type: 'error', error: { type: errorType, message } }, contentType: 'application/json' };
+  }
+}
+
+export class GeminiToAnthBridge implements BaseBridge {
+  readonly clientProto = 'gemini' as const;
+  readonly upstreamProto = 'anthropic' as const;
+
+  rewriteUrlPath(clientPath: string): string {
+    return clientPath;
+  }
+
+  transformRequest(body: any): any {
+    return body;
+  }
+
+  transformResponse(body: any): any {
+    return body;
+  }
+
+  transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
+    const [toClient] = upstreamStream.tee();
+    return { clientStream: toClient, usage: Promise.resolve({}) };
+  }
+
+  wrapError(statusCode: number, message: string): BridgeError {
+    const errorType = statusCode === 429 ? 'rate_limit_error' : 'api_error';
+    return { body: { type: 'error', error: { type: errorType, message } }, contentType: 'application/json' };
+  }
 }
 
 export function geminiStreamToAnthropicStream(
