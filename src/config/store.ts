@@ -2,6 +2,36 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { type Config, type ProxyKey, type UpstreamConfig, DEFAULT_CONFIG } from './types.js';
 
+const ENV_PLACEHOLDER_RE = /\$\{ENV:([^}]+)\}/g;
+
+function resolveEnvPlaceholders(value: string): string {
+  return value.replace(ENV_PLACEHOLDER_RE, (_match, varName) => {
+    const resolved = process.env[varName];
+    if (resolved === undefined) {
+      throw new Error(`Environment variable ${varName} is not set`);
+    }
+    return resolved;
+  });
+}
+
+function resolveSecretsInConfig(config: Config): Config {
+  for (const key of config.proxyKeys) {
+    if (key.key) key.key = resolveEnvPlaceholders(key.key);
+  }
+  for (const upstream of config.upstreams) {
+    if (upstream.apiKeys) {
+      upstream.apiKeys = upstream.apiKeys.map((k) => resolveEnvPlaceholders(k));
+    }
+    if (upstream.oauth?.clientId) {
+      upstream.oauth.clientId = resolveEnvPlaceholders(upstream.oauth.clientId);
+    }
+    if (upstream.oauth?.clientSecret) {
+      upstream.oauth.clientSecret = resolveEnvPlaceholders(upstream.oauth.clientSecret);
+    }
+  }
+  return config;
+}
+
 export class ConfigStore {
   private configPath: string;
   private cachedConfig: Config | null = null;
@@ -27,7 +57,7 @@ export class ConfigStore {
     }
     const raw = fs.readFileSync(this.configPath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<Config>;
-    const config = this.mergeDefaults(parsed);
+    const config = resolveSecretsInConfig(this.mergeDefaults(parsed));
     this.cachedConfig = config;
     this.cachedMtimeMs = stat.mtimeMs;
     this.cachedSize = stat.size;

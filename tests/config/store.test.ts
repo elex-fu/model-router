@@ -230,3 +230,101 @@ test('legacy config without bindAddress merges to 127.0.0.1 default', () => {
   assert.equal(config.server.bindAddress, '127.0.0.1');
   assert.equal(config.server.port, 9999);
 });
+
+test('load resolves ${ENV:VAR} placeholders in proxyKeys and apiKeys', () => {
+  fs.writeFileSync(
+    tmpFile,
+    JSON.stringify({
+      server: { port: 15005, bindAddress: '127.0.0.1', logFlushIntervalMs: 5000, logBatchSize: 100 },
+      proxyKeys: [
+        { name: 'pk1', key: '${ENV:MODEL_ROUTER_PROXY_KEY}', enabled: true, createdAt: '2024-01-01' },
+      ],
+      upstreams: [
+        {
+          name: 'u1',
+          provider: 'openai',
+          protocol: 'openai',
+          baseUrl: 'http://x',
+          apiKeys: ['${ENV:MODEL_ROUTER_UPSTREAM_KEY}'],
+          models: ['gpt-4o'],
+          enabled: true,
+        },
+      ],
+    }),
+    'utf-8'
+  );
+  process.env.MODEL_ROUTER_PROXY_KEY = 'proxy-secret';
+  process.env.MODEL_ROUTER_UPSTREAM_KEY = 'upstream-secret';
+  try {
+    const store = new ConfigStore(tmpFile);
+    const config = store.load();
+    assert.equal(config.proxyKeys[0].key, 'proxy-secret');
+    assert.equal(config.upstreams[0].apiKeys[0], 'upstream-secret');
+  } finally {
+    delete process.env.MODEL_ROUTER_PROXY_KEY;
+    delete process.env.MODEL_ROUTER_UPSTREAM_KEY;
+  }
+});
+
+test('load resolves ${ENV:VAR} placeholders in oauth clientId and clientSecret', () => {
+  fs.writeFileSync(
+    tmpFile,
+    JSON.stringify({
+      server: { port: 15005, bindAddress: '127.0.0.1', logFlushIntervalMs: 5000, logBatchSize: 100 },
+      proxyKeys: [],
+      upstreams: [
+        {
+          name: 'u1',
+          provider: 'openai',
+          protocol: 'openai',
+          baseUrl: 'http://x',
+          apiKeys: [],
+          models: ['gpt-4o'],
+          enabled: true,
+          oauth: {
+            tokenUrl: 'http://x/token',
+            clientId: '${ENV:MODEL_ROUTER_CLIENT_ID}',
+            clientSecret: '${ENV:MODEL_ROUTER_CLIENT_SECRET}',
+          },
+        },
+      ],
+    }),
+    'utf-8'
+  );
+  process.env.MODEL_ROUTER_CLIENT_ID = 'cid-secret';
+  process.env.MODEL_ROUTER_CLIENT_SECRET = 'csec-secret';
+  try {
+    const store = new ConfigStore(tmpFile);
+    const config = store.load();
+    assert.equal(config.upstreams[0].oauth!.clientId, 'cid-secret');
+    assert.equal(config.upstreams[0].oauth!.clientSecret, 'csec-secret');
+  } finally {
+    delete process.env.MODEL_ROUTER_CLIENT_ID;
+    delete process.env.MODEL_ROUTER_CLIENT_SECRET;
+  }
+});
+
+test('load throws when referenced env variable is missing', () => {
+  fs.writeFileSync(
+    tmpFile,
+    JSON.stringify({
+      server: { port: 15005, bindAddress: '127.0.0.1', logFlushIntervalMs: 5000, logBatchSize: 100 },
+      proxyKeys: [],
+      upstreams: [
+        {
+          name: 'u1',
+          provider: 'openai',
+          protocol: 'openai',
+          baseUrl: 'http://x',
+          apiKeys: ['${ENV:MODEL_ROUTER_MISSING_KEY}'],
+          models: ['gpt-4o'],
+          enabled: true,
+        },
+      ],
+    }),
+    'utf-8'
+  );
+  delete process.env.MODEL_ROUTER_MISSING_KEY;
+  const store = new ConfigStore(tmpFile);
+  assert.throws(() => store.load(), /Environment variable MODEL_ROUTER_MISSING_KEY is not set/);
+});
