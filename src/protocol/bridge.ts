@@ -56,6 +56,7 @@ import { AnthToOpenAIBridge } from './anth-to-openai.js';
 import { OpenAIToAnthBridge } from './openai-to-anth.js';
 import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
 import { parseSseStream } from './sse.js';
+import { anthropicToResponsesRequest, responsesToAnthropicResponse } from './responses.js';
 
 /** Stub bridge: passthrough for gemini client <-> gemini upstream. */
 class PassthroughGeminiBridge implements Bridge {
@@ -188,8 +189,8 @@ class AnthToResponsesBridge implements Bridge {
   readonly upstreamProto: Protocol = 'responses';
 
   rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return clientBody; }
-  transformResponse(upstreamBody: any): any { return upstreamBody; }
+  transformRequest(clientBody: any): any { return anthropicToResponsesRequest(clientBody); }
+  transformResponse(upstreamBody: any): any { return responsesToAnthropicResponse(upstreamBody); }
   transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
     const [toClient] = upstreamStream.tee();
     return { clientStream: toClient, usage: Promise.resolve({}) };
