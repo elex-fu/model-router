@@ -581,7 +581,7 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key'; copilotOptimized?: boolean; passThroughAuth?: boolean; oauth?: OAuthConfig };
+  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key' | 'google'; copilotOptimized?: boolean; passThroughAuth?: boolean; oauth?: OAuthConfig };
   apiKey: string;
   clientAuth?: string;
   bridge: Bridge;
@@ -668,6 +668,9 @@ async function trySingleUpstream(options: {
     if (upstream.authMode === 'x-api-key') {
       const token = clientAuth.startsWith('Bearer ') ? clientAuth.slice(7) : clientAuth;
       upstreamHeaders.set('x-api-key', token);
+    } else if (upstream.authMode === 'google') {
+      const token = clientAuth.startsWith('Bearer ') ? clientAuth.slice(7) : clientAuth;
+      upstreamHeaders.set('x-goog-api-key', token);
     } else {
       upstreamHeaders.set('authorization', clientAuth.startsWith('Bearer ') ? clientAuth : `Bearer ${clientAuth}`);
     }
@@ -676,6 +679,8 @@ async function trySingleUpstream(options: {
       const token = await oauthResolver.resolve(upstream.oauth);
       if (upstream.authMode === 'x-api-key') {
         upstreamHeaders.set('x-api-key', token);
+      } else if (upstream.authMode === 'google') {
+        upstreamHeaders.set('x-goog-api-key', token);
       } else {
         upstreamHeaders.set('authorization', `Bearer ${token}`);
       }
@@ -685,6 +690,8 @@ async function trySingleUpstream(options: {
     }
   } else if (upstream.authMode === 'x-api-key') {
     upstreamHeaders.set('x-api-key', apiKey);
+  } else if (upstream.authMode === 'google' || upstream.protocol === 'gemini') {
+    upstreamHeaders.set('x-goog-api-key', apiKey);
   } else {
     upstreamHeaders.set('authorization', `Bearer ${apiKey}`);
   }

@@ -273,3 +273,84 @@ test('transforms request body to gemini format', async () => {
     await upstream.close();
   }
 });
+
+test('sends x-goog-api-key header for gemini upstream', async () => {
+  let capturedHeaders: Record<string, string> = {};
+  const upstream = await startMockUpstream((req) => {
+    capturedHeaders = req.headers;
+    return {
+      status: 200,
+      body: {
+        candidates: [{ content: { parts: [{ text: 'ack' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 },
+      },
+    };
+  });
+  const proxy = await startProxy(baseConfig([{
+    name: 'gemini',
+    provider: 'google',
+    protocol: 'gemini',
+    baseUrl: upstream.baseUrl,
+    apiKeys: ['g-xxx'],
+    models: ['gemini-2.5-pro'],
+    enabled: true,
+  }]));
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer sk-test-12345' },
+      body: JSON.stringify({
+        model: 'gemini-2.5-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 50,
+      }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(capturedHeaders['x-goog-api-key'], 'g-xxx');
+    assert.ok(!capturedHeaders['authorization']);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('sends x-goog-api-key header when authMode is google', async () => {
+  let capturedHeaders: Record<string, string> = {};
+  const upstream = await startMockUpstream((req) => {
+    capturedHeaders = req.headers;
+    return {
+      status: 200,
+      body: {
+        candidates: [{ content: { parts: [{ text: 'ack' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 },
+      },
+    };
+  });
+  const proxy = await startProxy(baseConfig([{
+    name: 'gemini',
+    provider: 'google',
+    protocol: 'openai',
+    baseUrl: upstream.baseUrl,
+    apiKeys: ['g-xxx'],
+    models: ['gemini-2.5-pro'],
+    enabled: true,
+    authMode: 'google',
+  }]));
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer sk-test-12345' },
+      body: JSON.stringify({
+        model: 'gemini-2.5-pro',
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 50,
+      }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(capturedHeaders['x-goog-api-key'], 'g-xxx');
+    assert.ok(!capturedHeaders['authorization']);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});

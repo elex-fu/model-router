@@ -30,7 +30,7 @@ export interface UpstreamConfig {
   enabled: boolean;
   modelMap?: Record<string, string>;
   /** Auth mode for upstream requests. Default is 'bearer'. */
-  authMode?: 'bearer' | 'x-api-key';
+  authMode?: 'bearer' | 'x-api-key' | 'google';
   /** Enable Copilot-specific optimizations (thinking strip, tool merge, warmup downgrade). */
   copilotOptimized?: boolean;
   /** Pass the client's Authorization header through to the upstream instead of using configured apiKeys. */
