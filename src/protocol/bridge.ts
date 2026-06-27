@@ -56,7 +56,7 @@ import { AnthToOpenAIBridge } from './anth-to-openai.js';
 import { OpenAIToAnthBridge } from './openai-to-anth.js';
 import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
 import { parseSseStream } from './sse.js';
-import { anthropicToResponsesRequest, responsesToAnthropicResponse } from './responses.js';
+import { AnthToResponsesBridge, ResponsesToAnthBridge } from './responses.js';
 
 /** Stub bridge: passthrough for gemini client <-> gemini upstream. */
 class PassthroughGeminiBridge implements Bridge {
@@ -184,40 +184,10 @@ class AnthToGeminiBridgeImpl extends AnthToGeminiBridge {}
 class GeminiToAnthBridgeImpl extends GeminiToAnthBridge {}
 
 /** Stub bridge: anthropic -> responses (placeholder for Phase 2). */
-class AnthToResponsesBridge implements Bridge {
-  readonly clientProto: Protocol = 'anthropic';
-  readonly upstreamProto: Protocol = 'responses';
-
-  rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return anthropicToResponsesRequest(clientBody); }
-  transformResponse(upstreamBody: any): any { return responsesToAnthropicResponse(upstreamBody); }
-  transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
-    const [toClient] = upstreamStream.tee();
-    return { clientStream: toClient, usage: Promise.resolve({}) };
-  }
-  wrapError(statusCode: number, message: string): BridgeError {
-    const errorType = statusCode === 429 ? 'rate_limit_error' : 'api_error';
-    return { body: { type: 'error', error: { type: errorType, message } }, contentType: 'application/json' };
-  }
-}
+class AnthToResponsesBridgeImpl extends AnthToResponsesBridge {}
 
 /** Stub bridge: responses -> anthropic (placeholder for Phase 2). */
-class ResponsesToAnthBridge implements Bridge {
-  readonly clientProto: Protocol = 'responses';
-  readonly upstreamProto: Protocol = 'anthropic';
-
-  rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return clientBody; }
-  transformResponse(upstreamBody: any): any { return upstreamBody; }
-  transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
-    const [toClient] = upstreamStream.tee();
-    return { clientStream: toClient, usage: Promise.resolve({}) };
-  }
-  wrapError(statusCode: number, message: string): BridgeError {
-    const errorType = statusCode === 429 ? 'rate_limit_error' : 'api_error';
-    return { body: { type: 'error', error: { type: errorType, message } }, contentType: 'application/json' };
-  }
-}
+class ResponsesToAnthBridgeImpl extends ResponsesToAnthBridge {}
 
 /** Pick the bridge for a given (clientProto, upstreamProto) pair. */
 export function pickBridge(clientProto: Protocol, upstreamProto: Protocol): Bridge {
@@ -252,10 +222,10 @@ export function pickBridge(clientProto: Protocol, upstreamProto: Protocol): Brid
     return new GeminiToAnthBridgeImpl();
   }
   if (clientProto === 'anthropic' && upstreamProto === 'responses') {
-    return new AnthToResponsesBridge();
+    return new AnthToResponsesBridgeImpl();
   }
   if (clientProto === 'responses' && upstreamProto === 'anthropic') {
-    return new ResponsesToAnthBridge();
+    return new ResponsesToAnthBridgeImpl();
   }
   throw new Error(`Unsupported bridge: ${clientProto} -> ${upstreamProto}`);
 }
