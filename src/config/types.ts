@@ -16,6 +16,10 @@ export interface OAuthConfig {
   clientId: string;
   clientSecret: string;
   scope?: string;
+  /** 'client_credentials' | 'device_code'. Default 'client_credentials'. */
+  grantType?: 'client_credentials' | 'device_code';
+  /** Device flow verification URL override. */
+  deviceAuthUrl?: string;
 }
 
 export type Protocol = 'anthropic' | 'openai' | 'gemini' | 'responses';
