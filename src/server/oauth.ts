@@ -1,4 +1,5 @@
 import type { OAuthConfig } from '../config/types.js';
+import type { OAuthAccountStore } from './oauth-accounts.js';
 
 interface TokenEntry {
   accessToken: string;
@@ -8,7 +9,33 @@ interface TokenEntry {
 export class OAuthTokenResolver {
   private cache = new Map<string, TokenEntry>();
 
-  async resolve(config: OAuthConfig): Promise<string> {
+  constructor(private accountStore?: OAuthAccountStore) {}
+
+  async resolve(config: OAuthConfig, provider?: 'github_copilot' | 'codex_oauth'): Promise<string> {
+    const grantType = config.grantType ?? 'client_credentials';
+
+    if (grantType === 'device_code') {
+      if (!provider) {
+        throw new Error('provider is required for device_code grant');
+      }
+      if (!this.accountStore) {
+        throw new Error('OAuthAccountStore is required for device_code grant');
+      }
+      const account = this.accountStore.getDefault(provider);
+      if (!account) {
+        throw new Error(`No authenticated account for ${provider}`);
+      }
+      if (account.expiresAt && account.expiresAt < Date.now() + 60_000) {
+        // refresh if expiring within 60s
+        if (account.refreshToken) {
+          // refresh delegated to device flow manager in a real implementation
+          throw new Error(`Account token for ${provider} expired; re-authentication required`);
+        }
+      }
+      return account.accessToken;
+    }
+
+    // client_credentials (default)
     const key = `${config.tokenUrl}:${config.clientId}:${config.scope ?? ''}`;
     const cached = this.cache.get(key);
     if (cached && cached.expiresAt > Date.now() + 60_000) {
