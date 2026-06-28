@@ -105,7 +105,7 @@ test('abort: client disconnect propagates to upstream', { timeout: 10000 }, asyn
       body: JSON.stringify({ model: 'claude', messages: [] }),
       signal: ctl.signal,
     });
-    setTimeout(() => ctl.abort(), 100);
+    setTimeout(() => ctl.abort(), 500);
     await fetchP.catch(() => {});
     // give upstream time to observe TCP close
     await new Promise((r) => setTimeout(r, 1000));
