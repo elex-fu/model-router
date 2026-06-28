@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { HealthMonitor } from '../../src/health/monitor.js';
 import { KeyPool } from '../../src/server/keyPool.js';
 
@@ -11,7 +11,7 @@ function mockStore(initialUpstreams: any[]) {
       const u = upstreams.find((x) => x.name === name);
       if (u) u.enabled = enabled;
     },
-    load: () => ({ upstreams } as any),
+    load: () => ({ upstreams }) as any,
   };
 }
 
@@ -191,7 +191,14 @@ test('with keyPool: falls back to upstream.apiKeys when pool empty for upstream'
 
 test('probes anthropic upstream at /v1/messages with Bearer auth', async () => {
   const store = mockStore([
-    { name: 'u1', protocol: 'anthropic', baseUrl: 'http://localhost:1', apiKeys: ['k1'], models: ['m1'], enabled: true },
+    {
+      name: 'u1',
+      protocol: 'anthropic',
+      baseUrl: 'http://localhost:1',
+      apiKeys: ['k1'],
+      models: ['m1'],
+      enabled: true,
+    },
   ]);
   const monitor = new HealthMonitor(store as any);
 
@@ -242,7 +249,15 @@ test('probes openai upstream at /v1/chat/completions with Bearer auth', async ()
 
 test('probes with x-api-key header when authMode is x-api-key', async () => {
   const store = mockStore([
-    { name: 'u1', protocol: 'openai', baseUrl: 'http://localhost:1', apiKeys: ['k1'], models: ['m1'], enabled: true, authMode: 'x-api-key' },
+    {
+      name: 'u1',
+      protocol: 'openai',
+      baseUrl: 'http://localhost:1',
+      apiKeys: ['k1'],
+      models: ['m1'],
+      enabled: true,
+      authMode: 'x-api-key',
+    },
   ]);
   const monitor = new HealthMonitor(store as any);
 

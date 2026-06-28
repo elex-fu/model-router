@@ -117,7 +117,7 @@ export class SQLiteLogStore implements LogStore {
           row.first_token_ms,
           row.duration_ms,
           row.is_streaming ? 1 : 0,
-          row.created_at ?? new Date().toISOString()
+          row.created_at ?? new Date().toISOString(),
         );
       }
     });
@@ -126,7 +126,7 @@ export class SQLiteLogStore implements LogStore {
 
   async queryLogs(
     limit: number,
-    filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' }
+    filter?: { keyName?: string; protocol?: 'anthropic' | 'openai' },
   ): Promise<LogEntry[]> {
     if (!this.db) return [];
     let sql = 'SELECT * FROM request_logs';
@@ -169,7 +169,14 @@ export class SQLiteLogStore implements LogStore {
 
   async stats(date: string): Promise<StatsResult> {
     if (!this.db) {
-      return { totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, avgLatencyMs: 0, totalCacheReadTokens: 0, totalCacheCreationTokens: 0 };
+      return {
+        totalRequests: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        avgLatencyMs: 0,
+        totalCacheReadTokens: 0,
+        totalCacheCreationTokens: 0,
+      };
     }
     const row = this.db
       .prepare(
@@ -181,7 +188,7 @@ export class SQLiteLogStore implements LogStore {
           COALESCE(SUM(cache_creation_tokens), 0) AS totalCacheCreationTokens,
           COALESCE(AVG(duration_ms), 0) AS avgLatencyMs
         FROM request_logs
-        WHERE DATE(created_at) = ?`
+        WHERE DATE(created_at) = ?`,
       )
       .get(date) as any;
     return {
@@ -194,9 +201,7 @@ export class SQLiteLogStore implements LogStore {
     };
   }
 
-  async todayTokensByKey(
-    date: string
-  ): Promise<Array<{ keyName: string; tokensUsed: number }>> {
+  async todayTokensByKey(date: string): Promise<Array<{ keyName: string; tokensUsed: number }>> {
     if (!this.db) return [];
     const rows = this.db
       .prepare(
@@ -204,7 +209,7 @@ export class SQLiteLogStore implements LogStore {
                 COALESCE(SUM(COALESCE(request_tokens, 0) + COALESCE(response_tokens, 0)), 0) AS tokensUsed
          FROM request_logs
          WHERE DATE(created_at) = ?
-         GROUP BY proxy_key_name`
+         GROUP BY proxy_key_name`,
       )
       .all(date) as Array<{ keyName: string; tokensUsed: number }>;
     return rows;
@@ -214,17 +219,13 @@ export class SQLiteLogStore implements LogStore {
     if (!this.db) return [];
     const since = new Date(sinceMs).toISOString();
     const stmt = this.db.prepare(
-      `SELECT created_at FROM request_logs WHERE proxy_key_name = ? AND datetime(created_at) > datetime(?) ORDER BY created_at ASC`
+      `SELECT created_at FROM request_logs WHERE proxy_key_name = ? AND datetime(created_at) > datetime(?) ORDER BY created_at ASC`,
     );
     const rows = stmt.all(keyName, since) as Array<{ created_at: string }>;
     return rows.map((r) => new Date(r.created_at).getTime());
   }
 
-  async statsByKey(
-    keyName: string,
-    fromDate: string,
-    toDate: string
-  ): Promise<Omit<KeyStats, 'keyName'>> {
+  async statsByKey(keyName: string, fromDate: string, toDate: string): Promise<Omit<KeyStats, 'keyName'>> {
     if (!this.db) {
       return {
         requests: 0,
@@ -250,7 +251,7 @@ export class SQLiteLogStore implements LogStore {
          FROM request_logs
          WHERE proxy_key_name = ?
            AND DATE(created_at) >= ?
-           AND DATE(created_at) <= ?`
+           AND DATE(created_at) <= ?`,
       )
       .get(keyName, fromDate, toDate) as any;
     const inputTokens = Number(row.inputTokens) || 0;
@@ -284,7 +285,7 @@ export class SQLiteLogStore implements LogStore {
          WHERE DATE(created_at) >= ?
            AND DATE(created_at) <= ?
          GROUP BY proxy_key_name
-         ORDER BY (COALESCE(SUM(COALESCE(request_tokens, 0)), 0) + COALESCE(SUM(COALESCE(response_tokens, 0)), 0)) DESC`
+         ORDER BY (COALESCE(SUM(COALESCE(request_tokens, 0)), 0) + COALESCE(SUM(COALESCE(response_tokens, 0)), 0)) DESC`,
       )
       .all(fromDate, toDate) as any[];
     return rows.map((row) => {
@@ -326,7 +327,7 @@ export class SQLiteLogStore implements LogStore {
         FROM request_logs
         WHERE ${where.join(' AND ')}
         GROUP BY DATE(created_at)
-        ORDER BY DATE(created_at) DESC`
+        ORDER BY DATE(created_at) DESC`,
       )
       .all(...params) as any[];
     return rows.map((r) => ({
@@ -343,7 +344,8 @@ export class SQLiteLogStore implements LogStore {
 
   async rollupDaily(date: string): Promise<void> {
     if (!this.db) return;
-    this.db.prepare(`
+    this.db
+      .prepare(`
       INSERT INTO usage_daily_rollups (
         date, total_requests, total_input_tokens, total_output_tokens,
         total_cache_read_tokens, total_cache_creation_tokens,
@@ -369,7 +371,8 @@ export class SQLiteLogStore implements LogStore {
         total_cache_creation_tokens = excluded.total_cache_creation_tokens,
         avg_latency_ms = excluded.avg_latency_ms,
         avg_first_token_ms = excluded.avg_first_token_ms;
-    `).run(date);
+    `)
+      .run(date);
     this.db.prepare(`DELETE FROM request_logs WHERE DATE(created_at) = ?`).run(date);
   }
 
@@ -388,7 +391,7 @@ export class SQLiteLogStore implements LogStore {
           avg_first_token_ms AS avgFirstTokenMs
         FROM usage_daily_rollups
         WHERE date >= ? AND date <= ?
-        ORDER BY date DESC`
+        ORDER BY date DESC`,
       )
       .all(fromDate, toDate) as any[];
     return rows.map((r) => ({
@@ -412,7 +415,7 @@ export class SQLiteLogStore implements LogStore {
   }
 
   async keyActivitySummary(
-    today: string
+    today: string,
   ): Promise<Array<{ keyName: string; usedToday: number; lastUsed: string | null }>> {
     if (!this.db) return [];
     const rows = this.db
@@ -423,7 +426,7 @@ export class SQLiteLogStore implements LogStore {
                                   ELSE 0 END), 0) AS usedToday,
                 MAX(created_at) AS lastUsed
          FROM request_logs
-         GROUP BY proxy_key_name`
+         GROUP BY proxy_key_name`,
       )
       .all(today) as Array<{ keyName: string; usedToday: number; lastUsed: string | null }>;
     return rows.map((r) => ({
@@ -448,12 +451,7 @@ export class SQLiteLogStore implements LogStore {
   }
 }
 
-function addColumnIfMissing(
-  db: Database.Database,
-  table: string,
-  column: string,
-  type: string
-): void {
+function addColumnIfMissing(db: Database.Database, table: string, column: string, type: string): void {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
   if (cols.some((c) => c.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);

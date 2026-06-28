@@ -1,26 +1,26 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Agent } from 'undici';
-import { ConfigStore } from '../config/store.js';
-import { CircuitBreaker } from './circuitBreaker.js';
-import { selectUpstreams } from '../router/upstream.js';
-import { pickBridge, type Bridge, type Protocol } from '../protocol/bridge.js';
-import { authenticateProxyKey } from './auth.js';
-import { KeyLimiter, type ReserveResult } from '../limit/limiter.js';
-import { KeyPool } from './keyPool.js';
-import { IpAuthBlocker } from '../limit/ipBlocker.js';
+import type { ConfigStore } from '../config/store.js';
+import type { OAuthConfig } from '../config/types.js';
+import type { IpAuthBlocker } from '../limit/ipBlocker.js';
+import type { KeyLimiter, ReserveResult } from '../limit/limiter.js';
 import { redactSecrets } from '../limit/redact.js';
-import { getClientIp } from './clientIp.js';
 import type { LogEntry } from '../logger/types.js';
+import { type Bridge, type Protocol, pickBridge } from '../protocol/bridge.js';
+import { selectUpstreams } from '../router/upstream.js';
+import { authenticateProxyKey } from './auth.js';
+import type { CircuitBreaker } from './circuitBreaker.js';
+import { getClientIp } from './clientIp.js';
+import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
+import type { KeyPool } from './keyPool.js';
+import type { OAuthTokenResolver } from './oauth.js';
 import { preprocessRequest } from './preprocess.js';
 import {
+  isThinkingBudgetError,
   isThinkingSignatureError,
   rectifyAnthropicRequest,
-  isThinkingBudgetError,
   rectifyThinkingBudget,
 } from './rectifier.js';
-import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
-import { OAuthTokenResolver } from './oauth.js';
-import type { OAuthConfig } from '../config/types.js';
 
 export interface ProxyHandlerOptions {
   limiter?: KeyLimiter;
@@ -112,7 +112,7 @@ function writeProtocolError(
   clientProto: Protocol,
   statusCode: number,
   errorType: string,
-  message: string
+  message: string,
 ): void {
   const body =
     clientProto === 'anthropic'
@@ -124,7 +124,7 @@ function writeProtocolError(
 
 export function extractNonStreamUsage(
   upstreamProto: Protocol,
-  body: any
+  body: any,
 ): { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number } {
   if (!body || typeof body !== 'object') return {};
   if (upstreamProto === 'anthropic') {
@@ -156,7 +156,12 @@ export function injectAnthropicHeaders(headers: Headers, model: string): void {
   }
 
   const existing = headers.get('anthropic-beta') ?? '';
-  const betas = new Set(existing.split(',').map((b) => b.trim()).filter(Boolean));
+  const betas = new Set(
+    existing
+      .split(',')
+      .map((b) => b.trim())
+      .filter(Boolean),
+  );
   betas.add('claude-code-20250219');
 
   const m = (model || '').toLowerCase();
@@ -194,7 +199,7 @@ export async function proxyHandler(
   res: ServerResponse,
   store: ConfigStore,
   enqueue: (entry: LogEntry) => void,
-  options: ProxyHandlerOptions = {}
+  options: ProxyHandlerOptions = {},
 ): Promise<void> {
   const startTime = Date.now();
   const limiter = options.limiter;
@@ -343,11 +348,12 @@ export async function proxyHandler(
     }
   }
 
-  const candidates = model ? selectUpstreams(model, config.upstreams, proxyKey) : [];
+  const candidates = model ? selectUpstreams(model, config.upstreams, proxyKey, config.server.failoverQueue) : [];
 
   if (candidates.length === 0) {
     const modelExistsForAnyUpstream =
-      model !== undefined && selectUpstreams(model, config.upstreams).length > 0;
+      model !== undefined &&
+      selectUpstreams(model, config.upstreams, undefined, config.server.failoverQueue).length > 0;
     const errMessage = modelExistsForAnyUpstream
       ? 'Model not allowed for this proxy key'
       : 'No available upstream for the requested model';
@@ -417,7 +423,7 @@ export async function proxyHandler(
         const key = usesClientAuth
           ? ''
           : options.keyPool
-            ? options.keyPool.pick(upstream.name) ?? undefined
+            ? (options.keyPool.pick(upstream.name) ?? undefined)
             : keysForUpstream[k % keysForUpstream.length];
         if (!usesClientAuth && !key) break;
         const apiKey = key ?? '';
@@ -427,7 +433,15 @@ export async function proxyHandler(
           res,
           parsedBody,
           resolvedModel,
-          upstream: { name: upstream.name, baseUrl: upstream.baseUrl, protocol: upstream.protocol, authMode: upstream.authMode, copilotOptimized: upstream.copilotOptimized, passThroughAuth: upstream.passThroughAuth, oauth: upstream.oauth },
+          upstream: {
+            name: upstream.name,
+            baseUrl: upstream.baseUrl,
+            protocol: upstream.protocol,
+            authMode: upstream.authMode,
+            copilotOptimized: upstream.copilotOptimized,
+            passThroughAuth: upstream.passThroughAuth,
+            oauth: upstream.oauth,
+          },
           apiKey,
           clientAuth,
           bridge,
@@ -444,40 +458,38 @@ export async function proxyHandler(
             options.keyPool?.markSuccess(upstream.name, apiKey);
           }
           if (isStreaming && result.usagePromise) {
-            result.usagePromise.then((usage) => {
-              if (limiter) {
-                limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
-              }
-              enqueue({
-                proxy_key_name: proxyKeyName,
-                client_ip: clientIp,
-                client_protocol: clientProto,
-                upstream_protocol: upstream.protocol,
-                request_model: model,
-                actual_model: resolvedModel,
-                upstream_name: upstream.name,
-                status_code: result.statusCode ?? 200,
-                error_message: null,
-                request_tokens: usage.inputTokens ?? null,
-                response_tokens: usage.outputTokens ?? null,
-                total_tokens:
-                  usage.inputTokens !== undefined && usage.outputTokens !== undefined
-                    ? usage.inputTokens + usage.outputTokens
-                    : null,
-                cache_read_tokens: usage.cacheReadTokens ?? null,
-                cache_creation_tokens: usage.cacheCreationTokens ?? null,
-                first_token_ms: result.firstTokenMs ?? null,
-                duration_ms: Date.now() - startTime,
-                is_streaming: true,
-              });
-            }).catch(() => {});
+            result.usagePromise
+              .then((usage) => {
+                if (limiter) {
+                  limiter.recordUsage(proxyKeyName, usage.inputTokens ?? 0, usage.outputTokens ?? 0);
+                }
+                enqueue({
+                  proxy_key_name: proxyKeyName,
+                  client_ip: clientIp,
+                  client_protocol: clientProto,
+                  upstream_protocol: upstream.protocol,
+                  request_model: model,
+                  actual_model: resolvedModel,
+                  upstream_name: upstream.name,
+                  status_code: result.statusCode ?? 200,
+                  error_message: null,
+                  request_tokens: usage.inputTokens ?? null,
+                  response_tokens: usage.outputTokens ?? null,
+                  total_tokens:
+                    usage.inputTokens !== undefined && usage.outputTokens !== undefined
+                      ? usage.inputTokens + usage.outputTokens
+                      : null,
+                  cache_read_tokens: usage.cacheReadTokens ?? null,
+                  cache_creation_tokens: usage.cacheCreationTokens ?? null,
+                  first_token_ms: result.firstTokenMs ?? null,
+                  duration_ms: Date.now() - startTime,
+                  is_streaming: true,
+                });
+              })
+              .catch(() => {});
           } else if (!isStreaming) {
             if (limiter) {
-              limiter.recordUsage(
-                proxyKeyName,
-                result.usage?.inputTokens ?? 0,
-                result.usage?.outputTokens ?? 0
-              );
+              limiter.recordUsage(proxyKeyName, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
             }
             enqueue({
               proxy_key_name: proxyKeyName,
@@ -572,7 +584,12 @@ interface TryResult {
   statusCode?: number;
   usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
   errorMessage?: string;
-  usagePromise?: Promise<{ inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number }>;
+  usagePromise?: Promise<{
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+  }>;
   firstTokenMs?: number;
 }
 
@@ -581,7 +598,15 @@ async function trySingleUpstream(options: {
   res: ServerResponse;
   parsedBody: any;
   resolvedModel: string;
-  upstream: { name: string; baseUrl: string; protocol: Protocol; authMode?: 'bearer' | 'x-api-key' | 'google'; copilotOptimized?: boolean; passThroughAuth?: boolean; oauth?: OAuthConfig };
+  upstream: {
+    name: string;
+    baseUrl: string;
+    protocol: Protocol;
+    authMode?: 'bearer' | 'x-api-key' | 'google';
+    copilotOptimized?: boolean;
+    passThroughAuth?: boolean;
+    oauth?: OAuthConfig;
+  };
   apiKey: string;
   clientAuth?: string;
   bridge: Bridge;
@@ -686,7 +711,12 @@ async function trySingleUpstream(options: {
       }
     } catch (err: any) {
       cleanupSignal();
-      return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: `OAuth resolution failed: ${err.message}` };
+      return {
+        ok: false,
+        shouldRetry: false,
+        statusCode: 502,
+        errorMessage: `OAuth resolution failed: ${err.message}`,
+      };
     }
   } else if (upstream.authMode === 'x-api-key') {
     upstreamHeaders.set('x-api-key', apiKey);
@@ -727,10 +757,7 @@ async function trySingleUpstream(options: {
     let message = 'Upstream returned client error';
     try {
       const errBody: any = await upstreamRes.clone().json();
-      message =
-        errBody?.error?.message ??
-        errBody?.error ??
-        message;
+      message = errBody?.error?.message ?? errBody?.error ?? message;
       if (typeof message !== 'string') message = JSON.stringify(message);
     } catch {}
 
@@ -865,9 +892,7 @@ async function trySingleUpstream(options: {
     while (true) {
       const { done, value } = await Promise.race([
         reader.read(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('idle_timeout')), streamIdleTimeoutMs)
-        ),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('idle_timeout')), streamIdleTimeoutMs)),
       ]);
       if (done) break;
       if (value) {

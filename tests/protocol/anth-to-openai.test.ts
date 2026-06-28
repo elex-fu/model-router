@@ -1,21 +1,16 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { AnthToOpenAIBridge } from '../../src/protocol/anth-to-openai.js';
-import {
-  finalizeStream,
-  parseSseStream,
-  type SseEvent,
-} from '../../src/protocol/sse.js';
+import { finalizeStream, parseSseStream, type SseEvent } from '../../src/protocol/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FIX = join(__dirname, '..', 'fixtures', 'anth-to-openai');
-const loadFixture = (name: string): any =>
-  JSON.parse(readFileSync(join(FIX, name), 'utf8'));
+const loadFixture = (name: string): any => JSON.parse(readFileSync(join(FIX, name), 'utf8'));
 
 function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -45,9 +40,7 @@ async function readAllBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Ar
   return out;
 }
 
-async function collectStream(
-  stream: ReadableStream<Uint8Array>
-): Promise<SseEvent[]> {
+async function collectStream(stream: ReadableStream<Uint8Array>): Promise<SseEvent[]> {
   const bytes = await readAllBytes(stream);
   const reStream = streamOf(bytes);
   const events: SseEvent[] = [];
@@ -243,9 +236,7 @@ test('response: finish_reason length → max_tokens', () => {
   const b = new AnthToOpenAIBridge();
   const out = b.transformResponse(loadFixture('resp-length.json'));
   assert.equal(out.stop_reason, 'max_tokens');
-  assert.deepEqual(out.content, [
-    { type: 'text', text: 'this got truncated mid sen' },
-  ]);
+  assert.deepEqual(out.content, [{ type: 'text', text: 'this got truncated mid sen' }]);
   assert.deepEqual(out.usage, { input_tokens: 5, output_tokens: 100 });
 });
 
@@ -412,9 +403,7 @@ test('stream: tool_calls — args accumulate across chunks', async () => {
         {
           index: 0,
           delta: {
-            tool_calls: [
-              { index: 0, function: { arguments: '{"city":' } },
-            ],
+            tool_calls: [{ index: 0, function: { arguments: '{"city":' } }],
           },
         },
       ],
@@ -425,9 +414,7 @@ test('stream: tool_calls — args accumulate across chunks', async () => {
         {
           index: 0,
           delta: {
-            tool_calls: [
-              { index: 0, function: { arguments: '"Paris"}' } },
-            ],
+            tool_calls: [{ index: 0, function: { arguments: '"Paris"}' } }],
           },
         },
       ],

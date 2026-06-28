@@ -14,7 +14,7 @@ function sha256ToUuid(input: string): string {
     hash.slice(0, 8),
     hash.slice(8, 12),
     '4' + hash.slice(13, 16),
-    (parseInt(hash[16], 16) & 0x3 | 0x8).toString(16) + hash.slice(17, 20),
+    ((parseInt(hash[16], 16) & 0x3) | 0x8).toString(16) + hash.slice(17, 20),
     hash.slice(20, 32),
   ];
   return parts.join('-');
@@ -36,7 +36,8 @@ export function classifyRequest(body: any): RequestClassification {
 
   // Subagent: system prompt mentions subagent or metadata indicates it
   const system = body?.system;
-  const systemText = typeof system === 'string' ? system : Array.isArray(system) ? system.map((b: any) => b?.text ?? '').join('') : '';
+  const systemText =
+    typeof system === 'string' ? system : Array.isArray(system) ? system.map((b: any) => b?.text ?? '').join('') : '';
   const isSubagent = /subagent|sub-agent/i.test(systemText);
 
   // User-initiated: last message is from user and is substantial
@@ -117,7 +118,8 @@ export function injectDeterministicIds(body: any, headers: Headers): void {
   const messages = body?.messages;
   if (!Array.isArray(messages)) return;
 
-  const sessionId = headers.get('x-claude-code-session-id') ??
+  const sessionId =
+    headers.get('x-claude-code-session-id') ??
     body?.metadata?.session_id ??
     body?.metadata?.user_id ??
     'default-session';
@@ -146,14 +148,4 @@ export function optimizeCopilotBody(body: any): void {
 /** Header-only optimizations to run after headers are built. */
 export function optimizeCopilotHeaders(body: any, headers: Headers): void {
   injectDeterministicIds(body, headers);
-}
-
-/**
- * Full Copilot optimization pipeline.
- * Mutates body and headers in-place.
- * @deprecated Use optimizeCopilotBody + optimizeCopilotHeaders for correct ordering.
- */
-export function optimizeForCopilot(body: any, headers: Headers): void {
-  optimizeCopilotBody(body);
-  optimizeCopilotHeaders(body, headers);
 }

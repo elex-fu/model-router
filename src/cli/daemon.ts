@@ -1,6 +1,6 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 
 export function readPidFile(filePath: string): number | null {
   if (!fs.existsSync(filePath)) return null;

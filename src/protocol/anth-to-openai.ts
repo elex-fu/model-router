@@ -1,10 +1,4 @@
-import type {
-  Bridge,
-  BridgeError,
-  BridgeStreamResult,
-  BridgeUsage,
-  Protocol,
-} from './bridge.js';
+import type { Bridge, BridgeError, BridgeStreamResult, BridgeUsage, Protocol } from './bridge.js';
 import { parseSseStream, writeSseEvent } from './sse.js';
 
 /**
@@ -245,8 +239,13 @@ export class AnthToOpenAIBridge implements Bridge {
               // Per spec: emit message_start when we see the first chunk. Most OpenAI
               // streams have role="assistant" on the first chunk; some have content
               // immediately. Fire on the first chunk we see with delta or role.
-              if (delta && (delta.role !== undefined || delta.content !== undefined ||
-                  delta.tool_calls !== undefined || finishReason !== null)) {
+              if (
+                delta &&
+                (delta.role !== undefined ||
+                  delta.content !== undefined ||
+                  delta.tool_calls !== undefined ||
+                  finishReason !== null)
+              ) {
                 emit('message_start', {
                   type: 'message_start',
                   message: {
@@ -621,9 +620,7 @@ function mapFinishReasonToStopReason(fr: unknown): string {
 function randomId(): string {
   // crypto.randomUUID is available on Node 20+.
   try {
-    // @ts-ignore - global crypto is present at runtime in Node 20+.
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      // @ts-ignore
       return crypto.randomUUID().replace(/-/g, '');
     }
   } catch {

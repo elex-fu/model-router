@@ -1,15 +1,15 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
 
 import { ConfigStore } from '../../src/config/store.js';
-import { proxyHandler } from '../../src/server/proxy.js';
 import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
+import { proxyHandler } from '../../src/server/proxy.js';
 
 interface HarnessOptions {
   healthCheck?: () => Promise<boolean>;
@@ -50,7 +50,7 @@ async function startHarness(options: HarnessOptions = {}) {
         server.close((err) => {
           fs.rmSync(tmpDir, { recursive: true, force: true });
           err ? reject(err) : resolve();
-        })
+        }),
       ),
   };
 }

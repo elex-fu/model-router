@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { preprocessRequest } from '../../src/server/preprocess.js';
 
 test('filters _-prefixed private params recursively', () => {

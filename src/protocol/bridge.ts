@@ -50,22 +50,28 @@ export abstract class BaseBridge implements Bridge {
   abstract wrapError(statusCode: number, message: string): BridgeError;
 }
 
+import { AnthToOpenAIBridge } from './anth-to-openai.js';
+import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
+import { OpenAIToAnthBridge } from './openai-to-anth.js';
 import { PassthroughAnthropicBridge } from './passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from './passthrough-openai.js';
-import { AnthToOpenAIBridge } from './anth-to-openai.js';
-import { OpenAIToAnthBridge } from './openai-to-anth.js';
-import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
-import { parseSseStream } from './sse.js';
 import { AnthToResponsesBridge, ResponsesToAnthBridge } from './responses.js';
+import { parseSseStream } from './sse.js';
 
 /** Stub bridge: passthrough for gemini client <-> gemini upstream. */
 class PassthroughGeminiBridge implements Bridge {
   readonly clientProto: Protocol = 'gemini';
   readonly upstreamProto: Protocol = 'gemini';
 
-  rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return clientBody; }
-  transformResponse(upstreamBody: any): any { return upstreamBody; }
+  rewriteUrlPath(clientPath: string): string {
+    return clientPath;
+  }
+  transformRequest(clientBody: any): any {
+    return clientBody;
+  }
+  transformResponse(upstreamBody: any): any {
+    return upstreamBody;
+  }
   transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
     const [toClient, toParser] = upstreamStream.tee();
     const usage: Promise<BridgeUsage> = (async () => {
@@ -75,9 +81,14 @@ class PassthroughGeminiBridge implements Bridge {
         const data = ev.data;
         if (!data || data === '[DONE]') continue;
         let json: any;
-        try { json = JSON.parse(data); } catch { continue; }
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
         if (json?.usageMetadata?.promptTokenCount !== undefined) inputTokens = json.usageMetadata.promptTokenCount;
-        if (json?.usageMetadata?.candidatesTokenCount !== undefined) outputTokens = json.usageMetadata.candidatesTokenCount;
+        if (json?.usageMetadata?.candidatesTokenCount !== undefined)
+          outputTokens = json.usageMetadata.candidatesTokenCount;
       }
       return { inputTokens, outputTokens };
     })();
@@ -94,9 +105,15 @@ class PassthroughResponsesBridge implements Bridge {
   readonly clientProto: Protocol = 'responses';
   readonly upstreamProto: Protocol = 'responses';
 
-  rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return clientBody; }
-  transformResponse(upstreamBody: any): any { return upstreamBody; }
+  rewriteUrlPath(clientPath: string): string {
+    return clientPath;
+  }
+  transformRequest(clientBody: any): any {
+    return clientBody;
+  }
+  transformResponse(upstreamBody: any): any {
+    return upstreamBody;
+  }
   transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
     const [toClient, toParser] = upstreamStream.tee();
     const usage: Promise<BridgeUsage> = (async () => {
@@ -106,7 +123,11 @@ class PassthroughResponsesBridge implements Bridge {
         const data = ev.data;
         if (!data || data === '[DONE]') continue;
         let json: any;
-        try { json = JSON.parse(data); } catch { continue; }
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
         if (json?.response?.usage?.input_tokens !== undefined) inputTokens = json.response.usage.input_tokens;
         if (json?.response?.usage?.output_tokens !== undefined) outputTokens = json.response.usage.output_tokens;
       }
@@ -125,9 +146,15 @@ class ResponsesToOpenAIBridge implements Bridge {
   readonly clientProto: Protocol = 'responses';
   readonly upstreamProto: Protocol = 'openai';
 
-  rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return clientBody; }
-  transformResponse(upstreamBody: any): any { return upstreamBody; }
+  rewriteUrlPath(clientPath: string): string {
+    return clientPath;
+  }
+  transformRequest(clientBody: any): any {
+    return clientBody;
+  }
+  transformResponse(upstreamBody: any): any {
+    return upstreamBody;
+  }
   transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
     const [toClient, toParser] = upstreamStream.tee();
     const usage: Promise<BridgeUsage> = (async () => {
@@ -138,7 +165,11 @@ class ResponsesToOpenAIBridge implements Bridge {
         const data = ev.data;
         if (!data || data === '[DONE]') continue;
         let json: any;
-        try { json = JSON.parse(data); } catch { continue; }
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
         const u = json?.usage;
         if (u && typeof u === 'object') {
           if (u.prompt_tokens !== undefined) inputTokens = u.prompt_tokens;
@@ -164,9 +195,15 @@ class OpenAIToResponsesBridge implements Bridge {
   readonly clientProto: Protocol = 'openai';
   readonly upstreamProto: Protocol = 'responses';
 
-  rewriteUrlPath(clientPath: string): string { return clientPath; }
-  transformRequest(clientBody: any): any { return clientBody; }
-  transformResponse(upstreamBody: any): any { return upstreamBody; }
+  rewriteUrlPath(clientPath: string): string {
+    return clientPath;
+  }
+  transformRequest(clientBody: any): any {
+    return clientBody;
+  }
+  transformResponse(upstreamBody: any): any {
+    return upstreamBody;
+  }
   transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
     const [toClient] = upstreamStream.tee();
     return { clientStream: toClient, usage: Promise.resolve({}) };

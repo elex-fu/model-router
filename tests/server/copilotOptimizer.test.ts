@@ -1,13 +1,13 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import {
   classifyRequest,
-  mergeToolResults,
-  stripThinkingBlocks,
   downgradeWarmupModel,
   injectDeterministicIds,
+  mergeToolResults,
   optimizeCopilotBody,
   optimizeCopilotHeaders,
+  stripThinkingBlocks,
 } from '../../src/server/copilotOptimizer.js';
 
 test('classifyRequest: detects warmup', () => {
@@ -30,13 +30,15 @@ test('classifyRequest: detects subagent', () => {
 
 test('mergeToolResults: merges adjacent tool_result + text', () => {
   const body = {
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
-        { type: 'text', text: 'explain' },
-      ],
-    }],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
+          { type: 'text', text: 'explain' },
+        ],
+      },
+    ],
   };
   mergeToolResults(body);
   assert.equal(body.messages[0].content.length, 1);
@@ -46,13 +48,15 @@ test('mergeToolResults: merges adjacent tool_result + text', () => {
 
 test('mergeToolResults: no change when not adjacent', () => {
   const body = {
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'text', text: 'explain' },
-        { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
-      ],
-    }],
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'explain' },
+          { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
+        ],
+      },
+    ],
   };
   mergeToolResults(body);
   assert.equal(body.messages[0].content.length, 2);
@@ -60,14 +64,16 @@ test('mergeToolResults: no change when not adjacent', () => {
 
 test('stripThinkingBlocks: removes thinking from assistant', () => {
   const body = {
-    messages: [{
-      role: 'assistant',
-      content: [
-        { type: 'thinking', thinking: 'hmm' },
-        { type: 'text', text: 'hello' },
-        { type: 'redacted_thinking', data: 'r' },
-      ],
-    }],
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'hmm' },
+          { type: 'text', text: 'hello' },
+          { type: 'redacted_thinking', data: 'r' },
+        ],
+      },
+    ],
   };
   stripThinkingBlocks(body);
   assert.equal(body.messages[0].content.length, 1);
@@ -76,10 +82,12 @@ test('stripThinkingBlocks: removes thinking from assistant', () => {
 
 test('stripThinkingBlocks: leaves user messages alone', () => {
   const body = {
-    messages: [{
-      role: 'user',
-      content: [{ type: 'text', text: 'hello' }],
-    }],
+    messages: [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'hello' }],
+      },
+    ],
   };
   stripThinkingBlocks(body);
   assert.equal(body.messages[0].content.length, 1);

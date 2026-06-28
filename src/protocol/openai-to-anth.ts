@@ -1,10 +1,4 @@
-import type {
-  Bridge,
-  BridgeError,
-  BridgeStreamResult,
-  BridgeUsage,
-  Protocol,
-} from './bridge.js';
+import type { Bridge, BridgeError, BridgeStreamResult, BridgeUsage, Protocol } from './bridge.js';
 import { parseSseStream, writeSseEvent } from './sse.js';
 
 /**
@@ -309,7 +303,8 @@ export class OpenAIToAnthBridge implements Bridge {
                 if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
                 if (u.output_tokens !== undefined) state.outputTokens = u.output_tokens;
                 if (u.cache_read_input_tokens !== undefined) state.cacheReadTokens = u.cache_read_input_tokens;
-                if (u.cache_creation_input_tokens !== undefined) state.cacheCreationTokens = u.cache_creation_input_tokens;
+                if (u.cache_creation_input_tokens !== undefined)
+                  state.cacheCreationTokens = u.cache_creation_input_tokens;
               }
               if (!state.roleEmitted) {
                 emitChunk({ role: 'assistant', content: '' });
@@ -393,7 +388,8 @@ export class OpenAIToAnthBridge implements Bridge {
                 if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
                 if (u.output_tokens !== undefined) state.outputTokens = u.output_tokens;
                 if (u.cache_read_input_tokens !== undefined) state.cacheReadTokens = u.cache_read_input_tokens;
-                if (u.cache_creation_input_tokens !== undefined) state.cacheCreationTokens = u.cache_creation_input_tokens;
+                if (u.cache_creation_input_tokens !== undefined)
+                  state.cacheCreationTokens = u.cache_creation_input_tokens;
               }
               if (typeof d.stop_reason === 'string') {
                 state.finishReason = mapStopReasonToFinishReason(d.stop_reason);
@@ -407,7 +403,6 @@ export class OpenAIToAnthBridge implements Bridge {
                 emitDone();
                 state.finished = true;
               }
-              continue;
             }
           }
 
@@ -554,9 +549,7 @@ function mapStopReasonToFinishReason(sr: unknown): string {
 
 function randomId(): string {
   try {
-    // @ts-ignore - global crypto is present at runtime in Node 20+.
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      // @ts-ignore
       return crypto.randomUUID().replace(/-/g, '');
     }
   } catch {

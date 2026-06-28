@@ -1,14 +1,14 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
 
 import { ConfigStore } from '../../src/config/store.js';
-import { proxyHandler } from '../../src/server/proxy.js';
 import type { Config } from '../../src/config/types.js';
+import { proxyHandler } from '../../src/server/proxy.js';
 
 interface HangingUpstream {
   baseUrl: string;
@@ -33,10 +33,11 @@ async function startHangingUpstream(opts: { sendHeaders?: boolean } = {}): Promi
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     sawClose: () => sawClose,
-    close: () => new Promise<void>((resolve) => {
-      (server as any).closeAllConnections?.();
-      server.close(() => resolve());
-    }),
+    close: () =>
+      new Promise<void>((resolve) => {
+        (server as any).closeAllConnections?.();
+        server.close(() => resolve());
+      }),
   };
 }
 
@@ -45,18 +46,13 @@ interface ProxyHarness {
   close(): Promise<void>;
 }
 
-async function startProxy(
-  upstreamUrl: string,
-  opts: { streamIdleTimeoutMs?: number } = {}
-): Promise<ProxyHarness> {
+async function startProxy(upstreamUrl: string, opts: { streamIdleTimeoutMs?: number } = {}): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-abort-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   const configPath = path.join(tmpDir, 'config.json');
   const config: Config = {
     server: { port: 0, bindAddress: '127.0.0.1', logFlushIntervalMs: 100, logBatchSize: 10 },
-    proxyKeys: [
-      { name: 'test', key: 'sk-test', enabled: true, createdAt: '2026-05-02T00:00:00Z' },
-    ],
+    proxyKeys: [{ name: 'test', key: 'sk-test', enabled: true, createdAt: '2026-05-02T00:00:00Z' }],
     upstreams: [
       {
         name: 'mock',
@@ -90,7 +86,7 @@ async function startProxy(
         server.close(() => {
           fs.rmSync(tmpDir, { recursive: true, force: true });
           resolve();
-        })
+        }),
       ),
   };
 }

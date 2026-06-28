@@ -1,7 +1,7 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectUpstreams, selectUpstream } from '../../src/router/upstream.js';
+import { test } from 'node:test';
 import type { UpstreamConfig } from '../../src/config/types.js';
+import { selectUpstream, selectUpstreams } from '../../src/router/upstream.js';
 
 function makeUpstream(overrides: Partial<UpstreamConfig>): UpstreamConfig {
   return {

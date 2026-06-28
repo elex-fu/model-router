@@ -1,15 +1,10 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import {
-  readPidFile,
-  isProcessRunning,
-  writePidFile,
-  cleanupPidFile,
-} from '../../src/cli/daemon.js';
+import { test } from 'node:test';
+import { cleanupPidFile, isProcessRunning, readPidFile, writePidFile } from '../../src/cli/daemon.js';
 
 function tmpPath(): string {
   return path.join(os.tmpdir(), `mr-daemon-${randomUUID()}.pid`);

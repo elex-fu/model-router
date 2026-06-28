@@ -1,6 +1,5 @@
+import type { BaseBridge, BridgeError, BridgeStreamResult, BridgeUsage } from './bridge.js';
 import { GeminiShadowStore } from './gemini-shadow.js';
-import type { BaseBridge } from './bridge.js';
-import type { BridgeStreamResult, BridgeError, BridgeUsage } from './bridge.js';
 import { parseSseStream } from './sse.js';
 
 export interface GeminiContent {
@@ -8,7 +7,10 @@ export interface GeminiContent {
   parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
 }
 
-export function anthropicToGeminiRequest(body: any, model: string): {
+export function anthropicToGeminiRequest(
+  body: any,
+  model: string,
+): {
   urlPath: string;
   payload: any;
 } {
@@ -122,9 +124,14 @@ export class AnthToGeminiBridge implements BaseBridge {
         const data = ev.data;
         if (!data || data === '[DONE]') continue;
         let json: any;
-        try { json = JSON.parse(data); } catch { continue; }
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
         if (json?.usageMetadata?.promptTokenCount !== undefined) inputTokens = json.usageMetadata.promptTokenCount;
-        if (json?.usageMetadata?.candidatesTokenCount !== undefined) outputTokens = json.usageMetadata.candidatesTokenCount;
+        if (json?.usageMetadata?.candidatesTokenCount !== undefined)
+          outputTokens = json.usageMetadata.candidatesTokenCount;
       }
       return { inputTokens, outputTokens };
     })();
@@ -179,16 +186,17 @@ export class GeminiToAnthBridge implements BaseBridge {
   }
 }
 
-export function geminiStreamToAnthropicStream(
-  line: string,
-  store: GeminiShadowStore
-): any[] {
+export function geminiStreamToAnthropicStream(line: string, store: GeminiShadowStore): any[] {
   const events: any[] = [];
   if (!line.startsWith('data:')) return events;
   const data = line.slice(5).trim();
   if (!data) return events;
   let parsed: any;
-  try { parsed = JSON.parse(data); } catch { return events; }
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return events;
+  }
 
   const candidate = parsed.candidates?.[0];
   const parts = candidate?.content?.parts ?? [];
@@ -200,7 +208,11 @@ export function geminiStreamToAnthropicStream(
     if (part.functionCall) {
       const id = `toolu_${Math.random().toString(36).slice(2)}`;
       store.remember(id, part.functionCall.name, part.functionCall.args ?? {});
-      events.push({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id, name: part.functionCall.name, input: {} } });
+      events.push({
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'tool_use', id, name: part.functionCall.name, input: {} },
+      });
       events.push({
         type: 'content_block_delta',
         index: 1,

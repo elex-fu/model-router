@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { DEFAULT_CONFIG, type UpstreamConfig } from '../../src/config/types.js';
 
 test('DEFAULT_CONFIG.server.port is 15005', () => {

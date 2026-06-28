@@ -1,43 +1,40 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 
 import {
   anthropicToGeminiRequest,
-  geminiToAnthropicResponse,
   geminiStreamToAnthropicStream,
+  geminiToAnthropicResponse,
 } from '../../src/protocol/gemini.js';
 import { GeminiShadowStore } from '../../src/protocol/gemini-shadow.js';
 
 test('anthropicToGeminiRequest maps simple text message', () => {
-  const { payload } = anthropicToGeminiRequest(
-    { messages: [{ role: 'user', content: 'hi' }] },
-    'gemini-pro'
-  );
+  const { payload } = anthropicToGeminiRequest({ messages: [{ role: 'user', content: 'hi' }] }, 'gemini-pro');
   assert.equal(payload.contents[0].role, 'user');
   assert.equal(payload.contents[0].parts[0].text, 'hi');
 });
 
 test('anthropicToGeminiRequest maps assistant to model', () => {
-  const { payload } = anthropicToGeminiRequest(
-    { messages: [{ role: 'assistant', content: 'hello' }] },
-    'gemini-pro'
-  );
+  const { payload } = anthropicToGeminiRequest({ messages: [{ role: 'assistant', content: 'hello' }] }, 'gemini-pro');
   assert.equal(payload.contents[0].role, 'model');
   assert.equal(payload.contents[0].parts[0].text, 'hello');
 });
 
 test('anthropicToGeminiRequest maps system prompt', () => {
-  const { payload } = anthropicToGeminiRequest(
-    { system: 'sys', messages: [] },
-    'gemini-pro'
-  );
+  const { payload } = anthropicToGeminiRequest({ system: 'sys', messages: [] }, 'gemini-pro');
   assert.equal(payload.systemInstruction.parts[0].text, 'sys');
 });
 
 test('anthropicToGeminiRequest maps array system blocks', () => {
   const { payload } = anthropicToGeminiRequest(
-    { system: [{ type: 'text', text: 'sys1' }, { type: 'text', text: 'sys2' }], messages: [] },
-    'gemini-pro'
+    {
+      system: [
+        { type: 'text', text: 'sys1' },
+        { type: 'text', text: 'sys2' },
+      ],
+      messages: [],
+    },
+    'gemini-pro',
   );
   assert.equal(payload.systemInstruction.parts[0].text, 'sys1');
   assert.equal(payload.systemInstruction.parts[1].text, 'sys2');
@@ -49,13 +46,11 @@ test('anthropicToGeminiRequest maps image blocks', () => {
       messages: [
         {
           role: 'user',
-          content: [
-            { type: 'image', source: { media_type: 'image/jpeg', data: 'base64data' } },
-          ],
+          content: [{ type: 'image', source: { media_type: 'image/jpeg', data: 'base64data' } }],
         },
       ],
     },
-    'gemini-pro'
+    'gemini-pro',
   );
   assert.equal(payload.contents[0].parts[0].inlineData.mimeType, 'image/jpeg');
   assert.equal(payload.contents[0].parts[0].inlineData.data, 'base64data');
@@ -73,7 +68,7 @@ test('anthropicToGeminiRequest maps tools', () => {
         },
       ],
     },
-    'gemini-pro'
+    'gemini-pro',
   );
   assert.equal(payload.tools[0].functionDeclarations[0].name, 'get_weather');
   assert.equal(payload.tools[0].functionDeclarations[0].description, 'Get weather');
@@ -82,7 +77,7 @@ test('anthropicToGeminiRequest maps tools', () => {
 test('anthropicToGeminiRequest sets generationConfig', () => {
   const { payload } = anthropicToGeminiRequest(
     { messages: [], max_tokens: 100, temperature: 0.5, top_p: 0.9 },
-    'gemini-pro'
+    'gemini-pro',
   );
   assert.equal(payload.generationConfig.maxOutputTokens, 100);
   assert.equal(payload.generationConfig.temperature, 0.5);
@@ -145,7 +140,10 @@ test('geminiStreamToAnthropicStream maps text delta', () => {
 
 test('geminiStreamToAnthropicStream maps functionCall to tool_use events', () => {
   const store = new GeminiShadowStore();
-  const events = geminiStreamToAnthropicStream('data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"NYC"}}}]}}]}', store);
+  const events = geminiStreamToAnthropicStream(
+    'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"NYC"}}}]}}]}',
+    store,
+  );
   assert.equal(events.length, 2);
   assert.equal(events[0].type, 'content_block_start');
   assert.equal(events[0].content_block.type, 'tool_use');

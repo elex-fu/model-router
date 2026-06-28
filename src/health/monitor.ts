@@ -144,7 +144,9 @@ export class HealthMonitor {
       console.log(`[health] Upstream "${upstream.name}" all keys failed (${newCount}/${MAX_CONSECUTIVE_FAILURES})`);
       if (newCount >= MAX_CONSECUTIVE_FAILURES && upstream.enabled) {
         this.store.setUpstreamEnabled(upstream.name, false);
-        console.log(`[health] Upstream "${upstream.name}" disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive all-key failures.`);
+        console.log(
+          `[health] Upstream "${upstream.name}" disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive all-key failures.`,
+        );
       }
     }
   }

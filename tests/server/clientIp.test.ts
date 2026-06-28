@@ -1,12 +1,9 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IncomingMessage } from 'node:http';
+import { test } from 'node:test';
 import { getClientIp } from '../../src/server/clientIp.js';
 
-function mockReq(opts: {
-  remoteAddress?: string;
-  xForwardedFor?: string | string[];
-}): IncomingMessage {
+function mockReq(opts: { remoteAddress?: string; xForwardedFor?: string | string[] }): IncomingMessage {
   return {
     headers: {
       ...(opts.xForwardedFor ? { 'x-forwarded-for': opts.xForwardedFor } : {}),

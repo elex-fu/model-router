@@ -1,10 +1,4 @@
-import type {
-  Bridge,
-  BridgeError,
-  BridgeStreamResult,
-  BridgeUsage,
-  Protocol,
-} from './bridge.js';
+import type { Bridge, BridgeError, BridgeStreamResult, BridgeUsage, Protocol } from './bridge.js';
 import { parseSseStream } from './sse.js';
 
 /**

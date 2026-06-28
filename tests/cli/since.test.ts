@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { resolveSinceRange } from '../../src/cli/since.js';
 
 test('resolveSinceRange: "7d" returns range from 7 days ago through today', () => {

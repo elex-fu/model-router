@@ -36,9 +36,7 @@ class Utf8SafeDecoder {
  * - Tolerates `\r\n` and trailing whitespace.
  * - Handles multi-byte UTF-8 characters split across chunk boundaries safely.
  */
-export async function* parseSseStream(
-  stream: ReadableStream<Uint8Array>
-): AsyncIterable<SseEvent> {
+export async function* parseSseStream(stream: ReadableStream<Uint8Array>): AsyncIterable<SseEvent> {
   const reader = stream.getReader();
   const decoder = new Utf8SafeDecoder();
   let buffer = '';
@@ -50,13 +48,14 @@ export async function* parseSseStream(
       buffer += decoder.decode(value);
 
       // Normalise CRLF to LF for splitting.
-      let idx: number;
-      while ((idx = findEventBoundary(buffer)) !== -1) {
+      let idx: number = findEventBoundary(buffer);
+      while (idx !== -1) {
         const rawEvent = buffer.slice(0, idx);
         // Skip past the boundary (one or more blank lines).
         buffer = buffer.slice(idx + boundaryLength(buffer, idx));
         const ev = parseEventBlock(rawEvent);
         if (ev) yield ev;
+        idx = findEventBoundary(buffer);
       }
     }
     // Flush remaining buffer.

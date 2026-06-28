@@ -18,18 +18,15 @@ export function isThinkingSignatureError(message: string): boolean {
       lower.includes('signature') &&
       lower.includes('thinking') &&
       lower.includes('block')) ||
-    (lower.includes('thought signature') &&
-      (lower.includes('not valid') || lower.includes('invalid'))) ||
+    (lower.includes('thought signature') && (lower.includes('not valid') || lower.includes('invalid'))) ||
     lower.includes('must start with a thinking block') ||
     (lower.includes('expected') &&
       (lower.includes('thinking') || lower.includes('redacted_thinking')) &&
       lower.includes('found') &&
       lower.includes('tool_use')) ||
     (lower.includes('signature') && lower.includes('field required')) ||
-    (lower.includes('signature') &&
-      lower.includes('extra inputs are not permitted')) ||
-    ((lower.includes('thinking') || lower.includes('redacted_thinking')) &&
-      lower.includes('cannot be modified')) ||
+    (lower.includes('signature') && lower.includes('extra inputs are not permitted')) ||
+    ((lower.includes('thinking') || lower.includes('redacted_thinking')) && lower.includes('cannot be modified')) ||
     lower.includes('非法请求') ||
     lower.includes('illegal request') ||
     lower.includes('invalid request')
@@ -39,11 +36,7 @@ export function isThinkingSignatureError(message: string): boolean {
 /** Detect whether an upstream error is a thinking budget constraint error. */
 export function isThinkingBudgetError(message: string): boolean {
   const lower = message.toLowerCase();
-  return (
-    lower.includes('budget_tokens') &&
-    lower.includes('thinking') &&
-    lower.includes('1024')
-  );
+  return lower.includes('budget_tokens') && lower.includes('thinking') && lower.includes('1024');
 }
 
 /**
@@ -125,9 +118,7 @@ function shouldRemoveTopLevelThinking(body: any): boolean {
     if (msg?.role !== 'assistant') return false;
     const content = msg.content;
     if (!Array.isArray(content)) return false;
-    return content.some(
-      (b: any) => b?.type === 'thinking' || b?.type === 'redacted_thinking'
-    );
+    return content.some((b: any) => b?.type === 'thinking' || b?.type === 'redacted_thinking');
   });
   if (hasThinkingBlocks) {
     // If there are thinking blocks but the last assistant doesn't start with one,
@@ -159,8 +150,7 @@ function shouldRemoveTopLevelThinkingLegacy(body: any, messages: any[]): boolean
   if (!Array.isArray(content) || content.length === 0) return false;
 
   const firstBlockType = content[0]?.type;
-  const hasThinkingPrefix =
-    firstBlockType === 'thinking' || firstBlockType === 'redacted_thinking';
+  const hasThinkingPrefix = firstBlockType === 'thinking' || firstBlockType === 'redacted_thinking';
   if (hasThinkingPrefix) return false;
 
   const hasToolUse = content.some((b: any) => b?.type === 'tool_use');

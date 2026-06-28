@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { PassthroughOpenAiBridge } from '../../src/protocol/passthrough-openai.js';
 import { finalizeStream, type SseEvent } from '../../src/protocol/sse.js';
 

@@ -41,6 +41,10 @@ export interface UpstreamConfig {
   passThroughAuth?: boolean;
   /** OAuth client-credentials config for dynamic upstream token resolution. */
   oauth?: OAuthConfig;
+  /** Routing priority: lower value = tried first. Default 0. */
+  priority?: number;
+  /** Stable sort index within same priority. */
+  sortIndex?: number;
 }
 
 export interface ServerConfig {
@@ -51,6 +55,8 @@ export interface ServerConfig {
   logRetentionDays?: number;
   maxRetries?: number;
   requestTimeoutMs?: number;
+  /** Ordered list of upstream names for strict failover. Overrides priority when set. */
+  failoverQueue?: string[];
 }
 
 export interface Config {

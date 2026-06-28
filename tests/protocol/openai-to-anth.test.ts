@@ -1,21 +1,16 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { OpenAIToAnthBridge } from '../../src/protocol/openai-to-anth.js';
-import {
-  finalizeStream,
-  parseSseStream,
-  type SseEvent,
-} from '../../src/protocol/sse.js';
+import { finalizeStream, parseSseStream, type SseEvent } from '../../src/protocol/sse.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const FIX = join(__dirname, '..', 'fixtures', 'openai-to-anth');
-const loadFixture = (name: string): any =>
-  JSON.parse(readFileSync(join(FIX, name), 'utf8'));
+const loadFixture = (name: string): any => JSON.parse(readFileSync(join(FIX, name), 'utf8'));
 
 function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -45,9 +40,7 @@ async function readAllBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Ar
   return out;
 }
 
-async function collectStream(
-  stream: ReadableStream<Uint8Array>
-): Promise<SseEvent[]> {
+async function collectStream(stream: ReadableStream<Uint8Array>): Promise<SseEvent[]> {
   const bytes = await readAllBytes(stream);
   const reStream = streamOf(bytes);
   const events: SseEvent[] = [];
@@ -386,9 +379,7 @@ test('stream: pure text — chunk sequence + [DONE] + usage', async () => {
   assert.equal(datas[datas.length - 1], '[DONE]');
 
   // Parse non-DONE chunks
-  const chunks = datas
-    .slice(0, -1)
-    .map((d) => JSON.parse(d));
+  const chunks = datas.slice(0, -1).map((d) => JSON.parse(d));
 
   // First chunk: role assistant
   assert.equal(chunks[0].choices[0].delta.role, 'assistant');

@@ -1,10 +1,10 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { test } from 'node:test';
 import { OAuthTokenResolver } from '../../src/server/oauth.js';
 
 async function startMockTokenServer(
-  handler: (req: http.IncomingMessage, body: string) => { status: number; body: any }
+  handler: (req: http.IncomingMessage, body: string) => { status: number; body: any },
 ): Promise<{ url: string; close(): Promise<void>; requests: { body: string; headers: http.IncomingHttpHeaders }[] }> {
   const requests: { body: string; headers: http.IncomingHttpHeaders }[] = [];
   const server = http.createServer(async (req, res) => {
@@ -96,7 +96,7 @@ test('resolve: throws on non-200 response', async () => {
     const resolver = new OAuthTokenResolver();
     await assert.rejects(
       resolver.resolve({ tokenUrl: server.url, clientId: 'cid', clientSecret: 'csec' }),
-      /OAuth token request failed: 401/
+      /OAuth token request failed: 401/,
     );
   } finally {
     await server.close();
@@ -109,7 +109,7 @@ test('resolve: throws when access_token missing', async () => {
     const resolver = new OAuthTokenResolver();
     await assert.rejects(
       resolver.resolve({ tokenUrl: server.url, clientId: 'cid', clientSecret: 'csec' }),
-      /OAuth response missing access_token/
+      /OAuth response missing access_token/,
     );
   } finally {
     await server.close();

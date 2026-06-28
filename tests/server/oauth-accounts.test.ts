@@ -1,10 +1,10 @@
-import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import os from 'node:os';
-import { OAuthAccountStore } from '../../src/server/oauth-accounts.js';
+import path from 'node:path';
+import { beforeEach, describe, it } from 'node:test';
 import { OAuthTokenResolver } from '../../src/server/oauth.js';
+import { OAuthAccountStore } from '../../src/server/oauth-accounts.js';
 
 describe('OAuthAccountStore', () => {
   let tmpDir: string;
@@ -40,7 +40,10 @@ describe('OAuthTokenResolver with device_code', () => {
   it('resolves default account token', async () => {
     store.add({ id: '1', provider: 'codex_oauth', accessToken: 'dev-tok', isDefault: true });
     const resolver = new OAuthTokenResolver(store);
-    const token = await resolver.resolve({ tokenUrl: '', clientId: '', clientSecret: '', grantType: 'device_code' }, 'codex_oauth');
+    const token = await resolver.resolve(
+      { tokenUrl: '', clientId: '', clientSecret: '', grantType: 'device_code' },
+      'codex_oauth',
+    );
     assert.equal(token, 'dev-tok');
   });
 
@@ -48,7 +51,7 @@ describe('OAuthTokenResolver with device_code', () => {
     const resolver = new OAuthTokenResolver(store);
     await assert.rejects(
       () => resolver.resolve({ tokenUrl: '', clientId: '', clientSecret: '', grantType: 'device_code' }, 'codex_oauth'),
-      /No authenticated account/
+      /No authenticated account/,
     );
   });
 });

@@ -1,16 +1,16 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
 
 import { ConfigStore } from '../../src/config/store.js';
-import { proxyHandler } from '../../src/server/proxy.js';
-import { IpAuthBlocker } from '../../src/limit/ipBlocker.js';
 import type { Config } from '../../src/config/types.js';
+import { IpAuthBlocker } from '../../src/limit/ipBlocker.js';
 import type { LogEntry } from '../../src/logger/types.js';
+import { proxyHandler } from '../../src/server/proxy.js';
 
 async function startHarness(ipBlocker: IpAuthBlocker) {
   const tmpDir = path.join(os.tmpdir(), `mr-ipblock-${randomUUID()}`);
@@ -54,7 +54,7 @@ async function startHarness(ipBlocker: IpAuthBlocker) {
         server.close((err) => {
           fs.rmSync(tmpDir, { recursive: true, force: true });
           err ? reject(err) : resolve();
-        })
+        }),
       ),
   };
 }

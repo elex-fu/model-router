@@ -1,15 +1,15 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
 
 import { ConfigStore } from '../../src/config/store.js';
-import { proxyHandler } from '../../src/server/proxy.js';
 import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
+import { proxyHandler } from '../../src/server/proxy.js';
 
 interface MockCall {
   method: string;
@@ -26,7 +26,9 @@ interface MockUpstream {
   close(): Promise<void>;
 }
 
-type MockResponder = (req: MockCall) =>
+type MockResponder = (
+  req: MockCall,
+) =>
   | { status: number; body: any; headers?: Record<string, string> }
   | Promise<{ status: number; body: any; headers?: Record<string, string> }>;
 
@@ -67,10 +69,7 @@ async function startMockUpstream(responder: MockResponder): Promise<MockUpstream
     port,
     baseUrl: `http://127.0.0.1:${port}`,
     calls,
-    close: () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((err) => (err ? reject(err) : resolve()))
-      ),
+    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
   };
 }
 
@@ -82,10 +81,7 @@ interface ProxyHarness {
   configPath: string;
 }
 
-async function startProxy(
-  config: Config,
-  options: { maxBodyBytes?: number } = {}
-): Promise<ProxyHarness> {
+async function startProxy(config: Config, options: { maxBodyBytes?: number } = {}): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   const configPath = path.join(tmpDir, 'config.json');
@@ -116,7 +112,7 @@ async function startProxy(
         server.close((err) => {
           fs.rmSync(tmpDir, { recursive: true, force: true });
           err ? reject(err) : resolve();
-        })
+        }),
       ),
   };
 }
@@ -148,15 +144,19 @@ test('proxies anthropic client to gemini upstream (non-streaming)', async () => 
       usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
     },
   }));
-  const proxy = await startProxy(baseConfig([{
-    name: 'gemini',
-    provider: 'google',
-    protocol: 'gemini',
-    baseUrl: upstream.baseUrl,
-    apiKeys: ['g-xxx'],
-    models: ['gemini-2.5-pro'],
-    enabled: true,
-  }]));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'gemini',
+        provider: 'google',
+        protocol: 'gemini',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['g-xxx'],
+        models: ['gemini-2.5-pro'],
+        enabled: true,
+      },
+    ]),
+  );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
       method: 'POST',
@@ -189,15 +189,19 @@ test('proxies anthropic client to gemini upstream (streaming)', async () => {
       'data: {"candidates":[{"content":{"parts":[{"text":" world"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}\n\n' +
       'data: [DONE]\n\n',
   }));
-  const proxy = await startProxy(baseConfig([{
-    name: 'gemini',
-    provider: 'google',
-    protocol: 'gemini',
-    baseUrl: upstream.baseUrl,
-    apiKeys: ['g-xxx'],
-    models: ['gemini-2.5-pro'],
-    enabled: true,
-  }]));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'gemini',
+        provider: 'google',
+        protocol: 'gemini',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['g-xxx'],
+        models: ['gemini-2.5-pro'],
+        enabled: true,
+      },
+    ]),
+  );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
       method: 'POST',
@@ -234,15 +238,19 @@ test('transforms request body to gemini format', async () => {
       },
     };
   });
-  const proxy = await startProxy(baseConfig([{
-    name: 'gemini',
-    provider: 'google',
-    protocol: 'gemini',
-    baseUrl: upstream.baseUrl,
-    apiKeys: ['g-xxx'],
-    models: ['gemini-2.5-pro'],
-    enabled: true,
-  }]));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'gemini',
+        provider: 'google',
+        protocol: 'gemini',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['g-xxx'],
+        models: ['gemini-2.5-pro'],
+        enabled: true,
+      },
+    ]),
+  );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
       method: 'POST',
@@ -286,15 +294,19 @@ test('sends x-goog-api-key header for gemini upstream', async () => {
       },
     };
   });
-  const proxy = await startProxy(baseConfig([{
-    name: 'gemini',
-    provider: 'google',
-    protocol: 'gemini',
-    baseUrl: upstream.baseUrl,
-    apiKeys: ['g-xxx'],
-    models: ['gemini-2.5-pro'],
-    enabled: true,
-  }]));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'gemini',
+        provider: 'google',
+        protocol: 'gemini',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['g-xxx'],
+        models: ['gemini-2.5-pro'],
+        enabled: true,
+      },
+    ]),
+  );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
       method: 'POST',
@@ -326,16 +338,20 @@ test('sends x-goog-api-key header when authMode is google', async () => {
       },
     };
   });
-  const proxy = await startProxy(baseConfig([{
-    name: 'gemini',
-    provider: 'google',
-    protocol: 'openai',
-    baseUrl: upstream.baseUrl,
-    apiKeys: ['g-xxx'],
-    models: ['gemini-2.5-pro'],
-    enabled: true,
-    authMode: 'google',
-  }]));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'gemini',
+        provider: 'google',
+        protocol: 'openai',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['g-xxx'],
+        models: ['gemini-2.5-pro'],
+        enabled: true,
+        authMode: 'google',
+      },
+    ]),
+  );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
       method: 'POST',

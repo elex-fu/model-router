@@ -1,10 +1,10 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { test } from 'node:test';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -30,9 +30,7 @@ const env = loadEnv();
 function assertEnv(keys: string[]): void {
   const missing = keys.filter((k) => !env[k]);
   if (missing.length) {
-    throw new Error(
-      `Missing .env keys: ${missing.join(', ')}. Please add them to .env and re-run.`
-    );
+    throw new Error(`Missing .env keys: ${missing.join(', ')}. Please add them to .env and re-run.`);
   }
 }
 
@@ -50,7 +48,7 @@ async function run(args: string[], configPath: string): Promise<{ stdout: string
       (error, stdout, stderr) => {
         const code = error?.code && typeof error.code === 'number' ? error.code : 0;
         resolve({ stdout, stderr, code });
-      }
+      },
     );
   });
 }
@@ -74,7 +72,7 @@ test('upstream:add, upstream:list, upstream:delete', async () => {
         '--models',
         env.UPSTREAM_REAL_MODEL ?? 'default-model',
       ],
-      configPath
+      configPath,
     );
     assert.equal(addRes.code, 0, `upstream:add failed: ${addRes.stderr}`);
     assert.ok(addRes.stdout.includes('Created upstream'));
@@ -152,13 +150,10 @@ test('upstream:map:set, upstream:map:list, upstream:map:delete', async () => {
         env.UPSTREAM_BASE_URL,
         env.UPSTREAM_API_KEY,
       ],
-      configPath
+      configPath,
     );
 
-    const setRes = await run(
-      ['upstream:map:set', env.UPSTREAM_NAME, 'claude-*', 'kimi-k2.6'],
-      configPath
-    );
+    const setRes = await run(['upstream:map:set', env.UPSTREAM_NAME, 'claude-*', 'kimi-k2.6'], configPath);
     assert.equal(setRes.code, 0);
     assert.ok(setRes.stdout.includes('Set'));
 
@@ -166,10 +161,7 @@ test('upstream:map:set, upstream:map:list, upstream:map:delete', async () => {
     assert.equal(listRes.code, 0);
     assert.ok(listRes.stdout.includes('claude-*'));
 
-    const delRes = await run(
-      ['upstream:map:delete', env.UPSTREAM_NAME, 'claude-*'],
-      configPath
-    );
+    const delRes = await run(['upstream:map:delete', env.UPSTREAM_NAME, 'claude-*'], configPath);
     assert.equal(delRes.code, 0);
     assert.ok(delRes.stdout.includes('Deleted'));
 
@@ -203,17 +195,13 @@ test('test <upstream> — real connectivity probe', async () => {
         '--models',
         env.UPSTREAM_REAL_MODEL,
       ],
-      configPath
+      configPath,
     );
 
     const probeRes = await run(['test', env.UPSTREAM_NAME], configPath);
     // We expect this to succeed with real credentials; if the network is
     // unreachable or key invalid we surface the output so the user knows.
-    assert.equal(
-      probeRes.code,
-      0,
-      `Upstream probe failed. stdout: ${probeRes.stdout}\nstderr: ${probeRes.stderr}`
-    );
+    assert.equal(probeRes.code, 0, `Upstream probe failed. stdout: ${probeRes.stdout}\nstderr: ${probeRes.stderr}`);
     assert.ok(probeRes.stdout.includes('OK'));
   } finally {
     if (fs.existsSync(configPath)) fs.unlinkSync(configPath);

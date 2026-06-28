@@ -1,10 +1,10 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { AnthToOpenAIBridge } from '../../src/protocol/anth-to-openai.js';
 import { pickBridge } from '../../src/protocol/bridge.js';
+import { OpenAIToAnthBridge } from '../../src/protocol/openai-to-anth.js';
 import { PassthroughAnthropicBridge } from '../../src/protocol/passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from '../../src/protocol/passthrough-openai.js';
-import { AnthToOpenAIBridge } from '../../src/protocol/anth-to-openai.js';
-import { OpenAIToAnthBridge } from '../../src/protocol/openai-to-anth.js';
 
 test('pickBridge(anthropic, anthropic) returns PassthroughAnthropicBridge', () => {
   const b = pickBridge('anthropic', 'anthropic');

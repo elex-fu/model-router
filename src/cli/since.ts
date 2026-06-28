@@ -31,11 +31,7 @@ function parseISODate(s: string): Date | null {
   if (!ISO_DATE_RE.test(s)) return null;
   const [y, m, d] = s.split('-').map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
-  if (
-    date.getUTCFullYear() !== y ||
-    date.getUTCMonth() !== m - 1 ||
-    date.getUTCDate() !== d
-  ) {
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) {
     return null;
   }
   return date;

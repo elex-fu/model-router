@@ -1,65 +1,67 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import {
+  isThinkingBudgetError,
   isThinkingSignatureError,
   rectifyAnthropicRequest,
-  isThinkingBudgetError,
   rectifyThinkingBudget,
 } from '../../src/server/rectifier.js';
 
 test('detects invalid signature in thinking block', () => {
-  assert.ok(isThinkingSignatureError("Invalid `signature` in `thinking` block"));
+  assert.ok(isThinkingSignatureError('Invalid `signature` in `thinking` block'));
 });
 
 test('detects thought signature is not valid', () => {
-  assert.ok(isThinkingSignatureError("Unable to submit request because Thought signature is not valid"));
+  assert.ok(isThinkingSignatureError('Unable to submit request because Thought signature is not valid'));
 });
 
 test('detects must start with a thinking block', () => {
-  assert.ok(isThinkingSignatureError("a final assistant message must start with a thinking block"));
+  assert.ok(isThinkingSignatureError('a final assistant message must start with a thinking block'));
 });
 
 test('detects expected thinking but found tool_use', () => {
-  assert.ok(isThinkingSignatureError("Expected `thinking` or `redacted_thinking`, but found `tool_use`"));
+  assert.ok(isThinkingSignatureError('Expected `thinking` or `redacted_thinking`, but found `tool_use`'));
 });
 
 test('detects signature field required', () => {
-  assert.ok(isThinkingSignatureError("***.signature: Field required"));
+  assert.ok(isThinkingSignatureError('***.signature: Field required'));
 });
 
 test('detects signature extra inputs not permitted', () => {
-  assert.ok(isThinkingSignatureError("xxx.signature: Extra inputs are not permitted"));
+  assert.ok(isThinkingSignatureError('xxx.signature: Extra inputs are not permitted'));
 });
 
 test('detects thinking cannot be modified', () => {
-  assert.ok(isThinkingSignatureError("thinking or redacted_thinking blocks cannot be modified"));
+  assert.ok(isThinkingSignatureError('thinking or redacted_thinking blocks cannot be modified'));
 });
 
 test('detects illegal request (Chinese)', () => {
-  assert.ok(isThinkingSignatureError("非法请求：thinking signature 不合法"));
+  assert.ok(isThinkingSignatureError('非法请求：thinking signature 不合法'));
 });
 
 test('detects invalid request catch-all', () => {
-  assert.ok(isThinkingSignatureError("invalid request: malformed JSON"));
+  assert.ok(isThinkingSignatureError('invalid request: malformed JSON'));
 });
 
 test('does not trigger on unrelated errors', () => {
-  assert.ok(!isThinkingSignatureError("Request timeout"));
-  assert.ok(!isThinkingSignatureError("Connection refused"));
+  assert.ok(!isThinkingSignatureError('Request timeout'));
+  assert.ok(!isThinkingSignatureError('Connection refused'));
 });
 
 test('rectify removes thinking and redacted_thinking blocks', () => {
   const body = {
     model: 'claude-test',
-    messages: [{
-      role: 'assistant',
-      content: [
-        { type: 'thinking', thinking: 't', signature: 'sig1' },
-        { type: 'text', text: 'hello', signature: 'sig2' },
-        { type: 'tool_use', id: 'toolu_1', name: 'WebSearch', input: {}, signature: 'sig3' },
-        { type: 'redacted_thinking', data: 'r', signature: 'sig4' },
-      ],
-    }],
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 't', signature: 'sig1' },
+          { type: 'text', text: 'hello', signature: 'sig2' },
+          { type: 'tool_use', id: 'toolu_1', name: 'WebSearch', input: {}, signature: 'sig3' },
+          { type: 'redacted_thinking', data: 'r', signature: 'sig4' },
+        ],
+      },
+    ],
   };
   const result = rectifyAnthropicRequest(body);
   assert.ok(result.applied);
@@ -78,9 +80,7 @@ test('rectify removes top-level thinking when enabled and last assistant lacks t
     messages: [
       {
         role: 'assistant',
-        content: [
-          { type: 'tool_use', id: 'toolu_1', name: 'WebSearch', input: {} },
-        ],
+        content: [{ type: 'tool_use', id: 'toolu_1', name: 'WebSearch', input: {} }],
       },
       {
         role: 'user',
@@ -100,9 +100,7 @@ test('rectify preserves top-level adaptive thinking', () => {
     messages: [
       {
         role: 'assistant',
-        content: [
-          { type: 'tool_use', id: 'toolu_1', name: 'WebSearch', input: {} },
-        ],
+        content: [{ type: 'tool_use', id: 'toolu_1', name: 'WebSearch', input: {} }],
       },
     ],
   };
@@ -143,10 +141,12 @@ test('rectify no change when no issues', () => {
 test('rectify does not mutate original body', () => {
   const body = {
     model: 'claude-test',
-    messages: [{
-      role: 'assistant',
-      content: [{ type: 'thinking', thinking: 't' }],
-    }],
+    messages: [
+      {
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: 't' }],
+      },
+    ],
   };
   const original = JSON.stringify(body);
   rectifyAnthropicRequest(body);
@@ -154,12 +154,8 @@ test('rectify does not mutate original body', () => {
 });
 
 test('detects thinking budget error', () => {
-  assert.ok(
-    isThinkingBudgetError('thinking budget_tokens must be at least 1024')
-  );
-  assert.ok(
-    isThinkingBudgetError('budget_tokens for thinking type must be >= 1024')
-  );
+  assert.ok(isThinkingBudgetError('thinking budget_tokens must be at least 1024'));
+  assert.ok(isThinkingBudgetError('budget_tokens for thinking type must be >= 1024'));
 });
 
 test('does not trigger budget error on unrelated messages', () => {

@@ -26,7 +26,7 @@ export class KeyPool {
   register(upstreamName: string, keys: string[]): void {
     this.states.set(
       upstreamName,
-      keys.map((k) => ({ key: k, failures: 0, cooledUntil: 0 }))
+      keys.map((k) => ({ key: k, failures: 0, cooledUntil: 0 })),
     );
     this.lastIndex.set(upstreamName, -1);
   }

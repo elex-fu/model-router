@@ -1,9 +1,9 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
 import { SQLiteLogStore } from '../../src/logger/store.js';
 import type { LogEntry } from '../../src/logger/types.js';
 
@@ -119,7 +119,13 @@ test('statsByKey: counts requests, errors, rate_limited, tokens, latency', async
   await store.init();
   try {
     await store.insertBatch([
-      logEntry({ proxy_key_name: 'alice', status_code: 200, duration_ms: 100, request_tokens: 50, response_tokens: 30 }),
+      logEntry({
+        proxy_key_name: 'alice',
+        status_code: 200,
+        duration_ms: 100,
+        request_tokens: 50,
+        response_tokens: 30,
+      }),
       logEntry({ proxy_key_name: 'alice', status_code: 200, duration_ms: 200, request_tokens: 10, response_tokens: 5 }),
       logEntry({ proxy_key_name: 'alice', status_code: 500, duration_ms: 50, request_tokens: 0, response_tokens: 0 }),
       logEntry({ proxy_key_name: 'alice', status_code: 429, duration_ms: 5, request_tokens: 0, response_tokens: 0 }),
@@ -188,12 +194,12 @@ test('purgeOlderThan: deletes logs older than N days, keeps recent', async () =>
     const dbAny = (store as any).db;
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, duration_ms) VALUES ('old', 0, datetime('now', '-100 days'), 200, 1)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, duration_ms) VALUES ('old', 0, datetime('now', '-100 days'), 200, 1)",
       )
       .run();
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, duration_ms) VALUES ('young', 0, datetime('now', '-1 days'), 200, 1)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, duration_ms) VALUES ('young', 0, datetime('now', '-1 days'), 200, 1)",
       )
       .run();
     const deleted = await store.purgeOlderThan(90);
@@ -230,7 +236,7 @@ test('keyActivitySummary: returns usedToday and lastUsed per key', async () => {
     const dbAny = (store as any).db;
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens) VALUES ('alice', 0, datetime('now', '-2 days'), 200, 100, 50)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens) VALUES ('alice', 0, datetime('now', '-2 days'), 200, 100, 50)",
       )
       .run();
     await store.insertBatch([
@@ -258,7 +264,7 @@ test('keyActivitySummary: lastUsed reflects all-time max not just today', async 
     const dbAny = (store as any).db;
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code) VALUES ('charlie', 0, datetime('now', '-30 days'), 200)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code) VALUES ('charlie', 0, datetime('now', '-30 days'), 200)",
       )
       .run();
     const today = new Date().toISOString().slice(0, 10);
@@ -310,9 +316,7 @@ test('queryLogs: returns cache and first_token fields', async () => {
   const store = new SQLiteLogStore(t.path);
   await store.init();
   try {
-    await store.insertBatch([
-      logEntry({ cache_read_tokens: 50, cache_creation_tokens: 10, first_token_ms: 120 }),
-    ]);
+    await store.insertBatch([logEntry({ cache_read_tokens: 50, cache_creation_tokens: 10, first_token_ms: 120 })]);
     const rows = await store.queryLogs(10);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].cache_read_tokens, 50);
@@ -389,17 +393,17 @@ test('dailyUsage: aggregates by day across date range', async () => {
     const dbAny = (store as any).db;
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('alice', 0, datetime('now', '-2 days'), 200, 100, 50, 80, 20, 100)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('alice', 0, datetime('now', '-2 days'), 200, 100, 50, 80, 20, 100)",
       )
       .run();
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('alice', 0, datetime('now', '-1 days'), 200, 200, 100, 30, 10, 200)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('alice', 0, datetime('now', '-1 days'), 200, 200, 100, 30, 10, 200)",
       )
       .run();
     dbAny
       .prepare(
-        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('bob', 0, datetime('now', '-1 days'), 200, 50, 25, 10, 5, 50)"
+        "INSERT INTO request_logs (proxy_key_name, is_streaming, created_at, status_code, request_tokens, response_tokens, cache_read_tokens, cache_creation_tokens, duration_ms) VALUES ('bob', 0, datetime('now', '-1 days'), 200, 50, 25, 10, 5, 50)",
       )
       .run();
 

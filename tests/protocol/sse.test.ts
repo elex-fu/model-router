@@ -1,11 +1,6 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  parseSseStream,
-  writeSseEvent,
-  finalizeStream,
-  type SseEvent,
-} from '../../src/protocol/sse.js';
+import { test } from 'node:test';
+import { finalizeStream, parseSseStream, type SseEvent, writeSseEvent } from '../../src/protocol/sse.js';
 
 function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
   return new ReadableStream({

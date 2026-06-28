@@ -1,13 +1,13 @@
 import http from 'node:http';
 import { ConfigStore } from '../config/store.js';
-import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
-import { proxyHandler } from './proxy.js';
 import { HealthMonitor } from '../health/monitor.js';
-import { KeyLimiter } from '../limit/limiter.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
-import { KeyPool } from './keyPool.js';
+import { KeyLimiter } from '../limit/limiter.js';
+import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { CircuitBreaker } from './circuitBreaker.js';
+import { KeyPool } from './keyPool.js';
 import { OAuthTokenResolver } from './oauth.js';
+import { proxyHandler } from './proxy.js';
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -22,7 +22,7 @@ export interface StartServerOptions {
 export async function startServer(
   portArg?: number,
   configPathArg?: string,
-  options: StartServerOptions = {}
+  options: StartServerOptions = {},
 ): Promise<void> {
   const configPath = configPathArg || options.configPath || DEFAULT_CONFIG_PATH;
   const store = new ConfigStore(configPath);
@@ -63,7 +63,7 @@ export async function startServer(
       keyName: u.keyName,
       tokensUsed: u.tokensUsed,
       rpmWindow: await logStore.recentRequestsByKey(u.keyName, sinceMs),
-    }))
+    })),
   );
   limiter.hydrate(hydrated);
 

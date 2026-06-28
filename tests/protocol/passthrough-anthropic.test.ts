@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { PassthroughAnthropicBridge } from '../../src/protocol/passthrough-anthropic.js';
 import { finalizeStream, type SseEvent } from '../../src/protocol/sse.js';
 
@@ -120,7 +120,12 @@ test('passthrough-anthropic: last message_delta wins for output_tokens', async (
   const { clientStream, usage } = bridge.transformStream(streamOf(bytes));
   await readAll(clientStream);
   const u = await usage;
-  assert.deepEqual(u, { inputTokens: 100, outputTokens: 42, cacheReadTokens: undefined, cacheCreationTokens: undefined });
+  assert.deepEqual(u, {
+    inputTokens: 100,
+    outputTokens: 42,
+    cacheReadTokens: undefined,
+    cacheCreationTokens: undefined,
+  });
 });
 
 test('passthrough-anthropic: wrapError produces anthropic envelope', () => {

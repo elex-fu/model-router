@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { ConfigStore } from '../config/store.js';
-import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { generateProxyKey } from '../utils/generate-key.js';
-import { parseCreateOptions, applyUpdateOptions } from './key-options.js';
+import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
+import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
 
 const program = new Command();
 
@@ -270,7 +270,7 @@ program
           last_used: a?.lastUsed ?? '-',
           createdAt: k.createdAt,
         };
-      })
+      }),
     );
   });
 
@@ -294,7 +294,11 @@ program
   .option('-c, --config <path>', 'Path to config file')
   .action((name, provider, protocol, baseUrl, apiKeys, options) => {
     const store = getStore(options);
-    const models = options.models ? String(options.models).split(',').map((s: string) => s.trim()) : [];
+    const models = options.models
+      ? String(options.models)
+          .split(',')
+          .map((s: string) => s.trim())
+      : [];
     const validProtocols = ['anthropic', 'openai', 'gemini', 'responses'];
     if (!validProtocols.includes(protocol)) {
       console.error('Protocol must be "anthropic", "openai", "gemini", or "responses"');
@@ -325,7 +329,10 @@ program
       provider,
       protocol,
       baseUrl,
-      apiKeys: apiKeys.split(',').map((s: string) => s.trim()).filter(Boolean),
+      apiKeys: apiKeys
+        .split(',')
+        .map((s: string) => s.trim())
+        .filter(Boolean),
       models,
       enabled: true,
       ...(modelMap ? { modelMap } : {}),
@@ -357,7 +364,7 @@ program
         models: u.models.join(', '),
         modelMap: u.modelMap ? Object.keys(u.modelMap).length : 0,
         enabled: u.enabled,
-      }))
+      })),
     );
   });
 
@@ -428,14 +435,9 @@ program
       console.error(`Upstream "${upstreamName}" not found`);
       process.exit(1);
     }
-    const probeModel: string =
-      options.model ??
-      u.models[0] ??
-      (u.modelMap ? Object.values(u.modelMap)[0] : undefined);
+    const probeModel: string = options.model ?? u.models[0] ?? (u.modelMap ? Object.values(u.modelMap)[0] : undefined);
     if (!probeModel) {
-      console.error(
-        `Upstream "${upstreamName}" has no models or modelMap; pass --model <name> to probe`
-      );
+      console.error(`Upstream "${upstreamName}" has no models or modelMap; pass --model <name> to probe`);
       process.exit(1);
     }
 
@@ -474,9 +476,7 @@ program
       } catch {
         snippet = await res.text().catch(() => '');
       }
-      console.log(
-        `${upstreamName} ${u.baseUrl} model=${probeModel}: ${res.status} in ${ms}ms`
-      );
+      console.log(`${upstreamName} ${u.baseUrl} model=${probeModel}: ${res.status} in ${ms}ms`);
       if (res.status >= 400) {
         console.log(JSON.stringify(snippet, null, 2));
         process.exit(1);
@@ -529,22 +529,21 @@ program
     }
 
     const userMessage = message ?? 'Hello, can you hear me?';
-    const url = protocol === 'anthropic'
-      ? `${baseUrl}/v1/messages`
-      : `${baseUrl}/v1/chat/completions`;
+    const url = protocol === 'anthropic' ? `${baseUrl}/v1/messages` : `${baseUrl}/v1/chat/completions`;
 
-    const body = protocol === 'anthropic'
-      ? {
-          model,
-          max_tokens: 256,
-          messages: [{ role: 'user', content: userMessage }],
-          stream: !!options.stream,
-        }
-      : {
-          model,
-          messages: [{ role: 'user', content: userMessage }],
-          stream: !!options.stream,
-        };
+    const body =
+      protocol === 'anthropic'
+        ? {
+            model,
+            max_tokens: 256,
+            messages: [{ role: 'user', content: userMessage }],
+            stream: !!options.stream,
+          }
+        : {
+            model,
+            messages: [{ role: 'user', content: userMessage }],
+            stream: !!options.stream,
+          };
 
     console.log(`→ ${protocol.toUpperCase()} ${url}`);
     console.log(`  model: ${model}`);
@@ -664,7 +663,7 @@ program
         output: l.response_tokens,
         ms: l.duration_ms,
         created: l.created_at,
-      }))
+      })),
     );
   });
 
@@ -693,7 +692,7 @@ program
     const { logStoreFromConfig } = await import('../logger/store.js');
     const { resolveSinceRange } = await import('./since.js');
     const today = new Date().toISOString().slice(0, 10);
-    let range;
+    let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
     } catch (err: any) {
@@ -725,7 +724,7 @@ program
     const { logStoreFromConfig } = await import('../logger/store.js');
     const { resolveSinceRange } = await import('./since.js');
     const today = new Date().toISOString().slice(0, 10);
-    let range;
+    let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
     } catch (err: any) {
@@ -750,7 +749,7 @@ program
         total: r.totalTokens,
         avg_ms: r.avgLatencyMs,
         last_seen: r.lastSeen ?? '-',
-      }))
+      })),
     );
   });
 
@@ -765,7 +764,7 @@ program
     const { logStoreFromConfig } = await import('../logger/store.js');
     const { resolveSinceRange } = await import('./since.js');
     const today = new Date().toISOString().slice(0, 10);
-    let range;
+    let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
     } catch (err: any) {
@@ -797,15 +796,13 @@ program
         cache_read: r.cacheReadTokens,
         cache_creation: r.cacheCreationTokens,
         avg_ms: r.avgLatencyMs,
-      }))
+      })),
     );
     console.log(
-      `Summary: ${totalInput.toLocaleString()} input + ${totalOutput.toLocaleString()} output = ${(totalInput + totalOutput).toLocaleString()} total tokens`
+      `Summary: ${totalInput.toLocaleString()} input + ${totalOutput.toLocaleString()} output = ${(totalInput + totalOutput).toLocaleString()} total tokens`,
     );
     if (totalCacheRead > 0 || totalCacheCreation > 0) {
-      console.log(
-        `Cache: ${totalCacheRead.toLocaleString()} read + ${totalCacheCreation.toLocaleString()} creation`
-      );
+      console.log(`Cache: ${totalCacheRead.toLocaleString()} read + ${totalCacheCreation.toLocaleString()} creation`);
     }
   });
 

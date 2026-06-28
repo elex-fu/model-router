@@ -4,7 +4,7 @@ import type { ProxyKey } from '../config/types.js';
 
 export function authenticateProxyKey(
   store: ConfigStore,
-  req: IncomingMessage
+  req: IncomingMessage,
 ): { ok: true; key: ProxyKey; rawAuth?: string } | { ok: false } {
   let raw = req.headers['x-api-key'] || req.headers['authorization'];
   if (Array.isArray(raw)) {

@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { redactSecrets } from '../../src/limit/redact.js';
 
 test('redactSecrets: leaves regular text alone', () => {

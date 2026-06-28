@@ -14,12 +14,19 @@ export interface OAuthTokenResponse {
 
 export interface DeviceFlowManager {
   start(): Promise<DeviceCodeResponse>;
-  poll(deviceCode: string, intervalMs: number, expiresIn: number): AsyncGenerator<OAuthTokenResponse | { status: 'pending' }>;
+  poll(
+    deviceCode: string,
+    intervalMs: number,
+    expiresIn: number,
+  ): AsyncGenerator<OAuthTokenResponse | { status: 'pending' }>;
   refresh(refreshToken: string): Promise<OAuthTokenResponse>;
 }
 
 export class GitHubDeviceFlow implements DeviceFlowManager {
-  constructor(private clientId: string, private domain = 'github.com') {}
+  constructor(
+    private clientId: string,
+    private domain = 'github.com',
+  ) {}
 
   async start(): Promise<DeviceCodeResponse> {
     const url = `https://${this.domain}/login/device/code`;
@@ -32,7 +39,11 @@ export class GitHubDeviceFlow implements DeviceFlowManager {
     return (await res.json()) as DeviceCodeResponse;
   }
 
-  async *poll(deviceCode: string, intervalMs: number, expiresIn: number): AsyncGenerator<OAuthTokenResponse | { status: 'pending' }> {
+  async *poll(
+    deviceCode: string,
+    intervalMs: number,
+    expiresIn: number,
+  ): AsyncGenerator<OAuthTokenResponse | { status: 'pending' }> {
     const url = `https://${this.domain}/login/oauth/access_token`;
     const deadline = Date.now() + expiresIn * 1000;
     while (Date.now() < deadline) {
@@ -95,7 +106,11 @@ export class OpenAIDeviceFlow implements DeviceFlowManager {
     };
   }
 
-  async *poll(deviceCode: string, intervalMs: number, expiresIn: number): AsyncGenerator<OAuthTokenResponse | { status: 'pending' }> {
+  async *poll(
+    deviceCode: string,
+    intervalMs: number,
+    expiresIn: number,
+  ): AsyncGenerator<OAuthTokenResponse | { status: 'pending' }> {
     const deadline = Date.now() + expiresIn * 1000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, intervalMs));

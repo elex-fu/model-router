@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { type Config, type ProxyKey, type UpstreamConfig, DEFAULT_CONFIG } from './types.js';
+import { type Config, DEFAULT_CONFIG, type ProxyKey, type UpstreamConfig } from './types.js';
 
 const ENV_PLACEHOLDER_RE = /\$\{ENV:([^}]+)\}/g;
 
@@ -48,11 +48,7 @@ export class ConfigStore {
       return structuredClone(DEFAULT_CONFIG);
     }
     const stat = fs.statSync(this.configPath);
-    if (
-      this.cachedConfig !== null &&
-      stat.mtimeMs === this.cachedMtimeMs &&
-      stat.size === this.cachedSize
-    ) {
+    if (this.cachedConfig !== null && stat.mtimeMs === this.cachedMtimeMs && stat.size === this.cachedSize) {
       return this.cachedConfig;
     }
     const raw = fs.readFileSync(this.configPath, 'utf-8');
@@ -136,8 +132,15 @@ export class ConfigStore {
     }
     const current = config.proxyKeys[idx]!;
     const merged: ProxyKey = { ...current, ...patch, name: current.name };
-    for (const field of ['description', 'expiresAt', 'allowedUpstreams', 'allowedModels', 'rpm', 'dailyTokens'] as const) {
-      if (Object.prototype.hasOwnProperty.call(patch, field) && patch[field] === undefined) {
+    for (const field of [
+      'description',
+      'expiresAt',
+      'allowedUpstreams',
+      'allowedModels',
+      'rpm',
+      'dailyTokens',
+    ] as const) {
+      if (Object.hasOwn(patch, field) && patch[field] === undefined) {
         delete merged[field];
       }
     }

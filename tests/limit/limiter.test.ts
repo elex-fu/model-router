@@ -1,7 +1,7 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KeyLimiter } from '../../src/limit/limiter.js';
+import { test } from 'node:test';
 import type { ProxyKey } from '../../src/config/types.js';
+import { KeyLimiter } from '../../src/limit/limiter.js';
 
 function makeKey(overrides: Partial<ProxyKey> = {}): ProxyKey {
   return {

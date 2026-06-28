@@ -1,6 +1,6 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCreateOptions, applyUpdateOptions } from '../../src/cli/key-options.js';
+import { test } from 'node:test';
+import { applyUpdateOptions, parseCreateOptions } from '../../src/cli/key-options.js';
 import type { ProxyKey } from '../../src/config/types.js';
 
 function existingKey(overrides: Partial<ProxyKey> = {}): ProxyKey {
@@ -55,50 +55,35 @@ test('parseCreateOptions: rejects malformed expires', () => {
 });
 
 test('applyUpdateOptions: add-upstream appends to existing whitelist', () => {
-  const patch = applyUpdateOptions(
-    { addUpstream: 'kimi-code-2' },
-    existingKey({ allowedUpstreams: ['kimi-code'] })
-  );
+  const patch = applyUpdateOptions({ addUpstream: 'kimi-code-2' }, existingKey({ allowedUpstreams: ['kimi-code'] }));
   assert.deepEqual(patch.allowedUpstreams, ['kimi-code', 'kimi-code-2']);
 });
 
 test('applyUpdateOptions: add-upstream is idempotent (no duplicates)', () => {
-  const patch = applyUpdateOptions(
-    { addUpstream: 'kimi-code' },
-    existingKey({ allowedUpstreams: ['kimi-code'] })
-  );
+  const patch = applyUpdateOptions({ addUpstream: 'kimi-code' }, existingKey({ allowedUpstreams: ['kimi-code'] }));
   assert.deepEqual(patch.allowedUpstreams, ['kimi-code']);
 });
 
 test('applyUpdateOptions: remove-upstream subtracts from existing', () => {
   const patch = applyUpdateOptions(
     { removeUpstream: 'ds-bridge' },
-    existingKey({ allowedUpstreams: ['kimi-code', 'ds-bridge'] })
+    existingKey({ allowedUpstreams: ['kimi-code', 'ds-bridge'] }),
   );
   assert.deepEqual(patch.allowedUpstreams, ['kimi-code']);
 });
 
 test('applyUpdateOptions: remove-upstream that empties whitelist sets undefined', () => {
-  const patch = applyUpdateOptions(
-    { removeUpstream: 'kimi-code' },
-    existingKey({ allowedUpstreams: ['kimi-code'] })
-  );
+  const patch = applyUpdateOptions({ removeUpstream: 'kimi-code' }, existingKey({ allowedUpstreams: ['kimi-code'] }));
   assert.equal(patch.allowedUpstreams, undefined);
 });
 
 test('applyUpdateOptions: --upstreams "" clears whitelist', () => {
-  const patch = applyUpdateOptions(
-    { upstreams: '' },
-    existingKey({ allowedUpstreams: ['kimi-code'] })
-  );
+  const patch = applyUpdateOptions({ upstreams: '' }, existingKey({ allowedUpstreams: ['kimi-code'] }));
   assert.equal(patch.allowedUpstreams, undefined);
 });
 
 test('applyUpdateOptions: --expires never clears expiresAt', () => {
-  const patch = applyUpdateOptions(
-    { expires: 'never' },
-    existingKey({ expiresAt: '2026-12-31T00:00:00Z' })
-  );
+  const patch = applyUpdateOptions({ expires: 'never' }, existingKey({ expiresAt: '2026-12-31T00:00:00Z' }));
   assert.equal(patch.expiresAt, undefined);
 });
 

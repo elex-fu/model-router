@@ -1,18 +1,18 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { test } from 'node:test';
 
 import { ConfigStore } from '../../src/config/store.js';
-import { proxyHandler } from '../../src/server/proxy.js';
 import type { Config } from '../../src/config/types.js';
-import type { LogEntry } from '../../src/logger/types.js';
 import { KeyLimiter } from '../../src/limit/limiter.js';
+import type { LogEntry } from '../../src/logger/types.js';
 import { KeyPool } from '../../src/server/keyPool.js';
 import { OAuthTokenResolver } from '../../src/server/oauth.js';
+import { proxyHandler } from '../../src/server/proxy.js';
 
 interface MockCall {
   method: string;
@@ -29,7 +29,9 @@ interface MockUpstream {
   close(): Promise<void>;
 }
 
-type MockResponder = (req: MockCall) =>
+type MockResponder = (
+  req: MockCall,
+) =>
   | { status: number; body: any; headers?: Record<string, string> }
   | Promise<{ status: number; body: any; headers?: Record<string, string> }>;
 
@@ -70,10 +72,7 @@ async function startMockUpstream(responder: MockResponder): Promise<MockUpstream
     port,
     baseUrl: `http://127.0.0.1:${port}`,
     calls,
-    close: () =>
-      new Promise<void>((resolve, reject) =>
-        server.close((err) => (err ? reject(err) : resolve()))
-      ),
+    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
   };
 }
 
@@ -87,7 +86,14 @@ interface ProxyHarness {
 
 async function startProxy(
   config: Config,
-  options: { limiter?: KeyLimiter; maxBodyBytes?: number; keyPool?: KeyPool; oauthResolver?: OAuthTokenResolver; maxRetries?: number; requestTimeoutMs?: number } = {}
+  options: {
+    limiter?: KeyLimiter;
+    maxBodyBytes?: number;
+    keyPool?: KeyPool;
+    oauthResolver?: OAuthTokenResolver;
+    maxRetries?: number;
+    requestTimeoutMs?: number;
+  } = {},
 ): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -119,7 +125,7 @@ async function startProxy(
         server.close((err) => {
           fs.rmSync(tmpDir, { recursive: true, force: true });
           err ? reject(err) : resolve();
-        })
+        }),
       ),
   };
 }
@@ -215,7 +221,7 @@ test('integration: default authMode sends Authorization Bearer header', async ()
         models: ['claude'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -258,7 +264,7 @@ test('integration: authMode x-api-key sends x-api-key header', async () => {
         enabled: true,
         authMode: 'x-api-key',
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -329,7 +335,7 @@ test('integration: anth→anth pass-through non-streaming, body.model rewritten'
         modelMap: { 'claude-3.5': 'claude-actual' },
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -393,7 +399,7 @@ test('integration: openai→openai pass-through non-streaming', async () => {
         models: ['gpt-4o'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
@@ -453,7 +459,7 @@ test('integration: anth→openai non-streaming — body shape converted', async 
         models: ['claude-3.5'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -512,7 +518,7 @@ test('integration: openai→anth non-streaming — body shape converted', async 
         models: ['gpt-4o'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
@@ -592,7 +598,7 @@ test('integration: failover — first upstream 503, second succeeds', async () =
         models: ['claude'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -650,7 +656,7 @@ test('integration: upstream 4xx is forwarded as bridge-wrapped error, no retry',
         models: ['claude'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -680,7 +686,7 @@ test('integration: upstream 4xx is forwarded as bridge-wrapped error, no retry',
 
 function configWithKey(
   key: Partial<import('../../src/config/types.js').ProxyKey>,
-  upstreams: Config['upstreams']
+  upstreams: Config['upstreams'],
 ): Config {
   return {
     server: { port: 0, logFlushIntervalMs: 100, logBatchSize: 10 },
@@ -710,7 +716,7 @@ test('integration: key with allowedUpstreams blocks non-whitelisted upstream →
         models: ['claude-sonnet-4-5'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -746,7 +752,7 @@ test('integration: key with allowedModels blocks non-whitelisted model → 404',
         models: ['claude-sonnet-4-5'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -790,7 +796,7 @@ test('integration: key with allowedModels hit reaches upstream → 200', async (
         models: ['claude-sonnet-4-5'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -809,12 +815,7 @@ test('integration: key with allowedModels hit reaches upstream → 200', async (
 });
 
 test('integration: expired key → 401 authentication_error', async () => {
-  const proxy = await startProxy(
-    configWithKey(
-      { expiresAt: '2020-01-01T00:00:00Z' },
-      []
-    )
-  );
+  const proxy = await startProxy(configWithKey({ expiresAt: '2020-01-01T00:00:00Z' }, []));
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
       method: 'POST',
@@ -856,7 +857,7 @@ test('integration: key with future expiresAt still authenticates', async () => {
         models: ['claude'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -908,7 +909,7 @@ test('integration: rpm exceeded → 429 rate_limit_error + Retry-After header', 
         enabled: true,
       },
     ]),
-    { limiter }
+    { limiter },
   );
   try {
     const ok = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -955,7 +956,7 @@ test('integration: dailyTokens exhausted → 429 rate_limit_error', async () => 
         enabled: true,
       },
     ]),
-    { limiter }
+    { limiter },
   );
   try {
     const blocked = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -989,7 +990,7 @@ test('integration: successful request records usage to limiter', async () => {
         enabled: true,
       },
     ]),
-    { limiter }
+    { limiter },
   );
   try {
     const ok = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -1020,7 +1021,7 @@ test('integration: body over max-body-size → 413', async () => {
         enabled: true,
       },
     ]),
-    { maxBodyBytes: 256 }
+    { maxBodyBytes: 256 },
   );
   try {
     const big = 'x'.repeat(2048);
@@ -1057,7 +1058,7 @@ test('integration: error_message redacts upstream sk- key fragments', async () =
         models: ['claude'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
@@ -1117,7 +1118,7 @@ test('integration: multi-key — first key 500, second key succeeds', async () =
         enabled: true,
       },
     ]),
-    { keyPool }
+    { keyPool },
   );
 
   try {
@@ -1170,7 +1171,7 @@ test('integration: multi-key — 4xx does not retry next key', async () => {
         enabled: true,
       },
     ]),
-    { keyPool }
+    { keyPool },
   );
 
   try {
@@ -1237,7 +1238,7 @@ test('integration: multi-key — both keys 500, upstream-level failover', async 
         enabled: true,
       },
     ]),
-    { keyPool }
+    { keyPool },
   );
 
   try {
@@ -1294,7 +1295,7 @@ test('integration: /v1/responses routes as openai protocol', async () => {
         models: ['gpt-5.4'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/responses`, {
@@ -1333,7 +1334,7 @@ test('integration: /v1/responses/compact routes as openai protocol', async () =>
         models: ['gpt-5.4'],
         enabled: true,
       },
-    ])
+    ]),
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/responses/compact`, {
@@ -1462,7 +1463,7 @@ test('integration: maxRetries limits total attempts across upstreams and keys', 
         enabled: true,
       },
     ]),
-    { keyPool, maxRetries: 2 }
+    { keyPool, maxRetries: 2 },
   );
 
   try {
@@ -1500,7 +1501,7 @@ test('integration: requestTimeoutMs aborts slow upstreams', async () => {
         enabled: true,
       },
     ]),
-    { requestTimeoutMs: 50 }
+    { requestTimeoutMs: 50 },
   );
 
   try {
@@ -1554,7 +1555,7 @@ test('integration: oauth config resolves token dynamically', async () => {
         },
       },
     ]),
-    { oauthResolver }
+    { oauthResolver },
   );
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/responses`, {

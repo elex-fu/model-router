@@ -1,6 +1,6 @@
 const SECRET_PATTERNS = [
   { re: /sk-[A-Za-z0-9_-]{8,}/g, replacement: 'sk-***' },
-  { re: /Bearer\s+[A-Za-z0-9_\-\.~+\/]+={0,2}/g, replacement: 'Bearer ***' },
+  { re: /Bearer\s+[A-Za-z0-9_\-.~+/]+={0,2}/g, replacement: 'Bearer ***' },
   { re: /(x-api-key\s*[:=]\s*)[^\s]+/gi, replacement: '$1***' },
   { re: /(api-key\s*[:=]\s*)[^\s]+/gi, replacement: '$1***' },
   { re: /\b(gh[ousr]_[A-Za-z0-9]{20,})/g, replacement: '***' },

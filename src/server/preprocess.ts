@@ -211,8 +211,7 @@ function injectThinking(body: any, model: string): void {
   const m = (model || '').toLowerCase();
   if (m.includes('haiku')) return;
 
-  const maxTokens =
-    typeof body.max_tokens === 'number' ? body.max_tokens : 16384;
+  const maxTokens = typeof body.max_tokens === 'number' ? body.max_tokens : 16384;
 
   if (m.includes('opus-4-7') || m.includes('opus-4-6') || m.includes('sonnet-4-6')) {
     body.thinking = { type: 'adaptive' };

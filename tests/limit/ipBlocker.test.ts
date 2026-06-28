@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { IpAuthBlocker } from '../../src/limit/ipBlocker.js';
 
 test('IpAuthBlocker: defaults to allow', () => {
@@ -9,7 +9,7 @@ test('IpAuthBlocker: defaults to allow', () => {
 });
 
 test('IpAuthBlocker: blocks after threshold failures within window', () => {
-  let now = 1_000_000;
+  const now = 1_000_000;
   const b = new IpAuthBlocker({
     threshold: 5,
     windowMs: 60_000,
@@ -25,7 +25,7 @@ test('IpAuthBlocker: blocks after threshold failures within window', () => {
 });
 
 test('IpAuthBlocker: failures from different IPs are isolated', () => {
-  let now = 1_000_000;
+  const now = 1_000_000;
   const b = new IpAuthBlocker({
     threshold: 3,
     windowMs: 60_000,
@@ -54,7 +54,7 @@ test('IpAuthBlocker: window expires', () => {
 });
 
 test('IpAuthBlocker: clearOnSuccess removes recorded failures', () => {
-  let now = 1_000_000;
+  const now = 1_000_000;
   const b = new IpAuthBlocker({
     threshold: 3,
     windowMs: 60_000,

@@ -1,7 +1,7 @@
-import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { responsesStreamToAnthropicStream } from '../../src/protocol/responses.js';
+import { describe, it } from 'node:test';
 import { CodexChatHistoryStore } from '../../src/protocol/codex-history.js';
+import { responsesStreamToAnthropicStream } from '../../src/protocol/responses.js';
 
 describe('responses protocol conversion', () => {
   describe('responsesStreamToAnthropicStream', () => {
@@ -23,7 +23,9 @@ describe('responses protocol conversion', () => {
     });
 
     it('maps response.function_call_arguments.delta to input_json_delta', () => {
-      const events = responsesStreamToAnthropicStream('data: {"type":"response.function_call_arguments.delta","delta":"{\\"a\\":1}"}');
+      const events = responsesStreamToAnthropicStream(
+        'data: {"type":"response.function_call_arguments.delta","delta":"{\\"a\\":1}"}',
+      );
       assert.equal(events.length, 1);
       assert.equal(events[0].type, 'content_block_delta');
       assert.equal(events[0].index, 1);

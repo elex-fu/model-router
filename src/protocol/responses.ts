@@ -1,10 +1,4 @@
-import type {
-  Bridge,
-  BridgeError,
-  BridgeStreamResult,
-  BridgeUsage,
-  Protocol,
-} from './bridge.js';
+import type { Bridge, BridgeError, BridgeStreamResult, BridgeUsage, Protocol } from './bridge.js';
 import { parseSseStream, writeSseEvent } from './sse.js';
 
 export function responsesStreamToAnthropicStream(line: string): any[] {
@@ -13,13 +7,21 @@ export function responsesStreamToAnthropicStream(line: string): any[] {
   const data = line.slice(5).trim();
   if (!data || data === '[DONE]') return events;
   let parsed: any;
-  try { parsed = JSON.parse(data); } catch { return events; }
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return events;
+  }
 
   if (parsed.type === 'response.output_text.delta') {
     events.push({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: parsed.delta } });
   }
   if (parsed.type === 'response.function_call_arguments.delta') {
-    events.push({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: parsed.delta } });
+    events.push({
+      type: 'content_block_delta',
+      index: 1,
+      delta: { type: 'input_json_delta', partial_json: parsed.delta },
+    });
   }
   return events;
 }
@@ -57,9 +59,10 @@ export class AnthToResponsesBridge implements Bridge {
       }
     }
 
-    const instructions = typeof clientBody.system === 'string'
-      ? clientBody.system
-      : clientBody.system?.map((b: any) => b.text).join('\n') ?? '';
+    const instructions =
+      typeof clientBody.system === 'string'
+        ? clientBody.system
+        : (clientBody.system?.map((b: any) => b.text).join('\n') ?? '');
 
     const payload: any = {
       model: clientBody.model,
@@ -89,7 +92,12 @@ export class AnthToResponsesBridge implements Bridge {
       if (item.type === 'message') {
         content.push({ type: 'text', text: item.content?.[0]?.text ?? '' });
       } else if (item.type === 'function_call') {
-        content.push({ type: 'tool_use', id: item.call_id ?? `toolu_${Date.now()}`, name: item.name, input: item.arguments ?? {} });
+        content.push({
+          type: 'tool_use',
+          id: item.call_id ?? `toolu_${Date.now()}`,
+          name: item.name,
+          input: item.arguments ?? {},
+        });
       }
     }
     return {
@@ -330,7 +338,6 @@ export class AnthToResponsesBridge implements Bridge {
               });
               emit('message_stop', { type: 'message_stop' });
               state.finished = true;
-              continue;
             }
           }
 
@@ -414,7 +421,11 @@ export class ResponsesToAnthBridge implements Bridge {
         const data = ev.data;
         if (!data || data === '[DONE]') continue;
         let json: any;
-        try { json = JSON.parse(data); } catch { continue; }
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
         if (json?.type === 'response.completed') {
           const resp = json.response ?? json;
           const u = resp.usage;

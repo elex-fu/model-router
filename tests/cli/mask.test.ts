@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { maskSecret } from '../../src/cli/mask.js';
 
 test('maskSecret: long string → prefix + ellipsis + suffix', () => {

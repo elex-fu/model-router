@@ -1,7 +1,7 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { ProxyKey, UpstreamConfig } from '../../src/config/types.js';
 import { selectUpstreams } from '../../src/router/upstream.js';
-import type { UpstreamConfig, ProxyKey } from '../../src/config/types.js';
 
 function makeUpstream(overrides: Partial<UpstreamConfig>): UpstreamConfig {
   return {

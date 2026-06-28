@@ -1,12 +1,11 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
-
-import type { ProxyKey } from '../../src/config/types.js';
+import { test } from 'node:test';
 import { ConfigStore } from '../../src/config/store.js';
+import type { ProxyKey } from '../../src/config/types.js';
 
 function tmpConfigPath(): string {
   return path.join(os.tmpdir(), `mr-key-${randomUUID()}.json`);
@@ -80,11 +79,9 @@ test('ConfigStore.load tolerates legacy proxyKeys without new fields', () => {
       p,
       JSON.stringify({
         server: { port: 15005, logFlushIntervalMs: 5000, logBatchSize: 100 },
-        proxyKeys: [
-          { name: 'legacy', key: 'mrk_old', enabled: true, createdAt: '2026-05-01T00:00:00Z' },
-        ],
+        proxyKeys: [{ name: 'legacy', key: 'mrk_old', enabled: true, createdAt: '2026-05-01T00:00:00Z' }],
         upstreams: [],
-      })
+      }),
     );
     const store = new ConfigStore(p);
     const keys = store.listProxyKeys();

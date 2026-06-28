@@ -1,8 +1,8 @@
-import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { afterEach, beforeEach, test } from 'node:test';
 import { ConfigStore } from '../../src/config/store.js';
 import type { UpstreamConfig } from '../../src/config/types.js';
 
@@ -133,10 +133,7 @@ test('setModelMapEntry overwrites existing pattern', () => {
 
 test('setModelMapEntry throws for unknown upstream', () => {
   const store = new ConfigStore(tmpFile);
-  assert.throws(
-    () => store.setModelMapEntry('nope', 'claude-*', 'kimi-k2'),
-    /nope/,
-  );
+  assert.throws(() => store.setModelMapEntry('nope', 'claude-*', 'kimi-k2'), /nope/);
 });
 
 test('deleteModelMapEntry removes pattern and persists', () => {
@@ -223,7 +220,7 @@ test('legacy config without bindAddress merges to 127.0.0.1 default', () => {
       proxyKeys: [],
       upstreams: [],
     }),
-    'utf-8'
+    'utf-8',
   );
   const store = new ConfigStore(tmpFile);
   const config = store.load();
@@ -236,9 +233,7 @@ test('load resolves ${ENV:VAR} placeholders in proxyKeys and apiKeys', () => {
     tmpFile,
     JSON.stringify({
       server: { port: 15005, bindAddress: '127.0.0.1', logFlushIntervalMs: 5000, logBatchSize: 100 },
-      proxyKeys: [
-        { name: 'pk1', key: '${ENV:MODEL_ROUTER_PROXY_KEY}', enabled: true, createdAt: '2024-01-01' },
-      ],
+      proxyKeys: [{ name: 'pk1', key: '${ENV:MODEL_ROUTER_PROXY_KEY}', enabled: true, createdAt: '2024-01-01' }],
       upstreams: [
         {
           name: 'u1',
@@ -251,7 +246,7 @@ test('load resolves ${ENV:VAR} placeholders in proxyKeys and apiKeys', () => {
         },
       ],
     }),
-    'utf-8'
+    'utf-8',
   );
   process.env.MODEL_ROUTER_PROXY_KEY = 'proxy-secret';
   process.env.MODEL_ROUTER_UPSTREAM_KEY = 'upstream-secret';
@@ -289,7 +284,7 @@ test('load resolves ${ENV:VAR} placeholders in oauth clientId and clientSecret',
         },
       ],
     }),
-    'utf-8'
+    'utf-8',
   );
   process.env.MODEL_ROUTER_CLIENT_ID = 'cid-secret';
   process.env.MODEL_ROUTER_CLIENT_SECRET = 'csec-secret';
@@ -322,7 +317,7 @@ test('load throws when referenced env variable is missing', () => {
         },
       ],
     }),
-    'utf-8'
+    'utf-8',
   );
   delete process.env.MODEL_ROUTER_MISSING_KEY;
   const store = new ConfigStore(tmpFile);

@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { extractNonStreamUsage } from '../../src/server/proxy.js';
 
 test('extractNonStreamUsage: anthropic basic tokens', () => {

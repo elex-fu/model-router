@@ -1,5 +1,5 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { KeyPool } from '../../src/server/keyPool.js';
 
 test('pick returns first registered key by default (round-robin)', () => {
