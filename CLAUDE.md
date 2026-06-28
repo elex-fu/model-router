@@ -89,6 +89,25 @@ When adding new `UpstreamConfig` fields:
 - `passThroughAuth` requires careful proxy key setup (client's auth token must be registered as a proxy key)
 - `--trust-proxy` should only be used behind a trusted reverse proxy
 
+## Health Stack
+
+Run these before committing:
+
+```bash
+npx tsc --noEmit          # type check
+npm test                  # full test suite
+npm run lint              # biome (zero errors, warnings allowed)
+npm run deadcode          # knip
+shellcheck scripts/install.sh scripts/pre-flight.sh
+```
+
+If `npm install` fails with `EACCES` on root-owned `node_modules` files, fix ownership first:
+
+```bash
+sudo chown -R $(id -u):$(id -g) node_modules /Users/lex/.npm
+npm install
+```
+
 ## Common Pitfalls
 
 1. **Undici version**: Node 22 bundles undici 6.23.0. Do NOT install undici 8+ — it causes `fetch` failures.

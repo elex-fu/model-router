@@ -10,7 +10,10 @@
     "build": "tsc",
     "dev": "tsx src/cli/index.ts",
     "start": "node dist/cli/index.js",
-    "test": "node --test --import tsx --test-reporter=spec 'tests/**/*.test.ts'"
+    "test": "node --test --import tsx --test-reporter=spec 'tests/**/*.test.ts'",
+    "lint": "biome check .",
+    "lint:fix": "biome check . --write",
+    "deadcode": "knip"
   },
   "keywords": [
     "ai",
@@ -32,8 +35,10 @@
     "undici": "^6.23.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "knip": "^5.50.4",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0"
   },
