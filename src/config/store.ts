@@ -52,7 +52,10 @@ export class ConfigStore {
       return this.cachedConfig;
     }
     const raw = fs.readFileSync(this.configPath, 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<Config>;
+    const parsed = JSON.parse(raw) as Partial<Config> & { schemaVersion?: number };
+    if (parsed.schemaVersion === 2) {
+      throw new Error('V2 configuration requires ConfigServiceV2; refusing to overwrite it with the legacy store');
+    }
     const config = resolveSecretsInConfig(this.mergeDefaults(parsed));
     this.cachedConfig = config;
     this.cachedMtimeMs = stat.mtimeMs;
@@ -99,6 +102,9 @@ export class ConfigStore {
         logFlushIntervalMs: partial.server?.logFlushIntervalMs ?? DEFAULT_CONFIG.server.logFlushIntervalMs,
         logBatchSize: partial.server?.logBatchSize ?? DEFAULT_CONFIG.server.logBatchSize,
         logRetentionDays: partial.server?.logRetentionDays ?? DEFAULT_CONFIG.server.logRetentionDays,
+        maxRetries: partial.server?.maxRetries ?? DEFAULT_CONFIG.server.maxRetries,
+        requestTimeoutMs: partial.server?.requestTimeoutMs ?? DEFAULT_CONFIG.server.requestTimeoutMs,
+        failoverQueue: partial.server?.failoverQueue,
       },
       proxyKeys: Array.isArray(partial.proxyKeys) ? partial.proxyKeys : [],
       upstreams,

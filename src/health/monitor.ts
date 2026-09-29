@@ -1,5 +1,7 @@
 import type { ConfigStore } from '../config/store.js';
 import type { UpstreamConfig } from '../config/types.js';
+import { RuntimeConfigStore } from '../config/v2-runtime.js';
+import { joinApiUrl } from '../providers/url.js';
 import type { KeyPool } from '../server/keyPool.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
@@ -16,6 +18,7 @@ interface HealthProbe {
 function buildHealthProbe(upstream: UpstreamConfig, model: string): HealthProbe {
   const base = upstream.baseUrl.replace(/\/$/, '');
   const protocol = upstream.protocol || 'anthropic';
+  const explicitUrl = upstream.endpoint ? joinApiUrl(upstream.baseUrl, upstream.endpoint).toString() : undefined;
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     accept: 'application/json',
@@ -23,7 +26,7 @@ function buildHealthProbe(upstream: UpstreamConfig, model: string): HealthProbe 
 
   if (protocol === 'anthropic') {
     return {
-      url: `${base}/v1/messages`,
+      url: explicitUrl ?? `${base}/v1/messages`,
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -35,7 +38,7 @@ function buildHealthProbe(upstream: UpstreamConfig, model: string): HealthProbe 
   }
 
   return {
-    url: `${base}/v1/chat/completions`,
+    url: explicitUrl ?? `${base}/v1/chat/completions`,
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -47,6 +50,7 @@ function buildHealthProbe(upstream: UpstreamConfig, model: string): HealthProbe 
 }
 
 function authHeader(upstream: UpstreamConfig, key: string): Record<string, string> {
+  if (upstream.authMode === 'none' || upstream.authMode === 'pass-through') return {};
   if (upstream.authMode === 'x-api-key') {
     return { 'x-api-key': key };
   }
@@ -57,6 +61,10 @@ export class HealthMonitor {
   private store: ConfigStore;
   private keyPool?: KeyPool;
   private failureCounts = new Map<string, number>();
+  private observations = new Map<
+    string,
+    { healthy: boolean; checkedAt: number; consecutiveFailures: number; error?: string }
+  >();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(store: ConfigStore, keyPool?: KeyPool) {
@@ -78,25 +86,41 @@ export class HealthMonitor {
     }
   }
 
+  getStatus(
+    upstreamId: string,
+  ): { healthy: boolean; checkedAt: number; consecutiveFailures: number; error?: string } | undefined {
+    return this.observations.get(upstreamId);
+  }
+
   private async runCheck(): Promise<void> {
     const upstreams = this.store.listUpstreams();
     await Promise.all(upstreams.map((u) => this.checkUpstream(u)));
   }
 
   private async checkUpstream(upstream: UpstreamConfig): Promise<void> {
+    if (this.store instanceof RuntimeConfigStore && upstream.healthMode !== 'active') return;
     const model = upstream.models[0];
     if (!model) return;
 
-    let keys = this.keyPool?.getAvailableKeys(upstream.name) ?? [];
-    if (keys.length === 0) keys = upstream.apiKeys;
-    if (keys.length === 0) return;
+    let entries = this.keyPool?.getAvailableEntries(upstream.name) ?? [];
+    if (entries.length === 0) {
+      entries = upstream.apiKeys.map((key, index) => ({
+        credentialId: upstream.credentialIds?.[index] ?? key,
+        key,
+      }));
+    }
+    if (entries.length === 0 && (upstream.authMode === 'none' || upstream.authMode === 'pass-through')) {
+      entries = [{ credentialId: '', key: '' }];
+    }
+    if (entries.length === 0) return;
 
     const probe = buildHealthProbe(upstream, model);
 
     let anyOk = false;
     let lastError = '';
 
-    for (const key of keys) {
+    for (const entry of entries) {
+      const { key } = entry;
       let ok = false;
       try {
         const controller = new AbortController();
@@ -121,7 +145,7 @@ export class HealthMonitor {
 
       if (ok) {
         anyOk = true;
-        this.keyPool?.markSuccess(upstream.name, key);
+        this.keyPool?.markSuccess(upstream.name, entry);
         break;
       } else {
         console.log(`[health] Upstream "${upstream.name}" key probe failed (${lastError})`);
@@ -131,7 +155,8 @@ export class HealthMonitor {
     const currentCount = this.failureCounts.get(upstream.name) || 0;
 
     if (anyOk) {
-      if (!upstream.enabled) {
+      this.observations.set(upstream.name, { healthy: true, checkedAt: Date.now(), consecutiveFailures: 0 });
+      if (!upstream.enabled && !(this.store instanceof RuntimeConfigStore)) {
         this.store.setUpstreamEnabled(upstream.name, true);
         console.log(`[health] Upstream "${upstream.name}" recovered, enabled.`);
       }
@@ -141,8 +166,14 @@ export class HealthMonitor {
     } else {
       const newCount = currentCount + 1;
       this.failureCounts.set(upstream.name, newCount);
+      this.observations.set(upstream.name, {
+        healthy: false,
+        checkedAt: Date.now(),
+        consecutiveFailures: newCount,
+        error: lastError,
+      });
       console.log(`[health] Upstream "${upstream.name}" all keys failed (${newCount}/${MAX_CONSECUTIVE_FAILURES})`);
-      if (newCount >= MAX_CONSECUTIVE_FAILURES && upstream.enabled) {
+      if (newCount >= MAX_CONSECUTIVE_FAILURES && upstream.enabled && !(this.store instanceof RuntimeConfigStore)) {
         this.store.setUpstreamEnabled(upstream.name, false);
         console.log(
           `[health] Upstream "${upstream.name}" disabled after ${MAX_CONSECUTIVE_FAILURES} consecutive all-key failures.`,

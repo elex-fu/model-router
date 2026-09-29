@@ -64,6 +64,19 @@ test('legacy config without modelMap loads with modelMap undefined', () => {
   assert.equal(config.upstreams[0]!.modelMap, undefined);
 });
 
+test('server retry, timeout and failover fields survive reload', () => {
+  const store = new ConfigStore(tmpFile);
+  const config = store.load();
+  config.server.maxRetries = 7;
+  config.server.requestTimeoutMs = 75_000;
+  config.server.failoverQueue = ['secondary', 'primary'];
+  store.save(config);
+  const reloaded = new ConfigStore(tmpFile).load();
+  assert.equal(reloaded.server.maxRetries, 7);
+  assert.equal(reloaded.server.requestTimeoutMs, 75_000);
+  assert.deepEqual(reloaded.server.failoverQueue, ['secondary', 'primary']);
+});
+
 test('addUpstream with modelMap persists and round-trips', () => {
   const store = new ConfigStore(tmpFile);
   store.addUpstream(

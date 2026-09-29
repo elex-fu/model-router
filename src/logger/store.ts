@@ -1,5 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import Database from 'better-sqlite3';
-import { DEFAULT_DB_PATH } from '../utils/paths.js';
+import { DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH } from '../utils/paths.js';
 import type { DailyUsage, KeyStats, LogEntry, StatsResult } from './types.js';
 
 export interface LogStore {
@@ -40,6 +42,9 @@ export class SQLiteLogStore implements LogStore {
   async init(): Promise<void> {
     this.db = new Database(this.dbPath);
     this.db.pragma('journal_mode = WAL');
+    // This connection shares the database with the telemetry worker. Without
+    // a busy handler, a short telemetry transaction can make a log batch fail.
+    this.db.pragma('busy_timeout = 5000');
     this.db.pragma('synchronous = NORMAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS request_logs (
@@ -457,8 +462,19 @@ function addColumnIfMissing(db: Database.Database, table: string, column: string
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
-export async function logStoreFromConfig(_configPath?: string): Promise<LogStore> {
-  const store = new SQLiteLogStore();
+export async function logStoreFromConfig(configPath?: string): Promise<LogStore> {
+  const file = configPath ?? DEFAULT_CONFIG_PATH;
+  let dataDir = path.dirname(path.resolve(file));
+  if (fs.existsSync(file)) {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      schemaVersion?: number;
+      storage?: { dataDir?: string };
+    };
+    if (parsed.schemaVersion === 2 && parsed.storage?.dataDir) {
+      dataDir = path.resolve(path.dirname(path.resolve(file)), parsed.storage.dataDir);
+    }
+  }
+  const store = new SQLiteLogStore(path.join(dataDir, 'logs.sqlite'));
   await store.init();
   return store;
 }
