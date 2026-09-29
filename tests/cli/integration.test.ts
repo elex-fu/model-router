@@ -27,12 +27,22 @@ function loadEnv(): Record<string, string> {
 
 const env = loadEnv();
 
-function assertEnv(keys: string[]): void {
-  const missing = keys.filter((k) => !env[k]);
-  if (missing.length) {
-    throw new Error(`Missing .env keys: ${missing.join(', ')}. Please add them to .env and re-run.`);
-  }
-}
+const upstreamEnv = [
+  'UPSTREAM_NAME',
+  'UPSTREAM_PROVIDER',
+  'UPSTREAM_PROTOCOL',
+  'UPSTREAM_BASE_URL',
+  'UPSTREAM_API_KEY',
+];
+const hasEnv = (keys: string[]) => keys.every((key) => Boolean(env[key]));
+const fixture = {
+  name: env.UPSTREAM_NAME ?? 'local-test-upstream',
+  provider: env.UPSTREAM_PROVIDER ?? 'custom',
+  protocol: env.UPSTREAM_PROTOCOL ?? 'openai',
+  baseUrl: env.UPSTREAM_BASE_URL ?? 'http://127.0.0.1:11434/v1',
+  apiKey: env.UPSTREAM_API_KEY ?? 'test-only-not-live',
+  model: env.UPSTREAM_REAL_MODEL ?? 'test-model',
+};
 
 // ── test harness ──────────────────────────────────────────────────────
 function tmpConfigPath(): string {
@@ -56,21 +66,19 @@ async function run(args: string[], configPath: string): Promise<{ stdout: string
 // ── suite ─────────────────────────────────────────────────────────────
 
 test('upstream:add, upstream:list, upstream:delete', async () => {
-  assertEnv(['UPSTREAM_NAME', 'UPSTREAM_PROVIDER', 'UPSTREAM_PROTOCOL', 'UPSTREAM_BASE_URL', 'UPSTREAM_API_KEY']);
-
   const configPath = tmpConfigPath();
   try {
     // add
     const addRes = await run(
       [
         'upstream:add',
-        env.UPSTREAM_NAME,
-        env.UPSTREAM_PROVIDER,
-        env.UPSTREAM_PROTOCOL,
-        env.UPSTREAM_BASE_URL,
-        env.UPSTREAM_API_KEY,
+        fixture.name,
+        fixture.provider,
+        fixture.protocol,
+        fixture.baseUrl,
+        fixture.apiKey,
         '--models',
-        env.UPSTREAM_REAL_MODEL ?? 'default-model',
+        fixture.model,
       ],
       configPath,
     );
@@ -80,10 +88,10 @@ test('upstream:add, upstream:list, upstream:delete', async () => {
     // list
     const listRes = await run(['upstream:list'], configPath);
     assert.equal(listRes.code, 0);
-    assert.ok(listRes.stdout.includes(env.UPSTREAM_NAME));
+    assert.ok(listRes.stdout.includes(fixture.name));
 
     // delete
-    const delRes = await run(['upstream:delete', env.UPSTREAM_NAME], configPath);
+    const delRes = await run(['upstream:delete', fixture.name], configPath);
     assert.equal(delRes.code, 0);
     assert.ok(delRes.stdout.includes('Deleted upstream'));
 
@@ -137,51 +145,35 @@ test('key:create, key:list, key:disable, key:enable, key:rotate, key:delete', as
 });
 
 test('upstream:map:set, upstream:map:list, upstream:map:delete', async () => {
-  assertEnv(['UPSTREAM_NAME', 'UPSTREAM_PROVIDER', 'UPSTREAM_PROTOCOL', 'UPSTREAM_BASE_URL', 'UPSTREAM_API_KEY']);
-
   const configPath = tmpConfigPath();
   try {
     await run(
-      [
-        'upstream:add',
-        env.UPSTREAM_NAME,
-        env.UPSTREAM_PROVIDER,
-        env.UPSTREAM_PROTOCOL,
-        env.UPSTREAM_BASE_URL,
-        env.UPSTREAM_API_KEY,
-      ],
+      ['upstream:add', fixture.name, fixture.provider, fixture.protocol, fixture.baseUrl, fixture.apiKey],
       configPath,
     );
 
-    const setRes = await run(['upstream:map:set', env.UPSTREAM_NAME, 'claude-*', 'kimi-k2.6'], configPath);
+    const setRes = await run(['upstream:map:set', fixture.name, 'claude-*', 'kimi-k2.6'], configPath);
     assert.equal(setRes.code, 0);
     assert.ok(setRes.stdout.includes('Set'));
 
-    const listRes = await run(['upstream:map:list', env.UPSTREAM_NAME], configPath);
+    const listRes = await run(['upstream:map:list', fixture.name], configPath);
     assert.equal(listRes.code, 0);
     assert.ok(listRes.stdout.includes('claude-*'));
 
-    const delRes = await run(['upstream:map:delete', env.UPSTREAM_NAME, 'claude-*'], configPath);
+    const delRes = await run(['upstream:map:delete', fixture.name, 'claude-*'], configPath);
     assert.equal(delRes.code, 0);
     assert.ok(delRes.stdout.includes('Deleted'));
 
-    const list2 = await run(['upstream:map:list', env.UPSTREAM_NAME], configPath);
+    const list2 = await run(['upstream:map:list', fixture.name], configPath);
     assert.ok(list2.stdout.includes('No modelMap entries'));
   } finally {
     if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
   }
 });
 
-test('test <upstream> — real connectivity probe', async () => {
-  assertEnv([
-    'UPSTREAM_NAME',
-    'UPSTREAM_PROVIDER',
-    'UPSTREAM_PROTOCOL',
-    'UPSTREAM_BASE_URL',
-    'UPSTREAM_API_KEY',
-    'UPSTREAM_REAL_MODEL',
-  ]);
-
+test('test <upstream> — real connectivity probe', {
+  skip: !hasEnv([...upstreamEnv, 'UPSTREAM_REAL_MODEL']) && 'Requires opt-in live .env credentials',
+}, async () => {
   const configPath = tmpConfigPath();
   try {
     await run(

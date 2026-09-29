@@ -1,0 +1,25 @@
+[Unit]
+Description=model-router proxy and admin console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=model-router
+Group=model-router
+WorkingDirectory=/opt/model-router
+StateDirectory=model-router
+StateDirectoryMode=0700
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/model-router/dist/cli/index.js start --config /var/lib/model-router/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/model-router
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+services:
+  model-router:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: model-router:local
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    ports:
+      - "127.0.0.1:15005:15005" # model proxy
+      - "127.0.0.1:15006:15006" # admin UI/API; keep behind TLS reverse proxy
+    volumes:
+      - model-router-data:/data
+
+volumes:
+  model-router-data:

@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      RUN_OLLAMA_SMOKE: "0"
+      RUN_KIMI_SMOKE: "0"
+      RUN_DEEPSEEK_SMOKE: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install from lockfile
+        run: npm ci
+      - name: Build server and console
+        run: npm run build
+      - name: Run offline tests
+        run: npm test
+      - name: Install Chromium for browser E2E
+        run: npx playwright install --with-deps chromium
+      - name: Run browser E2E
+        run: npm run test:e2e
+
+  managed-saas-postgres-integration:
+    name: Managed SaaS PostgreSQL integration (PG ${{ matrix.postgres-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: node:22.16.0-bookworm
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["15", "18"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_DB: model_router_saas_ci
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres -d model_router_saas_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends postgresql-client openssl
+          rm -rf /var/lib/apt/lists/*
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Apply managed SaaS role template, full migrations, and runtime privilege probe
+        run: bash tests/saas/db/managed-postgres-runtime-privileges.integration.sh
+      # These optional live probes CREATE/DROP only random isolated schemas, so
+      # they use the trust-enabled PostgreSQL service administrator. The
+      # production migrator remains database/schema CREATE- and TEMP-restricted;
+      # runtime privilege checks and gateway E2E below continue using app roles.
+      - name: Run standalone migration 050 prepared evidence authorization advisory fence test
+        env:
+          MODEL_ROUTER_SAAS_MIGRATION_050_TEST_URL: postgresql://postgres@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/db/migrations/050_prepared_evidence_authorization_advisory_fences.test.ts
+      - name: Run standalone migration 051 unknown-outcome support-ticket test
+        env:
+          MODEL_ROUTER_SAAS_MIGRATION_051_TEST_URL: postgresql://postgres@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/db/migrations/051_unknown_outcome_support_ticket.test.ts
+      - name: Run real PostgreSQL commercial gateway HTTP E2E
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts

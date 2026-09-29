@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 2,
+  "revision": 1,
+  "instanceId": "docker-local",
+  "server": {
+    "port": 15005,
+    "bindAddress": "0.0.0.0",
+    "publicProxyBaseUrl": "http://127.0.0.1:15005",
+    "maxBodyBytes": 4194304,
+    "maxAttempts": 3,
+    "connectTimeoutMs": 10000,
+    "firstByteTimeoutMs": 60000,
+    "streamIdleTimeoutMs": 60000,
+    "totalRequestTimeoutMs": 300000,
+    "trustedProxyCidrs": []
+  },
+  "admin": {
+    "enabled": true,
+    "port": 15006,
+    "bindAddress": "0.0.0.0",
+    "publicAdminBaseUrl": "http://127.0.0.1:15006",
+    "sessionTtlSeconds": 28800
+  },
+  "storage": {
+    "dataDir": "/data",
+    "flushIntervalMs": 250,
+    "batchSize": 100,
+    "requestRetentionDays": 30,
+    "minuteRetentionDays": 7,
+    "hourRetentionDays": 90,
+    "dailyRetentionDays": 400
+  },
+  "quota": {
+    "timezone": "UTC",
+    "semanticsVersion": "normalized_v2",
+    "missingUsagePolicy": "retain-reservation",
+    "defaultMaxConcurrentRequests": 10
+  },
+  "upstreams": [],
+  "routes": [],
+  "proxyKeys": []
+}
