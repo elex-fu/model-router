@@ -1,9 +1,28 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { ConfigStore } from '../config/store.js';
+import {
+  type DeploymentEnvironment,
+  MODEL_ROUTER_DEPLOYMENT_MODE,
+  MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
+} from '../saas/deployment.js';
 import { generateProxyKey } from '../utils/generate-key.js';
 import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
+import { saasBootstrapAdmin } from './saas-management.js';
+import { saasMigrate } from './saas-migrations.js';
+import { tryV2, v2Config } from './v2.js';
+import {
+  adminBootstrap,
+  backupCreate,
+  backupRestore,
+  configApply,
+  configMigrate,
+  configValidate,
+  telemetryRebuildLive,
+  upstreamTest,
+  upstreamUpdate,
+} from './v2-management.js';
 
 const program = new Command();
 
@@ -12,6 +31,124 @@ program.name('model-router').description('Lightweight AI model proxy').version('
 function getStore(options: { config?: string }) {
   return new ConfigStore(options.config ?? DEFAULT_CONFIG_PATH);
 }
+
+type StartRoleOptions = {
+  role?: string;
+  workloadRole?: string;
+};
+
+/**
+ * Select a managed SaaS workload without mutating the supervisor environment.
+ * The server remains responsible for validating the complete deployment
+ * contract and running every readiness/privilege gate before it binds.
+ */
+function resolveStartEnvironment(options: StartRoleOptions): DeploymentEnvironment {
+  const requestedRoles = [options.role, options.workloadRole].filter((role): role is string => role !== undefined);
+  if (requestedRoles.length === 0) return process.env;
+
+  const requestedRole = requestedRoles[0];
+  if (requestedRoles.some((role) => role !== requestedRole)) {
+    throw new Error('--role and --workload-role must select the same managed SaaS workload role');
+  }
+
+  const configuredMode = process.env[MODEL_ROUTER_DEPLOYMENT_MODE];
+  if (configuredMode !== undefined && configuredMode !== 'managed-saas') {
+    throw new Error(`--role requires ${MODEL_ROUTER_DEPLOYMENT_MODE}=managed-saas`);
+  }
+  const configuredRole = process.env[MODEL_ROUTER_SAAS_WORKLOAD_ROLE];
+  if (configuredRole !== undefined && configuredRole !== requestedRole) {
+    throw new Error(`--role conflicts with ${MODEL_ROUTER_SAAS_WORKLOAD_ROLE}`);
+  }
+
+  return Object.freeze({
+    ...process.env,
+    [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas',
+    [MODEL_ROUTER_SAAS_WORKLOAD_ROLE]: requestedRole,
+  });
+}
+
+async function management(action: () => Promise<void>) {
+  try {
+    await action();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Command failed');
+    process.exitCode = 1;
+  }
+}
+
+program
+  .command('config:validate')
+  .description('Validate an offline V2 configuration without changing it')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .action((options) => management(() => configValidate(options)));
+
+program
+  .command('config:migrate')
+  .description('Preview the V1-to-V2 conversion or perform an offline V2 migration')
+  .option('--dry-run', 'Convert and validate without writing configuration, secrets, or backup')
+  .option('-c, --config <path>', 'Path to configuration')
+  .action((options) => management(() => configMigrate(options)));
+
+program
+  .command('admin:bootstrap')
+  .description('Create the first administrator via the local admin listener')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .option('--test-stdin', 'Test-only: read token, name, and password from three stdin lines')
+  .action((options) => management(() => adminBootstrap(options)));
+
+program
+  .command('saas:bootstrap-admin')
+  .description('Create the first SaaS platform administrator directly in PostgreSQL')
+  .action(() => management(() => saasBootstrapAdmin()));
+
+program
+  .command('saas:migrate')
+  .description('Apply SaaS database migrations explicitly. Server startup never runs migrations.')
+  .action(() => management(() => saasMigrate()));
+
+program
+  .command('config:apply <path>')
+  .description('Apply a V2 JSON file to an offline target with revision CAS')
+  .option('--expected-revision <revision>', 'Fail unless the current revision matches')
+  .option('-c, --config <path>', 'Target configuration path')
+  .action((path, options) => management(() => configApply(path, options)));
+
+program
+  .command('upstream:update <name>')
+  .description('Update an offline V2 upstream')
+  .option('--base-url <url>', 'New upstream base URL')
+  .option('--model <model>', 'Add an enabled model')
+  .option('--enable', 'Enable upstream')
+  .option('--disable', 'Disable upstream')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .action((name, options) => management(() => upstreamUpdate(name, options)));
+
+program
+  .command('upstream:test <name>')
+  .description('Probe a V2 upstream without changing configuration')
+  .option('--model <model>', 'Override model')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .action((name, options) => management(() => upstreamTest(name, options)));
+
+program
+  .command('backup:create')
+  .description('Create an offline V2 config, secrets, control and telemetry backup')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .action((options) => management(() => backupCreate(options)));
+
+program
+  .command('backup:restore <backupId>')
+  .description('Restore a complete V2 backup to a fully stopped instance')
+  .requiredOption('-c, --config <path>', 'Explicit path to the stopped V2 configuration')
+  .requiredOption('--expected-revision <revision>', 'Current configuration revision CAS')
+  .action((backupId, options) => management(() => backupRestore(backupId, options)));
+
+program
+  .command('telemetry:rebuild-live')
+  .description('Rebuild live telemetry aggregates on a fully stopped V2 instance')
+  .requiredOption('-c, --config <path>', 'Explicit path to the stopped V2 configuration')
+  .requiredOption('--expected-revision <revision>', 'Current configuration revision CAS')
+  .action((options) => management(() => telemetryRebuildLive(options)));
 
 // start
 program
@@ -24,8 +161,11 @@ program
   .option('--daemon', 'Run in background; requires --pid-file (and usually --log-file)')
   .option('--log-file <path>', 'Daemon stdout/stderr log file')
   .option('--pid-file <path>', 'Daemon PID file')
+  .option('--role <role>', 'Managed SaaS workload role; selects managed-saas startup')
+  .option('--workload-role <role>', 'Alias for --role')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
+    const environment = resolveStartEnvironment(options);
     let maxBodyBytes: number | undefined;
     if (options.maxBodySize) {
       const { parseByteSize } = await import('./size.js');
@@ -52,6 +192,8 @@ program
       if (options.bind) childArgs.push('--bind', options.bind);
       if (options.maxBodySize) childArgs.push('--max-body-size', options.maxBodySize);
       if (options.trustProxy) childArgs.push('--trust-proxy');
+      if (options.role) childArgs.push('--role', options.role);
+      if (options.workloadRole) childArgs.push('--workload-role', options.workloadRole);
       if (options.config) childArgs.push('--config', options.config);
       const pid = spawnDaemon({
         args: childArgs,
@@ -66,6 +208,7 @@ program
       bindAddress: options.bind,
       maxBodyBytes,
       trustProxy: options.trustProxy,
+      environment,
     });
   });
 
@@ -131,7 +274,8 @@ program
   .option('--daily-tokens <n>', 'Max input+output tokens per local day')
   .option('--expires <iso>', 'ISO 8601 timestamp; omit = never expires')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('key:create', options, name)) return;
     const store = getStore(options);
     const key = generateProxyKey();
     let patch: Partial<import('../config/types.js').ProxyKey>;
@@ -167,7 +311,8 @@ program
   .option('--daily-tokens <n>', 'Set daily token limit (0 = blocked)')
   .option('--expires <iso>', `Set expiry; literal "never" clears it`)
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('key:update', options, name)) return;
     const store = getStore(options);
     const existing = store.getProxyKeyByName(name);
     if (!existing) {
@@ -190,7 +335,8 @@ program
   .command('key:rotate <name>')
   .description('Generate a new key string for the named proxy key (old key invalidated immediately)')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('key:rotate', options, name)) return;
     const store = getStore(options);
     if (!store.getProxyKeyByName(name)) {
       console.error(`Proxy key "${name}" not found`);
@@ -207,7 +353,8 @@ program
   .command('key:enable <name>')
   .description('Enable a proxy key')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('key:enable', options, name)) return;
     const store = getStore(options);
     if (!store.setProxyKeyEnabled(name, true)) {
       console.error(`Proxy key "${name}" not found`);
@@ -220,7 +367,8 @@ program
   .command('key:disable <name>')
   .description('Disable a proxy key')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('key:disable', options, name)) return;
     const store = getStore(options);
     if (!store.setProxyKeyEnabled(name, false)) {
       console.error(`Proxy key "${name}" not found`);
@@ -236,6 +384,7 @@ program
   .option('--show-secrets', 'Show full key strings (unsafe)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
+    if (await tryV2('key:list', options)) return;
     const store = getStore(options);
     const keys = store.listProxyKeys();
     if (keys.length === 0) {
@@ -279,7 +428,8 @@ program
   .command('key:delete <name>')
   .description('Delete a proxy key')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('key:delete', options, name)) return;
     const store = getStore(options);
     store.deleteProxyKey(name);
     console.log(`Deleted proxy key: ${name}`);
@@ -291,8 +441,15 @@ program
   .description('Add a new upstream')
   .option('-m, --models <models>', 'Comma-separated list of models')
   .option('--map <entries>', 'Comma-separated modelMap entries: pattern=target,...')
+  .option('--auth-mode <mode>', 'V2 auth mode: bearer|x-api-key|google|none (use - for apiKeys with none)')
+  .option(
+    '--allow-insecure-http',
+    'V2 only: allow plaintext HTTP to localhost/private IPs; credentials and prompts may be exposed',
+  )
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, provider, protocol, baseUrl, apiKeys, options) => {
+  .action(async (name, provider, protocol, baseUrl, apiKeys, options) => {
+    if (await tryV2('upstream:add', options, name, provider, protocol, baseUrl, apiKeys)) return;
+    if (options.allowInsecureHttp) throw new Error('--allow-insecure-http is supported only by V2 configuration');
     const store = getStore(options);
     const models = options.models
       ? String(options.models)
@@ -347,6 +504,7 @@ program
   .option('--show-secrets', 'Show full apiKeys strings (unsafe)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (options) => {
+    if (await tryV2('upstream:list', options)) return;
     const store = getStore(options);
     const upstreams = store.listUpstreams();
     if (upstreams.length === 0) {
@@ -373,7 +531,8 @@ program
   .command('upstream:delete <name>')
   .description('Delete an upstream')
   .option('-c, --config <path>', 'Path to config file')
-  .action((name, options) => {
+  .action(async (name, options) => {
+    if (await tryV2('upstream:delete', options, name)) return;
     const store = getStore(options);
     store.deleteUpstream(name);
     console.log(`Deleted upstream: ${name}`);
@@ -384,7 +543,8 @@ program
   .command('upstream:map:set <upstream> <pattern> <target>')
   .description('Add or update a modelMap entry on an upstream')
   .option('-c, --config <path>', 'Path to config file')
-  .action((upstream, pattern, target, options) => {
+  .action(async (upstream, pattern, target, options) => {
+    if (await tryV2('upstream:map:set', options, upstream, pattern, target)) return;
     const store = getStore(options);
     store.setModelMapEntry(upstream, pattern, target);
     console.log(`Set ${upstream}: ${pattern} → ${target}`);
@@ -395,7 +555,8 @@ program
   .command('upstream:map:delete <upstream> <pattern>')
   .description('Delete a modelMap entry on an upstream')
   .option('-c, --config <path>', 'Path to config file')
-  .action((upstream, pattern, options) => {
+  .action(async (upstream, pattern, options) => {
+    if (await tryV2('upstream:map:delete', options, upstream, pattern)) return;
     const store = getStore(options);
     store.deleteModelMapEntry(upstream, pattern);
     console.log(`Deleted ${upstream}: ${pattern}`);
@@ -406,7 +567,8 @@ program
   .command('upstream:map:list <upstream>')
   .description('List modelMap entries for an upstream')
   .option('-c, --config <path>', 'Path to config file')
-  .action((upstream, options) => {
+  .action(async (upstream, options) => {
+    if (await tryV2('upstream:map:list', options, upstream)) return;
     const store = getStore(options);
     const u = store.getUpstream(upstream);
     if (!u) {
@@ -429,6 +591,7 @@ program
   .option('-c, --config <path>', 'Path to config file')
   .option('--model <model>', 'Override the model used in the probe')
   .action(async (upstreamName, options) => {
+    if (await tryV2('test', options, upstreamName)) return;
     const store = getStore(options);
     const u = store.getUpstream(upstreamName);
     if (!u) {
@@ -499,8 +662,9 @@ program
   .option('--key <key>', 'Proxy key to use (defaults to first enabled key)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (model, message, options) => {
-    const store = getStore(options);
-    const cfg = store.load();
+    const rawV2 = v2Config(options);
+    const store = rawV2 ? undefined : getStore(options);
+    const cfg = rawV2 ?? store!.load();
     const bind = cfg.server.bindAddress ?? '127.0.0.1';
     const port = cfg.server.port ?? 15005;
     const baseUrl = `http://${bind}:${port}`;
@@ -512,15 +676,26 @@ program
     }
 
     let proxyKey: string = options.key;
-    if (!proxyKey) {
-      const keys = store.listProxyKeys().filter((k) => k.enabled);
+    if (rawV2) {
+      if (!proxyKey) {
+        console.error('V2 proxy keys cannot be recovered; pass the raw key with --key');
+        process.exitCode = 1;
+        return;
+      }
+      if (rawV2.proxyKeys.some((key) => key.id === proxyKey || key.name === proxyKey)) {
+        console.error('V2 proxy key names cannot be resolved to plaintext; pass the raw key with --key');
+        process.exitCode = 1;
+        return;
+      }
+    } else if (!proxyKey) {
+      const keys = store!.listProxyKeys().filter((k) => k.enabled);
       if (keys.length === 0) {
         console.error('No enabled proxy keys found. Create one with key:create or pass --key');
         process.exit(1);
       }
       proxyKey = keys[0].key;
     } else {
-      const found = store.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
+      const found = store!.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
       if (!found) {
         console.error(`Proxy key "${options.key}" not found`);
         process.exit(1);
