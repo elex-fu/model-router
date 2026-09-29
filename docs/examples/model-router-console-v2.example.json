@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 2,
+  "revision": 1,
+  "instanceId": "router-example",
+  "server": {
+    "port": 15005,
+    "bindAddress": "127.0.0.1",
+    "publicProxyBaseUrl": "http://127.0.0.1:15005",
+    "maxBodyBytes": 4194304,
+    "maxAttempts": 3,
+    "connectTimeoutMs": 10000,
+    "firstByteTimeoutMs": 60000,
+    "streamIdleTimeoutMs": 60000,
+    "totalRequestTimeoutMs": 300000,
+    "trustedProxyCidrs": []
+  },
+  "admin": {
+    "enabled": true,
+    "port": 15006,
+    "bindAddress": "127.0.0.1",
+    "publicAdminBaseUrl": "http://127.0.0.1:15006",
+    "sessionTtlSeconds": 28800
+  },
+  "storage": {
+    "dataDir": "./data",
+    "flushIntervalMs": 250,
+    "batchSize": 100,
+    "requestRetentionDays": 30,
+    "minuteRetentionDays": 7,
+    "hourRetentionDays": 90,
+    "dailyRetentionDays": 400
+  },
+  "quota": {
+    "timezone": "UTC",
+    "semanticsVersion": "normalized_v2",
+    "missingUsagePolicy": "retain-reservation",
+    "defaultMaxConcurrentRequests": 10
+  },
+  "upstreams": [
+    {
+      "id": "up_kimi_platform",
+      "name": "Kimi 开放平台",
+      "provider": "kimi",
+      "presetId": "kimi-platform",
+      "protocol": "openai",
+      "enabled": true,
+      "baseUrl": "https://api.moonshot.cn/v1",
+      "endpoints": { "generate": "chat/completions", "models": "models" },
+      "auth": { "mode": "bearer" },
+      "credentials": [
+        {
+          "id": "cred_kimi_platform",
+          "label": "平台 API Key",
+          "enabled": true,
+          "secret": { "type": "env", "name": "MOONSHOT_API_KEY" }
+        }
+      ],
+      "accountGroupId": "account_kimi_platform",
+      "models": [
+        { "id": "kimi-k3", "enabled": true, "capabilities": { "text": "supported" }, "capabilitiesSource": "preset" }
+      ],
+      "priority": 0,
+      "sortIndex": 0,
+      "policy": {
+        "thinking": "preserve",
+        "healthMode": "passive",
+        "requestStreamUsage": true
+      }
+    },
+    {
+      "id": "up_kimi_code",
+      "name": "Kimi Code",
+      "provider": "kimi",
+      "presetId": "kimi-code",
+      "protocol": "anthropic",
+      "enabled": false,
+      "baseUrl": "https://api.kimi.com/coding/v1",
+      "endpoints": { "generate": "messages" },
+      "auth": { "mode": "x-api-key" },
+      "credentials": [
+        {
+          "id": "cred_kimi_code",
+          "label": "Code API Key",
+          "enabled": true,
+          "secret": { "type": "env", "name": "KIMI_CODE_API_KEY" }
+        }
+      ],
+      "accountGroupId": "account_kimi_code",
+      "models": [
+        { "id": "kimi-for-coding", "enabled": true, "capabilities": { "text": "supported" }, "capabilitiesSource": "preset" }
+      ],
+      "priority": 0,
+      "sortIndex": 1,
+      "policy": {
+        "thinking": "preserve",
+        "healthMode": "passive",
+        "autoCacheControl": false,
+        "anthropicBetas": []
+      }
+    },
+    {
+      "id": "up_deepseek_chat",
+      "name": "DeepSeek Chat",
+      "provider": "deepseek",
+      "presetId": "deepseek-chat",
+      "protocol": "openai",
+      "enabled": true,
+      "baseUrl": "https://api.deepseek.com",
+      "endpoints": { "generate": "chat/completions", "models": "models" },
+      "auth": { "mode": "bearer" },
+      "credentials": [
+        {
+          "id": "cred_deepseek_chat",
+          "label": "DeepSeek API Key",
+          "enabled": true,
+          "secret": { "type": "env", "name": "DEEPSEEK_API_KEY" }
+        }
+      ],
+      "accountGroupId": "account_deepseek",
+      "models": [
+        { "id": "deepseek-flash", "enabled": true, "capabilities": { "text": "supported" }, "capabilitiesSource": "preset" }
+      ],
+      "priority": 0,
+      "sortIndex": 2,
+      "policy": {
+        "thinking": "preserve",
+        "healthMode": "passive",
+        "requestStreamUsage": true
+      }
+    },
+    {
+      "id": "up_deepseek_messages",
+      "name": "DeepSeek Messages",
+      "provider": "deepseek",
+      "presetId": "deepseek-anthropic",
+      "protocol": "anthropic",
+      "enabled": true,
+      "baseUrl": "https://api.deepseek.com/anthropic/v1",
+      "endpoints": { "generate": "messages" },
+      "auth": { "mode": "x-api-key" },
+      "credentials": [
+        {
+          "id": "cred_deepseek_messages",
+          "label": "DeepSeek API Key",
+          "enabled": true,
+          "secret": { "type": "env", "name": "DEEPSEEK_API_KEY" }
+        }
+      ],
+      "accountGroupId": "account_deepseek",
+      "models": [
+        { "id": "deepseek-flash", "enabled": true, "capabilities": { "text": "supported" }, "capabilitiesSource": "preset" }
+      ],
+      "priority": 0,
+      "sortIndex": 3,
+      "policy": {
+        "thinking": "preserve",
+        "healthMode": "passive",
+        "autoCacheControl": false,
+        "anthropicBetas": []
+      }
+    },
+    {
+      "id": "up_custom_openai",
+      "name": "自定义 OpenAI Chat",
+      "provider": "custom",
+      "presetId": "custom-openai",
+      "protocol": "openai",
+      "enabled": false,
+      "baseUrl": "https://openai-compatible.example.com/v1",
+      "endpoints": { "generate": "chat/completions", "models": "models" },
+      "auth": { "mode": "bearer" },
+      "credentials": [
+        {
+          "id": "cred_custom_openai",
+          "label": "自定义凭证",
+          "enabled": true,
+          "secret": { "type": "env", "name": "CUSTOM_OPENAI_API_KEY" }
+        }
+      ],
+      "models": [
+        { "id": "your-openai-model", "enabled": true, "capabilities": {}, "capabilitiesSource": "manual" }
+      ],
+      "priority": 10,
+      "sortIndex": 4,
+      "policy": { "thinking": "preserve", "healthMode": "passive", "requestStreamUsage": false }
+    },
+    {
+      "id": "up_custom_anthropic",
+      "name": "自定义 Anthropic",
+      "provider": "custom",
+      "presetId": "custom-anthropic",
+      "protocol": "anthropic",
+      "enabled": false,
+      "baseUrl": "https://anthropic-compatible.example.com/v1",
+      "endpoints": { "generate": "messages" },
+      "auth": { "mode": "x-api-key" },
+      "credentials": [
+        {
+          "id": "cred_custom_anthropic",
+          "label": "自定义凭证",
+          "enabled": true,
+          "secret": { "type": "env", "name": "CUSTOM_ANTHROPIC_API_KEY" }
+        }
+      ],
+      "models": [
+        { "id": "your-anthropic-model", "enabled": true, "capabilities": {}, "capabilitiesSource": "manual" }
+      ],
+      "priority": 10,
+      "sortIndex": 5,
+      "policy": {
+        "thinking": "preserve",
+        "healthMode": "passive",
+        "anthropicVersion": "2023-06-01",
+        "anthropicBetas": [],
+        "autoCacheControl": false,
+        "inputIncludesCache": false
+      }
+    },
+    {
+      "id": "up_custom_responses",
+      "name": "自定义原生 Responses",
+      "provider": "custom",
+      "presetId": "custom-openai",
+      "protocol": "responses",
+      "enabled": false,
+      "baseUrl": "https://responses-compatible.example.com/v1",
+      "endpoints": { "generate": "responses", "compact": "responses/compact" },
+      "auth": { "mode": "bearer" },
+      "credentials": [
+        {
+          "id": "cred_custom_responses",
+          "label": "原生 Responses 凭证",
+          "enabled": true,
+          "secret": { "type": "env", "name": "CUSTOM_RESPONSES_API_KEY" }
+        }
+      ],
+      "models": [
+        { "id": "your-responses-model", "enabled": true, "capabilities": {}, "capabilitiesSource": "manual" }
+      ],
+      "priority": 10,
+      "sortIndex": 6,
+      "policy": { "thinking": "preserve", "healthMode": "passive" }
+    },
+    {
+      "id": "up_ollama_local",
+      "name": "Ollama 本地验证",
+      "provider": "custom",
+      "presetId": "custom-openai",
+      "protocol": "openai",
+      "enabled": true,
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "endpoints": { "generate": "chat/completions", "models": "models" },
+      "auth": { "mode": "none" },
+      "credentials": [],
+      "models": [
+        { "id": "qwen2.5-coder:7b", "enabled": true, "capabilities": { "text": "supported" }, "capabilitiesSource": "manual" }
+      ],
+      "priority": 0,
+      "sortIndex": 7,
+      "policy": { "thinking": "preserve", "healthMode": "passive", "allowInsecureHttp": true }
+    }
+  ],
+  "routes": [
+    {
+      "id": "route_chat",
+      "name": "通用聊天",
+      "enabled": true,
+      "clientProtocols": ["openai"],
+      "match": { "kind": "exact", "value": "chat-default" },
+      "order": 0,
+      "publishedModels": ["chat-default"],
+      "targets": [
+        { "upstreamId": "up_kimi_platform", "model": "kimi-k3" },
+        { "upstreamId": "up_deepseek_chat", "model": "deepseek-flash" }
+      ]
+    },
+    {
+      "id": "route_messages",
+      "name": "Messages 编程助手",
+      "enabled": true,
+      "clientProtocols": ["anthropic"],
+      "match": { "kind": "exact", "value": "code-default" },
+      "order": 1,
+      "publishedModels": ["code-default"],
+      "targets": [
+        { "upstreamId": "up_deepseek_messages", "model": "deepseek-flash" },
+        { "upstreamId": "up_kimi_code", "model": "kimi-for-coding" }
+      ]
+    },
+    {
+      "id": "route_custom_openai",
+      "name": "自定义 Chat",
+      "enabled": false,
+      "clientProtocols": ["openai", "anthropic"],
+      "match": { "kind": "exact", "value": "custom-chat" },
+      "order": 2,
+      "publishedModels": ["custom-chat"],
+      "targets": [{ "upstreamId": "up_custom_openai", "model": "your-openai-model" }]
+    },
+    {
+      "id": "route_custom_anthropic",
+      "name": "自定义 Messages",
+      "enabled": false,
+      "clientProtocols": ["anthropic", "openai"],
+      "match": { "kind": "exact", "value": "custom-messages" },
+      "order": 3,
+      "publishedModels": ["custom-messages"],
+      "targets": [{ "upstreamId": "up_custom_anthropic", "model": "your-anthropic-model" }]
+    },
+    {
+      "id": "route_custom_responses",
+      "name": "自定义 Responses",
+      "enabled": false,
+      "clientProtocols": ["responses"],
+      "match": { "kind": "exact", "value": "custom-responses" },
+      "order": 4,
+      "publishedModels": ["custom-responses"],
+      "targets": [{ "upstreamId": "up_custom_responses", "model": "your-responses-model" }]
+    },
+    {
+      "id": "route_local_code",
+      "name": "本地代码模型",
+      "enabled": true,
+      "clientProtocols": ["openai", "anthropic"],
+      "match": { "kind": "exact", "value": "local-code" },
+      "order": 5,
+      "publishedModels": ["local-code"],
+      "targets": [{ "upstreamId": "up_ollama_local", "model": "qwen2.5-coder:7b" }]
+    }
+  ],
+  "proxyKeys": []
+}

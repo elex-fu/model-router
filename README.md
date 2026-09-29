@@ -1,6 +1,42 @@
 # model-router
 
-轻量级 AI 模型代理服务，统一接入 Claude Code、OpenAI SDK 等客户端，支持 Anthropic ↔ OpenAI 双向协议桥接、多 Key 路由、modelMap 模型重写、异步日志记录与统计查询。
+轻量级 AI 模型代理服务，统一接入 Claude Code、OpenAI SDK 等客户端，支持 Anthropic ↔ OpenAI 双向协议桥接、多 Key 路由、模型重写、用量统计与本地 Web 控制台。支持 Kimi、DeepSeek，以及自定义 OpenAI Chat、Anthropic Messages 和原生 Responses 上游。
+
+实现边界与配置字段见 [完整技术方案](docs/model-router-console-technical-design.md)及 [V2 配置示例](docs/examples/model-router-console-v2.example.json)。供应商账号必须由你自行提供；没有官方凭证也可以使用本地 Ollama 验证代理链路。
+
+生产部署和容器、systemd、launchd 样例见 [部署指南](deploy/README.md)。
+
+## Web 控制台与 V2 配置
+
+构建要求 Node.js 20.19+ 或 22.12+。
+
+运行 `npm install && npm run build` 后执行 `model-router start`。V2 默认将代理绑定到 `127.0.0.1:15005`，管理端绑定到 `127.0.0.1:15006`；浏览器打开 [http://127.0.0.1:15006/admin/](http://127.0.0.1:15006/admin/)。首次启动会在本机终端输出限时 bootstrap token，用它创建管理员账号。管理端默认只监听回环地址；如要经反向代理公开访问，应先设置固定的 `publicAdminBaseUrl`、TLS 和可信代理网段。
+
+已有 V1 配置会在首次 V2 启动时迁移；迁移前旧配置会加密备份。UI 管理的上游凭证加密保存在本地数据库，UI 与配置导出不会回传凭证值；新增代理 Key 仅创建或轮换时显示一次。运行中的 V2 服务请通过管理端修改配置，离线 CLI 写入会拒绝，避免覆盖在线状态。
+
+如需直接在本机配置文件中填写上游 Key，使用 `secret: { "type": "inline", "value": "你的供应商 Key" }`。`value` 只校验非空，不限制不同供应商的 Key 格式；配置文件应设为仅当前用户可读（0600），并避免提交到版本库。`type: "env"` 则表示 `name` 是环境变量名，不是 Key 本身；管理界面、API、脱敏导出不会返回 inline 明文，历史快照会加密保存。
+
+离线维护可使用 `model-router config:validate --config <path>`、`config:migrate --dry-run`、`config:apply <source> --config <target> --expected-revision <n>` 和 `backup:create --config <path>`。备份包含配置、加密主密钥及 SQLite 一致性快照。**在线** `POST /admin/api/v1/maintenance/jobs` 的 `restore` 任务仍只对配置做 CAS 恢复并补齐缺失的 secret，不替换控制库或历史用量库；不要把它当作全量恢复，也不要在浏览器里触发数据库替换。
+
+完整恢复必须先停止代理及管理服务，并确保恢复期间不会被进程管理器自动重启，再在服务器本机执行：
+
+```sh
+model-router backup:restore <backupId> --config <配置文件绝对路径> --expected-revision <当前配置版本号>
+```
+
+`backupId` 来自已完成的备份任务结果；`--expected-revision` 是**当前**持久化配置版本，不是备份版本。离线命令校验备份与停机状态，恢复配置、`master.key`、`control.sqlite`，并把备份中的 `telemetry.sqlite` 恢复为运行时 `logs.sqlite`。执行前会保留可恢复的 `restore-safety-*` 当前状态快照；请确认恢复结果及重启后的数据无误后再由运维人员决定如何保留或清理它，不要提前删除。若命令报告中断回滚或拒绝执行，保持服务停止、检查报错及快照，再重试；不要通过浏览器或手工复制单个 SQLite 文件绕过校验。
+
+本地验证可在“上游”页面选择 “Ollama 本地验证”，地址 `http://127.0.0.1:11434/v1`、模型 `qwen2.5-coder:7b`、认证方式 `none`。随后创建路由、代理访问 Key，在“测试台”或客户端通过 `http://127.0.0.1:15005/v1/chat/completions` 发起请求。Ollama 只用于本地功能验证，不能代表 Kimi、DeepSeek 等云端模型的协议细节或价格。用量页将缺失 usage 的尝试标为未知；费用仅在你配置相应模型价格后估算，不能当作账单。
+
+本机提供的 Ollama 版本为 `0.34.3`，该模型声明上下文为 32768 tokens；控制台不会把“模型已安装”自动升级为工具、图片或推理能力已验证。
+
+运行 `npm run test:live:ollama` 可执行本地 Ollama 代理冒烟；普通 `npm test` 只运行离线单元与集成测试，不会自动调用模型或产生云端费用。浏览器 E2E 单独运行 `npm run test:e2e`，可使用 Playwright 默认的 Chromium（需先安装：`npx playwright install chromium`）；如果环境已安装 Google Chrome，也可运行 `E2E_USE_SYSTEM_CHROME=1 npm run test:e2e` 使用系统 Chrome。Kimi/DeepSeek 的专用凭证冒烟分别由 `test:live:kimi` 和 `test:live:deepseek` 显式触发，仍需设置对应的 `*_LIVE_API_KEY` 与 `*_LIVE_MODEL` 环境变量；它们不是完整协议能力矩阵验收。
+
+账号授权页仅对已验证的 OAuth 能力开放操作；未验证的设备流或客户端凭证流程不会伪装成可用。原生 Responses 只转发到声明支持它的上游，Chat/Anthropic 桥接不会冒充完整 Responses 能力。
+
+下文的 `upstream:add`、`key:create` 等命令示例主要为旧版 CLI 兼容说明。V2 配置在服务停止时可使用 CLI 修改；服务运行时请使用 Web 控制台或管理 API。新增上游后还需发布路由，客户端才能调用对应模型。
+
+验证边界：自动化测试覆盖供应商 URL、认证、协议转换、SSE、权限与配额；本地 Ollama 已验证非流式、流式和管理端测试台。Kimi/DeepSeek 的真实账号、模型能力与费用仍需使用专用凭证逐项确认。旧版日志迁移后以 `legacyLogRows` 单列，不会假装能从旧行恢复重试链；超出明细保留期的统计仅支持已归档的完整 UTC 日及已保存维度。
 
 ## 特性
 
@@ -10,14 +46,14 @@
 - **同 upstream 多 Key 自动调度**：每个 upstream 支持配置多个 API Key，请求时轮询调度；某个 Key 连续失败 3 次后自动冷却 5 分钟，同 upstream 内兜底切换到其它 Key
 - **多 upstream 故障降级 + 熔断器**：同一 model 可挂多个 upstream，失败自动降级到其它 upstream；每个 upstream 独立 Circuit Breaker（Closed/Open/HalfOpen），防止故障扩散
 - **代理 Key 鉴权**：为不同使用方分配独立的代理 key，认证错误按客户端协议返回
-- **上游认证策略区分**：支持 `Authorization: Bearer`（默认）与 `x-api-key` 两种上游鉴权模式，以及 OAuth 动态令牌解析与透传
+- **上游认证策略区分**：支持 `Authorization: Bearer`、`x-api-key`、经过校验的自定义 Header，以及 OAuth 动态令牌解析与受限透传
 - **Copilot 请求优化**：上游启用 `copilotOptimized` 后，自动执行请求分类、thinking 块剥离、tool_result 合并、warmup 模型降级、确定性 ID 注入
 - **System Prompt 计费头清洗**：自动剥离 Claude Code CLI 注入的 `x-anthropic-billing-header` 前缀，避免 upstream 400
 - **流式 + 非流式全程支持**：SSE 状态机在桥接两端正确还原 `tool_use`、`tool_calls`、`finish_reason`、usage 计数
 - **异步日志记录**：每条请求记录 `client_protocol` / `upstream_protocol` / 模型 / token / 耗时,本地 SQLite
 - **健康检查端点**：`GET /healthz` 返回 200 + `{status:"ok",db:"ok"}`，反代 / 监控可直接探活；DB 不可达时返回 503
 - **认证防爆破**：同一 IP 在 5 分钟内连续 10 次认证失败后，后续请求直接 429，成功一次自动清零
-- **X-Forwarded-For 信任开关**：`--trust-proxy` 仅在置于可信反代后开启，防止 IP 伪造绕过防爆破；默认直接取 socket 地址
+- **X-Forwarded-For 信任配置**：V2 仅信任 `server.trustedProxyCidrs` 指定的反代地址；单独使用旧版 `--trust-proxy` 不会放宽信任范围
 - **连接防泄漏**：客户端断开时自动中止上游 fetch；SSE 流 60s 无数据自动关闭，防止僵尸连接堆积
 - **SQLite WAL**：`PRAGMA journal_mode=WAL` 提升并发写入吞吐量，读写互不阻塞
 - **自动日志清理**：按 `server.logRetentionDays`（默认 30 天）自动清理旧日志，启动即执行并每 24h 轮询
@@ -150,8 +186,8 @@ model-router start
 # 指定端口
 model-router start --port 15005
 
-# 置于可信反代后，开启 XFF 信任（影响 IP 防爆破与日志中的 client_ip）
-model-router start --trust-proxy
+# 在 V2 配置的 server.trustedProxyCidrs 中指定可信反代地址后启动
+model-router start --config /path/to/config.json
 
 # daemon 后台运行
 model-router start --daemon --log-file /var/log/model-router.log
@@ -224,8 +260,8 @@ model-router start --port 15005 --config /etc/model-router/config.json
 # 限制最大请求体 (默认 4MB)
 model-router start --max-body-size 8mb
 
-# 信任 X-Forwarded-For（仅当在可信反代后开启）
-model-router start --trust-proxy
+# V2 请在配置文件中设置 server.trustedProxyCidrs；单独的旧 flag 不启用信任
+model-router start --config /etc/model-router/config.json
 
 # 后台运行并指定日志/PID 文件
 model-router start --daemon --log-file /var/log/model-router.log --pid-file /var/run/model-router.pid
@@ -652,9 +688,9 @@ npm test
 
 - 默认端口 `15005`,如有冲突可用 `--port` 覆盖
 - 默认绑定 `127.0.0.1`,需要对外暴露请显式 `--bind 0.0.0.0`(推荐放反代后)
-- **XFF 安全**: 仅在可信反代后开启 `--trust-proxy`；直接暴露到公网时保持默认（取 socket IP），否则攻击者可伪造 `X-Forwarded-For` 绕过 IP 防爆破
+- **XFF 安全**: V2 仅在 `server.trustedProxyCidrs` 指定实际反代网段；直接暴露公网时留空，否则客户端可伪造 `X-Forwarded-For`
 - 日志存储在 `~/.model-router/logs.sqlite`(WAL 模式),进程退出会自动 flush 未写入日志；默认保留 30 天，可在配置中调整 `logRetentionDays`
-- **API Key 安全**:妥善保管 upstream key 与代理 key;`key:list` / `upstream:list` 默认 mask,加 `--show-secrets` 才显示完整值
+- **API Key 安全**:妥善保管上游凭证与代理 Key；V2 代理 Key 只存摘要，无法通过 `--show-secrets` 恢复，遗失时需轮换
 - 协议字段必须为 `anthropic` 或 `openai`,否则 `upstream:add` 会拒绝
 
 ## 多用户与运营
@@ -711,7 +747,7 @@ model-router maintenance:vacuum
 
 1. `--bind 127.0.0.1`(默认)只允许本机访问
 2. Caddy / nginx 在前,负责 TLS、限速、访问日志
-3. `--trust-proxy` 仅在反代后开启，让代理从 `X-Forwarded-For` 读取真实客户端 IP（用于防爆破与日志审计）
+3. 在 V2 配置的 `server.trustedProxyCidrs` 中指定反代地址，使代理仅采信该来源的 `X-Forwarded-For`
 4. `--daemon` 让服务后台运行;`--pid-file` / `--log-file` 控制 PID 与日志路径
 
 启动:
@@ -721,13 +757,13 @@ model-router start \
   --bind 127.0.0.1 \
   --port 15005 \
   --max-body-size 4mb \
-  --trust-proxy \
+  --config /etc/model-router/config.json \
   --daemon \
   --log-file /var/log/model-router.log \
   --pid-file /var/run/model-router.pid
 ```
 
-> `--daemon` 会以当前 CLI 参数生成子进程，因此 `--trust-proxy`、`--bind`、`--max-body-size` 等 flag 会被自动继承到后台服务。
+> `--daemon` 会将 CLI 参数传给子进程；V2 的可信代理范围始终以配置文件为准。
 
 管理:
 
@@ -777,7 +813,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/model-router start --bind 127.0.0.1 --port 15005 --trust-proxy
+ExecStart=/usr/local/bin/model-router start --bind 127.0.0.1 --port 15005
 Restart=on-failure
 RestartSec=5
 
@@ -813,7 +849,6 @@ journalctl --user -u model-router -f
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>15005</string>
-    <string>--trust-proxy</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
