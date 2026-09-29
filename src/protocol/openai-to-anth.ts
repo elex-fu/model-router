@@ -15,6 +15,7 @@ import { parseSseStream, writeSseEvent } from './sse.js';
 export class OpenAIToAnthBridge implements Bridge {
   readonly clientProto: Protocol = 'openai';
   readonly upstreamProto: Protocol = 'anthropic';
+  private includeStreamUsage = false;
 
   rewriteUrlPath(clientPath: string): string {
     if (clientPath === '/v1/chat/completions') return '/v1/messages';
@@ -24,6 +25,7 @@ export class OpenAIToAnthBridge implements Bridge {
   transformRequest(clientBody: any): any {
     const out: any = {};
     const body = clientBody ?? {};
+    this.includeStreamUsage = body.stream_options?.include_usage === true;
 
     if (body.model !== undefined) out.model = body.model;
 
@@ -225,6 +227,7 @@ export class OpenAIToAnthBridge implements Bridge {
     });
 
     const encoder = new TextEncoder();
+    const includeStreamUsage = this.includeStreamUsage;
 
     type ToolBuf = {
       anthIndex: number; // anthropic content_block index
@@ -278,6 +281,23 @@ export class OpenAIToAnthBridge implements Bridge {
         };
 
         const emitDone = () => {
+          if (includeStreamUsage && (state.inputTokens !== undefined || state.outputTokens !== undefined)) {
+            const promptTokens = state.inputTokens ?? 0;
+            const completionTokens = state.outputTokens ?? 0;
+            const usageChunk = {
+              id: state.messageId || 'chatcmpl-' + randomId(),
+              object: 'chat.completion.chunk',
+              created: state.created,
+              model: state.model || '',
+              choices: [],
+              usage: {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+              },
+            };
+            controller.enqueue(encoder.encode(writeSseEvent({ data: JSON.stringify(usageChunk) })));
+          }
           const wire = writeSseEvent({ data: '[DONE]' });
           controller.enqueue(encoder.encode(wire));
         };

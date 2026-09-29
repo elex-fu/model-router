@@ -50,6 +50,7 @@ export abstract class BaseBridge implements Bridge {
   abstract wrapError(statusCode: number, message: string): BridgeError;
 }
 
+import { normalizeUsage } from '../providers/usage.js';
 import { AnthToOpenAIBridge } from './anth-to-openai.js';
 import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
 import { OpenAIToAnthBridge } from './openai-to-anth.js';
@@ -119,6 +120,7 @@ class PassthroughResponsesBridge implements Bridge {
     const usage: Promise<BridgeUsage> = (async () => {
       let inputTokens: number | undefined;
       let outputTokens: number | undefined;
+      let cacheReadTokens: number | undefined;
       for await (const ev of parseSseStream(toParser)) {
         const data = ev.data;
         if (!data || data === '[DONE]') continue;
@@ -128,10 +130,12 @@ class PassthroughResponsesBridge implements Bridge {
         } catch {
           continue;
         }
-        if (json?.response?.usage?.input_tokens !== undefined) inputTokens = json.response.usage.input_tokens;
-        if (json?.response?.usage?.output_tokens !== undefined) outputTokens = json.response.usage.output_tokens;
+        const u = normalizeUsage('responses', json?.response);
+        if (u.inputTokens !== undefined) inputTokens = u.inputTokens;
+        if (u.outputTokens !== undefined) outputTokens = u.outputTokens;
+        if (u.cacheReadTokens !== undefined) cacheReadTokens = u.cacheReadTokens;
       }
-      return { inputTokens, outputTokens };
+      return { inputTokens, outputTokens, cacheReadTokens };
     })();
     return { clientStream: toClient, usage };
   }

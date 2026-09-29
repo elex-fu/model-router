@@ -12,7 +12,10 @@ import { KeyLimiter } from '../../src/limit/limiter.js';
 import type { LogEntry } from '../../src/logger/types.js';
 import { KeyPool } from '../../src/server/keyPool.js';
 import { OAuthTokenResolver } from '../../src/server/oauth.js';
-import { proxyHandler } from '../../src/server/proxy.js';
+import { type ProxyHandlerOptions, proxyHandler } from '../../src/server/proxy.js';
+import { ResponseOwnershipStore } from '../../src/storage/response-ownership.js';
+import { SQLiteTelemetryStore } from '../../src/storage/telemetry-store.js';
+import type { AttemptRecord, RequestRecord } from '../../src/telemetry/types.js';
 
 interface MockCall {
   method: string;
@@ -84,17 +87,7 @@ interface ProxyHarness {
   configPath: string;
 }
 
-async function startProxy(
-  config: Config,
-  options: {
-    limiter?: KeyLimiter;
-    maxBodyBytes?: number;
-    keyPool?: KeyPool;
-    oauthResolver?: OAuthTokenResolver;
-    maxRetries?: number;
-    requestTimeoutMs?: number;
-  } = {},
-): Promise<ProxyHarness> {
+async function startProxy(config: Config, options: ProxyHandlerOptions = {}): Promise<ProxyHarness> {
   const tmpDir = path.join(os.tmpdir(), `mr-it-${randomUUID()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
   const configPath = path.join(tmpDir, 'config.json');
@@ -144,6 +137,497 @@ function baseConfig(upstreams: Config['upstreams']): Config {
     upstreams,
   };
 }
+
+test('configured upstream request policies affect Anthropic and streaming OpenAI requests', async () => {
+  const anthropic = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_policy',
+      type: 'message',
+      role: 'assistant',
+      model: 'custom-model',
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const anthropicProxy = await startProxy(
+    baseConfig([
+      {
+        name: 'custom-anthropic',
+        provider: 'custom',
+        presetId: 'custom-anthropic',
+        protocol: 'anthropic',
+        baseUrl: anthropic.baseUrl,
+        endpoint: 'messages',
+        apiKeys: [],
+        authMode: 'none',
+        models: ['custom-model'],
+        enabled: true,
+        thinkingPolicy: 'force',
+        autoCacheControl: true,
+        anthropicBetas: ['configured-beta'],
+        anthropicVersion: '2025-01-01',
+      },
+    ]),
+  );
+
+  const openai = await startMockUpstream(() => ({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+    body: 'data: {"id":"chunk-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: [DONE]\n\n',
+  }));
+  const openaiProxy = await startProxy(
+    baseConfig([
+      {
+        name: 'custom-openai',
+        provider: 'custom',
+        presetId: 'custom-openai',
+        protocol: 'openai',
+        baseUrl: openai.baseUrl,
+        endpoint: 'chat/completions',
+        apiKeys: [],
+        authMode: 'none',
+        models: ['custom-model'],
+        enabled: true,
+        requestStreamUsage: true,
+      },
+    ]),
+  );
+
+  try {
+    const anthropicResponse = await fetch(`${anthropicProxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'custom-model',
+        max_tokens: 64,
+        system: 'system',
+        messages: [{ role: 'user', content: 'hello' }],
+      }),
+    });
+    assert.equal(anthropicResponse.status, 200);
+    await anthropicResponse.json();
+    assert.equal(anthropic.calls[0]?.headers['anthropic-version'], '2025-01-01');
+    assert.equal(anthropic.calls[0]?.headers['anthropic-beta'], 'configured-beta');
+    assert.equal(anthropic.calls[0]?.body.thinking.type, 'enabled');
+    assert.deepEqual(anthropic.calls[0]?.body.system[0].cache_control, { type: 'ephemeral' });
+
+    const openaiResponse = await fetch(`${openaiProxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'custom-model', stream: true, messages: [{ role: 'user', content: 'hello' }] }),
+    });
+    assert.equal(openaiResponse.status, 200);
+    await openaiResponse.text();
+    assert.equal(openai.calls[0]?.body.stream_options.include_usage, true);
+  } finally {
+    await anthropicProxy.close();
+    await anthropic.close();
+    await openaiProxy.close();
+    await openai.close();
+  }
+});
+
+test('custom OpenAI /v1 prefix supports explicit no-auth, nonstream and optional usage', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'chatcmpl_local',
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 60 } },
+    },
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'ollama',
+        provider: 'custom-openai',
+        protocol: 'openai',
+        baseUrl: `${upstream.baseUrl}/v1`,
+        apiKeys: [],
+        authMode: 'none',
+        models: ['qwen2.5-coder:7b'],
+        enabled: true,
+      } as Config['upstreams'][number],
+    ]),
+  );
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen2.5-coder:7b', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(upstream.calls[0].url, '/v1/chat/completions');
+    assert.equal(upstream.calls[0].headers.authorization, undefined);
+    assert.equal(upstream.calls[0].headers['x-api-key'], undefined);
+    assert.equal(((await response.json()) as any).choices[0].message.content, 'ok');
+    assert.equal(proxy.logs[0].request_tokens, 100);
+    assert.equal(proxy.logs[0].response_tokens, 20);
+    assert.equal(proxy.logs[0].cache_read_tokens, 60);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('custom OpenAI no-auth stream forwards chunks and leaves missing usage unknown', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+    body: 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'ollama',
+        provider: 'custom-openai',
+        protocol: 'openai',
+        baseUrl: `${upstream.baseUrl}/v1`,
+        apiKeys: [],
+        authMode: 'none',
+        models: ['qwen2.5-coder:7b'],
+        enabled: true,
+      } as Config['upstreams'][number],
+    ]),
+  );
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'qwen2.5-coder:7b', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /"content":"hi"/);
+    assert.equal(upstream.calls[0].headers.authorization, undefined);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(proxy.logs[0].request_tokens, null);
+    assert.equal(proxy.logs[0].response_tokens, null);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('native Responses continuation stays bound to its credential and fails closed when unavailable', async () => {
+  let responseCount = 0;
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: `resp_test_${++responseCount}`,
+      object: 'response',
+      output: [],
+      usage: { input_tokens: 2, output_tokens: 1 },
+    },
+  }));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-response-owner-'));
+  const telemetry = new SQLiteTelemetryStore(path.join(tempDir, 'logs.sqlite'));
+  await telemetry.init();
+  const responseOwnership = new ResponseOwnershipStore(telemetry);
+  const config = baseConfig([
+    {
+      name: 'responses',
+      id: 'responses',
+      provider: 'custom-responses',
+      protocol: 'responses',
+      baseUrl: `${upstream.baseUrl}/v1`,
+      apiKeys: ['secret-a', 'secret-b'],
+      credentialIds: ['cred-a', 'cred-b'],
+      models: ['rmodel'],
+      enabled: true,
+    } as Config['upstreams'][number],
+  ]);
+  config.proxyKeys.push({ name: 'other', key: 'sk-other', enabled: true, createdAt: new Date().toISOString() });
+  const keyPool = new KeyPool();
+  keyPool.register('responses', [
+    { credentialId: 'cred-a', key: 'secret-a' },
+    { credentialId: 'cred-b', key: 'secret-b' },
+  ]);
+  const proxy = await startProxy(config, { responseOwnership, keyPool });
+  const send = async (key: string, previous?: string) =>
+    fetch(`${proxy.baseUrl}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'rmodel', input: 'hi', ...(previous ? { previous_response_id: previous } : {}) }),
+    });
+  try {
+    const first = await send('sk-test-12345');
+    assert.equal(first.status, 200);
+    await first.json();
+    assert.equal(responseOwnership.get('resp_test_1', 'test')?.upstreamId, 'responses');
+    assert.equal(responseOwnership.get('resp_test_1', 'test')?.credentialId, 'cred-a');
+    const second = await send('sk-test-12345', 'resp_test_1');
+    assert.equal(second.status, 200);
+    await second.json();
+    assert.equal(responseOwnership.get('resp_test_2', 'test')?.credentialId, 'cred-a');
+    keyPool.markCooldown('responses', { credentialId: 'cred-a', key: 'secret-a' }, 60_000);
+    const unavailable = await send('sk-test-12345', 'resp_test_2');
+    assert.equal(unavailable.status, 409);
+    const error = await unavailable.json();
+    assert.equal(error.error.type, 'response_credential_unavailable');
+    assert.equal(JSON.stringify(error).includes('secret-a'), false);
+    assert.equal(JSON.stringify(error).includes('secret-b'), false);
+    const other = await send('sk-other', 'resp_test_1');
+    assert.equal(other.status, 409);
+    assert.equal(upstream.calls.length, 2);
+    assert.deepEqual(upstream.calls.map((call) => call.headers.authorization), [
+      'Bearer secret-a',
+      'Bearer secret-a',
+    ]);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+    await telemetry.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('quota admission precedes upstream and telemetry records one request and one attempt', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      usage: { prompt_tokens: 3, completion_tokens: 2 },
+    },
+  }));
+  const requests: RequestRecord[] = [];
+  const attempts: AttemptRecord[] = [];
+  const events: string[] = [];
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u',
+        provider: 'custom-openai',
+        protocol: 'openai',
+        baseUrl: `${upstream.baseUrl}/v1`,
+        apiKeys: [],
+        authMode: 'none',
+        models: ['m'],
+        enabled: true,
+      } as Config['upstreams'][number],
+    ]),
+    {
+      telemetryStore: {
+        upsertRequest: async (r) => {
+          requests.push({ ...r });
+        },
+        upsertAttempt: async (a) => {
+          attempts.push({ ...a });
+        },
+      },
+      quotaLedger: {
+        admit: async () => {
+          events.push('admit');
+          assert.equal(upstream.calls.length, 0);
+          return { allowed: true };
+        },
+        markAttemptSent: async () => {
+          events.push('sent');
+        },
+        settle: async (_id, tokens) => {
+          events.push(`settle:${tokens}`);
+        },
+      },
+    },
+  );
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(requests.at(-1)?.state, 'completed');
+    assert.equal(attempts.at(-1)?.usage?.inputTotal, 3);
+    assert.equal(attempts.at(-1)?.usage?.outputTotal, 2);
+    assert.equal(attempts.at(-1)?.requestId, requests[0].id);
+    assert.deepEqual(events, ['admit', 'sent', 'settle:5']);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('V2 exact routes beat earlier globs, then use explicit endpoint', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: { choices: [{ message: { role: 'assistant', content: 'ok' } }] },
+  }));
+  const cfg = baseConfig([
+    {
+      id: 'up-a',
+      name: 'up-a',
+      provider: 'custom-openai',
+      protocol: 'openai',
+      baseUrl: `${upstream.baseUrl}/gateway/team/v1?fixed=1`,
+      endpoint: 'chat/completions',
+      apiKeys: [],
+      authMode: 'none',
+      models: ['actual-model'],
+      enabled: true,
+    },
+  ]);
+  cfg.routes = [
+    {
+      id: 'wrong-protocol',
+      name: 'wrong',
+      enabled: true,
+      clientProtocols: ['anthropic'],
+      match: { kind: 'glob', value: 'alias*' },
+      order: 0,
+      publishedModels: ['alias'],
+      targets: [{ upstreamId: 'up-a', model: 'wrong' }],
+    },
+    {
+      id: 'selected',
+      name: 'selected',
+      enabled: true,
+      clientProtocols: ['openai'],
+      match: { kind: 'exact', value: 'alias' },
+      order: 1,
+      publishedModels: ['alias'],
+      targets: [{ upstreamId: 'up-a', model: 'actual-model' }],
+    },
+  ];
+  const proxy = await startProxy(cfg, {
+    getRuntimeSnapshot: () => ({
+      routes: cfg.routes!,
+      upstreams: cfg.upstreams as Array<Config['upstreams'][number] & { id: string }>,
+    }),
+  });
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alias', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(upstream.calls[0].url, '/gateway/team/v1/chat/completions?fixed=1');
+    assert.equal(upstream.calls[0].body.model, 'actual-model');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('V2 protocol-incompatible exact route returns 422 without falling back to a glob', async () => {
+  const upstream = await startMockUpstream(() => ({ status: 200, body: { ok: true } }));
+  const cfg = baseConfig([
+    {
+      id: 'up-a',
+      name: 'up-a',
+      provider: 'custom-openai',
+      protocol: 'openai',
+      baseUrl: upstream.baseUrl,
+      apiKeys: [],
+      authMode: 'none',
+      models: ['actual-model'],
+      enabled: true,
+    },
+  ]);
+  cfg.routes = [
+    {
+      id: 'glob-openai',
+      name: 'glob',
+      enabled: true,
+      clientProtocols: ['openai'],
+      match: { kind: 'glob', value: 'alias*' },
+      order: 0,
+      publishedModels: ['alias'],
+      targets: [{ upstreamId: 'up-a', model: 'actual-model' }],
+    },
+    {
+      id: 'exact-anthropic',
+      name: 'exact',
+      enabled: true,
+      clientProtocols: ['anthropic'],
+      match: { kind: 'exact', value: 'alias' },
+      order: 10,
+      publishedModels: ['alias'],
+      targets: [{ upstreamId: 'up-a', model: 'actual-model' }],
+    },
+  ];
+  const requests: RequestRecord[] = [];
+  const proxy = await startProxy(cfg, {
+    getRuntimeSnapshot: () => ({
+      routes: cfg.routes!,
+      upstreams: cfg.upstreams as Array<Config['upstreams'][number] & { id: string }>,
+    }),
+    telemetryStore: {
+      upsertRequest: async (request) => requests.push({ ...request }),
+      upsertAttempt: async (_attempt: AttemptRecord) => {},
+    },
+  });
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alias', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 422);
+    assert.equal(((await response.json()) as any).error.type, 'unsupported_client_protocol');
+    assert.equal(upstream.calls.length, 0);
+    assert.equal(requests.at(-1)?.state, 'rejected');
+    assert.equal(requests.at(-1)?.finalHttpStatus, 422);
+    assert.equal(requests.at(-1)?.routeId, 'exact-anthropic');
+    assert.equal(proxy.logs.at(-1)?.error_message, 'unsupported_client_protocol');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('DeepSeek profile rotates a rejected credential without changing reasoning history', async () => {
+  const upstream = await startMockUpstream((call) =>
+    call.headers.authorization === 'Bearer stale'
+      ? { status: 401, body: { error: { message: 'invalid key' } } }
+      : {
+          status: 200,
+          body: {
+            choices: [{ message: { role: 'assistant', content: 'ok', reasoning_content: 'reason' } }],
+            usage: { prompt_tokens: 10, prompt_cache_hit_tokens: 6, prompt_cache_miss_tokens: 4, completion_tokens: 2 },
+          },
+        },
+  );
+  const pool = new KeyPool();
+  pool.register('deepseek', ['stale', 'good']);
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'deepseek',
+        provider: 'deepseek-chat',
+        protocol: 'openai',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['stale', 'good'],
+        models: ['deepseek-reasoner'],
+        enabled: true,
+      },
+    ]),
+    { keyPool: pool },
+  );
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-reasoner',
+        messages: [
+          { role: 'assistant', content: 'prior', reasoning_content: 'keep me' },
+          { role: 'user', content: 'continue' },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(upstream.calls.length, 2);
+    assert.equal(upstream.calls[0].body.messages[0].reasoning_content, 'keep me');
+    assert.equal(upstream.calls[1].headers.authorization, 'Bearer good');
+    assert.equal(proxy.logs.at(-1)?.cache_read_tokens, 6);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Auth + path
@@ -1149,6 +1633,151 @@ test('integration: multi-key — first key 500, second key succeeds', async () =
   }
 });
 
+test('integration: stable credential reconciliation preserves cooldown; legacy credentials still work', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_ok',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude',
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const keyPool = new KeyPool({ cooldownMs: 60_000 });
+  keyPool.register('u1', [
+    { credentialId: 'cred-a', key: 'key-a' },
+    { credentialId: 'cred-b', key: 'key-b' },
+  ]);
+  keyPool.markCooldown('u1', 'key-a', 60_000);
+
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['key-a', 'key-b'],
+        credentialIds: ['cred-a', 'cred-b'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    { keyPool },
+  );
+
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sk-test-12345',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(res.status, 200);
+    await res.json();
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].headers.authorization, 'Bearer key-b');
+    assert.deepEqual(keyPool.getAvailableKeys('u1'), ['key-b']);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: duplicate credential keys retain exact identity through cooldown and telemetry', async () => {
+  const keyPool = new KeyPool({ cooldownMs: 60_000 });
+  const entries = [
+    { credentialId: 'cred-a', key: 'shared-key' },
+    { credentialId: 'cred-b', key: 'shared-key' },
+  ];
+  keyPool.register('u1', entries);
+  const attempts: AttemptRecord[] = [];
+  let callNo = 0;
+  const responder = (call: MockCall) => {
+    callNo++;
+    return callNo === 1
+      ? { status: 429, headers: { 'retry-after': '60' }, body: { error: { message: 'slow down' } } }
+      : { status: 200, body: {
+          id: 'msg_shared', type: 'message', role: 'assistant', model: 'claude',
+          content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        } };
+  };
+  const mock = await startMockUpstream(responder);
+  const proxy = await startProxy(baseConfig([{
+    name: 'u1', provider: 'anthropic', protocol: 'anthropic', baseUrl: mock.baseUrl,
+    apiKeys: ['shared-key', 'shared-key'], credentialIds: ['cred-a', 'cred-b'],
+    models: ['claude'], enabled: true,
+  }]), {
+    keyPool,
+    telemetryStore: {
+      upsertRequest: async (_request: RequestRecord) => {},
+      upsertAttempt: async (attempt) => { attempts.push({ ...attempt }); },
+    },
+  });
+  try {
+    for (const expected of [429, 200]) {
+      const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
+        method: 'POST', headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      assert.equal(response.status, expected);
+      await response.text();
+    }
+    assert.deepEqual(mock.calls.map((call) => call.headers.authorization), ['Bearer shared-key', 'Bearer shared-key']);
+    assert.equal(attempts[1]?.credentialId, 'cred-a');
+    assert.equal(attempts[3]?.credentialId, 'cred-b');
+    assert.deepEqual(keyPool.getAvailableEntries('u1'), [entries[1]]);
+  } finally {
+    await proxy.close();
+    await mock.close();
+  }
+});
+
+test('integration: legacy upstream key is never persisted in attempt telemetry', async () => {
+  const upstreamSecret = 'legacy-upstream-secret-never-telemetry';
+  const attempts: AttemptRecord[] = [];
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      id: 'msg_legacy', type: 'message', role: 'assistant', model: 'claude',
+      content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    },
+  }));
+  const keyPool = new KeyPool();
+  const proxy = await startProxy(baseConfig([{
+    name: 'legacy-upstream', provider: 'anthropic', protocol: 'anthropic', baseUrl: upstream.baseUrl,
+    apiKeys: [upstreamSecret], models: ['claude'], enabled: true,
+  }]), {
+    keyPool,
+    telemetryStore: {
+      upsertRequest: async (_request: RequestRecord) => {},
+      upsertAttempt: async (attempt) => { attempts.push({ ...attempt }); },
+    },
+  });
+  try {
+    const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.ok(attempts.length > 0);
+    assert.equal(attempts[0].credentialId, null);
+    assert.equal(JSON.stringify(attempts).includes(upstreamSecret), false);
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
 test('integration: multi-key — 4xx does not retry next key', async () => {
   let calls = 0;
   const upstream = await startMockUpstream(() => {
@@ -1313,7 +1942,7 @@ test('integration: /v1/responses routes as openai protocol', async () => {
   }
 });
 
-test('integration: /v1/responses/compact routes as openai protocol', async () => {
+test('integration: /v1/responses/compact uses the configured native Responses endpoint', async () => {
   const upstream = await startMockUpstream(() => ({
     status: 200,
     body: {
@@ -1327,9 +1956,10 @@ test('integration: /v1/responses/compact routes as openai protocol', async () =>
     baseConfig([
       {
         name: 'u1',
-        provider: 'openai',
-        protocol: 'openai',
+        provider: 'custom-responses',
+        protocol: 'responses',
         baseUrl: upstream.baseUrl,
+        compactEndpoint: 'v1/responses/compact',
         apiKeys: ['up-key'],
         models: ['gpt-5.4'],
         enabled: true,
@@ -1342,7 +1972,7 @@ test('integration: /v1/responses/compact routes as openai protocol', async () =>
       headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'gpt-5.4', input: 'hello' }),
     });
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 200, await res.text());
     assert.equal(upstream.calls.length, 1);
     assert.equal(upstream.calls[0].url, '/v1/responses/compact');
   } finally {
@@ -1513,7 +2143,11 @@ test('integration: requestTimeoutMs aborts slow upstreams', async () => {
       },
       body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
     });
-    assert.equal(res.status, 502);
+    assert.equal(res.status, 504);
+    const body = (await res.json()) as { type: string; error: { type: string; message: string } };
+    assert.equal(body.type, 'error');
+    assert.equal(body.error.type, 'api_error');
+    assert.equal(body.error.message, 'total_request_timeout');
   } finally {
     await proxy.close();
     await upstream.close();

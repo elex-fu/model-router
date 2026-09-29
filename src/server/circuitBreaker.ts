@@ -38,7 +38,7 @@ export class CircuitBreaker {
     if (s.status === 'open') {
       if (Date.now() - s.lastFailureTime >= this.recoveryTimeoutMs) {
         s.status = 'half-open';
-        s.halfOpenPermits = 1;
+        s.halfOpenPermits = 0;
         s.successes = 0;
         return true;
       }
@@ -59,6 +59,8 @@ export class CircuitBreaker {
       s.successes++;
       if (s.successes >= this.successThreshold) {
         this.reset(upstreamName);
+      } else {
+        s.halfOpenPermits = 1;
       }
     } else if (s.status === 'closed') {
       s.failures = 0;
@@ -100,6 +102,14 @@ export class CircuitBreaker {
       lastFailureTime: 0,
       halfOpenPermits: 0,
     });
+  }
+
+  /** A read-only view for the management console; does not advance half-open state. */
+  status(upstreamName: string): { state: CircuitBreakerState['status']; failures: number; lastFailureTime: number } {
+    const state = this.states.get(upstreamName);
+    return state
+      ? { state: state.status, failures: state.failures, lastFailureTime: state.lastFailureTime }
+      : { state: 'closed', failures: 0, lastFailureTime: 0 };
   }
 
   private getState(upstreamName: string): CircuitBreakerState {

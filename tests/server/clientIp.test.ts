@@ -64,3 +64,15 @@ test('getClientIp: returns empty string when no socket and no XFF', () => {
   assert.equal(getClientIp(req, false), '');
   assert.equal(getClientIp(req, true), '');
 });
+
+test('getClientIp: only configured proxy CIDRs may supply X-Forwarded-For', () => {
+  const trusted = mockReq({ remoteAddress: '10.0.0.5', xForwardedFor: '203.0.113.9, 10.0.0.5' });
+  const untrusted = mockReq({ remoteAddress: '10.0.1.5', xForwardedFor: '203.0.113.9' });
+  assert.equal(getClientIp(trusted, ['10.0.0.0/24']), '203.0.113.9');
+  assert.equal(getClientIp(untrusted, ['10.0.0.0/24']), '10.0.1.5');
+});
+
+test('getClientIp: ignores malformed forwarded addresses even from trusted peer', () => {
+  const req = mockReq({ remoteAddress: '::ffff:127.0.0.1', xForwardedFor: 'attacker, 203.0.113.9' });
+  assert.equal(getClientIp(req, ['127.0.0.1/32']), '::ffff:127.0.0.1');
+});

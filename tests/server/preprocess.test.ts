@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { preprocessRequest } from '../../src/server/preprocess.js';
+import { providerProfile } from '../../src/providers/profiles.js';
 
 test('filters _-prefixed private params recursively', () => {
   const body = {
@@ -125,6 +126,42 @@ test('anthropic upstream: skips thinking for haiku', () => {
   };
   const out = preprocessRequest(body, 'anthropic', 'claude-haiku-4-5');
   assert.equal(out.thinking, undefined);
+});
+
+test('custom Anthropic defaults avoid Claude-only request preparation', () => {
+  const out = preprocessRequest(
+    { model: 'claude-sonnet-4-5', max_tokens: 100, system: 'sys', messages: [{ role: 'user', content: 'hi' }] },
+    'anthropic',
+    'claude-sonnet-4-5',
+    providerProfile('custom-anthropic', 'anthropic'),
+  );
+  assert.equal(out.thinking, undefined);
+  assert.equal(out.system, 'sys');
+});
+
+test('explicit Anthropic policies control thinking and cache preparation independently', () => {
+  const profile = providerProfile('custom-anthropic', 'anthropic');
+  const body = {
+    max_tokens: 100,
+    system: 'sys',
+    messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'private' }, { type: 'text', text: 'ok' }] }],
+  };
+  const forced = preprocessRequest(body, 'anthropic', 'custom-model', profile, {
+    thinking: 'force',
+    autoCacheControl: true,
+  });
+  assert.equal(forced.thinking.type, 'enabled');
+  assert.deepEqual(forced.system[0].cache_control, { type: 'ephemeral' });
+  assert.deepEqual(forced.messages[0].content[1].cache_control, { type: 'ephemeral' });
+
+  const stripped = preprocessRequest(body, 'anthropic', 'custom-model', profile, {
+    thinking: 'strip',
+    autoCacheControl: false,
+  });
+  assert.equal(stripped.thinking, undefined);
+  assert.equal(stripped.messages[0].content.some((block: any) => block.type === 'thinking'), false);
+  assert.equal(stripped.system, 'sys');
+  assert.equal(stripped.messages[0].content[0].cache_control, undefined);
 });
 
 test('openai upstream: strips thinking and cache_control', () => {

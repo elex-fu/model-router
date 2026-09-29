@@ -1,3 +1,4 @@
+import { normalizeUsage } from '../providers/usage.js';
 import type { Bridge, BridgeError, BridgeStreamResult, BridgeUsage, Protocol } from './bridge.js';
 import { parseSseStream } from './sse.js';
 
@@ -48,14 +49,11 @@ export class PassthroughOpenAiBridge implements Bridge {
         } catch {
           continue;
         }
-        const u = json?.usage;
-        if (u && typeof u === 'object') {
-          if (u.prompt_tokens !== undefined) inputTokens = u.prompt_tokens;
-          if (u.completion_tokens !== undefined) outputTokens = u.completion_tokens;
-          const details = u.prompt_tokens_details;
-          if (details && typeof details === 'object' && details.cached_tokens !== undefined) {
-            cacheReadTokens = details.cached_tokens;
-          }
+        if (json?.usage) {
+          const u = normalizeUsage('openai', json);
+          if (u.inputTokens !== undefined) inputTokens = u.inputTokens;
+          if (u.outputTokens !== undefined) outputTokens = u.outputTokens;
+          if (u.cacheReadTokens !== undefined) cacheReadTokens = u.cacheReadTokens;
         }
       }
 

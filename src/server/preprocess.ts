@@ -1,4 +1,5 @@
 import type { Protocol } from '../protocol/bridge.js';
+import type { ProviderProfile } from '../providers/profiles.js';
 
 /**
  * Pre-process a request body before protocol bridging and upstream forwarding.
@@ -8,22 +9,48 @@ import type { Protocol } from '../protocol/bridge.js';
  * - Injects cache_control and thinking for Anthropic upstreams.
  * - Strips thinking and cache_control for OpenAI upstreams.
  */
-export function preprocessRequest(body: any, upstreamProtocol: Protocol, resolvedModel: string): any {
+export function preprocessRequest(
+  body: any,
+  upstreamProtocol: Protocol,
+  resolvedModel: string,
+  profile?: ProviderProfile,
+  policy?: { thinking?: 'preserve' | 'strip' | 'force'; autoCacheControl?: boolean },
+): any {
   if (!body || typeof body !== 'object') return body;
   const cloned = JSON.parse(JSON.stringify(body));
 
   filterPrivateParams(cloned);
-  sanitizeOrphanToolResults(cloned);
+  if (!profile) sanitizeOrphanToolResults(cloned);
   stripBillingHeaders(cloned);
 
   if (upstreamProtocol === 'anthropic') {
-    injectCacheControl(cloned);
-    injectThinking(cloned, resolvedModel);
-  } else if (upstreamProtocol === 'openai') {
+    const shouldCache = policy?.autoCacheControl ?? (!profile || profile.claudeOptimizations);
+    if (shouldCache) injectCacheControl(cloned);
+    if (policy?.thinking === 'strip') {
+      stripThinking(cloned);
+    } else if (policy?.thinking === 'force' || (!policy?.thinking && (!profile || profile.claudeOptimizations))) {
+      injectThinking(cloned, resolvedModel);
+    }
+  } else if (upstreamProtocol === 'openai' && (!profile || !profile.preserveReasoning)) {
+    if (policy?.thinking !== 'preserve') stripThinkingAndCacheControl(cloned);
+  } else if (upstreamProtocol === 'openai' && policy?.thinking === 'strip') {
     stripThinkingAndCacheControl(cloned);
   }
 
   return cloned;
+}
+
+/** Remove thinking data without changing cache-control breakpoints. */
+function stripThinking(body: any): void {
+  delete body.thinking;
+  delete body.output_config;
+  delete body.anthropic_beta;
+  if (!Array.isArray(body.messages)) return;
+  for (const message of body.messages) {
+    if (Array.isArray(message?.content)) {
+      message.content = message.content.filter((block: any) => block?.type !== 'thinking' && block?.type !== 'redacted_thinking');
+    }
+  }
 }
 
 /** Recursively remove keys starting with '_' from objects. */
