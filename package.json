@@ -6,11 +6,24 @@
   "bin": {
     "model-router": "dist/cli/index.js"
   },
+  "workspaces": [
+    "web"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc",
+    "build:web": "npm run build -w web",
+    "prepack": "npm run build",
     "dev": "tsx src/cli/index.ts",
     "start": "node dist/cli/index.js",
-    "test": "node --test --import tsx --test-reporter=spec 'tests/**/*.test.ts'",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "node scripts/run-tests.mjs unit",
+    "test:integration": "node scripts/run-tests.mjs integration",
+    "test:e2e": "npm run build && playwright test --config tests/e2e/playwright.config.ts",
+    "test:live": "node scripts/run-tests.mjs live",
+    "test:live:kimi": "node scripts/run-tests.mjs live kimi",
+    "test:live:deepseek": "node scripts/run-tests.mjs live deepseek",
+    "test:live:ollama": "node scripts/run-tests.mjs live ollama",
     "lint": "biome check .",
     "lint:fix": "biome check . --write",
     "deadcode": "knip"
@@ -25,6 +38,9 @@
   "license": "MIT",
   "files": [
     "dist",
+    "web/dist",
+    "docs",
+    "deploy",
     "scripts",
     "README.md",
     "package.json"
@@ -32,17 +48,21 @@
   "dependencies": {
     "better-sqlite3": "^12.0.0",
     "commander": "^13.0.0",
-    "undici": "^6.23.0"
+    "pg": "^8.16.3",
+    "undici": "^6.23.0",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
+    "@playwright/test": "1.63.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.5",
     "knip": "^5.50.4",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "^20.19.0 || >=22.12.0"
   }
 }
