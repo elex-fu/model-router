@@ -85,6 +85,18 @@ export interface Project {
   updatedAt: string;
 }
 
+export type TenantMemberStatus = 'active' | 'suspended' | 'revoked' | 'disabled';
+export interface TenantMember {
+  userId: string;
+  displayName: string | null;
+  role: TenantRole;
+  status: TenantMemberStatus;
+}
+export interface TenantMemberPage {
+  items: TenantMember[];
+  nextCursor: string | null;
+}
+
 export interface SessionResult {
   session: SafeSession;
 }
@@ -199,6 +211,8 @@ export interface TenantByokCredentialWriteResult {
 }
 
 export type ConsoleRequestStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
+export type ConsoleFinancialStatus = 'not_applicable' | 'pending' | 'settled' | 'released' | 'reconciliation_pending';
+export type ConsoleReconciliationState = 'none' | 'pending' | 'resolved';
 export type ConsoleSupplyMode = ApiKeySupplyMode;
 export type ConsoleUsageStatus = 'reported' | 'partial' | 'missing' | 'estimated';
 export type ConsoleUsageSource = 'upstream' | 'local-estimate' | 'legacy';
@@ -236,7 +250,11 @@ export interface ConsoleRequest {
   model: string;
   protocol: 'anthropic' | 'openai' | 'gemini' | 'responses';
   supplyMode: ConsoleSupplyMode;
+  /** Execution state, not financial approval. */
   status: ConsoleRequestStatus;
+  /** Absent only for older API responses; never inferred from execution/HTTP. */
+  financialStatus?: ConsoleFinancialStatus;
+  reconciliationState?: ConsoleReconciliationState;
   createdAt: string;
   updatedAt: string;
 }
@@ -697,6 +715,62 @@ function customerWebhookDeliveryPageFromResponse(value: unknown): CustomerWebhoo
 }
 
 const projectRoles = new Set<ProjectRole>(['owner', 'admin', 'developer', 'billing', 'viewer']);
+const tenantMemberUserIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const workspaceErrorCodes = new Set([
+  'REQUEST_REJECTED', 'UNAUTHENTICATED', 'FORBIDDEN', 'NOT_FOUND', 'CONFLICT',
+  'CSRF_REJECTED', 'ORIGIN_REQUIRED', 'ORIGIN_REJECTED', 'HOST_REQUIRED', 'HOST_REJECTED',
+  'RATE_LIMITED', 'SERVICE_UNAVAILABLE', 'INTERNAL_ERROR',
+]);
+
+function workspaceString(value: unknown, max = 256): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+}
+
+function workspaceDate(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 64 && Number.isFinite(Date.parse(value));
+}
+
+function invalidWorkspaceResponse(): never {
+  throw new SaasApiError(200, 'INVALID_RESPONSE', '工作空间响应无效，请刷新后重试。');
+}
+
+function tenantFromResponse(value: unknown): SafeTenant {
+  if (!isRecord(value) || !workspaceString(value.id) || !workspaceString(value.name, 120) ||
+    !workspaceString(value.slug) || value.status !== 'active' || typeof value.role !== 'string' ||
+    !projectRoles.has(value.role as TenantRole) || !workspaceDate(value.createdAt) || !workspaceDate(value.updatedAt) ||
+    (value.defaultProjectId !== undefined && !workspaceString(value.defaultProjectId))) return invalidWorkspaceResponse();
+  return {
+    id: value.id, name: value.name, slug: value.slug, status: 'active', role: value.role as TenantRole,
+    createdAt: value.createdAt, updatedAt: value.updatedAt,
+    ...(value.defaultProjectId === undefined ? {} : { defaultProjectId: value.defaultProjectId }),
+  };
+}
+
+function tenantsFromResponse(value: unknown): SafeTenant[] {
+  if (!Array.isArray(value)) return invalidWorkspaceResponse();
+  const tenants = value.map(tenantFromResponse);
+  if (new Set(tenants.map(tenant => tenant.id)).size !== tenants.length) return invalidWorkspaceResponse();
+  return tenants;
+}
+
+function invitationFromResponse(value: unknown): InvitationResult {
+  if (!isRecord(value) || !workspaceString(value.invitationId) || typeof value.token !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,512}$/.test(value.token) || !workspaceDate(value.expiresAt)) return invalidWorkspaceResponse();
+  // One-time token is returned only to the issuing component's memory, never
+  // to a query cache or draft store. Unknown fields/digests are not projected.
+  return { invitationId: value.invitationId, token: value.token, expiresAt: value.expiresAt };
+}
+
+function acceptedIdentityFromResponse(value: unknown): SafeIdentity {
+  if (!isRecord(value) || !workspaceString(value.id) || !workspaceString(value.email, 254) ||
+    (value.displayName !== null && !workspaceString(value.displayName, 120)) || value.status !== 'active' ||
+    (value.emailVerifiedAt !== null && !workspaceDate(value.emailVerifiedAt)) || !workspaceDate(value.createdAt)) {
+    return invalidWorkspaceResponse();
+  }
+  return { id: value.id, email: value.email, displayName: value.displayName, status: 'active',
+    emailVerifiedAt: value.emailVerifiedAt, createdAt: value.createdAt };
+}
 
 function projectFromResponse(value: unknown, tenantId: string): Project {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -730,6 +804,20 @@ function projectFromResponse(value: unknown, tenantId: string): Project {
 function projectsFromResponse(value: unknown, tenantId: string): Project[] {
   if (!Array.isArray(value)) throw new SaasApiError(200, 'INVALID_RESPONSE', '服务返回了无效项目列表');
   return value.map(project => projectFromResponse(project, tenantId));
+}
+
+function tenantMemberPageFromResponse(value: unknown): TenantMemberPage {
+  if (!isRecord(value) || !Array.isArray(value.items) || value.items.length > 100 ||
+    (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || value.nextCursor.length > 1024 || !/^tm1\.[A-Za-z0-9_-]+$/.test(value.nextCursor)))) return invalidWorkspaceResponse();
+  const items: TenantMember[] = value.items.map(member => {
+    if (!isRecord(member) || typeof member.userId !== 'string' || !tenantMemberUserIdPattern.test(member.userId) ||
+      (member.displayName !== null && (typeof member.displayName !== 'string' || member.displayName.length > 120)) ||
+      typeof member.role !== 'string' || !projectRoles.has(member.role as TenantRole) ||
+      (member.status !== 'active' && member.status !== 'suspended' && member.status !== 'revoked' && member.status !== 'disabled')) return invalidWorkspaceResponse();
+    return { userId: member.userId, displayName: member.displayName, role: member.role as TenantRole, status: member.status };
+  });
+  if (new Set(items.map(member => member.userId.toLowerCase())).size !== items.length) return invalidWorkspaceResponse();
+  return { items, nextCursor: value.nextCursor };
 }
 
 const tenantCredentialStatuses = new Set<TenantByokCredentialStatus>(['pending', 'active', 'disabled', 'revoked']);
@@ -1182,6 +1270,7 @@ async function request<T>(
     idempotencyKey?: string;
     sensitive?: boolean;
     redactErrors?: boolean;
+    workspace?: boolean;
   } = {},
 ): Promise<T> {
   const method = options.method ?? 'GET';
@@ -1206,7 +1295,7 @@ async function request<T>(
     throw new SaasApiError(
       0,
       'NETWORK',
-      options.sensitive || options.redactErrors
+      options.sensitive || options.redactErrors || options.workspace
         ? '网络连接失败，请稍后重试。'
         : error instanceof Error
           ? error.message
@@ -1221,7 +1310,9 @@ async function request<T>(
     throw new SaasApiError(
       response.status,
       'INVALID_RESPONSE',
-      options.sensitive || options.redactErrors
+      options.workspace
+        ? '工作空间响应无法读取。'
+        : options.sensitive || options.redactErrors
         ? options.sensitive
           ? '凭证服务响应无法读取。'
           : '会话服务响应无法读取。'
@@ -1238,16 +1329,19 @@ async function request<T>(
   if (!response.ok) {
     const returnedCode = parsed?.error?.code;
     const safeSessionCode = returnedCode && customerSessionErrorCodes.has(returnedCode) ? returnedCode : 'HTTP_ERROR';
+    const safeWorkspaceCode = typeof returnedCode === 'string' && workspaceErrorCodes.has(returnedCode) ? returnedCode : 'HTTP_ERROR';
     throw new SaasApiError(
       response.status,
-      options.sensitive ? 'HTTP_ERROR' : options.redactErrors ? safeSessionCode : (returnedCode ?? 'HTTP_ERROR'),
-      options.sensitive
+      options.workspace ? safeWorkspaceCode : options.sensitive ? 'HTTP_ERROR' : options.redactErrors ? safeSessionCode : (returnedCode ?? 'HTTP_ERROR'),
+      options.workspace
+        ? '工作空间请求失败，请稍后重试。'
+        : options.sensitive
         ? '凭证请求失败，请稍后重试。'
         : options.redactErrors
           ? '会话请求失败，请稍后重试。'
           : (parsed?.error?.message ?? `请求失败 (${response.status})`),
-      options.sensitive || options.redactErrors ? undefined : parsed?.error?.details,
-      !options.sensitive && !options.redactErrors && response.status === 503 && parsed && Object.hasOwn(parsed, 'data')
+      options.sensitive || options.redactErrors || options.workspace ? undefined : parsed?.error?.details,
+      !options.sensitive && !options.redactErrors && !options.workspace && response.status === 503 && parsed && Object.hasOwn(parsed, 'data')
         ? parsed.data
         : undefined,
     );
@@ -1257,6 +1351,40 @@ async function request<T>(
     throw new SaasApiError(response.status, 'INVALID_RESPONSE', '服务响应缺少 data');
   }
   return parsed.data as T;
+}
+
+const consoleRequestStatuses = new Set<ConsoleRequestStatus>(['pending', 'succeeded', 'failed', 'unknown']);
+const consoleFinancialStatuses = new Set<ConsoleFinancialStatus>([
+  'not_applicable', 'pending', 'settled', 'released', 'reconciliation_pending',
+]);
+const consoleReconciliationStates = new Set<ConsoleReconciliationState>(['none', 'pending', 'resolved']);
+
+function invalidConsoleRequestResponse(): never {
+  throw new SaasApiError(200, 'INVALID_RESPONSE', '服务返回了无效请求状态');
+}
+
+/** Validate additive axes without inventing states for older response versions. */
+function consoleRequestStatesFromResponse<Item extends ConsoleRequest>(value: Item): Item {
+  if (
+    !isRecord(value) ||
+    (value.supplyMode !== 'byok' && value.supplyMode !== 'platform') ||
+    typeof value.status !== 'string' || !consoleRequestStatuses.has(value.status) ||
+    (value.financialStatus !== undefined &&
+      (typeof value.financialStatus !== 'string' || !consoleFinancialStatuses.has(value.financialStatus))) ||
+    (value.reconciliationState !== undefined &&
+      (typeof value.reconciliationState !== 'string' || !consoleReconciliationStates.has(value.reconciliationState)))
+  ) invalidConsoleRequestResponse();
+  if (
+    (value.financialStatus !== undefined &&
+      ((value.supplyMode === 'byok') !== (value.financialStatus === 'not_applicable'))) ||
+    (value.status === 'unknown' && value.reconciliationState !== undefined && value.reconciliationState !== 'pending')
+  ) invalidConsoleRequestResponse();
+  return value;
+}
+
+function consoleRequestPageFromResponse(value: ConsolePage<ConsoleRequest>): ConsolePage<ConsoleRequest> {
+  if (!isRecord(value) || !Array.isArray(value.items)) invalidConsoleRequestResponse();
+  return { ...value, items: value.items.map((item) => consoleRequestStatesFromResponse(item)) };
 }
 
 export const saasClient = {
@@ -1278,9 +1406,10 @@ export const saasClient = {
       body: {},
       redactErrors: true,
     }).then(otherCustomerSessionsRevocationFromResponse),
-  getTenants: () => request<SafeTenant[]>('/tenants'),
+  getTenants: (options: { signal?: AbortSignal } = {}) =>
+    request<unknown>('/tenants', { signal: options.signal, workspace: true }).then(tenantsFromResponse),
   createTenant: (input: { name: string; slug?: string }) =>
-    request<SafeTenant>('/tenants', { method: 'POST', body: input }),
+    request<unknown>('/tenants', { method: 'POST', body: input, workspace: true }).then(tenantFromResponse),
   getCustomerRefunds: (
     tenantId: string,
     options: { cursor?: string; limit?: number; signal?: AbortSignal } = {},
@@ -1353,20 +1482,36 @@ export const saasClient = {
       { signal, redactErrors: true },
     ).then(customerWebhookDeliveryPageFromResponse);
   },
-  getProjects: (tenantId: string) =>
-    request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/projects`).then(value => projectsFromResponse(value, tenantId)),
+  getProjects: (tenantId: string, options: { signal?: AbortSignal } = {}) =>
+    request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/projects`, { signal: options.signal, workspace: true })
+      .then(value => projectsFromResponse(value, tenantId)),
+  getTenantMembers: (tenantId: string, options: { limit?: number; cursor?: string; signal?: AbortSignal } = {}) => {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) {
+      if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100) throw new SaasApiError(400, 'REQUEST_REJECTED', '成员分页输入无效。');
+      query.set('limit', String(options.limit));
+    }
+    if (options.cursor !== undefined) {
+      if (typeof options.cursor !== 'string' || options.cursor.length > 1024 || !/^tm1\.[A-Za-z0-9_-]+$/.test(options.cursor)) throw new SaasApiError(400, 'REQUEST_REJECTED', '成员分页输入无效。');
+      query.set('cursor', options.cursor);
+    }
+    const suffix = query.size ? `?${query.toString()}` : '';
+    return request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/members${suffix}`, { signal: options.signal, workspace: true }).then(tenantMemberPageFromResponse);
+  },
   createProject: (tenantId: string, input: { name: string; slug?: string }) =>
     request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/projects`, {
       method: 'POST',
       body: input,
+      workspace: true,
     }).then(value => projectFromResponse(value, tenantId)),
   createInvitation: (
     tenantId: string,
     input: { email: string; role: InvitationRole },
-  ) => request<InvitationResult>(`/tenants/${encodeURIComponent(tenantId)}/invitations`, {
+  ) => request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/invitations`, {
     method: 'POST',
     body: input,
-  }),
+    workspace: true,
+  }).then(invitationFromResponse),
   getTenantByokCredentials: (tenantId: string) =>
     request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/credentials`, { sensitive: true }).then(
       tenantByokCredentialsFromResponse,
@@ -1432,17 +1577,18 @@ export const saasClient = {
   listRequests: (
     tenantId: string,
     filters: ConsoleQueryFilters & { cursor?: string; limit?: number } = {},
-  ) => request<ConsolePage<ConsoleRequest>>(withQuery(`/tenants/${encodeURIComponent(tenantId)}/requests`, filters)),
+  ) => request<ConsolePage<ConsoleRequest>>(withQuery(`/tenants/${encodeURIComponent(tenantId)}/requests`, filters))
+    .then(consoleRequestPageFromResponse),
   getRequest: (tenantId: string, requestId: string, projectId?: string) =>
     request<ConsoleRequestDetail>(withQuery(
       `/tenants/${encodeURIComponent(tenantId)}/requests/${encodeURIComponent(requestId)}`,
       { ...(projectId === undefined ? {} : { projectId }) },
-    )),
+    )).then((value) => consoleRequestStatesFromResponse(value)),
   getRequestDetail: (tenantId: string, requestId: string, projectId?: string) =>
     request<ConsoleRequestDetail>(withQuery(
       `/tenants/${encodeURIComponent(tenantId)}/requests/${encodeURIComponent(requestId)}`,
       { ...(projectId === undefined ? {} : { projectId }) },
-    )),
+    )).then((value) => consoleRequestStatesFromResponse(value)),
   getServicePlanCatalog: (tenantId: string) =>
     request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/service-plans/catalog`).then(servicePlansFromResponse),
   getServicePlans: (tenantId: string) =>
@@ -1477,5 +1623,5 @@ export const saasClient = {
   getServicePlanOrderCheckout: (tenantId: string, orderId: string, signal?: AbortSignal) =>
     saasClient.getServicePlanOrder(tenantId, orderId, signal).then(order => order.checkout),
   acceptInvitation: (input: { token: string; email: string; displayName: string; password: string }) =>
-    request<SafeIdentity>('/invitations/accept', { method: 'POST', body: input }),
+    request<unknown>('/invitations/accept', { method: 'POST', body: input, workspace: true }).then(acceptedIdentityFromResponse),
 };

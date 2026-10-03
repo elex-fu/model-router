@@ -5,6 +5,8 @@ import {
   type ApiKeyMetadata,
   type ApiKeySupplyMode,
   type ConsoleBillableBasis,
+  type ConsoleFinancialStatus,
+  type ConsoleReconciliationState,
   type CustomerRefundStatus,
   type CustomerRefundSummary,
   type ConsoleQueryFilters,
@@ -21,13 +23,10 @@ import {
   type CustomerWebhookSecretMetadata,
   type CreatedApiKey,
   type CustomerSessionRevocation,
-  type InvitationResult,
-  type InvitationRole,
   type OtherCustomerSessionsRevocation,
   type Project,
   SaasApiError,
   type SafeCustomerSession,
-  type SafeIdentity,
   type SafeSession,
   type SafeTenant,
   type ServicePlanCatalogItem,
@@ -43,6 +42,8 @@ import {
 import { Badge, ErrorNotice, Field, Panel, SaveButton, State } from '../components/ui';
 import { SaasWalletPage } from './saas-wallet';
 import { ServicePlanPurchase } from './service-plan-purchase';
+import { WorkspaceContent, WorkspaceInvitationAcceptance } from './saas-workspace';
+import { clearWorkspaceDrafts, workspaceMembersRootKey, workspaceRoleLabels } from './saas-workspace-state';
 
 const tenantsKey = ['saas-console', 'tenants'] as const;
 const projectsRootKey = ['saas-console', 'projects'] as const;
@@ -63,7 +64,6 @@ export const customerWebhookDeliveryHistoryKey = (tenantId: string, endpointId: 
   [...customerWebhookRootKey, tenantId, endpointId, 'deliveries'] as const;
 
 const keyManagementRoles = new Set<TenantRole>(['owner', 'admin', 'developer']);
-const projectCreationRoles = new Set<TenantRole>(['owner', 'admin']);
 const customerRefundRoles = new Set<TenantRole>(['owner', 'admin', 'billing']);
 
 function canViewCustomerRefunds(role: TenantRole): boolean {
@@ -167,7 +167,7 @@ function customerSessionErrorCopy(error: unknown): {
   if (error instanceof SaasApiError && error.code === 'NOT_FOUND') {
     return {
       title: '会话状态已变化',
-      message: '该会话可能已失效，列表已重新加载。',
+      message: '该会话可能已失效，请刷新会话列表核对。',
       action: 'retry',
       actionLabel: '刷新会话列表',
     };
@@ -189,6 +189,9 @@ function customerSessionErrorCopy(error: unknown): {
 }
 
 export type CustomerSessionMutation = { kind: 'session'; sessionId: string } | { kind: 'others' };
+export type CustomerSessionMutationOutcome = 'confirmed' | 'unknown' | 'rejected';
+
+type CustomerSessionRevocationResult = CustomerSessionRevocation | OtherCustomerSessionsRevocation;
 
 type CustomerSessionMutationClient = Pick<
   typeof saasClient,
@@ -201,19 +204,138 @@ export async function performCustomerSessionMutation(
     client?: CustomerSessionMutationClient;
     refresh: () => Promise<unknown>;
     onCurrentSessionRevoked: () => void | Promise<void>;
+    isCurrent?: () => boolean;
   },
-): Promise<CustomerSessionRevocation | OtherCustomerSessionsRevocation> {
+): Promise<CustomerSessionRevocationResult> {
   const client = dependencies.client ?? saasClient;
-  if (mutation.kind === 'others') {
-    const result = await client.revokeOtherCustomerSessions();
-    await dependencies.refresh();
-    return result;
-  }
+  const result = mutation.kind === 'others'
+    ? await client.revokeOtherCustomerSessions()
+    : await client.revokeCustomerSession(mutation.sessionId);
+  if (dependencies.isCurrent && !dependencies.isCurrent()) return result;
 
-  const result = await client.revokeCustomerSession(mutation.sessionId);
-  await dependencies.refresh();
-  if (result.currentSessionRevoked) await dependencies.onCurrentSessionRevoked();
+  // Start the read first, but never make local invalidation wait for it.
+  // Capture its failure immediately so an invalidation failure cannot mask it.
+  const refreshed = (async () => {
+    try {
+      await dependencies.refresh();
+      return { ok: true } as const;
+    } catch (error) {
+      return { ok: false, error } as const;
+    }
+  })();
+  let invalidationFailed = false;
+  let invalidationError: unknown;
+  if ('currentSessionRevoked' in result && result.currentSessionRevoked &&
+      (!dependencies.isCurrent || dependencies.isCurrent())) {
+    try {
+      await dependencies.onCurrentSessionRevoked();
+    } catch (error) {
+      invalidationFailed = true;
+      invalidationError = error;
+    }
+  }
+  const refreshResult = await refreshed;
+  if (!refreshResult.ok) throw refreshResult.error;
+  if (invalidationFailed) throw invalidationError;
   return result;
+}
+
+type CustomerSessionIgnored = {
+  status: 'ignored'; reason: 'busy' | 'refresh-required' | 'stale';
+};
+export type CustomerSessionMutationAttempt =
+  | { status: 'complete'; result: CustomerSessionRevocationResult }
+  | { status: 'error'; error: unknown; outcome: CustomerSessionMutationOutcome }
+  | CustomerSessionIgnored;
+export type CustomerSessionRefreshAttempt =
+  | { status: 'refreshed' }
+  | { status: 'error'; error: unknown }
+  | CustomerSessionIgnored;
+
+function customerSessionMutationUnknown(error: unknown): boolean {
+  return !(error instanceof SaasApiError) || error.status === 0 || error.status >= 500 ||
+    error.code === 'NETWORK' || error.code === 'INVALID_RESPONSE';
+}
+
+/** Per-mounted/authenticated scope; this owns the UI's real mutation path, not auth policy. */
+export function createCustomerSessionMutationLifecycle(dependencies: {
+  client?: CustomerSessionMutationClient;
+  refresh: (isCurrent: () => boolean) => Promise<unknown>;
+  onCurrentSessionRevoked: () => void | Promise<void>;
+  isCurrent?: () => boolean;
+}) {
+  const client = dependencies.client ?? saasClient;
+  let active = true;
+  let generation = 0;
+  let inFlight: object | undefined;
+  let requiresRefresh = false;
+  const isCurrent = () => active && (!dependencies.isCurrent || dependencies.isCurrent());
+
+  return {
+    get busy() { return inFlight !== undefined; },
+    get requiresRefresh() { return requiresRefresh; },
+    isCurrent,
+    activate() { if (!active) { active = true; generation += 1; } },
+    deactivate() { active = false; generation += 1; inFlight = undefined; },
+    async perform(mutation: CustomerSessionMutation): Promise<CustomerSessionMutationAttempt> {
+      if (!isCurrent()) return { status: 'ignored', reason: 'stale' };
+      if (inFlight) return { status: 'ignored', reason: 'busy' };
+      if (requiresRefresh) return { status: 'ignored', reason: 'refresh-required' };
+      const token = {};
+      const startedGeneration = generation;
+      inFlight = token;
+      const stillCurrent = () => isCurrent() && generation === startedGeneration && inFlight === token;
+      let acknowledged: CustomerSessionRevocationResult | undefined;
+      try {
+        const result = await performCustomerSessionMutation(mutation, {
+          client: {
+            revokeCustomerSession: async (sessionId) => {
+              const result = await client.revokeCustomerSession(sessionId);
+              acknowledged = result;
+              return result;
+            },
+            revokeOtherCustomerSessions: async () => {
+              const result = await client.revokeOtherCustomerSessions();
+              acknowledged = result;
+              return result;
+            },
+          },
+          refresh: () => dependencies.refresh(stillCurrent),
+          onCurrentSessionRevoked: dependencies.onCurrentSessionRevoked,
+          isCurrent: stillCurrent,
+        });
+        return stillCurrent() ? { status: 'complete', result } : { status: 'ignored', reason: 'stale' };
+      } catch (error) {
+        if (!stillCurrent()) return { status: 'ignored', reason: 'stale' };
+        requiresRefresh = acknowledged !== undefined || customerSessionMutationUnknown(error);
+        return {
+          status: 'error', error,
+          outcome: acknowledged ? 'confirmed' : requiresRefresh ? 'unknown' : 'rejected',
+        };
+      } finally {
+        // An older promise must not release a newer scope's lock.
+        if (inFlight === token) inFlight = undefined;
+      }
+    },
+    async refreshAndConfirm(): Promise<CustomerSessionRefreshAttempt> {
+      if (!isCurrent()) return { status: 'ignored', reason: 'stale' };
+      if (inFlight) return { status: 'ignored', reason: 'busy' };
+      const token = {};
+      const startedGeneration = generation;
+      inFlight = token;
+      const stillCurrent = () => isCurrent() && generation === startedGeneration && inFlight === token;
+      try {
+        await dependencies.refresh(stillCurrent);
+        if (!stillCurrent()) return { status: 'ignored', reason: 'stale' };
+        requiresRefresh = false;
+        return { status: 'refreshed' };
+      } catch (error) {
+        return stillCurrent() ? { status: 'error', error } : { status: 'ignored', reason: 'stale' };
+      } finally {
+        if (inFlight === token) inFlight = undefined;
+      }
+    },
+  };
 }
 
 function customerSessionDate(value: string): string {
@@ -483,356 +605,11 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (result: SessionResul
   );
 }
 
-function invitationLink(token: string) {
-  const current = new URL(window.location.href);
-  const consoleIndex = current.pathname.indexOf('/console');
-  const mountPath = consoleIndex >= 0 ? current.pathname.slice(0, consoleIndex) : '';
-  current.pathname = `${mountPath}/console/invitations/accept`;
-  current.search = '';
-  current.hash = `token=${encodeURIComponent(token)}`;
-  return current.toString();
-}
-
 function AcceptInvitationPage() {
-  const location = useLocation();
-  const [token, setToken] = useState('');
-  const [email, setEmail] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [password, setPassword] = useState('');
-  const [acceptedIdentity, setAcceptedIdentity] = useState<SafeIdentity>();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>();
-
-  useEffect(() => {
-    const fragment = window.location.hash.slice(1);
-    const inviteToken = new URLSearchParams(fragment).get('token');
-    if (!inviteToken) return;
-    setToken(inviteToken);
-    window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
-  }, [location.hash, location.pathname, location.search]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError(undefined);
-    try {
-      const identity = await saasClient.acceptInvitation({ token, email, displayName, password });
-      setAcceptedIdentity(identity);
-      setToken('');
-      setPassword('');
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (acceptedIdentity)
-    return (
-      <AuthFrame subtitle="邀请加入">
-        <h1>邀请已接受</h1>
-        <p className="muted">{acceptedIdentity.email} 已加入工作空间。请登录以继续。</p>
-        <Link className="button-link primary" to="/console/login">
-          前往登录
-        </Link>
-      </AuthFrame>
-    );
-
-  return (
-    <AuthFrame subtitle="邀请加入">
-      <h1>接受邀请</h1>
-      <p className="muted">填写邀请邮箱和个人信息以加入工作空间。此页面不开放公开注册。</p>
-      <ErrorNotice error={error} />
-      <form onSubmit={submit}>
-        <Field label="邀请令牌">
-          <input
-            required
-            type="password"
-            autoComplete="off"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-          />
-        </Field>
-        <Field label="邮箱">
-          <input
-            required
-            type="email"
-            autoComplete="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-          />
-        </Field>
-        <Field label="姓名">
-          <input
-            required
-            autoComplete="name"
-            value={displayName}
-            onChange={(event) => setDisplayName(event.target.value)}
-          />
-        </Field>
-        <Field label="设置密码">
-          <input
-            required
-            type="password"
-            minLength={12}
-            autoComplete="new-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-        </Field>
-        <SaveButton busy={busy}>接受邀请</SaveButton>
-      </form>
-    </AuthFrame>
-  );
+  return <AuthFrame subtitle="邀请加入"><WorkspaceInvitationAcceptance /></AuthFrame>;
 }
 
-const roleLabels: Record<TenantRole, string> = {
-  owner: '所有者',
-  admin: '管理员',
-  developer: '开发者',
-  billing: '账单管理员',
-  viewer: '只读成员',
-};
-
-const invitationRoles: { value: InvitationRole; label: string }[] = [
-  { value: 'admin', label: roleLabels.admin },
-  { value: 'developer', label: roleLabels.developer },
-  { value: 'billing', label: roleLabels.billing },
-  { value: 'viewer', label: roleLabels.viewer },
-];
-
-function TenantCard({ tenant }: { tenant: SafeTenant }) {
-  const canInvite = tenant.role === 'owner' || tenant.role === 'admin';
-  const canCreateProject = projectCreationRoles.has(tenant.role);
-  const projects = useTenantProjects(tenant.id);
-  const availableInvitationRoles =
-    tenant.role === 'admin' ? invitationRoles.filter((option) => option.value !== 'admin') : invitationRoles;
-  const [inviting, setInviting] = useState(false);
-  const [email, setEmail] = useState('');
-  const [role, setRole] = useState<InvitationRole>('developer');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>();
-  const [invitation, setInvitation] = useState<InvitationResult>();
-  const [copyMessage, setCopyMessage] = useState('');
-  const [projectName, setProjectName] = useState('');
-  const [projectSlug, setProjectSlug] = useState('');
-  const [projectBusy, setProjectBusy] = useState(false);
-  const [projectError, setProjectError] = useState<unknown>();
-  const [createdProject, setCreatedProject] = useState<Project>();
-  const link = useMemo(() => (invitation ? invitationLink(invitation.token) : ''), [invitation]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError(undefined);
-    setCopyMessage('');
-    setInvitation(undefined);
-    try {
-      const result = await saasClient.createInvitation(tenant.id, { email, role });
-      setInvitation(result);
-      setEmail('');
-      setInviting(false);
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopyMessage('邀请链接已复制');
-    } catch {
-      setCopyMessage('复制失败，请手动选择并复制上方链接');
-    }
-  }
-
-  async function createProject(event: FormEvent) {
-    event.preventDefault();
-    const name = projectName.trim();
-    if (!name) {
-      setProjectError(new Error('请输入项目名称。'));
-      return;
-    }
-    setProjectBusy(true);
-    setProjectError(undefined);
-    setCreatedProject(undefined);
-    try {
-      const project = await saasClient.createProject(tenant.id, {
-        name,
-        ...(projectSlug.trim() ? { slug: projectSlug.trim() } : {}),
-      });
-      setCreatedProject(project);
-      setProjectName('');
-      setProjectSlug('');
-      await projects.refetch();
-    } catch (err) {
-      setProjectError(err);
-    } finally {
-      setProjectBusy(false);
-    }
-  }
-
-  return (
-    <article className="saas-tenant-card">
-      <div className="saas-tenant-heading">
-        <div>
-          <h3>{tenant.name}</h3>
-          <small>{tenant.slug}</small>
-        </div>
-        <Badge tone="good">{roleLabels[tenant.role]}</Badge>
-      </div>
-      <div className="summary-list">
-        <div>
-          <span>租户 ID</span>
-          <code>{tenant.id}</code>
-        </div>
-        <div>
-          <span>状态</span>
-          <strong>{tenant.status === 'active' ? '正常' : tenant.status}</strong>
-        </div>
-        {tenant.defaultProjectId && (
-          <div>
-            <span>默认项目</span>
-            <code>{tenant.defaultProjectId}</code>
-          </div>
-        )}
-      </div>
-      <div className="saas-projects">
-        <div className="saas-tenant-heading">
-          <div>
-            <h4>项目</h4>
-            <small>仅显示当前成员有权访问的项目。</small>
-          </div>
-          <small>{projects.data?.length ?? '—'} 个</small>
-        </div>
-        <State
-          loading={projects.isPending}
-          error={projects.error}
-          retry={() => {
-            void projects.refetch();
-          }}
-          empty={projects.data?.length === 0}
-          emptyAction={<p>当前租户暂无可访问项目。</p>}
-        >
-          <div className="saas-project-list">
-            {projects.data?.map((project) => (
-              <div className="row" key={project.id}>
-                <span>
-                  <strong>{project.name}</strong>
-                  <small>
-                    <code>{project.slug}</code> · <code>{project.id}</code>
-                  </small>
-                </span>
-                <Badge tone={project.role === 'viewer' || project.role === 'billing' ? 'neutral' : 'good'}>
-                  {roleLabels[project.role]}
-                  {project.id === tenant.defaultProjectId ? ' · 默认' : ''}
-                </Badge>
-              </div>
-            ))}
-          </div>
-        </State>
-        {canCreateProject && (
-          <form className="saas-project-form" onSubmit={createProject}>
-            <Field label="项目名称">
-              <input
-                required
-                maxLength={120}
-                value={projectName}
-                onChange={(event) => setProjectName(event.target.value)}
-              />
-            </Field>
-            <Field label="项目标识（可选）" hint="留空时由服务端生成。">
-              <input value={projectSlug} onChange={(event) => setProjectSlug(event.target.value)} />
-            </Field>
-            {projectError ? <ErrorNotice error={projectError} /> : null}
-            {createdProject && (
-              <div className="notice" role="status">
-                <strong>项目已创建</strong>
-                <span>
-                  {createdProject.name} · {createdProject.slug}
-                </span>
-              </div>
-            )}
-            <SaveButton busy={projectBusy}>创建项目</SaveButton>
-          </form>
-        )}
-      </div>
-      {canInvite && (
-        <>
-          <div className="actions">
-            <button
-              type="button"
-              onClick={() => {
-                setInviting((value) => !value);
-                setError(undefined);
-              }}
-            >
-              邀请成员
-            </button>
-          </div>
-          {inviting && (
-            <form className="saas-invite-form" onSubmit={submit}>
-              <Field label="成员邮箱">
-                <input
-                  required
-                  type="email"
-                  autoComplete="off"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                />
-              </Field>
-              <Field label="租户角色">
-                <select value={role} onChange={(event) => setRole(event.target.value as InvitationRole)}>
-                  {availableInvitationRoles.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <ErrorNotice error={error} />
-              <SaveButton busy={busy}>创建一次性邀请</SaveButton>
-            </form>
-          )}
-          {invitation && (
-            <div className="notice secret saas-invitation" role="status">
-              <strong>邀请已创建</strong>
-              <span>
-                请立即复制此一次性链接并发送给受邀成员。过期时间：
-                {new Date(invitation.expiresAt).toLocaleString('zh-CN')}
-              </span>
-              <input
-                aria-label="一次性邀请链接"
-                readOnly
-                value={link}
-                onFocus={(event) => event.currentTarget.select()}
-              />
-              <div className="actions">
-                <button type="button" onClick={copyLink}>
-                  复制邀请链接
-                </button>
-                <a href={link}>打开接受邀请</a>
-                <button
-                  type="button"
-                  className="quiet"
-                  onClick={() => {
-                    setInvitation(undefined);
-                    setCopyMessage('');
-                  }}
-                >
-                  隐藏链接
-                </button>
-              </div>
-              {copyMessage && <small role="status">{copyMessage}</small>}
-            </div>
-          )}
-        </>
-      )}
-    </article>
-  );
-}
+const roleLabels = workspaceRoleLabels;
 
 function ConsoleHeader({
   active,
@@ -1022,16 +799,31 @@ export function SessionConfirmationDialog({
   );
 }
 
-function SessionSecurityErrorNotice({
+export function SessionSecurityErrorNotice({
   error,
   onRetry,
   onLogout,
+  outcome,
 }: {
   error: unknown;
   onRetry: () => void;
   onLogout: () => Promise<void>;
+  outcome?: CustomerSessionMutationOutcome;
 }) {
-  const copy = customerSessionErrorCopy(error);
+  const expired = error instanceof SaasApiError && (error.status === 401 || error.code === 'UNAUTHENTICATED');
+  const copy: ReturnType<typeof customerSessionErrorCopy> = !expired && outcome === 'unknown'
+    ? {
+        title: '撤销结果尚未确认',
+        message: '请求可能已到达服务器；不会自动重试撤销。请刷新会话列表核对后再操作。',
+        action: 'retry', actionLabel: '刷新会话列表确认',
+      }
+    : !expired && outcome === 'confirmed'
+      ? {
+          title: '撤销已确认，页面更新未完成',
+          message: '服务器已确认撤销，但列表刷新或本地退出处理未完成。请刷新状态后核对，不要重复提交。',
+          action: 'retry', actionLabel: '刷新会话列表确认',
+        }
+      : customerSessionErrorCopy(error);
   function takeAction() {
     if (copy.action === 'login') {
       void onLogout().catch(() => {});
@@ -1056,62 +848,111 @@ function SessionSecurityErrorNotice({
 export function CustomerSessionsPage({
   onLogout,
   onCurrentSessionRevoked,
+  sessionScope,
+  isCurrentSessionScope,
 }: {
   onLogout: () => Promise<void>;
   onCurrentSessionRevoked: () => void | Promise<void>;
+  sessionScope?: SafeSession;
+  isCurrentSessionScope?: () => boolean;
 }) {
   const queryClient = useQueryClient();
+  const scopedSessionsKey = useMemo(
+    () => sessionScope
+      ? [...customerSessionsKey, sessionScope.userId, sessionScope.createdAt] as const
+      : customerSessionsKey,
+    [sessionScope?.userId, sessionScope?.createdAt],
+  );
+  const callbacks = useRef({ onCurrentSessionRevoked, isCurrentSessionScope, sessionScope });
+  callbacks.current = { onCurrentSessionRevoked, isCurrentSessionScope, sessionScope };
+  const lifecycle = useMemo(() => createCustomerSessionMutationLifecycle({
+    isCurrent: () => callbacks.current.sessionScope === sessionScope &&
+      (!callbacks.current.isCurrentSessionScope || callbacks.current.isCurrentSessionScope()),
+    onCurrentSessionRevoked: () => callbacks.current.onCurrentSessionRevoked(),
+    refresh: async (isCurrent) => {
+      await queryClient.cancelQueries({ queryKey: scopedSessionsKey });
+      if (!isCurrent()) return;
+      const rows = await saasClient.getCustomerSessions();
+      if (isCurrent()) queryClient.setQueryData(scopedSessionsKey, rows);
+    },
+  }), [queryClient, scopedSessionsKey, sessionScope]);
   const sessions = useQuery({
-    queryKey: customerSessionsKey,
+    queryKey: scopedSessionsKey,
     queryFn: saasClient.getCustomerSessions,
     retry: false,
   });
   const [confirmation, setConfirmation] = useState<CustomerSessionConfirmation>();
   const [mutationBusy, setMutationBusy] = useState(false);
   const [mutationError, setMutationError] = useState<unknown>();
+  const [mutationOutcome, setMutationOutcome] = useState<CustomerSessionMutationOutcome>();
+  const [requiresRefresh, setRequiresRefresh] = useState(false);
   const [announcement, setAnnouncement] = useState('');
   const confirmationTrigger = useRef<HTMLButtonElement>(null);
+  const confirmationScope = useRef(sessionScope);
   const activeOtherCount = (sessions.data ?? []).filter((session) => session.status === 'active' && !session.current)
     .length;
 
   const dismissConfirmation = useCallback(() => setConfirmation(undefined), []);
   useEffect(() => {
+    lifecycle.activate();
+    confirmationScope.current = sessionScope;
+    setConfirmation(undefined);
+    setMutationBusy(false);
+    setMutationError(undefined);
+    setMutationOutcome(undefined);
+    setRequiresRefresh(lifecycle.requiresRefresh);
+    setAnnouncement('');
+    return () => lifecycle.deactivate();
+  }, [lifecycle, sessionScope]);
+  useEffect(() => {
     if (!confirmation) confirmationTrigger.current?.focus();
   }, [confirmation]);
 
   async function confirmMutation() {
-    if (!confirmation || mutationBusy) return;
+    if (!confirmation || mutationBusy || lifecycle.busy || lifecycle.requiresRefresh ||
+        !lifecycle.isCurrent() || confirmationScope.current !== sessionScope) return;
     const mutation: CustomerSessionMutation =
       confirmation.kind === 'others'
         ? { kind: 'others' }
         : { kind: 'session', sessionId: confirmation.session.id };
     setMutationBusy(true);
     setMutationError(undefined);
+    setMutationOutcome(undefined);
     setAnnouncement('');
-    try {
-      const result = await performCustomerSessionMutation(mutation, {
-        refresh: () => queryClient.invalidateQueries({ queryKey: customerSessionsKey }),
-        onCurrentSessionRevoked,
-      });
-      setConfirmation(undefined);
+    const attempt = await lifecycle.perform(mutation);
+    if (attempt.status === 'ignored' || !lifecycle.isCurrent()) return;
+    setConfirmation(undefined);
+    setMutationBusy(false);
+    setRequiresRefresh(lifecycle.requiresRefresh);
+    if (attempt.status === 'complete') {
+      const result = attempt.result;
       if ('revokedCount' in result) {
         setAnnouncement(`已撤销 ${result.revokedCount} 个其他活动会话；当前会话仍保持登录。`);
       } else if (!result.currentSessionRevoked) {
         setAnnouncement('已撤销该登录会话。');
       }
-    } catch (error) {
-      setConfirmation(undefined);
-      setMutationError(error);
-      await sessions.refetch();
-    } finally {
-      setMutationBusy(false);
+    } else {
+      setMutationError(attempt.error);
+      setMutationOutcome(attempt.outcome);
     }
   }
 
-  const refresh = () => {
-    setMutationError(undefined);
-    void sessions.refetch();
-  };
+  async function refresh() {
+    if (lifecycle.busy || !lifecycle.isCurrent()) return;
+    setMutationBusy(true);
+    const attempt = await lifecycle.refreshAndConfirm();
+    if (attempt.status === 'ignored' || !lifecycle.isCurrent()) return;
+    setMutationBusy(false);
+    setRequiresRefresh(lifecycle.requiresRefresh);
+    if (attempt.status === 'refreshed') {
+      setMutationError(undefined);
+      setMutationOutcome(undefined);
+      setAnnouncement('已刷新会话列表，请以服务端状态为准重新核对后操作。');
+    } else {
+      setMutationError(attempt.error);
+      if (!lifecycle.requiresRefresh) setMutationOutcome(undefined);
+    }
+  }
 
   return (
     <div className="saas-console">
@@ -1131,15 +972,17 @@ export function CustomerSessionsPage({
         title="登录会话"
         action={
           <div className="actions">
-            <button type="button" className="quiet" disabled={sessions.isFetching} onClick={refresh}>
+            <button type="button" className="quiet" disabled={sessions.isFetching || mutationBusy} onClick={refresh}>
               {sessions.isFetching ? '正在刷新…' : '刷新列表'}
             </button>
             <button
               type="button"
               className="danger"
-              disabled={mutationBusy || activeOtherCount === 0}
+              disabled={mutationBusy || requiresRefresh || activeOtherCount === 0}
               onClick={(event) => {
+                if (lifecycle.busy || lifecycle.requiresRefresh || !lifecycle.isCurrent()) return;
                 confirmationTrigger.current = event.currentTarget;
+                confirmationScope.current = sessionScope;
                 setConfirmation({ kind: 'others', activeCount: activeOtherCount });
               }}
             >
@@ -1151,8 +994,8 @@ export function CustomerSessionsPage({
         <p className="muted">
           仅展示服务端安全返回的会话信息。当前接口暂未提供设备、浏览器、IP 或上次使用时间。
         </p>
-        {Boolean(mutationError) && (
-          <SessionSecurityErrorNotice error={mutationError} onRetry={refresh} onLogout={onLogout} />
+        {(mutationOutcome !== undefined || Boolean(mutationError)) && (
+          <SessionSecurityErrorNotice error={mutationError} outcome={mutationOutcome} onRetry={refresh} onLogout={onLogout} />
         )}
         {announcement && (
           <div className="notice" role="status" aria-live="polite">
@@ -1166,7 +1009,7 @@ export function CustomerSessionsPage({
             <i />
           </div>
         ) : sessions.isError ? (
-          !mutationError && (
+          mutationOutcome === undefined && !mutationError && (
             <SessionSecurityErrorNotice
               error={sessions.error}
               onRetry={refresh}
@@ -1217,10 +1060,12 @@ export function CustomerSessionsPage({
                       <button
                         type="button"
                         className="danger"
-                        disabled={mutationBusy}
+                        disabled={mutationBusy || requiresRefresh}
                         aria-label={session.current ? '撤销当前登录会话' : '撤销此登录会话'}
                         onClick={(event) => {
+                          if (lifecycle.busy || lifecycle.requiresRefresh || !lifecycle.isCurrent()) return;
                           confirmationTrigger.current = event.currentTarget;
+                          confirmationScope.current = sessionScope;
                           setConfirmation({ kind: 'session', session });
                         }}
                       >
@@ -2252,34 +2097,9 @@ export function CustomerWebhooksPage({ onLogout }: { onLogout: () => Promise<voi
   );
 }
 
-function ConsoleHome({ session, onLogout }: { session: SafeSession; onLogout: () => Promise<void> }) {
-  const queryClient = useQueryClient();
-  const tenants = useQuery({ queryKey: tenantsKey, queryFn: saasClient.getTenants, retry: false });
-  const [tenantName, setTenantName] = useState('');
-  const [tenantSlug, setTenantSlug] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<unknown>();
-  const [createdTenant, setCreatedTenant] = useState<SafeTenant>();
-
-  async function createTenant(event: FormEvent) {
-    event.preventDefault();
-    setCreating(true);
-    setCreateError(undefined);
-    setCreatedTenant(undefined);
-    const input = { name: tenantName, ...(tenantSlug.trim() ? { slug: tenantSlug.trim() } : {}) };
-    try {
-      const result = await saasClient.createTenant(input);
-      setCreatedTenant(result);
-      setTenantName('');
-      setTenantSlug('');
-      await queryClient.invalidateQueries({ queryKey: tenantsKey });
-    } catch (err) {
-      setCreateError(err);
-    } finally {
-      setCreating(false);
-    }
-  }
-
+function ConsoleHome({ session, onLogout, onSessionExpired }: {
+  session: SafeSession; onLogout: () => Promise<void>; onSessionExpired: () => void;
+}) {
   return (
     <div className="saas-console">
       <ConsoleHeader active="workspace" onLogout={onLogout} />
@@ -2287,70 +2107,10 @@ function ConsoleHome({ session, onLogout }: { session: SafeSession; onLogout: ()
         <div>
           <p className="eyebrow">WORKSPACE</p>
           <h1>客户控制台</h1>
-          <p>管理租户、项目和成员邀请。</p>
+          <p>查看租户、项目与自己的权限，管理成员邀请。</p>
         </div>
       </div>
-      <div className="grid-two">
-        <Panel title="当前身份">
-          <div className="summary-list">
-            <div>
-              <span>用户 ID</span>
-              <code>{session.userId}</code>
-            </div>
-            <div>
-              <span>会话有效期至</span>
-              <strong>{new Date(session.expiresAt).toLocaleString('zh-CN')}</strong>
-            </div>
-            <div>
-              <span>租户</span>
-              <strong>{tenants.data?.length ?? '—'}</strong>
-            </div>
-          </div>
-        </Panel>
-        <Panel title="创建租户">
-          <form onSubmit={createTenant}>
-            <Field label="租户名称">
-              <input
-                required
-                maxLength={120}
-                value={tenantName}
-                onChange={(event) => setTenantName(event.target.value)}
-              />
-            </Field>
-            <Field label="租户标识（可选）" hint="留空时由服务端生成。">
-              <input value={tenantSlug} onChange={(event) => setTenantSlug(event.target.value)} />
-            </Field>
-            <ErrorNotice error={createError} />
-            {createdTenant ? (
-              <div className="notice" role="status">
-                <strong>租户已创建</strong>
-                <span>
-                  {createdTenant.name} · {roleLabels[createdTenant.role]}
-                  {createdTenant.defaultProjectId ? ` · 默认项目 ${createdTenant.defaultProjectId}` : ''}
-                </span>
-              </div>
-            ) : null}
-            <SaveButton busy={creating}>创建租户</SaveButton>
-          </form>
-        </Panel>
-      </div>
-      <Panel title="我的租户">
-        <State
-          loading={tenants.isPending}
-          error={tenants.error}
-          retry={() => {
-            void tenants.refetch();
-          }}
-          empty={tenants.data?.length === 0}
-          emptyAction={<p>创建租户后，这里会显示实际返回的租户信息。</p>}
-        >
-          <div className="saas-tenant-list">
-            {tenants.data?.map((tenant) => (
-              <TenantCard key={tenant.id} tenant={tenant} />
-            ))}
-          </div>
-        </State>
-      </Panel>
+      <WorkspaceContent session={session} onSessionExpired={onSessionExpired} />
     </div>
   );
 }
@@ -4128,6 +3888,46 @@ function requestModeTone(mode: ConsoleRequest['supplyMode']): 'neutral' | 'good'
   return mode === 'byok' ? 'good' : 'neutral';
 }
 
+const requestFinancialLabels: Record<ConsoleFinancialStatus, string> = {
+  not_applicable: '不适用（BYOK 无平台 Token 扣费）',
+  pending: '待结算',
+  settled: '已结算',
+  released: '预留已释放',
+  reconciliation_pending: '财务待对账（尚未结算）',
+};
+const requestReconciliationLabels: Record<ConsoleReconciliationState, string> = {
+  none: '未进入执行对账',
+  pending: '执行结果待对账',
+  resolved: '执行对账已完成',
+};
+const requestStateExplanation =
+  '执行成功或重放 HTTP 200 不代表平台 Token 费用已结算；执行对账与财务对账独立。BYOK 仅展示代理用量，不预留或扣减平台 Token 钱包。';
+
+export function RequestFinancialStatus({ request }: {
+  request: Pick<ConsoleRequest, 'supplyMode' | 'financialStatus'>;
+}) {
+  const status = request.financialStatus;
+  if (status === undefined || ((request.supplyMode === 'byok') !== (status === 'not_applicable'))) {
+    return <Badge tone="warn">财务状态未提供</Badge>;
+  }
+  return (
+    <Badge tone={status === 'settled' ? 'good' : status === 'pending' || status === 'reconciliation_pending' ? 'warn' : 'neutral'}>
+      {requestFinancialLabels[status] ?? '财务状态未提供'}
+    </Badge>
+  );
+}
+
+export function RequestReconciliationStatus({ request }: {
+  request: Pick<ConsoleRequest, 'reconciliationState'>;
+}) {
+  const state = request.reconciliationState;
+  return (
+    <Badge tone={state === 'resolved' ? 'good' : state === 'none' ? 'neutral' : 'warn'}>
+      {state === undefined ? '执行对账状态未提供' : requestReconciliationLabels[state] ?? '执行对账状态未提供'}
+    </Badge>
+  );
+}
+
 export function RequestsPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const tenants = useQuery({ queryKey: tenantsKey, queryFn: saasClient.getTenants, retry: false });
   const [selectedTenantId, setSelectedTenantId] = useState('');
@@ -4175,6 +3975,7 @@ export function RequestsPage({ onLogout }: { onLogout: () => Promise<void> }) {
           <p className="eyebrow">REQUESTS</p>
           <h1>请求日志</h1>
           <p>只显示服务端安全投影；提示词、响应体和内部供给标识不会返回到浏览器。</p>
+          <p>{requestStateExplanation}</p>
         </div>
         <button
           type="button"
@@ -4250,7 +4051,9 @@ export function RequestsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                         <th>模型</th>
                         <th>项目</th>
                         <th>供给模式</th>
-                        <th>状态</th>
+                        <th>执行状态</th>
+                        <th>财务状态</th>
+                        <th>执行对账</th>
                         <th>详情</th>
                       </tr>
                     </thead>
@@ -4278,6 +4081,8 @@ export function RequestsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                               {requestStatusLabel(request.status)}
                             </Badge>
                           </td>
+                          <td><RequestFinancialStatus request={request} /></td>
+                          <td><RequestReconciliationStatus request={request} /></td>
                           <td>
                             <Link
                               to={`/console/requests/${encodeURIComponent(request.id)}?tenantId=${encodeURIComponent(selectedTenant.id)}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`}
@@ -4426,6 +4231,7 @@ export function RequestDetailPage({ onLogout }: { onLogout: () => Promise<void> 
           <p className="eyebrow">REQUEST DETAIL</p>
           <h1>请求详情</h1>
           <p>仅展示安全元数据、尝试状态和用量信任信息。</p>
+          <p>{requestStateExplanation}</p>
         </div>
         <div className="actions">
           <Link className="button-link" to="/console/requests">
@@ -4513,7 +4319,7 @@ export function RequestDetailPage({ onLogout }: { onLogout: () => Promise<void> 
                       </Badge>
                     </div>
                     <div>
-                      <span>状态</span>
+                      <span>执行状态</span>
                       <Badge
                         tone={
                           detail.data.status === 'succeeded' ? 'good' : detail.data.status === 'failed' ? 'bad' : 'warn'
@@ -4521,6 +4327,14 @@ export function RequestDetailPage({ onLogout }: { onLogout: () => Promise<void> 
                       >
                         {requestStatusLabel(detail.data.status)}
                       </Badge>
+                    </div>
+                    <div>
+                      <span>财务状态</span>
+                      <RequestFinancialStatus request={detail.data} />
+                    </div>
+                    <div>
+                      <span>执行对账</span>
+                      <RequestReconciliationStatus request={detail.data} />
                     </div>
                     <div>
                       <span>创建 / 更新</span>
@@ -4586,21 +4400,26 @@ export function SaasConsoleApp() {
   const [sessionStatus, setSessionStatus] = useState<'checking' | 'authenticated' | 'anonymous' | 'error'>('checking');
   const [sessionError, setSessionError] = useState<unknown>();
   const [sessionCheck, setSessionCheck] = useState(0);
+  const sessionScope = useRef<SafeSession | undefined>(undefined);
+  const sessionGeneration = useRef(0);
 
   useEffect(() => {
     if (path === '/console/setup' || path === '/console/invitations/accept') return;
     let active = true;
+    const generation = ++sessionGeneration.current;
     setSessionStatus('checking');
     setSessionError(undefined);
     void saasClient
       .getSession()
       .then((result) => {
-        if (!active) return;
+        if (!active || generation !== sessionGeneration.current) return;
+        sessionScope.current = result.session;
         setSession(result.session);
         setSessionStatus('authenticated');
       })
       .catch((error) => {
-        if (!active) return;
+        if (!active || generation !== sessionGeneration.current) return;
+        sessionScope.current = undefined;
         setSession(undefined);
         setSessionError(error);
         setSessionStatus(isUnauthorized(error) ? 'anonymous' : 'error');
@@ -4627,6 +4446,8 @@ export function SaasConsoleApp() {
     return (
       <LoginPage
         onAuthenticated={(result) => {
+          sessionGeneration.current += 1;
+          sessionScope.current = result.session;
           setSession(result.session);
           setSessionError(undefined);
           setSessionStatus('authenticated');
@@ -4663,6 +4484,11 @@ export function SaasConsoleApp() {
   if (sessionStatus !== 'authenticated' || !session) return <Navigate to="/console/login" replace />;
 
   const clearLocalSession = () => {
+    // A result belonging to an older login must not clear a replacement session.
+    if (sessionScope.current !== session) return;
+    sessionGeneration.current += 1;
+    sessionScope.current = undefined;
+    clearWorkspaceDrafts(session.userId);
     setSession(undefined);
     setSessionStatus('anonymous');
     setSessionError(undefined);
@@ -4676,6 +4502,7 @@ export function SaasConsoleApp() {
     queryClient.removeQueries({ queryKey: customerSessionsKey });
     queryClient.removeQueries({ queryKey: customerRefundRootKey });
     queryClient.removeQueries({ queryKey: customerWebhookRootKey });
+    queryClient.removeQueries({ queryKey: workspaceMembersRootKey });
     queryClient.removeQueries({ queryKey: ['saas-wallet'] });
     navigate('/console/login', { replace: true });
   };
@@ -4689,7 +4516,15 @@ export function SaasConsoleApp() {
   };
 
   if (path === '/console/security') {
-    return <CustomerSessionsPage onLogout={logout} onCurrentSessionRevoked={clearLocalSession} />;
+    return (
+      <CustomerSessionsPage
+        key={`${session.userId}:${session.createdAt}`}
+        sessionScope={session}
+        isCurrentSessionScope={() => sessionScope.current === session}
+        onLogout={logout}
+        onCurrentSessionRevoked={clearLocalSession}
+      />
+    );
   }
   if (path === '/console/catalog') return <ServicePlanCatalogPage onLogout={logout} />;
   if (path === '/console/keys') return <KeyManagementPage onLogout={logout} />;
@@ -4700,5 +4535,5 @@ export function SaasConsoleApp() {
   if (path === '/console/requests') return <RequestsPage onLogout={logout} />;
   if (path === '/console/wallet') return <SaasWalletPage onLogout={logout} />;
   if (isRequestDetail) return <RequestDetailPage onLogout={logout} />;
-  return <ConsoleHome session={session} onLogout={logout} />;
+  return <ConsoleHome session={session} onLogout={logout} onSessionExpired={clearLocalSession} />;
 }
