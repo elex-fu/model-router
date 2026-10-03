@@ -2154,12 +2154,18 @@ export class SaasMeteringService {
     }
     if (!attemptDispatchTransitionAllowed(expectedDispatchState, dispatchState)) fail('ATTEMPT_TRANSITION_INVALID');
     if (!resultTransitionAllowed(expectedResultState, resultState)) fail('ATTEMPT_TRANSITION_INVALID');
-    if (dispatchState === 'not_sent' && resultState !== 'pending') fail('ATTEMPT_TRANSITION_INVALID');
+    // Only a never-dispatched, response-free attempt can acquire this terminal
+    // failure. It cannot be manufactured by moving sent/uncertain work back.
+    const preDispatchFailure = expectedDispatchState === 'not_sent' && expectedResponseStarted === false &&
+      (expectedResultState === 'pending' || expectedResultState === 'failed') &&
+      dispatchState === 'not_sent' && resultState === 'failed' && responseStarted === false;
+    if (dispatchState === 'not_sent' && resultState !== 'pending' && !preDispatchFailure) fail('ATTEMPT_TRANSITION_INVALID');
     if (resultState === 'unknown' && dispatchState === 'not_sent') fail('ATTEMPT_TRANSITION_INVALID');
     if (
       (resultState === 'succeeded' || resultState === 'failed') &&
       dispatchState !== 'sent' &&
-      dispatchState !== 'unknown'
+      dispatchState !== 'unknown' &&
+      !preDispatchFailure
     ) {
       fail('ATTEMPT_TRANSITION_INVALID');
     }

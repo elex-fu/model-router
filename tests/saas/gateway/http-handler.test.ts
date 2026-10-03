@@ -17,10 +17,12 @@ import type {
   RequestPreparationResult,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
+import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 
 class FakeRequest extends EventEmitter {
   readonly socket = { remoteAddress: '127.0.0.1' };
   readonly complete = true;
+  aborted = false;
   chunks: Uint8Array[];
   url: string;
   method: string;
@@ -160,8 +162,23 @@ function prepared(payloadBytes = new TextEncoder().encode('server-prepared-paylo
     payloadSha256: 'a'.repeat(64),
     requestFingerprint: 'fingerprint-1',
     requestFingerprintVersion: 'v1',
+    payloadCompilerVersion: 'compiler-v1',
+    usageEstimatorVersion: 'estimator-v1',
     endpoint: '/provider/private',
+    requestedModel: 'public-model',
+    mappedModel: 'provider-model',
     resolvedModel: 'provider-model',
+    modelResolution: {
+      requestedModel: 'public-model',
+      mappedModel: 'provider-model',
+      resolvedModel: 'provider-model',
+      mappingSource: 'alias',
+      mappingVersion: 1,
+    },
+    clientProtocol: 'openai',
+    providerProtocol: 'openai',
+    clientOperation: 'chat.completions',
+    providerOperation: 'chat.completions',
     caller: {} as never,
     entitlement: {} as never,
     authority: {} as never,
@@ -218,6 +235,8 @@ function sent(): PreparedEvidenceDispatchResult {
 function harness(
   options: {
     readonly preparationResult?: RequestPreparationResult;
+    readonly afterPreparation?: (request: FakeRequest, response: FakeResponse) => void;
+    readonly preDispatchCompensation?: GatewayPreDispatchCompensationPort;
     readonly authenticate?: (rawKey: string) => Promise<AuthenticatedApiKey | null>;
     readonly dispatch?: (
       input: PreparedEvidenceDispatchInput,
@@ -252,6 +271,7 @@ function harness(
   const preparation: RequestPreparationPort = {
     prepare: async (input) => {
       preparationInputs.push(input);
+      options.afterPreparation?.(request, response);
       return options.preparationResult ?? prepared();
     },
   };
@@ -274,6 +294,7 @@ function harness(
     authenticator,
     preparation,
     dispatch,
+    preDispatchCompensation: options.preDispatchCompensation,
     modelDiscovery,
     maxBodyBytes: options.maxBodyBytes,
   });
@@ -548,6 +569,54 @@ test('maps client interruption to the stream AbortSignal without retrying dispat
   assert.equal(aborted, true);
   assert.equal(setup.dispatchInputs.length, 1);
   assert.equal(setup.response.destroyed, true);
+});
+
+test('cancellation during awaited preparation compensates once before any upstream dispatch', async () => {
+  const calls: Parameters<GatewayPreDispatchCompensationPort['compensate']>[0][] = [];
+  const setup = harness({
+    afterPreparation: (request, response) => { request.aborted = true; response.destroy(); },
+    preDispatchCompensation: { async compensate(input) { calls.push(input); return {} as never; } },
+  });
+  await setup.handler(asRequest(setup.request), asResponse(setup.response));
+  assert.equal(setup.dispatchInputs.length, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.cause, 'client_cancelled');
+  assert.equal(calls[0]?.prepared.requestId, 'request-1');
+  assert.equal(calls[0]?.responseMayHaveStarted, false);
+  assert.equal(setup.request.listenerCount('aborted'), 0);
+  assert.equal(setup.response.listenerCount('close'), 0);
+});
+
+test('dispatch failure requests authoritative cleanup and records response delivery as a veto', async () => {
+  for (const started of [false, true]) {
+    const calls: Parameters<GatewayPreDispatchCompensationPort['compensate']>[0][] = [];
+    const setup = harness({
+      dispatch: async (input) => {
+        if (started) await input.client?.start(200, {});
+        throw new Error('synthetic private provider error');
+      },
+      preDispatchCompensation: { async compensate(input) { calls.push(input); return {} as never; } },
+    });
+    await setup.handler(asRequest(setup.request), asResponse(setup.response));
+    assert.equal(setup.dispatchInputs.length, 1);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.cause, 'dispatch_failed');
+    assert.equal(calls[0]?.responseMayHaveStarted, started);
+    assert.equal(String(setup.response.endBody).includes('private provider'), false);
+  }
+});
+
+test('HTTP cleanup failure cannot retry dispatch or expose storage details', async () => {
+  let cleanups = 0;
+  const setup = harness({
+    dispatch: async () => { throw new Error('provider failure'); },
+    preDispatchCompensation: { async compensate() { cleanups++; throw new Error('private storage error'); } },
+  });
+  await setup.handler(asRequest(setup.request), asResponse(setup.response));
+  assert.equal(cleanups, 1);
+  assert.equal(setup.dispatchInputs.length, 1);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 502);
+  assert.equal(String(setup.response.endBody).includes('private storage'), false);
 });
 
 test('handles a dispatcher response with no client body through start/end', async () => {

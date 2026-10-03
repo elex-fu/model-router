@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import type { AuthenticatedApiKey } from '../keys/types.js';
+import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceClientStream,
   PreparedEvidenceDispatchInput,
@@ -59,6 +60,7 @@ export interface SaasGatewayHttpOptions {
   readonly preparationService?: RequestPreparationPort;
   readonly dispatch?: PreparedEvidenceDispatchPort;
   readonly dispatchService?: PreparedEvidenceDispatchPort;
+  readonly preDispatchCompensation?: GatewayPreDispatchCompensationPort;
   readonly modelDiscovery?: ModelDiscoveryPort;
   readonly maxBodyBytes?: number;
   readonly entryPoint?: string;
@@ -482,6 +484,10 @@ export class NodePreparedEvidenceClientStream implements PreparedEvidenceClientS
     this.request.once('close', this.onRequestClose);
     this.response.once('close', this.onResponseClose);
     this.response.once('error', this.onResponseError);
+    // Cancellation can occur during awaited preparation, before listeners exist.
+    if (this.request.aborted || (!this.request.complete && this.request.destroyed) || this.response.destroyed || this.response.writableEnded) {
+      this.controller.abort();
+    }
   }
 
   get signal(): AbortSignal {
@@ -786,6 +792,23 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     }
 
     const client = new NodePreparedEvidenceClientStream(req, res, requestId);
+    const preparedRequest = prepared;
+    const compensate = async (cause: 'client_cancelled' | 'dispatch_failed') => {
+      try {
+        await options.preDispatchCompensation?.compensate({
+          prepared: preparedRequest,
+          cause,
+          responseMayHaveStarted: res.headersSent,
+        });
+      } catch {
+        // The transaction owner retains unresolved reservations; never retry here.
+      }
+    };
+    if (client.signal.aborted) {
+      await compensate('client_cancelled');
+      client.dispose();
+      return true;
+    }
     const dispatchAudit: PreparedRequestEvidenceAudit = {
       ...auditContext,
       actorUserId: authenticatedCaller.authorization.principalId,
@@ -801,7 +824,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         client,
       });
     } catch {
+      const cause = client.signal.aborted ? 'client_cancelled' : 'dispatch_failed';
       client.abort();
+      await compensate(cause);
       sendHttpError(res, new GatewayHttpError(502, 'DISPATCH_FAILED'), requestId);
       client.dispose();
       return true;
@@ -809,6 +834,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     client.dispose();
 
     if (!isRecord(dispatched) || (dispatched.kind !== 'sent' && dispatched.kind !== 'unknown')) {
+      await compensate('dispatch_failed');
       sendHttpError(res, new GatewayHttpError(502, 'DISPATCH_FAILED'), requestId);
       return true;
     }

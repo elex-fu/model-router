@@ -31,7 +31,8 @@ export type RequestPreparationStage =
   | 'payload'
   | 'admission'
   | 'attempt'
-  | 'evidence';
+  | 'evidence'
+  | 'dispatch';
 
 export type RequestPreparationFailureCode =
   | 'invalid_input'
@@ -54,6 +55,8 @@ export type RequestPreparationFailureCode =
   | 'binding_mismatch'
   | 'idempotency_conflict'
   | 'idempotency_replay'
+  | 'client_cancelled'
+  | 'dispatch_failed'
   | 'storage_failure';
 
 export interface RequestPreparationAllowed<T> {
@@ -452,6 +455,10 @@ export interface RequestPreparationCompensationInput {
   };
   readonly failedStage: RequestPreparationStage;
   readonly failureCode: RequestPreparationFailureCode;
+  /** Server-owned evidence reference, supplied after preparation commits. */
+  readonly evidenceId?: string;
+  /** Local response delivery is an additional veto, never proof of non-execution. */
+  readonly responseMayHaveStarted?: boolean;
 }
 
 export interface RequestPreparationCompensationResult {
