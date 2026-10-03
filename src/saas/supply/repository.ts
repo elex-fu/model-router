@@ -868,7 +868,7 @@ const DISPATCH_CORE_SQL = `
     a.request_id AS attempt_request_id,
     a.id AS attempt_attempt_id,
     a.ordinal AS attempt_attempt_ordinal,
-    a.supply_mode AS attempt_supply_mode,
+    r.supply_mode AS attempt_supply_mode,
     a.account_owner_kind AS attempt_account_owner_kind,
     a.account_id AS attempt_account_id,
     a.provider_id AS attempt_provider_id,
@@ -881,7 +881,7 @@ const DISPATCH_CORE_SQL = `
     a.route_public_model_version AS attempt_route_public_model_version,
     a.route_protocol AS attempt_route_protocol,
     a.route_target_mode AS attempt_route_target_mode,
-    a.route_upstream_id AS attempt_route_upstream_id,
+    r.route_upstream_id AS attempt_route_upstream_id,
     a.upstream_id AS attempt_upstream_id,
     a.resolved_model AS attempt_resolved_model,
     a.dispatch_profile_id AS attempt_dispatch_profile_id,
@@ -962,7 +962,6 @@ const DISPATCH_CORE_SQL = `
     AND a.response_started = FALSE
     AND a.request_id = e.request_id
     AND a.ordinal = e.attempt_ordinal
-    AND a.supply_mode = e.supply_mode
     AND a.account_owner_kind = e.account_owner_kind
     AND a.account_id = e.account_id
     AND a.provider_id = e.provider_id
@@ -975,7 +974,6 @@ const DISPATCH_CORE_SQL = `
     AND a.route_public_model_version = e.route_public_model_version
     AND a.route_protocol = e.route_protocol
     AND a.route_target_mode = e.route_target_mode
-    AND a.route_upstream_id = e.route_upstream_id
     AND a.upstream_id = e.upstream_id
     AND a.resolved_model = e.resolved_model
     AND a.dispatch_profile_id = e.dispatch_profile_id
