@@ -264,3 +264,122 @@ test('direct handler mocks enforce CSRF before JSON DTO parsing and reject extra
   assert.equal((extraField.data.error as Record<string, unknown>).code, 'INVALID_BODY');
   assert.deepEqual(calls.createProject, []);
 });
+
+// DTO regression only: invoke the original handler using the existing fake
+// request/response and service ports, without sockets or DB. These tests do not
+// substitute for real password/session/authorization PostgreSQL acceptance.
+test('session POST and GET preserve public null/boolean metadata without weakening redaction or scalar guards', async () => {
+  const createdAt = '2026-01-01T00:00:00.000Z';
+  const expiresAt = '2099-01-01T00:00:00.000Z';
+  const privateValue = 'synthetic-dto-secret-must-not-leak';
+  const cycle: { nullable: null; self?: unknown } = { nullable: null };
+  cycle.self = cycle;
+  let deep: unknown = { boundaryNull: null, boundaryTrue: true, boundaryFalse: false, boundaryText: 'depth-limit-fixture' };
+  // Session=0, metadata=1, deep=2; ten wrappers put these scalar leaves
+  // at depth 13, testing that null/boolean do not bypass the depth guard.
+  for (let index = 0; index < 10; index++) deep = { nested: deep };
+  const publicSession = {
+    userId: 'dto-fixture-user', activeTenantId: null, createdAt, expiresAt,
+    metadata: {
+      enabled: true, disabled: false, nullable: null, finite: 12.5,
+      missing: undefined, notANumber: Number.NaN, positiveInfinity: Number.POSITIVE_INFINITY, negativeInfinity: Number.NEGATIVE_INFINITY,
+      values: [null, true, false, 0, undefined, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, SESSION_TOKEN],
+      safeDate: new Date(createdAt), invalidDate: new Date(Number.NaN), cycle, deep,
+      token: null, password: false, secret: true, credential: privateValue, hash: privateValue,
+      tokenHash: privateValue, passwordHash: privateValue, nested: { nullable: null, enabled: true, disabled: false, secret: privateValue },
+      hiddenValue: SESSION_TOKEN,
+    },
+    token: SESSION_TOKEN, csrfToken: CSRF_TOKEN, passwordHash: privateValue, secret: privateValue,
+    hiddenValue: SESSION_TOKEN,
+  };
+  const lookups: string[] = [];
+  const logins: Array<{ email: string; password: string; ttlSeconds: number }> = [];
+  const service = {
+    async login(input: { email: string; password: string; ttlSeconds: number }) {
+      logins.push(input);
+      return { token: SESSION_TOKEN, csrfToken: CSRF_TOKEN, session: publicSession };
+    },
+    async getSession(token: string) {
+      lookups.push(token); return token === SESSION_TOKEN ? publicSession : undefined;
+    },
+  };
+  const handler = createSaasIdentityHandler({ service: service as never, publicOrigin: ORIGIN, sessionTtlSeconds: 900 });
+  const results = [
+    await invoke(handler, makeRequest('POST', '/console/api/v1/auth/session', {
+      origin: ORIGIN, host: HOST, 'content-type': 'application/json',
+    }, JSON.stringify({ email: 'dto-fixture@example.test', password: 'synthetic-dto-password-only' }))),
+    await invoke(handler, makeRequest('GET', '/console/api/v1/auth/session', sessionHeaders)),
+  ];
+  for (const result of results) {
+    assert.equal(result.handled, true); assert.equal(result.recorder.status, 200);
+    assert.equal(result.recorder.headers['cache-control'], 'no-store');
+    assert.equal(result.recorder.headers['x-content-type-options'], 'nosniff');
+    assert.equal(result.recorder.headers['referrer-policy'], 'no-referrer');
+    assert.equal(result.recorder.headers['content-type'], 'application/json; charset=utf-8');
+    assert.deepEqual(Object.keys(result.data).sort(), ['data', 'meta']);
+    assert.deepEqual(Object.keys(result.data.meta as Record<string, unknown>), ['requestId']);
+    assert.equal(typeof (result.data.meta as Record<string, unknown>).requestId, 'string');
+    const data = result.data.data as Record<string, unknown>;
+    assert.deepEqual(Object.keys(data), ['session']);
+    const session = data.session as Record<string, unknown>;
+    assert.deepEqual(Object.keys(session).sort(), ['activeTenantId', 'createdAt', 'expiresAt', 'metadata', 'userId']);
+    assert.equal(session.userId, 'dto-fixture-user'); assert.equal(session.activeTenantId, null);
+    assert.equal(session.createdAt, createdAt); assert.equal(session.expiresAt, expiresAt);
+    const metadata = session.metadata as Record<string, unknown>;
+    assert.deepEqual(Object.keys(metadata).sort(), ['cycle', 'deep', 'disabled', 'enabled', 'finite', 'nested', 'nullable', 'safeDate', 'values']);
+    assert.equal(metadata.enabled, true); assert.equal(metadata.disabled, false); assert.equal(metadata.nullable, null);
+    assert.equal(metadata.finite, 12.5); assert.equal(metadata.safeDate, createdAt);
+    assert.deepEqual(metadata.values, [null, true, false, 0]);
+    assert.deepEqual(metadata.cycle, { nullable: null });
+    assert.deepEqual(metadata.nested, { nullable: null, enabled: true, disabled: false });
+    const safeDeep = metadata.deep as Record<string, unknown>;
+    let cursor = safeDeep; let depth = 1;
+    while (Object.hasOwn(cursor, 'nested')) { cursor = cursor.nested as Record<string, unknown>; depth++; }
+    assert.equal(depth, 11); assert.deepEqual(cursor, {}, 'depth > 12 remains omitted even for null/boolean leaves');
+    assert.ok(![SESSION_TOKEN, CSRF_TOKEN, privateValue, 'depth-limit-fixture'].some(value => result.recorder.body.includes(value)),
+      'synthetic secret/hidden/deep values must never enter the public DTO');
+  }
+  const cookies = results[0]!.recorder.headers['set-cookie'];
+  assert.ok(Array.isArray(cookies) && cookies.length === 2);
+  const sessionCookie = cookies.find(value => value.startsWith('mr_saas_session='));
+  const csrfCookie = cookies.find(value => value.startsWith('mr_saas_csrf='));
+  assert.ok(sessionCookie && csrfCookie);
+  for (const cookie of [sessionCookie, csrfCookie]) {
+    assert.ok(cookie.includes('SameSite=Strict') && cookie.includes('Path=/console/api/v1') && cookie.includes('Max-Age=900') && cookie.includes('Secure'));
+  }
+  assert.ok(sessionCookie.includes('HttpOnly')); assert.ok(!csrfCookie.includes('HttpOnly'));
+  assert.equal(results[1]!.recorder.headers['set-cookie'], undefined, 'GET does not mint/reset a session');
+  assert.deepEqual(lookups, [SESSION_TOKEN]);
+  assert.deepEqual(logins, [{ email: 'dto-fixture@example.test', password: 'synthetic-dto-password-only', ttlSeconds: 900 }]);
+});
+
+test('member directory final and empty pages keep nullable cursor/name and the exact minimal projection', async () => {
+  const actor = '10000000-0000-4000-8000-000000000001';
+  const tenant = '20000000-0000-4000-8000-000000000001';
+  const member = { userId: actor, displayName: null, role: 'owner' as const, status: 'active' as const,
+    email: 'synthetic-member-dto@example.test', passwordHash: 'synthetic-member-password-hash',
+    token: SESSION_TOKEN, credential: null, secret: false, safeExtra: true };
+  for (const items of [[member], []]) {
+    const calls: Array<[string, string, unknown]> = [];
+    const lookups: string[] = [];
+    const service = {
+      async getSession(token: string) {
+        lookups.push(token); return token === SESSION_TOKEN ? { userId: actor, activeTenantId: null } : undefined;
+      },
+      async listTenantMembers(userId: string, tenantId: string, query: unknown) {
+        calls.push([userId, tenantId, query]); return { items, nextCursor: null };
+      },
+    };
+    const handler = createSaasIdentityHandler({ service: service as never, publicOrigin: ORIGIN, sessionTtlSeconds: 900 });
+    const result = await invoke(handler, makeRequest('GET', `/console/api/v1/tenants/${tenant}/members`, sessionHeaders));
+    assert.equal(result.handled, true); assert.equal(result.recorder.status, 200);
+    assert.deepEqual(result.data.data, { items: items.map(() => ({ userId: actor, displayName: null, role: 'owner', status: 'active' })), nextCursor: null });
+    assert.equal(result.recorder.headers['cache-control'], 'no-store');
+    assert.equal(result.recorder.headers['x-content-type-options'], 'nosniff');
+    assert.equal(result.recorder.headers['referrer-policy'], 'no-referrer');
+    assert.equal(result.recorder.headers['set-cookie'], undefined, 'readonly directory does not mint/reset a session');
+    assert.deepEqual(lookups, [SESSION_TOKEN]); assert.deepEqual(calls, [[actor, tenant, {}]]);
+    assert.ok(![member.email, member.passwordHash, SESSION_TOKEN].some(value => result.recorder.body.includes(value)),
+      'member projection must not expand to unknown or sensitive fields');
+  }
+});

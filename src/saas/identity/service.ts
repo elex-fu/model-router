@@ -21,6 +21,9 @@ import type {
   SafeProject,
   SafeSession,
   SafeTenant,
+  SafeTenantMember,
+  TenantMemberPage,
+  TenantMemberQuery,
   TenantContext,
   TenantContextInput,
   TenantRole,
@@ -36,6 +39,9 @@ const USER_SESSION_MUTATION_FENCE_SQL = 'SELECT pg_advisory_xact_lock(hashtextex
 const TENANT_AUTHORIZATION_FENCE_SQL =
   "SELECT pg_advisory_xact_lock_shared(hashtextextended('saas-authz:tenant:' || $1::uuid::text, 0))";
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DIRECTORY_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DIRECTORY_CURSOR_PREFIX = 'tm1.';
+const DIRECTORY_MAX_CURSOR_LENGTH = 1024;
 
 /*
  * Authorization readers acquire tenant -> project -> sorted user ->
@@ -77,6 +83,14 @@ interface ProjectRow {
   role: string;
   created_at: TimestampValue;
   updated_at: TimestampValue;
+}
+
+interface TenantMemberRow {
+  actor_role: string;
+  user_id: string | null;
+  display_name: string | null;
+  role: string | null;
+  status: string | null;
 }
 
 interface PlatformStateRow {
@@ -210,6 +224,46 @@ function validateId(id: string): void {
   if (typeof id !== 'string' || id.trim().length === 0 || id.length > 200) {
     fail(400, 'INVALID_INPUT');
   }
+}
+
+function directoryScopeHash(actorUserId: string, tenantId: string): string {
+  return createHash('sha256').update(JSON.stringify(['tenant-members', actorUserId, tenantId])).digest('hex');
+}
+
+function directoryCursor(scopeHash: string, userId: string): string {
+  return DIRECTORY_CURSOR_PREFIX + Buffer.from(JSON.stringify({ kind: 'tenant-members', version: 1, scopeHash, userId })).toString('base64url');
+}
+
+function directoryQuery(input: TenantMemberQuery, scopeHash: string): { limit: number; after: string | null } {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+    Object.keys(input).some(key => key !== 'limit' && key !== 'cursor')) fail(400, 'INVALID_INPUT');
+  const limit = input.limit ?? 25;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || input.limit === null) fail(400, 'INVALID_INPUT');
+  if (input.cursor === undefined) return { limit, after: null };
+  const cursor = input.cursor;
+  if (typeof cursor !== 'string' || cursor.length > DIRECTORY_MAX_CURSOR_LENGTH || !cursor.startsWith(DIRECTORY_CURSOR_PREFIX)) fail(400, 'INVALID_INPUT');
+  let parsed: unknown;
+  try {
+    const encoded = cursor.slice(DIRECTORY_CURSOR_PREFIX.length);
+    const json = Buffer.from(encoded, 'base64url').toString('utf8');
+    if (Buffer.from(json, 'utf8').toString('base64url') !== encoded) fail(400, 'INVALID_INPUT');
+    parsed = JSON.parse(json);
+  } catch { return fail(400, 'INVALID_INPUT'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail(400, 'INVALID_INPUT');
+  const row = parsed as Record<string, unknown>;
+  if (Object.keys(row).sort().join(',') !== 'kind,scopeHash,userId,version' || row.kind !== 'tenant-members' ||
+    row.version !== 1 || row.scopeHash !== scopeHash || typeof row.userId !== 'string' ||
+    !DIRECTORY_UUID_PATTERN.test(row.userId)) fail(400, 'INVALID_INPUT');
+  return { limit, after: row.userId.toLowerCase() };
+}
+
+function safeTenantMember(row: TenantMemberRow): SafeTenantMember {
+  if (typeof row.user_id !== 'string' || !DIRECTORY_UUID_PATTERN.test(row.user_id) || !isTenantRole(row.role) ||
+    (row.display_name !== null && (typeof row.display_name !== 'string' || row.display_name.length > 120)) ||
+    (row.status !== 'active' && row.status !== 'suspended' && row.status !== 'revoked' && row.status !== 'disabled')) {
+    fail(500, 'IDENTITY_STORAGE_ERROR');
+  }
+  return { userId: row.user_id, displayName: row.display_name, role: row.role, status: row.status };
 }
 
 function iso(value: TimestampValue): string {
@@ -997,6 +1051,58 @@ export class SaasIdentityService {
       [userId],
     );
     return result.rows.map(safeTenant);
+  }
+
+  /**
+   * One read-only statement: fresh current actor/tenant authorization and the
+   * bounded page share one snapshot. No caller role/context cache is trusted.
+   * Cursor is a scoped selector, not a grant; every page repeats authorization.
+   * Existing CP SELECT columns suffice; no DDL, helper EXECUTE or row locks.
+   */
+  async listTenantMembers(actorUserId: string, tenantId: string, input: TenantMemberQuery = {}): Promise<TenantMemberPage> {
+    if (typeof actorUserId !== 'string' || !DIRECTORY_UUID_PATTERN.test(actorUserId) ||
+      typeof tenantId !== 'string' || !DIRECTORY_UUID_PATTERN.test(tenantId)) fail(400, 'INVALID_INPUT');
+    actorUserId = actorUserId.toLowerCase(); tenantId = tenantId.toLowerCase();
+    const scopeHash = directoryScopeHash(actorUserId, tenantId);
+    const { limit, after } = directoryQuery(input, scopeHash);
+    const result = await this.query<TenantMemberRow>(this.database,
+      `WITH authorized AS (
+         SELECT actor_membership.role
+         FROM saas_tenants tenant
+         JOIN saas_memberships actor_membership ON actor_membership.tenant_id = tenant.id
+         JOIN saas_users actor ON actor.id = actor_membership.user_id
+         WHERE tenant.id = $1 AND actor_membership.user_id = $2
+           AND tenant.status = 'active' AND actor_membership.status = 'active'
+           AND actor.disabled_at IS NULL AND actor_membership.role IN ('owner', 'admin')
+       )
+       SELECT authorized.role AS actor_role, page.user_id, page.display_name, page.role, page.status
+       FROM authorized
+       LEFT JOIN LATERAL (
+         SELECT member.user_id, member_user.display_name, member.role,
+                CASE WHEN member_user.disabled_at IS NOT NULL THEN 'disabled' ELSE member.status END AS status
+         FROM saas_memberships member
+         JOIN saas_users member_user ON member_user.id = member.user_id
+         WHERE member.tenant_id = $1 AND ($3::uuid IS NULL OR member.user_id > $3::uuid)
+         ORDER BY member.user_id ASC
+         LIMIT $4
+       ) page ON TRUE
+       ORDER BY page.user_id ASC`, [tenantId, actorUserId, after, limit + 1]);
+    if (result.rows.length === 0) fail(403, 'TENANT_ACCESS_DENIED');
+    if (result.rows.length > limit + 1 || result.rows.some(row => row.actor_role !== 'owner' && row.actor_role !== 'admin')) fail(500, 'IDENTITY_STORAGE_ERROR');
+    if (result.rows[0]?.user_id === null) {
+      if (result.rows.length !== 1 || result.rows[0].display_name !== null || result.rows[0].role !== null || result.rows[0].status !== null) fail(500, 'IDENTITY_STORAGE_ERROR');
+      return { items: [], nextCursor: null };
+    }
+    const members = result.rows.map(safeTenantMember);
+    let previous = after;
+    for (const member of members) {
+      const id = member.userId.toLowerCase();
+      if (previous !== null && id <= previous) fail(500, 'IDENTITY_STORAGE_ERROR');
+      previous = id;
+    }
+    const items = members.slice(0, limit);
+    const last = items.at(-1);
+    return { items, nextCursor: members.length > limit && last ? directoryCursor(scopeHash, last.userId) : null };
   }
 
   async listProjects(userId: string, tenantId: string): Promise<SafeProject[]> {

@@ -91,6 +91,28 @@ export interface SafeProject {
   updatedAt: string;
 }
 
+/** Membership state, with a disabled account shown as disabled (not as active). */
+export type TenantMemberStatus = 'active' | 'suspended' | 'revoked' | 'disabled';
+
+/** Owner/admin-only directory projection. No email, credentials or sessions. */
+export interface SafeTenantMember {
+  userId: string;
+  displayName: string | null;
+  role: TenantRole;
+  status: TenantMemberStatus;
+}
+
+export interface TenantMemberQuery {
+  cursor?: string;
+  /** Default 25; maximum 100. */
+  limit?: number;
+}
+
+export interface TenantMemberPage {
+  items: SafeTenantMember[];
+  nextCursor: string | null;
+}
+
 export interface CreateInvitationInput {
   email: string;
   role: InvitationRole;

@@ -9,7 +9,7 @@ import type {
   SaasIdentityService,
   SafeCustomerSession,
 } from './service.js';
-import type { SafeProject } from './types.js';
+import type { SafeProject, TenantMemberPage, TenantMemberQuery } from './types.js';
 
 const API_PREFIX = '/console/api/v1';
 const SESSION_PATH = `${API_PREFIX}/auth/session`;
@@ -220,6 +220,7 @@ type Route =
   | 'sessionsRevokeOthers'
   | 'tenants'
   | 'tenantProjects'
+  | 'tenantMembers'
   | 'tenantInvitations'
   | 'acceptInvitation'
   | 'projectKeys'
@@ -264,6 +265,9 @@ function findRoute(
   if (projectsMatch) {
     return { route: 'tenantProjects', tenantId: pathIdentifier(projectsMatch[1], 'tenant') };
   }
+
+  const membersMatch = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/members$`).exec(path);
+  if (membersMatch) return { route: 'tenantMembers', tenantId: pathIdentifier(membersMatch[1], 'tenant') };
 
   const keyMatch = new RegExp(
     `^${API_PREFIX}/tenants/([^/]+)/projects/([^/]+)/keys(?:/([^/]+)/(rotate|revoke))?$`,
@@ -319,9 +323,10 @@ function constantTimeMatches(expected: string | undefined, supplied: string | un
 }
 
 function safePublicValue(value: unknown, hiddenValue?: string, seen = new WeakSet<object>(), depth = 0): unknown {
-  if (depth > 12 || value === undefined || value === null) return undefined;
+  if (depth > 12 || value === undefined) return undefined;
+  if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'string') return value === hiddenValue ? undefined : value;
-  if (typeof value === 'number' || typeof value === 'boolean') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value === 'bigint') return value.toString();
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
   if (typeof value !== 'object') return undefined;
@@ -444,6 +449,43 @@ function publicProject(value: SafeProject): JsonObject {
   };
 }
 
+function memberQuery(req: IncomingMessage, origin: string): TenantMemberQuery {
+  const params = new URL(req.url ?? '/', origin).searchParams;
+  for (const key of params.keys()) {
+    if ((key !== 'limit' && key !== 'cursor') || params.getAll(key).length !== 1) {
+      throw new HttpError(400, 'REQUEST_REJECTED', 'The query contains invalid data');
+    }
+  }
+  const query: TenantMemberQuery = {};
+  const limit = params.get('limit');
+  if (limit !== null) {
+    if (!/^[1-9]\d{0,2}$/.test(limit) || Number(limit) > 100) throw new HttpError(400, 'REQUEST_REJECTED', 'The page size is invalid');
+    query.limit = Number(limit);
+  }
+  const cursor = params.get('cursor');
+  if (cursor !== null) {
+    if (!/^tm1\.[A-Za-z0-9_-]+$/.test(cursor) || cursor.length > 1024) throw new HttpError(400, 'REQUEST_REJECTED', 'The cursor is invalid');
+    query.cursor = cursor;
+  }
+  return query;
+}
+
+function publicMemberPage(value: TenantMemberPage): JsonObject {
+  if (!value || !Array.isArray(value.items) || value.items.length > 100 ||
+    (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || value.nextCursor.length > 1024 || !/^tm1\.[A-Za-z0-9_-]+$/.test(value.nextCursor)))) {
+    throw new HttpError(500, 'INTERNAL_ERROR', 'The request could not be completed');
+  }
+  return { items: value.items.map(member => {
+    if (!member || typeof member.userId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(member.userId) ||
+      (member.displayName !== null && (typeof member.displayName !== 'string' || member.displayName.length > 120)) ||
+      !['owner', 'admin', 'developer', 'billing', 'viewer'].includes(member.role) ||
+      !['active', 'suspended', 'revoked', 'disabled'].includes(member.status)) {
+      throw new HttpError(500, 'INTERNAL_ERROR', 'The request could not be completed');
+    }
+    return { userId: member.userId, displayName: member.displayName, role: member.role, status: member.status };
+  }), nextCursor: value.nextCursor };
+}
+
 function publicCustomerSession(value: SafeCustomerSession): JsonObject {
   const session = asObject(value);
   if (
@@ -539,7 +581,8 @@ async function enforceRateLimit(
   if (!Number.isSafeInteger(retryAfter) || retryAfter < 1) {
     throw new HttpError(503, 'RATE_LIMITER_UNAVAILABLE', 'The authentication service is temporarily unavailable.');
   }
-  throw new HttpError(429, 'LOGIN_RATE_LIMITED', 'Too many login attempts', retryAfter);
+  throw new HttpError(429, scope === 'tenantMembers' ? 'RATE_LIMITED' : 'LOGIN_RATE_LIMITED',
+    scope === 'tenantMembers' ? 'Too many requests' : 'Too many login attempts', retryAfter);
 }
 
 /**
@@ -617,6 +660,7 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
         sessionsRevokeOthers: ['POST'],
         tenants: ['GET', 'POST'],
         tenantProjects: ['GET', 'POST'],
+        tenantMembers: ['GET'],
         tenantInvitations: ['POST'],
         acceptInvitation: ['POST'],
         projectKeys: ['GET', 'POST'],
@@ -757,6 +801,19 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
 
           const projects = await options.service.listProjects(requireUserId(session), tenantId);
           sendJson(res, 200, requestId, projects.map(publicProject));
+          return true;
+        }
+
+        if (match.route === 'tenantMembers' && method === 'GET') {
+          if (!match.tenantId) throw new HttpError(400, 'INVALID_PATH', 'The tenant identifier is invalid');
+          const query = memberQuery(req, expectedOrigin);
+          const { session } = await getSession(req);
+          const actorUserId = requireUserId(session);
+          // Reuse the shared opaque limiter, scoped to the authenticated actor,
+          // not a caller-provided user/role. GET neither mutates nor requires CSRF.
+          await enforceRateLimit(req, rateLimiter, match.route, actorUserId);
+          const page = await options.service.listTenantMembers(actorUserId, match.tenantId, query);
+          sendJson(res, 200, requestId, publicMemberPage(page));
           return true;
         }
 
