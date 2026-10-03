@@ -1519,14 +1519,10 @@ function compareAttempt(row: EvidenceRow, input: NormalizedEvidence): void {
 }
 
 export class SaasPreparedRequestEvidenceService {
-  private readonly now: () => Date;
-
   constructor(
     private readonly database: SaasDatabase,
     private readonly options: PreparedRequestEvidenceServiceOptions,
-  ) {
-    this.now = options.now ?? (() => new Date());
-  }
+  ) {}
 
   async register(
     input: PreparedRequestEvidenceInput,
@@ -2484,8 +2480,10 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
     },
     maxHoldCurrency: row.max_hold_currency == null ? null : String(row.max_hold_currency),
     maxHoldMinorUnits: normalizedRowValue(row, 'max_hold_minor_units', 'maximum hold') as PreparedEvidenceInteger,
-    dispatchDeadline: String(normalizedRowValue(row, 'dispatch_deadline', 'dispatch deadline')),
-    expiresAt: String(normalizedRowValue(row, 'expires_at', 'expiry')),
+    // node-postgres returns timestamptz as Date. String(Date) drops signed
+    // milliseconds; use the same Date/string ISO normalization as signing.
+    dispatchDeadline: iso(normalizedRowValue(row, 'dispatch_deadline', 'dispatch deadline'), 'dispatchDeadline'),
+    expiresAt: iso(normalizedRowValue(row, 'expires_at', 'expiry'), 'expiresAt'),
     retryBudget: Number(normalizedRowValue(row, 'retry_budget', 'retry budget')),
     verifierKeyId: text(normalizedRowValue(row, 'verifier_key_id', 'verifier key'), 'verifierKeyId'),
     signatureBase64: text(normalizedRowValue(row, 'signature_base64', 'signature'), 'signature'),
