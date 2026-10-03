@@ -1787,6 +1787,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'supply_mode',
     'execution_state',
     'financial_status',
+    'reconciliation_state',
     'created_at',
     'updated_at',
   ]),
@@ -2504,6 +2505,68 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_idempotency_records', 'request_id', 'SELECT'],
   ['saas_idempotency_records', 'kind', 'SELECT'],
   ['saas_idempotency_records', 'key_digest', 'SELECT'],
+  // Pricing creates only the fixed immutable snapshot records, never price versions.
+  // Keep INSERT column-scoped so future snapshot columns require explicit review.
+  ...(
+    [
+      'id',
+      'tenant_id',
+      'request_id',
+      'customer_price_version',
+      'public_model_id',
+      'public_model_version',
+      'provider_id',
+      'product_id',
+      'protocol',
+      'endpoint',
+      'currency',
+      'commercial_policy_version',
+      'calculator_version',
+      'rounding_version',
+      'rounding_mode',
+      'rounding_boundary',
+      'hold_input_total',
+      'hold_input_uncached',
+      'hold_input_cache_read',
+      'hold_input_cache_write',
+      'hold_input_cache_write_5m',
+      'hold_input_cache_write_1h',
+      'hold_input_output_total',
+      'hold_input_reasoning_output',
+      'hold_amount_minor_units',
+      'wallet_hold_required',
+      'admission_expires_at',
+      'idempotency_key',
+      'snapshot_digest',
+      'created_at',
+    ] as const
+  ).map((column) => ['saas_request_customer_price_snapshots', column, 'INSERT'] as const),
+  ...(
+    [
+      'id',
+      'tenant_id',
+      'request_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'platform_account_id',
+      'public_model_id',
+      'public_model_version',
+      'provider_id',
+      'product_id',
+      'resolved_model',
+      'protocol',
+      'endpoint',
+      'currency',
+      'commercial_policy_version',
+      'calculator_version',
+      'rounding_version',
+      'rounding_mode',
+      'rounding_boundary',
+      'idempotency_key',
+      'snapshot_digest',
+      'created_at',
+    ] as const
+  ).map((column) => ['saas_attempt_supplier_cost_snapshots', column, 'INSERT'] as const),
   // Health reads include filter predicates; the UPSERT reads current/EXCLUDED expressions and RETURNING.
   ...(
     [
@@ -2940,9 +3003,22 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'settlement_digest',
       'kind',
       'created_at',
+      'normal_success_evidence_ref',
     ] as const
   ).map((column) => ['saas_usage_settlements', column, 'INSERT'] as const),
+  // Dynamic read-table SELECT also covers this column after reconciliation.
+  // Naming it explicitly makes a through056/missing-column role fail closed,
+  // even when the read-table currently has only its historical nine columns.
+  ['saas_usage_settlements', 'normal_success_evidence_ref', 'SELECT'],
   ['saas_usage_settlements', 'settlement_digest', 'UPDATE'],
+  // Dispatch claim-proof filters, projection and ordering need exactly these
+  // columns. Audit must not join the dynamic all-column read-table allowlist.
+  ['saas_audit_events', 'tenant_id', 'SELECT'],
+  ['saas_audit_events', 'action', 'SELECT'],
+  ['saas_audit_events', 'target_type', 'SELECT'],
+  ['saas_audit_events', 'target_id', 'SELECT'],
+  ['saas_audit_events', 'occurred_at', 'SELECT'],
+  ['saas_audit_events', 'id', 'SELECT'],
   // The gateway audit stream is append-only.
   ...(
     [

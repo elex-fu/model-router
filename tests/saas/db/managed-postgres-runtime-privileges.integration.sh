@@ -38,6 +38,18 @@ psql \
   --dbname="$database_name" \
   --file=deploy/managed-saas-postgres-roles.sql
 
+echo 'Applying the dedicated validation-worker manifest as the temporary service administrator.'
+# Reconcile the fourth workload only after the complete current registry and
+# ordinary application-role reconciliation. Never grant worker ledger access.
+psql \
+  --no-psqlrc \
+  --set=ON_ERROR_STOP=1 \
+  --host="$postgres_host" \
+  --port="$postgres_port" \
+  --username="$postgres_admin" \
+  --dbname="$database_name" \
+  --file=deploy/managed-saas-validation-worker-role-grants.sql
+
 echo 'Running the production runtime privilege probe as the control-plane role.'
 MODEL_ROUTER_SAAS_RUNTIME_PRIVILEGE_TEST_URL="$runtime_url" \
   node --import tsx --test tests/saas/db/runtime-privileges.integration.test.ts

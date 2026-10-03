@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
 import {
   SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS,
@@ -13,6 +14,7 @@ import {
   verifySaasRuntimeDatabasePrivileges,
 } from '../../../src/saas/db/runtime-privileges.js';
 import { PLATFORM_OPERATIONS_SUMMARY_SQL } from '../../../src/saas/platform/operations/summary-service.js';
+import { SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL } from '../../../src/saas/db/credential-validation-worker-privileges.js';
 
 function safeRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -401,7 +403,7 @@ test('control-plane manifest covers startup and representative mounted SQL witho
 });
 
 test('role template mirrors the control-plane manifest and grants no broad table DML', () => {
-  const sql = readFileSync(new URL('../../../deploy/managed-saas-postgres-roles.sql', import.meta.url), 'utf8');
+  const sql = readFileSync(resolve(process.cwd(), 'deploy/managed-saas-postgres-roles.sql'), 'utf8');
   const grantBlock = sql.match(/DO \$control_plane_runtime_grants\$([\s\S]*?)\$control_plane_runtime_grants\$/)?.[1];
   assert.ok(grantBlock);
   const deployedGrants = [...grantBlock.matchAll(/\('([^']+)', '(SELECT|INSERT|UPDATE)', '([^']+)'\)/g)]
@@ -454,13 +456,60 @@ test('gateway manifest contains no capacity-policy writes', () => {
     (SAAS_GATEWAY_RUNTIME_READ_TABLES as readonly string[]).includes('saas_capacity_policy_audit_details'),
     false,
   );
-  const sql = readFileSync(new URL('../../../deploy/managed-saas-postgres-roles.sql', import.meta.url), 'utf8');
+  const sql = readFileSync(resolve(process.cwd(), 'deploy/managed-saas-postgres-roles.sql'), 'utf8');
   const gatewayBlock = sql.match(/DO \$gateway_runtime_grants\$([\s\S]*?)\$gateway_runtime_grants\$/)?.[1];
   assert.ok(gatewayBlock);
   assert.doesNotMatch(
     gatewayBlock,
     /\('(saas_tenants|saas_projects|saas_project_inference_policy_versions|saas_api_keys|saas_capacity_policy_audit_details)', '[^']+', '(?:INSERT|UPDATE)'\)/,
   );
+});
+
+test('057 requires only gateway evidence-reference INSERT/SELECT; no CP or immutable-fact UPDATE is added', async () => {
+  const evidenceGrants = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+    ([table, column]) => table === 'saas_usage_settlements' && column === 'normal_success_evidence_ref',
+  );
+  assert.deepEqual(evidenceGrants, [
+    ['saas_usage_settlements', 'normal_success_evidence_ref', 'INSERT'],
+    ['saas_usage_settlements', 'normal_success_evidence_ref', 'SELECT'],
+  ]);
+  assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
+    ([table]) => table === 'saas_usage_settlements',
+  ), []);
+  assert.ok(SAAS_GATEWAY_RUNTIME_READ_TABLES.includes('saas_usage_settlements'));
+  assert.deepEqual(SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+    ([table, , privilege]) => table === 'saas_usage_settlements' && privilege === 'UPDATE',
+  ), [['saas_usage_settlements', 'settlement_digest', 'UPDATE']], 'no new immutable-fact UPDATE grant');
+  const deployment = readFileSync(resolve(process.cwd(), 'deploy/managed-saas-postgres-roles.sql'), 'utf8');
+  const gatewayBlock = deployment.match(/DO \$gateway_runtime_grants\$([\s\S]*?)\$gateway_runtime_grants\$/)?.[1];
+  assert.ok(gatewayBlock);
+  assert.match(gatewayBlock, /\('saas_usage_settlements', 'normal_success_evidence_ref', 'INSERT'\)/);
+  assert.match(gatewayBlock, /\('saas_usage_settlements', 'normal_success_evidence_ref', 'SELECT'\)/);
+  assert.doesNotMatch(gatewayBlock, /\('saas_usage_settlements', 'normal_success_evidence_ref', 'UPDATE'\)/);
+  assert.match(gatewayBlock, /attribute\.attnum > 0 AND NOT attribute\.attisdropped/);
+  assert.match(gatewayBlock, /v_columns, 'model_router_saas', v_table, 'model_router_saas_gateway'/);
+  for (const unsafe of [
+    { missing_column_privilege_count: 1 },
+    { missing_read_column_count: 1 },
+    { unexpected_column_privilege_count: 1 },
+    { unexpected_table_privilege_count: 1 },
+    { application_function_execute_count: 1 },
+  ]) await assert.rejects(verifySaasRuntimeDatabasePrivileges(databaseReturning(safeGatewayRow(unsafe)), 'gateway'),
+    SaasRuntimePrivilegeError);
+});
+
+test('058 changes no CP rotation columns and grants neither CP job UPDATE nor gateway key/account UPDATE', () => {
+  for (const table of ['saas_tenant_provider_credentials', 'saas_platform_provider_credentials']) {
+    for (const column of ['current_version', 'expires_at']) assert.ok(SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+      ([relation, field, privilege]) => relation === table && field === column && privilege === 'UPDATE',
+    ));
+  }
+  assert.equal(SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([table, , privilege]) =>
+    table === 'saas_tenant_provider_credential_validation_jobs' && privilege === 'UPDATE'), false);
+  for (const table of ['saas_api_keys', 'saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    assert.equal(SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(([relation, , privilege]) =>
+      relation === table && privilege === 'UPDATE'), false);
+  }
 });
 
 test('control-plane unknown-outcome grants match the scanner and append-only observation contract', () => {
@@ -673,6 +722,93 @@ test('gateway probe fails closed on every missing or forbidden privilege class',
   }
 });
 
+test('gateway pricing snapshots have exactly the service INSERT columns and keep immutable facts read-only', () => {
+  const snapshots = [
+    ['saas_request_customer_price_snapshots', 'CUSTOMER_SNAPSHOT_COLUMNS', [
+      'id', 'tenant_id', 'request_id', 'customer_price_version', 'public_model_id', 'public_model_version',
+      'provider_id', 'product_id', 'protocol', 'endpoint', 'currency', 'commercial_policy_version',
+      'calculator_version', 'rounding_version', 'rounding_mode', 'rounding_boundary',
+      'hold_input_total', 'hold_input_uncached', 'hold_input_cache_read', 'hold_input_cache_write',
+      'hold_input_cache_write_5m', 'hold_input_cache_write_1h', 'hold_input_output_total',
+      'hold_input_reasoning_output', 'hold_amount_minor_units', 'wallet_hold_required',
+      'admission_expires_at', 'idempotency_key', 'snapshot_digest', 'created_at',
+    ]],
+    ['saas_attempt_supplier_cost_snapshots', 'SUPPLIER_SNAPSHOT_COLUMNS', [
+      'id', 'tenant_id', 'request_id', 'attempt_id', 'supplier_cost_version', 'platform_account_id',
+      'public_model_id', 'public_model_version', 'provider_id', 'product_id', 'resolved_model',
+      'protocol', 'endpoint', 'currency', 'commercial_policy_version', 'calculator_version',
+      'rounding_version', 'rounding_mode', 'rounding_boundary', 'idempotency_key', 'snapshot_digest', 'created_at',
+    ]],
+  ] as const;
+  const pricingSource = readFileSync(resolve(process.cwd(), 'src/saas/pricing/service.ts'), 'utf8');
+  const expectedColumns = SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.match(
+    /expected_column_privileges\(table_name, column_name, privilege_type\) AS \(VALUES([\s\S]*?)\),\nexpected_full_insert_tables/,
+  )?.[1];
+  const fullInsertTables = SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.match(
+    /expected_full_insert_tables\(table_name\) AS \(VALUES ([\s\S]*?)\),/,
+  )?.[1];
+  assert.ok(expectedColumns && fullInsertTables);
+
+  for (const [table, projection, columns] of snapshots) {
+    const grants = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([relation]) => relation === table);
+    assert.deepEqual(
+      grants.map(([, column, privilege]) => [column, privilege]),
+      columns.map((column) => [column, 'INSERT']),
+      'no duplicate, future column, UPDATE or other snapshot grant may be added',
+    );
+    assert.ok(SAAS_GATEWAY_RUNTIME_READ_TABLES.includes(table), 'existing column SELECT remains required');
+    const delimiter = String.fromCharCode(96);
+    const serviceColumns = pricingSource.match(
+      new RegExp('const ' + projection + ' = ' + delimiter + '([\\s\\S]*?)' + delimiter + ';'),
+    )?.[1];
+    assert.ok(serviceColumns);
+    assert.deepEqual(serviceColumns.split(',').map((column) => column.trim()), [...columns]);
+    assert.match(pricingSource, new RegExp('INSERT INTO ' + table + '\\s+\\(\\$\\{' + projection + '\\.replace'));
+    assert.deepEqual(
+      [...expectedColumns.matchAll(new RegExp("\\('" + table + "', '([^']+)', '([^']+)'\\)", 'g'))]
+        .map((match) => [match[1], match[2]]),
+      columns.map((column) => [column, 'INSERT']),
+      'the native startup probe requires the same exact column manifest',
+    );
+    assert.equal(fullInsertTables.includes(table), false, 'never enumerate future columns for snapshot INSERT');
+    assert.equal(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes("('" + table + "',"), false);
+    assert.equal(SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([relation]) => relation === table), false);
+  }
+  for (const table of ['saas_customer_price_versions', 'saas_supplier_cost_versions'] as const) {
+    assert.ok(SAAS_GATEWAY_RUNTIME_READ_TABLES.includes(table));
+    assert.equal(
+      SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(([relation, , privilege]) => relation === table && privilege !== 'SELECT'),
+      false,
+      'gateway must never append or mutate price versions',
+    );
+  }
+  assert.match(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL, /AS extra_column_privilege/);
+  assert.match(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL, /AS any_table_level_privilege/);
+});
+
+test('gateway snapshot probe retains rejection of missing, unlisted, mutable and broad privileges', async (context) => {
+  // Catalog-counter inputs exercise the unchanged verifier, not live PG snapshot INSERTs.
+  for (const [name, unsafe] of [
+    ['missing snapshot INSERT column', { missing_column_privilege_count: 1 }],
+    ['missing snapshot or price-version SELECT column', { missing_read_column_count: 1 }],
+    ['future or unlisted snapshot INSERT column', { unexpected_column_privilege_count: 1 }],
+    ['snapshot UPDATE', { unexpected_column_privilege_count: 1 }],
+    ['snapshot DELETE', { unexpected_delete_privilege_count: 1 }],
+    ['table-wide snapshot SELECT/INSERT/UPDATE', { unexpected_table_privilege_count: 1 }],
+    ['price-version INSERT/UPDATE', { unexpected_column_privilege_count: 1 }],
+    ['price-version DELETE', { unexpected_delete_privilege_count: 1 }],
+    ['extra sequence grant', { unexpected_sequence_privilege_count: 1 }],
+    ['application function EXECUTE', { application_function_execute_count: 1 }],
+  ] as const) {
+    await context.test(name, async () => {
+      await assert.rejects(
+        verifySaasRuntimeDatabasePrivileges(databaseReturning(safeGatewayRow(unsafe)), 'gateway'),
+        SaasRuntimePrivilegeError,
+      );
+    });
+  }
+});
+
 test('gateway affinity probe fails closed for missing and excessive column/table privileges', async (context) => {
   const unsafeRows = [
     ['missing affinity SELECT column', { missing_column_privilege_count: 1, missing_read_column_count: 1 }],
@@ -688,6 +824,60 @@ test('gateway affinity probe fails closed for missing and excessive column/table
     await context.test(name, async () => {
       await assert.rejects(
         verifySaasRuntimeDatabasePrivileges(databaseReturning(safeGatewayRow(override)), 'gateway'),
+        SaasRuntimePrivilegeError,
+      );
+    });
+  }
+});
+
+test('gateway claim-audit reads require exactly six purpose columns and retain append-only writes', () => {
+  const auditGrants = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_audit_events');
+  assert.deepEqual(auditGrants.filter(([, , privilege]) => privilege === 'SELECT'), [
+    ['saas_audit_events', 'tenant_id', 'SELECT'],
+    ['saas_audit_events', 'action', 'SELECT'],
+    ['saas_audit_events', 'target_type', 'SELECT'],
+    ['saas_audit_events', 'target_id', 'SELECT'],
+    ['saas_audit_events', 'occurred_at', 'SELECT'],
+    ['saas_audit_events', 'id', 'SELECT'],
+  ]);
+  assert.deepEqual(auditGrants.filter(([, , privilege]) => privilege === 'INSERT').map(([, column]) => column), [
+    'id', 'tenant_id', 'actor_user_id', 'action', 'target_type', 'target_id', 'occurred_at',
+    'source_ip', 'user_agent', 'entry_point', 'request_id',
+  ], 'existing append-only audit INSERT columns remain unchanged');
+  assert.equal(auditGrants.some(([, , privilege]) => privilege === 'UPDATE'), false);
+  assert.equal((SAAS_GATEWAY_RUNTIME_READ_TABLES as readonly string[]).includes('saas_audit_events'), false);
+  for (const column of ['actor_user_id', 'source_ip', 'user_agent', 'entry_point', 'request_id']) {
+    assert.equal(auditGrants.some(([, field, privilege]) => field === column && privilege === 'SELECT'), false);
+  }
+
+  const expectedColumns = SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.match(
+    /expected_column_privileges\(table_name, column_name, privilege_type\) AS \(VALUES([\s\S]*?)\),\nexpected_full_insert_tables/,
+  )?.[1];
+  const expectedReadTables = SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.match(
+    /expected_read_tables\(table_name\) AS \(VALUES([\s\S]*?)\),\nexpected_column_privileges/,
+  )?.[1];
+  assert.ok(expectedColumns && expectedReadTables);
+  assert.deepEqual([...expectedColumns.matchAll(/\('saas_audit_events', '([^']+)', 'SELECT'\)/g)]
+    .map((match) => match[1]).sort(), ['action', 'id', 'occurred_at', 'target_id', 'target_type', 'tenant_id']);
+  assert.doesNotMatch(expectedReadTables, /saas_audit_events/);
+});
+
+test('gateway claim-audit probe rejects catalog-reported missing, private, broad and mutation privileges', async (context) => {
+  // These counter results exercise the real verifier, not live PostgreSQL ACLs.
+  // Restricted-role positive and per-column negative reads still need PG15/18.
+  for (const [name, unsafe] of [
+    ['missing purpose SELECT column', { missing_column_privilege_count: 1 }],
+    ['private or future unlisted audit SELECT column', { unexpected_column_privilege_count: 1 }],
+    ['audit UPDATE column', { unexpected_column_privilege_count: 1 }],
+    ['table-wide audit SELECT or UPDATE', { unexpected_table_privilege_count: 1 }],
+    ['audit DELETE', { unexpected_delete_privilege_count: 1 }],
+    ['audit TRUNCATE', { unexpected_table_privilege_count: 1 }],
+    ['custom routine EXECUTE', { application_function_execute_count: 1 }],
+    ['gateway key/account management write', { unexpected_column_privilege_count: 1 }],
+  ] as const) {
+    await context.test(name, async () => {
+      await assert.rejects(
+        verifySaasRuntimeDatabasePrivileges(databaseReturning(safeGatewayRow(unsafe)), 'gateway'),
         SaasRuntimePrivilegeError,
       );
     });
@@ -950,4 +1140,38 @@ test('probe pins the effective path and inspects role, ownership, and effective 
   );
   assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /server_version_supported/);
   assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /out_of_schema_function_privilege/);
+});
+
+test('customer request axes add exactly one CP purpose SELECT, with no request writes or internal identifiers', () => {
+  const expected = [
+    'id', 'tenant_id', 'project_id', 'public_model', 'protocol', 'supply_mode',
+    'execution_state', 'financial_status', 'reconciliation_state', 'created_at', 'updated_at',
+  ].map((column) => ['saas_requests', column, 'SELECT'].join('\t')).sort();
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_requests')
+      .map((grant) => grant.join('\t')).sort(),
+    expected,
+  );
+  assert.equal(SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([table]) => table === 'saas_requests'), false);
+  assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
+  assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes("('saas_requests', 'reconciliation_state', 'SELECT')"));
+  for (const column of ['proxy_key_id', 'principal_id', 'entitlement_id', 'supply_profile_id', 'request_fingerprint']) {
+    assert.equal(SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+      ([table, field]) => table === 'saas_requests' && field === column,
+    ), false, 'customer projection cannot authorize an internal request field');
+  }
+  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /missing_select_count/);
+  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /extra_table_privilege/);
+  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /aclexplode\(attribute\.attacl\)/);
+  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /missing_function_execute_count/);
+});
+
+test('customer reconciliation read does not relax startup rejection of missing or excess authority', async () => {
+  for (const unsafe of [
+    { missing_select_count: 1 }, { extra_table_privilege: true },
+    { unsafe_delete_privilege: true }, { missing_function_execute_count: 1 },
+    { unsafe_security_definer_function_count: 1 }, { out_of_schema_function_privilege: true },
+  ]) {
+    await assert.rejects(verifySaasRuntimeDatabasePrivileges(databaseReturning(safeRow(unsafe))), SaasRuntimePrivilegeError);
+  }
 });
