@@ -1673,12 +1673,22 @@ export class SaasPreparedRequestEvidenceService {
         });
         const lockedAt = await this.databaseClock(tx);
         this.assertWindow(normalized, lockedAt);
+        const attemptVersion = integer(
+          normalizedRowValue(attempt, 'state_version', 'locked attempt version'),
+          'locked attempt version',
+        );
         const attemptUpdate = await tx.query(
           'UPDATE saas_attempts ' +
-            'SET prepared_evidence_id = $3 ' +
+            'SET prepared_evidence_id = $3, state_version = state_version + 1, ' +
+            'updated_at = GREATEST(updated_at, clock_timestamp()) ' +
             'WHERE tenant_id = $1 AND id = $2 AND prepared_evidence_id IS NULL ' +
+            'AND request_id = $4 AND ordinal = $5 AND state_version = $6::bigint ' +
+            "AND binding_state = 'bound' AND dispatch_authority_state = 'bound' " +
+            "AND dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false " +
+            'AND response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL ' +
             'RETURNING id',
-          [normalized.tenantId, normalized.attemptId, normalized.evidenceId],
+          [normalized.tenantId, normalized.attemptId, normalized.evidenceId,
+            normalized.requestId, normalized.attemptOrdinal, attemptVersion],
         );
         rowCount(attemptUpdate, 1, 'prepared evidence attempt claim');
         const evidenceUpdate = await tx.query<EvidenceRow>(
