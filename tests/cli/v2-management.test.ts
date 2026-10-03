@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createAdminServer } from '../../src/admin/server.js';
 import { type ConfigV2, defaultConfigV2 } from '../../src/config/v2-schema.js';
 import { SQLiteTelemetryStore } from '../../src/storage/telemetry-store.js';
@@ -103,6 +104,49 @@ async function fixture() {
     read: () => JSON.parse(readFileSync(configPath, 'utf8')) as ConfigV2,
     close: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+// Used ONLY by the two Docker helper PTY tests. Own data/config and real admin
+// handler, never the hard-coded helper port or an existing user's admin store.
+async function dockerBootstrapFixture() {
+  const f = await fixture();
+  const app = createAdminServer({
+    configPath: f.configPath,
+    bootstrapToken: 'OWNED_DOCKER_FIXTURE_TOKEN_NOT_SUBMITTED',
+    bootstrapExpiresAt: Date.now() + 60_000,
+  });
+  let requests = 0;
+  let wrongRequests = 0;
+  const statuses: number[] = [];
+  let ownedHost = '';
+  app.server.on('request', (req, res) => {
+    requests++;
+    if (req.method !== 'POST' || req.url !== '/admin/api/v1/bootstrap' || req.headers.host !== ownedHost)
+      wrongRequests++;
+    res.once('finish', () => statuses.push(res.statusCode));
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      app.server.once('error', reject);
+      app.server.listen(0, '127.0.0.1', () => { app.server.off('error', reject); resolve(); });
+    });
+    const address = app.server.address();
+    assert.ok(address && typeof address !== 'string');
+    assert.notEqual(address.port, 15006);
+    ownedHost = `127.0.0.1:${address.port}`;
+    const endpoint = `http://${ownedHost}/admin/api/v1/bootstrap`;
+    const preload = fileURLToPath(new URL('./docker-bootstrap-owned-fetch.preload.mjs', import.meta.url));
+    return {
+      app,
+      args: (mode: 'submit' | 'cancel') => ['--import', preload, 'deploy/docker/bootstrap.mjs',
+        `--owned-bootstrap-url=${endpoint}`, `--owned-bootstrap-mode=${mode}`],
+      observations: () => ({ requests, wrongRequests, statuses: [...statuses] }),
+      close: async () => { try { await app.close(); } finally { f.close(); } },
+    };
+  } catch (error) {
+    try { await app.close(); } finally { f.close(); }
+    throw error;
+  }
 }
 
 test('config:validate is read-only and config:apply uses CAS and checks secret references', async () => {
@@ -337,9 +381,11 @@ test('admin:bootstrap uses local API, keeps credentials out of output, and repor
 });
 
 test('Docker bootstrap helper does not echo token or password in a PTY', async () => {
+  const owned = await dockerBootstrapFixture();
+  try {
   const pty = await ptyRun(
     process.execPath,
-    ['deploy/docker/bootstrap.mjs'],
+    owned.args('submit'),
     [
       ['One-time bootstrap token: ', 'DUMMY_TOKEN'],
       ['Administrator name: ', 'owner'],
@@ -348,12 +394,26 @@ test('Docker bootstrap helper does not echo token or password in a PTY', async (
   );
   assert.match(pty.output, /One-time bootstrap token:/);
   assert.doesNotMatch(pty.output, /DUMMY_TOKEN|DUMMY_PASSWORD_123/);
+  assert.match(pty.output, /DOCKER_FIXTURE_READY=SUBMIT/);
+  assert.match(pty.output, /DOCKER_FIXTURE_FETCH=OWNED_POST/);
+  assert.match(pty.output, /DOCKER_FIXTURE_STATUS=403/);
+  assert.match(pty.output, /Invalid bootstrap token/);
+  assert.deepEqual(owned.observations(), { requests: 1, wrongRequests: 0, statuses: [403] });
+  assert.equal(owned.app.store.hasAdmin(), false);
+  } finally { await owned.close(); }
 });
 
 test('Docker bootstrap Ctrl+C cancels hidden input and restores terminal handling', async () => {
-  const pty = await ptyRun(process.execPath, ['deploy/docker/bootstrap.mjs'], [['One-time bootstrap token: ', '\x03']]);
+  const owned = await dockerBootstrapFixture();
+  try {
+  const pty = await ptyRun(process.execPath, owned.args('cancel'), [['One-time bootstrap token: ', '\x03']]);
   assert.match(pty.output, /Input cancelled/);
   assert.doesNotMatch(pty.output, /DUMMY_TOKEN/);
+  assert.match(pty.output, /DOCKER_FIXTURE_READY=CANCEL/);
+  assert.doesNotMatch(pty.output, /DOCKER_FIXTURE_FETCH=|DOCKER_FIXTURE_STATUS=/);
+  assert.deepEqual(owned.observations(), { requests: 0, wrongRequests: 0, statuses: [] });
+  assert.equal(owned.app.store.hasAdmin(), false);
+  } finally { await owned.close(); }
 });
 
 test('offline writes refuse responding server; upstream:update and upstream:test use V2', async () => {
