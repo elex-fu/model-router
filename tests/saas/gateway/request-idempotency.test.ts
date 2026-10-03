@@ -62,6 +62,23 @@ function sqlResult<Row>(rows: Row[]): SqlResult<Row> {
   return { rows, rowCount: rows.length };
 }
 
+function isClaimLookup(statement: string): boolean {
+  return statement.startsWith('SELECT ') &&
+    statement.includes(' FROM saas_gateway_request_idempotency_keys JOIN saas_requests AS request_row ');
+}
+
+function assertClaimLookupContract(statement: string, values: readonly unknown[]): void {
+  assert.match(statement,
+    /^SELECT saas_gateway_request_idempotency_keys\.request_fingerprint AS request_fingerprint, saas_gateway_request_idempotency_keys\.request_fingerprint_version AS request_fingerprint_version, saas_gateway_request_idempotency_keys\.request_id AS request_id, saas_gateway_request_idempotency_keys\.state AS state, /);
+  assert.match(statement,
+    /request_row\.execution_state AS execution_state, request_row\.project_id AS canonical_project_id, request_row\.proxy_key_id AS canonical_proxy_key_id, request_row\.request_fingerprint AS canonical_request_fingerprint, request_row\.request_fingerprint_version AS canonical_request_fingerprint_version FROM /);
+  assert.match(statement,
+    /JOIN saas_requests AS request_row ON request_row\.tenant_id = saas_gateway_request_idempotency_keys\.tenant_id AND request_row\.id = saas_gateway_request_idempotency_keys\.request_id WHERE /);
+  assert.match(statement,
+    /WHERE saas_gateway_request_idempotency_keys\.tenant_id = \$1 AND saas_gateway_request_idempotency_keys\.project_id = \$2 AND saas_gateway_request_idempotency_keys\.proxy_key_id = \$3 AND saas_gateway_request_idempotency_keys\.key_digest = \$4 FOR UPDATE OF saas_gateway_request_idempotency_keys, request_row$/);
+  assert.equal(values.length, 4);
+}
+
 class FakeSqlExecutor implements SqlExecutor {
   constructor(
     private readonly database: FakeSaasDatabase,
@@ -74,6 +91,8 @@ class FakeSqlExecutor implements SqlExecutor {
     this.database.calls.push({ sql: statement, values: [...values], executor: this });
 
     if (statement.startsWith('INSERT INTO saas_gateway_request_idempotency_keys')) {
+      assert.match(statement,
+        /ON CONFLICT \(tenant_id, project_id, proxy_key_id, key_digest\) DO NOTHING RETURNING request_id$/);
       if (this.raceGate) await this.raceGate.wait();
       const [tenantId, projectId, proxyKeyId, keyDigest, fingerprint, version, requestId] = values;
       const key = mapKey(tenantId, projectId, proxyKeyId, keyDigest);
@@ -93,7 +112,8 @@ class FakeSqlExecutor implements SqlExecutor {
       return sqlResult([{ request_id: row.request_id }] as Row[]);
     }
 
-    if (statement.startsWith('SELECT request_fingerprint, request_fingerprint_version')) {
+    if (isClaimLookup(statement)) {
+      assertClaimLookupContract(statement, values);
       const [tenantId, projectId, proxyKeyId, keyDigest] = values;
       const row = this.rows.get(mapKey(tenantId, projectId, proxyKeyId, keyDigest));
       return sqlResult(
@@ -217,6 +237,7 @@ test('a repeated key and matching server fingerprint returns the original reserv
   const database = new FakeSaasDatabase();
   const idempotency = store();
   const first = await idempotency.claim(database.executor(), claimInput());
+  const mappingBefore = structuredClone([...database.rows.entries()]);
   const second = await idempotency.claim(database.executor(), claimInput({ requestId: REQUEST_B_ID }));
 
   if (first.kind !== 'claimed') throw new Error('Expected the first claim to win');
@@ -231,23 +252,62 @@ test('a repeated key and matching server fingerprint returns the original reserv
   });
   assert.equal(database.rows.size, 1);
   assert.equal([...database.rows.values()][0].request_id, REQUEST_A_ID);
-  assert.equal(database.calls.filter(({ sql }) => sql.startsWith('SELECT request_fingerprint')).length, 1);
+  const lookups = database.calls.filter(({ sql }) => isClaimLookup(sql));
+  assert.equal(lookups.length, 1);
+  assert.deepEqual(lookups[0].values, [TENANT_ID, PROJECT_ID, PROXY_KEY_ID, first.keyDigest]);
+  assert.deepEqual([...database.rows.entries()], mappingBefore);
+  assert.ok(database.calls.every(({ sql }) => !sql.startsWith('UPDATE ')));
   assert.ok(database.calls.every(({ values }) => !values.includes(CLIENT_KEY)));
 });
 
 test('a reused key with a different fingerprint or fingerprint version is a safe conflict', async () => {
   const database = new FakeSaasDatabase();
   const idempotency = store();
-  await idempotency.claim(database.executor(), claimInput());
+  const first = await idempotency.claim(database.executor(), claimInput());
+  if (first.kind !== 'claimed') throw new Error('Expected the first claim to win');
+  const mappingBefore = structuredClone([...database.rows.entries()]);
 
-  assert.deepEqual(await idempotency.claim(database.executor(), claimInput({ requestFingerprint: FINGERPRINT_B })), {
+  assert.deepEqual(await idempotency.claim(database.executor(), claimInput({
+    requestId: REQUEST_B_ID, requestFingerprint: FINGERPRINT_B,
+  })), {
     kind: 'fingerprint_conflict',
   });
+  assert.deepEqual([...database.rows.entries()], mappingBefore);
   assert.deepEqual(
-    await idempotency.claim(database.executor(), claimInput({ requestFingerprintVersion: 'gateway-request-v2' })),
+    await idempotency.claim(database.executor(), claimInput({
+      requestId: REQUEST_C_ID, requestFingerprintVersion: 'gateway-request-v2',
+    })),
     { kind: 'fingerprint_conflict' },
   );
   assert.equal(database.rows.size, 1);
+  assert.deepEqual([...database.rows.entries()], mappingBefore);
+  const lookups = database.calls.filter(({ sql }) => isClaimLookup(sql));
+  assert.equal(lookups.length, 2);
+  for (const lookup of lookups) {
+    assert.deepEqual(lookup.values, [TENANT_ID, PROJECT_ID, PROXY_KEY_ID, first.keyDigest]);
+  }
+  assert.ok(database.calls.every(({ sql }) => !sql.startsWith('UPDATE ')));
+});
+
+test('a failed canonical lookup propagates the SQL error without changing the mapping', async () => {
+  const database = new FakeSaasDatabase();
+  const idempotency = store();
+  await idempotency.claim(database.executor(), claimInput());
+  const mappingBefore = structuredClone([...database.rows.entries()]);
+  const sqlError = new Error('simulated canonical lookup failure');
+  const executor = database.executor();
+  const tx: SqlExecutor = {
+    async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+      if (isClaimLookup(sql.replace(/\s+/g, ' ').trim())) throw sqlError;
+      return executor.query<Row>(sql, values);
+    },
+  };
+
+  await assert.rejects(
+    idempotency.claim(tx, claimInput({ requestId: REQUEST_B_ID })),
+    (error: unknown) => error === sqlError,
+  );
+  assert.deepEqual([...database.rows.entries()], mappingBefore);
 });
 
 test('two concurrent claims serialize through INSERT conflict and FOR UPDATE with only one owner', async () => {

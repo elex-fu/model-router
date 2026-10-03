@@ -250,7 +250,10 @@ export class GatewayRequestIdempotencyStore {
     // ON CONFLICT waits for the competing INSERT. Lock and inspect its committed
     // row before returning so a race cannot be mistaken for a fresh claim.
     const existing = await tx.query<StoredIdempotencyRow>(
-      `SELECT request_fingerprint, request_fingerprint_version, request_id, state,
+      `SELECT ${TABLE}.request_fingerprint AS request_fingerprint,
+              ${TABLE}.request_fingerprint_version AS request_fingerprint_version,
+              ${TABLE}.request_id AS request_id,
+              ${TABLE}.state AS state,
               request_row.execution_state AS execution_state,
               request_row.project_id AS canonical_project_id,
               request_row.proxy_key_id AS canonical_proxy_key_id,
