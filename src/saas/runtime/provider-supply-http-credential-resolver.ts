@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import {
   PROVIDER_CREDENTIAL_CONTEXT_VERSION,
   PROVIDER_CREDENTIAL_ENVELOPE_ALGORITHM,
@@ -24,6 +25,8 @@ const DEFAULT_ALLOWED_AUTHENTICATION_HEADERS = Object.freeze([
   'x-goog-api-key',
 ]);
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_AUTHENTICATION_VALUE_BYTES = 16 * 1024;
+const BEARER_PREFIX = Buffer.from('Bearer ', 'ascii');
 
 const SAFE_MESSAGES = Object.freeze({
   INVALID_INPUT: 'provider HTTP credential resolver input is invalid',
@@ -51,7 +54,9 @@ export interface ProviderSupplyHttpCredentialService {
   ): Promise<T>;
 }
 
-export type ProviderSupplyHttpAuthenticationHeader = string | Pick<ProviderHttpCredential, 'headerName'>;
+export type ProviderSupplyHttpAuthenticationHeader =
+  | string
+  | (Pick<ProviderHttpCredential, 'headerName'> & { readonly valueFormat?: 'raw' | 'bearer' });
 
 export type ProviderSupplyHttpAuthenticationHeaderResolver = (
   input: ProviderHttpCredentialResolveInput,
@@ -60,7 +65,12 @@ export type ProviderSupplyHttpAuthenticationHeaderResolver = (
 export interface ProviderSupplyHttpCredentialResolverOptions {
   readonly proofReader: ProviderSupplyHttpCredentialProofReader;
   readonly unsealer: Pick<GatewayProviderCredentialUnsealer, 'withCredential'>;
-  /** A deployment-owned resolver; request input never supplies the header name. */
+  /**
+   * Deployment-owned header/format policy, never supplied by a request.
+   * Authorization defaults to bearer; other headers default to raw. Stored
+   * complete header values require explicit raw; plaintext is never inspected
+   * for, or stripped of, an existing authentication prefix.
+   */
   readonly resolveAuthenticationHeader: ProviderSupplyHttpAuthenticationHeaderResolver;
   readonly allowedAuthenticationHeaders?: readonly string[];
   readonly now?: () => Date;
@@ -125,15 +135,52 @@ function credentialVersionFromInput(value: unknown): number {
   return version;
 }
 
-function headerNameFromValue(
-  value: ProviderSupplyHttpAuthenticationHeader,
+function authenticationFromValue(
+  value: unknown,
   allowedAuthenticationHeaders: ReadonlySet<string>,
-): string {
-  const raw = typeof value === 'string' ? value : isRecord(value) ? value.headerName : undefined;
-  if (typeof raw !== 'string') fail('CREDENTIAL_INVALID');
+): { readonly headerName: string; readonly valueFormat: 'raw' | 'bearer' } {
+  let raw: unknown = value;
+  let format: unknown;
+  if (typeof value !== 'string') {
+    try {
+      if (!isRecord(value)) fail('CREDENTIAL_INVALID');
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      if (
+        !keys.every((key) => key === 'headerName' || key === 'valueFormat') ||
+        !descriptors.headerName || !Object.hasOwn(descriptors.headerName, 'value') ||
+        (descriptors.valueFormat !== undefined && !Object.hasOwn(descriptors.valueFormat, 'value'))
+      ) fail('CREDENTIAL_INVALID');
+      raw = descriptors.headerName.value;
+      format = descriptors.valueFormat?.value;
+    } catch {
+      fail('CREDENTIAL_INVALID');
+    }
+  }
+  if (typeof raw !== 'string' || /[\x00-\x1f\x7f]/.test(raw)) fail('CREDENTIAL_INVALID');
   const headerName = raw.trim().toLowerCase();
-  if (headerName === '' || !allowedAuthenticationHeaders.has(headerName)) fail('CREDENTIAL_INVALID');
-  return headerName;
+  if (!HEADER_NAME.test(headerName) || !allowedAuthenticationHeaders.has(headerName)) fail('CREDENTIAL_INVALID');
+  const valueFormat = format === undefined ? headerName === 'authorization' ? 'bearer' : 'raw' : format;
+  if ((valueFormat !== 'raw' && valueFormat !== 'bearer') || (valueFormat === 'bearer' && headerName !== 'authorization'))
+    fail('CREDENTIAL_INVALID');
+  return { headerName, valueFormat };
+}
+
+function formattedCredential(secret: Buffer, format: 'raw' | 'bearer'): Buffer {
+  const prefixBytes = format === 'bearer' ? BEARER_PREFIX.byteLength : 0;
+  if (secret.byteLength === 0 || secret.byteLength + prefixBytes > MAX_AUTHENTICATION_VALUE_BYTES || !isUtf8(secret))
+    fail('CREDENTIAL_INVALID');
+  for (const byte of secret) if (byte <= 0x1f || byte === 0x7f) fail('CREDENTIAL_INVALID');
+  if (format === 'raw') return secret;
+  const formatted = Buffer.alloc(prefixBytes + secret.byteLength);
+  BEARER_PREFIX.copy(formatted);
+  secret.copy(formatted, prefixBytes);
+  return formatted;
+}
+
+function assertActive(input: ProviderHttpCredentialResolveInput): void {
+  if (!input.signal || typeof input.signal.aborted !== 'boolean') fail('INVALID_INPUT');
+  if (input.signal.aborted) fail('CREDENTIAL_UNAVAILABLE');
 }
 
 function normalizeAllowedAuthenticationHeaders(value: readonly string[] | undefined): ReadonlySet<string> {
@@ -141,7 +188,7 @@ function normalizeAllowedAuthenticationHeaders(value: readonly string[] | undefi
   if (!Array.isArray(headers) || headers.length === 0) fail('INVALID_INPUT');
   const normalized = new Set<string>();
   for (const header of headers) {
-    if (typeof header !== 'string' || header.trim() === '') fail('INVALID_INPUT');
+    if (typeof header !== 'string' || header.trim() === '' || /[\x00-\x1f\x7f]/.test(header)) fail('INVALID_INPUT');
     const normalizedHeader = header.trim().toLowerCase();
     if (!HEADER_NAME.test(normalizedHeader)) fail('INVALID_INPUT');
     normalized.add(normalizedHeader);
@@ -374,60 +421,86 @@ export class ProviderSupplyHttpCredentialResolver {
     useCredential: Parameters<ProviderHttpCredentialResolver>[1],
   ): Promise<PreparedEvidenceTransportResponse> {
     let callbackContractError: ProviderSupplyHttpCredentialResolverError | undefined;
+    let callbacksOpen = false;
+    let activeSecret: Buffer | undefined;
+    let activeFormatted: Buffer | undefined;
     try {
       const evidenceId = evidenceIdFromInput(input);
       if (typeof useCredential !== 'function') fail('INVALID_INPUT');
       const credentialVersion = credentialVersionFromInput(input.credentialVersion);
+      assertActive(input);
 
       // Resolve the deployment-owned header before reading proof or unsealing.
-      const headerName = headerNameFromValue(
+      const authentication = authenticationFromValue(
         await this.resolveAuthenticationHeader(input),
         this.allowedAuthenticationHeaders,
       );
+      assertActive(input);
+      const proof = await this.proofReader.readDispatchProof(evidenceId);
+      assertActive(input);
+      if (!proof) fail('CREDENTIAL_UNAVAILABLE');
       const now = this.now();
       if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail('CREDENTIAL_UNAVAILABLE');
-      const proof = await this.proofReader.readDispatchProof(evidenceId);
-      if (!proof) fail('CREDENTIAL_UNAVAILABLE');
       assertAuthorizedProof(proof, input, evidenceId, credentialVersion, now);
 
       let injectionCount = 0;
       let response: PreparedEvidenceTransportResponse | undefined;
-      await this.unsealer.withCredential(
-        { account: proof.account, credential: proof.credential, version: proof.version },
-        async (secret) => {
-          const candidateSecret: unknown = secret;
-          if (!Buffer.isBuffer(candidateSecret)) {
-            if (candidateSecret instanceof Uint8Array) candidateSecret.fill(0);
-            callbackContractError = new ProviderSupplyHttpCredentialResolverError('CREDENTIAL_INVALID');
-            throw callbackContractError;
-          }
-          if (injectionCount !== 0) {
-            injectionCount += 1;
-            candidateSecret.fill(0);
-            callbackContractError = new ProviderSupplyHttpCredentialResolverError('CREDENTIAL_INVALID');
-            throw callbackContractError;
-          }
-          injectionCount += 1;
-          try {
-            const candidate = await useCredential({ headerName, value: candidateSecret });
-            if (!isTransportResponse(candidate)) {
+      callbacksOpen = true;
+      try {
+        await this.unsealer.withCredential(
+          { account: proof.account, credential: proof.credential, version: proof.version },
+          async (secret) => {
+            const candidateSecret: unknown = secret;
+            if (!Buffer.isBuffer(candidateSecret)) {
+              if (candidateSecret instanceof Uint8Array) candidateSecret.fill(0);
               callbackContractError = new ProviderSupplyHttpCredentialResolverError('CREDENTIAL_INVALID');
               throw callbackContractError;
             }
-            response = candidate;
-            return candidate;
-          } finally {
-            candidateSecret.fill(0);
-          }
-        },
-      );
+            if (!callbacksOpen || injectionCount !== 0) {
+              injectionCount += 1;
+              candidateSecret.fill(0);
+              callbackContractError = new ProviderSupplyHttpCredentialResolverError('CREDENTIAL_INVALID');
+              throw callbackContractError;
+            }
+            injectionCount += 1;
+            activeSecret = candidateSecret;
+            try {
+              assertActive(input);
+              activeFormatted = formattedCredential(candidateSecret, authentication.valueFormat);
+              const candidate = await useCredential({ headerName: authentication.headerName, value: activeFormatted });
+              assertActive(input);
+              if (!callbacksOpen) fail('CREDENTIAL_INVALID');
+              if (!isTransportResponse(candidate)) {
+                callbackContractError = new ProviderSupplyHttpCredentialResolverError('CREDENTIAL_INVALID');
+                throw callbackContractError;
+              }
+              response = candidate;
+              return candidate;
+            } catch (error) {
+              if (error instanceof ProviderSupplyHttpCredentialResolverError) callbackContractError ??= error;
+              throw error;
+            } finally {
+              activeFormatted?.fill(0);
+              candidateSecret.fill(0);
+            }
+          },
+        );
+      } finally {
+        callbacksOpen = false;
+      }
 
+      if (callbackContractError) throw callbackContractError;
+      assertActive(input);
       if (injectionCount !== 1 || response === undefined) fail('CREDENTIAL_UNAVAILABLE');
       return response;
     } catch (error) {
       if (callbackContractError) throw callbackContractError;
       if (error instanceof ProviderSupplyHttpCredentialResolverError) throw error;
       throw new ProviderSupplyHttpCredentialResolverError('CREDENTIAL_UNAVAILABLE');
+    } finally {
+      callbacksOpen = false;
+      activeFormatted?.fill(0);
+      activeSecret?.fill(0);
     }
   }
 }
