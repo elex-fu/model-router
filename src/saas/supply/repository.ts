@@ -2514,7 +2514,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       lockPredicate.values,
     );
     const locked = lockedRows[0];
-    if (!locked || locked.authz_version !== input.expectedAuthzVersion) return null;
+    if (!locked || asPositiveInteger(locked.authz_version) !== input.expectedAuthzVersion) return null;
     if (input.status === 'revoked' && locked.current_version !== null) {
       const version = asPositiveInteger(locked.current_version);
       await lockAdvisoryLayers(
@@ -2581,7 +2581,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       lockPredicate.values,
     );
     const locked = lockedRows[0];
-    if (!locked || locked.authz_version !== input.expectedAuthzVersion) return null;
+    if (!locked || asPositiveInteger(locked.authz_version) !== input.expectedAuthzVersion) return null;
     const predicate = credentialPredicate(input.credential, 6);
     const rows = await this.query<CredentialRow>(
       `UPDATE ${table}
