@@ -1,5 +1,5 @@
 /** The supported per-Key IP policy modes. */
-export type IpPolicyMode = 'disabled' | 'allowlist';
+export type IpPolicyMode = 'disabled' | 'allowlist' | 'denyall';
 
 /** A validated, canonical IP policy. Rules always include an explicit prefix. */
 export interface IpPolicy {
@@ -19,9 +19,6 @@ interface ParsedNetwork extends ParsedAddress {
 
 const MAX_RULES = 256;
 const IPV4_MASK = (1n << 32n) - 1n;
-const IPV6_MASK = (1n << 128n) - 1n;
-const IPV4_MAPPED_PREFIX = 0xffffn << 32n;
-const IPV4_MAPPED_END = IPV4_MAPPED_PREFIX | IPV4_MASK;
 
 function invalid(message: string): never {
   throw new TypeError(message);
@@ -196,8 +193,8 @@ export function canonicalizeIpPolicy(input: unknown): IpPolicy {
   }
 
   const candidate = input as { mode?: unknown; rules?: unknown };
-  if (candidate.mode !== 'disabled' && candidate.mode !== 'allowlist') {
-    return invalid('IP policy mode must be disabled or allowlist');
+  if (candidate.mode !== 'disabled' && candidate.mode !== 'allowlist' && candidate.mode !== 'denyall') {
+    return invalid('IP policy mode must be disabled, allowlist or denyall');
   }
   if (!Array.isArray(candidate.rules)) return invalid('IP policy rules must be an array');
   if (candidate.rules.length > MAX_RULES) return invalid(`IP policy may contain at most ${MAX_RULES} rules`);
@@ -206,6 +203,9 @@ export function canonicalizeIpPolicy(input: unknown): IpPolicy {
   }
   if (candidate.mode === 'allowlist' && candidate.rules.length === 0) {
     return invalid('An allowlist requires at least one rule');
+  }
+  if (candidate.mode === 'denyall' && candidate.rules.length !== 0) {
+    return invalid('A denyall policy requires empty rules');
   }
 
   const networks = candidate.rules.map(parseNetwork);
@@ -244,5 +244,6 @@ export function isIpAllowed(address: unknown, policy: unknown): boolean {
   }
 
   if (normalized.mode === 'disabled') return true;
+  if (normalized.mode === 'denyall') return false;
   return normalized.rules.some((rule) => networkContains(parseNetwork(rule), peer));
 }

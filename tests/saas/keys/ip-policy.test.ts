@@ -86,7 +86,7 @@ test('rejects non-literals, ambiguous syntax, zones, ports, and invalid prefixes
     ' 192.0.2.1',
   ];
   for (const input of invalidInputs) {
-    assert.throws(() => canonicalizeIpCidr(input), undefined, input);
+    assert.throws(() => canonicalizeIpCidr(input), input);
   }
 });
 
