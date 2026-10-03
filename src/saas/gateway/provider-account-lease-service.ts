@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
 import type {
   PreparedEvidenceLease,
   PreparedEvidenceLeaseProvider,
@@ -219,7 +220,7 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     tx: SqlExecutor,
     input: NormalizedLeaseInput,
   ): Promise<ProviderAccountLease | null> {
-    await this.lockAccount(tx, input);
+    await this.fenceAndReadAccount(tx, input);
 
     /* Lock all current held rows before taking the database clock sample. */
     const heldResult = await tx.query<HeldLeaseRow>(
@@ -305,7 +306,20 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     };
   }
 
-  private async lockAccount(tx: SqlExecutor, input: NormalizedLeaseInput): Promise<void> {
+  private async fenceAndReadAccount(tx: SqlExecutor, input: NormalizedLeaseInput): Promise<void> {
+    // Match migration 050's account writer fence, and serialize acquisitions
+    // even when the account has no held lease rows yet. Account authority is
+    // SELECT-only for the gateway: it must not require a tuple-lock UPDATE ACL.
+    // All live acquirers must share this fence; a legacy tuple-lock-only
+    // acquirer does not participate and is not safe to mix during rollout.
+    const key = input.ownerKind === 'tenant'
+      ? saasAdvisoryKey.tenantProviderAccount(input.tenantId, input.accountId)
+      : saasAdvisoryKey.platformProviderAccount(input.accountId);
+    await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))', [key]);
+
+    // Keep this a separate statement after the wait. The production database
+    // transaction boundary forces READ COMMITTED, so a committed CP revocation
+    // is visible here, not hidden by the snapshot taken by the lock statement.
     const result =
       input.ownerKind === 'tenant'
         ? await tx.query<AccountRow>(
@@ -315,8 +329,7 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
                 AND id = $2
                 AND status = 'active'
                 AND validation_state = 'verified'
-                AND revoked_at IS NULL
-              FOR UPDATE`,
+                AND revoked_at IS NULL`,
             [input.tenantId, input.accountId],
           )
         : await tx.query<AccountRow>(
@@ -325,8 +338,7 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
               WHERE id = $1
                 AND status = 'active'
                 AND validation_state = 'verified'
-                AND revoked_at IS NULL
-              FOR UPDATE`,
+                AND revoked_at IS NULL`,
             [input.accountId],
           );
     if (result.rows.length !== 1) fail('ACCOUNT_UNAVAILABLE', 'provider account is not currently leasable');

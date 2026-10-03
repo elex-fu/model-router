@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import { PROVIDER_ACCOUNT_LEASES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/025_provider_account_leases.js';
 import { PostgresProviderAccountLeaseService, ProviderAccountLeaseError } from '../../../src/saas/gateway/index.js';
 import type { PreparedEvidenceLeaseRequest } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
@@ -29,12 +30,15 @@ function result<Row>(rows: Row[]): SqlResult<Row> {
 
 class FakeLeaseDatabase {
   readonly statements: string[] = [];
+  readonly calls: { sql: string; values: readonly unknown[] }[] = [];
   readonly events: string[] = [];
   readonly leases: FakeLeaseRow[] = [];
   nowMs = Date.parse('2026-09-28T00:00:00.000Z');
   accountAvailable = true;
   failOn: RegExp | null = null;
   private nextFencingToken = 0n;
+  // Serializes this unit fixture only. Real lock exclusion and MVCC visibility
+  // are proved separately by provider-account-lease-postgres.integration.test.
   private transactionTail = Promise.resolve();
 
   async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
@@ -57,10 +61,15 @@ class FakeLeaseDatabase {
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     const normalized = sql.replace(/\s+/g, ' ').trim();
     this.statements.push(normalized);
+    this.calls.push({ sql: normalized, values: [...values] });
     if (this.failOn?.test(normalized)) throw new Error('fake storage failure');
 
+    if (normalized === 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))') {
+      this.events.push('account-fence');
+      return result([]) as SqlResult<Row>;
+    }
     if (normalized.includes('FROM saas_tenant_provider_accounts')) {
-      this.events.push('account-lock');
+      this.events.push('account-read');
       return (
         this.accountAvailable
           ? result([{ id: String(values[1]), status: 'active', validation_state: 'verified', revoked_at: null }])
@@ -68,7 +77,7 @@ class FakeLeaseDatabase {
       ) as SqlResult<Row>;
     }
     if (normalized.includes('FROM saas_platform_provider_accounts')) {
-      this.events.push('account-lock');
+      this.events.push('account-read');
       return (
         this.accountAvailable
           ? result([{ id: String(values[0]), status: 'active', validation_state: 'verified', revoked_at: null }])
@@ -245,13 +254,16 @@ test('migration 025 is forward-only and defines append-only fenced slot leases',
   assert.doesNotMatch(PROVIDER_ACCOUNT_LEASES_SAAS_MIGRATION.sql, /saas_attempts|UPDATE\s+saas_provider_account/i);
 });
 
-test('acquire locks account and held slots before the database clock, then returns a fencing lease', async () => {
+test('acquire fences then reads account and locks held slots before the database clock', async () => {
   const database = new FakeLeaseDatabase();
   const lease = await service(database).acquire(request());
 
   assert.ok(lease);
   assert.equal(lease.fencingToken, '1');
-  assert.deepEqual(database.events.slice(0, 3), ['account-lock', 'held-slots-lock', 'clock']);
+  assert.deepEqual(database.events.slice(0, 4), ['account-fence', 'account-read', 'held-slots-lock', 'clock']);
+  assert.doesNotMatch(database.calls.find(({ sql }) => sql.includes('FROM saas_platform_provider_accounts'))!.sql,
+    /FOR (?:UPDATE|SHARE|KEY SHARE|NO KEY UPDATE)/);
+  assert.match(database.calls.find(({ sql }) => sql.startsWith('SELECT id, slot, fencing_token'))!.sql, /FOR UPDATE$/);
   assert.equal(database.leases[0]?.slot, 0);
   assert.equal(database.leases[0]?.status, 'held');
 });
@@ -335,4 +347,58 @@ test('database failures fail closed and roll back the lease row', async () => {
     (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'STORAGE_ERROR',
   );
   assert.equal(database.leases.length, 0);
+});
+
+test('account fences use the existing exact owner and tenant identities without over-broad keys', async () => {
+  const fences: string[] = [];
+  for (const [mode, tenantId, accountId] of [
+    ['byok', 'tenant-1', 'account:一'],
+    ['byok', 'tenant-2', 'account:一'],
+    ['platform', 'tenant-1', 'account:一'],
+    ['platform', 'tenant-2', 'account:一'],
+    ['platform', 'tenant-1', 'different-account'],
+  ] as const) {
+    const database = new FakeLeaseDatabase();
+    const input = request(mode, accountId);
+    const scoped = { ...input, tenantId, evidence: { ...input.evidence, tenantId } };
+    assert.ok(await service(database).acquire(scoped));
+    assert.equal(database.calls[0]?.sql, 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))');
+    const expected = mode === 'byok'
+      ? saasAdvisoryKey.tenantProviderAccount(tenantId, accountId)
+      : saasAdvisoryKey.platformProviderAccount(accountId);
+    assert.deepEqual(database.calls[0]?.values, [expected]);
+    fences.push(expected);
+    const read = database.calls[1]!;
+    assert.match(read.sql, new RegExp(`FROM saas_${mode === 'byok' ? 'tenant' : 'platform'}_provider_accounts`));
+    assert.doesNotMatch(read.sql, /FOR (?:UPDATE|SHARE|KEY SHARE|NO KEY UPDATE)/);
+    assert.deepEqual(read.values, mode === 'byok' ? [tenantId, accountId] : [accountId]);
+  }
+  assert.notEqual(fences[0], fences[1]);
+  assert.notEqual(fences[0], fences[2]);
+  assert.equal(fences[2], fences[3], 'platform capacity is shared across request tenants');
+  assert.notEqual(fences[2], fences[4]);
+});
+
+test('failed account fence stops before the account read, lease writes, sequence or retries', async () => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const database = new FakeLeaseDatabase();
+    database.failOn = /pg_advisory_xact_lock/;
+    await assert.rejects(service(database).acquire(request(mode)),
+      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'STORAGE_ERROR');
+    assert.equal(database.calls.length, 1);
+    assert.deepEqual(database.events, []);
+    assert.equal(database.leases.length, 0);
+  }
+});
+
+test('an unavailable account fails after its fence and before touching lease state', async () => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const database = new FakeLeaseDatabase();
+    database.accountAvailable = false;
+    await assert.rejects(service(database).acquire(request(mode)),
+      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'ACCOUNT_UNAVAILABLE');
+    assert.deepEqual(database.events, ['account-fence', 'account-read']);
+    assert.equal(database.calls.length, 2);
+    assert.equal(database.leases.length, 0);
+  }
 });
