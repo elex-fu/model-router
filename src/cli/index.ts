@@ -10,6 +10,7 @@ import { generateProxyKey } from '../utils/generate-key.js';
 import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
 import { saasBootstrapAdmin } from './saas-management.js';
+import { saasMigrationAudit } from './saas-migration-audit.js';
 import { saasMigrate } from './saas-migrations.js';
 import { tryV2, v2Config } from './v2.js';
 import {
@@ -105,6 +106,21 @@ program
   .command('saas:migrate')
   .description('Apply SaaS database migrations explicitly. Server startup never runs migrations.')
   .action(() => management(() => saasMigrate()));
+
+program
+  .command('saas:migration-audit')
+  .description('Read-only ledger/catalog audit using MODEL_ROUTER_SAAS_AUDIT_DATABASE_URL; missing baseline is unverified')
+  .option('--deployment-id <id>', 'Explicit non-sensitive target deployment label')
+  .option('--environment-id <id>', 'Explicit non-sensitive target environment label')
+  .option('--database <name>', 'Expected PostgreSQL database name')
+  .option('--schema <name>', 'Explicit SaaS schema name')
+  .option('--release-id <id>', 'Expected release label for this executable and reviewed baseline')
+  .option('--catalog-baseline <path>', 'Reviewed JSON catalog baseline; never generated or promoted automatically')
+  .option('--allow-local-plaintext', 'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS')
+  .action((options) => management(async () => {
+    const result = await saasMigrationAudit(options);
+    process.exitCode = result.exitCode;
+  }));
 
 program
   .command('config:apply <path>')
