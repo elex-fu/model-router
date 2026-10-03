@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
 import { SaasPricingService } from '../../../src/saas/pricing/service.js';
 import type {
   AppendCustomerPriceVersionInput,
@@ -170,6 +171,7 @@ class RecordingPricingDatabase implements SaasDatabase {
   readonly executors: RecordingPricingExecutor[] = [];
   readonly rootStatements: Statement[] = [];
   transactionCalls = 0;
+  failAdvisoryLock = false;
 
   constructor() {
     this.customerPrices = [priceRow('customer', customerIdentity)];
@@ -195,7 +197,10 @@ class RecordingPricingDatabase implements SaasDatabase {
 
   async execute<RowType>(sql: string, values: readonly unknown[]): Promise<SqlResult<RowType>> {
     const statement = sql.replace(/\s+/g, ' ').trim().toLowerCase();
-    if (statement.startsWith('select pg_advisory_xact_lock')) return result();
+    if (statement.startsWith('select pg_advisory_xact_lock')) {
+      if (this.failAdvisoryLock) throw new Error('synthetic lineage lock failure');
+      return result();
+    }
 
     const isCustomer = statement.includes('saas_customer_price_versions');
     const isSupplier = statement.includes('saas_supplier_cost_versions');
@@ -318,16 +323,15 @@ test('resolvers reuse a caller executor and use a standalone transaction otherwi
   assert.equal(callerRecordingExecutor, callerExecutor);
   assert.equal(database.rootStatements.length, 0);
   assert.equal(advisoryStatements(callerRecordingExecutor).length, 2);
-  assert.ok(
-    callerRecordingExecutor.statements
-      .filter(({ sql }) => sql.toLowerCase().includes('from saas_customer_price_versions'))
-      .every(({ sql }) => sql.toLowerCase().includes('for share')),
-  );
-  assert.ok(
-    callerRecordingExecutor.statements
-      .filter(({ sql }) => sql.toLowerCase().includes('from saas_supplier_cost_versions'))
-      .every(({ sql }) => sql.toLowerCase().includes('for share')),
-  );
+  for (const [index, table] of ['saas_customer_price_versions', 'saas_supplier_cost_versions'].entries()) {
+    const readIndex = callerRecordingExecutor.statements.findIndex(({ sql }) => sql.includes(`FROM ${table}`));
+    const lock = advisoryStatements(callerRecordingExecutor)[index];
+    assert.ok(lock);
+    assert.ok(readIndex > callerRecordingExecutor.statements.indexOf(lock));
+    const read = callerRecordingExecutor.statements[readIndex];
+    assert.ok(read);
+    assert.doesNotMatch(read.sql, /FOR\s+(?:SHARE|UPDATE|KEY SHARE|NO KEY UPDATE)/i);
+  }
 
   const standaloneDatabase = new RecordingPricingDatabase();
   const standaloneService = new SaasPricingService(standaloneDatabase, {
@@ -338,6 +342,10 @@ test('resolvers reuse a caller executor and use a standalone transaction otherwi
   assert.equal(standaloneDatabase.transactionCalls, 1);
   assert.equal(standaloneDatabase.executors.length, 1);
   assert.equal(advisoryStatements(executorAt(standaloneDatabase, 0)).length, 1);
+  const resolvedSupplier = await standaloneService.resolveSupplierCostVersion(supplierIdentity);
+  assert.equal(resolvedSupplier.id, 'supplier-price-1');
+  assert.equal(standaloneDatabase.transactionCalls, 2);
+  assert.equal(advisoryStatements(executorAt(standaloneDatabase, 1)).length, 1);
 });
 
 test('append and resolve share lineage lock keys, while distinct identities stay isolated', async () => {
@@ -383,4 +391,50 @@ test('append and resolve share lineage lock keys, while distinct identities stay
   );
   const distinctSupplierLock = firstAdvisoryKey(executorAt(database, 5));
   assert.notEqual(distinctSupplierLock, appendedSupplierLock);
+});
+
+test('both resolvers fail closed before reading prices when their lineage mutex fails', async () => {
+  for (const kind of ['customer', 'supplier'] as const) {
+    const database = new RecordingPricingDatabase();
+    database.failAdvisoryLock = true;
+    const service = new SaasPricingService(database);
+    await assert.rejects(
+      kind === 'customer'
+        ? service.resolveCustomerPriceVersion(customerIdentity)
+        : service.resolveSupplierCostVersion(supplierIdentity),
+      (error: unknown) => error instanceof SaasPricingError && error.code === 'PRICING_STORAGE_ERROR',
+    );
+    const executor = executorAt(database, 0);
+    assert.equal(executor.statements.length, 1);
+    assert.match(executor.statements[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock/);
+    assert.equal(database.rootStatements.length, 0);
+  }
+});
+
+test('both resolvers retain exact effective-window and complete identity selection', async () => {
+  const database = new RecordingPricingDatabase();
+  for (const [kind, identity, prices] of [
+    ['customer', customerIdentity, database.customerPrices],
+    ['supplier', supplierIdentity, database.supplierPrices],
+  ] as const) {
+    prices.push(
+      priceRow(kind, identity, { id: `${kind}-expired`, version: 2, expires_at: '2026-09-28T00:00:00.000Z' }),
+      priceRow(kind, identity, { id: `${kind}-future`, version: 3, effective_at: '2026-09-29T00:00:00.000Z' }),
+      priceRow(kind, { ...identity, productId: 'other-product' }, { id: `${kind}-other-product`, version: 4 }),
+    );
+  }
+  const service = new SaasPricingService(database, { now: () => new Date('2026-09-28T00:00:00.000Z') });
+  assert.equal((await service.resolveCustomerPriceVersion(customerIdentity)).id, 'customer-price-1');
+  assert.equal((await service.resolveSupplierCostVersion(supplierIdentity)).id, 'supplier-price-1');
+  database.customerPrices.splice(0);
+  database.supplierPrices.splice(0);
+  for (const resolve of [
+    () => service.resolveCustomerPriceVersion(customerIdentity),
+    () => service.resolveSupplierCostVersion(supplierIdentity),
+  ]) {
+    await assert.rejects(
+      resolve(),
+      (error: unknown) => error instanceof SaasPricingError && error.code === 'PRICE_VERSION_NOT_EFFECTIVE',
+    );
+  }
 });

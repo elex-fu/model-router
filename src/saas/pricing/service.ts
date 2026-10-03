@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { MAX_MINOR_UNITS, normalizeCurrency } from '../billing/money.js';
+import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import {
   calculatePriceVersion,
@@ -684,6 +685,10 @@ function priceLineageLockKey(lineage: PriceLineage): string {
   return createHash('sha256').update(canonicalPriceLineageKey(lineage)).digest().readBigInt64BE(0).toString(10);
 }
 
+type SnapshotIdentity =
+  | { readonly kind: 'customer'; readonly tenantId: string; readonly requestId: string }
+  | { readonly kind: 'supplier'; readonly tenantId: string; readonly requestId: string; readonly attemptId: string };
+
 function mapStorageError(
   error: unknown,
   conflict: 'PRICE_VERSION_CONFLICT' | 'SNAPSHOT_CONFLICT' | 'PRICING_STORAGE_ERROR' = 'PRICING_STORAGE_ERROR',
@@ -747,6 +752,24 @@ export class SaasPricingService {
    */
   private async lockPriceLineage(executor: SqlExecutor, lineage: PriceLineage): Promise<void> {
     await this.query(executor, 'SELECT pg_advisory_xact_lock($1::bigint)', [priceLineageLockKey(lineage)]);
+  }
+
+  /** Protects absent snapshots as well as immutable replays; read only after this wait. */
+  private async lockSnapshot(executor: SqlExecutor, identity: SnapshotIdentity): Promise<void> {
+    // Canonical DB UUID text prevents alternate spellings of one row from taking different locks.
+    await this.query(
+      executor,
+      `SELECT pg_advisory_xact_lock(hashtextextended(
+         jsonb_build_array('saas-pricing-snapshot-v1', $1::text, $2::uuid::text, $3::uuid::text, $4::uuid::text)::text, 0))`,
+      [identity.kind, identity.tenantId, identity.requestId, identity.kind === 'supplier' ? identity.attemptId : null],
+    );
+  }
+
+  private async lockPlatformAccountIdentity(executor: SqlExecutor, platformAccountId: string): Promise<void> {
+    // Matches 050's exclusive account writer fence; take it before request integrity locks.
+    await this.query(executor, 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))', [
+      saasAdvisoryKey.platformProviderAccount(platformAccountId),
+    ]);
   }
 
   private async resolvePlatformPricingTarget(
@@ -973,14 +996,13 @@ export class SaasPricingService {
           AND product_id = $3
           AND owner_kind = 'platform'
           AND supply_mode = 'platform'
-        LIMIT 1
-        FOR SHARE`,
+        LIMIT 1`,
       [platformAccountId, providerId, productId],
     );
     if (!rows[0]) fail('SUPPLIER_ACCOUNT_NOT_FOUND');
   }
 
-  private async requireSupplierAttemptBinding(
+  private async lockSupplierAttemptBinding(
     executor: SqlExecutor,
     input: {
       readonly tenantId: string;
@@ -988,8 +1010,7 @@ export class SaasPricingService {
       readonly attemptId: string;
       readonly platformAccountId: string;
     },
-    price: SupplierCostVersionRecord,
-  ): Promise<void> {
+  ): Promise<Row> {
     const columnRows = await this.query<{ column_name?: unknown }>(
       executor,
       `SELECT column_name
@@ -1032,6 +1053,19 @@ export class SaasPricingService {
     );
     const row = rows[0];
     if (!row) fail('SUPPLIER_ATTEMPT_BINDING_MISMATCH');
+    return row;
+  }
+
+  private requireSupplierAttemptBinding(
+    row: Row,
+    input: {
+      readonly tenantId: string;
+      readonly requestId: string;
+      readonly attemptId: string;
+      readonly platformAccountId: string;
+    },
+    price: SupplierCostVersionRecord,
+  ): void {
     const same = (key: string, expected: unknown): boolean =>
       row[key] === expected || String(row[key]) === String(expected);
     if (
@@ -1241,8 +1275,7 @@ export class SaasPricingService {
             AND effective_at <= $8
             AND (expires_at IS NULL OR expires_at > $8)
           ORDER BY effective_at DESC, version DESC
-          LIMIT 1
-          FOR SHARE`,
+          LIMIT 1`,
         [...customerIdentityValues(identity), at],
       );
       if (!rows[0]) fail('PRICE_VERSION_NOT_EFFECTIVE');
@@ -1267,8 +1300,7 @@ export class SaasPricingService {
             AND effective_at <= $9
             AND (expires_at IS NULL OR expires_at > $9)
           ORDER BY effective_at DESC, version DESC
-          LIMIT 1
-          FOR SHARE`,
+          LIMIT 1`,
         [...supplierIdentityValues(identity), at],
       );
       if (!rows[0]) fail('PRICE_VERSION_NOT_EFFECTIVE');
@@ -1299,13 +1331,13 @@ export class SaasPricingService {
 
     return this.write(options.executor, async (tx) => {
       const request = await this.requirePlatformRequest(tx, tenantId, requestId);
+      await this.lockSnapshot(tx, { kind: 'customer', tenantId, requestId });
       const existingRows = await this.query<CustomerSnapshotRow>(
         tx,
         `SELECT ${CUSTOMER_SNAPSHOT_COLUMNS}
            FROM saas_request_customer_price_snapshots
           WHERE tenant_id = $1 AND request_id = $2
-          LIMIT 1
-          FOR UPDATE`,
+          LIMIT 1`,
         [tenantId, requestId],
       );
       if (existingRows[0]) {
@@ -1319,8 +1351,7 @@ export class SaasPricingService {
         `SELECT ${CUSTOMER_PRICE_COLUMNS}
            FROM saas_customer_price_versions
           WHERE id = $1
-          LIMIT 1
-          FOR SHARE`,
+          LIMIT 1`,
         [priceReference],
       );
       if (!priceRows[0]) fail('PRICE_VERSION_NOT_FOUND');
@@ -1429,14 +1460,18 @@ export class SaasPricingService {
     const createdAt = this.currentDate().toISOString();
 
     return this.write(options.executor, async (tx) => {
+      await this.lockPlatformAccountIdentity(tx, platformAccountId);
       const request = await this.requirePlatformRequest(tx, tenantId, requestId);
+      const attemptIdentity = { tenantId, requestId, attemptId, platformAccountId };
+      // Mutable integrity rows precede the snapshot mutex, including caller-owned attempt rows.
+      const attempt = await this.lockSupplierAttemptBinding(tx, attemptIdentity);
+      await this.lockSnapshot(tx, { kind: 'supplier', tenantId, requestId, attemptId });
       const existingRows = await this.query<SupplierSnapshotRow>(
         tx,
         `SELECT ${SUPPLIER_SNAPSHOT_COLUMNS}
            FROM saas_attempt_supplier_cost_snapshots
           WHERE tenant_id = $1 AND request_id = $2 AND attempt_id = $3
-          LIMIT 1
-          FOR UPDATE`,
+          LIMIT 1`,
         [tenantId, requestId, attemptId],
       );
       if (existingRows[0]) {
@@ -1450,8 +1485,7 @@ export class SaasPricingService {
         `SELECT ${SUPPLIER_COST_COLUMNS}
            FROM saas_supplier_cost_versions
           WHERE id = $1
-          LIMIT 1
-          FOR SHARE`,
+          LIMIT 1`,
         [priceReference],
       );
       if (!priceRows[0]) fail('PRICE_VERSION_NOT_FOUND');
@@ -1465,7 +1499,7 @@ export class SaasPricingService {
         fail('PRICE_VERSION_NOT_EFFECTIVE');
       }
       await this.requirePlatformAccount(tx, platformAccountId, price.providerId, price.productId);
-      await this.requireSupplierAttemptBinding(tx, { tenantId, requestId, attemptId, platformAccountId }, price);
+      this.requireSupplierAttemptBinding(attempt, attemptIdentity, price);
       const id = normalizeId(this.idFactory());
       const values = [
         id,
