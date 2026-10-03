@@ -6,13 +6,16 @@ import http, { type IncomingMessage, type RequestListener, type Server, type Ser
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { defaultConfigV2 } from '../../src/config/v2-schema.js';
 import { SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL } from '../../src/saas/db/credential-validation-worker-privileges.js';
+import { SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL } from '../../src/saas/db/credential-validation-worker-schema-readiness.js';
 import { SAAS_RUNTIME_PRIVILEGE_PROBE_SQL } from '../../src/saas/db/runtime-privileges.js';
 import {
   DEPLOYMENT_ENV_VARS,
   type DeploymentEnvironment,
   MODEL_ROUTER_DEPLOYMENT_MODE,
+  MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
   MODEL_ROUTER_SAAS_DATABASE_URL,
   MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
   MODEL_ROUTER_SAAS_KMS_PROVIDER,
@@ -27,8 +30,15 @@ import type { PaymentProviderAdapter } from '../../src/saas/payments/adapter.js'
 import { createSaasPaymentHandler, type SaasPaymentHttpOptions } from '../../src/saas/payments/http.js';
 import type { PaymentOrderRecord, PaymentWebhookResult } from '../../src/saas/payments/types.js';
 import type { ManagedSaasGatewayRuntimeDependencies } from '../../src/saas/runtime/gateway-runtime-module.js';
+import {
+  CREDENTIAL_VALIDATION_TARGETS_FACTORY_PURPOSE,
+  CredentialValidationTargetsModuleError,
+  type CredentialValidationTargetsFactoryOptions,
+} from '../../src/saas/runtime/credential-validation-targets-module.js';
 import type { ManagedSaasProviders } from '../../src/saas/runtime/providers.js';
 import type { LoadedValidationWorkerProviderCredentialKms } from '../../src/saas/runtime/validation-worker-provider-credential-kms.js';
+import { resolveApprovedCredentialValidationTarget } from '../../src/saas/supply/credential-validation-targets.js';
+import { approvedTarget, customJob } from '../saas/supply/credential-validation-test-fixture.js';
 import { CustomerWebhookEgressTransport } from '../../src/saas/webhooks/egress-transport.js';
 import type { WebhookSigningSecretProtector } from '../../src/saas/webhooks/signing-secret-protector.js';
 import { startServer } from '../../src/server/index.js';
@@ -110,6 +120,20 @@ const SAFE_RUNTIME_PRIVILEGE_ROW = {
   sequence_update_count: 0,
   missing_function_execute_count: 0,
   unsafe_security_definer_function_count: 0,
+};
+// Startup unit fixture only: actual catalog proof belongs to the restricted
+// real-PG suite, not these deliberately supplied booleans.
+const SAFE_VALIDATION_WORKER_SCHEMA_READINESS_ROW = {
+  server_ready: true,
+  session_ready: true,
+  owner_ready: true,
+  tables_ready: true,
+  columns_ready: true,
+  keys_ready: true,
+  indexes_ready: true,
+  checks_ready: true,
+  triggers_ready: true,
+  routines_ready: true,
 };
 
 function managedEnvironment(
@@ -246,9 +270,14 @@ function fakeGatewayKmsModule(events: string[], checkReady = async () => events.
 function fakeDatabase(
   events: string[],
   runtimePrivilegeRow: Record<string, unknown> = SAFE_RUNTIME_PRIVILEGE_ROW,
+  validationWorkerReadinessRow: Record<string, unknown> = SAFE_VALIDATION_WORKER_SCHEMA_READINESS_ROW,
 ): ManagedSaasDatabase {
   return {
     query: async <Row>(sql: string) => {
+      if (sql === SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL) {
+        events.push('validation-worker-schema-readiness-verify');
+        return { rows: [validationWorkerReadinessRow as Row], rowCount: 1 };
+      }
       if (sql === SAAS_RUNTIME_PRIVILEGE_PROBE_SQL) {
         events.push('runtime-privileges-verify');
         return { rows: [runtimePrivilegeRow as Row], rowCount: 1 };
@@ -1169,7 +1198,9 @@ test('control-plane mounts tenant-scoped unknown-outcome reads and stops its sca
       deploymentFrom(environment),
       managedOptions([], {
         environment,
-        verifyUnknownOutcomeSchema: async () => events.push('unknown-outcome-schema-ready'),
+        verifyUnknownOutcomeSchema: async () => {
+          events.push('unknown-outcome-schema-ready');
+        },
         createDatabase: () => {
           database = platformOperatorDatabase(() => ['operations'], sqlStatements);
           return database;
@@ -1418,6 +1449,20 @@ test('standard startServer route composes gateway runtime and binds only the /v1
   assert.equal(events.at(-1), 'database-close');
 });
 
+/** Worker metadata composition fixture only; never a database/catalog approval fixture. */
+function validationTargetsEnvironment(overrides: DeploymentEnvironment = {}): DeploymentEnvironment {
+  return {
+    [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas', NODE_ENV: 'production',
+    [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'credential-validation-worker',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerDatabaseUrl]: 'postgresql://validation-worker:fixture@db.example/saas',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: 'trusted-worker-kms',
+    [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: 'trusted-worker-targets-metadata',
+    [DEPLOYMENT_ENV_VARS.saas.deploymentId]: 'validation-startup-test',
+    [DEPLOYMENT_ENV_VARS.saas.environmentId]: 'test',
+    ...overrides,
+  };
+}
+
 test('validation worker starts only its dedicated loop, KMS and database without providers or listeners', async () => {
   const events: string[] = [];
   const environment = {
@@ -1447,6 +1492,9 @@ test('validation worker starts only its dedicated loop, KMS and database without
         loadProviders: async () => {
           assert.fail('validation worker must not load control-plane providers');
         },
+        verifySchema: async () => {
+          assert.fail('the worker must use catalog readiness, not a ledger verifier override');
+        },
         loadValidationWorkerKms: async () => {
           events.push('validation-kms-load');
           return kms;
@@ -1473,13 +1521,471 @@ test('validation worker starts only its dedicated loop, KMS and database without
     assert.equal(runtime.gateway, null);
     assert.equal(runtime.credentialValidationWorker !== null, true);
     assert.deepEqual(runtime.listeners, {});
+    assert.equal(events.includes('validation-worker-schema-readiness-verify'), true);
     assert.equal(events.includes('validation-worker-runtime-privileges-verify'), true);
+    assert.ok(events.indexOf('database-ping') < events.indexOf('validation-worker-schema-readiness-verify'));
+    assert.ok(events.indexOf('validation-worker-schema-readiness-verify') < events.indexOf('validation-worker-runtime-privileges-verify'));
+    assert.ok(events.indexOf('validation-worker-runtime-privileges-verify') < events.indexOf('validation-kms-load'));
+    assert.equal(events.includes('schema-verify'), false);
+    assert.equal(events.includes('schema-method'), false);
     assert.deepEqual(events.slice(-3), ['validation-kms-load', 'validation-kms-ready', 'validation-loop-start']);
   } finally {
     await runtime?.close();
   }
   assert.ok(events.indexOf('validation-loop-close') < events.indexOf('validation-kms-close'));
   assert.equal(events.includes('providers-ready'), false);
+});
+
+test('validation worker refuses unsafe or unavailable catalog readiness before KMS, worker dispatch or listeners', async () => {
+  const scenarios: Array<{ name: string; row?: Record<string, unknown>; driverError?: boolean }> = [
+    ...Object.keys(SAFE_VALIDATION_WORKER_SCHEMA_READINESS_ROW).map((check) => ({
+      name: check, row: { ...SAFE_VALIDATION_WORKER_SCHEMA_READINESS_ROW, [check]: false },
+    })),
+    { name: 'missing metadata', row: {} },
+    { name: 'unproven boolean', row: { ...SAFE_VALIDATION_WORKER_SCHEMA_READINESS_ROW, owner_ready: 'true' } },
+    { name: 'driver metadata denied', driverError: true },
+  ];
+  for (const nodeEnv of ['production', 'test']) {
+    for (const scenario of scenarios) {
+      const events: string[] = [];
+      const environment = {
+        [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas', NODE_ENV: nodeEnv,
+        [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'credential-validation-worker',
+        [DEPLOYMENT_ENV_VARS.saas.validationWorkerDatabaseUrl]: 'postgresql://validation-worker:fixture@db.example/saas',
+        [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: 'trusted-worker-kms',
+        [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: 'trusted-worker-targets-metadata',
+        [DEPLOYMENT_ENV_VARS.saas.deploymentId]: 'validation-startup-test',
+        [DEPLOYMENT_ENV_VARS.saas.environmentId]: 'test',
+      } satisfies DeploymentEnvironment;
+      const database = fakeDatabase(events, SAFE_RUNTIME_PRIVILEGE_ROW, scenario.row);
+      if (scenario.driverError) {
+        database.query = async () => {
+          events.push('validation-worker-schema-readiness-verify');
+          throw Object.assign(new Error('unit-fixture-private-driver-context'), { code: '42501' });
+        };
+      }
+      const options = managedOptions(events, {
+        environment,
+        createDatabase: () => { events.push('database-create'); return database; },
+        verifySchema: async () => { assert.fail('a successful/no-op ledger override is not structural readiness'); },
+        credentialValidationTargetsModuleImporter: () => { assert.fail('unready schema must precede metadata module imports'); },
+        loadValidationWorkerKms: async () => { assert.fail('unready schema must precede KMS module loading'); },
+        startCredentialValidationWorker: () => { assert.fail('unready schema must precede any worker/KMS/network dispatch'); },
+        loadProviders: async () => { assert.fail('unready schema must not load control-plane providers'); },
+        createListener: () => { assert.fail('unready schema must not create listeners'); },
+        onReady: () => { assert.fail('unready schema must not publish runtime readiness'); },
+      });
+      await assert.rejects(startManagedSaasServer(deploymentFrom(environment), options),
+        /^Error: Managed SaaS credential-validation worker schema readiness failed$/,
+        `${nodeEnv}: ${scenario.name}`);
+      assert.deepEqual(events, ['database-create', 'database-ping', 'validation-worker-schema-readiness-verify', 'database-close']);
+      // The standard server entry point must reach the same fail-closed worker
+      // branch, not a generic history/no-op hook or local deployment startup.
+      if (scenario.name === 'owner_ready') {
+        events.length = 0;
+        await assert.rejects(startServer(undefined, '/unused/validation-worker-local-config.json', {
+          environment, managedSaas: options,
+        }), /^Error: Managed SaaS credential-validation worker schema readiness failed$/);
+        assert.deepEqual(events, ['database-create', 'database-ping', 'validation-worker-schema-readiness-verify', 'database-close']);
+      }
+    }
+  }
+});
+
+test('validation startup supplies an immutable operator registry explicitly; generic tuning cannot replace authority', async () => {
+  const events: string[] = [];
+  const target = approvedTarget();
+  const environment = {
+    [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas', NODE_ENV: 'production',
+    [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'credential-validation-worker',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerDatabaseUrl]: 'postgresql://validation-worker:fixture@db.example/saas',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: 'trusted-worker-kms',
+    [DEPLOYMENT_ENV_VARS.saas.deploymentId]: 'validation-startup-test',
+    [DEPLOYMENT_ENV_VARS.saas.environmentId]: 'test',
+  } satisfies DeploymentEnvironment;
+  const kms: LoadedValidationWorkerProviderCredentialKms = {
+    decryptDataKey: async () => { assert.fail('startup does not decrypt provider credentials'); },
+    checkReady: async () => { events.push('kms-ready'); }, close: async () => { events.push('kms-close'); },
+  };
+  const rawTuning = { pollIntervalMs: 100, approvedTargets: undefined, transportTestOptions: undefined };
+  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    environment, credentialValidationTargets: [target], credentialValidationWorkerOptions: rawTuning,
+    loadValidationWorkerKms: async () => kms,
+    startCredentialValidationWorker: (_database, loadedKms, options) => {
+      assert.equal(loadedKms, kms);
+      assert.equal(options.pollIntervalMs, 100);
+      assert.ok(options.approvedTargets);
+      const binding = resolveApprovedCredentialValidationTarget(options.approvedTargets, customJob(target));
+      assert.ok(binding);
+      assert.equal(binding.evidenceSha256, target.evidenceSha256);
+      assert.equal(Object.isFrozen(binding), true);
+      events.push('loop-start');
+      return { close: async () => { events.push('loop-close'); } };
+    },
+  }));
+  await runtime.close();
+  assert.ok(events.indexOf('validation-worker-schema-readiness-verify') < events.indexOf('validation-worker-runtime-privileges-verify'));
+  assert.ok(events.indexOf('validation-worker-runtime-privileges-verify') < events.indexOf('loop-start'));
+  assert.ok(events.indexOf('loop-close') < events.indexOf('kms-close'));
+  assert.equal(events.at(-1), 'database-close');
+});
+
+test('invalid validation binding configuration fails before database/KMS startup, and default configuration remains empty', async () => {
+  const events: string[] = [];
+  const environment = {
+    [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas', NODE_ENV: 'production',
+    [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'credential-validation-worker',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerDatabaseUrl]: 'postgresql://validation-worker:fixture@db.example/saas',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: 'trusted-worker-kms',
+    [DEPLOYMENT_ENV_VARS.saas.deploymentId]: 'validation-startup-test',
+    [DEPLOYMENT_ENV_VARS.saas.environmentId]: 'test',
+  } satisfies DeploymentEnvironment;
+  await assert.rejects(startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    environment, credentialValidationTargets: [{ ...approvedTarget(), evidenceSha256: 'f'.repeat(64) }],
+    loadValidationWorkerKms: async () => { assert.fail('invalid target must precede KMS'); },
+  })), /target approval is invalid/);
+  assert.deepEqual(events, []);
+  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    environment,
+    credentialValidationTargetsModuleImporter: () => { assert.fail('missing setting must not discover a metadata module'); },
+    loadValidationWorkerKms: async () => ({ decryptDataKey: async () => Buffer.alloc(32), checkReady: async () => {}, close: async () => {} }),
+    startCredentialValidationWorker: (_database, _kms, options) => {
+      assert.ok(options.approvedTargets);
+      assert.equal(resolveApprovedCredentialValidationTarget(options.approvedTargets, customJob()), null);
+      return { close: async () => {} };
+    },
+  }));
+  await runtime.close();
+});
+
+test('standard worker entry point loads only metadata after real probes and passes a copied registry to the loop', async () => {
+  const events: string[] = [];
+  const environment = validationTargetsEnvironment();
+  const input = approvedTarget({ model: 'reviewed-org/model-v1:variant' });
+  const expected = { ...input };
+  const raw = [input];
+  const kms: LoadedValidationWorkerProviderCredentialKms = {
+    decryptDataKey: async () => { assert.fail('startup must not decrypt provider credentials'); },
+    checkReady: async () => { events.push('validation-kms-ready'); },
+    close: async () => { events.push('validation-kms-close'); },
+  };
+  let runtime: ManagedSaasRuntime | undefined;
+  try {
+    await startServer(undefined, '/unused/validation-local-config.json', {
+      environment,
+      managedSaas: managedOptions(events, {
+        // The standard server/CLI environment must take precedence over SDK
+        // composition options, rather than silently loading this other source.
+        environment: { ...environment, [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: 'wrong-sdk-environment' },
+        verifySchema: async () => { assert.fail('generic ledger hook cannot replace the real worker probes'); },
+        loadProviders: async () => { assert.fail('metadata startup must not acquire control-plane capabilities'); },
+        createListener: () => { assert.fail('metadata startup must not bind a listener'); },
+        credentialValidationTargetsModuleImporter: (specifier) => {
+          events.push('targets-import');
+          assert.equal(specifier, environment[MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]);
+          return {
+            createCredentialValidationTargets(options: CredentialValidationTargetsFactoryOptions) {
+              events.push('targets-factory');
+              assert.equal(arguments.length, 1);
+              assert.deepEqual(Reflect.ownKeys(options), ['purpose']);
+              assert.equal(options.purpose, CREDENTIAL_VALIDATION_TARGETS_FACTORY_PURPOSE);
+              assert.equal(Object.isFrozen(options), true);
+              for (const key of ['env', 'database', 'kms', 'job', 'tenant', 'headers', 'fetch', 'lifecycle']) {
+                assert.equal(Object.hasOwn(options, key), false);
+              }
+              return raw;
+            },
+          };
+        },
+        loadValidationWorkerKms: async () => { events.push('validation-kms-load'); return kms; },
+        startCredentialValidationWorker: (_database, loadedKms, options) => {
+          assert.equal(loadedKms, kms);
+          assert.ok(options.approvedTargets);
+          assert.equal(Object.isFrozen(raw), false);
+          assert.equal(Object.isFrozen(input), false);
+          const mutable = input as { baseUrl: string; evidenceSha256: string };
+          mutable.baseUrl = 'https://unreviewed-startup-fixture.example.test/';
+          mutable.evidenceSha256 = '0'.repeat(64);
+          raw.length = 0;
+          const binding = resolveApprovedCredentialValidationTarget(options.approvedTargets, customJob(expected));
+          assert.ok(binding);
+          assert.equal(binding.baseUrl, expected.baseUrl);
+          assert.equal(binding.evidenceSha256, expected.evidenceSha256);
+          assert.equal(Object.isFrozen(binding), true);
+          assert.equal(options.deployment, 'validation-startup-test');
+          assert.equal(options.environment, 'test');
+          events.push('validation-loop-start');
+          return { close: async () => { events.push('validation-loop-close'); } };
+        },
+        onReady: (ready) => { runtime = ready; events.push('runtime-ready'); },
+      }),
+    });
+    assert.ok(runtime);
+    assert.equal(runtime.providers, null);
+    assert.equal(runtime.gateway, null);
+    assert.deepEqual(runtime.listeners, {});
+    assert.deepEqual(events, [
+      'database-create', 'database-ping', 'validation-worker-schema-readiness-verify',
+      'validation-worker-runtime-privileges-verify', 'targets-import', 'targets-factory',
+      'validation-kms-load', 'validation-kms-ready', 'validation-loop-start', 'runtime-ready',
+    ]);
+  } finally {
+    await runtime?.close();
+  }
+  assert.deepEqual(events.slice(-3), ['validation-loop-close', 'validation-kms-close', 'database-close']);
+});
+
+test('standard worker startup uses the default native ESM importer for reviewed static metadata', async () => {
+  const events: string[] = [];
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'model-router-worker-target-module-'));
+  let runtime: ManagedSaasRuntime | undefined;
+  try {
+    const expected = approvedTarget();
+    const modulePath = path.join(directory, 'reviewed-targets.mjs');
+    await fs.promises.writeFile(modulePath, `
+const metadata = ${JSON.stringify([expected])};
+export let factoryCalls = 0;
+export function createCredentialValidationTargets(options) {
+  factoryCalls += 1;
+  if (!options || Reflect.ownKeys(options).length !== 1 ||
+      options.purpose !== ${JSON.stringify(CREDENTIAL_VALIDATION_TARGETS_FACTORY_PURPOSE)} ||
+      !Object.isFrozen(options)) throw new Error('Invalid metadata-only fixture options');
+  return metadata;
+}
+`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const moduleUrl = pathToFileURL(modulePath).href;
+    const environment = validationTargetsEnvironment({
+      [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: moduleUrl,
+    });
+    const kms: LoadedValidationWorkerProviderCredentialKms = {
+      decryptDataKey: async () => { assert.fail('metadata startup never decrypts'); },
+      checkReady: async () => { events.push('kms-ready'); },
+      close: async () => { events.push('kms-close'); },
+    };
+    await startServer(undefined, '/unused/validation-local-config.json', {
+      environment,
+      managedSaas: managedOptions(events, {
+        loadValidationWorkerKms: async () => {
+          // This import is deliberately after runtime metadata loading and the
+          // real probes, not a pre-imported or injected module namespace.
+          const namespace = await import(moduleUrl);
+          assert.equal(namespace.factoryCalls, 1);
+          assert.deepEqual(events, [
+            'database-create', 'database-ping', 'validation-worker-schema-readiness-verify',
+            'validation-worker-runtime-privileges-verify',
+          ]);
+          events.push('kms-load');
+          return kms;
+        },
+        startCredentialValidationWorker: (_database, _kms, options) => {
+          assert.ok(options.approvedTargets);
+          const binding = resolveApprovedCredentialValidationTarget(options.approvedTargets, customJob(expected));
+          assert.ok(binding);
+          assert.equal(binding.baseUrl, expected.baseUrl);
+          assert.equal(binding.evidenceSha256, expected.evidenceSha256);
+          events.push('loop-start');
+          return { close: async () => { events.push('loop-close'); } };
+        },
+        onReady: (ready) => { runtime = ready; },
+      }),
+    });
+    assert.ok(runtime);
+    assert.deepEqual(events.slice(-3), ['kms-load', 'kms-ready', 'loop-start']);
+  } finally {
+    await runtime?.close();
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  }
+  assert.deepEqual(events.slice(-3), ['loop-close', 'kms-close', 'database-close']);
+});
+
+test('worker SDK targets and metadata module conflict fails before database, import, KMS or loop acquisition', async () => {
+  const environment = validationTargetsEnvironment();
+  for (const targets of [[], [approvedTarget()], [{ ...approvedTarget(), evidenceSha256: 'f'.repeat(64) }]]) {
+    const events: string[] = [];
+    await assert.rejects(startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+      environment, credentialValidationTargets: targets,
+      credentialValidationTargetsModuleImporter: () => { assert.fail('conflicting authority must not import a module'); },
+      loadValidationWorkerKms: async () => { assert.fail('conflicting authority must not acquire KMS'); },
+      startCredentialValidationWorker: () => { assert.fail('conflicting authority must not dispatch'); },
+    })), /SDK targets and targets module cannot both be configured/);
+    assert.deepEqual(events, []);
+  }
+});
+
+test('worker metadata declaration and startup environment must match without an implicit or SDK fallback', async () => {
+  const environment = validationTargetsEnvironment();
+  const deployment = deploymentFrom(environment);
+  const cases = [
+    { deployment: { ...deployment, credentialValidationTargetsModule: undefined }, environment },
+    { deployment, environment: { ...environment, [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: undefined } },
+    { deployment, environment: { ...environment, [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: 'private-conflicting-module' } },
+  ];
+  for (const scenario of cases) {
+    const events: string[] = [];
+    await assert.rejects(startManagedSaasServer(scenario.deployment, managedOptions(events, {
+      environment: scenario.environment,
+      credentialValidationTargetsModuleImporter: () => { assert.fail('mismatched configuration must not import'); },
+      loadValidationWorkerKms: async () => { assert.fail('mismatched configuration must not acquire KMS'); },
+      startCredentialValidationWorker: () => { assert.fail('mismatched configuration must not dispatch'); },
+    })), /^Error: Credential-validation worker targets module configuration is unavailable$/);
+    assert.deepEqual(events, []);
+  }
+});
+
+test('metadata startup controls reject accessors and descriptor failures before DB without exposing diagnostics', async () => {
+  const diagnostic = 'private-startup-controls-secret https://private-startup-controls.example.test/module.mjs';
+  for (const control of ['deployment', 'environment', 'importer', 'descriptor-proxy']) {
+    const events: string[] = [];
+    let getterReads = 0;
+    let environment = validationTargetsEnvironment();
+    const deployment = { ...deploymentFrom(environment) };
+    const options = managedOptions(events, { environment });
+    const getter = () => { getterReads += 1; throw new Error(diagnostic); };
+    if (control === 'deployment') {
+      Object.defineProperty(deployment, 'credentialValidationTargetsModule', { get: getter });
+    } else if (control === 'environment') {
+      Object.defineProperty(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE, { get: getter });
+    } else if (control === 'importer') {
+      Object.defineProperty(options, 'credentialValidationTargetsModuleImporter', { get: getter });
+    } else {
+      environment = new Proxy(environment, {
+        getOwnPropertyDescriptor(value, key) {
+          if (key === MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE) throw new Error(diagnostic);
+          return Reflect.getOwnPropertyDescriptor(value, key);
+        },
+      });
+      options.environment = environment;
+    }
+    await assert.rejects(startManagedSaasServer(deployment, options), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'Credential-validation worker targets module configuration is unavailable');
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      assert.equal([String(error), error.stack, JSON.stringify(error)].join('\n').includes('private-startup-controls'), false);
+      return true;
+    });
+    assert.equal(getterReads, 0);
+    assert.deepEqual(events, []);
+  }
+});
+
+test('non-worker typed startup rejects metadata module declarations, environment settings and import capabilities', async () => {
+  const combined = managedEnvironment({ customer: 45161, platform: 45162, gateway: 45163 });
+  const environments = [
+    combined,
+    { ...combined, [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'control-plane' },
+    gatewayEnvironment({ customer: 45161, platform: 45162, gateway: 45163 }),
+  ];
+  for (const environment of environments) {
+    const deployment = deploymentFrom(environment);
+    const specifier = 'private-non-worker-target-module';
+    const cases = [
+      { deployment: { ...deployment, credentialValidationTargetsModule: specifier }, environment, importer: undefined },
+      { deployment, environment: { ...environment, [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: specifier }, importer: undefined },
+      { deployment, environment, importer: () => { assert.fail('non-worker must never consult a targets importer'); } },
+    ];
+    for (const scenario of cases) {
+      const events: string[] = [];
+      await assert.rejects(startManagedSaasServer(scenario.deployment, managedOptions(events, {
+        environment: scenario.environment, credentialValidationTargetsModuleImporter: scenario.importer,
+      })), /^TypeError: Credential-validation targets module is available only to the credential-validation worker$/);
+      assert.deepEqual(events, []);
+    }
+  }
+});
+
+test('metadata module failures are sanitized and close PG without loading KMS, wiring the worker or binding', async () => {
+  const diagnostic = 'private-startup-target-secret https://operator:private-startup-target-secret@private-target.example.test/module.mjs';
+  const scenarios: Array<{
+    name: string; code: CredentialValidationTargetsModuleError['code']; specifier?: string;
+    importFailed?: boolean; exportInvalid?: boolean; factoryFailed?: boolean; raw?: unknown;
+  }> = [
+    { name: 'malformed explicit setting', specifier: 'https://operator:private-startup-target-secret@private-target.example.test/module.mjs', code: 'INVALID_MODULE_SPECIFIER' },
+    { name: 'module I/O failure', importFailed: true, code: 'MODULE_LOAD_FAILED' },
+    { name: 'missing own export', exportInvalid: true, code: 'MODULE_EXPORT_INVALID' },
+    { name: 'factory failure', factoryFailed: true, code: 'FACTORY_FAILED' },
+    { name: 'incorrect full descriptor digest', raw: [{ ...approvedTarget(), evidenceSha256: 'f'.repeat(64) }], code: 'TARGETS_INVALID' },
+    { name: 'expired reviewed descriptor', raw: [approvedTarget({ expiresAt: '2000-01-01T00:00:00.000Z' })], code: 'TARGETS_INVALID' },
+  ];
+  for (const scenario of scenarios) {
+    const events: string[] = [];
+    const environment = validationTargetsEnvironment({
+      [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: scenario.specifier ?? 'trusted-worker-targets-metadata',
+    });
+    await assert.rejects(startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+      environment,
+      credentialValidationTargetsModuleImporter: () => {
+        events.push('targets-import');
+        if (scenario.importFailed) throw Object.assign(new Error(diagnostic), { body: diagnostic, cause: diagnostic });
+        const module = {
+          createCredentialValidationTargets: async () => {
+            events.push('targets-factory');
+            if (scenario.factoryFailed) throw Object.assign(new Error(diagnostic), { body: diagnostic, cause: diagnostic });
+            return scenario.raw;
+          },
+        };
+        return scenario.exportInvalid ? { default: module } : module;
+      },
+      loadValidationWorkerKms: async () => { assert.fail('invalid metadata must precede KMS loading'); },
+      startCredentialValidationWorker: () => { assert.fail('invalid metadata must not wire a loop'); },
+      loadProviders: async () => { assert.fail('worker must not load control-plane providers'); },
+      createListener: () => { assert.fail('worker metadata failure must not bind'); },
+      onReady: () => { assert.fail('invalid metadata must not publish readiness'); },
+    })), (error: unknown) => {
+      assert.ok(error instanceof CredentialValidationTargetsModuleError, scenario.name);
+      assert.equal(error.code, scenario.code);
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      const output = [String(error), error.stack, JSON.stringify(error)].join('\n');
+      for (const privateValue of ['private-startup-target-secret', 'private-target.example.test', 'trusted-worker-targets-metadata']) {
+        assert.equal(output.includes(privateValue), false);
+      }
+      return true;
+    });
+    assert.deepEqual(events, [
+      'database-create', 'database-ping', 'validation-worker-schema-readiness-verify',
+      'validation-worker-runtime-privileges-verify',
+      ...(scenario.specifier === undefined ? ['targets-import'] : []),
+      ...(scenario.specifier === undefined && !scenario.importFailed && !scenario.exportInvalid ? ['targets-factory'] : []),
+      'database-close',
+    ], scenario.name);
+  }
+});
+
+test('configured metadata cannot import before real restricted worker privilege proof in production or test', async () => {
+  for (const nodeEnv of ['production', 'test']) {
+    for (const denial of ['driver-error', 'missing-row', 'superuser', 'session_role_unchanged', 'any_function_privilege', 'extra_column_privilege']) {
+      const events: string[] = [];
+      const environment = validationTargetsEnvironment({ NODE_ENV: nodeEnv });
+      const database = fakeDatabase(events);
+      const query = database.query;
+      database.query = async <Row>(sql: string) => {
+        if (sql !== SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL) return query<Row>(sql);
+        if (denial === 'driver-error') {
+          events.push('validation-worker-runtime-privileges-verify');
+          throw new Error('private-worker-privilege-driver-context');
+        }
+        const result = await query<Record<string, unknown>>(sql);
+        return {
+          rows: denial === 'missing-row' ? [] : result.rows.map((row) => ({
+            ...row, [denial]: denial !== 'session_role_unchanged',
+          }) as Row),
+          rowCount: denial === 'missing-row' ? 0 : result.rowCount,
+        };
+      };
+      await assert.rejects(startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+        environment,
+        createDatabase: () => { events.push('database-create'); return database; },
+        verifySchema: async () => { assert.fail('generic schema override must not replace actual worker probes'); },
+        credentialValidationTargetsModuleImporter: () => { assert.fail('unsafe privileges must precede metadata loading'); },
+        loadValidationWorkerKms: async () => { assert.fail('unsafe privileges must precede KMS loading'); },
+        startCredentialValidationWorker: () => { assert.fail('unsafe privileges must precede worker dispatch'); },
+        onReady: () => { assert.fail('unsafe privileges must not publish readiness'); },
+      })), /^Error: Managed SaaS credential-validation worker database privileges are unsafe$/);
+      assert.deepEqual(events, [
+        'database-create', 'database-ping', 'validation-worker-schema-readiness-verify',
+        'validation-worker-runtime-privileges-verify', 'database-close',
+      ], `${nodeEnv}: ${denial}`);
+    }
+  }
 });
 
 test('gateway module, KMS, readiness and dependency failures close acquired resources before binding', async () => {

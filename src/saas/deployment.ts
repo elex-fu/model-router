@@ -21,6 +21,9 @@ export const SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE = 'SAAS_PROVIDER_CREDENTIA
 export const SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE = 'SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE' as const;
 export const MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE =
   'SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE' as const;
+/** Trusted static metadata only; this module is exclusive to the credential-validation worker. */
+export const MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE =
+  'MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE' as const;
 export const SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE =
   'SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE' as const;
 export const MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE = 'MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE' as const;
@@ -70,6 +73,7 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
     gatewayRuntimeModule: MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
     validationWorkerProviderCredentialDecryptKmsModule:
       MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+    credentialValidationTargetsModule: MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
     providerCredentialKmsKeyId: MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
     deploymentId: MODEL_ROUTER_SAAS_DEPLOYMENT_ID,
     environmentId: MODEL_ROUTER_SAAS_ENVIRONMENT_ID,
@@ -133,6 +137,7 @@ export const SAAS_DEPLOYMENT_ENV_NAMES = deepFreeze([
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
   MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+  MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
   MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
   MODEL_ROUTER_SAAS_DEPLOYMENT_ID,
   MODEL_ROUTER_SAAS_ENVIRONMENT_ID,
@@ -182,6 +187,8 @@ export interface ManagedSaasDeploymentConfig {
   readonly gatewayRuntimeModule?: string;
   /** Dedicated decrypt-only KMS module; present only for the validation worker role. */
   readonly validationWorkerProviderCredentialDecryptKmsModule?: string;
+  /** Reviewed metadata-only target factory; worker-only, never an approval of database catalog authority. */
+  readonly credentialValidationTargetsModule?: string;
   /** Stable non-secret AAD identity used when sealing or unsealing provider credentials. */
   readonly deploymentId: string;
   /** Stable non-secret AAD environment identity used when sealing or unsealing provider credentials. */
@@ -243,7 +250,43 @@ function invalid(code: DeploymentConfigErrorCode, message: string, variableName?
 }
 
 function isPresent(environment: DeploymentEnvironment, name: string): boolean {
+  if (name === MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(environment, name);
+      // An accessor is an explicit (invalid) declaration, never an implicit
+      // missing/default choice. Do not invoke it even when checking local mode.
+      return descriptor !== undefined && (!Object.hasOwn(descriptor, 'value') || descriptor.value !== undefined);
+    } catch {
+      return invalid('INVALID_PROVIDER_MODULE', `${name} must be an own data setting.`, name);
+    }
+  }
   return environment[name] !== undefined;
+}
+
+function optionalCredentialValidationTargetsModule(environment: DeploymentEnvironment): string | undefined {
+  const name = MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE;
+  let value: unknown;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(environment, name);
+    if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) throw new Error('Invalid data setting');
+    value = descriptor?.value;
+  } catch {
+    return invalid('INVALID_PROVIDER_MODULE', `${name} must be an own data setting.`, name);
+  }
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    return invalid(
+      'INVALID_PROVIDER_MODULE',
+      `${name} must be a non-empty trusted static credential-validation metadata module spec.`,
+      name,
+    );
+  }
+  return requiredSetting(
+    { [name]: value },
+    name,
+    'trusted static credential-validation metadata module spec',
+    'INVALID_PROVIDER_MODULE',
+  );
 }
 
 function hasSaasSettings(environment: DeploymentEnvironment): boolean {
@@ -493,6 +536,13 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
   const listenerNames = managedSaasListenerNames(workloadRole);
   const validationWorker = workloadRole === 'credential-validation-worker';
   const gateway = workloadRole === 'gateway';
+  if (!validationWorker && isPresent(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE)) {
+    invalid(
+      'UNEXPECTED_WORKLOAD_SETTING',
+      `${MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE} is permitted only for the credential-validation-worker workload.`,
+      MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
+    );
+  }
   if (validationWorker) {
     const forbiddenSettings = [
       MODEL_ROUTER_SAAS_DATABASE_URL,
@@ -604,6 +654,9 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
         'INVALID_PROVIDER_MODULE',
       )
     : undefined;
+  const credentialValidationTargetsModule = validationWorker
+    ? optionalCredentialValidationTargetsModule(environment)
+    : undefined;
 
   const sealingKmsModule = environment[SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE];
   const providerCredentialKmsKeyId = optionalKmsKeyId(environment);
@@ -702,6 +755,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
     ...(validationWorkerKmsModule === undefined
       ? {}
       : { validationWorkerProviderCredentialDecryptKmsModule: validationWorkerKmsModule }),
+    ...(credentialValidationTargetsModule === undefined ? {} : { credentialValidationTargetsModule }),
     deploymentId: deploymentIdSetting ?? 'model-router-development',
     environmentId:
       environmentIdSetting ??

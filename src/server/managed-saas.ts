@@ -22,6 +22,7 @@ import type {
   ManagedSaasDeploymentConfig,
 } from '../saas/deployment.js';
 import {
+  MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
   MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
   managedSaasListenerNames,
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
@@ -120,11 +121,17 @@ import {
   loadValidationWorkerProviderCredentialKms,
   SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/runtime/validation-worker-provider-credential-kms.js';
+import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
   type CredentialValidationWorkerHandle,
   type CredentialValidationWorkerOptions,
   startCredentialValidationWorker as startValidationWorkerLoop,
 } from '../saas/supply/credential-validation-worker.js';
+import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
+import { verifyCredentialValidationWorkerSchemaReadiness } from '../saas/db/credential-validation-worker-schema-readiness.js';
+import type { ApprovedCredentialValidationTarget } from '../saas/supply/types.js';
+import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
+import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
 import { type CustomerByokHttpHandler, createCustomerByokHttpHandler } from '../saas/supply/customer-http.js';
 import { ProviderSupplyService } from '../saas/supply/index.js';
 import { CustomerWebhookDeliveryWorker, type CustomerWebhookWorkerOptions } from '../saas/webhooks/delivery-worker.js';
@@ -231,6 +238,8 @@ export interface ManagedSaasStartOptions {
   loadValidationWorkerKms?: (
     environment: DeploymentEnvironment,
   ) => Promise<LoadedValidationWorkerProviderCredentialKms | undefined>;
+  /** Worker-only metadata import seam; it does not receive database, KMS, job or HTTP capabilities. */
+  credentialValidationTargetsModuleImporter?: ProviderModuleImporter;
   /** Runtime module import seam; only the isolated gateway workload consults it. */
   gatewayRuntimeModuleImporter?: ProviderModuleImporter;
   /** Dedicated decrypt-only KMS import seam; only the isolated gateway workload consults it. */
@@ -242,7 +251,12 @@ export interface ManagedSaasStartOptions {
     options: CredentialValidationWorkerOptions,
   ) => CredentialValidationWorkerHandle;
   /** Optional worker loop tuning or test fetch; deployment identity is always supplied by config. */
-  credentialValidationWorkerOptions?: Partial<Omit<CredentialValidationWorkerOptions, 'deployment' | 'environment'>>;
+  credentialValidationWorkerOptions?: Partial<Omit<CredentialValidationWorkerOptions,
+    'deployment' | 'environment' | 'approvedTargets' | 'transportTestOptions'>>;
+  /** Trusted SDK metadata; mutually exclusive with the configured targets module. Neither source grants catalog approval. */
+  credentialValidationTargets?: readonly ApprovedCredentialValidationTarget[];
+  /** Requires the opaque Node-test-runner CA/address capability; never a production DNS/TLS override. */
+  credentialValidationWorkerTestTransport?: CredentialValidationTransportTestOptions;
   /** Explicit production payment composition; omission leaves payment routes unmounted. */
   payments?: ManagedSaasPaymentsOptions;
   /** Explicit trusted webhook composition; enabled startup requires a dedicated protector and egress transport. */
@@ -759,6 +773,17 @@ function installSignals(runtime: ManagedSaasRuntime): () => void {
   };
 }
 
+/** Snapshot only the new metadata controls, without invoking caller-owned accessors. */
+function targetsModuleData(value: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) throw new Error('Invalid data control');
+    return descriptor?.value;
+  } catch {
+    throw new Error('Credential-validation worker targets module configuration is unavailable');
+  }
+}
+
 async function startCredentialValidationWorkerRuntime(
   deployment: ManagedSaasDeploymentConfig,
   options: ManagedSaasStartOptions,
@@ -766,6 +791,25 @@ async function startCredentialValidationWorkerRuntime(
 ): Promise<ManagedSaasRuntime> {
   if (options.gateway || options.payments || options.paymentHandler) {
     throw new TypeError('Credential-validation worker cannot receive gateway or payment capabilities');
+  }
+  const configuredTargetsModule = targetsModuleData(deployment, 'credentialValidationTargetsModule');
+  const targetsModuleImporter = targetsModuleData(options, 'credentialValidationTargetsModuleImporter');
+  if (
+    (configuredTargetsModule !== undefined &&
+      (typeof configuredTargetsModule !== 'string' || configuredTargetsModule.trim() === '' ||
+        configuredTargetsModule.trim() !== configuredTargetsModule)) ||
+    targetsModuleData(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE) !== configuredTargetsModule
+  ) {
+    throw new Error('Credential-validation worker targets module configuration is unavailable');
+  }
+  if (configuredTargetsModule !== undefined && options.credentialValidationTargets !== undefined) {
+    throw new TypeError('Credential-validation worker SDK targets and targets module cannot both be configured');
+  }
+  let approvedTargets = compileApprovedCredentialValidationTargets(options.credentialValidationTargets ?? []);
+  if (options.credentialValidationWorkerTestTransport &&
+    (environment.NODE_ENV !== 'test' || !isProviderHttpTestAddressCapability(
+      options.credentialValidationWorkerTestTransport.addressCapability))) {
+    throw new TypeError('Credential-validation worker test transport is unavailable');
   }
   const configuredKmsModule = deployment.validationWorkerProviderCredentialDecryptKmsModule;
   if (
@@ -778,7 +822,6 @@ async function startCredentialValidationWorkerRuntime(
 
   const createDatabase = options.createDatabase ?? defaultCreateDatabase;
   const pingDatabase = options.pingDatabase ?? ((database: ManagedSaasDatabase) => pingSaasDatabase(database));
-  const verifySchema = options.verifySchema ?? defaultVerifySchema;
   const closeDatabase = options.closeDatabase ?? ((database: ManagedSaasDatabase) => closeSaasDatabase(database));
   const loadKms =
     options.loadValidationWorkerKms ??
@@ -809,16 +852,33 @@ async function startCredentialValidationWorkerRuntime(
       throw new Error('Managed SaaS credential-validation worker PostgreSQL ping failed');
     }
     try {
-      await verifySchema(database);
+      // The restricted worker cannot read the migration ledger. Always prove
+      // its real catalog-only structure; deployment/migrator history approval
+      // remains independent, and the generic history hook is not a substitute.
+      await verifyCredentialValidationWorkerSchemaReadiness(database);
     } catch {
-      throw new Error('Managed SaaS credential-validation worker schema verification failed');
+      throw new Error('Managed SaaS credential-validation worker schema readiness failed');
     }
-    if (environment.NODE_ENV === 'production') {
+    // Configured operator code requires the actual restricted-role proof even
+    // in test/development; the generic history hook cannot substitute for it.
+    if (environment.NODE_ENV === 'production' || configuredTargetsModule !== undefined) {
       try {
         await verifyCredentialValidationWorkerRuntimePrivileges(database);
       } catch {
         throw new Error('Managed SaaS credential-validation worker database privileges are unsafe');
       }
+    }
+    if (configuredTargetsModule !== undefined) {
+      // In-process trusted code is not a sandbox. Pass only the dedicated
+      // setting to the reviewed metadata loader, never the supervisor's DB,
+      // KMS, tenant, headers or fetch configuration. The factory receives only
+      // its frozen purpose, and the worker independently checks live authority.
+      const metadata = await loadCredentialValidationTargetsModule({
+        env: Object.freeze({ [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: configuredTargetsModule }),
+        importer: targetsModuleImporter as ProviderModuleImporter | undefined,
+      });
+      if (metadata === undefined) throw new Error('Credential-validation worker targets metadata is unavailable');
+      approvedTargets = compileApprovedCredentialValidationTargets(metadata);
     }
     kms = await loadKms(environment);
     if (!kms) throw new Error('Managed SaaS credential-validation worker KMS is unavailable');
@@ -830,6 +890,8 @@ async function startCredentialValidationWorkerRuntime(
 
     worker = startWorker(database, kms, {
       ...options.credentialValidationWorkerOptions,
+      approvedTargets,
+      transportTestOptions: options.credentialValidationWorkerTestTransport,
       deployment: deployment.deploymentId,
       environment: deployment.environmentId,
     });
@@ -882,6 +944,14 @@ export async function startManagedSaasServer(
   }
 
   const environment = options.environment ?? process.env;
+  if (
+    deployment.workloadRole !== 'credential-validation-worker' &&
+    (targetsModuleData(deployment, 'credentialValidationTargetsModule') !== undefined ||
+      targetsModuleData(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE) !== undefined ||
+      targetsModuleData(options, 'credentialValidationTargetsModuleImporter') !== undefined)
+  ) {
+    throw new TypeError('Credential-validation targets module is available only to the credential-validation worker');
+  }
   if (deployment.workloadRole === 'credential-validation-worker') {
     return startCredentialValidationWorkerRuntime(deployment, options, environment);
   }
