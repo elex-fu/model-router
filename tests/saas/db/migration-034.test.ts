@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
 import { PROVIDER_SUPPLY_ACCOUNTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/015_provider_supply_accounts.js';
+import { PAYMENT_WEBHOOK_DURABLE_INBOX_SAAS_MIGRATION } from '../../../src/saas/db/migrations/033_payment_webhook_durable_inbox.js';
 import { PROVIDER_CATALOG_PRODUCT_WRITE_FENCE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/034_provider_catalog_product_write_fence.js';
 
 const migration = PROVIDER_CATALOG_PRODUCT_WRITE_FENCE_SAAS_MIGRATION;
@@ -16,10 +17,12 @@ function functionSql(name: string): string {
 test('migration 034 registers after the immutable 033 history', () => {
   assert.equal(migration.version, 34);
   assert.equal(migration.name, 'provider_catalog_product_write_fence');
+  assert.equal(SAAS_MIGRATIONS[32], PAYMENT_WEBHOOK_DURABLE_INBOX_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[33], migration);
+  assert.equal(SAAS_MIGRATIONS.filter(({ version }) => version === 34).length, 1);
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    Array.from({ length: 52 }, (_, index) => index + 1),
+    Array.from({ length: 60 }, (_, index) => index + 1),
   );
 });
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { Pool as PgPool, type PoolClient } from 'pg';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
@@ -11,7 +12,7 @@ const migration = UNKNOWN_OUTCOME_SUPPORT_TICKET_SAAS_MIGRATION;
 const sql = migration.sql;
 const migration051TestUrl = process.env.MODEL_ROUTER_SAAS_MIGRATION_051_TEST_URL?.trim();
 const workerSource = readFileSync(
-  new URL('../../../../src/saas/metering/unknown-outcome-recovery-worker.ts', import.meta.url),
+  resolve(process.cwd(), 'src/saas/metering/unknown-outcome-recovery-worker.ts'),
   'utf8',
 );
 
@@ -212,11 +213,15 @@ test('migration 051 is registered in append order and remains forward-only', () 
   assert.equal(migration.version, 51);
   assert.equal(migration.name, 'unknown_outcome_support_ticket');
   assert.equal(SAAS_MIGRATIONS[50], migration);
-  assert.equal(SAAS_MIGRATIONS.at(-1)?.version, 52);
+  assert.equal(SAAS_MIGRATIONS.filter(({ version }) => version === 51).length, 1);
+  assert.deepEqual(
+    SAAS_MIGRATIONS.map(({ version }) => version),
+    Array.from({ length: 60 }, (_, index) => index + 1),
+  );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);
   assert.doesNotMatch(sql, /\bGRANT\s+/i);
   assert.match(
-    readFileSync(new URL('../../../../src/saas/db/migrations/001_initial_schema.ts', import.meta.url), 'utf8'),
+    readFileSync(resolve(process.cwd(), 'src/saas/db/migrations/001_initial_schema.ts'), 'utf8'),
     /UNKNOWN_OUTCOME_SUPPORT_TICKET_SAAS_MIGRATION/,
   );
 });
@@ -328,7 +333,8 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
   let transactionOpen = false;
 
   try {
-    client = await pool.connect();
+    const connectedClient = await pool.connect();
+    client = connectedClient;
     await client.query(`CREATE SCHEMA "${schema}"`);
     schemaCreated = true;
     await setMigration051SearchPath(client, schema);
@@ -578,7 +584,7 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
     const invalidResolvedCase = randomUUID();
     await assertPostgresError(
       () =>
-        client.query(
+        connectedClient.query(
           `INSERT INTO saas_unknown_outcome_reconciliation_cases
              (id, tenant_id, project_id, request_id, supply_mode, case_state,
               resolution_idempotency_key, resolution_digest, resolution_actor_user_id,
@@ -604,7 +610,7 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
     const invalidObservationId = randomUUID();
     await assertPostgresError(
       () =>
-        client.query(
+        connectedClient.query(
           `INSERT INTO saas_unknown_outcome_reconciliation_observations
              (id, tenant_id, case_id, request_id, attempt_id, observation_kind,
               evidence_reference, operator_outcome, actor_user_id, reason, audit_event_id)
@@ -629,7 +635,7 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
     const mismatchedObservationId = randomUUID();
     await assertPostgresError(
       () =>
-        client.query(
+        connectedClient.query(
           `INSERT INTO saas_unknown_outcome_reconciliation_observations
              (id, tenant_id, case_id, request_id, attempt_id, observation_kind,
               evidence_reference, operator_outcome, actor_user_id, reason, audit_event_id,
@@ -656,7 +662,7 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
     const nonOperatorObservationId = randomUUID();
     await assertPostgresError(
       () =>
-        client.query(
+        connectedClient.query(
           `INSERT INTO saas_unknown_outcome_reconciliation_observations
              (id, tenant_id, case_id, request_id, observation_kind, supply_mode,
               execution_state, reconciliation_state, financial_status, request_state_version,
@@ -671,7 +677,7 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
 
     await assertPostgresError(
       () =>
-        client.query(
+        connectedClient.query(
           `UPDATE saas_unknown_outcome_reconciliation_cases
               SET resolution_support_ticket_ref = 'SUP-051-CHANGED'
             WHERE id = $1`,
@@ -682,7 +688,7 @@ test('migration 051 executes after its 049 schema prerequisite in a disposable s
     );
     await assertPostgresError(
       () =>
-        client.query(
+        connectedClient.query(
           `UPDATE saas_unknown_outcome_reconciliation_observations
               SET reason = 'changed after append'
             WHERE id = $1`,

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { Pool as PgPool, type PoolClient } from 'pg';
 import { runSaasMigrations } from '../../../src/saas/db/migrate.js';
@@ -541,18 +542,34 @@ test('orders migrations and holds a session advisory lock across the run', async
   );
 });
 
-test('the default migration runner applies the unique registered 050-052 suffix in order', async () => {
+test('the default migration runner applies the unique current 001-060 history and preserves the 050-052 segment', async () => {
   const pool = new MigrationPool();
 
   await runSaasMigrations(pool);
 
-  assert.deepEqual(pool.applied.map(({ version }) => version).slice(-3), [50, 51, 52]);
-  assert.deepEqual(pool.applied.map(({ name }) => name).slice(-3), [
+  const versions = Array.from({ length: 60 }, (_, index) => index + 1);
+  assert.deepEqual(SAAS_MIGRATIONS.map(({ version }) => version), versions);
+  assert.deepEqual(pool.applied.map(({ version }) => version), versions);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 60);
+  assert.deepEqual(pool.applied.slice(49, 52).map(({ version }) => version), [50, 51, 52]);
+  assert.deepEqual(pool.applied.slice(49).map(({ name }) => name), [
     'prepared_evidence_authorization_advisory_fences',
     'unknown_outcome_support_ticket',
     'commercial_authority_guard_rowtype_safety',
+    'commercial_authority_read_fences',
+    'trigger_only_trusted_execution',
+    'prepared_evidence_optional_validity_scalars',
+    'restricted_role_check_and_platform_auth_execution',
+    'normal_success_usage_evidence_reference',
+    'credential_validation_invalidation_trigger_execution',
+    'pre_dispatch_terminal_cancellation',
+    'prepared_evidence_claim_generated_account',
   ]);
-  assert.equal(pool.applied.length, 52);
+  assert.equal(pool.applied.length, 60);
+  assert.deepEqual(pool.applied, SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
+    version, name, checksum: createHash('sha256').update(name).update('\0').update(sql).digest('hex'),
+  })), 'the runner must record the exact name-plus-NUL-plus-original-SQL checksum for every registered migration');
+  assert.deepEqual(pool.events.filter((event) => event.startsWith('record:')), versions.map((version) => `record:${version}`));
 });
 
 test('reruns are idempotent and still acquire and release the advisory lock', async () => {

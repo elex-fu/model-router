@@ -159,7 +159,11 @@ test('migration 050 is registered in append order and remains forward-only', () 
   assert.equal(migration.version, 50);
   assert.equal(migration.name, 'prepared_evidence_authorization_advisory_fences');
   assert.equal(SAAS_MIGRATIONS[49], migration);
-  assert.equal(SAAS_MIGRATIONS.at(-1)?.version, 52);
+  assert.equal(SAAS_MIGRATIONS.filter(({ version }) => version === 50).length, 1);
+  assert.deepEqual(
+    SAAS_MIGRATIONS.map(({ version }) => version),
+    Array.from({ length: 60 }, (_, index) => index + 1),
+  );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);
   assert.doesNotMatch(migration.sql, /\bALTER\s+ROLE\b|\bSECURITY\s+DEFINER\b/i);
   assert.doesNotMatch(migration.sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);
