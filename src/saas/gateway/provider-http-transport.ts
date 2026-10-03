@@ -19,6 +19,7 @@ import {
   selectPinnedProviderAddress,
 } from './provider-http-address.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
+import { observeProviderJsonUsage } from './provider-json-usage-observer.js';
 
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -812,6 +813,26 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     const safeResponseHeaders = responseHeaders(response);
     if (responseBody && isEventStreamContentType(response.headers.get('content-type'))) {
       const observed = observeProviderSseUsage(responseBody, {
+        providerProtocol: context.request.evidence.providerProtocol,
+        providerOperation: context.request.evidence.providerOperation,
+      });
+      const result = {
+        responseStarted: false,
+        resultHttpStatus: response.status,
+        headers: safeResponseHeaders,
+        body: observed.body,
+        get providerUsage() {
+          const observation = observed.getObservation();
+          return observation?.state === 'reported' ? observation.usage : null;
+        },
+      };
+      context.transferCleanup();
+      return result;
+    }
+
+    const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+    if (responseBody && mediaType === 'application/json' && response.status >= 200 && response.status < 300) {
+      const observed = observeProviderJsonUsage(responseBody, {
         providerProtocol: context.request.evidence.providerProtocol,
         providerOperation: context.request.evidence.providerOperation,
       });

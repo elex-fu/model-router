@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import type { LookupOptions } from 'node:dns';
 import { test } from 'node:test';
-import type { Dispatcher } from 'undici';
+import type { Dispatcher, HeadersInit } from 'undici';
 import { Agent } from 'undici';
 import type { PreparedEvidenceTransportRequest } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
@@ -176,6 +176,41 @@ test('resolves the server-owned target, injects credentials transiently, and sen
   );
   assert.deepEqual(new Uint8Array(seenInit?.body as ArrayBuffer), payload);
   assert.equal('credential' in result, false);
+});
+
+test('generic transport passes credential header values through without choosing or adding an authentication scheme', { timeout: 5000 }, async (t) => {
+  const cases = [
+    { name: 'authorization raw', headerName: 'authorization', value: 'synthetic-raw-token' },
+    { name: 'authorization bearer', headerName: 'authorization', value: 'Bearer synthetic-token' },
+    { name: 'Anthropic API key', headerName: 'x-api-key', value: 'synthetic-anthropic-token' },
+  ] as const;
+  for (const scenario of cases) {
+    for (const bytes of [false, true]) await t.test(`${scenario.name} ${bytes ? 'bytes' : 'string'}`, async () => {
+      const value = bytes ? Buffer.from(scenario.value) : scenario.value;
+      let fetchCalls = 0;
+      const instance = transport(async (_url, init) => {
+        fetchCalls += 1;
+        assert.ok(init.headers instanceof Headers);
+        assert.equal(init.headers.get(scenario.headerName) === scenario.value, true, 'transport must preserve the resolver-owned header value');
+        assert.equal(init.headers.has(scenario.headerName === 'authorization' ? 'x-api-key' : 'authorization'), false);
+        return new Response(null, { status: 204 });
+      }, {
+        resolveCredential: async (_input, useCredential) => useCredential({ headerName: scenario.headerName, value }),
+      });
+      try {
+        const result = await instance.send(request());
+        assert.equal(fetchCalls, 1);
+        assert.equal(result.resultHttpStatus, 204);
+        assert.equal(result.body, null);
+        if (value instanceof Uint8Array) {
+          // Generic transport clears its copy, not the resolver-owned source.
+          assert.equal(Buffer.from(value).toString('utf8') === scenario.value, true);
+        }
+      } finally {
+        if (value instanceof Uint8Array) value.fill(0);
+      }
+    });
+  }
 });
 
 test('returns a streaming body with backpressure-compatible chunks and only allowlisted response headers', async () => {
@@ -404,7 +439,7 @@ test('ProviderHttpTransport leaves unsupported, malformed, and missing SSE usage
   });
 });
 
-test('non-SSE JSON responses retain the unobserved streaming path', async () => {
+test('non-SSE JSON responses with incomplete usage remain unreported and pass through exact bytes', async () => {
   const chunks = [encoder.encode('{"usage":{"prompt_tokens":12}}'), encoder.encode('\n')];
   const fakeFetch: ProviderHttpFetch = async () =>
     new Response(streamFromChunks(chunks), { headers: { 'content-type': 'application/json' } });
@@ -412,13 +447,110 @@ test('non-SSE JSON responses retain the unobserved streaming path', async () => 
     request({ evidence: evidence({ providerProtocol: 'openai', providerOperation: 'chat.completions' }) }),
   );
 
-  assert.equal(result.providerUsage, undefined);
+  assert.equal(result.providerUsage, null);
   assert.ok(result.body);
   assert.deepEqual(
     (await drain(result.body)).map((chunk) => [...chunk]),
     chunks.map((chunk) => [...chunk]),
   );
-  assert.equal(result.providerUsage, undefined);
+  assert.equal(result.providerUsage, null);
+});
+
+test('ProviderHttpTransport observes supported provider JSON usage only after complete consumption', async () => {
+  const cases = [
+    {
+      providerProtocol: 'openai', providerOperation: 'chat.completions',
+      body: { object: 'chat.completion', choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } },
+    },
+    {
+      providerProtocol: 'anthropic', providerOperation: 'messages',
+      body: { type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn',
+        usage: { input_tokens: 3, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    },
+    {
+      providerProtocol: 'responses', providerOperation: 'responses',
+      body: { object: 'response', status: 'completed', output: [], error: null,
+        usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } },
+    },
+  ] as const;
+  for (const fixture of cases) {
+    const chunks = splitBytes(encoder.encode(JSON.stringify(fixture.body)), [1, 7, 2]);
+    const result = await transport(async () => new Response(streamFromChunks(chunks), {
+      status: 200, headers: { 'content-type': 'Application/JSON; charset=utf-8' },
+    })).send(request({ evidence: evidence({
+      // Selection must use provider-side signed evidence, not client protocol.
+      protocol: fixture.providerProtocol === 'anthropic' ? 'openai' : 'anthropic',
+      providerProtocol: fixture.providerProtocol, providerOperation: fixture.providerOperation,
+    }) }));
+    // Read through a function so the initial-null assertion does not narrow
+    // this live getter across asynchronous body consumption.
+    const readUsage = () => result.providerUsage;
+    assert.equal(result.providerUsage, null);
+    assert.ok(result.body);
+    const reader = result.body.getReader();
+    for (const chunk of chunks) {
+      assert.deepEqual((await reader.read()).value, chunk);
+      assert.equal(result.providerUsage, null);
+    }
+    assert.equal((await reader.read()).done, true);
+    reader.releaseLock();
+    const usage = readUsage();
+    assert.ok(usage, 'complete valid JSON must supply usage after EOF');
+    assert.equal(usage.inputTotal, 3);
+    assert.equal(usage.outputTotal, 2);
+    assert.equal(usage.status, 'reported');
+    assert.equal(usage.source, 'upstream');
+  }
+});
+
+test('JSON-shaped error responses and unsupported content types never supply normal financial usage', async () => {
+  const bytes = encoder.encode(JSON.stringify({ object: 'chat.completion',
+    choices: [{ message: { role: 'assistant' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }));
+  for (const [status, contentType] of [[429, 'application/json'], [200, 'text/plain']] as const) {
+    const result = await transport(async () => new Response(streamFromChunks([bytes]), {
+      status, headers: { 'content-type': contentType },
+    })).send(request({ evidence: evidence({ providerProtocol: 'openai', providerOperation: 'chat.completions' }) }));
+    assert.ok(result.body);
+    assert.deepEqual(await drain(result.body), [bytes]);
+    assert.equal(result.providerUsage, undefined);
+  }
+});
+
+test('lease abort during JSON body consumption propagates cancellation and cannot publish prefix usage', async () => {
+  const controller = new AbortController();
+  const bytes = encoder.encode(JSON.stringify({ object: 'chat.completion',
+    choices: [{ message: { role: 'assistant' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }));
+  let announceRead!: () => void;
+  const reading = new Promise<void>((resolve) => { announceRead = resolve; });
+  let sent = false;
+  let cancelled = false;
+  const upstream = new ReadableStream<Uint8Array>({
+    pull(output) {
+      if (!sent) { sent = true; output.enqueue(bytes); return; }
+      announceRead();
+      return new Promise<void>(() => {});
+    },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  const result = await transport(async () => new Response(upstream, {
+    status: 200, headers: { 'content-type': 'application/json' },
+  })).send(request({ signal: controller.signal,
+    evidence: evidence({ providerProtocol: 'openai', providerOperation: 'chat.completions' }) }));
+  assert.ok(result.body);
+  const reader = result.body.getReader();
+  assert.deepEqual((await reader.read()).value, bytes);
+  assert.equal(result.providerUsage, null);
+  const pending = reader.read();
+  await reading;
+  controller.abort();
+  await assert.rejects(pending,
+    (error: unknown) => error instanceof ProviderHttpTransportError && error.code === 'ABORTED');
+  assert.equal(cancelled, true);
+  assert.equal(result.providerUsage, null);
+  reader.releaseLock();
 });
 
 test('keeps lease cancellation active through body consumption and cancels the upstream reader', async () => {

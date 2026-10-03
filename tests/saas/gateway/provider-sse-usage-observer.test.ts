@@ -19,6 +19,7 @@ import type {
 import { SaasPreparedEvidenceDispatchService } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type {
   PreparedRequestEvidenceAudit,
+  PreparedRequestEvidenceClaimOptions,
   PreparedRequestEvidenceDispatchPort,
   PreparedRequestEvidenceRecord,
 } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
@@ -385,6 +386,7 @@ const audit: PreparedRequestEvidenceAudit = {
 };
 
 function evidence(overrides: Partial<PreparedRequestEvidenceRecord> = {}): PreparedRequestEvidenceRecord {
+  const platform = overrides.supplyMode === 'platform';
   return {
     evidenceId: 'evidence-1',
     tenantId: 'tenant-1',
@@ -393,16 +395,33 @@ function evidence(overrides: Partial<PreparedRequestEvidenceRecord> = {}): Prepa
     attemptId: 'attempt-1',
     attemptOrdinal: 1,
     supplyMode: 'byok',
+    accountOwnerKind: platform ? 'platform' : 'tenant',
     publicModel: 'model-1',
     protocol: 'anthropic',
+    requestedModel: 'model-1',
+    mappedModel: 'resolved-model-1',
+    resolvedModel: 'resolved-model-1',
+    modelResolution: {
+      requestedModel: 'model-1',
+      mappedModel: 'resolved-model-1',
+      resolvedModel: 'resolved-model-1',
+      mappingSource: 'alias',
+      mappingVersion: 1,
+    },
+    clientProtocol: 'anthropic',
+    clientOperation: 'messages',
     providerProtocol: 'openai',
     providerOperation: 'chat.completions',
+    requestFingerprint: 'sse-local-request-fingerprint',
+    requestFingerprintVersion: 'canonical-v1',
+    payloadCompilerVersion: 'sse-local-compiler-v1',
+    usageEstimatorVersion: 'estimator-v1',
     endpoint: '/v1/messages',
     upstreamId: 'upstream-1',
     accountId: 'account-1',
     credentialId: 'credential-1',
     credentialVersion: '1',
-    routeTargetMode: 'tenant_account',
+    routeTargetMode: platform ? 'platform_pool' : 'tenant_account',
     payloadSha256,
     statementSha256: 'b'.repeat(64),
     status: 'registered',
@@ -413,13 +432,15 @@ function evidence(overrides: Partial<PreparedRequestEvidenceRecord> = {}): Prepa
   };
 }
 
-function attempt(overrides: Partial<AttemptRecord> = {}): AttemptRecord {
+function attempt(record: PreparedRequestEvidenceRecord): AttemptRecord {
+  assert.ok(record.modelResolution, 'the SSE fixture must retain explicit model provenance');
+  const platform = record.supplyMode === 'platform';
   return {
-    id: 'attempt-1',
-    tenantId: 'tenant-1',
-    requestId: 'request-1',
+    id: record.attemptId,
+    tenantId: record.tenantId,
+    requestId: record.requestId,
     projectPolicyVersion: '1',
-    customerPriceVersion: null,
+    customerPriceVersion: platform ? 'price-1' : null,
     customerMeteringPolicyId: 'customer-policy-1',
     customerMeteringPolicyVersion: '1',
     providerMeteringPolicyId: 'provider-policy-1',
@@ -427,36 +448,46 @@ function attempt(overrides: Partial<AttemptRecord> = {}): AttemptRecord {
     contractAttestationId: 'attestation-1',
     routeConfigId: 'route-1',
     routeConfigVersion: '1',
-    routePublicModelId: 'public-model-1',
+    routePublicModelId: 'model-1',
     routePublicModelVersion: '1',
-    routeProtocol: 'openai',
-    routeTargetMode: 'tenant_account',
-    ordinal: 1,
-    upstreamId: 'upstream-1',
+    routeProtocol: record.protocol,
+    routeTargetMode: record.routeTargetMode,
+    ordinal: record.attemptOrdinal,
+    upstreamId: record.upstreamId,
     bindingState: 'bound',
     dispatchAuthorityState: 'bound',
-    accountOwnerKind: 'tenant',
-    accountId: 'account-1',
+    accountOwnerKind: platform ? 'platform' : 'tenant',
+    accountId: record.accountId,
     providerId: 'provider-1',
     productId: 'product-1',
-    resolvedModel: 'resolved-model-1',
-    protocol: 'openai',
-    endpoint: 'chat-completions',
-    supplierCostVersion: null,
+    resolvedModel: record.modelResolution.resolvedModel,
+    modelResolution: { ...record.modelResolution },
+    clientProtocol: record.clientProtocol,
+    providerProtocol: record.providerProtocol,
+    clientOperation: record.clientOperation,
+    providerOperation: record.providerOperation,
+    requestFingerprint: record.requestFingerprint,
+    requestFingerprintVersion: record.requestFingerprintVersion,
+    payloadSha256: record.payloadSha256,
+    payloadCompilerVersion: record.payloadCompilerVersion,
+    usageEstimatorVersion: record.usageEstimatorVersion,
+    protocol: record.protocol,
+    endpoint: record.endpoint,
+    supplierCostVersion: platform ? 'cost-1' : null,
     dispatchProfileId: 'profile-1',
     supplyProfileAuthzVersion: '1',
-    credentialId: 'credential-1',
-    credentialVersion: '1',
+    credentialId: record.credentialId,
+    credentialVersion: record.credentialVersion,
     credentialAuthzVersion: '1',
     accountAuthzVersion: '1',
-    poolId: null,
-    poolAuthzVersion: null,
-    poolMemberAccountAuthzVersion: null,
-    poolMemberAuthzVersion: null,
-    poolGrantAuthzVersion: null,
-    poolGrantProfileAuthzVersion: null,
-    poolGrantPoolAuthzVersion: null,
-    profileAccountAuthzVersion: '1',
+    poolId: platform ? 'pool-1' : null,
+    poolAuthzVersion: platform ? '1' : null,
+    poolMemberAccountAuthzVersion: platform ? '1' : null,
+    poolMemberAuthzVersion: platform ? '1' : null,
+    poolGrantAuthzVersion: platform ? '1' : null,
+    poolGrantProfileAuthzVersion: platform ? '1' : null,
+    poolGrantPoolAuthzVersion: platform ? '1' : null,
+    profileAccountAuthzVersion: platform ? null : '1',
     preparedEvidenceId: null,
     dispatchState: 'not_sent',
     resultState: 'pending',
@@ -467,28 +498,96 @@ function attempt(overrides: Partial<AttemptRecord> = {}): AttemptRecord {
     createdAt: '2026-09-28T00:00:00.000Z',
     updatedAt: '2026-09-28T00:00:00.000Z',
     stateVersion: 1,
-    ...overrides,
   };
 }
 
 class FakeMetering implements PreparedEvidenceMeteringPort {
-  current = attempt();
+  current: AttemptRecord;
+  getAttemptCount = 0;
+  readonly knownNonSuccessResponses: Parameters<PreparedEvidenceMeteringPort['recordKnownNonSuccessHttpResponse']>[0][] = [];
 
-  async getAttempt(): Promise<AttemptRecord> {
+  constructor(record: PreparedRequestEvidenceRecord) {
+    this.current = attempt(record);
+  }
+
+  async getAttempt(tenantId: string, requestId: string, attemptId: string): Promise<AttemptRecord> {
+    assert.equal(tenantId, this.current.tenantId);
+    assert.equal(requestId, this.current.requestId);
+    assert.equal(attemptId, this.current.id);
+    this.getAttemptCount += 1;
     return this.current;
   }
 
+  claimPreparedEvidence(record: PreparedRequestEvidenceRecord, claimedAt: string): void {
+    assert.equal(this.current.tenantId, record.tenantId);
+    assert.equal(this.current.requestId, record.requestId);
+    assert.equal(this.current.id, record.attemptId);
+    assert.equal(this.current.ordinal, record.attemptOrdinal);
+    assert.equal(this.current.bindingState, 'bound');
+    assert.equal(this.current.dispatchAuthorityState, 'bound');
+    assert.equal(this.current.preparedEvidenceId, null);
+    assert.equal(this.current.dispatchState, 'not_sent');
+    assert.equal(this.current.resultState, 'pending');
+    assert.equal(this.current.responseStarted, false);
+    assert.equal(this.current.responseStartedAt, null);
+    assert.equal(this.current.resultHttpStatus, null);
+    assert.equal(this.current.unknownReason, null);
+    assert.equal(this.current.stateVersion, 1);
+    this.current = {
+      ...this.current,
+      preparedEvidenceId: record.evidenceId,
+      stateVersion: this.current.stateVersion + 1,
+      updatedAt: claimedAt,
+    };
+  }
+
   async transitionAttempt(input: AttemptTransitionInput): Promise<AttemptRecord> {
+    assert.equal(input.tenantId, this.current.tenantId);
+    assert.equal(input.requestId, this.current.requestId);
+    assert.equal(input.attemptId, this.current.id);
+    assert.equal(input.expectedStateVersion, this.current.stateVersion);
+    assert.equal(input.expectedDispatchState, this.current.dispatchState);
+    assert.equal(input.expectedResultState, this.current.resultState);
+    assert.equal(input.expectedResponseStarted, this.current.responseStarted);
     this.current = {
       ...this.current,
       dispatchState: input.dispatchState ?? this.current.dispatchState,
       resultState: input.resultState ?? this.current.resultState,
       responseStarted: this.current.responseStarted || input.responseStarted === true,
+      responseStartedAt: input.responseStarted === true
+        ? (this.current.responseStartedAt ?? this.current.updatedAt) : this.current.responseStartedAt,
       resultHttpStatus: input.resultHttpStatus ?? this.current.resultHttpStatus,
       unknownReason: input.unknownReason ?? null,
       stateVersion: this.current.stateVersion + 1,
     };
     return this.current;
+  }
+
+  async recordKnownNonSuccessHttpResponse(
+    input: Parameters<PreparedEvidenceMeteringPort['recordKnownNonSuccessHttpResponse']>[0],
+  ): Promise<AttemptRecord> {
+    assert.equal(input.tenantId, this.current.tenantId);
+    assert.equal(input.requestId, this.current.requestId);
+    assert.equal(input.attemptId, this.current.id);
+    assert.ok(Number.isSafeInteger(input.resultHttpStatus) && input.resultHttpStatus >= 300 && input.resultHttpStatus <= 599);
+    assert.equal(typeof input.responseStarted, 'boolean');
+    assert.ok(this.current.dispatchState === 'dispatching' || this.current.dispatchState === 'sent');
+    assert.equal(this.current.resultState, 'pending');
+    this.knownNonSuccessResponses.push(input);
+    return this.transitionAttempt({
+      tenantId: input.tenantId,
+      requestId: input.requestId,
+      attemptId: input.attemptId,
+      expectedStateVersion: this.current.stateVersion,
+      expectedDispatchState: this.current.dispatchState,
+      expectedResultState: 'pending',
+      expectedResponseStarted: this.current.responseStarted,
+      dispatchState: 'sent',
+      resultState: 'failed',
+      responseStarted: true,
+      resultHttpStatus: input.resultHttpStatus,
+      unknownReason: null,
+    });
   }
 }
 
@@ -561,20 +660,32 @@ function httpTransport(chunks: readonly Uint8Array[]): ProviderHttpTransport {
   });
 }
 
-function dispatchEvidencePort(record: PreparedRequestEvidenceRecord): PreparedRequestEvidenceDispatchPort {
+function dispatchEvidencePort(record: PreparedRequestEvidenceRecord, metering: FakeMetering): PreparedRequestEvidenceDispatchPort {
+  let current = record;
   return {
-    async preflightForDispatch(evidenceId) {
-      assert.equal(evidenceId, record.evidenceId);
-      return record;
+    async preflightForDispatch(evidenceId, context, options?: PreparedRequestEvidenceClaimOptions) {
+      assert.equal(evidenceId, current.evidenceId);
+      assert.deepEqual(context, audit);
+      assert.equal(options?.payloadSha256, current.payloadSha256);
+      assert.equal(current.status, 'registered');
+      return current;
     },
-    async claimForDispatch(evidenceId) {
-      assert.equal(evidenceId, record.evidenceId);
-      return {
-        ...record,
+    async claimForDispatch(evidenceId, context, options?: PreparedRequestEvidenceClaimOptions) {
+      assert.equal(evidenceId, current.evidenceId);
+      assert.deepEqual(context, audit);
+      assert.equal(options?.payloadSha256, current.payloadSha256);
+      assert.equal(current.status, 'registered');
+      const claimedAt = '2026-09-28T00:01:00.000Z';
+      assert.ok(Date.parse(claimedAt) < Date.parse(current.expiresAt));
+      // Model the same atomic claim side effects as the production evidence service.
+      metering.claimPreparedEvidence(current, claimedAt);
+      current = {
+        ...current,
         status: 'claimed',
-        claimedAt: '2026-09-28T00:01:00.000Z',
-        claimedAttemptId: record.attemptId,
+        claimedAt,
+        claimedAttemptId: current.attemptId,
       };
+      return current;
     },
   };
 }
@@ -605,19 +716,40 @@ test('local SSE E2E: ProviderHttpTransport dispatches transparent bytes and sett
   const transactionInputs: NormalSuccessTransactionInput[] = [];
 
   for (const supplyMode of ['byok', 'platform'] as const) {
-    const metering = new FakeMetering();
     const evidenceRecord = evidence({ supplyMode });
+    const metering = new FakeMetering(evidenceRecord);
     const client = new FakeClient();
     const completions: NormalSuccessCompletionInput[] = [];
     const transactions: NormalSuccessTransactionInput[] = [];
     const transaction: NormalSuccessTransactionPort = {
       async complete(input) {
+        assert.equal(input.tenantId, evidenceRecord.tenantId);
+        assert.equal(input.requestId, evidenceRecord.requestId);
+        assert.equal(input.attemptId, evidenceRecord.attemptId);
+        assert.equal(input.supplyMode, supplyMode);
+        assert.equal(input.responseStarted, true);
+        assert.match(input.usageEvidenceRef, /^[0-9a-f]{64}$/);
+        assert.equal(metering.current.dispatchState, 'sent');
+        assert.equal(metering.current.resultState, 'pending');
         transactions.push(input);
         transactionInputs.push(input);
-        return { kind: 'settled', attempt: metering.current };
+        const terminal = await metering.transitionAttempt({
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+          attemptId: input.attemptId,
+          expectedStateVersion: metering.current.stateVersion,
+          expectedDispatchState: 'sent',
+          expectedResultState: 'pending',
+          expectedResponseStarted: true,
+          dispatchState: 'sent',
+          resultState: 'succeeded',
+          responseStarted: true,
+          unknownReason: null,
+        });
+        return { kind: 'settled', attempt: terminal };
       },
       async retainUnknown() {
-        return metering.current;
+        throw new Error('valid complete SSE usage must not enter reconciliation');
       },
     };
     const coordinator = new DispatchUsageSettlementCoordinator(
@@ -641,7 +773,7 @@ test('local SSE E2E: ProviderHttpTransport dispatches transparent bytes and sett
     const inner = httpTransport(wireChunks);
     const transport = new ProviderSseUsageObservingTransport(inner);
     const dispatch = new SaasPreparedEvidenceDispatchService(
-      dispatchEvidencePort(evidenceRecord),
+      dispatchEvidencePort(evidenceRecord, metering),
       metering,
       leaseProvider(),
       transport,
@@ -658,6 +790,11 @@ test('local SSE E2E: ProviderHttpTransport dispatches transparent bytes and sett
 
     assert.equal(result.kind, 'sent');
     if (result.kind !== 'sent') continue;
+    assert.equal(result.attempt.resultState, 'succeeded');
+    assert.equal(result.attempt.stateVersion, 5);
+    assert.equal(result.attempt.preparedEvidenceId, evidenceRecord.evidenceId);
+    assert.equal(metering.getAttemptCount, 2);
+    assert.equal(metering.knownNonSuccessResponses.length, 0);
     const observedResponse = result.transport as ProviderSseObservedTransportResponse;
     const observation = await observedResponse.usageObservation;
     assert.equal(observation?.state, 'reported');
@@ -683,13 +820,26 @@ test('local SSE E2E: ProviderHttpTransport dispatches transparent bytes and sett
     assert.equal(transactions[0]?.supplyMode, supplyMode);
     assert.equal(transactions[0]?.usage.status, 'reported');
     assert.equal(transactions[0]?.usage.source, 'upstream');
-    if (supplyMode === 'byok') assert.equal(transactions[0]?.chargeAmountMinorUnits, null);
-    if (supplyMode === 'platform') assert.equal(transactions[0]?.chargeAmountMinorUnits, '19');
+    if (supplyMode === 'byok') {
+      assert.equal(transactions[0]?.chargeAmountMinorUnits, null);
+      assert.equal(transactions[0]?.reservationId, null);
+      assert.equal(transactions[0]?.priceSnapshotRef, null);
+      assert.equal(transactions[0]?.customerPriceVersion, null);
+      assert.equal(transactions[0]?.currency, null);
+    }
+    if (supplyMode === 'platform') {
+      assert.equal(transactions[0]?.chargeAmountMinorUnits, '19');
+      assert.equal(transactions[0]?.reservationId, 'hold-1');
+      assert.equal(transactions[0]?.priceSnapshotRef, 'snapshot-1');
+      assert.equal(transactions[0]?.customerPriceVersion, 'price-1');
+      assert.equal(transactions[0]?.currency, 'USD');
+    }
   }
 
   assert.equal(observedResults.length, 2);
   assert.deepEqual(observedResults[0]?.usage, observedResults[1]?.usage);
   assert.deepEqual(transactionInputs[0]?.usage, transactionInputs[1]?.usage);
+  assert.equal(transactionInputs[0]?.usageEvidenceRef, transactionInputs[1]?.usageEvidenceRef);
 });
 
 test('upstream cancellation from ProviderHttpTransport propagates and cannot produce a usage report', async () => {
@@ -746,10 +896,11 @@ test('successful delivery without trusted usage retains the reconciliation hold'
     encoder.encode(sse(JSON.stringify({ choices: [{ delta: { content: 'visible response' } }] })) + sse('[DONE]')),
     [4, 13, 1],
   );
-  const metering = new FakeMetering();
   const evidenceRecord = evidence({ supplyMode: 'platform' });
+  const metering = new FakeMetering(evidenceRecord);
   const client = new FakeClient();
   const retained: NormalSuccessUncertaintyInput[] = [];
+  let holdState: 'reserved' | 'reconciliation_pending' = 'reserved';
   let completeCalls = 0;
   const settlement: NormalSuccessSettlementPort = {
     async complete() {
@@ -757,12 +908,32 @@ test('successful delivery without trusted usage retains the reconciliation hold'
       return { kind: 'settled', attempt: metering.current };
     },
     async retainUnknown(input) {
+      assert.equal(input.tenantId, evidenceRecord.tenantId);
+      assert.equal(input.requestId, evidenceRecord.requestId);
+      assert.equal(input.attemptId, evidenceRecord.attemptId);
+      assert.equal(input.supplyMode, 'platform');
+      assert.equal(metering.current.dispatchState, 'sent');
+      assert.equal(metering.current.resultState, 'pending');
       retained.push(input);
-      return metering.current;
+      const unknown = await metering.transitionAttempt({
+        tenantId: input.tenantId,
+        requestId: input.requestId,
+        attemptId: input.attemptId,
+        expectedStateVersion: metering.current.stateVersion,
+        expectedDispatchState: 'sent',
+        expectedResultState: 'pending',
+        expectedResponseStarted: true,
+        dispatchState: 'unknown',
+        resultState: 'unknown',
+        responseStarted: true,
+        unknownReason: input.reason,
+      });
+      holdState = 'reconciliation_pending';
+      return unknown;
     },
   };
   const dispatch = new SaasPreparedEvidenceDispatchService(
-    dispatchEvidencePort(evidenceRecord),
+    dispatchEvidencePort(evidenceRecord, metering),
     metering,
     leaseProvider(),
     new ProviderSseUsageObservingTransport(httpTransport(chunks)),
@@ -778,6 +949,12 @@ test('successful delivery without trusted usage retains the reconciliation hold'
   });
 
   assert.equal(result.kind, 'unknown');
+  assert.equal(result.attempt.dispatchState, 'unknown');
+  assert.equal(result.attempt.resultState, 'unknown');
+  assert.equal(result.attempt.preparedEvidenceId, evidenceRecord.evidenceId);
+  assert.equal(metering.getAttemptCount, 2);
+  assert.equal(metering.knownNonSuccessResponses.length, 0);
+  assert.equal(holdState, 'reconciliation_pending');
   assert.equal(client.endCount, 1);
   assert.equal(completeCalls, 0);
   assert.equal(retained.length, 1);
