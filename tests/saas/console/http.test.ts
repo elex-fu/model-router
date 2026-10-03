@@ -167,8 +167,12 @@ async function createTestServer(
   return { origin: `http://127.0.0.1:${address.port}`, calls };
 }
 
-function sessionHeaders(cookie = SESSION_TOKEN): HeadersInit {
+function sessionHeaders(cookie = SESSION_TOKEN) {
   return { cookie: `mr_saas_session=${cookie}` };
+}
+
+function assertJsonObject(value: unknown): asserts value is Record<string, unknown> {
+  assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value));
 }
 
 test('authenticates usage and request queries from the single session cookie', async () => {
@@ -318,4 +322,66 @@ test('requires a tenant owner/admin and reports the explicit wallet query wiring
   assert.equal(unavailable.status, 503);
   const body = (await unavailable.json()) as { error?: { code?: string } };
   assert.equal(body.error?.code, 'CUSTOMER_WALLET_UNAVAILABLE');
+});
+
+test('GET request metadata preserves known-success financial pending and BYOK not-applicable without wallet queries', async () => {
+  const pending = {
+    id: 'request-pending',
+    projectId: 'project-a',
+    model: 'model-a',
+    protocol: 'openai',
+    supplyMode: 'platform',
+    status: 'succeeded',
+    financialStatus: 'reconciliation_pending',
+    reconciliationState: 'resolved',
+    createdAt: '2026-09-28T01:00:00.000Z',
+    updatedAt: '2026-09-28T01:00:02.000Z',
+  } satisfies ConsoleRequest;
+  const byok = {
+    ...pending, id: 'request-byok', supplyMode: 'byok', financialStatus: 'not_applicable',
+  } satisfies ConsoleRequest;
+  const detail = {
+    ...pending,
+    attempts: [{
+      id: 'attempt-a', sequence: 1, status: 'succeeded', responseStarted: true,
+      responseStartedAt: '2026-09-28T01:00:01.000Z', httpStatus: 200,
+      createdAt: pending.createdAt, updatedAt: pending.updatedAt,
+    }],
+    usageEvents: [],
+  } satisfies ConsoleRequestDetail;
+  const app = await createTestServer({
+    listRequests: async (input: ConsoleRequestListQuery | string) => {
+      if (typeof input === 'string') assert.fail('The console handler must use its session-derived query object');
+      assert.equal(input.userId, USER_ID);
+      assert.equal(input.tenantId, 'tenant-a');
+      assert.equal(input.projectId, 'project-a');
+      return { items: [pending, byok], hasMore: false, nextCursor: null };
+    },
+    getRequestDetail: async (input) => {
+      assert.equal(input.userId, USER_ID);
+      assert.equal(input.tenantId, 'tenant-a');
+      assert.equal(input.requestId, pending.id);
+      assert.equal(input.projectId, 'project-a');
+      return detail;
+    },
+  });
+  const headers = { ...sessionHeaders(), 'x-user-id': 'forged-user', 'x-tenant-id': 'forged-tenant' };
+  const listResponse = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/requests?projectId=project-a`, { headers });
+  assert.equal(listResponse.status, 200);
+  const listBody = await listResponse.json();
+  assertJsonObject(listBody);
+  assertJsonObject(listBody.data);
+  assert.ok(Array.isArray(listBody.data.items));
+  assert.deepEqual(listBody.data.items, [pending, byok]);
+  const detailResponse = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/requests/request-pending?projectId=project-a`, { headers });
+  assert.equal(detailResponse.status, 200); // Metadata read, not money approval.
+  const detailBody = await detailResponse.json();
+  assertJsonObject(detailBody);
+  assertJsonObject(detailBody.data);
+  assert.deepEqual(detailBody.data, detail);
+  assert.equal(detailBody.data.financialStatus, 'reconciliation_pending');
+  assert.equal(app.calls.wallets.length, 0);
+  for (const body of [listBody.data, detailBody.data]) {
+    assert.doesNotMatch(JSON.stringify(body), /wallet|ledger|amount|evidence|proxyKey|credential|prompt|responseBody/i);
+  }
 });

@@ -11,6 +11,10 @@ const MAX_MODEL_LENGTH = 512;
 const CURSOR_PREFIX = 'c1.';
 
 const REQUEST_STATUSES = new Set<ConsoleRequestStatus>(['pending', 'succeeded', 'failed', 'unknown']);
+const FINANCIAL_STATUSES = new Set<ConsoleFinancialStatus>([
+  'not_applicable', 'pending', 'settled', 'released', 'reconciliation_pending',
+]);
+const RECONCILIATION_STATES = new Set<ConsoleReconciliationState>(['none', 'pending', 'resolved']);
 const SUPPLY_MODES = new Set<ConsoleSupplyMode>(['byok', 'platform']);
 const PROTOCOLS = new Set<ConsoleProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
 const USAGE_STATUSES = new Set<ConsoleUsageStatus>(['reported', 'partial', 'missing', 'estimated']);
@@ -25,6 +29,8 @@ export type ConsoleQueryDatabase = Pick<SqlExecutor, 'query'>;
 export type ConsoleProtocol = GatewayProtocol;
 export type ConsoleSupplyMode = SupplyMode;
 export type ConsoleRequestStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
+export type ConsoleFinancialStatus = 'not_applicable' | 'pending' | 'settled' | 'released' | 'reconciliation_pending';
+export type ConsoleReconciliationState = 'none' | 'pending' | 'resolved';
 export type ConsoleUsageStatus = 'reported' | 'partial' | 'missing' | 'estimated';
 export type ConsoleUsageSource = 'upstream' | 'local-estimate' | 'legacy';
 export type ConsoleMeasurementKind = 'snapshot' | 'delta';
@@ -101,7 +107,11 @@ export interface ConsoleRequest {
   readonly model: string;
   readonly protocol: ConsoleProtocol;
   readonly supplyMode: ConsoleSupplyMode;
+  /** Execution state; retained as status for existing clients. */
   readonly status: ConsoleRequestStatus;
+  readonly financialStatus: ConsoleFinancialStatus;
+  /** Execution reconciliation, independent of financial reconciliation. */
+  readonly reconciliationState: ConsoleReconciliationState;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -558,6 +568,8 @@ function requestProjection(alias: string): string {
     ${alias}.protocol AS protocol,
     ${alias}.supply_mode AS supply_mode,
     ${alias}.execution_state AS status,
+    ${alias}.financial_status AS financial_status,
+    ${alias}.reconciliation_state AS reconciliation_state,
     ${alias}.created_at AS created_at,
     ${alias}.updated_at AS updated_at`;
 }
@@ -609,13 +621,24 @@ function protocol(value: unknown): ConsoleProtocol {
 }
 
 function mapRequest(row: Row): ConsoleRequest {
+  const supplyMode = enumStorage(row.supply_mode, SUPPLY_MODES);
+  const status = enumStorage(row.status, REQUEST_STATUSES);
+  const financialStatus = enumStorage(row.financial_status, FINANCIAL_STATUSES);
+  const reconciliationState = enumStorage(row.reconciliation_state, RECONCILIATION_STATES);
+  if (
+    (supplyMode === 'byok') !== (financialStatus === 'not_applicable') ||
+    (status === 'unknown' && reconciliationState !== 'pending')
+  ) storage();
+  // Read persisted axes independently; success/resolved never implies settled.
   return {
     id: storageText(row.id),
     projectId: storageText(row.project_id),
     model: storageText(row.model, MAX_MODEL_LENGTH),
     protocol: protocol(row.protocol),
-    supplyMode: enumStorage(row.supply_mode, SUPPLY_MODES),
-    status: enumStorage(row.status, REQUEST_STATUSES),
+    supplyMode,
+    status,
+    financialStatus,
+    reconciliationState,
     createdAt: storageDate(row.created_at),
     updatedAt: storageDate(row.updated_at),
   };

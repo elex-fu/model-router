@@ -27,6 +27,8 @@ function requestRow(id: string, createdAt: string): Row {
     protocol: 'openai',
     supply_mode: 'platform',
     status: 'succeeded',
+    financial_status: 'settled',
+    reconciliation_state: 'resolved',
     created_at: createdAt,
     updated_at: createdAt,
   };
@@ -279,4 +281,90 @@ test('fails closed on database errors and does not return partial data', async (
       error.code === 'CONSOLE_STORAGE_ERROR' &&
       error.message === 'The console query could not be completed.',
   );
+});
+
+test('request list and detail expose persisted execution, financial and reconciliation axes independently', async () => {
+  const database = new RecordingDatabase();
+  const base = requestRow('request-a', '2026-09-28T01:00:00.000Z');
+  const cases = [
+    { supply_mode: 'platform', status: 'succeeded', financial_status: 'reconciliation_pending', reconciliation_state: 'resolved' },
+    { supply_mode: 'platform', status: 'succeeded', financial_status: 'settled', reconciliation_state: 'resolved' },
+    { supply_mode: 'platform', status: 'failed', financial_status: 'released', reconciliation_state: 'none' },
+    { supply_mode: 'platform', status: 'pending', financial_status: 'pending', reconciliation_state: 'none' },
+    { supply_mode: 'platform', status: 'unknown', financial_status: 'pending', reconciliation_state: 'pending' },
+    { supply_mode: 'byok', status: 'succeeded', financial_status: 'not_applicable', reconciliation_state: 'resolved' },
+    { supply_mode: 'byok', status: 'unknown', financial_status: 'not_applicable', reconciliation_state: 'pending' },
+  ];
+  const queries = service(database);
+  for (const states of cases) {
+    // Unexpected database columns are not part of the customer projection.
+    const row = { ...base, ...states, proxy_key_id: 'internal-key', usage_evidence_ref: 'internal-evidence' };
+    database.requestRows = [row];
+    database.detailRequest = row;
+    const page = await queries.listRequests({ userId: 'user-a', tenantId: 'tenant-a', projectId: 'project-a' });
+    const detail = await queries.getRequest({ userId: 'user-a', tenantId: 'tenant-a', requestId: 'request-a', projectId: 'project-a' });
+    assert.ok(detail);
+    for (const projected of [page.items[0], detail]) {
+      assert.equal(projected?.status, states.status);
+      assert.equal(projected?.financialStatus, states.financial_status);
+      assert.equal(projected?.reconciliationState, states.reconciliation_state);
+      assert.equal(JSON.stringify(projected).includes('internal-'), false);
+    }
+  }
+  const requestCalls = database.calls.filter((call) => call.sql.includes('FROM saas_requests AS r'));
+  for (const call of requestCalls) {
+    assert.match(call.sql, /r\.financial_status AS financial_status/);
+    assert.match(call.sql, /r\.reconciliation_state AS reconciliation_state/);
+    assert.match(call.sql, /r\.tenant_id = \$2/);
+    assert.match(call.sql, /tm\.user_id = \$1/);
+    assert.match(call.sql, /pm\.user_id = \$1/);
+    assert.doesNotMatch(call.sql, /SELECT\s+\*|saas_wallets|saas_billing_reservations|saas_ledger|proxy_key_id|usage_evidence_ref/i);
+  }
+});
+
+test('invalid or missing stored axes fail closed without inferred financial approval', async () => {
+  const invalidStates: Row[] = [
+    { financial_status: undefined },
+    { financial_status: null },
+    { financial_status: 'future-status' },
+    { reconciliation_state: undefined },
+    { reconciliation_state: null },
+    { reconciliation_state: 'future-state' },
+    { supply_mode: 'byok', financial_status: 'settled' },
+    { supply_mode: 'platform', financial_status: 'not_applicable' },
+    { status: 'unknown', reconciliation_state: 'resolved' },
+    { status: 'unknown', reconciliation_state: 'none' },
+  ];
+  for (const invalidState of invalidStates) {
+    const database = new RecordingDatabase();
+    const row = { ...requestRow('request-a', '2026-09-28T01:00:00.000Z'), ...invalidState };
+    database.requestRows = [row];
+    database.detailRequest = row;
+    const queries = service(database);
+    await assert.rejects(
+      queries.listRequests({ userId: 'user-a', tenantId: 'tenant-a', projectId: 'project-a' }),
+      isConsoleError('CONSOLE_STORAGE_ERROR'),
+    );
+    await assert.rejects(
+      queries.getRequest({ userId: 'user-a', tenantId: 'tenant-a', requestId: 'request-a', projectId: 'project-a' }),
+      isConsoleError('CONSOLE_STORAGE_ERROR'),
+    );
+  }
+});
+
+test('adding financial metadata does not expand cross-tenant or revoked-project detail access', async () => {
+  const database = new RecordingDatabase();
+  const queries = service(database);
+  const otherTenant = await queries.getRequest({ userId: 'user-a', tenantId: 'tenant-other', requestId: 'request-a' });
+  assert.equal(otherTenant, null);
+  assert.equal(database.calls.length, 1);
+  database.allowProjectMembership = false;
+  const revoked = await queries.getRequest({ userId: 'user-a', tenantId: 'tenant-a', requestId: 'request-a', projectId: 'project-a' });
+  assert.equal(revoked, null);
+  assert.equal(database.calls.length, 2);
+  for (const call of database.calls) {
+    assert.match(call.sql, /r\.id = \$3/);
+    assert.match(call.sql, /tm\.status = 'active'/);
+    assert.match(call.sql, /pm\.status = 'active'/);
+  }
 });
