@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { Pool } from 'pg';
 import { type CredentialKeyProvider, encryptCredential } from '../../../../src/saas/credentials/crypto.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
+import { SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
 import { runSaasMigrations } from '../../../../src/saas/db/migrate.js';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
 import { CUSTOMER_WEBHOOK_DELIVERY_SAAS_MIGRATION } from '../../../../src/saas/db/migrations/043_customer_webhook_delivery.js';
@@ -29,6 +30,32 @@ const authFenceMigrations = [
   BYOK_REFUND_ENTITLEMENT_EFFECT_SAAS_MIGRATION,
   PLATFORM_AUTHORIZATION_FENCES_SAAS_MIGRATION,
 ];
+
+// This legacy owner-schema fixture is not the restricted-role managed MFA
+// gate. Keep its historical migration set intact; never apply 056 here.
+function guardedPostgresUrl(): string {
+  assert.ok(realPostgresUrl, 'SAAS_TEST_DATABASE_URL must explicitly identify the owned disposable fixture');
+  let parsed: URL;
+  let database: string;
+  let username: string;
+  try {
+    parsed = new URL(realPostgresUrl);
+    database = decodeURIComponent(parsed.pathname.slice(1));
+    username = decodeURIComponent(parsed.username);
+  } catch { throw new Error('Legacy auth fixture PostgreSQL URL is invalid; details redacted'); }
+  assert.ok(['postgres:', 'postgresql:'].includes(parsed.protocol), 'legacy auth fixture requires PostgreSQL');
+  assert.ok(username.length > 0, 'legacy auth fixture requires an explicit schema-owner principal');
+  assert.ok(parsed.search === '' && parsed.hash === '', 'legacy auth fixture must not contain connection overrides or fragments');
+  const hostname = parsed.hostname.toLowerCase();
+  const port = Number(parsed.port);
+  const ci = hostname === 'postgres' && port === 5432 && database === 'model_router_saas_ci';
+  const local = ['127.0.0.1', '[::1]'].includes(hostname) && Boolean(parsed.port)
+    && Number.isInteger(port) && port > 0 && port <= 65_535 && ![5432, 6432].includes(port)
+    && (database === 'model_router_saas_ci' || /^model_router_test_[a-zA-Z0-9_]+$/.test(database));
+  assert.ok(ci || local,
+    'legacy auth fixture requires designated CI postgres/model_router_saas_ci or an owned disposable exact-loopback database on an explicit nondefault port');
+  return realPostgresUrl;
+}
 
 class ScopedClient implements SaasDatabaseClient {
   constructor(private readonly client: import('pg').PoolClient) {}
@@ -77,8 +104,7 @@ class ScopedPool implements SaasDatabasePool {
 }
 
 async function withScopedPostgresSchema<T>(work: (pool: ScopedPool) => Promise<T>): Promise<T> {
-  if (!realPostgresUrl) throw new Error('SAAS_TEST_DATABASE_URL is required');
-  const pool = new Pool({ connectionString: realPostgresUrl, max: 4 });
+  const pool = new Pool({ connectionString: guardedPostgresUrl(), max: 4 });
   const schema = `saas_platform_auth_lock_test_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   let created = false;
   try {
@@ -105,28 +131,43 @@ function passwordHash(password: string): string {
   return `scrypt$16384$8$1$${salt.toString('base64url')}$${digest.toString('base64url')}`;
 }
 
+type BlockingStage = 'issuance-writer' | 'user-reader' | 'provisional-session' | 'confirmation-setup';
+
+function blockingStage(statement: string): BlockingStage | undefined {
+  if (statement === SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL.toLowerCase()) return 'issuance-writer';
+  if (statement.startsWith('select pg_advisory_xact_lock_shared(')) return 'user-reader';
+  if (statement.startsWith('insert into saas_platform_sessions')) return 'provisional-session';
+  if (statement.includes('from saas_platform_mfa_setup_tokens s') && statement.includes('for update of s')) return 'confirmation-setup';
+  return undefined;
+}
+
 function observeTransactionalQueries(database: SaasDatabase): {
   database: SaasDatabase;
-  waitUntilBlocked(fragment: string, pool: ScopedPool): Promise<void>;
+  waitUntilBlocked(stages: readonly BlockingStage[], pool: ScopedPool, blocker: SaasDatabaseClient): Promise<void>;
 } {
-  let waiter: { fragment: string; resolve: () => void } | undefined;
-  let backendPid: number | undefined;
+  const activeQueries = new Map<number, BlockingStage>();
   const observed: SaasDatabase = {
     async query<Row>(sql: string, values?: readonly unknown[]) {
       return database.query<Row>(sql, values);
     },
     async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
       return database.transaction(async (tx) => {
-        const process = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
-        backendPid = Number(process.rows[0]?.pid);
+        let backendPid: number | undefined;
         return work({
           async query<Row>(sql: string, values?: readonly unknown[]) {
-            const pending = waiter;
-            if (pending && sql.toLowerCase().includes(pending.fragment)) {
-              waiter = undefined;
-              pending.resolve();
+            const statement = sql.replace(/\s+/g, ' ').trim().toLowerCase();
+            // Do not take a snapshot before the service's SET TRANSACTION /
+            // timeout preparation. Record the actual backend only afterward.
+            if (backendPid === undefined && !statement.startsWith('set ')) {
+              const identity = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+              const pid = identity.rows[0]?.pid;
+              assert.ok(typeof pid === 'number' && Number.isInteger(pid) && pid > 0, 'the service must use a real PostgreSQL backend');
+              backendPid = pid;
             }
-            return tx.query<Row>(sql, values);
+            const stage = blockingStage(statement);
+            if (backendPid !== undefined && stage) activeQueries.set(backendPid, stage);
+            try { return await tx.query<Row>(sql, values); }
+            finally { if (backendPid !== undefined) activeQueries.delete(backendPid); }
           },
         });
       });
@@ -139,49 +180,54 @@ function observeTransactionalQueries(database: SaasDatabase): {
 
   return {
     database: observed,
-    async waitUntilBlocked(fragment: string, pool: ScopedPool): Promise<void> {
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          if (waiter?.fragment === fragment) waiter = undefined;
-          reject(new Error(`Timed out waiting for PostgreSQL query fragment: ${fragment}`));
-        }, 3_000);
-        waiter = {
-          fragment,
-          resolve: () => {
-            clearTimeout(timer);
-            resolve();
-          },
-        };
-      });
-
+    async waitUntilBlocked(stages: readonly BlockingStage[], pool: ScopedPool, blocker: SaasDatabaseClient): Promise<void> {
+      const identity = await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const blockerPid = identity.rows[0]?.pid;
+      assert.ok(typeof blockerPid === 'number' && Number.isInteger(blockerPid) && blockerPid > 0, 'the fixture blocker must use a real PostgreSQL backend');
       const deadline = Date.now() + 3_000;
       while (Date.now() < deadline) {
-        if (backendPid === undefined) throw new Error('The PostgreSQL service backend PID was not recorded');
-        const activity = await pool.query<{ wait_event_type: string | null }>(
-          `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`,
-          [backendPid],
-        );
-        if (activity.rows[0]?.wait_event_type === 'Lock') return;
+        for (const [backendPid, stage] of activeQueries) {
+          if (!stages.includes(stage)) continue;
+          assert.notEqual(backendPid, blockerPid, 'service and fixture blocker must use distinct physical backends');
+          const activity = await pool.query<{ blocked_by_fixture: boolean }>(
+            'SELECT $2::integer = ANY(pg_catalog.pg_blocking_pids($1::integer)) AS blocked_by_fixture',
+            [backendPid, blockerPid],
+          );
+          if (activity.rows[0]?.blocked_by_fixture === true) return;
+        }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      throw new Error(`PostgreSQL backend ${backendPid ?? 'unknown'} did not block on a lock`);
+      throw new Error('The service did not block at the expected stage behind the exact fixture backend');
     },
   };
 }
 
 async function holdAuthorizationFence(pool: ScopedPool, userId: string): Promise<SaasDatabaseClient> {
   const blocker = await pool.connect();
-  await blocker.query('BEGIN');
-  await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))', [userId]);
-  return blocker;
+  try {
+    await blocker.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+    await blocker.query("SET LOCAL lock_timeout = '2s'");
+    await blocker.query("SET LOCAL statement_timeout = '10s'");
+    await blocker.query("SET LOCAL idle_in_transaction_session_timeout = '15s'");
+    // Match 046's BEFORE STATEMENT -> exclusive user order. DELETE roles
+    // below must reenter this writer lock, never acquire it after a user lock.
+    await blocker.query(SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL);
+    await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))', [userId]);
+    return blocker;
+  } catch (cause) {
+    await blocker.query('ROLLBACK').catch(() => undefined);
+    blocker.release(true);
+    throw cause;
+  }
 }
 
 async function revokeRoleAndCommit(blocker: SaasDatabaseClient, userId: string): Promise<void> {
-  await blocker.query(
+  const revoked = await blocker.query(
     `DELETE FROM saas_platform_role_assignments
      WHERE user_id = $1 AND role = 'superadmin'`,
     [userId],
   );
+  assert.equal(revoked.rowCount, 1, 'the exact fixture superadmin assignment must really be revoked');
   await blocker.query('COMMIT');
 }
 
@@ -231,14 +277,20 @@ test('PostgreSQL role revocation serializes MFA enrollment and login', { skip: !
 
     const enrollmentBlocker = await holdAuthorizationFence(pool, userId);
     const enrollmentPromise = service.issueMfaEnrollmentToken(email);
+    void enrollmentPromise.catch(() => undefined);
+    let enrollmentBlockerCommitted = false;
     try {
-      await observed.waitUntilBlocked('pg_advisory_xact_lock_shared', pool);
+      await observed.waitUntilBlocked(['issuance-writer'], pool, enrollmentBlocker);
       await revokeRoleAndCommit(enrollmentBlocker, userId);
+      enrollmentBlockerCommitted = true;
       await assert.rejects(
         enrollmentPromise,
-        (error: unknown) => error instanceof PlatformAuthError && error.code === 'MFA_ENROLLMENT_UNAVAILABLE',
+        (error: unknown) => error instanceof PlatformAuthError && error.code === 'MFA_ENROLLMENT_UNAVAILABLE' && error.status === 403,
       );
+      const enrollments = await pool.query<{ id: string }>('SELECT id FROM saas_platform_mfa_enrollment_tokens WHERE user_id = $1', [userId]);
+      assert.equal(enrollments.rows.length, 0, 'a revoked issuer target must receive no enrollment token');
     } finally {
+      if (!enrollmentBlockerCommitted) await enrollmentBlocker.query('ROLLBACK').catch(() => undefined);
       enrollmentBlocker.release();
       await enrollmentPromise.catch(() => undefined);
     }
@@ -250,13 +302,20 @@ test('PostgreSQL role revocation serializes MFA enrollment and login', { skip: !
     );
     const loginBlocker = await holdAuthorizationFence(pool, userId);
     const loginPromise = service.login(email, password, totpCode(secret, currentTime.getTime()));
+    void loginPromise.catch(() => undefined);
+    let loginBlockerCommitted = false;
     try {
-      await observed.waitUntilBlocked('pg_advisory_xact_lock_shared', pool);
+      // Depending on which service transaction is in flight, login waits at
+      // the authority reader or at INSERT's BEFORE STATEMENT writer trigger.
+      // Never require the later shared recheck while INSERT is already blocked.
+      await observed.waitUntilBlocked(['user-reader', 'provisional-session'], pool, loginBlocker);
       await revokeRoleAndCommit(loginBlocker, userId);
+      loginBlockerCommitted = true;
       assert.equal(await loginPromise, undefined);
       const sessions = await pool.query<{ id: string }>('SELECT id FROM saas_platform_sessions');
       assert.equal(sessions.rows.length, 0);
     } finally {
+      if (!loginBlockerCommitted) await loginBlocker.query('ROLLBACK').catch(() => undefined);
       loginBlocker.release();
       await loginPromise.catch(() => undefined);
     }
@@ -294,9 +353,10 @@ test('PostgreSQL role revocation serializes MFA enrollment and login', { skip: !
     );
     const codeBeforeExpiry = totpCode(enrollmentSecret, currentTime.getTime());
     const confirmationPromise = service.confirmMfaEnrollment(enrollmentStart.confirmationToken, codeBeforeExpiry);
+    void confirmationPromise.catch(() => undefined);
     let setupLockCommitted = false;
     try {
-      await observed.waitUntilBlocked('for update of s', pool);
+      await observed.waitUntilBlocked(['confirmation-setup'], pool, setupLock);
       currentTime = new Date(expiresAt + 1);
       await setupLock.query('COMMIT');
       setupLockCommitted = true;

@@ -12,6 +12,7 @@ import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
 import { saasBootstrapAdmin } from './saas-management.js';
 import { saasMigrationAudit } from './saas-migration-audit.js';
 import { saasMigrate } from './saas-migrations.js';
+import { saasPlatformMfaEnroll } from './saas-platform-mfa-enrollment.js';
 import { tryV2, v2Config } from './v2.js';
 import {
   adminBootstrap,
@@ -101,6 +102,13 @@ program
   .command('saas:bootstrap-admin')
   .description('Create the first SaaS platform administrator directly in PostgreSQL')
   .action(() => management(() => saasBootstrapAdmin()));
+
+program
+  .command('saas:platform-mfa-enroll')
+  .description('Issue a one-time platform MFA enrollment handoff from a secure operator TTY using the explicit management database and TOTP KMS provider')
+  .option('--allow-local-plaintext', 'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS')
+  .addHelpText('after', '\nRequires MODEL_ROUTER_SAAS_DATABASE_URL and the trusted MODEL_ROUTER_SAAS_KMS_PROVIDER module. Only platform-totp is loaded. The provider receives fixed non-secret region/deployment/workload labels and must use workload identity for authentication; no DB, Redis, upstream or API credentials are forwarded, and no embedded AES keys are supported. Remote PostgreSQL requires verified TLS; session/role/search_path/query overrides are rejected.\n')
+  .action((options) => management(() => saasPlatformMfaEnroll({}, options)));
 
 program
   .command('saas:migrate')
