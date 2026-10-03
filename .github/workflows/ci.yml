@@ -62,8 +62,62 @@ jobs:
           rm -rf /var/lib/apt/lists/*
       - name: Install locked dependencies
         run: npm ci
+      - name: Check required managed SaaS gate wiring
+        run: node --import tsx --test tests/ci/managed-saas-required-gates.test.ts
+      - name: Strictly typecheck critical PostgreSQL test sources
+        timeout-minutes: 3
+        run: >-
+          ./node_modules/.bin/tsc --noEmit
+          --target ES2022 --module NodeNext --moduleResolution NodeNext
+          --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node
+          tests/saas/gateway/authorization-prelock-postgres.integration.test.ts
+          tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
+          tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts
+          tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts
+          tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts
+          tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts
+          tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts
+          tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts
+          tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts
+          tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts
+          tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts
+          tests/cli/managed-saas-validation-worker-postgres.integration.test.ts
+          tests/saas/supply/managed-postgres-credential-validation.integration.test.ts
+          src/saas/db/credential-validation-worker-schema-readiness.ts
+          src/saas/db/credential-validation-worker-privileges.ts
+          src/saas/runtime/credential-validation-targets-module.ts
+          tests/saas/db/credential-validation-worker-schema-readiness.test.ts
+          tests/saas/db/credential-validation-worker-privileges.test.ts
+          tests/ci/managed-saas-required-gates.test.ts
       - name: Apply managed SaaS role template, full migrations, and runtime privilege probe
         run: bash tests/saas/db/managed-postgres-runtime-privileges.integration.sh
+      # Both roots need an empty queue. Run the source CLI before any business
+      # fixture, then the worker business root before 058 leaves its own jobs.
+      - name: Run required real PostgreSQL standard CLI empty-queue worker lifecycle gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_VALIDATION_E2E_WORKER_URL: postgresql://model_router_saas_validation_worker@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/cli/managed-saas-validation-worker-postgres.integration.test.ts
+      - name: Run required real PostgreSQL dedicated credential-validation worker gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_VALIDATION_E2E_WORKER_URL: postgresql://model_router_saas_validation_worker@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/supply/managed-postgres-credential-validation.integration.test.ts
+      # Worker prov-*/random-model and 058 random-product fixtures do not consume
+      # bootstrap or share the HTTP gateway-e2e-* tenant/product namespace.
+      # No worker process remains running when 058 creates its fixture jobs.
+      - name: Run required real PostgreSQL 058 credential-validation invalidation gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts
       # These optional live probes CREATE/DROP only random isolated schemas, so
       # they use the trust-enabled PostgreSQL service administrator. The
       # production migrator remains database/schema CREATE- and TEMP-restricted;
@@ -76,6 +130,22 @@ jobs:
         env:
           MODEL_ROUTER_SAAS_MIGRATION_051_TEST_URL: postgresql://postgres@postgres:5432/model_router_saas_ci
         run: node --import tsx --test tests/saas/db/migrations/051_unknown_outcome_support_ticket.test.ts
+      - name: Run required real PostgreSQL 054 trigger-only trusted execution gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts
+      - name: Run required real PostgreSQL prelock and advisory concurrency gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/gateway/authorization-prelock-postgres.integration.test.ts
       - name: Run real PostgreSQL commercial gateway HTTP E2E
         env:
           NODE_ENV: test
@@ -84,3 +154,96 @@ jobs:
           MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
         run: node --import tsx --test tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
+      # 055 reuses only this fresh database's successful synthetic HTTP fixture;
+      # configured roles with no successful BYOK/platform fixture fail closed.
+      - name: Run required real PostgreSQL 055 prepared optional validity gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts
+      - name: Run required real PostgreSQL 056 restricted CHECK and platform-auth fencing gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts
+      - name: Run required real PostgreSQL MFA enrollment and revocation gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts
+      - name: Run required real PostgreSQL financial invariants
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts
+
+  # Each matrix item owns a NEW service/database; no database is shared between
+  # roots or with the consumed HTTP fixture above. Existing root safety guards
+  # allow service DNS postgres:5432 only for this exact CI database name.
+  managed-saas-isolated-required-gates:
+    name: Managed SaaS isolated required gate (${{ matrix.gate }}, PG ${{ matrix.postgres-version }})
+    needs: managed-saas-postgres-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: node:22.16.0-bookworm
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["15", "18"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "member-directory", "member-directory-http"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_DB: model_router_saas_ci
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres -d model_router_saas_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends postgresql-client openssl
+          rm -rf /var/lib/apt/lists/*
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check required managed SaaS gate wiring
+        run: node --import tsx --test tests/ci/managed-saas-required-gates.test.ts
+      - name: Strictly typecheck isolated required roots and their fixtures
+        timeout-minutes: 3
+        run: >-
+          ./node_modules/.bin/tsc --noEmit
+          --target ES2022 --module NodeNext --moduleResolution NodeNext
+          --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node
+          tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts
+          tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts
+          tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts
+          tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts
+          tests/saas/identity/tenant-member-directory.postgres.integration.test.ts
+          tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts
+          tests/saas/gateway/pre-dispatch-postgres-fixture.ts
+          tests/saas/metering/normal-success-postgres-fixture.ts
+          tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
+          tests/ci/managed-saas-isolated-required-gates.ts
+          tests/ci/managed-saas-required-gates.test.ts
+      - name: Provision fresh CI service and execute the fixed required root
+        run: node --import tsx tests/ci/managed-saas-isolated-required-gates.ts "${{ matrix.gate }}"
