@@ -32,7 +32,6 @@ import {
   type PlatformCapacityPolicyTarget,
   type PlatformLoginInput,
   type PlatformMe,
-  type PlatformMfaEnrollmentStart,
   type PlatformUnknownOutcomeCaseDetail,
   type PlatformUnknownOutcomeCaseSummary,
   type PlatformUnknownOutcomeObservation,
@@ -50,6 +49,7 @@ import {
   platformClient,
 } from '../api/saas-platform-client';
 import { Badge, Field, formatDate, Panel, SaveButton } from '../components/ui';
+import { createMfaEnrollmentLifecycle, mfaEnrollmentNotice } from './saas-platform-mfa-lifecycle';
 
 const roleLabels: Record<PlatformAdminRole, string> = {
   superadmin: '超级管理员',
@@ -89,7 +89,12 @@ function safePlatformReturnPath(value: unknown): string {
   return typeof value === 'string' && platformRoutes.has(value) ? value : '/platform/overview';
 }
 
+const INVALID_PLATFORM_CREDENTIALS_MESSAGE = '邮箱、密码或 MFA 验证码不正确。';
+
 function platformErrorMessage(error: unknown): string {
+  if (error instanceof PlatformApiError && error.status === 401 && error.code === 'INVALID_CREDENTIALS') {
+    return INVALID_PLATFORM_CREDENTIALS_MESSAGE;
+  }
   if (typeof error === 'object' && error !== null) {
     const apiError = error as { status?: unknown; code?: unknown };
     if (apiError.status === 401 || apiError.code === 'UNAUTHENTICATED') {
@@ -135,7 +140,7 @@ function platformErrorMessage(error: unknown): string {
   }
   switch (error.code) {
     case 'INVALID_CREDENTIALS':
-      return '邮箱、密码或 MFA 验证码不正确。';
+      return INVALID_PLATFORM_CREDENTIALS_MESSAGE;
     case 'UNAUTHENTICATED':
       return '平台管理员会话已失效，请重新登录。';
     case 'CSRF_REJECTED':
@@ -297,45 +302,52 @@ function MfaEnrollmentPage() {
   const [enrollmentToken, setEnrollmentToken] = useState('');
   const [issuer, setIssuer] = useState('model-router');
   const [code, setCode] = useState('');
-  const [enrollment, setEnrollment] = useState<PlatformMfaEnrollmentStart>();
-  const [confirmed, setConfirmed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>();
+  const [lifecycle] = useState(() => createMfaEnrollmentLifecycle(platformClient));
+  const [state, setState] = useState(lifecycle.getState);
+  const busy = state.kind === 'starting' || state.kind === 'confirming';
+  const enrollment = state.kind === 'awaiting-confirmation' ? state.enrollment : undefined;
+  const notice = mfaEnrollmentNotice(state);
 
-  async function start(event: FormEvent) {
+  useEffect(() => {
+    const unmount = lifecycle.mount(setState);
+    const checkExpiry = () => lifecycle.checkExpiry();
+    window.addEventListener('focus', checkExpiry);
+    document.addEventListener('visibilitychange', checkExpiry);
+    return () => {
+      window.removeEventListener('focus', checkExpiry);
+      document.removeEventListener('visibilitychange', checkExpiry);
+      unmount();
+    };
+  }, [lifecycle]);
+
+  useEffect(() => {
+    if (state.kind !== 'awaiting-confirmation') setCode('');
+    if (state.kind !== 'idle') setEnrollmentToken('');
+  }, [state.kind]);
+
+  function start(event: FormEvent) {
     event.preventDefault();
-    setBusy(true);
-    setError(undefined);
-    try {
-      const result = await platformClient.startMfaEnrollment(issuer, enrollmentToken);
-      setEnrollment(result);
-      setEnrollmentToken('');
-      setCode('');
-    } catch (startError) {
-      setError(startError);
-    } finally {
-      setBusy(false);
-    }
+    const token = enrollmentToken;
+    setEnrollmentToken('');
+    setCode('');
+    void lifecycle.start(issuer, token);
   }
 
-  async function confirm(event: FormEvent) {
+  function confirm(event: FormEvent) {
     event.preventDefault();
-    if (!enrollment) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await platformClient.confirmMfaEnrollment(enrollment.confirmationToken, code);
-      setConfirmed(true);
-      setEnrollment(undefined);
-      setCode('');
-    } catch (confirmError) {
-      setError(confirmError);
-    } finally {
-      setBusy(false);
-    }
+    const submittedCode = code;
+    setEnrollmentToken('');
+    setCode('');
+    void lifecycle.confirm(submittedCode);
   }
 
-  if (confirmed) return <AuthFrame subtitle="MFA 配置">
+  function cancel() {
+    setEnrollmentToken('');
+    setCode('');
+    lifecycle.cancel();
+  }
+
+  if (state.kind === 'confirmed') return <AuthFrame subtitle="MFA 配置">
     <h1>MFA 已配置</h1>
     <p className="muted">平台管理员 MFA 已确认。请返回登录页面使用最新验证码登录。</p>
     <Link className="button-link primary" to="/platform/login">返回登录</Link>
@@ -344,10 +356,12 @@ function MfaEnrollmentPage() {
   return <AuthFrame subtitle="MFA 配置">
     <h1>配置平台 MFA</h1>
     <p className="muted">使用服务器 CLI 签发的一次性配置令牌开始。令牌和确认信息只保留在当前页面内存中。</p>
-    <PlatformErrorNotice error={error}/>
-    {!enrollment && <form onSubmit={start}>
-      <Field label="一次性配置令牌"><input required type="password" autoComplete="off" value={enrollmentToken} onChange={event => setEnrollmentToken(event.target.value)}/></Field>
-      <Field label="认证器发行方"><input required maxLength={120} value={issuer} onChange={event => setIssuer(event.target.value)}/></Field>
+    <p className="muted">离开、取消、提交确认或过期会清除本页敏感信息，不会撤销服务端操作；页面不会自动重试。</p>
+    {notice && <div className="notice error" role="alert">{notice}</div>}
+    {busy && <p role="status">{state.kind === 'starting' ? '正在生成 MFA 配置…' : '正在确认 MFA，敏感配置已隐藏…'}</p>}
+    {(state.kind === 'idle' || state.kind === 'starting') && <form onSubmit={start}>
+      <Field label="一次性配置令牌"><input required type="password" autoComplete="off" disabled={busy} value={enrollmentToken} onChange={event => setEnrollmentToken(event.target.value)}/></Field>
+      <Field label="认证器发行方"><input required maxLength={120} disabled={busy} value={issuer} onChange={event => setIssuer(event.target.value)}/></Field>
       <SaveButton busy={busy}>生成 MFA 配置</SaveButton>
     </form>}
     {enrollment && <>
@@ -361,7 +375,10 @@ function MfaEnrollmentPage() {
         <SaveButton busy={busy}>确认 MFA</SaveButton>
       </form>
     </>}
-    <div className="actions"><Link to="/platform/login">返回登录</Link></div>
+    <div className="actions">
+      {(state.kind === 'idle' || busy || enrollment) && <button type="button" onClick={cancel}>取消并清除配置</button>}
+      <Link to="/platform/login" onClick={cancel}>返回登录</Link>
+    </div>
   </AuthFrame>;
 }
 
@@ -1926,6 +1943,7 @@ function AuditHistoryPage() {
       <div className="actions"><button className="primary" type="submit">应用筛选</button><button type="button" onClick={clearFilters}>清除筛选</button></div>
     </form>
     <Panel title="审计事件">
+      <p className="muted">DECLARED TRUSTED OPERATOR 是外部运维声明引用，不是已验证的平台用户；操作者 ID 筛选仍仅匹配平台用户 UUID。</p>
       {loading && <div className="skeleton" role="status" aria-label="正在加载审计事件"><i/><i/><i/></div>}
       {!loading && error !== undefined && <PlatformErrorNotice error={error} onRetry={() => setReloadKey(value => value + 1)} title="审计历史读取失败"/>}
       {!loading && error === undefined && page?.items.length === 0 && <div className="empty" role="status">当前筛选条件下没有审计事件。</div>}
@@ -1936,7 +1954,8 @@ function AuditHistoryPage() {
 }
 
 function AuditEventRow({ event }: { event: PlatformAuditEvent }) {
-  return <tr><td><code>{event.id}</code></td><td>{event.actorId ? <code>{event.actorId}</code> : '—'}</td><td><code>{event.action}</code></td><td><code>{event.entityType}</code></td><td>{event.entityId ? <code>{event.entityId}</code> : '—'}</td><td>{formatDate(event.occurredAt)}</td></tr>;
+  const attestation = event.actorId === null ? event.operatorAttestation : undefined;
+  return <tr><td><code>{event.id}</code></td><td>{event.actorId ? <code>{event.actorId}</code> : attestation ? <div><span>DECLARED TRUSTED OPERATOR</span><div><code>{attestation.operatorId}</code></div><small className="muted">外部声明 · 原因：{attestation.reasonCode} · 结果：{attestation.outcome}</small></div> : '—'}</td><td><code>{event.action}</code></td><td><code>{event.entityType}</code></td><td>{event.entityId ? <code>{event.entityId}</code> : '—'}</td><td>{formatDate(event.occurredAt)}</td></tr>;
 }
 
 type SupplyStatus = PlatformSupplyAccount['status'];
@@ -2890,12 +2909,12 @@ export function SaasPlatformApp() {
   const location = useLocation();
   const navigate = useNavigate();
   const { auth, me, sessionError, signIn, signOut, reloadMe } = usePlatformSession();
+  const loginReturnPath = safePlatformReturnPath((location.state as { from?: unknown } | null)?.from);
 
   const login = useCallback(async (input: PlatformLoginInput) => {
     await signIn(input);
-    const from = (location.state as { from?: unknown } | null)?.from;
-    navigate(safePlatformReturnPath(from), { replace: true });
-  }, [location.state, navigate, signIn]);
+    navigate(loginReturnPath, { replace: true });
+  }, [loginReturnPath, navigate, signIn]);
 
   const logout = useCallback(async () => {
     try {
@@ -2908,5 +2927,5 @@ export function SaasPlatformApp() {
     }
   }, [navigate, signOut]);
 
-  return <Routes><Route path="/platform" element={<PlatformIndex auth={auth}/>}/><Route path="/platform/login" element={auth.kind === 'checking' ? <LoadingPage/> : auth.kind === 'signed-in' ? <Navigate to="/platform/overview" replace/> : <PlatformLoginPage onLogin={login} sessionError={sessionError}/>}/><Route path="/platform/mfa/enroll" element={<MfaEnrollmentPage/>}/><Route element={<ProtectedPlatformRoute auth={auth} me={me} onLogout={logout}/>}><Route path="/platform/overview" element={<PlatformOverviewPage me={me} onRetryMe={reloadMe}/>}/><Route path="/platform/ops" element={<OpsOverviewPage/>}/><Route path="/platform/unknown-outcomes" element={<UnknownOutcomesPage me={me}/>}/><Route path="/platform/capacity" element={<CapacityPolicyPage me={me}/>}/><Route path="/platform/pricing" element={<PricingPage me={me}/>}/><Route path="/platform/refunds" element={<RefundsPage me={me}/>}/><Route path="/platform/catalog/products" element={<ProductsPage/>}/><Route path="/platform/catalog/capabilities" element={<CapabilitiesPage/>}/><Route path="/platform/catalog/rights" element={<RightsPage me={me}/>}/><Route path="/platform/supply/accounts" element={<SupplyAccountsPage me={me}/>}/><Route path="/platform/audit/events" element={<AuditHistoryPage/>}/></Route><Route path="*" element={<Navigate to="/platform" replace/>}/></Routes>;
+  return <Routes><Route path="/platform" element={<PlatformIndex auth={auth}/>}/><Route path="/platform/login" element={auth.kind === 'checking' ? <LoadingPage/> : auth.kind === 'signed-in' ? <Navigate to={loginReturnPath} replace/> : <PlatformLoginPage onLogin={login} sessionError={sessionError}/>}/><Route path="/platform/mfa/enroll" element={<MfaEnrollmentPage/>}/><Route element={<ProtectedPlatformRoute auth={auth} me={me} onLogout={logout}/>}><Route path="/platform/overview" element={<PlatformOverviewPage me={me} onRetryMe={reloadMe}/>}/><Route path="/platform/ops" element={<OpsOverviewPage/>}/><Route path="/platform/unknown-outcomes" element={<UnknownOutcomesPage me={me}/>}/><Route path="/platform/capacity" element={<CapacityPolicyPage me={me}/>}/><Route path="/platform/pricing" element={<PricingPage me={me}/>}/><Route path="/platform/refunds" element={<RefundsPage me={me}/>}/><Route path="/platform/catalog/products" element={<ProductsPage/>}/><Route path="/platform/catalog/capabilities" element={<CapabilitiesPage/>}/><Route path="/platform/catalog/rights" element={<RightsPage me={me}/>}/><Route path="/platform/supply/accounts" element={<SupplyAccountsPage me={me}/>}/><Route path="/platform/audit/events" element={<AuditHistoryPage/>}/></Route><Route path="*" element={<Navigate to="/platform" replace/>}/></Routes>;
 }
