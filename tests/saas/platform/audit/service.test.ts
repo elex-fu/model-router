@@ -104,7 +104,8 @@ test('returns a safe projection and uses stable bounded keyset ordering with bou
     '2026-09-04T16:00:00.000Z',
     3,
   ]);
-  assert.doesNotMatch(firstCall.sql, /api_key\.created|credential|secret|body|detail|before|after|email|password/i);
+  assert.doesNotMatch(firstCall.sql, /api_key\.created|credential|secret|body|detail|before|after|password/i);
+  assert.doesNotMatch(firstCall.sql, /a\.source_ip|SELECT\s+a\.user_agent/);
 
   const second = await service.listEvents({
     actorId: ACTOR_ID,
@@ -232,4 +233,145 @@ test('fails closed for malformed rows and database failures without exposing sto
     assert.doesNotMatch(error.message, /password|do-not-leak/i);
     return true;
   });
+});
+
+function operatorMetadata(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    audience: 'platform',
+    actor_kind: 'trusted_operator',
+    workload_id: 'saas:platform-mfa-enroll',
+    database_role: 'model_router_saas_control_plane',
+    operator_id: 'ops:handoff-01',
+    reason_code: 'initial-enrollment',
+    outcome: 'issued',
+    ...overrides,
+  });
+}
+
+function operatorRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return auditRow(ID_A, '2026-09-30T16:00:00.000Z', {
+    tenant_id: null,
+    actor_user_id: null,
+    action: 'platform_mfa.enrollment_token.issued',
+    target_type: 'platform_mfa_enrollment_user',
+    target_id: ACTOR_ID,
+    entry_point: 'trusted_operator_cli:platform_mfa_enroll',
+    operator_attestation_metadata: operatorMetadata(),
+    ...overrides,
+  });
+}
+
+test('projects only bounded declared MFA operator metadata and redacts email-digest denial targets', async () => {
+  const database = new FakeAuditExecutor();
+  const digest = 'd'.repeat(64);
+  database.enqueue([
+    operatorRow({ source_ip: '192.0.2.5', user_agent: 'raw-UA-secret', details: { token: 'payload-secret' } }),
+    operatorRow({
+      id: ID_B,
+      action: 'platform_mfa.enrollment_token.denied',
+      target_type: 'platform_mfa_enrollment_email_digest',
+      target_id: digest,
+      operator_attestation_metadata: operatorMetadata({ reason_code: 'approved-enrollment', outcome: 'target-unavailable' }),
+    }),
+    ...['target-unavailable', 'verified-totp-present', 'enrollment-pending'].map(outcome => operatorRow({
+      action: 'platform_mfa.enrollment_token.denied',
+      operator_attestation_metadata: operatorMetadata({ operator_id: 'o'.repeat(96), outcome }),
+    })),
+  ]);
+  const page = await new PlatformAuditHistoryQueryService(database, CURSOR_SECRET).list({ limit: 10 });
+  assert.deepEqual(page.items[0]?.operatorAttestation, {
+    operatorId: 'ops:handoff-01', reasonCode: 'initial-enrollment', outcome: 'issued',
+  });
+  assert.equal(page.items[0]?.actorId, null);
+  assert.equal(page.items[0]?.entityId, ACTOR_ID);
+  assert.deepEqual(page.items[1]?.operatorAttestation, {
+    operatorId: 'ops:handoff-01', reasonCode: 'approved-enrollment', outcome: 'target-unavailable',
+  });
+  assert.equal(page.items[1]?.entityId, null);
+  assert.equal(page.items.slice(2).every(event => event.operatorAttestation?.operatorId.length === 96), true);
+  assert.doesNotMatch(JSON.stringify(page), /raw-UA-secret|payload-secret|192\.0\.2\.5|audience|actor_kind|workload_id|database_role|user_agent|source_ip/);
+  assert.equal(JSON.stringify(page).includes(digest), false);
+  const sql = database.calls[0]?.sql ?? '';
+  assert.match(sql, /CASE WHEN a\.tenant_id IS NULL AND a\.actor_user_id IS NULL/);
+  assert.match(sql, /a\.action IN \('platform_mfa\.enrollment_token\.issued', 'platform_mfa\.enrollment_token\.denied'\)/);
+  assert.match(sql, /a\.entry_point = 'trusted_operator_cli:platform_mfa_enroll'/);
+  assert.match(sql, /octet_length\(a\.user_agent\) <= 1024\s+THEN a\.user_agent ELSE NULL END AS operator_attestation_metadata/);
+  assert.doesNotMatch(sql, /::json|jsonb_/); // Bound the SQL read before application deserialization.
+});
+
+test('omits malformed, oversize, forged, unrelated and prototype-bearing operator metadata without dropping safe rows', async () => {
+  const raw = operatorMetadata();
+  const badMetadata: unknown[] = [
+    undefined, null, {}, [], 42, '', '{', 'null', '[]', '"user-agent"',
+    raw + 'x', ' '.repeat(1025) + raw, raw + '界'.repeat(400),
+    operatorMetadata({ audience: 'customer' }),
+    operatorMetadata({ actor_kind: 'platform_user' }),
+    operatorMetadata({ workload_id: 'saas:bootstrap-admin' }),
+    operatorMetadata({ database_role: 'model_router_saas_gateway' }),
+    operatorMetadata({ database_role: 'model_router_saas_migrator' }),
+    operatorMetadata({ operator_id: '' }),
+    operatorMetadata({ operator_id: 'o'.repeat(97) }),
+    operatorMetadata({ operator_id: '运维' }),
+    operatorMetadata({ operator_id: 'ops\nforged' }),
+    operatorMetadata({ operator_id: '<img src=x onerror=alert(1)>' }),
+    operatorMetadata({ reason_code: 'unknown-reason' }),
+    operatorMetadata({ outcome: 'unknown' }),
+    operatorMetadata({ outcome: 'enrollment-pending' }),
+    operatorMetadata({ token: 'must-not-leak-token' }),
+    operatorMetadata({ email_digest: 'must-not-leak-email-digest' }),
+    operatorMetadata({ outcome: { value: 'issued' } }),
+    raw.replace('"audience":', '"audience":"customer","audience":'),
+    raw.replace('"audience":', '"\\u0061udience":"customer","audience":'),
+    raw.replace('{', '{"__proto__":{"operator_id":"must-not-leak-proto"},'),
+    raw.replace('{', '{"constructor":{"prototype":{"token":"must-not-leak-proto"}},'),
+    raw.replace('"outcome":"issued"', '"unexpected":"issued"'),
+  ];
+  const badRows = [
+    ...badMetadata.map(operator_attestation_metadata => operatorRow({ operator_attestation_metadata })),
+    operatorRow({ tenant_id: TENANT_ID }),
+    operatorRow({ actor_user_id: ACTOR_ID }),
+    operatorRow({ entry_point: 'platform_http' }),
+    operatorRow({ entry_point: 'trusted_operator_cli:platform_mfa_enroll:forged' }),
+    operatorRow({ action: 'platform_mfa.enrollment_token.issued:forged' }),
+    operatorRow({ action: 'api_key.created' }),
+    operatorRow({ target_type: 'saas_user' }),
+    operatorRow({ target_id: 'not-a-user-uuid' }),
+    operatorRow({ action: 'platform_mfa.enrollment_token.denied' }),
+    operatorRow({ target_type: 'platform_mfa_enrollment_email_digest', target_id: 'd'.repeat(64) }),
+    operatorRow({
+      action: 'platform_mfa.enrollment_token.denied', target_type: 'platform_mfa_enrollment_email_digest',
+      target_id: 'd'.repeat(64), operator_attestation_metadata: operatorMetadata({ outcome: 'enrollment-pending' }),
+    }),
+  ];
+  const database = new FakeAuditExecutor();
+  database.enqueue(badRows);
+  const page = await new PlatformAuditHistoryQueryService(database, CURSOR_SECRET).list({ limit: 100 });
+  assert.equal(page.items.length, badRows.length);
+  for (const event of page.items) {
+    assert.equal(Object.hasOwn(event, 'operatorAttestation'), false);
+    if (event.entityType === 'platform_mfa_enrollment_email_digest') assert.equal(event.entityId, null);
+  }
+  assert.doesNotMatch(JSON.stringify(page), /must-not-leak|onerror|operator_id|user_agent|__proto__|constructor/);
+  assert.equal(Object.hasOwn(Object.prototype, 'operator_id'), false);
+});
+
+test('adding an operator projection leaves actor UUID predicates, cursor binding and old safe records unchanged', async () => {
+  const database = new FakeAuditExecutor();
+  database.enqueue([
+    operatorRow(),
+    auditRow(ID_B, '2026-09-01T00:00:00.000Z', { user_agent: operatorMetadata() }),
+  ]);
+  const service = new PlatformAuditHistoryQueryService(database, CURSOR_SECRET);
+  const page = await service.list({ actorId: ACTOR_ID, limit: 1 });
+  assert.match(database.calls[0]?.sql ?? '', /WHERE a\.actor_user_id = \$1/);
+  assert.deepEqual(database.calls[0]?.values, [ACTOR_ID, 2]);
+  assert.ok(page.nextCursor);
+  await assert.rejects(service.list({ actorId: TENANT_ID, cursor: page.nextCursor }), isError('AUDIT_INVALID_INPUT'));
+  await assert.rejects(service.list({ operatorId: 'ops:handoff-01' } as never), isError('AUDIT_INVALID_INPUT'));
+  assert.equal(database.calls.length, 1);
+
+  database.enqueue([auditRow(ID_B, '2026-09-01T00:00:00.000Z', { user_agent: operatorMetadata() })]);
+  const legacy = await service.list();
+  assert.equal(legacy.items[0]?.actorId, ACTOR_ID);
+  assert.equal(Object.hasOwn(legacy.items[0] ?? {}, 'operatorAttestation'), false);
 });

@@ -1,5 +1,14 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { PlatformAuditQueryError } from './errors.js';
+import {
+  MFA_OPERATOR_DENIED_ACTION,
+  MFA_OPERATOR_DIGEST_TARGET,
+  MFA_OPERATOR_ENTRY_POINT,
+  MFA_OPERATOR_ISSUED_ACTION,
+  MFA_OPERATOR_METADATA_MAX_BYTES,
+  MFA_OPERATOR_USER_TARGET,
+  projectMfaOperatorAttestation,
+} from './operator-attestation.js';
 import type {
   PlatformAuditDateInput,
   PlatformAuditEventRecord,
@@ -62,6 +71,7 @@ interface AuditRow {
   readonly occurred_at: unknown;
   readonly entry_point: unknown;
   readonly request_id: unknown;
+  readonly operator_attestation_metadata?: unknown;
 }
 
 interface AuditCursor {
@@ -378,7 +388,7 @@ function storedTimestamp(value: unknown): string {
 
 function mapRow(row: AuditRow): PlatformAuditEventRecord {
   if (row === null || typeof row !== 'object') storage();
-  return {
+  const event: PlatformAuditEventRecord = {
     id: storedUuid(row.id, false) as string,
     tenantId: storedUuid(row.tenant_id, true),
     actorId: storedUuid(row.actor_user_id, true),
@@ -388,6 +398,13 @@ function mapRow(row: AuditRow): PlatformAuditEventRecord {
     occurredAt: storedTimestamp(row.occurred_at),
     entryPoint: storedText(row.entry_point, MAX_ENTRY_POINT_LENGTH, false) as string,
     requestId: storedText(row.request_id, MAX_REQUEST_ID_LENGTH, true),
+  };
+  const operatorAttestation = projectMfaOperatorAttestation(event, row.operator_attestation_metadata);
+  return {
+    ...event,
+    // Even an invalid declaration must not disclose the email-digest target.
+    entityId: event.entityType === MFA_OPERATOR_DIGEST_TARGET ? null : event.entityId,
+    ...(operatorAttestation === undefined ? {} : { operatorAttestation }),
   };
 }
 
@@ -453,7 +470,13 @@ export class PlatformAuditHistoryQueryService {
 
     const limit = params.add(normalized.limit + 1);
     const sql = `SELECT a.id, a.tenant_id, a.actor_user_id, a.action,
-       a.target_type, a.target_id, a.occurred_at, a.entry_point, a.request_id
+       a.target_type, a.target_id, a.occurred_at, a.entry_point, a.request_id,
+       CASE WHEN a.tenant_id IS NULL AND a.actor_user_id IS NULL
+         AND a.action IN ('${MFA_OPERATOR_ISSUED_ACTION}', '${MFA_OPERATOR_DENIED_ACTION}')
+         AND a.entry_point = '${MFA_OPERATOR_ENTRY_POINT}'
+         AND a.target_type IN ('${MFA_OPERATOR_USER_TARGET}', '${MFA_OPERATOR_DIGEST_TARGET}')
+         AND octet_length(a.user_agent) <= ${MFA_OPERATOR_METADATA_MAX_BYTES}
+         THEN a.user_agent ELSE NULL END AS operator_attestation_metadata
       FROM saas_audit_events AS a
       ${predicates.length === 0 ? '' : `WHERE ${predicates.join('\n        AND ')}`}
       ORDER BY a.occurred_at DESC, a.id DESC

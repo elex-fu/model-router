@@ -29,9 +29,17 @@ export interface PlatformAuditHistoryListQuery {
 export type PlatformAuditListQuery = PlatformAuditHistoryListQuery;
 export type PlatformAuditHistoryQuery = PlatformAuditHistoryListQuery;
 
+/** Only the allowlisted declaration from trusted MFA CLI issuance is public. */
+export interface PlatformAuditOperatorAttestation {
+  /** A declared external operator reference, never a verified platform user. */
+  readonly operatorId: string;
+  readonly reasonCode: 'initial-enrollment' | 'approved-enrollment';
+  readonly outcome: 'issued' | 'target-unavailable' | 'verified-totp-present' | 'enrollment-pending';
+}
+
 /**
  * Safe audit metadata. Payloads, details, credentials, request bodies, and
- * user-agent/source-IP data are intentionally not part of this contract.
+ * raw user-agent/source-IP data are intentionally not part of this contract.
  */
 export interface PlatformAuditEventRecord {
   readonly id: string;
@@ -43,6 +51,8 @@ export interface PlatformAuditEventRecord {
   readonly occurredAt: string;
   readonly entryPoint: string;
   readonly requestId: string | null;
+  /** Only the purpose-bound trusted MFA CLI attestation is projected. */
+  readonly operatorAttestation?: PlatformAuditOperatorAttestation;
 }
 
 export type PlatformAuditHistoryRecord = PlatformAuditEventRecord;

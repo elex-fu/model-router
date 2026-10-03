@@ -491,6 +491,13 @@ export interface PlatformCatalogPageQuery {
 
 export type PlatformCatalogProductsQuery = Omit<PlatformCatalogPageQuery, 'providerId'>;
 
+export interface PlatformAuditOperatorAttestation {
+  /** Declared external operator reference; not a verified platform user. */
+  operatorId: string;
+  reasonCode: 'initial-enrollment' | 'approved-enrollment';
+  outcome: 'issued' | 'target-unavailable' | 'verified-totp-present' | 'enrollment-pending';
+}
+
 export interface PlatformAuditEvent {
   id: string;
   actorId: string | null;
@@ -498,6 +505,7 @@ export interface PlatformAuditEvent {
   entityType: string;
   entityId: string | null;
   occurredAt: string;
+  operatorAttestation?: PlatformAuditOperatorAttestation;
 }
 
 export interface PlatformAuditPageQuery {
@@ -1726,6 +1734,39 @@ function parseAuditNullableText(value: unknown, field: string, maxLength: number
   return value;
 }
 
+function parseAuditOperatorAttestation(
+  value: unknown,
+  event: PlatformAuditEvent,
+  context: Record<string, unknown>,
+): PlatformAuditOperatorAttestation | undefined {
+  if (value === undefined) return undefined;
+  const invalid = (): never => {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '审计响应中的运维声明无效');
+  };
+  if (!isRecord(value)) return invalid();
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== 3 || keys.some(key => key !== 'operatorId' && key !== 'reasonCode' && key !== 'outcome')) {
+    return invalid();
+  }
+  if (context.tenantId !== null || event.actorId !== null
+    || context.entryPoint !== 'trusted_operator_cli:platform_mfa_enroll'
+    || (event.action !== 'platform_mfa.enrollment_token.issued'
+      && event.action !== 'platform_mfa.enrollment_token.denied')
+    || typeof value.operatorId !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(value.operatorId)) return invalid();
+  const reasonCode = value.reasonCode;
+  const outcome = value.outcome;
+  if (reasonCode !== 'initial-enrollment' && reasonCode !== 'approved-enrollment') return invalid();
+  if (outcome !== 'issued' && outcome !== 'target-unavailable'
+    && outcome !== 'verified-totp-present' && outcome !== 'enrollment-pending') return invalid();
+  if ((event.action === 'platform_mfa.enrollment_token.issued') !== (outcome === 'issued')) return invalid();
+  if (event.entityType === 'platform_mfa_enrollment_user') {
+    parseAuditUuid(event.entityId, 'entityId');
+  } else if (event.entityType !== 'platform_mfa_enrollment_email_digest'
+    || outcome !== 'target-unavailable' || context.entityId !== null) return invalid();
+  return { operatorId: value.operatorId, reasonCode, outcome };
+}
+
 function parseAuditEvent(value: unknown): PlatformAuditEvent {
   if (!isRecord(value)) {
     throw new PlatformApiError(200, 'INVALID_RESPONSE', '审计事件响应无效');
@@ -1748,14 +1789,17 @@ function parseAuditEvent(value: unknown): PlatformAuditEvent {
     throw new PlatformApiError(200, 'INVALID_RESPONSE', '审计事件响应无效');
   }
 
-  return {
+  const event: PlatformAuditEvent = {
     id: parseAuditUuid(value.id, 'id') as string,
     actorId: parseAuditUuid(value.actorId, 'actorId', true),
     action,
     entityType,
-    entityId: parseAuditNullableText(value.entityId, 'entityId', 512),
+    entityId: entityType === 'platform_mfa_enrollment_email_digest'
+      ? null : parseAuditNullableText(value.entityId, 'entityId', 512),
     occurredAt,
   };
+  const operatorAttestation = parseAuditOperatorAttestation(value.operatorAttestation, event, value);
+  return { ...event, ...(operatorAttestation === undefined ? {} : { operatorAttestation }) };
 }
 
 function parseAuditPage(value: unknown): PlatformAuditEventPage {
