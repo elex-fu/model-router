@@ -52,6 +52,62 @@ export interface ProviderCapabilityReference {
   readonly version: number;
 }
 
+/** Operator-owned startup configuration, never a tenant/job supplied destination. */
+export interface ApprovedCredentialValidationTarget {
+  readonly providerId: 'custom';
+  readonly productId: 'custom-openai' | 'custom-anthropic';
+  readonly credentialType: 'api-key';
+  readonly model: string;
+  readonly endpoint: 'chat-completions' | 'messages';
+  readonly capabilityVersion: number;
+  readonly protocol: 'openai-compatible' | 'anthropic-compatible';
+  readonly authProfile: 'openai-bearer-v1' | 'anthropic-api-key-2023-06-01';
+  /** Canonical HTTPS API directory ending in /; the profile fixes the relative path. */
+  readonly baseUrl: string;
+  readonly approvalReference: string;
+  readonly expiresAt: string | null;
+  /** SHA-256 of canonical reviewed binding evidence, also stored on the capability version. */
+  readonly evidenceSha256: string;
+}
+
+/** Exact-snapshot manual requeue command; actor authorization belongs to the audited service. */
+export interface CredentialValidationRequeueCommand {
+  readonly jobId: string;
+  readonly expectedLeaseGeneration: number;
+  readonly expectedSnapshotSha256: string;
+  readonly idempotencyKey: string;
+  readonly actorUserId: string;
+  readonly requestId: string;
+  readonly reasonCode: 'target_approved' | 'retry_provider_validation';
+}
+
+/** Facts to be read/rechecked under the eventual audited transaction's authority locks. */
+export interface CredentialValidationRequeueCapabilityEvidence {
+  readonly providerId: string;
+  readonly productId: string;
+  readonly model: string;
+  readonly endpoint: string;
+  readonly capabilityVersion: number;
+  readonly protocol: string;
+  readonly evidenceSha256: string;
+}
+
+/**
+ * Non-mutating intent. A future audited transaction must recheck live authority,
+ * append durable history and audit, then CAS the job generation. This is not a
+ * permission, lease, or an executable un-audited requeue operation.
+ */
+export interface CredentialValidationRequeueIntent extends CredentialValidationRequeueCommand {
+  readonly tenantId: string;
+  readonly credentialId: string;
+  readonly credentialVersion: number;
+  readonly priorState: 'failed' | 'cancelled';
+  readonly priorAttemptCount: number;
+  readonly priorErrorCode: string | null;
+  readonly targetEvidenceSha256: string;
+  readonly requiresAtomicAuditHistory: true;
+}
+
 /** Explicit actor evidence required for auditable supply-relationship changes. */
 export interface ProviderSupplyAuditContext {
   readonly actorUserId: string;

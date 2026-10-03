@@ -18,7 +18,26 @@ import {
   type ProviderCredentialValidationResult,
   validateProviderCredential,
 } from './credential-validation-adapters.js';
-import type { ProviderCredentialValidationJobRecord, ProviderCredentialValidationJobState } from './types.js';
+import {
+  CredentialValidationHttpTransport,
+  CredentialValidationTransportError,
+  type CredentialValidationTransportTestOptions,
+  type PreparedCredentialValidationProbe,
+} from './credential-validation-http-transport.js';
+import {
+  credentialValidationJobSnapshotSha256,
+  CredentialValidationTargetError,
+  isApprovedCredentialValidationTargets,
+  resolveApprovedCredentialValidationTarget,
+  type ApprovedCredentialValidationTargets,
+} from './credential-validation-targets.js';
+import type {
+  CredentialValidationRequeueCapabilityEvidence,
+  CredentialValidationRequeueCommand,
+  CredentialValidationRequeueIntent,
+  ProviderCredentialValidationJobRecord,
+  ProviderCredentialValidationJobState,
+} from './types.js';
 
 export const CREDENTIAL_VALIDATION_LEASE_TTL_MS = 30_000;
 export const CREDENTIAL_VALIDATION_MAX_ATTEMPTS = 5;
@@ -168,7 +187,7 @@ function jobState(value: unknown): ProviderCredentialValidationJobState {
 
 function mapJob(row: ValidationJobRow): ProviderCredentialValidationJobRecord {
   if (!Array.isArray(row.allowed_models) || row.allowed_models.length === 0) throw workerError('STORE_UNAVAILABLE');
-  return {
+  return Object.freeze({
     id: safeText(row.id),
     tenantId: safeText(row.tenant_id),
     accountId: safeText(row.account_id),
@@ -177,12 +196,12 @@ function mapJob(row: ValidationJobRow): ProviderCredentialValidationJobRecord {
     providerId: safeText(row.provider_id),
     productId: safeText(row.product_id),
     credentialType: safeText(row.credential_type),
-    allowedModels: row.allowed_models.map(safeText),
-    target: {
+    allowedModels: Object.freeze(row.allowed_models.map(safeText)),
+    target: Object.freeze({
       model: safeText(row.target_model),
       endpoint: safeText(row.target_endpoint),
       version: positiveInteger(row.capability_version),
-    },
+    }),
     idempotencyKey: safeText(row.idempotency_key),
     state: jobState(row.status),
     attemptCount: nonnegativeInteger(row.attempt_count),
@@ -193,7 +212,7 @@ function mapJob(row: ValidationJobRow): ProviderCredentialValidationJobRecord {
     completedAt: nullableTimestamp(row.completed_at),
     createdAt: safeTimestamp(row.created_at),
     updatedAt: safeTimestamp(row.updated_at),
-  };
+  });
 }
 
 function queryRows<Row>(executor: SqlExecutor, sql: string, values: readonly unknown[] = []): Promise<{ rows: Row[] }> {
@@ -239,6 +258,9 @@ export interface PostgresCredentialValidationWorkerOptions {
   readonly retryMaxMs?: number;
   readonly deployment: string;
   readonly environment: string;
+  readonly approvedTargets?: ApprovedCredentialValidationTargets;
+  /** Worker-owned lifetime only; cancellation never claims to cancel an external KMS call. */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -257,6 +279,7 @@ export class PostgresCredentialValidationWorkerStore {
     private readonly kms: ProviderCredentialUnsealingKms,
     private readonly options: PostgresCredentialValidationWorkerOptions,
   ) {
+    this.options = Object.freeze({ ...options });
     this.leaseTtlMs = positiveBound(options.leaseTtlMs ?? CREDENTIAL_VALIDATION_LEASE_TTL_MS, 1_000, 120_000);
     this.maxAttempts = positiveBound(options.maxAttempts ?? CREDENTIAL_VALIDATION_MAX_ATTEMPTS, 1, 20);
     this.retryBaseMs = positiveBound(options.retryBaseMs ?? CREDENTIAL_VALIDATION_RETRY_BASE_MS, 100, 60_000);
@@ -267,13 +290,19 @@ export class PostgresCredentialValidationWorkerStore {
     );
     safeText(options.deployment);
     safeText(options.environment);
+    if (options.approvedTargets !== undefined && !isApprovedCredentialValidationTargets(options.approvedTargets)) {
+      throw workerError('STORE_UNAVAILABLE');
+    }
   }
 
   private async safeTransaction<T>(work: (executor: SqlExecutor) => Promise<T>, serializable = false): Promise<T> {
     try {
       return await this.database.transaction(async (tx) => {
+        if (this.options.signal?.aborted) leaseLost();
         if (serializable) await queryRows(tx, 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
-        return work(tx);
+        const result = await work(tx);
+        if (this.options.signal?.aborted) leaseLost();
+        return result;
       });
     } catch (error) {
       if (error instanceof CredentialValidationWorkerError) throw error;
@@ -410,7 +439,9 @@ export class PostgresCredentialValidationWorkerStore {
   } | null> {
     const job = lease.job;
     await lockAdvisoryLayers(tx, workerAuthorityLockLayers(job), 'exclusive');
-    const expectedProtocol = credentialValidationCapabilityProtocol(job);
+    const customTarget = this.options.approvedTargets
+      ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, job) : null;
+    const expectedProtocol = credentialValidationCapabilityProtocol(job) ?? customTarget?.protocol ?? null;
     if (requireSupportedCapability && expectedProtocol === null) return null;
     const accounts = await queryRows<LockedAccountRow>(
       tx,
@@ -511,6 +542,8 @@ export class PostgresCredentialValidationWorkerStore {
             AND capability.protocol = $8
             AND capability.support_level = 'supported'
             AND capability.validation_state = 'verified'
+            ${customTarget ? `AND capability.evidence_sha256 = $9
+            AND ($10::timestamptz IS NULL OR $10::timestamptz > clock_timestamp())` : ''}
             AND NOT EXISTS (
               SELECT 1 FROM saas_provider_capabilities AS newer
                WHERE newer.provider_id = capability.provider_id
@@ -529,6 +562,7 @@ export class PostgresCredentialValidationWorkerStore {
           job.target.endpoint,
           job.target.version,
           expectedProtocol,
+          ...(customTarget ? [customTarget.evidenceSha256, customTarget.expiresAt] : []),
         ],
       );
       if (capabilities.rows.length !== 1) return null;
@@ -676,7 +710,9 @@ export class PostgresCredentialValidationWorkerStore {
 
   async complete(lease: CredentialValidationLease, result: ProviderCredentialValidationResult): Promise<boolean> {
     return this.safeTransaction(async (tx) => {
-      if (!(await this.lockLeaseForCompletion(tx, lease, result.state === 'verified'))) return false;
+      const requireTarget = result.state === 'verified' ||
+        (lease.job.providerId === 'custom' && result.errorCode !== 'adapter_unsupported');
+      if (!(await this.lockLeaseForCompletion(tx, lease, requireTarget))) return false;
       const terminalState = result.state === 'verified' ? 'verified' : 'failed';
       const resultErrorCode = errorCode(result);
       const terminal = result.state === 'verified' || !result.retryable || lease.job.attemptCount >= this.maxAttempts;
@@ -709,7 +745,7 @@ export class PostgresCredentialValidationWorkerStore {
 
       if (result.state === 'verified') {
         await this.updateHealthState(tx, lease, 'verified', null);
-      } else if (terminal && result.errorCode !== 'adapter_unsupported') {
+      } else if (terminal && result.errorCode !== 'adapter_unsupported' && result.errorCode !== 'provider_address_rejected') {
         await this.updateHealthState(tx, lease, 'failed', result.errorCode);
       }
       return true;
@@ -774,7 +810,10 @@ function positiveBound(value: number, min: number, max: number): number {
 }
 
 export interface CredentialValidationWorkerOptions {
+  /** Legacy fixed-adapter seam only. Custom validation never reads or calls it. */
   readonly fetch?: ProviderCredentialValidationFetch;
+  readonly approvedTargets?: ApprovedCredentialValidationTargets;
+  readonly transportTestOptions?: CredentialValidationTransportTestOptions;
   readonly deployment: string;
   readonly environment: string;
   readonly pollIntervalMs?: number;
@@ -788,21 +827,39 @@ export interface CredentialValidationWorkerOptions {
 
 export class CredentialValidationWorker {
   private readonly store: PostgresCredentialValidationWorkerStore;
+  private readonly transport: CredentialValidationHttpTransport;
+  private readonly halt = new AbortController();
+  private readonly activeRuns = new Set<Promise<CredentialValidationWorkerResult>>();
+  private closePromise?: Promise<void>;
 
   constructor(
     database: SaasDatabase,
     kms: ProviderCredentialUnsealingKms,
     private readonly options: CredentialValidationWorkerOptions,
   ) {
-    this.store = new PostgresCredentialValidationWorkerStore(database, kms, options);
+    this.options = Object.freeze({ ...options });
+    this.store = new PostgresCredentialValidationWorkerStore(database, kms, { ...this.options, signal: this.halt.signal });
+    this.transport = new CredentialValidationHttpTransport(this.options.transportTestOptions);
   }
 
   async runOnce(): Promise<CredentialValidationWorkerResult> {
+    if (this.halt.signal.aborted) return 'stale';
+    const run = this.processOnce();
+    this.activeRuns.add(run);
+    try { return await run; }
+    catch (error) { if (this.halt.signal.aborted) return 'stale'; throw error; }
+    finally { this.activeRuns.delete(run); }
+  }
+
+  private async processOnce(): Promise<CredentialValidationWorkerResult> {
     const lease = await this.store.claimNext();
     if (!lease) return 'idle';
+    if (this.halt.signal.aborted) return 'stale';
 
     let result: ProviderCredentialValidationResult;
-    if (!isSupportedTarget(lease.job)) {
+    const customTarget = this.options.approvedTargets
+      ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, lease.job) : null;
+    if (!isSupportedTarget(lease.job) && !customTarget) {
       result = {
         state: 'failed',
         errorCode: 'adapter_unsupported',
@@ -812,24 +869,43 @@ export class CredentialValidationWorker {
         durationMs: 0,
       };
     } else {
+      let plan: PreparedCredentialValidationProbe | undefined;
       try {
-        result = await this.store.withCredential(lease, async (secret) => {
+        if (customTarget) {
+          // URL/public DNS policy is resolved before decrypting any credential;
+          // withCredential independently repeats all authority checks after DNS.
           await this.store.recheckBeforeProviderRequest(lease);
-          return validateProviderCredential(lease.job, secret, this.options.fetch);
+          plan = await this.transport.prepare(customTarget, this.halt.signal);
+        }
+        result = await this.store.withCredential(lease, async (secret) => {
+          if (this.halt.signal.aborted) leaseLost();
+          if (plan) return this.transport.probe(plan, secret, () => this.store.recheckBeforeProviderRequest(lease));
+          await this.store.recheckBeforeProviderRequest(lease);
+          if (this.halt.signal.aborted) leaseLost();
+          return validateProviderCredential(lease.job, secret, this.options.fetch, this.halt.signal);
         });
       } catch (error) {
+        if (this.halt.signal.aborted) return 'stale';
         if (error instanceof CredentialValidationWorkerError && error.code === 'LEASE_LOST') return 'stale';
+        let code: ProviderCredentialValidationErrorCode = 'credential_unavailable';
+        if (error instanceof CredentialValidationTransportError) {
+          if (error.code === 'validation_transport_closed') return 'stale';
+          code = error.code;
+        }
         result = {
           state: 'failed',
-          errorCode: 'credential_unavailable',
-          retryable: true,
+          errorCode: code,
+          retryable: !(error instanceof CredentialValidationTransportError && error.code === 'provider_address_rejected'),
           adapterId: null,
           httpStatus: null,
           durationMs: 0,
         };
+      } finally {
+        if (plan) await this.transport.release(plan);
       }
     }
 
+    if (this.halt.signal.aborted) return 'stale';
     try {
       return (await this.store.complete(lease, result)) ? 'processed' : 'stale';
     } catch (error) {
@@ -844,19 +920,34 @@ export class CredentialValidationWorker {
       100,
       60_000,
     );
-    for (;;) {
+    while (!this.halt.signal.aborted) {
       try {
         const result = await this.runOnce();
-        if (result === 'idle') await delay(pollIntervalMs);
+        if (result === 'idle') await delay(pollIntervalMs, this.halt.signal);
       } catch {
         try {
           this.options.onError?.('cycle_failed');
         } catch {
           // An observer cannot terminate credential processing.
         }
-        await delay(pollIntervalMs);
+        await delay(pollIntervalMs, this.halt.signal);
       }
     }
+  }
+
+  /**
+   * Aborts DNS/HTTP/readers and drains actual runs before KMS/database close.
+   * A pending KMS decrypt is not cancellable by its current interface: close
+   * waits for it, wipes returned plaintext, and cannot dispatch/commit health.
+   * An abandoned lease is recovered using normal database TTL/generation rules.
+   */
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.halt.abort();
+    this.closePromise = Promise.all([
+      this.transport.close(), Promise.allSettled([...this.activeRuns]),
+    ]).then(() => undefined);
+    return this.closePromise;
   }
 }
 
@@ -864,8 +955,52 @@ function isSupportedTarget(job: ProviderCredentialValidationJobRecord): boolean 
   return isSupportedCredentialValidationTarget(job);
 }
 
-function delay(durationMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, durationMs));
+/**
+ * Schema-free intent preparation for BOTH fixed and custom products. This is
+ * neither actor authorization nor a DB-current evidence attestation: the future
+ * control-plane service must obtain/recheck evidence under locks, persist a
+ * deduplicated command + immutable prior-cycle history + audit in the SAME
+ * transaction, then CAS the exact job generation to queued. Cumulative attempts
+ * never reset; a new durable cycle has its own bounded retry counter/budget.
+ * No worker method executes a history-less requeue or changes the target.
+ */
+export function prepareCredentialValidationRequeue(
+  job: ProviderCredentialValidationJobRecord,
+  command: CredentialValidationRequeueCommand,
+  capability: CredentialValidationRequeueCapabilityEvidence,
+  approvedTargets?: ApprovedCredentialValidationTargets,
+): Readonly<CredentialValidationRequeueIntent> {
+  const custom = approvedTargets ? resolveApprovedCredentialValidationTarget(approvedTargets, job) : null;
+  const protocol = credentialValidationCapabilityProtocol(job) ?? custom?.protocol;
+  const hash = /^[0-9a-f]{64}$/;
+  const safeActor = (value: unknown) => typeof value === 'string' && /^[\x21-\x7e]{1,256}$/.test(value);
+  if (!protocol || !capability || capability.providerId !== job.providerId || capability.productId !== job.productId ||
+    capability.model !== job.target.model || capability.endpoint !== job.target.endpoint ||
+    capability.capabilityVersion !== job.target.version || capability.protocol !== protocol ||
+    !hash.test(capability.evidenceSha256) || (custom && capability.evidenceSha256 !== custom.evidenceSha256) ||
+    !command || (job.state !== 'failed' && job.state !== 'cancelled') ||
+    command.jobId !== job.id || !Number.isSafeInteger(command.expectedLeaseGeneration) ||
+    command.expectedLeaseGeneration < 0 || command.expectedLeaseGeneration !== job.leaseGeneration ||
+    !hash.test(command.expectedSnapshotSha256) || command.expectedSnapshotSha256 !== credentialValidationJobSnapshotSha256(job) ||
+    !hash.test(command.idempotencyKey) || !safeActor(command.actorUserId) || !safeActor(command.requestId) ||
+    !['target_approved', 'retry_provider_validation'].includes(command.reasonCode)) throw new CredentialValidationTargetError();
+  return Object.freeze({
+    jobId: command.jobId, expectedLeaseGeneration: command.expectedLeaseGeneration,
+    expectedSnapshotSha256: command.expectedSnapshotSha256, idempotencyKey: command.idempotencyKey,
+    actorUserId: command.actorUserId, requestId: command.requestId, reasonCode: command.reasonCode,
+    tenantId: job.tenantId, credentialId: job.credentialId, credentialVersion: job.credentialVersion,
+    priorState: job.state, priorAttemptCount: job.attemptCount, priorErrorCode: job.lastErrorCode,
+    targetEvidenceSha256: capability.evidenceSha256, requiresAtomicAuditHistory: true,
+  });
+}
+
+function delay(durationMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve(); };
+    const timer = setTimeout(finish, durationMs);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
 }
 
 export interface CredentialValidationWorkerHandle {
@@ -895,8 +1030,10 @@ export function startCredentialValidationWorker(
     while (!closed) {
       try {
         const result = await worker.runOnce();
+        if (closed) break;
         if (result === 'idle') await delayWithClose(pollIntervalMs);
       } catch {
+        if (closed) break;
         try {
           options.onError?.('cycle_failed');
         } catch {
@@ -912,9 +1049,10 @@ export function startCredentialValidationWorker(
     async close() {
       if (closed) return done;
       closed = true;
+      const closeWorker = worker.close();
       if (timer !== undefined) clearTimeout(timer);
       resolveWait?.();
-      await done;
+      await Promise.all([closeWorker, done]);
     },
   };
 }

@@ -39,7 +39,23 @@ function ownerKey(owner: ProviderSupplyOwner, id: string): string {
 }
 
 function accountKey(reference: ProviderAccountReference): string {
-  return ownerKey(reference, reference.accountId);
+  if (reference.ownerKind === 'tenant' && typeof reference.tenantId === 'string') {
+    return ownerKey({ ownerKind: 'tenant', tenantId: reference.tenantId, supplyMode: 'byok' }, reference.accountId);
+  }
+  if (reference.ownerKind === 'platform' && reference.tenantId === null) {
+    return ownerKey({ ownerKind: 'platform', tenantId: null, supplyMode: 'platform' }, reference.accountId);
+  }
+  throw error('INVALID_REFERENCE');
+}
+
+function snapshotOwner(owner: Pick<ProviderSupplyOwner, 'ownerKind' | 'tenantId' | 'supplyMode'>): ProviderSupplyOwner {
+  if (owner.ownerKind === 'tenant' && typeof owner.tenantId === 'string' && owner.supplyMode === 'byok') {
+    return { ownerKind: 'tenant', tenantId: owner.tenantId, supplyMode: 'byok' };
+  }
+  if (owner.ownerKind === 'platform' && owner.tenantId === null && owner.supplyMode === 'platform') {
+    return { ownerKind: 'platform', tenantId: null, supplyMode: 'platform' };
+  }
+  throw error('INVALID_DISPATCH_PROOF_OWNER');
 }
 
 function credentialKey(reference: ProviderCredentialReference | ProviderCredentialRecord): string {
@@ -169,29 +185,35 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   }
 
   async updateAccountLifecycle(input: UpdateProviderAccountLifecycleInput): Promise<ProviderAccountRecord | null> {
-    const account = this.accounts.find((candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account));
+    const index = this.accounts.findIndex((candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account));
+    const account = this.accounts[index];
     if (!account || account.authzVersion !== input.expectedAuthzVersion) return null;
-    Object.assign(account, {
+    const updated: ProviderAccountRecord = {
+      ...account,
       status: input.status,
       disabledAt: input.disabledAt,
       revokedAt: input.revokedAt,
       updatedAt: input.updatedAt,
       authzVersion: account.authzVersion + 1,
-    });
-    return clone(account);
+    };
+    this.accounts[index] = updated;
+    return clone(updated);
   }
 
   async updateAccountValidation(input: UpdateProviderAccountValidationInput): Promise<ProviderAccountRecord | null> {
-    const account = this.accounts.find((candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account));
+    const index = this.accounts.findIndex((candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account));
+    const account = this.accounts[index];
     if (!account || account.authzVersion !== input.expectedAuthzVersion) return null;
-    Object.assign(account, {
+    const updated: ProviderAccountRecord = {
+      ...account,
       validationState: input.validationState,
       validationErrorCode: input.validationErrorCode,
       lastValidatedAt: input.lastValidatedAt,
       updatedAt: input.updatedAt,
       authzVersion: account.authzVersion + 1,
-    });
-    return clone(account);
+    };
+    this.accounts[index] = updated;
+    return clone(updated);
   }
 
   async createCredential(input: PersistedProviderCredentialInput): Promise<ProviderCredentialRecord> {
@@ -309,21 +331,23 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
     input: AppendProviderCredentialVersionInput,
   ): Promise<{ readonly credential: ProviderCredentialRecord; readonly version: ProviderCredentialVersionRecord }> {
     const credentialReference: ProviderCredentialReference = input.credential;
-    const credential = this.credentials.find(
+    const credentialIndex = this.credentials.findIndex(
       (candidate) => credentialKey(candidate) === credentialKey(credentialReference),
     );
+    const credential = this.credentials[credentialIndex];
     if (!credential) throw error('CREDENTIAL_NOT_FOUND');
     if (credential.status === 'revoked') throw error('CREDENTIAL_REVOKED');
     if (credential.currentVersion !== input.expectedCurrentVersion) throw error('CREDENTIAL_VERSION_CONFLICT');
     const key = versionKey(input.credential);
     if (this.versions.some((version) => versionKey(version) === key)) throw error('23505');
-    if (credential.currentVersion !== null) {
-      const previous = this.versions.find(
-        (version) => versionKey(version) === versionKey({ ...credentialReference, version: credential.currentVersion }),
+    const currentVersion = credential.currentVersion;
+    if (currentVersion !== null) {
+      const previousIndex = this.versions.findIndex(
+        (version) => versionKey(version) === versionKey({ ...credentialReference, version: currentVersion }),
       );
+      const previous = this.versions[previousIndex];
       if (previous) {
-        previous.status = 'retired';
-        previous.retiredAt = input.createdAt;
+        this.versions[previousIndex] = { ...previous, status: 'retired', retiredAt: input.createdAt };
       }
     }
     const version: StoredProviderCredentialVersion = {
@@ -346,75 +370,93 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       envelope: clone(input.envelope),
     };
     this.versions.push(version);
-    credential.currentVersion = input.credential.version;
-    credential.status = credential.status === 'active' ? 'pending' : credential.status;
-    credential.validationState = 'unverified';
-    credential.validationErrorCode = null;
-    credential.lastValidatedAt = null;
-    credential.expiresAt = input.expiresAt;
-    credential.updatedAt = input.createdAt;
-    credential.authzVersion += 1;
-    for (const job of this.validationJobs) {
+    const updated: ProviderCredentialRecord = {
+      ...credential,
+      currentVersion: input.credential.version,
+      status: credential.status === 'active' ? 'pending' : credential.status,
+      validationState: 'unverified',
+      validationErrorCode: null,
+      lastValidatedAt: null,
+      expiresAt: input.expiresAt,
+      updatedAt: input.createdAt,
+      authzVersion: credential.authzVersion + 1,
+    };
+    this.credentials[credentialIndex] = updated;
+    this.validationJobs = this.validationJobs.map((job): ProviderCredentialValidationJobRecord => {
       if (
         job.tenantId === credential.tenantId &&
         job.credentialId === credential.id &&
         (job.state === 'queued' || job.state === 'leased')
       ) {
-        Object.assign(job, {
-          state: 'cancelled' as const,
+        return {
+          ...job,
+          state: 'cancelled',
           leaseUntil: null,
           leaseGeneration: job.leaseGeneration + 1,
           lastErrorCode: 'credential_changed',
           completedAt: input.createdAt,
           updatedAt: input.createdAt,
-        });
+        };
       }
-    }
-    return { credential: clone(credential), version: publicVersion(version) };
+      return job;
+    });
+    return { credential: clone(updated), version: publicVersion(version) };
   }
 
   async updateCredentialLifecycle(
     input: UpdateProviderCredentialLifecycleInput,
   ): Promise<ProviderCredentialRecord | null> {
-    const credential = this.credentials.find(
+    const credentialIndex = this.credentials.findIndex(
       (candidate) => credentialKey(candidate) === credentialKey(input.credential),
     );
+    const credential = this.credentials[credentialIndex];
     if (!credential || credential.authzVersion !== input.expectedAuthzVersion) return null;
-    Object.assign(credential, {
+    const updated: ProviderCredentialRecord = {
+      ...credential,
       status: input.status,
       disabledAt: input.disabledAt,
       revokedAt: input.revokedAt,
       updatedAt: input.updatedAt,
       authzVersion: credential.authzVersion + 1,
-    });
-    if (input.status === 'revoked' && credential.currentVersion !== null) {
-      const current = this.versions.find(
-        (version) => versionKey(version) === versionKey({ ...input.credential, version: credential.currentVersion }),
+    };
+    this.credentials[credentialIndex] = updated;
+    const currentVersion = credential.currentVersion;
+    if (input.status === 'revoked' && currentVersion !== null) {
+      const currentIndex = this.versions.findIndex(
+        (version) => versionKey(version) === versionKey({ ...input.credential, version: currentVersion }),
       );
+      const current = this.versions[currentIndex];
       if (current) {
-        current.status = 'revoked';
-        current.revokedAt = input.revokedAt ?? input.updatedAt;
+        this.versions[currentIndex] = {
+          ...current,
+          status: 'revoked',
+          revokedAt: input.revokedAt ?? input.updatedAt,
+        };
       }
     }
-    return clone(credential);
+    return clone(updated);
   }
 
   async updateCredentialValidation(
     input: UpdateProviderCredentialValidationInput,
   ): Promise<ProviderCredentialRecord | null> {
-    const credential = this.credentials.find(
+    const credentialIndex = this.credentials.findIndex(
       (candidate) => credentialKey(candidate) === credentialKey(input.credential),
     );
+    const credential = this.credentials[credentialIndex];
     if (!credential || credential.authzVersion !== input.expectedAuthzVersion) return null;
-    credential.validationState = input.validationState;
-    credential.validationErrorCode = input.validationErrorCode;
-    credential.lastValidatedAt = input.lastValidatedAt;
-    if (credential.status !== 'revoked' && credential.status !== 'disabled') {
-      credential.status = input.validationState === 'verified' ? 'active' : 'pending';
-    }
-    credential.updatedAt = input.updatedAt;
-    credential.authzVersion += 1;
-    return clone(credential);
+    const updated: ProviderCredentialRecord = {
+      ...credential,
+      validationState: input.validationState,
+      validationErrorCode: input.validationErrorCode,
+      lastValidatedAt: input.lastValidatedAt,
+      status: credential.status === 'revoked' || credential.status === 'disabled'
+        ? credential.status : input.validationState === 'verified' ? 'active' : 'pending',
+      updatedAt: input.updatedAt,
+      authzVersion: credential.authzVersion + 1,
+    };
+    this.credentials[credentialIndex] = updated;
+    return clone(updated);
   }
 
   async getCredentialVersion(
@@ -442,8 +484,9 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   }
 
   resetValidation(reference: ProviderAccountReference): void {
-    const account = this.accounts.find((candidate) => accountKey(candidate) === accountKey(reference));
-    if (account) account.validationState = 'unverified' satisfies ProviderValidationState;
+    const index = this.accounts.findIndex((candidate) => ownerKey(candidate, candidate.id) === accountKey(reference));
+    const account = this.accounts[index];
+    if (account) this.accounts[index] = { ...account, validationState: 'unverified' satisfies ProviderValidationState };
   }
 }
 
@@ -523,7 +566,7 @@ export function createTenantDispatchProof(
     responseStarted: false,
     ...overrides.attempt,
   };
-  const accountSnapshot: ProviderCredentialDispatchProof['account'] = {
+  const accountSnapshotValues = {
     ownerKind: account.ownerKind,
     tenantId: account.tenantId,
     supplyMode: account.supplyMode,
@@ -537,7 +580,11 @@ export function createTenantDispatchProof(
     authzVersion: account.authzVersion,
     ...overrides.account,
   };
-  const credentialSnapshot: ProviderCredentialDispatchProof['credential'] = {
+  const accountSnapshot: ProviderCredentialDispatchProof['account'] = {
+    ...accountSnapshotValues,
+    ...snapshotOwner(accountSnapshotValues),
+  };
+  const credentialSnapshotValues = {
     ownerKind: credential.ownerKind,
     tenantId: credential.tenantId,
     supplyMode: credential.supplyMode,
@@ -551,6 +598,10 @@ export function createTenantDispatchProof(
     expiresAt: credential.expiresAt,
     authzVersion: credential.authzVersion,
     ...overrides.credential,
+  };
+  const credentialSnapshot: ProviderCredentialDispatchProof['credential'] = {
+    ...credentialSnapshotValues,
+    ...snapshotOwner(credentialSnapshotValues),
   };
   const profile: ProviderCredentialDispatchProof['profile'] = {
     tenantId: account.tenantId,
