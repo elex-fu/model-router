@@ -187,10 +187,13 @@ function makeExecutor(overrides: Partial<AuthorityRows> = {}, failure?: string):
   return new RecordingExecutor({ ...validRows(), ...overrides }, failure);
 }
 
-function authorityStep(sql: string): string {
+function authorityStep(sql: string, values: readonly unknown[] = []): string {
   const normalized = sql.toLowerCase();
   if (normalized.includes('saas-authz:tenant:')) return 'tenant-fence';
   if (normalized.includes('saas-authz:project:')) return 'project-fence';
+  if (normalized.includes('pg_advisory_xact_lock_shared') && String(values[0]).startsWith('saas-authz:api-key:')) {
+    return 'key-fence';
+  }
   if (normalized.includes('pg_advisory_xact_lock_shared')) return 'user-fence';
   if (normalized.includes('from saas_tenants')) return 'tenant';
   if (normalized.includes('from saas_projects')) return 'project';
@@ -213,7 +216,7 @@ async function assertDenied(operation: Promise<void>, message?: RegExp): Promise
   });
 }
 
-test('prelock fences SELECT-only authority before reads and retains the API-key row lock', async () => {
+test('prelock fences all SELECT-only authority before separate plain reads', async () => {
   const executor = makeExecutor();
   const prelock = new PostgresSaasRequestAdmissionAuthorizationPrelock();
 
@@ -259,7 +262,11 @@ test('prelock fences SELECT-only authority before reads and retains the API-key 
         values: ['tenant-a', 'project-a', 'user-a'],
       },
       {
-        sql: 'SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type, execution_principal_id, entitlement_id, supply_profile_id, supply_mode, model_scopes, status, revoked_at, expires_at, authz_version, model_scope_version, entitlement_authz_version, supply_profile_authz_version FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 LIMIT 2 FOR SHARE',
+        sql: 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))',
+        values: ['saas-authz:api-key:74656e616e742d61:70726f6a6563742d61:6b65792d61'],
+      },
+      {
+        sql: 'SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type, execution_principal_id, entitlement_id, supply_profile_id, supply_mode, model_scopes, status, revoked_at, expires_at, authz_version, model_scope_version, entitlement_authz_version, supply_profile_authz_version FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 LIMIT 2',
         values: ['tenant-a', 'project-a', 'key-a'],
       },
       { sql: 'SELECT clock_timestamp() AS now', values: [] },
@@ -267,7 +274,7 @@ test('prelock fences SELECT-only authority before reads and retains the API-key 
   );
 
   assert.deepEqual(
-    executor.statements.map(({ sql }) => authorityStep(sql)),
+    executor.statements.map(({ sql, values }) => authorityStep(sql, values)),
     [
       'tenant-fence',
       'tenant',
@@ -278,13 +285,13 @@ test('prelock fences SELECT-only authority before reads and retains the API-key 
       'principal',
       'tenant-membership',
       'project-membership',
+      'key-fence',
       'key',
       'database-clock',
     ],
   );
   const rowLockedSql = executor.statements.filter(({ sql }) => /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i.test(sql));
-  assert.equal(rowLockedSql.length, 1);
-  assert.match(rowLockedSql[0]?.sql ?? '', /FROM saas_api_keys/i);
+  assert.equal(rowLockedSql.length, 0);
   assert.doesNotMatch(
     executor.statements.find(({ sql }) => /saas_project_inference_policy_versions/i.test(sql))?.sql ?? '',
     /FOR SHARE|FOR UPDATE|FOR KEY SHARE/i,
@@ -498,8 +505,8 @@ test('project-service prelock checks project policy and key binding without crea
   const prelock = new PostgresSaasRequestAdmissionAuthorizationPrelock();
   await prelock.prelock(input(executor, currentRequest, currentKey));
   assert.deepEqual(
-    executor.statements.map(({ sql }) => authorityStep(sql)),
-    ['tenant-fence', 'tenant', 'project-fence', 'project', 'policy', 'key', 'database-clock'],
+    executor.statements.map(({ sql, values }) => authorityStep(sql, values)),
+    ['tenant-fence', 'tenant', 'project-fence', 'project', 'policy', 'key-fence', 'key', 'database-clock'],
   );
   assert.equal(
     executor.statements.some(({ sql }) => /saas_users|saas_memberships/i.test(sql)),
@@ -515,5 +522,90 @@ test('prelock wraps database failures as fail-closed storage errors', async () =
   await assert.rejects(
     prelock.prelock(input(executor)),
     (error: unknown) => error instanceof SaasAdmissionAuthorizationError && error.code === 'storage_failure',
+  );
+});
+
+test('prelock waits for the key fence before reading revocation, epochs, or expiry', async () => {
+  for (const mutation of [
+    { status: 'revoked', revoked_at: now },
+    { authz_version: 12 },
+    { model_scope_version: 8 },
+    { entitlement_authz_version: 6 },
+    { supply_profile_authz_version: 4 },
+    { expires_at: now },
+  ]) {
+    const executor = makeExecutor();
+    let releaseFence!: () => void;
+    let reachedFence!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseFence = resolve; });
+    const reached = new Promise<void>((resolve) => { reachedFence = resolve; });
+    const waitingExecutor: SqlExecutor = {
+      async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
+        if (authorityStep(sql, values) === 'key-fence') {
+          reachedFence();
+          await blocked;
+        }
+        return executor.query<RowType>(sql, values);
+      },
+    };
+    const operation = new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(waitingExecutor));
+    const rejection = assertDenied(operation, /not active|mismatch|expired/);
+    await reached;
+    assert.equal(executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)), false);
+    executor.rows.key = [{ ...executor.rows.key[0], ...mutation }];
+    releaseFence();
+    await rejection;
+    const steps = executor.statements.map(({ sql, values }) => authorityStep(sql, values));
+    assert.equal(steps.indexOf('key'), steps.indexOf('key-fence') + 1);
+    if ('expires_at' in mutation) {
+      assert.equal(steps.at(-1), 'database-clock');
+    }
+  }
+});
+
+test('prelock fails closed when the API-key advisory fence cannot be acquired', async () => {
+  const executor = makeExecutor();
+  const failingExecutor: SqlExecutor = {
+    async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
+      if (authorityStep(sql, values) === 'key-fence') throw new Error('injected fence failure');
+      return executor.query<RowType>(sql, values);
+    },
+  };
+  await assert.rejects(
+    new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(failingExecutor)),
+    (error: unknown) => error instanceof SaasAdmissionAuthorizationError && error.code === 'storage_failure',
+  );
+  assert.equal(executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)), false);
+});
+
+test('prelock checks expiry with the database clock after a fence wait even when the key is unchanged', async () => {
+  const executor = makeExecutor();
+  const expiresAt = validRows().key[0]?.expires_at;
+  let releaseFence!: () => void;
+  let reachedFence!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseFence = resolve; });
+  const reached = new Promise<void>((resolve) => { reachedFence = resolve; });
+  const waitingExecutor: SqlExecutor = {
+    async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
+      if (authorityStep(sql, values) === 'key-fence') {
+        reachedFence();
+        await blocked;
+      }
+      return executor.query<RowType>(sql, values);
+    },
+  };
+
+  const operation = new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(waitingExecutor));
+  const rejection = assertDenied(operation, /API key is expired/);
+  await reached;
+  assert.equal(executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)), false);
+  // The persisted expiry does not change; wall-clock time reaches it while waiting.
+  executor.rows.clock = [{ now: expiresAt }];
+  releaseFence();
+  await rejection;
+  assert.equal(executor.rows.key[0]?.expires_at, expiresAt);
+  assert.deepEqual(
+    executor.statements.slice(-3).map(({ sql, values }) => authorityStep(sql, values)),
+    ['key-fence', 'key', 'database-clock'],
   );
 });

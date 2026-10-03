@@ -1,3 +1,4 @@
+import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
 import type { ApiKeyAuthorizationSnapshot, ApiKeyPrincipalKind, AuthenticatedApiKey } from '../keys/types.js';
 import type { CreateRequestInput } from '../metering/types.js';
@@ -158,12 +159,15 @@ interface LockedKey {
  * PostgreSQL implementation of the admission authorization prelock.
  *
  * Mutable tenant/project/user/membership authority is protected by the
- * transaction-scoped advisory fences installed by migrations 046/047. Reads
+ * transaction-scoped advisory fences installed by migrations 046/047/050. Reads
  * use separate READ COMMITTED statements after those fences and never tuple-
  * lock the SELECT-only facts. The immutable policy version is plain-read
- * behind the project fence. The mutable API-key row retains its targeted
- * column-privilege-compatible row lock. This order precedes metering/idempotency
- * so replay visibility cannot bypass the current project and key authorization.
+ * behind the project fence. The API key is also plain-read after the matching
+ * shared fence: 050 fences every INSERT/UPDATE/DELETE using both old and new
+ * identities, and KeyService takes that exclusive fence before target row locks.
+ * This requires READ COMMITTED and holds every fence until transaction end.
+ * This order precedes metering/idempotency so replay visibility cannot bypass
+ * the current project and key authorization.
  */
 export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasRequestAdmissionAuthorizationPrelock {
   async prelock(input: SaasRequestAdmissionAuthorizationPrelockInput): Promise<void> {
@@ -195,7 +199,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
       }
       const key = await this.lockApiKey(executor, request, authorization);
 
-      // This is deliberately after the key row-lock wait. Do not use
+      // This is deliberately after the key advisory-fence wait and fresh read. Do not use
       // statement_timestamp(), whose value may predate that wait.
       const now = await this.databaseClock(executor);
       this.assertCurrentKey(key, request, now);
@@ -364,6 +368,14 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     request: CreateRequestInput,
     authorization: ApiKeyAuthorizationSnapshot,
   ): Promise<LockedKey> {
+    // Match KeyService and migration 050's UTF-8 hex business-layer key.
+    // Keep the wait and read in separate statements: a READ COMMITTED snapshot
+    // taken before a blocked fence could otherwise retain pre-revocation facts.
+    await this.query<Row>(
+      executor,
+      'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))',
+      [saasAdvisoryKey.apiKey(request.tenantId, request.projectId, authorization.keyId)],
+    );
     const result = await this.query<Row>(
       executor,
       `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
@@ -372,8 +384,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
               entitlement_authz_version, supply_profile_authz_version
        FROM saas_api_keys
        WHERE tenant_id = $1 AND project_id = $2 AND id = $3
-       LIMIT 2
-       FOR SHARE`,
+       LIMIT 2`,
       [request.tenantId, request.projectId, authorization.keyId],
     );
     const row = exactlyOne(result, 'API key');
