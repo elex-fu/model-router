@@ -10,6 +10,8 @@ import type {
   SafeCustomerSession,
 } from './service.js';
 import type { SafeProject, TenantMemberPage, TenantMemberQuery } from './types.js';
+import { createCustomerMfaHandler } from './customer-mfa-http.js';
+import type { CustomerMfaOperations } from './customer-mfa-types.js';
 
 const API_PREFIX = '/console/api/v1';
 const SESSION_PATH = `${API_PREFIX}/auth/session`;
@@ -27,6 +29,8 @@ export interface SaasIdentityHttpOptions {
   keyService?: Pick<KeyService, 'create' | 'list' | 'rotate' | 'revoke'>;
   publicOrigin: string;
   sessionTtlSeconds: number;
+  /** Managed startup injects the genuine self-service producer after schema readiness. */
+  customerMfa?: CustomerMfaOperations;
   cookieSecure?: boolean;
   /** Managed composition must inject the shared limiter; omission is local-only compatibility behavior. */
   rateLimiter?: SaasIdentityRateLimiter;
@@ -612,6 +616,9 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
   const rateLimiter: SaasIdentityRateLimiter = options.rateLimiter ?? {
     take: async (key) => compatibilityLoginLimiter.take(key),
   };
+  const customerMfaHandler = options.customerMfa
+    ? createCustomerMfaHandler({ service: options.customerMfa, publicOrigin: options.publicOrigin, rateLimiter })
+    : undefined;
   const getSession = async (req: IncomingMessage): Promise<{ token: string; session: unknown }> => {
     const token = sessionTokenFromCookie(req);
     if (!token) throw new HttpError(401, 'UNAUTHENTICATED', 'Authentication is required');
@@ -649,6 +656,7 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
       path = routePath(req, expectedOrigin);
       if (path === undefined) throw new HttpError(400, 'INVALID_PATH', 'Request path is invalid');
       if (!path.startsWith(`${API_PREFIX}/`)) return false;
+      if (customerMfaHandler && await customerMfaHandler(req, res)) return true;
       const match = findRoute(path);
       if (!match) return false;
 

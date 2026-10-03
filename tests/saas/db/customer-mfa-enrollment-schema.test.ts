@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { test } from 'node:test';
+const source=()=>readFileSync(resolve(process.cwd(),'deploy/drafts/customer-mfa-enrollment.forward.sql'),'utf8');
+test('unnumbered customer MFA schema has immutable pending bindings, explicit trusted namespace and no role/EXEC expansion',()=>{
+  const sql=source();
+  assert.match(sql,/current_user <> 'model_router_saas_migrator'/);
+  assert.match(sql,/SET LOCAL search_path TO pg_catalog, model_router_saas, pg_temp/);
+  assert.match(sql,/FOREIGN KEY\(session_id,user_id\) REFERENCES model_router_saas.saas_sessions\(id,user_id\)/);
+  assert.match(sql,/FOREIGN KEY\(credential_id,user_id\) REFERENCES model_router_saas.saas_mfa_credentials\(id,user_id\)/);
+  assert.match(sql,/saas_customer_mfa_one_open_enrollment/);
+  assert.match(sql,/expires_at<=created_at\+interval '5 minutes'/);
+  assert.match(sql,/attempt_count BETWEEN 0 AND 5/);
+  assert.match(sql,/OLD.closed_at IS NOT NULL/);
+  assert.match(sql,/Customer MFA pending authority binding rejected/);
+  assert.match(sql,/saas_platform_role_assignments p WHERE p.user_id=NEW.user_id/);
+  assert.doesNotMatch(sql,/^\s*(?:GRANT|CREATE ROLE|ALTER ROLE|SET ROLE)\b/im);
+  assert.doesNotMatch(sql,/SECURITY DEFINER|password_hash\s+(?:text|bytea)|plaintext/i);
+});
+test('same-TX journal/outbox completeness and user writer fences are actual trigger bodies not approval seeds',()=>{
+  const sql=source();
+  assert.match(sql,/Customer MFA event requires the same audit fact/);
+  assert.match(sql,/Customer MFA command requires same-transaction events/);
+  assert.match(sql,/Customer MFA event outbox is required in the same transaction/);
+  assert.match(sql,/saas_customer_mfa_command_complete AFTER INSERT OR UPDATE/);
+  assert.match(sql,/DEFERRABLE INITIALLY DEFERRED/);
+  assert.match(sql,/pg_advisory_xact_lock\(1396788563,46\)/);
+  assert.match(sql,/hashtextextended\(NEW.user_id::text,0\)/);
+  assert.match(sql,/REVOKE ALL ON FUNCTION/);
+  assert.doesNotMatch(sql,/INSERT INTO.*(?:saas_mfa_credentials|saas_sessions|saas_platform_role_assignments)/);
+});
