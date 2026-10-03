@@ -370,6 +370,16 @@ export interface RecordUsageSettlementInput {
   /** Hashed at the boundary; this is an idempotent effect key, not a raw secret. */
   readonly settlementKey: string;
   readonly settlementKind?: 'usage_recorded' | 'platform_cost_observed';
+  /** Required by normal-success writers; absent only for non-normal/legacy effects. Never backfilled. */
+  readonly normalSuccessEvidenceRef?: string;
+}
+
+/** Read-only verification of an already persisted usage_recorded effect. */
+export interface UsageSettlementReplayInput extends RecordUsageEventInput {
+  readonly eventKey: string;
+  readonly settlementKey: string;
+  /** Missing input cannot select the legacy digest algorithm. */
+  readonly usageEvidenceRef: string;
 }
 
 export interface UsageSettlementRecord {
@@ -380,6 +390,7 @@ export interface UsageSettlementRecord {
   readonly attemptId: string;
   readonly settlementKeyDigest: string;
   readonly settlementDigest: string;
+  readonly normalSuccessEvidenceRef: string | null;
   readonly kind: 'usage_recorded' | 'platform_cost_observed';
   readonly createdAt: string;
 }

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
+import { createRequestAdmissionReservationBusinessKey } from '../../../src/saas/gateway/admission.js';
 import {
   DispatchUsageSettlementCoordinator,
   type NormalSuccessSettlementSnapshot,
@@ -12,7 +13,12 @@ import {
   type ConditionalSettlementMetering,
   DurableNormalSuccessSettlementPort,
 } from '../../../src/saas/metering/conditional-settlement-port.js';
-import type { AttemptRecord } from '../../../src/saas/metering/types.js';
+import type {
+  AttemptRecord,
+  RecordUsageEventInput,
+  RecordUsageSettlementInput,
+} from '../../../src/saas/metering/types.js';
+import type { SettleBillingInput } from '../../../src/saas/billing/types.js';
 import { normalizeRates } from '../../../src/saas/pricing/calculator.js';
 import type { CustomerPriceVersionRecord, RateSetInput } from '../../../src/saas/pricing/types.js';
 import type { NormalizedUsage } from '../../../src/telemetry/usage.js';
@@ -66,7 +72,7 @@ const snapshot: NormalSuccessSettlementSnapshot = {
   usageEstimatorVersion: 'estimator-v1',
 };
 
-const observedUsage: NormalizedUsage = {
+const observedUsage = {
   inputTotal: 5,
   inputUncached: 5,
   cacheRead: 0,
@@ -78,17 +84,71 @@ const observedUsage: NormalizedUsage = {
   status: 'reported',
   source: 'upstream',
   semanticsVersion: 'v1',
-};
+} satisfies NormalizedUsage;
 
-function attempt(): AttemptRecord {
-  return { id: 'attempt-1' } as AttemptRecord;
+function attempt(supplyMode: 'byok' | 'platform' = 'platform'): AttemptRecord {
+  const platform = supplyMode === 'platform';
+  return {
+    id: 'attempt-1',
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    projectPolicyVersion: '1',
+    customerPriceVersion: platform ? 'price-v1' : null,
+    customerMeteringPolicyId: 'customer-policy-1',
+    customerMeteringPolicyVersion: '1',
+    providerMeteringPolicyId: 'provider-policy-1',
+    providerMeteringPolicyVersion: '1',
+    contractAttestationId: 'attestation-1',
+    routeConfigId: 'route-1',
+    routeConfigVersion: '1',
+    routePublicModelId: 'model-1',
+    routePublicModelVersion: '1',
+    routeProtocol: 'openai',
+    routeTargetMode: platform ? 'platform_pool' : 'tenant_account',
+    ordinal: 1,
+    upstreamId: 'upstream-1',
+    bindingState: 'bound',
+    dispatchAuthorityState: 'bound',
+    accountOwnerKind: platform ? 'platform' : 'tenant',
+    accountId: 'account-1',
+    providerId: 'provider-1',
+    productId: 'product-1',
+    resolvedModel: 'model-1',
+    protocol: 'openai',
+    endpoint: 'chat-completions',
+    supplierCostVersion: platform ? 'cost-v1' : null,
+    dispatchProfileId: 'profile-1',
+    supplyProfileAuthzVersion: '1',
+    credentialId: 'credential-1',
+    credentialVersion: '1',
+    credentialAuthzVersion: '1',
+    accountAuthzVersion: '1',
+    poolId: platform ? 'pool-1' : null,
+    poolAuthzVersion: platform ? '1' : null,
+    poolMemberAccountAuthzVersion: platform ? '1' : null,
+    poolMemberAuthzVersion: platform ? '1' : null,
+    poolGrantAuthzVersion: platform ? '1' : null,
+    poolGrantProfileAuthzVersion: platform ? '1' : null,
+    poolGrantPoolAuthzVersion: platform ? '1' : null,
+    profileAccountAuthzVersion: platform ? null : '1',
+    preparedEvidenceId: 'evidence-1',
+    dispatchState: 'sent',
+    resultState: 'succeeded',
+    responseStarted: true,
+    responseStartedAt: '2026-09-01T00:00:00.000Z',
+    resultHttpStatus: 200,
+    unknownReason: null,
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    stateVersion: 5,
+  };
 }
 
 function transactionSpy(onComplete: (input: NormalSuccessTransactionInput) => void): NormalSuccessTransactionPort {
   return {
     async complete(input) {
       onComplete(input);
-      return { kind: 'settled', attempt: attempt() };
+      return { kind: 'settled', attempt: attempt(input.supplyMode) };
     },
     async retainUnknown() {
       throw new Error('unexpected reconciliation');
@@ -197,10 +257,13 @@ test('incomplete usage and a mismatched server price fail closed before the tran
 
 test('durable normal success writes usage, wallet settlement, and terminal states on one executor', async () => {
   const order: string[] = [];
-  const requestTransitions: Array<Record<string, unknown>> = [];
+  const requestTransitions: Array<Parameters<ConditionalSettlementMetering['transitionRequest']>[0]> = [];
+  const reservationBusinessKey = createRequestAdmissionReservationBusinessKey('tenant-1', 'request-1');
+  let requestStateVersion = 6;
   const sqlExecutor = {
-    async query<Row>(sql: string): Promise<{ rows: Row[] }> {
+    async query<Row>(sql: string, values?: readonly unknown[]): Promise<{ rows: Row[] }> {
       if (sql.includes('FROM saas_attempts a')) {
+        assert.deepEqual(values, ['tenant-1', 'request-1', 'attempt-1']);
         return {
           rows: [
             {
@@ -231,10 +294,16 @@ test('durable normal success writes usage, wallet settlement, and terminal state
         };
       }
       if (sql.includes('FROM saas_billing_reservations')) {
+        assert.deepEqual(values, ['tenant-1', 'request-1', 'saas.billing.reservation', reservationBusinessKey]);
         return {
           rows: [
             {
               id: 'hold-1',
+              tenant_id: 'tenant-1',
+              request_id: 'request-1',
+              wallet_id: 'wallet-1',
+              idempotency_namespace: 'saas.billing.reservation',
+              business_key: reservationBusinessKey,
               currency: 'USD',
               amount_minor_units: '100',
               state: 'reserved',
@@ -256,36 +325,72 @@ test('durable normal success writes usage, wallet settlement, and terminal state
     assert.equal(options?.executor, sqlExecutor);
   };
   const metering = {
-    async recordUsageEvent(_input: unknown, options?: { executor?: SqlExecutor }) {
+    async recordUsageEvent(input: RecordUsageEventInput, options?: { executor?: SqlExecutor }) {
       sameExecutor(options);
+      assert.equal(input.tenantId, 'tenant-1');
+      assert.equal(input.requestId, 'request-1');
+      assert.equal(input.attemptId, 'attempt-1');
+      assert.equal(input.supplyMode, 'platform');
+      assert.equal(input.eventKey, 'event-key');
+      assert.equal(input.usage.status, 'reported');
+      assert.equal(input.usage.source, 'upstream');
       order.push('usage-event');
       return { id: 'usage-event-1' };
     },
-    async createUsageSettlement(_input: unknown, options?: { executor?: SqlExecutor }) {
+    async createUsageSettlement(input: RecordUsageSettlementInput, options?: { executor?: SqlExecutor }) {
       sameExecutor(options);
+      assert.deepEqual(input, {
+        tenantId: 'tenant-1',
+        usageEventId: 'usage-event-1',
+        settlementKey: 'settlement-key',
+        settlementKind: 'usage_recorded',
+        normalSuccessEvidenceRef: 'e'.repeat(64),
+      });
       order.push('usage-settlement');
       return {};
     },
-    async transitionAttempt(input: { executor?: SqlExecutor }) {
+    async transitionAttempt(input: Parameters<ConditionalSettlementMetering['transitionAttempt']>[0]) {
       sameExecutor(input);
+      assert.equal(input.expectedStateVersion, 4);
+      assert.equal(input.expectedDispatchState, 'sent');
+      assert.equal(input.expectedResultState, 'pending');
+      assert.equal(input.expectedResponseStarted, true);
+      assert.equal(input.resultState, 'succeeded');
       order.push('attempt-terminal');
       return attempt();
     },
-    async transitionRequest(input: { executor?: SqlExecutor }) {
+    async transitionRequest(input: Parameters<ConditionalSettlementMetering['transitionRequest']>[0]) {
       sameExecutor(input);
+      assert.equal(input.expectedStateVersion, requestStateVersion);
+      requestStateVersion += 1;
       order.push('request-terminal');
-      requestTransitions.push(input as Record<string, unknown>);
-      return { stateVersion: 8 };
+      requestTransitions.push(input);
+      return { stateVersion: requestStateVersion };
     },
-    async transitionFinancialStatus(input: { executor?: SqlExecutor }) {
+    async transitionFinancialStatus(input: Parameters<ConditionalSettlementMetering['transitionFinancialStatus']>[0]) {
       sameExecutor(input);
+      assert.equal(input.expectedStateVersion, 8);
+      assert.equal(input.expectedFinancialStatus, 'pending');
+      assert.equal(input.financialStatus, 'settled');
       order.push('financial-terminal');
       return {};
     },
   } as unknown as ConditionalSettlementMetering;
   const billing = {
-    async settle(executor: SqlExecutor) {
+    async settle(executor: SqlExecutor, input: SettleBillingInput) {
       assert.equal(executor, sqlExecutor);
+      assert.deepEqual(input, {
+        supplyMode: 'platform',
+        tenantId: 'tenant-1',
+        requestId: 'request-1',
+        currency: 'USD',
+        priceSnapshotRef: 'snapshot-1',
+        settlementId: 'settlement-key',
+        usageEvidenceRef: 'e'.repeat(64),
+        businessKey: reservationBusinessKey,
+        idempotencyNamespace: 'saas.billing.reservation',
+        actualAmountMinorUnits: '7',
+      });
       order.push('wallet-settlement');
       return { state: 'settled' };
     },
@@ -324,6 +429,8 @@ test('durable normal success writes usage, wallet settlement, and terminal state
   });
 
   assert.equal(result.kind, 'settled');
+  assert.equal(result.attempt.resultState, 'succeeded');
+  assert.equal(result.attempt.stateVersion, 5);
   assert.deepEqual(order, [
     'transaction',
     'usage-event',

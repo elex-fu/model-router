@@ -66,6 +66,25 @@ export function settlementDigest(input: {
   return sha256Hex(JSON.stringify([input.tenantId, input.usageEventId, input.kind, input.usageEventDigest]));
 }
 
+/** Versioned normal-success proof. The opaque reference is bound, never rehashed or normalized. */
+export function normalSuccessSettlementDigest(input: {
+  tenantId: string;
+  usageEventId: string;
+  kind: 'usage_recorded';
+  usageEventDigest: string;
+  settlementKeyDigest: string;
+  usageEvidenceRef: string;
+}): string {
+  if (!/^[0-9a-f]{64}$/.test(input.usageEvidenceRef)) {
+    throw new TypeError('normal-success evidence reference must be an opaque lowercase SHA-256 reference');
+  }
+  return sha256Hex(JSON.stringify([
+    'model-router.normal-success-settlement.v1',
+    input.tenantId, input.usageEventId, input.kind, input.usageEventDigest,
+    input.settlementKeyDigest, input.usageEvidenceRef,
+  ]));
+}
+
 export function canonicalUsageValues(usage: UsageValues): string {
   return JSON.stringify([
     usage.inputTotal,

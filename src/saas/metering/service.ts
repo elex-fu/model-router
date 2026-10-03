@@ -7,6 +7,7 @@ import {
   digestClientKey,
   type HmacSecret,
   normalizeFingerprint,
+  normalSuccessSettlementDigest,
   settlementDigest,
   usageEventDigest,
 } from './digest.js';
@@ -43,6 +44,7 @@ import type {
   RouteAuthoritySnapshotInput,
   UsageEventRecord,
   UsageSettlementRecord,
+  UsageSettlementReplayInput,
   UsageValues,
 } from './types.js';
 
@@ -1220,12 +1222,19 @@ function mapSettlement(row: Row): UsageSettlementRecord {
     attemptId: asIdentifier(row.attempt_id),
     settlementKeyDigest: asDigest(row.settlement_key_digest),
     settlementDigest: asDigest(row.settlement_digest),
+    normalSuccessEvidenceRef: row.normal_success_evidence_ref === null
+      ? null : asNormalSuccessEvidenceRef(row.normal_success_evidence_ref, 'METERING_STORAGE_ERROR'),
     kind:
       row.kind === 'usage_recorded' || row.kind === 'platform_cost_observed'
         ? row.kind
         : fail('METERING_STORAGE_ERROR'),
     createdAt: asDateString(row.created_at),
   };
+}
+
+function asNormalSuccessEvidenceRef(value: unknown, code: SaasMeteringErrorCode): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) fail(code);
+  return value;
 }
 
 function requestColumns(alias = ''): string {
@@ -2575,6 +2584,9 @@ export class SaasMeteringService {
     );
     const kind = input.settlementKind ?? 'usage_recorded';
     if (kind !== 'usage_recorded' && kind !== 'platform_cost_observed') fail('METERING_INVALID_INPUT');
+    const normalSuccessEvidenceRef = input.normalSuccessEvidenceRef === undefined ? null
+      : asNormalSuccessEvidenceRef(input.normalSuccessEvidenceRef, 'METERING_INVALID_INPUT');
+    if (normalSuccessEvidenceRef !== null && kind !== 'usage_recorded') fail('METERING_INVALID_INPUT');
 
     return this.write(options.executor, async (tx) => {
       const usage = await this.one<Row>(
@@ -2586,23 +2598,24 @@ export class SaasMeteringService {
         [tenantId, usageEventId],
       );
       if (!usage) fail('USAGE_EVENT_NOT_FOUND');
-      const digest = settlementDigest({
+      const digestIdentity = {
         tenantId,
         usageEventId,
         kind,
         usageEventDigest: asDigest(usage.event_digest),
-      });
+      };
+      const digest = normalSuccessEvidenceRef === null ? settlementDigest(digestIdentity)
+        : normalSuccessSettlementDigest({ ...digestIdentity, kind: 'usage_recorded',
+          settlementKeyDigest, usageEvidenceRef: normalSuccessEvidenceRef });
       const inserted = await this.rows<Row>(
         tx,
         `INSERT INTO saas_usage_settlements
            (id, tenant_id, usage_event_id, request_id, attempt_id, settlement_key_digest,
-            settlement_digest, kind, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT
-         DO UPDATE SET settlement_digest = saas_usage_settlements.settlement_digest
-         WHERE FALSE
+            settlement_digest, kind, created_at, normal_success_evidence_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT DO NOTHING
          RETURNING id, tenant_id, usage_event_id, request_id, attempt_id,
-                   settlement_key_digest, settlement_digest, kind, created_at`,
+                   settlement_key_digest, settlement_digest, kind, created_at, normal_success_evidence_ref`,
         [
           randomUUID(),
           tenantId,
@@ -2613,13 +2626,14 @@ export class SaasMeteringService {
           digest,
           kind,
           normalizeNow(this.now),
+          normalSuccessEvidenceRef,
         ],
       );
       if (inserted[0]) return mapSettlement(inserted[0]);
       const existing = await this.one<Row>(
         tx,
         `SELECT id, tenant_id, usage_event_id, request_id, attempt_id,
-                settlement_key_digest, settlement_digest, kind, created_at
+                settlement_key_digest, settlement_digest, kind, created_at, normal_success_evidence_ref
          FROM saas_usage_settlements
          WHERE tenant_id = $1
            AND (usage_event_id = $2 OR settlement_key_digest = $3)
@@ -2630,10 +2644,18 @@ export class SaasMeteringService {
       );
       if (!existing) fail('METERING_STORAGE_ERROR');
       const existingSettlement = mapSettlement(existing);
+      // Persisted presence selects the algorithm. An omitted/different input ref
+      // cannot downgrade a v1 row, and a legacy row cannot be silently upgraded.
+      const existingDigest = existingSettlement.normalSuccessEvidenceRef === null ? settlementDigest(digestIdentity)
+        : normalSuccessSettlementDigest({ ...digestIdentity, kind: 'usage_recorded', settlementKeyDigest,
+          usageEvidenceRef: existingSettlement.normalSuccessEvidenceRef });
       if (
+        existingSettlement.tenantId !== tenantId ||
+        existingSettlement.requestId !== usage.request_id || existingSettlement.attemptId !== usage.attempt_id ||
         existingSettlement.usageEventId !== usageEventId ||
         existingSettlement.settlementKeyDigest !== settlementKeyDigest ||
-        existingSettlement.settlementDigest !== digest ||
+        existingSettlement.normalSuccessEvidenceRef !== normalSuccessEvidenceRef ||
+        existingSettlement.settlementDigest !== existingDigest ||
         existingSettlement.kind !== kind
       ) {
         fail('USAGE_SETTLEMENT_CONFLICT');
@@ -2647,6 +2669,73 @@ export class SaasMeteringService {
     options: MeteringOperationOptions = {},
   ): Promise<UsageSettlementRecord> {
     return this.createUsageSettlement(input, options);
+  }
+
+  /**
+   * Verify immutable persisted facts without attempting an INSERT/upsert.
+   * The same normalization and private HMAC configuration as the original
+   * writers are used; changing both client keys cannot mint a second effect.
+   * Stored ref presence, not caller input, selects the digest version. Legacy
+   * BYOK cannot prove its original ref; legacy platform still needs the port's
+   * complete settled-hold check. No historical row is rewritten or backfilled.
+   */
+  async assertUsageSettlementReplay(
+    input: UsageSettlementReplayInput,
+    options: MeteringOperationOptions = {},
+  ): Promise<void> {
+    const tenantId = asIdentifier(input.tenantId);
+    const requestId = asIdentifier(input.requestId);
+    const attemptId = asIdentifier(input.attemptId);
+    const supplyMode = asSupplyMode(input.supplyMode);
+    const usageEvidenceRef = asNormalSuccessEvidenceRef(input.usageEvidenceRef, 'METERING_INVALID_INPUT');
+    const usage = normalizeUsage(input.usage);
+    const identity = { tenantId, requestId, attemptId, supplyMode };
+    const eventDigest = usageEventDigest(identity, usage);
+    const dedupeKeyDigest = digestClientKey(asNonEmptyText(input.eventKey, 'eventKey', 4096), this.idempotencyHmacSecret);
+    const settlementKeyDigest = digestClientKey(
+      asNonEmptyText(input.settlementKey, 'settlementKey', 4096), this.idempotencyHmacSecret,
+    );
+    const executor = options.executor ?? this.database;
+    const row = await this.one<Row>(
+      executor,
+      `SELECT ${usageColumns}
+         FROM saas_usage_events
+        WHERE tenant_id = $1 AND attempt_id = $2 AND dedupe_key_digest = $3
+        LIMIT 1`,
+      [tenantId, attemptId, dedupeKeyDigest],
+    );
+    if (!row) fail('USAGE_DUPLICATE_CONFLICT');
+    const stored = mapUsage(row);
+    const storedUsage = normalizeUsage(stored);
+    if (
+      stored.tenantId !== tenantId || stored.requestId !== requestId || stored.attemptId !== attemptId ||
+      stored.supplyMode !== supplyMode || stored.dedupeKeyDigest !== dedupeKeyDigest ||
+      stored.eventDigest !== eventDigest || stored.eventDigest !== usageEventDigest(identity, storedUsage) ||
+      canonicalUsage(storedUsage) !== canonicalUsage(usage)
+    ) {
+      fail('USAGE_DUPLICATE_CONFLICT');
+    }
+    const settlement = await this.getUsageSettlement(tenantId, stored.id, { executor });
+    if (
+      !settlement || settlement.tenantId !== tenantId || settlement.requestId !== requestId ||
+      settlement.attemptId !== attemptId || settlement.usageEventId !== stored.id ||
+      settlement.kind !== 'usage_recorded' || settlement.settlementKeyDigest !== settlementKeyDigest
+    ) {
+      fail('USAGE_SETTLEMENT_CONFLICT');
+    }
+    const digestIdentity = { tenantId, usageEventId: stored.id, kind: 'usage_recorded' as const,
+      usageEventDigest: stored.eventDigest };
+    if (settlement.normalSuccessEvidenceRef === null) {
+      if (supplyMode !== 'platform' || settlement.settlementDigest !== settlementDigest(digestIdentity)) {
+        fail('USAGE_SETTLEMENT_CONFLICT');
+      }
+    } else if (
+      settlement.normalSuccessEvidenceRef !== usageEvidenceRef ||
+      settlement.settlementDigest !== normalSuccessSettlementDigest({ ...digestIdentity, settlementKeyDigest,
+        usageEvidenceRef: settlement.normalSuccessEvidenceRef })
+    ) {
+      fail('USAGE_SETTLEMENT_CONFLICT');
+    }
   }
 
   async getRequest(
@@ -2775,7 +2864,7 @@ export class SaasMeteringService {
     const row = await this.one<Row>(
       executor,
       `SELECT id, tenant_id, usage_event_id, request_id, attempt_id,
-              settlement_key_digest, settlement_digest, kind, created_at
+              settlement_key_digest, settlement_digest, kind, created_at, normal_success_evidence_ref
        FROM saas_usage_settlements
        WHERE tenant_id = $1 AND usage_event_id = $2
        LIMIT 1`,

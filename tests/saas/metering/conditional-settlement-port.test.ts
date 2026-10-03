@@ -37,6 +37,7 @@ interface FakeState {
   usage: NormalizedUsageExact | null;
   usageEventId: string | null;
   settlementKey: string | null;
+  normalSuccessEvidenceRef: string | null;
   usageEventCount: number;
   usageSettlementCount: number;
   ledgerTransactionCount: number;
@@ -131,6 +132,7 @@ function initialHold(overrides: Row = {}): Row {
     id: 'hold-1',
     tenant_id: 'tenant-1',
     request_id: 'request-1',
+    wallet_id: 'wallet-1',
     currency: 'USD',
     idempotency_namespace: 'saas.billing.reservation',
     business_key: admissionBusinessKey(),
@@ -153,6 +155,7 @@ function initialState(overrides: Partial<FakeState> = {}): FakeState {
     usage: null,
     usageEventId: null,
     settlementKey: null,
+    normalSuccessEvidenceRef: null,
     usageEventCount: 0,
     usageSettlementCount: 0,
     ledgerTransactionCount: 0,
@@ -352,8 +355,10 @@ class FakeMetering implements ConditionalSettlementMetering {
     this.requireExecutor(options.executor);
     if (this.database.state.settlementKey === null) {
       this.database.state.settlementKey = input.settlementKey;
+      this.database.state.normalSuccessEvidenceRef = input.normalSuccessEvidenceRef ?? null;
       this.database.state.usageSettlementCount += 1;
-    } else if (this.database.state.settlementKey !== input.settlementKey) {
+    } else if (this.database.state.settlementKey !== input.settlementKey ||
+      this.database.state.normalSuccessEvidenceRef !== (input.normalSuccessEvidenceRef ?? null)) {
       throw Object.assign(new Error('settlement conflict'), { code: 'USAGE_SETTLEMENT_CONFLICT' });
     }
     return {
@@ -364,6 +369,7 @@ class FakeMetering implements ConditionalSettlementMetering {
       attemptId: 'attempt-1',
       settlementKeyDigest: 's'.repeat(64),
       settlementDigest: 't'.repeat(64),
+      normalSuccessEvidenceRef: this.database.state.normalSuccessEvidenceRef,
       kind: 'usage_recorded',
       createdAt: '2026-09-28T00:00:00.000Z',
     };
@@ -570,6 +576,7 @@ test('keeps an overage frozen and reconciliation-pending without reporting settl
   assert.equal(harness.database.state.row.attempt_dispatch_state, 'sent');
   assert.equal(harness.database.state.row.attempt_result_state, 'succeeded');
   assert.equal(harness.database.state.ledgerTransactionCount, 0);
+  assert.equal(harness.database.state.normalSuccessEvidenceRef, null, 'unknown/outcome writer must stay legacy');
 });
 
 test('a verified successful execution stays succeeded when Billing fences an overage', async () => {
@@ -617,6 +624,7 @@ test('a verified successful execution stays succeeded when Billing fences an ove
   assert.equal(harness.database.state.row.financial_status, 'reconciliation_pending');
   assert.equal(harness.database.state.hold?.state, 'reconciliation_pending');
   assert.equal(harness.database.state.spendingFrozen, true);
+  assert.equal(harness.database.state.normalSuccessEvidenceRef, 'e'.repeat(64));
 });
 
 test('unknown platform results move the request and its reservation to reconciliation pending together', async () => {

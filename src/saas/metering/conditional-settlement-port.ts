@@ -25,6 +25,7 @@ import type {
   RequestTransitionInput,
   UsageEventRecord,
   UsageSettlementRecord,
+  UsageSettlementReplayInput,
   UsageValues,
 } from './types.js';
 import type {
@@ -55,6 +56,8 @@ export interface ConditionalSettlementMetering {
     input: RecordUsageSettlementInput,
     options?: MeteringOperationOptions,
   ): Promise<UsageSettlementRecord>;
+  /** Required for terminal normal-success replay; no write fallback is safe. */
+  assertUsageSettlementReplay?(input: UsageSettlementReplayInput, options?: MeteringOperationOptions): Promise<void>;
   transitionAttempt(input: AttemptTransitionInput): Promise<AttemptRecord>;
   transitionRequest(input: RequestTransitionInput): Promise<RequestRecord>;
   transitionFinancialStatus(input: FinancialTransitionInput): Promise<RequestRecord>;
@@ -103,9 +106,19 @@ interface NormalSuccessStateRow {
 
 interface NormalSuccessHoldRow {
   readonly id: unknown;
+  readonly tenant_id: unknown;
+  readonly request_id: unknown;
+  readonly wallet_id: unknown;
+  readonly idempotency_namespace: unknown;
+  readonly business_key: unknown;
+  readonly amount_minor_units: unknown;
   readonly currency: unknown;
   readonly state: unknown;
   readonly price_snapshot_ref: unknown;
+  readonly settlement_id: unknown;
+  readonly settlement_amount_minor_units: unknown;
+  readonly usage_evidence_ref: unknown;
+  readonly ledger_transaction_id: unknown;
 }
 
 function stateText(value: unknown): string | null {
@@ -123,6 +136,7 @@ function normalSuccessRequestIsTerminal(row: NormalSuccessStateRow, supplyMode: 
   const executionIsTerminal =
     stateText(row.attempt_dispatch_state) === 'sent' &&
     stateText(row.attempt_result_state) === 'succeeded' &&
+    row.attempt_response_started === true &&
     stateText(row.request_result_state) === 'succeeded' &&
     stateText(row.request_reconciliation_state) === 'resolved';
   const financialStatus = stateText(row.request_financial_status);
@@ -789,6 +803,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
         !text(input.priceSnapshotRef) ||
         !/^[A-Z]{3}$/.test(input.currency ?? '') ||
         !/^(0|[1-9][0-9]*)$/.test(input.chargeAmountMinorUnits ?? '') ||
+        token(input.chargeAmountMinorUnits) !== input.chargeAmountMinorUnits ||
         !text(input.customerPriceVersion)
       ) {
         throw new Error('normal-success platform quote is incomplete');
@@ -804,8 +819,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
       throw new Error('normal-success BYOK input contains wallet authority');
     }
 
-    let replayed = false;
-    const result = await this.database.transaction(async (tx): Promise<NormalSuccessTransactionResult | null> => {
+    return this.database.transaction(async (tx): Promise<NormalSuccessTransactionResult> => {
       const state = await one<NormalSuccessStateRow>(
         tx,
         `SELECT a.id AS attempt_id, a.tenant_id AS attempt_tenant_id,
@@ -828,6 +842,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
       );
       if (
         !state ||
+        stateText(state.attempt_id) !== input.attemptId ||
         stateText(state.attempt_tenant_id) !== input.tenantId ||
         stateText(state.attempt_request_id) !== input.requestId ||
         stateText(state.request_tenant_id) !== input.tenantId ||
@@ -842,10 +857,27 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
       }
 
       if (normalSuccessRequestIsTerminal(state, input.supplyMode)) {
+        if (stateVersion(state.request_state_version) === null || stateVersion(state.attempt_state_version) === null) {
+          throw new Error('normal-success replay state version is invalid');
+        }
+        const assertReplay = this.metering.assertUsageSettlementReplay;
+        if (!assertReplay) throw new Error('normal-success replay verification capability is unavailable');
+        await assertReplay.call(this.metering, {
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+          attemptId: input.attemptId,
+          supplyMode: input.supplyMode,
+          eventKey: input.usageEventKey,
+          settlementKey: input.settlementKey,
+          usageEvidenceRef: input.usageEvidenceRef,
+          usage: input.usage,
+        }, { executor: tx });
         if (input.supplyMode === 'platform') {
           const settledHold = await one<NormalSuccessHoldRow>(
             tx,
-            `SELECT id, currency, state, price_snapshot_ref
+            `SELECT id, tenant_id, request_id, wallet_id, idempotency_namespace, business_key,
+                    amount_minor_units, currency, state, price_snapshot_ref,
+                    settlement_id, settlement_amount_minor_units, usage_evidence_ref, ledger_transaction_id
                FROM saas_billing_reservations
               WHERE tenant_id = $1 AND request_id = $2 AND idempotency_namespace = $3 AND business_key = $4
               `,
@@ -859,16 +891,40 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           if (
             !settledHold ||
             stateText(settledHold.id) !== input.reservationId ||
+            stateText(settledHold.tenant_id) !== input.tenantId ||
+            stateText(settledHold.request_id) !== input.requestId ||
+            stateText(settledHold.wallet_id) === null ||
+            stateText(settledHold.idempotency_namespace) !== RESERVATION_NAMESPACE ||
+            stateText(settledHold.business_key) !== admissionBusinessKey(input.tenantId, input.requestId) ||
+            !token(settledHold.amount_minor_units) || token(settledHold.amount_minor_units) === '0' ||
             stateText(settledHold.state) !==
               (stateText(state.request_financial_status) === 'settled' ? 'settled' : 'reconciliation_pending') ||
             stateText(settledHold.price_snapshot_ref) !== input.priceSnapshotRef ||
-            stateText(settledHold.currency) !== input.currency
+            stateText(settledHold.currency) !== input.currency ||
+            settledHold.settlement_id !== text(input.settlementKey, 4096) ||
+            token(settledHold.settlement_amount_minor_units) !== input.chargeAmountMinorUnits ||
+            settledHold.usage_evidence_ref !== input.usageEvidenceRef
           ) {
             throw new Error('normal-success replay does not match its settled hold');
           }
+          const charged = BigInt(input.chargeAmountMinorUnits as string);
+          const held = BigInt(token(settledHold.amount_minor_units) as string);
+          if (stateText(settledHold.state) === 'settled'
+            ? charged > held || (charged === 0n
+              ? settledHold.ledger_transaction_id !== null : stateText(settledHold.ledger_transaction_id) === null)
+            : settledHold.ledger_transaction_id !== null) {
+            throw new Error('normal-success replay hold has inconsistent charge units or ledger reference');
+          }
         }
-        replayed = true;
-        return null;
+        const attempt = await this.readAttempt(input.tenantId, input.requestId, input.attemptId, tx);
+        if (
+          attempt.id !== input.attemptId || attempt.tenantId !== input.tenantId || attempt.requestId !== input.requestId ||
+          attempt.dispatchState !== 'sent' || attempt.resultState !== 'succeeded' || attempt.responseStarted !== true ||
+          attempt.stateVersion !== stateVersion(state.attempt_state_version)
+        ) {
+          throw new Error('normal-success replay attempt does not match its locked terminal state');
+        }
+        return { kind: 'replayed', attempt };
       }
 
       if (
@@ -893,7 +949,8 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
         }
         const hold = await one<NormalSuccessHoldRow>(
           tx,
-          `SELECT id, currency, state, price_snapshot_ref
+          `SELECT id, tenant_id, request_id, wallet_id, idempotency_namespace, business_key,
+                  amount_minor_units, currency, state, price_snapshot_ref
              FROM saas_billing_reservations
             WHERE tenant_id = $1 AND request_id = $2 AND idempotency_namespace = $3 AND business_key = $4
             `,
@@ -907,6 +964,12 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
         if (
           !hold ||
           stateText(hold.id) !== input.reservationId ||
+          stateText(hold.tenant_id) !== input.tenantId ||
+          stateText(hold.request_id) !== input.requestId ||
+          stateText(hold.wallet_id) === null ||
+          stateText(hold.idempotency_namespace) !== RESERVATION_NAMESPACE ||
+          stateText(hold.business_key) !== admissionBusinessKey(input.tenantId, input.requestId) ||
+          !token(hold.amount_minor_units) || token(hold.amount_minor_units) === '0' ||
           stateText(hold.state) !== 'reserved' ||
           stateText(hold.currency) !== input.currency ||
           stateText(hold.price_snapshot_ref) !== input.priceSnapshotRef
@@ -932,6 +995,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           usageEventId: usageEvent.id,
           settlementKey: input.settlementKey,
           settlementKind: 'usage_recorded',
+          normalSuccessEvidenceRef: input.usageEvidenceRef,
         },
         { executor: tx },
       );
@@ -1010,17 +1074,6 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
         attempt,
       };
     });
-
-    if (result) return result;
-    if (!replayed) throw new Error('normal-success settlement transaction returned no result');
-    const getAttempt = (
-      this.metering as ConditionalSettlementMetering & {
-        getAttempt?: (tenantId: string, requestId: string, attemptId: string) => Promise<AttemptRecord | null>;
-      }
-    ).getAttempt;
-    const attempt = await getAttempt?.call(this.metering, input.tenantId, input.requestId, input.attemptId);
-    if (!attempt) throw new Error('normal-success replay attempt could not be read');
-    return { kind: 'replayed', attempt };
   }
 
   async retainUnknown(input: NormalSuccessUncertaintyInput): Promise<AttemptRecord> {
