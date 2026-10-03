@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { createServer } from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { EventEmitter, once } from 'node:events';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { test } from 'node:test';
+import {
+  createProviderCredentialContext,
+  sealProviderCredential,
+  type ProviderCredentialKms,
+} from '../../src/saas/credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor } from '../../src/saas/db/index.js';
 import type { ModelResolutionProvenance } from '../../src/saas/gateway/contracts.js';
 import { createSaasGatewayHandler, type SaasGatewayHttpHandler } from '../../src/saas/gateway/http-handler.js';
@@ -20,10 +27,9 @@ import type {
   PreparedRequestEvidenceInput,
   PreparedRequestEvidenceRecord,
 } from '../../src/saas/gateway/prepared-request-evidence-service.js';
-import { ProviderHttpTransportError } from '../../src/saas/gateway/provider-http-transport.js';
+import { ProviderHttpTransport, ProviderHttpTransportError } from '../../src/saas/gateway/provider-http-transport.js';
 import {
   allowRequestPreparation,
-  blockRequestPreparation,
   type RequestPreparationAdmission,
   type RequestPreparationAdmissionPort,
   type RequestPreparationAttemptPersistenceInput,
@@ -38,6 +44,9 @@ import {
 import type { AuthenticatedApiKey } from '../../src/saas/keys/types.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../../src/saas/metering/types.js';
 import type { RequestPreparationSigner } from '../../src/saas/runtime/request-preparation-signer-adapter.js';
+import { GatewayProviderCredentialUnsealer } from '../../src/saas/runtime/gateway-provider-credential-unsealer.js';
+import { ProviderSupplyHttpCredentialResolver } from '../../src/saas/runtime/provider-supply-http-credential-resolver.js';
+import type { ProviderCredentialDispatchBinding, ProviderCredentialDispatchProof } from '../../src/saas/supply/types.js';
 import {
   createManagedSaasGatewayComposition,
   createManagedSaasGatewayProductionComposition,
@@ -368,6 +377,114 @@ function inertDispatchDependencies(): ManagedSaasGatewayCompositionDependencies[
   } as unknown as ManagedSaasGatewayCompositionDependencies['dispatch'];
 }
 
+function dispatchAttemptRecord(evidence: PreparedRequestEvidenceRecord): AttemptRecord {
+  const platform = evidence.supplyMode === 'platform';
+  return {
+    id: evidence.attemptId,
+    tenantId: evidence.tenantId,
+    requestId: evidence.requestId,
+    projectPolicyVersion: '1',
+    customerPriceVersion: platform ? 'customer-price-a' : null,
+    customerMeteringPolicyId: 'customer-policy-a',
+    customerMeteringPolicyVersion: '1',
+    providerMeteringPolicyId: 'provider-policy-a',
+    providerMeteringPolicyVersion: '1',
+    contractAttestationId: 'attestation-a',
+    routeConfigId: 'route-a',
+    routeConfigVersion: '1',
+    routePublicModelId: 'public-model-a',
+    routePublicModelVersion: '1',
+    routeProtocol: evidence.protocol,
+    routeTargetMode: evidence.routeTargetMode,
+    ordinal: evidence.attemptOrdinal,
+    upstreamId: evidence.upstreamId,
+    bindingState: 'bound',
+    dispatchAuthorityState: 'bound',
+    accountOwnerKind: platform ? 'platform' : 'tenant',
+    accountId: evidence.accountId,
+    providerId: 'provider-a',
+    productId: 'product-a',
+    resolvedModel: evidence.resolvedModel ?? 'provider-model-a',
+    modelResolution: evidence.modelResolution,
+    clientProtocol: evidence.clientProtocol,
+    providerProtocol: evidence.providerProtocol,
+    clientOperation: evidence.clientOperation,
+    providerOperation: evidence.providerOperation,
+    requestFingerprint: evidence.requestFingerprint,
+    requestFingerprintVersion: evidence.requestFingerprintVersion,
+    payloadCompilerVersion: evidence.payloadCompilerVersion,
+    usageEstimatorVersion: evidence.usageEstimatorVersion,
+    payloadSha256: evidence.payloadSha256,
+    protocol: evidence.protocol,
+    endpoint: evidence.endpoint,
+    supplierCostVersion: platform ? 'supplier-cost-a' : null,
+    dispatchProfileId: 'dispatch-a',
+    supplyProfileAuthzVersion: '1',
+    credentialId: evidence.credentialId,
+    credentialVersion: evidence.credentialVersion,
+    credentialAuthzVersion: '1',
+    accountAuthzVersion: '1',
+    poolId: platform ? 'pool-a' : null,
+    poolAuthzVersion: platform ? '1' : null,
+    poolMemberAccountAuthzVersion: platform ? '1' : null,
+    poolMemberAuthzVersion: platform ? '1' : null,
+    poolGrantAuthzVersion: platform ? '1' : null,
+    poolGrantProfileAuthzVersion: platform ? '1' : null,
+    poolGrantPoolAuthzVersion: platform ? '1' : null,
+    profileAccountAuthzVersion: platform ? null : '1',
+    preparedEvidenceId: null,
+    dispatchState: 'not_sent',
+    resultState: 'pending',
+    responseStarted: false,
+    responseStartedAt: null,
+    resultHttpStatus: null,
+    unknownReason: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    stateVersion: 1,
+  };
+}
+
+function claimedDispatchAttempt(current: AttemptRecord, evidence: PreparedRequestEvidenceRecord): AttemptRecord {
+  assert.equal(current.tenantId, evidence.tenantId);
+  assert.equal(current.requestId, evidence.requestId);
+  assert.equal(current.id, evidence.attemptId);
+  assert.equal(current.ordinal, evidence.attemptOrdinal);
+  assert.equal(current.bindingState, 'bound');
+  assert.equal(current.dispatchAuthorityState, 'bound');
+  assert.equal(current.preparedEvidenceId, null);
+  assert.equal(current.dispatchState, 'not_sent');
+  assert.equal(current.resultState, 'pending');
+  assert.equal(current.responseStarted, false);
+  return { ...current, preparedEvidenceId: evidence.evidenceId, stateVersion: current.stateVersion + 1, updatedAt: NOW };
+}
+
+function transitionedDispatchAttempt(current: AttemptRecord, input: AttemptTransitionInput): AttemptRecord {
+  assert.equal(input.tenantId, current.tenantId);
+  assert.equal(input.requestId, current.requestId);
+  assert.equal(input.attemptId, current.id);
+  assert.equal(input.expectedStateVersion, current.stateVersion, 'strict CAS must use the post-claim version');
+  assert.equal(input.expectedDispatchState, current.dispatchState);
+  assert.equal(input.expectedResultState, current.resultState);
+  assert.equal(input.expectedResponseStarted, current.responseStarted);
+  if (input.dispatchState === 'dispatching') {
+    assert.ok(current.preparedEvidenceId);
+    assert.equal(current.bindingState, 'bound');
+    assert.equal(current.dispatchAuthorityState, 'bound');
+  }
+  return {
+    ...current,
+    dispatchState: input.dispatchState ?? current.dispatchState,
+    resultState: input.resultState ?? current.resultState,
+    responseStarted: current.responseStarted || input.responseStarted === true,
+    responseStartedAt: current.responseStarted ? current.responseStartedAt : input.responseStarted ? NOW : null,
+    resultHttpStatus: input.resultHttpStatus ?? current.resultHttpStatus,
+    unknownReason: input.unknownReason ?? null,
+    stateVersion: current.stateVersion + 1,
+    updatedAt: NOW,
+  };
+}
+
 function dispatchComposition(
   transport: PreparedEvidenceTransport,
   runtimeHealthWriter: ProviderAccountRuntimeHealthWriter,
@@ -384,42 +501,43 @@ function dispatchComposition(
     accountOwnerKind: 'tenant',
     publicModel: 'model-a',
     protocol: 'openai',
+    requestedModel: MODEL_RESOLUTION.requestedModel,
+    mappedModel: MODEL_RESOLUTION.mappedModel,
+    resolvedModel: MODEL_RESOLUTION.resolvedModel,
+    modelResolution: { ...MODEL_RESOLUTION },
+    clientProtocol: 'openai',
+    providerProtocol: 'openai',
+    clientOperation: 'chat.completions',
+    providerOperation: 'chat.completions',
+    requestFingerprint: 'c'.repeat(64),
+    requestFingerprintVersion: 'fingerprint-v1',
+    payloadCompilerVersion: 'compiler-v1',
+    usageEstimatorVersion: 'estimator-v1',
     endpoint: 'https://provider.example/v1',
     upstreamId: 'upstream-a',
     accountId: 'account-a',
     credentialId: 'credential-a',
     credentialVersion: '1',
     routeTargetMode: 'tenant_account',
-    payloadSha256: 'a'.repeat(64),
+    payloadSha256: createHash('sha256').update(payloadBytes).digest('hex'),
     statementSha256: 'b'.repeat(64),
     status: 'registered',
     claimedAt: null,
     claimedAttemptId: null,
     expiresAt: EXPIRES_AT,
   };
-  let meteringAttempt = {
-    id: dispatchEvidence.attemptId,
-    tenantId: dispatchEvidence.tenantId,
-    requestId: dispatchEvidence.requestId,
-    preparedEvidenceId: null,
-    dispatchState: 'not_sent',
-    resultState: 'pending',
-    responseStarted: false,
-    stateVersion: 1,
-  } as AttemptRecord;
+  let meteringAttempt = dispatchAttemptRecord(dispatchEvidence);
+  let currentEvidence = dispatchEvidence;
   const metering: PreparedEvidenceMeteringPort = {
     async getAttempt() {
-      return meteringAttempt;
+      return { ...meteringAttempt };
     },
     async transitionAttempt(input: AttemptTransitionInput) {
-      meteringAttempt = {
-        ...meteringAttempt,
-        dispatchState: input.dispatchState ?? meteringAttempt.dispatchState,
-        resultState: input.resultState ?? meteringAttempt.resultState,
-        responseStarted: meteringAttempt.responseStarted || input.responseStarted === true,
-        stateVersion: meteringAttempt.stateVersion + 1,
-      } as AttemptRecord;
+      meteringAttempt = transitionedDispatchAttempt(meteringAttempt, input);
       return meteringAttempt;
+    },
+    async recordKnownNonSuccessHttpResponse() {
+      throw new Error('known non-success response is outside this dispatch health assertion');
     },
   };
   const leaseProvider: PreparedEvidenceLeaseProvider = {
@@ -465,12 +583,14 @@ function dispatchComposition(
           return dispatchEvidence;
         },
         async claimForDispatch() {
-          return {
+          meteringAttempt = claimedDispatchAttempt(meteringAttempt, dispatchEvidence);
+          currentEvidence = {
             ...dispatchEvidence,
             status: 'claimed',
             claimedAt: NOW,
             claimedAttemptId: dispatchEvidence.attemptId,
           };
+          return structuredClone(currentEvidence);
         },
       },
       metering,
@@ -482,7 +602,11 @@ function dispatchComposition(
     maxBodyBytes: 1024,
     entryPoint: 'dispatch-composition-test',
   });
-  return { composition, payloadBytes };
+  return {
+    composition, payloadBytes,
+    readAttempt: () => structuredClone(meteringAttempt),
+    readEvidence: () => structuredClone(currentEvidence),
+  };
 }
 
 test('managed gateway composition wires success and retryable failure through the fenced health writer', async () => {
@@ -541,6 +665,143 @@ test('managed gateway composition wires success and retryable failure through th
   }
 });
 
+test('composition dispatch uses real credential unsealing, native bearer formatting, and ProviderHttpTransport', { timeout: 5000 }, async () => {
+  const secret = Buffer.from('synthetic-composition-provider-token');
+  const dataKey = randomBytes(32);
+  const decryptedKeys: Uint8Array[] = [];
+  let encryptionContext: Readonly<Record<string, string>> | undefined;
+  let kmsDecrypts = 0;
+  let proofReads = 0;
+  let fetches = 0;
+  let bearerMatched = false;
+  const kms: ProviderCredentialKms = {
+    async generateDataKey(request) {
+      encryptionContext = request.encryptionContext;
+      return { plaintextKey: Buffer.from(dataKey), ciphertextBlob: Buffer.from('synthetic-wrapped-composition-key') };
+    },
+    async decryptDataKey(request) {
+      assert.deepEqual(request.encryptionContext, encryptionContext);
+      kmsDecrypts += 1;
+      const plaintext = Buffer.from(dataKey);
+      decryptedKeys.push(plaintext);
+      return plaintext;
+    },
+  };
+  const envelope = await sealProviderCredential(secret, createProviderCredentialContext({
+    deployment: 'composition', environment: 'test', ownerKind: 'tenant', tenantId: 'tenant-a',
+    supplyMode: 'byok', purpose: 'inference', providerId: 'provider-a', productId: 'product-a',
+    accountId: 'account-a', credentialId: 'credential-a', credentialVersion: 1, credentialType: 'api-key',
+  }), kms, 'synthetic-composition-kms');
+  const healthWrites: unknown[] = [];
+  let readAttempt: (() => AttemptRecord) | undefined;
+  let readEvidence: (() => PreparedRequestEvidenceRecord) | undefined;
+  const resolver = new ProviderSupplyHttpCredentialResolver({
+    proofReader: {
+      async readDispatchProof(id): Promise<ProviderCredentialDispatchProof> {
+        assert.equal(id, 'dispatch-evidence');
+        assert.ok(readAttempt && readEvidence);
+        const attempt = readAttempt();
+        const evidence = readEvidence();
+        // Read actual helper state after claim and its versioned dispatch CAS.
+        assert.equal(attempt.preparedEvidenceId, id);
+        assert.equal(attempt.stateVersion, 3);
+        assert.equal(attempt.dispatchState, 'dispatching');
+        assert.equal(evidence.status, 'claimed');
+        proofReads += 1;
+        const binding: ProviderCredentialDispatchBinding = {
+          tenantId: 'tenant-a', requestId: 'dispatch-request', attemptId: 'dispatch-attempt', attemptOrdinal: 1,
+          supplyMode: 'byok', accountOwnerKind: 'tenant', accountId: 'account-a', providerId: 'provider-a', productId: 'product-a',
+          protocol: 'openai', endpoint: evidence.endpoint, routeConfigId: 'route-a', routeConfigVersion: 1,
+          routePublicModelId: 'public-model-a', routePublicModelVersion: 1, routeProtocol: 'openai',
+          routeTargetMode: 'tenant_account', routeUpstreamId: 'upstream-a', upstreamId: 'upstream-a',
+          resolvedModel: MODEL_RESOLUTION.resolvedModel, dispatchProfileId: 'dispatch-a', supplyProfileAuthzVersion: 1,
+          credentialId: 'credential-a', credentialVersion: 1, credentialAuthzVersion: 1, accountAuthzVersion: 1,
+          profileAccountAuthzVersion: 1, poolId: null, poolAuthzVersion: null, poolMemberAccountAuthzVersion: null,
+          poolMemberAuthzVersion: null, poolGrantAuthzVersion: null, poolGrantProfileAuthzVersion: null, poolGrantPoolAuthzVersion: null,
+        };
+        return {
+          evidence: {
+            ...binding, evidenceId: id, supplyProfileId: 'dispatch-a', supplyProfileVersion: 1, publicModel: 'model-a',
+            status: 'claimed', claimedAt: NOW, claimedAttemptId: 'dispatch-attempt',
+            dispatchDeadline: DISPATCH_DEADLINE, expiresAt: EXPIRES_AT,
+          },
+          attempt: {
+            ...binding, preparedEvidenceId: attempt.preparedEvidenceId ?? null, dispatchAuthorityState: attempt.dispatchAuthorityState,
+            dispatchState: attempt.dispatchState, resultState: attempt.resultState, responseStarted: attempt.responseStarted,
+          },
+          account: {
+            ownerKind: 'tenant', tenantId: 'tenant-a', supplyMode: 'byok', id: 'account-a', providerId: 'provider-a', productId: 'product-a',
+            credentialType: 'api-key', purpose: 'inference', status: 'active', validationState: 'verified', authzVersion: 1,
+          },
+          credential: {
+            ownerKind: 'tenant', tenantId: 'tenant-a', supplyMode: 'byok', id: 'credential-a', accountId: 'account-a',
+            providerId: 'provider-a', productId: 'product-a', status: 'active', validationState: 'verified',
+            currentVersion: 1, expiresAt: null, authzVersion: 1,
+          },
+          version: {
+            ownerKind: 'tenant', tenantId: 'tenant-a', accountId: 'account-a', credentialId: 'credential-a', version: 1,
+            status: 'active', envelopeSchemaVersion: envelope.schemaVersion, contextVersion: envelope.contextVersion,
+            algorithm: envelope.algorithm, kmsPurpose: 'inference', wrappingRevision: 1, createdAt: NOW,
+            expiresAt: null, retiredAt: null, revokedAt: null, kmsKeyId: envelope.kmsKeyId, envelope,
+          },
+          profile: { tenantId: 'tenant-a', id: 'dispatch-a', supplyMode: 'byok', status: 'active', authzVersion: 1 },
+          profileAccount: {
+            tenantId: 'tenant-a', supplyProfileId: 'dispatch-a', supplyMode: 'byok', accountId: 'account-a',
+            providerId: 'provider-a', productId: 'product-a', accountAuthzVersion: 1, status: 'active', authzVersion: 1,
+            effectiveAt: NOW, expiresAt: null,
+          },
+          pool: null, poolMember: null, poolGrant: null,
+          claimAudit: { action: 'saas_prepared_request_evidence.claimed', targetType: 'saas_prepared_request_evidence', targetId: id },
+        };
+      },
+    },
+    unsealer: new GatewayProviderCredentialUnsealer({
+      decryptDataKey: (request) => kms.decryptDataKey(request), checkReady: async () => {}, close: async () => {},
+    }, { deployment: 'composition', environment: 'test' }),
+    resolveAuthenticationHeader: () => 'authorization',
+    now: () => new Date(NOW),
+  });
+  const transport = new ProviderHttpTransport({
+    resolveCredential: resolver.resolveCredential,
+    resolveDispatchProfile: async () => ({ url: 'https://provider.example/v1/dispatch' }),
+    resolveAddresses: async () => [{ address: '8.8.8.8', family: 4 }],
+    endpointPolicy: { allowedHosts: ['provider.example'], allowedPorts: [443] }, timeoutMs: 1000,
+    fetch: async (_url, init) => {
+      fetches += 1;
+      assert.equal(init.redirect, 'manual');
+      assert.ok(init.dispatcher);
+      assert.ok(init.headers instanceof Headers);
+      bearerMatched = init.headers.get('authorization') === `Bearer ${secret.toString('utf8')}`;
+      // Native upstream contract stays strict: raw plaintext yields a real 401 response.
+      return new Response(null, { status: bearerMatched ? 200 : 401 });
+    },
+  });
+  const graph = dispatchComposition(transport, { recordRuntimeOutcome: async (input) => { healthWrites.push(input); return 'applied'; } });
+  readAttempt = graph.readAttempt;
+  readEvidence = graph.readEvidence;
+  try {
+    const result = await graph.composition.dispatch.dispatch({
+      evidenceId: 'dispatch-evidence', payloadBytes: graph.payloadBytes,
+      audit: { actorUserId: 'user-a', entryPoint: 'native-auth-composition-test' },
+    });
+    assert.equal(bearerMatched, true, 'native upstream must observe bearer formatting');
+    assert.equal(fetches, 1);
+    assert.equal(proofReads, 1);
+    assert.equal(kmsDecrypts, 1);
+    assert.equal(result.kind, 'sent');
+    if (result.kind !== 'sent') throw new Error('native authenticated response was not sent');
+    assert.equal(result.transport.resultHttpStatus, 200);
+    assert.equal(result.attempt.stateVersion, 4);
+    assert.equal(result.attempt.preparedEvidenceId, 'dispatch-evidence');
+    assert.equal(healthWrites.length, 1);
+    assert.ok(decryptedKeys.every((bytes) => bytes.every((byte) => byte === 0)));
+  } finally {
+    await graph.composition.close();
+    secret.fill(0);
+    dataKey.fill(0);
+  }
+});
+
 async function startHttpServer(
   handler: SaasGatewayHttpHandler,
   requestId?: string,
@@ -574,6 +835,8 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
   let registrarCalls = 0;
   let transactionCalls = 0;
   let closeCalls = 0;
+  let cancellationResponse: { destroyed: boolean } | undefined;
+  const compensationStages: string[] = [];
   const dependencies: ManagedSaasGatewayCompositionDependencies = {
     authenticator: {
       authenticate: async () => authenticatedCaller(),
@@ -621,6 +884,7 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
       compensation: {
         async releasePreDispatch(input, options) {
           calls.push('compensation');
+          compensationStages.push(input.failedStage);
           executors.push(options?.executor);
           return allowRequestPreparation({
             requestId: input.requestId,
@@ -645,9 +909,10 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
           executors.push(options?.executor);
           registrarCalls += 1;
           if (registrarCalls === 2) {
-            return blockRequestPreparation('evidence_registration_failed', 'test registration failure');
+            throw new Error('test registration failure');
           }
-          return allowRequestPreparation(evidenceRecord(input));
+          if (registrarCalls === 3 && cancellationResponse) cancellationResponse.destroyed = true;
+          return evidenceRecord(input);
         },
       },
     },
@@ -704,6 +969,23 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
     'registrar',
     'compensation',
   ]);
+
+  // Exercise the production composition's HTTP cancellation wiring without a
+  // socket or upstream: the client disappears while preparation awaits its registrar.
+  const request = Object.assign(Readable.from([Buffer.from('{"model":"model-a","messages":[]}')]), {
+    method: 'POST', url: '/v1/chat/completions', complete: true, aborted: false,
+    headers: { authorization: 'Bearer synthetic-key', 'content-type': 'application/json' },
+    socket: { remoteAddress: '127.0.0.1' },
+  });
+  const response = Object.assign(new EventEmitter(), {
+    headersSent: false, writableEnded: false, destroyed: false, setHeader() {},
+  });
+  cancellationResponse = response;
+  assert.equal(await composition.handler(request as unknown as IncomingMessage, response as unknown as ServerResponse), true);
+  assert.equal(transactionCalls, 4, 'preparation and committed-request cleanup each own a separate transaction');
+  assert.deepEqual(compensationStages, ['evidence', 'dispatch']);
+  assert.equal(calls.at(-1), 'compensation');
+  assert.equal(response.listenerCount('close'), 0);
 
   await composition.close();
   await composition.close();
@@ -853,7 +1135,7 @@ test('managed HTTP boundary shares trusted IDs across 401 and concurrent admissi
       admission: {
         async authorizeAndReserve(input) {
           admissionRequestIds.push(input.requestId);
-          return rejectRequestPreparation('quota_denied', 'fixture admission refusal');
+          return rejectRequestPreparation('quota_exceeded', 'fixture admission refusal');
         },
       },
       attempt: { persist: async (input) => allowRequestPreparation(attemptRecord(input)) },
@@ -871,7 +1153,7 @@ test('managed HTTP boundary shares trusted IDs across 401 and concurrent admissi
           }),
       },
       signer: { sign: async () => allowRequestPreparation({ signatureBase64: 'c2lnbmF0dXJl' }) },
-      registrar: { register: async (input) => allowRequestPreparation(evidenceRecord(input)) },
+      registrar: { register: async (input) => evidenceRecord(input) },
     },
     preparationOptions: {
       evidenceVerifierKeyId: 'verifier-http',
@@ -1002,7 +1284,7 @@ test('standalone handler uses a secure fallback ID and keeps dispatch error head
       },
       body: JSON.stringify({ model: 'model-a', messages: [] }),
     });
-    const body = (await response.json()) as { error: { requestId: string } };
+    const body = (await response.json()) as { error: { requestId: string; code: string } };
     assert.equal(response.status, 502);
     assert.equal(body.error.code, 'DISPATCH_FAILED');
     assert.equal(body.error.requestId, trustedRequestId);
@@ -1027,6 +1309,7 @@ test('streamed provider headers cannot replace the server request ID', async () 
     },
     dispatch: {
       dispatch: async ({ client }) => {
+        assert.ok(client, 'HTTP dispatch must receive the client stream');
         client.start(200, {
           'content-type': 'text/event-stream',
           'x-request-id': 'provider-controlled-stream-id',
@@ -1210,6 +1493,18 @@ test('production builder binds the real database transaction and does not alloca
     accountOwnerKind: 'tenant',
     publicModel: 'model-a',
     protocol: 'openai',
+    requestedModel: MODEL_RESOLUTION.requestedModel,
+    mappedModel: MODEL_RESOLUTION.mappedModel,
+    resolvedModel: MODEL_RESOLUTION.resolvedModel,
+    modelResolution: { ...MODEL_RESOLUTION },
+    clientProtocol: 'openai',
+    providerProtocol: 'openai',
+    clientOperation: 'chat.completions',
+    providerOperation: 'chat.completions',
+    requestFingerprint: 'c'.repeat(64),
+    requestFingerprintVersion: 'fingerprint-v1',
+    payloadCompilerVersion: 'compiler-v1',
+    usageEstimatorVersion: 'estimator-v1',
     endpoint: 'https://provider.example/v1',
     upstreamId: 'upstream-a',
     accountId: 'account-a',
@@ -1223,11 +1518,13 @@ test('production builder binds the real database transaction and does not alloca
     claimedAttemptId: null,
     expiresAt: EXPIRES_AT,
   };
+  let currentAttempt = dispatchAttemptRecord(productionEvidence);
   productionDispatch.evidence = {
     async preflightForDispatch() {
       return productionEvidence;
     },
     async claimForDispatch() {
+      currentAttempt = claimedDispatchAttempt(currentAttempt, productionEvidence);
       return {
         ...productionEvidence,
         status: 'claimed',
@@ -1253,29 +1550,17 @@ test('production builder binds the real database transaction and does not alloca
     },
   ] as const;
   for (const scenario of productionScenarios) {
-    let currentAttempt = {
-      id: productionEvidence.attemptId,
-      tenantId: productionEvidence.tenantId,
-      requestId: productionEvidence.requestId,
-      preparedEvidenceId: null,
-      dispatchState: 'not_sent',
-      resultState: 'pending',
-      responseStarted: false,
-      stateVersion: 1,
-    } as AttemptRecord;
+    currentAttempt = dispatchAttemptRecord(productionEvidence);
     productionDispatch.metering = {
       async getAttempt() {
-        return currentAttempt;
+        return { ...currentAttempt };
       },
       async transitionAttempt(input: AttemptTransitionInput) {
-        currentAttempt = {
-          ...currentAttempt,
-          dispatchState: input.dispatchState ?? currentAttempt.dispatchState,
-          resultState: input.resultState ?? currentAttempt.resultState,
-          responseStarted: currentAttempt.responseStarted || input.responseStarted === true,
-          stateVersion: currentAttempt.stateVersion + 1,
-        } as AttemptRecord;
+        currentAttempt = transitionedDispatchAttempt(currentAttempt, input);
         return currentAttempt;
+      },
+      async recordKnownNonSuccessHttpResponse() {
+        throw new Error('known non-success response is outside this production health assertion');
       },
     };
     productionDispatch.leaseProvider = {
@@ -1361,7 +1646,10 @@ test('production builder binds the real database transaction and does not alloca
       return { rows: [], rowCount: 0 };
     },
   };
-  const wrappedAdmissionInput = (requestId: string, attemptId: string) =>
+  const wrappedAdmissionInput = (
+    requestId: string,
+    attemptId: string,
+  ): Parameters<RequestPreparationAdmissionPort['authorizeAndReserve']>[0] =>
     ({
       requestId,
       attemptId,
@@ -1376,16 +1664,17 @@ test('production builder binds the real database transaction and does not alloca
       authority: authority(),
       payloadSha256: 'b'.repeat(64),
       payloadBounds: {
-        inputTotal: 1,
-        inputUncached: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cacheWrite5m: 0,
-        cacheWrite1h: 0,
-        outputTotal: 1,
-        reasoningOutput: 0,
+        inputTotalUpperBound: 1,
+        inputUncachedUpperBound: 1,
+        cacheReadUpperBound: 0,
+        cacheWriteUpperBound: 0,
+        cacheWrite5mUpperBound: 0,
+        cacheWrite1hUpperBound: 0,
+        outputTotalUpperBound: 1,
+        reasoningOutputUpperBound: 0,
+        feasibleInputBuckets: ['input'],
       },
-    }) as Parameters<RequestPreparationAdmissionPort['authorizeAndReserve']>[0];
+    });
   const firstClaim = await dependencies.admission.authorizeAndReserve(
     wrappedAdmissionInput(REQUEST_A_ID, 'attempt-a'),
     { executor: claimExecutor },

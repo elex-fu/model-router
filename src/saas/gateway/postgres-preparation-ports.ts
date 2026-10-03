@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { SaasBillingError } from '../billing/errors.js';
 import type { PlatformWalletLedgerService } from '../billing/service.js';
-import type { ReleaseBillingInput } from '../billing/types.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import type { AuthenticatedApiKey } from '../keys/types.js';
 import type { SaasMeteringService } from '../metering/service.js';
@@ -15,6 +14,7 @@ import {
   SaasRequestAdmissionService,
 } from './admission.js';
 import type { SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
+import { PostgresPreDispatchCompensation } from './postgres-pre-dispatch-compensation.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   type GatewayRequestIdempotencyStore,
@@ -30,9 +30,7 @@ import {
   type RequestPreparationAttemptRecord,
   type RequestPreparationCaller,
   type RequestPreparationCallerPort,
-  type RequestPreparationCompensationInput,
   type RequestPreparationCompensationPort,
-  type RequestPreparationCompensationResult,
   type RequestPreparationDecision,
   type RequestPreparationEntitlement,
   type RequestPreparationEntitlementPort,
@@ -45,7 +43,6 @@ import {
 
 const SAFE_ADMISSION_FAILURE = 'SaaS request admission could not be authorized.';
 const SAFE_ATTEMPT_FAILURE = 'SaaS initial attempt could not be persisted.';
-const SAFE_COMPENSATION_FAILURE = 'SaaS pre-dispatch reservations could not be safely released.';
 
 type Row = Record<string, unknown>;
 
@@ -1009,86 +1006,10 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
     },
   };
 
-  const compensation: RequestPreparationCompensationPort = {
-    async releasePreDispatch(input: RequestPreparationCompensationInput, sqlOptions?: RequestPreparationSqlOptions) {
-      const executor = sqlOptions?.executor;
-      if (!executor) return blockRequestPreparation('capability_unavailable', SAFE_COMPENSATION_FAILURE);
-      try {
-        const [request, storedAttempt] = await Promise.all([
-          options.metering.getRequest(input.tenantId, input.requestId, { executor }),
-          options.metering.getAttempt(input.tenantId, input.requestId, input.attemptId, { executor }),
-        ]);
-        if (
-          !request ||
-          !storedAttempt ||
-          request.tenantId !== input.tenantId ||
-          storedAttempt.tenantId !== input.tenantId ||
-          storedAttempt.requestId !== input.requestId ||
-          storedAttempt.id !== input.attemptId ||
-          !attemptIsPreDispatch(storedAttempt) ||
-          storedAttempt.dispatchState !== input.expectedAttempt.dispatchState ||
-          storedAttempt.resultState !== input.expectedAttempt.resultState ||
-          storedAttempt.responseStarted !== input.expectedAttempt.responseStarted ||
-          !requestIsUncharged(request, request.supplyMode)
-        ) {
-          return { decision: 'reject', code: 'binding_mismatch', message: SAFE_COMPENSATION_FAILURE };
-        }
-        if (!options.capacity) return blockRequestPreparation('capability_unavailable', SAFE_COMPENSATION_FAILURE);
-        const capacityRelease = await options.capacity.release(executor, {
-          tenantId: input.tenantId,
-          projectId: request.projectId,
-          requestId: input.requestId,
-          attemptId: input.attemptId,
-          quotaReservation: input.admission.quotaReservation,
-          rateReservation: input.admission.rateReservation,
-        });
-        let holdResult: RequestPreparationCompensationResult['holdReservation'] = 'not_applicable';
-        if (request.supplyMode === 'platform') {
-          const hold = input.admission.holdReservation;
-          if (!hold || hold.tenantId !== input.tenantId || hold.requestId !== input.requestId) {
-            return { decision: 'reject', code: 'binding_mismatch', message: SAFE_COMPENSATION_FAILURE };
-          }
-          const release: ReleaseBillingInput = {
-            supplyMode: 'platform',
-            tenantId: input.tenantId,
-            requestId: input.requestId,
-            currency: hold.currency,
-            releaseId: `gateway-pre-dispatch:${input.attemptId}`,
-            releaseEvidenceRef: `gateway-pre-dispatch:${input.attemptId}:${input.failedStage}:${input.failureCode}`,
-            businessKey: createRequestAdmissionReservationBusinessKey(input.tenantId, input.requestId),
-          };
-          const released = await options.billing.release(executor, release);
-          if (
-            released.id !== hold.reservationId ||
-            released.tenantId !== input.tenantId ||
-            released.requestId !== input.requestId ||
-            released.state !== 'released'
-          ) {
-            return blockRequestPreparation('storage_failure', SAFE_COMPENSATION_FAILURE);
-          }
-          holdResult = 'released';
-        }
-        const quotaReservation = capacityRelease.quotaReservation;
-        const rateReservation = capacityRelease.rateReservation;
-        const allReleased =
-          quotaReservation === 'released' &&
-          rateReservation === 'released' &&
-          (holdResult === 'released' || holdResult === 'not_applicable');
-        const value: RequestPreparationCompensationResult = {
-          requestId: input.requestId,
-          attemptId: input.attemptId,
-          disposition: allReleased ? 'released' : 'retained_for_reconciliation',
-          quotaReservation,
-          rateReservation,
-          holdReservation: holdResult,
-          manualReconciliationRequired: !allReleased,
-        };
-        return allowRequestPreparation(value);
-      } catch {
-        return blockRequestPreparation('storage_failure', SAFE_COMPENSATION_FAILURE);
-      }
-    },
-  };
+  const compensation: RequestPreparationCompensationPort = new PostgresPreDispatchCompensation({
+    capacity: options.capacity,
+    billing: options.billing,
+  });
 
   return { caller, entitlement, admission, attempt, compensation };
 }

@@ -368,6 +368,7 @@ function attemptRecord(input: RequestPreparationAttemptPersistenceInput): Reques
 }
 
 function evidenceRecord(input: PreparedRequestEvidenceInput): PreparedRequestEvidenceRecord {
+  assert.ok(input.modelResolution, 'the compiled fixture must retain explicit model provenance');
   return {
     evidenceId: input.evidenceId ?? 'missing-evidence-id',
     tenantId: input.tenantId,
@@ -376,9 +377,13 @@ function evidenceRecord(input: PreparedRequestEvidenceInput): PreparedRequestEvi
     attemptId: input.attemptId,
     attemptOrdinal: input.attemptOrdinal,
     supplyMode: input.supplyMode,
+    accountOwnerKind: input.accountOwnerKind,
     publicModel: input.publicModel,
     protocol: input.protocol,
-    modelResolution: input.modelResolution,
+    requestedModel: input.modelResolution.requestedModel,
+    mappedModel: input.modelResolution.mappedModel,
+    resolvedModel: input.resolvedModel,
+    modelResolution: { ...input.modelResolution },
     clientProtocol: input.clientProtocol,
     providerProtocol: input.providerProtocol,
     clientOperation: input.clientOperation,
@@ -521,6 +526,7 @@ function preparationService(
 }
 
 function dispatchAttempt(evidence: PreparedRequestEvidenceRecord): AttemptRecord {
+  assert.ok(evidence.modelResolution, 'the registered fixture must retain explicit model provenance');
   return {
     id: evidence.attemptId,
     tenantId: evidence.tenantId,
@@ -546,7 +552,17 @@ function dispatchAttempt(evidence: PreparedRequestEvidenceRecord): AttemptRecord
     accountId: evidence.accountId,
     providerId: 'provider-1',
     productId: 'product-1',
-    resolvedModel: 'provider-model',
+    resolvedModel: evidence.modelResolution.resolvedModel,
+    modelResolution: { ...evidence.modelResolution },
+    clientProtocol: evidence.clientProtocol,
+    providerProtocol: evidence.providerProtocol,
+    clientOperation: evidence.clientOperation,
+    providerOperation: evidence.providerOperation,
+    requestFingerprint: evidence.requestFingerprint,
+    requestFingerprintVersion: evidence.requestFingerprintVersion,
+    payloadSha256: evidence.payloadSha256,
+    payloadCompilerVersion: evidence.payloadCompilerVersion,
+    usageEstimatorVersion: evidence.usageEstimatorVersion,
     protocol: 'openai',
     endpoint: evidence.endpoint,
     supplierCostVersion: null,
@@ -580,7 +596,7 @@ function dispatchAttempt(evidence: PreparedRequestEvidenceRecord): AttemptRecord
 class FakeEvidenceStore {
   readonly audits: PreparedRequestEvidenceAudit[] = [];
 
-  constructor(private readonly state: PreparationState) {}
+  constructor(private readonly state: PreparationState, private readonly metering: FakeMetering) {}
 
   async preflightForDispatch(
     evidenceId: string,
@@ -603,6 +619,8 @@ class FakeEvidenceStore {
     assert.ok(registered);
     assert.equal(evidenceId, registered.evidenceId);
     assert.equal(options?.payloadSha256, registered.payloadSha256);
+    assert.equal(registered.status, 'registered');
+    this.metering.claimPreparedEvidence(registered);
     this.audits.push(audit);
     return {
       ...registered,
@@ -615,11 +633,14 @@ class FakeEvidenceStore {
 
 class FakeMetering implements PreparedEvidenceMeteringPort {
   readonly transitions: AttemptTransitionInput[] = [];
+  readonly knownNonSuccessResponses: Parameters<PreparedEvidenceMeteringPort['recordKnownNonSuccessHttpResponse']>[0][] = [];
+  getAttemptCount = 0;
   current: AttemptRecord | null = null;
 
   constructor(private readonly state: PreparationState) {}
 
   async getAttempt(tenantId: string, requestId: string, attemptId: string): Promise<AttemptRecord | null> {
+    this.getAttemptCount += 1;
     const evidence = this.state.registered.at(-1);
     assert.ok(evidence);
     assert.equal(tenantId, evidence.tenantId);
@@ -629,20 +650,81 @@ class FakeMetering implements PreparedEvidenceMeteringPort {
     return this.current;
   }
 
+  claimPreparedEvidence(evidence: PreparedRequestEvidenceRecord): void {
+    assert.ok(this.current);
+    assert.equal(this.current.tenantId, evidence.tenantId);
+    assert.equal(this.current.requestId, evidence.requestId);
+    assert.equal(this.current.id, evidence.attemptId);
+    assert.equal(this.current.ordinal, evidence.attemptOrdinal);
+    assert.equal(this.current.bindingState, 'bound');
+    assert.equal(this.current.dispatchAuthorityState, 'bound');
+    assert.equal(this.current.preparedEvidenceId, null);
+    assert.equal(this.current.dispatchState, 'not_sent');
+    assert.equal(this.current.resultState, 'pending');
+    assert.equal(this.current.responseStarted, false);
+    assert.equal(this.current.responseStartedAt, null);
+    assert.equal(this.current.resultHttpStatus, null);
+    assert.equal(this.current.unknownReason, null);
+    assert.equal(this.current.stateVersion, 1);
+    // The real claim updates both evidence and attempt in one transaction.
+    this.current = {
+      ...this.current,
+      preparedEvidenceId: evidence.evidenceId,
+      stateVersion: this.current.stateVersion + 1,
+      updatedAt: NOW,
+    };
+  }
+
   async transitionAttempt(input: AttemptTransitionInput): Promise<AttemptRecord> {
     assert.ok(this.current);
+    assert.equal(input.tenantId, this.current.tenantId);
+    assert.equal(input.requestId, this.current.requestId);
+    assert.equal(input.attemptId, this.current.id);
+    assert.equal(input.expectedStateVersion, this.current.stateVersion);
+    assert.equal(input.expectedDispatchState, this.current.dispatchState);
+    assert.equal(input.expectedResultState, this.current.resultState);
+    assert.equal(input.expectedResponseStarted, this.current.responseStarted);
     this.transitions.push(input);
     this.current = {
       ...this.current,
       dispatchState: input.dispatchState ?? this.current.dispatchState,
       resultState: input.resultState ?? this.current.resultState,
       responseStarted: this.current.responseStarted || input.responseStarted === true,
+      responseStartedAt: input.responseStarted === true ? (this.current.responseStartedAt ?? NOW) : this.current.responseStartedAt,
       resultHttpStatus: input.resultHttpStatus ?? this.current.resultHttpStatus,
       unknownReason: input.unknownReason ?? this.current.unknownReason,
       stateVersion: this.current.stateVersion + 1,
       updatedAt: NOW,
     };
     return this.current;
+  }
+
+  async recordKnownNonSuccessHttpResponse(
+    input: Parameters<PreparedEvidenceMeteringPort['recordKnownNonSuccessHttpResponse']>[0],
+  ): Promise<AttemptRecord> {
+    assert.ok(this.current);
+    assert.equal(input.tenantId, this.current.tenantId);
+    assert.equal(input.requestId, this.current.requestId);
+    assert.equal(input.attemptId, this.current.id);
+    assert.ok(Number.isSafeInteger(input.resultHttpStatus) && input.resultHttpStatus >= 300 && input.resultHttpStatus <= 599);
+    assert.equal(typeof input.responseStarted, 'boolean');
+    assert.ok(this.current.dispatchState === 'dispatching' || this.current.dispatchState === 'sent');
+    assert.equal(this.current.resultState, 'pending');
+    this.knownNonSuccessResponses.push(input);
+    return this.transitionAttempt({
+      tenantId: input.tenantId,
+      requestId: input.requestId,
+      attemptId: input.attemptId,
+      expectedStateVersion: this.current.stateVersion,
+      expectedDispatchState: this.current.dispatchState,
+      expectedResultState: 'pending',
+      expectedResponseStarted: this.current.responseStarted,
+      dispatchState: 'sent',
+      resultState: 'failed',
+      responseStarted: true,
+      resultHttpStatus: input.resultHttpStatus,
+      unknownReason: null,
+    });
   }
 }
 
@@ -733,8 +815,8 @@ function authenticator(calls: string[]): ProxyKeyAuthenticator {
 test('composes the HTTP gateway through preparation, evidence dispatch, and fake provider transport', async () => {
   const preparationState: PreparationState = { calls: [], registered: [], payloads: [] };
   const preparation = preparationService(preparationState);
-  const evidence = new FakeEvidenceStore(preparationState);
   const metering = new FakeMetering(preparationState);
+  const evidence = new FakeEvidenceStore(preparationState, metering);
   const lease = new FakeLeaseProvider();
   const provider: ProviderTrace = {
     profileInputs: [],
@@ -779,6 +861,11 @@ test('composes the HTTP gateway through preparation, evidence dispatch, and fake
   assert.equal(provider.credentialInputs[0]?.credentialId, 'credential-1');
   assert.equal(lease.acquireCount, 1);
   assert.equal(lease.releaseCount, 1);
+  assert.equal(metering.getAttemptCount, 2, 'dispatch must read the authoritative attempt again after claim');
+  assert.equal(metering.transitions[0]?.expectedStateVersion, 2, 'dispatch CAS must use the version updated by claim');
+  assert.equal(metering.current?.stateVersion, 4);
+  assert.equal(metering.current?.preparedEvidenceId, preparationState.registered[0]?.evidenceId);
+  assert.equal(metering.knownNonSuccessResponses.length, 0);
   assert.equal(metering.transitions.map((transition) => transition.dispatchState).join(','), 'dispatching,sent');
   assert.equal(metering.current?.dispatchState, 'sent');
   assert.equal(metering.current?.responseStarted, true);

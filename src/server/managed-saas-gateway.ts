@@ -21,6 +21,7 @@ import {
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
 import { PostgresProviderAccountScheduler } from '../saas/gateway/postgres-provider-account-scheduler.js';
+import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   PostgresRequestPreparationAuthorityAdapter,
   type PostgresRequestPreparationAuthorityAdapterDependencies,
@@ -502,6 +503,10 @@ export function createManagedSaasGatewayComposition(
     authenticator: dependencies.authenticator,
     preparation,
     dispatch,
+    preDispatchCompensation: new GatewayPreDispatchCompensationService(
+      dependencies.preparation.transaction,
+      dependencies.preparation.compensation,
+    ),
     modelDiscovery: createModelDiscoveryPort(dependencies.preparation),
     maxBodyBytes: dependencies.maxBodyBytes,
     entryPoint: dependencies.entryPoint,

@@ -15,7 +15,7 @@ import {
   type RequestPreparationPayloadBounds,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
-import type { AttemptRecord, RequestAdmission, RequestRecord } from '../../../src/saas/metering/types.js';
+import type { AttemptRecord, CreateRequestInput, RequestAdmission, RequestRecord } from '../../../src/saas/metering/types.js';
 import {
   createManagedSaasGatewayProductionComposition,
   type ManagedSaasGatewayProductionOptions,
@@ -267,6 +267,41 @@ function setup(mode: Mode = 'platform', fixtureOptions: { insufficientFunds?: bo
           : null;
         return { rows: canonicalRow ? [canonicalRow as Row] : [], rowCount: canonicalRow ? 1 : 0 };
       }
+      if (sql.includes('FROM saas_gateway_request_idempotency_keys') && sql.includes('FOR UPDATE')) {
+        const row = gatewayIdempotency.get(values.join('|'));
+        return { rows: row ? [row as Row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (sql.includes('FROM saas_requests WHERE') && sql.includes('FOR UPDATE')) {
+        const request = requests.get(String(values[1]));
+        const row = request && request.tenantId === values[0] ? {
+          id: request.id, project_id: request.projectId, proxy_key_id: request.proxyKeyId,
+          supply_mode: request.supplyMode, request_fingerprint: request.requestFingerprint,
+          request_fingerprint_version: request.requestFingerprintVersion, execution_state: request.resultState,
+          reconciliation_state: request.reconciliationState, financial_status: request.financialStatus, state_version: 1,
+        } : undefined;
+        return { rows: row ? [row as Row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (sql.includes('FROM saas_attempts WHERE') && sql.includes('FOR UPDATE')) {
+        const entries = [...attempts.values()].filter((attempt) => attempt.tenantId === values[0] && attempt.requestId === values[1]);
+        return { rows: entries.map((attempt) => ({ id: attempt.id, ordinal: 1, dispatch_state: attemptState,
+          result_state: 'pending', response_started: false, response_started_at: null, result_http_status: null,
+          unknown_reason: null, state_version: 1, prepared_evidence_id: null,
+          dispatch_authority_state: 'bound', binding_state: 'bound' } as Row)), rowCount: entries.length };
+      }
+      if (sql.includes('FROM saas_gateway_capacity_reservations')) {
+        const request = requests.get(String(values[1]));
+        const binding = [...gatewayIdempotency.entries()].find(([, row]) => row.request_id === values[1]);
+        const row = request && binding ? {
+          project_id: request.projectId, proxy_key_id: request.proxyKeyId, attempt_id: 'attempt-a',
+          supply_mode: request.supplyMode, idempotency_scope_key: binding[0].split('|')[3],
+          request_fingerprint: request.requestFingerprint, request_fingerprint_version: request.requestFingerprintVersion,
+          quota_reservation_id: 'quota-a', rate_reservation_id: 'rate-a', state: 'reserved',
+        } : undefined;
+        return { rows: row ? [row as Row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (sql.startsWith('UPDATE saas_gateway_capacity_reservations')) {
+        return { rows: [{ request_id: values[1] } as Row], rowCount: 1 };
+      }
       if (sql.includes('FROM saas_billing_reservations')) {
         return { rows: billingRow ? [billingRow as Row] : [], rowCount: billingRow ? 1 : 0 };
       }
@@ -302,12 +337,12 @@ function setup(mode: Mode = 'platform', fixtureOptions: { insufficientFunds?: bo
   } as SaasDatabase;
   const metering = {
     async admitPreparedRequest(
-      input: AnyRow,
+      input: CreateRequestInput,
       identity: { requestId: string; attemptId: string; executor?: SqlExecutor },
     ) {
       calls.meter += 1;
       if (identity.executor) executorEvents.push({ stage: 'metering', executor: identity.executor });
-      const requestInput = input as AnyRow;
+      const requestInput = input;
       const key =
         typeof requestInput.idempotencyKey === 'string'
           ? `${requestInput.tenantId}:${requestInput.projectId}:${requestInput.proxyKeyId}:${requestInput.idempotencyKey}`
@@ -737,15 +772,17 @@ test('production composition wraps the real Postgres admission with one durable 
   );
   assert.ok(fixture.executorEvents.every(({ executor }) => executor === fixture.executor));
 
-  let retry: Awaited<ReturnType<typeof productionAdmission.authorizeAndReserve>> | null = null;
+  const capture: { value: Awaited<ReturnType<typeof productionAdmission.authorizeAndReserve>> | null } = { value: null };
   await assert.rejects(
     fixture.database.transaction(async (executor) => {
-      retry = await productionAdmission.authorizeAndReserve(command(REQUEST_B_ID, 'attempt-b') as never, { executor });
+      const retry = await productionAdmission.authorizeAndReserve(command(REQUEST_B_ID, 'attempt-b') as never, { executor });
+      capture.value = retry;
       if (retry.decision !== 'reject') throw new Error('matching retry unexpectedly entered admission');
       throw new Error('rollback rejected retry transaction');
     }),
     /rollback rejected retry transaction/,
   );
+  const retry = capture.value;
   assert.equal(retry?.decision, 'reject');
   if (retry?.decision === 'reject') {
     assert.equal(retry.code, 'idempotency_replay');
@@ -806,18 +843,20 @@ test('same key and fingerprint across two HTTP request IDs returns the canonical
   assert.ok(!firstMappingWrite.values.includes(CLIENT_KEY));
   assert.ok(fixture.queryEvents.every(({ values }) => !values.includes(CLIENT_KEY)));
 
-  let replay: Awaited<ReturnType<typeof authorize>> | null = null;
+  const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
   await assert.rejects(
     fixture.database.transaction(async (executor) => {
-      replay = await fixture.ports.admission.authorizeAndReserve(
+      const replay = await fixture.ports.admission.authorizeAndReserve(
         fixture.admissionInput(REQUEST_B_ID, 'attempt-b') as never,
         { executor },
       );
+      capture.value = replay;
       if (replay.decision !== 'allow') throw new Error('preparation transaction rollback');
       return replay;
     }),
     /preparation transaction rollback/,
   );
+  const replay = capture.value;
   assert.equal(replay?.decision, 'reject');
   if (replay?.decision === 'reject') {
     assert.equal(replay.code, 'idempotency_replay');
@@ -841,18 +880,20 @@ test('same scoped idempotency key with a different fingerprint conflicts without
     return result;
   });
   assert.equal(first.decision, 'allow');
-  let conflict: Awaited<ReturnType<typeof authorize>> | null = null;
+  const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
   await assert.rejects(
     fixture.database.transaction(async (executor) => {
-      conflict = await fixture.ports.admission.authorizeAndReserve(
+      const conflict = await fixture.ports.admission.authorizeAndReserve(
         fixture.admissionInput(REQUEST_B_ID, 'attempt-b', CLIENT_KEY, 'c'.repeat(64)) as never,
         { executor },
       );
+      capture.value = conflict;
       if (conflict.decision !== 'allow') throw new Error('preparation transaction rollback');
       return conflict;
     }),
     /preparation transaction rollback/,
   );
+  const conflict = capture.value;
   assert.equal(conflict?.decision, 'reject');
   if (conflict?.decision === 'reject') assert.equal(conflict.code, 'idempotency_conflict');
   assert.equal(fixture.calls.reserve, 1);
@@ -873,15 +914,17 @@ test('cross-tenant caller/entitlement binding is rejected before any reservation
 
 test('insufficient wallet balance rolls back the HMAC claim, request, attempt, capacity, and hold writes', async () => {
   const fixture = setup('platform', { insufficientFunds: true });
-  let decision: Awaited<ReturnType<typeof authorize>> | null = null;
+  const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
   await assert.rejects(
     fixture.database.transaction(async (executor) => {
-      decision = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor });
+      const decision = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor });
+      capture.value = decision;
       if (decision.decision !== 'allow') throw new Error('preparation transaction rollback');
       return decision;
     }),
     /preparation transaction rollback/,
   );
+  const decision = capture.value;
   assert.equal(decision?.decision, 'reject');
   if (decision?.decision === 'reject') assert.equal(decision.code, 'hold_denied');
   assert.equal(fixture.requests.size, 0);
@@ -940,7 +983,7 @@ test('server request-ID fallback claims once per HTTP request when the client ke
   assert.equal(fixture.calls.reserve, 2);
 });
 
-test('compensation refuses dispatched and unknown attempts without releasing any reservation', async () => {
+test('compensation retains dispatched and unknown attempts without releasing any reservation', async () => {
   for (const state of ['dispatching', 'unknown']) {
     const fixture = setup();
     const admitted = await authorize(fixture);
@@ -959,7 +1002,8 @@ test('compensation refuses dispatched and unknown attempts without releasing any
       },
       { executor: fixture.executor },
     );
-    assert.notEqual(decision.decision, 'allow', state);
+    assert.equal(decision.decision, 'allow', state);
+    if (decision.decision === 'allow') assert.equal(decision.value.disposition, 'retained_for_reconciliation');
     assert.equal(fixture.calls.capacityRelease, 0, state);
     assert.equal(fixture.calls.walletRelease, 0, state);
   }
