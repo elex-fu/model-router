@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
 import { calculatePrice, calculateUsageSettlement, normalizeRates } from '../../../src/saas/pricing/index.js';
 import type {
+  CommercialPriceVersionRecordBase,
   CustomerPriceVersionRecord,
   SupplierCostVersionRecord,
   TokenUsageInput,
@@ -32,7 +33,7 @@ const rates = normalizeRates({
 function version(
   kind: 'customer' | 'supplier',
   id: string,
-  overrides: Partial<CustomerPriceVersionRecord & SupplierCostVersionRecord> = {},
+  overrides: Partial<CommercialPriceVersionRecordBase> = {},
 ): CustomerPriceVersionRecord | SupplierCostVersionRecord {
   const base = {
     id,

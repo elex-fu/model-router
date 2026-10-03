@@ -328,7 +328,7 @@ test('release requires explicit non-dispatch evidence before any state change', 
   const attemptRelease = (input: ReleaseBillingInput) =>
     database.transaction((tx) => {
       const observedExecutor: BillingTransactionExecutor = {
-        query<Row>(sql, values = []) {
+        query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
           queryCount += 1;
           return tx.query<Row>(sql, values);
         },
