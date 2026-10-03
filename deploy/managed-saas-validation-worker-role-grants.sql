@@ -1,9 +1,12 @@
 -- Dedicated least-privilege grants for the credential-validation worker.
 --
--- Run as a PostgreSQL administrator after migrations include version 039 and
+-- Run as a PostgreSQL administrator after migrations include version 058 and
 -- after deploy/managed-saas-postgres-roles.sql. The database must be dedicated
 -- to this SaaS deployment. This script does not set credentials; manage the
 -- role password through the deployment secret manager.
+-- 058 only repairs two original row-trigger wrappers; this worker grant set
+-- is unchanged. It never grants credential current_version/expires_at UPDATE,
+-- job identity INSERT/UPDATE, migration-ledger access or routine EXECUTE.
 
 BEGIN;
 
@@ -147,7 +150,7 @@ GRANT SELECT (
   TO model_router_saas_validation_worker;
 GRANT SELECT (
   provider_id, product_id, model, endpoint, protocol, version, support_level,
-  validation_state
+  validation_state, evidence_sha256
 ) ON TABLE model_router_saas.saas_provider_capabilities
   TO model_router_saas_validation_worker;
 GRANT SELECT (

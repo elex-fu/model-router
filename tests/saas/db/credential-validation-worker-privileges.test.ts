@@ -53,6 +53,10 @@ test('worker privilege probe grants only the documented column-level snapshot an
     SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
     /'saas_provider_capabilities', 'validation_state', 'SELECT'/,
   );
+  assert.match(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+    /'saas_provider_capabilities', 'evidence_sha256', 'SELECT'/);
+  assert.doesNotMatch(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+    /'saas_provider_capabilities', '(?:evidence_ref|evidence_version)', 'SELECT'/);
   assert.match(
     SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
     /'saas_tenant_provider_account_capabilities', 'capability_version', 'SELECT'/,
@@ -96,6 +100,19 @@ test('worker privilege probe rejects broad grants, unsafe roles and malformed pr
   }
 });
 
+test('worker SELECT never implies INSERT/UPDATE/REFERENCES on the same column', () => {
+  const sql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  assert.match(sql, /CROSS JOIN \(VALUES \('SELECT'\), \('INSERT'\), \('UPDATE'\), \('REFERENCES'\)\) AS actual\(privilege_type\)/);
+  assert.match(sql, /has_column_privilege\(current_user, relation\.oid, attribute\.attname, actual\.privilege_type\)/);
+  assert.match(sql, /expected\.privilege_type = actual\.privilege_type/);
+  assert.doesNotMatch(sql, /expected\.privilege_type IN \('SELECT', 'INSERT', 'UPDATE', 'REFERENCES'\)/);
+  for (const column of ['current_version', 'expires_at']) {
+    assert.ok(sql.includes(`('saas_tenant_provider_credentials', '${column}', 'SELECT')`));
+    assert.ok(!sql.includes(`('saas_tenant_provider_credentials', '${column}', 'UPDATE')`));
+  }
+  assert.doesNotMatch(sql, /\('saas_(?:usage_settlements|schema_migrations)'/);
+});
+
 test('deployment grant script exposes only the worker role’s column-scoped permissions', () => {
   const sql = readFileSync(
     new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', import.meta.url),
@@ -106,6 +123,7 @@ test('deployment grant script exposes only the worker role’s column-scoped per
   assert.match(sql, /GRANT UPDATE \(/);
   assert.match(sql, /ON TABLE model_router_saas\.saas_provider_rights/);
   assert.match(sql, /ON TABLE model_router_saas\.saas_provider_capabilities/);
+  assert.match(sql, /GRANT SELECT \(\s*provider_id, product_id, model, endpoint, protocol, version, support_level,\s*validation_state, evidence_sha256\s*\) ON TABLE model_router_saas\.saas_provider_capabilities\s+TO model_router_saas_validation_worker;/);
   assert.match(sql, /ON TABLE model_router_saas\.saas_tenant_provider_account_capabilities/);
   assert.match(
     sql,
@@ -117,4 +135,7 @@ test('deployment grant script exposes only the worker role’s column-scoped per
   assert.doesNotMatch(sql, /GRANT\s+DELETE\b/i);
   assert.doesNotMatch(sql, /GRANT\s+INSERT\b/i);
   assert.match(sql, /REVOKE EXECUTE ON ALL FUNCTIONS/);
+  assert.match(sql, /migrations include version 058/);
+  assert.doesNotMatch(sql, /GRANT UPDATE \([^)]*\b(?:current_version|expires_at)\b[^)]*\) ON TABLE model_router_saas\.saas_tenant_provider_credentials/s);
+  assert.doesNotMatch(sql, /GRANT\s+EXECUTE\b/i);
 });

@@ -114,6 +114,7 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_provider_capabilities', 'version', 'SELECT'),
     ('saas_provider_capabilities', 'support_level', 'SELECT'),
     ('saas_provider_capabilities', 'validation_state', 'SELECT'),
+    ('saas_provider_capabilities', 'evidence_sha256', 'SELECT'),
     ('saas_tenant_provider_account_capabilities', 'tenant_id', 'SELECT'),
     ('saas_tenant_provider_account_capabilities', 'account_id', 'SELECT'),
     ('saas_tenant_provider_account_capabilities', 'provider_id', 'SELECT'),
@@ -265,21 +266,17 @@ SELECT
     FROM pg_catalog.pg_class AS relation
     JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
     JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = relation.oid
+    CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) AS actual(privilege_type)
     WHERE namespace.oid = (SELECT oid FROM application_schema)
       AND relation.relkind IN ('r', 'p')
       AND attribute.attnum > 0
       AND NOT attribute.attisdropped
-      AND (
-        pg_catalog.has_column_privilege(current_user, relation.oid, attribute.attname, 'SELECT')
-        OR pg_catalog.has_column_privilege(current_user, relation.oid, attribute.attname, 'INSERT')
-        OR pg_catalog.has_column_privilege(current_user, relation.oid, attribute.attname, 'UPDATE')
-        OR pg_catalog.has_column_privilege(current_user, relation.oid, attribute.attname, 'REFERENCES')
-      )
+      AND pg_catalog.has_column_privilege(current_user, relation.oid, attribute.attname, actual.privilege_type)
       AND NOT EXISTS (
         SELECT 1 FROM expected_column_privileges AS expected
         WHERE expected.table_name = relation.relname
           AND expected.column_name = attribute.attname
-          AND expected.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+          AND expected.privilege_type = actual.privilege_type
       )
   ) AS extra_column_privilege,
   EXISTS (
