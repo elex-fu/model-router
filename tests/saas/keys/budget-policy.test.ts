@@ -4,6 +4,7 @@ import { MAX_MINOR_UNITS } from '../../../src/saas/billing/money.js';
 import {
   evaluateProxyKeyBudgetAdmission,
   ProxyKeyBudgetError,
+  type BudgetWindowUsage,
   type ProxyKeyBudgetPolicy,
   type ProxyKeyBudgetUsage,
 } from '../../../src/saas/keys/budget-policy.js';
@@ -13,12 +14,8 @@ function byokPolicy(daily: bigint | number | string | null, lifetime: bigint | n
 }
 
 function byokUsage(
-  daily: {
-    settled: bigint | number | string;
-    outstandingReserved: bigint | number | string;
-    newReservation: bigint | number | string;
-  },
-  lifetime = { settled: 0n, outstandingReserved: 0n, newReservation: 0n },
+  daily: BudgetWindowUsage,
+  lifetime: BudgetWindowUsage = { settled: 0n, outstandingReserved: 0n, newReservation: 0n },
 ) {
   return { supplyMode: 'byok', tokenUsage: { daily, lifetime } } as const;
 }
