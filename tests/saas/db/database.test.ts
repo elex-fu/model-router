@@ -11,9 +11,11 @@ import type {
 class FakeClient implements SaasDatabaseClient {
   readonly statements: string[] = [];
   releases: Array<Error | boolean | undefined> = [];
+  beginFailure?: Error;
 
   async query<Row>(sql: string): Promise<SqlResult<Row>> {
     this.statements.push(sql);
+    if (sql.startsWith('BEGIN') && this.beginFailure) throw this.beginFailure;
     return { rows: [], rowCount: 0 };
   }
 
@@ -96,11 +98,11 @@ test('rolls back a failed transaction and releases its client', async () => {
     (error: unknown) => error === failure,
   );
 
-  assert.deepEqual(pool.client.statements, ['BEGIN', 'SELECT 1', 'ROLLBACK']);
+  assert.deepEqual(pool.client.statements, ['BEGIN ISOLATION LEVEL READ COMMITTED', 'SELECT 1', 'ROLLBACK']);
   assert.deepEqual(pool.client.releases, [false]);
 });
 
-test('commits a successful transaction and releases its client', async () => {
+test('explicitly starts READ COMMITTED before work, commits, and releases its client', async () => {
   const pool = new FakePool();
   const database = createSaasDatabase(options(pool));
   const result = await database.transaction(async (tx) => {
@@ -109,6 +111,22 @@ test('commits a successful transaction and releases its client', async () => {
   });
 
   assert.equal(result, 'committed');
-  assert.deepEqual(pool.client.statements, ['BEGIN', 'SELECT 1', 'COMMIT']);
+  assert.deepEqual(pool.client.statements, ['BEGIN ISOLATION LEVEL READ COMMITTED', 'SELECT 1', 'COMMIT']);
   assert.deepEqual(pool.client.releases, [false]);
+});
+
+test('does not invoke transaction work when the explicit isolation boundary fails', async () => {
+  const pool = new FakePool();
+  const database = createSaasDatabase(options(pool));
+  const failure = new Error('isolation boundary failed');
+  pool.client.beginFailure = failure;
+  let workInvoked = false;
+
+  await assert.rejects(database.transaction(async () => {
+    workInvoked = true;
+  }), (error: unknown) => error === failure);
+
+  assert.equal(workInvoked, false);
+  assert.deepEqual(pool.client.statements, ['BEGIN ISOLATION LEVEL READ COMMITTED']);
+  assert.deepEqual(pool.client.releases, [true]);
 });

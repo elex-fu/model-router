@@ -126,7 +126,9 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
       let discardClient = false;
 
       try {
-        await client.query('BEGIN');
+        // Advisory authorization fences wait before a separate authority read.
+        // Each read needs a fresh snapshot even when the session default differs.
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         transactionStarted = true;
         const value = await work(client);
         await client.query('COMMIT');
