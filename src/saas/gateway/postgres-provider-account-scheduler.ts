@@ -432,6 +432,7 @@ SELECT product.status AS product_status,
    AND pool.authz_version = $14
    AND member.provider_id = account.provider_id AND member.product_id = account.product_id
    AND member.status = 'active' AND member.account_authz_version = account.authz_version
+   AND member.account_authz_version = $15
    AND member.authz_version = $16
    AND grant_row.supply_mode = 'platform' AND grant_row.status = 'active'
    AND grant_row.authz_version = $17 AND grant_row.profile_authz_version = $18

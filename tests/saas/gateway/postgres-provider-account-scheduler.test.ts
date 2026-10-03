@@ -356,6 +356,65 @@ test('PostgreSQL scheduler admits only persisted BYOK and platform account autho
   }
 });
 
+test('platform eligibility binds all 22 authority parameters including the member account epoch', async () => {
+  const { scheduler, state, input } = setup('platform');
+  const platformCandidate = candidate('platform');
+  const result = await scheduler.select(input([platformCandidate]));
+  assert.equal(result.decision, 'allow');
+
+  const query = state.statements.find(({ sql }) => sql.includes('postgres-provider-account-scheduler:platform-eligibility'));
+  assert.ok(query);
+  const parameterSlots = [...new Set(Array.from(query.sql.matchAll(/\$(\d+)\b/g), (match) => Number(match[1])))].sort(
+    (left, right) => left - right,
+  );
+  assert.deepEqual(parameterSlots, Array.from({ length: 22 }, (_, index) => index + 1));
+  assert.equal(query.values.length, 22);
+  assert.equal(query.values[14], platformCandidate.poolMemberAccountAuthzVersion);
+  assert.match(query.sql, /member\.account_authz_version\s*=\s*\$15\b/);
+  assert.match(query.sql, /member\.account_authz_version\s*=\s*account\.authz_version\b/);
+});
+
+test('stale platform member account epochs are rejected', async () => {
+  const { scheduler, state, input } = setup('platform');
+  const platformCandidate = candidate('platform');
+  assert.ok(platformCandidate.supplyMode === 'platform');
+  const staleMemberCandidate = { ...platformCandidate, poolMemberAccountAuthzVersion: 3 };
+  assert.notEqual(staleMemberCandidate.poolMemberAccountAuthzVersion, staleMemberCandidate.accountAuthzVersion);
+
+  const result = await scheduler.select(input([staleMemberCandidate]));
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
+  const query = state.statements.find(({ sql }) => sql.includes('postgres-provider-account-scheduler:platform-eligibility'));
+  assert.ok(query);
+  assert.equal(query.values[14], staleMemberCandidate.poolMemberAccountAuthzVersion);
+  assert.equal(state.statements.some(({ sql }) => sql.includes(':concurrency')), false);
+});
+
+test('platform candidates must target the exact persisted route pool before downstream checks', async () => {
+  const genericUpstreamId = 'generic-upstream';
+  const route = { ...routeRow('platform'), upstream_id: genericUpstreamId };
+  const platformCandidate = { ...candidate('platform'), upstreamId: genericUpstreamId };
+  assert.equal(platformCandidate.poolId, 'pool-a');
+  assert.notEqual(platformCandidate.poolId, route.upstream_id);
+  let healthCalls = 0;
+  const { scheduler, state, input } = setup('platform', { routeRows: [route] }, {
+    health: {
+      async get(healthInput) {
+        healthCalls += 1;
+        return HEALTHY.get(healthInput);
+      },
+    },
+  });
+
+  const result = await scheduler.select(input([platformCandidate]));
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
+  assert.equal(state.statements.length, 1);
+  assert.ok(state.statements[0]?.sql.includes('postgres-provider-account-scheduler:route'));
+  assert.equal(state.statements.some(({ sql }) => sql.includes('eligibility') || sql.includes(':concurrency')), false);
+  assert.equal(healthCalls, 0);
+});
+
 test('missing rights, inactive supply, unverified capability, and ambiguous authority fail closed', async (t) => {
   await t.test('missing rights or supply relation yields no eligible candidate', async () => {
     const { scheduler, input } = setup('byok', { eligibilityRows: new Map([['account-a', []]]) });
