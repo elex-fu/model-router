@@ -6,14 +6,25 @@ import { SaasCatalogService } from '../../dist/saas/catalog/service.js';
 import { SaasCommercialMeteringPolicyService } from '../../dist/saas/gateway/commercial-metering-policy-service.js';
 import { PostgresRequestPreparationAuthorityAdapter } from '../../dist/saas/gateway/postgres-request-preparation-authority-adapter.js';
 import { canonicalPreparedRequestEvidencePayload } from '../../dist/saas/gateway/prepared-request-evidence-service.js';
+import type {
+  PreparedRequestEvidenceAudit,
+  PreparedRequestEvidenceInput,
+  PreparedRequestEvidenceRecord,
+} from '../../src/saas/gateway/prepared-request-evidence-service.js';
 import { ProviderHttpTransport } from '../../dist/saas/gateway/provider-http-transport.js';
 import { ProviderPayloadCompiler } from '../../dist/saas/gateway/provider-payload-compiler.js';
 import {
   allowRequestPreparation,
   rejectRequestPreparation,
 } from '../../dist/saas/gateway/request-preparation-service.js';
+import type {
+  RequestPreparationAdmissionPort,
+  RequestPreparationAttemptPersistenceInput,
+} from '../../src/saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../../dist/saas/gateway/route-config-service.js';
 import { KeyService } from '../../dist/saas/keys/service.js';
+import type { KnownNonSuccessHttpResponseInput } from '../../src/saas/metering/service.js';
+import type { AttemptRecord, AttemptTransitionInput } from '../../src/saas/metering/types.js';
 import { createManagedSaasGatewayComposition } from '../../dist/server/managed-saas-gateway.js';
 import { normalizeUsage } from '../../dist/telemetry/usage.js';
 
@@ -39,11 +50,43 @@ const STREAMING_RESPONSE_FRAMES = [
 ] as const;
 const STREAMING_RESPONSE_BODY = STREAMING_RESPONSE_FRAMES.join('');
 
+// These are domain-record views, not saas_attempts SQL rows. The three display
+// fields come from the bound saas_requests projection; neither supply_mode nor
+// route_upstream_id is fabricated as an attempt-table column.
+type FixtureAttempt = AttemptRecord & {
+  readonly projectId: string;
+  readonly publicModel: string;
+  readonly supplyMode: 'byok' | 'platform';
+};
+type FixtureEvidence = PreparedRequestEvidenceRecord &
+  Omit<PreparedRequestEvidenceInput, 'evidenceId' | 'credentialVersion' | 'expiresAt'>;
+type FixtureAudit = {
+  id: string;
+  tenantId: string;
+  actorUserId: string | null;
+  action: string;
+  targetType: string;
+  targetId: string;
+  occurredAt: string;
+  entryPoint: string;
+  requestId: string | null;
+};
+type FixtureKnownNonSuccessResponse = {
+  readonly input: KnownNonSuccessHttpResponseInput;
+  outcome: 'attempted' | 'recorded' | 'replayed' | 'rejected';
+  beforeAttemptVersion: number | null;
+  afterAttemptVersion: number | null;
+};
+
 type FixtureState = {
   requests: Map<string, Record<string, unknown>>;
-  attempts: Map<string, Record<string, unknown>>;
-  evidence: Map<string, Record<string, unknown>>;
+  attempts: Map<string, FixtureAttempt>;
+  evidence: Map<string, FixtureEvidence>;
   holds: Array<Record<string, unknown>>;
+  auditEvents: FixtureAudit[];
+  attemptReads: AttemptRecord[];
+  attemptTransitions: AttemptTransitionInput[];
+  knownNonSuccessResponses: FixtureKnownNonSuccessResponse[];
   authorityQueries: string[];
   dispatches: Array<Record<string, unknown>>;
   upstreamCalls: Array<{ authorization: string | undefined; body: Record<string, unknown> }>;
@@ -213,6 +256,7 @@ function makeDatabase(state: FixtureState) {
     const normalized = sql.replace(/\s+/g, ' ').trim();
     state.authorityQueries.push(normalized);
     let rows: Record<string, unknown>[];
+    let affectedRows: number | undefined;
     if (normalized.startsWith('SET TRANSACTION')) {
       rows = [];
     } else if (normalized.startsWith('SELECT pg_advisory_xact_lock')) {
@@ -284,15 +328,55 @@ function makeDatabase(state: FixtureState) {
       rows = [{ protocol: 'openai', version: '11', support_level: 'supported', validation_state: 'verified' }];
     } else if (normalized.includes('FROM saas_provider_rights')) {
       rows = normalized.includes('WHERE rights_id = $1 AND version = $2') ? [poolRight] : [accountRight];
+    } else if (normalized.startsWith('INSERT INTO saas_audit_events')) {
+      // Mirror PreparedRequestEvidenceService.audit's eleven positional fields.
+      // In particular action/target are $4/$6, not claim-version parameters.
+      if (
+        values.length !== 11 ||
+        typeof values[0] !== 'string' || typeof values[1] !== 'string' ||
+        (values[2] !== null && typeof values[2] !== 'string') ||
+        typeof values[3] !== 'string' || typeof values[4] !== 'string' ||
+        typeof values[5] !== 'string' || typeof values[6] !== 'string' ||
+        (values[7] !== null && typeof values[7] !== 'string') ||
+        (values[8] !== null && typeof values[8] !== 'string') ||
+        typeof values[9] !== 'string' ||
+        (values[10] !== null && typeof values[10] !== 'string')
+      ) throw new Error('invalid fixture evidence audit');
+      state.auditEvents.push({
+        id: values[0], tenantId: values[1], actorUserId: values[2],
+        action: values[3], targetType: values[4], targetId: values[5],
+        occurredAt: values[6], entryPoint: values[9], requestId: values[10],
+      });
+      rows = [];
+      affectedRows = 1;
     } else {
       throw new Error(`Unexpected SQL in deterministic gateway fixture: ${normalized}`);
     }
-    return { rows: structuredClone(rows), rowCount: rows.length };
+    return { rows: structuredClone(rows), rowCount: affectedRows ?? rows.length };
   };
   const executor = { query };
   return {
     query,
-    transaction: async <T>(work: (tx: typeof executor) => Promise<T>) => work(executor),
+    transaction: async <T>(work: (tx: typeof executor) => Promise<T>) => {
+      const snapshot = structuredClone({
+        requests: state.requests, attempts: state.attempts, evidence: state.evidence,
+        holds: state.holds, auditEvents: state.auditEvents,
+      });
+      try {
+        return await work(executor);
+      } catch (error) {
+        // Keep map identities: the fixture ports hold references to them.
+        state.requests.clear();
+        for (const [id, row] of snapshot.requests) state.requests.set(id, row);
+        state.attempts.clear();
+        for (const [id, row] of snapshot.attempts) state.attempts.set(id, row);
+        state.evidence.clear();
+        for (const [id, row] of snapshot.evidence) state.evidence.set(id, row);
+        state.holds.splice(0, state.holds.length, ...snapshot.holds);
+        state.auditEvents.splice(0, state.auditEvents.length, ...snapshot.auditEvents);
+        throw error;
+      }
+    },
     migrate: async () => {},
     verifySchema: async () => {},
     ping: async () => {},
@@ -300,30 +384,83 @@ function makeDatabase(state: FixtureState) {
   };
 }
 
-function makeAttempt(input: Record<string, any>): Record<string, unknown> {
+function makeAttempt(input: RequestPreparationAttemptPersistenceInput, state: FixtureState): FixtureAttempt {
+  const request = state.requests.get(input.requestId);
+  if (
+    !request || request.id !== input.requestId || request.tenantId !== input.caller.tenantId ||
+    request.projectId !== input.caller.projectId || request.publicModel !== input.publicModel ||
+    (request.supplyMode !== 'byok' && request.supplyMode !== 'platform') ||
+    request.supplyMode !== input.authority.candidate.supplyMode
+  ) throw new Error('fixture attempt is not bound to its request');
+  const candidate = input.authority.candidate;
+  const pool = candidate.supplyMode === 'platform' ? candidate : null;
+  const createdAt = new Date().toISOString();
   return {
     id: input.attemptId,
     tenantId: input.caller.tenantId,
-    projectId: input.caller.projectId,
+    projectId: request.projectId,
     requestId: input.requestId,
     ordinal: input.admission.attemptOrdinal,
-    supplyMode: input.authority.candidate.supplyMode,
+    supplyMode: request.supplyMode,
+    projectPolicyVersion: String(input.entitlement.projectPolicyVersion),
+    customerPriceVersion: input.authority.commercial.customerPriceVersion,
+    customerMeteringPolicyId: input.authority.commercial.customerMeteringPolicyId,
+    customerMeteringPolicyVersion: String(input.authority.commercial.customerMeteringPolicyVersion),
+    providerMeteringPolicyId: input.authority.commercial.providerMeteringPolicyId,
+    providerMeteringPolicyVersion: String(input.authority.commercial.providerMeteringPolicyVersion),
+    contractAttestationId: input.authority.commercial.contractAttestationId,
     routeConfigId: input.authority.route.routeConfigId,
-    routeConfigVersion: input.authority.route.routeConfigVersion,
-    publicModel: input.publicModel,
+    routeConfigVersion: String(input.authority.route.routeConfigVersion),
+    routePublicModelId: input.authority.route.publicModelId,
+    routePublicModelVersion: String(input.authority.route.publicModelVersion),
+    routeProtocol: input.authority.route.protocol,
+    routeTargetMode: input.authority.route.targetMode,
+    publicModel: request.publicModel,
     protocol: input.protocol,
+    endpoint: input.authority.route.endpoint,
+    bindingState: 'bound',
+    dispatchAuthorityState: 'bound',
+    accountOwnerKind: candidate.accountOwnerKind,
     upstreamId: input.authority.candidate.upstreamId,
     accountId: input.authority.candidate.accountId,
     credentialId: input.authority.candidate.credentialId,
     providerId: input.authority.candidate.providerId,
     productId: input.authority.candidate.productId,
     resolvedModel: input.authority.candidate.resolvedModel,
+    modelResolution: structuredClone(input.modelResolution),
+    clientProtocol: input.clientProtocol,
+    providerProtocol: input.providerProtocol,
+    clientOperation: input.clientOperation,
+    providerOperation: input.providerOperation,
+    requestFingerprint: input.requestFingerprint,
+    requestFingerprintVersion: input.requestFingerprintVersion,
+    payloadSha256: input.payloadSha256,
+    payloadCompilerVersion: input.payloadCompilerVersion,
+    usageEstimatorVersion: input.usageEstimatorVersion,
+    dispatchProfileId: candidate.dispatchProfileId,
+    supplyProfileAuthzVersion: String(candidate.supplyProfileAuthzVersion),
+    credentialVersion: String(candidate.credentialVersion),
+    credentialAuthzVersion: String(candidate.credentialAuthzVersion),
+    accountAuthzVersion: String(candidate.accountAuthzVersion),
+    profileAccountAuthzVersion: candidate.supplyMode === 'byok' ? String(candidate.profileAccountAuthzVersion) : null,
+    poolId: pool?.poolId ?? null,
+    poolAuthzVersion: pool === null ? null : String(pool.poolAuthzVersion),
+    poolMemberAccountAuthzVersion: pool === null ? null : String(pool.poolMemberAccountAuthzVersion),
+    poolMemberAuthzVersion: pool === null ? null : String(pool.poolMemberAuthzVersion ?? input.authority.poolMemberAuthzVersion),
+    poolGrantAuthzVersion: pool === null ? null : String(pool.poolGrantAuthzVersion),
+    poolGrantProfileAuthzVersion: pool === null ? null : String(pool.poolGrantProfileAuthzVersion),
+    poolGrantPoolAuthzVersion: pool === null ? null : String(pool.poolGrantPoolAuthzVersion),
     supplierCostVersion: input.authority.commercial.supplierCostVersion,
     preparedEvidenceId: null,
     dispatchState: 'not_sent',
     resultState: 'pending',
     responseStarted: false,
-    stateVersion: 0,
+    responseStartedAt: null,
+    resultHttpStatus: null,
+    unknownReason: null,
+    createdAt,
+    updatedAt: createdAt,
+    stateVersion: 1,
   };
 }
 
@@ -333,6 +470,10 @@ async function startFixture(options: { streaming?: boolean } = {}) {
     attempts: new Map(),
     evidence: new Map(),
     holds: [],
+    auditEvents: [],
+    attemptReads: [],
+    attemptTransitions: [],
+    knownNonSuccessResponses: [],
     authorityQueries: [],
     dispatches: [],
     upstreamCalls: [],
@@ -469,8 +610,9 @@ async function startFixture(options: { streaming?: boolean } = {}) {
       scheduler: { select: async ({ candidates }: { candidates: any[] }) => allowRequestPreparation(candidates[0]) },
       payload,
       admission: {
-        async authorizeAndReserve(input: any) {
-          const expiresAt = new Date(Date.now() + 60_000).toISOString();
+        async authorizeAndReserve(input: Parameters<RequestPreparationAdmissionPort['authorizeAndReserve']>[0]) {
+          const observedNow = Date.now();
+          const expiresAt = new Date(observedNow + 60_000).toISOString();
           const admission = {
             idempotencyBinding: {
               state: 'created',
@@ -495,8 +637,8 @@ async function startFixture(options: { streaming?: boolean } = {}) {
               priceSnapshotRef: 'price-e2e-v1',
               expiresAt,
             },
-            deadlineAtMs: Date.now() + 30_000,
-            dispatchDeadline: new Date(Date.now() + 30_000).toISOString(),
+            deadlineAtMs: observedNow + 30_000,
+            dispatchDeadline: new Date(observedNow + 30_000).toISOString(),
             expiresAt,
             remainingAttempts: 1,
             retryBudget: 0,
@@ -511,6 +653,9 @@ async function startFixture(options: { streaming?: boolean } = {}) {
             entitlementId: input.caller.entitlementId,
             supplyProfileId: input.caller.supplyProfileId,
             supplyMode: input.caller.supplyMode,
+            protocol: input.authority.route.protocol,
+            requestFingerprint: input.requestFingerprint,
+            requestFingerprintVersion: input.requestFingerprintVersion,
             routeConfigId: input.authority.route.routeConfigId,
             routeConfigVersion: input.authority.route.routeConfigVersion,
             publicModel: input.authority.route.publicModel,
@@ -519,7 +664,10 @@ async function startFixture(options: { streaming?: boolean } = {}) {
             resolvedModel: input.authority.candidate.resolvedModel,
             customerPriceVersion: input.authority.commercial.customerPriceVersion,
             executionState: 'pending',
+            reconciliationState: 'none',
             financialStatus: 'pending',
+            stateVersion: 1,
+            updatedAt: new Date(observedNow).toISOString(),
             usage: null,
           });
           state.holds.push({ requestId: input.requestId, state: 'reserved', amountMinorUnits: '5' });
@@ -527,8 +675,8 @@ async function startFixture(options: { streaming?: boolean } = {}) {
         },
       },
       attempt: {
-        async persist(input: any) {
-          const row = makeAttempt(input);
+        async persist(input: RequestPreparationAttemptPersistenceInput) {
+          const row = makeAttempt(input, state);
           attemptMap.set(input.attemptId, row);
           return allowRequestPreparation({
             tenantId: input.caller.tenantId,
@@ -586,23 +734,29 @@ async function startFixture(options: { streaming?: boolean } = {}) {
         },
       },
       registrar: {
-        async register(input: Record<string, any>) {
+        async register(input: PreparedRequestEvidenceInput) {
           const canonical = canonicalPreparedRequestEvidencePayload(input);
           if (
             !verifyBytes(null, Buffer.from(canonical), signerPublicKey, Buffer.from(input.signatureBase64, 'base64'))
           ) {
             throw new Error('prepared evidence signature did not verify');
           }
-          const record = {
+          const record: FixtureEvidence = {
             ...input,
             evidenceId: input.evidenceId ?? EVIDENCE_ID,
+            ...(input.modelResolution === undefined ? {} : {
+              requestedModel: input.modelResolution.requestedModel,
+              mappedModel: input.modelResolution.mappedModel,
+            }),
+            credentialVersion: String(input.credentialVersion),
+            expiresAt: new Date(input.expiresAt instanceof Date ? input.expiresAt.getTime() : input.expiresAt).toISOString(),
             statementSha256: sha256(canonical),
             status: 'registered',
             claimedAt: null,
             claimedAttemptId: null,
           };
-          state.evidence.set(EVIDENCE_ID, record);
-          return record;
+          state.evidence.set(record.evidenceId, structuredClone(record));
+          return structuredClone(record);
         },
       },
     } as never,
@@ -620,40 +774,215 @@ async function startFixture(options: { streaming?: boolean } = {}) {
           const record = state.evidence.get(evidenceId);
           if (!record || record.status !== 'registered' || record.payloadSha256 !== options.payloadSha256)
             throw new Error('evidence preflight failed');
-          return record;
+          return structuredClone(record);
         },
-        async claimForDispatch(evidenceId: string, _audit: unknown, options: { payloadSha256?: string }) {
-          const record = state.evidence.get(evidenceId);
-          if (!record || record.status !== 'registered' || record.payloadSha256 !== options.payloadSha256)
-            throw new Error('evidence claim failed');
-          record.status = 'claimed';
-          record.claimedAttemptId = ATTEMPT_ID;
-          record.claimedAt = new Date().toISOString();
-          const attempt = state.attempts.get(ATTEMPT_ID);
-          if (attempt) attempt.preparedEvidenceId = EVIDENCE_ID;
-          return record;
+        async claimForDispatch(evidenceId: string, audit: PreparedRequestEvidenceAudit, options: { payloadSha256?: string }) {
+          return database.transaction(async (tx) => {
+            const record = state.evidence.get(evidenceId);
+            const attempt = record === undefined ? undefined : attemptMap.get(record.attemptId);
+            const request = record === undefined ? undefined : state.requests.get(record.requestId);
+            const claimedAt = new Date().toISOString();
+            const expiresAtMs = record === undefined ? NaN : Date.parse(record.expiresAt);
+            const deadlineAtMs = record === undefined ? NaN : record.dispatchDeadline instanceof Date
+              ? record.dispatchDeadline.getTime() : Date.parse(record.dispatchDeadline);
+            if (
+              !record || record.status !== 'registered' || record.payloadSha256 !== options.payloadSha256 ||
+              !Number.isFinite(expiresAtMs) || !Number.isFinite(deadlineAtMs) ||
+              expiresAtMs <= Date.parse(claimedAt) || deadlineAtMs <= Date.parse(claimedAt) ||
+              !request || request.id !== record.requestId || request.tenantId !== record.tenantId ||
+              request.projectId !== record.projectId || request.proxyKeyId !== record.proxyKeyId ||
+              request.entitlementId !== record.entitlementId || request.supplyProfileId !== record.supplyProfileId ||
+              request.supplyMode !== record.supplyMode || request.publicModel !== record.publicModel ||
+              request.protocol !== record.protocol || request.requestFingerprint !== record.requestFingerprint ||
+              request.requestFingerprintVersion !== record.requestFingerprintVersion ||
+              request.providerId !== record.providerId || request.productId !== record.productId ||
+              request.resolvedModel !== record.resolvedModel ||
+              !attempt || attempt.tenantId !== record.tenantId || attempt.requestId !== record.requestId ||
+              attempt.ordinal !== record.attemptOrdinal || attempt.bindingState !== 'bound' ||
+              attempt.dispatchAuthorityState !== 'bound' || attempt.preparedEvidenceId !== null ||
+              attempt.dispatchState !== 'not_sent' || attempt.resultState !== 'pending' ||
+              attempt.responseStarted !== false || attempt.responseStartedAt !== null ||
+              attempt.resultHttpStatus !== null || attempt.unknownReason !== null ||
+              !Number.isSafeInteger(attempt.stateVersion) || attempt.stateVersion < 1
+            ) throw new Error('evidence claim failed');
+            // The real claim is one transaction: evidence binding, version +1,
+            // GREATEST(updated_at, DB clock), evidence status, and its audit.
+            attemptMap.set(attempt.id, {
+              ...attempt,
+              preparedEvidenceId: record.evidenceId,
+              stateVersion: attempt.stateVersion + 1,
+              updatedAt: new Date(Math.max(Date.parse(attempt.updatedAt), Date.parse(claimedAt))).toISOString(),
+            });
+            const claimed: FixtureEvidence = {
+              ...record, status: 'claimed', claimedAttemptId: attempt.id, claimedAt,
+            };
+            state.evidence.set(record.evidenceId, claimed);
+            await tx.query(
+              'INSERT INTO saas_audit_events ' +
+                '(id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, ' +
+                'source_ip, user_agent, entry_point, request_id) ' +
+                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
+              ['40000000-0000-4000-8000-000000000001', record.tenantId, audit.actorUserId,
+                'saas_prepared_request_evidence.claimed', 'saas_prepared_request_evidence', record.evidenceId,
+                claimedAt, audit.sourceIp ?? null, audit.userAgent ?? null, audit.entryPoint, audit.requestId ?? null],
+            );
+            return structuredClone(claimed);
+          });
         },
       },
       metering: {
-        async getAttempt(_tenantId: string, _requestId: string, attemptId: string) {
-          return attemptMap.get(attemptId) ?? null;
+        async getAttempt(tenantId: string, requestId: string, attemptId: string) {
+          const row = attemptMap.get(attemptId);
+          if (!row || row.tenantId !== tenantId || row.requestId !== requestId) return null;
+          // No object alias can make a pre-claim read appear to be post-claim.
+          state.attemptReads.push(structuredClone(row));
+          return structuredClone(row);
         },
-        async transitionAttempt(input: any) {
+        async transitionAttempt(input: AttemptTransitionInput) {
           const row = attemptMap.get(input.attemptId);
           if (
-            !row ||
+            !row || row.tenantId !== input.tenantId || row.requestId !== input.requestId ||
             row.dispatchState !== input.expectedDispatchState ||
-            row.resultState !== input.expectedResultState
+            row.resultState !== input.expectedResultState ||
+            row.responseStarted !== input.expectedResponseStarted ||
+            input.expectedStateVersion !== row.stateVersion
           )
             throw new Error('attempt transition conflict');
-          Object.assign(row, {
-            dispatchState: input.dispatchState,
-            resultState: input.resultState,
-            responseStarted: Boolean(row.responseStarted || input.responseStarted),
-            resultHttpStatus: input.resultHttpStatus,
-            stateVersion: Number(row.stateVersion) + 1,
-          });
-          return row;
+          const dispatchState = input.dispatchState ?? row.dispatchState;
+          const resultState = input.resultState ?? row.resultState;
+          const responseStarted = input.responseStarted ?? row.responseStarted;
+          if (row.responseStarted && !responseStarted) throw new Error('attempt response transition conflict');
+          // This bounded fixture models the real dispatcher's send/uncertainty
+          // transitions, not an unrestricted "accept any requested state" port.
+          const claimedEvidence = state.evidence.get(row.preparedEvidenceId ?? '');
+          const dispatching = row.dispatchState === 'not_sent' && dispatchState === 'dispatching' &&
+            row.resultState === 'pending' && resultState === 'pending' && !responseStarted &&
+            row.bindingState === 'bound' && row.dispatchAuthorityState === 'bound' &&
+            row.responseStartedAt === null && row.resultHttpStatus === null && row.unknownReason === null &&
+            claimedEvidence?.status === 'claimed' && claimedEvidence.claimedAttemptId === row.id &&
+            claimedEvidence.tenantId === row.tenantId && claimedEvidence.requestId === row.requestId;
+          const sent = row.dispatchState === 'dispatching' && dispatchState === 'sent' &&
+            row.resultState === 'pending' && resultState === 'pending';
+          const unknown = (row.dispatchState === 'dispatching' || row.dispatchState === 'sent') &&
+            dispatchState === 'unknown' && resultState === 'unknown' &&
+            typeof input.unknownReason === 'string' && input.unknownReason.trim() !== '' &&
+            input.unknownReason.length <= 1024;
+          if (!dispatching && !sent && !unknown) throw new Error('invalid fixture attempt transition');
+          if (
+            input.resultHttpStatus !== undefined && input.resultHttpStatus !== null &&
+            (!Number.isInteger(input.resultHttpStatus) || input.resultHttpStatus < 200 || input.resultHttpStatus > 599)
+          ) throw new Error('invalid fixture attempt HTTP status');
+          const updatedAt = new Date(Math.max(Date.now(), Date.parse(row.updatedAt))).toISOString();
+          const updated: FixtureAttempt = {
+            ...row,
+            dispatchState,
+            resultState,
+            responseStarted,
+            responseStartedAt: row.responseStarted ? row.responseStartedAt : responseStarted ? updatedAt : null,
+            resultHttpStatus: input.resultHttpStatus === undefined ? row.resultHttpStatus : input.resultHttpStatus,
+            unknownReason: unknown ? input.unknownReason ?? null : null,
+            updatedAt,
+            stateVersion: row.stateVersion + 1,
+          };
+          state.attemptTransitions.push(structuredClone(input));
+          attemptMap.set(updated.id, updated);
+          return structuredClone(updated);
+        },
+        async recordKnownNonSuccessHttpResponse(input: KnownNonSuccessHttpResponseInput): Promise<AttemptRecord> {
+          // Call evidence is not durable DB state: retain rejected/rolled-back
+          // calls too, so the successful cases' zero count cannot hide a call.
+          const call: FixtureKnownNonSuccessResponse = {
+            input: structuredClone(input), outcome: 'attempted',
+            beforeAttemptVersion: null, afterAttemptVersion: null,
+          };
+          state.knownNonSuccessResponses.push(call);
+          try {
+            if (
+              [input.tenantId, input.requestId, input.attemptId].some(
+                (value) => typeof value !== 'string' || value.trim() === '' || value.trim().length > 255,
+              ) ||
+              !Number.isSafeInteger(input.resultHttpStatus) || input.resultHttpStatus < 300 || input.resultHttpStatus > 599 ||
+              typeof input.responseStarted !== 'boolean'
+            ) throw new Error('invalid fixture known non-success response');
+            const tenantId = input.tenantId.trim();
+            const requestId = input.requestId.trim();
+            const attemptId = input.attemptId.trim();
+            let replayed = false;
+            const result = await database.transaction(async () => {
+              const attempt = attemptMap.get(attemptId);
+              const request = state.requests.get(requestId);
+              if (
+                !attempt || !request || attempt.id !== attemptId || attempt.tenantId !== tenantId ||
+                attempt.requestId !== requestId || request.id !== requestId || request.tenantId !== tenantId
+              ) throw new Error('fixture known non-success attempt not found');
+              call.beforeAttemptVersion = attempt.stateVersion;
+              const supplyMode = request.supplyMode;
+              if (supplyMode !== 'platform' && supplyMode !== 'byok')
+                throw new Error('invalid fixture known non-success supply mode');
+              const financialStatus = supplyMode === 'platform' ? 'reconciliation_pending' : 'not_applicable';
+              const retainHold = () => {
+                if (supplyMode === 'byok') return;
+                const holds = state.holds.filter((hold) => hold.requestId === requestId);
+                const hold = holds[0];
+                if (holds.length !== 1 || !hold || (hold.state !== 'reserved' && hold.state !== 'reconciliation_pending'))
+                  throw new Error('fixture known non-success hold conflict');
+                // Keep the same reservation/amount; no charge, release or wallet.
+                hold.state = 'reconciliation_pending';
+              };
+              if (
+                attempt.dispatchState === 'sent' && attempt.resultState === 'failed' &&
+                request.executionState === 'failed' && request.reconciliationState === 'none' &&
+                request.financialStatus === financialStatus
+              ) {
+                if (attempt.resultHttpStatus !== input.resultHttpStatus)
+                  throw new Error('fixture known non-success replay conflict');
+                retainHold();
+                replayed = true;
+                return structuredClone(attempt);
+              }
+              if (
+                (attempt.dispatchState !== 'dispatching' && attempt.dispatchState !== 'sent') ||
+                attempt.resultState !== 'pending' || request.executionState !== 'pending' ||
+                request.reconciliationState !== 'none' ||
+                (supplyMode === 'platform' && request.financialStatus !== 'pending' && request.financialStatus !== 'reconciliation_pending') ||
+                (supplyMode === 'byok' && request.financialStatus !== 'not_applicable') ||
+                !Number.isSafeInteger(attempt.stateVersion) || attempt.stateVersion < 1 ||
+                !Number.isSafeInteger(attempt.stateVersion + 1) ||
+                typeof request.stateVersion !== 'number' || !Number.isSafeInteger(request.stateVersion) || request.stateVersion < 1
+              ) throw new Error('fixture known non-success transition conflict');
+              const requestVersion = request.stateVersion;
+              // Match the service's execution CAS, then its optional financial CAS.
+              const requestVersionIncrement = 1 + (supplyMode === 'platform' && request.financialStatus === 'pending' ? 1 : 0);
+              if (!Number.isSafeInteger(requestVersion + requestVersionIncrement))
+                throw new Error('fixture known non-success version conflict');
+              const updatedAt = new Date().toISOString();
+              const updated: FixtureAttempt = {
+                ...attempt, dispatchState: 'sent', resultState: 'failed',
+                // A complete HTTP status proves a response even if the body flag is false.
+                responseStarted: true,
+                responseStartedAt: attempt.responseStarted ? attempt.responseStartedAt : updatedAt,
+                resultHttpStatus: input.resultHttpStatus, unknownReason: null,
+                stateVersion: attempt.stateVersion + 1, updatedAt,
+              };
+              if (
+                attemptMap.get(attemptId)?.stateVersion !== attempt.stateVersion ||
+                state.requests.get(requestId)?.stateVersion !== requestVersion
+              ) throw new Error('fixture known non-success version conflict');
+              attemptMap.set(attemptId, updated);
+              state.requests.set(requestId, {
+                ...request, executionState: 'failed', reconciliationState: 'none', financialStatus,
+                stateVersion: requestVersion + requestVersionIncrement, updatedAt,
+              });
+              retainHold();
+              return structuredClone(updated);
+            });
+            call.afterAttemptVersion = result.stateVersion;
+            call.outcome = replayed ? 'replayed' : 'recorded';
+            return result;
+          } catch (error) {
+            call.outcome = 'rejected';
+            throw error;
+          }
         },
       },
       leaseProvider: {
@@ -723,6 +1052,78 @@ async function startFixture(options: { streaming?: boolean } = {}) {
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) return;
   await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+async function expectClaimAndDispatchContract(state: FixtureState): Promise<void> {
+  // EOF can be visible to the HTTP client just before the final sent CAS.
+  // Wait only for the real dispatcher to finish; never manufacture its result.
+  await expect.poll(() => state.attempts.get(ATTEMPT_ID)?.stateVersion, { timeout: 5_000 }).toBe(4);
+  expect(state.attemptReads).toHaveLength(2);
+  const [preClaim, postClaim] = state.attemptReads;
+  const finalAttempt = state.attempts.get(ATTEMPT_ID);
+  const evidence = state.evidence.get(EVIDENCE_ID);
+  if (!preClaim || !postClaim || !finalAttempt || !evidence) throw new Error('missing fixture dispatch records');
+  expect(preClaim).toMatchObject({
+    tenantId: TENANT_ID, requestId: REQUEST_ID, id: ATTEMPT_ID, ordinal: 1,
+    bindingState: 'bound', dispatchAuthorityState: 'bound', accountOwnerKind: 'platform',
+    accountId: 'account-e2e', credentialId: 'credential-e2e', credentialVersion: '20',
+    endpoint: ENDPOINT, routeTargetMode: 'platform_pool',
+    preparedEvidenceId: null, stateVersion: 1, dispatchState: 'not_sent', resultState: 'pending',
+    responseStarted: false, responseStartedAt: null, resultHttpStatus: null, unknownReason: null,
+  });
+  expect(postClaim).toMatchObject({
+    preparedEvidenceId: EVIDENCE_ID, stateVersion: 2, dispatchState: 'not_sent', resultState: 'pending',
+    responseStarted: false, responseStartedAt: null, resultHttpStatus: null, unknownReason: null,
+  });
+  expect(evidence).toMatchObject({
+    requestedModel: PUBLIC_MODEL, mappedModel: PROVIDER_MODEL, resolvedModel: PROVIDER_MODEL,
+    modelResolution: { requestedModel: PUBLIC_MODEL, mappedModel: PROVIDER_MODEL, resolvedModel: PROVIDER_MODEL },
+    status: 'claimed', claimedAttemptId: ATTEMPT_ID,
+  });
+  expect(evidence.modelResolution).toBeDefined();
+  expect(preClaim.modelResolution).toEqual(evidence.modelResolution);
+  expect(postClaim.modelResolution).toEqual(evidence.modelResolution);
+  expect(finalAttempt.modelResolution).toEqual(evidence.modelResolution);
+  const provenanceFields = [
+    'clientProtocol', 'providerProtocol', 'clientOperation', 'providerOperation',
+    'requestFingerprint', 'requestFingerprintVersion', 'payloadCompilerVersion', 'usageEstimatorVersion',
+    'payloadSha256',
+  ] as const;
+  for (const field of provenanceFields) {
+    expect(typeof evidence[field]).toBe('string');
+    expect(evidence[field]?.length).toBeGreaterThan(0);
+    expect(preClaim[field]).toBe(evidence[field]);
+    expect(postClaim[field]).toBe(evidence[field]);
+    expect(finalAttempt[field]).toBe(evidence[field]);
+  }
+  expect(state.attemptTransitions).toHaveLength(2);
+  expect(state.attemptTransitions[0]).toMatchObject({
+    tenantId: TENANT_ID, requestId: REQUEST_ID, attemptId: ATTEMPT_ID,
+    expectedDispatchState: 'not_sent', expectedResultState: 'pending', expectedResponseStarted: false,
+    expectedStateVersion: 2, dispatchState: 'dispatching', resultState: 'pending', responseStarted: false,
+  });
+  expect(state.attemptTransitions[1]).toMatchObject({
+    tenantId: TENANT_ID, requestId: REQUEST_ID, attemptId: ATTEMPT_ID,
+    expectedDispatchState: 'dispatching', expectedResultState: 'pending', expectedResponseStarted: false,
+    expectedStateVersion: 3, dispatchState: 'sent', resultState: 'pending', responseStarted: true,
+    resultHttpStatus: 200,
+  });
+  expect(finalAttempt).toMatchObject({
+    stateVersion: 4, preparedEvidenceId: EVIDENCE_ID, dispatchState: 'sent', resultState: 'pending',
+    resultHttpStatus: 200, responseStarted: true, unknownReason: null,
+  });
+  expect(finalAttempt.responseStartedAt).not.toBeNull();
+  expect(evidence.claimedAt).not.toBeNull();
+  expect(Date.parse(postClaim.updatedAt)).toBeGreaterThanOrEqual(Date.parse(preClaim.updatedAt));
+  expect(Date.parse(postClaim.updatedAt)).toBeGreaterThanOrEqual(Date.parse(evidence.claimedAt ?? ''));
+  expect(Date.parse(finalAttempt.updatedAt)).toBeGreaterThanOrEqual(Date.parse(postClaim.updatedAt));
+  expect(state.auditEvents).toHaveLength(1);
+  expect(state.auditEvents[0]).toMatchObject({
+    tenantId: TENANT_ID, actorUserId: 'member-e2e', action: 'saas_prepared_request_evidence.claimed',
+    targetType: 'saas_prepared_request_evidence', targetId: EVIDENCE_ID,
+    entryPoint: 'managed-saas-gateway-e2e', requestId: REQUEST_ID,
+  });
+  expect(state.auditEvents[0]?.occurredAt).toBe(evidence.claimedAt);
 }
 
 test('managed SaaS gateway authenticates a Proxy Key, resolves eligible platform supply, and reaches only a local HTTP upstream', async () => {
@@ -825,6 +1226,8 @@ test('managed SaaS gateway authenticates a Proxy Key, resolves eligible platform
     expect(app.state.authorityQueries.some((sql) => sql.includes('preparation-authority:platform'))).toBe(true);
     expect(app.state.authorityQueries.some((sql) => sql.includes('FROM saas_provider_capabilities'))).toBe(true);
     expect(app.state.authorityQueries.some((sql) => sql.includes('FROM saas_provider_rights'))).toBe(true);
+    await expectClaimAndDispatchContract(app.state);
+    expect(app.state.knownNonSuccessResponses).toHaveLength(0);
   } finally {
     await app.close();
   }
@@ -863,6 +1266,8 @@ test('managed SaaS gateway streams SSE over ProviderHttpTransport with the serve
     expect(app.state.requests.get(REQUEST_ID)?.id).toBe(REQUEST_ID);
     expect(app.state.attempts.get(ATTEMPT_ID)?.requestId).toBe(REQUEST_ID);
     expect(app.state.evidence.get(EVIDENCE_ID)?.requestId).toBe(REQUEST_ID);
+    await expectClaimAndDispatchContract(app.state);
+    expect(app.state.knownNonSuccessResponses).toHaveLength(0);
   } finally {
     await app.close();
   }
