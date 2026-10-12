@@ -1,0 +1,10 @@
+[Unit]
+# Convenience grouping only. Each workload remains independently
+# enable-able; multi-instance gateway deployments enable the gateway unit on
+# each node instead of this target.
+Description=model-router managed SaaS workloads (control-plane, gateway, credential-validation worker)
+Requires=model-router-saas-control-plane.service model-router-saas-gateway.service model-router-saas-credential-validation-worker.service
+After=model-router-saas-control-plane.service model-router-saas-gateway.service model-router-saas-credential-validation-worker.service
+
+[Install]
+WantedBy=multi-user.target

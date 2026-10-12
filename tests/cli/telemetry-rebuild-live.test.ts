@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -54,6 +54,83 @@ async function fixture() {
 }
 const command = (configPath: string, revision = '1') =>
   cli('telemetry:rebuild-live', '--config', configPath, '--expected-revision', revision);
+
+function watchSqliteHolder(child: ChildProcess) {
+  let closed = false;
+  let exited = false;
+  let processError: Error | undefined;
+  const onError = (error: Error) => { processError = error; };
+  child.on('error', onError);
+  child.once('exit', () => { exited = true; });
+  const close = new Promise<void>((resolve) => {
+    child.once('close', () => {
+      closed = true;
+      child.off('error', onError);
+      resolve();
+    });
+  });
+  const hasExited = () => exited || child.exitCode !== null || child.signalCode !== null;
+
+  async function waitForClose(milliseconds: number): Promise<boolean> {
+    if (closed) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        close.then(() => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), milliseconds); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+
+  function waitForReady(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let output = '';
+      const cleanup = () => {
+        clearTimeout(timer);
+        child.stdout?.off('data', onData);
+        child.off('error', onFailure);
+        child.off('exit', onFailure);
+        child.off('close', onFailure);
+      };
+      const onFailure = () => { cleanup(); reject(new Error('SQLite holder failed before readiness')); };
+      const onData = (data: Buffer) => {
+        output += data.toString();
+        if (output.length > 4096) { onFailure(); return; }
+        if (/(?:^|\n)ready\n/.test(output)) {
+          if (processError || hasExited() || closed) { onFailure(); return; }
+          cleanup();
+          resolve();
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('SQLite holder readiness deadline'));
+      }, 5_000);
+      child.stdout?.on('data', onData);
+      child.once('error', onFailure);
+      child.once('exit', onFailure);
+      child.once('close', onFailure);
+      // Lifecycle observation began immediately after spawn, before this wait.
+      if (processError || hasExited() || closed || !child.stdout) onFailure();
+    });
+  }
+
+  async function terminateAndClose(): Promise<void> {
+    const signal = (name: NodeJS.Signals) => {
+      if (closed || hasExited()) return;
+      try { child.kill(name); }
+      catch { processError = new Error('SQLite holder signal failed'); }
+    };
+    signal('SIGTERM');
+    if (!await waitForClose(2_000)) {
+      signal('SIGKILL');
+      if (!await waitForClose(2_000)) throw new Error('SQLite holder close deadline; cleanup unproved');
+    }
+    if (processError) throw new Error('SQLite holder lifecycle failed');
+  }
+
+  return { waitForReady, terminateAndClose, isClosed: () => closed };
+}
 
 test('offline CLI migrates pre-live database with nonzero request and attempt rows', async () => {
   const f = await fixture();
@@ -114,6 +191,7 @@ test('empty database returns zero counts; stale revision and V1 are refused', as
 test('configured listener or another process with DB open refuses rebuild', async () => {
   const f = await fixture();
   const listener = createServer();
+  let holder: ReturnType<typeof watchSqliteHolder> | undefined;
   try {
     await new Promise<void>((resolve) => listener.listen(f.port, '127.0.0.1', resolve));
     const online = await command(f.configPath);
@@ -129,23 +207,19 @@ test('configured listener or another process with DB open refuses rebuild', asyn
       ],
       { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
     );
+    holder = watchSqliteHolder(child);
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout?.once('data', (data) => {
-          if (String(data).includes('ready')) resolve();
-        });
-        child.once('exit', () => reject(new Error('holder exited')));
-      });
+      await holder.waitForReady();
       const held = await command(f.configPath);
       assert.equal(held.code, 1);
       assert.match(held.stderr, /open in another process/);
     } finally {
-      child.kill('SIGTERM');
-      await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      await holder.terminateAndClose();
     }
   } finally {
     if (listener.listening) await new Promise<void>((resolve) => listener.close(() => resolve()));
-    f.close();
+    // Retain the owned DB if the holder's close could not be confirmed.
+    if (!holder || holder.isClosed()) f.close();
   }
 });
 

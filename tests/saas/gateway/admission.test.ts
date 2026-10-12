@@ -52,6 +52,14 @@ interface FakeAuditRow {
   requestId: string;
 }
 
+interface FakeRateCounterRow {
+  accountScope: string;
+  accountId: string;
+  windowStart: string;
+  requests: number;
+  tokens: bigint;
+}
+
 interface FakeAdmissionState {
   requests: RequestRecord[];
   attempts: AttemptRecord[];
@@ -59,6 +67,7 @@ interface FakeAdmissionState {
   outbox: FakeOutboxRow[];
   reservations: ReserveBillingInput[];
   audits: FakeAuditRow[];
+  rateCounters: FakeRateCounterRow[];
   events: string[];
   failOutbox: boolean;
   failAudit: boolean;
@@ -76,6 +85,7 @@ function emptyState(): FakeAdmissionState {
     outbox: [],
     reservations: [],
     audits: [],
+    rateCounters: [],
     events: [],
     failOutbox: false,
     failAudit: false,
@@ -103,6 +113,33 @@ class FakeAdmissionExecutor implements SqlExecutor {
         eventKey: String(values[6]),
         payload: String(values[8]),
       });
+    }
+    if (statement.startsWith('insert into saas_provider_account_rate_counters')) {
+      this.state.events.push('rate-counter');
+      // Emulate date_trunc('second', $3::timestamptz) plus the ON CONFLICT
+      // accumulate semantics of the production upsert.
+      const window = new Date(String(values[2]));
+      window.setUTCMilliseconds(0);
+      const windowStart = window.toISOString();
+      const tokens = BigInt(String(values[3]));
+      const existing = this.state.rateCounters.find(
+        (row) =>
+          row.accountScope === String(values[0]) &&
+          row.accountId === String(values[1]) &&
+          row.windowStart === windowStart,
+      );
+      if (existing) {
+        existing.requests += 1;
+        existing.tokens += tokens;
+      } else {
+        this.state.rateCounters.push({
+          accountScope: String(values[0]),
+          accountId: String(values[1]),
+          windowStart,
+          requests: 1,
+          tokens,
+        });
+      }
     }
     if (statement.startsWith('insert into saas_audit_events')) {
       if (this.state.failAudit) throw new Error('injected audit failure');
@@ -584,7 +621,15 @@ test('platform admission prelocks first and uses one executor for all admission 
   assert.equal(billing.calls[0]?.input.amountMinorUnits, 125n);
   assert.equal(billing.calls[0]?.input.priceSnapshotRef, 'snapshot-from-guard');
   assert.equal(billing.calls[0]?.input.expiresAt, '2026-09-28T00:06:00.000Z');
-  assert.deepEqual(database.state.events, ['prelock', 'metering', 'guard', 'billing', 'outbox', 'audit']);
+  assert.deepEqual(database.state.events, [
+    'prelock',
+    'metering',
+    'guard',
+    'billing',
+    'rate-counter',
+    'outbox',
+    'audit',
+  ]);
   assert.equal(
     billing.calls[0]?.input.businessKey,
     createRequestAdmissionReservationBusinessKey('tenant-a', 'request-1'),
@@ -629,7 +674,7 @@ test('joins a caller-owned outer executor without opening a nested transaction',
   assert.equal(metering.executors[0], outer);
   assert.equal(guard.inputs[0]?.executor, outer);
   assert.equal(billing.calls[0]?.executor, outer);
-  assert.deepEqual(outer.state.events, ['prelock', 'metering', 'guard', 'billing', 'outbox', 'audit']);
+  assert.deepEqual(outer.state.events, ['prelock', 'metering', 'guard', 'billing', 'rate-counter', 'outbox', 'audit']);
 });
 
 test('caller monetary fields cannot override the guard hold facts', async () => {
@@ -1026,4 +1071,142 @@ test('the migration constrains the outbox to bounded metadata and future deliver
   assert.doesNotMatch(sql, /\blast_error\b/i);
   assert.match(sql, /payload_metadata_only/i);
   assert.doesNotMatch(sql, /request_body|response_body|provider_secret|customer_key/i);
+});
+
+test('platform admission upserts the account rate counter on the commit transaction', async () => {
+  const { database, metering, service } = createService();
+
+  const result = await service.admit(platformCommand());
+
+  assert.equal(result.kind, 'created');
+  assert.equal(database.state.rateCounters.length, 1);
+  assert.deepEqual(database.state.rateCounters[0], {
+    accountScope: 'platform',
+    accountId: 'platform-account-a',
+    windowStart: fixedNow.toISOString(),
+    requests: 1,
+    // KEY-BUD upper bound: inputTotal 100 + outputTotal 50.
+    tokens: 150n,
+  });
+  // The upsert shares the admission commit executor with every other write.
+  const counterStatement = database.executors[0]?.statements.find(({ sql }) =>
+    sql.includes('saas_provider_account_rate_counters'),
+  );
+  assert.ok(counterStatement);
+  assert.equal(database.executors[0], metering.executors[0]);
+  assert.match(counterStatement?.sql ?? '', /ON CONFLICT \(account_scope, account_id, window_start\)/);
+  assert.match(counterStatement?.sql ?? '', /date_trunc\('second', \$3::timestamptz\)/);
+  assert.deepEqual(counterStatement?.values, ['platform', 'platform-account-a', fixedNow.toISOString(), '150']);
+});
+
+test('same-second admissions accumulate; a new second opens a new truncated row', async () => {
+  const database = new FakeAdmissionDatabase();
+  const metering = new FakeMetering();
+  const billing = new FakeBilling();
+  const guard = new FakeGuard();
+  const prelock = new FakeAuthorizationPrelock();
+  let clock = new Date('2026-09-28T00:00:00.123Z').getTime();
+  const service = new SaasRequestAdmissionService(database, metering, billing, guard, prelock, {
+    idFactory: () => 'outbox-1',
+    now: () => new Date(clock),
+  });
+  const admit = (idempotencyKey: string) => {
+    const request = createRequest('platform', idempotencyKey);
+    return service.admit({
+      supplyMode: 'platform',
+      request,
+      authenticatedKey: authenticatedKeyForRequest(request),
+      holdEvidence: {
+        inputTotal: 10,
+        inputUncached: 10,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
+        outputTotal: 5,
+        reasoningOutput: 0,
+        admissionExpiresAt: '2026-09-28T00:05:00.000Z',
+      },
+    });
+  };
+
+  await admit('key-1');
+  // The fake metering port replays on tenant+proxyKey; reset it so each
+  // admission is an independent created request against the same account.
+  database.state.idempotency = [];
+  await admit('key-2');
+  assert.equal(database.state.rateCounters.length, 1);
+  assert.deepEqual(database.state.rateCounters[0], {
+    accountScope: 'platform',
+    accountId: 'platform-account-a',
+    // Milliseconds are truncated to the counter second.
+    windowStart: '2026-09-28T00:00:00.000Z',
+    requests: 2,
+    tokens: 30n,
+  });
+
+  clock = new Date('2026-09-28T00:00:01.456Z').getTime();
+  database.state.idempotency = [];
+  await admit('key-3');
+  assert.equal(database.state.rateCounters.length, 2);
+  assert.deepEqual(database.state.rateCounters[1], {
+    accountScope: 'platform',
+    accountId: 'platform-account-a',
+    windowStart: '2026-09-28T00:00:01.000Z',
+    requests: 1,
+    tokens: 15n,
+  });
+});
+
+test('BYOK admission advances only the request dimension', async () => {
+  const { database, service } = createService();
+  const request = createRequest('byok');
+
+  const result = await service.admit({
+    supplyMode: 'byok',
+    request,
+    authenticatedKey: authenticatedKeyForRequest(request),
+  });
+
+  assert.equal(result.kind, 'created');
+  assert.deepEqual(database.state.rateCounters, [
+    {
+      accountScope: 'tenant',
+      accountId: 'tenant-account-a',
+      windowStart: fixedNow.toISOString(),
+      requests: 1,
+      tokens: 0n,
+    },
+  ]);
+});
+
+test('a replayed admission never double counts account rate', async () => {
+  const { database, service } = createService();
+
+  const first = await service.admit(platformCommand());
+  const replay = await service.admit(platformCommand());
+
+  assert.equal(first.kind, 'created');
+  assert.equal(replay.kind, 'replayed');
+  assert.equal(database.state.rateCounters.length, 1);
+  assert.equal(database.state.rateCounters[0]?.requests, 1);
+});
+
+test('a rolled-back admission leaves no rate counter residue', async () => {
+  const { database, service } = createService();
+  database.state.failOutbox = true;
+
+  await assert.rejects(service.admit(platformCommand()), /injected outbox failure/);
+
+  assert.equal(database.commits, 0);
+  assert.equal(database.rollbacks, 1);
+  assert.equal(database.state.rateCounters.length, 0);
+  // The upsert did run inside the doomed transaction, before the outbox write.
+  const executor = database.executors[0];
+  const events = executor?.state.events ?? [];
+  assert.ok(events.indexOf('rate-counter') > events.indexOf('billing'));
+  const statements = executor?.statements.map(({ sql }) => sql) ?? [];
+  const counterAt = statements.findIndex((sql) => sql.includes('saas_provider_account_rate_counters'));
+  const outboxAt = statements.findIndex((sql) => sql.includes('saas_request_admission_outbox'));
+  assert.ok(counterAt !== -1 && outboxAt !== -1 && counterAt < outboxAt);
 });

@@ -27,6 +27,18 @@ async function exactlyOne(tx: SqlExecutor, sql: string, values: readonly unknown
 }
 
 /**
+ * KEY-BUD (contract C-4) budget counter resolution slice. Runs in the same
+ * compensation transaction; errors roll the transaction back. Absent disables
+ * budget accounting (pre-081 behavior).
+ */
+export interface PreDispatchCompensationKeyBudget {
+  release(
+    executor: SqlExecutor,
+    input: { readonly tenantId: string; readonly requestId: string },
+  ): Promise<boolean>;
+}
+
+/**
  * Uses the caller's executor exclusively. All authority reads and CAS writes
  * occur in that transaction. Any failed write MUST escape to roll it back.
  * The caller must not commit a reject/block decision after partial cleanup.
@@ -35,6 +47,7 @@ export class PostgresPreDispatchCompensation implements RequestPreparationCompen
   constructor(private readonly options: {
     readonly capacity?: PostgresPreparationCapacityPort;
     readonly billing: Pick<PlatformWalletLedgerService, 'release'>;
+    readonly keyBudget?: PreDispatchCompensationKeyBudget;
   }) {}
 
   async releasePreDispatch(input: RequestPreparationCompensationInput, sqlOptions?: RequestPreparationSqlOptions) {
@@ -175,6 +188,12 @@ export class PostgresPreDispatchCompensation implements RequestPreparationCompen
       if (released.id !== hold.reservationId || released.tenantId !== input.tenantId ||
         released.requestId !== input.requestId || released.state !== 'released') throw new Error(SAFE_FAILURE);
     } else if (input.admission.holdReservation !== null) throw new Error(SAFE_FAILURE);
+    // KEY-BUD (contract C-4): pre-dispatch cancellation drops the admission
+    // budget reservation without recording usage, for both supply modes;
+    // replay and pre-081 drift are no-ops inside the store.
+    if (this.options.keyBudget) {
+      await this.options.keyBudget.release(tx, { tenantId: input.tenantId, requestId: input.requestId });
+    }
     await exactlyOne(tx,
       `UPDATE saas_requests SET execution_state = 'failed', financial_status = $4,
               updated_at = clock_timestamp(), state_version = state_version + 1

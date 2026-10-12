@@ -15,6 +15,11 @@ import type {
 } from './endpoint-service.js';
 import { assertWebhookUuid, CUSTOMER_WEBHOOK_EVENT_TYPES, type CustomerWebhookEventType } from './events.js';
 
+/** Minimal dead-letter replay surface; the durable store owns the state machine. */
+export interface CustomerWebhookReplayStore {
+  replayDeadLetter(actor: CustomerWebhookActorContext, deliveryId: string): Promise<boolean>;
+}
+
 const API_PREFIX = '/console/api/v1';
 const SESSION_COOKIE_NAME = 'mr_saas_session';
 const CSRF_COOKIE_NAME = 'mr_saas_csrf';
@@ -40,12 +45,20 @@ export interface CustomerWebhookHttpOptions {
     | 'readEndpoint'
     | 'listSigningSecretMetadata'
   >;
+  /** Omitted only where dead-letter replay is not mounted; replay then returns 503. */
+  readonly deliveryStore?: CustomerWebhookReplayStore;
   readonly publicOrigin: string;
 }
 
 type Route =
   | { readonly operation: 'list' | 'create'; readonly tenantId: string }
   | { readonly operation: 'listDeliveries'; readonly tenantId: string; readonly endpointId: string }
+  | {
+      readonly operation: 'replayDelivery';
+      readonly tenantId: string;
+      readonly endpointId: string;
+      readonly deliveryId: string;
+    }
   | {
       readonly operation: 'read' | 'update' | 'disable' | 'enable' | 'revoke' | 'rotate' | 'listSecrets';
       readonly tenantId: string;
@@ -167,6 +180,16 @@ function findRoute(path: string, method: string): Route | undefined {
       default:
         return undefined;
     }
+  }
+  if (rest.length === 4 && rest[1] === 'deliveries' && rest[3] === 'replay') {
+    const endpointId = pathIdentifier(rest[0] ?? '', 'endpoint');
+    const deliveryId = pathIdentifier(rest[2] ?? '', 'delivery');
+    try {
+      assertWebhookUuid(deliveryId, 'delivery');
+    } catch {
+      throw new HttpError(400, 'INVALID_PATH', 'The delivery identifier is invalid');
+    }
+    return { operation: 'replayDelivery', tenantId, endpointId, deliveryId };
   }
   if (rest.length === 4 && rest[1] === 'secrets' && rest[3] === 'revoke') {
     const endpointId = pathIdentifier(rest[0] ?? '', 'endpoint');
@@ -452,7 +475,9 @@ function serviceError(error: unknown): HttpError {
     code === 'WEBHOOK_ENDPOINT_REVOKED' ||
     code === 'WEBHOOK_SECRET_UNAVAILABLE' ||
     code === 'WEBHOOK_SECRET_ROTATION_CONFLICT' ||
-    code === 'WEBHOOK_SECRET_STATE_INVALID'
+    code === 'WEBHOOK_SECRET_STATE_INVALID' ||
+    code === 'WEBHOOK_TENANT_QUOTA_EXCEEDED' ||
+    code === 'WEBHOOK_REPLAY_STATE_CONFLICT'
   ) {
     return new HttpError(409, 'WEBHOOK_STATE_CONFLICT', 'The webhook resource cannot be changed in its current state');
   }
@@ -476,6 +501,7 @@ function methodAllowed(route: Route): string {
     case 'enable':
     case 'revoke':
     case 'rotate':
+    case 'replayDelivery':
       return 'POST';
   }
 }
@@ -584,6 +610,33 @@ export function createCustomerWebhookHandler(options: CustomerWebhookHttpOptions
           limit,
         });
         sendJson(res, 200, requestId, history);
+        return true;
+      }
+
+      if (route.operation === 'replayDelivery') {
+        if (url.search !== '') throw new HttpError(400, 'INVALID_QUERY', 'The query is invalid');
+        requireManager(context);
+        await readOptionalEmptyObject(req);
+        const store = options.deliveryStore;
+        if (!store || typeof store.replayDeadLetter !== 'function') {
+          throw new HttpError(503, 'WEBHOOK_REPLAY_UNAVAILABLE', 'Dead-letter replay is not available');
+        }
+        // Reuse the endpoint service's active membership and tenant ownership check,
+        // then bind the path delivery to the path endpoint before any state change.
+        await options.endpointService.readEndpoint(actor, route.endpointId);
+        const ownership = await options.database.query(
+          `SELECT 1 FROM saas_customer_webhook_deliveries
+           WHERE tenant_id = $1 AND id = $2 AND endpoint_id = $3`,
+          [context.tenantId, route.deliveryId, route.endpointId],
+        );
+        if (ownership.rows.length !== 1) {
+          throw new HttpError(404, 'NOT_FOUND', 'The requested resource was not found');
+        }
+        const replayed = await store.replayDeadLetter(actor, route.deliveryId);
+        if (!replayed) {
+          throw new HttpError(409, 'WEBHOOK_STATE_CONFLICT', 'The delivery cannot be replayed in its current state');
+        }
+        sendJson(res, 200, requestId, { deliveryId: route.deliveryId, replayed: true });
         return true;
       }
 

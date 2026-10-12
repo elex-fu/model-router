@@ -21,6 +21,7 @@ import type {
   ReleaseBillingInput,
   ReserveBillingInput,
   SettleBillingInput,
+  UsageCorrectionPostingInput,
   VerifiedFundingInput,
   WalletRecord,
 } from './types.js';
@@ -28,6 +29,7 @@ import type {
 const RESERVATION_NAMESPACE = 'saas.billing.reservation';
 const SETTLEMENT_NAMESPACE = 'saas.billing.settlement';
 const FUNDING_NAMESPACE = 'saas.wallet.funding';
+const USAGE_CORRECTION_NAMESPACE = 'metering.usage-correction';
 const MAX_TEXT_LENGTH = 512;
 
 type StoredTimestamp = string | Date;
@@ -286,7 +288,8 @@ function mapLedgerTransactionRow(row: LedgerTransactionRow): LedgerTransactionRo
   if (
     row.source_type !== 'wallet_funding' &&
     row.source_type !== 'billing_settlement' &&
-    row.source_type !== 'wallet_refund'
+    row.source_type !== 'wallet_refund' &&
+    row.source_type !== 'usage_correction'
   ) {
     throw new SaasBillingError('BILLING_STORAGE_ERROR');
   }
@@ -302,7 +305,14 @@ function mapLedgerTransactionRow(row: LedgerTransactionRow): LedgerTransactionRo
 }
 
 function toLedgerSource(value: LedgerTransactionSource): LedgerTransactionSource {
-  if (value === 'wallet_funding' || value === 'billing_settlement' || value === 'wallet_refund') return value;
+  if (
+    value === 'wallet_funding' ||
+    value === 'billing_settlement' ||
+    value === 'wallet_refund' ||
+    value === 'usage_correction'
+  ) {
+    return value;
+  }
   throw new SaasBillingError('INVALID_INPUT');
 }
 
@@ -723,6 +733,56 @@ export class PlatformWalletLedgerService {
       // transaction. Exclude it from this intermediate projection so active
       // billing holds are not double-counted against the just-debited amount.
       const currentWallet = await this.walletSummary(executor, projected, refundOrderId);
+      return {
+        transactionId: posting.transaction.id,
+        replayed: !posting.created,
+        wallet: currentWallet,
+      };
+    });
+  }
+
+  /**
+   * Post the signed wallet effect of an append-only usage correction. The
+   * metering correction service calls this in the same transaction that
+   * inserts the correction event, so the event and its ledger posting commit
+   * or roll back together. The correction digest is the idempotency key; a
+   * replay returns the original posting unchanged. A negative delta that
+   * would take the wallet below zero fails closed (INSUFFICIENT_FUNDS) —
+   * balances never go negative.
+   */
+  async postUsageCorrection(
+    executor: BillingTransactionExecutor,
+    input: UsageCorrectionPostingInput,
+  ): Promise<{ readonly transactionId: string; readonly replayed: boolean; readonly wallet: WalletRecord }> {
+    this.requireExecutor(executor);
+    return this.withSafeStorage(async () => {
+      const tenantId = normalizeTenantId(input.tenantId);
+      const currency = normalizeCurrency(input.currency);
+      const delta = input.amountDeltaMinorUnits;
+      if (typeof delta !== 'bigint' || delta === 0n) throw new SaasBillingError('INVALID_INPUT');
+      const correctionEventId = normalizeText(input.correctionEventId);
+      const correctionDigest = normalizeText(input.correctionDigest);
+      const wallet = await this.lockWallet(executor, tenantId, currency);
+      const posting = await this.postLedgerTransaction(executor, {
+        id: this.idFactory(),
+        tenantId,
+        currency,
+        identity: { namespace: USAGE_CORRECTION_NAMESPACE, businessKey: correctionDigest },
+        sourceType: toLedgerSource('usage_correction'),
+        amountMinorUnits: delta > 0n ? delta : -delta,
+        metadataRef: correctionDigest,
+        sourceOrderRef: `usage-correction:${correctionEventId}`,
+        priceSnapshotRef: null,
+        usageEvidenceRef: null,
+        walletId: wallet.id,
+        walletDirection: delta > 0n ? 'credit' : 'debit',
+        counterpartyAccountType: 'billing_revenue',
+        counterpartyAccountRef: correctionEventId,
+      });
+      const projected = posting.created
+        ? await this.adjustWalletProjection(executor, wallet, posting.transaction.id, delta)
+        : wallet;
+      const currentWallet = await this.walletSummary(executor, projected);
       return {
         transactionId: posting.transaction.id,
         replayed: !posting.created,

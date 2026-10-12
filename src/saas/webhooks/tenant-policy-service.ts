@@ -113,8 +113,8 @@ export class CustomerWebhookTenantPolicyService {
       const audit = await tx.query(
         `INSERT INTO saas_audit_events
            (id, tenant_id, actor_user_id, action, target_type, target_id, entry_point, request_id)
-         VALUES ($1, $2, $3, 'customer_webhook.tenant_policy_updated', 'customer_webhook_tenant_policy', $2, 'platform_admin', $4)`,
-        [auditId, tenantId, actor.actorUserId, actor.requestId],
+         VALUES ($1, $2, $3, 'customer_webhook.tenant_policy_updated', 'customer_webhook_tenant_policy', $5, 'platform_admin', $4)`,
+        [auditId, tenantId, actor.actorUserId, actor.requestId, tenantId],
       );
       if (audit.rowCount !== 1) throw new Error('WEBHOOK_AUDIT_WRITE_FAILED');
       const result = await tx.query<{

@@ -396,12 +396,19 @@ async function login(app: App, fixture: Fixture, userId: string): Promise<Sessio
     method: 'POST', headers: { origin: app.origin(), 'content-type': 'application/json' },
     body: JSON.stringify({ email, password: fixture.password }),
   });
-  const cookies = setCookies(reply); assert.equal(cookies.length, 2, 'two real login cookies required');
+  const cookies = setCookies(reply); assert.equal(cookies.length, 4, 'two expired CSRF paths followed by two real login cookies required');
+  assert.equal(cookies.filter(value => !value.includes('Max-Age=0')).length, 2, 'two live real login cookies required');
+  const expiredCsrf = cookies.filter(value => value.startsWith('mr_saas_csrf=;') && value.includes('Max-Age=0'));
+  assert.equal(expiredCsrf.length, 2);
+  assert.deepEqual(expiredCsrf.map(value => /(?:^|; )Path=([^;]+)/.exec(value)?.[1]).sort(), ['/console', '/console/api/v1']);
+  assert.ok(expiredCsrf.every(value => value.includes('SameSite=Strict') && !value.includes('HttpOnly')));
   const pair = (name: string): { cookie: string; token: string } => {
-    const matches = cookies.filter(value => value.startsWith(`${name}=`)); assert.equal(matches.length, 1);
+    const matches = cookies.filter(value => value.startsWith(`${name}=`) && !value.includes('Max-Age=0')); assert.equal(matches.length, 1);
     const value = matches[0]!;
-    assert.ok(value.includes('Path=/console/api/v1') && value.includes('SameSite=Strict') && value.includes('Max-Age=900'));
+    assert.match(value, name === 'mr_saas_session' ? /(?:^|; )Path=\/console\/api\/v1(?:;|$)/ : /(?:^|; )Path=\/console(?:;|$)/);
+    assert.ok(value.includes('SameSite=Strict') && value.includes('Max-Age=900'));
     if (name === 'mr_saas_session') assert.ok(value.includes('HttpOnly'), 'real session cookie must be HttpOnly');
+    else assert.ok(!value.includes('HttpOnly'), 'only CSRF double-submit value is readable by the portal');
     const cookie = value.split(';', 1)[0]!;
     const token = decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1));
     assert.ok(/^[A-Za-z0-9_-]{43}$/.test(token), 'opaque real customer credential required');
@@ -584,7 +591,10 @@ test('tenant member directory: real customer HTTP sessions and restricted PG15/1
       } });
       assert.deepEqual(successful(reply, fixture), { loggedOut: true });
       const expired = setCookies(reply);
-      assert.equal(expired.length, 2); assert.ok(expired.every(cookie => cookie.includes('Max-Age=0')));
+      assert.equal(expired.length, 3); assert.ok(expired.every(cookie => cookie.includes('Max-Age=0')));
+      assert.deepEqual(expired.map(value => value.split(';').map(part => part.trim()).filter(part => part.startsWith('Path=') || part === 'HttpOnly').join(';')).sort(),
+        ['HttpOnly;Path=/console/api/v1', 'Path=/console', 'Path=/console/api/v1'].sort());
+      assert.ok(expired.every(value => value.includes('SameSite=Strict') && value.includes('Expires=Thu, 01 Jan 1970')));
       denied(await http.request('/auth/session', { headers: { cookie: current.cookie } }), fixture, 401, 'UNAUTHENTICATED');
       denied(await get(actor, fixture.tenantId, `?cursor=${encodeURIComponent(cursor)}`), fixture, 401, 'UNAUTHENTICATED');
       denied(await get(actor), fixture, 401, 'UNAUTHENTICATED');

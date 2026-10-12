@@ -15,7 +15,7 @@ import { REQUIRED_FLAG, anyRoleConfigured, completeLegacy, observedDatabase, obs
 interface Snapshot {
   usage: string; settlements: string; wallets: string; balance: string; walletLedger: string;
   reservations: string; activeHold: string; billingTransactions: string; entries: string; unbalanced: string;
-  prices: string; evidence: string; providerLeases: string; capacity: string;
+  prices: string; evidence: string; providerLeases: string; capacity: string; activeCapacity: string;
   requestFacts: string; attemptFacts: string; usageFacts: string; settlementFacts: string; holdFacts: string;
 }
 async function snapshot(migrator: SqlExecutor, fixture: Fixture): Promise<Snapshot> {
@@ -44,6 +44,8 @@ async function snapshot(migrator: SqlExecutor, fixture: Fixture): Promise<Snapsh
         (SELECT count(*)::text FROM saas_prepared_request_evidence WHERE tenant_id = $1 AND status = 'claimed') AS evidence,
         (SELECT count(*)::text FROM saas_provider_account_leases WHERE tenant_id = $1) AS "providerLeases",
         (SELECT count(*)::text FROM saas_gateway_capacity_reservations WHERE tenant_id = $1) AS capacity,
+        (SELECT count(*)::text FROM saas_gateway_capacity_reservations
+          WHERE tenant_id = $1 AND state IN ('reserved', 'retained_for_reconciliation')) AS "activeCapacity",
         (SELECT md5(COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.id), '[]'::jsonb)::text)
            FROM saas_requests r WHERE tenant_id = $1) AS "requestFacts",
         (SELECT md5(COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id), '[]'::jsonb)::text)
@@ -231,6 +233,8 @@ test('FIN057: real persistent normal-success evidence and terminal replay under 
       const before = await snapshot(migrator.database, fixture);
       assert.equal(before.usage, '0'); assert.equal(before.settlements, '0');
       assert.equal(before.evidence, '1');
+      assert.equal(before.capacity, '1', 'the fixture seeds the dispatch capacity reservation');
+      assert.equal(before.activeCapacity, '1', 'dispatch requires an active capacity reservation');
       assert.equal(before.activeHold, mode === 'platform' ? '50' : '0');
       const completed = await phase('first_complete', () => port.complete(fixture.input));
       assert.equal(completed.kind, 'settled');
@@ -238,7 +242,12 @@ test('FIN057: real persistent normal-success evidence and terminal replay under 
       await assertPersistedProof(fixture, false);
       const committed = await snapshot(migrator.database, fixture);
       assert.equal(committed.usage, '1'); assert.equal(committed.settlements, '1');
-      assert.equal(committed.providerLeases, '0'); assert.equal(committed.capacity, '0');
+      assert.equal(committed.providerLeases, '0');
+      // Migration 038 retains the reservation as no-delete idempotency evidence;
+      // only pre-dispatch compensation releases/retains it, so a normal-success
+      // settlement leaves the active reservation row in place.
+      assert.equal(committed.capacity, '1');
+      assert.equal(committed.activeCapacity, '1');
       if (mode === 'byok') {
         assert.equal(committed.wallets, '0'); assert.equal(committed.balance, '0');
         assert.equal(committed.reservations, '0'); assert.equal(committed.billingTransactions, '0'); assert.equal(committed.entries, '0');

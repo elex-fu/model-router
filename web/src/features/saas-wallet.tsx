@@ -30,6 +30,7 @@ interface LedgerPosition {
 const ledgerTypeLabels = {
   top_up: '钱包充值',
   usage_charge: '模型用量结算',
+  wallet_refund: '钱包充值退款',
 };
 
 interface StoredTopUp {

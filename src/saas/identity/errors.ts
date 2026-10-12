@@ -12,7 +12,9 @@ export type SaasIdentityErrorCode =
   | 'INVALID_INVITATION_ROLE'
   | 'INVITATION_PENDING'
   | 'INVITATION_INVALID'
-  | 'INVITATION_ALREADY_MEMBER';
+  | 'INVITATION_ALREADY_MEMBER'
+  | 'MEMBER_NOT_FOUND'
+  | 'LAST_OWNER_REQUIRED';
 
 const safeMessages: Record<SaasIdentityErrorCode, string> = {
   INVALID_INPUT: 'The request contains invalid identity data.',
@@ -29,6 +31,8 @@ const safeMessages: Record<SaasIdentityErrorCode, string> = {
   INVITATION_PENDING: 'A valid invitation already exists for this email address.',
   INVITATION_INVALID: 'The invitation is invalid, expired, or cannot be accepted.',
   INVITATION_ALREADY_MEMBER: 'This user already has an active membership in the tenant.',
+  MEMBER_NOT_FOUND: 'The requested tenant member was not found.',
+  LAST_OWNER_REQUIRED: 'The tenant must retain at least one active owner.',
 };
 
 export class SaasIdentityError extends Error {

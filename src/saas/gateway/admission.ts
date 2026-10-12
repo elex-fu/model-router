@@ -17,6 +17,7 @@ import type {
   SaasRequestAdmissionAuthenticatedKey,
   SaasRequestAdmissionAuthorizationPrelock,
 } from './authorization-prelock.js';
+import type { ClientAddressResolution } from './client-address.js';
 
 const REQUEST_ADMISSION_OUTBOX_EVENT_TYPE = 'request.admitted' as const;
 const REQUEST_ADMISSION_OUTBOX_SCHEMA_VERSION = 1 as const;
@@ -31,6 +32,12 @@ export type AdmissionCreateRequestInput = CreateRequestInput & {
 
 interface AdmissionAuthorizationEvidenceCommand {
   readonly authenticatedKey: SaasRequestAdmissionAuthenticatedKey;
+  /**
+   * Server-resolved client address evidence (contract C-4). Only a trusted
+   * composition boundary may set this; the admission guard fails closed on a
+   * non-disabled key IP policy when it is absent or unresolved.
+   */
+  readonly clientAddress?: ClientAddressResolution;
 }
 
 export interface ByokRequestAdmissionCommand extends AdmissionAuthorizationEvidenceCommand {
@@ -131,6 +138,8 @@ export interface SaasRequestAdmissionGuardInput {
   readonly request: RequestRecord;
   readonly candidate: AttemptRecord;
   readonly holdEvidence: PlatformRequestAdmissionHoldEvidence | null;
+  /** Server-resolved client address evidence; null/absent fails closed against a non-disabled key IP policy. */
+  readonly clientAddress?: ClientAddressResolution | null;
 }
 
 /** Authoritative facts revalidated by a concrete DB-backed admission guard. */
@@ -197,12 +206,14 @@ type NormalizedCommand =
       readonly supplyMode: 'byok';
       readonly request: AdmissionCreateRequestInput;
       readonly authenticatedKey: SaasRequestAdmissionAuthenticatedKey;
+      readonly clientAddress?: ClientAddressResolution;
     }
   | {
       readonly supplyMode: 'platform';
       readonly request: AdmissionCreateRequestInput;
       readonly holdEvidence: PlatformRequestAdmissionHoldEvidence;
       readonly authenticatedKey: SaasRequestAdmissionAuthenticatedKey;
+      readonly clientAddress?: ClientAddressResolution;
     };
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -302,15 +313,28 @@ function requireHoldEvidence(value: unknown, label: string): PlatformRequestAdmi
   };
 }
 
+function normalizeClientAddressEvidence(value: unknown): ClientAddressResolution | undefined {
+  if (value === undefined || value === null) return undefined;
+  const record = requireRecord(value, 'clientAddress');
+  if (
+    (record.status === 'resolved' && typeof record.address === 'string' && record.address.trim() !== '') ||
+    record.status === 'unresolved'
+  ) {
+    return record as unknown as ClientAddressResolution;
+  }
+  throw new TypeError('clientAddress must be a client address resolution');
+}
+
 function normalizeCommand(command: SaasRequestAdmissionCommand): NormalizedCommand {
   const record = requireRecord(command, 'admission command');
   const supplyMode = record.supplyMode;
   const request = requireAdmissionRequest(record.request);
   const authenticatedKey = requireAdmissionAuthenticatedKey(record.authenticatedKey);
+  const clientAddress = normalizeClientAddressEvidence(record.clientAddress);
 
   if (supplyMode === 'byok') {
     if (request.supplyMode !== 'byok') throw new TypeError('BYOK admission requires a BYOK request');
-    return { supplyMode, request, authenticatedKey };
+    return { supplyMode, request, authenticatedKey, clientAddress };
   }
 
   if (supplyMode !== 'platform') throw new TypeError('admission command supplyMode is invalid');
@@ -320,6 +344,7 @@ function normalizeCommand(command: SaasRequestAdmissionCommand): NormalizedComma
       supplyMode,
       request,
       authenticatedKey,
+      clientAddress,
       holdEvidence: requireHoldEvidence(record.holdEvidence, 'platform holdEvidence'),
     };
   }
@@ -327,6 +352,7 @@ function normalizeCommand(command: SaasRequestAdmissionCommand): NormalizedComma
     supplyMode,
     request,
     authenticatedKey,
+    clientAddress,
     holdEvidence: {
       ...requireHoldInput(record.holdInput, 'platform holdInput'),
       admissionExpiresAt: normalizeAdmissionExpiry(record.admissionExpiresAt, 'platform admissionExpiresAt'),
@@ -723,6 +749,7 @@ export class SaasRequestAdmissionService {
           request: admission.request,
           candidate: initialAttempt,
           holdEvidence: holdEvidenceSnapshot,
+          clientAddress: normalized.clientAddress ?? null,
         }),
         requestSnapshot,
         candidateSnapshot,
@@ -752,11 +779,44 @@ export class SaasRequestAdmissionService {
         });
       }
 
+      await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
+
       const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);
       await this.appendAdmissionAuditEvent(tx, admission, outboxEvent.createdAt);
       return { ...admission, reservation, outboxEvent };
     };
     return options.executor ? work(options.executor) : this.database.transaction(work);
+  }
+
+  /**
+   * R6 (migration 098, docs/remaining-capability-plan-2026-10-11.md): the
+   * PostgreSQL-authoritative per-account consumption counter. This runs on
+   * the admission commit transaction — the same atomic boundary that persists
+   * the request and its initial attempt — so only a committed admission
+   * consumes account rate, replays/tombstones never double count, and a
+   * rolled-back admission leaves no counter residue. The token dimension uses
+   * the validated platform hold-evidence upper bound (the KEY-BUD admission
+   * semantics); BYOK carries no hold evidence by design, so only its request
+   * dimension advances. window_start is second-truncated from the injected
+   * clock so admission and the scheduling window read share one clock.
+   */
+  private async recordAccountRateConsumption(
+    tx: SqlExecutor,
+    initialAttempt: NonNullable<RequestAdmissionCreated['initialAttempt']>,
+    holdEvidence: PlatformRequestAdmissionHoldEvidence | null,
+  ): Promise<void> {
+    const accountScope = initialAttempt.accountOwnerKind === 'tenant' ? 'tenant' : 'platform';
+    const tokens =
+      holdEvidence === null ? 0n : BigInt(String(holdEvidence.inputTotal)) + BigInt(String(holdEvidence.outputTotal));
+    await tx.query(
+      `INSERT INTO saas_provider_account_rate_counters
+         (account_scope, account_id, window_start, requests, tokens)
+       VALUES ($1, $2, date_trunc('second', $3::timestamptz), 1, $4)
+       ON CONFLICT (account_scope, account_id, window_start)
+       DO UPDATE SET requests = saas_provider_account_rate_counters.requests + 1,
+                     tokens = saas_provider_account_rate_counters.tokens + EXCLUDED.tokens`,
+      [accountScope, initialAttempt.accountId, normalizeNow(this.now()), tokens.toString(10)],
+    );
   }
 
   private async appendAdmissionAuditEvent(

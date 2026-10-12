@@ -4,6 +4,12 @@ import { normalizeCurrency, parseMinorUnits } from '../billing/money.js';
 import type { SaasIdentityService } from '../identity/service.js';
 import type { TenantContext } from '../identity/types.js';
 import {
+  type CustomerPaymentOrderQuery,
+  type CustomerPaymentOrderQueryContext,
+  CustomerPaymentOrderQueryError,
+  type SaasCustomerPaymentOrderQueryService,
+} from './customer-order-query.js';
+import {
   type CustomerRefundQuery,
   type CustomerRefundQueryContext,
   CustomerRefundQueryError,
@@ -73,6 +79,18 @@ export interface SaasCustomerRefundHistoryHttpOptions {
   };
   /** Omission leaves refund history unavailable; no mutation or provider fallback is attempted. */
   readonly refundQueryService?: Pick<SaasCustomerRefundQueryService, 'listRefunds'>;
+  readonly publicOrigin: string;
+}
+
+export interface SaasCustomerPaymentOrderHistoryHttpOptions {
+  readonly service: Pick<SaasIdentityService, 'getSession'> & {
+    readonly resolveTenantBillingContext: (input: {
+      readonly userId: string;
+      readonly tenantId: string;
+    }) => Promise<CustomerPaymentOrderQueryContext>;
+  };
+  /** Omission leaves payment order history unavailable; no mutation or provider fallback is attempted. */
+  readonly paymentOrderQueryService?: Pick<SaasCustomerPaymentOrderQueryService, 'listPaymentOrders'>;
   readonly publicOrigin: string;
 }
 
@@ -353,7 +371,7 @@ function userId(session: unknown): string {
 }
 
 function safeServiceError(value: unknown): HttpError {
-  if (value instanceof CustomerRefundQueryError) {
+  if (value instanceof CustomerRefundQueryError || value instanceof CustomerPaymentOrderQueryError) {
     return new HttpError(value.status, value.code, value.message);
   }
   if (isPaymentError(value)) return new HttpError(value.status, value.code, value.message);
@@ -426,6 +444,21 @@ function normalizeWalletTopUpPolicy(
   } catch {
     return undefined;
   }
+}
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
+/** R1 (090): optional checkout promo code — a bounded string; format rules stay in the promo domain. */
+function promoCodeField(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '' || value.length > 32 || hasControlCharacter(value)) {
+    throw new HttpError(400, 'INVALID_BODY', 'Request body contains an invalid field');
+  }
+  return value;
 }
 
 function walletTopUpAmount(value: unknown, policy: PaymentWalletTopUpPolicy): string {
@@ -670,7 +703,7 @@ export function createSaasPaymentHandler(options: SaasPaymentHttpOptions): SaasP
 
       const body = parseStrictObject(
         await readJson(req),
-        ['amountMinorUnits', 'currency'],
+        ['amountMinorUnits', 'currency', 'promoCode'],
         ['amountMinorUnits', 'currency'],
       );
       const currency = nonEmptyString(body.currency, 'currency');
@@ -682,6 +715,7 @@ export function createSaasPaymentHandler(options: SaasPaymentHttpOptions): SaasP
         clientRequestId: idempotencyHeader(req),
         amountMinorUnits: walletTopUpAmount(body.amountMinorUnits, walletTopUpPolicy),
         currency: walletTopUpPolicy.currency,
+        ...(body.promoCode === undefined ? {} : { promoCode: promoCodeField(body.promoCode) }),
       };
       const order = await options.paymentService.createWalletTopUp(input);
       sendJson(res, 201, requestId, customerWalletTopUp(order));
@@ -787,6 +821,107 @@ export function createSaasCustomerRefundHistoryHandler(
         throw new HttpError(503, 'REFUND_HISTORY_UNAVAILABLE', 'Customer refund history is not configured');
       }
       const page = await options.refundQueryService.listRefunds(context, query);
+      sendJson(res, 200, requestId, { items: page.items, nextCursor: page.nextCursor });
+      return true;
+    } catch (error) {
+      if (res.destroyed || res.writableEnded) return true;
+      sendError(res, requestId, error instanceof HttpError ? error : safeServiceError(error));
+      return true;
+    }
+  };
+}
+
+function paymentOrderHistoryQuery(req: IncomingMessage, origin: string): CustomerPaymentOrderQuery {
+  const target = req.url ?? '/';
+  if (target.length > 8192) throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+
+  let url: URL;
+  try {
+    url = new URL(target, origin);
+  } catch {
+    throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+  }
+  for (const key of url.searchParams.keys()) {
+    if (key !== 'limit' && key !== 'cursor') {
+      throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+    }
+  }
+
+  const limits = url.searchParams.getAll('limit');
+  const cursors = url.searchParams.getAll('cursor');
+  if (limits.length > 1 || cursors.length > 1) {
+    throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+  }
+
+  let limit: number | undefined;
+  if (limits.length === 1) {
+    if (!/^[1-9][0-9]{0,2}$/.test(limits[0])) {
+      throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+    }
+    limit = Number(limits[0]);
+    if (limit > 100) throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+  }
+  if (cursors.length === 1 && cursors[0].length === 0) {
+    throw new HttpError(400, 'INVALID_QUERY', 'The payment order history query is invalid');
+  }
+  return {
+    ...(limit === undefined ? {} : { limit }),
+    ...(cursors.length === 0 ? {} : { cursor: cursors[0] }),
+  };
+}
+
+/** Read-only customer payment order history. It is independent of PSP adapters and payment mutation services. */
+export function createSaasCustomerPaymentOrderHistoryHandler(
+  options: SaasCustomerPaymentOrderHistoryHttpOptions,
+): SaasPaymentHttpHandler {
+  const publicUrl = new URL(options.publicOrigin);
+  return async (req, res) => {
+    const requestId = `saas_payment_orders_${randomUUID()}`;
+    try {
+      const path = routePath(req, publicUrl.origin);
+      if (path === undefined) throw new HttpError(400, 'INVALID_PATH', 'Request path is invalid');
+      const match = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/payment-orders$`).exec(path);
+      if (!match) return false;
+
+      if ((req.method ?? 'GET').toUpperCase() !== 'GET') {
+        req.resume();
+        requestMethodError(res, requestId, ['GET']);
+        return true;
+      }
+      if (requestHasBody(req)) {
+        req.resume();
+        throw new HttpError(400, 'BODY_NOT_ALLOWED', 'A request body is not allowed for this endpoint');
+      }
+
+      const tenantId = pathIdentifier(match[1], 'tenant');
+      const token = cookieValue(req, SESSION_COOKIE_NAME);
+      if (!token) throw new HttpError(401, 'UNAUTHENTICATED', 'Authentication is required');
+      const session = await options.service.getSession(token);
+      if (!session) throw new HttpError(401, 'UNAUTHENTICATED', 'Authentication is required');
+      const sessionUserId = userId(session);
+      const context = await options.service.resolveTenantBillingContext({ userId: sessionUserId, tenantId });
+      if (
+        !context ||
+        typeof context !== 'object' ||
+        Array.isArray(context) ||
+        context.userId !== sessionUserId ||
+        context.tenantId !== tenantId
+      ) {
+        throw new HttpError(403, 'FORBIDDEN', 'The operation is not permitted');
+      }
+      if (!BILLING_TENANT_ROLES.has(context.tenantRole)) {
+        throw new HttpError(403, 'FORBIDDEN', 'The operation is not permitted');
+      }
+
+      const query = paymentOrderHistoryQuery(req, publicUrl.origin);
+      if (!options.paymentOrderQueryService) {
+        throw new HttpError(
+          503,
+          'PAYMENT_ORDER_HISTORY_UNAVAILABLE',
+          'Customer payment order history is not configured',
+        );
+      }
+      const page = await options.paymentOrderQueryService.listPaymentOrders(context, query);
       sendJson(res, 200, requestId, { items: page.items, nextCursor: page.nextCursor });
       return true;
     } catch (error) {

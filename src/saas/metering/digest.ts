@@ -78,11 +78,49 @@ export function normalSuccessSettlementDigest(input: {
   if (!/^[0-9a-f]{64}$/.test(input.usageEvidenceRef)) {
     throw new TypeError('normal-success evidence reference must be an opaque lowercase SHA-256 reference');
   }
-  return sha256Hex(JSON.stringify([
-    'model-router.normal-success-settlement.v1',
-    input.tenantId, input.usageEventId, input.kind, input.usageEventDigest,
-    input.settlementKeyDigest, input.usageEvidenceRef,
-  ]));
+  return sha256Hex(
+    JSON.stringify([
+      'model-router.normal-success-settlement.v1',
+      input.tenantId,
+      input.usageEventId,
+      input.kind,
+      input.usageEventDigest,
+      input.settlementKeyDigest,
+      input.usageEvidenceRef,
+    ]),
+  );
+}
+
+/**
+ * Versioned append-only usage-correction proof (contract C-1.2). The signed
+ * amount delta is bound as canonical integer text; every correcting field is
+ * covered so the unique digest doubles as the idempotency key.
+ */
+export function usageCorrectionDigest(input: {
+  tenantId: string;
+  correctedUsageEventId: string;
+  correctedSettlementId: string | null;
+  reasonCode: string;
+  correctionUsage: NormalizedUsageExact;
+  amountDeltaMinorUnits: string;
+  currency: string;
+  operatorIdentity: string;
+  evidenceRef: string | null;
+}): string {
+  return sha256Hex(
+    JSON.stringify([
+      'model-router.usage-correction.v1',
+      input.tenantId,
+      input.correctedUsageEventId,
+      input.correctedSettlementId,
+      input.reasonCode,
+      canonicalUsage(input.correctionUsage),
+      input.amountDeltaMinorUnits,
+      input.currency,
+      input.operatorIdentity,
+      input.evidenceRef,
+    ]),
+  );
 }
 
 export function canonicalUsageValues(usage: UsageValues): string {

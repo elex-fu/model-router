@@ -43,6 +43,9 @@ const ACCOUNT: ProviderAccountRecord = {
   validationErrorCode: null,
   lastValidatedAt: null,
   authzVersion: 1,
+  priority: 0,
+  weight: 1,
+  revalidationIntervalSeconds: null,
   createdAt: '2026-09-29T00:00:00.000Z',
   updatedAt: '2026-09-29T00:00:00.000Z',
   disabledAt: null,
@@ -105,6 +108,8 @@ interface SupplyCalls {
   readonly credentials: unknown[];
   readonly rotations: unknown[];
   readonly accountLifecycle: unknown[];
+  readonly accountScheduling: unknown[];
+  readonly accountRevalidation: unknown[];
   readonly credentialLifecycle: unknown[];
 }
 
@@ -149,6 +154,16 @@ function makeSupply(calls: SupplyCalls): PlatformAdminSupplyService {
       calls.accountLifecycle.push(clone(input));
       if (input.expectedAuthzVersion !== 1) throw new ProviderSupplyError('ACCOUNT_STATE_CONFLICT');
       return { ...clone(ACCOUNT), status: 'revoked', authzVersion: 2, revokedAt: ACCOUNT.updatedAt };
+    },
+    updatePlatformProviderAccountScheduling: async (input) => {
+      calls.accountScheduling.push(clone(input));
+      if (input.expectedAuthzVersion !== 1) throw new ProviderSupplyError('ACCOUNT_STATE_CONFLICT');
+      return { ...clone(ACCOUNT), priority: input.priority, weight: input.weight, authzVersion: 2 };
+    },
+    updatePlatformProviderAccountRevalidation: async (input) => {
+      calls.accountRevalidation.push(clone(input));
+      if (input.expectedAuthzVersion !== 1) throw new ProviderSupplyError('ACCOUNT_STATE_CONFLICT');
+      return { ...clone(ACCOUNT), revalidationIntervalSeconds: input.revalidationIntervalSeconds, authzVersion: 2 };
     },
     enablePlatformProviderCredential: async (input) => {
       calls.credentialLifecycle.push(clone(input));
@@ -292,6 +307,8 @@ test('platform supply is operations/superadmin-only and absent service fails clo
       credentials: [],
       rotations: [],
       accountLifecycle: [],
+      accountScheduling: [],
+      accountRevalidation: [],
       credentialLifecycle: [],
     }),
   );
@@ -306,6 +323,8 @@ test('platform supply is operations/superadmin-only and absent service fails clo
       credentials: [],
       rotations: [],
       accountLifecycle: [],
+      accountScheduling: [],
+      accountRevalidation: [],
       credentialLifecycle: [],
     }),
   );
@@ -318,6 +337,8 @@ test('account creation fixes platform ownership, passes audit evidence, and reda
     credentials: [],
     rotations: [],
     accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
     credentialLifecycle: [],
   };
   const app = await startHarness(ACTOR, makeSupply(calls));
@@ -349,6 +370,8 @@ test('supply writes require exact origin/host and CSRF and reject strict-body vi
     credentials: [],
     rotations: [],
     accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
     credentialLifecycle: [],
   };
   const app = await startHarness(ACTOR, makeSupply(calls));
@@ -406,6 +429,8 @@ test('credential create/rotate accept secrets only as input and return metadata/
     credentials: [],
     rotations: [],
     accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
     credentialLifecycle: [],
   };
   const app = await startHarness(ACTOR, makeSupply(calls));
@@ -459,6 +484,8 @@ test('credential and account lifecycle routes pass explicit CAS and never resolv
     credentials: [],
     rotations: [],
     accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
     credentialLifecycle: [],
   };
   const app = await startHarness(ACTOR, makeSupply(calls));
@@ -491,12 +518,136 @@ test('credential and account lifecycle routes pass explicit CAS and never resolv
   assert.equal(calls.credentialLifecycle.length, 1);
 });
 
+test('the account scheduling route CAS-updates contract C-7 scalars with audit and strict bounds', async () => {
+  const calls: SupplyCalls = {
+    accounts: [],
+    credentials: [],
+    rotations: [],
+    accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
+    credentialLifecycle: [],
+  };
+  const app = await startHarness(ACTOR, makeSupply(calls));
+
+  const updated = await app.request(
+    `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/scheduling`,
+    writeInit({ priority: 1000, weight: 250, expectedAuthzVersion: 1 }),
+  );
+  assert.equal(updated.status, 200);
+  assertSafeHeaders(updated);
+  const data = updated.body.data as Record<string, unknown>;
+  assert.equal(data.priority, 1000);
+  assert.equal(data.weight, 250);
+  assert.equal(data.authzVersion, 2);
+  assert.equal('tenantId' in data, false);
+  const call = calls.accountScheduling[0] as Record<string, unknown>;
+  assert.equal(call.accountId, ACCOUNT.id);
+  assert.equal(call.priority, 1000);
+  assert.equal(call.weight, 250);
+  const audit = call.audit as Record<string, unknown>;
+  assert.equal(audit.actorUserId, ACTOR.userId);
+  assert.equal(audit.entryPoint, 'platform_admin');
+
+  const stale = await app.request(
+    `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/scheduling`,
+    writeInit({ priority: 0, weight: 1, expectedAuthzVersion: 2 }),
+  );
+  assert.equal(stale.status, 409);
+  assert.equal(errorCode(stale.body), 'ACCOUNT_STATE_CONFLICT');
+
+  for (const body of [
+    { priority: 1001, weight: 1, expectedAuthzVersion: 1 },
+    { priority: -1, weight: 1, expectedAuthzVersion: 1 },
+    { priority: 0, weight: 0, expectedAuthzVersion: 1 },
+    { priority: 0, weight: 10001, expectedAuthzVersion: 1 },
+    { priority: 0.5, weight: 1, expectedAuthzVersion: 1 },
+    { priority: 0, expectedAuthzVersion: 1 },
+    { priority: 0, weight: 1, expectedAuthzVersion: 1, mode: 'extra' },
+  ]) {
+    const rejected = await app.request(
+      `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/scheduling`,
+      writeInit(body),
+    );
+    assert.equal(rejected.status, 400, JSON.stringify(body));
+  }
+  // Only the success and the stale-CAS attempt reach the service; every
+  // strict-body violation is rejected at the transport boundary.
+  assert.equal(calls.accountScheduling.length, 2);
+});
+
+test('the account revalidation route CAS-updates the D3 cadence with audit, disable and strict bounds', async () => {
+  const calls: SupplyCalls = {
+    accounts: [],
+    credentials: [],
+    rotations: [],
+    accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
+    credentialLifecycle: [],
+  };
+  const app = await startHarness(ACTOR, makeSupply(calls));
+
+  const updated = await app.request(
+    `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/revalidation`,
+    writeInit({ revalidationIntervalSeconds: 3600, expectedAuthzVersion: 1 }),
+  );
+  assert.equal(updated.status, 200);
+  assertSafeHeaders(updated);
+  const data = updated.body.data as Record<string, unknown>;
+  assert.equal(data.revalidationIntervalSeconds, 3600);
+  assert.equal(data.authzVersion, 2);
+  assert.equal('tenantId' in data, false);
+  const call = calls.accountRevalidation[0] as Record<string, unknown>;
+  assert.equal(call.accountId, ACCOUNT.id);
+  assert.equal(call.revalidationIntervalSeconds, 3600);
+  const audit = call.audit as Record<string, unknown>;
+  assert.equal(audit.actorUserId, ACTOR.userId);
+  assert.equal(audit.entryPoint, 'platform_admin');
+
+  const stale = await app.request(
+    `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/revalidation`,
+    writeInit({ revalidationIntervalSeconds: null, expectedAuthzVersion: 2 }),
+  );
+  assert.equal(stale.status, 409);
+  assert.equal(errorCode(stale.body), 'ACCOUNT_STATE_CONFLICT');
+
+  // null is the explicit disable, not a missing field.
+  const disabled = await app.request(
+    `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/revalidation`,
+    writeInit({ revalidationIntervalSeconds: null, expectedAuthzVersion: 1 }),
+  );
+  assert.equal(disabled.status, 200);
+  assert.equal((disabled.body.data as Record<string, unknown>).revalidationIntervalSeconds, null);
+
+  for (const body of [
+    { revalidationIntervalSeconds: 899, expectedAuthzVersion: 1 },
+    { revalidationIntervalSeconds: 604801, expectedAuthzVersion: 1 },
+    { revalidationIntervalSeconds: 0, expectedAuthzVersion: 1 },
+    { revalidationIntervalSeconds: 3600.5, expectedAuthzVersion: 1 },
+    { revalidationIntervalSeconds: 'hourly', expectedAuthzVersion: 1 },
+    { expectedAuthzVersion: 1 },
+    { revalidationIntervalSeconds: 3600, expectedAuthzVersion: 1, mode: 'extra' },
+  ]) {
+    const rejected = await app.request(
+      `${app.base}/admin/api/v1/supply/accounts/${ACCOUNT.id}/revalidation`,
+      writeInit(body),
+    );
+    assert.equal(rejected.status, 400, JSON.stringify(body));
+  }
+  // Two successes + one stale-CAS attempt reach the service; strict-body
+  // violations are rejected at the transport boundary.
+  assert.equal(calls.accountRevalidation.length, 3);
+});
+
 test('supply service errors stay generic and request bodies never appear in errors', async () => {
   const calls: SupplyCalls = {
     accounts: [],
     credentials: [],
     rotations: [],
     accountLifecycle: [],
+    accountScheduling: [],
+    accountRevalidation: [],
     credentialLifecycle: [],
   };
   const supply = makeSupply(calls);

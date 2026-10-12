@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { Pool } from 'pg';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import { runSaasMigrations } from '../../../src/saas/db/migrate.js';
 import type { SaasMigration } from '../../../src/saas/db/migrations/001_initial_schema.js';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
@@ -155,9 +156,10 @@ class ScopedPool implements SaasDatabasePool {
 }
 
 class ScopedSaasDatabase implements SaasDatabase {
+  readonly statements: Array<{ readonly sql: string; readonly values: readonly unknown[] }> = [];
   constructor(
     private readonly pool: ScopedPool,
-    private readonly afterSharedAuthorizationLock?: () => Promise<void>,
+    private readonly afterAuthorizationUserLock?: () => Promise<void>,
   ) {}
 
   query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
@@ -174,8 +176,16 @@ class ScopedSaasDatabase implements SaasDatabase {
       const tx: SqlExecutor = {
         query: async <Row>(sql: string, values?: readonly unknown[]) => {
           const result = await client.query<Row>(sql, values);
-          if (sql.trimStart().toLowerCase().startsWith('select pg_advisory_xact_lock_shared')) {
-            await this.afterSharedAuthorizationLock?.();
+          this.statements.push({ sql: sql.replace(/\s+/g, ' ').trim(), values: [...(values ?? [])] });
+          if (
+            (sql === 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))' ||
+              sql === 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))') &&
+            values?.length === 1 &&
+            typeof values[0] === 'string' &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(values[0])
+          ) {
+            // Pause at the actual raw-user fence, not writer G or T/P.
+            await this.afterAuthorizationUserLock?.();
           }
           return result;
         },
@@ -372,6 +382,21 @@ test('platform authorization fences serialize real PostgreSQL revocation and rol
     });
     const action = new PlatformCapacityPolicyService(actionDatabase).setTenantPolicy(writeInput(first));
     await actionEnteredLock.promise;
+    assert.deepEqual(
+      actionDatabase.statements.slice(0, 4).map(({ sql }) => sql),
+      [
+        'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+        "SET LOCAL lock_timeout = '2s'",
+        "SET LOCAL statement_timeout = '10s'",
+        'SELECT pg_advisory_xact_lock(1396788563, 46)',
+      ],
+    );
+    assert.deepEqual(
+      actionDatabase.statements
+        .filter(({ sql }) => sql === 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))')
+        .map(({ values }) => values[0]),
+      [saasAdvisoryKey.tenant(first.tenantId), first.actor.userId],
+    );
 
     const revocationStarted = deferred();
     const revokeAfterAction = (async () => {
@@ -556,5 +581,97 @@ test('PostgreSQL prepared-evidence guard accepts project-service key proof witho
         return true;
       },
     );
+
+    // Keep the original no-member service proof above. Capacity mutation must
+    // fence the genuine operator, never invent creator-as-execution-member.
+    const operator = await seedActor(pool, 'key-policy-union');
+    const serviceDatabase = new ScopedSaasDatabase(pool);
+    const servicePolicy = await new PlatformCapacityPolicyService(serviceDatabase).setApiKeyPolicy({
+      tenantId,
+      projectId,
+      apiKeyId,
+      expectedRevision: 1,
+      limits: POLICY_LIMITS,
+      reason: 'capacity_adjustment',
+      requestId: randomUUID(),
+      actor: operator.actor,
+    });
+    assert.equal(servicePolicy.revision, '2');
+    const exclusiveSql = 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))';
+    assert.deepEqual(
+      serviceDatabase.statements.filter(({ sql }) => sql === exclusiveSql).map(({ values }) => values[0]),
+      [
+        saasAdvisoryKey.tenant(tenantId),
+        saasAdvisoryKey.project(tenantId, projectId),
+        operator.actor.userId,
+        saasAdvisoryKey.apiKey(tenantId, projectId, apiKeyId),
+      ],
+    );
+    const serviceShape = await pool.query<{
+      readonly principal_user_id: unknown;
+      readonly execution_principal_id: unknown;
+    }>(
+      'SELECT principal_user_id, execution_principal_id FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3',
+      [tenantId, projectId, apiKeyId],
+    );
+    assert.equal(serviceShape.rows[0]?.principal_user_id, null);
+    assert.equal(serviceShape.rows[0]?.execution_principal_id, projectId);
+
+    // Now create a real member union with its required live project-membership
+    // FK/trigger authority. It is distinct from the platform operator.
+    await pool.query(
+      `INSERT INTO saas_project_memberships (tenant_id, project_id, user_id, role)
+       VALUES ($1, $2, $3, 'developer')`,
+      [tenantId, projectId, creatorId],
+    );
+    const memberKeyId = randomUUID();
+    await pool.query(
+      `INSERT INTO saas_api_keys
+         (id, tenant_id, project_id, principal_user_id, supply_profile_id, supply_mode,
+          name, prefix, key_hash, model_scopes, entitlement_id, execution_principal_type,
+          execution_principal_id, created_by_user_id, entitlement_authz_version,
+          supply_profile_authz_version)
+       SELECT $1, tenant_id, project_id, $2, supply_profile_id, supply_mode,
+              'member key', 'mr_live_memberpolicy', repeat('c', 64), model_scopes,
+              entitlement_id, 'member', $2, $2, entitlement_authz_version,
+              supply_profile_authz_version
+         FROM saas_api_keys WHERE tenant_id = $3 AND project_id = $4 AND id = $5`,
+      [memberKeyId, creatorId, tenantId, projectId, apiKeyId],
+    );
+    const memberDatabase = new ScopedSaasDatabase(pool);
+    const memberPolicy = await new PlatformCapacityPolicyService(memberDatabase).setApiKeyPolicy({
+      tenantId,
+      projectId,
+      apiKeyId: memberKeyId,
+      expectedRevision: 1,
+      limits: POLICY_LIMITS,
+      reason: 'capacity_adjustment',
+      requestId: randomUUID(),
+      actor: operator.actor,
+    });
+    assert.equal(memberPolicy.revision, '2');
+    assert.deepEqual(
+      memberDatabase.statements.filter(({ sql }) => sql === exclusiveSql).map(({ values }) => values[0]),
+      [
+        saasAdvisoryKey.tenant(tenantId),
+        saasAdvisoryKey.project(tenantId, projectId),
+        ...[creatorId, operator.actor.userId].sort(),
+        saasAdvisoryKey.apiKey(tenantId, projectId, memberKeyId),
+      ],
+    );
+    const hintIndex = memberDatabase.statements.findIndex(({ sql }) =>
+      sql.startsWith('SELECT tenant_id, project_id, id, principal_user_id'),
+    );
+    const rowIndex = memberDatabase.statements.findIndex(
+      ({ sql }) => sql.includes('FROM saas_api_keys') && sql.endsWith('FOR UPDATE'),
+    );
+    assert.ok(hintIndex >= 0 && rowIndex > hintIndex);
+    assert.doesNotMatch(memberDatabase.statements[hintIndex]?.sql ?? '', /FOR UPDATE|FOR SHARE/);
+    const audit = await pool.query<{ readonly count: unknown }>(
+      `SELECT COUNT(*)::text AS count FROM saas_capacity_policy_audit_details
+        WHERE tenant_id = $1 AND project_id = $2 AND api_key_id IN ($3, $4)`,
+      [tenantId, projectId, apiKeyId, memberKeyId],
+    );
+    assert.equal(audit.rows[0]?.count, '2');
   });
 });

@@ -611,13 +611,20 @@ for (const change of ['disabled', 'role-revoked', 'unsupported-role'] as const) 
         else fixture.database.state.roles[0]!.role = 'unsupported-fixture-role';
       }
     };
-    await assert.rejects(fixture.service.issueMfaEnrollmentToken('owner@example.com'),
-      (cause: unknown) => cause instanceof PlatformAuthError && cause.code === 'MFA_ENROLLMENT_UNAVAILABLE' && cause.status === 403);
+    await assert.rejects(
+      fixture.service.issueMfaEnrollmentToken('owner@example.com'),
+      (cause: unknown) =>
+        cause instanceof PlatformAuthError && cause.code === 'MFA_ENROLLMENT_UNAVAILABLE' && cause.status === 403,
+    );
     const writer = statements.indexOf('select pg_advisory_xact_lock(1396788563, 46)');
     const userFence = statements.indexOf('select pg_advisory_xact_lock(hashtextextended($1::text, 0))');
-    const eligibility = statements.findIndex((statement) => statement.startsWith('select u.id from saas_users u where u.id ='));
-    assert.ok(writer >= 0 && writer < userFence && userFence < eligibility,
-      'candidate discovery must not substitute for fresh fenced authority');
+    const eligibility = statements.findIndex((statement) =>
+      statement.startsWith('select u.id from saas_users u where u.id ='),
+    );
+    assert.ok(
+      writer >= 0 && writer < userFence && userFence < eligibility,
+      'candidate discovery must not substitute for fresh fenced authority',
+    );
     assert.ok(!statements.some((statement) => statement.startsWith('select pg_advisory_xact_lock_shared')));
     assert.equal(fixture.database.state.enrollmentTokens.length, 0);
     assert.equal(fixture.database.state.credentials.length, 0);
@@ -906,10 +913,17 @@ test('platform auth retains method-scoped writer/read fences without row-locking
   ): number {
     const transactionId = queries[indices[0]!]!.transactionId;
     assert.notEqual(transactionId, undefined, `${label} must be inside a transaction`);
-    assert.ok(indices.every((index) => queries[index]!.transactionId === transactionId),
-      `${label} must retain its fence and authority reads/writes in the same transaction`);
-    const prepared = queries.findIndex((query) => query.transactionId === transactionId && query.statement === isolation);
-    assert.ok(prepared >= 0 && prepared < Math.min(...indices), `${label} must explicitly prepare fresh READ COMMITTED`);
+    assert.ok(
+      indices.every((index) => queries[index]!.transactionId === transactionId),
+      `${label} must retain its fence and authority reads/writes in the same transaction`,
+    );
+    const prepared = queries.findIndex(
+      (query) => query.transactionId === transactionId && query.statement === isolation,
+    );
+    assert.ok(
+      prepared >= 0 && prepared < Math.min(...indices),
+      `${label} must explicitly prepare fresh READ COMMITTED`,
+    );
     return transactionId!;
   }
 
@@ -921,8 +935,11 @@ test('platform auth retains method-scoped writer/read fences without row-locking
   const issued = await trace(() => fixture.service.issueMfaEnrollmentToken('OWNER@example.com', audit));
   const enrollment = issued.value;
   const issuance = issued.queries;
-  assert.deepEqual(fences(issuance), [writerFence, exclusiveUserFence],
-    'issuance must take only the matching 046 global writer then exclusive user, never upgrade a shared reader');
+  assert.deepEqual(
+    fences(issuance),
+    [writerFence, exclusiveUserFence],
+    'issuance must take only the matching 046 global writer then exclusive user, never upgrade a shared reader',
+  );
   const discovery = queryIndex(issuance, 'select id from saas_users where email_canonical =');
   const writer = queryIndex(issuance, writerFence);
   const exclusive = queryIndex(issuance, exclusiveUserFence);
@@ -932,8 +949,13 @@ test('platform auth retains method-scoped writer/read fences without row-locking
   const tokenInsert = queryIndex(issuance, 'insert into saas_platform_mfa_enrollment_tokens');
   const auditInsert = queryIndex(issuance, 'insert into saas_audit_events');
   assert.ok(
-    discovery < writer && writer < exclusive && exclusive < eligibility && eligibility < verified
-      && verified < pending && pending < tokenInsert && tokenInsert < auditInsert,
+    discovery < writer &&
+      writer < exclusive &&
+      exclusive < eligibility &&
+      eligibility < verified &&
+      verified < pending &&
+      pending < tokenInsert &&
+      tokenInsert < auditInsert,
     'issuance discovery cannot substitute for fresh eligibility/verified/pending reads after both fences',
   );
   assert.equal(issuance[discovery]!.transactionId, undefined);
@@ -943,15 +965,21 @@ test('platform auth retains method-scoped writer/read fences without row-locking
   assert.deepEqual(issuance[verified]!.values, [fixture.userId]);
   assert.deepEqual(issuance[pending]!.values, [fixture.userId, '2026-01-02T03:04:05.000Z']);
   assertPreparedTransaction(
-    issuance, [writer, exclusive, eligibility, verified, pending, tokenInsert, auditInsert], 'issuance',
+    issuance,
+    [writer, exclusive, eligibility, verified, pending, tokenInsert, auditInsert],
+    'issuance',
   );
   assert.equal(fixture.database.state.enrollmentTokens.length, 1);
   assert.notEqual(fixture.database.state.enrollmentTokens[0]!.token_hash, enrollment.token);
   assert.equal(fixture.database.state.auditEvents.length, 1);
   assert.equal(fixture.database.state.auditEvents[0]![1], 'platform_mfa.enrollment_token.issued');
   assert.equal(fixture.database.state.auditEvents[0]![3], fixture.userId);
-  assert.deepEqual(fixture.database.state.auditEvents[0]!.slice(5),
-    [audit.requestId, audit.operatorId, audit.reasonCode, 'issued']);
+  assert.deepEqual(fixture.database.state.auditEvents[0]!.slice(5), [
+    audit.requestId,
+    audit.operatorId,
+    audit.reasonCode,
+    'issued',
+  ]);
   const auditSql = issuance[auditInsert]!.statement;
   assert.match(auditSql, /values \(\$1, null, null,/);
   assert.ok(!JSON.stringify(fixture.database.state.auditEvents).includes(enrollment.token));
@@ -967,56 +995,80 @@ test('platform auth retains method-scoped writer/read fences without row-locking
   const enrollmentConsume = queryIndex(begun.queries, 'update saas_platform_mfa_enrollment_tokens');
   assert.ok(beginWrite < beginAuthority && beginAuthority < enrollmentConsume);
   assertPreparedTransaction(
-    begun.queries, [beginWrite, beginAuthority, enrollmentConsume], 'enrollment start writer recheck',
+    begun.queries,
+    [beginWrite, beginAuthority, enrollmentConsume],
+    'enrollment start writer recheck',
   );
 
   // An invalid-format code deterministically takes confirmation's reader path;
   // valid confirmation uses the verified_at writer trigger, not an extra shared lock.
-  const rejected = await trace(() => assert.rejects(
-    fixture.service.confirmMfaEnrollment(begun.value.confirmationToken, 'not-six-digits'),
-    (error: unknown) => errorCode(error, 'MFA_CONFIRMATION_INVALID'),
-  ));
+  const rejected = await trace(() =>
+    assert.rejects(
+      fixture.service.confirmMfaEnrollment(begun.value.confirmationToken, 'not-six-digits'),
+      (error: unknown) => errorCode(error, 'MFA_CONFIRMATION_INVALID'),
+    ),
+  );
   const rejection = rejected.queries;
   assert.deepEqual(
-    fences(rejection), [sharedUserFence], 'invalid-code confirmation must independently acquire its shared fence',
+    fences(rejection),
+    [sharedUserFence],
+    'invalid-code confirmation must independently acquire its shared fence',
   );
   const setupLock = queryIndex(rejection, 'select s.id, s.user_id, s.credential_id, c.encrypted_secret');
   const confirmationShared = queryIndex(rejection, sharedUserFence);
   const confirmationAuthority = queryIndex(rejection, 'select u.id from saas_users u where u.id =');
-  const currentSetup = queryIndex(rejection, 'select s.id from saas_platform_mfa_setup_tokens s join saas_mfa_credentials c');
+  const currentSetup = queryIndex(
+    rejection,
+    'select s.id from saas_platform_mfa_setup_tokens s join saas_mfa_credentials c',
+  );
   const attemptUpdate = queryIndex(rejection, 'update saas_platform_mfa_setup_tokens set attempt_count');
-  assert.ok(setupLock < confirmationShared && confirmationShared < confirmationAuthority
-    && confirmationAuthority < currentSetup && currentSetup < attemptUpdate);
+  assert.ok(
+    setupLock < confirmationShared &&
+      confirmationShared < confirmationAuthority &&
+      confirmationAuthority < currentSetup &&
+      currentSetup < attemptUpdate,
+  );
   assert.deepEqual(rejection[confirmationShared]!.values, [fixture.userId]);
   assertPreparedTransaction(
-    rejection, [setupLock, confirmationShared, confirmationAuthority, currentSetup, attemptUpdate], 'confirmation reader',
+    rejection,
+    [setupLock, confirmationShared, confirmationAuthority, currentSetup, attemptUpdate],
+    'confirmation reader',
   );
   assert.equal(fixture.database.state.setupTokens[0]!.attempt_count, 1);
   assert.equal(fixture.database.state.setupTokens[0]!.consumed_at, null);
   assert.equal(fixture.database.state.credentials[0]!.verified_at, null);
 
-  const confirmed = await trace(() => fixture.service.confirmMfaEnrollment(
-    begun.value.confirmationToken, totpCode(secret, fixture.now()),
-  ));
+  const confirmed = await trace(() =>
+    fixture.service.confirmMfaEnrollment(begun.value.confirmationToken, totpCode(secret, fixture.now())),
+  );
   assert.deepEqual(fences(confirmed.queries), [], 'valid confirmation must not add a shared-to-exclusive upgrade');
   const verificationWrite = queryIndex(confirmed.queries, 'update saas_mfa_credentials set verified_at');
   const verificationAuthority = queryIndex(confirmed.queries, 'select u.id from saas_users u where u.id =');
   const verificationRead = queryIndex(confirmed.queries, 'select id from saas_mfa_credentials');
   const setupConsume = queryIndex(confirmed.queries, 'update saas_platform_mfa_setup_tokens set consumed_at');
-  assert.ok(verificationWrite < verificationAuthority && verificationAuthority < verificationRead
-    && verificationRead < setupConsume);
+  assert.ok(
+    verificationWrite < verificationAuthority &&
+      verificationAuthority < verificationRead &&
+      verificationRead < setupConsume,
+  );
   assertPreparedTransaction(
-    confirmed.queries, [verificationWrite, verificationAuthority, verificationRead, setupConsume], 'confirmation writer recheck',
+    confirmed.queries,
+    [verificationWrite, verificationAuthority, verificationRead, setupConsume],
+    'confirmation writer recheck',
   );
 
   fixture.setTime('2026-01-02T03:04:35.000Z');
-  const loggedIn = await trace(() => fixture.service.login(
-    'owner@example.com', fixture.password, totpCode(secret, fixture.now()),
-  ));
+  const loggedIn = await trace(() =>
+    fixture.service.login('owner@example.com', fixture.password, totpCode(secret, fixture.now())),
+  );
   const login = loggedIn.value;
   assert.ok(login);
   const loginTrace = loggedIn.queries;
-  assert.deepEqual(fences(loginTrace), [sharedUserFence, sharedUserFence], 'login must retain both independent reader fences');
+  assert.deepEqual(
+    fences(loginTrace),
+    [sharedUserFence, sharedUserFence],
+    'login must retain both independent reader fences',
+  );
   const loginShared = loginTrace.flatMap(({ statement }, index) => (statement === sharedUserFence ? [index] : []));
   const credentialShared = loginShared[0]!;
   const finalShared = loginShared[1]!;
@@ -1026,20 +1078,32 @@ test('platform auth retains method-scoped writer/read fences without row-locking
   const provisionalSession = queryIndex(loginTrace, 'insert into saas_platform_sessions');
   const finalAuthority = queryIndex(loginTrace, 'select c.id from saas_mfa_credentials c join saas_users u');
   assert.ok(
-    credentialShared < loginEligibility && loginEligibility < credentialRead && credentialRead < replayCas
-      && replayCas < provisionalSession && provisionalSession < finalShared && finalShared < finalAuthority,
+    credentialShared < loginEligibility &&
+      loginEligibility < credentialRead &&
+      credentialRead < replayCas &&
+      replayCas < provisionalSession &&
+      provisionalSession < finalShared &&
+      finalShared < finalAuthority,
     'credential read must be fenced; replay CAS runs outside it; provisional INSERT must precede the final fenced authority recheck',
   );
   assert.deepEqual(loginTrace[credentialShared]!.values, [fixture.userId]);
   assert.deepEqual(loginTrace[finalShared]!.values, [fixture.userId]);
   const credentialTransaction = assertPreparedTransaction(
-    loginTrace, [credentialShared, loginEligibility, credentialRead], 'login credential reader',
+    loginTrace,
+    [credentialShared, loginEligibility, credentialRead],
+    'login credential reader',
   );
   assert.equal(loginTrace[replayCas]!.transactionId, undefined, 'replay CAS must not hold a shared transaction fence');
   const finalTransaction = assertPreparedTransaction(
-    loginTrace, [provisionalSession, finalShared, finalAuthority], 'login final reader',
+    loginTrace,
+    [provisionalSession, finalShared, finalAuthority],
+    'login final reader',
   );
-  assert.notEqual(credentialTransaction, finalTransaction, 'final login authority needs a new READ COMMITTED transaction');
+  assert.notEqual(
+    credentialTransaction,
+    finalTransaction,
+    'final login authority needs a new READ COMMITTED transaction',
+  );
 
   const session = await trace(() => fixture.service.getSession(login.token));
   assert.deepEqual(session.value, login.session);

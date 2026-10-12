@@ -26,6 +26,7 @@ export type {
   ReleaseBillingInput,
   ReserveBillingInput,
   SettleBillingInput,
+  UsageCorrectionPostingInput,
   VerifiedFundingInput,
   WalletRecord,
 } from './types.js';

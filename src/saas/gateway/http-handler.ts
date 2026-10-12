@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import type { AuthenticatedApiKey } from '../keys/types.js';
 import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
+import { resolveClientAddress } from './client-address.js';
 import type {
   PreparedEvidenceClientStream,
   PreparedEvidenceDispatchInput,
@@ -64,6 +65,11 @@ export interface SaasGatewayHttpOptions {
   readonly modelDiscovery?: ModelDiscoveryPort;
   readonly maxBodyBytes?: number;
   readonly entryPoint?: string;
+  /**
+   * CIDRs of trusted reverse proxies allowed to attest X-Forwarded-For. Empty
+   * (default) means only the socket peer is ever used as the client address.
+   */
+  readonly trustedProxyCidrs?: readonly string[];
 }
 
 /** Server-created request identity passed by a trusted composition boundary. */
@@ -767,6 +773,13 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         clientRequest: body,
         idempotencyKey: requestIdempotencyKey,
         audit: auditContext,
+        // Resolved at the trusted HTTP boundary only; the admission guard
+        // fails closed on a non-disabled key IP policy without it.
+        clientAddress: resolveClientAddress(
+          req.socket?.remoteAddress ?? '',
+          req.headers['x-forwarded-for'],
+          options.trustedProxyCidrs ?? [],
+        ),
       });
     } catch {
       sendHttpError(res, new GatewayHttpError(503, 'PREPARATION_UNAVAILABLE'), requestId);

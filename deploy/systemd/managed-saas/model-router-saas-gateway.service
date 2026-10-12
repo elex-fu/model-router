@@ -1,0 +1,43 @@
+[Unit]
+# Managed SaaS gateway workload: commercial /v1 listener only. Holds the
+# least-privilege gateway database role (no control-plane tables) and the
+# decrypt-only provider-credential KMS module. Same fail-closed contract:
+# startup verifies schema readiness, runtime privileges and KMS readiness
+# before binding; any failure is a non-zero exit.
+Description=model-router managed SaaS gateway (/v1 listener)
+After=network-online.target
+Wants=network-online.target
+After=postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=model-router
+Group=model-router
+WorkingDirectory=/opt/model-router
+# Secrets live only in these files (install 0400 root:model-router):
+#   common.env    — deployment/environment IDs, KMS module specifiers,
+#                   Redis URL, listener binds
+#   gateway.env   — MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL and the gateway
+#                   decrypt-only KMS module specifier
+EnvironmentFile=/etc/model-router-saas/common.env
+EnvironmentFile=/etc/model-router-saas/gateway.env
+Environment=NODE_ENV=production
+Environment=MODEL_ROUTER_DEPLOYMENT_MODE=managed-saas
+ExecStart=/usr/bin/node /opt/model-router/dist/cli/index.js start --role gateway
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -240,3 +240,75 @@ test('authority rejection blocks dispatch and wrong TLS trust cannot verify cred
   assert.equal(result.state, 'failed');
   assert.equal(requests, 0, 'untrusted TLS must fail before HTTP/auth headers reach the server');
 });
+
+import { credentialValidationTargetEvidenceSha256 as canonicalTransportEvidence } from '../../../src/saas/supply/credential-validation-targets.js';
+
+function canonicalTransportTarget(baseUrl: string, kind: 'chat' | 'messages' = 'chat', expiresAt: string | null = null): ApprovedCredentialValidationTarget {
+  const descriptor: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'> = {
+    schemaVersion: 2, providerId: 'custom', credentialType: 'api-key', model: 'organisation/model-v1',
+    capabilityVersion: 1, baseUrl, approvalReference: 'canonical-transport-fixture-v2', expiresAt,
+    ...(kind === 'chat' ? { productId: 'custom-openai', endpoint: '/v1/chat/completions', protocol: 'openai',
+      wirePath: 'chat/completions', wireProtocol: 'openai', authProfile: 'openai-bearer-v1' } as const :
+      { productId: 'custom-anthropic', endpoint: '/v1/messages', protocol: 'anthropic',
+        wirePath: 'messages', wireProtocol: 'anthropic', authProfile: 'anthropic-api-key-2023-06-01' } as const),
+  };
+  return { ...descriptor, evidenceSha256: canonicalTransportEvidence(descriptor) };
+}
+
+test('canonical v2 capability uses genuine pinned Chat/Messages wire without changing the immutable job endpoint', async (t) => {
+  const requests: Array<{ method?: string; url?: string; headers: IncomingHttpHeaders; body: unknown }> = [];
+  const local = await validationHttpsFixture(t, (request, response) => {
+    let wire = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk: string) => { wire += chunk; });
+    request.on('end', () => {
+      requests.push({ method: request.method, url: request.url, headers: request.headers, body: JSON.parse(wire) });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(probeEnvelope(request.url === '/v1/messages' ? 'messages' : 'chat')));
+    });
+  });
+  const transport = new CredentialValidationHttpTransport(local.testOptions);
+  t.after(() => transport.close());
+  for (const kind of ['chat', 'messages'] as const) {
+    const target = canonicalTransportTarget(local.baseUrl, kind);
+    const job = customJob(target);
+    const before = JSON.stringify(job);
+    let rechecks = 0;
+    const result = await transport.probe(await transport.prepare(binding(target)), Buffer.from('fixture-canonical-token'),
+      async () => { rechecks += 1; });
+    assert.equal(result.state, 'verified');
+    const request = requests.at(-1);
+    assert.ok(request);
+    assert.equal(request.method, 'POST');
+    assert.equal(request.url, target.endpoint);
+    assert.equal(request.headers.authorization, kind === 'chat' ? 'Bearer fixture-canonical-token' : undefined);
+    assert.equal(request.headers['x-api-key'], kind === 'messages' ? 'fixture-canonical-token' : undefined);
+    assert.equal(request.headers['anthropic-version'], kind === 'messages' ? '2023-06-01' : undefined);
+    assert.equal(request.headers.cookie, undefined);
+    assert.equal(request.headers['user-agent'], 'model-router');
+    assert.deepEqual(request.body, { model: target.model, max_tokens: 8, stream: false,
+      messages: [{ role: 'user', content: 'Reply with OK.' }] });
+    assert.equal(rechecks, 1);
+    assert.equal(JSON.stringify(job), before);
+    assert.equal(JSON.stringify(result).includes('fixture-canonical-token'), false);
+  }
+  assert.equal(requests.length, 2);
+});
+
+test('v2 unbranded copies, expired approved metadata and actual pre-dispatch authority refusal never send credentials', async (t) => {
+  let requests = 0;
+  const local = await validationHttpsFixture(t, (request, response) => { request.resume(); requests += 1; response.end(); });
+  const transport = new CredentialValidationHttpTransport(local.testOptions);
+  t.after(() => transport.close());
+  const approved = binding(canonicalTransportTarget(local.baseUrl));
+  await assert.rejects(transport.prepare({ ...approved }), CredentialValidationTransportError);
+  const old = canonicalTransportTarget(local.baseUrl, 'chat', '2000-01-01T00:00:00.000Z');
+  const oldBinding = resolveApprovedCredentialValidationTarget(compileApprovedCredentialValidationTargets([old]), customJob(old),
+    Date.parse('1999-12-31T23:59:59.999Z'));
+  assert.ok(oldBinding);
+  await assert.rejects(transport.prepare(oldBinding), CredentialValidationTransportError);
+  const refusal = new Error('canonical-fixture-authority-refused');
+  await assert.rejects(transport.probe(await transport.prepare(approved), Buffer.from('fixture-canonical-token'),
+    async () => { throw refusal; }), (error: unknown) => error === refusal);
+  assert.equal(requests, 0);
+});

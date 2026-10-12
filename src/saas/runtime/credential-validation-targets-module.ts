@@ -66,6 +66,7 @@ const TARGET_KEYS = Object.freeze([
   'providerId', 'productId', 'credentialType', 'model', 'endpoint', 'capabilityVersion',
   'protocol', 'authProfile', 'baseUrl', 'approvalReference', 'expiresAt', 'evidenceSha256',
 ] as const satisfies readonly (keyof ApprovedCredentialValidationTarget)[]);
+const CANONICAL_TARGET_KEYS = Object.freeze([...TARGET_KEYS, 'schemaVersion', 'wirePath', 'wireProtocol'] as const);
 const OPTION_KEYS = ['env', 'importer', 'importModule', 'cwd', 'now'] as const;
 
 type UnknownRecord = Record<string, unknown>;
@@ -179,13 +180,17 @@ function copyMetadata(raw: unknown): LoadedCredentialValidationTargets {
       const slot = ownData(raw, String(index));
       if (!slot?.enumerable || !isPlainRecord(slot.value)) throw new Error('Invalid target entry');
       const input = slot.value;
+      const schema = ownData(input, 'schemaVersion');
+      if (schema !== undefined && (!schema.enumerable || schema.value !== 2)) throw new Error('Invalid target schema');
+      const targetKeys: readonly (keyof ApprovedCredentialValidationTarget)[] =
+        schema === undefined ? TARGET_KEYS : CANONICAL_TARGET_KEYS;
       const keys = Reflect.ownKeys(input);
-      if (keys.length !== TARGET_KEYS.length ||
-        keys.some((key) => typeof key !== 'string' || !TARGET_KEYS.includes(key as typeof TARGET_KEYS[number]))) {
+      if (keys.length !== targetKeys.length ||
+        keys.some((key) => typeof key !== 'string' || !targetKeys.some((known) => known === key))) {
         throw new Error('Invalid target fields');
       }
       const copied = Object.create(null) as UnknownRecord;
-      for (const key of TARGET_KEYS) {
+      for (const key of targetKeys) {
         const descriptor = ownData(input, key);
         if (!descriptor?.enumerable) throw new Error('Missing target data');
         const value: unknown = descriptor.value;

@@ -25,6 +25,11 @@ export interface SaasMigrationAuditCommandOptions {
   catalogBaseline?: string;
   /** Explicit opt-in for a loopback disposable DB or a locally authenticated tunnel. */
   allowLocalPlaintext?: boolean;
+  /**
+   * Reviewed legacy ledger checksum mappings, each `<22|23>=<sha256>:<evidenceId>`.
+   * They only annotate known 022/023 history; they never grant compatibility.
+   */
+  legacyChecksums?: readonly string[];
 }
 export interface SaasMigrationAuditCommandDependencies {
   env?: NodeJS.ProcessEnv;
@@ -33,9 +38,14 @@ export interface SaasMigrationAuditCommandDependencies {
   writeLine?: (line: string) => void;
 }
 export type SaasMigrationAuditCommandCode =
-  | 'INVALID_OPTIONS' | 'AUDIT_URL_REQUIRED' | 'AUDIT_URL_INVALID'
-  | 'BASELINE_IO_FAILED' | 'BASELINE_INVALID' | 'BASELINE_BINDING_MISMATCH'
-  | 'AUDIT_FAILED' | 'POOL_CLOSE_FAILED';
+  | 'INVALID_OPTIONS'
+  | 'AUDIT_URL_REQUIRED'
+  | 'AUDIT_URL_INVALID'
+  | 'BASELINE_IO_FAILED'
+  | 'BASELINE_INVALID'
+  | 'BASELINE_BINDING_MISMATCH'
+  | 'AUDIT_FAILED'
+  | 'POOL_CLOSE_FAILED';
 export interface SaasMigrationAuditCommandResult {
   format: 'saas-migration-audit-command-v1';
   status: 'matched' | 'blocked' | 'error';
@@ -44,13 +54,33 @@ export interface SaasMigrationAuditCommandResult {
   error: { code: SaasMigrationAuditCommandCode } | null;
 }
 class CommandFailure extends Error {
-  constructor(readonly code: SaasMigrationAuditCommandCode) { super('SaaS migration audit command failed'); }
+  constructor(readonly code: SaasMigrationAuditCommandCode) {
+    super('SaaS migration audit command failed');
+  }
 }
 export class SaasMigrationAuditCommandError extends Error {
   constructor() {
     super('Unable to report the SaaS migration audit result');
     this.name = 'SaasMigrationAuditCommandError';
   }
+}
+
+const LEGACY_CHECKSUM_MAPPING = /^(22|23)=([0-9a-f]{64}):([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/;
+const MAX_LEGACY_CHECKSUM_MAPPINGS = 8;
+
+/** Strict operator-supplied mappings; duplicates or malformed entries fail before any I/O. */
+function parseLegacyChecksums(raw: unknown): { version: 22 | 23; checksum: string; evidenceId: string }[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > MAX_LEGACY_CHECKSUM_MAPPINGS) throw new CommandFailure('INVALID_OPTIONS');
+  const seen = new Set<string>();
+  return raw.map((entry) => {
+    const match = typeof entry === 'string' ? LEGACY_CHECKSUM_MAPPING.exec(entry) : null;
+    if (!match) throw new CommandFailure('INVALID_OPTIONS');
+    const key = `${match[1]}=${match[2]}`;
+    if (seen.has(key)) throw new CommandFailure('INVALID_OPTIONS');
+    seen.add(key);
+    return { version: Number(match[1]) as 22 | 23, checksum: match[2] as string, evidenceId: match[3] as string };
+  });
 }
 
 /** Fully explicit endpoint/identity, with no libpq environment or socket discovery. */
@@ -61,21 +91,30 @@ function validatedUrl(raw: unknown, database: string, allowLocalPlaintext: boole
     const sslmode = url.searchParams.get('sslmode');
     const port = url.port ? Number(url.port) : 5432;
     const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-    const loopback = hostname === 'localhost' || hostname === '::1'
-      || (isIP(hostname) === 4 && hostname.startsWith('127.'));
-    if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || !url.username
-      || url.hash || decodeURIComponent(url.pathname.slice(1)) !== database
-      || !Number.isInteger(port) || port < 1 || port > 65535
-      || [...url.searchParams.keys()].some((key) => key !== 'sslmode')
-      || url.searchParams.getAll('sslmode').length > 1
-      || (sslmode !== null && !['disable', 'require', 'verify-full'].includes(sslmode))
-      || (sslmode === 'disable' && (!allowLocalPlaintext || !loopback))) {
+    const loopback =
+      hostname === 'localhost' || hostname === '::1' || (isIP(hostname) === 4 && hostname.startsWith('127.'));
+    if (
+      !['postgres:', 'postgresql:'].includes(url.protocol) ||
+      !url.hostname ||
+      !url.username ||
+      url.hash ||
+      decodeURIComponent(url.pathname.slice(1)) !== database ||
+      !Number.isInteger(port) ||
+      port < 1 ||
+      port > 65535 ||
+      [...url.searchParams.keys()].some((key) => key !== 'sslmode') ||
+      url.searchParams.getAll('sslmode').length > 1 ||
+      (sslmode !== null && !['disable', 'require', 'verify-full'].includes(sslmode)) ||
+      (sslmode === 'disable' && (!allowLocalPlaintext || !loopback))
+    ) {
       throw new Error('invalid');
     }
     decodeURIComponent(url.username);
     decodeURIComponent(url.password);
     return url;
-  } catch { throw new CommandFailure('AUDIT_URL_INVALID'); }
+  } catch {
+    throw new CommandFailure('AUDIT_URL_INVALID');
+  }
 }
 
 function createAuditPool(connectionString: string): SaasDatabasePool {
@@ -85,19 +124,25 @@ function createAuditPool(connectionString: string): SaasDatabasePool {
   const sslmode = url.searchParams.get('sslmode');
   const password = decodeURIComponent(url.password);
   const pool = new Pool({
-    host: url.hostname.replace(/^\[|\]$/g, ''), port: url.port ? Number(url.port) : 5432,
-    database: decodeURIComponent(url.pathname.slice(1)), user: decodeURIComponent(url.username),
+    host: url.hostname.replace(/^\[|\]$/g, ''),
+    port: url.port ? Number(url.port) : 5432,
+    database: decodeURIComponent(url.pathname.slice(1)),
+    user: decodeURIComponent(url.username),
     // A function is intentional: an empty explicit password must not fall back to PGPASSWORD.
     password: () => password,
     // TLS with certificate/hostname verification is the default, including
     // sslmode=require. Plaintext is a validated, explicit loopback-only policy.
     ssl: sslmode === 'disable' ? false : { rejectUnauthorized: true },
-    application_name: 'model-router-saas-migration-audit', max: 1,
-    connectionTimeoutMillis: 5000, idleTimeoutMillis: 1000,
+    application_name: 'model-router-saas-migration-audit',
+    max: 1,
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 1000,
   });
   let idleConnectionFailed = false;
   // An idle pg error must not escape the structured/sanitized error boundary.
-  pool.on('error', () => { idleConnectionFailed = true; });
+  pool.on('error', () => {
+    idleConnectionFailed = true;
+  });
   return {
     async query<Row>(sql: string, values?: readonly unknown[]) {
       const result = await pool.query(sql, values ? [...values] : undefined);
@@ -134,7 +179,9 @@ async function readBaselineFile(path: string): Promise<string> {
     }
     if (length > MAX_BASELINE_BYTES) throw new Error('Invalid baseline file');
     return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, length));
-  } finally { await file.close(); }
+  } finally {
+    await file.close();
+  }
 }
 
 /** One safe JSON line; return status so the CLI registration can set process.exitCode. */
@@ -143,44 +190,68 @@ export async function saasMigrationAudit(
   dependencies: SaasMigrationAuditCommandDependencies = {},
 ): Promise<SaasMigrationAuditCommandResult> {
   const result: SaasMigrationAuditCommandResult = {
-    format: 'saas-migration-audit-command-v1', status: 'error', exitCode: 2, report: null, error: null,
+    format: 'saas-migration-audit-command-v1',
+    status: 'error',
+    exitCode: 2,
+    report: null,
+    error: null,
   };
   let pool: SaasDatabasePool | undefined;
   try {
     const target = {
-      deploymentId: options.deploymentId, environmentId: options.environmentId,
-      database: options.database, schema: options.schema,
+      deploymentId: options.deploymentId,
+      environmentId: options.environmentId,
+      database: options.database,
+      schema: options.schema,
     } as SaasMigrationAuditTarget;
-    if (!isSaasMigrationAuditTarget(target) || typeof options.releaseId !== 'string'
-      || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(options.releaseId)
-      || (options.allowLocalPlaintext !== undefined && typeof options.allowLocalPlaintext !== 'boolean')
-      || (options.catalogBaseline !== undefined && (typeof options.catalogBaseline !== 'string'
-        || !options.catalogBaseline.trim() || options.catalogBaseline.includes('\0')))) {
+    if (
+      !isSaasMigrationAuditTarget(target) ||
+      typeof options.releaseId !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(options.releaseId) ||
+      (options.allowLocalPlaintext !== undefined && typeof options.allowLocalPlaintext !== 'boolean') ||
+      (options.catalogBaseline !== undefined &&
+        (typeof options.catalogBaseline !== 'string' ||
+          !options.catalogBaseline.trim() ||
+          options.catalogBaseline.includes('\0')))
+    ) {
       throw new CommandFailure('INVALID_OPTIONS');
     }
+    const legacyChecksums = parseLegacyChecksums(options.legacyChecksums);
     const environment = dependencies.env ?? process.env;
     const connectionString = environment[SAAS_MIGRATION_AUDIT_URL_ENV];
     validatedUrl(connectionString, target.database, options.allowLocalPlaintext === true);
     let catalogBaseline: SaasAuditCatalogBaseline | undefined;
     if (options.catalogBaseline !== undefined) {
       let text: string;
-      try { text = await (dependencies.readBaselineFile ?? readBaselineFile)(options.catalogBaseline); }
-      catch { throw new CommandFailure('BASELINE_IO_FAILED'); }
       try {
-        if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_BASELINE_BYTES) throw new Error('invalid');
+        text = await (dependencies.readBaselineFile ?? readBaselineFile)(options.catalogBaseline);
+      } catch {
+        throw new CommandFailure('BASELINE_IO_FAILED');
+      }
+      try {
+        if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > MAX_BASELINE_BYTES)
+          throw new Error('invalid');
         const value: unknown = JSON.parse(text);
         if (!isSaasAuditCatalogBaseline(value)) throw new Error('invalid');
         catalogBaseline = value;
-      } catch { throw new CommandFailure('BASELINE_INVALID'); }
-      if (catalogBaseline.releaseId !== options.releaseId || catalogBaseline.schema !== target.schema
-        || catalogBaseline.migrationsChecksum !== getSaasMigrationAuditExpectations().checksum) {
+      } catch {
+        throw new CommandFailure('BASELINE_INVALID');
+      }
+      if (
+        catalogBaseline.releaseId !== options.releaseId ||
+        catalogBaseline.schema !== target.schema ||
+        catalogBaseline.migrationsChecksum !== getSaasMigrationAuditExpectations().checksum
+      ) {
         throw new CommandFailure('BASELINE_BINDING_MISMATCH');
       }
     }
     // Every CLI option, URL, and provided baseline is validated before this point.
     pool = (dependencies.createPool ?? createAuditPool)(connectionString as string);
     result.report = await auditSaasMigrationCompatibility(pool, {
-      target, releaseId: options.releaseId, catalogBaseline,
+      target,
+      releaseId: options.releaseId,
+      catalogBaseline,
+      ...(legacyChecksums === undefined ? {} : { legacyChecksums }),
     });
     result.status = result.report.compatibility === 'matches-trusted-baseline' ? 'matched' : 'blocked';
     result.exitCode = result.status === 'matched' ? 0 : 1;
@@ -188,14 +259,19 @@ export async function saasMigrationAudit(
     result.error = { code: error instanceof CommandFailure ? error.code : 'AUDIT_FAILED' };
   } finally {
     if (pool) {
-      try { await pool.end(); } catch {
+      try {
+        await pool.end();
+      } catch {
         result.status = 'error';
         result.exitCode = 2;
         result.error ??= { code: 'POOL_CLOSE_FAILED' };
       }
     }
   }
-  try { (dependencies.writeLine ?? ((line: string) => console.log(line)))(JSON.stringify(result)); }
-  catch { throw new SaasMigrationAuditCommandError(); }
+  try {
+    (dependencies.writeLine ?? ((line: string) => console.log(line)))(JSON.stringify(result));
+  } catch {
+    throw new SaasMigrationAuditCommandError();
+  }
   return result;
 }

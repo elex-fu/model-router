@@ -109,6 +109,20 @@ function providerVersionLockLayers(
   return [...providerCredentialLockLayers(reference), [credentialVersionAdvisoryKey(reference)]];
 }
 
+/**
+ * Job target endpoints are classifier tokens for the fixed adapter registry
+ * ('chat-completions' / 'messages'), never URL paths — the 035/083
+ * endpoint_shape CHECKs reject leading slashes, while account capability rows
+ * canonically carry URL paths. Map the canonical paths to their tokens and
+ * strip any other single leading slash so every enqueue path (auto create,
+ * rotation, manual requeue) stores the same canonical form.
+ */
+export function normalizeValidationJobEndpoint(endpoint: string): string {
+  if (endpoint === '/v1/chat/completions') return 'chat-completions';
+  if (endpoint === '/v1/messages') return 'messages';
+  return endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+}
+
 export interface PersistedProviderAccountInput {
   readonly owner: ProviderSupplyOwner;
   readonly id: string;
@@ -123,9 +137,21 @@ export interface PersistedProviderAccountInput {
   readonly capabilities: readonly ProviderCapabilityReference[];
   readonly status: ProviderAccountStatus;
   readonly validationState: ProviderValidationState;
+  readonly priority: number;
+  readonly weight: number;
+  /** D3 periodic revalidation cadence; null disables the sweep for this account. */
+  readonly revalidationIntervalSeconds: number | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
+
+/**
+ * R4 (migration 094) OAuth refresh scheduling state. NULL on the row means
+ * "not an OAuth credential" (byte-identical pre-R4 semantics); the migration's
+ * shape CHECK requires oauth_next_refresh_at/oauth_last_refresh_at to be NULL
+ * exactly when the state is NULL.
+ */
+export type ProviderCredentialOauthRefreshState = 'idle' | 'refreshing' | 'failed';
 
 export interface PersistedProviderCredentialInput {
   readonly owner: ProviderSupplyOwner;
@@ -137,6 +163,15 @@ export interface PersistedProviderCredentialInput {
   readonly status: 'pending';
   readonly validationState: 'unverified';
   readonly expiresAt: string | null;
+  /**
+   * #18a onboarding: non-null inserts oauth_refresh_state='idle' with this
+   * first-refresh schedule (OAuth-bound credentials); absent/null leaves all
+   * oauth_* columns at their NULL defaults (non-OAuth semantics). The INSERT
+   * names the oauth columns only when this is non-null, so the restricted-role
+   * column grants decide which workloads may onboard OAuth credentials.
+   * Optional so pre-#18a callers and signed fixtures keep their exact shape.
+   */
+  readonly oauthRefresh?: { readonly nextRefreshAt: string } | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -159,6 +194,20 @@ export interface AppendProviderCredentialVersionInput {
   readonly kmsPurpose: string;
   readonly wrappingRevision: number;
   readonly expectedCurrentVersion: number | null;
+  /**
+   * #18a rotation inheritance: when present, the parent UPDATE reschedules the
+   * OAuth refresh loop for the new material — state 'idle', this next-refresh
+   * timestamp, error cleared, force-refresh flag cleared (the flag signals
+   * provider rejection of the replaced material; the rotation supersedes it
+   * and the revalidation requeue re-flags the new material if it is also
+   * rejected). A row mid-refresh ('refreshing') is owned by the R4 worker and
+   * every oauth_* column is preserved via the CASE guard, so the worker's
+   * finalize write stays the single scheduler of its own rotations. When
+   * absent the UPDATE is byte-identical to pre-#18a and touches no oauth_*
+   * column, which keeps the restricted-role column grants (SELECT-only on
+   * oauth_* for the control plane) sufficient for every non-OAuth flow.
+   */
+  readonly oauthRefreshSchedule?: { readonly nextRefreshAt: string };
   readonly createdAt: string;
   readonly expiresAt: string | null;
 }
@@ -203,6 +252,22 @@ export interface UpdateProviderAccountValidationInput {
   readonly updatedAt: string;
 }
 
+export interface UpdateProviderAccountSchedulingInput {
+  readonly account: ProviderAccountReference;
+  readonly priority: number;
+  readonly weight: number;
+  readonly expectedAuthzVersion: number;
+  readonly updatedAt: string;
+}
+
+export interface UpdateProviderAccountRevalidationInput {
+  readonly account: ProviderAccountReference;
+  /** null disables periodic revalidation; otherwise the 084 bounds apply. */
+  readonly revalidationIntervalSeconds: number | null;
+  readonly expectedAuthzVersion: number;
+  readonly updatedAt: string;
+}
+
 export interface UpdateProviderCredentialLifecycleInput {
   readonly credential: ProviderCredentialReference;
   readonly status: 'active' | 'disabled' | 'revoked';
@@ -237,8 +302,21 @@ export interface ProviderSupplyRepository {
   listAccounts(filter?: ProviderAccountListFilter): Promise<readonly ProviderAccountRecord[]>;
   updateAccountLifecycle(input: UpdateProviderAccountLifecycleInput): Promise<ProviderAccountRecord | null>;
   updateAccountValidation(input: UpdateProviderAccountValidationInput): Promise<ProviderAccountRecord | null>;
+  /** Contract C-7 scheduling scalars; same CAS + epoch-bump discipline as lifecycle updates. */
+  updateAccountScheduling(input: UpdateProviderAccountSchedulingInput): Promise<ProviderAccountRecord | null>;
+  /** D3 periodic revalidation cadence; same CAS + epoch-bump discipline as scheduling updates. */
+  updateAccountRevalidation(input: UpdateProviderAccountRevalidationInput): Promise<ProviderAccountRecord | null>;
 
   createCredential(input: PersistedProviderCredentialInput): Promise<ProviderCredentialRecord>;
+  /**
+   * #18a: reads only the oauth_refresh_state scalar (NULL = not an OAuth
+   * credential). Rotation uses it to decide whether a reschedule write is
+   * allowed to name the oauth_* columns at all; null means the credential row
+   * does not exist.
+   */
+  getCredentialOauthRefreshState(
+    credential: ProviderCredentialReference,
+  ): Promise<{ readonly state: ProviderCredentialOauthRefreshState | null } | null>;
   /** Enqueues a non-secret validation snapshot; callers must share the credential-write transaction. */
   enqueueProviderCredentialValidationJob(
     input: ProviderCredentialValidationJobInput,
@@ -286,6 +364,9 @@ interface AccountRowFields {
   validation_error_code: string | null;
   last_validated_at: string | Date | null;
   authz_version: number | string;
+  priority: number | string;
+  weight: number | string;
+  revalidation_interval_seconds: number | string | null;
   created_at: string | Date;
   updated_at: string | Date;
   disabled_at: string | Date | null;
@@ -322,7 +403,7 @@ interface CredentialRow {
 
 interface CredentialValidationJobRow {
   id: string;
-  tenant_id: string;
+  tenant_id?: string;
   account_id: string;
   credential_id: string;
   credential_version: number | string;
@@ -711,6 +792,7 @@ const ACCOUNT_COLUMNS = `
   owner_kind, tenant_id, supply_mode, id, display_name, provider_id, product_id,
   credential_type, region, purpose, rights_id, rights_version, status,
   validation_state, validation_error_code, last_validated_at, authz_version,
+  priority, weight, revalidation_interval_seconds,
   created_at, updated_at, disabled_at, revoked_at`;
 
 const CREDENTIAL_COLUMNS = `
@@ -1316,6 +1398,33 @@ function asNullablePositiveInteger(value: unknown): number | null {
   return value === null ? null : asPositiveInteger(value);
 }
 
+/* Contract C-7 bounds, mirrored by the 082 CHECK constraints. */
+function asSchedulingScalar(value: unknown, min: number, max: number): number {
+  const result = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(result) || result < min || result > max) {
+    throw repositoryError('INVALID_STORED_SCHEDULING_SCALAR');
+  }
+  return result;
+}
+
+function asSchedulingPriority(value: unknown): number {
+  return asSchedulingScalar(value, 0, 1000);
+}
+
+function asSchedulingWeight(value: unknown): number {
+  return asSchedulingScalar(value, 1, 10_000);
+}
+
+/* D3 bounds, mirrored by the 084 CHECK constraints; null disables the sweep. */
+function asRevalidationInterval(value: unknown): number | null {
+  if (value === null) return null;
+  const result = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(result) || result < 900 || result > 604_800) {
+    throw repositoryError('INVALID_STORED_SCHEDULING_SCALAR');
+  }
+  return result;
+}
+
 function asText(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') throw repositoryError('INVALID_STORED_TEXT');
   return value;
@@ -1342,7 +1451,10 @@ function credentialStatus(value: unknown): ProviderCredentialRecord['status'] {
 }
 
 function validationState(value: unknown): ProviderValidationState {
-  if (value === 'unverified' || value === 'verified' || value === 'failed') return value;
+  // R5: 'quarantined' is a real stored account state (migration 097).
+  if (value === 'unverified' || value === 'verified' || value === 'failed' || value === 'quarantined') {
+    return value;
+  }
   throw repositoryError('INVALID_STORED_VALIDATION_STATE');
 }
 
@@ -1359,13 +1471,17 @@ function nonnegativeInteger(value: unknown): number {
   return parsed;
 }
 
-function mapCredentialValidationJob(row: CredentialValidationJobRow): ProviderCredentialValidationJobRecord {
+function mapCredentialValidationJob(
+  row: CredentialValidationJobRow,
+  ownerKind: ProviderSupplyOwnerKind,
+): ProviderCredentialValidationJobRecord {
   if (!Array.isArray(row.allowed_models) || row.allowed_models.length === 0) {
     throw repositoryError('INVALID_CREDENTIAL_VALIDATION_JOB');
   }
   return {
     id: asText(row.id),
-    tenantId: asText(row.tenant_id),
+    ownerKind,
+    tenantId: ownerKind === 'tenant' ? asText(row.tenant_id) : null,
     accountId: asText(row.account_id),
     credentialId: asText(row.credential_id),
     credentialVersion: asPositiveInteger(row.credential_version),
@@ -1397,6 +1513,7 @@ function sameValidationJobSnapshot(
 ): boolean {
   const allowedModels = [...input.allowedModels].sort();
   return (
+    job.ownerKind === input.ownerKind &&
     job.tenantId === input.tenantId &&
     job.accountId === input.accountId &&
     job.credentialId === input.credentialId &&
@@ -1457,6 +1574,9 @@ function mapAccount(row: AccountRow, capabilities: readonly CapabilityRow[]): Pr
     validationErrorCode: row.validation_error_code,
     lastValidatedAt: nullableTimestamp(row.last_validated_at),
     authzVersion: asPositiveInteger(row.authz_version),
+    priority: asSchedulingPriority(row.priority),
+    weight: asSchedulingWeight(row.weight),
+    revalidationIntervalSeconds: asRevalidationInterval(row.revalidation_interval_seconds),
     createdAt: asTimestamp(row.created_at),
     updatedAt: asTimestamp(row.updated_at),
     disabledAt: nullableTimestamp(row.disabled_at),
@@ -1898,6 +2018,9 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
             input.rightsVersion,
             input.status,
             input.validationState,
+            input.priority,
+            input.weight,
+            input.revalidationIntervalSeconds,
             input.createdAt,
             input.updatedAt,
           ]
@@ -1913,13 +2036,16 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
             input.rightsVersion,
             input.status,
             input.validationState,
+            input.priority,
+            input.weight,
+            input.revalidationIntervalSeconds,
             input.createdAt,
             input.updatedAt,
           ];
     const columns =
       input.owner.ownerKind === 'tenant'
-        ? '(tenant_id, id, display_name, provider_id, product_id, credential_type, region, purpose, rights_id, rights_version, status, validation_state, created_at, updated_at)'
-        : '(id, display_name, provider_id, product_id, credential_type, region, purpose, rights_id, rights_version, status, validation_state, created_at, updated_at)';
+        ? '(tenant_id, id, display_name, provider_id, product_id, credential_type, region, purpose, rights_id, rights_version, status, validation_state, priority, weight, revalidation_interval_seconds, created_at, updated_at)'
+        : '(id, display_name, provider_id, product_id, credential_type, region, purpose, rights_id, rights_version, status, validation_state, priority, weight, revalidation_interval_seconds, created_at, updated_at)';
     const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
     await this.query<AccountRow>(
       `INSERT INTO ${table} ${columns}
@@ -2177,6 +2303,67 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
     return mapAccount(row, await this.accountCapabilities(reference, row.provider_id, row.product_id));
   }
 
+  async updateAccountScheduling(input: UpdateProviderAccountSchedulingInput): Promise<ProviderAccountRecord | null> {
+    await lockAdvisoryLayers(this.executor, providerAccountLockLayers(input.account), 'exclusive');
+    const table = accountTable(input.account.ownerKind);
+    const lockPredicate = accountPredicate(input.account, 1);
+    const lockedRows = await this.query<AccountRow>(
+      `SELECT ${accountColumns(input.account.ownerKind)}
+         FROM ${table}
+        WHERE ${lockPredicate.sql}
+        LIMIT 1
+        FOR UPDATE`,
+      lockPredicate.values,
+    );
+    if (!lockedRows[0]) return null;
+    const predicate = accountPredicate(input.account, 5);
+    const rows = await this.query<AccountRow>(
+      `UPDATE ${table}
+       SET priority = $1,
+           weight = $2,
+           updated_at = $3,
+           authz_version = authz_version + 1
+       WHERE ${predicate.sql} AND authz_version = $4
+       RETURNING ${accountColumns(input.account.ownerKind)}`,
+      [input.priority, input.weight, input.updatedAt, input.expectedAuthzVersion, ...predicate.values],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const reference = accountReferenceFromRow(row);
+    return mapAccount(row, await this.accountCapabilities(reference, row.provider_id, row.product_id));
+  }
+
+  async updateAccountRevalidation(
+    input: UpdateProviderAccountRevalidationInput,
+  ): Promise<ProviderAccountRecord | null> {
+    await lockAdvisoryLayers(this.executor, providerAccountLockLayers(input.account), 'exclusive');
+    const table = accountTable(input.account.ownerKind);
+    const lockPredicate = accountPredicate(input.account, 1);
+    const lockedRows = await this.query<AccountRow>(
+      `SELECT ${accountColumns(input.account.ownerKind)}
+         FROM ${table}
+        WHERE ${lockPredicate.sql}
+        LIMIT 1
+        FOR UPDATE`,
+      lockPredicate.values,
+    );
+    if (!lockedRows[0]) return null;
+    const predicate = accountPredicate(input.account, 4);
+    const rows = await this.query<AccountRow>(
+      `UPDATE ${table}
+       SET revalidation_interval_seconds = $1,
+           updated_at = $2,
+           authz_version = authz_version + 1
+       WHERE ${predicate.sql} AND authz_version = $3
+       RETURNING ${accountColumns(input.account.ownerKind)}`,
+      [input.revalidationIntervalSeconds, input.updatedAt, input.expectedAuthzVersion, ...predicate.values],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const reference = accountReferenceFromRow(row);
+    return mapAccount(row, await this.accountCapabilities(reference, row.provider_id, row.product_id));
+  }
+
   async createCredential(input: PersistedProviderCredentialInput): Promise<ProviderCredentialRecord> {
     const credentialReference: ProviderCredentialReference = {
       ownerKind: input.owner.ownerKind,
@@ -2186,6 +2373,11 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
     };
     await lockAdvisoryLayers(this.executor, providerCredentialLockLayers(credentialReference), 'exclusive');
     const table = credentialTable(input.owner.ownerKind);
+    // The oauth columns are named only for OAuth onboarding: INSERT column
+    // grants are per-column, so the non-OAuth insert stays byte-identical and
+    // within the pre-#18a restricted-role grants.
+    const oauthRefresh = input.oauthRefresh ?? null;
+    const oauthColumns = oauthRefresh === null ? [] : (['idle', oauthRefresh.nextRefreshAt] as const);
     const values =
       input.owner.ownerKind === 'tenant'
         ? [
@@ -2200,6 +2392,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
             input.expiresAt,
             input.createdAt,
             input.updatedAt,
+            ...oauthColumns,
           ]
         : [
             input.id,
@@ -2212,11 +2405,13 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
             input.expiresAt,
             input.createdAt,
             input.updatedAt,
+            ...oauthColumns,
           ];
+    const oauthColumnList = oauthRefresh === null ? '' : ', oauth_refresh_state, oauth_next_refresh_at';
     const columns =
       input.owner.ownerKind === 'tenant'
-        ? '(tenant_id, id, account_id, provider_id, product_id, credential_type, status, validation_state, expires_at, created_at, updated_at)'
-        : '(id, account_id, provider_id, product_id, credential_type, status, validation_state, expires_at, created_at, updated_at)';
+        ? `(tenant_id, id, account_id, provider_id, product_id, credential_type, status, validation_state, expires_at, created_at, updated_at${oauthColumnList})`
+        : `(id, account_id, provider_id, product_id, credential_type, status, validation_state, expires_at, created_at, updated_at${oauthColumnList})`;
     const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
     await this.query(
       `INSERT INTO ${table} ${columns}
@@ -2230,19 +2425,67 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
     return result;
   }
 
+  async getCredentialOauthRefreshState(
+    reference: ProviderCredentialReference,
+  ): Promise<{ readonly state: ProviderCredentialOauthRefreshState | null } | null> {
+    if (this.executor === this.database && !this.inTransaction && typeof this.database.transaction === 'function') {
+      return this.database.transaction((executor) =>
+        new PostgresProviderSupplyRepository(this.database, executor, true).getCredentialOauthRefreshState(reference),
+      );
+    }
+    await lockAdvisoryLayers(this.executor, providerCredentialLockLayers(reference), 'shared');
+    const predicate = credentialPredicate(reference, 1);
+    const rows = await this.query<{ readonly oauth_refresh_state: string | null }>(
+      `SELECT oauth_refresh_state
+       FROM ${credentialTable(reference.ownerKind)}
+       WHERE ${predicate.sql}
+       LIMIT 1`,
+      predicate.values,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    if (
+      row.oauth_refresh_state !== null &&
+      row.oauth_refresh_state !== 'idle' &&
+      row.oauth_refresh_state !== 'refreshing' &&
+      row.oauth_refresh_state !== 'failed'
+    ) {
+      throw repositoryError('INVALID_OAUTH_REFRESH_STATE');
+    }
+    return { state: row.oauth_refresh_state };
+  }
+
   async enqueueProviderCredentialValidationJob(
     input: ProviderCredentialValidationJobInput,
   ): Promise<ProviderCredentialValidationJobRecord> {
+    if (
+      (input.ownerKind === 'tenant' && input.tenantId === null) ||
+      (input.ownerKind === 'platform' && input.tenantId !== null)
+    ) {
+      throw repositoryError('CREDENTIAL_VALIDATION_JOB_WRITE_FAILED');
+    }
+    const targetEndpoint = normalizeValidationJobEndpoint(input.target.endpoint);
+    if (targetEndpoint === '') throw repositoryError('INVALID_INPUT');
+    // The canonical endpoint feeds the insert AND the idempotency replay
+    // comparison alike — comparing the stored token form against the raw
+    // input would self-conflict on every replay.
+    const normalizedInput: ProviderCredentialValidationJobInput = {
+      ...input,
+      target: { ...input.target, endpoint: targetEndpoint },
+    };
+    input = normalizedInput;
     const credentialReference: ProviderCredentialReference & { readonly version: number } = {
-      ownerKind: 'tenant',
+      ownerKind: input.ownerKind,
       tenantId: input.tenantId,
       accountId: input.accountId,
       credentialId: input.credentialId,
       version: input.credentialVersion,
     };
     await lockAdvisoryLayers(this.executor, providerVersionLockLayers(credentialReference), 'exclusive');
-    const values = [
-      input.tenantId,
+    const sharedColumns =
+      'account_id, credential_id, credential_version, provider_id, product_id, credential_type,\n' +
+      '          allowed_models, target_model, target_endpoint, capability_version, idempotency_key';
+    const sharedValues = [
       input.accountId,
       input.credentialId,
       input.credentialVersion,
@@ -2251,37 +2494,55 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       input.credentialType,
       [...input.allowedModels],
       input.target.model,
-      input.target.endpoint,
+      targetEndpoint,
       input.target.version,
       input.idempotencyKey,
     ];
+    const tenant = input.ownerKind === 'tenant';
+    const insertColumns = tenant ? `tenant_id, ${sharedColumns}` : sharedColumns;
+    const values = tenant ? [input.tenantId, ...sharedValues] : sharedValues;
+    const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+    const returning = tenant
+      ? `id, tenant_id, ${sharedColumns}, status,
+         attempt_count, available_at, lease_until, lease_generation, last_error_code, completed_at, created_at, updated_at`
+      : `id, ${sharedColumns}, status,
+         attempt_count, available_at, lease_until, lease_generation, last_error_code, completed_at, created_at, updated_at`;
     const inserted = await this.query<CredentialValidationJobRow>(
-      `INSERT INTO saas_tenant_provider_credential_validation_jobs
-         (tenant_id, account_id, credential_id, credential_version, provider_id, product_id, credential_type,
-          allowed_models, target_model, target_endpoint, capability_version, idempotency_key)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      tenant
+        ? `INSERT INTO saas_tenant_provider_credential_validation_jobs
+         (${insertColumns})
+       VALUES (${placeholders})
        ON CONFLICT (tenant_id, credential_id, credential_version) DO NOTHING
-       RETURNING id, tenant_id, account_id, credential_id, credential_version, provider_id, product_id, credential_type,
-         allowed_models, target_model, target_endpoint, capability_version, idempotency_key, status,
-         attempt_count, available_at, lease_until, lease_generation, last_error_code, completed_at, created_at, updated_at`,
+       RETURNING ${returning}`
+        : `INSERT INTO saas_platform_provider_credential_validation_jobs
+         (${insertColumns})
+       VALUES (${placeholders})
+       ON CONFLICT (credential_id, credential_version) DO NOTHING
+       RETURNING ${returning}`,
       values,
     );
     const rows =
       inserted.length > 0
         ? inserted
         : await this.query<CredentialValidationJobRow>(
-            `SELECT id, tenant_id, account_id, credential_id, credential_version, provider_id, product_id, credential_type,
-                    allowed_models, target_model, target_endpoint, capability_version, idempotency_key, status,
-                    attempt_count, available_at, lease_until, lease_generation, last_error_code, completed_at, created_at, updated_at
+            tenant
+              ? `SELECT ${returning}
                FROM saas_tenant_provider_credential_validation_jobs
               WHERE tenant_id = $1 AND credential_id = $2 AND credential_version = $3
               LIMIT 1
+              FOR UPDATE`
+              : `SELECT ${returning}
+               FROM saas_platform_provider_credential_validation_jobs
+              WHERE credential_id = $1 AND credential_version = $2
+              LIMIT 1
               FOR UPDATE`,
-            [input.tenantId, input.credentialId, input.credentialVersion],
+            tenant
+              ? [input.tenantId, input.credentialId, input.credentialVersion]
+              : [input.credentialId, input.credentialVersion],
           );
     const row = rows[0];
     if (!row) throw repositoryError('CREDENTIAL_VALIDATION_JOB_WRITE_FAILED');
-    const job = mapCredentialValidationJob(row);
+    const job = mapCredentialValidationJob(row, input.ownerKind);
     if (!sameValidationJobSnapshot(job, input)) {
       throw repositoryError('VALIDATION_JOB_IDEMPOTENCY_CONFLICT');
     }
@@ -2465,7 +2726,23 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       versionValues,
     );
 
-    const parentPredicate = credentialPredicate(input.credential, 5);
+    // #18a rotation inheritance: the oauth_* columns join the SET list only
+    // when the caller supplies a reschedule. The CASE guard keeps a row the R4
+    // refresh worker has claimed ('refreshing') untouched — the worker's own
+    // finalize write reschedules it — while an idle/failed row adopts the new
+    // material's schedule with the force flag and error cleared. Without a
+    // reschedule the statement is byte-identical to pre-#18a and names no
+    // oauth_* column, preserving the restricted-role column grants.
+    const reschedule = input.oauthRefreshSchedule;
+    const oauthSetClauses =
+      reschedule === undefined
+        ? ''
+        : `,
+           oauth_refresh_state = CASE WHEN oauth_refresh_state = 'refreshing' THEN oauth_refresh_state ELSE 'idle' END,
+           oauth_next_refresh_at = CASE WHEN oauth_refresh_state = 'refreshing' THEN oauth_next_refresh_at ELSE $5::timestamptz END,
+           oauth_refresh_error_code = CASE WHEN oauth_refresh_state = 'refreshing' THEN oauth_refresh_error_code ELSE NULL END,
+           oauth_force_refresh_requested = CASE WHEN oauth_refresh_state = 'refreshing' THEN oauth_force_refresh_requested ELSE false END`;
+    const parentPredicate = credentialPredicate(input.credential, reschedule === undefined ? 5 : 6);
     const updatedRows = await this.query<CredentialRow>(
       `UPDATE ${credentialTableName}
        SET current_version = $1,
@@ -2475,7 +2752,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
            last_validated_at = NULL,
            expires_at = $2,
            updated_at = $3,
-           authz_version = authz_version + 1
+           authz_version = authz_version + 1${oauthSetClauses}
        WHERE ${parentPredicate.sql} AND current_version IS NOT DISTINCT FROM $4
        RETURNING ${credentialColumns(input.credential.ownerKind)}`,
       [
@@ -2483,6 +2760,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
         input.expiresAt,
         input.createdAt,
         input.expectedCurrentVersion,
+        ...(reschedule === undefined ? [] : [reschedule.nextRefreshAt]),
         ...parentPredicate.values,
       ],
     );

@@ -4,8 +4,11 @@ import type {
   PersistedProviderAccountInput,
   PersistedProviderCredentialInput,
   PersistedTenantByokProfileAccountInput,
+  ProviderCredentialOauthRefreshState,
   ProviderSupplyRepository,
   UpdateProviderAccountLifecycleInput,
+  UpdateProviderAccountRevalidationInput,
+  UpdateProviderAccountSchedulingInput,
   UpdateProviderAccountValidationInput,
   UpdateProviderCredentialLifecycleInput,
   UpdateProviderCredentialValidationInput,
@@ -87,6 +90,19 @@ function publicVersion(record: StoredProviderCredentialVersion): ProviderCredent
   };
 }
 
+/** #18a test mirror of the migration-094 oauth_* scheduling columns. */
+export interface FakeOauthRefreshScheduling {
+  state: ProviderCredentialOauthRefreshState | null;
+  nextRefreshAt: string | null;
+  lastRefreshAt: string | null;
+  forceRefreshRequested: boolean;
+  errorCode: string | null;
+}
+
+function nullOauthScheduling(): FakeOauthRefreshScheduling {
+  return { state: null, nextRefreshAt: null, lastRefreshAt: null, forceRefreshRequested: false, errorCode: null };
+}
+
 export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   accounts: ProviderAccountRecord[] = [];
   credentials: ProviderCredentialRecord[] = [];
@@ -94,6 +110,9 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   auditEvents: AppendProviderSupplyAuditEventInput[] = [];
   validationJobs: ProviderCredentialValidationJobRecord[] = [];
   byokProfileAccountBindings: PersistedTenantByokProfileAccountInput[] = [];
+  /** Every appendCredentialVersion input, in call order (recording for #18a assertions). */
+  appendedCredentialVersionInputs: AppendProviderCredentialVersionInput[] = [];
+  oauthRefreshScheduling = new Map<string, FakeOauthRefreshScheduling>();
   failAudit = false;
   failValidationEnqueue = false;
   dispatchProof: ProviderCredentialDispatchProof | null = null;
@@ -106,6 +125,8 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
     child.auditEvents = clone(this.auditEvents);
     child.validationJobs = clone(this.validationJobs);
     child.byokProfileAccountBindings = clone(this.byokProfileAccountBindings);
+    child.appendedCredentialVersionInputs = clone(this.appendedCredentialVersionInputs);
+    child.oauthRefreshScheduling = clone(this.oauthRefreshScheduling);
     child.failAudit = this.failAudit;
     child.failValidationEnqueue = this.failValidationEnqueue;
     child.dispatchProof = this.dispatchProof === null ? null : clone(this.dispatchProof);
@@ -116,10 +137,27 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
     this.auditEvents = child.auditEvents;
     this.validationJobs = child.validationJobs;
     this.byokProfileAccountBindings = child.byokProfileAccountBindings;
+    this.appendedCredentialVersionInputs = child.appendedCredentialVersionInputs;
+    this.oauthRefreshScheduling = child.oauthRefreshScheduling;
     this.failAudit = child.failAudit;
     this.failValidationEnqueue = child.failValidationEnqueue;
     this.dispatchProof = child.dispatchProof;
     return result;
+  }
+
+  /** Test read of the mirrored oauth_* scheduling columns. */
+  oauthRefreshOf(reference: ProviderCredentialReference): FakeOauthRefreshScheduling {
+    const scheduling = this.oauthRefreshScheduling.get(credentialKey(reference));
+    if (!scheduling) throw error('CREDENTIAL_NOT_FOUND');
+    return clone(scheduling);
+  }
+
+  /** Test setup for rotation-inheritance scenarios (e.g. a 'refreshing' claim or a force flag). */
+  setOauthRefreshForTest(reference: ProviderCredentialReference, patch: Partial<FakeOauthRefreshScheduling>): void {
+    const key = credentialKey(reference);
+    const scheduling = this.oauthRefreshScheduling.get(key);
+    if (!scheduling) throw error('CREDENTIAL_NOT_FOUND');
+    this.oauthRefreshScheduling.set(key, { ...scheduling, ...patch });
   }
 
   async appendAuditEvent(input: AppendProviderSupplyAuditEventInput): Promise<void> {
@@ -156,6 +194,9 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       validationErrorCode: null,
       lastValidatedAt: null,
       authzVersion: 1,
+      priority: input.priority,
+      weight: input.weight,
+      revalidationIntervalSeconds: input.revalidationIntervalSeconds,
       createdAt: input.createdAt,
       updatedAt: input.updatedAt,
       disabledAt: null,
@@ -185,7 +226,9 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   }
 
   async updateAccountLifecycle(input: UpdateProviderAccountLifecycleInput): Promise<ProviderAccountRecord | null> {
-    const index = this.accounts.findIndex((candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account));
+    const index = this.accounts.findIndex(
+      (candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account),
+    );
     const account = this.accounts[index];
     if (!account || account.authzVersion !== input.expectedAuthzVersion) return null;
     const updated: ProviderAccountRecord = {
@@ -201,7 +244,9 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   }
 
   async updateAccountValidation(input: UpdateProviderAccountValidationInput): Promise<ProviderAccountRecord | null> {
-    const index = this.accounts.findIndex((candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account));
+    const index = this.accounts.findIndex(
+      (candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account),
+    );
     const account = this.accounts[index];
     if (!account || account.authzVersion !== input.expectedAuthzVersion) return null;
     const updated: ProviderAccountRecord = {
@@ -209,6 +254,41 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       validationState: input.validationState,
       validationErrorCode: input.validationErrorCode,
       lastValidatedAt: input.lastValidatedAt,
+      updatedAt: input.updatedAt,
+      authzVersion: account.authzVersion + 1,
+    };
+    this.accounts[index] = updated;
+    return clone(updated);
+  }
+
+  async updateAccountScheduling(input: UpdateProviderAccountSchedulingInput): Promise<ProviderAccountRecord | null> {
+    const index = this.accounts.findIndex(
+      (candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account),
+    );
+    const account = this.accounts[index];
+    if (!account || account.authzVersion !== input.expectedAuthzVersion) return null;
+    const updated: ProviderAccountRecord = {
+      ...account,
+      priority: input.priority,
+      weight: input.weight,
+      updatedAt: input.updatedAt,
+      authzVersion: account.authzVersion + 1,
+    };
+    this.accounts[index] = updated;
+    return clone(updated);
+  }
+
+  async updateAccountRevalidation(
+    input: UpdateProviderAccountRevalidationInput,
+  ): Promise<ProviderAccountRecord | null> {
+    const index = this.accounts.findIndex(
+      (candidate) => ownerKey(candidate, candidate.id) === accountKey(input.account),
+    );
+    const account = this.accounts[index];
+    if (!account || account.authzVersion !== input.expectedAuthzVersion) return null;
+    const updated: ProviderAccountRecord = {
+      ...account,
+      revalidationIntervalSeconds: input.revalidationIntervalSeconds,
       updatedAt: input.updatedAt,
       authzVersion: account.authzVersion + 1,
     };
@@ -244,21 +324,47 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       revokedAt: null,
     };
     this.credentials.push(credential);
+    const oauthRefresh = input.oauthRefresh ?? null;
+    this.oauthRefreshScheduling.set(
+      key,
+      oauthRefresh === null
+        ? nullOauthScheduling()
+        : { ...nullOauthScheduling(), state: 'idle', nextRefreshAt: oauthRefresh.nextRefreshAt },
+    );
     return clone(credential);
+  }
+
+  async getCredentialOauthRefreshState(
+    reference: ProviderCredentialReference,
+  ): Promise<{ readonly state: ProviderCredentialOauthRefreshState | null } | null> {
+    const credential = this.credentials.find((candidate) => credentialKey(candidate) === credentialKey(reference));
+    if (!credential) return null;
+    const scheduling = this.oauthRefreshScheduling.get(credentialKey(reference)) ?? nullOauthScheduling();
+    return { state: scheduling.state };
   }
 
   async enqueueProviderCredentialValidationJob(
     input: ProviderCredentialValidationJobInput,
   ): Promise<ProviderCredentialValidationJobRecord> {
     if (this.failValidationEnqueue) throw error('VALIDATION_JOB_WRITE_FAILED');
+    // Same fail-closed owner/tenant shape as the Postgres writer: a tenant job
+    // without tenant identity or a platform job with one is store corruption.
+    if (
+      (input.ownerKind === 'tenant' && input.tenantId === null) ||
+      (input.ownerKind === 'platform' && input.tenantId !== null)
+    ) {
+      throw error('VALIDATION_JOB_WRITE_FAILED');
+    }
     const existing = this.validationJobs.find(
       (job) =>
+        job.ownerKind === input.ownerKind &&
         job.tenantId === input.tenantId &&
         job.credentialId === input.credentialId &&
         job.credentialVersion === input.credentialVersion,
     );
     if (existing) {
       const existingSnapshot = {
+        ownerKind: existing.ownerKind,
         tenantId: existing.tenantId,
         accountId: existing.accountId,
         credentialId: existing.credentialId,
@@ -271,6 +377,7 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
         idempotencyKey: existing.idempotencyKey,
       };
       const inputSnapshot = {
+        ownerKind: input.ownerKind,
         tenantId: input.tenantId,
         accountId: input.accountId,
         credentialId: input.credentialId,
@@ -330,6 +437,7 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
   async appendCredentialVersion(
     input: AppendProviderCredentialVersionInput,
   ): Promise<{ readonly credential: ProviderCredentialRecord; readonly version: ProviderCredentialVersionRecord }> {
+    this.appendedCredentialVersionInputs.push(clone(input));
     const credentialReference: ProviderCredentialReference = input.credential;
     const credentialIndex = this.credentials.findIndex(
       (candidate) => credentialKey(candidate) === credentialKey(credentialReference),
@@ -382,6 +490,22 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       authzVersion: credential.authzVersion + 1,
     };
     this.credentials[credentialIndex] = updated;
+    // Mirror of the repository's #18a CASE guard: a supplied reschedule applies
+    // unless the R4 worker owns the row ('refreshing'); the last-refresh stamp
+    // is historical and preserved either way.
+    if (input.oauthRefreshSchedule !== undefined) {
+      const schedulingKey = credentialKey(credentialReference);
+      const scheduling = this.oauthRefreshScheduling.get(schedulingKey) ?? nullOauthScheduling();
+      if (scheduling.state !== 'refreshing') {
+        this.oauthRefreshScheduling.set(schedulingKey, {
+          ...scheduling,
+          state: 'idle',
+          nextRefreshAt: input.oauthRefreshSchedule.nextRefreshAt,
+          errorCode: null,
+          forceRefreshRequested: false,
+        });
+      }
+    }
     this.validationJobs = this.validationJobs.map((job): ProviderCredentialValidationJobRecord => {
       if (
         job.tenantId === credential.tenantId &&
@@ -450,8 +574,12 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       validationState: input.validationState,
       validationErrorCode: input.validationErrorCode,
       lastValidatedAt: input.lastValidatedAt,
-      status: credential.status === 'revoked' || credential.status === 'disabled'
-        ? credential.status : input.validationState === 'verified' ? 'active' : 'pending',
+      status:
+        credential.status === 'revoked' || credential.status === 'disabled'
+          ? credential.status
+          : input.validationState === 'verified'
+            ? 'active'
+            : 'pending',
       updatedAt: input.updatedAt,
       authzVersion: credential.authzVersion + 1,
     };

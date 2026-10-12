@@ -5,6 +5,11 @@ import {
   createPostgresPreparationPorts,
   type PostgresPreparationPortsOptions,
 } from '../../../src/saas/gateway/postgres-preparation-ports.js';
+import {
+  KeyBudgetAdmissionDeniedError,
+  type KeyBudgetAdmissionFacts,
+  type KeyBudgetAdmissionPort,
+} from '../../../src/saas/gateway/postgres-preparation-budget.js';
 import { GatewayRequestIdempotencyStore } from '../../../src/saas/gateway/request-idempotency.js';
 import {
   allowRequestPreparation,
@@ -208,7 +213,10 @@ function authority(
   } as never;
 }
 
-function setup(mode: Mode = 'platform', fixtureOptions: { insufficientFunds?: boolean } = {}) {
+function setup(
+  mode: Mode = 'platform',
+  fixtureOptions: { insufficientFunds?: boolean; keyBudget?: KeyBudgetAdmissionPort } = {},
+) {
   const value = caller(mode);
   const ent = entitlement(value);
   const auth = authority(value);
@@ -253,7 +261,7 @@ function setup(mode: Mode = 'platform', fixtureOptions: { insufficientFunds?: bo
         });
         return { rows: [{ request_id: String(requestId) } as Row], rowCount: 1 };
       }
-      if (sql.startsWith('SELECT request_fingerprint, request_fingerprint_version')) {
+      if (sql.startsWith('SELECT saas_gateway_request_idempotency_keys.request_fingerprint AS request_fingerprint,')) {
         const [tenantId, projectId, proxyKeyId, keyDigest] = values;
         const row = gatewayIdempotency.get([tenantId, projectId, proxyKeyId, keyDigest].join('|'));
         const canonicalRow = row
@@ -514,6 +522,7 @@ function setup(mode: Mode = 'platform', fixtureOptions: { insufficientFunds?: bo
     },
     capacity,
     idempotencyStore,
+    ...(fixtureOptions.keyBudget === undefined ? {} : { keyBudget: fixtureOptions.keyBudget }),
     payloadCompilerVersion: 'payload-v1',
     usageEstimatorVersion: 'estimate-v1',
     requestFingerprintVersion: 'fingerprint-v1',
@@ -1007,4 +1016,75 @@ test('compensation retains dispatched and unknown attempts without releasing any
     assert.equal(fixture.calls.capacityRelease, 0, state);
     assert.equal(fixture.calls.walletRelease, 0, state);
   }
+});
+
+test('keyBudget reserve runs inside admission with the admitted facts; replays never re-reserve', async () => {
+  const reserved: KeyBudgetAdmissionFacts[] = [];
+  const keyBudget: KeyBudgetAdmissionPort = {
+    async reserve(_executor, facts) {
+      reserved.push(facts);
+    },
+  };
+  const fixture = setup('platform', { keyBudget });
+  const admitted = await authorize(fixture);
+  assert.equal(admitted.decision, 'allow');
+  assert.equal(reserved.length, 1);
+  assert.deepEqual(reserved[0], {
+    tenantId: TENANT_ID,
+    projectId: fixture.caller.projectId,
+    keyId: fixture.caller.proxyKeyId,
+    requestId: REQUEST_A_ID,
+    supplyMode: 'platform',
+    payloadBounds: BOUNDS,
+    charge: { currency: 'USD', amountMinorUnits: '25' },
+  });
+
+  // A byok admission carries no charge facts.
+  const byokReserved: KeyBudgetAdmissionFacts[] = [];
+  const byokFixture = setup('byok', {
+    keyBudget: {
+      async reserve(_executor, facts) {
+        byokReserved.push(facts);
+      },
+    },
+  });
+  const byokAdmitted = await authorize(byokFixture);
+  assert.equal(byokAdmitted.decision, 'allow');
+  assert.equal(byokReserved.length, 1);
+  assert.equal(byokReserved[0]?.charge, null);
+  assert.equal(byokReserved[0]?.supplyMode, 'byok');
+
+  // Idempotent replay of the same request must not double-reserve budget.
+  const replayReserved: KeyBudgetAdmissionFacts[] = [];
+  const replayFixture = setup('platform', {
+    keyBudget: {
+      async reserve(_executor, facts) {
+        replayReserved.push(facts);
+      },
+    },
+  });
+  assert.equal((await authorize(replayFixture)).decision, 'allow');
+  const replay = await replayFixture.ports.admission.authorizeAndReserve(
+    replayFixture.admissionInput() as never,
+    { executor: replayFixture.executor },
+  );
+  assert.equal(replay.decision, 'reject');
+  if (replay.decision === 'reject') assert.equal(replay.code, 'idempotency_replay');
+  assert.equal(replayReserved.length, 1);
+});
+
+test('keyBudget denial rejects the admission as budget_exceeded', async () => {
+  const fixture = setup('platform', {
+    keyBudget: {
+      async reserve() {
+        throw new KeyBudgetAdmissionDeniedError('daily_tokens');
+      },
+    },
+  });
+  const decision = await authorize(fixture);
+  assert.deepEqual(decision, {
+    decision: 'reject',
+    code: 'budget_exceeded',
+    message: 'The API key budget is exhausted.',
+  });
 });

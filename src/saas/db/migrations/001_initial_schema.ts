@@ -57,6 +57,25 @@ import { NORMAL_SUCCESS_USAGE_EVIDENCE_REFERENCE_SAAS_MIGRATION } from './057_no
 import { CREDENTIAL_VALIDATION_INVALIDATION_TRIGGER_EXECUTION_SAAS_MIGRATION } from './058_credential_validation_invalidation_trigger_execution.js';
 import { PRE_DISPATCH_TERMINAL_CANCELLATION_SAAS_MIGRATION } from './059_pre_dispatch_terminal_cancellation.js';
 import { PREPARED_EVIDENCE_CLAIM_GENERATED_ACCOUNT_SAAS_MIGRATION } from './060_prepared_evidence_claim_generated_account.js';
+import { USAGE_CORRECTIONS_SAAS_MIGRATION } from './063_usage_corrections.js';
+import { API_KEY_IP_POLICIES_SAAS_MIGRATION } from './080_api_key_ip_policies.js';
+import { API_KEY_BUDGETS_SAAS_MIGRATION } from './081_api_key_budgets.js';
+import { PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './082_provider_account_scheduling.js';
+import { PLATFORM_CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION } from './083_platform_credential_validation_jobs.js';
+import { PROVIDER_ACCOUNT_REVALIDATION_SAAS_MIGRATION } from './084_provider_account_revalidation.js';
+import { CUSTOMER_PASSKEY_CEREMONIES_SAAS_MIGRATION } from './085_customer_passkey_ceremonies.js';
+import { CUSTOMER_WEBHOOK_TENANT_POLICY_ENTITLEMENT_SAAS_MIGRATION } from './087_customer_webhook_tenant_policy_entitlement.js';
+import { CUSTOMER_WEBHOOK_EVENT_TYPES_CHECK_REWRITE_SAAS_MIGRATION } from './088_customer_webhook_event_types_check_rewrite.js';
+import { MARKETING_REDEEM_CODES_SAAS_MIGRATION } from './089_marketing_redeem_codes.js';
+import { MARKETING_PROMO_CODES_SAAS_MIGRATION } from './090_marketing_promo_codes.js';
+import { MARKETING_AFFILIATE_SAAS_MIGRATION } from './091_marketing_affiliate.js';
+import { MARKETING_ANNOUNCEMENTS_SAAS_MIGRATION } from './092_marketing_announcements.js';
+import { PROVIDER_ACCOUNT_QUOTA_SNAPSHOTS_SAAS_MIGRATION } from './093_provider_account_quota_snapshots.js';
+import { PROVIDER_CREDENTIAL_OAUTH_REFRESH_SAAS_MIGRATION } from './094_provider_credential_oauth_refresh_state.js';
+import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from './095_marketing_announcement_fanout_cursor.js';
+import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from './096_customer_webhook_maintenance_payload_rewrite.js';
+import { PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION } from './097_provider_account_quarantine_state.js';
+import { PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION } from './098_provider_account_rate_counters_and_health_score.js';
 
 export interface SaasMigration {
   version: number;
@@ -422,4 +441,71 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   CREDENTIAL_VALIDATION_INVALIDATION_TRIGGER_EXECUTION_SAAS_MIGRATION,
   PRE_DISPATCH_TERMINAL_CANCELLATION_SAAS_MIGRATION,
   PREPARED_EVIDENCE_CLAIM_GENERATED_ACCOUNT_SAAS_MIGRATION,
+  // 061 audited_credential_validation_requeue: isolated stage-1 candidate,
+  // register only at integration GO. 062: reserved for the FIN request
+  // execution fence/recovery design (PROPOSED).
+  USAGE_CORRECTIONS_SAAS_MIGRATION,
+  // 064-079: retired unregistered (serial integration landed 080/081 first;
+  // lower numbers can never be applied on top, per the fail-closed ordering
+  // rule). Tracks D/E/F/G consume 082+ per the contracts-m0-freeze ledger.
+  API_KEY_IP_POLICIES_SAAS_MIGRATION,
+  API_KEY_BUDGETS_SAAS_MIGRATION,
+  PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
+  PLATFORM_CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION,
+  PROVIDER_ACCOUNT_REVALIDATION_SAAS_MIGRATION,
+  CUSTOMER_PASSKEY_CEREMONIES_SAAS_MIGRATION,
+  // 086: reserved for Track E and intentionally unused (E4 required no schema
+  // change). Track F consumes 087 per the same ledger.
+  CUSTOMER_WEBHOOK_TENANT_POLICY_ENTITLEMENT_SAAS_MIGRATION,
+  // 088: Track F evidence repair — the 043 event-types CHECK becomes
+  // equivalent pg_catalog-only SQL so restricted-role writes do not require
+  // EXECUTE on the non-callable schema helper (migration 056's pattern).
+  CUSTOMER_WEBHOOK_EVENT_TYPES_CHECK_REWRITE_SAAS_MIGRATION,
+  // 089: Track G1 redeem codes (docs/marketing-domain-design-2026-10-11.md);
+  // 090/091 remain reserved for G2 promo codes / G3 affiliate rewards per the
+  // same ledger.
+  MARKETING_REDEEM_CODES_SAAS_MIGRATION,
+  // 090: R1/G2 promo codes — checkout pricing snapshot discounts only, never
+  // repriced after the fact; orders keep the insert-only original amount so
+  // client-request replay compares the customer's original input.
+  MARKETING_PROMO_CODES_SAAS_MIGRATION,
+  // 091: R2/G3 affiliate rebates — lifetime-immutable attribution, singleton
+  // versioned policy head, append-only rewards with basis-point snapshots.
+  MARKETING_AFFILIATE_SAAS_MIGRATION,
+  // 092: Track G4 announcements — platform broadcast drafts with a one-way
+  // publish/withdraw state machine, version CAS and append-only read receipts.
+  MARKETING_ANNOUNCEMENTS_SAAS_MIGRATION,
+  // 093: Track D4 provider account quota snapshots (scheduling signal only,
+  // never billing). Arbitration: 090/091 stay reserved for G2 promo codes /
+  // G3 affiliate rewards; the marketing-reserved segment's 093 slot was
+  // reassigned to Track D4 and the marketing evolution segment defers to
+  // 094-098 per the contracts-m0-freeze ledger.
+  PROVIDER_ACCOUNT_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
+  // 094: R4 OAuth token refresh scheduling/observability state. Refresh
+  // secrets stay inside the credential envelopes; the gateway never writes
+  // credential relations (pin invariant) — the validation worker sets the
+  // force-refresh flag on 401-class failures and the refresh worker
+  // consumes and clears it.
+  PROVIDER_CREDENTIAL_OAUTH_REFRESH_SAAS_MIGRATION,
+  // 095: R8/G4.5 announcement webhook fan-out cursor — the announcement row
+  // is the cursor; the timestamp lands only after every entitled tenant has
+  // the event durably enqueued. Re-arbitration 2026-10-11: the plan's
+  // reservation order (095 quarantine / 096 group / 097 counters / 098
+  // fan-out) would have stranded lower numbers behind the head, so the
+  // fan-out takes 095; R5 quarantine / R9 group / R6 counters take 096+ in
+  // landing order per docs/remaining-capability-plan-2026-10-11.md.
+  MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION,
+  // 096: R8 evidence repair — the 043 platform.maintenance payload contract
+  // pinned a placeholder shape that never had a producer; the announcement
+  // fan-out emits the real payload. Guarded one-CHECK swap (088's pattern):
+  // fails closed if any platform.maintenance event rows exist.
+  CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION,
+  // 097: R5 credential quarantine — observation state between failed and
+  // verified (scheduling-excluded but probed on a longer cadence); entry only
+  // from failed, exit only towards verified, entry facts immutable.
+  PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION,
+  // 098: R6/D5 PG-authoritative per-account rate counters (admission upsert,
+  // scheduling reads the trailing window) + R7/D6 continuous health score and
+  // half-open probe state. NULL keeps pre-R6/R7 behavior for existing rows.
+  PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION,
 ];

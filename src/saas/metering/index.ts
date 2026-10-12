@@ -6,6 +6,7 @@ export {
   normalizeFingerprint,
   settlementDigest,
   sha256Hex,
+  usageCorrectionDigest,
   usageEventDigest,
 } from './digest.js';
 export type { SaasMeteringErrorCode } from './errors.js';
@@ -105,3 +106,12 @@ export {
   UnknownOutcomeReconciliationWorker,
   validateOperatorCoverage,
 } from './unknown-outcome-recovery-worker.js';
+export type {
+  RecordUsageCorrectionInput,
+  UsageCorrectionLedgerPort,
+  UsageCorrectionReasonCode,
+  UsageCorrectionRecord,
+  UsageCorrectionResult,
+  UsageCorrectionServiceOptions,
+} from './usage-correction.js';
+export { UsageCorrectionService } from './usage-correction.js';

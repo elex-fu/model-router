@@ -117,6 +117,8 @@ export type SaasKeyErrorCode =
   | 'KEY_NO_ENTITLEMENT'
   | 'KEY_PROFILE_INVALID'
   | 'KEY_SCOPE_NOT_ALLOWED'
+  | 'KEY_IP_POLICY_VERSION_CONFLICT'
+  | 'KEY_BUDGET_POLICY_VERSION_CONFLICT'
   | 'KEY_STORAGE_ERROR';
 
 export class SaasKeyError extends Error {

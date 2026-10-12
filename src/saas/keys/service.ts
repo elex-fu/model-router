@@ -2,7 +2,33 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../db/index.js';
 import type { SupplyMode } from '../gateway/contracts.js';
+import {
+  CustomerKeyMutationSessionError,
+  type CustomerKeyMutationSessionHandle,
+  runCustomerKeyMutationWrite,
+} from '../identity/customer-key-mutation-session.js';
+import { assertCustomerKeyMutationSessionBound, revalidateCustomerKeyMutationSession } from '../identity/service.js';
 import type { TenantContext } from '../identity/types.js';
+import {
+  type KeyBudgetCounterSnapshot,
+  type KeyBudgetPolicySnapshot,
+  type KeyBudgetUsageSnapshot,
+  parseReplaceKeyBudgetPolicyInput,
+  type ReplaceKeyBudgetPolicyInput,
+} from './budget-policy-contract.js';
+import {
+  KEY_BUDGET_TOKEN_SEMANTICS_VERSION,
+  type KeyBudgetCounterWindow,
+  keyBudgetUtcDayFrom,
+  selectKeyBudgetCounters,
+} from './budget-store.js';
+import { canonicalizeIpPolicy } from './ip-policy.js';
+import {
+  type KeyIpPolicySnapshot,
+  type KeyIpPolicyValue,
+  parseKeyIpPolicyVersion,
+  type ReplaceKeyIpPolicyInput,
+} from './ip-policy-contract.js';
 import {
   type ApiKeyMetadata,
   type ApiKeyPrincipalKind,
@@ -50,9 +76,11 @@ async function lockAdvisoryFenceLayer(tx: SqlExecutor, requests: readonly Adviso
 }
 
 /*
- * Key writes acquire tenant/project fences, then sorted user fences before
- * membership checks. Creation rechecks entitlement/profile and provider
- * rights before inserting a new key; rotation locks the existing key row
+ * Key writes enter global046 before tenant/project fences, then take sorted
+ * exclusive user fences before key/business fences and membership checks.
+ * Shared read paths retain their existing fences. Creation rechecks
+ * entitlement/profile and provider rights before inserting a new key;
+ * rotation locks the existing key row
  * before rechecking its stored entitlement/profile and provider rights. This
  * follows the plan's tenant -> authorization/key binding -> entitlement,
  * profile and route -> audit row-lock order. Mutable authority relations are
@@ -86,6 +114,29 @@ interface ApiKeyRow {
   model_scope_version: number | string;
   entitlement_authz_version: number | string | null;
   supply_profile_authz_version: number | string | null;
+}
+
+interface ApiKeyIpPolicyRow {
+  tenant_id: string;
+  project_id: string;
+  key_id: string;
+  version: number | string;
+  mode: string;
+  rules: unknown;
+  created_at: TimestampValue;
+  updated_at: TimestampValue;
+}
+
+interface ApiKeyBudgetPolicyRow {
+  tenant_id: string;
+  project_id: string;
+  key_id: string;
+  lineage_id: string;
+  version: number | string;
+  token_daily: number | string | null;
+  token_lifetime: number | string | null;
+  charge_daily: number | string | null;
+  charge_lifetime: number | string | null;
 }
 
 export const unavailableSupplyProfileResolver: SupplyProfileResolver = {
@@ -202,6 +253,87 @@ function nextAuthzVersion(value: number | string): number {
     fail(500, 'KEY_STORAGE_ERROR', 'The API key authorization version cannot advance');
   }
   return current + 1;
+}
+
+/** HTTP-parsed DTOs are re-validated at the service boundary; parsing alone is not CAS. */
+function parseIpPolicyReplacement(input: ReplaceKeyIpPolicyInput): ReplaceKeyIpPolicyInput {
+  try {
+    return {
+      expectedVersion: parseKeyIpPolicyVersion(input?.expectedVersion),
+      policy: canonicalizeIpPolicy(input?.policy),
+    };
+  } catch (error) {
+    if (error instanceof SaasKeyError) throw error;
+    fail(400, 'KEY_INVALID_INPUT', 'The API key IP policy replacement is invalid');
+  }
+}
+
+function storedIpPolicy(row: ApiKeyIpPolicyRow): KeyIpPolicyValue {
+  try {
+    return canonicalizeIpPolicy({ mode: row.mode, rules: row.rules });
+  } catch (error) {
+    if (error instanceof SaasKeyError) throw error;
+    fail(500, 'KEY_STORAGE_ERROR', 'The key service returned an invalid API key IP policy');
+  }
+}
+
+function nextIpPolicyVersion(value: number | string): string {
+  const current = BigInt(databaseVersion(value, 'API key IP policy version'));
+  if (current >= 9223372036854775807n) {
+    fail(500, 'KEY_STORAGE_ERROR', 'The API key IP policy version cannot advance');
+  }
+  return (current + 1n).toString(10);
+}
+
+/** HTTP-parsed budget DTOs are re-validated at the service boundary with the server-owned supply mode. */
+function parseBudgetReplacement(input: ReplaceKeyBudgetPolicyInput, mode: SupplyMode): ReplaceKeyBudgetPolicyInput {
+  try {
+    return parseReplaceKeyBudgetPolicyInput(input, mode);
+  } catch (error) {
+    if (error instanceof SaasKeyError) throw error;
+    fail(400, 'KEY_INVALID_INPUT', 'The API key budget policy replacement is invalid');
+  }
+}
+
+/** Canonical non-negative decimal text for persisted budget amounts; NULL stays NULL. */
+function nullableBudgetAmount(value: number | string | null): string | null {
+  if (value === null) return null;
+  const text = typeof value === 'number' ? String(value) : value;
+  if (typeof text !== 'string' || !/^(0|[1-9][0-9]{0,18})$/.test(text)) {
+    fail(500, 'KEY_STORAGE_ERROR', 'The key service returned an invalid API key budget amount');
+  }
+  return text;
+}
+
+function nextBudgetPolicyVersion(value: number | string): string {
+  const current = BigInt(databaseVersion(value, 'API key budget policy version'));
+  if (current >= 9223372036854775807n) {
+    fail(500, 'KEY_STORAGE_ERROR', 'The API key budget policy version cannot advance');
+  }
+  return (current + 1n).toString(10);
+}
+
+interface BudgetCounterWindows {
+  readonly daily: KeyBudgetCounterWindow;
+  readonly lifetime: KeyBudgetCounterWindow;
+}
+
+function verifiedCounter(settled: string, outstandingReserved: string): KeyBudgetCounterSnapshot {
+  return { status: 'verified', settled, outstandingReserved };
+}
+
+function budgetUsage(windows: BudgetCounterWindows): KeyBudgetUsageSnapshot {
+  return {
+    daily: verifiedCounter(windows.daily.tokenSettled, windows.daily.tokenOutstandingReserved),
+    lifetime: verifiedCounter(windows.lifetime.tokenSettled, windows.lifetime.tokenOutstandingReserved),
+  };
+}
+
+function chargeUsage(windows: BudgetCounterWindows): KeyBudgetUsageSnapshot {
+  return {
+    daily: verifiedCounter(windows.daily.chargeSettled, windows.daily.chargeOutstandingReserved),
+    lifetime: verifiedCounter(windows.lifetime.chargeSettled, windows.lifetime.chargeOutstandingReserved),
+  };
 }
 
 function supplyMode(value: unknown): SupplyMode {
@@ -460,7 +592,7 @@ function assertScopesAllowed(scopes: readonly string[], allowedModels: ReadonlyS
 }
 
 function errorOrStorage(error: unknown): never {
-  if (error instanceof SaasKeyError) throw error;
+  if (error instanceof SaasKeyError || error instanceof CustomerKeyMutationSessionError) throw error;
   fail(500, 'KEY_STORAGE_ERROR', 'The API key service could not complete the request');
 }
 
@@ -491,6 +623,14 @@ export class KeyService {
   private async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
     try {
       return await this.database.transaction(work);
+    } catch (error) {
+      errorOrStorage(error);
+    }
+  }
+
+  private async writeTransaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+    try {
+      return await runCustomerKeyMutationWrite(this.database, work);
     } catch (error) {
       errorOrStorage(error);
     }
@@ -554,10 +694,19 @@ export class KeyService {
     context: TenantContext,
     additionalKeys: readonly string[] = [],
   ): Promise<void> {
-    const requests: AdvisoryFenceRequest[] = userIds.map((userId) => ({
+    const users: AdvisoryFenceRequest[] = userIds.map((userId) => ({
       key: saasAdvisoryKey.user(userId),
-      mode: 'shared',
+      mode: apiKeyMode,
     }));
+    const requests: AdvisoryFenceRequest[] = [];
+    if (apiKeyMode === 'exclusive') {
+      // Separate layers: never rely on a mixed lexical sort to put users first
+      // or upgrade a shared user fence after acquiring key/business locks.
+      await lockAdvisoryFenceLayer(tx, users);
+    } else {
+      // Preserve the original shared-reader batch and its ordering.
+      requests.push(...users);
+    }
     requests.push(
       ...apiKeyIds.map((apiKeyId) => ({
         key: saasAdvisoryKey.apiKey(context.tenantId, context.projectId, apiKeyId),
@@ -950,7 +1099,23 @@ export class KeyService {
     }
   }
 
+  /** Trusted internal legacy API; NEVER selected by HTTP mutations. */
   async create(context: TenantContext, input: CreateApiKeyInput): Promise<CreatedApiKey> {
+    return this.createMutation(context, input);
+  }
+  async createAuthenticated(
+    context: TenantContext,
+    input: CreateApiKeyInput,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<CreatedApiKey> {
+    assertCustomerKeyMutationSessionBound(handle, this.database, context.userId);
+    return this.createMutation(context, input, handle);
+  }
+  private async createMutation(
+    context: TenantContext,
+    input: CreateApiKeyInput,
+    handle?: CustomerKeyMutationSessionHandle,
+  ): Promise<CreatedApiKey> {
     assertContext(context);
     const inputNow = currentDate(this.now);
     const name = normalizeName(input?.name);
@@ -961,7 +1126,7 @@ export class KeyService {
     const keyId = randomUUID();
     this.assertResolverAvailable();
 
-    return this.transaction(async (tx) => {
+    return this.writeTransaction(async (tx) => {
       await this.lockAuthorizationScope(
         tx,
         context,
@@ -981,6 +1146,7 @@ export class KeyService {
       const binding = await this.lockEntitlementAndProfile(tx, context, resolution, false);
       const createdAt = await this.databaseNow(tx);
       this.assertIssuanceWindows(createdAt, binding, providerRights, expiresAt, false);
+      if (handle !== undefined) await revalidateCustomerKeyMutationSession(handle, this.database, tx, context.userId);
       const issued = issueSecret();
       const executionPrincipalId = executionPrincipalType === 'member' ? context.userId : context.projectId;
       const principalUserId = executionPrincipalType === 'member' ? context.userId : null;
@@ -1023,6 +1189,24 @@ export class KeyService {
       );
       const row = result.rows[0];
       if (!row) fail(500, 'KEY_STORAGE_ERROR', 'The API key was not created');
+      // Every key owns a disabled v1 IP policy head from creation so the CAS
+      // expectedVersion always starts at '1' (080 mirrors this for old keys).
+      await this.query(
+        tx,
+        `INSERT INTO saas_api_key_ip_policies
+           (tenant_id, project_id, key_id, version, mode, rules, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, 'disabled', '[]'::jsonb, $4, $4)`,
+        [context.tenantId, context.projectId, keyId, createdAt],
+      );
+      // Every key owns an unlimited self-lineage v1 budget head from creation
+      // so the CAS expectedVersion always starts at '1' (081 backfills old keys).
+      await this.query(
+        tx,
+        `INSERT INTO saas_api_key_budget_policies
+           (tenant_id, project_id, key_id, lineage_id, version, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, 1, $4, $4)`,
+        [context.tenantId, context.projectId, keyId, createdAt],
+      );
       await this.audit(tx, context, 'api_key.created', keyId, createdAt);
       return { ...metadata(row), secret: issued.secret };
     });
@@ -1131,13 +1315,29 @@ export class KeyService {
     }
   }
 
+  /** Trusted internal legacy API; NEVER selected by HTTP mutations. */
   async revoke(context: TenantContext, keyId: string): Promise<ApiKeyMetadata> {
+    return this.revokeMutation(context, keyId);
+  }
+  async revokeAuthenticated(
+    context: TenantContext,
+    keyId: string,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<ApiKeyMetadata> {
+    assertCustomerKeyMutationSessionBound(handle, this.database, context.userId);
+    return this.revokeMutation(context, keyId, handle);
+  }
+  private async revokeMutation(
+    context: TenantContext,
+    keyId: string,
+    handle?: CustomerKeyMutationSessionHandle,
+  ): Promise<ApiKeyMetadata> {
     assertContext(context);
     if (typeof keyId !== 'string' || keyId.trim() === '') {
       fail(400, 'KEY_INVALID_INPUT', 'The API key identifier is invalid');
     }
     const now = currentDate(this.now);
-    return this.transaction(async (tx) => {
+    return this.writeTransaction(async (tx) => {
       await this.fenceTenantProjectAuthorization(tx, context, 'exclusive');
       const keySelect = `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
                                 execution_principal_id, created_by_user_id, rotated_by_user_id, revoked_by_user_id,
@@ -1157,6 +1357,7 @@ export class KeyService {
       ]);
       const row = selected.rows[0];
       if (!row) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      if (handle !== undefined) await revalidateCustomerKeyMutationSession(handle, this.database, tx, context.userId);
       if (row.status === 'revoked') return metadata(row);
       const nextVersion = nextAuthzVersion(row.authz_version);
       const updated = await this.query<ApiKeyRow>(
@@ -1178,7 +1379,23 @@ export class KeyService {
     });
   }
 
+  /** Trusted internal legacy API; NEVER selected by HTTP mutations. */
   async rotate(context: TenantContext, keyId: string): Promise<CreatedApiKey> {
+    return this.rotateMutation(context, keyId);
+  }
+  async rotateAuthenticated(
+    context: TenantContext,
+    keyId: string,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<CreatedApiKey> {
+    assertCustomerKeyMutationSessionBound(handle, this.database, context.userId);
+    return this.rotateMutation(context, keyId, handle);
+  }
+  private async rotateMutation(
+    context: TenantContext,
+    keyId: string,
+    handle?: CustomerKeyMutationSessionHandle,
+  ): Promise<CreatedApiKey> {
     assertContext(context);
     if (typeof keyId !== 'string' || keyId.trim() === '') {
       fail(400, 'KEY_INVALID_INPUT', 'The API key identifier is invalid');
@@ -1186,7 +1403,7 @@ export class KeyService {
     currentDate(this.now);
     const replacementId = randomUUID();
 
-    return this.transaction(async (tx) => {
+    return this.writeTransaction(async (tx) => {
       await this.fenceTenantProjectAuthorization(tx, context, 'exclusive');
       const keySelect = `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
                                 execution_principal_id, created_by_user_id, rotated_by_user_id, revoked_by_user_id,
@@ -1261,6 +1478,7 @@ export class KeyService {
       const now = await this.databaseNow(tx);
       this.assertIssuanceWindows(now, binding, providerRights, keyExpiresAt, true);
 
+      if (handle !== undefined) await revalidateCustomerKeyMutationSession(handle, this.database, tx, context.userId);
       const issued = issueSecret();
       const nextVersion = nextAuthzVersion(row.authz_version);
       const revoked = await this.query<ApiKeyRow>(
@@ -1318,10 +1536,418 @@ export class KeyService {
       );
       const replacement = created.rows[0];
       if (!replacement) fail(500, 'KEY_STORAGE_ERROR', 'The API key was not rotated');
+      // Rotation keeps the caller's effective IP policy: the replacement key
+      // starts a fresh v1 head carrying the replaced key's current policy.
+      const predecessorPolicy = await this.query<ApiKeyIpPolicyRow>(
+        tx,
+        `SELECT tenant_id, project_id, key_id, version, mode, rules, created_at, updated_at
+         FROM saas_api_key_ip_policies
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3`,
+        [context.tenantId, context.projectId, keyId],
+      );
+      const inherited = predecessorPolicy.rows[0]
+        ? storedIpPolicy(predecessorPolicy.rows[0])
+        : { mode: 'disabled' as const, rules: [] as readonly string[] };
+      await this.query(
+        tx,
+        `INSERT INTO saas_api_key_ip_policies
+           (tenant_id, project_id, key_id, version, mode, rules, created_at, updated_at)
+         VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6, $6)`,
+        [context.tenantId, context.projectId, replacementId, inherited.mode, JSON.stringify(inherited.rules), now],
+      );
+      // Rotation inherits the budget lineage (contract C-4): the replacement
+      // key's fresh v1 head carries the replaced key's caps and lineage, so
+      // rotating a Key never resets accumulated budget counters.
+      const predecessorBudget = await this.query<ApiKeyBudgetPolicyRow>(
+        tx,
+        `SELECT tenant_id, project_id, key_id, lineage_id, version,
+                token_daily, token_lifetime, charge_daily, charge_lifetime
+         FROM saas_api_key_budget_policies
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3`,
+        [context.tenantId, context.projectId, keyId],
+      );
+      const inheritedBudget = predecessorBudget.rows[0] ?? null;
+      await this.query(
+        tx,
+        `INSERT INTO saas_api_key_budget_policies
+           (tenant_id, project_id, key_id, lineage_id, version,
+            token_daily, token_lifetime, charge_daily, charge_lifetime, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $9)`,
+        [
+          context.tenantId,
+          context.projectId,
+          replacementId,
+          inheritedBudget ? inheritedBudget.lineage_id : keyId,
+          inheritedBudget ? inheritedBudget.token_daily : null,
+          inheritedBudget ? inheritedBudget.token_lifetime : null,
+          inheritedBudget ? inheritedBudget.charge_daily : null,
+          inheritedBudget ? inheritedBudget.charge_lifetime : null,
+          now,
+        ],
+      );
       await this.audit(tx, context, 'api_key.rotated', keyId, now);
       await this.audit(tx, context, 'api_key.created', replacementId, now);
       return { ...metadata(replacement), secret: issued.secret };
     });
+  }
+
+  async getKeyIpPolicy(context: TenantContext, keyId: string): Promise<KeyIpPolicySnapshot> {
+    assertContext(context);
+    if (typeof keyId !== 'string' || keyId.trim() === '') {
+      fail(400, 'KEY_INVALID_INPUT', 'The API key identifier is invalid');
+    }
+    return this.transaction(async (tx) => {
+      await this.lockAuthorizationScope(tx, context, 'shared', [context.userId], [keyId]);
+      const keyResult = await this.query<Pick<ApiKeyRow, 'authz_version'>>(
+        tx,
+        `SELECT authz_version FROM saas_api_keys WHERE id = $1 AND tenant_id = $2 AND project_id = $3`,
+        [keyId, context.tenantId, context.projectId],
+      );
+      const key = keyResult.rows[0];
+      if (!key) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      const policyResult = await this.query<ApiKeyIpPolicyRow>(
+        tx,
+        `SELECT tenant_id, project_id, key_id, version, mode, rules, created_at, updated_at
+         FROM saas_api_key_ip_policies
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3`,
+        [context.tenantId, context.projectId, keyId],
+      );
+      const head = policyResult.rows[0];
+      // A missing head is pre-080 drift: the effective policy is disabled and
+      // the first replacement re-seats the head at its expected version.
+      return {
+        tenantId: context.tenantId,
+        projectId: context.projectId,
+        keyId,
+        version: head ? databaseVersion(head.version, 'API key IP policy version') : '1',
+        authzVersion: authzVersion(key.authz_version),
+        policy: head ? storedIpPolicy(head) : { mode: 'disabled', rules: [] },
+      };
+    });
+  }
+
+  async replaceKeyIpPolicy(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyIpPolicyInput,
+  ): Promise<KeyIpPolicySnapshot> {
+    return this.replaceKeyIpPolicyMutation(context, keyId, input);
+  }
+  async replaceKeyIpPolicyAuthenticated(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyIpPolicyInput,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<KeyIpPolicySnapshot> {
+    assertCustomerKeyMutationSessionBound(handle, this.database, context.userId);
+    return this.replaceKeyIpPolicyMutation(context, keyId, input, handle);
+  }
+  private async replaceKeyIpPolicyMutation(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyIpPolicyInput,
+    handle?: CustomerKeyMutationSessionHandle,
+  ): Promise<KeyIpPolicySnapshot> {
+    assertContext(context);
+    if (typeof keyId !== 'string' || keyId.trim() === '') {
+      fail(400, 'KEY_INVALID_INPUT', 'The API key identifier is invalid');
+    }
+    const replacement = parseIpPolicyReplacement(input);
+    const now = currentDate(this.now);
+    return this.writeTransaction(async (tx) => {
+      await this.fenceTenantProjectAuthorization(tx, context, 'exclusive');
+      const keySelect = `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
+                                execution_principal_id, created_by_user_id, rotated_by_user_id, revoked_by_user_id,
+                                entitlement_id, supply_profile_id, supply_mode, name, prefix, model_scopes, status,
+                                created_at, expires_at, revoked_at, last_used_at, authz_version, model_scope_version,
+                                entitlement_authz_version, supply_profile_authz_version
+                         FROM saas_api_keys
+                         WHERE id = $1 AND tenant_id = $2 AND project_id = $3`;
+      const hint = await this.lockApiKeyHint(tx, context, keySelect, keyId);
+      const memberIds = this.principalUserIds(context, hint);
+      await this.fenceUserAndApiKeys(tx, memberIds, [keyId], 'exclusive', context);
+      await this.lockCurrentMembers(tx, context, memberIds, false);
+      const selected = await this.query<ApiKeyRow>(tx, `${keySelect} FOR UPDATE`, [
+        keyId,
+        context.tenantId,
+        context.projectId,
+      ]);
+      const row = selected.rows[0];
+      if (!row) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      if (handle !== undefined) await revalidateCustomerKeyMutationSession(handle, this.database, tx, context.userId);
+      if (row.status === 'revoked') fail(409, 'KEY_ALREADY_REVOKED', 'The API key is already revoked');
+      const headResult = await this.query<ApiKeyIpPolicyRow>(
+        tx,
+        `SELECT tenant_id, project_id, key_id, version, mode, rules, created_at, updated_at
+         FROM saas_api_key_ip_policies
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3
+         FOR UPDATE`,
+        [context.tenantId, context.projectId, keyId],
+      );
+      const head = headResult.rows[0];
+      if (!head || databaseVersion(head.version, 'API key IP policy version') !== replacement.expectedVersion) {
+        fail(409, 'KEY_IP_POLICY_VERSION_CONFLICT', 'The API key IP policy version does not match the current head');
+      }
+      const nextVersion = nextIpPolicyVersion(head.version);
+      const nextAuthorizationVersion = nextAuthzVersion(row.authz_version);
+      const updated = await this.query<ApiKeyIpPolicyRow>(
+        tx,
+        `UPDATE saas_api_key_ip_policies
+         SET version = $4, mode = $5, rules = $6::jsonb, updated_at = $7
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3 AND version = $8
+         RETURNING tenant_id, project_id, key_id, version, mode, rules, created_at, updated_at`,
+        [
+          context.tenantId,
+          context.projectId,
+          keyId,
+          nextVersion,
+          replacement.policy.mode,
+          JSON.stringify(replacement.policy.rules),
+          now,
+          replacement.expectedVersion,
+        ],
+      );
+      const newHead = updated.rows[0];
+      if (!newHead) {
+        fail(409, 'KEY_IP_POLICY_VERSION_CONFLICT', 'The API key IP policy version does not match the current head');
+      }
+      // The policy is part of key authorization: advancing authz_version
+      // invalidates every cached admission decision for this key.
+      const authorized = await this.query<Pick<ApiKeyRow, 'authz_version'>>(
+        tx,
+        `UPDATE saas_api_keys
+         SET authz_version = $4
+         WHERE id = $1 AND tenant_id = $2 AND project_id = $3
+         RETURNING authz_version`,
+        [keyId, context.tenantId, context.projectId, nextAuthorizationVersion],
+      );
+      const bumped = authorized.rows[0];
+      if (!bumped) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      await this.audit(tx, context, 'api_key.ip_policy_replaced', keyId, now);
+      return {
+        tenantId: context.tenantId,
+        projectId: context.projectId,
+        keyId,
+        version: databaseVersion(newHead.version, 'API key IP policy version'),
+        authzVersion: authzVersion(bumped.authz_version),
+        policy: storedIpPolicy(newHead),
+      };
+    });
+  }
+
+  async getKeyBudgetPolicy(context: TenantContext, keyId: string): Promise<KeyBudgetPolicySnapshot> {
+    assertContext(context);
+    if (typeof keyId !== 'string' || keyId.trim() === '') {
+      fail(400, 'KEY_INVALID_INPUT', 'The API key identifier is invalid');
+    }
+    return this.transaction(async (tx) => {
+      await this.lockAuthorizationScope(tx, context, 'shared', [context.userId], [keyId]);
+      const keyResult = await this.query<Pick<ApiKeyRow, 'authz_version' | 'supply_mode'>>(
+        tx,
+        `SELECT authz_version, supply_mode FROM saas_api_keys WHERE id = $1 AND tenant_id = $2 AND project_id = $3`,
+        [keyId, context.tenantId, context.projectId],
+      );
+      const key = keyResult.rows[0];
+      if (!key) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      const headResult = await this.query<ApiKeyBudgetPolicyRow>(
+        tx,
+        `SELECT tenant_id, project_id, key_id, lineage_id, version,
+                token_daily, token_lifetime, charge_daily, charge_lifetime
+         FROM saas_api_key_budget_policies
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3`,
+        [context.tenantId, context.projectId, keyId],
+      );
+      // A missing head is pre-081 drift: the effective policy is an unlimited
+      // self-lineage v1 head and the first replacement re-seats it.
+      return this.keyBudgetSnapshot(tx, context, key, headResult.rows[0] ?? null, keyId);
+    });
+  }
+
+  async replaceKeyBudgetPolicy(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyBudgetPolicyInput,
+  ): Promise<KeyBudgetPolicySnapshot> {
+    return this.replaceKeyBudgetPolicyMutation(context, keyId, input);
+  }
+  async replaceKeyBudgetPolicyAuthenticated(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyBudgetPolicyInput,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<KeyBudgetPolicySnapshot> {
+    assertCustomerKeyMutationSessionBound(handle, this.database, context.userId);
+    return this.replaceKeyBudgetPolicyMutation(context, keyId, input, handle);
+  }
+  private async replaceKeyBudgetPolicyMutation(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyBudgetPolicyInput,
+    handle?: CustomerKeyMutationSessionHandle,
+  ): Promise<KeyBudgetPolicySnapshot> {
+    assertContext(context);
+    if (typeof keyId !== 'string' || keyId.trim() === '') {
+      fail(400, 'KEY_INVALID_INPUT', 'The API key identifier is invalid');
+    }
+    const now = currentDate(this.now);
+    return this.writeTransaction(async (tx) => {
+      await this.fenceTenantProjectAuthorization(tx, context, 'exclusive');
+      const keySelect = `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
+                                execution_principal_id, created_by_user_id, rotated_by_user_id, revoked_by_user_id,
+                                entitlement_id, supply_profile_id, supply_mode, name, prefix, model_scopes, status,
+                                created_at, expires_at, revoked_at, last_used_at, authz_version, model_scope_version,
+                                entitlement_authz_version, supply_profile_authz_version
+                         FROM saas_api_keys
+                         WHERE id = $1 AND tenant_id = $2 AND project_id = $3`;
+      const hint = await this.lockApiKeyHint(tx, context, keySelect, keyId);
+      const memberIds = this.principalUserIds(context, hint);
+      await this.fenceUserAndApiKeys(tx, memberIds, [keyId], 'exclusive', context);
+      await this.lockCurrentMembers(tx, context, memberIds, false);
+      const selected = await this.query<ApiKeyRow>(tx, `${keySelect} FOR UPDATE`, [
+        keyId,
+        context.tenantId,
+        context.projectId,
+      ]);
+      const row = selected.rows[0];
+      if (!row) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      // Strict DTO parsing needs the server-owned supply mode from the locked key.
+      const replacement = parseBudgetReplacement(input, row.supply_mode);
+      if (handle !== undefined) await revalidateCustomerKeyMutationSession(handle, this.database, tx, context.userId);
+      if (row.status === 'revoked') fail(409, 'KEY_ALREADY_REVOKED', 'The API key is already revoked');
+      const headResult = await this.query<ApiKeyBudgetPolicyRow>(
+        tx,
+        `SELECT tenant_id, project_id, key_id, lineage_id, version,
+                token_daily, token_lifetime, charge_daily, charge_lifetime
+         FROM saas_api_key_budget_policies
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3
+         FOR UPDATE`,
+        [context.tenantId, context.projectId, keyId],
+      );
+      const head = headResult.rows[0];
+      if (!head || databaseVersion(head.version, 'API key budget policy version') !== replacement.expectedVersion) {
+        fail(
+          409,
+          'KEY_BUDGET_POLICY_VERSION_CONFLICT',
+          'The API key budget policy version does not match the current head',
+        );
+      }
+      const nextVersion = nextBudgetPolicyVersion(head.version);
+      const nextAuthorizationVersion = nextAuthzVersion(row.authz_version);
+      const updated = await this.query<ApiKeyBudgetPolicyRow>(
+        tx,
+        `UPDATE saas_api_key_budget_policies
+         SET version = $4, token_daily = $5, token_lifetime = $6,
+             charge_daily = $7, charge_lifetime = $8, updated_at = $9
+         WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3 AND version = $10
+         RETURNING tenant_id, project_id, key_id, lineage_id, version,
+                   token_daily, token_lifetime, charge_daily, charge_lifetime`,
+        [
+          context.tenantId,
+          context.projectId,
+          keyId,
+          nextVersion,
+          replacement.tokenCaps.daily,
+          replacement.tokenCaps.lifetime,
+          replacement.customerChargeCaps?.daily ?? null,
+          replacement.customerChargeCaps?.lifetime ?? null,
+          now,
+          replacement.expectedVersion,
+        ],
+      );
+      const newHead = updated.rows[0];
+      if (!newHead) {
+        fail(
+          409,
+          'KEY_BUDGET_POLICY_VERSION_CONFLICT',
+          'The API key budget policy version does not match the current head',
+        );
+      }
+      // Budget caps are part of key authorization: advancing authz_version
+      // invalidates every cached admission decision for this key.
+      const authorized = await this.query<Pick<ApiKeyRow, 'authz_version'>>(
+        tx,
+        `UPDATE saas_api_keys
+         SET authz_version = $4
+         WHERE id = $1 AND tenant_id = $2 AND project_id = $3
+         RETURNING authz_version`,
+        [keyId, context.tenantId, context.projectId, nextAuthorizationVersion],
+      );
+      const bumped = authorized.rows[0];
+      if (!bumped) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      await this.audit(tx, context, 'api_key.budget_policy_replaced', keyId, now);
+      return this.keyBudgetSnapshot(
+        tx,
+        context,
+        { authz_version: bumped.authz_version, supply_mode: row.supply_mode },
+        newHead,
+        keyId,
+      );
+    });
+  }
+
+  /** Assembles the C-4 snapshot; counters and the UTC day are server-owned facts. */
+  private async keyBudgetSnapshot(
+    tx: SqlExecutor,
+    context: TenantContext,
+    key: Pick<ApiKeyRow, 'authz_version' | 'supply_mode'>,
+    head: ApiKeyBudgetPolicyRow | null,
+    keyId: string,
+  ): Promise<KeyBudgetPolicySnapshot> {
+    const lineageId = head ? head.lineage_id : keyId;
+    const currentWindow = keyBudgetUtcDayFrom(currentDate(this.now));
+    const windows = await selectKeyBudgetCounters(tx, context.tenantId, lineageId, currentWindow);
+    const base = {
+      tenantId: context.tenantId,
+      projectId: context.projectId,
+      keyId,
+      lineageId,
+      version: head ? databaseVersion(head.version, 'API key budget policy version') : '1',
+      authzVersion: authzVersion(key.authz_version),
+      tokenUnit: 'tokens' as const,
+      tokenCountingSemanticsVersion: KEY_BUDGET_TOKEN_SEMANTICS_VERSION,
+      currentWindow,
+      tokenCaps: {
+        daily: nullableBudgetAmount(head?.token_daily ?? null),
+        lifetime: nullableBudgetAmount(head?.token_lifetime ?? null),
+      },
+      tokenUsage: budgetUsage(windows),
+    };
+    if (key.supply_mode === 'byok') {
+      return { ...base, supplyMode: 'byok', customerChargeBudget: null };
+    }
+    const chargeDaily = nullableBudgetAmount(head?.charge_daily ?? null);
+    const chargeLifetime = nullableBudgetAmount(head?.charge_lifetime ?? null);
+    if (chargeDaily === null && chargeLifetime === null) {
+      return { ...base, supplyMode: 'platform', customerChargeBudget: null };
+    }
+    const currency =
+      windows.lifetime.chargeCurrency ??
+      windows.daily.chargeCurrency ??
+      (await this.resolveTenantChargeCurrency(tx, context.tenantId));
+    return {
+      ...base,
+      supplyMode: 'platform',
+      customerChargeBudget: {
+        currency,
+        unit: 'minor_units',
+        caps: { daily: chargeDaily, lifetime: chargeLifetime },
+        usage: chargeUsage(windows),
+      },
+    };
+  }
+
+  /** The charge budget currency is server-bound: the tenant's single settlement wallet. */
+  private async resolveTenantChargeCurrency(tx: SqlExecutor, tenantId: string): Promise<string> {
+    const wallets = await this.query<Pick<{ currency: string }, 'currency'>>(
+      tx,
+      `SELECT currency FROM saas_wallets WHERE tenant_id = $1 LIMIT 2`,
+      [tenantId],
+    );
+    const currency = wallets.rows.length === 1 ? wallets.rows[0]?.currency : null;
+    if (typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency)) {
+      fail(500, 'KEY_STORAGE_ERROR', 'The API key charge budget currency cannot be resolved');
+    }
+    return currency;
   }
 
   createApiKey(context: TenantContext, input: CreateApiKeyInput): Promise<CreatedApiKey> {

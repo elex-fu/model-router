@@ -15,6 +15,7 @@ import {
 } from './admission.js';
 import type { SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
 import { PostgresPreDispatchCompensation } from './postgres-pre-dispatch-compensation.js';
+import type { KeyBudgetAdmissionPort } from './postgres-preparation-budget.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   type GatewayRequestIdempotencyStore,
@@ -101,6 +102,12 @@ export interface PostgresPreparationPortsOptions {
   readonly entitlement: RequestPreparationEntitlementPort;
   /** Required to allow admission; absent means fail closed. */
   readonly capacity?: PostgresPreparationCapacityPort;
+  /**
+   * KEY-BUD (contract C-4) per-lineage budget reservation. Runs in the same
+   * transaction after the billing hold; a denial rejects the admission and the
+   * rollback releases everything. Absent disables budget accounting.
+   */
+  readonly keyBudget?: KeyBudgetAdmissionPort;
   /** Used when the production composition has not already claimed this request. */
   readonly idempotencyStore?: GatewayRequestIdempotencyStore;
   readonly payloadCompilerVersion: string;
@@ -733,10 +740,11 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           ? {
               supplyMode: 'platform',
               authenticatedKey,
+              clientAddress: input.clientAddress,
               request,
               holdEvidence: admissionHoldEvidence(input.payloadBounds, expiresAt),
             }
-          : { supplyMode: 'byok', authenticatedKey, request };
+          : { supplyMode: 'byok', authenticatedKey, clientAddress: input.clientAddress, request };
 
       const fixedIdsMetering: SaasMeteringAdmissionPort = {
         async admitRequest(request: CreateRequestInput, meterOptions = {}) {
@@ -826,6 +834,24 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
             message: 'BYOK cannot reserve a platform wallet hold.',
           };
         }
+        // KEY-BUD (contract C-4): only fresh admissions reserve budget;
+        // replays already carry the original admission's reservation row.
+        if (result.kind === 'created' && options.keyBudget) {
+          await options.keyBudget.reserve(executor, {
+            tenantId: resolvedCaller.tenantId,
+            projectId: resolvedCaller.projectId,
+            keyId: resolvedCaller.proxyKeyId,
+            requestId: canonicalRequestId,
+            supplyMode: resolvedCaller.supplyMode,
+            payloadBounds: input.payloadBounds,
+            charge: holdReservation
+              ? {
+                  currency: holdReservation.currency,
+                  amountMinorUnits: String(holdReservation.amountMinorUnits),
+                }
+              : null,
+          });
+        }
         const persistedAttempt =
           result.kind === 'created'
             ? result.initialAttempt
@@ -842,6 +868,7 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
             candidate: persistedAttempt,
             holdEvidence:
               resolvedCaller.supplyMode === 'platform' ? admissionHoldEvidence(input.payloadBounds, expiresAt) : null,
+            clientAddress: input.clientAddress ?? null,
           });
         }
         const deadlineAtMs = expiresAt.getTime();
@@ -894,6 +921,20 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
             decision: 'reject',
             code: 'binding_mismatch',
             message: 'The idempotency key is already bound to a different request identity or fingerprint.',
+          };
+        }
+        if (safeErrorCode(error) === 'CALLER_DENIED') {
+          return {
+            decision: 'reject',
+            code: 'caller_denied',
+            message: 'The client address is not permitted for this API key.',
+          };
+        }
+        if (safeErrorCode(error) === 'KEY_BUDGET_EXCEEDED') {
+          return {
+            decision: 'reject',
+            code: 'budget_exceeded',
+            message: 'The API key budget is exhausted.',
           };
         }
         if (

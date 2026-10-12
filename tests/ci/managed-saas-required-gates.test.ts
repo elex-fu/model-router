@@ -24,8 +24,24 @@ const isolatedGates = [
   ['pre-dispatch-compensation', 'tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts', true],
   ['concurrent-claim', 'tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts', true],
   ['normal-success-terminal-replay', 'tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts', false],
+  ['usage-correction-063', 'tests/saas/metering/usage-correction.postgres.integration.test.ts', false],
+  ['key-ip-policy-080', 'tests/saas/keys/ip-policy.postgres.integration.test.ts', false],
+  ['key-budget-policy-081', 'tests/saas/keys/budget-policy.postgres.integration.test.ts', false],
+  ['settlement-sigkill-crash', 'tests/drills/settlement-sigkill-crash.postgres.integration.test.ts', false],
   ['member-directory', 'tests/saas/identity/tenant-member-directory.postgres.integration.test.ts', false],
   ['member-directory-http', 'tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts', false],
+  ['dual-instance-failover', 'tests/drills/dual-instance-failover.postgres.integration.test.ts', false],
+  ['marketing-redeem-codes-089', 'tests/saas/marketing/redeem-codes.postgres.integration.test.ts', false],
+  ['marketing-promo-codes-090', 'tests/saas/marketing/promo-codes.postgres.integration.test.ts', false],
+  ['marketing-affiliate-091', 'tests/saas/marketing/affiliate.postgres.integration.test.ts', false],
+  ['marketing-announcements-092', 'tests/saas/marketing/announcements.postgres.integration.test.ts', false],
+  ['quota-sync-093', 'tests/saas/supply/quota-sync-worker.postgres.integration.test.ts', false],
+  ['oauth-token-refresh-094', 'tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts', false],
+  ['announcement-fanout-095', 'tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts', false],
+  ['account-quarantine-097', 'tests/saas/supply/account-quarantine.postgres.integration.test.ts', false],
+  ['rate-limit-scheduling-098', 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts', false],
+  ['health-score-098', 'tests/saas/gateway/health-score.postgres.integration.test.ts', false],
+  ['oauth-refresh-onboarding', 'tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts', false],
 ] as const;
 const cancellationFixture = 'tests/saas/gateway/pre-dispatch-postgres-fixture.ts';
 const terminalReplayFixture = 'tests/saas/metering/normal-success-postgres-fixture.ts';
@@ -245,7 +261,10 @@ function validateIsolatedRunner(source: string): void {
     MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: databaseUrls.migrator,
     MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: databaseUrls.control_plane,
     MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: databaseUrls.gateway,
-  `), 'no inherited credentials/PG overrides, REQUIRED=0, or administrator business URL');
+    MODEL_ROUTER_SAAS_GATEWAY_E2E_VALIDATION_WORKER_URL: databaseUrls.validation_worker,
+    MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY: CI_SOFTWARE_KMS_MASTER_KEY,
+    MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: 'software-local',
+  `), 'no inherited credentials/PG overrides, REQUIRED=0, or administrator business URL; only runner-owned literals (the four CI-service role URLs and the synthetic CI-only envelope key) are ever passed');
   assert.deepEqual([...code.matchAll(/process\.env\.([A-Z_]+)/g)].map(([, name]) => name), ['CI', 'GITHUB_ACTIONS']);
   assert.doesNotMatch(code, /process\.env\[|\.\.\.process\.env|readFile|dotenv|\b(?:GRANT|REVOKE|TRUNCATE|DROP|DELETE|UPDATE|INSERT|ALTER|CREATE)\b/i,
     'runner cannot inspect user config, widen ACL, manufacture fixtures or reset/reseed a consumed database');
@@ -380,7 +399,7 @@ test('shared CI fixtures retain separate tenant/product namespaces and do not co
   assert.match(http, /await identity\.issueBootstrapToken\(\)/);
 });
 
-test('six additional complete roots run on both versions only after the old required matrix in independent fresh services', () => {
+test('ten additional complete roots run on both versions only after the old required matrix in independent fresh services', () => {
   validateWorkflow(workflow); // All previous roots/order/role contracts remain required.
   validateIsolatedWorkflow(workflow);
   validateProvisioning(provisioning); // Same normal CLI/manifests, not copied migration SQL.
@@ -478,8 +497,15 @@ test('actual source prerequisites distinguish three successful-HTTP dependencies
       assert.match(source, /pre-dispatch-postgres-fixture\.js/);
       assert.match(source, /await cancellationFixture\(/);
     } else {
-      assert.match(source, /await seedFixture\(/);
-      assert.doesNotMatch(source, /pre-dispatch-postgres-fixture\.js|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+      // Seed helpers are named per domain (seedIdentities/seedAccount/seedCredential/seedFixture/...);
+      // the invariant is own-row seeding, never a shared HTTP bootstrap.
+      assert.match(source, /\bseed[A-Z][A-Za-z]*\(/);
+      // Connection helpers (cancellationDatabases/cancellationTransaction) are
+      // allowed; the one-shot commercial HTTP fixture and bootstrap tokens are not.
+      assert.doesNotMatch(
+        source,
+        /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/,
+      );
     }
   }
   const terminal = read(terminalReplayFixture);

@@ -315,31 +315,43 @@ test('playground abort cancels in-flight upstream and settles quota', async () =
 });
 
 test('public proxy cannot select playground source or key by spoofed headers', async () => {
-  const f = fixture('http://127.0.0.1:1/v1');
-  const server = http.createServer((req, res) => {
-    void proxyHandler(req, res, { load: () => f.config } as ConfigStore, () => {}, {
-      telemetryStore: {
-        upsertRequest: async (record) => {
-          f.requests.push(structuredClone(record));
-        },
-        upsertAttempt: async () => {},
-      },
-    });
+  let sent = 0;
+  const mock = await upstream((_req, res) => {
+    sent++;
+    res.setHeader('content-type', 'application/json');
+    res.end('{}');
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    const response = await fetch(
-      `http://127.0.0.1:${(server.address() as { port: number }).port}/v1/chat/completions`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-traffic-source': 'playground', 'x-proxy-key-id': 'key_1' },
-        body: JSON.stringify({ model: 'public-model', messages: [{ role: 'user', content: 'prompt' }] }),
-      },
-    );
-    assert.equal(response.status, 401);
-    assert.equal(f.requests.at(-1)?.source, 'production');
-    assert.equal(f.requests.at(-1)?.proxyKeyId, null);
+    const f = fixture(mock.url);
+    const server = http.createServer((req, res) => {
+      void proxyHandler(req, res, { load: () => f.config } as ConfigStore, () => {}, {
+        telemetryStore: {
+          upsertRequest: async (record) => {
+            f.requests.push(structuredClone(record));
+          },
+          upsertAttempt: async () => {},
+        },
+      });
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const response = await fetch(
+        `http://127.0.0.1:${(server.address() as { port: number }).port}/v1/chat/completions`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-traffic-source': 'playground', 'x-proxy-key-id': 'key_1' },
+          body: JSON.stringify({ model: 'public-model', messages: [{ role: 'user', content: 'prompt' }] }),
+        },
+      );
+      assert.equal(response.status, 401);
+      assert.equal(f.requests.at(-1)?.source, 'production');
+      assert.equal(f.requests.at(-1)?.proxyKeyId, null);
+      assert.equal(sent, 0);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await mock.close();
   }
 });

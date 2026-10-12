@@ -4,6 +4,14 @@ import {
   SAAS_PLATFORM_AUTHORIZATION_WRITER_TIMEOUTS_SQL,
 } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import {
+  assertCustomerKeyMutationWrite,
+  CUSTOMER_KEY_MUTATION_CURRENT_SQL,
+  CUSTOMER_KEY_MUTATION_ISSUE_SQL,
+  CustomerKeyMutationSessionError,
+  type CustomerKeyMutationSessionHandle,
+  readCustomerKeyMutationSessionRow,
+} from './customer-key-mutation-session.js';
 import { SaasIdentityError, type SaasIdentityErrorCode } from './errors.js';
 import { hashPassword as hashPasswordValue, verifyPassword as verifyPasswordValue } from './password.js';
 import type {
@@ -22,10 +30,10 @@ import type {
   SafeSession,
   SafeTenant,
   SafeTenantMember,
-  TenantMemberPage,
-  TenantMemberQuery,
   TenantContext,
   TenantContextInput,
+  TenantMemberPage,
+  TenantMemberQuery,
   TenantRole,
 } from './types.js';
 
@@ -43,11 +51,54 @@ const DIRECTORY_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 const DIRECTORY_CURSOR_PREFIX = 'tm1.';
 const DIRECTORY_MAX_CURSOR_LENGTH = 1024;
 
+interface IssuedCustomerKeyMutationSession {
+  readonly database: SaasDatabase;
+  readonly sessionId: string;
+  readonly userId: string;
+  readonly tokenHash: string;
+  readonly csrfHash: string;
+}
+// ONLY the actual IdentityService native predicate below can populate this map.
+const issuedCustomerKeyMutationSessions = new WeakMap<object, IssuedCustomerKeyMutationSession>();
+function issuedCustomerKeyMutationSession(handle: unknown): IssuedCustomerKeyMutationSession {
+  if (!handle || typeof handle !== 'object') throw new CustomerKeyMutationSessionError(503);
+  const state = issuedCustomerKeyMutationSessions.get(handle);
+  if (!state) throw new CustomerKeyMutationSessionError(503);
+  return state;
+}
+export function assertCustomerKeyMutationSessionIssued(handle: unknown, userId: string): void {
+  if (issuedCustomerKeyMutationSession(handle).userId !== userId) throw new CustomerKeyMutationSessionError(401);
+}
+export function assertCustomerKeyMutationSessionBound(handle: unknown, database: SaasDatabase, userId: string): void {
+  const state = issuedCustomerKeyMutationSession(handle);
+  if (state.database !== database) throw new CustomerKeyMutationSessionError(503);
+  if (state.userId !== userId) throw new CustomerKeyMutationSessionError(401);
+}
+export async function revalidateCustomerKeyMutationSession(
+  handle: unknown,
+  database: SaasDatabase,
+  tx: SqlExecutor,
+  userId: string,
+): Promise<void> {
+  assertCustomerKeyMutationWrite(database, tx);
+  assertCustomerKeyMutationSessionBound(handle, database, userId);
+  const state = issuedCustomerKeyMutationSession(handle);
+  const result = await tx
+    .query<unknown>(CUSTOMER_KEY_MUTATION_CURRENT_SQL, [state.sessionId, state.userId, state.tokenHash, state.csrfHash])
+    .catch(() => {
+      throw new CustomerKeyMutationSessionError(503);
+    });
+  if (result.rows.length === 0 && result.rowCount === 0) throw new CustomerKeyMutationSessionError(401);
+  if (result.rows.length !== 1 || result.rowCount !== 1) throw new CustomerKeyMutationSessionError(503);
+  const row = readCustomerKeyMutationSessionRow(result.rows[0], state.tokenHash, state.csrfHash);
+  if (row.id !== state.sessionId || row.user_id !== state.userId) throw new CustomerKeyMutationSessionError(401);
+}
+
 /*
  * Authorization readers acquire tenant -> project -> sorted user ->
  * entitlement/profile -> provider-rights fences before authority reads.
- * Session mutations follow migration 046's writer order: writer statement
- * fence -> session row -> user fence -> audit. Invitation acceptance first
+ * Customer session mutations explicitly follow global046 -> session row ->
+ * user fence -> audit. Migration046's session trigger is PLATFORM-only. Invitation acceptance first
  * claims its invitation row and then takes only the optional user fence; it
  * never takes the tenant/project fences.
  */
@@ -226,41 +277,73 @@ function validateId(id: string): void {
   }
 }
 
+/** Membership mutations bind ids to uuid columns; reject non-uuid input before SQL. */
+function validateDirectoryId(id: string): void {
+  if (typeof id !== 'string' || !DIRECTORY_UUID_PATTERN.test(id)) fail(400, 'INVALID_INPUT');
+}
+
 function directoryScopeHash(actorUserId: string, tenantId: string): string {
-  return createHash('sha256').update(JSON.stringify(['tenant-members', actorUserId, tenantId])).digest('hex');
+  return createHash('sha256')
+    .update(JSON.stringify(['tenant-members', actorUserId, tenantId]))
+    .digest('hex');
 }
 
 function directoryCursor(scopeHash: string, userId: string): string {
-  return DIRECTORY_CURSOR_PREFIX + Buffer.from(JSON.stringify({ kind: 'tenant-members', version: 1, scopeHash, userId })).toString('base64url');
+  return (
+    DIRECTORY_CURSOR_PREFIX +
+    Buffer.from(JSON.stringify({ kind: 'tenant-members', version: 1, scopeHash, userId })).toString('base64url')
+  );
 }
 
 function directoryQuery(input: TenantMemberQuery, scopeHash: string): { limit: number; after: string | null } {
-  if (!input || typeof input !== 'object' || Array.isArray(input) ||
-    Object.keys(input).some(key => key !== 'limit' && key !== 'cursor')) fail(400, 'INVALID_INPUT');
+  if (
+    !input ||
+    typeof input !== 'object' ||
+    Array.isArray(input) ||
+    Object.keys(input).some((key) => key !== 'limit' && key !== 'cursor')
+  )
+    fail(400, 'INVALID_INPUT');
   const limit = input.limit ?? 25;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || input.limit === null) fail(400, 'INVALID_INPUT');
   if (input.cursor === undefined) return { limit, after: null };
   const cursor = input.cursor;
-  if (typeof cursor !== 'string' || cursor.length > DIRECTORY_MAX_CURSOR_LENGTH || !cursor.startsWith(DIRECTORY_CURSOR_PREFIX)) fail(400, 'INVALID_INPUT');
+  if (
+    typeof cursor !== 'string' ||
+    cursor.length > DIRECTORY_MAX_CURSOR_LENGTH ||
+    !cursor.startsWith(DIRECTORY_CURSOR_PREFIX)
+  )
+    fail(400, 'INVALID_INPUT');
   let parsed: unknown;
   try {
     const encoded = cursor.slice(DIRECTORY_CURSOR_PREFIX.length);
     const json = Buffer.from(encoded, 'base64url').toString('utf8');
     if (Buffer.from(json, 'utf8').toString('base64url') !== encoded) fail(400, 'INVALID_INPUT');
     parsed = JSON.parse(json);
-  } catch { return fail(400, 'INVALID_INPUT'); }
+  } catch {
+    return fail(400, 'INVALID_INPUT');
+  }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail(400, 'INVALID_INPUT');
   const row = parsed as Record<string, unknown>;
-  if (Object.keys(row).sort().join(',') !== 'kind,scopeHash,userId,version' || row.kind !== 'tenant-members' ||
-    row.version !== 1 || row.scopeHash !== scopeHash || typeof row.userId !== 'string' ||
-    !DIRECTORY_UUID_PATTERN.test(row.userId)) fail(400, 'INVALID_INPUT');
+  if (
+    Object.keys(row).sort().join(',') !== 'kind,scopeHash,userId,version' ||
+    row.kind !== 'tenant-members' ||
+    row.version !== 1 ||
+    row.scopeHash !== scopeHash ||
+    typeof row.userId !== 'string' ||
+    !DIRECTORY_UUID_PATTERN.test(row.userId)
+  )
+    fail(400, 'INVALID_INPUT');
   return { limit, after: row.userId.toLowerCase() };
 }
 
 function safeTenantMember(row: TenantMemberRow): SafeTenantMember {
-  if (typeof row.user_id !== 'string' || !DIRECTORY_UUID_PATTERN.test(row.user_id) || !isTenantRole(row.role) ||
+  if (
+    typeof row.user_id !== 'string' ||
+    !DIRECTORY_UUID_PATTERN.test(row.user_id) ||
+    !isTenantRole(row.role) ||
     (row.display_name !== null && (typeof row.display_name !== 'string' || row.display_name.length > 120)) ||
-    (row.status !== 'active' && row.status !== 'suspended' && row.status !== 'revoked' && row.status !== 'disabled')) {
+    (row.status !== 'active' && row.status !== 'suspended' && row.status !== 'revoked' && row.status !== 'disabled')
+  ) {
     fail(500, 'IDENTITY_STORAGE_ERROR');
   }
   return { userId: row.user_id, displayName: row.display_name, role: row.role, status: row.status };
@@ -712,8 +795,8 @@ export class SaasIdentityService {
     const sessionId = randomUUID();
 
     const session = await this.transaction(async (tx) => {
-      // Session INSERT invokes migration 046's global writer trigger. Keep
-      // the writer -> entity-fence order before the user recheck.
+      // Migration046 does NOT trigger customer session INSERT. Explicitly take
+      // the shared global writer namespace FIRST, then the user recheck.
       await this.fenceAuthorizationWriters(tx);
       await this.fenceUserAuthorization(tx, user.id);
       const activeUser = await this.query<{ id: string }>(
@@ -778,14 +861,45 @@ export class SaasIdentityService {
     return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
 
+  async issueKeyMutationSession(token: string, csrfToken: string): Promise<CustomerKeyMutationSessionHandle> {
+    if (!tokenLooksPresent(token)) throw new CustomerKeyMutationSessionError(401);
+    if (!tokenLooksPresent(csrfToken)) throw new CustomerKeyMutationSessionError(403);
+    const tokenHash = hashToken(token),
+      csrfHash = hashToken(csrfToken);
+    const result = await this.database
+      .query<unknown>(CUSTOMER_KEY_MUTATION_ISSUE_SQL, [tokenHash, csrfHash])
+      .catch(() => {
+        throw new CustomerKeyMutationSessionError(503);
+      });
+    if (result.rows.length === 0 && result.rowCount === 0) throw new CustomerKeyMutationSessionError(401);
+    if (result.rows.length !== 1 || result.rowCount !== 1) throw new CustomerKeyMutationSessionError(503);
+    const row = readCustomerKeyMutationSessionRow(result.rows[0], tokenHash, csrfHash);
+    const handle = Object.freeze({
+      purpose: 'customer-key-mutation-session-v1',
+    } satisfies CustomerKeyMutationSessionHandle);
+    issuedCustomerKeyMutationSessions.set(handle, {
+      database: this.database,
+      sessionId: row.id,
+      userId: row.user_id,
+      tokenHash,
+      csrfHash,
+    });
+    return handle;
+  }
+
   async logout(token: string): Promise<void> {
     if (!tokenLooksPresent(token)) return;
-    await this.query(
-      this.database,
-      `UPDATE saas_sessions SET revoked_at = COALESCE(revoked_at, $2)
+    await this.transaction(async (tx) => {
+      // Customer sessions have NO migration046 statement trigger. Acquire G
+      // explicitly before UPDATE takes its tuple lock; original CAS/time unchanged.
+      await this.fenceAuthorizationWriters(tx);
+      await this.query(
+        tx,
+        `UPDATE saas_sessions SET revoked_at = COALESCE(revoked_at, $2)
        WHERE token_hash = $1`,
-      [hashToken(token), this.currentDate().toISOString()],
-    );
+        [hashToken(token), this.currentDate().toISOString()],
+      );
+    });
   }
 
   async listSessions(token: string): Promise<SafeCustomerSession[] | undefined> {
@@ -826,9 +940,9 @@ export class SaasIdentityService {
     const sessionHint = hint.rows[0];
     if (!sessionHint) throw new CustomerSessionAuthenticationError();
 
-    // Migration 046 takes its global writer fence before tuple locks and the
-    // per-user fence after them. Match that order to serialize against both
-    // session revocation and user disablement without an advisory/tuple cycle.
+    // Native046 guards platform sessions, NOT this customer table. All owned
+    // customer writers take the same G explicitly before tuples/user fences.
+    // Match that order for session revocation and user disablement.
     await this.fenceAuthorizationWriters(tx);
     const locked = await this.query<{
       id: string;
@@ -977,7 +1091,19 @@ export class SaasIdentityService {
     const defaultProjectId = randomUUID();
 
     return this.transaction(async (tx) => {
-      await this.fenceUserAuthorization(tx, userId);
+      // Strongest 050 scope layer before authority reads or any INSERT:
+      // preallocated tenant -> preallocated default project -> creator.
+      await this.query(
+        tx,
+        "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:tenant:' || $1::uuid::text, 0))",
+        [tenantId],
+      );
+      await this.query(
+        tx,
+        "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:project:' || $1::uuid::text || ':' || $2::uuid::text, 0))",
+        [tenantId, defaultProjectId],
+      );
+      await this.query(tx, USER_SESSION_MUTATION_FENCE_SQL, [userId]);
       const user = await this.query<{ id: string }>(
         tx,
         `SELECT id FROM saas_users WHERE id = $1 AND disabled_at IS NULL LIMIT 1`,
@@ -1059,13 +1185,24 @@ export class SaasIdentityService {
    * Cursor is a scoped selector, not a grant; every page repeats authorization.
    * Existing CP SELECT columns suffice; no DDL, helper EXECUTE or row locks.
    */
-  async listTenantMembers(actorUserId: string, tenantId: string, input: TenantMemberQuery = {}): Promise<TenantMemberPage> {
-    if (typeof actorUserId !== 'string' || !DIRECTORY_UUID_PATTERN.test(actorUserId) ||
-      typeof tenantId !== 'string' || !DIRECTORY_UUID_PATTERN.test(tenantId)) fail(400, 'INVALID_INPUT');
-    actorUserId = actorUserId.toLowerCase(); tenantId = tenantId.toLowerCase();
+  async listTenantMembers(
+    actorUserId: string,
+    tenantId: string,
+    input: TenantMemberQuery = {},
+  ): Promise<TenantMemberPage> {
+    if (
+      typeof actorUserId !== 'string' ||
+      !DIRECTORY_UUID_PATTERN.test(actorUserId) ||
+      typeof tenantId !== 'string' ||
+      !DIRECTORY_UUID_PATTERN.test(tenantId)
+    )
+      fail(400, 'INVALID_INPUT');
+    actorUserId = actorUserId.toLowerCase();
+    tenantId = tenantId.toLowerCase();
     const scopeHash = directoryScopeHash(actorUserId, tenantId);
     const { limit, after } = directoryQuery(input, scopeHash);
-    const result = await this.query<TenantMemberRow>(this.database,
+    const result = await this.query<TenantMemberRow>(
+      this.database,
       `WITH authorized AS (
          SELECT actor_membership.role
          FROM saas_tenants tenant
@@ -1086,11 +1223,23 @@ export class SaasIdentityService {
          ORDER BY member.user_id ASC
          LIMIT $4
        ) page ON TRUE
-       ORDER BY page.user_id ASC`, [tenantId, actorUserId, after, limit + 1]);
+       ORDER BY page.user_id ASC`,
+      [tenantId, actorUserId, after, limit + 1],
+    );
     if (result.rows.length === 0) fail(403, 'TENANT_ACCESS_DENIED');
-    if (result.rows.length > limit + 1 || result.rows.some(row => row.actor_role !== 'owner' && row.actor_role !== 'admin')) fail(500, 'IDENTITY_STORAGE_ERROR');
+    if (
+      result.rows.length > limit + 1 ||
+      result.rows.some((row) => row.actor_role !== 'owner' && row.actor_role !== 'admin')
+    )
+      fail(500, 'IDENTITY_STORAGE_ERROR');
     if (result.rows[0]?.user_id === null) {
-      if (result.rows.length !== 1 || result.rows[0].display_name !== null || result.rows[0].role !== null || result.rows[0].status !== null) fail(500, 'IDENTITY_STORAGE_ERROR');
+      if (
+        result.rows.length !== 1 ||
+        result.rows[0].display_name !== null ||
+        result.rows[0].role !== null ||
+        result.rows[0].status !== null
+      )
+        fail(500, 'IDENTITY_STORAGE_ERROR');
       return { items: [], nextCursor: null };
     }
     const members = result.rows.map(safeTenantMember);
@@ -1103,6 +1252,216 @@ export class SaasIdentityService {
     const items = members.slice(0, limit);
     const last = items.at(-1);
     return { items, nextCursor: members.length > limit && last ? directoryCursor(scopeHash, last.userId) : null };
+  }
+
+  private async appendTenantMembershipAudit(
+    tx: SqlExecutor,
+    tenantId: string,
+    actorUserId: string,
+    action: string,
+    targetUserId: string,
+    occurredAt: string,
+  ): Promise<void> {
+    await this.query(
+      tx,
+      `INSERT INTO saas_audit_events
+         (id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, entry_point, request_id)
+       VALUES ($1, $2, $3, $4, 'saas_membership', $5, $6, 'customer_identity_members', NULL)`,
+      [randomUUID(), tenantId, actorUserId, action, targetUserId, occurredAt],
+    );
+  }
+
+  /** Fresh actor role under the tenant + actor fences; 404 mirrors createInvitation. */
+  private async actorTenantRole(tx: SqlExecutor, tenantId: string, actorUserId: string): Promise<TenantRole> {
+    const actor = await this.query<{ role: string }>(
+      tx,
+      `SELECT m.role FROM saas_memberships m
+       JOIN saas_tenants t ON t.id = m.tenant_id
+       JOIN saas_users u ON u.id = m.user_id
+       WHERE m.tenant_id = $1 AND m.user_id = $2
+         AND m.status = 'active' AND t.status = 'active' AND u.disabled_at IS NULL LIMIT 1`,
+      [tenantId, actorUserId],
+    );
+    const role = actor.rows[0]?.role;
+    if (!role || !isTenantRole(role)) fail(404, 'TENANT_ACCESS_DENIED');
+    return role;
+  }
+
+  /** Row-locked target membership joined to its account row; revoked rows are absent members. */
+  private async lockTenantMembership(
+    tx: SqlExecutor,
+    tenantId: string,
+    targetUserId: string,
+  ): Promise<{ role: TenantRole; status: string; displayName: string | null }> {
+    const target = await this.query<{ role: string; status: string; display_name: string | null }>(
+      tx,
+      `SELECT m.role, m.status, u.display_name
+       FROM saas_memberships m
+       JOIN saas_users u ON u.id = m.user_id
+       WHERE m.tenant_id = $1 AND m.user_id = $2
+       FOR UPDATE OF m`,
+      [tenantId, targetUserId],
+    );
+    const row = target.rows[0];
+    if (!row) fail(404, 'MEMBER_NOT_FOUND');
+    if (!isTenantRole(row.role) || typeof row.status !== 'string') fail(500, 'IDENTITY_STORAGE_ERROR');
+    if (row.status !== 'active') fail(404, 'MEMBER_NOT_FOUND');
+    return {
+      role: row.role,
+      status: row.status,
+      displayName: row.display_name === null ? null : String(row.display_name),
+    };
+  }
+
+  /** Active-owner headcount under the tenant authorization fence (the E1 invariant). */
+  private async activeOwnerCount(tx: SqlExecutor, tenantId: string): Promise<number> {
+    const result = await this.query<{ owners: string }>(
+      tx,
+      `SELECT count(*)::text AS owners FROM saas_memberships
+       WHERE tenant_id = $1 AND role = 'owner' AND status = 'active'`,
+      [tenantId],
+    );
+    const owners = Number(result.rows[0]?.owners);
+    if (!Number.isSafeInteger(owners) || owners < 0) fail(500, 'IDENTITY_STORAGE_ERROR');
+    return owners;
+  }
+
+  async updateTenantMemberRole(
+    actorUserId: string,
+    tenantId: string,
+    targetUserId: string,
+    role: TenantRole,
+  ): Promise<SafeTenantMember> {
+    validateDirectoryId(actorUserId);
+    validateDirectoryId(tenantId);
+    validateDirectoryId(targetUserId);
+    if (!isTenantRole(role)) fail(400, 'INVALID_INPUT');
+
+    return this.transaction(async (tx) => {
+      await this.fenceTenantAuthorization(tx, tenantId);
+      await this.fenceUserAuthorization(tx, actorUserId);
+      const actorRole = await this.actorTenantRole(tx, tenantId, actorUserId);
+      const target = await this.lockTenantMembership(tx, tenantId, targetUserId);
+      if (actorRole === 'admin') {
+        // Admins manage the non-privileged band only: no owner/admin targets,
+        // no owner/admin grants.
+        if (target.role === 'owner' || target.role === 'admin' || role === 'owner' || role === 'admin') {
+          fail(403, 'INSUFFICIENT_TENANT_ROLE');
+        }
+      } else if (actorRole !== 'owner') {
+        fail(403, 'INSUFFICIENT_TENANT_ROLE');
+      }
+      if (target.role === role) {
+        return { userId: targetUserId, displayName: target.displayName, role, status: 'active' };
+      }
+      if (target.role === 'owner' && role !== 'owner' && (await this.activeOwnerCount(tx, tenantId)) <= 1) {
+        fail(409, 'LAST_OWNER_REQUIRED');
+      }
+      const now = this.currentDate().toISOString();
+      const updated = await this.query(
+        tx,
+        `UPDATE saas_memberships SET role = $3, updated_at = $4
+         WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`,
+        [tenantId, targetUserId, role, now],
+      );
+      if (updated.rowCount !== 1) fail(500, 'IDENTITY_STORAGE_ERROR');
+      await this.appendTenantMembershipAudit(
+        tx,
+        tenantId,
+        actorUserId,
+        'tenant_member.role_updated',
+        targetUserId,
+        now,
+      );
+      return { userId: targetUserId, displayName: target.displayName, role, status: 'active' };
+    });
+  }
+
+  async removeTenantMember(actorUserId: string, tenantId: string, targetUserId: string): Promise<SafeTenantMember> {
+    validateDirectoryId(actorUserId);
+    validateDirectoryId(tenantId);
+    validateDirectoryId(targetUserId);
+
+    return this.transaction(async (tx) => {
+      await this.fenceTenantAuthorization(tx, tenantId);
+      await this.fenceUserAuthorization(tx, actorUserId);
+      const actorRole = await this.actorTenantRole(tx, tenantId, actorUserId);
+      const target = await this.lockTenantMembership(tx, tenantId, targetUserId);
+      if (targetUserId !== actorUserId) {
+        // Removing someone else: owner removes anyone; admins remove only the
+        // non-privileged band. Self-removal (leaving) stays open to every role.
+        if (actorRole === 'admin') {
+          if (target.role === 'owner' || target.role === 'admin') fail(403, 'INSUFFICIENT_TENANT_ROLE');
+        } else if (actorRole !== 'owner') {
+          fail(403, 'INSUFFICIENT_TENANT_ROLE');
+        }
+      }
+      if (target.role === 'owner' && (await this.activeOwnerCount(tx, tenantId)) <= 1) {
+        fail(409, 'LAST_OWNER_REQUIRED');
+      }
+      const now = this.currentDate().toISOString();
+      const revoked = await this.query(
+        tx,
+        `UPDATE saas_memberships SET status = 'revoked', revoked_at = $3, updated_at = $3
+         WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`,
+        [tenantId, targetUserId, now],
+      );
+      if (revoked.rowCount !== 1) fail(500, 'IDENTITY_STORAGE_ERROR');
+      await this.query(
+        tx,
+        `UPDATE saas_project_memberships SET status = 'revoked', revoked_at = $3, updated_at = $3
+         WHERE tenant_id = $1 AND user_id = $2 AND status <> 'revoked'`,
+        [tenantId, targetUserId, now],
+      );
+      await this.appendTenantMembershipAudit(tx, tenantId, actorUserId, 'tenant_member.removed', targetUserId, now);
+      return { userId: targetUserId, displayName: target.displayName, role: target.role, status: 'revoked' };
+    });
+  }
+
+  async transferTenantOwnership(
+    actorUserId: string,
+    tenantId: string,
+    targetUserId: string,
+  ): Promise<SafeTenantMember> {
+    validateDirectoryId(actorUserId);
+    validateDirectoryId(tenantId);
+    validateDirectoryId(targetUserId);
+    if (targetUserId === actorUserId) fail(400, 'INVALID_INPUT');
+
+    return this.transaction(async (tx) => {
+      await this.fenceTenantAuthorization(tx, tenantId);
+      await this.fenceUserAuthorization(tx, actorUserId);
+      const actorRole = await this.actorTenantRole(tx, tenantId, actorUserId);
+      if (actorRole !== 'owner') fail(403, 'INSUFFICIENT_TENANT_ROLE');
+      const target = await this.lockTenantMembership(tx, tenantId, targetUserId);
+      const now = this.currentDate().toISOString();
+      // The swap preserves the at-least-one-owner invariant by construction:
+      // the target row becomes owner in the same transaction that demotes the
+      // actor to admin.
+      const promoted = await this.query(
+        tx,
+        `UPDATE saas_memberships SET role = 'owner', updated_at = $3
+         WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`,
+        [tenantId, targetUserId, now],
+      );
+      if (promoted.rowCount !== 1) fail(500, 'IDENTITY_STORAGE_ERROR');
+      const demoted = await this.query(
+        tx,
+        `UPDATE saas_memberships SET role = 'admin', updated_at = $3
+         WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'`,
+        [tenantId, actorUserId, now],
+      );
+      if (demoted.rowCount !== 1) fail(500, 'IDENTITY_STORAGE_ERROR');
+      await this.appendTenantMembershipAudit(
+        tx,
+        tenantId,
+        actorUserId,
+        'tenant_ownership.transferred',
+        targetUserId,
+        now,
+      );
+      return { userId: targetUserId, displayName: target.displayName, role: 'owner', status: 'active' };
+    });
   }
 
   async listProjects(userId: string, tenantId: string): Promise<SafeProject[]> {
@@ -1135,10 +1494,19 @@ export class SaasIdentityService {
     const projectId = randomUUID();
 
     return this.transaction(async (tx) => {
-      // Tenant and user fences precede the authority read and project writes.
-      // Their database triggers serialize membership/tenant and user changes.
-      await this.fenceTenantAuthorization(tx, tenantId);
-      await this.fenceUserAuthorization(tx, actorUserId);
+      // Strongest 050 scope layer before the fresh role read or any INSERT:
+      // existing tenant -> preallocated new project -> current actor.
+      await this.query(
+        tx,
+        "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:tenant:' || $1::uuid::text, 0))",
+        [tenantId],
+      );
+      await this.query(
+        tx,
+        "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:project:' || $1::uuid::text || ':' || $2::uuid::text, 0))",
+        [tenantId, projectId],
+      );
+      await this.query(tx, USER_SESSION_MUTATION_FENCE_SQL, [actorUserId]);
       const actor = await this.query<{ role: string }>(
         tx,
         `SELECT m.role FROM saas_memberships m

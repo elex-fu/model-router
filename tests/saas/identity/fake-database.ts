@@ -471,6 +471,69 @@ export class FakeSaasDatabase {
       const membership = this.state.memberships.find((row) => row.tenant_id === a && row.user_id === b);
       return result<Row>(membership ? [{ tenant_id: membership.tenant_id, user_id: membership.user_id } as Row] : []);
     }
+    if (statement.startsWith('select m.role, m.status, u.display_name from saas_memberships')) {
+      const membership = this.state.memberships.find((row) => row.tenant_id === a && row.user_id === b);
+      const user = this.state.users.find((row) => row.id === b);
+      return result<Row>(
+        membership
+          ? [
+              {
+                role: membership.role,
+                status: membership.status ?? 'active',
+                display_name: user?.display_name ?? null,
+              } as Row,
+            ]
+          : [],
+      );
+    }
+    if (statement.startsWith('select count(*)::text as owners from saas_memberships')) {
+      const owners = this.state.memberships.filter(
+        (row) => row.tenant_id === a && row.role === 'owner' && (row.status === undefined || row.status === 'active'),
+      ).length;
+      return result<Row>([{ owners: String(owners) } as Row]);
+    }
+    if (statement.startsWith('update saas_memberships set role = $3')) {
+      const membership = this.state.memberships.find(
+        (row) => row.tenant_id === a && row.user_id === b && (row.status === undefined || row.status === 'active'),
+      );
+      if (!membership) return result<Row>();
+      membership.role = c;
+      membership.updated_at = d;
+      return result<Row>([{ user_id: b } as Row]);
+    }
+    if (statement.startsWith("update saas_memberships set role = '")) {
+      const literal = /set role = '([a-z]+)'/.exec(statement)?.[1];
+      const membership = this.state.memberships.find(
+        (row) => row.tenant_id === a && row.user_id === b && (row.status === undefined || row.status === 'active'),
+      );
+      if (!membership || !literal) return result<Row>();
+      membership.role = literal;
+      membership.updated_at = c;
+      return result<Row>([{ user_id: b } as Row]);
+    }
+    if (statement.startsWith("update saas_memberships set status = '")) {
+      const membership = this.state.memberships.find(
+        (row) => row.tenant_id === a && row.user_id === b && (row.status === undefined || row.status === 'active'),
+      );
+      if (!membership) return result<Row>();
+      membership.status = 'revoked';
+      membership.revoked_at = c;
+      membership.updated_at = c;
+      return result<Row>([{ user_id: b } as Row]);
+    }
+    if (statement.startsWith("update saas_project_memberships set status = '")) {
+      for (const row of this.state.projectMemberships) {
+        if (row.tenant_id === a && row.user_id === b && row.status !== 'revoked') {
+          row.status = 'revoked';
+          row.revoked_at = c;
+          row.updated_at = c;
+        }
+      }
+      return result<Row>();
+    }
+    if (statement.startsWith('insert into saas_audit_events')) {
+      return result<Row>();
+    }
 
     if (statement.startsWith('select id from saas_invitations')) {
       const now = new Date(String(c)).getTime();

@@ -124,9 +124,11 @@ program
   .option('--schema <name>', 'Explicit SaaS schema name')
   .option('--release-id <id>', 'Expected release label for this executable and reviewed baseline')
   .option('--catalog-baseline <path>', 'Reviewed JSON catalog baseline; never generated or promoted automatically')
+  .option('--legacy-checksum <mapping>', 'Reviewed legacy 022/023 ledger checksum mapping <22|23>=<sha256>:<evidenceId>; repeatable; annotates known history only, never grants compatibility', (value: string, previous: string[]) => [...previous, value], [])
   .option('--allow-local-plaintext', 'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS')
   .action((options) => management(async () => {
-    const result = await saasMigrationAudit(options);
+    const { legacyChecksum, ...rest } = options;
+    const result = await saasMigrationAudit({ ...rest, legacyChecksums: legacyChecksum });
     process.exitCode = result.exitCode;
   }));
 

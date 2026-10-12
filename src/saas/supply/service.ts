@@ -46,6 +46,7 @@ import type {
   RebindPlatformPoolMemberInput,
   RebindTenantProviderSupplyProfileAccountInput,
   ReplaceProviderCredentialSecretInput,
+  ReplaceTenantProviderCredentialSecretForOperatorInput,
   ReplaceTenantProviderCredentialSecretInput,
   SupplyTimestamp,
   TenantProviderCredentialLifecycleInput,
@@ -111,6 +112,7 @@ export type {
   RebindPlatformPoolGrantInput,
   RebindPlatformPoolMemberInput,
   RebindTenantProviderSupplyProfileAccountInput,
+  ReplaceTenantProviderCredentialSecretForOperatorInput,
   ReplaceTenantProviderCredentialSecretInput,
   TenantProviderCredentialLifecycleInput,
   TenantProviderSupplyProfileAccountRecord,
@@ -167,6 +169,9 @@ export interface PlatformProviderAccountCreateInput {
   readonly rightsId: string;
   readonly rightsVersion: number;
   readonly capabilities: readonly ProviderCapabilityReference[];
+  /** Contract C-7 scheduling scalars; default to the neutral tie (0 / 1). */
+  readonly priority?: number;
+  readonly weight?: number;
   readonly audit: ProviderSupplyAuditContext;
 }
 
@@ -188,6 +193,22 @@ export interface PlatformProviderCredentialSecretRotationInput {
 
 export interface PlatformProviderAccountLifecycleInput {
   readonly accountId: string;
+  readonly expectedAuthzVersion: number;
+  readonly audit: ProviderSupplyAuditContext;
+}
+
+export interface PlatformProviderAccountSchedulingInput {
+  readonly accountId: string;
+  readonly priority: number;
+  readonly weight: number;
+  readonly expectedAuthzVersion: number;
+  readonly audit: ProviderSupplyAuditContext;
+}
+
+export interface PlatformProviderAccountRevalidationInput {
+  readonly accountId: string;
+  /** null disables the periodic revalidation sweep for this account. */
+  readonly revalidationIntervalSeconds: number | null;
   readonly expectedAuthzVersion: number;
   readonly audit: ProviderSupplyAuditContext;
 }
@@ -475,6 +496,20 @@ function positiveInteger(value: unknown, code: ProviderSupplyErrorCode = 'INVALI
   return numeric;
 }
 
+/** Contract C-7 scheduling scalar; accepts integer text for HTTP-sourced input. */
+function schedulingScalar(value: unknown, min: number, max: number): number {
+  const numeric =
+    typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+  if (!Number.isSafeInteger(numeric) || numeric < min || numeric > max) fail('INVALID_INPUT');
+  return numeric;
+}
+
+/** D3 revalidation cadence; null is the explicit disable, integer text accepted for HTTP input. */
+function revalidationIntervalScalar(value: unknown): number | null {
+  if (value === null) return null;
+  return schedulingScalar(value, 900, 604_800);
+}
+
 function currentDate(now: () => Date): Date {
   const value = now();
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) fail('INVALID_INPUT');
@@ -571,7 +606,10 @@ function poolStatus(value: unknown): ProviderPoolRecord['status'] {
 }
 
 function validationState(value: unknown): ProviderValidationState {
-  if (value === 'unverified' || value === 'verified' || value === 'failed') return value;
+  // R5: 'quarantined' is a real stored account state (migration 097).
+  if (value === 'unverified' || value === 'verified' || value === 'failed' || value === 'quarantined') {
+    return value;
+  }
   fail('SUPPLY_STORAGE_ERROR');
 }
 
@@ -1188,8 +1226,93 @@ export class ProviderSupplyService {
         capabilities: input.capabilities,
         status: 'pending',
         validationState: 'unverified',
+        ...(input.priority === undefined ? {} : { priority: input.priority }),
+        ...(input.weight === undefined ? {} : { weight: input.weight }),
       },
       normalizeAuditContext(input.audit),
+    );
+  }
+
+  /** Contract C-7: operator-controlled scheduling scalars with audit, CAS, and epoch bump. */
+  async updatePlatformProviderAccountScheduling(
+    input: PlatformProviderAccountSchedulingInput,
+  ): Promise<ProviderAccountRecord> {
+    if (!input) fail('INVALID_INPUT');
+    const normalizedReference = normalizeAccountReference({
+      ownerKind: 'platform',
+      tenantId: null,
+      accountId: identifier(input.accountId),
+    });
+    const audit = normalizeAuditContext(input.audit);
+    const now = currentDate(this.now).toISOString();
+    return this.repositoryRun(() =>
+      this.repository.transaction(async (repository, executor) => {
+        if (executor) await lockAdvisoryLayers(executor, providerAccountLockLayers([normalizedReference]), 'exclusive');
+        if (typeof repository.appendAuditEvent !== 'function') fail('SUPPLY_STORAGE_ERROR');
+        const current = await repository.getAccount(normalizedReference);
+        if (!current) fail('ACCOUNT_NOT_FOUND');
+        const expected = positiveInteger(input.expectedAuthzVersion);
+        if (expected !== current.authzVersion) fail('ACCOUNT_STATE_CONFLICT');
+        if (current.status === 'revoked') fail('ACCOUNT_REVOKED');
+        const updated = await repository.updateAccountScheduling({
+          account: normalizedReference,
+          priority: schedulingScalar(input.priority, 0, 1000),
+          weight: schedulingScalar(input.weight, 1, 10_000),
+          expectedAuthzVersion: expected,
+          updatedAt: now,
+        });
+        if (!updated) fail('ACCOUNT_STATE_CONFLICT');
+        await repository.appendAuditEvent({
+          tenantId: null,
+          action: 'provider_supply.account.scheduling_updated',
+          targetType: 'saas_provider_account',
+          targetId: updated.id,
+          occurredAt: now,
+          audit,
+        });
+        return updated;
+      }),
+    );
+  }
+
+  /** D3: operator-controlled periodic revalidation cadence with audit, CAS, and epoch bump. */
+  async updatePlatformProviderAccountRevalidation(
+    input: PlatformProviderAccountRevalidationInput,
+  ): Promise<ProviderAccountRecord> {
+    if (!input) fail('INVALID_INPUT');
+    const normalizedReference = normalizeAccountReference({
+      ownerKind: 'platform',
+      tenantId: null,
+      accountId: identifier(input.accountId),
+    });
+    const audit = normalizeAuditContext(input.audit);
+    const now = currentDate(this.now).toISOString();
+    return this.repositoryRun(() =>
+      this.repository.transaction(async (repository, executor) => {
+        if (executor) await lockAdvisoryLayers(executor, providerAccountLockLayers([normalizedReference]), 'exclusive');
+        if (typeof repository.appendAuditEvent !== 'function') fail('SUPPLY_STORAGE_ERROR');
+        const current = await repository.getAccount(normalizedReference);
+        if (!current) fail('ACCOUNT_NOT_FOUND');
+        const expected = positiveInteger(input.expectedAuthzVersion);
+        if (expected !== current.authzVersion) fail('ACCOUNT_STATE_CONFLICT');
+        if (current.status === 'revoked') fail('ACCOUNT_REVOKED');
+        const updated = await repository.updateAccountRevalidation({
+          account: normalizedReference,
+          revalidationIntervalSeconds: revalidationIntervalScalar(input.revalidationIntervalSeconds),
+          expectedAuthzVersion: expected,
+          updatedAt: now,
+        });
+        if (!updated) fail('ACCOUNT_STATE_CONFLICT');
+        await repository.appendAuditEvent({
+          tenantId: null,
+          action: 'provider_supply.account.revalidation_updated',
+          targetType: 'saas_provider_account',
+          targetId: updated.id,
+          occurredAt: now,
+          audit,
+        });
+        return updated;
+      }),
     );
   }
 
@@ -1235,7 +1358,8 @@ export class ProviderSupplyService {
     return this.repositoryRun(
       () =>
         this.repository.transaction(async (repository, executor) => {
-          if (executor) await lockAdvisoryLayers(executor, providerAccountLockLayers([normalizedReference]), 'exclusive');
+          if (executor)
+            await lockAdvisoryLayers(executor, providerAccountLockLayers([normalizedReference]), 'exclusive');
           const current = await repository.getAccount(normalizedReference);
           if (!current) fail('ACCOUNT_NOT_FOUND');
           const expected = expectedAuthzVersion ?? current.authzVersion;
@@ -1293,7 +1417,8 @@ export class ProviderSupplyService {
     return this.repositoryRun(
       () =>
         this.repository.transaction(async (repository, executor) => {
-          if (executor) await lockAdvisoryLayers(executor, providerAccountLockLayers([normalizedReference]), 'exclusive');
+          if (executor)
+            await lockAdvisoryLayers(executor, providerAccountLockLayers([normalizedReference]), 'exclusive');
           if (audit !== undefined && typeof repository.appendAuditEvent !== 'function') fail('SUPPLY_STORAGE_ERROR');
           const current = await repository.getAccount(normalizedReference);
           if (!current) fail('ACCOUNT_NOT_FOUND');
@@ -1746,6 +1871,32 @@ export class ProviderSupplyService {
       },
       audit,
       input.context,
+    );
+  }
+
+  /**
+   * R4 OAuth refresh (decision A) operator path: the control-plane refresh
+   * worker supplies the full credential reference from its claim; there is no
+   * TenantContext because the deployment operator is not a tenant member.
+   * Semantics are identical to the platform rotation path (status checks,
+   * expectedVersion CAS, #18a schedule inheritance, validation-job enqueue,
+   * same-transaction audit); only the BYOK supply-profile re-authorization
+   * block tied to a TenantContext is skipped.
+   */
+  async replaceTenantProviderCredentialSecretForOperator(
+    input: ReplaceTenantProviderCredentialSecretForOperatorInput,
+  ): Promise<ProviderCredentialWriteResult> {
+    if (!input?.audit) fail('INVALID_INPUT');
+    const reference = normalizeCredentialReference(input.credential);
+    if (reference.ownerKind !== 'tenant') fail('INVALID_INPUT');
+    return this.persistence.replaceProviderCredentialSecretWithAudit(
+      {
+        credential: reference,
+        expectedVersion: positiveInteger(input.expectedVersion),
+        secret: input.secret,
+        ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+      },
+      normalizeAuditContext(input.audit),
     );
   }
 

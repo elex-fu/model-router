@@ -1,6 +1,6 @@
 # Model-router 开发进展、能力建设与后续任务
 
-初始盘点日期：2026-09-29；最新统一文档截点：**2026-10-03 12:23:32 UTC**（Asia/Shanghai本地日期2026-10-03）。窗口以各自实际UTC记录，submitted/terminal observed不改写为精确内部test start/end；历史成功/失败与scope不合并为统一发布验收。
+初始盘点日期：2026-09-29；最新统一文档截点：**2026-10-04 13:01:05 UTC / 上海时间2026-10-04 21:01:05**。窗口以各自实际UTC记录，submitted/terminal observed不改写为精确内部test start/end；历史成功/失败与scope不合并为统一发布验收。
 
 历史业务代码与 CI 证据基线：`main` / `6366cb976d05e7c731ba10f695d651497d4f4966`；不代表当前保留的工作树已验收。
 
@@ -8,9 +8,78 @@
 
 关联方案：[Sub2API 商业平台能力融入方案](./sub2api-commercialization-integration-plan.md)；剩余任务统一见该方案 §11。
 
-## 结论摘要
+## 当前 checkpoint（2026-10-04 13:01:05 UTC / 上海时间2026-10-04 21:01:05）
 
-统一 latest 快照截至 **2026-10-03 12:23:32 UTC**：**14项完整出口全部OPEN，尚非商业就绪**。原完整build09:15 exit0、Chrome JuNX全11 spec一次40/40（38 browser＋2 HTTP-only，本地memory/mock）及pricing Ll5MnS22/22＋9 strict零诊断各守独立scope；PG15/18原7039各一次27/27与canonical60仍仅LIMITED窗口，不是完整FIN或统一发行候选。 G4新27/27＋17 strict0已接受；中央6wa68 FAILED7、tyld87 FAILED5 test-only，focused cost units/305 test roots NOTRUN；fLdygh type-only修订未重编。actual tVb原27=25/2，DRdcKG worker-reported原27=23/4，MAIN全文/hash/projection接受pending。候选整合非安装/激活；最新细节见[验证证据](#验证证据与当前阻塞)，历史计数不合并。
+本节固定截至 **2026-10-04 13:01:05 UTC / 上海时间2026-10-04 21:01:05**。以下是 MAIN 已接受的限定事实；旧 checkpoint 的“最新/下一步”等措辞仅指其历史截点，旧失败与未知 proof 不回填。**14项完整出口全部 OPEN**，主链 **GW → full FIN → actual KEY-IP → KEY-BUD** 与原任务优先级、前置、完整出口及依赖不变。
+
+- **当前 code-tested snapshot**：T9 current820 原 `npm test` ONCE 于12:52:41.756–12:53:12.311 UTC exit0；独立原 `npm run build` ONCE 于12:55:02.974–12:55:15.043 UTC exit0。固定357 roots＝286 unit／68 integration／3 live exclusions，原排序、脚本、断言、skip与server/web/Vite flags保持；仅含批准的16项变化（canonical12＋startup fixture1＋当时docs3），无private FIN/KMS/history overlays。MAIN接受 primary SHA `09c400bfeda29a549c51e2739b1009de82e8f2ea33767d261a2eec4a85ae6b3d`。截至此截点 native counts **NOT_CAPTURED**；Nx投影另有GO但尚未接受，不猜pass/skip数字。
+- **独立组件**：canonical12安装后 strong 类型检查零诊断、原whole5为85/85、no skip，实际12:34:16–19 UTC（MAIN primary交接缩写 `0017…`），不与全量相加。Tj CVxaN7 strong39零诊断、whole14为292 pass＋7原PG skip，仅private组件，未安装/未证明PG；旧strict37 FAIL保留历史。独立nRY MFA/KMS native为109 total＝105 pass／1 fail／3 skip，safe frame1360；tP4仅expected Buffer snapshot夹具修复、SOURCE ONLY，等待新native。不将该失败定性为生产错误，也不以此解释或回填旧hang的因果。
+- **offline执行边界**：owned npmRC/cache及npm自动HOME的bounded审查为0 known unsafe project cases，已批准并完成原套offline执行；不声称普遍HOME I/O完备，不保留已过时的offline HOLD判断。
+- **边界与下一步**：本候选只更新三份MD，后续doc-only字节不是上述code-tested窗口重新验证的源码。完整GW/FIN、真实PG/权限、Provider/cloud/realKMS/PSP、schema/角色/能力激活与远端Git/CI均没有本次新证明；001–060 immutable、061 inactive、062 reserved。按主链继续独立source审查与相应授权验收，不从offline或组件通过提前开放商业能力。
+
+## 历史 checkpoint（2026-10-04 12:11:33 UTC / 上海时间2026-10-04 20:11:33）
+
+以下仅整合截至本轮MAIN交接的结果；旧章节及旧proof按原scope原样保留，其“当前/下一步”不覆盖本节。**14项完整出口全部 OPEN；未达到商业发布条件。**
+
+| 当前范围 | 已知结果与未闭合边界 |
+|---|---|
+| canonical协议12 | 2026-10-04 11:54:41 UTC实际源码安装；12 after精确匹配、真正40项范围外保护未变。安装前 strict12零诊断、whole5＝85 PASS／无skip；不是安装后全量或schema/角色/Provider激活证明，source activation仍HOLD。 |
+| actual original820 | 原test exit1；新安全投影确认UNIT286＝3002 total／2983 pass／1 fail／18 skip／0 cancel/todo。唯一已知失败指向 `saas-startup.test.ts:2608`、assert2640:12、ERR_ASSERTION；不重复聚合该case。原`&&`契约据unit footer确认integration NOTRUN，非从无INTEGRATION文本推断。build exit0是canonical12安装前结果；最小routing fixture修复进行中、未验证。 |
+| Tj候选 | private限定292 pass＋7原PG skip；未实际安装，PG skip不代表真实PG通过。 |
+| history | 新HYCC窗口12:09:11–18 UTC：strong10／23均exit0、零诊断；whole3＝64/64、whole11＝130/130，均无skip。范围重叠，不合计为194；仅私有source组件、未安装，真实PG／rendering／factory仍HOLD。旧typeFAIL保留原proof，不回填。 |
+| KMS | strict9／release13已报告PASS；whole8 HUNG、未terminal。新safe projection74项已知观察／无footer／pending UNKNOWN；固定flush barrier静态修复进行中，不是已证cause、whole通过或cleanup证明。 |
+
+下一步先收敛原820失败与KMS whole终态，并审查history真实PG／rendering依赖，再审查固定源码组合并取得原scope严格编译/whole结果；真实PG、权限/readiness、生产KMS/IAM/TLS/PSP/Provider及恢复各守独立授权。实际接线顺序仍 **GW → full FIN → actual KEY-IP → KEY-BUD**，不能用组件PASS或源码安装提前开放。
+
+本节仅同步工程状态，不授权运行、部署或商业开放；源码安装按各自receipt记录，没有Git push/remote CI、runtime或actual PG新证据。历史001–060、inactive061／reserved062和旧失败/未知proof均不改写，后续诊断不倒填本截点。
+
+## 历史结论摘要（2026-10-04 09:06:15 UTC）
+
+统一当前快照：**2026-10-04 09:06:15 UTC / 上海时间2026-10-04 17:06:15**。**14项完整出口全部OPEN，尚非商业就绪**。主链保持 **GW → full FIN → actual KEY-IP → KEY-BUD → 适用生产/UI/恢复/发布验收**；§11十四任务的ID、优先级、工作量、前置、完整验收出口与依赖不变。稳定独立adapter/UI/runbook继续按6 Sol源码lane＋2 Luna max验证lane并行，不争用中央事务/schema/ACL。
+
+**已落地**：原客户MFA19及其MFA2/CLI1/Cookie1后继、wallet refund5、principal UI3、Key writer2、容量policy3保留各自安装范围。UIleaf三文件实际安装于07:57:18 UTC，原KEY17及父级会话/CSRF/一次性secret/form draft行为保留；安装前strict4零诊断、whole4一次52/52，无skip。Y31九文件author安装receipt记录09:00:21 UTC完成，9/9源码精确匹配，本次文档只读复核实际9个after均匹配；MAIN安装receipt审查/fresh当时进行中，不把它称为新的安装后运行验收。其已接受native仅是**安装前**server8/cross1零诊断、whole4一次76/76；不证明PG、同TX撤权真实并发或实际IP/预算接线。完整receipt/primary及SHA见[当前限定证据](./development-progress-2026-09-29.md#当前限定证据)。
+
+**最新限定验证**：history M4 strict13零诊断、whole8一次63/63；FIN IpGa八组strict零诊断、whole14一次118/118，无fail/skip/cancel/todo。FIN safe projection仅映射113个具名结果，footer其余5个名称归属UNKNOWN，不另造footer、不跨scope求和。两项仍是私有组件，不是PG/全局caller/完整FIN或生产激活证明；LM8的109/6及tb9的97/18只保留历史。Tj rMf PREP37/13、854 fresh零差异不是PASS：后续eNBbKq strict37一次exit2／1诊断，whole13 **NOTRUN**，MAIN接受safe primary并fresh860零差异；固定TS2741夹具397:5诊断属性未捕获，缺capacityBinding只是静态源码推断，不是已证运行原因。Curie在修复，旧失败proof不重写。
+
+**补齐截点前独立组件证据**：RPC类型后继HzJYvi strict20零诊断、whole3一次69/69，MAIN fresh602接受；仅memory/fake IPC，无PG、实际fork或安装。manual tags RLznDD strict5零诊断、whole2为94 total＝87 pass＋7原有缺DSN PG skip，MAIN fresh264接受；只source/scripted，不是PG通过。worker annotation EXVWXF strict17零诊断、whole4一次121/121，MAIN fresh1067接受；owned helper HTTP/CLI＋memory/scripted，无PG、未安装。三项均是独立私有组件，不是Tj combined PASS，不证明真实commandTags/ACK或full FIN；旧失败RPC只保留在历史区。完整primary/SHA见[当前限定证据](./development-progress-2026-09-29.md#当前限定证据)。
+
+**正在开发**：MFA SoYeWW四目标仍私有source/prep，无执行；KMS仍在TX内且await无界，未证明超时/取消/PG安全。Erdos v2自定义协议2wGoUYpb十一文件源码冻结、未执行/未激活；history owner-view BdX的37 relations／521 columns仅SQL文本与权限设计，未证明grammar/ACL/RLS/owner函数运行；unique EXEC/readiness由Ampere继续实现。
+
+**下一任务与未闭合门禁**：先完成Tj夹具与统一caller修复，再审核固定组合源码及严格隔离的原全量验证方案。初始环境只PATH/LANG/TMPDIR、inherit=false；明确owned npmrc/cache选项仍不能阻止npm自动HOME与应用默认homedir读写，禁止继承HOME/NPM白名单、伪造homedir或修改原roots/flags来绕过。因此当前full original npm执行继续**HOLD**，等待真实owned config/source-harness边界。column/default/PK/FK/CHECK/index、native PG15/18、真实ACK/SIGKILL恢复、完整factory、KMS/IAM/TLS/PSP/Provider与商业准入均未闭合；actual KEY-IP和KEY-BUD依赖不提前放开。
+
+**全量证据与交付范围**：N18旧824原npm test/build已通过、包含principal UI3，但在Key2/容量3/UIleaf3/Y31九文件安装前，**不覆盖当前源码组合**；旧18/27 skips与live3 exclusions不改，private monetary cohort不在该824中。不同源码/窗口的组件counts不汇总为现树全绿。001–060保持冻结，061 inactive、062 reserved，无schema/角色激活；unknown不TTL释放/自动重发，NULL/partial不造零，BYOK不修改钱包。PG是共享事实/容量/租约/健康/affinity权威；Redis仅CP认证限速/派生缓存，非gateway权威lease。
+
+**元数据范围**：MAIN先前上报50 dirty是在Y31安装前的有限观察；旧HEAD `54142d5f8eb38fe1539d4cf0ddb819e262972cf0`及50 commits push仅历史交付记录，本次无新Git/remote读取，不猜安装后dirty数或新commit/push/CI结果。历史06:57:51源快照和07:12:59独立失败观测按原字节保留如下，后续成功仅属于新的明确候选，不回填旧proof。
+
+**后续独立观测（元数据交接捕获于2026-10-04 09:20:15 UTC，不回填09:06:15源快照）**：MAIN后来FULL审Y31安装receipt并fresh108零差异接受；author receipt仍记录09:00:21 UTC源码9/9安装。这里的09:20:15是本次交接捕获时间，不是假定的验收/执行时刻；76/76仍仅安装前组件证明，无安装后whole验收。平台MFA锁序新native final仍UNKNOWN，等待直接接受的safe primary，不预期PASS。
+
+**09:06源截点之后的独立history观测（本次元数据捕获2026-10-04 09:22:42 UTC）**：hDclRu strict15 ONCE零诊断，whole9 ONCE72/72，零fail/skip/cancel/todo且72 mapped。实际strict提交09:18:27.399、whole终态09:18:30.611、sealed09:18:30.733 UTC；MAIN FULL读primary并核对native refs/source checks，406 guards零差异。仅private1q/BdX owner-projection组件，无source install/SQL/PG/grants/ACL/schema/full FIN ready；after-only compiler15 inventory不等于first-read或OS census。该后续结果不回填09:06快照或旧57失败。[safe primary](/private/tmp/luna-history-owner-projection-native.hDclRu/minimal-safe-primary.json)，SHA `936a73b40dc253012c978bf126e93cb4d67f7f8d4ac8b150bd1eaf0741f9a0e3`。
+
+**随后MFA独立失败观测（本次元数据捕获2026-10-04 09:39:15 UTC，不回填09:06源截点）**：IeQ4nu strict4 ONCE exit2／1项TS7022（managed test820:21），whole3 NOTRUN，FAILED/HOLD。MAIN交接actual strict stage09:20:30.439–09:20:31.527 UTC；safe primary封装窗口09:20:30.437–09:20:32.005 UTC，两者不混称内部起止。source guards零差异、strict handle及stdio结束，无PG；不等于OS cleanup。Euclid type-only修复、Copernicus KMS liveness源码author进行中，原四目标没有native PASS。上方09:20:15捕获时的UNKNOWN仅当时状态，随后以此实际失败为准；不改旧proof、不称已修复。[safe primary](/private/tmp/luna-platform-mfa-lock-order-native.IeQ4nu/mfa-lock-order-native-safe-primary.json)，SHA `216fca10169b478d605c0913d4b2f3d21b8af684ac5b2ca673774de6e5a9e4a7`。
+
+**历史06:57:51源快照结论（原文保留，后续观测不回填）：**
+
+统一当前快照：**2026-10-04 06:57:51 UTC / 上海时间2026-10-04 14:57:51**。**14项完整出口全部OPEN，尚非商业就绪**；原14个ID、优先级、工作量、前置、完整出口与依赖不变，主链 **GW → full FIN → actual KEY-IP → actual KEY-BUD → 适用生产/UI/恢复/发布验收**。独立稳定adapter/UI/runbook按6 Sol源码lane＋2 Luna max验证lane并行，不争用中央共享事务/schema/ACL。源码接线、限定验证、schema/生产激活与商业开放分别验收。
+
+**N18冻结824源码已包含实际安装UI3，范围不覆盖后续安装的Key2（05:44:39 UTC）与容量3（06:40:25 UTC）**：原npm test一次 **04:28:20.935–04:28:47.892 UTC** exit0；286 unit roots，**2973＝2955 pass／0 fail／18原有skip／0 cancel/todo**；68 integration roots，**222＝195 pass／0 fail／27原有skip／0 cancel/todo**。原build一次 **04:30:47.601–04:30:57.719 UTC** exit0／零TS诊断／Vite116 modules。MAIN全文审三份primary/plan并fresh **2569 FS checks零差异**，涵盖actual824、821 tMIC来源/UI3 copies、tools26、declared deps18、protected/history/index/safe refs；两stage前后0 delta且streams关闭。**这是该已含UI3的原全量OFFLINE候选PASS，不再只是beforeUI证明；但独立private monetary cohort不在此824范围，原18/27 skips和live3 exclusions保持，不是PG/生产或all14全绿。** 原server/web skipLibCheck=true不等价critical false；first reads/OS pools/listeners/descendants closure仍UNKNOWN/NOT_CAPTURED。完整primary路径/SHA见[当前限定证据](#当前限定证据)。
+
+**已落地**：客户MFA actual19及MFA2/CLI1/Cookie1后继、wallet refund5、member/project_service UI3、Key writer2和容量policy3均已源码安装。Key2安装于05:44:39 UTC；容量3安装于06:40:25 UTC，receipt实际3 after一致／37 guard零差异。各自限定验证为UI50、wallet非PG17/17、Key fake-driver22/22、容量strict3零诊断／whole2为18 pass＋2原缺DSN的PG skip；不是实际PG/退款writer/PSP或生产激活证明。父级会话/CSRF/一次性secret边界不因安装而放宽。
+
+**正在开发**：最新私有FIN候选LM8八组strict均exit0／零诊断，whole14一次 **115＝109 pass／6 fail，exit1、0 skip/cancel/todo**；MAIN接受primary/v3并核对876 metadata records零差异。v3仅安全断言坐标与静态条件标签，不证明运行根因；旧tb9的97 pass／18 fail及c174标签映射保留为历史，不重写原proof。9NI已通过strict13／whole6 **62/62**限定source/memory组件，Nb7配对readiness通过strict4／whole2 **13/13**；均未安装/未SQL，不代表全局caller closure、native commandTags/ACK、PG15/18 grammar/权限或full FIN。
+
+gd6/manualtags、history Boolean57、IPC69和UIleaf19仍是私有源码/待各自验证；截至本截点history native尚无接受结果，UIleaf仅原17＋新增2 authored，不挪用旧UI50作为新拆分PASS。客户session logout授权缺口与同TX Key guard仍在开发；history role的raw lease/tokenhash最小view/function仅私有设计/author、未SQL。Curie coherent97/role/catalog草案、Cop partial core reader与既有WG6/pJan/axes/Vk组件各守source范围，不能由静态合同或局部PASS关闭14个出口。
+
+**下一任务**：优先修复LM8的6项实际失败，保留原case/断言/strict与资金、缺证拒绝、租户隔离不变量；随后在批准的固定候选验证统一caller、历史权限和真实PG事务/故障矩阵。actual KEY-IP仍未安装/未native，KEY-BUD继续等待 **GW → full FIN → actual KEY-IP**。双PG权限、COMMIT/ACK/SIGKILL、restore、生产KMS/IAM/TLS/PSP/Provider和商业准入仍OPEN；001–060冻结、061 inactive、062 reserved。unknown不TTL释放/重发，NULL/partial不造零，BYOK不修改钱包。
+
+有限rtk status只读复核为 **49 dirty＝43 tracked modifications＋6 untracked**，HEAD仍 `54142d5f8eb38fe1539d4cf0ddb819e262972cf0`；这是有限本地元数据，不是FULL-tree或运行证明。旧50 commits已push，无新commit/push/remote CI交接证据；本次不执行Git写入或remote核验，旧CI failure/isolated SKIPPED只保留历史，不由本地组件PASS推因果。
+
+PG共享事实/容量/租约/健康/affinity已有core接线，Redis仅CP认证限速/派生缓存，不是gateway权威lease或财务账本。Euclid KEY-IP后继未安装／未native，预算仍等待GW、full FIN和完整KEY-IP。真实PG15/18升级/权限、COMMIT/ACK/SIGKILL、restore、production KMS/IAM/TLS/PSP/Provider及商业权利保持OPEN；001–060 immutable、061 inactive、062 reserved，未激活。unknown不TTL释放/自动重发，NULL/partial未知不造零，BYOK不修改钱包。
+
+tMIC beforeUI全量与02:24:31 UTC旧失败见下述dated historical区；不同scope的footers不求和，源码后继不回填旧proof或推断UNKNOWN cause。
+
+**历史12:23:32 UTC结论摘要（当时状态，非当前HEAD或最新结果）：**
+
+历史快照截至 **2026-10-03 12:23:32 UTC**：**14项完整出口全部OPEN，尚非商业就绪**。原完整build09:15 exit0、Chrome JuNX全11 spec一次40/40（38 browser＋2 HTTP-only，本地memory/mock）及pricing Ll5MnS22/22＋9 strict零诊断各守独立scope；PG15/18原7039各一次27/27与canonical60仍仅LIMITED窗口，不是完整FIN或统一发行候选。 G4新27/27＋17 strict0已接受；中央6wa68 FAILED7、tyld87 FAILED5 test-only，focused cost units/305 test roots NOTRUN；fLdygh type-only修订未重编。actual tVb原27=25/2，DRdcKG worker-reported原27=23/4，MAIN全文/hash/projection接受pending。候选整合非安装/激活；最新细节见[验证证据](#验证证据与当前阻塞)，历史计数不合并。
 
 主链 **GW → 完整FIN → actual KEY-IP → actual KEY-BUD** 及原生产装配/UI/恢复/发布依赖不变。real customer MFA进行中，RBAC6uE源码冻结，actual ACK/SIGKILL和91crash24未运行。MAIN12:00只读Git上报main/6366cb9、97 tracked/102 untracked、tracked +11,541/−1,438（不含untracked/private），不是本文重统计；截点无新commit/push/fetch、remote CI/release观测。本次仅三MD候选，不运行验证，不推完成百分比。
 
@@ -82,7 +151,111 @@ G5十文件 **07:56:13 UTC** 源码安装后，http测试修正源码95a于 **08
 
 ## 验证证据与当前阻塞
 
-统一 latest 快照截至 **2026-10-03 12:23:32 UTC**：**14项完整出口全部OPEN，尚非商业就绪**。原完整build09:15 exit0、Chrome JuNX全11 spec一次40/40（38 browser＋2 HTTP-only，本地memory/mock）及pricing Ll5MnS22/22＋9 strict零诊断各守独立scope；PG15/18原7039各一次27/27与canonical60仍仅LIMITED窗口，不是完整FIN或统一发行候选。 主链 **GW → 完整FIN → actual KEY-IP → actual KEY-BUD** 不变；下列来源仅MAIN限定接受或明确未接受/未运行的安全状态，不是本文重跑。
+### 当前限定证据
+
+统一源截点 **2026-10-04 09:06:15 UTC / 上海时间2026-10-04 17:06:15**。安全primary/receipt全文读取并核对SHA；MAIN已接受的bounded结果按直接交接记录，Y31新receipt的author安装事实与MAIN尚进行中的安装审查区分。只读hash不等于first-read/runtime closure、实际SQL或OS cleanup。
+
+| 限定窗口 | 实际结果与边界 | 安全primary及SHA-256 |
+|---|---|---|
+| UIleaf actual3 install | 07:57:18 UTC，author receipt三after精确、原17/父级secret/session边界保留；非新运行验收 | [安全记录](/private/tmp/model-router-key-ui-leaf-install.TrumjIXO/RECEIPT.json)；`822be15b06cf86b8cd0e5f90cc5234563b4d3e4242ac2cf069871c68e6bfb3eb` |
+| UIleaf安装前限定native | strict4一次exit0／0诊断，whole4一次52/52，0 fail/skip/cancel/todo；无browser/性能/生产证明 | [安全记录](/private/tmp/luna-key-ui-sterile3-native.GwhQxd/minimal-safe-primary.json)；`f05670f498cf734759a542a5ba56add53556801eee0fa85a3532fc914d73b91b` |
+| history M4私有组件 | strict13零诊断，whole8一次63/63；08:07:49.862 submitted–08:07:53.394 sealed，不称精确内部start/end；无PG/SQL/安装 | [安全记录](/private/tmp/luna-history-persisted-digest-native.cMkdvg/minimal-safe-primary.json)；`519b2849d368fee1169e3da14f9f8fd2eb51358b76924d52fa49161b7508120a` |
+| FIN IpGa私有组件 | 八strict零诊断，whole14一次118/118，0 fail/skip/cancel/todo；08:24:52.497–08:25:15.785 UTC观测窗。safe具名113，footer额外5归属UNKNOWN；不是full FIN或PG | [安全记录](/private/tmp/luna-fin-g1-read-oracle-native.dM2Myz/oracle-successor-native-safe-primary.json)；`304263fd7c8a60e6291ddd4d3c4c63c760291d460a4fd41ad4ce7aaffe81f0f0` |
+| RPC类型后继，截点前独立组件 | 07:39:37.366–07:39:40.122 UTC；strict20一次exit0／0诊断，whole3一次69/69，0 fail/skip/cancel/todo；MAIN fresh602接受。memory/fake IPC，无PG/实际fork/安装；旧失败仅历史 | [安全记录](/private/tmp/luna-core-db-rpc-type-successor-native.HzJYvi/rpc-successor-native-safe-primary.json)；`8fef7f3aafe80a79d635269b10042e52e0951f2dc8229c0970c2dcb3f3627c92` |
+| manual tags，截点前独立组件 | 07:37:38.714–07:37:40.421 UTC；strict5零诊断，whole2一次94 total＝87 pass＋7原缺DSN PG skip，0 fail；MAIN fresh264接受。source/scripted ONLY，无PG，不把skip算PASS | [安全记录](/private/tmp/luna-manual-transaction-tags-corrected-native.RLznDD/manual5-native-safe-primary.json)；`40cc7094e1098bc7bfceed59c0c01f63982f337231f84ad6259f7f7fc0b8d4ba` |
+| worker annotation，截点前独立组件 | 07:51:20.542–07:51:25.103 UTC；strict17零诊断，whole4一次121/121，0 fail/skip/cancel/todo；MAIN fresh1067接受。owned helper HTTP/CLI＋memory/scripted，无PG/未安装，不是Tj combined PASS | [安全记录](/private/tmp/luna-native-command-adapters-worker-annotation-native.EXVWXF/worker-annotation-native-safe-primary.json)；`dce67a2207b24d1b4341ed8b00bc8a9767b4ed6fa1c592577b375f1dc0793a16` |
+| Y31安装前组件native | server8/cross1零诊断，whole4一次76/76，0 fail/skip/cancel/todo；08:45:31.633 submitted–08:45:38.106 sealed；不覆盖安装后运行/PG | [安全记录](/private/tmp/luna-identity-key-first-actual-native.k4N7ZK/minimal-safe-primary.json)；`0faf1d3b87bc773819ee337ba30abb68eba6b3e315e308953723a3775ebc7160` |
+| Y31 actual9 author安装receipt | 09:00:21 UTC apply_patch完成；9/9实际after本次只读核对匹配。MAIN receipt审查/fresh当时进行中；source安装不等于安装后全量PASS | [安全记录](/private/tmp/model-router-identity-key-install.Mp3ISfpX/RECEIPT.json)；`8db9b6d501d705cfec0c0eb4ba6f3e47c066a6585c8f20928e67d0a460a220c8` |
+| Tj最新组合失败 | 08:58:53.684–08:58:58.160 UTC；strict37一次exit2／1诊断，whole13 NOTRUN。TS2741夹具397:5属性NOT_CAPTURED，capacityBinding只静态推断；MAIN FULL/fresh860零差异，不证明唯一原因 | [安全记录](/private/tmp/luna-transaction-callers-combined-native.eNBbKq/combined37-native-safe-primary.json)；`e472d23774ca1f41874cd70316c1608196c7a1ee9a6517f9283a5b8e57cfea97` |
+| MFA SoYeWW四目标SOURCE | 私有/sourceprep，无native/PG；KMS仍TX内await无界，原auth/counter/lock语义不得借source评阅称运行闭合 | [安全记录](/private/tmp/model-router-platform-mfa-lock-order.SoYeWW/HANDOFF.txt)；`9a699c5274f02a062d124742f2866d606bdc43e305ac56d8ae61fc5f0083e7d8` |
+| history BdX owner/column mask SOURCE | 37 relations／521 columns仅SQL文本方案；raw lease/tokenhash最小view/function未SQL/ACL激活，unique EXEC/readiness仍待集成 | [安全记录](/private/tmp/model-router-history-owner-projection.BdXmoL/HANDOFF.txt)；`ed76a589a25991976da5be88e28052a5509625ddcedb5f9bcb6c04d0986ab177` |
+
+FIN具名113与footer118的五项差额仅保留UNKNOWN，不伪造额外root/footer；[safe映射](/private/tmp/luna-fin-g1-read-oracle-native.dM2Myz/whole14-safe-projection.json)，SHA `7e85069896ec2da12de8a4345f953eb3545f7e9c134e80f7596c4ab20a05eac3`。Erdos 2wGoUYpb十一文件冻结/未执行与Ampere uniqueEXEC继续author是源码lane交接，不是运行结果。Tj旧PREP37/13不覆盖随后编译失败。
+
+N18原offline/build的counts及SHA保留在下述历史表：含principal UI3，**不含后来Key2/容量3/UIleaf/Y31**，不能声称当前整树全绿。当前全量npm HOME隔离与PG15/18、schema/catalog/权限、ACK/SIGKILL/restore、fullfactory及生产商业门禁仍HOLD/OPEN，所有14项完整出口OPEN。
+
+### 历史源快照06:57:51与独立观测07:12:59（保留原文，不回填）
+
+统一截点 **2026-10-04 06:57:51 UTC / 上海时间2026-10-04 14:57:51**；完整安全primary与实际SHA读取，MAIN接受状态按直接交接记录。N18原全量offline/build、UI50、钱包、private FIN及source/runtime contract各自守scope；raw日志/message/stack/operands不读取，不重跑验证。前后pins零差异不等于first-read runtime closure或OS cleanup。
+
+| 限定窗口 | 实际结果与边界 | 安全primary及SHA-256 |
+|---|---|---|
+| N18 actual824 original npm test，已含UI3 | 04:28:20.935–04:28:47.892 UTC，一次exit0；286 unit roots，2973＝2955 pass／0 fail／18原skip／0 cancel/todo；68 integration roots，222＝195 pass／0 fail／27原skip／0 cancel/todo。无新过滤/root丢弃，live3按原runner排除；private monetary cohort不在该824范围。 | [test primary](/private/tmp/luna-ui3-release-original-npm-test-native.Jx8qqx/original-npm-test-final-safe-primary.json)；`092db23cf0dd3806ef4f95ecc00b92128a6d3af5948c283f263587d463a54732` |
+| N18 actual824 independent original build，已含UI3 | 04:30:47.601–04:30:57.719 UTC，一次exit0／零TS诊断／Vite116 modules；原server/web skipLibCheck=true，不等价critical strict false。仅N18固定source，不是生产/PG/release验收。 | [build primary](/private/tmp/luna-ui3-release-original-npm-build-native.8qZbhT/original-npm-build-final-safe-primary.json)；`9ccb22023d0a894cfcce82f5720f2427437abbf5db597aea21b22a957619160b` |
+| N18 combined accepted scope | MAIN FULL审三primary/plan、fresh2569 FS checks零差异：actual824、821 tMIC来源/UI3 copies、tools26/deps18/protected/history/index/safe refs。test/build before/end0 delta，handles terminal/streams closed；first reads未采集，OS closureUNKNOWN，不推全机清理。 | [safe handoff](/private/tmp/luna-current-ui3-release-source-prep.N18Iav/original-test-build-final-safe-handoff.json)；`efb6e01dbde70f1fb24314ed760a3acb2ca5f550da9ac3168f6bd91f654783da` |
+| 已安装UI3专项四whole roots | 04:06:49.635–04:06:52.440 UTC strict4一次exit0／零诊断（skipLibCheck=false）；04:06:52.536–04:06:53.049 UTC whole4一次50/50、0 fail/skip/cancel/todo；KEY17＋原MFA/session33，输入前/中/后零差异。MAIN FULL primary及11 safe refs fresh零差异，限定PASS已接受；无browser/PG/full npm test/build。 | [UI primary](/private/tmp/luna-key-principal-ui-strict4-whole4-native.qZ2zVv/ui-strict4-whole4-final-safe-primary.json)；`72c794e09cf287c5338be29702a46437fedebe5f40e120ce03c1d55a7e2994b5` |
+| 已安装wallet refund5限定非PG | 02:34:04.282–02:34:12.729 UTC；五explicit roots分三compiler均exit0／零诊断、skipLibCheck=false；原两whole roots17/17、0 fail/skip/cancel。未执行真实退款writer、PSP或PG。 | [wallet primary](/private/tmp/luna-wallet-refund-native.eWjtmf/wallet-refund-native-final-safe-primary.json)；`043a8b5fc90f80718ffef2ca6fea9b9819b43a8b5ea33b3b229d17fb41bca655` |
+| 最新FIN LM8私有whole14 | 06:16:15.770–06:16:38.060 UTC；八组strict一次均exit0／零诊断；whole14一次115＝109 pass／6 fail，exit1、0 skip/cancel/todo。MAIN接受primary/v3并fresh876 metadata records零差异；仅冻结memory/SQL/crypto/source组件，非实际PG/full FIN。v3安全静态断言标签不证明cause，root标签不造独立footers。 | [LM8 primary](/private/tmp/luna-tb9-final-full14-native.LM8l4l/minimal-safe-primary.json)；`dd27d30eb6732d6eda2be1ee3107e9b65f3d579b49a0d92a21c6cf497966350f`；[v3安全诊断](/private/tmp/luna-tb9-final-full14-native.LM8l4l/whole14-assertion-ordinal.safe-diagnosis.v3.json)；`57b45cbe1eec7a00c974771ec49681ec8915d92ec3800e4c522530f9ce2c05fd` |
+| 历史 private FIN tb9（03:31 UTC） | 03:31:14.447–03:31:35.574 UTC，八strict组零诊断；whole14一次115＝97 pass／18 fail、exit1、0 skip/cancel；admission23、BPx7各23/23与7/7、零skip，三个独立footers不相加为full FIN。 | [FIN primary](/private/tmp/luna-financial-tb9-coupled.i45htU/minimal-safe-primary.json)；`f042fb409d3674f0bb3ea32706bd3df55ca8aab4d048065a6cecff7ecec4dfb1` |
+| 历史 tb9 receipt11原root标签映射 | whole14中actual安全事件按唯一原case name映射11 pass／0 fail；independent root footer NOT_EMITTED。whole14 footer115与已映射110的差额5归属UNKNOWN，不造新的独立receipt PASS footer；旧5/6不回写。 | [safe mapping](/private/tmp/luna-financial-tb9-coupled.i45htU/whole14-failures-and-root-mapping.safe-supplement.v1.json)；`c174b1fbc739f260a61f8a843497bd40f073bca632a39afe30ef6adf2e3a0109` |
+| Curie source24限定contract | 03:59:31.564–03:59:33.366 UTC，strict4一次exit0／零诊断，whole24/24、0 fail/skip/cancel/todo；MAIN FULL审与93 FS checks零差异接受。仅SQL文本/canonical constant contract，非native SQL grammar、权限、catalog或97；原root标签5/15/4无独立footer。 | [source24 primary](/private/tmp/luna-curie-source24-native.D7DN1f/minimal-safe-primary.json)；`7583e34cd6732c77026f1631551709c48053f18f9a8881c27201ca542440608b` |
+| 历史 Runtime24 Xr5 bounded strict failure | 04:29:47.235–04:29:49.179 UTC；strict4一次exit2／两项实际TS2307：src/config/types.ts:46:45、92:19；whole2 NOTRUN。MAIN FULL primary/fresh8 safe refs＋364 before/inter/after records零差异接受。该历史窗口的inline v2 input有限PREP当时NOTRUN，不是旧proof retry或唯一原因证明。 | [runtime primary](/private/tmp/luna-runtime24-native.nNED3y/minimal-safe-primary.json)；`9015dd6cd00b2cbe6fff5443c51112465a57511a808617b9437142f968048454` |
+| WG6 runtime24后继限定组件 | submitted/sealed 04:45:25.499–04:45:28.340 UTC；strict4一次exit0／零诊断，两whole roots24/24、0 fail/skip/cancel/todo。声明-only缺实现negative与固定文本startup seam；无实际startup/SQL/PG/FIN，不回填Xr5旧失败原因。 | [WG6 primary](/private/tmp/luna-runtime24-WG6-native.nAipHH/minimal-safe-primary.json)；`aec9653429ffa247bc0bd4dfe5b411229f4ab41b69d0455fc36c4fa109f48022` |
+| pJan readiness／provider composition限定组件 | strict4 05:09:45.295–05:09:47.108 UTC一次exit0／零诊断；两原whole memory/source roots05:12:29.071–05:12:29.399 UTC一次19/19，0 fail/skip/cancel/todo。非实际SQL/PG/177/whole14或权限激活。 | [pJan primary](/private/tmp/luna-finance-readiness-pjan-four-native.CFF3HE/pjan-four-native-final-safe-primary.json)；`05272669832b350273ce100d9c6ba8d01678b49cadce6f67a1e4026c5871c05a` |
+| axes6财务双轴限定组件 | submitted/sealed 05:08:25.075–05:08:27.882 UTC；strict6一次exit0／零诊断，两whole roots16/16，0 fail/skip/cancel/todo。仅新双轴组件，不含原177/whole14或真实FIN事务。 | [axes primary](/private/tmp/luna-financial-axes6-native.7w1qBV/minimal-safe-primary.json)；`2883fcdb5aefa28f19d05c15536607a6e62c1187dc9e416f5b1869fb69521453` |
+| Key writer2限定组件 | submitted/sealed 05:29:28.135–05:29:30.076 UTC；strict2一次exit0／零诊断，原service whole22/22，0 fail/skip/cancel/todo。fake-driver范围，非PG/GW/FIN/IP/BUD；该执行不含安装。另于05:44:39 UTC安装两处源码／2 after一致、12 protected零差异，安装无native APP证明。 | [Key primary](/private/tmp/luna-key-writer2-native.VSLQCO/minimal-safe-primary.json)；`449efab06bd21ef3713fa698331d7aab00bc42c4064ff16ad55afcbc48f5ed19`；[独立安装receipt](/private/tmp/model-router-key-writer-install.ExN9DHHn/RECEIPT.json)；`f1240ee53cb7ea1e6f5ee069c0217c8b788d0618034ded350ce457aedf977342` |
+| Vk42 transaction-commit／axes限定组件 | 05:41:53.125–05:41:56.249 UTC，strict11一次exit0／零诊断，whole5一次42/42，0 fail/skip/cancel/todo。仅源码／内存组件；commandTags/global caller closure仍OPEN，非实际PG/177/whole14/full FIN。 | [Vk42 primary](/private/tmp/luna-transaction-commit-vk-native.Js6uXo/commit-axes-native-safe-primary.json)；`eb94997e7d49b775a72c6eb726924824e8fe38cec2de2705b20e94a6966592e2` |
+| 9NI command-tags限定组件 | 06:11:48.500–06:11:53.136 UTC；strict13一次exit0／零诊断，whole6一次62/62，0 fail/skip/cancel/todo；MAIN507 metadata checks零差异接受。私有source/memory组件未安装，native ACK/commandTags、global caller closure/PG/full FIN仍OPEN。 | [9NI primary](/private/tmp/luna-transaction-command-tags-native.DAvb21/command-tags-native-safe-primary.json)；`b7b58cd5f1ccc6dc9ff36276174b071e9dc7b2d322e8cc81ae057aaade909130` |
+| Nb7 NULL paired-readiness限定组件 | 05:57:04.141–05:57:05.717 UTC；strict4一次exit0／零诊断，whole2一次13/13，0 fail/skip/cancel/todo；MAIN175 metadata checks零差异接受。仅immutable050文本/正常readiness的配对source合同，未安装／未SQL／未startup选择或forward激活，非PG15/18 grammar/catalog验收。 | [Nb7 primary](/private/tmp/luna-key-null-readiness-native.qG1TpX/minimal-safe-primary.json)；`5a2862b66462b46d6b04cf4fd720c1679e9c8a79bb39d41c9f67e4f10deac42a` |
+| 已安装容量policy3限定组件 | 06:28:09.182–06:28:10.891 UTC；strict3一次exit0／零诊断，whole2为20＝18 pass／0 fail／2原缺DSN的PG skip、0 cancel/todo；MAIN228 metadata checks零差异接受，不称PG通过。独立源码安装06:40:25 UTC，3 after一致、37 guard零差异，MAIN接受receipt；安装无新native执行。 | [capacity primary](/private/tmp/luna-capacity-key-writer-native.XQuR0n/capacity3-native-safe-primary.json)；`68f92686fb96d20edb3e91ec453e29fc266c8a869a8db20f25a4c736ed0a1803`；[安装receipt](/private/tmp/model-router-capacity-writer-install.AOLcJA9W/RECEIPT.json)；`cd4b96fb98e0b652e1f93fd205c24f9adc0458b9175285f60ab5dbeebecb2796` |
+| 新增独立观测截至07:12:59 UTC：history | private组件：strict12一次exit0／0诊断；whole57一次56 pass／1 fail／0 skip（exit1）。FAIL/HOLD、未安装、正在修复；不是组件全绿或PG proof，不回填06:57:51源快照。MAIN FULL审／fresh399零差异。 | [history primary](/private/tmp/luna-history-lease-cohort-native.u8xzZh/minimal-safe-final-primary.json)；`d7d7b3424e6e87f3657cd6d65fb237801660d3fa70a1659f51eb2044450cea95` |
+| 新增独立观测截至07:12:59 UTC：RPC | private组件：strict20一次exit2／7诊断；whole3 NOTRUN。FAIL/HOLD、未安装、正在修复；不是组件全绿或PG proof，不回填06:57:51源快照。MAIN FULL审／fresh587零差异。 | [RPC primary](/private/tmp/luna-core-db-rpc-component-native.zHnuzb/rpc-component-native-safe-primary.json)；`206214c4c8574530b9dc1f65ffb9cc9258c72d19097c455492f99071cb43a728` |
+| Curie f5s3VY coherent97 source合同 | 04:23:27 UTC冻结，MAIN FULL handoff已审。97 source functions／221 expected attachments、19 normal-forward阶段与role/catalog drafts均private未安装/未SQL/未native；SQL-source SHA不是canonical注册migration checksum。Cop真实reader仍有独立normal60/index/key/history/mask缺口，不mintall14。 | [source handoff](/private/tmp/model-router-cohesive-fin-forward-release.f5s3VY/HANDOFF.txt)；`3daaae263528cc4ad2125b7b7aa3b3353a8e2a2fecf3b78935b00668c279aa7c` |
+
+N18仅证明固定旧824已含UI3的原offline/build，不覆盖后装Key2/容量3或私有monetary候选。当前FIN依据LM8仍6 fail；旧tb997/18及c174差额5 PASS归属UNKNOWN只留历史，不造新的root footer。9NI62、Nb7 13、容量18＋2原PG skip及既有组件分别守scope，不相加为平台PASS。history运行截至截点未有接受结果，UIleaf19等候选未安装；实际PG/权限、ACK/SIGKILL、restore、KMS/IAM/TLS/PSP/Provider、新remote CI及14完整出口均OPEN。
+
+**截点边界与后续实际观测**：06:57:51 UTC为源快照；新增独立组件观测截至07:12:59 UTC，不回填该源快照：history strict12 exit0／0诊断，whole57=56 pass／1 fail／0 skip；RPC strict20 exit2／7诊断，whole3 NOTRUN。两项均FAIL/HOLD、未安装、正在修复，不是组件全绿或PG proof；文中“待验／尚无结果”仅指源截点，后续状态以这里的实际失败观测为准。MAIN已FULL审两项safe primary并fresh399／587检查零差异：[history primary](/private/tmp/luna-history-lease-cohort-native.u8xzZh/minimal-safe-final-primary.json)，SHA `d7d7b3424e6e87f3657cd6d65fb237801660d3fa70a1659f51eb2044450cea95`；[RPC primary](/private/tmp/luna-core-db-rpc-component-native.zHnuzb/rpc-component-native-safe-primary.json)，SHA `206214c4c8574530b9dc1f65ffb9cc9258c72d19097c455492f99071cb43a728`。
+
+**历史区边界**：以下沿革、旧工作树和当时“下一步”措辞均按各自原日期/scope保留，不代表09:06:15源快照的当前队列；最新状态和下一任务以上方结论摘要、当前限定证据及方案§11为准。
+
+### 历史 tMIC beforeUI 全量窗口（2026-10-04 03:42–03:45 UTC）
+
+以下三条保留原冻结824的UI3之前全量证明，旧来源与proof字节未改；不再称最新afterUI状态。当前已含UI3的N18结果见上表。
+
+| 限定窗口 | 实际结果与边界 | 安全primary及SHA-256 |
+|---|---|---|
+| tMIC824 original npm test，UI3之前 | 03:42:15.207–03:42:45.530 UTC，一次exit0；286 unit roots，2964＝2946 pass／0 fail／18原skip；68 integration roots，222＝195 pass／0 fail／27原skip。没有新过滤/root丢弃；不是UI3后全量。 | [test primary](/private/tmp/luna-console-cookie-original-npm-test-native.66ZLMq/original-npm-test-final-safe-primary.json)；`65a9e67a64fefb9bac51619946dd4a08b9561efab700c5fed31aa3427107551a` |
+| tMIC824 independent original build，UI3之前 | 03:44:58.008–03:45:07.584 UTC，一次exit0／零TS诊断／Vite116 modules；原server/web skipLibCheck=true，不等价critical false。 | [build primary](/private/tmp/luna-console-cookie-original-npm-build-native.ZSipSO/original-npm-build-final-safe-primary.json)；`874da5dce094bbd2e4dfc0eaa3c88d38cb0abb5d2263cec3739d2326b8f8c54a` |
+| tMIC824 full handoff | MAIN fresh824 origin/copy＋18 safe refs零差异，原test/build handles终态；first runtime reads／OS pools/listeners/descendants清理未独立采集，不推完整closure。 | [safe handoff](/private/tmp/luna-current-console-cookie-full-source-prep.tMICdG/original-test-build-conditional-final-safe-handoff.json)；`0ca3ae4891b96240c444f455a0771bca7f284c8599e26b492fb39139f17602a3` |
+
+### 历史限定证据（截至2026-10-04 02:24:31 UTC）
+
+历史截点 **2026-10-04 02:24:31 UTC / 上海时间2026-10-04 10:24:31**；以下保留当时824原失败、独立private组件和安装状态，WIP／NOTRUN／pending仅属该历史窗口，不是当前判断。仅读取safe primary与code/frame补充、核对文档与证据SHA；不读raw日志/message/operands，不重跑验证。不同窗口footers不求和，source/tool pins稳定不声称actual runtime closure；原生PG/生产/商业准入不由组件结果替代。
+
+| 限定窗口 | 实际结果与边界 | 安全primary及SHA-256 |
+|---|---|---|
+| actual824 original npm test | 02:04:23.368–02:04:40.252 UTC，一次exit1；286 unit roots，2958＝2931 pass／9 fail／18原有skip／0 cancel。68 integration roots因原`&&` NOTRUN。 | [primary](/private/tmp/luna-current-atomic19-npm-test-native.8fnp2w/original-npm-test-final-safe-primary.json)；`5051eccd4e00d330c5b12c2b792a04a907ab79a091af9bf70ec89886f1b66361` |
+| actual824 independent original build | 02:08:55.941–02:09:05.159 UTC，一次exit0／TS零诊断／Vite116 modules；原server/web skipLibCheck=true，不等价critical false。只属当时源码，不含后来钱包五文件。 | [primary](/private/tmp/luna-current-atomic19-npm-build-native.57AuR4/original-npm-build-final-safe-primary.json)；`23340a37c28d8cc89211ea99dbf161869531bdad67a1fb4f6bc41637fe16ab27` |
+| private replay17 | strict3一次exit0／零诊断，whole17一次17/17、0 fail/skip/cancel；synthetic crypto/owned memory，不是PG或财务批准。 | [primary](/private/tmp/luna-replay17-fixed-native.8DjSE1/minimal-safe-primary.json)；`cb013529b8924196e20ea89bb88f2068281ebec7197043b13368562c4cd2f796` |
+| t4 lineage/CAS SQL text | strict1一次exit0／零诊断，whole10一次10/10；仅SQL文本source structure，未验SQL grammar/catalog或native PG。 | [primary](/private/tmp/luna-receipt-lineage-text10.rBNWMA/minimal-safe-primary.json)；`7a3e7c6b4b59378f7023ae38fed1054e493ab12e12c297cf58b53fe7d743f104` |
+| private FIN dqr compiler window | 02:09:39.830–02:09:53.836 UTC；原177 exit2／1 TS2322，unknown3 exit2／11 test diagnostics；receipt11、leaseSource2、admissionFixture1、mapper1、replay3各exit0／零诊断。该原窗口whole14/admission23 NOTRUN。 | [primary](/private/tmp/luna-financial-coupled-native.dqrW2a/final-minimal-safe-primary.json)；`830dc5f5207e07b06a5cb60bd31cc82db567d1b809d09dd4ade0b9784933fc2f` |
+| 后来独立receipt/admission两根 | submitted→terminal observed 02:15:02.433–02:15:02.838 UTC，一次exit1，34＝26 pass／8 fail、0 skip/cancel；401 source＋14 tools pins零差异。原177/whole14不是PASS；拆root footer pending，不假称11 receipt PASS，不倒填dqr NOTRUN。 | [primary](/private/tmp/luna-receipt-admission-two-native.xVLKDR/final-minimal-safe-primary.json)；`15c86bbb775ac41fdaf7372173b7a1287682b5895d5e6b75b8cea47e65234659` |
+
+actual824九失败的[安全code/首project frame补充](/private/tmp/luna-current-atomic19-npm-test-native.8fnp2w/nine-failures-native-code-first-project-frame-artifact-only.json)，SHA `a1573568e323ceceb9b014cdb7e158e0b08883e1c3e33e9f6dd89e808ae58c9a`：九块实际配对；含ERR_ASSERTION、EADDRNOTAVAIL及TypeError（后者code未采集），不据frame推唯一原因。实际handle terminal/流关闭不证明OS descendants/listeners/pools清空，runtime first reads未采集。后来两根首ERR_ASSERTION在`tests/saas/gateway/request-preparation-service.test.ts:1361:10`，Erdos源码诊断八失败仍进行中，不先写修复通过。
+
+钱包五文件02:17:25–26 UTC已安装、MAIN五target＋13deps核对0 mismatch，但原7＋10期望17尚NOTRUN；Sol actual9 CLI/MFA修订未安装，不能用824当时build或旧CLI19/CSRF237局部通过代验。真实Provider/KMS/PSP/PG、schema/production activation均未在本次窗口验证。
+
+### 历史限定证据（截至2026-10-03 17:00 UTC）
+
+下表仅记录指定local safe primaries的实际scope；本次只读核对SHA与安全counts/exit投影，未读取raw日志/message/stack/operands，也未重跑任何验证。whole305完整footer仅是冻结private issuer844候选（workspace：`/private/tmp/luna-issuer844-mechanical-preflight.jZcf6j/workspace`）的全量依据；G2 strict177对应private XYL候选，均不代表当前`54142d5`本地/远程offline suite或CI失败原因；独立编译、组件whole和PG窗口不能相加或相互代验。原始proof不因后续fixture、format-only或source修订而改写。
+
+| 限定窗口 | 实际结果与边界 | 安全primary及SHA-256 |
+|---|---|---|
+| private issuer844 whole305 | 一次完整305根：3075＝2708 pass／349 fail／18 skip，exit1；没有新的305 green。 | [primary](/private/tmp/luna-original305-native.f1fwPI/safe-primary.json)；`3d908d658afeaa0a9c09ea4a0602d1e99809df59e25da29dbfcd584f36c3e7ab` |
+| private XYL G2 alias177 | strict177 exit2／35 diagnostics；whole4 NOTRUN。 | [primary](/private/tmp/luna-g2-alias-177-whole4.cHlsTZ/final-safe-primary.json)；`b8cca51ed26610589c5907adc47cc11132e9a2c1d98bc7bc88705fbac3ba20aa` |
+| 独立seven-root | strict7 exit0／零诊断；whole7为65/65 pass。private源码未安装，不外推中央或当前HEAD。 | [primary](/private/tmp/luna-seven-strict-whole-native.scb7nB/final-safe-primary.json)；`4fe49acc6510c296a7ac788b7e8739a74c2ae86942fcb14285a77a3a570c2abb` |
+| cop6 mechanical | strict6 exit0／零诊断；whole6为86＝81 pass／4 fail／1 old PG skip。后续exact五行fixture修订NOTRUN，不回填旧结果。 | [primary](/private/tmp/luna-cop6-mechanical-native.de11ku/final-safe-primary.json)；`89251fc5a4004c21921bbdeb5db0f5ac78705d932fe6caf995f1485f6a742990` |
+| customer MFA fixed | strict17 exit0／零诊断；五whole-unit根32/32 pass。13源安装提交但inactive／schema未注册／HTTP未startup挂载；后续单个EOF blank-LF为format-only测试源码变化，不重写原proof。 | [primary](/private/tmp/luna-customer-mfa-fixed-native.p1FVjE/customer-mfa-fixed-native-safe-primary.json)；`2fe6ef10b228c428e0257ff7b627dd6fbed110c7bd88bc4df8c6a914997c8971` |
+| customer CSRF/cookie | strict48 exit2／432 diagnostics；whole31 NOTRUN。 | [primary](/private/tmp/luna-customer-csrf-cookie-native.lgX4o6/customer-csrf-cookie-native-safe-primary.json)；`cdb5ebd8e07135827ab0ff8ea44f4b3cd8ecef587cd934a6297e506b2b405e38` |
+| G5 observer broker | whole27＝24 pass／3 fail；native3 NOTRUN；cleanup未证明，不推OS原因或真实PG批准。 | [primary](/private/tmp/luna-g5-observer-broker-native.3LYeJZ/g5-observer-broker-final-finite-safe-primary.json)；`18c198810544dc91d6d7081dd17d16d9c913b3093773672fe5cc08b9e75a35dd` |
+
+远程CI及已推送commit见[当前结论](#结论摘要)，其failed step不是原因证明。历史build/Chrome/pricing与双PG bounded27继续各守原范围，不外推该HEAD或生产。新private类型/历史producer/SQL/前端候选未安装/激活；客户MFA组件通过不代表启动装配/全客户生命周期通过。G5失败及native3 NOTRUN不授权PG角色变更、reconcile或清理推断；actual ACK/SIGKILL和完整FIN保持OPEN。
+
+### 历史12:23:32 UTC快照
+
+以下保留2026-10-03 12:23:32 UTC当时的接受/准备/NOTRUN状态。诸如“305 NOTRUN”“6366cb9/dirty”“无新push/CI”“接受pending”仅属于该历史截点，不是当前判断；后续当前结果见上表，不倒填或重写原primary。
+
+历史快照截至 **2026-10-03 12:23:32 UTC**：**14项完整出口全部OPEN，尚非商业就绪**。原完整build09:15 exit0、Chrome JuNX全11 spec一次40/40（38 browser＋2 HTTP-only，本地memory/mock）及pricing Ll5MnS22/22＋9 strict零诊断各守独立scope；PG15/18原7039各一次27/27与canonical60仍仅LIMITED窗口，不是完整FIN或统一发行候选。 主链 **GW → 完整FIN → actual KEY-IP → actual KEY-BUD** 不变；下列来源仅MAIN限定接受或明确未接受/未运行的安全状态，不是本文重跑。
 
 - 原完整build **09:15 UTC exit0**与server/web noEmit分开；JuNX全11 spec一次 **40/40（38 browser＋2 HTTP-only）、0 skip/retry**仅本地memory/mock、非PG/production UI。pricing Ll5MnS **22/22＋9 strict0**仅bounded SQL-capturer；旧失败与PG15/18原27/27限定窗口不累计。
 
@@ -450,11 +623,37 @@ typing夹具修复后的fresh非PG复验已报告，记录见[summary](/private/
 
 ## 工作树与交付状态
 
-- MAIN **2026-10-03 12:00 UTC**只读Git上报main/`6366cb9`，97 tracked dirty／102 untracked、tracked **+11,541/−1,438**，不含untracked/private candidates；这是MAIN时间有界观察，本文未运行Git或重统计。历史08:33 HEAD/ref与08:08盘点97/102、+11,467/−1,436保留其旧scope，不能覆盖当前dirty树。固定截点无新commit/push/fetch、remote CI/release观测；旧提交、共享工作树和各验证候选必须分开，不能以HEAD/单一manifest认定全部WIP通过。
-- 10-01单独授权的暂停摘要仅更新本文，其余文档当时冻结；旧开发/QA与队列已取消。10-02用户明确恢复开发并授权同步技术方案、本文和部署说明，按新任务推进。已有未提交与partial改动及成功/失败证据保留，不回滚、清理或重置，不提交推送；本次文档同步未执行测试/SQL/服务。
+- 当前交付元数据（MAIN上报，本文无Git/remote读取）：旧HEAD/origin-main `54142d5f8eb38fe1539d4cf0ddb819e262972cf0`的50 commits/214 files/+40,521/−1,440已push；其后dirty新改动及本次docs未commit/push，未重统计dirty数量。旧remote CI仍failure，无新remote GREEN或release批准。17:00历史clean、12:00的97 tracked dirty/102 untracked与08:33/08:08旧盘点各保留当时scope，不能作为当前状态；private未安装/未激活内容不因文档更新进入push或验收。
+- 10-01单独授权的暂停摘要仅更新本文，其余文档当时冻结；旧开发/QA与队列已取消。10-02用户明确恢复开发并授权同步技术方案、本文和部署说明，按新任务推进。当时已有未提交与partial改动及成功/失败证据保留，不回滚、清理或重置；后续源码push状态见当前快照。本次仅三文档编辑，未提交推送、未执行测试/SQL/服务。
 - 停工前设计/代码由GPT-6.1 Sol负责，构建/测试/验证由GPT-6 Luna执行；以下为已保留的历史证据，不表示10-02新验证通过；当前执行分工见结论摘要。PG18正式局部证据与Hilbert个人PG15实际调用分开；后者缺same-scope/独占证明、需fresh重验，492-path误归属证据撤回。签名5组REQUIRED/strict通过；最新fresh PG18 HTTP0/1/0已越过SIGNATURE_INVALID，当前lease_acquire/应用42501阻塞，新mutex修复非PG10/10及三根strict通过，新PG18 lease专项8/9 child通过、BYOK CP撤销支链42501失败（另parent失败），未进入HTTP重验。09-30 HTTP候选未含054/prelock/FIN/MFA/055–056负向、full负向withheld；95/95仍仅reported窗口，readiness旧结构补证与独立PG15 worker功能通过分开；后者252-path闭包漂移、缺loaded-time hash，不作全import候选，PG18新worker命令exit0但counts全null、counts-unverified，不作full五case通过；loader/helper新可审计非PG25/25及strict通过，replay typing夹具fresh非PG169/169与六根strict/root strict通过、112-path范围前后相同，旧exit2保留历史，不称whole-tree/PG验收。057 static6/6及两根strict通过但未注册/应用/FIN接线；标准CLI的fresh非PG106/106及七根explicit strict exit0通过，7个目标文件与284-path import closure稳定；旧strict exit2三错为历史，不证明全project/root strict、build或真实PG startup。完整FIN/GW、标准CLI/revalidation/真实provider与production TLS/recovery未验收，14项均按§11完整出口跟踪。
 - Kimi 验证 Secret 不进入仓库。根目录 `/kimi-validation.config.json` 已有 ignore 规则；此前检查 `docs/examples/kimi-validation.config.json` 不存在且无 Git 历史。`docs/examples/model-router-console-v2.example.json` 是另一份安全模板，不是验证 Secret 配置。
 
 ## 下一步顺序建议
 
-保留原7039双版各一次27/27/normal060/AFTER及负向各自scope，不重跑已消费库。先将E1/HH/hH/uHqq/FoV frozen producers按first-price/G1/unpriced真实接口纳入中央候选，补Cq out-of-TX hard gates、G4 reader priced UUID首个writer、实际issuer/correction及原子G3事件，不把源码review当安装/激活。6wa68 FAILED7、tyld87 FAILED5 test-only保留，fLdygh五type-only修订须独立明确GO后重编；focused cost units及原305全根NOTRUN，NEW841＋五targets全305 PREP pending（另缺bootstrap.mjs及platform_supplier_cost_cap.forward.sql；87/focused static missing0仍无执行）。G5 actual tVb原27=25/2、DRdcKG worker-reported原27=23/4，MAIN全文/hash/projection接受pending，先收集并接受有限门禁，再分别申请live reconcile/实际PG阶段GO。real customer MFA/RBAC6uE及91crash24均需对应实际证明，ACK pure不替代actual ACK/SIGKILL。严格 **GW → 完整FIN → actual KEY-IP → actual KEY-BUD**；061 inactive、062 PROPOSED、001–060不改，unknown不TTL释放/重发。稳定adapter/UI与DB/COM可安全并行；最终固定发行提交完成required双PG/部署恢复/商业批准才开放对应产品/route。
+以本统一截点证据为准，先处理actual824九失败及private FIN原177/unknown3 compiler缺口、独立receipt/admission八失败；保留原case/断言/flags、金额/授权/租户隔离不变量。Sol九失败修订未安装，钱包五文件已安装但限定native尚NOTRUN；中央review及单独验证GO后才能记新结果，824当时build不能覆盖后来改动。旧whole305/XYL/G5等失败与原因UNKNOWN保留，不从safe frame推唯一cause。
+
+继续真实G1成本/G2容量/G3原子事件/G4审批、更正及immutable-history集成；purpose/MFA/当前授权、priced UUID与original money guard不可由stub、Boolean批准或新报价替代。客户MFA optional trusted capability和缺真实身份503边界已source-install，但schema/生产未激活、本机服务未重启。完整PG/角色/catalog/deferred门禁、actual ACK/SIGKILL及故障/恢复/更正矩阵仍须独立批准和证据；replay17/t4 SQL结构10不代替它们，原7039双PG消费库不复用为fresh。
+
+严格 **GW → full FIN → actual KEY-IP → actual KEY-BUD**；061 inactive、062 reserved/PROPOSED、001–060不改，unknown不TTL释放/重发。独立稳定adapter/UI/runbook与DB/COM按6 Sol＋2 Luna max安全并行，不抢中央共享写入热点。最终固定发行提交的required CI/双PG、生产部署恢复及商业批准齐备后才开放对应产品/route。
+
+## 历史续开发固定快照：2026-10-04 00:17:35 UTC
+
+截点：**2026-10-04 00:17:35 UTC / 北京时间2026-10-04 08:17:35**。此节仅追加截至该时点的状态；上文2026-10-03 17:00 UTC及更早记录均保留为历史，不追写后来运行。**原14项完整出口全部OPEN**，主链仍为GW → full FIN → actual KEY-IP → actual KEY-BUD，后续生产装配/UI/恢复/发布依赖不变；不据局部通过计算完成百分比。
+
+- MAIN上报当前repo有10个dirty文件：原三份docs、三个CJS tests、benchmark两个CJS hunks、CLI两个owned-child targets及第三个managed-start owned-TCP target。本文未运行Git重新盘点。benchmark仅安装已审own-file URL两个hunks，实际after SHA-256为`3cab499f5942bbc0d780cf11774768caba71d3f339e50727a00a47e0ff2d5d79`，没有运行benchmark或读取`.env`。其余13个private既有模块尚未merge，新mapper test仍有前置依赖；不能记作当前repo FIN通过。截点尚无新commit/push。
+- G2新private固定候选的original strict177与additive mapper strict各执行一次，均exit0/0诊断；original whole4为22/22，mapper为5/5，均一次、0 fail/skip。见[safe-primary](/private/tmp/luna-g2-typed-cjs-native.wON1sY/minimal-safe-primary.json)，SHA-256为`42752f09e171c612f2f06fdfea7ce4b64a65de9548fe83969f4b374bd3551871`。这是private组件范围证明，不是当前repo全量、PG、完整FIN或schema/ACL激活证明，不回写旧strict35失败。
+- CSRF三个原project compiler vectors：server exit2，三处TS6133；web exit2，三处TS2769；cross-http exit0/0诊断。whole31 **NOTRUN**。见[safe-primary](/private/tmp/luna-csrf-jvl-three-project-native.GnxZhp/csrf-jvl-three-project-final-safe-primary.json)，SHA-256为`d83d9125c7de7874227d379b908334f77830958af001e36b95cd9223c77e32ae`。Euclid针对六诊断的四文件源码修复TsJVis已源码冻结、尚未验证；源码修复不升级为PASS。
+- 当前repo CJS3：原CI19文件类型检查exit0/0诊断、原三根whole15/15（0skip），两份限定证据各守scope，不相加、不扩为全量通过；与上述private G2组件PASS及旧HEAD远程CI失败分别记录。customer UI whole31仍NOTRUN，不由CSRF源码修复替代运行证明。
+- CLI2独立只读review未发现新增阻断bug，原4+8 cases保留；强杀driver后fork cleanup仍未证明，不声称全树清空。current CLI native12尚未运行，349 PREP仍partial；CLI3的7-case owned-port0源码修改已写、未封存，current CLI7同样NOTRUN。current283尚未运行；旧whole305失败及各窗口UNKNOWN不补填新原因。远程CI `37137541040`仍为旧HEAD的失败记录，不回写PASS，也不以private局部通过解释或覆盖该远程结果。
+- 存储紧急边界（MAIN只读metadata上报）：Data约430Gi已用、仅363Mi available、显示100%；`/private/tmp`约144G，MAIN报告另有非本任务大目录占用。本节未执行新磁盘盘点。新大型copy及native运行停止等待空间；不清理用户/他项目文件、旧workspace、证据/raw、consumed PG DB或daemon，不删除/清空/覆盖/kill，也不因容量错误绕过审批。此次仅授权追加本文的小型快照，不修改其他docs、不执行编译/tests/SQL/服务/Git，不发任何新执行GO。其后MAIN fresh df仅metadata观察空间恢复（351Gi used / 79Gi available / 82%），MAIN未执行删除、不归因，前述容量快照保留历史；MAIN已派Luna新CLI19/CSRF compilers门禁，结果尚未取得，不回填PASS。
+
+## 历史验证固定快照：2026-10-04 00:42:35 UTC
+
+截点由纯clock metadata取得：**2026-10-04 00:42:35 UTC / 上海时间08:42:35**。以下按MAIN接受的限定证据追加，上节00:17:35及更早历史不改；**全部14项完整出口仍OPEN，完整GW/FIN/PG商业链未READY**。
+
+- current CLI三根真实native **19/19、exit0、0 skip/cancel**，窗口00:30:56–00:31:03 UTC。见[primary](/private/tmp/luna-owned-cli3-native.pZR7TQ/owned-cli3-19-final-safe-primary.json)，SHA-256 `b06b9677d15d5e2df4b2a5b40db62c1fe29f91576d17099597b69131d6fadfee`；MAIN全文审核及11 refs核对0 mismatch。这是新的限定窗口，不倒填上节CLI12+7 NOTRUN，也不证明全进程树清空。
+- CSRF三个original project compiler vectors各执行一次，均exit0/0诊断，窗口00:29:22–00:29:34 UTC；whole31一次实际 **237 total / 213 pass / 24 fail / 0 skip**。24个失败记录EPERM、`node:net` frame 1987，syscall未采集，不猜cause。见[primary](/private/tmp/luna-csrf-four-source-native.5LD0Be/minimal-safe-primary.json)，SHA-256 `2f99f00987ad2155d57815914626d068a45de63ed68ab97663fdce2c3858c5f8`；MAIN四refs核对0 mismatch。合法新escalated复验尚无结果，不回填PASS，不改旧六诊断/whole31 NOTRUN历史。
+- MAIN上报当前14项加playground新root，共15个dirty docs/source条目；本文未运行Git盘点。新current unit283仍 **NOTRUN、PREP中**，没有当前FULL PASS；private G2组件结果与current CLI/CSRF各守scope，不合并为全量证明。
+- financial receipt fj14（MAIN提供hash前缀`d130…`）及real modern wIx4（前缀`598d…`）已source frozen，MAIN全文语义/actual pins核对0 mismatch；两者native **NOTRUN、未merge**，不记为FIN通过或SQL已执行。Curie SQL SOURCE与Ampere唯一同candidate protocol/hunks合并仍在做，不能用DTO/helper stub替代真实接线。
+- 没有新commit/push；remote CI `37137541040`旧HEAD failure未变。MAIN后续只读metadata观察约79Gi空间恢复，未执行删除且不归因；不清理旧workspace/evidence/raw、consumed PG DB或daemon。本次仅追加本文，不执行native/build/编译/tests/SQL/Git，不授予新执行GO。
+- 后来新批准的本地网络窗口：经审核正式`require_escalated`运行original whole31恰好一次，源码/flags未改，**2026-10-04 00:47:05.362–00:47:08.229 UTC**实际 **237/237、0 fail/skip/cancel、exit0**。见[primary](/private/tmp/luna-csrf-whole31-escalated.TkjVNU/minimal-safe-primary.json)，SHA-256 `763440e57d0a6317fbbe8db93643666ba1c228298c4d43a899d9c51810f68e84`，MAIN全文及六refs核对0 mismatch。此为新批准窗口的有限通过；此前三个compiler各exit0/0诊断与旧default whole31的213 pass/24 fail分别保留，不改00:42快照、不将所有EPERM简单归为产品问题或固定原因。current283仍PREP/NOTRUN，待完整当前offline验证实际remaining failures；无新commit/release，14项仍全部OPEN。

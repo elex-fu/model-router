@@ -48,6 +48,72 @@ export interface CredentialKeyProvider {
   getKey(keyId: string): Awaitable<Uint8Array | CredentialKeyMaterial | undefined>;
 }
 
+/** Optional only for legacy crypto callers. MFA enrollment always supplies 5s. */
+export interface CredentialLookupOptions {
+  readonly timeoutMs: number;
+}
+export const MFA_ENROLLMENT_KEY_LOOKUP_TIMEOUT_MS = 5_000;
+
+class KeyLookupDeadline {
+  private readonly expiresAt: number;
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private expired = false;
+  private rejectWait: ((reason: CredentialCryptoError) => void) | undefined;
+
+  constructor(timeoutMs: number) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MFA_ENROLLMENT_KEY_LOOKUP_TIMEOUT_MS) {
+      throw cryptoError('INVALID_INPUT');
+    }
+    this.expiresAt = performance.now() + timeoutMs;
+    this.timer = setTimeout(() => this.expire(), timeoutMs);
+  }
+  private expire(): void {
+    this.expired = true;
+    this.rejectWait?.(cryptoError('KEY_LOOKUP_TIMEOUT'));
+    this.rejectWait = undefined;
+  }
+  check(): void {
+    if (this.expired || performance.now() >= this.expiresAt) {
+      this.expire();
+      throw cryptoError('KEY_LOOKUP_TIMEOUT');
+    }
+  }
+  wait<T>(lookup: () => Awaitable<T>): Promise<T> {
+    this.check();
+    return new Promise<T>((resolve, reject) => {
+      this.rejectWait = reject;
+      // Only the provider lookup continues after timeout, never crypto/SQL.
+      // Do not copy or mutate any late provider-owned key material.
+      void Promise.resolve().then(() => {
+        this.check();
+        return lookup();
+      }).then(value => {
+        if (this.expired) return;
+        try {
+          this.check();
+          this.rejectWait = undefined;
+          resolve(value);
+        } catch (error) { reject(error); }
+      }, error => {
+        if (this.expired) return;
+        try {
+          this.check();
+          this.rejectWait = undefined;
+          reject(error);
+        } catch (timeout) { reject(timeout); }
+      });
+    });
+  }
+  close(): void {
+    clearTimeout(this.timer);
+    this.expired = true;
+    this.rejectWait = undefined;
+  }
+}
+function lookupDeadline(options: CredentialLookupOptions | undefined): KeyLookupDeadline | undefined {
+  return options === undefined ? undefined : new KeyLookupDeadline(options.timeoutMs);
+}
+
 export interface CredentialEnvelope {
   readonly schemaVersion: typeof CREDENTIAL_ENVELOPE_SCHEMA_VERSION;
   readonly algorithm: typeof CREDENTIAL_ENVELOPE_ALGORITHM;
@@ -63,6 +129,7 @@ export type CredentialCryptoErrorCode =
   | 'UNSUPPORTED_ENVELOPE'
   | 'KEY_PROVIDER_UNAVAILABLE'
   | 'KEY_UNAVAILABLE'
+  | 'KEY_LOOKUP_TIMEOUT'
   | 'INVALID_KEY'
   | 'AUTHENTICATION_FAILED'
   | 'ENCRYPTION_FAILED';
@@ -73,6 +140,7 @@ const ERROR_MESSAGES: Record<CredentialCryptoErrorCode, string> = {
   UNSUPPORTED_ENVELOPE: 'Credential envelope is unsupported',
   KEY_PROVIDER_UNAVAILABLE: 'Credential key provider is unavailable',
   KEY_UNAVAILABLE: 'Credential key is unavailable',
+  KEY_LOOKUP_TIMEOUT: 'Credential key lookup timed out',
   INVALID_KEY: 'Credential key is invalid',
   AUTHENTICATION_FAILED: 'Credential authentication failed',
   ENCRYPTION_FAILED: 'Credential encryption failed',
@@ -159,23 +227,27 @@ function copyCurrentKey(material: unknown): { keyId: string; key: Buffer } {
   }
 }
 
-async function resolveCurrentKey(provider: unknown): Promise<{ keyId: string; key: Buffer }> {
+async function resolveCurrentKey(provider: unknown, deadline?: KeyLookupDeadline): Promise<{ keyId: string; key: Buffer }> {
   validateKeyProvider(provider);
   let material: unknown;
   try {
-    material = await provider.getCurrentKey();
-  } catch {
+    material = deadline ? await deadline.wait(() => provider.getCurrentKey()) : await provider.getCurrentKey();
+    deadline?.check();
+  } catch (error) {
+    if (deadline && error instanceof CredentialCryptoError && error.code === 'KEY_LOOKUP_TIMEOUT') throw error;
     throw cryptoError('KEY_UNAVAILABLE');
   }
   return copyCurrentKey(material);
 }
 
-async function resolveHistoricalKey(provider: unknown, keyId: string): Promise<Buffer> {
+async function resolveHistoricalKey(provider: unknown, keyId: string, deadline?: KeyLookupDeadline): Promise<Buffer> {
   validateKeyProvider(provider);
   let material: unknown;
   try {
-    material = await provider.getKey(keyId);
-  } catch {
+    material = deadline ? await deadline.wait(() => provider.getKey(keyId)) : await provider.getKey(keyId);
+    deadline?.check();
+  } catch (error) {
+    if (deadline && error instanceof CredentialCryptoError && error.code === 'KEY_LOOKUP_TIMEOUT') throw error;
     throw cryptoError('KEY_UNAVAILABLE');
   }
   if (material === undefined || material === null) throw cryptoError('KEY_UNAVAILABLE');
@@ -325,18 +397,19 @@ function decryptBuffer(parsed: ParsedEnvelope, context: CredentialContext, key: 
   }
 }
 
-async function decryptToBuffer(envelope: unknown, context: unknown, provider: unknown): Promise<Buffer> {
+async function decryptToBuffer(envelope: unknown, context: unknown, provider: unknown, deadline?: KeyLookupDeadline): Promise<Buffer> {
   const normalizedContext = validateContext(context);
   const parsed = parseEnvelope(envelope);
   try {
     let key: Buffer;
     try {
-      key = await resolveHistoricalKey(provider, parsed.keyId);
+      key = await resolveHistoricalKey(provider, parsed.keyId, deadline);
     } catch (error) {
       // Providers may expose the active key only through getCurrentKey and
       // retain only retired keys in the historical lookup.
       if (!(error instanceof CredentialCryptoError) || error.code !== 'KEY_UNAVAILABLE') throw error;
-      const currentKey = await resolveCurrentKey(provider);
+      deadline?.check();
+      const currentKey = await resolveCurrentKey(provider, deadline);
       if (currentKey.keyId !== parsed.keyId) {
         currentKey.key.fill(0);
         throw cryptoError('KEY_UNAVAILABLE');
@@ -344,6 +417,7 @@ async function decryptToBuffer(envelope: unknown, context: unknown, provider: un
       key = currentKey.key;
     }
     try {
+      deadline?.check();
       return decryptBuffer(parsed, normalizedContext, key);
     } finally {
       key.fill(0);
@@ -359,18 +433,23 @@ export async function encryptCredential(
   plaintext: string,
   context: CredentialContext,
   keyProvider: CredentialKeyProvider,
+  options?: CredentialLookupOptions,
 ): Promise<CredentialEnvelope> {
   const normalizedContext = validateContext(context);
   const plaintextBytes = plaintextBuffer(plaintext);
+  let deadline: KeyLookupDeadline | undefined;
   try {
-    const currentKey = await resolveCurrentKey(keyProvider);
+    deadline = lookupDeadline(options);
+    const currentKey = await resolveCurrentKey(keyProvider, deadline);
     try {
+      deadline?.check();
       return encryptBuffer(plaintextBytes, normalizedContext, currentKey.keyId, currentKey.key);
     } finally {
       currentKey.key.fill(0);
     }
   } finally {
     plaintextBytes.fill(0);
+    deadline?.close();
   }
 }
 
@@ -378,13 +457,16 @@ export async function decryptCredential(
   envelope: CredentialEnvelope,
   context: CredentialContext,
   keyProvider: CredentialKeyProvider,
+  options?: CredentialLookupOptions,
 ): Promise<string> {
-  const plaintext = await decryptToBuffer(envelope, context, keyProvider);
+  const deadline = lookupDeadline(options);
   try {
-    return plaintext.toString('utf8');
-  } finally {
-    plaintext.fill(0);
-  }
+    const plaintext = await decryptToBuffer(envelope, context, keyProvider, deadline);
+    try {
+      deadline?.check();
+      return plaintext.toString('utf8');
+    } finally { plaintext.fill(0); }
+  } finally { deadline?.close(); }
 }
 
 /** Re-encrypt an existing envelope under the provider's current key. */

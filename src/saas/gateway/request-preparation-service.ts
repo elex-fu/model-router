@@ -20,6 +20,7 @@ import {
 } from './prepared-request-evidence-service.js';
 import type { ProviderAccountSchedulerPort } from './provider-account-scheduler.js';
 import type { GatewayRequestIdempotencyClaimed } from './request-idempotency.js';
+import type { ClientAddressResolution } from './client-address.js';
 
 /** Exact integers are kept at the orchestration boundary; no floating point is accepted. */
 export type RequestPreparationExactInteger = bigint | number | string;
@@ -39,6 +40,7 @@ export type RequestPreparationFailureCode =
   | 'proxy_key_invalid'
   | 'proxy_key_disabled'
   | 'caller_denied'
+  | 'budget_exceeded'
   | 'entitlement_denied'
   | 'quota_exceeded'
   | 'rate_limited'
@@ -155,6 +157,8 @@ export interface RequestPreparationInput {
   readonly idempotencyKey?: string;
   readonly audit: RequestPreparationRequestAudit;
   readonly scheduling?: RequestPreparationSchedulingContext;
+  /** Server-resolved client address evidence; only a trusted HTTP boundary may set this. */
+  readonly clientAddress?: ClientAddressResolution;
 }
 
 export interface RequestPreparationCallerPort {
@@ -354,6 +358,8 @@ export interface RequestPreparationAdmissionPort {
       readonly authority: RequestPreparationAuthority;
       readonly payloadSha256: string;
       readonly payloadBounds: RequestPreparationPayloadBounds;
+      /** Server-resolved client address evidence forwarded to the admission guard (contract C-4). */
+      readonly clientAddress?: ClientAddressResolution;
     },
     options?: RequestPreparationSqlOptions,
   ): Promise<RequestPreparationDecision<RequestPreparationAdmission>>;
@@ -2074,6 +2080,7 @@ export class SaasRequestPreparationService {
             authority,
             payloadSha256,
             payloadBounds: payload.usage,
+            clientAddress: input.clientAddress,
           },
           { executor },
         ),

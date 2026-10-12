@@ -8,6 +8,10 @@ export type {
   PlatformOperationsSummary,
   PlatformOperationsSummaryErrorCode,
   PlatformOperationsSummaryQuery,
+  PlatformOperationsSummaryServiceOptions,
+  PlatformRuntimeProbe,
+  PlatformRuntimeProbeStatus,
+  PlatformRuntimeProbes,
 } from './summary-service.js';
 export {
   PLATFORM_OPERATIONS_MAX_TIME_RANGE_MS,

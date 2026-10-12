@@ -3,6 +3,7 @@ import http, { type Server } from 'node:http';
 import { afterEach, test } from 'node:test';
 import type { TenantContext } from '../../../src/saas/identity/types.js';
 import {
+  createSaasCustomerPaymentOrderHistoryHandler,
   createSaasCustomerRefundHistoryHandler,
   createSaasPaymentHandler,
   type SaasPaymentHttpOptions,
@@ -54,6 +55,7 @@ async function createTestServer(
   mismatchedTenantContext = false,
   topUpPolicyEnabled = true,
   refundQueryServiceEnabled = true,
+  paymentOrderQueryServiceEnabled = true,
 ) {
   const calls: {
     create?: unknown;
@@ -61,6 +63,7 @@ async function createTestServer(
     checkout?: unknown;
     webhook?: Buffer;
     refunds?: unknown;
+    paymentOrders?: unknown;
   } = {};
   let durableOrder = order();
   const paymentService = {
@@ -151,9 +154,11 @@ async function createTestServer(
   };
   let handler: ReturnType<typeof createSaasPaymentHandler>;
   let refundHistoryHandler: ReturnType<typeof createSaasCustomerRefundHistoryHandler>;
+  let paymentOrderHistoryHandler: ReturnType<typeof createSaasCustomerPaymentOrderHistoryHandler>;
   server = http.createServer((req, res) => {
     void (async () => {
       if (await refundHistoryHandler(req, res)) return;
+      if (await paymentOrderHistoryHandler(req, res)) return;
       if (await handler(req, res)) return;
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
@@ -189,6 +194,35 @@ async function createTestServer(
                   },
                 ],
                 nextCursor: 'r1.opaque-cursor-value',
+              };
+            },
+          },
+        }
+      : {}),
+    publicOrigin: origin,
+  });
+  paymentOrderHistoryHandler = createSaasCustomerPaymentOrderHistoryHandler({
+    service: identity,
+    ...(paymentOrderQueryServiceEnabled
+      ? {
+          paymentOrderQueryService: {
+            listPaymentOrders: async (context, query) => {
+              calls.paymentOrders = { userId: context.userId, tenantId: context.tenantId, query };
+              return {
+                items: [
+                  {
+                    id: '10000000-0000-4000-8000-000000000001',
+                    orderType: 'wallet_topup',
+                    amountMinorUnits: '12500',
+                    currency: 'USD',
+                    status: 'fulfilled',
+                    createdAt: '2026-09-28T12:00:00.000000Z',
+                    updatedAt: '2026-09-28T12:00:01.000000Z',
+                    paidAt: '2026-09-28T12:00:02.000000Z',
+                    fulfilledAt: '2026-09-28T12:00:03.000000Z',
+                  },
+                ],
+                nextCursor: 'p1.opaque-cursor-value',
               };
             },
           },
@@ -310,6 +344,55 @@ test('authorizes owner/admin top-ups and enforces the configured currency, range
   });
   assert.equal(clientPricing.status, 400);
   assert.equal((app.calls.create as { tenantId: string }).tenantId, 'tenant-a');
+});
+
+test('createOrder accepts an optional promoCode and keeps the strict body closed', async () => {
+  const app = await createTestServer();
+  const create = (body: unknown, clientRequestId: string) =>
+    fetch(`${app.origin}/console/api/v1/tenants/tenant-a/orders`, {
+      method: 'POST',
+      headers: {
+        ...sessionHeaders(app.origin),
+        'content-type': 'application/json',
+        'idempotency-key': clientRequestId,
+      },
+      body: JSON.stringify(body),
+    });
+
+  const withPromo = await create({ amountMinorUnits: '125', currency: 'USD', promoCode: 'save-25' }, 'promo-1');
+  assert.equal(withPromo.status, 201);
+  assert.deepEqual(app.calls.create, {
+    tenantId: 'tenant-a',
+    clientRequestId: 'promo-1',
+    amountMinorUnits: '125',
+    currency: 'USD',
+    promoCode: 'save-25',
+  });
+
+  const withoutPromo = await create({ amountMinorUnits: '125', currency: 'USD' }, 'promo-2');
+  assert.equal(withoutPromo.status, 201);
+  assert.equal(Object.hasOwn(app.calls.create as Record<string, unknown>, 'promoCode'), false);
+
+  const extraField = await create(
+    { amountMinorUnits: '125', currency: 'USD', promoCode: 'SAVE-25', merchantId: 'spoof' },
+    'promo-3',
+  );
+  assert.equal(extraField.status, 400);
+
+  const numeric = await create({ amountMinorUnits: '125', currency: 'USD', promoCode: 42 }, 'promo-4');
+  assert.equal(numeric.status, 400);
+
+  const empty = await create({ amountMinorUnits: '125', currency: 'USD', promoCode: '' }, 'promo-5');
+  assert.equal(empty.status, 400);
+
+  const oversized = await create(
+    { amountMinorUnits: '125', currency: 'USD', promoCode: `A${'1'.repeat(32)}` },
+    'promo-6',
+  );
+  assert.equal(oversized.status, 400);
+
+  const controlChar = await create({ amountMinorUnits: '125', currency: 'USD', promoCode: 'SAVE\u000125' }, 'promo-7');
+  assert.equal(controlChar.status, 400);
 });
 
 test('reads only through the authorized tenant context and keeps webhooks public', async () => {
@@ -597,4 +680,111 @@ test('refund history rejects request bodies and non-GET methods without payment 
   for (const key of ['create', 'read', 'checkout', 'webhook'] as const) {
     assert.equal(app.calls[key], undefined, `${key} must not call payment or PSP operations`);
   }
+});
+
+test('payment order history returns the locked envelope and safe summary for an authorized billing session', async () => {
+  const app = await createTestServer('billing');
+  const response = await fetch(
+    `${app.origin}/console/api/v1/tenants/tenant-a/payment-orders?limit=2&cursor=p1.opaque-cursor-value`,
+    { headers: { cookie: `mr_saas_session=${SESSION}` } },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const body = (await response.json()) as {
+    data: { items: Array<Record<string, unknown>>; nextCursor: string | null };
+    meta: { requestId: string };
+  };
+  assert.deepEqual(Object.keys(body).sort(), ['data', 'meta']);
+  assert.deepEqual(body.data, {
+    items: [
+      {
+        id: '10000000-0000-4000-8000-000000000001',
+        orderType: 'wallet_topup',
+        amountMinorUnits: '12500',
+        currency: 'USD',
+        status: 'fulfilled',
+        createdAt: '2026-09-28T12:00:00.000000Z',
+        updatedAt: '2026-09-28T12:00:01.000000Z',
+        paidAt: '2026-09-28T12:00:02.000000Z',
+        fulfilledAt: '2026-09-28T12:00:03.000000Z',
+      },
+    ],
+    nextCursor: 'p1.opaque-cursor-value',
+  });
+  assert.equal(typeof body.meta.requestId, 'string');
+  assert.deepEqual(app.calls.paymentOrders, {
+    userId: USER_ID,
+    tenantId: 'tenant-a',
+    query: { limit: 2, cursor: 'p1.opaque-cursor-value' },
+  });
+  for (const key of ['create', 'read', 'checkout', 'webhook', 'refunds'] as const) {
+    assert.equal(app.calls[key], undefined, `${key} must not call payment or PSP operations`);
+  }
+});
+
+test('payment order history requires a session and rejects roles outside owner/admin/billing', async () => {
+  const unauthenticatedApp = await createTestServer();
+  const unauthenticated = await fetch(`${unauthenticatedApp.origin}/console/api/v1/tenants/tenant-a/payment-orders`);
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(unauthenticatedApp.calls.paymentOrders, undefined);
+
+  await new Promise<void>((resolve) => server?.close(() => resolve()));
+  server = undefined;
+  const viewerApp = await createTestServer('viewer');
+  const viewer = await fetch(`${viewerApp.origin}/console/api/v1/tenants/tenant-a/payment-orders`, {
+    headers: { cookie: `mr_saas_session=${SESSION}` },
+  });
+  assert.equal(viewer.status, 403);
+  assert.equal(viewerApp.calls.paymentOrders, undefined);
+});
+
+test('payment order history treats the path tenant as a selector and fails closed on a mismatched server context', async () => {
+  const app = await createTestServer('owner', true);
+  const response = await fetch(`${app.origin}/console/api/v1/tenants/tenant-b/payment-orders`, {
+    headers: { cookie: `mr_saas_session=${SESSION}` },
+  });
+  assert.equal(response.status, 403);
+  assert.equal(app.calls.paymentOrders, undefined);
+});
+
+test('payment order history validates query parameters and returns unavailable when its read service is absent', async () => {
+  const app = await createTestServer();
+  for (const query of ['?limit=0', '?limit=101', '?limit=1&limit=2', '?cursor=', '?unexpected=x']) {
+    const response = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/payment-orders${query}`, {
+      headers: { cookie: `mr_saas_session=${SESSION}` },
+    });
+    assert.equal(response.status, 400, query);
+  }
+  assert.equal(app.calls.paymentOrders, undefined);
+
+  const bodyResponse = await new Promise<number>((resolve, reject) => {
+    const outgoing = http.request(
+      `${app.origin}/console/api/v1/tenants/tenant-a/payment-orders`,
+      { method: 'GET', headers: { cookie: `mr_saas_session=${SESSION}`, 'content-length': '3' } },
+      (incoming) => {
+        incoming.resume();
+        incoming.on('end', () => resolve(incoming.statusCode ?? 0));
+      },
+    );
+    outgoing.on('error', reject);
+    outgoing.end('bad');
+  });
+  assert.equal(bodyResponse, 400);
+  assert.equal(app.calls.paymentOrders, undefined);
+
+  const mutation = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/payment-orders`, {
+    method: 'POST',
+    headers: sessionHeaders(app.origin),
+  });
+  assert.equal(mutation.status, 405);
+
+  await new Promise<void>((resolve) => server?.close(() => resolve()));
+  server = undefined;
+  const unavailableApp = await createTestServer('owner', false, true, true, false);
+  const unavailable = await fetch(`${unavailableApp.origin}/console/api/v1/tenants/tenant-a/payment-orders`, {
+    headers: { cookie: `mr_saas_session=${SESSION}` },
+  });
+  assert.equal(unavailable.status, 503);
+  const body = (await unavailable.json()) as { error: { code: string } };
+  assert.equal(body.error.code, 'PAYMENT_ORDER_HISTORY_UNAVAILABLE');
 });

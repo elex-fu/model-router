@@ -16,11 +16,18 @@ import {
 import type { TenantContext } from '../identity/types.js';
 import type { SupplyProfileResolver } from '../keys/types.js';
 import { ProviderSupplyError, type ProviderSupplyErrorCode } from './errors.js';
+import {
+  isOauthRefreshBoundCredential,
+  type OauthRefreshSchedule,
+  oauthRefreshScheduleFromMaterial,
+} from './oauth-refresh-onboarding.js';
 import type {
   PersistedProviderAccountInput,
   PersistedProviderCredentialInput,
   ProviderSupplyRepository,
   UpdateProviderAccountLifecycleInput,
+  UpdateProviderAccountRevalidationInput,
+  UpdateProviderAccountSchedulingInput,
   UpdateProviderAccountValidationInput,
   UpdateProviderCredentialLifecycleInput,
   UpdateProviderCredentialValidationInput,
@@ -145,6 +152,22 @@ function identifier(value: unknown): string {
 
 function positiveInteger(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) fail('INVALID_INPUT');
+  return value;
+}
+
+/** Contract C-7 scheduling scalar: an in-range integer or the neutral default. */
+function schedulingScalar(value: unknown, min: number, max: number, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) fail('INVALID_INPUT');
+  return value;
+}
+
+/** D3 revalidation cadence: null/undefined disables; configured values honor the 084 bounds. */
+function revalidationInterval(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 900 || value > 604_800) {
+    fail('INVALID_INPUT');
+  }
   return value;
 }
 
@@ -487,6 +510,23 @@ function assertSecret(secret: Uint8Array): void {
   if (!(secret instanceof Uint8Array) || secret.byteLength === 0) fail('INVALID_INPUT');
 }
 
+/**
+ * #18a: the first-refresh schedule for an OAuth-bound credential triple (the
+ * R4 fixed adapter registry is the binding key); null keeps the NULL oauth_*
+ * shape for every other credential. The plaintext secret only contributes a
+ * validated expires_in; malformed material degrades to the default TTL and
+ * never blocks the write.
+ */
+function oauthOnboardingSchedule(
+  account: Pick<ProviderAccountRecord, 'providerId' | 'productId' | 'credentialType'>,
+  secret: Uint8Array,
+  credentialId: string,
+  now: Date,
+): OauthRefreshSchedule | null {
+  if (!isOauthRefreshBoundCredential(account)) return null;
+  return oauthRefreshScheduleFromMaterial(secret, credentialId, now);
+}
+
 function assertWriteResult(result: ProviderCredentialWriteResult | null | undefined): ProviderCredentialWriteResult {
   if (!result) fail('SUPPLY_STORAGE_ERROR');
   return result;
@@ -606,6 +646,9 @@ export class ProviderSupplyPersistenceService {
       capabilities,
       status,
       validationState,
+      priority: schedulingScalar(input.priority, 0, 1000, 0),
+      weight: schedulingScalar(input.weight, 1, 10_000, 1),
+      revalidationIntervalSeconds: revalidationInterval(input.revalidationIntervalSeconds),
       createdAt: now,
       updatedAt: now,
     };
@@ -692,6 +735,58 @@ export class ProviderSupplyPersistenceService {
     return this.changeAccountLifecycle(reference, 'active');
   }
 
+  /** Contract C-7: CAS-update the persisted scheduling scalars, bumping the account epoch. */
+  async updateProviderAccountScheduling(
+    reference: ProviderAccountReference,
+    scheduling: { readonly priority: number; readonly weight: number; readonly expectedAuthzVersion: number },
+  ): Promise<ProviderAccountRecord> {
+    if (!scheduling) fail('INVALID_INPUT');
+    const current = await this.account(reference);
+    if (current.status === 'revoked') fail('ACCOUNT_REVOKED');
+    const expected = positiveInteger(scheduling.expectedAuthzVersion);
+    if (expected !== current.authzVersion) fail('ACCOUNT_STATE_CONFLICT');
+    const now = currentDate(this.now).toISOString();
+    const input: UpdateProviderAccountSchedulingInput = {
+      account: normalizeAccountReference(reference),
+      // Required scalars: an absent value maps to NaN and fails range validation.
+      priority: schedulingScalar(scheduling.priority ?? Number.NaN, 0, 1000, Number.NaN),
+      weight: schedulingScalar(scheduling.weight ?? Number.NaN, 1, 10_000, Number.NaN),
+      expectedAuthzVersion: expected,
+      updatedAt: now,
+    };
+    const updated = await this.run(() => this.repository.updateAccountScheduling(input), 'SUPPLY_STORAGE_ERROR');
+    if (!updated) fail('ACCOUNT_STATE_CONFLICT');
+    return updated;
+  }
+
+  /** D3: CAS-update the account's periodic revalidation cadence (null disables), bumping the epoch. */
+  async updateProviderAccountRevalidation(
+    reference: ProviderAccountReference,
+    revalidation: { readonly revalidationIntervalSeconds: number | null; readonly expectedAuthzVersion: number },
+  ): Promise<ProviderAccountRecord> {
+    if (!revalidation) fail('INVALID_INPUT');
+    const current = await this.account(reference);
+    if (current.status === 'revoked') fail('ACCOUNT_REVOKED');
+    const expected = positiveInteger(revalidation.expectedAuthzVersion);
+    if (expected !== current.authzVersion) fail('ACCOUNT_STATE_CONFLICT');
+    const now = currentDate(this.now).toISOString();
+    // Required scalar: an absent value maps to NaN and fails validation; null
+    // is the explicit disable, never a default.
+    const interval =
+      revalidation.revalidationIntervalSeconds === null
+        ? null
+        : revalidationInterval(revalidation.revalidationIntervalSeconds ?? Number.NaN);
+    const input: UpdateProviderAccountRevalidationInput = {
+      account: normalizeAccountReference(reference),
+      revalidationIntervalSeconds: interval,
+      expectedAuthzVersion: expected,
+      updatedAt: now,
+    };
+    const updated = await this.run(() => this.repository.updateAccountRevalidation(input), 'SUPPLY_STORAGE_ERROR');
+    if (!updated) fail('ACCOUNT_STATE_CONFLICT');
+    return updated;
+  }
+
   async disableProviderAccount(reference: ProviderAccountReference): Promise<ProviderAccountRecord> {
     return this.changeAccountLifecycle(reference, 'disabled');
   }
@@ -752,6 +847,9 @@ export class ProviderSupplyPersistenceService {
             status: 'pending',
             validationState: 'unverified',
             expiresAt,
+            // #18a: OAuth-bound credentials start their refresh schedule at
+            // creation; every other credential keeps the NULL oauth_* shape.
+            oauthRefresh: oauthOnboardingSchedule(account, input.secret, credentialId, nowDate),
             createdAt: nowDate.toISOString(),
             updatedAt: nowDate.toISOString(),
           };
@@ -773,6 +871,39 @@ export class ProviderSupplyPersistenceService {
             createdAt: nowDate.toISOString(),
             expiresAt,
           });
+          if (account.ownerKind === 'platform') {
+            // Platform pool auto-validation: a fresh platform credential queues
+            // its own proof-of-life; the worker's terminal failure parks the
+            // account below the existing scheduler eligibility gate.
+            const capability = account.capabilities[0];
+            if (account.capabilities.length !== 1 || !capability) fail('CREDENTIAL_UNAVAILABLE');
+            const idempotencyKey = createHash('sha256')
+              .update(
+                [
+                  'provider-credential-validation-v1',
+                  'platform',
+                  account.id,
+                  credentialId,
+                  String(appended.version.version),
+                  account.providerId,
+                  account.productId,
+                ].join('\u0000'),
+              )
+              .digest('hex');
+            await repository.enqueueProviderCredentialValidationJob({
+              ownerKind: 'platform',
+              tenantId: null,
+              accountId: account.id,
+              credentialId,
+              credentialVersion: appended.version.version,
+              providerId: account.providerId,
+              productId: account.productId,
+              credentialType: account.credentialType,
+              allowedModels: [capability.model],
+              target: capability,
+              idempotencyKey,
+            });
+          }
           if (audit !== undefined) {
             await this.appendAuditEvent(
               repository,
@@ -872,6 +1003,9 @@ export class ProviderSupplyPersistenceService {
             status: 'pending',
             validationState: 'unverified',
             expiresAt,
+            // #18a: OAuth-bound credentials start their refresh schedule at
+            // creation; every other credential keeps the NULL oauth_* shape.
+            oauthRefresh: oauthOnboardingSchedule(account, input.secret, credentialId, nowDate),
             createdAt: nowText,
             updatedAt: nowText,
           };
@@ -918,6 +1052,7 @@ export class ProviderSupplyPersistenceService {
             )
             .digest('hex');
           const validationJob: ProviderCredentialValidationJobInput = {
+            ownerKind: 'tenant',
             tenantId,
             accountId: account.id,
             credentialId,
@@ -1113,6 +1248,22 @@ export class ProviderSupplyPersistenceService {
             }
           }
           const version = (credential.currentVersion ?? 0) + 1;
+          // #18a rotation inheritance: an OAuth-bound credential whose refresh
+          // loop is parked ('idle') or backed off ('failed') adopts the new
+          // material's schedule with the new version. A 'refreshing' row is
+          // owned by the R4 worker — no schedule is passed, keeping the UPDATE
+          // byte-identical and within the control-plane column grants, and the
+          // worker's finalize write remains the single scheduler of its own
+          // rotations. A NULL state (pre-#18a or non-OAuth material) keeps its
+          // byte-identical NULL semantics.
+          let oauthRefreshSchedule: OauthRefreshSchedule | undefined;
+          if (isOauthRefreshBoundCredential(account)) {
+            const oauthState = await repository.getCredentialOauthRefreshState(reference);
+            if (!oauthState) fail('CREDENTIAL_NOT_FOUND');
+            if (oauthState.state === 'idle' || oauthState.state === 'failed') {
+              oauthRefreshSchedule = oauthRefreshScheduleFromMaterial(input.secret, credential.id, nowDate);
+            }
+          }
           const envelope = await seal(
             input.secret,
             contextFor(account, credential.id, version, this.options.deployment, this.options.environment),
@@ -1127,10 +1278,14 @@ export class ProviderSupplyPersistenceService {
             kmsPurpose: account.purpose,
             wrappingRevision: 1,
             expectedCurrentVersion: input.expectedVersion,
+            ...(oauthRefreshSchedule === undefined ? {} : { oauthRefreshSchedule }),
             createdAt: nowDate.toISOString(),
             expiresAt,
           });
-          if (credential.ownerKind === 'tenant' && credential.supplyMode === 'byok') {
+          if (
+            (credential.ownerKind === 'tenant' && credential.supplyMode === 'byok') ||
+            credential.ownerKind === 'platform'
+          ) {
             const capability = account.capabilities[0];
             if (account.capabilities.length !== 1 || !capability) fail('CREDENTIAL_UNAVAILABLE');
             const allowedModels = validationAllowedModels ?? [capability.model];
@@ -1139,7 +1294,7 @@ export class ProviderSupplyPersistenceService {
               .update(
                 [
                   'provider-credential-validation-v1',
-                  credential.tenantId,
+                  credential.ownerKind === 'tenant' ? credential.tenantId : 'platform',
                   account.id,
                   credential.id,
                   String(appended.version.version),
@@ -1149,7 +1304,8 @@ export class ProviderSupplyPersistenceService {
               )
               .digest('hex');
             await repository.enqueueProviderCredentialValidationJob({
-              tenantId: credential.tenantId,
+              ownerKind: credential.ownerKind,
+              tenantId: credential.ownerKind === 'tenant' ? credential.tenantId : null,
               accountId: account.id,
               credentialId: credential.id,
               credentialVersion: appended.version.version,

@@ -21,12 +21,12 @@ import {
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
 import { PostgresProviderAccountScheduler } from '../saas/gateway/postgres-provider-account-scheduler.js';
-import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   PostgresRequestPreparationAuthorityAdapter,
   type PostgresRequestPreparationAuthorityAdapterDependencies,
 } from '../saas/gateway/postgres-request-preparation-authority-adapter.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
+import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
@@ -84,6 +84,7 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
+import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
@@ -106,6 +107,7 @@ import {
   RequestPreparationSignerAdapter,
 } from '../saas/runtime/request-preparation-signer-adapter.js';
 import { PostgresProviderSupplyRepository } from '../saas/supply/repository.js';
+import { createCustomerWebhookEventProducer } from '../saas/webhooks/producers.js';
 
 /** Stable safe error used when the `/v1` graph cannot be constructed. */
 export class ManagedSaasGatewayCompositionError extends Error {
@@ -168,6 +170,8 @@ export interface ManagedSaasGatewayCompositionDependencies {
   readonly lifecycle: ManagedSaasGatewayLifecycle;
   readonly maxBodyBytes: number;
   readonly entryPoint: string;
+  /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
+  readonly trustedProxyCidrs?: readonly string[];
 }
 
 export interface ManagedSaasGatewayComposition {
@@ -510,6 +514,7 @@ export function createManagedSaasGatewayComposition(
     modelDiscovery: createModelDiscoveryPort(dependencies.preparation),
     maxBodyBytes: dependencies.maxBodyBytes,
     entryPoint: dependencies.entryPoint,
+    trustedProxyCidrs: dependencies.trustedProxyCidrs,
   });
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
@@ -580,6 +585,11 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly providerHttpTestAddressCapability?: ProviderHttpTestAddressCapability;
   readonly providerCredentialUnsealingKms: ProviderCredentialUnsealingKms;
   readonly credentialContext: GatewayProviderCredentialUnsealerOptions;
+  /**
+   * F3: when enabled, settlement terminal commits and terminal request
+   * failures enqueue customer webhook events inside their own transactions.
+   */
+  readonly customerWebhooks?: { readonly enabled?: boolean };
   readonly resolveAuthenticationHeader: ProviderSupplyHttpAuthenticationHeaderResolver;
   readonly fetch: ProviderHttpFetch;
   readonly endpointPolicy: ProviderHttpEndpointPolicy;
@@ -588,6 +598,8 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly leaseTtlMs: number;
   readonly maxBodyBytes: number;
   readonly entryPoint: string;
+  /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
+  readonly trustedProxyCidrs?: readonly string[];
 }
 
 function sameEndpointPolicy(left: ProviderHttpEndpointPolicy, right: ProviderHttpEndpointPolicy): boolean {
@@ -884,10 +896,16 @@ export function createManagedSaasGatewayProductionComposition(
     signer: options.evidenceSigner,
     runtimeVerifierKeyId: options.evidenceVerifierKeyId,
   });
-  const metering = new SaasMeteringService(database);
+  const webhookEventProducer = options.customerWebhooks?.enabled ? createCustomerWebhookEventProducer() : undefined;
+  const metering = new SaasMeteringService(database, {
+    ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
+  });
   const normalSuccessSettlement = new DispatchUsageSettlementCoordinator(
     new SaasPricingService(database),
-    new DurableNormalSuccessSettlementPort(database),
+    new DurableNormalSuccessSettlementPort(database, {
+      keyBudget: createKeyBudgetResolution(),
+      ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
+    }),
   );
   const leaseOptions: ProviderAccountLeaseServiceOptions = {
     database,
@@ -954,6 +972,7 @@ export function createManagedSaasGatewayProductionComposition(
     },
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
+    trustedProxyCidrs: options.trustedProxyCidrs,
   });
 }
 

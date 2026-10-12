@@ -583,15 +583,16 @@ test('rejects empty, duplicate, and wildcard scopes before persistence', async (
   );
 });
 
-test('migration 008 defines bounded append-only catalog tables and registry versions are contiguous', () => {
+test('migration 008 defines bounded append-only catalog tables and registry versions match the documented sequence', () => {
   const versions = SAAS_MIGRATIONS.map(({ version }) => version);
-  const latestVersion = versions.at(-1);
 
-  assert.ok(latestVersion !== undefined);
-  assert.deepEqual(
-    versions,
-    Array.from({ length: latestVersion }, (_, index) => index + 1),
-  );
+  // Frozen contiguous 001-060 prefix, then the documented 061/062 gap, the
+  // retired 064-079 block, and the 063/080/081/082 registered forwards
+  // (docs/contracts-m0-freeze.md migration registry).
+  assert.deepEqual(versions, [
+    ...Array.from({ length: 60 }, (_, index) => index + 1),
+    63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98,
+  ]);
   assert.equal(SAAS_MIGRATIONS[7], PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION);
   assert.match(PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION.sql, /CREATE TABLE saas_provider_capabilities/);
   assert.match(PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION.sql, /CREATE TABLE saas_provider_rights/);

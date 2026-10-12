@@ -106,6 +106,148 @@ function credentialGrant(evidenceId = 'evidence-a'): ProviderCredentialAccessGra
   return { evidenceId };
 }
 
+test('contract C-7 scheduling scalars default to the neutral tie and persist explicit values', async () => {
+  const { service } = serviceSetup();
+  const tenant = await service.createProviderAccount(tenantAccount());
+  assert.equal(tenant.priority, 0);
+  assert.equal(tenant.weight, 1);
+
+  const platform = await service.createProviderAccount(platformAccount({ priority: 500, weight: 250 }));
+  assert.equal(platform.priority, 500);
+  assert.equal(platform.weight, 250);
+});
+
+test('contract C-7 scheduling scalars reject out-of-range and non-integer input', async () => {
+  const { service } = serviceSetup();
+  for (const overrides of [
+    { priority: -1 },
+    { priority: 1001 },
+    { priority: 0.5 },
+    { weight: 0 },
+    { weight: 10001 },
+    { weight: 1.5 },
+  ] as const) {
+    await assert.rejects(service.createProviderAccount(tenantAccount(overrides)), (error: unknown) => {
+      assert.ok(error instanceof ProviderSupplyError);
+      assert.equal(error.code, 'INVALID_INPUT');
+      return true;
+    });
+  }
+});
+
+test('D3 revalidation cadence defaults to disabled and persists explicit values', async () => {
+  const { service } = serviceSetup();
+  const tenant = await service.createProviderAccount(tenantAccount());
+  assert.equal(tenant.revalidationIntervalSeconds, null);
+
+  const platform = await service.createProviderAccount(platformAccount({ revalidationIntervalSeconds: 3600 }));
+  assert.equal(platform.revalidationIntervalSeconds, 3600);
+
+  // null is the explicit disable, never confused with an absent value.
+  const disabled = await service.createProviderAccount(
+    platformAccount({ id: 'platform-account-b', revalidationIntervalSeconds: null }),
+  );
+  assert.equal(disabled.revalidationIntervalSeconds, null);
+});
+
+test('D3 revalidation cadence rejects out-of-range and non-integer input', async () => {
+  const { service } = serviceSetup();
+  for (const overrides of [
+    { revalidationIntervalSeconds: 899 },
+    { revalidationIntervalSeconds: 604_801 },
+    { revalidationIntervalSeconds: 0 },
+    { revalidationIntervalSeconds: 3600.5 },
+    { revalidationIntervalSeconds: Number.NaN },
+  ] as const) {
+    await assert.rejects(service.createProviderAccount(tenantAccount(overrides)), (error: unknown) => {
+      assert.ok(error instanceof ProviderSupplyError);
+      assert.equal(error.code, 'INVALID_INPUT');
+      return true;
+    });
+  }
+});
+
+test('updateProviderAccountRevalidation CAS-updates the cadence, disables with null and bumps the epoch', async () => {
+  const { service } = serviceSetup();
+  const created = await service.createProviderAccount(tenantAccount());
+  const updated = await service.updateProviderAccountRevalidation(tenantReference(), {
+    revalidationIntervalSeconds: 86_400,
+    expectedAuthzVersion: created.authzVersion,
+  });
+  assert.equal(updated.revalidationIntervalSeconds, 86_400);
+  assert.equal(updated.authzVersion, created.authzVersion + 1);
+
+  const disabled = await service.updateProviderAccountRevalidation(tenantReference(), {
+    revalidationIntervalSeconds: null,
+    expectedAuthzVersion: updated.authzVersion,
+  });
+  assert.equal(disabled.revalidationIntervalSeconds, null);
+  assert.equal(disabled.authzVersion, updated.authzVersion + 1);
+
+  await assert.rejects(
+    service.updateProviderAccountRevalidation(tenantReference(), {
+      revalidationIntervalSeconds: 3600,
+      expectedAuthzVersion: created.authzVersion,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderSupplyError);
+      assert.equal(error.code, 'ACCOUNT_STATE_CONFLICT');
+      return true;
+    },
+  );
+  for (const cadence of [899, 604_801, 0, 3600.5, Number.NaN, undefined] as const) {
+    await assert.rejects(
+      service.updateProviderAccountRevalidation(tenantReference(), {
+        revalidationIntervalSeconds: cadence as number,
+        expectedAuthzVersion: disabled.authzVersion,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ProviderSupplyError);
+        assert.equal(error.code, 'INVALID_INPUT');
+        return true;
+      },
+    );
+  }
+});
+
+test('updateProviderAccountScheduling CAS-updates scalars and bumps the account epoch', async () => {
+  const { service } = serviceSetup();
+  const created = await service.createProviderAccount(tenantAccount());
+  const updated = await service.updateProviderAccountScheduling(tenantReference(), {
+    priority: 1000,
+    weight: 10000,
+    expectedAuthzVersion: created.authzVersion,
+  });
+  assert.equal(updated.priority, 1000);
+  assert.equal(updated.weight, 10000);
+  assert.equal(updated.authzVersion, created.authzVersion + 1);
+
+  await assert.rejects(
+    service.updateProviderAccountScheduling(tenantReference(), {
+      priority: 1,
+      weight: 1,
+      expectedAuthzVersion: created.authzVersion,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderSupplyError);
+      assert.equal(error.code, 'ACCOUNT_STATE_CONFLICT');
+      return true;
+    },
+  );
+  await assert.rejects(
+    service.updateProviderAccountScheduling(tenantReference(), {
+      priority: 1001,
+      weight: 1,
+      expectedAuthzVersion: updated.authzVersion,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderSupplyError);
+      assert.equal(error.code, 'INVALID_INPUT');
+      return true;
+    },
+  );
+});
+
 test('keeps tenant BYOK and platform supply accounts in disjoint owner contracts', async () => {
   const { service } = serviceSetup();
   const tenant = await service.createProviderAccount(tenantAccount());

@@ -6,6 +6,7 @@ import {
   PostgresRequestAdmissionGuardError,
 } from '../../../src/saas/gateway/postgres-request-admission-guard.js';
 import type { AttemptRecord, RequestRecord } from '../../../src/saas/metering/types.js';
+import type { ClientAddressResolution } from '../../../src/saas/gateway/client-address.js';
 
 type Row = Record<string, unknown>;
 const NOW = new Date('2026-09-28T00:00:00.000Z');
@@ -676,7 +677,11 @@ function evidence() {
   };
 }
 
-async function run(fixture: Fixture, mode: 'byok' | 'platform' = 'platform') {
+async function run(
+  fixture: Fixture,
+  mode: 'byok' | 'platform' = 'platform',
+  clientAddress?: ClientAddressResolution | null,
+) {
   const database = new FakeDatabase(fixture);
   const guard = new PostgresRequestAdmissionGuard(database, { now: () => NOW, idFactory: () => 'snapshot-a' });
   return guard.revalidate({
@@ -684,7 +689,21 @@ async function run(fixture: Fixture, mode: 'byok' | 'platform' = 'platform') {
     request: fixture.request,
     candidate: fixture.attempt,
     holdEvidence: mode === 'platform' ? evidence() : null,
+    clientAddress: clientAddress ?? null,
   });
+}
+
+function ipPolicyHead(mode: string, rules: readonly string[]): Row {
+  return {
+    tenant_id: 'tenant-a',
+    project_id: 'project-a',
+    key_id: 'key-a',
+    version: '1',
+    mode,
+    rules: [...rules],
+    created_at: NOW,
+    updated_at: NOW,
+  };
 }
 
 test('platform admission revalidates authorities and writes only the customer price snapshot', async () => {
@@ -998,4 +1017,77 @@ test('platform and BYOK separation is fail-closed before any price write', async
     (error: unknown) => error instanceof PostgresRequestAdmissionGuardError,
   );
   assert.equal(platform.snapshot, null);
+});
+
+test('a missing key IP policy head stays disabled and admits without address evidence', async () => {
+  const fixture = makeFixture('platform');
+  const result = await run(fixture);
+  assert.equal(result.platformPriceHold?.customerPriceVersion, 'price-v1');
+  assert.equal(
+    fixture.statements.some((statement) => statement.includes('postgres-request-admission:key-ip-policy')),
+    true,
+  );
+});
+
+test('an allowlist admits a resolved in-policy client address', async () => {
+  const fixture = makeFixture('platform');
+  fixture.rows['key-ip-policy'] = ipPolicyHead('allowlist', ['203.0.113.0/24', '2001:db8::/32']);
+  const allowed = await run(fixture, 'platform', {
+    status: 'resolved',
+    address: '203.0.113.7',
+    source: 'socket-peer',
+  });
+  assert.equal(allowed.platformPriceHold?.customerPriceVersion, 'price-v1');
+  const v6 = await run(makeFixture('platform'), 'platform');
+  assert.equal(v6.platformPriceHold?.customerPriceVersion, 'price-v1');
+  const fixture6 = makeFixture('platform');
+  fixture6.rows['key-ip-policy'] = ipPolicyHead('allowlist', ['2001:db8::/32']);
+  const allowed6 = await run(fixture6, 'platform', {
+    status: 'resolved',
+    address: '2001:db8::42',
+    source: 'socket-peer',
+  });
+  assert.equal(allowed6.platformPriceHold?.customerPriceVersion, 'price-v1');
+});
+
+test('an allowlist denies out-of-policy, unresolved and absent client address evidence', async () => {
+  for (const clientAddress of [
+    { status: 'resolved', address: '198.51.100.9', source: 'socket-peer' } as ClientAddressResolution,
+    { status: 'unresolved', reason: 'untrusted-forwarded-header' } as ClientAddressResolution,
+    null,
+    undefined,
+  ]) {
+    const fixture = makeFixture('platform');
+    fixture.rows['key-ip-policy'] = ipPolicyHead('allowlist', ['203.0.113.0/24']);
+    await assert.rejects(
+      () => run(fixture, 'platform', clientAddress ?? null),
+      (error: unknown) =>
+        error instanceof PostgresRequestAdmissionGuardError && error.code === 'CALLER_DENIED',
+    );
+    assert.equal(fixture.snapshot, null);
+  }
+});
+
+test('denyall rejects even a resolved in-range address and a disabled head never evaluates the address', async () => {
+  const denied = makeFixture('byok');
+  denied.rows['key-ip-policy'] = ipPolicyHead('denyall', []);
+  await assert.rejects(
+    () => run(denied, 'byok', { status: 'resolved', address: '203.0.113.7', source: 'socket-peer' }),
+    (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'CALLER_DENIED',
+  );
+
+  const disabled = makeFixture('byok');
+  disabled.rows['key-ip-policy'] = ipPolicyHead('disabled', []);
+  const admitted = await run(disabled, 'byok');
+  assert.equal(admitted.platformPriceHold, null);
+});
+
+test('a malformed stored policy head fails closed instead of failing open', async () => {
+  const fixture = makeFixture('platform');
+  fixture.rows['key-ip-policy'] = ipPolicyHead('allowlist', ['not-an-address']);
+  await assert.rejects(
+    () => run(fixture, 'platform', { status: 'resolved', address: '203.0.113.7', source: 'socket-peer' }),
+    (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'CALLER_DENIED',
+  );
+  assert.equal(fixture.snapshot, null);
 });

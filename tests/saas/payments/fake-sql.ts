@@ -5,6 +5,8 @@ import type {
   PaymentCheckoutAction,
   PaymentProviderCreateOrderInput,
   PaymentProviderCreateOrderResult,
+  PaymentProviderEventConfirmation,
+  PaymentProviderEventConfirmationInput,
   PaymentProviderWebhookVerificationInput,
   PaymentWalletFundingLedger,
   VerifiedPaymentProviderWebhook,
@@ -37,6 +39,7 @@ export interface FakePaymentOrder {
   provider_submission_state?: string | null;
   provider_submission_lease_token?: string | null;
   provider_submission_lease_expires_at?: string | null;
+  original_amount_minor_units?: string | null;
 }
 
 export interface FakeServicePlanOrder {
@@ -221,6 +224,7 @@ export class FakePaymentDatabase {
         provider_submission_state: 'idle',
         provider_submission_lease_token: null,
         provider_submission_lease_expires_at: null,
+        original_amount_minor_units: i === null || i === undefined ? null : text(i),
       };
       this.state.orders.push(order);
       return result<Row>([order as Row]);
@@ -257,10 +261,10 @@ export class FakePaymentDatabase {
       order.state = 'pending';
       order.provider_order_id = text(c);
       order.provider_failure_code = null;
-      order.checkout_kind = f === null ? null : text(f);
-      order.checkout_url = g === null ? null : text(g);
-      order.checkout_text = h === null ? null : text(h);
-      order.checkout_expires_at = i === null ? null : text(i);
+      order.checkout_kind = e === null ? null : text(e);
+      order.checkout_url = f === null ? null : text(f);
+      order.checkout_text = g === null ? null : text(g);
+      order.checkout_expires_at = h === null ? null : text(h);
       order.provider_submission_state = 'idle';
       order.provider_submission_lease_token = null;
       order.provider_submission_lease_expires_at = null;
@@ -560,6 +564,10 @@ export class FakePaymentProvider implements PaymentProviderAdapter {
   safeRejectCreate = false;
   unknownCreateAcceptance = false;
   shouldRejectWebhook = false;
+  /** Undefined leaves the seam absent; otherwise the fake attests before fulfillment. */
+  confirmEventResult: PaymentProviderEventConfirmation | undefined | 'absent' = 'absent';
+  confirmEventError: Error | undefined;
+  readonly confirmCalls: PaymentProviderEventConfirmationInput[] = [];
   createGate: Promise<void> | undefined;
   createStarted: (() => void) | undefined;
   checkoutAction: PaymentCheckoutAction | undefined;
@@ -618,6 +626,17 @@ export class FakePaymentProvider implements PaymentProviderAdapter {
       providerKey: this.providerKey,
       merchantId: input.merchantId,
       payload: JSON.parse(input.rawBody.toString('utf8')) as unknown,
+    };
+  }
+
+  get confirmEvent():
+    | ((input: PaymentProviderEventConfirmationInput) => Promise<PaymentProviderEventConfirmation>)
+    | undefined {
+    if (this.confirmEventResult === 'absent') return undefined;
+    return async (input) => {
+      this.confirmCalls.push(input);
+      if (this.confirmEventError) throw this.confirmEventError;
+      return this.confirmEventResult ?? { confirmed: true };
     };
   }
 

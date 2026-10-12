@@ -204,7 +204,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
-        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "member-directory", "member-directory-http"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
@@ -238,8 +238,24 @@ jobs:
           tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts
           tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts
           tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts
+          tests/saas/metering/usage-correction.postgres.integration.test.ts
+          tests/saas/keys/ip-policy.postgres.integration.test.ts
+          tests/saas/keys/budget-policy.postgres.integration.test.ts
+          tests/drills/settlement-sigkill-crash.postgres.integration.test.ts
           tests/saas/identity/tenant-member-directory.postgres.integration.test.ts
           tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts
+          tests/drills/dual-instance-failover.postgres.integration.test.ts
+          tests/saas/marketing/redeem-codes.postgres.integration.test.ts
+          tests/saas/marketing/promo-codes.postgres.integration.test.ts
+          tests/saas/marketing/affiliate.postgres.integration.test.ts
+          tests/saas/marketing/announcements.postgres.integration.test.ts
+          tests/saas/supply/quota-sync-worker.postgres.integration.test.ts
+          tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts
+          tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts
+          tests/saas/supply/account-quarantine.postgres.integration.test.ts
+          tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts
+          tests/saas/gateway/health-score.postgres.integration.test.ts
+          tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts
           tests/saas/gateway/pre-dispatch-postgres-fixture.ts
           tests/saas/metering/normal-success-postgres-fixture.ts
           tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts

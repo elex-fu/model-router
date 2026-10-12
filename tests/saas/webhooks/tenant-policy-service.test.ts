@@ -102,3 +102,29 @@ test('platform may not lower tenant limits below current active endpoint or pend
     /BELOW_CURRENT_USAGE/,
   );
 });
+
+test('first-time configuration seeds migration defaults for whitelist and low-balance threshold', async () => {
+  const db = new PolicyDatabase();
+  const service = new CustomerWebhookTenantPolicyService(db);
+  await service.configure({ actorUserId: ACTOR, requestId: 'policy-request-1' }, TENANT, INPUT);
+  const insert = db.calls.find((sql) => sql.startsWith('INSERT INTO saas_customer_webhook_tenant_policies'));
+  assert.ok(insert);
+  const columnList = insert.slice(insert.indexOf('(') + 1, insert.indexOf(')'));
+  // The seed column set is exactly the quota/audit surface; migration 087's
+  // DEFAULT supplies allowed_event_types and low_balance_threshold_minor_units.
+  assert.deepEqual(
+    columnList.split(',').map((column) => column.trim()),
+    [
+      'tenant_id',
+      'enabled',
+      'max_active_endpoints',
+      'max_events_per_minute',
+      'max_pending_deliveries',
+      'revision',
+      'updated_by_user_id',
+      'audit_event_id',
+    ],
+  );
+  assert.ok(!insert.includes('allowed_event_types'));
+  assert.ok(!insert.includes('low_balance_threshold_minor_units'));
+});

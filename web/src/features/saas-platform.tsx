@@ -17,6 +17,7 @@ import {
   type PlatformCatalogRights,
   type PlatformCatalogRightsRevokeInput,
   type PlatformCatalogRightsVersionInput,
+  type PlatformGovernanceOperatorSummary,
   type PlatformPriceMetric,
   type PlatformPricingTarget,
   type PlatformPriceVersion,
@@ -37,6 +38,7 @@ import {
   type PlatformUnknownOutcomeObservation,
   type PlatformOperationsStatusCounts,
   type PlatformOperationsSummary,
+  type PlatformRuntimeProbeStatus,
   type PlatformRefundRecord,
   type PlatformSupplyAccount,
   type PlatformSupplyAccountCreateInput,
@@ -46,6 +48,7 @@ import {
   type PlatformSupplyCredentialRotationInput,
   type PlatformSupplyCredentialVersion,
   type PlatformSupplyLifecycleAction,
+  PLATFORM_ADMIN_ROLES,
   platformClient,
 } from '../api/saas-platform-client';
 import { Badge, Field, formatDate, Panel, SaveButton } from '../components/ui';
@@ -71,6 +74,9 @@ const platformRoutes = new Set([
   '/platform/catalog/rights',
   '/platform/supply/accounts',
   '/platform/audit/events',
+  '/platform/governance/users',
+  '/platform/governance/tenants',
+  '/platform/governance/operators',
 ]);
 
 type AuthState =
@@ -469,8 +475,10 @@ function PlatformShell({ children, me, onLogout }: { children: ReactNode; me: Me
   const canSeeRefundNavigation = me.kind === 'ready' && me.me.roles.some(role => role === 'finance' || role === 'superadmin');
   const canSeeCapacityNavigation = me.kind === 'ready' && me.me.roles.some(role => role === 'operations' || role === 'superadmin');
   const canSeePricingNavigation = me.kind === 'ready' && me.me.roles.some(role => role === 'operations' || role === 'superadmin');
+  const canSeeGovernanceNavigation = canReadGovernance(me);
+  const canSeeOperatorNavigation = me.kind === 'ready' && me.me.roles.some(role => role === 'superadmin');
 
-  return <div className="shell"><a className="skip" href="#main">跳至内容</a><aside className={menu ? 'sidebar open' : 'sidebar'}><Brand/><nav aria-label="平台管理导航"><NavLink to="/platform/overview" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>工作区</NavLink><NavLink to="/platform/ops" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>运营概览</NavLink><NavLink to="/platform/unknown-outcomes" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>未知结果案件</NavLink>{canSeeCapacityNavigation && <NavLink to="/platform/capacity" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>容量策略</NavLink>}{canSeePricingNavigation && <NavLink to="/platform/pricing" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>价格版本</NavLink>}{canSeeRefundNavigation && <NavLink to="/platform/refunds" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>退款管理</NavLink>}<NavLink to="/platform/catalog/products" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>产品目录</NavLink><NavLink to="/platform/catalog/capabilities" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>能力目录</NavLink><NavLink to="/platform/catalog/rights" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>权益目录</NavLink><NavLink to="/platform/supply/accounts" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>平台供给</NavLink>{canSeeAuditNavigation && <NavLink to="/platform/audit/events" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>审计历史</NavLink>}<Link to="/platform/mfa/enroll" onClick={() => setMenu(false)}>MFA 配置</Link></nav><button className="quiet logout" type="button" disabled={logoutBusy} onClick={() => void logout()}>{logoutBusy ? '正在退出…' : '退出登录'}</button></aside><div className="workspace"><header className="topbar"><button className="menu-toggle" type="button" aria-label="切换导航" aria-expanded={menu} onClick={() => setMenu(!menu)}>☰</button><div className="instance"><strong>平台管理工作区</strong><Badge tone={identityTone}>{identityStatus}</Badge></div><div className="toolbar"><Link className="button-link" to="/platform/mfa/enroll">MFA 配置</Link></div></header><main id="main">{children}</main></div></div>;
+  return <div className="shell"><a className="skip" href="#main">跳至内容</a><aside className={menu ? 'sidebar open' : 'sidebar'}><Brand/><nav aria-label="平台管理导航"><NavLink to="/platform/overview" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>工作区</NavLink><NavLink to="/platform/ops" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>运营概览</NavLink><NavLink to="/platform/unknown-outcomes" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>未知结果案件</NavLink>{canSeeCapacityNavigation && <NavLink to="/platform/capacity" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>容量策略</NavLink>}{canSeePricingNavigation && <NavLink to="/platform/pricing" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>价格版本</NavLink>}{canSeeRefundNavigation && <NavLink to="/platform/refunds" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>退款管理</NavLink>}<NavLink to="/platform/catalog/products" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>产品目录</NavLink><NavLink to="/platform/catalog/capabilities" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>能力目录</NavLink><NavLink to="/platform/catalog/rights" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>权益目录</NavLink><NavLink to="/platform/supply/accounts" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>平台供给</NavLink>{canSeeAuditNavigation && <NavLink to="/platform/audit/events" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>审计历史</NavLink>}{canSeeGovernanceNavigation && <NavLink to="/platform/governance/users" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>用户管理</NavLink>}{canSeeGovernanceNavigation && <NavLink to="/platform/governance/tenants" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>租户生命周期</NavLink>}{canSeeOperatorNavigation && <NavLink to="/platform/governance/operators" onClick={() => setMenu(false)} className={({ isActive }) => isActive ? 'active' : ''}>操作员管理</NavLink>}<Link to="/platform/mfa/enroll" onClick={() => setMenu(false)}>MFA 配置</Link></nav><button className="quiet logout" type="button" disabled={logoutBusy} onClick={() => void logout()}>{logoutBusy ? '正在退出…' : '退出登录'}</button></aside><div className="workspace"><header className="topbar"><button className="menu-toggle" type="button" aria-label="切换导航" aria-expanded={menu} onClick={() => setMenu(!menu)}>☰</button><div className="instance"><strong>平台管理工作区</strong><Badge tone={identityTone}>{identityStatus}</Badge></div><div className="toolbar"><Link className="button-link" to="/platform/mfa/enroll">MFA 配置</Link></div></header><main id="main">{children}</main></div></div>;
 }
 
 function PlatformOverviewPage({ me, onRetryMe }: { me: MeState; onRetryMe: () => void }) {
@@ -607,7 +615,7 @@ export function OperationsSummaryContent({ summary }: { summary: PlatformOperati
         </Panel>
       </div>
       <Panel title="运行时探针">
-        <p className="muted">运营摘要只读取 PostgreSQL 中的业务事实；尚未接入这些依赖的独立 readiness/worker 探针。</p>
+        <p className="muted">运行时探针实时检查 PostgreSQL、Redis、KMS 与验证 worker 心跳；worker 探针以最近 10 分钟任务心跳为准，队列空闲时显示"空闲/降级"。</p>
         <div className="summary-list">
           <OperationsProbeStatus label="PostgreSQL 服务健康" status={metrics.runtimeProbes.postgresql}/>
           <OperationsProbeStatus label="Redis" status={metrics.runtimeProbes.redis}/>
@@ -693,8 +701,16 @@ function OperationsHealthCount({
   return <div role="listitem"><span><Badge tone={count === '0' && tone === 'good' ? 'neutral' : tone}>{label}</Badge></span><strong>{formatDecimalCount(count)}</strong></div>;
 }
 
-function OperationsProbeStatus({ label, status }: { label: string; status: 'unavailable' | 'not_configured' }) {
-  return <div><span>{label}</span><Badge tone="warn">{status === 'not_configured' ? '未配置探针' : '不可用'}</Badge></div>;
+const PROBE_STATUS_PRESENTATION: Record<PlatformRuntimeProbeStatus, { label: string; tone: 'good' | 'warn' | 'bad' | 'neutral' }> = {
+  ok: { label: '正常', tone: 'good' },
+  degraded: { label: '空闲/降级', tone: 'warn' },
+  unavailable: { label: '不可用', tone: 'bad' },
+  not_configured: { label: '未配置探针', tone: 'neutral' },
+};
+
+function OperationsProbeStatus({ label, status }: { label: string; status: PlatformRuntimeProbeStatus }) {
+  const presentation = PROBE_STATUS_PRESENTATION[status];
+  return <div><span>{label}</span><Badge tone={presentation.tone}>{presentation.label}</Badge></div>;
 }
 
 function OpsOverviewPage() {
@@ -2893,6 +2909,464 @@ export function CapacityPolicyPage({ me }: { me: MeState }) {
   </>;
 }
 
+function governanceRoles(me: MeState, accepted: readonly PlatformAdminRole[]): boolean {
+  return me.kind === 'ready' && me.me.roles.some(role => (accepted as readonly string[]).includes(role));
+}
+
+const GOVERNANCE_READ_ROLES: readonly PlatformAdminRole[] = ['superadmin', 'security', 'operations', 'support-readonly'];
+
+function canReadGovernance(me: MeState): boolean {
+  return governanceRoles(me, GOVERNANCE_READ_ROLES);
+}
+
+function useGovernanceList<Item>(
+  loader: (cursor: string | undefined, signal: AbortSignal) => Promise<{ items: Item[]; nextCursor: string | null }>,
+  filterVersion: number,
+) {
+  const [cursor, setCursor] = useState<string>();
+  const [previousCursors, setPreviousCursors] = useState<Array<string | undefined>>([]);
+  const [page, setPage] = useState<{ items: Item[]; nextCursor: string | null }>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>();
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(undefined);
+    void loader(cursor, controller.signal).then(result => {
+      if (!controller.signal.aborted) setPage(result);
+    }).catch((loadError: unknown) => {
+      if (!controller.signal.aborted) setError(loadError);
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [loader, cursor, filterVersion, reloadKey]);
+
+  return {
+    page,
+    loading,
+    error,
+    pageIndex: previousCursors.length + 1,
+    canNext: page?.nextCursor !== null && page?.nextCursor !== undefined,
+    canPrevious: previousCursors.length > 0,
+    next() {
+      const nextCursor = page?.nextCursor;
+      if (!nextCursor) return;
+      setPreviousCursors(values => [...values, cursor]);
+      setCursor(nextCursor);
+    },
+    previous() {
+      if (previousCursors.length === 0) return;
+      setCursor(previousCursors[previousCursors.length - 1]);
+      setPreviousCursors(values => values.slice(0, -1));
+    },
+    reload() {
+      setReloadKey(value => value + 1);
+    },
+    reset() {
+      setCursor(undefined);
+      setPreviousCursors([]);
+      setReloadKey(value => value + 1);
+    },
+  };
+}
+
+function GovernancePagination({ list, label }: { list: ReturnType<typeof useGovernanceList<unknown>>; label: string }) {
+  return <div className="actions" aria-label={label}>
+    <button type="button" onClick={list.previous} disabled={list.loading || !list.canPrevious}>上一页</button>
+    <span className="muted">第 {list.pageIndex} 页</span>
+    <button type="button" onClick={list.next} disabled={list.loading || !list.canNext}>下一页</button>
+  </div>;
+}
+
+/** Two-step inline confirmation for destructive governance actions; no window.confirm so it stays testable. */
+function GovernanceConfirmButton({
+  label,
+  confirmLabel,
+  busy,
+  onConfirm,
+}: {
+  label: string;
+  confirmLabel: string;
+  busy: boolean;
+  onConfirm: () => void;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (busy) setArmed(false);
+  }, [busy]);
+  return <button
+    type="button"
+    disabled={busy}
+    className={armed ? 'danger' : undefined}
+    onClick={() => {
+      if (armed) {
+        setArmed(false);
+        onConfirm();
+      } else {
+        setArmed(true);
+      }
+    }}
+  >{busy ? '处理中…' : armed ? confirmLabel : label}</button>;
+}
+
+export function GovernanceUsersPage({ me }: { me: MeState }) {
+  const canWrite = governanceRoles(me, ['superadmin', 'security']);
+  const [emailDraft, setEmailDraft] = useState('');
+  const [statusDraft, setStatusDraft] = useState<'' | 'active' | 'disabled'>('');
+  const [emailContains, setEmailContains] = useState<string>();
+  const [status, setStatus] = useState<'active' | 'disabled'>();
+  const [filterVersion, setFilterVersion] = useState(0);
+  const [busyKey, setBusyKey] = useState('');
+  const [actionError, setActionError] = useState<unknown>();
+  const [notice, setNotice] = useState('');
+  const [passwordTarget, setPasswordTarget] = useState<string>();
+  const [passwordDraft, setPasswordDraft] = useState('');
+
+  const loader = useCallback(
+    (cursor: string | undefined, signal: AbortSignal) =>
+      platformClient.listGovernanceUsers({
+        limit: 50,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(emailContains === undefined ? {} : { emailContains }),
+        ...(status === undefined ? {} : { status }),
+        signal,
+      }),
+    [emailContains, status],
+  );
+  const list = useGovernanceList(loader, filterVersion);
+
+  function applyFilters(event: FormEvent) {
+    event.preventDefault();
+    setEmailContains(emailDraft.trim() || undefined);
+    setStatus(statusDraft === '' ? undefined : statusDraft);
+    setFilterVersion(value => value + 1);
+    list.reset();
+  }
+
+  async function runAction(key: string, action: () => Promise<unknown>, message: string) {
+    setBusyKey(key);
+    setActionError(undefined);
+    setNotice('');
+    try {
+      await action();
+      setNotice(message);
+      list.reload();
+    } catch (error) {
+      if (error instanceof PlatformApiError && error.status === 401) clearPlatformCsrfToken();
+      setActionError(error);
+    } finally {
+      setBusyKey('');
+    }
+  }
+
+  function submitPasswordReset(event: FormEvent) {
+    event.preventDefault();
+    if (!passwordTarget || passwordDraft === '') return;
+    const target = passwordTarget;
+    void runAction(
+      `password:${target}`,
+      () => platformClient.resetGovernanceUserPassword(target, passwordDraft),
+      '密码已重置，该用户的全部会话已吊销。',
+    );
+    setPasswordTarget(undefined);
+    setPasswordDraft('');
+  }
+
+  return <>
+    <div className="page-title"><div><p className="eyebrow">治理</p><h1>用户管理</h1><p>查看平台客户账号并执行禁用、密码重置和 MFA 重置。所有操作都会写入审计日志。</p></div></div>
+    <div className="notice" role="note"><strong>授权与审计</strong><span>禁用/启用、密码重置、MFA 重置仅对 superadmin 或 security 角色开放；服务端会重新核验角色和会话，并吊销受影响用户的会话。</span></div>
+    {!canWrite && me.kind === 'ready' && <div className="notice" role="note"><strong>当前角色只读</strong><span>用户变更操作仅对 superadmin 或 security 角色开放；最终授权仍由服务端判定。</span></div>}
+    <form className="filters" onSubmit={applyFilters}>
+      <Field label="邮箱包含"><input value={emailDraft} maxLength={320} onChange={event => setEmailDraft(event.target.value)} placeholder="按邮箱片段筛选"/></Field>
+      <Field label="状态"><select value={statusDraft} onChange={event => setStatusDraft(event.target.value as '' | 'active' | 'disabled')}><option value="">全部</option><option value="active">启用</option><option value="disabled">已禁用</option></select></Field>
+      <button className="primary" type="submit">应用筛选</button>
+    </form>
+    <Panel title="用户列表">
+      {list.loading && <div className="skeleton" role="status" aria-label="正在加载用户"><i/><i/><i/></div>}
+      {!list.loading && list.error !== undefined && <PlatformErrorNotice error={list.error} onRetry={list.reload} title="用户列表读取失败"/>}
+      {actionError !== undefined && <PlatformErrorNotice error={actionError} title="用户操作失败"/>}
+      {notice && <div className="notice" role="status"><strong>操作完成</strong><span>{notice}</span></div>}
+      {!list.loading && list.error === undefined && list.page?.items.length === 0 && <div className="empty" role="status">当前没有符合条件的用户。</div>}
+      {!list.loading && list.error === undefined && list.page !== undefined && list.page.items.length > 0 && <div className="table-wrap"><table aria-label="用户列表"><thead><tr><th>邮箱</th><th>显示名</th><th>邮箱验证</th><th>状态</th><th>创建时间</th>{canWrite && <th>操作</th>}</tr></thead><tbody>{list.page.items.map(item => {
+        const disabled = item.disabledAt !== null;
+        return <tr key={item.id}>
+          <td>{item.email}</td>
+          <td>{item.displayName ?? '—'}</td>
+          <td>{item.emailVerifiedAt === null ? '未验证' : formatDate(item.emailVerifiedAt)}</td>
+          <td><Badge tone={disabled ? 'bad' : 'good'}>{disabled ? '已禁用' : '启用'}</Badge></td>
+          <td>{formatDate(item.createdAt)}</td>
+          {canWrite && <td><div className="actions">
+            <GovernanceConfirmButton
+              label={disabled ? '启用' : '禁用'}
+              confirmLabel={disabled ? '确认启用' : '确认禁用'}
+              busy={busyKey === `disable:${item.id}`}
+              onConfirm={() => void runAction(
+                `disable:${item.id}`,
+                () => platformClient.setGovernanceUserDisabled(item.id, !disabled),
+                disabled ? '用户已启用。' : '用户已禁用，其全部会话已吊销。',
+              )}
+            />
+            <button type="button" disabled={busyKey !== ''} onClick={() => { setPasswordTarget(passwordTarget === item.id ? undefined : item.id); setPasswordDraft(''); }}>重置密码</button>
+            <GovernanceConfirmButton
+              label="重置 MFA"
+              confirmLabel="确认重置 MFA"
+              busy={busyKey === `mfa:${item.id}`}
+              onConfirm={() => void runAction(
+                `mfa:${item.id}`,
+                () => platformClient.resetGovernanceUserMfa(item.id),
+                'MFA 凭据已吊销，该用户的全部会话已吊销。',
+              )}
+            />
+          </div>{passwordTarget === item.id && <form onSubmit={submitPasswordReset} className="filters">
+            <Field label="新密码" hint="至少 12 个字符；密码由操作员线下告知用户，接口不会回显。">
+              <input required minLength={12} type="password" autoComplete="new-password" value={passwordDraft} onChange={event => setPasswordDraft(event.target.value)}/>
+            </Field>
+            <button className="primary" type="submit" disabled={busyKey !== ''}>确认重置密码</button>
+          </form>}</td>}
+        </tr>;
+      })}</tbody></table></div>}
+      <GovernancePagination list={list} label="用户分页"/>
+    </Panel>
+  </>;
+}
+
+export function GovernanceTenantsPage({ me }: { me: MeState }) {
+  const canWriteLifecycle = governanceRoles(me, ['superadmin', 'operations']);
+  const canTakeover = governanceRoles(me, ['superadmin']);
+  const [slugDraft, setSlugDraft] = useState('');
+  const [statusDraft, setStatusDraft] = useState<'' | 'active' | 'suspended' | 'closed'>('');
+  const [slugContains, setSlugContains] = useState<string>();
+  const [status, setStatus] = useState<'active' | 'suspended' | 'closed'>();
+  const [filterVersion, setFilterVersion] = useState(0);
+  const [busyKey, setBusyKey] = useState('');
+  const [actionError, setActionError] = useState<unknown>();
+  const [notice, setNotice] = useState('');
+  const [takeoverTarget, setTakeoverTarget] = useState<string>();
+  const [takeoverDraft, setTakeoverDraft] = useState('');
+
+  const loader = useCallback(
+    (cursor: string | undefined, signal: AbortSignal) =>
+      platformClient.listGovernanceTenants({
+        limit: 50,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(slugContains === undefined ? {} : { slugContains }),
+        ...(status === undefined ? {} : { status }),
+        signal,
+      }),
+    [slugContains, status],
+  );
+  const list = useGovernanceList(loader, filterVersion);
+
+  function applyFilters(event: FormEvent) {
+    event.preventDefault();
+    setSlugContains(slugDraft.trim() || undefined);
+    setStatus(statusDraft === '' ? undefined : statusDraft);
+    setFilterVersion(value => value + 1);
+    list.reset();
+  }
+
+  async function runAction(key: string, action: () => Promise<unknown>, message: string) {
+    setBusyKey(key);
+    setActionError(undefined);
+    setNotice('');
+    try {
+      await action();
+      setNotice(message);
+      list.reload();
+    } catch (error) {
+      if (error instanceof PlatformApiError && error.status === 401) clearPlatformCsrfToken();
+      setActionError(error);
+    } finally {
+      setBusyKey('');
+    }
+  }
+
+  function submitTakeover(event: FormEvent) {
+    event.preventDefault();
+    if (!takeoverTarget || takeoverDraft.trim() === '') return;
+    const tenantId = takeoverTarget;
+    const targetUserId = takeoverDraft.trim();
+    void runAction(
+      `takeover:${tenantId}`,
+      () => platformClient.takeoverGovernanceTenant(tenantId, targetUserId),
+      '所有权已转移，原 owner 已降为 admin。',
+    );
+    setTakeoverTarget(undefined);
+    setTakeoverDraft('');
+  }
+
+  const tenantStatusPresentation = (value: 'active' | 'suspended' | 'closed'): { label: string; tone: 'good' | 'warn' | 'bad' } =>
+    value === 'active' ? { label: '启用', tone: 'good' } : value === 'suspended' ? { label: '已暂停', tone: 'warn' } : { label: '已关闭', tone: 'bad' };
+
+  return <>
+    <div className="page-title"><div><p className="eyebrow">治理</p><h1>租户生命周期</h1><p>暂停、恢复或关闭租户，必要时将所有权转移给指定成员。</p></div></div>
+    <div className="notice" role="note"><strong>状态语义</strong><span>暂停后可恢复；关闭是终态，不可恢复。所有权转移仅对 superadmin 开放，目标用户必须是该租户的活跃成员。</span></div>
+    {!canWriteLifecycle && me.kind === 'ready' && <div className="notice" role="note"><strong>当前角色只读</strong><span>租户状态变更仅对 superadmin 或 operations 角色开放；最终授权仍由服务端判定。</span></div>}
+    <form className="filters" onSubmit={applyFilters}>
+      <Field label="Slug 包含"><input value={slugDraft} maxLength={128} onChange={event => setSlugDraft(event.target.value)} placeholder="按 slug 片段筛选"/></Field>
+      <Field label="状态"><select value={statusDraft} onChange={event => setStatusDraft(event.target.value as '' | 'active' | 'suspended' | 'closed')}><option value="">全部</option><option value="active">启用</option><option value="suspended">已暂停</option><option value="closed">已关闭</option></select></Field>
+      <button className="primary" type="submit">应用筛选</button>
+    </form>
+    <Panel title="租户列表">
+      {list.loading && <div className="skeleton" role="status" aria-label="正在加载租户"><i/><i/><i/></div>}
+      {!list.loading && list.error !== undefined && <PlatformErrorNotice error={list.error} onRetry={list.reload} title="租户列表读取失败"/>}
+      {actionError !== undefined && <PlatformErrorNotice error={actionError} title="租户操作失败"/>}
+      {notice && <div className="notice" role="status"><strong>操作完成</strong><span>{notice}</span></div>}
+      {!list.loading && list.error === undefined && list.page?.items.length === 0 && <div className="empty" role="status">当前没有符合条件的租户。</div>}
+      {!list.loading && list.error === undefined && list.page !== undefined && list.page.items.length > 0 && <div className="table-wrap"><table aria-label="租户列表"><thead><tr><th>名称</th><th>Slug</th><th>状态</th><th>创建时间</th><th>更新时间</th>{(canWriteLifecycle || canTakeover) && <th>操作</th>}</tr></thead><tbody>{list.page.items.map(item => {
+        const presentation = tenantStatusPresentation(item.status);
+        return <tr key={item.id}>
+          <td>{item.name}</td>
+          <td><code>{item.slug}</code></td>
+          <td><Badge tone={presentation.tone}>{presentation.label}</Badge></td>
+          <td>{formatDate(item.createdAt)}</td>
+          <td>{formatDate(item.updatedAt)}</td>
+          {(canWriteLifecycle || canTakeover) && <td><div className="actions">
+            {canWriteLifecycle && item.status === 'active' && <GovernanceConfirmButton label="暂停" confirmLabel="确认暂停" busy={busyKey === `suspend:${item.id}`} onConfirm={() => void runAction(`suspend:${item.id}`, () => platformClient.setGovernanceTenantStatus(item.id, 'suspend'), '租户已暂停。')}/>}
+            {canWriteLifecycle && item.status === 'suspended' && <GovernanceConfirmButton label="恢复" confirmLabel="确认恢复" busy={busyKey === `resume:${item.id}`} onConfirm={() => void runAction(`resume:${item.id}`, () => platformClient.setGovernanceTenantStatus(item.id, 'resume'), '租户已恢复。')}/>}
+            {canWriteLifecycle && item.status !== 'closed' && <GovernanceConfirmButton label="关闭" confirmLabel="确认关闭（不可恢复）" busy={busyKey === `close:${item.id}`} onConfirm={() => void runAction(`close:${item.id}`, () => platformClient.setGovernanceTenantStatus(item.id, 'close'), '租户已关闭，此为终态。')}/>}
+            {canTakeover && item.status !== 'closed' && <button type="button" disabled={busyKey !== ''} onClick={() => { setTakeoverTarget(takeoverTarget === item.id ? undefined : item.id); setTakeoverDraft(''); }}>转移所有权</button>}
+          </div>{canTakeover && takeoverTarget === item.id && <form onSubmit={submitTakeover} className="filters">
+            <Field label="目标用户 ID" hint="必须是该租户的活跃成员；转移后原 owner 降为 admin。">
+              <input required maxLength={64} autoComplete="off" value={takeoverDraft} onChange={event => setTakeoverDraft(event.target.value)} placeholder="用户 UUID"/>
+            </Field>
+            <button className="primary" type="submit" disabled={busyKey !== ''}>确认转移所有权</button>
+          </form>}</td>}
+        </tr>;
+      })}</tbody></table></div>}
+      <GovernancePagination list={list} label="租户分页"/>
+    </Panel>
+  </>;
+}
+
+export function GovernanceOperatorsPage({ me }: { me: MeState }) {
+  const isSuperadmin = governanceRoles(me, ['superadmin']);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [operators, setOperators] = useState<PlatformGovernanceOperatorSummary[]>();
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown>();
+  const [busyKey, setBusyKey] = useState('');
+  const [actionError, setActionError] = useState<unknown>();
+  const [notice, setNotice] = useState('');
+  const [grantDraft, setGrantDraft] = useState({ userId: '', role: 'operations' as PlatformAdminRole });
+  const [createDraft, setCreateDraft] = useState({ email: '', displayName: '', password: '', role: 'operations' as PlatformAdminRole });
+
+  useEffect(() => {
+    if (!isSuperadmin) {
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setLoading(true);
+    setLoadError(undefined);
+    void platformClient.listGovernanceOperators({ signal: controller.signal }).then(result => {
+      if (!controller.signal.aborted) setOperators(result);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setLoadError(error);
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [isSuperadmin, reloadKey]);
+
+  async function runAction(key: string, action: () => Promise<unknown>, message: string) {
+    setBusyKey(key);
+    setActionError(undefined);
+    setNotice('');
+    try {
+      await action();
+      setNotice(message);
+      setReloadKey(value => value + 1);
+    } catch (error) {
+      if (error instanceof PlatformApiError && error.status === 401) clearPlatformCsrfToken();
+      setActionError(error);
+    } finally {
+      setBusyKey('');
+    }
+  }
+
+  function submitGrant(event: FormEvent) {
+    event.preventDefault();
+    const userId = grantDraft.userId.trim();
+    if (userId === '') return;
+    void runAction(
+      'grant',
+      () => platformClient.grantGovernanceOperatorRole(userId, grantDraft.role),
+      '角色已授予。',
+    );
+  }
+
+  function submitCreate(event: FormEvent) {
+    event.preventDefault();
+    void runAction(
+      'create',
+      () => platformClient.createGovernanceOperator({
+        email: createDraft.email,
+        ...(createDraft.displayName.trim() === '' ? {} : { displayName: createDraft.displayName }),
+        password: createDraft.password,
+        role: createDraft.role,
+      }),
+      '操作员已创建。初始密码不会回显；MFA 注册走受信任的 CLI 流程。',
+    );
+    setCreateDraft({ email: '', displayName: '', password: '', role: 'operations' });
+  }
+
+  if (!isSuperadmin) {
+    return <>
+      <div className="page-title"><div><p className="eyebrow">治理</p><h1>操作员管理</h1><p>平台操作员账号与角色分配。</p></div></div>
+      <div className="notice" role="note"><strong>仅超级管理员</strong><span>操作员管理仅对 superadmin 角色开放；最终授权仍由服务端判定。</span></div>
+    </>;
+  }
+
+  return <>
+    <div className="page-title"><div><p className="eyebrow">治理</p><h1>操作员管理</h1><p>查看平台操作员，授予或撤销角色，并创建新操作员账号。</p></div></div>
+    <div className="notice" role="note"><strong>安全约束</strong><span>不能撤销自己的角色；最后一个 superadmin 不能被撤销。新操作员的初始密码不回显，MFA 注册通过受信任的 CLI 流程完成。</span></div>
+    <Panel title="操作员列表">
+      {loading && <div className="skeleton" role="status" aria-label="正在加载操作员"><i/><i/><i/></div>}
+      {!loading && loadError !== undefined && <PlatformErrorNotice error={loadError} onRetry={() => setReloadKey(value => value + 1)} title="操作员列表读取失败"/>}
+      {actionError !== undefined && <PlatformErrorNotice error={actionError} title="操作员操作失败"/>}
+      {notice && <div className="notice" role="status"><strong>操作完成</strong><span>{notice}</span></div>}
+      {!loading && loadError === undefined && operators?.length === 0 && <div className="empty" role="status">当前没有操作员。</div>}
+      {!loading && loadError === undefined && operators !== undefined && operators.length > 0 && <div className="table-wrap"><table aria-label="操作员列表"><thead><tr><th>邮箱</th><th>显示名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody>{operators.map(item => <tr key={item.userId}>
+        <td>{item.email}</td>
+        <td>{item.displayName ?? '—'}</td>
+        <td><div className="actions">{item.roles.map(role => <Badge key={role} tone={role === 'superadmin' ? 'warn' : 'neutral'}>{roleLabels[role]}</Badge>)}</div></td>
+        <td><Badge tone={item.disabledAt === null ? 'good' : 'bad'}>{item.disabledAt === null ? '启用' : '已禁用'}</Badge></td>
+        <td><div className="actions">{item.roles.map(role => <GovernanceConfirmButton
+          key={role}
+          label={`撤销 ${roleLabels[role]}`}
+          confirmLabel={`确认撤销 ${roleLabels[role]}`}
+          busy={busyKey === `revoke:${item.userId}:${role}`}
+          onConfirm={() => void runAction(
+            `revoke:${item.userId}:${role}`,
+            () => platformClient.revokeGovernanceOperatorRole(item.userId, role),
+            `已撤销 ${roleLabels[role]} 角色。`,
+          )}
+        />)}</div></td>
+      </tr>)}</tbody></table></div>}
+    </Panel>
+    <Panel title="授予角色">
+      <form onSubmit={submitGrant}>
+        <Field label="用户 ID"><input required maxLength={64} autoComplete="off" value={grantDraft.userId} onChange={event => setGrantDraft(current => ({ ...current, userId: event.target.value }))} placeholder="用户 UUID"/></Field>
+        <Field label="角色"><select value={grantDraft.role} onChange={event => setGrantDraft(current => ({ ...current, role: event.target.value as PlatformAdminRole }))}>{PLATFORM_ADMIN_ROLES.map(role => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></Field>
+        <SaveButton busy={busyKey === 'grant'}>授予角色</SaveButton>
+      </form>
+    </Panel>
+    <Panel title="创建操作员">
+      <form onSubmit={submitCreate}>
+        <Field label="邮箱"><input required type="email" maxLength={320} autoComplete="off" value={createDraft.email} onChange={event => setCreateDraft(current => ({ ...current, email: event.target.value }))}/></Field>
+        <Field label="显示名（可选）"><input maxLength={255} autoComplete="off" value={createDraft.displayName} onChange={event => setCreateDraft(current => ({ ...current, displayName: event.target.value }))}/></Field>
+        <Field label="初始密码" hint="至少 12 个字符；创建后不回显，请线下告知并督促尽快改密。"><input required minLength={12} type="password" autoComplete="new-password" value={createDraft.password} onChange={event => setCreateDraft(current => ({ ...current, password: event.target.value }))}/></Field>
+        <Field label="角色"><select value={createDraft.role} onChange={event => setCreateDraft(current => ({ ...current, role: event.target.value as PlatformAdminRole }))}>{PLATFORM_ADMIN_ROLES.map(role => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></Field>
+        <SaveButton busy={busyKey === 'create'}>创建操作员</SaveButton>
+      </form>
+    </Panel>
+  </>;
+}
+
 function ProtectedPlatformRoute({ auth, me, onLogout }: { auth: AuthState; me: MeState; onLogout: () => Promise<void> }) {
   const location = useLocation();
   if (auth.kind === 'checking') return <LoadingPage/>;
@@ -2927,5 +3401,5 @@ export function SaasPlatformApp() {
     }
   }, [navigate, signOut]);
 
-  return <Routes><Route path="/platform" element={<PlatformIndex auth={auth}/>}/><Route path="/platform/login" element={auth.kind === 'checking' ? <LoadingPage/> : auth.kind === 'signed-in' ? <Navigate to={loginReturnPath} replace/> : <PlatformLoginPage onLogin={login} sessionError={sessionError}/>}/><Route path="/platform/mfa/enroll" element={<MfaEnrollmentPage/>}/><Route element={<ProtectedPlatformRoute auth={auth} me={me} onLogout={logout}/>}><Route path="/platform/overview" element={<PlatformOverviewPage me={me} onRetryMe={reloadMe}/>}/><Route path="/platform/ops" element={<OpsOverviewPage/>}/><Route path="/platform/unknown-outcomes" element={<UnknownOutcomesPage me={me}/>}/><Route path="/platform/capacity" element={<CapacityPolicyPage me={me}/>}/><Route path="/platform/pricing" element={<PricingPage me={me}/>}/><Route path="/platform/refunds" element={<RefundsPage me={me}/>}/><Route path="/platform/catalog/products" element={<ProductsPage/>}/><Route path="/platform/catalog/capabilities" element={<CapabilitiesPage/>}/><Route path="/platform/catalog/rights" element={<RightsPage me={me}/>}/><Route path="/platform/supply/accounts" element={<SupplyAccountsPage me={me}/>}/><Route path="/platform/audit/events" element={<AuditHistoryPage/>}/></Route><Route path="*" element={<Navigate to="/platform" replace/>}/></Routes>;
+  return <Routes><Route path="/platform" element={<PlatformIndex auth={auth}/>}/><Route path="/platform/login" element={auth.kind === 'checking' ? <LoadingPage/> : auth.kind === 'signed-in' ? <Navigate to={loginReturnPath} replace/> : <PlatformLoginPage onLogin={login} sessionError={sessionError}/>}/><Route path="/platform/mfa/enroll" element={<MfaEnrollmentPage/>}/><Route element={<ProtectedPlatformRoute auth={auth} me={me} onLogout={logout}/>}><Route path="/platform/overview" element={<PlatformOverviewPage me={me} onRetryMe={reloadMe}/>}/><Route path="/platform/ops" element={<OpsOverviewPage/>}/><Route path="/platform/unknown-outcomes" element={<UnknownOutcomesPage me={me}/>}/><Route path="/platform/capacity" element={<CapacityPolicyPage me={me}/>}/><Route path="/platform/pricing" element={<PricingPage me={me}/>}/><Route path="/platform/refunds" element={<RefundsPage me={me}/>}/><Route path="/platform/catalog/products" element={<ProductsPage/>}/><Route path="/platform/catalog/capabilities" element={<CapabilitiesPage/>}/><Route path="/platform/catalog/rights" element={<RightsPage me={me}/>}/><Route path="/platform/supply/accounts" element={<SupplyAccountsPage me={me}/>}/><Route path="/platform/audit/events" element={<AuditHistoryPage/>}/><Route path="/platform/governance/users" element={<GovernanceUsersPage me={me}/>}/><Route path="/platform/governance/tenants" element={<GovernanceTenantsPage me={me}/>}/><Route path="/platform/governance/operators" element={<GovernanceOperatorsPage me={me}/>}/></Route><Route path="*" element={<Navigate to="/platform" replace/>}/></Routes>;
 }

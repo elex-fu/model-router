@@ -85,7 +85,7 @@ export interface CustomerWalletLedgerEntry {
   readonly currency: string;
   readonly direction: 'credit' | 'debit';
   readonly amountMinorUnits: string;
-  readonly type: 'top_up' | 'usage_charge';
+  readonly type: 'top_up' | 'usage_charge' | 'wallet_refund';
   readonly createdAt: string;
 }
 
@@ -228,7 +228,8 @@ function mapLedgerEntry(row: WalletLedgerRow, expectedCurrency: string): Custome
   if (
     row.currency !== expectedCurrency ||
     (direction !== 'credit' && direction !== 'debit') ||
-    (sourceType !== 'wallet_funding' && sourceType !== 'billing_settlement')
+    (sourceType !== 'wallet_funding' && sourceType !== 'billing_settlement' && sourceType !== 'wallet_refund') ||
+    (sourceType === 'wallet_refund' && direction !== 'debit')
   ) {
     storage();
   }
@@ -245,7 +246,7 @@ function mapLedgerEntry(row: WalletLedgerRow, expectedCurrency: string): Custome
     currency: expectedCurrency,
     direction,
     amountMinorUnits: amount.toString(),
-    type: sourceType === 'wallet_funding' ? 'top_up' : 'usage_charge',
+    type: sourceType === 'wallet_funding' ? 'top_up' : sourceType === 'wallet_refund' ? 'wallet_refund' : 'usage_charge',
     createdAt: storedTimestamp(row.created_at),
   };
 }

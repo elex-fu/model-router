@@ -228,6 +228,51 @@ test('tenant, amount, and currency mismatches persist reconciliation without cre
   assert.equal(fixture.database.state.orders[0]?.state, 'pending');
 });
 
+test('a provider-declined confirmation routes a signed success to reconciliation without fulfilling', async () => {
+  const fixture = createFixture();
+  fixture.provider.confirmEventResult = { confirmed: false, code: 'PROVIDER_QUERY_NOT_SUCCESS' };
+  const order = await createOrder(fixture);
+  assert.ok(order.providerOrderId);
+
+  await fixture.service.handleWebhook(
+    {},
+    successWebhook(order.providerOrderId, 'tenant-a', 'event-unconfirmed', '125'),
+  );
+  const batch = await fixture.service.processPendingWebhooks();
+  assert.equal(batch.processed, 1);
+  assert.equal(fixture.provider.confirmCalls.length, 1);
+  assert.equal(fixture.provider.confirmCalls[0]?.order.localOrderId, order.id);
+  assert.equal(fixture.provider.confirmCalls[0]?.order.amountMinorUnits, '125');
+  assert.equal(fixture.provider.confirmCalls[0]?.event.status, 'succeeded');
+  assert.equal(fixture.database.state.inbox[0]?.processing_outcome, 'reconciliation');
+  assert.equal(fixture.database.state.inbox[0]?.outcome_code, 'PROVIDER_QUERY_NOT_SUCCESS');
+  assert.equal(fixture.database.state.orders[0]?.state, 'pending');
+  assert.equal(fixture.database.state.funding.length, 0, 'an unconfirmed success never credits the wallet');
+});
+
+test('a thrown confirmation retries the claim and a later confirmed attempt fulfills', async () => {
+  const fixture = createFixture();
+  fixture.provider.confirmEventResult = { confirmed: true };
+  fixture.provider.confirmEventError = new Error('provider requery unreachable');
+  const order = await createOrder(fixture);
+  assert.ok(order.providerOrderId);
+
+  await fixture.service.handleWebhook({}, successWebhook(order.providerOrderId, 'tenant-a', 'event-retry', '125'));
+  const first = await fixture.service.processPendingWebhooks();
+  assert.equal(first.retrying, 1);
+  assert.equal(fixture.database.state.orders[0]?.state, 'pending');
+  assert.equal(fixture.database.state.funding.length, 0);
+
+  fixture.provider.confirmEventError = undefined;
+  fixture.clock.value = new Date(fixture.clock.value.getTime() + 2_000); // outlast the 1s retry backoff
+  const second = await fixture.service.processPendingWebhooks();
+  assert.equal(second.processed, 1);
+  assert.equal(fixture.database.state.inbox[0]?.processing_outcome, 'fulfilled');
+  assert.equal(fixture.database.state.orders[0]?.state, 'fulfilled');
+  assert.equal(fixture.database.state.funding.length, 1);
+  assert.equal(fixture.provider.confirmCalls.length, 2);
+});
+
 test('ledger failure rolls back order and inbox changes, then a retry can fulfill safely', async () => {
   const fixture = createFixture();
   const order = await createOrder(fixture);

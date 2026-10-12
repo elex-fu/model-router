@@ -1,5 +1,6 @@
 import type { SaasDatabase } from '../db/index.js';
 import type { GatewayProtocol } from './contracts.js';
+import { effectiveWeight, parseHealthScoreColumn } from './health-score.js';
 import {
   ProviderAccountScheduler,
   type ProviderAccountSchedulerAffinityBindDecision,
@@ -67,6 +68,12 @@ interface EligibilityRow extends Row {
   account_status: unknown;
   account_validation_state: unknown;
   account_authz_version: unknown;
+  account_priority: unknown;
+  account_weight: unknown;
+  account_quota_state: unknown;
+  account_rpm_limit: unknown;
+  account_tpm_limit: unknown;
+  account_health_score: unknown;
   credential_owner_kind: unknown;
   credential_supply_mode: unknown;
   credential_id: unknown;
@@ -206,6 +213,10 @@ SELECT product.status AS product_status,
        account.rights_id AS account_rights_id, account.rights_version AS account_rights_version,
        account.status AS account_status, account.validation_state AS account_validation_state,
        account.authz_version AS account_authz_version,
+       account.priority AS account_priority, account.weight AS account_weight,
+       account.quota_state AS account_quota_state,
+       account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
+       health.health_score AS account_health_score,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -275,6 +286,10 @@ SELECT product.status AS product_status,
    AND account_capability.model = capability.model
    AND account_capability.endpoint = capability.endpoint
    AND account_capability.capability_version = capability.version
+  /* R7 (migration 098): PK (owner_scope_key, account_id) keeps this fan-out free. */
+  LEFT JOIN saas_provider_account_runtime_health health
+    ON health.owner_scope_key = $1::text AND health.account_id = account.id
+   AND health.owner_kind = 'tenant'
  WHERE product.provider_id = $4 AND product.product_id = $5 AND product.status = 'active'
    AND profile.supply_mode = 'byok' AND profile.status = 'active'
    AND profile.authz_version = $12 AND profile.model_scopes @> ARRAY[$15]::text[]
@@ -318,6 +333,10 @@ SELECT product.status AS product_status,
        account.rights_id AS account_rights_id, account.rights_version AS account_rights_version,
        account.status AS account_status, account.validation_state AS account_validation_state,
        account.authz_version AS account_authz_version,
+       account.priority AS account_priority, account.weight AS account_weight,
+       account.quota_state AS account_quota_state,
+       account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
+       health.health_score AS account_health_score,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -417,6 +436,10 @@ SELECT product.status AS product_status,
    AND account_capability.model = capability.model
    AND account_capability.endpoint = capability.endpoint
    AND account_capability.capability_version = capability.version
+  /* R7 (migration 098): PK (owner_scope_key, account_id) keeps this fan-out free. */
+  LEFT JOIN saas_provider_account_runtime_health health
+    ON health.owner_scope_key = 'platform' AND health.account_id = account.id
+   AND health.owner_kind = 'platform'
  WHERE product.provider_id = $5 AND product.product_id = $6 AND product.status = 'active'
    AND profile.supply_mode = 'platform' AND profile.status = 'active'
    AND profile.authz_version = $13 AND profile.model_scopes @> ARRAY[$21]::text[]
@@ -479,6 +502,20 @@ SELECT count(*)::text AS in_flight
    AND status = 'held'
    AND lease_expires_at > clock_timestamp()`;
 
+/*
+ * R6 (migration 098): the trailing 60-second per-account consumption window.
+ * The (account_scope, account_id, window_start DESC) index keeps this a
+ * bounded single-index range scan over at most one row per admission second;
+ * no heavy aggregation ever enters the eligibility path.
+ */
+const RATE_WINDOW_SQL = `/* postgres-provider-account-scheduler:rate-window */
+SELECT coalesce(sum(requests), 0)::text AS requests,
+       coalesce(sum(tokens), 0)::text AS tokens
+  FROM saas_provider_account_rate_counters
+ WHERE account_scope = $1
+   AND account_id = $2
+   AND window_start > $3::timestamptz - interval '60 seconds'`;
+
 function isRecord(value: unknown): value is Row {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -506,6 +543,78 @@ function sameVersion(actual: unknown, expected: unknown): boolean {
   const left = versionText(actual);
   const right = versionText(expected);
   return left !== null && right !== null && left === right;
+}
+
+/* Contract C-7 bounds, mirrored by the 082 CHECK constraints on both account tables. */
+const SCHEDULING_PRIORITY_MAX = 1000;
+const SCHEDULING_WEIGHT_MAX = 10_000;
+
+function schedulingScalar(value: unknown, min: number, max: number): number | null {
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : null;
+  return parsed !== null && Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+}
+
+function schedulingPriority(value: unknown): number | null {
+  return schedulingScalar(value, 0, SCHEDULING_PRIORITY_MAX);
+}
+
+function schedulingWeight(value: unknown): number | null {
+  return schedulingScalar(value, 1, SCHEDULING_WEIGHT_MAX);
+}
+
+/*
+ * Track D4 (migration 093): the persisted quota snapshot is a scheduling
+ * signal only. NULL (never checked), 'unknown' (last check untrustworthy),
+ * and 'ok' leave the candidate untouched — exactly the pre-D4 behavior.
+ * 'low' demotes the candidate to the minimum contract weight, and
+ * 'exhausted' denies this candidate alone. Any other persisted shape blocks
+ * the whole selection, mirroring the fail-closed scheduling-scalar rule;
+ * the signal never enters the billing path.
+ */
+type SchedulingQuotaSignal = 'none' | 'low' | 'exhausted' | 'malformed';
+
+function schedulingQuotaSignal(value: unknown): SchedulingQuotaSignal {
+  if (value === null || value === undefined || value === 'unknown' || value === 'ok') return 'none';
+  if (value === 'low' || value === 'exhausted') return value;
+  return 'malformed';
+}
+
+/*
+ * R6 (migration 098): persisted per-account rate ceilings. NULL keeps the
+ * pre-R6 "no account-level cap" behavior and skips the window read entirely;
+ * a positive safe integer is a hard ceiling; anything else blocks the whole
+ * selection, mirroring the D1 scheduling-scalar fail-closed rule. The 098
+ * CHECK constraints already enforce positivity, so a non-positive or
+ * non-integer persisted value is authority drift and must never be guessed.
+ */
+const SCHEDULING_RATE_LIMIT_MAX = 1_000_000_000;
+
+function schedulingRateLimit(value: unknown): number | null | 'malformed' {
+  if (value === null || value === undefined) return null;
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : null;
+  return parsed !== null && Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= SCHEDULING_RATE_LIMIT_MAX
+    ? parsed
+    : 'malformed';
+}
+
+const RATE_WINDOW_SUM_MAX = 1_000_000_000_000_000n;
+
+function rateWindowSum(value: unknown): bigint | null {
+  try {
+    const parsed =
+      typeof value === 'bigint'
+        ? value
+        : typeof value === 'number' && Number.isSafeInteger(value)
+          ? BigInt(value)
+          : typeof value === 'string' && /^[0-9]+$/.test(value)
+            ? BigInt(value)
+            : null;
+    return parsed !== null && parsed >= 0n && parsed <= RATE_WINDOW_SUM_MAX ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function timestamp(value: unknown): Date | null {
@@ -889,6 +998,60 @@ class PostgresEligibilityAuthority {
         if (!validateCommonEligibilityRow(row, input.candidate, input, input.now) || !relationIsValid) {
           return { decision: 'deny', reason: 'persisted account eligibility facts no longer match the candidate' };
         }
+        const priority = schedulingPriority(row.account_priority);
+        const weight = schedulingWeight(row.account_weight);
+        if (priority === null || weight === null) {
+          return { decision: 'block', reason: 'persisted account scheduling scalars are malformed' };
+        }
+        const quotaSignal = schedulingQuotaSignal(row.account_quota_state);
+        if (quotaSignal === 'malformed') {
+          return { decision: 'block', reason: 'persisted account quota signal is malformed' };
+        }
+        if (quotaSignal === 'exhausted') {
+          return { decision: 'deny', reason: 'persisted account quota snapshot is exhausted' };
+        }
+        // R6: account-level rpm/tpm ceilings deny only this candidate (the D4
+        // exhausted semantics); NULL limits skip the window read entirely.
+        const rpmLimit = schedulingRateLimit(row.account_rpm_limit);
+        const tpmLimit = schedulingRateLimit(row.account_tpm_limit);
+        if (rpmLimit === 'malformed' || tpmLimit === 'malformed') {
+          return { decision: 'block', reason: 'persisted account rate limits are malformed' };
+        }
+        if (rpmLimit !== null || tpmLimit !== null) {
+          const windowResult = await tx.query<{ requests: unknown; tokens: unknown }>(RATE_WINDOW_SQL, [
+            input.candidate.supplyMode === 'byok' ? 'tenant' : 'platform',
+            input.candidate.accountId,
+            input.now,
+          ]);
+          if (windowResult.rows.length !== 1) {
+            return { decision: 'block', reason: 'persisted account rate window is unavailable' };
+          }
+          const windowRequests = rateWindowSum(windowResult.rows[0]?.requests);
+          const windowTokens = rateWindowSum(windowResult.rows[0]?.tokens);
+          if (windowRequests === null || windowTokens === null) {
+            return { decision: 'block', reason: 'persisted account rate window is malformed' };
+          }
+          if (rpmLimit !== null && windowRequests >= BigInt(rpmLimit)) {
+            return { decision: 'deny', reason: 'persisted account rpm limit is exhausted' };
+          }
+          if (tpmLimit !== null && windowTokens >= BigInt(tpmLimit)) {
+            return { decision: 'deny', reason: 'persisted account tpm limit is exhausted' };
+          }
+        }
+        // R7: the continuous health score modulates the weighted draw only;
+        // it never grants or removes eligibility by itself. The shared
+        // health-score module (agent N's R7 formula) throws on any malformed
+        // persisted shape, which maps to the fail-closed scheduling block
+        // instead of a guess.
+        let adjustedWeight: number;
+        try {
+          const healthScore = parseHealthScoreColumn(row.account_health_score);
+          // D4: a 'low' quota snapshot demotes to the contract minimum
+          // weight; the R7 health multiplier then applies on top of it.
+          adjustedWeight = effectiveWeight(quotaSignal === 'low' ? 1 : weight, healthScore);
+        } catch {
+          return { decision: 'block', reason: 'persisted account health score is malformed' };
+        }
         return {
           decision: 'allow',
           candidate: input.candidate,
@@ -900,9 +1063,9 @@ class PostgresEligibilityAuthority {
             validationState: 'verified',
           },
           rights: toRights(row, input.candidate),
-          // No priority or weight exists in the persisted contract; use a neutral deterministic tie.
-          priority: 0,
-          weight: 1,
+          // Contract C-7: persisted scheduling scalars (082), never inferred.
+          priority,
+          weight: adjustedWeight,
         };
       });
     } catch {

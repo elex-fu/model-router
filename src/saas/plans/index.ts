@@ -8,6 +8,7 @@ export {
   type SaasPlanHttpHandler,
   type SaasPlanHttpOptions,
 } from './http.js';
+export type { GrantedMarketingSubscription, GrantMarketingSubscriptionInput } from './service.js';
 export { ByokServicePlanService, ServicePlanService } from './service.js';
 export type {
   ByokPlanEntitlementRequestContext,

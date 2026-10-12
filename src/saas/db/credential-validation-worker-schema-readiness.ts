@@ -4,6 +4,7 @@ import { PROVIDER_SUPPLY_CREDENTIALS_SAAS_MIGRATION } from './migrations/016_pro
 import { CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION } from './migrations/035_credential_validation_jobs.js';
 import { PROVIDER_CREDENTIAL_WRAPPER_HISTORY_SAAS_MIGRATION } from './migrations/039_provider_credential_wrapper_history.js';
 import { RUNTIME_ROLE_LOCK_FENCES_SAAS_MIGRATION } from './migrations/048_runtime_role_lock_fences.js';
+import { PLATFORM_CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION } from './migrations/083_platform_credential_validation_jobs.js';
 import { PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION } from './migrations/050_prepared_evidence_authorization_advisory_fences.js';
 import type { SqlExecutor } from './types.js';
 
@@ -27,6 +28,14 @@ const T = {
   accounts: 'saas_tenant_provider_accounts', bindings: 'saas_tenant_provider_account_capabilities',
   credentials: 'saas_tenant_provider_credentials', versions: 'saas_tenant_provider_credential_versions',
   wrappings: 'saas_tenant_provider_credential_wrappings',
+} as const;
+// 083 platform-owner queue family: the worker claims both owner dimensions
+// through one fenced protocol, so structural readiness covers both.
+const P = {
+  jobs: 'saas_platform_provider_credential_validation_jobs',
+  accounts: 'saas_platform_provider_accounts', bindings: 'saas_platform_provider_account_capabilities',
+  credentials: 'saas_platform_provider_credentials', versions: 'saas_platform_provider_credential_versions',
+  wrappings: 'saas_platform_provider_credential_wrappings',
 } as const;
 const columns: Array<{ table_name: string; column_name: string; type_name: string; not_null: boolean }> = [];
 function fields(table: string, type: string, names: string): void {
@@ -54,6 +63,7 @@ for (const table of [T.accounts, T.credentials]) {
   fields(table, 'text', 'id provider_id product_id credential_type status validation_state validation_error_code?');
   fields(table, 'int8', 'authz_version');
   fields(table, 'timestamptz', 'last_validated_at? updated_at');
+fields(T.accounts, 'int4', 'revalidation_interval_seconds?');
 }
 fields(T.accounts, 'text', 'region purpose rights_id');
 fields(T.accounts, 'int4', 'rights_version');
@@ -67,6 +77,30 @@ fields(T.versions, 'timestamptz', 'expires_at?');
 fields(T.wrappings, 'uuid', 'tenant_id');
 fields(T.wrappings, 'text', 'account_id credential_id kms_key_id wrapped_dek');
 fields(T.wrappings, 'int4', 'credential_version wrapping_revision');
+fields(P.jobs, 'uuid', 'id');
+fields(P.jobs, 'text', 'account_id credential_id provider_id product_id credential_type target_model target_endpoint idempotency_key status last_error_code?');
+fields(P.jobs, 'int4', 'credential_version capability_version attempt_count');
+fields(P.jobs, 'int8', 'lease_generation');
+fields(P.jobs, 'text[]', 'allowed_models');
+fields(P.jobs, 'timestamptz', 'available_at created_at updated_at lease_until? completed_at?');
+fields(P.bindings, 'text', 'account_id provider_id product_id model endpoint');
+fields(P.bindings, 'int4', 'capability_version');
+for (const table of [P.accounts, P.credentials]) {
+  fields(table, 'text', 'id provider_id product_id credential_type status validation_state validation_error_code?');
+  fields(table, 'int8', 'authz_version');
+  fields(table, 'timestamptz', 'last_validated_at? updated_at');
+fields(P.accounts, 'int4', 'revalidation_interval_seconds?');
+}
+fields(P.accounts, 'text', 'region purpose rights_id');
+fields(P.accounts, 'int4', 'rights_version');
+fields(P.credentials, 'text', 'account_id');
+fields(P.credentials, 'int4', 'current_version?');
+fields(P.credentials, 'timestamptz', 'expires_at?');
+fields(P.versions, 'text', 'account_id credential_id status algorithm kms_purpose kms_key_id wrapped_dek nonce ciphertext auth_tag');
+fields(P.versions, 'int4', 'version schema_version context_version wrapping_revision');
+fields(P.versions, 'timestamptz', 'expires_at?');
+fields(P.wrappings, 'text', 'account_id credential_id kms_key_id wrapped_dek');
+fields(P.wrappings, 'int4', 'credential_version wrapping_revision');
 
 const names = (value: string) => value.split(' ');
 // Every manifest identifier is trusted ASCII. PostgreSQL stores at most 63
@@ -90,6 +124,20 @@ key(T.jobs, `${T.jobs}_identity_unique`, 'u', 'tenant_id credential_id credentia
 key(T.jobs, `${T.jobs}_idempotency_unique`, 'u', 'idempotency_key');
 key(T.accounts, `${T.accounts}_account_identity_unique`, 'u', 'tenant_id id provider_id product_id');
 key(T.credentials, `${T.credentials}_identity_unique`, 'u', 'tenant_id id account_id');
+for (const [table, value] of [
+  [P.jobs, 'id'], [P.accounts, 'id'], [P.credentials, 'id'], [P.versions, 'credential_id version'],
+  [P.bindings, 'account_id provider_id product_id model endpoint capability_version'],
+  [P.wrappings, 'credential_id credential_version wrapping_revision'],
+] as const) key(table, `${table}_pkey`, 'p', value);
+key(P.jobs, `${P.jobs}_identity_unique`, 'u', 'credential_id credential_version');
+key(P.jobs, `${P.jobs}_idempotency_unique`, 'u', 'idempotency_key');
+key(P.accounts, `${P.accounts}_account_identity_unique`, 'u', 'id provider_id product_id');
+key(P.credentials, `${P.credentials}_identity_unique`, 'u', 'id account_id');
+for (const [table, suffix, value, referenced, refValue] of [
+  [P.jobs, 'account_fk', 'account_id provider_id product_id', P.accounts, 'id provider_id product_id'],
+  [P.jobs, 'credential_fk', 'credential_id account_id', P.credentials, 'id account_id'],
+  [P.jobs, 'version_fk', 'credential_id credential_version', P.versions, 'credential_id version'],
+] as const) key(table, `${table}_${suffix}`, 'f', value, referenced, refValue);
 for (const [table, suffix, value, referenced, refValue] of [
   [T.jobs, 'account_fk', 'tenant_id account_id provider_id product_id', T.accounts, 'tenant_id id provider_id product_id'],
   [T.jobs, 'credential_fk', 'tenant_id credential_id account_id', T.credentials, 'tenant_id id account_id'],
@@ -115,6 +163,8 @@ const indexes = [
     columns: names('tenant_id credential_id account_id version'), unique: true, predicate: null },
   { table_name: T.wrappings, name: `${T.wrappings}_operation_idx`,
     columns: names('tenant_id credential_id credential_version operation_id'), unique: true, predicate: null },
+  { table_name: P.jobs, name: `${P.jobs}_claim_idx`, columns: names('available_at created_at id'), unique: false,
+    predicate: "status = ANY (ARRAY['queued'::text, 'leased'::text])" },
 ].map((index) => ({ ...index, name: catalogName(index.name) }));
 // Only single comparisons / status ANY / equality of non-null boolean facts
 // are normalized below. Removing grouping is not a general SQL equivalence rule.
@@ -125,6 +175,11 @@ const checks = [
   ...['attempt_count >= 0', 'lease_generation >= 0', 'credential_version >= 1', 'capability_version >= 1']
     .map((expression) => ({ table_name: T.jobs, name: null, expression })),
   { table_name: T.capabilities, name: null, expression: "evidence_sha256 ~ '^[0-9a-f]{64}$'::text" },
+  { table_name: P.jobs, name: `${P.jobs}_lease_shape`, expression: "(status = 'leased'::text) = (lease_until IS NOT NULL)" },
+  { table_name: P.jobs, name: `${P.jobs}_completion_shape`, expression: "(status = ANY (ARRAY['verified'::text, 'failed'::text, 'cancelled'::text])) = (completed_at IS NOT NULL)" },
+  { table_name: P.jobs, name: null, expression: "status = ANY (ARRAY['queued'::text, 'leased'::text, 'verified'::text, 'failed'::text, 'cancelled'::text])" },
+  ...['attempt_count >= 0', 'lease_generation >= 0', 'credential_version >= 1', 'capability_version >= 1']
+    .map((expression) => ({ table_name: P.jobs, name: null, expression })),
 ].map((check) => ({ ...check, name: check.name === null ? null : catalogName(check.name) }));
 
 interface Routine { signature: string; source: string; return_type: string; volatility: string;
@@ -156,6 +211,15 @@ const credentialInvalidation = routine(CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION
 const accountInvalidation = routine(CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION.sql,
   'saas_invalidate_account_credential_validation_jobs', [], true);
 const wrappingImmutable = routine(PROVIDER_CREDENTIAL_WRAPPER_HISTORY_SAAS_MIGRATION.sql, 'saas_provider_credential_wrapper_history_reject_change');
+// 083 writes its two invalidation wrappers invoker-style and ALTERs the exact
+// 058 execution metadata in the same migration; the readiness contract parses
+// the CREATE body and requires definer metadata, mirroring the tenant pair.
+const platformJobIdentity = routine(PLATFORM_CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION.sql,
+  'saas_platform_credential_validation_job_identity_immutable');
+const platformCredentialInvalidation = routine(PLATFORM_CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION.sql,
+  'saas_platform_invalidate_credential_validation_jobs', [], true);
+const platformAccountInvalidation = routine(PLATFORM_CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION.sql,
+  'saas_platform_invalidate_account_credential_validation_jobs', [], true);
 const writer = routine(PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql,
   'saas_prepared_evidence_authorization_writer_fence', [], true);
 routine(PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql,
@@ -179,6 +243,10 @@ trigger(T.jobs, 'identity_immutable', jobIdentity, 19);
 trigger(T.jobs, 'no_delete', jobDelete, 11);
 trigger(T.accounts, 'invalidate_validation_jobs', accountInvalidation, 17, ['status']);
 trigger(T.credentials, 'invalidate_validation_jobs', credentialInvalidation, 17, ['current_version', 'status']);
+trigger(P.jobs, 'identity_immutable', platformJobIdentity, 19);
+trigger(P.jobs, 'no_delete', jobDelete, 11);
+trigger(P.accounts, 'invalidate_validation_jobs', platformAccountInvalidation, 17, ['status']);
+trigger(P.credentials, 'invalidate_validation_jobs', platformCredentialInvalidation, 17, ['current_version', 'status']);
 trigger(T.accounts, 'validate_rights', rightsMatch, 23,
   names('provider_id product_id credential_type supply_mode region purpose rights_id rights_version'));
 trigger(T.accounts, 'require_byok_rights', rightsFence, 23);
@@ -193,7 +261,15 @@ trigger(T.accounts, 'pe_authz_fence', writer, 31, [], ['provider_account', 'tena
 trigger(T.credentials, 'pe_authz_fence', writer, 31, [], ['credential', 'tenant', 'tenant_id', 'id', 'account_id']);
 trigger(T.versions, 'pe_authz_fence', writer, 31, [], ['credential_version', 'tenant', 'tenant_id', 'credential_id', 'version', 'account_id']);
 
-const CONTRACT = JSON.stringify({ tables: Object.values(T).map((table_name) => ({ table_name })),
+/** Exact, grouped deparse expectation; unlike simple checks, parentheses are never erased.
+ * Only the two fixed canonical custom endpoints are additional legal job identities.
+ * This is a future forward contract, NOT a migration/registration or approval.
+ */
+export const CANONICAL_CREDENTIAL_VALIDATION_ENDPOINT_EXPRESSION = "(((target_endpoint <> ''::text) AND (target_endpoint = btrim(target_endpoint)) AND (POSITION(('://'::text) IN (target_endpoint)) = 0) AND (\"left\"(target_endpoint, 1) <> '/'::text) AND (POSITION(('?'::text) IN (target_endpoint)) = 0) AND (POSITION(('#'::text) IN (target_endpoint)) = 0)) OR ((provider_id = 'custom'::text) AND (credential_type = 'api-key'::text) AND (((product_id = 'custom-openai'::text) AND (target_endpoint = '/v1/chat/completions'::text)) OR ((product_id = 'custom-anthropic'::text) AND (target_endpoint = '/v1/messages'::text)))))";
+export type CredentialValidationTargetSchema = 'legacy-v1' | 'canonical-v2';
+
+const CONTRACT = JSON.stringify({ endpointChecks: [],
+  tables: [...Object.values(T), ...Object.values(P)].map((table_name) => ({ table_name })),
   columns, keys, indexes, checks, triggers, routines });
 
 /** One snapshot of public catalog metadata; never reads application data or the migration ledger. */
@@ -210,6 +286,8 @@ keys AS (SELECT * FROM pg_catalog.jsonb_to_recordset((SELECT value->'keys' FROM 
 indexes AS (SELECT * FROM pg_catalog.jsonb_to_recordset((SELECT value->'indexes' FROM contract))
   AS x(table_name text, name text, columns text[], "unique" boolean, predicate text)),
 checks AS (SELECT * FROM pg_catalog.jsonb_to_recordset((SELECT value->'checks' FROM contract))
+  AS x(table_name text, name text, expression text)),
+endpoint_checks AS (SELECT * FROM pg_catalog.jsonb_to_recordset((SELECT value->'endpointChecks' FROM contract))
   AS x(table_name text, name text, expression text)),
 triggers AS (SELECT * FROM pg_catalog.jsonb_to_recordset((SELECT value->'triggers' FROM contract))
   AS x(table_name text, name text, signature text, type integer, columns text[], argument_count integer, arguments_hex text)),
@@ -263,7 +341,14 @@ SELECT
     WHERE c.relname = e.table_name AND (e.name IS NULL OR k.conname = e.name) AND k.contype = 'c' AND k.convalidated
       AND coalesce((pg_catalog.to_jsonb(k)->>'conenforced')::boolean, true)
       AND pg_catalog.regexp_replace(pg_catalog.pg_get_expr(k.conbin, k.conrelid), '[[:space:]()]', '', 'g')
-        = pg_catalog.regexp_replace(e.expression, '[[:space:]()]', '', 'g'))) AS checks_ready,
+        = pg_catalog.regexp_replace(e.expression, '[[:space:]()]', '', 'g')))
+    AND NOT EXISTS (SELECT 1 FROM endpoint_checks e WHERE NOT EXISTS (
+      SELECT 1 FROM relations c JOIN pg_catalog.pg_constraint k ON k.conrelid = c.oid
+      WHERE c.relname = e.table_name AND k.conname = e.name AND k.contype = 'c' AND k.convalidated
+        AND coalesce((pg_catalog.to_jsonb(k)->>'conenforced')::boolean, true)
+        AND NOT k.condeferrable AND NOT k.condeferred AND NOT k.connoinherit
+        AND pg_catalog.regexp_replace(pg_catalog.pg_get_expr(k.conbin, k.conrelid), '[[:space:]]', '', 'g')
+          = pg_catalog.regexp_replace(e.expression, '[[:space:]]', '', 'g'))) AS checks_ready,
   NOT EXISTS (SELECT 1 FROM triggers e WHERE NOT EXISTS (SELECT 1 FROM relations c JOIN pg_catalog.pg_trigger t ON t.tgrelid = c.oid
     WHERE c.relname = e.table_name AND t.tgname = e.name AND NOT t.tgisinternal AND t.tgenabled = 'O'
       AND t.tgfoid = pg_catalog.to_regprocedure('model_router_saas.' || e.signature)::oid AND t.tgtype = e.type
@@ -285,9 +370,20 @@ SELECT
 `;
 
 /** Structural worker readiness is NOT a migration history or deployment approval attestation. */
-export async function verifyCredentialValidationWorkerSchemaReadiness(executor: SqlExecutor): Promise<void> {
+export async function verifyCredentialValidationWorkerSchemaReadiness(
+  executor: SqlExecutor, targetSchema: CredentialValidationTargetSchema = 'legacy-v1',
+  owner: 'tenant' | 'platform' = 'tenant',
+): Promise<void> {
   try {
-    const result = await executor.query<Record<ReadinessCheck, unknown>>(SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL, [CONTRACT]);
+    if ((targetSchema !== 'legacy-v1' && targetSchema !== 'canonical-v2') ||
+      (owner !== 'tenant' && owner !== 'platform')) throw new SaasCredentialValidationWorkerSchemaReadinessError();
+    const endpointTable = owner === 'platform' ? P.jobs : T.jobs;
+    const contract = targetSchema === 'legacy-v1' ? CONTRACT : JSON.stringify({
+      ...JSON.parse(CONTRACT),
+      endpointChecks: [{ table_name: endpointTable, name: catalogName(`${endpointTable}_endpoint_shape`),
+        expression: CANONICAL_CREDENTIAL_VALIDATION_ENDPOINT_EXPRESSION }],
+    });
+    const result = await executor.query<Record<ReadinessCheck, unknown>>(SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL, [contract]);
     const row = result.rows.length === 1 ? result.rows[0] : undefined;
     if (!row || CHECKS.some((check) => typeof row[check] !== 'boolean')) throw new SaasCredentialValidationWorkerSchemaReadinessError();
     const failed = CHECKS.filter((check) => row[check] !== true);

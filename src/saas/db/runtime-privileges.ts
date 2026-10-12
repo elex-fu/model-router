@@ -95,6 +95,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'updated_at',
   ]),
+  // E4 platform governance: disable/enable and operator-set password reset.
+  ...columnGrants('saas_users', 'UPDATE', ['password_hash', 'disabled_at', 'updated_at']),
   ...columnGrants('saas_platform_role_assignments', 'SELECT', ['user_id', 'role']),
   ...columnGrants('saas_platform_role_assignments', 'INSERT', ['user_id', 'role', 'granted_at', 'granted_by_user_id']),
   ...columnGrants('saas_bootstrap_tokens', 'SELECT', ['token_hash', 'expires_at', 'consumed_at']),
@@ -150,7 +152,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'id',
     'user_id',
     'kind',
+    'credential_id',
+    'public_key',
     'encrypted_secret',
+    'sign_count',
     'created_at',
     'verified_at',
     'revoked_at',
@@ -160,12 +165,46 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'id',
     'user_id',
     'kind',
+    'credential_id',
+    'public_key',
     'encrypted_secret',
+    'sign_count',
     'created_at',
     'verified_at',
     'revoked_at',
   ]),
-  ...columnGrants('saas_mfa_credentials', 'UPDATE', ['verified_at', 'revoked_at', 'last_used_step']),
+  ...columnGrants('saas_mfa_credentials', 'UPDATE', ['verified_at', 'revoked_at', 'last_used_step', 'sign_count']),
+  ...columnGrants('saas_customer_passkey_ceremonies', 'SELECT', [
+    'id',
+    'user_id',
+    'session_id',
+    'ceremony',
+    'challenge_hash',
+    'credential_id',
+    'password_digest',
+    'attempt_count',
+    'created_at',
+    'expires_at',
+    'consumed_at',
+    'closed_at',
+  ]),
+  ...columnGrants('saas_customer_passkey_ceremonies', 'INSERT', [
+    'id',
+    'user_id',
+    'session_id',
+    'ceremony',
+    'challenge_hash',
+    'credential_id',
+    'password_digest',
+    'created_at',
+    'expires_at',
+  ]),
+  ...columnGrants('saas_customer_passkey_ceremonies', 'UPDATE', [
+    'credential_id',
+    'attempt_count',
+    'consumed_at',
+    'closed_at',
+  ]),
   ...columnGrants('saas_platform_mfa_enrollment_tokens', 'SELECT', [
     'id',
     'user_id',
@@ -223,6 +262,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ]),
   ...columnGrants('saas_tenants', 'INSERT', ['id', 'name', 'slug', 'status', 'created_at', 'updated_at']),
   ...columnGrants('saas_tenants', 'UPDATE', [
+    // E4 platform governance: tenant lifecycle (suspend/resume/close).
+    'status',
     'requests_per_minute',
     'tokens_per_minute',
     'max_concurrent_requests',
@@ -231,6 +272,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ]),
   ...columnGrants('saas_memberships', 'SELECT', ['tenant_id', 'user_id', 'role', 'status', 'revoked_at']),
   ...columnGrants('saas_memberships', 'INSERT', ['tenant_id', 'user_id', 'role', 'created_at', 'updated_at']),
+  // E1 member management: role change / revocation / ownership transfer.
+  ...columnGrants('saas_memberships', 'UPDATE', ['role', 'status', 'revoked_at', 'updated_at']),
   ...columnGrants('saas_projects', 'SELECT', [
     'tenant_id',
     'id',
@@ -269,6 +312,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'updated_at',
   ]),
+  // E1 member removal cascades revocation; project roles stay owner-granted.
+  ...columnGrants('saas_project_memberships', 'UPDATE', ['status', 'revoked_at', 'updated_at']),
   ...columnGrants('saas_invitations', 'SELECT', [
     'tenant_id',
     'id',
@@ -386,6 +431,96 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'requests_per_minute',
     'tokens_per_minute',
     'max_concurrent_requests',
+  ]),
+  // KEY-IP (080): one versioned head row per key. The key service replaces the
+  // policy under a CAS on version and never deletes; created keys insert their
+  // disabled v1 row.
+  ...columnGrants('saas_api_key_ip_policies', 'SELECT', [
+    'tenant_id',
+    'project_id',
+    'key_id',
+    'version',
+    'mode',
+    'rules',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_api_key_ip_policies', 'INSERT', [
+    'tenant_id',
+    'project_id',
+    'key_id',
+    'version',
+    'mode',
+    'rules',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_api_key_ip_policies', 'UPDATE', ['version', 'mode', 'rules', 'updated_at']),
+  // KEY-BUD (081): one versioned budget head per key plus lineage counters and
+  // per-request reservations. The key service CAS-replaces caps and never
+  // deletes; usage corrections may only add their settled delta to the lineage
+  // counters; reservation rows are gateway-written evidence (read-only here).
+  ...columnGrants('saas_api_key_budget_policies', 'SELECT', [
+    'tenant_id',
+    'project_id',
+    'key_id',
+    'lineage_id',
+    'version',
+    'token_daily',
+    'token_lifetime',
+    'charge_daily',
+    'charge_lifetime',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_api_key_budget_policies', 'INSERT', [
+    'tenant_id',
+    'project_id',
+    'key_id',
+    'lineage_id',
+    'version',
+    'token_daily',
+    'token_lifetime',
+    'charge_daily',
+    'charge_lifetime',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_api_key_budget_policies', 'UPDATE', [
+    'version',
+    'token_daily',
+    'token_lifetime',
+    'charge_daily',
+    'charge_lifetime',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_api_key_budget_counters', 'SELECT', [
+    'tenant_id',
+    'project_id',
+    'lineage_id',
+    'window_kind',
+    'day',
+    'token_settled',
+    'token_outstanding_reserved',
+    'charge_settled',
+    'charge_outstanding_reserved',
+    'charge_currency',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_api_key_budget_counters', 'UPDATE', ['token_settled', 'charge_settled', 'updated_at']),
+  ...columnGrants('saas_api_key_budget_reservations', 'SELECT', [
+    'tenant_id',
+    'project_id',
+    'lineage_id',
+    'request_id',
+    'day',
+    'token_units',
+    'charge_minor_units',
+    'charge_currency',
+    'state',
+    'created_at',
+    'updated_at',
   ]),
   ...columnGrants('saas_route_config_heads', 'SELECT', [
     'tenant_id',
@@ -634,7 +769,18 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'validation_state',
     'validation_error_code',
     'last_validated_at',
+    'revalidation_interval_seconds',
     'authz_version',
+    'priority',
+    'weight',
+    'quota_state',
+    'quota_remaining_minor_units',
+    'quota_currency',
+    'quota_checked_at',
+    'quarantine_entered_at',
+    'quarantine_reason_code',
+    'rpm_limit',
+    'tpm_limit',
     'created_at',
     'updated_at',
     'disabled_at',
@@ -653,6 +799,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'rights_version',
     'status',
     'validation_state',
+    'revalidation_interval_seconds',
+    'priority',
+    'weight',
+    'rpm_limit',
+    'tpm_limit',
     'created_at',
     'updated_at',
   ]),
@@ -661,7 +812,16 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'validation_state',
     'validation_error_code',
     'last_validated_at',
+    'revalidation_interval_seconds',
     'authz_version',
+    'priority',
+    'weight',
+    'quota_state',
+    'quota_remaining_minor_units',
+    'quota_currency',
+    'quota_checked_at',
+    'rpm_limit',
+    'tpm_limit',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -682,7 +842,18 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'validation_state',
     'validation_error_code',
     'last_validated_at',
+    'revalidation_interval_seconds',
     'authz_version',
+    'priority',
+    'weight',
+    'quota_state',
+    'quota_remaining_minor_units',
+    'quota_currency',
+    'quota_checked_at',
+    'quarantine_entered_at',
+    'quarantine_reason_code',
+    'rpm_limit',
+    'tpm_limit',
     'created_at',
     'updated_at',
     'disabled_at',
@@ -700,6 +871,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'rights_version',
     'status',
     'validation_state',
+    'revalidation_interval_seconds',
+    'priority',
+    'weight',
+    'rpm_limit',
+    'tpm_limit',
     'created_at',
     'updated_at',
   ]),
@@ -708,7 +884,16 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'validation_state',
     'validation_error_code',
     'last_validated_at',
+    'revalidation_interval_seconds',
     'authz_version',
+    'priority',
+    'weight',
+    'quota_state',
+    'quota_remaining_minor_units',
+    'quota_currency',
+    'quota_checked_at',
+    'rpm_limit',
+    'tpm_limit',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -779,6 +964,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
     'disabled_at',
     'revoked_at',
+    'oauth_refresh_state',
+    'oauth_next_refresh_at',
+    'oauth_last_refresh_at',
+    'oauth_force_refresh_requested',
+    'oauth_refresh_error_code',
   ]),
   ...columnGrants('saas_tenant_provider_credentials', 'INSERT', [
     'tenant_id',
@@ -792,6 +982,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'expires_at',
     'created_at',
     'updated_at',
+    // R4 #18 assembly A: OAuth onboarding initializes the idle state and the
+    // first-refresh schedule; the remaining oauth_* columns stay NULL on
+    // insert and are never granted here.
+    'oauth_refresh_state',
+    'oauth_next_refresh_at',
   ]),
   ...columnGrants('saas_tenant_provider_credentials', 'UPDATE', [
     'status',
@@ -804,6 +999,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
     'disabled_at',
     'revoked_at',
+    'oauth_refresh_state',
+    'oauth_next_refresh_at',
+    'oauth_last_refresh_at',
+    'oauth_force_refresh_requested',
+    'oauth_refresh_error_code',
   ]),
   ...columnGrants('saas_platform_provider_credentials', 'SELECT', [
     'owner_kind',
@@ -824,6 +1024,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
     'disabled_at',
     'revoked_at',
+    'oauth_refresh_state',
+    'oauth_next_refresh_at',
+    'oauth_last_refresh_at',
+    'oauth_force_refresh_requested',
+    'oauth_refresh_error_code',
   ]),
   ...columnGrants('saas_platform_provider_credentials', 'INSERT', [
     'id',
@@ -836,6 +1041,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'expires_at',
     'created_at',
     'updated_at',
+    // R4 #18 assembly A: OAuth onboarding initializes the idle state and the
+    // first-refresh schedule; the remaining oauth_* columns stay NULL on
+    // insert and are never granted here.
+    'oauth_refresh_state',
+    'oauth_next_refresh_at',
   ]),
   ...columnGrants('saas_platform_provider_credentials', 'UPDATE', [
     'status',
@@ -848,6 +1058,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
     'disabled_at',
     'revoked_at',
+    'oauth_refresh_state',
+    'oauth_next_refresh_at',
+    'oauth_last_refresh_at',
+    'oauth_force_refresh_requested',
+    'oauth_refresh_error_code',
   ]),
   ...columnGrants('saas_tenant_provider_credential_versions', 'SELECT', [
     'owner_kind',
@@ -942,6 +1157,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'operation_id',
     'source_kms_key_id',
     'kms_key_id',
+    'wrapped_dek',
     'context_sha256',
     'actor_kind',
     'actor_user_id',
@@ -979,6 +1195,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'operation_id',
     'source_kms_key_id',
     'kms_key_id',
+    'wrapped_dek',
     'context_sha256',
     'actor_kind',
     'actor_user_id',
@@ -1190,6 +1407,42 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ]),
   ...columnGrants('saas_tenant_provider_credential_validation_jobs', 'INSERT', [
     'tenant_id',
+    'account_id',
+    'credential_id',
+    'credential_version',
+    'provider_id',
+    'product_id',
+    'credential_type',
+    'allowed_models',
+    'target_model',
+    'target_endpoint',
+    'capability_version',
+    'idempotency_key',
+  ]),
+  ...columnGrants('saas_platform_provider_credential_validation_jobs', 'SELECT', [
+    'id',
+    'account_id',
+    'credential_id',
+    'credential_version',
+    'provider_id',
+    'product_id',
+    'credential_type',
+    'allowed_models',
+    'target_model',
+    'target_endpoint',
+    'capability_version',
+    'idempotency_key',
+    'status',
+    'attempt_count',
+    'available_at',
+    'lease_until',
+    'lease_generation',
+    'last_error_code',
+    'completed_at',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_platform_provider_credential_validation_jobs', 'INSERT', [
     'account_id',
     'credential_id',
     'credential_version',
@@ -1461,6 +1714,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'provider_submission_state',
     'provider_submission_lease_token',
     'provider_submission_lease_expires_at',
+    'original_amount_minor_units',
   ]),
   ...columnGrants('saas_payment_orders', 'INSERT', [
     'id',
@@ -1477,6 +1731,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'provider_attempts',
     'created_at',
     'updated_at',
+    'original_amount_minor_units',
   ]),
   ...columnGrants('saas_payment_orders', 'UPDATE', [
     'state',
@@ -1822,6 +2077,266 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'billable_basis',
     'created_at',
   ]),
+  // Usage corrections are append-only: the operator endpoint reads settlement
+  // membership, then inserts digest-bound correction events; never UPDATE/DELETE.
+  ...columnGrants('saas_usage_settlements', 'SELECT', ['id', 'tenant_id', 'usage_event_id']),
+  ...columnGrants('saas_usage_correction_events', 'SELECT', [
+    'id',
+    'tenant_id',
+    'corrected_usage_event_id',
+    'corrected_settlement_id',
+    'reason_code',
+    'correction_usage',
+    'amount_delta_minor_units',
+    'currency',
+    'operator_identity',
+    'evidence_ref',
+    'correction_digest',
+    'created_at',
+  ]),
+  ...columnGrants('saas_usage_correction_events', 'INSERT', [
+    'id',
+    'tenant_id',
+    'corrected_usage_event_id',
+    'corrected_settlement_id',
+    'reason_code',
+    'correction_usage',
+    'amount_delta_minor_units',
+    'currency',
+    'operator_identity',
+    'evidence_ref',
+    'correction_digest',
+    'created_at',
+  ]),
+  // Marketing redeem codes (G1): generation inserts, redemption performs a
+  // locked one-way CAS on the status/terminal columns only; identity columns
+  // are trigger-guarded and never updatable. Redemptions are append-only.
+  ...columnGrants('saas_marketing_redeem_codes', 'SELECT', [
+    'id',
+    'code_hash',
+    'code_prefix',
+    'kind',
+    'amount_minor_units',
+    'currency',
+    'service_plan_version_id',
+    'status',
+    'batch_ref',
+    'created_by_user_id',
+    'created_at',
+    'updated_at',
+    'redeemed_by_tenant_id',
+    'redeemed_by_user_id',
+    'redeemed_at',
+    'disabled_at',
+  ]),
+  ...columnGrants('saas_marketing_redeem_codes', 'INSERT', [
+    'id',
+    'code_hash',
+    'code_prefix',
+    'kind',
+    'amount_minor_units',
+    'currency',
+    'service_plan_version_id',
+    'batch_ref',
+    'created_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_marketing_redeem_codes', 'UPDATE', [
+    'status',
+    'updated_at',
+    'redeemed_by_tenant_id',
+    'redeemed_by_user_id',
+    'redeemed_at',
+    'disabled_at',
+  ]),
+  ...columnGrants('saas_marketing_redeem_redemptions', 'SELECT', [
+    'id',
+    'code_id',
+    'tenant_id',
+    'user_id',
+    'ledger_transaction_id',
+    'created_at',
+  ]),
+  ...columnGrants('saas_marketing_redeem_redemptions', 'INSERT', [
+    'id',
+    'code_id',
+    'tenant_id',
+    'user_id',
+    'ledger_transaction_id',
+    'created_at',
+  ]),
+  // Marketing announcements (G4): operators insert drafts and drive the
+  // one-way status machine. UPDATE is limited to the state-machine columns
+  // (status, the unpublish window end, the version CAS counter and
+  // updated_at); identity columns are trigger-guarded and never updatable.
+  // Read receipts are append-only per (announcement, user).
+  ...columnGrants('saas_marketing_announcements', 'SELECT', [
+    'id',
+    'kind',
+    'severity',
+    'title',
+    'body',
+    'publish_at',
+    'unpublish_at',
+    'status',
+    'version',
+    'created_by_user_id',
+    'created_at',
+    'updated_at',
+    'fanout_completed_at',
+  ]),
+  ...columnGrants('saas_marketing_announcements', 'INSERT', [
+    'id',
+    'kind',
+    'severity',
+    'title',
+    'body',
+    'publish_at',
+    'unpublish_at',
+    'created_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_marketing_announcements', 'UPDATE', [
+    'status',
+    'unpublish_at',
+    'version',
+    'updated_at',
+    'fanout_completed_at',
+  ]),
+  ...columnGrants('saas_marketing_announcement_reads', 'SELECT', [
+    'announcement_id',
+    'user_id',
+    'tenant_id',
+    'read_at',
+  ]),
+  ...columnGrants('saas_marketing_announcement_reads', 'INSERT', [
+    'announcement_id',
+    'user_id',
+    'tenant_id',
+    'read_at',
+  ]),
+  // Marketing promo codes (R1): generation inserts and one-way disable CAS;
+  // discount terms are trigger-guarded and never updatable. Usages are
+  // append-only checkout facts written in the order transaction.
+  ...columnGrants('saas_marketing_promo_codes', 'SELECT', [
+    'id',
+    'code',
+    'kind',
+    'percent_bp',
+    'amount_minor_units',
+    'currency',
+    'scope',
+    'starts_at',
+    'ends_at',
+    'max_uses',
+    'per_tenant_once',
+    'status',
+    'created_by_user_id',
+    'created_at',
+    'updated_at',
+    'disabled_at',
+  ]),
+  ...columnGrants('saas_marketing_promo_codes', 'INSERT', [
+    'id',
+    'code',
+    'kind',
+    'percent_bp',
+    'amount_minor_units',
+    'currency',
+    'scope',
+    'starts_at',
+    'ends_at',
+    'max_uses',
+    'per_tenant_once',
+    'created_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_marketing_promo_codes', 'UPDATE', ['status', 'updated_at', 'disabled_at']),
+  ...columnGrants('saas_marketing_promo_usages', 'SELECT', [
+    'id',
+    'code_id',
+    'tenant_id',
+    'order_id',
+    'discount_minor_units',
+    'per_tenant_once',
+    'created_at',
+  ]),
+  ...columnGrants('saas_marketing_promo_usages', 'INSERT', [
+    'id',
+    'code_id',
+    'tenant_id',
+    'order_id',
+    'discount_minor_units',
+    'per_tenant_once',
+    'created_at',
+  ]),
+  // Marketing affiliate (R2): attribution inserts are lifetime-immutable;
+  // the platform policy head advances by exact +1 version bumps; rewards are
+  // append-only accrual facts from the fulfillment transaction.
+  ...columnGrants('saas_marketing_affiliate_attributions', 'SELECT', [
+    'invitee_tenant_id',
+    'inviter_tenant_id',
+    'invite_code',
+    'created_at',
+  ]),
+  ...columnGrants('saas_marketing_affiliate_attributions', 'INSERT', [
+    'invitee_tenant_id',
+    'inviter_tenant_id',
+    'invite_code',
+    'created_at',
+  ]),
+  ...columnGrants('saas_marketing_affiliate_policies', 'SELECT', [
+    'id',
+    'reward_bp',
+    'enabled',
+    'version',
+    'updated_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_marketing_affiliate_policies', 'INSERT', [
+    'id',
+    'reward_bp',
+    'enabled',
+    'version',
+    'updated_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_marketing_affiliate_policies', 'UPDATE', [
+    'reward_bp',
+    'enabled',
+    'version',
+    'updated_by_user_id',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_marketing_affiliate_rewards', 'SELECT', [
+    'id',
+    'inviter_tenant_id',
+    'invitee_tenant_id',
+    'source_funding_ref',
+    'source_amount_minor_units',
+    'reward_amount_minor_units',
+    'currency',
+    'reward_bp_snapshot',
+    'ledger_transaction_id',
+    'created_at',
+  ]),
+  ...columnGrants('saas_marketing_affiliate_rewards', 'INSERT', [
+    'id',
+    'inviter_tenant_id',
+    'invitee_tenant_id',
+    'source_funding_ref',
+    'source_amount_minor_units',
+    'reward_amount_minor_units',
+    'currency',
+    'reward_bp_snapshot',
+    'ledger_transaction_id',
+    'created_at',
+  ]),
   // The control-plane recovery scanner and operator resolution repository use
   // only the durable case lifecycle and append-only observation projections.
   ...columnGrants('saas_unknown_outcome_reconciliation_cases', 'SELECT', [
@@ -1946,12 +2461,53 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   // Mounted customer endpoint lifecycle and delivery worker. Event payloads
   // and target URLs are read by the worker's send path; the currently mounted
   // endpoint metadata API also selects target_url. The safe delivery-history
-  // projection adds only outcome metadata; enqueue, replay, and retention stay
-  // outside this mounted contract.
-  ...columnGrants('saas_customer_webhook_tenant_policies', 'SELECT', ['tenant_id', 'enabled', 'max_active_endpoints']),
+  // projection adds only outcome metadata. F4 adds the platform configure path
+  // (policy INSERT/UPDATE), customer dead-letter replay, and retention pruning.
+  ...columnGrants('saas_customer_webhook_tenant_policies', 'SELECT', [
+    'tenant_id',
+    'enabled',
+    'max_active_endpoints',
+    // F2: the Postgres entitlement authority reads the event-type whitelist.
+    'allowed_event_types',
+    // F3: producer enqueue quota locks read the rate and backlog ceilings.
+    'max_events_per_minute',
+    'max_pending_deliveries',
+    // F3: the notification scanner joins wallets on the low-balance threshold.
+    'low_balance_threshold_minor_units',
+    // F4: the configure upsert RETURNING projects the optimistic revision.
+    'revision',
+    // F4: ON CONFLICT DO UPDATE reads updated_by_user_id/audit_event_id from
+    // the EXCLUDED pseudo-relation; PostgreSQL prices every EXCLUDED column
+    // read as a SELECT privilege on that column. RETURNING prices updated_at
+    // the same way.
+    'updated_by_user_id',
+    'audit_event_id',
+    'updated_at',
+  ]),
   // PostgreSQL requires UPDATE on at least one column for SELECT ... FOR UPDATE.
-  // This low-impact timestamp column keeps that requirement column-scoped.
-  ...columnGrants('saas_customer_webhook_tenant_policies', 'UPDATE', ['updated_at']),
+  // The configure path additionally rewrites the quota and audit columns.
+  ...columnGrants('saas_customer_webhook_tenant_policies', 'UPDATE', [
+    'enabled',
+    'max_active_endpoints',
+    'max_events_per_minute',
+    'max_pending_deliveries',
+    'revision',
+    'updated_by_user_id',
+    'audit_event_id',
+    'updated_at',
+  ]),
+  // F4: first-time configuration seeds the row; entitlement whitelist and the
+  // low-balance threshold intentionally stay at their migration defaults.
+  ...columnGrants('saas_customer_webhook_tenant_policies', 'INSERT', [
+    'tenant_id',
+    'enabled',
+    'max_active_endpoints',
+    'max_events_per_minute',
+    'max_pending_deliveries',
+    'revision',
+    'updated_by_user_id',
+    'audit_event_id',
+  ]),
   ...columnGrants('saas_customer_webhook_endpoints', 'SELECT', [
     'tenant_id',
     'id',
@@ -2009,6 +2565,24 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'schema_version',
     'occurred_at',
     'payload',
+    // F3: producer idempotency replays compare the stored key.
+    'idempotency_key',
+  ]),
+  // F3: producers append immutable events inside the business transaction.
+  ...columnGrants('saas_customer_webhook_events', 'INSERT', [
+    'tenant_id',
+    'event_id',
+    'idempotency_key',
+    'event_type',
+    'schema_version',
+    'occurred_at',
+    'payload',
+    'api_key_id',
+    'service_plan_order_id',
+    'refund_id',
+    'request_id',
+    'project_id',
+    'request_supply_mode',
   ]),
   ...columnGrants('saas_customer_webhook_deliveries', 'SELECT', [
     'tenant_id',
@@ -2022,6 +2596,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'state',
     'attempt_count',
     'attempt_sequence',
+    // F4: dead-letter replay eligibility reads the replay ceiling.
+    'replay_count',
     'last_http_status',
     'last_latency_ms',
     'last_error_code',
@@ -2030,11 +2606,26 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'lease_expires_at',
     'fencing_token',
     'created_at',
+    // F4: retention pruning predicates and orders on the terminal timestamp.
+    'updated_at',
+  ]),
+  // F3: producer fan-out snapshots deliveries from active endpoints.
+  ...columnGrants('saas_customer_webhook_deliveries', 'INSERT', [
+    'tenant_id',
+    'id',
+    'event_id',
+    'endpoint_id',
+    'endpoint_version',
+    'secret_version',
+    'overlap_secret_version',
+    'payload_version',
   ]),
   ...columnGrants('saas_customer_webhook_deliveries', 'UPDATE', [
     'state',
     'attempt_count',
     'attempt_sequence',
+    // F4: dead-letter replay increments the replay counter in place.
+    'replay_count',
     'available_at',
     'lease_token',
     'lease_expires_at',
@@ -2068,14 +2659,37 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'error_code',
     'finished_at',
   ]),
-  ...columnGrants('saas_customer_webhook_tenant_usage', 'SELECT', ['tenant_id', 'pending_deliveries']),
-  ...columnGrants('saas_customer_webhook_tenant_usage', 'UPDATE', ['pending_deliveries', 'updated_at']),
+  // F3: the quota reservation reads the minute bucket in WHERE/CASE and the
+  // tenant id in RETURNING, so PostgreSQL requires those SELECT columns too.
+  ...columnGrants('saas_customer_webhook_tenant_usage', 'SELECT', [
+    'tenant_id',
+    'pending_deliveries',
+    'minute_bucket',
+    'events_in_bucket',
+  ]),
+  ...columnGrants('saas_customer_webhook_tenant_usage', 'INSERT', [
+    'tenant_id',
+    'minute_bucket',
+    'events_in_bucket',
+    'pending_deliveries',
+  ]),
+  ...columnGrants('saas_customer_webhook_tenant_usage', 'UPDATE', [
+    'pending_deliveries',
+    'minute_bucket',
+    'events_in_bucket',
+    'updated_at',
+  ]),
 ] as const;
 
-/** Table-level DELETE is the narrowest PostgreSQL privilege for these two SQL statements. */
+/** Table-level DELETE is the narrowest PostgreSQL privilege for these SQL statements. */
 export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneTableGrant[] = [
   ['saas_billing_spending_freezes', 'DELETE'],
   ['saas_refund_wallet_freezes', 'DELETE'],
+  // E4 platform governance: operator role revocation.
+  ['saas_platform_role_assignments', 'DELETE'],
+  // F4: retention pruning deletes bounded terminal delivery/attempt metadata.
+  ['saas_customer_webhook_deliveries', 'DELETE'],
+  ['saas_customer_webhook_delivery_attempts', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */
@@ -2439,6 +3053,10 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_memberships',
   'saas_project_memberships',
   'saas_api_keys',
+  'saas_api_key_ip_policies',
+  'saas_api_key_budget_policies',
+  'saas_api_key_budget_counters',
+  'saas_api_key_budget_reservations',
   'saas_requests',
   'saas_attempts',
   'saas_project_entitlements',
@@ -2581,6 +3199,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'last_outcome',
       'source_fencing_token',
       'revision',
+      'health_score',
+      'half_open_probe_at',
     ] as const
   ).map((column) => ['saas_provider_account_runtime_health', column, 'SELECT'] as const),
   ...(
@@ -2596,6 +3216,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'last_outcome',
       'source_fencing_token',
       'revision',
+      'health_score',
+      'half_open_probe_at',
     ] as const
   ).map((column) => ['saas_provider_account_runtime_health', column, 'INSERT'] as const),
   ...(
@@ -2607,8 +3229,24 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'last_outcome',
       'source_fencing_token',
       'revision',
+      'health_score',
+      'half_open_probe_at',
     ] as const
   ).map((column) => ['saas_provider_account_runtime_health', column, 'UPDATE'] as const),
+  // R6: the admission chain upserts per-account per-second counters and the
+  // eligibility chain reads the trailing window — both stay on PostgreSQL.
+  ['saas_provider_account_rate_counters', 'account_scope', 'SELECT'],
+  ['saas_provider_account_rate_counters', 'account_id', 'SELECT'],
+  ['saas_provider_account_rate_counters', 'window_start', 'SELECT'],
+  ['saas_provider_account_rate_counters', 'requests', 'SELECT'],
+  ['saas_provider_account_rate_counters', 'tokens', 'SELECT'],
+  ['saas_provider_account_rate_counters', 'account_scope', 'INSERT'],
+  ['saas_provider_account_rate_counters', 'account_id', 'INSERT'],
+  ['saas_provider_account_rate_counters', 'window_start', 'INSERT'],
+  ['saas_provider_account_rate_counters', 'requests', 'INSERT'],
+  ['saas_provider_account_rate_counters', 'tokens', 'INSERT'],
+  ['saas_provider_account_rate_counters', 'requests', 'UPDATE'],
+  ['saas_provider_account_rate_counters', 'tokens', 'UPDATE'],
   // Affinity resolution reads only its scoped key and target state; inserts create the full
   // immutable identity, while UPDATE is limited to binding/lifecycle fields.
   ...(
@@ -2876,6 +3514,53 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ...(['state', 'updated_at'] as const).map(
     (column) => ['saas_gateway_capacity_reservations', column, 'UPDATE'] as const,
   ),
+  // KEY-BUD (081): admission upserts lineage counters and inserts the
+  // per-request reservation; settlement/compensation/reconciliation adjust the
+  // counter amounts and flip the reservation state. Identity/day/amount facts
+  // are insert-only; the 081 trigger guards them thereafter.
+  ...(
+    [
+      'tenant_id',
+      'project_id',
+      'lineage_id',
+      'window_kind',
+      'day',
+      'token_settled',
+      'token_outstanding_reserved',
+      'charge_settled',
+      'charge_outstanding_reserved',
+      'charge_currency',
+      'created_at',
+      'updated_at',
+    ] as const
+  ).map((column) => ['saas_api_key_budget_counters', column, 'INSERT'] as const),
+  ...(
+    [
+      'token_settled',
+      'token_outstanding_reserved',
+      'charge_settled',
+      'charge_outstanding_reserved',
+      'charge_currency',
+      'updated_at',
+    ] as const
+  ).map((column) => ['saas_api_key_budget_counters', column, 'UPDATE'] as const),
+  ...(
+    [
+      'tenant_id',
+      'project_id',
+      'lineage_id',
+      'request_id',
+      'day',
+      'token_units',
+      'charge_minor_units',
+      'charge_currency',
+      'created_at',
+      'updated_at',
+    ] as const
+  ).map((column) => ['saas_api_key_budget_reservations', column, 'INSERT'] as const),
+  ...(['state', 'updated_at'] as const).map(
+    (column) => ['saas_api_key_budget_reservations', column, 'UPDATE'] as const,
+  ),
   // The lease adapter writes only lease identity at creation and lifecycle timestamps thereafter.
   ...(
     [
@@ -3035,6 +3720,65 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'request_id',
     ] as const
   ).map((column) => ['saas_audit_events', column, 'INSERT'] as const),
+  // F3: settlement terminal commits enqueue customer webhook events inside the
+  // settlement transaction. Column scope matches the control-plane enqueue
+  // surface minus what the gateway never touches: no target_url, no signing
+  // envelopes, no delivery lifecycle columns.
+  ...(['tenant_id', 'enabled', 'allowed_event_types', 'max_events_per_minute', 'max_pending_deliveries'] as const).map(
+    (column) => ['saas_customer_webhook_tenant_policies', column, 'SELECT'] as const,
+  ),
+  // SELECT ... FOR UPDATE on the policy row requires one UPDATE column.
+  ['saas_customer_webhook_tenant_policies', 'updated_at', 'UPDATE'],
+  ...(['tenant_id', 'id', 'current_version', 'state'] as const).map(
+    (column) => ['saas_customer_webhook_endpoints', column, 'SELECT'] as const,
+  ),
+  ...(['tenant_id', 'endpoint_id', 'version', 'event_types'] as const).map(
+    (column) => ['saas_customer_webhook_endpoint_versions', column, 'SELECT'] as const,
+  ),
+  ...(['tenant_id', 'endpoint_id', 'secret_version', 'state', 'overlap_expires_at'] as const).map(
+    (column) => ['saas_customer_webhook_signing_secrets', column, 'SELECT'] as const,
+  ),
+  ...(
+    ['tenant_id', 'event_id', 'event_type', 'schema_version', 'occurred_at', 'payload', 'idempotency_key'] as const
+  ).map((column) => ['saas_customer_webhook_events', column, 'SELECT'] as const),
+  ...(
+    [
+      'tenant_id',
+      'event_id',
+      'idempotency_key',
+      'event_type',
+      'schema_version',
+      'occurred_at',
+      'payload',
+      'api_key_id',
+      'service_plan_order_id',
+      'refund_id',
+      'request_id',
+      'project_id',
+      'request_supply_mode',
+    ] as const
+  ).map((column) => ['saas_customer_webhook_events', column, 'INSERT'] as const),
+  ...(
+    [
+      'tenant_id',
+      'id',
+      'event_id',
+      'endpoint_id',
+      'endpoint_version',
+      'secret_version',
+      'overlap_secret_version',
+      'payload_version',
+    ] as const
+  ).map((column) => ['saas_customer_webhook_deliveries', column, 'INSERT'] as const),
+  ...(['tenant_id', 'pending_deliveries', 'minute_bucket', 'events_in_bucket'] as const).map(
+    (column) => ['saas_customer_webhook_tenant_usage', column, 'SELECT'] as const,
+  ),
+  ...(['tenant_id', 'minute_bucket', 'events_in_bucket', 'pending_deliveries'] as const).map(
+    (column) => ['saas_customer_webhook_tenant_usage', column, 'INSERT'] as const,
+  ),
+  ...(['pending_deliveries', 'minute_bucket', 'events_in_bucket', 'updated_at'] as const).map(
+    (column) => ['saas_customer_webhook_tenant_usage', column, 'UPDATE'] as const,
+  ),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;

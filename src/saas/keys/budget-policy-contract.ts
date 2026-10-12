@@ -64,22 +64,23 @@ interface KeyBudgetSnapshotBase {
 }
 
 /** Response facts only; these interfaces do not assert atomic admission or verified persistence. */
-export type KeyBudgetPolicySnapshot = KeyBudgetSnapshotBase & (
-  | {
-      readonly supplyMode: 'byok';
-      readonly customerChargeBudget: null;
-    }
-  | {
-      readonly supplyMode: 'platform';
-      readonly customerChargeBudget: {
-        /** Server-bound customer price/settlement currency; not supplier currency. */
-        readonly currency: string;
-        readonly unit: 'minor_units';
-        readonly caps: KeyBudgetCapsDto;
-        readonly usage: KeyBudgetUsageSnapshot;
-      } | null;
-    }
-);
+export type KeyBudgetPolicySnapshot = KeyBudgetSnapshotBase &
+  (
+    | {
+        readonly supplyMode: 'byok';
+        readonly customerChargeBudget: null;
+      }
+    | {
+        readonly supplyMode: 'platform';
+        readonly customerChargeBudget: {
+          /** Server-bound customer price/settlement currency; not supplier currency. */
+          readonly currency: string;
+          readonly unit: 'minor_units';
+          readonly caps: KeyBudgetCapsDto;
+          readonly usage: KeyBudgetUsageSnapshot;
+        } | null;
+      }
+  );
 
 function strictObject(input: unknown, fields: readonly string[]): Record<string, unknown> {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -121,10 +122,7 @@ function caps(input: unknown): KeyBudgetCapsDto {
 }
 
 /** Pure strict DTO parsing; supplyMode must come from an authorized server-owned Key. */
-export function parseReplaceKeyBudgetPolicyInput(
-  input: unknown,
-  supplyMode: SupplyMode,
-): ReplaceKeyBudgetPolicyInput {
+export function parseReplaceKeyBudgetPolicyInput(input: unknown, supplyMode: SupplyMode): ReplaceKeyBudgetPolicyInput {
   if (supplyMode !== 'byok' && supplyMode !== 'platform') {
     throw new TypeError('Invalid Key budget supply mode');
   }
@@ -154,7 +152,8 @@ export function assertKeyBudgetUtcDay(input: unknown): asserts input is KeyBudge
   const start = Date.parse(day.startInclusive);
   const end = Date.parse(day.endExclusive);
   if (
-    !Number.isFinite(start) || !Number.isFinite(end) ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
     new Date(start).toISOString() !== day.startInclusive ||
     new Date(end).toISOString() !== day.endExclusive ||
     end - start !== 86_400_000

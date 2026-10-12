@@ -27,6 +27,15 @@ export const MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE =
 export const SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE =
   'SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE' as const;
 export const MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE = 'MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE' as const;
+/** Optional trusted customer-MFA deployment descriptor, never a readiness Boolean. */
+export const MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE =
+  'MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE' as const;
+/** Optional trusted customer-passkey deployment descriptor, never a readiness Boolean. */
+export const MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE =
+  'MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE' as const;
+/** Optional trusted customer webhook signing-secret protector module descriptor. */
+export const MODEL_ROUTER_SAAS_CUSTOMER_WEBHOOK_SIGNING_PROTECTOR_MODULE =
+  'MODEL_ROUTER_SAAS_CUSTOMER_WEBHOOK_SIGNING_PROTECTOR_MODULE' as const;
 export const MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID =
   'MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID' as const;
 export const MODEL_ROUTER_SAAS_DEPLOYMENT_ID = 'MODEL_ROUTER_SAAS_DEPLOYMENT_ID' as const;
@@ -71,6 +80,8 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
     providerCredentialRewrappingKmsModule: SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE,
     gatewayProviderCredentialDecryptKmsModule: SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
     gatewayRuntimeModule: MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
+    customerMfaCapabilityModule: MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE,
+    customerPasskeyCapabilityModule: MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE,
     validationWorkerProviderCredentialDecryptKmsModule:
       MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
     credentialValidationTargetsModule: MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
@@ -136,6 +147,8 @@ export const SAAS_DEPLOYMENT_ENV_NAMES = deepFreeze([
   SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE,
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
   MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
+  MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE,
+  MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
   MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
   MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
@@ -185,6 +198,10 @@ export interface ManagedSaasDeploymentConfig {
   readonly gatewayProviderCredentialDecryptKmsModule?: string;
   /** Trusted runtime module supplying gateway-only policy and provider capabilities. */
   readonly gatewayRuntimeModule?: string;
+  /** Absence leaves customer MFA unavailable; presence requires real core readiness. */
+  readonly customerMfaCapabilityModule?: string;
+  /** Absence leaves customer passkeys unavailable; presence requires real core readiness. */
+  readonly customerPasskeyCapabilityModule?: string;
   /** Dedicated decrypt-only KMS module; present only for the validation worker role. */
   readonly validationWorkerProviderCredentialDecryptKmsModule?: string;
   /** Reviewed metadata-only target factory; worker-only, never an approval of database catalog authority. */
@@ -250,7 +267,11 @@ function invalid(code: DeploymentConfigErrorCode, message: string, variableName?
 }
 
 function isPresent(environment: DeploymentEnvironment, name: string): boolean {
-  if (name === MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE) {
+  if (
+    name === MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE ||
+    name === MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE ||
+    name === MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE
+  ) {
     try {
       const descriptor = Object.getOwnPropertyDescriptor(environment, name);
       // An accessor is an explicit (invalid) declaration, never an implicit
@@ -287,6 +308,52 @@ function optionalCredentialValidationTargetsModule(environment: DeploymentEnviro
     'trusted static credential-validation metadata module spec',
     'INVALID_PROVIDER_MODULE',
   );
+}
+
+function optionalCustomerMfaCapabilityModule(environment: DeploymentEnvironment): string | undefined {
+  const name = MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE;
+  let value: unknown;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(environment, name);
+    if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) throw new Error('Invalid data setting');
+    value = descriptor?.value;
+  } catch {
+    return invalid('INVALID_PROVIDER_MODULE', `${name} must be an own data setting.`, name);
+  }
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    [...value].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) ||
+    Buffer.byteLength(value, 'utf8') > 4096
+  ) {
+    return invalid('INVALID_PROVIDER_MODULE', `${name} must be a bounded trusted module spec.`, name);
+  }
+  return value;
+}
+
+function optionalCustomerPasskeyCapabilityModule(environment: DeploymentEnvironment): string | undefined {
+  const name = MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE;
+  let value: unknown;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(environment, name);
+    if (descriptor !== undefined && !Object.hasOwn(descriptor, 'value')) throw new Error('Invalid data setting');
+    value = descriptor?.value;
+  } catch {
+    return invalid('INVALID_PROVIDER_MODULE', `${name} must be an own data setting.`, name);
+  }
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    [...value].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) ||
+    Buffer.byteLength(value, 'utf8') > 4096
+  ) {
+    return invalid('INVALID_PROVIDER_MODULE', `${name} must be a bounded trusted module spec.`, name);
+  }
+  return value;
 }
 
 function hasSaasSettings(environment: DeploymentEnvironment): boolean {
@@ -536,6 +603,26 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
   const listenerNames = managedSaasListenerNames(workloadRole);
   const validationWorker = workloadRole === 'credential-validation-worker';
   const gateway = workloadRole === 'gateway';
+  const customerMfaCapabilityModule = optionalCustomerMfaCapabilityModule(environment);
+  if (customerMfaCapabilityModule !== undefined && workloadRole !== 'combined' && workloadRole !== 'control-plane') {
+    invalid(
+      'UNEXPECTED_WORKLOAD_SETTING',
+      `${MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE} is control-plane-only.`,
+      MODEL_ROUTER_SAAS_CUSTOMER_MFA_CAPABILITY_MODULE,
+    );
+  }
+  const customerPasskeyCapabilityModule = optionalCustomerPasskeyCapabilityModule(environment);
+  if (
+    customerPasskeyCapabilityModule !== undefined &&
+    workloadRole !== 'combined' &&
+    workloadRole !== 'control-plane'
+  ) {
+    invalid(
+      'UNEXPECTED_WORKLOAD_SETTING',
+      `${MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE} is control-plane-only.`,
+      MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE,
+    );
+  }
   if (!validationWorker && isPresent(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE)) {
     invalid(
       'UNEXPECTED_WORKLOAD_SETTING',
@@ -715,7 +802,12 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
   const deploymentIdSetting = optionalContextLabel(environment, MODEL_ROUTER_SAAS_DEPLOYMENT_ID, 'deployment');
   const environmentIdSetting = optionalContextLabel(environment, MODEL_ROUTER_SAAS_ENVIRONMENT_ID, 'environment');
   const needsExplicitContext =
-    environment.NODE_ENV === 'production' || sealingKmsConfigured || validationWorker || gatewayKmsModule !== undefined;
+    environment.NODE_ENV === 'production' ||
+    sealingKmsConfigured ||
+    validationWorker ||
+    gatewayKmsModule !== undefined ||
+    customerMfaCapabilityModule !== undefined ||
+    customerPasskeyCapabilityModule !== undefined;
   if (needsExplicitContext && deploymentIdSetting === undefined) {
     invalid(
       'MISSING_REQUIRED_SETTING',
@@ -752,6 +844,8 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
     ...(providerCredentialRewrappingKmsModule === undefined ? {} : { providerCredentialRewrappingKmsModule }),
     ...(gatewayKmsModule === undefined ? {} : { gatewayProviderCredentialDecryptKmsModule: gatewayKmsModule }),
     ...(gatewayRuntimeModule === undefined ? {} : { gatewayRuntimeModule }),
+    ...(customerMfaCapabilityModule === undefined ? {} : { customerMfaCapabilityModule }),
+    ...(customerPasskeyCapabilityModule === undefined ? {} : { customerPasskeyCapabilityModule }),
     ...(validationWorkerKmsModule === undefined
       ? {}
       : { validationWorkerProviderCredentialDecryptKmsModule: validationWorkerKmsModule }),

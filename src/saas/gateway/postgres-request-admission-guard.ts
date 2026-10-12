@@ -9,6 +9,7 @@ import type {
   RequestRecord,
 } from '../metering/types.js';
 import { SaasPricingError, SaasPricingService } from '../pricing/index.js';
+import { isIpAllowed } from '../keys/ip-policy.js';
 import type {
   PlatformRequestAdmissionHoldEvidence,
   SaasRequestAdmissionGuard,
@@ -26,6 +27,7 @@ export type PostgresRequestAdmissionGuardErrorCode =
   | 'AUTHORITY_MISMATCH'
   | 'EXPIRED'
   | 'PRICE_UNAVAILABLE'
+  | 'CALLER_DENIED'
   | 'STORAGE_ERROR';
 
 const SAFE_MESSAGES: Record<PostgresRequestAdmissionGuardErrorCode, string> = {
@@ -33,6 +35,7 @@ const SAFE_MESSAGES: Record<PostgresRequestAdmissionGuardErrorCode, string> = {
   AUTHORITY_MISMATCH: 'The SaaS request admission authority is stale or mismatched.',
   EXPIRED: 'The SaaS request admission authority is expired.',
   PRICE_UNAVAILABLE: 'The SaaS request admission price could not be proven current.',
+  CALLER_DENIED: 'The SaaS request admission caller address is not permitted for this key.',
   STORAGE_ERROR: 'The SaaS request admission authority could not be revalidated.',
 };
 
@@ -799,6 +802,25 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         (key.principal_user_id !== null || request.principalId !== request.projectId))
     ) {
       deny('AUTHORITY_MISMATCH');
+    }
+
+    // KEY-IP (contract C-4, migration 080): the persisted head is the
+    // authoritative policy. A missing head is pre-080 drift and stays disabled;
+    // any non-disabled mode fails closed when the trusted client address
+    // evidence is absent, unresolved, or outside the policy.
+    const ipPolicies = await rows(
+      executor,
+      '/* postgres-request-admission:key-ip-policy */ SELECT * FROM saas_api_key_ip_policies WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3 LIMIT 2',
+      [request.tenantId, request.projectId, request.proxyKeyId],
+    );
+    if (ipPolicies.length > 1) storage();
+    const ipPolicy = ipPolicies[0];
+    if (ipPolicy && ipPolicy.mode !== 'disabled') {
+      const resolution = input.clientAddress;
+      const address = resolution && resolution.status === 'resolved' ? resolution.address : null;
+      if (address === null || !isIpAllowed(address, { mode: ipPolicy.mode, rules: ipPolicy.rules })) {
+        deny('CALLER_DENIED');
+      }
     }
 
     const persistedRequest = await lockOne(

@@ -119,7 +119,6 @@ export class KeyPool {
   }
 
   markCooldown(upstreamName: string, identity: KeyPoolIdentity, cooldownMs: number): void {
-    const states = this.states.get(upstreamName);
     const state = this.findState(upstreamName, identity);
     if (!state) return;
     state.failures = Math.max(state.failures, this.maxFailures);

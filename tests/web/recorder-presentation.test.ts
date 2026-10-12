@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { Config } from '../../web/src/api/types.ts';
+import type { Config, System } from '../../web/src/api/types.ts';
 import {
   DatabaseStatusPanel,
   listenerPresentation,
@@ -98,7 +98,7 @@ test('structured settings exposes all V2 storage controls as required positive i
 });
 
 test('renders both databases from the nested /system payload with connection status and capacity metrics', () => {
-  const payload = {
+  const payload: NonNullable<System['databases']> = {
     control: {
       health: { status: 'available', scope: 'connection', reason: null },
       capacity: {
@@ -136,7 +136,7 @@ test('renders both databases from the nested /system payload with connection sta
 });
 
 test('database panel ignores paths and makes no integrity claim from connection status', () => {
-  const payload = {
+  const payload: NonNullable<System['databases']> & { telemetry: { path: string } } = {
     telemetry: {
       health: { status: 'unavailable', scope: 'connection', reason: 'connection_closed' },
       capacity: {
@@ -166,7 +166,7 @@ test('localizes every database diagnostic reason code', () => {
     ['sqlite_metrics_unavailable', '暂时无法读取 SQLite 容量指标'],
   ] as const;
   for (const [reason, label] of reasons) {
-    const payload = {
+    const payload: NonNullable<System['databases']> = {
       control: {
         health: {
           status: reason === 'sqlite_metrics_unavailable' ? 'available' : 'unavailable',

@@ -17,6 +17,7 @@ const BINDING_KEYS = [
   'providerId', 'productId', 'credentialType', 'model', 'endpoint', 'capabilityVersion',
   'protocol', 'authProfile', 'baseUrl', 'approvalReference', 'expiresAt', 'evidenceSha256',
 ] as const;
+const CANONICAL_BINDING_KEYS = [...BINDING_KEYS, 'schemaVersion', 'wirePath', 'wireProtocol'] as const;
 
 export class CredentialValidationTargetError extends Error {
   readonly code = 'VALIDATION_TARGET_INVALID' as const;
@@ -50,7 +51,93 @@ export function canonicalCredentialValidationBaseUrl(value: unknown): URL {
   } catch { invalid(); }
 }
 
-function validatedDescriptor(input: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'>) {
+type TargetSnapshot = Readonly<Partial<Record<typeof CANONICAL_BINDING_KEYS[number], unknown>>>;
+
+/** Copy one own-data observation; do not pretend to detect Proxy or freeze caller memory. */
+function captureTarget(
+  input: object, schema: PropertyDescriptor | undefined, requireEvidence: boolean,
+): TargetSnapshot {
+  try {
+    const fields = Reflect.ownKeys(input);
+    const known = schema === undefined ? BINDING_KEYS : CANONICAL_BINDING_KEYS;
+    const required = requireEvidence ? known : known.filter((field) => field !== 'evidenceSha256');
+    if (Array.isArray(input) || required.some((field) => !fields.includes(field))) invalid();
+    if (schema !== undefined) {
+      const prototype = Object.getPrototypeOf(input);
+      if ((prototype !== Object.prototype && prototype !== null) ||
+        fields.length > known.length ||
+        fields.some((field) => typeof field !== 'string' || !known.some((key) => key === field))) invalid();
+    } else {
+      // Legacy Object.keys semantics ignore symbols/non-enumerable extras,
+      // including an ESM namespace's Symbol.toStringTag. None enters authority.
+      for (const field of fields) {
+        if (typeof field === 'symbol' || known.some((key) => key === field)) continue;
+        const descriptor = field === 'schemaVersion' ? schema : Object.getOwnPropertyDescriptor(input, field);
+        if (!descriptor || descriptor.enumerable) invalid();
+      }
+    }
+    const copied: Partial<Record<typeof CANONICAL_BINDING_KEYS[number], unknown>> = Object.create(null);
+    for (const field of known) {
+      if (!fields.includes(field)) continue; // only optional evidence in the digest-construction API
+      const descriptor = field === 'schemaVersion' ? schema : Object.getOwnPropertyDescriptor(input, field);
+      if (!descriptor || (schema !== undefined && !descriptor.enumerable) || !Object.hasOwn(descriptor, 'value')) invalid();
+      const value: unknown = descriptor.value;
+      if (typeof value !== 'string' && typeof value !== 'number' && value !== null) invalid();
+      copied[field] = value;
+    }
+    return Object.freeze(copied);
+  } catch { invalid(); }
+}
+
+function validatedCanonicalDescriptor(input: TargetSnapshot) {
+  if (input.schemaVersion !== 2 || input.providerId !== 'custom' || input.credentialType !== 'api-key' ||
+    !isCustomCredentialValidationModel(input.model) || typeof input.capabilityVersion !== 'number' ||
+    !Number.isSafeInteger(input.capabilityVersion) ||
+    input.capabilityVersion < 1 || !text(input.approvalReference, 256)) invalid();
+  const chat = input.productId === 'custom-openai' && input.endpoint === '/v1/chat/completions' &&
+    input.protocol === 'openai' && input.wirePath === 'chat/completions' &&
+    input.wireProtocol === 'openai' && input.authProfile === 'openai-bearer-v1';
+  const messages = input.productId === 'custom-anthropic' && input.endpoint === '/v1/messages' &&
+    input.protocol === 'anthropic' && input.wirePath === 'messages' &&
+    input.wireProtocol === 'anthropic' && input.authProfile === 'anthropic-api-key-2023-06-01';
+  if (!chat && !messages) invalid();
+  const baseUrl = canonicalCredentialValidationBaseUrl(input.baseUrl).href;
+  if (input.expiresAt !== null && (typeof input.expiresAt !== 'string' || input.expiresAt.length !== 24 ||
+    !Number.isFinite(Date.parse(input.expiresAt)) || new Date(input.expiresAt).toISOString() !== input.expiresAt)) invalid();
+  return {
+    schema: 'model-router-credential-validation-target-v2',
+    schemaVersion: 2,
+    purpose: 'credential-validation',
+    providerId: input.providerId, productId: chat ? 'custom-openai' : 'custom-anthropic',
+    credentialType: input.credentialType, model: input.model,
+    endpoint: chat ? '/v1/chat/completions' : '/v1/messages', capabilityVersion: input.capabilityVersion,
+    protocol: chat ? 'openai' : 'anthropic', wirePath: chat ? 'chat/completions' : 'messages',
+    wireProtocol: chat ? 'openai' : 'anthropic',
+    authProfile: chat ? 'openai-bearer-v1' : 'anthropic-api-key-2023-06-01', baseUrl,
+    requestUrl: new URL(chat ? 'chat/completions' : 'messages', baseUrl).href,
+    approvalReference: input.approvalReference, expiresAt: input.expiresAt,
+  } as const;
+}
+
+/** Type only captured primitive fields; the original legacy validator below still owns semantics. */
+function legacyInput(snapshot: TargetSnapshot): Readonly<Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'>> {
+  if (snapshot.providerId !== 'custom' || snapshot.credentialType !== 'api-key' ||
+    (snapshot.productId !== 'custom-openai' && snapshot.productId !== 'custom-anthropic') ||
+    typeof snapshot.model !== 'string' || typeof snapshot.capabilityVersion !== 'number' ||
+    (snapshot.endpoint !== 'chat-completions' && snapshot.endpoint !== 'messages') ||
+    (snapshot.protocol !== 'openai-compatible' && snapshot.protocol !== 'anthropic-compatible') ||
+    (snapshot.authProfile !== 'openai-bearer-v1' && snapshot.authProfile !== 'anthropic-api-key-2023-06-01') ||
+    typeof snapshot.baseUrl !== 'string' || typeof snapshot.approvalReference !== 'string' ||
+    (snapshot.expiresAt !== null && typeof snapshot.expiresAt !== 'string')) invalid();
+  return Object.freeze({
+    providerId: snapshot.providerId, productId: snapshot.productId, credentialType: snapshot.credentialType,
+    model: snapshot.model, endpoint: snapshot.endpoint, capabilityVersion: snapshot.capabilityVersion,
+    protocol: snapshot.protocol, authProfile: snapshot.authProfile, baseUrl: snapshot.baseUrl,
+    approvalReference: snapshot.approvalReference, expiresAt: snapshot.expiresAt,
+  });
+}
+
+function validatedLegacyDescriptor(input: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'>) {
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
     Object.keys(input).some((key) => !BINDING_KEYS.includes(key as typeof BINDING_KEYS[number])) ||
     input.providerId !== 'custom' || input.credentialType !== 'api-key' ||
@@ -77,11 +164,28 @@ function validatedDescriptor(input: Omit<ApprovedCredentialValidationTarget, 'ev
   } as const;
 }
 
+function validatedInput(
+  input: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'>, requireEvidence = false,
+) {
+  let schema: PropertyDescriptor | undefined;
+  try {
+    schema = input && typeof input === 'object' ? Object.getOwnPropertyDescriptor(input, 'schemaVersion') : undefined;
+  } catch { invalid(); }
+  if (!input || typeof input !== 'object') invalid();
+  const snapshot = captureTarget(input, schema, requireEvidence);
+  if (schema !== undefined) {
+    return { kind: 'canonical' as const, descriptor: validatedCanonicalDescriptor(snapshot),
+      evidenceSha256: snapshot.evidenceSha256 };
+  }
+  return { kind: 'legacy' as const, descriptor: validatedLegacyDescriptor(legacyInput(snapshot)),
+    evidenceSha256: snapshot.evidenceSha256 };
+}
+
 /** An operator must review this evidence and register its digest independently in the catalog. */
 export function credentialValidationTargetEvidenceSha256(
   input: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'>,
 ): string {
-  return createHash('sha256').update(JSON.stringify(validatedDescriptor(input))).digest('hex');
+  return createHash('sha256').update(JSON.stringify(validatedInput(input).descriptor)).digest('hex');
 }
 
 function key(providerId: string, productId: string, model: string, endpoint: string, version: number): string {
@@ -94,16 +198,34 @@ export function compileApprovedCredentialValidationTargets(
   if (!Array.isArray(inputs) || inputs.length > MAX_TARGETS) invalid();
   const entries = new Map<string, Readonly<ApprovedCredentialValidationTarget>>();
   for (const input of inputs) {
-    const descriptor = validatedDescriptor(input);
-    if (!HASH.test(input.evidenceSha256) || credentialValidationTargetEvidenceSha256(input) !== input.evidenceSha256) invalid();
-    const entryKey = key(input.providerId, input.productId, input.model, input.endpoint, input.capabilityVersion);
+    const checked = validatedInput(input, true);
+    const descriptor = checked.descriptor;
+    const evidence = checked.evidenceSha256;
+    // BOTH schemas hash and bind one validated owned observation, never caller metadata again.
+    if (typeof evidence !== 'string' || !HASH.test(evidence) ||
+      createHash('sha256').update(JSON.stringify(descriptor)).digest('hex') !== evidence) invalid();
+    const entryKey = key(descriptor.providerId, descriptor.productId, descriptor.model, descriptor.endpoint, descriptor.capabilityVersion);
     if (entries.has(entryKey)) invalid();
-    const binding = Object.freeze({
-      providerId: input.providerId, productId: input.productId, credentialType: input.credentialType,
-      model: input.model, endpoint: input.endpoint, capabilityVersion: input.capabilityVersion,
-      protocol: input.protocol, authProfile: input.authProfile, baseUrl: descriptor.baseUrl,
-      approvalReference: input.approvalReference, expiresAt: input.expiresAt, evidenceSha256: input.evidenceSha256,
-    });
+    let binding: Readonly<ApprovedCredentialValidationTarget>;
+    if (checked.kind === 'canonical') {
+      const canonical = checked.descriptor;
+      binding = Object.freeze({
+        schemaVersion: 2, providerId: canonical.providerId, productId: canonical.productId,
+        credentialType: canonical.credentialType, model: canonical.model, endpoint: canonical.endpoint,
+        capabilityVersion: canonical.capabilityVersion, protocol: canonical.protocol,
+        wirePath: canonical.wirePath, wireProtocol: canonical.wireProtocol, authProfile: canonical.authProfile,
+        baseUrl: canonical.baseUrl, approvalReference: canonical.approvalReference,
+        expiresAt: canonical.expiresAt, evidenceSha256: evidence,
+      });
+    } else {
+      const legacy = checked.descriptor;
+      binding = Object.freeze({
+        providerId: legacy.providerId, productId: legacy.productId, credentialType: legacy.credentialType,
+        model: legacy.model, endpoint: legacy.endpoint, capabilityVersion: legacy.capabilityVersion,
+        protocol: legacy.protocol, authProfile: legacy.authProfile, baseUrl: legacy.baseUrl,
+        approvalReference: legacy.approvalReference, expiresAt: legacy.expiresAt, evidenceSha256: evidence,
+      });
+    }
     entries.set(entryKey, binding);
     approvedBindings.add(binding);
   }
@@ -138,10 +260,44 @@ export function resolveApprovedCredentialValidationTarget(
 
 export function credentialValidationTargetRequestUrl(binding: Readonly<ApprovedCredentialValidationTarget>): URL {
   if (!isApprovedCredentialValidationBinding(binding)) invalid();
+  if (binding.schemaVersion === 2) {
+    const profile = credentialValidationTargetProbeProfile(binding);
+    return new URL(profile.kind === 'chat' ? 'chat/completions' : 'messages', binding.baseUrl);
+  }
   return new URL(binding.endpoint === 'chat-completions' ? 'chat/completions' : 'messages', binding.baseUrl);
 }
 
-/** Hash only immutable authority, not mutable status/lease/retry timestamps. */
+
+/** Only compiler-branded bindings select a fixed wire implementation; never ProviderProfile fallback. */
+export function credentialValidationTargetProbeProfile(binding: Readonly<ApprovedCredentialValidationTarget>): Readonly<{
+  adapterId: 'custom-openai-chat-v1' | 'custom-anthropic-messages-v1'; kind: 'chat' | 'messages';
+}> {
+  if (!isApprovedCredentialValidationBinding(binding)) invalid();
+  if (binding.schemaVersion === 2) {
+    if (binding.productId === 'custom-openai' && binding.endpoint === '/v1/chat/completions' &&
+      binding.protocol === 'openai' && binding.wirePath === 'chat/completions' &&
+      binding.wireProtocol === 'openai' && binding.authProfile === 'openai-bearer-v1') {
+      return Object.freeze({ adapterId: 'custom-openai-chat-v1', kind: 'chat' });
+    }
+    if (binding.productId === 'custom-anthropic' && binding.endpoint === '/v1/messages' &&
+      binding.protocol === 'anthropic' && binding.wirePath === 'messages' &&
+      binding.wireProtocol === 'anthropic' && binding.authProfile === 'anthropic-api-key-2023-06-01') {
+      return Object.freeze({ adapterId: 'custom-anthropic-messages-v1', kind: 'messages' });
+    }
+    invalid();
+  }
+  return Object.freeze({
+    adapterId: binding.productId === 'custom-openai' ? 'custom-openai-chat-v1' : 'custom-anthropic-messages-v1',
+    kind: binding.endpoint === 'messages' ? 'messages' : 'chat',
+  });
+}
+
+/**
+ * Hash only immutable authority, not mutable status/lease/retry timestamps.
+ * This is the 061 tenant-queue requeue binding: its SQL writer recomputes the
+ * identical digest, and that channel never carries platform jobs (the requeue
+ * preparation below refuses them), so the owner dimension is constant here.
+ */
 export function credentialValidationJobSnapshotSha256(job: ProviderCredentialValidationJobRecord): string {
   return createHash('sha256').update(JSON.stringify([
     'model-router-credential-validation-job-v1', job.id, job.tenantId, job.accountId, job.credentialId,

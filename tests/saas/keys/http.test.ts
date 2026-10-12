@@ -1,24 +1,67 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { test } from 'node:test';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import {
+  CUSTOMER_KEY_MUTATION_ISSUE_SQL,
+  type CustomerKeyMutationSessionHandle,
+} from '../../../src/saas/identity/customer-key-mutation-session.js';
+import { assertCustomerKeyMutationSessionBound, SaasIdentityService } from '../../../src/saas/identity/service.js';
 import type { TenantContext } from '../../../src/saas/identity/types.js';
+import type {
+  KeyBudgetPolicySnapshot,
+  ReplaceKeyBudgetPolicyInput,
+} from '../../../src/saas/keys/budget-policy-contract.js';
 import { createSaasKeyHandler } from '../../../src/saas/keys/http.js';
+import type { KeyIpPolicySnapshot, ReplaceKeyIpPolicyInput } from '../../../src/saas/keys/ip-policy-contract.js';
 import { KeyService } from '../../../src/saas/keys/service.js';
 import type { ApiKeyMetadata, CreateApiKeyInput, CreatedApiKey } from '../../../src/saas/keys/types.js';
 
-const SESSION_COOKIE = 'mr_saas_session=session-token';
-const CSRF_COOKIE = 'mr_saas_csrf=csrf-token';
-const CSRF_TOKEN = 'csrf-token';
+const USER_ID = '11111111-1111-4111-8111-111111111111';
+const SESSION_TOKEN = 'owned_synthetic_session_token_001';
+const CSRF_TOKEN = 'owned_synthetic_csrf_token_001';
+const SESSION_COOKIE = 'mr_saas_session=' + SESSION_TOKEN;
+const CSRF_COOKIE = 'mr_saas_csrf=' + CSRF_TOKEN;
 
 type KeyHttpService = {
   create(context: TenantContext, input: CreateApiKeyInput): Promise<CreatedApiKey>;
   list(context: TenantContext): Promise<ApiKeyMetadata[]>;
   rotate(context: TenantContext, keyId: string): Promise<CreatedApiKey>;
   revoke(context: TenantContext, keyId: string): Promise<ApiKeyMetadata>;
+  getKeyIpPolicy(context: TenantContext, keyId: string): Promise<KeyIpPolicySnapshot>;
+  getKeyBudgetPolicy(context: TenantContext, keyId: string): Promise<KeyBudgetPolicySnapshot>;
+  createAuthenticated?(
+    context: TenantContext,
+    input: CreateApiKeyInput,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<CreatedApiKey>;
+  rotateAuthenticated?(
+    context: TenantContext,
+    keyId: string,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<CreatedApiKey>;
+  revokeAuthenticated?(
+    context: TenantContext,
+    keyId: string,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<ApiKeyMetadata>;
+  replaceKeyIpPolicyAuthenticated?(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyIpPolicyInput,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<KeyIpPolicySnapshot>;
+  replaceKeyBudgetPolicyAuthenticated?(
+    context: TenantContext,
+    keyId: string,
+    input: ReplaceKeyBudgetPolicyInput,
+    handle: CustomerKeyMutationSessionHandle,
+  ): Promise<KeyBudgetPolicySnapshot>;
 };
 
 const baseContext: TenantContext = {
-  userId: 'user-1',
+  userId: USER_ID,
   tenantId: 'tenant-1',
   projectId: 'project-1',
   tenantRole: 'owner',
@@ -30,10 +73,10 @@ function keyMetadata(id: string, overrides: Partial<ApiKeyMetadata> = {}): ApiKe
     id,
     tenantId: 'tenant-1',
     projectId: 'project-1',
-    principalUserId: 'user-1',
+    principalUserId: USER_ID,
     executionPrincipalType: 'member',
-    executionPrincipalId: 'user-1',
-    createdByUserId: 'user-1',
+    executionPrincipalId: USER_ID,
+    createdByUserId: USER_ID,
     rotatedByUserId: null,
     revokedByUserId: null,
     entitlementId: 'entitlement-1',
@@ -59,7 +102,58 @@ function errorWithStatus(status: number): Error & { status: number } {
   return Object.assign(new Error('rejected'), { status });
 }
 
-function makeHarness(options: { role?: TenantContext['tenantRole']; keyService?: unknown } = {}) {
+const verifiedZeroCounter = { status: 'verified', settled: '0', outstandingReserved: '0' } as const;
+
+function budgetSnapshot(
+  context: TenantContext,
+  keyId: string,
+  key: ApiKeyMetadata,
+  budget: {
+    version: string;
+    lineageId: string;
+    tokenCaps: { daily: string | null; lifetime: string | null };
+    customerChargeCaps: { daily: string | null; lifetime: string | null } | null;
+  },
+): KeyBudgetPolicySnapshot {
+  return {
+    tenantId: context.tenantId,
+    projectId: context.projectId,
+    keyId,
+    lineageId: budget.lineageId,
+    version: budget.version,
+    authzVersion: key.authzVersion,
+    supplyMode: 'platform',
+    tokenUnit: 'tokens',
+    tokenCountingSemanticsVersion: 'token-units-v1',
+    currentWindow: {
+      timezone: 'UTC',
+      startInclusive: '2026-09-28T00:00:00.000Z',
+      endExclusive: '2026-09-29T00:00:00.000Z',
+    },
+    tokenCaps: { daily: budget.tokenCaps.daily, lifetime: budget.tokenCaps.lifetime },
+    tokenUsage: { daily: verifiedZeroCounter, lifetime: verifiedZeroCounter },
+    customerChargeBudget:
+      budget.customerChargeCaps === null
+        ? null
+        : {
+            currency: 'USD',
+            unit: 'minor_units',
+            caps: { daily: budget.customerChargeCaps.daily, lifetime: budget.customerChargeCaps.lifetime },
+            usage: { daily: verifiedZeroCounter, lifetime: verifiedZeroCounter },
+          },
+  };
+}
+
+function makeHarness(
+  options: {
+    role?: TenantContext['tenantRole'];
+    keyService?: KeyHttpService;
+    withoutResolver?: boolean;
+    withoutIssuer?: boolean;
+    forgedIssuer?: boolean;
+    withoutAuthenticated?: boolean;
+  } = {},
+) {
   const calls = {
     authorize: [] as Array<Record<string, string>>,
     create: [] as Array<{ context: TenantContext; input: CreateApiKeyInput }>,
@@ -68,6 +162,16 @@ function makeHarness(options: { role?: TenantContext['tenantRole']; keyService?:
     revoke: [] as string[],
   };
   const rows = new Map<string, ApiKeyMetadata>();
+  const policies = new Map<string, { version: string; mode: 'disabled' | 'allowlist' | 'denyall'; rules: string[] }>();
+  const budgets = new Map<
+    string,
+    {
+      version: string;
+      lineageId: string;
+      tokenCaps: { daily: string | null; lifetime: string | null };
+      customerChargeCaps: { daily: string | null; lifetime: string | null } | null;
+    }
+  >();
   const context = { ...baseContext, tenantRole: options.role ?? 'owner' };
   let secretNumber = 0;
 
@@ -80,7 +184,72 @@ function makeHarness(options: { role?: TenantContext['tenantRole']; keyService?:
     }
   };
 
+  // Real issuer, scripted native query port: NOT a verified-capability mint stub.
+  const sha = (v: string) => createHash('sha256').update(v).digest('hex');
+  const database: SaasDatabase = {
+    async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+      let rows: unknown[];
+      const statement = sql.replace(/\s+/g, ' ').trim();
+      if (sql === CUSTOMER_KEY_MUTATION_ISSUE_SQL) {
+        rows =
+          values[0] === sha(SESSION_TOKEN) && values[1] === sha(CSRF_TOKEN)
+            ? [
+                {
+                  id: '22222222-2222-4222-8222-222222222222',
+                  user_id: USER_ID,
+                  token_hash: sha(SESSION_TOKEN),
+                  csrf_token_hash: sha(CSRF_TOKEN),
+                },
+              ]
+            : [];
+      } else if (
+        statement ===
+        'SELECT s.user_id, s.expires_at, s.created_at FROM saas_sessions s JOIN saas_users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > $2 AND u.disabled_at IS NULL LIMIT 1'
+      ) {
+        rows =
+          values[0] === sha(SESSION_TOKEN)
+            ? [{ user_id: USER_ID, expires_at: '2030-01-01T00:00:00.000Z', created_at: '2026-09-28T00:00:00.000Z' }]
+            : [];
+      } else if (
+        statement ===
+        'SELECT s.csrf_token_hash FROM saas_sessions s JOIN saas_users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > $2 AND u.disabled_at IS NULL LIMIT 1'
+      ) {
+        rows = values[0] === sha(SESSION_TOKEN) ? [{ csrf_token_hash: sha(CSRF_TOKEN) }] : [];
+      } else {
+        throw new Error('Unexpected owned HTTP fixture SQL');
+      }
+      // Only the generic scripted-driver row boundary; actual issuer validates origin.
+      return { rows: rows as Row[], rowCount: rows.length };
+    },
+    async transaction<T>(_work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+      throw new Error('Unexpected HTTP fixture TX');
+    },
+    async migrate() {
+      throw new Error('No fixture migration');
+    },
+    async verifySchema() {
+      throw new Error('No fixture readiness');
+    },
+    async ping() {
+      throw new Error('No fixture ping');
+    },
+    async close() {},
+  };
+  const actualIdentity = new SaasIdentityService(database, { now: () => new Date('2026-09-28T00:00:00.000Z') });
+
   const defaultKeyService: KeyHttpService = {
+    async createAuthenticated(candidate, input, handle) {
+      assertCustomerKeyMutationSessionBound(handle, database, candidate.userId);
+      return defaultKeyService.create(candidate, input);
+    },
+    async rotateAuthenticated(candidate, keyId, handle) {
+      assertCustomerKeyMutationSessionBound(handle, database, candidate.userId);
+      return defaultKeyService.rotate(candidate, keyId);
+    },
+    async revokeAuthenticated(candidate, keyId, handle) {
+      assertCustomerKeyMutationSessionBound(handle, database, candidate.userId);
+      return defaultKeyService.revoke(candidate, keyId);
+    },
     async create(candidate, input) {
       assertManagementRole(candidate);
       calls.create.push({ context: candidate, input });
@@ -94,8 +263,84 @@ function makeHarness(options: { role?: TenantContext['tenantRole']; keyService?:
         createdByUserId: candidate.userId,
       });
       rows.set(id, metadata);
+      policies.set(id, { version: '1', mode: 'disabled', rules: [] });
+      budgets.set(id, {
+        version: '1',
+        lineageId: id,
+        tokenCaps: { daily: null, lifetime: null },
+        customerChargeCaps: null,
+      });
       secretNumber += 1;
       return { ...metadata, secret: `mr_live_create_${secretNumber}` };
+    },
+    async getKeyIpPolicy(candidate, keyId) {
+      assertManagementRole(candidate);
+      const current = rows.get(keyId);
+      const policy = policies.get(keyId);
+      if (!current || !policy) throw errorWithStatus(404);
+      return {
+        tenantId: candidate.tenantId,
+        projectId: candidate.projectId,
+        keyId,
+        version: policy.version,
+        authzVersion: current.authzVersion,
+        policy: { mode: policy.mode, rules: [...policy.rules] },
+      };
+    },
+    async replaceKeyIpPolicyAuthenticated(candidate, keyId, input, handle) {
+      assertCustomerKeyMutationSessionBound(handle, database, candidate.userId);
+      assertManagementRole(candidate);
+      const current = rows.get(keyId);
+      const policy = policies.get(keyId);
+      if (!current || !policy) throw errorWithStatus(404);
+      if (input.expectedVersion !== policy.version) {
+        throw Object.assign(errorWithStatus(409), { code: 'KEY_IP_POLICY_VERSION_CONFLICT' });
+      }
+      const nextVersion = String(Number(policy.version) + 1);
+      const replaced = {
+        version: nextVersion,
+        mode: input.policy.mode,
+        rules: [...input.policy.rules],
+      };
+      policies.set(keyId, replaced);
+      rows.set(keyId, { ...current, authzVersion: current.authzVersion + 1 });
+      return {
+        tenantId: candidate.tenantId,
+        projectId: candidate.projectId,
+        keyId,
+        version: nextVersion,
+        authzVersion: current.authzVersion + 1,
+        policy: { mode: replaced.mode, rules: [...replaced.rules] },
+      };
+    },
+    async getKeyBudgetPolicy(candidate, keyId) {
+      assertManagementRole(candidate);
+      const current = rows.get(keyId);
+      const budget = budgets.get(keyId);
+      if (!current || !budget) throw errorWithStatus(404);
+      return budgetSnapshot(candidate, keyId, current, budget);
+    },
+    async replaceKeyBudgetPolicyAuthenticated(candidate, keyId, input, handle) {
+      assertCustomerKeyMutationSessionBound(handle, database, candidate.userId);
+      assertManagementRole(candidate);
+      const current = rows.get(keyId);
+      const budget = budgets.get(keyId);
+      if (!current || !budget) throw errorWithStatus(404);
+      if (input.expectedVersion !== budget.version) {
+        throw Object.assign(errorWithStatus(409), { code: 'KEY_BUDGET_POLICY_VERSION_CONFLICT' });
+      }
+      const replaced = {
+        version: String(Number(budget.version) + 1),
+        lineageId: budget.lineageId,
+        tokenCaps: { daily: input.tokenCaps.daily, lifetime: input.tokenCaps.lifetime },
+        customerChargeCaps:
+          input.customerChargeCaps === null
+            ? null
+            : { daily: input.customerChargeCaps.daily, lifetime: input.customerChargeCaps.lifetime },
+      };
+      budgets.set(keyId, replaced);
+      rows.set(keyId, { ...current, authzVersion: current.authzVersion + 1 });
+      return budgetSnapshot(candidate, keyId, { ...current, authzVersion: current.authzVersion + 1 }, replaced);
     },
     async list(candidate) {
       assertManagementRole(candidate);
@@ -137,15 +382,23 @@ function makeHarness(options: { role?: TenantContext['tenantRole']; keyService?:
   };
 
   const identity = {
-    async getSession(token: string) {
-      return token === 'session-token' ? { userId: 'user-1' } : undefined;
-    },
-    async verifyCsrfToken(token: string, csrf: string) {
-      return token === 'session-token' && csrf === CSRF_TOKEN;
-    },
+    getSession: (token: string) => actualIdentity.getSession(token),
+    verifyCsrfToken: (token: string, csrf: string) => actualIdentity.verifyCsrfToken(token, csrf),
+    ...(options.withoutIssuer
+      ? {}
+      : {
+          issueKeyMutationSession: (token: string, csrf: string) =>
+            options.forgedIssuer
+              ? Promise.resolve(
+                  Object.freeze({
+                    purpose: 'customer-key-mutation-session-v1',
+                  } satisfies CustomerKeyMutationSessionHandle),
+                )
+              : actualIdentity.issueKeyMutationSession(token, csrf),
+        }),
     async authorizeProjectAccess(input: { userId: string; tenantId: string; projectId: string }) {
       calls.authorize.push(input);
-      if (input.userId !== 'user-1' || input.tenantId !== 'tenant-1' || input.projectId !== 'project-1') {
+      if (input.userId !== USER_ID || input.tenantId !== 'tenant-1' || input.projectId !== 'project-1') {
         throw errorWithStatus(404);
       }
       return context;
@@ -154,7 +407,17 @@ function makeHarness(options: { role?: TenantContext['tenantRole']; keyService?:
 
   return {
     identity,
-    keyService: (options.keyService as KeyHttpService | undefined) ?? defaultKeyService,
+    keyService: options.withoutResolver
+      ? new KeyService(database)
+      : (options.keyService ??
+        (options.withoutAuthenticated
+          ? {
+              create: defaultKeyService.create,
+              list: defaultKeyService.list,
+              rotate: defaultKeyService.rotate,
+              revoke: defaultKeyService.revoke,
+            }
+          : defaultKeyService)),
     calls,
     context,
   };
@@ -171,8 +434,8 @@ async function startHarness(options: Parameters<typeof makeHarness>[0] = {}) {
   assert.ok(address && typeof address !== 'string');
   const origin = `http://127.0.0.1:${address.port}`;
   handler = createSaasKeyHandler({
-    service: harness.identity as never,
-    keyService: harness.keyService as never,
+    service: harness.identity,
+    keyService: harness.keyService,
     publicOrigin: origin,
     sessionTtlSeconds: 900,
   });
@@ -267,8 +530,8 @@ test('key routes authorize the cookie user and reject cross-tenant/project selec
     });
     assert.equal(crossProject.status, 404);
     assert.deepEqual(app.calls.authorize, [
-      { userId: 'user-1', tenantId: 'tenant-2', projectId: 'project-1' },
-      { userId: 'user-1', tenantId: 'tenant-1', projectId: 'project-2' },
+      { userId: USER_ID, tenantId: 'tenant-2', projectId: 'project-1' },
+      { userId: USER_ID, tenantId: 'tenant-1', projectId: 'project-2' },
     ]);
   } finally {
     await app.close();
@@ -377,8 +640,8 @@ test('create defaults to the authenticated member, supports project services, an
     assert.equal(defaultMember.status, 201);
     const defaultMemberData = dataObject(await body(defaultMember));
     assert.equal(defaultMemberData.executionPrincipalType, 'member');
-    assert.equal(defaultMemberData.executionPrincipalId, 'user-1');
-    assert.equal(defaultMemberData.createdByUserId, 'user-1');
+    assert.equal(defaultMemberData.executionPrincipalId, USER_ID);
+    assert.equal(defaultMemberData.createdByUserId, USER_ID);
     assert.deepEqual(app.calls.create[0]?.input, {
       name: 'key',
       modelScopes: ['model-a'],
@@ -392,7 +655,7 @@ test('create defaults to the authenticated member, supports project services, an
     assert.equal(projectServiceData.executionPrincipalType, 'project_service');
     assert.equal(projectServiceData.executionPrincipalId, 'project-1');
     assert.equal(projectServiceData.principalUserId, null);
-    assert.equal(projectServiceData.createdByUserId, 'user-1');
+    assert.equal(projectServiceData.createdByUserId, USER_ID);
     assert.deepEqual(app.calls.create[1]?.input, {
       name: 'key',
       modelScopes: ['model-a'],
@@ -421,8 +684,8 @@ test('create defaults to the authenticated member, supports project services, an
     }
     assert.equal(app.calls.create.length, 2);
     assert.deepEqual(app.calls.authorize, [
-      { userId: 'user-1', tenantId: 'tenant-1', projectId: 'project-1' },
-      { userId: 'user-1', tenantId: 'tenant-1', projectId: 'project-1' },
+      { userId: USER_ID, tenantId: 'tenant-1', projectId: 'project-1' },
+      { userId: USER_ID, tenantId: 'tenant-1', projectId: 'project-1' },
     ]);
   } finally {
     await app.close();
@@ -468,14 +731,14 @@ test('rotate returns a one-time replacement secret and rejects a forged body', a
     assert.equal(rotatedData.executionPrincipalType, 'project_service');
     assert.equal(rotatedData.executionPrincipalId, 'project-1');
     assert.equal(rotatedData.principalUserId, null);
-    assert.equal(rotatedData.createdByUserId, 'user-1');
+    assert.equal(rotatedData.createdByUserId, USER_ID);
   } finally {
     await app.close();
   }
 });
 
 test('create fails closed when the KeyService has no entitlement resolver', async () => {
-  const app = await startHarness({ keyService: new KeyService({} as never) });
+  const app = await startHarness({ withoutResolver: true });
   try {
     const response = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
       method: 'POST',
@@ -484,6 +747,285 @@ test('create fails closed when the KeyService has no entitlement resolver', asyn
     });
     assert.equal(response.status, 503);
     assert.equal(errorCode(await body(response)), 'SERVICE_UNAVAILABLE');
+  } finally {
+    await app.close();
+  }
+});
+
+test('HTTP mutations require actual issuer and authenticated writer; GET remains unchanged without them', async () => {
+  for (const options of [{ withoutIssuer: true }, { withoutAuthenticated: true }]) {
+    const app = await startHarness(options);
+    try {
+      for (const suffix of ['keys', 'keys/key-1/rotate', 'keys/key-1/revoke']) {
+        const response = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/${suffix}`, {
+          method: 'POST',
+          headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+          body: JSON.stringify(
+            suffix === 'keys' ? { name: 'key', modelScopes: ['model-a'], supplyMode: 'platform' } : {},
+          ),
+        });
+        assert.equal(response.status, 503);
+        assert.equal(errorCode(await body(response)), 'SERVICE_UNAVAILABLE');
+      }
+      assert.equal(app.calls.create.length, 0);
+      assert.equal(app.calls.rotate.length, 0);
+      assert.equal(app.calls.revoke.length, 0);
+      const get = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+        headers: { cookie: SESSION_COOKIE },
+      });
+      assert.equal(get.status, 200);
+      assert.equal(app.calls.list, 1);
+    } finally {
+      await app.close();
+    }
+  }
+});
+test('HTTP refuses a shape-only issuer handle before any business service call', async () => {
+  const app = await startHarness({ forgedIssuer: true });
+  try {
+    const response = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'key', modelScopes: ['model-a'], supplyMode: 'platform' }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal(errorCode(await body(response)), 'SERVICE_UNAVAILABLE');
+    assert.equal(app.calls.create.length, 0);
+    assert.equal(
+      JSON.stringify(
+        await body(
+          await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, { headers: { cookie: SESSION_COOKIE } }),
+        ),
+      ).includes(SESSION_TOKEN),
+      false,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test('GET ip-policy returns the versioned snapshot and rejects unsupported methods and anonymous callers', async () => {
+  const app = await startHarness();
+  try {
+    const created = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Console key', modelScopes: ['model-a'], supplyMode: 'platform' }),
+    });
+    assert.equal(created.status, 201);
+    const keyId = String(dataObject(await body(created)).id);
+
+    const anonymous = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/ip-policy`);
+    assert.equal(anonymous.status, 401);
+
+    const wrongMethod = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/ip-policy`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(wrongMethod.status, 405);
+
+    const response = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/ip-policy`, {
+      headers: authHeaders(false),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(dataObject(await body(response)), {
+      tenantId: 'tenant-1',
+      projectId: 'project-1',
+      keyId,
+      version: '1',
+      authzVersion: 1,
+      policy: { mode: 'disabled', rules: [] },
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test('PUT ip-policy enforces the write boundary and advances the CAS head', async () => {
+  const app = await startHarness();
+  try {
+    const created = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Console key', modelScopes: ['model-a'], supplyMode: 'platform' }),
+    });
+    const keyId = String(dataObject(await body(created)).id);
+    const url = `${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/ip-policy`;
+
+    const noCsrf = await fetch(url, {
+      method: 'PUT',
+      headers: { cookie: `${SESSION_COOKIE}; ${CSRF_COOKIE}`, origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: '1', policy: { mode: 'denyall', rules: [] } }),
+    });
+    assert.equal(noCsrf.status, 403);
+
+    const malformed = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: '1' }),
+    });
+    assert.equal(malformed.status, 400);
+
+    const replaced = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: '1', policy: { mode: 'allowlist', rules: ['203.0.113.0/24'] } }),
+    });
+    assert.equal(replaced.status, 200);
+    assert.deepEqual(dataObject(await body(replaced)), {
+      tenantId: 'tenant-1',
+      projectId: 'project-1',
+      keyId,
+      version: '2',
+      authzVersion: 2,
+      policy: { mode: 'allowlist', rules: ['203.0.113.0/24'] },
+    });
+
+    const stale = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: '1', policy: { mode: 'denyall', rules: [] } }),
+    });
+    assert.equal(stale.status, 409);
+    assert.equal(errorCode(await body(stale)), 'CONFLICT');
+
+    const current = await fetch(url, { headers: authHeaders(false) });
+    assert.equal(String(dataObject(await body(current)).version), '2');
+  } finally {
+    await app.close();
+  }
+});
+
+test('GET budget-policy returns the versioned snapshot and rejects unsupported methods and anonymous callers', async () => {
+  const app = await startHarness();
+  try {
+    const created = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Console key', modelScopes: ['model-a'], supplyMode: 'platform' }),
+    });
+    assert.equal(created.status, 201);
+    const keyId = String(dataObject(await body(created)).id);
+
+    const anonymous = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/budget-policy`);
+    assert.equal(anonymous.status, 401);
+
+    const wrongMethod = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/budget-policy`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(wrongMethod.status, 405);
+
+    const response = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/budget-policy`, {
+      headers: authHeaders(false),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(dataObject(await body(response)), {
+      tenantId: 'tenant-1',
+      projectId: 'project-1',
+      keyId,
+      lineageId: keyId,
+      version: '1',
+      authzVersion: 1,
+      supplyMode: 'platform',
+      tokenUnit: 'tokens',
+      tokenCountingSemanticsVersion: 'token-units-v1',
+      currentWindow: {
+        timezone: 'UTC',
+        startInclusive: '2026-09-28T00:00:00.000Z',
+        endExclusive: '2026-09-29T00:00:00.000Z',
+      },
+      tokenCaps: { daily: null, lifetime: null },
+      tokenUsage: { daily: verifiedZeroCounter, lifetime: verifiedZeroCounter },
+      customerChargeBudget: null,
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test('PUT budget-policy enforces the write boundary and advances the CAS head', async () => {
+  const app = await startHarness();
+  try {
+    const created = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Console key', modelScopes: ['model-a'], supplyMode: 'platform' }),
+    });
+    const keyId = String(dataObject(await body(created)).id);
+    const url = `${app.base}/tenants/tenant-1/projects/project-1/keys/${keyId}/budget-policy`;
+
+    const noCsrf = await fetch(url, {
+      method: 'PUT',
+      headers: { cookie: `${SESSION_COOKIE}; ${CSRF_COOKIE}`, origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expectedVersion: '1',
+        tokenCaps: { daily: '1000', lifetime: null },
+        customerChargeCaps: null,
+      }),
+    });
+    assert.equal(noCsrf.status, 403);
+
+    const malformed = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: '1', tokenCaps: { daily: '1000', lifetime: null } }),
+    });
+    assert.equal(malformed.status, 400);
+
+    const replaced = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expectedVersion: '1',
+        tokenCaps: { daily: '1000', lifetime: null },
+        customerChargeCaps: { daily: '5000', lifetime: '90000' },
+      }),
+    });
+    assert.equal(replaced.status, 200);
+    assert.deepEqual(dataObject(await body(replaced)), {
+      tenantId: 'tenant-1',
+      projectId: 'project-1',
+      keyId,
+      lineageId: keyId,
+      version: '2',
+      authzVersion: 2,
+      supplyMode: 'platform',
+      tokenUnit: 'tokens',
+      tokenCountingSemanticsVersion: 'token-units-v1',
+      currentWindow: {
+        timezone: 'UTC',
+        startInclusive: '2026-09-28T00:00:00.000Z',
+        endExclusive: '2026-09-29T00:00:00.000Z',
+      },
+      tokenCaps: { daily: '1000', lifetime: null },
+      tokenUsage: { daily: verifiedZeroCounter, lifetime: verifiedZeroCounter },
+      customerChargeBudget: {
+        currency: 'USD',
+        unit: 'minor_units',
+        caps: { daily: '5000', lifetime: '90000' },
+        usage: { daily: verifiedZeroCounter, lifetime: verifiedZeroCounter },
+      },
+    });
+
+    const stale = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        expectedVersion: '1',
+        tokenCaps: { daily: null, lifetime: null },
+        customerChargeCaps: null,
+      }),
+    });
+    assert.equal(stale.status, 409);
+    assert.equal(errorCode(await body(stale)), 'CONFLICT');
+
+    const current = await fetch(url, { headers: authHeaders(false) });
+    const currentBody = dataObject(await body(current));
+    assert.equal(String(currentBody.version), '2');
+    assert.equal(String(currentBody.authzVersion), '2');
   } finally {
     await app.close();
   }

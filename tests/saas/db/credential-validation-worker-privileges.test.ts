@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import {
   SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
   SaasCredentialValidationWorkerPrivilegeError,
@@ -115,7 +116,7 @@ test('worker SELECT never implies INSERT/UPDATE/REFERENCES on the same column', 
 
 test('deployment grant script exposes only the worker role’s column-scoped permissions', () => {
   const sql = readFileSync(
-    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', import.meta.url),
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
     'utf8',
   );
   assert.match(sql, /model_router_saas_validation_worker/);

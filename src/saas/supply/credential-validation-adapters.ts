@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { ProviderCredentialValidationJobRecord } from './types.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
 
@@ -46,7 +47,9 @@ export type ProviderCredentialValidationFetch = (url: URL, init: RequestInit) =>
 export interface ProviderCredentialValidationResponse {
   readonly status: number;
   readonly headers: { get(name: string): string | null };
-  readonly body: ReadableStream<Uint8Array> | null;
+  // Fetch globals use the DOM stream when DOM is loaded; pinned Undici uses
+  // node:stream/web. Keep both concrete byte-stream types, not a cast or shim.
+  readonly body: ReadableStream<Uint8Array> | NodeReadableStream<Uint8Array> | null;
 }
 
 export interface CredentialValidationProbe {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -26,7 +26,7 @@ export function approvedTarget(
 
 export function customJob(target: ApprovedCredentialValidationTarget = approvedTarget()): ProviderCredentialValidationJobRecord {
   return {
-    id: 'job-custom', tenantId: 'tenant-fixture', accountId: 'account-fixture', credentialId: 'credential-fixture',
+    id: 'job-custom', ownerKind: 'tenant', tenantId: 'tenant-fixture', accountId: 'account-fixture', credentialId: 'credential-fixture',
     credentialVersion: 1, providerId: target.providerId, productId: target.productId, credentialType: 'api-key',
     allowedModels: [target.model], target: { model: target.model, endpoint: target.endpoint, version: target.capabilityVersion },
     idempotencyKey: 'a'.repeat(64), state: 'failed', attemptCount: 5, availableAt: '2026-09-29T00:00:00.000Z',
@@ -85,13 +85,23 @@ export async function validationHttpsFixture(
   t.after(() => rm(directory, { recursive: true, force: true }));
   const certificatePath = join(directory, 'fixture.crt');
   const privateKeyPath = join(directory, 'fixture.key');
+  const ownedConfigPath = join(directory, 'fixture-openssl.cnf');
+  await writeFile(ownedConfigPath, '[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = 127.0.0.1\n', { mode: 0o600 });
   const generated = spawnSync('openssl', [
-    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+    'req', '-config', ownedConfigPath, '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
     '-sha256', '-nodes', '-days', '2', '-subj', '/CN=127.0.0.1',
     '-addext', 'subjectAltName=IP:127.0.0.1', '-addext', 'basicConstraints=critical,CA:TRUE',
     '-addext', 'keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign',
     '-keyout', privateKeyPath, '-out', certificatePath,
-  ], { encoding: 'utf8', timeout: 30_000 });
+  ], {
+    encoding: 'utf8', timeout: 30_000,
+    env: {
+      PATH: process.env.PATH,
+      LANG: process.env.LANG,
+      TMPDIR: process.env.TMPDIR,
+      OPENSSL_CONF: ownedConfigPath,
+    },
+  });
   assert.equal(generated.status, 0, 'OpenSSL must generate the local test-only HTTPS certificate');
   const [certificatePem, key] = await Promise.all([readFile(certificatePath, 'utf8'), readFile(privateKeyPath, 'utf8')]);
   const server = createServer({ cert: certificatePem, key }, handler);

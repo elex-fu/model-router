@@ -25,6 +25,8 @@ import { ProviderSupplyError } from '../../supply/errors.js';
 import type {
   PlatformProviderAccountCreateInput,
   PlatformProviderAccountLifecycleInput,
+  PlatformProviderAccountRevalidationInput,
+  PlatformProviderAccountSchedulingInput,
   PlatformProviderCredentialCreateInput,
   PlatformProviderCredentialLifecycleInput,
   PlatformProviderCredentialSecretRotationInput,
@@ -35,6 +37,7 @@ import type {
   ProviderCredentialVersionRecord,
   ProviderCredentialWriteResult,
 } from '../../supply/types.js';
+import type { CustomerWebhookTenantPolicyService } from '../../webhooks/tenant-policy-service.js';
 import {
   hasPlatformRole,
   PLATFORM_ADMIN_ROLES,
@@ -61,6 +64,12 @@ import {
   type CapacityPolicyRecord,
   type PlatformCapacityPolicyService,
 } from '../capacity-policy-service.js';
+import {
+  PlatformGovernanceError,
+  type PlatformOperatorManagementService,
+  type PlatformTenantLifecycleService,
+  type PlatformUserGovernanceService,
+} from '../governance/index.js';
 
 export const PLATFORM_ADMIN_READ_PREFIX = '/admin/api/v1' as const;
 
@@ -98,6 +107,8 @@ export const PLATFORM_ADMIN_WRITE_PATHS = Object.freeze({
   revokeSupplyCredential: `${PLATFORM_ADMIN_READ_PREFIX}/supply/credentials/:credentialId/revoke`,
   registerCustomerPriceVersion: `${PLATFORM_ADMIN_READ_PREFIX}/pricing/customer-versions`,
   registerSupplierCostVersion: `${PLATFORM_ADMIN_READ_PREFIX}/pricing/supplier-cost-versions`,
+  /** PUT only; seeds a fail-closed default policy on first write. */
+  configureWebhookTenantPolicy: `${PLATFORM_ADMIN_READ_PREFIX}/webhooks/tenant-policies/:tenantId`,
 } as const);
 
 export interface PlatformAdminOperationsSummaryQuery {
@@ -156,6 +167,12 @@ export interface PlatformAdminSupplyService {
   enablePlatformProviderAccount(input: PlatformProviderAccountLifecycleInput): Promise<ProviderAccountRecord>;
   disablePlatformProviderAccount(input: PlatformProviderAccountLifecycleInput): Promise<ProviderAccountRecord>;
   revokePlatformProviderAccount(input: PlatformProviderAccountLifecycleInput): Promise<ProviderAccountRecord>;
+  updatePlatformProviderAccountScheduling(
+    input: PlatformProviderAccountSchedulingInput,
+  ): Promise<ProviderAccountRecord>;
+  updatePlatformProviderAccountRevalidation(
+    input: PlatformProviderAccountRevalidationInput,
+  ): Promise<ProviderAccountRecord>;
   enablePlatformProviderCredential(input: PlatformProviderCredentialLifecycleInput): Promise<ProviderCredentialRecord>;
   disablePlatformProviderCredential(input: PlatformProviderCredentialLifecycleInput): Promise<ProviderCredentialRecord>;
   revokePlatformProviderCredential(input: PlatformProviderCredentialLifecycleInput): Promise<ProviderCredentialRecord>;
@@ -217,8 +234,25 @@ export interface PlatformAdminReadHandlerOptions {
   readonly capacityPolicies?: PlatformAdminCapacityPolicyService;
   /** Omitted until startup wires the restricted, identifier-only target selectors. */
   readonly capacityPolicyTargets?: PlatformAdminCapacityPolicyTargetSelectors;
+  /** Omitted until startup wires the E4 governance services. */
+  readonly governance?: PlatformAdminGovernanceServices;
+  /** Omitted until startup wires the audited customer webhook quota provisioning service. */
+  readonly webhookTenantPolicies?: Pick<CustomerWebhookTenantPolicyService, 'configure'>;
   /** Omitted until the startup composition wires the transactional catalog writer. */
   readonly writeSecurity?: PlatformAdminWriteHttpSecurity;
+}
+
+/** E4 governance service surface consumed by the admin transport boundary. */
+export interface PlatformAdminGovernanceServices {
+  readonly users: Pick<
+    PlatformUserGovernanceService,
+    'listUsers' | 'setUserDisabled' | 'resetUserPassword' | 'resetUserMfa'
+  >;
+  readonly tenants: Pick<PlatformTenantLifecycleService, 'listTenants' | 'setTenantStatus' | 'takeoverTenant'>;
+  readonly operators: Pick<
+    PlatformOperatorManagementService,
+    'listOperators' | 'grantOperatorRole' | 'revokeOperatorRole' | 'createOperator'
+  >;
 }
 
 export type PlatformAdminReadHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
@@ -239,19 +273,40 @@ type SupplyRoute =
   | 'supplyAccountCredentials'
   | 'rotateSupplyCredentialSecret'
   | 'supplyAccountLifecycle'
+  | 'supplyAccountScheduling'
+  | 'supplyAccountRevalidation'
   | 'supplyCredentialLifecycle'
   | 'registerCustomerPriceVersion'
   | 'registerSupplierCostVersion';
 type CapacityPolicyRoute = 'tenantCapacityPolicy' | 'projectCapacityPolicy' | 'apiKeyCapacityPolicy';
 type CapacityPolicySelectorRoute = 'capacityTenantTargets' | 'capacityProjectTargets' | 'capacityApiKeyTargets';
+/** E4 governance routes; the concrete action comes from the path suffix. */
+type GovernanceRoute =
+  | 'governanceUsers'
+  | 'governanceUserMutation'
+  | 'governanceTenants'
+  | 'governanceTenantMutation'
+  | 'governanceOperators'
+  | 'governanceOperatorRole';
 type WriteRoute =
   | 'registerRightsVersion'
   | 'revokeRights'
   | 'createSupplyAccount'
   | 'rotateSupplyCredentialSecret'
   | 'supplyAccountLifecycle'
+  | 'supplyAccountScheduling'
+  | 'supplyAccountRevalidation'
   | 'supplyCredentialLifecycle';
-type Route = ReadRoute | SupplyRoute | WriteRoute | CapacityPolicyRoute | CapacityPolicySelectorRoute;
+/** F4 platform-side customer webhook tenant quota provisioning. */
+type WebhookPolicyRoute = 'webhookTenantPolicy';
+type Route =
+  | ReadRoute
+  | SupplyRoute
+  | WriteRoute
+  | CapacityPolicyRoute
+  | CapacityPolicySelectorRoute
+  | GovernanceRoute
+  | WebhookPolicyRoute;
 
 class HttpError extends Error {
   constructor(
@@ -438,7 +493,177 @@ function capacityPolicySelectorTarget(path: string): CapacityPolicySelectorTarge
   return { route, tenantId, projectId: capacitySelectorId(segments[2] as string) };
 }
 
+const GOVERNANCE_PREFIX = `${PLATFORM_ADMIN_READ_PREFIX}/governance`;
+const GOVERNANCE_USER_ACTIONS = ['disable', 'enable', 'password-reset', 'mfa-reset'] as const;
+const GOVERNANCE_TENANT_ACTIONS = ['suspend', 'resume', 'close', 'takeover'] as const;
+
+function governanceRoute(path: string): GovernanceRoute | undefined {
+  if (path === `${GOVERNANCE_PREFIX}/users`) return 'governanceUsers';
+  if (path === `${GOVERNANCE_PREFIX}/tenants`) return 'governanceTenants';
+  if (path === `${GOVERNANCE_PREFIX}/operators`) return 'governanceOperators';
+
+  const userPrefix = `${GOVERNANCE_PREFIX}/users/`;
+  if (path.startsWith(userPrefix)) {
+    const segments = path.slice(userPrefix.length).split('/');
+    if (
+      segments.length === 2 &&
+      segments[0] !== '' &&
+      GOVERNANCE_USER_ACTIONS.includes(segments[1] as (typeof GOVERNANCE_USER_ACTIONS)[number])
+    ) {
+      return 'governanceUserMutation';
+    }
+    return undefined;
+  }
+  const tenantPrefix = `${GOVERNANCE_PREFIX}/tenants/`;
+  if (path.startsWith(tenantPrefix)) {
+    const segments = path.slice(tenantPrefix.length).split('/');
+    if (
+      segments.length === 2 &&
+      segments[0] !== '' &&
+      GOVERNANCE_TENANT_ACTIONS.includes(segments[1] as (typeof GOVERNANCE_TENANT_ACTIONS)[number])
+    ) {
+      return 'governanceTenantMutation';
+    }
+    return undefined;
+  }
+  const operatorPrefix = `${GOVERNANCE_PREFIX}/operators/`;
+  if (path.startsWith(operatorPrefix)) {
+    const segments = path.slice(operatorPrefix.length).split('/');
+    if (segments.length === 2 && segments[0] !== '' && segments[1] === 'roles') return 'governanceOperatorRole';
+    if (segments.length === 3 && segments[0] !== '' && segments[1] === 'roles' && segments[2] !== '') {
+      return 'governanceOperatorRole';
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function isGovernanceRoute(route: Route): route is GovernanceRoute {
+  return (
+    route === 'governanceUsers' ||
+    route === 'governanceUserMutation' ||
+    route === 'governanceTenants' ||
+    route === 'governanceTenantMutation' ||
+    route === 'governanceOperators' ||
+    route === 'governanceOperatorRole'
+  );
+}
+
+function governancePathId(path: string, prefix: string): string {
+  const encoded = path.slice(prefix.length).split('/')[0] ?? '';
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(encoded);
+  } catch {
+    throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  }
+  if (
+    decoded.length === 0 ||
+    decoded.includes('/') ||
+    decoded.includes('\\') ||
+    [...decoded].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    })
+  ) {
+    throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  }
+  return decoded;
+}
+
+function governanceUserAction(path: string): (typeof GOVERNANCE_USER_ACTIONS)[number] {
+  const action = path.slice(`${GOVERNANCE_PREFIX}/users/`.length).split('/')[1];
+  if (!GOVERNANCE_USER_ACTIONS.includes(action as (typeof GOVERNANCE_USER_ACTIONS)[number])) {
+    throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  }
+  return action as (typeof GOVERNANCE_USER_ACTIONS)[number];
+}
+
+function governanceTenantAction(path: string): (typeof GOVERNANCE_TENANT_ACTIONS)[number] {
+  const action = path.slice(`${GOVERNANCE_PREFIX}/tenants/`.length).split('/')[1];
+  if (!GOVERNANCE_TENANT_ACTIONS.includes(action as (typeof GOVERNANCE_TENANT_ACTIONS)[number])) {
+    throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  }
+  return action as (typeof GOVERNANCE_TENANT_ACTIONS)[number];
+}
+
+function governanceOperatorRoleFromPath(path: string): string {
+  const segments = path.slice(`${GOVERNANCE_PREFIX}/operators/`.length).split('/');
+  if (segments.length !== 3) throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(segments[2] ?? '');
+  } catch {
+    throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  }
+  return decoded;
+}
+
+/** F4: the tenant policy path parameter is always a tenant UUID. */
+function webhookPolicyTenantId(path: string): string {
+  const prefix = `${PLATFORM_ADMIN_READ_PREFIX}/webhooks/tenant-policies/`;
+  const id = decodeCapacityPathId(path.slice(prefix.length));
+  if (!CAPACITY_UUID_PATTERN.test(id)) throw new HttpError(400, 'INVALID_PATH', 'The request path is invalid.');
+  return id.toLowerCase();
+}
+
+function webhookPolicyUnavailable(): HttpError {
+  return new HttpError(503, 'WEBHOOK_POLICY_UNAVAILABLE', 'The customer webhook policy service is not available');
+}
+
+function webhookPolicyServiceError(error: unknown): HttpError {
+  if (error instanceof TypeError || error instanceof RangeError) {
+    return new HttpError(400, 'INVALID_BODY', 'The request body is invalid.');
+  }
+  const code = error instanceof Error ? error.message : '';
+  if (code === 'WEBHOOK_POLICY_FORBIDDEN') return forbidden();
+  if (code === 'WEBHOOK_POLICY_BELOW_CURRENT_USAGE') {
+    return new HttpError(409, 'WEBHOOK_POLICY_BELOW_CURRENT_USAGE', 'The policy cannot be below current usage');
+  }
+  return internalError();
+}
+
+function governanceError(error: unknown): HttpError {
+  if (error instanceof PlatformGovernanceError) {
+    // Re-construct from the stable code so a wrapped service can never echo a
+    // custom message (password material, emails) through this boundary.
+    const safe = new PlatformGovernanceError(error.code);
+    return new HttpError(safe.status, safe.code, safe.message);
+  }
+  return internalError();
+}
+
+function governanceUnavailable(): HttpError {
+  return new HttpError(503, 'GOVERNANCE_UNAVAILABLE', 'The platform governance service is not available');
+}
+
+function governanceService(
+  options: PlatformAdminReadHandlerOptions,
+): NonNullable<PlatformAdminReadHandlerOptions['governance']> {
+  if (!options.governance) throw governanceUnavailable();
+  return options.governance;
+}
+
+function strictBodyObject(value: unknown, allowedKeys: readonly string[]): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HttpError(400, 'INVALID_BODY', 'The request body is invalid.');
+  }
+  const body = value as Record<string, unknown>;
+  for (const key of Object.keys(body)) {
+    if (!allowedKeys.includes(key)) throw new HttpError(400, 'INVALID_BODY', 'The request body is invalid.');
+  }
+  return body;
+}
+
 function routeForPath(path: string): Route | undefined {
+  const governance = governanceRoute(path);
+  if (governance) return governance;
+  const webhookPolicyPrefix = `${PLATFORM_ADMIN_READ_PREFIX}/webhooks/tenant-policies/`;
+  if (path.startsWith(webhookPolicyPrefix)) {
+    const segments = path.slice(webhookPolicyPrefix.length).split('/');
+    if (segments.length === 1 && segments[0] !== '') return 'webhookTenantPolicy';
+    return undefined;
+  }
   const selectorRoute = capacityPolicySelectorRoute(path);
   if (selectorRoute) return selectorRoute;
   const capacityRoute = capacityPolicyRoute(path);
@@ -476,6 +701,8 @@ function routeForPath(path: string): Route | undefined {
       if (path.startsWith(accountPrefix)) {
         const segments = path.slice(accountPrefix.length).split('/');
         if (segments.length === 2 && segments[1] === 'credentials') return 'supplyAccountCredentials';
+        if (segments.length === 2 && segments[1] === 'scheduling') return 'supplyAccountScheduling';
+        if (segments.length === 2 && segments[1] === 'revalidation') return 'supplyAccountRevalidation';
         if (
           segments.length === 2 &&
           SUPPLY_LIFECYCLE_ACTIONS.includes(segments[1] as (typeof SUPPLY_LIFECYCLE_ACTIONS)[number])
@@ -994,6 +1221,9 @@ function parseSupplyAccountBody(value: unknown): Omit<PlatformProviderAccountCre
       'rightsId',
       'rightsVersion',
       'capabilities',
+      'priority',
+      'weight',
+      'revalidationIntervalSeconds',
     ],
     [
       'displayName',
@@ -1019,6 +1249,59 @@ function parseSupplyAccountBody(value: unknown): Omit<PlatformProviderAccountCre
     rightsId: bodyText(object, 'rightsId', MAX_ID_LENGTH),
     rightsVersion: bodyPositiveInteger(object, 'rightsVersion'),
     capabilities: bodyCapabilities(object),
+    ...(object.priority === undefined ? {} : { priority: bodySchedulingScalar(object, 'priority', 0, 1000) }),
+    ...(object.weight === undefined ? {} : { weight: bodySchedulingScalar(object, 'weight', 1, 10_000) }),
+    ...(object.revalidationIntervalSeconds === undefined
+      ? {}
+      : { revalidationIntervalSeconds: bodyRevalidationInterval(object, 'revalidationIntervalSeconds') }),
+  };
+}
+
+/** Contract C-7 scheduling scalar bounds; validated again at the service layer. */
+function bodySchedulingScalar(object: Record<string, unknown>, key: string, min: number, max: number): number {
+  const value = object[key];
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new HttpError(400, 'INVALID_BODY', 'The request body is invalid.');
+  }
+  return value;
+}
+
+/** D3 revalidation cadence bounds; null is the explicit disable, validated again at the service layer. */
+function bodyRevalidationInterval(object: Record<string, unknown>, key: string): number | null {
+  const value = object[key];
+  if (value === null) return null;
+  return bodySchedulingScalar(object, key, 900, 604_800);
+}
+
+function parseSupplySchedulingBody(value: unknown): {
+  readonly priority: number;
+  readonly weight: number;
+  readonly expectedAuthzVersion: number;
+} {
+  const object = parseStrictObject(
+    value,
+    ['priority', 'weight', 'expectedAuthzVersion'],
+    ['priority', 'weight', 'expectedAuthzVersion'],
+  );
+  return {
+    priority: bodySchedulingScalar(object, 'priority', 0, 1000),
+    weight: bodySchedulingScalar(object, 'weight', 1, 10_000),
+    expectedAuthzVersion: bodyPositiveInteger(object, 'expectedAuthzVersion'),
+  };
+}
+
+function parseSupplyRevalidationBody(value: unknown): {
+  readonly revalidationIntervalSeconds: number | null;
+  readonly expectedAuthzVersion: number;
+} {
+  const object = parseStrictObject(
+    value,
+    ['revalidationIntervalSeconds', 'expectedAuthzVersion'],
+    ['revalidationIntervalSeconds', 'expectedAuthzVersion'],
+  );
+  return {
+    revalidationIntervalSeconds: bodyRevalidationInterval(object, 'revalidationIntervalSeconds'),
+    expectedAuthzVersion: bodyPositiveInteger(object, 'expectedAuthzVersion'),
   };
 }
 
@@ -1056,6 +1339,35 @@ interface CapacityPolicyUpdateBody {
   readonly expectedRevision: string;
   readonly limits: CapacityPolicyLimits;
   readonly reason: CapacityPolicyReason;
+}
+/**
+ * F4 webhook tenant policy body. All four controls are required so a platform
+ * write is always explicit; the service's INSERT path intentionally omits
+ * `allowed_event_types` and `low_balance_threshold_minor_units`, so first-time
+ * configuration seeds the migration defaults (full event whitelist, no
+ * low-balance threshold) — fail-closed remains governed by `enabled`.
+ * Bounds are re-validated fail-closed at the service layer.
+ */
+function parseWebhookTenantPolicyBody(value: unknown): {
+  readonly enabled: boolean;
+  readonly maxActiveEndpoints: number;
+  readonly maxEventsPerMinute: number;
+  readonly maxPendingDeliveries: number;
+} {
+  const object = parseStrictObject(
+    value,
+    ['enabled', 'maxActiveEndpoints', 'maxEventsPerMinute', 'maxPendingDeliveries'],
+    ['enabled', 'maxActiveEndpoints', 'maxEventsPerMinute', 'maxPendingDeliveries'],
+  );
+  if (typeof object.enabled !== 'boolean') {
+    throw new HttpError(400, 'INVALID_BODY', 'Request body contains an invalid field');
+  }
+  return {
+    enabled: object.enabled,
+    maxActiveEndpoints: bodySchedulingScalar(object, 'maxActiveEndpoints', 1, 100),
+    maxEventsPerMinute: bodySchedulingScalar(object, 'maxEventsPerMinute', 1, 10_000),
+    maxPendingDeliveries: bodySchedulingScalar(object, 'maxPendingDeliveries', 1, 100_000),
+  };
 }
 
 function parseCapacityPolicyUpdateBody(value: unknown): CapacityPolicyUpdateBody {
@@ -1445,6 +1757,24 @@ function validateOptions(options: PlatformAdminReadHandlerOptions): void {
   if (typeof options.catalog.listRights !== 'function') {
     throw new TypeError('catalog.listRights is required');
   }
+  if (options.governance !== undefined) {
+    const governance = options.governance;
+    if (!governance || typeof governance !== 'object') throw new TypeError('governance must be an object');
+    for (const method of ['listUsers', 'setUserDisabled', 'resetUserPassword', 'resetUserMfa'] as const) {
+      if (typeof governance.users?.[method] !== 'function')
+        throw new TypeError(`governance.users.${method} is required`);
+    }
+    for (const method of ['listTenants', 'setTenantStatus', 'takeoverTenant'] as const) {
+      if (typeof governance.tenants?.[method] !== 'function') {
+        throw new TypeError(`governance.tenants.${method} is required`);
+      }
+    }
+    for (const method of ['listOperators', 'grantOperatorRole', 'revokeOperatorRole', 'createOperator'] as const) {
+      if (typeof governance.operators?.[method] !== 'function') {
+        throw new TypeError(`governance.operators.${method} is required`);
+      }
+    }
+  }
   if (options.writeSecurity !== undefined) {
     if (!options.writeSecurity || typeof options.writeSecurity !== 'object') {
       throw new TypeError('writeSecurity must be an object');
@@ -1466,6 +1796,7 @@ function validateOptions(options: PlatformAdminReadHandlerOptions): void {
       'enablePlatformProviderAccount',
       'disablePlatformProviderAccount',
       'revokePlatformProviderAccount',
+      'updatePlatformProviderAccountScheduling',
       'enablePlatformProviderCredential',
       'disablePlatformProviderCredential',
       'revokePlatformProviderCredential',
@@ -1511,6 +1842,11 @@ function validateOptions(options: PlatformAdminReadHandlerOptions): void {
     const requiredMethods = ['listTenantIds', 'listProjectIds', 'listApiKeyIds'] as const;
     if (requiredMethods.some((method) => typeof options.capacityPolicyTargets?.[method] !== 'function')) {
       throw new TypeError('capacity policy target selector methods are required');
+    }
+  }
+  if (options.webhookTenantPolicies !== undefined) {
+    if (!options.webhookTenantPolicies || typeof options.webhookTenantPolicies.configure !== 'function') {
+      throw new TypeError('webhookTenantPolicies.configure is required');
     }
   }
 }
@@ -1622,18 +1958,24 @@ function methodNotAllowed(res: ServerResponse, requestId: string, allow: string)
 }
 
 function allowedMethods(route: Route): readonly string[] {
+  if (route === 'webhookTenantPolicy') return ['PUT'];
   if (route === 'tenantCapacityPolicy' || route === 'projectCapacityPolicy' || route === 'apiKeyCapacityPolicy') {
     return ['GET', 'PUT'];
   }
   if (route === 'rights') return ['GET', 'POST'];
   if (route === 'supplyAccounts') return ['GET', 'POST'];
   if (route === 'supplyAccountCredentials') return ['GET', 'POST'];
+  if (route === 'governanceOperators') return ['GET', 'POST'];
+  if (route === 'governanceUserMutation' || route === 'governanceTenantMutation') return ['POST'];
+  if (route === 'governanceOperatorRole') return ['POST', 'DELETE'];
   if (route === 'registerCustomerPriceVersion' || route === 'registerSupplierCostVersion') return ['POST'];
   if (
     route === 'registerRightsVersion' ||
     route === 'revokeRights' ||
     route === 'rotateSupplyCredentialSecret' ||
     route === 'supplyAccountLifecycle' ||
+    route === 'supplyAccountScheduling' ||
+    route === 'supplyAccountRevalidation' ||
     route === 'supplyCredentialLifecycle'
   ) {
     return [route === 'rotateSupplyCredentialSecret' ? 'PUT' : 'POST'];
@@ -1788,6 +2130,9 @@ function safeProviderAccountDto(record: ProviderAccountRecord): Record<string, u
     status: record.status,
     validationState: record.validationState,
     authzVersion: record.authzVersion,
+    priority: record.priority,
+    weight: record.weight,
+    revalidationIntervalSeconds: record.revalidationIntervalSeconds,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     disabledAt: record.disabledAt,
@@ -1852,6 +2197,8 @@ function isSupplyRoute(route: Route): route is SupplyRoute {
     route === 'supplyAccountCredentials' ||
     route === 'rotateSupplyCredentialSecret' ||
     route === 'supplyAccountLifecycle' ||
+    route === 'supplyAccountScheduling' ||
+    route === 'supplyAccountRevalidation' ||
     route === 'supplyCredentialLifecycle'
   );
 }
@@ -1906,7 +2253,7 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
       const actor = await options.access.authenticate(req as PlatformAdminAccessRequest);
       if (!isAuthenticatedPlatformActor(actor)) throw notAuthenticated();
 
-      if (isWrite && !hasPlatformRole(actor, ['operations'])) throw forbidden();
+      if (isWrite && !isGovernanceRoute(route) && !hasPlatformRole(actor, ['operations'])) throw forbidden();
       if (isWrite) await requireWriteCsrf(req, options.writeSecurity);
       if (isCapacityPolicyRoute(route) && !hasPlatformRole(actor, ['operations'])) throw forbidden();
       if (isCapacityPolicyRoute(route) && !options.capacityPolicies) throw capacityPolicyUnavailable();
@@ -1946,11 +2293,65 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
       if (isSupplyRoute(route) && !options.supply) {
         throw supplyUnavailable();
       }
+      // E4 governance role bands. The services re-verify the actor against a
+      // fresh in-transaction role read; these gates are the boundary layer.
+      if (
+        (route === 'governanceUsers' || route === 'governanceTenants') &&
+        !hasPlatformRole(actor, ['superadmin', 'security', 'operations', 'support-readonly'])
+      ) {
+        throw forbidden();
+      }
+      if (route === 'governanceUserMutation' && !hasPlatformRole(actor, ['superadmin', 'security'])) {
+        throw forbidden();
+      }
+      if (
+        route === 'governanceTenantMutation' &&
+        governanceTenantAction(url.pathname) === 'takeover' &&
+        !hasPlatformRole(actor, ['superadmin'])
+      ) {
+        throw forbidden();
+      }
+      if (
+        route === 'governanceTenantMutation' &&
+        governanceTenantAction(url.pathname) !== 'takeover' &&
+        !hasPlatformRole(actor, ['superadmin', 'operations'])
+      ) {
+        throw forbidden();
+      }
+      if (
+        (route === 'governanceOperators' || route === 'governanceOperatorRole') &&
+        !hasPlatformRole(actor, ['superadmin'])
+      ) {
+        throw forbidden();
+      }
+      if (isGovernanceRoute(route)) governanceService(options);
 
       if (isWrite) {
         const values = queryValues(url, []);
         if (values.size !== 0) invalidQuery();
         const audit = requestAuditContext(req, actor, requestId);
+
+        if (route === 'webhookTenantPolicy') {
+          const webhookTenantPolicies = options.webhookTenantPolicies;
+          if (!webhookTenantPolicies) throw webhookPolicyUnavailable();
+          const tenantId = webhookPolicyTenantId(url.pathname);
+          const input = parseWebhookTenantPolicyBody(await readJson(req));
+          const policy = await webhookTenantPolicies.configure(
+            { actorUserId: actor.userId, requestId },
+            tenantId,
+            input,
+          );
+          sendJson(res, 200, requestId, {
+            tenantId: policy.tenantId,
+            enabled: policy.enabled,
+            maxActiveEndpoints: policy.maxActiveEndpoints,
+            maxEventsPerMinute: policy.maxEventsPerMinute,
+            maxPendingDeliveries: policy.maxPendingDeliveries,
+            revision: policy.revision,
+            updatedAt: policy.updatedAt,
+          });
+          return true;
+        }
 
         if (isCapacityPolicyRoute(route)) {
           const capacityPolicies = options.capacityPolicies;
@@ -2070,6 +2471,22 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
             return true;
           }
 
+          if (route === 'supplyAccountScheduling') {
+            const accountId = supplyPathId(url.pathname, 'accounts', '/scheduling');
+            const input = parseSupplySchedulingBody(await readJson(req));
+            const data = await supply.updatePlatformProviderAccountScheduling({ ...input, accountId, audit });
+            sendJson(res, 200, requestId, safeProviderAccountDto(data));
+            return true;
+          }
+
+          if (route === 'supplyAccountRevalidation') {
+            const accountId = supplyPathId(url.pathname, 'accounts', '/revalidation');
+            const input = parseSupplyRevalidationBody(await readJson(req));
+            const data = await supply.updatePlatformProviderAccountRevalidation({ ...input, accountId, audit });
+            sendJson(res, 200, requestId, safeProviderAccountDto(data));
+            return true;
+          }
+
           if (route === 'supplyCredentialLifecycle') {
             const action = supplyLifecycleAction(url.pathname, 'credentials');
             const credentialId = supplyPathId(url.pathname, 'credentials', `/${action}`);
@@ -2084,6 +2501,68 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
             sendJson(res, 200, requestId, safeProviderCredentialDto(data));
             return true;
           }
+        }
+
+        if (route === 'governanceUserMutation') {
+          const governance = governanceService(options);
+          const userId = governancePathId(url.pathname, `${GOVERNANCE_PREFIX}/users/`);
+          const action = governanceUserAction(url.pathname);
+          if (action === 'password-reset') {
+            const body = strictBodyObject(await readJson(req), ['password']);
+            await governance.users.resetUserPassword(actor, userId, body.password);
+          } else if (action === 'mfa-reset') {
+            strictBodyObject(await readJson(req), []);
+            await governance.users.resetUserMfa(actor, userId);
+          } else {
+            strictBodyObject(await readJson(req), []);
+            await governance.users.setUserDisabled(actor, userId, action === 'disable');
+          }
+          sendJson(res, 200, requestId, { ok: true });
+          return true;
+        }
+
+        if (route === 'governanceTenantMutation') {
+          const governance = governanceService(options);
+          const tenantId = governancePathId(url.pathname, `${GOVERNANCE_PREFIX}/tenants/`);
+          const action = governanceTenantAction(url.pathname);
+          if (action === 'takeover') {
+            const body = strictBodyObject(await readJson(req), ['targetUserId']);
+            await governance.tenants.takeoverTenant(actor, tenantId, body.targetUserId);
+            sendJson(res, 200, requestId, { ok: true });
+            return true;
+          }
+          strictBodyObject(await readJson(req), []);
+          const record = await governance.tenants.setTenantStatus(actor, tenantId, action);
+          sendJson(res, 200, requestId, record);
+          return true;
+        }
+
+        if (route === 'governanceOperators') {
+          const governance = governanceService(options);
+          const body = strictBodyObject(await readJson(req), ['email', 'displayName', 'password', 'role']);
+          const created = await governance.operators.createOperator(actor, {
+            email: body.email,
+            displayName: body.displayName,
+            password: body.password,
+            role: body.role,
+          });
+          // The response never echoes the initial password.
+          sendJson(res, 201, requestId, created);
+          return true;
+        }
+
+        if (route === 'governanceOperatorRole') {
+          const governance = governanceService(options);
+          const userId = governancePathId(url.pathname, `${GOVERNANCE_PREFIX}/operators/`);
+          if (method === 'DELETE') {
+            drainRequest(req);
+            await governance.operators.revokeOperatorRole(actor, userId, governanceOperatorRoleFromPath(url.pathname));
+          } else {
+            const body = strictBodyObject(await readJson(req), ['role']);
+            await governance.operators.grantOperatorRole(actor, userId, body.role);
+          }
+          sendJson(res, 200, requestId, { ok: true });
+          return true;
         }
 
         throw internalError();
@@ -2187,6 +2666,46 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
         return true;
       }
 
+      if (route === 'governanceUsers') {
+        const values = queryValues(url, ['limit', 'cursor', 'emailContains', 'status']);
+        const limit = queryLimit(values);
+        const status = optionalQueryValue(values, 'status');
+        if (status !== undefined && status !== 'active' && status !== 'disabled') invalidQuery();
+        const page = await governanceService(options).users.listUsers(actor, {
+          ...(limit === undefined ? {} : { limit }),
+          cursor: optionalQueryValue(values, 'cursor') ?? null,
+          emailContains: optionalQueryValue(values, 'emailContains'),
+          status,
+        });
+        sendJson(res, 200, requestId, page);
+        return true;
+      }
+
+      if (route === 'governanceTenants') {
+        const values = queryValues(url, ['limit', 'cursor', 'slugContains', 'status']);
+        const limit = queryLimit(values);
+        const status = optionalQueryValue(values, 'status');
+        if (status !== undefined && status !== 'active' && status !== 'suspended' && status !== 'closed') {
+          invalidQuery();
+        }
+        const page = await governanceService(options).tenants.listTenants(actor, {
+          ...(limit === undefined ? {} : { limit }),
+          cursor: optionalQueryValue(values, 'cursor') ?? null,
+          slugContains: optionalQueryValue(values, 'slugContains'),
+          status,
+        });
+        sendJson(res, 200, requestId, page);
+        return true;
+      }
+
+      if (route === 'governanceOperators') {
+        const values = queryValues(url, []);
+        if (values.size !== 0) invalidQuery();
+        const operators = await governanceService(options).operators.listOperators(actor);
+        sendJson(res, 200, requestId, { items: operators });
+        return true;
+      }
+
       const data =
         route === 'products'
           ? await options.catalog.listProducts(catalogQuery(url, false))
@@ -2202,15 +2721,19 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
         requestId,
         error instanceof HttpError
           ? error
-          : isCapacityPolicyRoute(route)
-            ? capacityPolicyServiceError(error)
-            : isCapacityPolicySelectorRoute(route)
-              ? internalError()
-              : isSupplyRoute(route)
-                ? supplyServiceError(error)
-                : isPlatformPricingRoute(route)
-                  ? serviceError(error)
-                  : serviceError(error),
+          : route === 'webhookTenantPolicy'
+            ? webhookPolicyServiceError(error)
+            : isGovernanceRoute(route)
+              ? governanceError(error)
+              : isCapacityPolicyRoute(route)
+                ? capacityPolicyServiceError(error)
+                : isCapacityPolicySelectorRoute(route)
+                  ? internalError()
+                  : isSupplyRoute(route)
+                    ? supplyServiceError(error)
+                    : isPlatformPricingRoute(route)
+                      ? serviceError(error)
+                      : serviceError(error),
       );
       return true;
     }

@@ -177,6 +177,8 @@ export interface ByokPlanEntitlementResolver {
 export interface ServicePlanServiceOptions {
   readonly now?: () => Date;
   readonly idFactory?: () => string;
+  /** F3: optional customer webhook producer; when absent no events are emitted. */
+  readonly webhookEvents?: import('../webhooks/producers.js').CustomerWebhookEventProducer;
 }
 
 export type ServicePlanDatabase = Pick<SaasDatabase, 'query' | 'transaction'>;

@@ -6,8 +6,8 @@ import { Readable } from 'node:stream';
 import { test } from 'node:test';
 import {
   createProviderCredentialContext,
-  sealProviderCredential,
   type ProviderCredentialKms,
+  sealProviderCredential,
 } from '../../src/saas/credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor } from '../../src/saas/db/index.js';
 import type { ModelResolutionProvenance } from '../../src/saas/gateway/contracts.js';
@@ -43,10 +43,13 @@ import {
 } from '../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../src/saas/keys/types.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../../src/saas/metering/types.js';
-import type { RequestPreparationSigner } from '../../src/saas/runtime/request-preparation-signer-adapter.js';
 import { GatewayProviderCredentialUnsealer } from '../../src/saas/runtime/gateway-provider-credential-unsealer.js';
 import { ProviderSupplyHttpCredentialResolver } from '../../src/saas/runtime/provider-supply-http-credential-resolver.js';
-import type { ProviderCredentialDispatchBinding, ProviderCredentialDispatchProof } from '../../src/saas/supply/types.js';
+import type { RequestPreparationSigner } from '../../src/saas/runtime/request-preparation-signer-adapter.js';
+import type {
+  ProviderCredentialDispatchBinding,
+  ProviderCredentialDispatchProof,
+} from '../../src/saas/supply/types.js';
 import {
   createManagedSaasGatewayComposition,
   createManagedSaasGatewayProductionComposition,
@@ -456,7 +459,12 @@ function claimedDispatchAttempt(current: AttemptRecord, evidence: PreparedReques
   assert.equal(current.dispatchState, 'not_sent');
   assert.equal(current.resultState, 'pending');
   assert.equal(current.responseStarted, false);
-  return { ...current, preparedEvidenceId: evidence.evidenceId, stateVersion: current.stateVersion + 1, updatedAt: NOW };
+  return {
+    ...current,
+    preparedEvidenceId: evidence.evidenceId,
+    stateVersion: current.stateVersion + 1,
+    updatedAt: NOW,
+  };
 }
 
 function transitionedDispatchAttempt(current: AttemptRecord, input: AttemptTransitionInput): AttemptRecord {
@@ -603,7 +611,8 @@ function dispatchComposition(
     entryPoint: 'dispatch-composition-test',
   });
   return {
-    composition, payloadBytes,
+    composition,
+    payloadBytes,
     readAttempt: () => structuredClone(meteringAttempt),
     readEvidence: () => structuredClone(currentEvidence),
   };
@@ -665,7 +674,9 @@ test('managed gateway composition wires success and retryable failure through th
   }
 });
 
-test('composition dispatch uses real credential unsealing, native bearer formatting, and ProviderHttpTransport', { timeout: 5000 }, async () => {
+test('composition dispatch uses real credential unsealing, native bearer formatting, and ProviderHttpTransport', {
+  timeout: 5000,
+}, async () => {
   const secret = Buffer.from('synthetic-composition-provider-token');
   const dataKey = randomBytes(32);
   const decryptedKeys: Uint8Array[] = [];
@@ -687,11 +698,25 @@ test('composition dispatch uses real credential unsealing, native bearer formatt
       return plaintext;
     },
   };
-  const envelope = await sealProviderCredential(secret, createProviderCredentialContext({
-    deployment: 'composition', environment: 'test', ownerKind: 'tenant', tenantId: 'tenant-a',
-    supplyMode: 'byok', purpose: 'inference', providerId: 'provider-a', productId: 'product-a',
-    accountId: 'account-a', credentialId: 'credential-a', credentialVersion: 1, credentialType: 'api-key',
-  }), kms, 'synthetic-composition-kms');
+  const envelope = await sealProviderCredential(
+    secret,
+    createProviderCredentialContext({
+      deployment: 'composition',
+      environment: 'test',
+      ownerKind: 'tenant',
+      tenantId: 'tenant-a',
+      supplyMode: 'byok',
+      purpose: 'inference',
+      providerId: 'provider-a',
+      productId: 'product-a',
+      accountId: 'account-a',
+      credentialId: 'credential-a',
+      credentialVersion: 1,
+      credentialType: 'api-key',
+    }),
+    kms,
+    'synthetic-composition-kms',
+  );
   const healthWrites: unknown[] = [];
   let readAttempt: (() => AttemptRecord) | undefined;
   let readEvidence: (() => PreparedRequestEvidenceRecord) | undefined;
@@ -709,55 +734,141 @@ test('composition dispatch uses real credential unsealing, native bearer formatt
         assert.equal(evidence.status, 'claimed');
         proofReads += 1;
         const binding: ProviderCredentialDispatchBinding = {
-          tenantId: 'tenant-a', requestId: 'dispatch-request', attemptId: 'dispatch-attempt', attemptOrdinal: 1,
-          supplyMode: 'byok', accountOwnerKind: 'tenant', accountId: 'account-a', providerId: 'provider-a', productId: 'product-a',
-          protocol: 'openai', endpoint: evidence.endpoint, routeConfigId: 'route-a', routeConfigVersion: 1,
-          routePublicModelId: 'public-model-a', routePublicModelVersion: 1, routeProtocol: 'openai',
-          routeTargetMode: 'tenant_account', routeUpstreamId: 'upstream-a', upstreamId: 'upstream-a',
-          resolvedModel: MODEL_RESOLUTION.resolvedModel, dispatchProfileId: 'dispatch-a', supplyProfileAuthzVersion: 1,
-          credentialId: 'credential-a', credentialVersion: 1, credentialAuthzVersion: 1, accountAuthzVersion: 1,
-          profileAccountAuthzVersion: 1, poolId: null, poolAuthzVersion: null, poolMemberAccountAuthzVersion: null,
-          poolMemberAuthzVersion: null, poolGrantAuthzVersion: null, poolGrantProfileAuthzVersion: null, poolGrantPoolAuthzVersion: null,
+          tenantId: 'tenant-a',
+          requestId: 'dispatch-request',
+          attemptId: 'dispatch-attempt',
+          attemptOrdinal: 1,
+          supplyMode: 'byok',
+          accountOwnerKind: 'tenant',
+          accountId: 'account-a',
+          providerId: 'provider-a',
+          productId: 'product-a',
+          protocol: 'openai',
+          endpoint: evidence.endpoint,
+          routeConfigId: 'route-a',
+          routeConfigVersion: 1,
+          routePublicModelId: 'public-model-a',
+          routePublicModelVersion: 1,
+          routeProtocol: 'openai',
+          routeTargetMode: 'tenant_account',
+          routeUpstreamId: 'upstream-a',
+          upstreamId: 'upstream-a',
+          resolvedModel: MODEL_RESOLUTION.resolvedModel,
+          dispatchProfileId: 'dispatch-a',
+          supplyProfileAuthzVersion: 1,
+          credentialId: 'credential-a',
+          credentialVersion: 1,
+          credentialAuthzVersion: 1,
+          accountAuthzVersion: 1,
+          profileAccountAuthzVersion: 1,
+          poolId: null,
+          poolAuthzVersion: null,
+          poolMemberAccountAuthzVersion: null,
+          poolMemberAuthzVersion: null,
+          poolGrantAuthzVersion: null,
+          poolGrantProfileAuthzVersion: null,
+          poolGrantPoolAuthzVersion: null,
         };
         return {
           evidence: {
-            ...binding, evidenceId: id, supplyProfileId: 'dispatch-a', supplyProfileVersion: 1, publicModel: 'model-a',
-            status: 'claimed', claimedAt: NOW, claimedAttemptId: 'dispatch-attempt',
-            dispatchDeadline: DISPATCH_DEADLINE, expiresAt: EXPIRES_AT,
+            ...binding,
+            evidenceId: id,
+            supplyProfileId: 'dispatch-a',
+            supplyProfileVersion: 1,
+            publicModel: 'model-a',
+            status: 'claimed',
+            claimedAt: NOW,
+            claimedAttemptId: 'dispatch-attempt',
+            dispatchDeadline: DISPATCH_DEADLINE,
+            expiresAt: EXPIRES_AT,
           },
           attempt: {
-            ...binding, preparedEvidenceId: attempt.preparedEvidenceId ?? null, dispatchAuthorityState: attempt.dispatchAuthorityState,
-            dispatchState: attempt.dispatchState, resultState: attempt.resultState, responseStarted: attempt.responseStarted,
+            ...binding,
+            preparedEvidenceId: attempt.preparedEvidenceId ?? null,
+            dispatchAuthorityState: attempt.dispatchAuthorityState,
+            dispatchState: attempt.dispatchState,
+            resultState: attempt.resultState,
+            responseStarted: attempt.responseStarted,
           },
           account: {
-            ownerKind: 'tenant', tenantId: 'tenant-a', supplyMode: 'byok', id: 'account-a', providerId: 'provider-a', productId: 'product-a',
-            credentialType: 'api-key', purpose: 'inference', status: 'active', validationState: 'verified', authzVersion: 1,
+            ownerKind: 'tenant',
+            tenantId: 'tenant-a',
+            supplyMode: 'byok',
+            id: 'account-a',
+            providerId: 'provider-a',
+            productId: 'product-a',
+            credentialType: 'api-key',
+            purpose: 'inference',
+            status: 'active',
+            validationState: 'verified',
+            authzVersion: 1,
           },
           credential: {
-            ownerKind: 'tenant', tenantId: 'tenant-a', supplyMode: 'byok', id: 'credential-a', accountId: 'account-a',
-            providerId: 'provider-a', productId: 'product-a', status: 'active', validationState: 'verified',
-            currentVersion: 1, expiresAt: null, authzVersion: 1,
+            ownerKind: 'tenant',
+            tenantId: 'tenant-a',
+            supplyMode: 'byok',
+            id: 'credential-a',
+            accountId: 'account-a',
+            providerId: 'provider-a',
+            productId: 'product-a',
+            status: 'active',
+            validationState: 'verified',
+            currentVersion: 1,
+            expiresAt: null,
+            authzVersion: 1,
           },
           version: {
-            ownerKind: 'tenant', tenantId: 'tenant-a', accountId: 'account-a', credentialId: 'credential-a', version: 1,
-            status: 'active', envelopeSchemaVersion: envelope.schemaVersion, contextVersion: envelope.contextVersion,
-            algorithm: envelope.algorithm, kmsPurpose: 'inference', wrappingRevision: 1, createdAt: NOW,
-            expiresAt: null, retiredAt: null, revokedAt: null, kmsKeyId: envelope.kmsKeyId, envelope,
+            ownerKind: 'tenant',
+            tenantId: 'tenant-a',
+            accountId: 'account-a',
+            credentialId: 'credential-a',
+            version: 1,
+            status: 'active',
+            envelopeSchemaVersion: envelope.schemaVersion,
+            contextVersion: envelope.contextVersion,
+            algorithm: envelope.algorithm,
+            kmsPurpose: 'inference',
+            wrappingRevision: 1,
+            createdAt: NOW,
+            expiresAt: null,
+            retiredAt: null,
+            revokedAt: null,
+            kmsKeyId: envelope.kmsKeyId,
+            envelope,
           },
           profile: { tenantId: 'tenant-a', id: 'dispatch-a', supplyMode: 'byok', status: 'active', authzVersion: 1 },
           profileAccount: {
-            tenantId: 'tenant-a', supplyProfileId: 'dispatch-a', supplyMode: 'byok', accountId: 'account-a',
-            providerId: 'provider-a', productId: 'product-a', accountAuthzVersion: 1, status: 'active', authzVersion: 1,
-            effectiveAt: NOW, expiresAt: null,
+            tenantId: 'tenant-a',
+            supplyProfileId: 'dispatch-a',
+            supplyMode: 'byok',
+            accountId: 'account-a',
+            providerId: 'provider-a',
+            productId: 'product-a',
+            accountAuthzVersion: 1,
+            status: 'active',
+            authzVersion: 1,
+            effectiveAt: NOW,
+            expiresAt: null,
           },
-          pool: null, poolMember: null, poolGrant: null,
-          claimAudit: { action: 'saas_prepared_request_evidence.claimed', targetType: 'saas_prepared_request_evidence', targetId: id },
+          pool: null,
+          poolMember: null,
+          poolGrant: null,
+          claimAudit: {
+            action: 'saas_prepared_request_evidence.claimed',
+            targetType: 'saas_prepared_request_evidence',
+            targetId: id,
+          },
         };
       },
     },
-    unsealer: new GatewayProviderCredentialUnsealer({
-      decryptDataKey: (request) => kms.decryptDataKey(request), checkReady: async () => {}, close: async () => {},
-    }, { deployment: 'composition', environment: 'test' }),
+    unsealer: new GatewayProviderCredentialUnsealer(
+      {
+        decryptDataKey: (request) => kms.decryptDataKey(request),
+        checkReady: async () => {},
+        close: async () => {},
+      },
+      { deployment: 'composition', environment: 'test' },
+    ),
     resolveAuthenticationHeader: () => 'authorization',
     now: () => new Date(NOW),
   });
@@ -765,7 +876,8 @@ test('composition dispatch uses real credential unsealing, native bearer formatt
     resolveCredential: resolver.resolveCredential,
     resolveDispatchProfile: async () => ({ url: 'https://provider.example/v1/dispatch' }),
     resolveAddresses: async () => [{ address: '8.8.8.8', family: 4 }],
-    endpointPolicy: { allowedHosts: ['provider.example'], allowedPorts: [443] }, timeoutMs: 1000,
+    endpointPolicy: { allowedHosts: ['provider.example'], allowedPorts: [443] },
+    timeoutMs: 1000,
     fetch: async (_url, init) => {
       fetches += 1;
       assert.equal(init.redirect, 'manual');
@@ -776,12 +888,18 @@ test('composition dispatch uses real credential unsealing, native bearer formatt
       return new Response(null, { status: bearerMatched ? 200 : 401 });
     },
   });
-  const graph = dispatchComposition(transport, { recordRuntimeOutcome: async (input) => { healthWrites.push(input); return 'applied'; } });
+  const graph = dispatchComposition(transport, {
+    recordRuntimeOutcome: async (input) => {
+      healthWrites.push(input);
+      return 'applied';
+    },
+  });
   readAttempt = graph.readAttempt;
   readEvidence = graph.readEvidence;
   try {
     const result = await graph.composition.dispatch.dispatch({
-      evidenceId: 'dispatch-evidence', payloadBytes: graph.payloadBytes,
+      evidenceId: 'dispatch-evidence',
+      payloadBytes: graph.payloadBytes,
       audit: { actorUserId: 'user-a', entryPoint: 'native-auth-composition-test' },
     });
     assert.equal(bearerMatched, true, 'native upstream must observe bearer formatting');
@@ -973,15 +1091,24 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
   // Exercise the production composition's HTTP cancellation wiring without a
   // socket or upstream: the client disappears while preparation awaits its registrar.
   const request = Object.assign(Readable.from([Buffer.from('{"model":"model-a","messages":[]}')]), {
-    method: 'POST', url: '/v1/chat/completions', complete: true, aborted: false,
+    method: 'POST',
+    url: '/v1/chat/completions',
+    complete: true,
+    aborted: false,
     headers: { authorization: 'Bearer synthetic-key', 'content-type': 'application/json' },
     socket: { remoteAddress: '127.0.0.1' },
   });
   const response = Object.assign(new EventEmitter(), {
-    headersSent: false, writableEnded: false, destroyed: false, setHeader() {},
+    headersSent: false,
+    writableEnded: false,
+    destroyed: false,
+    setHeader() {},
   });
   cancellationResponse = response;
-  assert.equal(await composition.handler(request as unknown as IncomingMessage, response as unknown as ServerResponse), true);
+  assert.equal(
+    await composition.handler(request as unknown as IncomingMessage, response as unknown as ServerResponse),
+    true,
+  );
   assert.equal(transactionCalls, 4, 'preparation and committed-request cleanup each own a separate transaction');
   assert.deepEqual(compensationStages, ['evidence', 'dispatch']);
   assert.equal(calls.at(-1), 'compensation');
@@ -1476,6 +1603,21 @@ test('production builder binds the real database transaction and does not alloca
   const productionDispatchHealth = (composition.dispatch as unknown as { runtimeHealthWriter: unknown })
     .runtimeHealthWriter;
   assert.ok(productionDispatchHealth instanceof PostgresProviderAccountRuntimeHealthStore);
+  // F3: customerWebhooks.enabled wires the settlement/failure producer into the
+  // dispatch metering service; the default composition leaves it unset.
+  const webhookComposition = createManagedSaasGatewayProductionComposition(database, {
+    ...options,
+    customerWebhooks: { enabled: true },
+  });
+  const webhookMetering = (webhookComposition.dispatch as unknown as { metering: unknown }).metering as {
+    webhookEvents?: unknown;
+  };
+  assert.ok(webhookMetering.webhookEvents, 'customerWebhooks.enabled wires the webhook event producer');
+  const plainMetering = (composition.dispatch as unknown as { metering: unknown }).metering as {
+    webhookEvents?: unknown;
+  };
+  assert.equal(plainMetering.webhookEvents, undefined);
+  await webhookComposition.close();
   const productionDispatch = composition.dispatch as unknown as {
     evidence: PreparedRequestEvidenceDispatchPort;
     metering: PreparedEvidenceMeteringPort;
@@ -1629,7 +1771,7 @@ test('production builder binds the real database transaction and does not alloca
         });
         return { rows: [{ request_id: requestId } as Row], rowCount: 1 };
       }
-      if (sql.startsWith('SELECT request_fingerprint, request_fingerprint_version')) {
+      if (sql.startsWith('SELECT saas_gateway_request_idempotency_keys.request_fingerprint AS request_fingerprint,')) {
         const [tenantId, projectId, proxyKeyId, keyDigest] = values;
         const row = persisted.get([tenantId, projectId, proxyKeyId, keyDigest].join('|'));
         const canonicalRow = row
@@ -1649,32 +1791,31 @@ test('production builder binds the real database transaction and does not alloca
   const wrappedAdmissionInput = (
     requestId: string,
     attemptId: string,
-  ): Parameters<RequestPreparationAdmissionPort['authorizeAndReserve']>[0] =>
-    ({
-      requestId,
-      attemptId,
-      idempotencyKey: 'client-retry-key',
-      tenantId: TENANT_ID,
-      projectId: PROJECT_ID,
-      proxyKeyId: PROXY_KEY_ID,
-      requestFingerprint: 'a'.repeat(64),
-      requestFingerprintVersion: 'fingerprint-v1',
-      caller: caller(),
-      entitlement: entitlement(),
-      authority: authority(),
-      payloadSha256: 'b'.repeat(64),
-      payloadBounds: {
-        inputTotalUpperBound: 1,
-        inputUncachedUpperBound: 1,
-        cacheReadUpperBound: 0,
-        cacheWriteUpperBound: 0,
-        cacheWrite5mUpperBound: 0,
-        cacheWrite1hUpperBound: 0,
-        outputTotalUpperBound: 1,
-        reasoningOutputUpperBound: 0,
-        feasibleInputBuckets: ['input'],
-      },
-    });
+  ): Parameters<RequestPreparationAdmissionPort['authorizeAndReserve']>[0] => ({
+    requestId,
+    attemptId,
+    idempotencyKey: 'client-retry-key',
+    tenantId: TENANT_ID,
+    projectId: PROJECT_ID,
+    proxyKeyId: PROXY_KEY_ID,
+    requestFingerprint: 'a'.repeat(64),
+    requestFingerprintVersion: 'fingerprint-v1',
+    caller: caller(),
+    entitlement: entitlement(),
+    authority: authority(),
+    payloadSha256: 'b'.repeat(64),
+    payloadBounds: {
+      inputTotalUpperBound: 1,
+      inputUncachedUpperBound: 1,
+      cacheReadUpperBound: 0,
+      cacheWriteUpperBound: 0,
+      cacheWrite5mUpperBound: 0,
+      cacheWrite1hUpperBound: 0,
+      outputTotalUpperBound: 1,
+      reasoningOutputUpperBound: 0,
+      feasibleInputBuckets: ['input'],
+    },
+  });
   const firstClaim = await dependencies.admission.authorizeAndReserve(
     wrappedAdmissionInput(REQUEST_A_ID, 'attempt-a'),
     { executor: claimExecutor },

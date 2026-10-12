@@ -5,6 +5,7 @@ import {
 } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
 import type { TenantContext } from '../identity/types.js';
+import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import { isServicePlanError, ServicePlanError, type ServicePlanErrorCode } from './errors.js';
 import type {
   ByokPlanEntitlementRequestContext,
@@ -185,6 +186,35 @@ export interface ServicePlanRefundEffectSource {
   readonly snapshotId: string;
   readonly entitlementId: string;
   readonly servicePlanPolicyVersion: string;
+}
+
+/**
+ * G1.5 marketing redeem grant input (design:
+ * docs/marketing-domain-design-2026-10-11.md §4.3). Internal-only: the
+ * marketing redeem service calls grantMarketingSubscription inside its own
+ * code-CAS transaction. No HTTP handler accepts this input.
+ */
+export interface GrantMarketingSubscriptionInput {
+  readonly tenantId: string;
+  /** Redeeming customer; recorded as the grant audit actor. */
+  readonly userId: string;
+  readonly servicePlanVersionId: string;
+  /**
+   * Idempotency natural key — the redeem code id. The grant's order shell
+   * carries `marketing-redeem:<grantRef>` as client_request_id, so UNIQUE
+   * (tenant_id, client_request_id) turns a repeated call into a replay read.
+   */
+  readonly grantRef: string;
+}
+
+export interface GrantedMarketingSubscription {
+  readonly orderId: string;
+  readonly projectId: string;
+  readonly subscriptionId: string;
+  readonly entitlementId: string;
+  readonly effectiveAt: string;
+  readonly expiresAt: string;
+  readonly replayed: boolean;
 }
 
 interface RefundEffectOrderRow {
@@ -677,6 +707,7 @@ function normalizeFulfillment(input: VerifiedServicePlanFulfillmentInput): Verif
 export class ByokServicePlanService implements ByokPlanEntitlementResolver {
   private readonly now: () => Date;
   private readonly idFactory: () => string;
+  private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
     private readonly database: ServicePlanDatabase,
@@ -684,6 +715,13 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
   ) {
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+    if (
+      options.webhookEvents !== undefined &&
+      (options.webhookEvents === null || typeof options.webhookEvents.servicePlanOrderStatusChanged !== 'function')
+    ) {
+      throw new TypeError('webhookEvents must implement the customer webhook producer contract');
+    }
+    this.webhookEvents = options.webhookEvents;
   }
 
   private async query<Row>(
@@ -1687,6 +1725,14 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
           ],
         );
         if (!paid.rows[0]) fail('ORDER_STATE_CONFLICT');
+        // F3: the transition event commits with the state change.
+        await this.webhookEvents?.servicePlanOrderStatusChanged(executor, {
+          tenantId: proof.tenantId,
+          orderId: proof.orderId,
+          status: 'paid',
+          occurredAt: proof.verifiedAtIso,
+          transitionRef: id(this.idFactory()),
+        });
       }
 
       const fulfilling = await this.query<OrderRow>(
@@ -1698,6 +1744,13 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
         [proof.tenantId, proof.orderId, nowIso],
       );
       if (!fulfilling.rows[0]) fail('ORDER_STATE_CONFLICT');
+      await this.webhookEvents?.servicePlanOrderStatusChanged(executor, {
+        tenantId: proof.tenantId,
+        orderId: proof.orderId,
+        status: 'fulfilling',
+        occurredAt: nowIso,
+        transitionRef: id(this.idFactory()),
+      });
 
       if (previous && previous.status === 'active') {
         const supersededEntitlement = await this.query<EntitlementRow>(
@@ -1787,6 +1840,13 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
       );
       const fulfilledOrder = fulfilled.rows[0];
       if (!fulfilledOrder) fail('ORDER_STATE_CONFLICT');
+      await this.webhookEvents?.servicePlanOrderStatusChanged(executor, {
+        tenantId: proof.tenantId,
+        orderId: proof.orderId,
+        status: 'fulfilled',
+        occurredAt: nowIso,
+        transitionRef: id(this.idFactory()),
+      });
       await this.audit(
         executor,
         proof.tenantId,
@@ -1802,6 +1862,245 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
         replayed: false,
       };
     });
+  }
+
+  /**
+   * G1.5 generation-time validation for marketing subscription codes: the
+   * referenced plan version must be purchasable (published version under a
+   * published plan). Participant-style: runs in the caller's transaction.
+   * Redemption re-validates under the shared plan fence.
+   */
+  async assertMarketingGrantPlanVersion(executor: SqlExecutor, servicePlanVersionId: string): Promise<void> {
+    const planVersion = await this.findPlanVersion(executor, id(servicePlanVersionId));
+    if (!planVersion) fail('PLAN_VERSION_UNAVAILABLE');
+  }
+
+  /**
+   * G1.5 marketing redeem grant (design: docs/marketing-domain-design-2026-10-11.md
+   * §4.3). Participant-style entry point: the marketing redeem service calls
+   * this inside its own locked code-CAS transaction, so the grant commits or
+   * rolls back with the redemption and never touches the wallet ledger.
+   *
+   * The schema hangs every snapshot/subscription off an order (NOT NULL FKs),
+   * so the grant writes a terminal 'cancelled' order shell: the cancelled
+   * state satisfies the verified-evidence CHECKs with every settlement field
+   * NULL (no payment is fabricated), and the order guard trigger makes the
+   * shell unpayable and unfulfillable. The grant itself is the active
+   * subscription + entitlement chain; `service_plan.marketing_grant` is the
+   * distinguishable audit action. Idempotency: client_request_id derives
+   * from the redeem code id, so UNIQUE (tenant_id, client_request_id) makes
+   * a repeat call a replay read. A tenant with an already-active
+   * subscription is refused (ACTIVE_SUBSCRIPTION_EXISTS) rather than
+   * silently superseded — the code stays active and can be redeemed after
+   * the current term ends.
+   */
+  async grantMarketingSubscription(
+    executor: SqlExecutor,
+    input: GrantMarketingSubscriptionInput,
+  ): Promise<GrantedMarketingSubscription> {
+    const tenantId = id(input?.tenantId);
+    const userId = id(input?.userId);
+    const planVersionId = id(input?.servicePlanVersionId);
+    const clientRequestId = `marketing-redeem:${text(input?.grantRef, 255)}`;
+
+    await this.fenceAuthorizationWriters(executor);
+
+    const existing = await this.findOrderByClientRequest(executor, tenantId, clientRequestId, true);
+    if (existing) {
+      const order = existing.order;
+      if (
+        order.plan_version_id !== planVersionId ||
+        order.operation !== 'activation' ||
+        order.renewal_of_subscription_id !== null ||
+        order.state !== 'cancelled' ||
+        order.subscription_id === null
+      ) {
+        fail('ORDER_CONFLICT');
+      }
+      const granted = await this.findSubscriptionWithSnapshot(
+        executor,
+        { tenantId, projectId: order.project_id },
+        id(order.subscription_id),
+      );
+      if (!granted) fail('STORAGE_ERROR');
+      return {
+        orderId: id(order.id),
+        projectId: id(order.project_id),
+        subscriptionId: id(granted.subscription.id),
+        entitlementId: id(granted.subscription.entitlement_id),
+        effectiveAt: timestamp(granted.subscription.effective_at),
+        expiresAt: timestamp(granted.subscription.expires_at),
+        replayed: true,
+      };
+    }
+
+    const projects = await this.query<{ readonly id: string }>(
+      executor,
+      `SELECT id FROM saas_projects WHERE tenant_id = $1 AND is_default = TRUE LIMIT 1`,
+      [tenantId],
+    );
+    const projectId = projects.rows[0]?.id;
+    if (typeof projectId !== 'string' || projectId === '') fail('ENTITLEMENT_UNAVAILABLE');
+
+    const planVersion = await this.findPlanVersion(executor, planVersionId, true);
+    if (!planVersion) fail('PLAN_VERSION_UNAVAILABLE');
+
+    const context = { tenantId, projectId };
+    const active = await this.findActiveSubscription(executor, context, true);
+    if (active) fail('ACTIVE_SUBSCRIPTION_EXISTS');
+
+    // Same profile fence/read pattern as fulfillVerified: profile rows are
+    // mutable policy facts read under the shared advisory fence.
+    await this.query(
+      executor,
+      `SELECT pg_advisory_xact_lock_shared(
+         hashtextextended(
+           'saas_supply_profile:' || encode(convert_to(($1::uuid)::text, 'UTF8'), 'hex') || ':' ||
+             encode(convert_to($2::text, 'UTF8'), 'hex'),
+           0
+         )
+       )`,
+      [tenantId, planVersion.supplyProfileId],
+    );
+    const profileResult = await this.query<ProfileRow>(
+      executor,
+      `SELECT id, status, supply_mode, model_scopes, authz_version
+       FROM saas_supply_profiles
+       WHERE tenant_id = $1 AND id = $2 AND supply_mode = 'byok'
+       LIMIT 1`,
+      [tenantId, planVersion.supplyProfileId],
+    );
+    const profile = profileResult.rows[0];
+    if (profile?.status !== 'active' || profile.supply_mode !== 'byok') {
+      fail('ENTITLEMENT_UNAVAILABLE');
+    }
+    const profileScopes = scopeValues(profile.model_scopes, 'ENTITLEMENT_UNAVAILABLE');
+    const modelScopes = intersectScopes(planVersion.allowedModels, profileScopes);
+
+    const now = currentDate(this.now);
+    const nowIso = now.toISOString();
+    const orderId = id(this.idFactory());
+    const snapshotId = id(this.idFactory());
+    const entitlementId = id(this.idFactory());
+    const subscriptionId = id(this.idFactory());
+    const expiresAt = addTermDays(now, planVersion.termDays).toISOString();
+    const snapshotDigest = digestSnapshot({
+      planVersionId: planVersion.id,
+      planId: planVersion.planId,
+      planVersion: planVersion.version,
+      allowedProviderIds: planVersion.allowedProviderIds,
+      allowedModels: planVersion.allowedModels,
+      supplyMode: planVersion.supplyMode,
+      supplyProfileId: planVersion.supplyProfileId,
+      priceVersion: planVersion.priceVersion,
+      priceMinorUnits: planVersion.priceMinorUnits,
+      currency: planVersion.currency,
+      termDays: planVersion.termDays,
+      policyVersion: planVersion.policyVersion,
+    });
+
+    const orderResult = await this.query<OrderRow>(
+      executor,
+      `INSERT INTO saas_service_plan_orders
+         (id, tenant_id, project_id, plan_version_id, operation,
+          renewal_of_subscription_id, client_request_id, state, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'activation', NULL, $5, 'cancelled', $6, $6)
+       RETURNING ${ORDER_COLUMNS}`,
+      [orderId, tenantId, projectId, planVersion.id, clientRequestId, nowIso],
+      'ORDER_CONFLICT',
+    );
+    if (!orderResult.rows[0]) fail('STORAGE_ERROR');
+
+    const snapshotResult = await this.query<SnapshotRow>(
+      executor,
+      `INSERT INTO saas_service_plan_snapshots
+         (id, tenant_id, order_id, plan_version_id, plan_id, plan_version,
+          allowed_provider_ids, allowed_models, supply_mode, supply_profile_id,
+          price_version, price_minor_units, currency, term_days, policy_version,
+          snapshot_digest, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       RETURNING ${SNAPSHOT_COLUMNS}`,
+      [
+        snapshotId,
+        tenantId,
+        orderId,
+        planVersion.id,
+        planVersion.planId,
+        planVersion.version,
+        planVersion.allowedProviderIds,
+        planVersion.allowedModels,
+        planVersion.supplyMode,
+        planVersion.supplyProfileId,
+        planVersion.priceVersion,
+        planVersion.priceMinorUnits,
+        planVersion.currency,
+        planVersion.termDays,
+        planVersion.policyVersion,
+        snapshotDigest,
+        nowIso,
+      ],
+    );
+    if (!snapshotResult.rows[0]) fail('STORAGE_ERROR');
+
+    const entitlement = await this.query<EntitlementRow>(
+      executor,
+      `INSERT INTO saas_project_entitlements
+         (id, tenant_id, project_id, supply_profile_id, supply_mode, status,
+          model_scopes, authz_version, created_at, updated_at, last_audited_at,
+          disabled_at, effective_at, expires_at, superseded_at, source_type,
+          source_ref, service_plan_snapshot_id)
+       VALUES ($1, $2, $3, $4, 'byok', 'active', $5, 1, $6, $6, $6,
+               NULL, $6, $7, NULL, 'service_plan', $8, $9)
+       RETURNING id, tenant_id, project_id, supply_profile_id, supply_mode,
+                 status, model_scopes, authz_version, effective_at, expires_at,
+                 superseded_at, disabled_at`,
+      [
+        entitlementId,
+        tenantId,
+        projectId,
+        planVersion.supplyProfileId,
+        modelScopes,
+        nowIso,
+        expiresAt,
+        orderId,
+        snapshotId,
+      ],
+      'ACTIVE_SUBSCRIPTION_EXISTS',
+    );
+    if (!entitlement.rows[0]) fail('STORAGE_ERROR');
+
+    const subscriptionResult = await this.query<SubscriptionRow>(
+      executor,
+      `INSERT INTO saas_service_plan_subscriptions
+         (id, tenant_id, project_id, order_id, snapshot_id, entitlement_id,
+          previous_subscription_id, operation, status, effective_at, expires_at,
+          activated_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10, $9, $9, $9)
+       RETURNING ${SUBSCRIPTION_COLUMNS}`,
+      [subscriptionId, tenantId, projectId, orderId, snapshotId, entitlementId, null, 'activation', nowIso, expiresAt],
+    );
+    if (!subscriptionResult.rows[0]) fail('STORAGE_ERROR');
+
+    const linked = await this.query<OrderRow>(
+      executor,
+      `UPDATE saas_service_plan_orders
+       SET subscription_id = $3, updated_at = $4
+       WHERE tenant_id = $1 AND id = $2 AND state = 'cancelled'
+       RETURNING ${ORDER_COLUMNS}`,
+      [tenantId, orderId, subscriptionId, nowIso],
+    );
+    if (!linked.rows[0]) fail('ORDER_STATE_CONFLICT');
+
+    await this.audit(executor, tenantId, userId, 'service_plan.marketing_grant', subscriptionId, nowIso);
+    return {
+      orderId,
+      projectId,
+      subscriptionId,
+      entitlementId,
+      effectiveAt: nowIso,
+      expiresAt,
+      replayed: false,
+    };
   }
 
   async cancelSubscription(context: TenantContext, subscriptionId: string): Promise<ByokSubscriptionRecord> {

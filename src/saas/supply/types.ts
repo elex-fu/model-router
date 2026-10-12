@@ -6,7 +6,13 @@ export type ProviderSupplyMode = 'byok' | 'platform';
 
 export type ProviderAccountStatus = 'pending' | 'active' | 'disabled' | 'revoked';
 export type ProviderCredentialStatus = 'pending' | 'active' | 'disabled' | 'revoked';
-export type ProviderValidationState = 'unverified' | 'verified' | 'failed';
+/**
+ * R5 (migration 097): 'quarantined' is the observation state between failed
+ * and verified. Accounts only (credentials never carry it); entry is owned by
+ * the credential-validation worker, so it is a READ-visible state here, never
+ * an accepted write input.
+ */
+export type ProviderValidationState = 'unverified' | 'verified' | 'failed' | 'quarantined';
 export type ProviderCredentialVersionStatus = 'active' | 'retired' | 'revoked';
 export type ProviderSupplyRelationStatus = 'active' | 'disabled' | 'revoked';
 
@@ -58,9 +64,9 @@ export interface ApprovedCredentialValidationTarget {
   readonly productId: 'custom-openai' | 'custom-anthropic';
   readonly credentialType: 'api-key';
   readonly model: string;
-  readonly endpoint: 'chat-completions' | 'messages';
+  readonly endpoint: 'chat-completions' | 'messages' | '/v1/chat/completions' | '/v1/messages';
   readonly capabilityVersion: number;
-  readonly protocol: 'openai-compatible' | 'anthropic-compatible';
+  readonly protocol: 'openai-compatible' | 'anthropic-compatible' | 'openai' | 'anthropic';
   readonly authProfile: 'openai-bearer-v1' | 'anthropic-api-key-2023-06-01';
   /** Canonical HTTPS API directory ending in /; the profile fixes the relative path. */
   readonly baseUrl: string;
@@ -68,7 +74,34 @@ export interface ApprovedCredentialValidationTarget {
   readonly expiresAt: string | null;
   /** SHA-256 of canonical reviewed binding evidence, also stored on the capability version. */
   readonly evidenceSha256: string;
+  /** Absent for the original v1 descriptor. The compiler requires all three v2 fields together. */
+  readonly schemaVersion?: 2;
+  readonly wirePath?: 'chat/completions' | 'messages';
+  readonly wireProtocol?: 'openai' | 'anthropic';
 }
+
+/** A v2 descriptor binds ONE canonical inference capability to ONE fixed validation probe. */
+export type CanonicalCredentialValidationTarget = ApprovedCredentialValidationTarget &
+  (
+    | {
+        readonly schemaVersion: 2;
+        readonly productId: 'custom-openai';
+        readonly endpoint: '/v1/chat/completions';
+        readonly protocol: 'openai';
+        readonly wirePath: 'chat/completions';
+        readonly wireProtocol: 'openai';
+        readonly authProfile: 'openai-bearer-v1';
+      }
+    | {
+        readonly schemaVersion: 2;
+        readonly productId: 'custom-anthropic';
+        readonly endpoint: '/v1/messages';
+        readonly protocol: 'anthropic';
+        readonly wirePath: 'messages';
+        readonly wireProtocol: 'anthropic';
+        readonly authProfile: 'anthropic-api-key-2023-06-01';
+      }
+  );
 
 /** Exact-snapshot manual requeue command; actor authorization belongs to the audited service. */
 export interface CredentialValidationRequeueCommand {
@@ -185,7 +218,9 @@ export interface CreatedTenantByokCredential {
 
 /** Immutable, non-secret authority snapshot used by the validation worker. */
 export interface ProviderCredentialValidationJobInput {
-  readonly tenantId: string;
+  /** Owner dimension of the queued validation; platform jobs have no tenant. */
+  readonly ownerKind: ProviderSupplyOwnerKind;
+  readonly tenantId: string | null;
   readonly accountId: string;
   readonly credentialId: string;
   readonly credentialVersion: number;
@@ -229,6 +264,20 @@ export interface ReplaceTenantProviderCredentialSecretInput {
   readonly audit: ProviderSupplyAuditContext;
 }
 
+/**
+ * R4 OAuth refresh (decision A) operator-semantics rotation: the control-plane
+ * refresh worker supplies the full credential reference from its claim and no
+ * TenantContext exists — the deployment operator is not a tenant member
+ * (symmetric with the platform rotation path).
+ */
+export interface ReplaceTenantProviderCredentialSecretForOperatorInput {
+  readonly credential: ProviderCredentialReference & { readonly ownerKind: 'tenant'; readonly tenantId: string };
+  readonly expectedVersion: number;
+  readonly secret: Uint8Array;
+  readonly expiresAt?: SupplyTimestamp | null;
+  readonly audit: ProviderSupplyAuditContext;
+}
+
 interface ProviderAccountInputCommon {
   readonly id?: string;
   readonly displayName: string;
@@ -245,6 +294,11 @@ interface ProviderAccountInputCommon {
   readonly capability?: ProviderCapabilityReference;
   readonly status?: ProviderAccountStatus;
   readonly validationState?: ProviderValidationState;
+  /** Contract C-7 scheduling scalars; default to the neutral tie (0 / 1). */
+  readonly priority?: number;
+  readonly weight?: number;
+  /** D3 periodic revalidation cadence in seconds; null/absent disables it. */
+  readonly revalidationIntervalSeconds?: number | null;
 }
 
 export type CreateProviderAccountInput =
@@ -275,6 +329,10 @@ export type ProviderAccountRecord = ProviderSupplyOwner & {
   readonly validationErrorCode: string | null;
   readonly lastValidatedAt: string | null;
   readonly authzVersion: number;
+  readonly priority: number;
+  readonly weight: number;
+  /** D3 periodic revalidation cadence in seconds; null disables the sweep for this account. */
+  readonly revalidationIntervalSeconds: number | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly disabledAt: string | null;

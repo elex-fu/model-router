@@ -14,7 +14,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Agent } from "undici";
 
 // ── Minimal .env parser ──────────────────────────────────────────────
@@ -366,7 +366,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (process.argv[1] === fileURLToPath(pathToFileURL(__filename))) {
   main().catch((e) => {
     console.error(e);
     process.exit(1);

@@ -188,6 +188,14 @@ function createPlanService(database: FakePaymentDatabase, calls: PlanCalls): Ser
   };
 }
 
+interface RecordedPlanTransition {
+  readonly tenantId: string;
+  readonly orderId: string;
+  readonly status: string;
+  readonly occurredAt: string;
+  readonly transitionRef: string;
+}
+
 function createFixture() {
   const database = new FakePaymentDatabase();
   const provider = new FakePaymentProvider();
@@ -195,6 +203,7 @@ function createFixture() {
   const calls: PlanCalls = { fulfillments: [] };
   const clock = { value: new Date(NOW) };
   const planService = createPlanService(database, calls);
+  const webhookTransitions: RecordedPlanTransition[] = [];
   const service = new PaymentFulfillmentService(database, provider, {
     providerKey: provider.providerKey,
     merchantId: MERCHANT_ID,
@@ -205,8 +214,16 @@ function createFixture() {
     })(),
     walletFundingLedger: ledger,
     servicePlanService: planService,
+    webhookEvents: {
+      async refundStatusChanged() {
+        throw new Error('unexpected refund event on the plan payment path');
+      },
+      async servicePlanOrderStatusChanged(_tx, input) {
+        webhookTransitions.push({ ...input });
+      },
+    },
   });
-  return { database, provider, ledger, calls, clock, planService, service };
+  return { database, provider, ledger, calls, clock, planService, service, webhookTransitions };
 }
 
 async function createPayment(fixture: ReturnType<typeof createFixture>) {
@@ -381,4 +398,33 @@ test('BYOK public payment orders expose checkout without creating a second provi
   assert.equal(refreshed.checkout.action?.kind, 'qr');
   assert.equal(fixture.provider.refreshCalls.length, 0);
   assert.equal(fixture.provider.calls.length, 1);
+});
+
+test('F3: a reconciled BYOK payment emits one in-transaction reconciliation transition event', async () => {
+  const fixture = createFixture();
+  await createPayment(fixture);
+  const mismatch = await fixture.service.handleWebhook(
+    {},
+    successWebhook(PROVIDER_ORDER_ID, TENANT_ID, 'settlement-byok-hook', '1201'),
+  );
+  assert.equal(mismatch.outcome, 'accepted');
+  await fixture.service.processPendingWebhooks();
+  assert.equal(fixture.database.state.servicePlanOrders[0]?.state, 'reconciliation_pending');
+
+  assert.equal(fixture.webhookTransitions.length, 1);
+  const event = fixture.webhookTransitions[0];
+  assert.ok(event);
+  assert.equal(event.tenantId, TENANT_ID);
+  assert.equal(event.orderId, fixture.database.state.servicePlanOrders[0]?.id);
+  assert.equal(event.status, 'reconciliation_pending');
+  assert.equal(event.occurredAt, NOW);
+  assert.match(event.transitionRef, /^payment-\d+$/);
+
+  // A fulfilled payment emits no reconciliation event.
+  const clean = createFixture();
+  await createPayment(clean);
+  await clean.service.handleWebhook({}, successWebhook(PROVIDER_ORDER_ID, TENANT_ID, 'settlement-byok-clean', '1200'));
+  await clean.service.processPendingWebhooks();
+  assert.equal(clean.database.state.servicePlanOrders[0]?.state, 'fulfilled');
+  assert.equal(clean.webhookTransitions.length, 0);
 });

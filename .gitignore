@@ -5,3 +5,4 @@ dist/
 .env
 .env.local
 /kimi-validation.config.json
+secrets.local.md

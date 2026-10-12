@@ -1,14 +1,34 @@
 # Sub2API 商业平台能力融入 model-router 技术方案
 
-更新日期：2026-10-03（Asia/Shanghai）；初始方案日期：2026-09-29。下述执行窗口按实际 UTC 日期逐项标注，本地更新日期不改写执行日期。
+更新日期：2026-10-04（Asia/Shanghai）；统一当前截点：**2026-10-04 13:01:05 UTC / 上海时间2026-10-04 21:01:05**；初始方案日期：2026-09-29。下述执行窗口按实际UTC日期逐项标注，本地更新日期不改写执行日期，旧快照只保留其历史scope。
 
 状态：产品与工程实施方案（待商业授权、上游授权及目标市场合规评审）
+
+## 当前能力与验收 checkpoint（2026-10-04 13:01:05 UTC / 上海时间2026-10-04 21:01:05）
+
+本节固定截至 **2026-10-04 13:01:05 UTC / 上海时间2026-10-04 21:01:05**。以下是 MAIN 已接受的限定事实；旧 checkpoint 的“最新/下一步”等措辞仅指其历史截点，旧失败与未知 proof 不回填。**14项完整出口全部 OPEN**，主链 **GW → full FIN → actual KEY-IP → KEY-BUD** 与原任务优先级、前置、完整出口及依赖不变。
+
+- **当前 code-tested snapshot**：T9 current820 原 `npm test` ONCE 于12:52:41.756–12:53:12.311 UTC exit0；独立原 `npm run build` ONCE 于12:55:02.974–12:55:15.043 UTC exit0。固定357 roots＝286 unit／68 integration／3 live exclusions，原排序、脚本、断言、skip与server/web/Vite flags保持；仅含批准的16项变化（canonical12＋startup fixture1＋当时docs3），无private FIN/KMS/history overlays。MAIN接受 primary SHA `09c400bfeda29a549c51e2739b1009de82e8f2ea33767d261a2eec4a85ae6b3d`。截至此截点 native counts **NOT_CAPTURED**；Nx投影另有GO但尚未接受，不猜pass/skip数字。
+- **独立组件**：canonical12安装后 strong 类型检查零诊断、原whole5为85/85、no skip，实际12:34:16–19 UTC（MAIN primary交接缩写 `0017…`），不与全量相加。Tj CVxaN7 strong39零诊断、whole14为292 pass＋7原PG skip，仅private组件，未安装/未证明PG；旧strict37 FAIL保留历史。独立nRY MFA/KMS native为109 total＝105 pass／1 fail／3 skip，safe frame1360；tP4仅expected Buffer snapshot夹具修复、SOURCE ONLY，等待新native。不将该失败定性为生产错误，也不以此解释或回填旧hang的因果。
+- **offline执行边界**：owned npmRC/cache及npm自动HOME的bounded审查为0 known unsafe project cases，已批准并完成原套offline执行；不声称普遍HOME I/O完备，不保留已过时的offline HOLD判断。
+- **边界与下一步**：本候选只更新三份MD，后续doc-only字节不是上述code-tested窗口重新验证的源码。完整GW/FIN、真实PG/权限、Provider/cloud/realKMS/PSP、schema/角色/能力激活与远端Git/CI均没有本次新证明；001–060 immutable、061 inactive、062 reserved。按主链继续独立source审查与相应授权验收，不从offline或组件通过提前开放商业能力。
+
+## 历史能力与验收 checkpoint（2026-10-04 12:11:33 UTC / 上海时间2026-10-04 20:11:33）
+
+本节为最新交接截点；下方既有章节、执行窗口及旧“当前/下一步”措辞保留各自历史时间与 scope，不回填、不合并为现树验收。§11 的14项完整出口全部 OPEN，尚非商业就绪。
+
+- **协议12已安装，激活仍 HOLD**：canonical credential-validation 12个源码目标于2026-10-04 11:54:41 UTC实际安装，12 after精确匹配、40项范围外保护未变。此前安装前限定 strict12零诊断、whole5为85 PASS／无skip；不构成安装后全量、Provider、真实PG或生产能力批准。V1语义、normal060与未激活schema/角色边界保持；OpenSSL owned fixture只是测试源码，不是本轮外部执行。
+- **原820窗口已结束但未全绿**：original test exit1；安全投影确认原UNIT286 footer为3002 total＝2983 pass／1 fail／18 skip／0 cancel/todo，失败指向 `saas-startup.test.ts:2608`（assertion2640:12，ERR_ASSERTION）。按真实runner的原`&&`契约，integration NOTRUN，不因没有INTEGRATION文本而造footer。original build exit0仅属canonical12安装前源码。Copernicus正做最小routing fixture修复，尚无新通过；Tj限定private组件292 pass＋7原PG skip、未实际安装、不称PG通过。
+- **后继组件与未终态任务**：history在12:09:11–18 UTC的新HYCC窗口strong10／23均exit0、零诊断，whole3＝64/64、whole11＝130/130、均无skip；两范围重叠，不相加为194。仅私有source组件通过、未安装，真实PG／rendering／factory仍HOLD；KMS strict9／release13已报告PASS，但whole8 HUNG、未terminal；safe projection只有74项已知观察、没有footer、pending UNKNOWN。固定flush barrier静态修复源码进行中，不是已证原因或运行通过；修复、局部通过与未终态任务均不证明cleanup或关闭完整出口。
+- **剩余顺序**：先明确原820失败与KMS whole终态、审查history真实PG／rendering依赖，再按真实author来源审查组合、严格编译和完整原suite；真实PG/权限、schema/role/readiness与生产适配另需授权和验收。实际主链仍为 **GW → full FIN → actual KEY-IP → KEY-BUD**，独立UI/adapter可并行，但不越门禁启用。
+
+本节仅同步工程状态，不授权运行、部署或商业开放；源码安装事实按各自receipt单独记录，无Git push/remote CI、runtime或actual PG新证据。不改变001–060历史、inactive061／reserved062或任何能力开关。
 
 方案组织约定：本文描述的是一套统一、完整的托管 API 平台目标架构；各章节是同一系统的领域视图，不代表独立子产品，也不允许绕过其依赖或验收条件。身份、协议能力、Provider 权利、项目权益、Key 绑定、请求准入、供应调度、计量结算、支付履约和运营恢复共同组成同一条端到端契约。本文定义完整目标态、权威事实和跨域契约，§11 统一维护剩余任务、依赖及开发顺序，不承诺固定工期；具体产品能否开放只按 Provider 产品、凭证类型、地区、用途、模型/端点及供给模式逐项核验商业授权和系统验收。
 
 目标产品：托管 API 平台，支持客户自带上游凭证（BYOK）和平台授权供给两种供给模式
 
-范围说明：截至本次核对，当前代码已覆盖 PostgreSQL SaaS 身份与权限、项目权益和 Proxy Key、Provider/供给管理、请求计量与钱包账务、版本化价格/成本快照及托管 gateway 等主要领域，但尚未完成统一的技术和商业验收。模块已实现、迁移已注册或页面存在，不等同于端到端验收通过。托管 `/v1` 在全部适用的技术、商业授权及运营验收完成前必须保持关闭或安全拒绝。2026-09-30 恢复及 2026-10-01 停工均为历史；用户已于 2026-10-02 明确恢复 §11 全部 14 项任务，要求最大安全并行。设计与代码编辑仅由 GPT-6.1 Sol 负责，构建、测试与验证执行仅由 GPT-6 Luna max 负责；旧停工任务与队列不自动重启，按本次新授权推进。已有 broad/focused 测试、构建和浏览器的阶段性通过证据，但各窗口只覆盖当时限定源码，不能视为最终工作树验收；14 项任务均未标记完成。历史 **2026-10-03 08:33:16 UTC** 文档窗口只读核对本地 HEAD 元数据仍指向 main/`6366cb9`，不以该提交代表未提交工作树。主线08:08 UTC提供的97 tracked dirty/102 untracked及tracked +11,467/−1,436仅为该时点盘点（不含新文件或外部private patch），该历史窗口未运行Git、重统计dirty或核验remote；当前统一截点亦无新Git commit/push/fetch、远程CI或发行提交观测。
+范围说明：截至本次核对，当前代码已覆盖 PostgreSQL SaaS 身份与权限、项目权益和 Proxy Key、Provider/供给管理、请求计量与钱包账务、版本化价格/成本快照及托管 gateway 等主要领域，但尚未完成统一的技术和商业验收。模块已实现、迁移已注册或页面存在，不等同于端到端验收通过。托管 `/v1` 在全部适用的技术、商业授权及运营验收完成前必须保持关闭或安全拒绝。2026-09-30 恢复及 2026-10-01 停工均为历史；用户已于 2026-10-02 明确恢复 §11 全部 14 项任务，要求最大安全并行。设计与代码编辑仅由 GPT-6.1 Sol 负责，构建、测试与验证执行仅由 GPT-6 Luna max 负责；旧停工任务与队列不自动重启，按本次新授权推进。已有 broad/focused 测试、构建和浏览器的阶段性通过证据，但各窗口只覆盖当时限定源码，不能视为最终工作树验收；14 项任务均未标记完成。历史 **2026-10-03 08:33:16 UTC** 文档窗口只读核对本地 HEAD 元数据仍指向 main/`6366cb9`，不以该提交代表未提交工作树。主线08:08 UTC提供的97 tracked dirty/102 untracked及tracked +11,467/−1,436仅为该时点盘点（不含新文件或外部private patch），该历史窗口未运行Git、重统计dirty或核验remote；当前交付/CI状态以§11的新统一截点为准，不继续沿用该旧HEAD或“无新push/CI”判断。
 
 历史代码与证据基线：`main` 的 `6366cb976d05e7c731ba10f695d651497d4f4966`，此前改动已提交推送，数据库迁移注册至 052。2026-09-30 只读核对了该提交的 [GitHub Actions CI](https://github.com/elex-fu/model-router/actions/runs/36569295036)（运行创建于 2026-09-29），结果如下；这些结果不代表今日恢复开发后的工作树或新改动已验收：
 
@@ -443,7 +463,53 @@ PSP、云部署及商业权利等待定事项需要形成适用产品的商业�
 
 本节是剩余任务的统一登记处；进展汇总仅记录实现和证据，不维护另一套冲突的任务清单。任务编号用于跟踪交付、依赖与验收，不代表独立产品或分轮方案。P0 表示当前技术阻塞或发布门禁，P1 是完整商业平台必须完成的建设，P2 是不影响安全门禁的工程优化。P1 不代表可以在未完成时开放对应商业能力。
 
-统一 latest 快照截至 **2026-10-03 12:23:32 UTC**：**14项完整出口全部OPEN，尚非商业就绪**。原完整build09:15 exit0、Chrome JuNX全11 spec一次40/40（38 browser＋2 HTTP-only，本地memory/mock）及pricing Ll5MnS22/22＋9 strict零诊断各守独立scope；PG15/18原7039各一次27/27与canonical60仍仅LIMITED窗口，不是完整FIN或统一发行候选。
+历史源快照（当前状态已由上文13:01:05 checkpoint及下表更新）：**2026-10-04 09:06:15 UTC / 上海时间2026-10-04 17:06:15**。**14项完整出口全部OPEN，尚非商业就绪**。主链保持 **GW → full FIN → actual KEY-IP → KEY-BUD → 适用生产/UI/恢复/发布验收**；§11十四任务的ID、优先级、工作量、前置、完整验收出口与依赖不变。稳定独立adapter/UI/runbook继续按6 Sol源码lane＋2 Luna max验证lane并行，不争用中央事务/schema/ACL。
+
+**已落地**：原客户MFA19及其MFA2/CLI1/Cookie1后继、wallet refund5、principal UI3、Key writer2、容量policy3保留各自安装范围。UIleaf三文件实际安装于07:57:18 UTC，原KEY17及父级会话/CSRF/一次性secret/form draft行为保留；安装前strict4零诊断、whole4一次52/52，无skip。Y31九文件author安装receipt记录09:00:21 UTC完成，9/9源码精确匹配，本次文档只读复核实际9个after均匹配；MAIN安装receipt审查/fresh当时进行中，不把它称为新的安装后运行验收。其已接受native仅是**安装前**server8/cross1零诊断、whole4一次76/76；不证明PG、同TX撤权真实并发或实际IP/预算接线。完整receipt/primary及SHA见[当前限定证据](./development-progress-2026-09-29.md#当前限定证据)。
+
+**最新限定验证**：history M4 strict13零诊断、whole8一次63/63；FIN IpGa八组strict零诊断、whole14一次118/118，无fail/skip/cancel/todo。FIN safe projection仅映射113个具名结果，footer其余5个名称归属UNKNOWN，不另造footer、不跨scope求和。两项仍是私有组件，不是PG/全局caller/完整FIN或生产激活证明；LM8的109/6及tb9的97/18只保留历史。Tj rMf PREP37/13、854 fresh零差异不是PASS：后续eNBbKq strict37一次exit2／1诊断，whole13 **NOTRUN**，MAIN接受safe primary并fresh860零差异；固定TS2741夹具397:5诊断属性未捕获，缺capacityBinding只是静态源码推断，不是已证运行原因。Curie在修复，旧失败proof不重写。
+
+**补齐截点前独立组件证据**：RPC类型后继HzJYvi strict20零诊断、whole3一次69/69，MAIN fresh602接受；仅memory/fake IPC，无PG、实际fork或安装。manual tags RLznDD strict5零诊断、whole2为94 total＝87 pass＋7原有缺DSN PG skip，MAIN fresh264接受；只source/scripted，不是PG通过。worker annotation EXVWXF strict17零诊断、whole4一次121/121，MAIN fresh1067接受；owned helper HTTP/CLI＋memory/scripted，无PG、未安装。三项均是独立私有组件，不是Tj combined PASS，不证明真实commandTags/ACK或full FIN；旧失败RPC只保留在历史区。完整primary/SHA见[当前限定证据](./development-progress-2026-09-29.md#当前限定证据)。
+
+**正在开发**：MFA SoYeWW四目标仍私有source/prep，无执行；KMS仍在TX内且await无界，未证明超时/取消/PG安全。Erdos v2自定义协议2wGoUYpb十一文件源码冻结、未执行/未激活；history owner-view BdX的37 relations／521 columns仅SQL文本与权限设计，未证明grammar/ACL/RLS/owner函数运行；unique EXEC/readiness由Ampere继续实现。
+
+**下一任务与未闭合门禁**：先完成Tj夹具与统一caller修复，再审核固定组合源码及严格隔离的原全量验证方案。初始环境只PATH/LANG/TMPDIR、inherit=false；明确owned npmrc/cache选项仍不能阻止npm自动HOME与应用默认homedir读写，禁止继承HOME/NPM白名单、伪造homedir或修改原roots/flags来绕过。因此当前full original npm执行继续**HOLD**，等待真实owned config/source-harness边界。column/default/PK/FK/CHECK/index、native PG15/18、真实ACK/SIGKILL恢复、完整factory、KMS/IAM/TLS/PSP/Provider与商业准入均未闭合；actual KEY-IP和KEY-BUD依赖不提前放开。
+
+**全量证据与交付范围**：N18旧824原npm test/build已通过、包含principal UI3，但在Key2/容量3/UIleaf3/Y31九文件安装前，**不覆盖当前源码组合**；旧18/27 skips与live3 exclusions不改，private monetary cohort不在该824中。不同源码/窗口的组件counts不汇总为现树全绿。001–060保持冻结，061 inactive、062 reserved，无schema/角色激活；unknown不TTL释放/自动重发，NULL/partial不造零，BYOK不修改钱包。PG是共享事实/容量/租约/健康/affinity权威；Redis仅CP认证限速/派生缓存，非gateway权威lease。
+
+**元数据范围**：MAIN先前上报50 dirty是在Y31安装前的有限观察；旧HEAD `54142d5f8eb38fe1539d4cf0ddb819e262972cf0`及50 commits push仅历史交付记录，本次无新Git/remote读取，不猜安装后dirty数或新commit/push/CI结果。历史06:57:51源快照和07:12:59独立失败观测按原字节保留如下，后续成功仅属于新的明确候选，不回填旧proof。
+
+**后续独立观测（元数据交接捕获于2026-10-04 09:20:15 UTC，不回填09:06:15源快照）**：MAIN后来FULL审Y31安装receipt并fresh108零差异接受；author receipt仍记录09:00:21 UTC源码9/9安装。这里的09:20:15是本次交接捕获时间，不是假定的验收/执行时刻；76/76仍仅安装前组件证明，无安装后whole验收。平台MFA锁序新native final仍UNKNOWN，等待直接接受的safe primary，不预期PASS。
+
+**09:06源截点之后的独立history观测（本次元数据捕获2026-10-04 09:22:42 UTC）**：hDclRu strict15 ONCE零诊断，whole9 ONCE72/72，零fail/skip/cancel/todo且72 mapped。实际strict提交09:18:27.399、whole终态09:18:30.611、sealed09:18:30.733 UTC；MAIN FULL读primary并核对native refs/source checks，406 guards零差异。仅private1q/BdX owner-projection组件，无source install/SQL/PG/grants/ACL/schema/full FIN ready；after-only compiler15 inventory不等于first-read或OS census。该后续结果不回填09:06快照或旧57失败。[safe primary](/private/tmp/luna-history-owner-projection-native.hDclRu/minimal-safe-primary.json)，SHA `936a73b40dc253012c978bf126e93cb4d67f7f8d4ac8b150bd1eaf0741f9a0e3`。
+
+**随后MFA独立失败观测（本次元数据捕获2026-10-04 09:39:15 UTC，不回填09:06源截点）**：IeQ4nu strict4 ONCE exit2／1项TS7022（managed test820:21），whole3 NOTRUN，FAILED/HOLD。MAIN交接actual strict stage09:20:30.439–09:20:31.527 UTC；safe primary封装窗口09:20:30.437–09:20:32.005 UTC，两者不混称内部起止。source guards零差异、strict handle及stdio结束，无PG；不等于OS cleanup。Euclid type-only修复、Copernicus KMS liveness源码author进行中，原四目标没有native PASS。上方09:20:15捕获时的UNKNOWN仅当时状态，随后以此实际失败为准；不改旧proof、不称已修复。[safe primary](/private/tmp/luna-platform-mfa-lock-order-native.IeQ4nu/mfa-lock-order-native-safe-primary.json)，SHA `216fca10169b478d605c0913d4b2f3d21b8af684ac5b2ca673774de6e5a9e4a7`。
+
+**历史06:57:51源快照与07:12:59独立观测（以下原文仅代表当时scope，不是当前状态；当前以本节摘要与§11.1为准）：**
+
+统一当前快照：**2026-10-04 06:57:51 UTC / 上海时间2026-10-04 14:57:51**。**14项完整出口全部OPEN，尚非商业就绪**；原14个ID、优先级、工作量、前置、完整出口与依赖不变，主链 **GW → full FIN → actual KEY-IP → actual KEY-BUD → 适用生产/UI/恢复/发布验收**。独立稳定adapter/UI/runbook按6 Sol源码lane＋2 Luna max验证lane并行，不争用中央共享事务/schema/ACL。源码接线、限定验证、schema/生产激活与商业开放分别验收。
+
+**N18冻结824源码已包含实际安装UI3，范围不覆盖后续安装的Key2（05:44:39 UTC）与容量3（06:40:25 UTC）**：原npm test一次 **04:28:20.935–04:28:47.892 UTC** exit0；286 unit roots，**2973＝2955 pass／0 fail／18原有skip／0 cancel/todo**；68 integration roots，**222＝195 pass／0 fail／27原有skip／0 cancel/todo**。原build一次 **04:30:47.601–04:30:57.719 UTC** exit0／零TS诊断／Vite116 modules。MAIN全文审三份primary/plan并fresh **2569 FS checks零差异**，涵盖actual824、821 tMIC来源/UI3 copies、tools26、declared deps18、protected/history/index/safe refs；两stage前后0 delta且streams关闭。**这是该已含UI3的原全量OFFLINE候选PASS，不再只是beforeUI证明；但独立private monetary cohort不在此824范围，原18/27 skips和live3 exclusions保持，不是PG/生产或all14全绿。** 原server/web skipLibCheck=true不等价critical false；first reads/OS pools/listeners/descendants closure仍UNKNOWN/NOT_CAPTURED。完整primary路径/SHA见[当前限定证据](./development-progress-2026-09-29.md#当前限定证据)。
+
+**已落地**：客户MFA actual19及MFA2/CLI1/Cookie1后继、wallet refund5、member/project_service UI3、Key writer2和容量policy3均已源码安装。Key2安装于05:44:39 UTC；容量3安装于06:40:25 UTC，receipt实际3 after一致／37 guard零差异。各自限定验证为UI50、wallet非PG17/17、Key fake-driver22/22、容量strict3零诊断／whole2为18 pass＋2原缺DSN的PG skip；不是实际PG/退款writer/PSP或生产激活证明。父级会话/CSRF/一次性secret边界不因安装而放宽。
+
+**正在开发**：最新私有FIN候选LM8八组strict均exit0／零诊断，whole14一次 **115＝109 pass／6 fail，exit1、0 skip/cancel/todo**；MAIN接受primary/v3并核对876 metadata records零差异。v3仅安全断言坐标与静态条件标签，不证明运行根因；旧tb9的97 pass／18 fail及c174标签映射保留为历史，不重写原proof。9NI已通过strict13／whole6 **62/62**限定source/memory组件，Nb7配对readiness通过strict4／whole2 **13/13**；均未安装/未SQL，不代表全局caller closure、native commandTags/ACK、PG15/18 grammar/权限或full FIN。
+
+gd6/manualtags、history Boolean57、IPC69和UIleaf19仍是私有源码/待各自验证；截至本截点history native尚无接受结果，UIleaf仅原17＋新增2 authored，不挪用旧UI50作为新拆分PASS。客户session logout授权缺口与同TX Key guard仍在开发；history role的raw lease/tokenhash最小view/function仅私有设计/author、未SQL。Curie coherent97/role/catalog草案、Cop partial core reader与既有WG6/pJan/axes/Vk组件各守source范围，不能由静态合同或局部PASS关闭14个出口。
+
+**下一任务**：优先修复LM8的6项实际失败，保留原case/断言/strict与资金、缺证拒绝、租户隔离不变量；随后在批准的固定候选验证统一caller、历史权限和真实PG事务/故障矩阵。actual KEY-IP仍未安装/未native，KEY-BUD继续等待 **GW → full FIN → actual KEY-IP**。双PG权限、COMMIT/ACK/SIGKILL、restore、生产KMS/IAM/TLS/PSP/Provider和商业准入仍OPEN；001–060冻结、061 inactive、062 reserved。unknown不TTL释放/重发，NULL/partial不造零，BYOK不修改钱包。
+
+有限rtk status只读复核为 **49 dirty＝43 tracked modifications＋6 untracked**，HEAD仍 `54142d5f8eb38fe1539d4cf0ddb819e262972cf0`；这是有限本地元数据，不是FULL-tree或运行证明。旧50 commits已push，无新commit/push/remote CI交接证据；本次不执行Git写入或remote核验，旧CI failure/isolated SKIPPED只保留历史，不由本地组件PASS推因果。
+
+PG共享事实/容量/租约/健康/affinity已有core接线，Redis仅CP认证限速/派生缓存，不是gateway权威lease或财务账本。Euclid KEY-IP后继未安装／未native，预算仍等待GW、full FIN和完整KEY-IP。真实PG15/18升级/权限、COMMIT/ACK/SIGKILL、restore、production KMS/IAM/TLS/PSP/Provider及商业权利保持OPEN；001–060 immutable、061 inactive、062 reserved，未激活。unknown不TTL释放/自动重发，NULL/partial未知不造零，BYOK不修改钱包。
+
+tMIC beforeUI全量通过及02:24:31 UTC旧失败仅保留在[历史证据](./development-progress-2026-09-29.md#历史限定证据截至2026-10-04-022431-utc)，旧窗口不由N18回填。
+
+**截点边界与后续实际观测**：06:57:51 UTC为源快照；新增独立组件观测截至07:12:59 UTC，不回填该源快照：history strict12 exit0／0诊断，whole57=56 pass／1 fail／0 skip；RPC strict20 exit2／7诊断，whole3 NOTRUN。两项均FAIL/HOLD、未安装、正在修复，不是组件全绿或PG proof；文中“待验／尚无结果”仅指源截点，后续状态以这里的实际失败观测为准。MAIN已FULL审两项safe primary并fresh399／587检查零差异：[history primary](/private/tmp/luna-history-lease-cohort-native.u8xzZh/minimal-safe-final-primary.json)，SHA `d7d7b3424e6e87f3657cd6d65fb237801660d3fa70a1659f51eb2044450cea95`；[RPC primary](/private/tmp/luna-core-db-rpc-component-native.zHnuzb/rpc-component-native-safe-primary.json)，SHA `206214c4c8574530b9dc1f65ffb9cc9258c72d19097c455492f99071cb43a728`。
+
+**历史12:23:32 UTC快照（以下保留当时状态，不是当前HEAD/执行结果；当前判断以上述摘要与§11.1为准）：**
+
+历史快照截至 **2026-10-03 12:23:32 UTC**：**14项完整出口全部OPEN，尚非商业就绪**。原完整build09:15 exit0、Chrome JuNX全11 spec一次40/40（38 browser＋2 HTTP-only，本地memory/mock）及pricing Ll5MnS22/22＋9 strict零诊断各守独立scope；PG15/18原7039各一次27/27与canonical60仍仅LIMITED窗口，不是完整FIN或统一发行候选。
 
 G4新u9F限定unit **27/27＋17 strict零诊断**已由MAIN接受（safe primary SHA `8849a2ae9cc1aaa4203ad14bc93088341f4563945195b232a34a1e718e9cb0d3`）；旧LaY／3vlJY3 **26=25 pass/1 fail**（money12/12、postgres unit13/14、原negative-auth fixture失败）仍保留，不倒填通过。“postgres unit”不是原生PG；真实PG contract factory未运行。JFC实际issuer源码评阅不等于运行证明；G4历史reader的priced UUID首个writer仍缺失。
 
@@ -475,26 +541,28 @@ G5十文件于 **07:56:13 UTC** 源码安装；修正后的限定非PG窗口已�
 
 ### 11.1 剩余任务登记
 
+下表当前状态固定截至2026-10-04 13:01:05 UTC；本节此前09:06:15摘要及旧失败保留历史scope，不覆盖当前checkpoint。14个ID、优先级、工作量、启动前置、最小/完整目标、验收门禁及完成依赖原样保留，全部OPEN。
+
 “启动前置”说明何时可以开始对应切片；“完成依赖”说明何时可以关闭整个任务。最小端到端交付是可独立评审和验证的切片，不缩减完整验收范围，也不等于任务完成。外部准入与技术实现分别跟踪；任务只在对应源码、测试及运行证据齐备后标记完成。
 
 相对工作量保留为规划维度，不承诺天数：GW-01、KEY-IP 为中等；FIN-01、KEY-BUD、RUN-01、PROV-01、PAY-01、UI-CUST、UI-OPS、OPS-01、REL-01 为大；DB-01 为中至大，取决于实际存量环境与历史证据；COM-01 主要是外部依赖。ENG-01 按选定切片评估，不抢占主链。最小切片用于缩小评审范围，不据此折减整个任务的剩余工作量。
 
 | 编号 | 优先级与当前状态 | 最小端到端交付 | 完整验收出口 | 启动前置 | 完成依赖 |
 |---|---|---|---|---|---|
-| GW-01 网关授权锁与权限 | P0，进行中/完整出口OPEN。双版同7039商业根各一次27/27及只读AFTER、原958正常六场景与054/prelock/055/056/058/059负向各守原scope；统一候选GW门禁仍未关闭，不借FIN源码/独立计数代验，旧失败不倒填原因。 | 在受限角色下完成一次 BYOK 和 platform 请求、usage 记录及必要的钱包效果。 | 证明 054/055/056 及后续迁移的负向权限、prelock 并发撤权及六场景 HTTP 的流式/非流式、replay/conflict、JSON usage 行为，完成 PG15/18 矩阵。 | 针对当前未通过的负向及统一候选矩阵，补齐PG15/18可接受same-scope/独占证据并重验；正常六场景已有通过证据，历史SQL不回写，后续修复正常前滚。 | §11.3.1 的 GW 门禁通过；账务完整性由 FIN-01 继续验收。 |
-| FIN-01 请求及账务闭环 | P0，进行中/完整出口OPEN。双版7039各27/27仅LIMITED。G4新u9F27/27＋17 strict0已接受，旧26=25/1保留，真实PG factory未跑；6wa68 strict FAILED7、tyld87 FAILED5 test-only，focused cost units NOTRUN。fLdygh源码review未重编；305 test roots NOTRUN/PREP pending。E1/HH/hH/uHqq/FoV冻结候选正在整合但未安装/激活，Cq out-of-TX hard gates及G4 reader priced UUID首个writer缺口仍在。91crash24 AUTHORED NOTRUN、actual ACK/SIGKILL NOTRUN；061 inactive、062 PROPOSED，G1–G4未统一验收。 | 走通 service 预留/结算事务，并在完整 HTTP 中核对 BYOK 无钱包效果、platform 账本与 usage 一致。 | 补派发前取消补偿，验收terminal replay的usage/digest/charge比较及BYOK持久证据，完成pending/dispatching崩溃恢复、恢复角色契约和usage更正；覆盖gateway取消/missing usage/崩溃/unknown/并发/重复结算完整矩阵。 | service 修复/测试可与 GW 并行；完整请求验收须有可执行的 GW 链路。 | GW 门禁及完整真实事务/故障矩阵通过，形成预算所需的 FIN 门禁。 |
-| DB-01 存量升级兼容 | P0，进行中/完整出口OPEN。双版正常CLI060/ledger60及7039后native identity/fresh四role/八catalog只读AFTER仅原窗，不称loaded closure或存量兼容。G5 purpose列授权尚无live PG reconcile证明；DRdcKG worker-reported原27=23/4，MAIN全文/hash/projection接受pending，不能据源码/纯门禁改变角色或历史001–060。 | 对一个明确目标只读核验可信 ledger/catalog 基线，输出可核对的兼容性报告。 | 完成环境清单、022/023 历史盘点、批准基线及必要的前滚修复/升级演练，保持历史账本不变。 | 可立即只读盘点；没有可信基线时只能报告 unverified。 | 每个待升级环境均有可信历史与 catalog 证据；053 空库成功不代替存量兼容。 |
-| KEY-IP Key 网络策略 | P1，完整出口OPEN。共享KEY策略/DTO pure53/53及同五strict exit0已接受，仅纯逻辑；schema/API/UI与实际gateway wiring未验收，须保持GW→完整FIN前置。 | 经 API/UI 设置一条版本化策略，在实际推理入口拒绝不匹配地址并证明无上游调用。 | 完成 schema、审计/失效、可信代理、双协议入口、轮换/replay、并发策略变更与资源清理。 | 设计、DTO 与纯测试规划可提前；实际 gateway IP 实施须先通过 GW 和完整 FIN 门禁。 | GW 和完整 FIN 门禁通过、锁序稳定，完整 IP 授权矩阵通过。 |
-| KEY-BUD Key 日及累计预算 | P1，完整出口OPEN。共享KEY策略/DTO pure53/53及同五strict exit0已接受，不与KEY-IP重复累计；预算原子资金链/实际gateway未验收，仍等待GW、完整FIN及actual KEY-IP。 | 经 API/UI 设置一个预算，在真实并发请求中原子预留、结算并拒绝超额。 | 完成日窗口、累计计数、Key lineage、轮换、更正、unknown、BYOK/platform 差异及并发恢复语义。 | 设计、DTO 与纯测试规划可提前；实际预算实施须先通过 GW、完整 FIN 和 KEY-IP 门禁，并稳定共享锁序契约。 | FIN-01、KEY-IP 及完整预算事务/故障矩阵通过。 |
-| RUN-01 生产运行时装配 | P1，进行中/完整出口OPEN。Redis23/23/四strict、owned RAM-only9/9、TLS bd6真实本地TLS/synthetic RESP5/5各守scope，不证明生产Redis或runtime闭包。G5 actual tVb25/2及DRdcKG未接受不提供完整cleanup/OS census；生产TLS/cloud ACL/IAM/装配仍开放。 | 在实际部署中启动一个隔离 workload，验证数据库/KMS readiness 及其业务职责。 | 完成可信 runtime、KMS/IAM/网络、Redis 控制面、业务 worker、role supervisor、SaaS 部署模板及安全 TTY 初始化后的可信 MFA enrollment 交接/恢复。 | 稳定端口/生命周期契约即可开始设计和独立适配。 | 对应 GW/FIN 链路、全部所需 workload 的最小权限、初始化/MFA 交接与部署恢复通过。 |
-| PROV-01 产品与协议验证 | P1，进行中/完整出口OPEN。worker7/7、bigint102及四角色11/11各守独立scope；原PROV060移至061，三unit35/35与七strict仅非PG，旧typing失败保留。061 inactive/未注册/未应用，cycle-aware/readiness/正常CLI接线及生产provider/KMS/IAM、renew/revalidation尚未完整验收；累积attempts不重置、不增加CP direct EXEC。 | 对一个待验证产品以受控目标完成 credential validation，记录能力/健康并按权利绑定路由。 | 完成 Kimi Code、DeepSeek Anthropic 固定目标的实际验证、自定义 OpenAI/Anthropic 适配、模型/端点与独立协议证据，以及标准 CLI/部署接线和实际 revalidation service/history。 | catalog、验证契约稳定即可并行设计/适配；商业权利单独登记。 | RUN-01 的实际装配和各产品技术矩阵通过，COM-01 记录允许对应开放范围。 |
-| PAY-01 PSP 与履约恢复 | P1，完整出口OPEN。领域服务已有，生产PSP待选择/装配；退款/unknown对账/恢复及正式商户准入仍待适用验收。 | 对选定的单 PSP 完成一笔订单的受控查单/回调与幂等履约，再核对账本或期限权益。 | 完成显式生产适配、退款、乱序/迟到/unknown 对账及崩溃恢复；正式商户准入另有证据。 | 接口与恢复设计可并行；具体适配依赖 PSP 选择与测试配置。 | FIN-01、RUN-01、PSP 技术验证及 COM-01 的适用商业批准齐备。 |
-| UI-CUST 客户生命周期 | P1，进行中/完整出口OPEN。客户/成员及旧G5 unit129/129、九strict/新PG根compile各守原窗；actual tVb原27=25/2、DRdcKG worker-reported原27=23/4，MAIN全文/hash/projection接受pending，无accepted cleanup/native G5 GO。real customer MFA进行中，真实CP财务投影/PG guard、PG15成员HTTP、mutation/Passkey/production UI未验收。 | 沿已有邀请进入工作区，按角色完成一项真实客户操作并展示成功/拒绝/失败状态。 | 完成角色/租户/模式矩阵，补成员/角色/移除/Owner 转移、客户 MFA/Passkey 与安全恢复、政策、状态和接入说明。 | 对应 API/DTO 和权限契约稳定即可开发，不等待所有后台任务完成。 | 每条客户流程连接真实授权与对应业务状态；收费流程依赖适用 FIN/PAY/COM 验收。 |
-| UI-OPS 平台运营工作流 | P1，进行中/完整出口OPEN。原page/Chrome/platform17/17及strict各守历史scope；RBAC6uE已SOURCE_FROZEN、MAIN源码review中，未安装/运行，不证明live grant/revoke。G4历史reader priced UUID首个writer缺失，actual tVb25/2及DRdcKG未接受不替代live reconcile/PG、真实运营财务恢复、可信MFA/backend/TLS。 | 在明确权限下完成一项运营动作，并核对实际状态、审计和拒绝路径。 | 补可信 operator MFA enrollment/确认/恢复、租户/用户、商品权益、池/路由、成本/账本/对账、风险告警、开关与数据治理流程。 | 复用稳定领域 API 和授权即可并行实施。 | 对应领域服务与权限、缺 MFA 禁止会话及异常/恢复矩阵通过；不以页面存在代替运营验收。 |
-| OPS-01 可靠性与运营验收 | P1，完整出口OPEN。工具及部分恢复模块已有；91crash24仅AUTHORED NOTRUN，actual COMMIT/ACK及SIGKILL未运行，未证明双实例故障恢复或完整cleanup/OS census。 | 在实际双实例部署中完成一次故障与恢复演练，核对授权、容量和账务不变量。 | 完成 PG/WAL 与撤权恢复、SLO/告警、留存、支持/退款 runbook 和容量压测。 | 指标、脚本和 runbook 可持续并行建设。 | RUN-01 及实际产品链齐备，按已确定 RPO/RTO 通过完整演练。 |
-| COM-01 商业开放条件 | P0门禁/完整出口OPEN。授权与运营准入未确认；本地fixture、源码review、unit/strict不替代Provider/PSP/主体与开放范围批准。 | 为一个拟开放产品组合形成可核验的权利、主体、商户及运营批准记录。 | 完成适用地区/币种/主体、Provider 权利、PSP、政策、客服/on-call 及开放范围审批。 | 从现在起跨任务持续推进，不依赖技术任务全部完成。 | 外部决策与批准覆盖全部拟开放范围，技术测试不能替代。 |
-| REL-01 统一发布验收 | P0门禁/完整出口OPEN。双版7039各27/27及normal060/AFTER仅LIMITED；G4新27/27＋17 strict0不是实际PG资金闭环，旧失败保留。6wa68 FAILED7、tyld87 FAILED5，focused units/305 roots NOTRUN；fLdygh修订未重编。G5 actual tVb25/2、DRdcKG worker-reported原27=23/4、MAIN接受pending；producer未安装/激活、actual ACK/SIGKILL未跑，无统一固定发行候选/新远程CI/商业批准，14出口均OPEN。 | 为固定候选 commit 汇总完整 required 矩阵和部署/恢复/商业证据。 | 完成 §11.4 全部适用门禁，明确可开放产品/route 与回退路径。 | 可提前维护证据模板与 required 配置。 | GW/FIN/DB、适用 P1、OPS-01 与 COM-01 齐备，固定提交全部通过。 |
-| ENG-01 工程收敛 | P2，未关闭/完整出口OPEN。最新原Chrome JuNX全11 spec一次40/40（38 browser+2 HTTP-only）、0 skip/retry，本地memory/mock、非PG/production UI；旧十根33/33及1541限定inventory/graph各守历史scope。旧132诊断、31/33失败和修后2/2另留历史，不累加。原14 unit/16 Chrome及production assets独立；entry313505 bytes/gzip99867、graph329344/gzip104212不证明整站下载/性能/用户延迟或REL验收。  原305 test roots NOTRUN：840补两个script dependency后NEW841＋五targets全量PREP仍HOLD/pending，另缺bootstrap.mjs及platform_supplier_cost_cap.forward.sql；87/focused static missing0不是执行，缺输入不算产品失败。 | 拆分一个现有页面/客户端切片，保持业务契约并验证回归及性能变化。 | 完成领域拆分、共享契约、包体积/性能优化和升级说明。 | 不争用网关/财务写入热点的改动可并行。 | 相应回归通过；安全/容量缺陷转为发布阻断，不挤占主链。 |
+| GW-01 网关授权锁与权限 | P0，进行中/完整出口OPEN。Y31/Key9、容量3、UIleaf、MFA、wallet已纳入T9 current820原test/build各一次exit0；仅offline固定候选，native counts截至截点NOT_CAPTURED，真实撤权、受限角色双PG完整GW矩阵未齐。 | 在受限角色下完成一次 BYOK 和 platform 请求、usage 记录及必要的钱包效果。 | 证明 054/055/056 及后续迁移的负向权限、prelock 并发撤权及六场景 HTTP 的流式/非流式、replay/conflict、JSON usage 行为，完成 PG15/18 矩阵。 | 针对当前未通过的负向及统一候选矩阵，补齐PG15/18可接受same-scope/独占证据并重验；正常六场景已有通过证据，历史SQL不回写，后续修复正常前滚。 | §11.3.1 的 GW 门禁通过；账务完整性由 FIN-01 继续验收。 |
+| FIN-01 请求及账务闭环 | P0，进行中/完整出口OPEN。Tj CVxaN7 strong39零诊断、whole14为292 pass＋7原PG skip，仅private组件，未安装/未证明实际PG。T9通过不含private FIN/KMS/history overlays；全局caller、真实账务事务/故障矩阵仍OPEN，旧Tj/LM8/tb9失败保留历史。 | 走通 service 预留/结算事务，并在完整 HTTP 中核对 BYOK 无钱包效果、platform 账本与 usage 一致。 | 补派发前取消补偿，验收terminal replay的usage/digest/charge比较及BYOK持久证据，完成pending/dispatching崩溃恢复、恢复角色契约和usage更正；覆盖gateway取消/missing usage/崩溃/unknown/并发/重复结算完整矩阵。 | service 修复/测试可与 GW 并行；完整请求验收须有可执行的 GW 链路。 | GW 门禁及完整真实事务/故障矩阵通过，形成预算所需的 FIN 门禁。 |
+| DB-01 存量升级兼容 | P0，进行中/完整出口OPEN。WG6/Nb7限定组件与BdX SQL文本设计不证明column/default/PK/FK/CHECK/index或实际权限/存量升级；001–060冻结、061 inactive、062 reserved，前滚未激活。 | 对一个明确目标只读核验可信 ledger/catalog 基线，输出可核对的兼容性报告。 | 完成环境清单、022/023 历史盘点、批准基线及必要的前滚修复/升级演练，保持历史账本不变。 | 可立即只读盘点；没有可信基线时只能报告 unverified。 | 每个待升级环境均有可信历史与 catalog 证据；053 空库成功不代替存量兼容。 |
+| KEY-IP Key 网络策略 | P1，完整出口OPEN。实际IP后继仍未安装/未native；Y31会话/Key源码安装及Nb7 source contract不代验网络策略。实际API/UI/gateway策略等待GW和full FIN。 | 经 API/UI 设置一条版本化策略，在实际推理入口拒绝不匹配地址并证明无上游调用。 | 完成 schema、审计/失效、可信代理、双协议入口、轮换/replay、并发策略变更与资源清理。 | 设计、DTO 与纯测试规划可提前；实际 gateway IP 实施须先通过 GW 和完整 FIN 门禁。 | GW 和完整 FIN 门禁通过、锁序稳定，完整 IP 授权矩阵通过。 |
+| KEY-BUD Key 日及累计预算 | P1，完整出口OPEN。pure契约不等于预算原子预留/计量/恢复；实际机制等待GW、full FIN和完整KEY-IP。 | 经 API/UI 设置一个预算，在真实并发请求中原子预留、结算并拒绝超额。 | 完成日窗口、累计计数、Key lineage、轮换、更正、unknown、BYOK/platform 差异及并发恢复语义。 | 设计、DTO 与纯测试规划可提前；实际预算实施须先通过 GW、完整 FIN 和 KEY-IP 门禁，并稳定共享锁序契约。 | FIN-01、KEY-IP 及完整预算事务/故障矩阵通过。 |
+| RUN-01 生产运行时装配 | P1，进行中/完整出口OPEN。当前已安装Key9/容量3/UIleaf/MFA/wallet纳入T9原offline test/build各exit0，不是生产适配证明。独立nRY MFA/KMS为109＝105 pass／1 fail／3 skip，safe frame1360；tP4仅expected Buffer snapshot夹具源码修复待复验，不定性生产错误或旧hang因果。真实factory/catalog/ACL/readiness/TLS/IAM/restore未齐。 | 在实际部署中启动一个隔离 workload，验证数据库/KMS readiness 及其业务职责。 | 完成可信 runtime、KMS/IAM/网络、Redis 控制面、业务 worker、role supervisor、SaaS 部署模板及安全 TTY 初始化后的可信 MFA enrollment 交接/恢复。 | 稳定端口/生命周期契约即可开始设计和独立适配。 | 对应 GW/FIN 链路、全部所需 workload 的最小权限、初始化/MFA 交接与部署恢复通过。 |
+| PROV-01 产品与协议验证 | P1，进行中/完整出口OPEN。canonical credential-validation12已源码安装，安装后strong零诊断、whole5为85/85、no skip（12:34:16–19 UTC），并纳入T9原offline test/build固定候选。private Tj CVxaN7 strong39／292 pass＋7原PG skip不是Provider/PG证明；真实产品装配、revalidation/history权限、Provider矩阵与商业权利仍未闭环。 | 对一个待验证产品以受控目标完成 credential validation，记录能力/健康并按权利绑定路由。 | 完成 Kimi Code、DeepSeek Anthropic 固定目标的实际验证、自定义 OpenAI/Anthropic 适配、模型/端点与独立协议证据，以及标准 CLI/部署接线和实际 revalidation service/history。 | catalog、验证契约稳定即可并行设计/适配；商业权利单独登记。 | RUN-01 的实际装配和各产品技术矩阵通过，COM-01 记录允许对应开放范围。 |
+| PAY-01 PSP 与履约恢复 | P1，完整出口OPEN。wallet refund5源码及其后继纳入T9 current820原offline test/build各exit0；此前非PG reader/client/UI17/17仍守组件scope。真实退款writer/PSP/unknown对账/恢复与商户准入仍待验收。 | 对选定的单 PSP 完成一笔订单的受控查单/回调与幂等履约，再核对账本或期限权益。 | 完成显式生产适配、退款、乱序/迟到/unknown 对账及崩溃恢复；正式商户准入另有证据。 | 接口与恢复设计可并行；具体适配依赖 PSP 选择与测试配置。 | FIN-01、RUN-01、PSP 技术验证及 COM-01 的适用商业批准齐备。 |
+| UI-CUST 客户生命周期 | P1，进行中/完整出口OPEN。已安装客户MFA、wallet、principal UI3/UIleaf及Key9均纳入T9 current820原offline test/build各exit0；截至截点native counts NOT_CAPTURED，不借旧UI组件counts补数。真实客户PG/browser/撤权流程和完整生命周期未齐。 | 沿已有邀请进入工作区，按角色完成一项真实客户操作并展示成功/拒绝/失败状态。 | 完成角色/租户/模式矩阵，补成员/角色/移除/Owner 转移、客户 MFA/Passkey 与安全恢复、政策、状态和接入说明。 | 对应 API/DTO 和权限契约稳定即可开发，不等待所有后台任务完成。 | 每条客户流程连接真实授权与对应业务状态；收费流程依赖适用 FIN/PAY/COM 验收。 |
+| UI-OPS 平台运营工作流 | P1，进行中/完整出口OPEN。Tj CVxaN7 strong39零诊断、whole14为292 pass＋7原PG skip仅private；history等独立组件保留各自scope，不相加为统一候选。nRY MFA/KMS一项失败、tP4夹具源码修复待复验；实际history权限、资金/RBAC/MFA/运营PG未闭环。 | 在明确权限下完成一项运营动作，并核对实际状态、审计和拒绝路径。 | 补可信 operator MFA enrollment/确认/恢复、租户/用户、商品权益、池/路由、成本/账本/对账、风险告警、开关与数据治理流程。 | 复用稳定领域 API 和授权即可并行实施。 | 对应领域服务与权限、缺 MFA 禁止会话及异常/恢复矩阵通过；不以页面存在代替运营验收。 |
+| OPS-01 可靠性与运营验收 | P1，完整出口OPEN。actual ACK/SIGKILL、双实例/restore及完整OS cleanup未证明；限定source/native counts不代验运行恢复，详见当前及历史证据。 | 在实际双实例部署中完成一次故障与恢复演练，核对授权、容量和账务不变量。 | 完成 PG/WAL 与撤权恢复、SLO/告警、留存、支持/退款 runbook 和容量压测。 | 指标、脚本和 runbook 可持续并行建设。 | RUN-01 及实际产品链齐备，按已确定 RPO/RTO 通过完整演练。 |
+| COM-01 商业开放条件 | P0门禁/完整出口OPEN。Provider/PSP/运营主体、地区/用途及开放范围的商业批准未确认，技术验证不替代外部准入。 | 为一个拟开放产品组合形成可核验的权利、主体、商户及运营批准记录。 | 完成适用地区/币种/主体、Provider 权利、PSP、政策、客服/on-call 及开放范围审批。 | 从现在起跨任务持续推进，不依赖技术任务全部完成。 | 外部决策与批准覆盖全部拟开放范围，技术测试不能替代。 |
+| REL-01 统一发布验收 | P0门禁/完整出口OPEN。T9 current820原npm test与独立build各一次exit0，覆盖当前Key9/容量3/UIleaf/MFA/wallet及canonical12/fixture1/当时docs3，native counts截至截点NOT_CAPTURED。ownedRC/cache及npm自动HOME的bounded审查0 known unsafe已获批准原套执行，不声称普遍HOME I/O完备，不再把已完成offline标HOLD。private monetary/双PG/恢复/生产/商业与新remote CI仍未齐；随后doc-only字节未另跑。 | 为固定候选 commit 汇总完整 required 矩阵和部署/恢复/商业证据。 | 完成 §11.4 全部适用门禁，明确可开放产品/route 与回退路径。 | 可提前维护证据模板与 required 配置。 | GW/FIN/DB、适用 P1、OPS-01 与 COM-01 齐备，固定提交全部通过。 |
+| ENG-01 工程收敛 | P2，未关闭/完整出口OPEN。已安装UIleaf三文件纳入T9 current820原offline test/build各exit0，原KEY/父级生命周期保持；此前安装前strict4/whole4为52仅历史组件。无新性能/browser或统一商业发布证明。 | 拆分一个现有页面/客户端切片，保持业务契约并验证回归及性能变化。 | 完成领域拆分、共享契约、包体积/性能优化和升级说明。 | 不争用网关/财务写入热点的改动可并行。 | 相应回归通过；安全/容量缺陷转为发布阻断，不挤占主链。 |
 
 ### 11.2 核心任务的实现和验收边界
 
@@ -554,7 +622,7 @@ PG15/18验收须在自有隔离子进程的实际生产链路SIGKILL：precommit
 
 以下是GW-01/FIN-01与剩余MFA门禁的检查清单，不新增任务编号。历史迁移SQL及ledger记录不改写；060源码登记、正常CLI应用、claim专项与商业/发布证据分别验收。当前双版fresh ledger60及d32各7/7已接受，061仅非PG35/35+七strict、inactive/未注册，062仍PROPOSED；范围及after限制见进展证据，不复用旧QA或聚合counts。
 
-1. 保留双版同7039各一次27/27、各自normal060/只读AFTER及原958/054/prelock/055/056/058/059限定证明和旧失败，不按异窗总数关闭共同候选矩阵。中央first-price/G1/unpriced整合E1/HH/hH/uHqq/FoV冻结候选尚未安装/激活；6wa68 strict FAILED7、tyld87 FAILED5 test-only，focused cost units与原305 test roots NOTRUN，fLdygh type-only修订未重编，NEW841＋五targets全305 PREP pending（另缺bootstrap.mjs及platform_supplier_cost_cap.forward.sql；87/focused static missing0仍无执行）。G4新27/27＋17 strict0不证明真实PG；priced UUID历史reader首个writer、Cq out-of-TX hard gates仍在。G5 actual tVb原27=25/2，clean/helper失败DESCENDANT_OWNERSHIP_UNPROVED、errno/mask未采；DRdcKG worker-reported原27=23/4，MAIN全文/hash/projection接受pending，不给PG reconcile/read guard GO。另获MAIN固定候选和各阶段执行GO，实际ACK/SIGKILL及91crash24仍NOTRUN；消费库不得fresh/reset，061 inactive、062 PROPOSED、unknown不按TTL释放或重发。
+1. 当前优先核对actual GW/core584的精确COMMIT ACK与caller保护、同TX完成事实读回及真实capacity/G1/G2/G3消费，并补齐history/MFA原生门禁；Tj CVxaN7 strong39零诊断、whole14为292 pass＋7原PG skip仅private组件，已修根/最新组合SOURCE ONLY不得据此直接安装或启用。LM8/tb9/Tj旧失败保留各自历史scope，不再列为当前首要修复；T9 current820原offline test/build各exit0不含private FIN/KMS/history overlays。按GW→full FIN→actual KEY-IP→KEY-BUD验收，001–060冻结、061 inactive、062 reserved，缺证拒绝、金额/租户隔离、unknown不TTL释放/重发不变。
 2. 在全新disposable DB上以专用migrator执行完整迁移、reconcile角色模板及runtime probes；按各自合同核对角色：三商业role各23项正向，validation worker21项正向及ledger version/checksum两项预期42501拒绝，不为验证增权。业务使用受限control-plane/gateway角色，一次性bootstrap保持原guard，不重置、不复用已消费fixture，也不使用本机PG5432。
 3. 保留054/055真实历史、PG18正式范围及PG15个人实际调用记录，后者无same-scope/独占证明、需fresh重验；统一候选最小权限/并发/事务矩阵不挪用reported aggregate/typecheck。证明trusted owner/固定search_path/精确绑定，app不得直接EXECUTE wrapper/helper、gateway不得UPDATE Key；补production MFA TLS/start→confirm/单次消费/并发/恢复，不用500或parent计数代替断言。
 4. 保留原六正常/replay/conflict断言；双版7039各27/27新增限定证明missing/八类invalid JSON usage、headers前及SSE首帧取消，helper/unit/类型门禁不另累计为PG通过。继续完整FIN的合法超bound/hold、retry-shared供应商成本cap、原容量窗口/用量消费、COMMIT/ACK、并发、真实SIGKILL、062所有writer/恢复角色与append-only更正；执行与财务两轴独立，succeeded + reconciliation_pending不能被改写成假unknown或零收费，也不能据目前有限故障覆盖关闭FIN。
@@ -568,7 +636,7 @@ RUN-01、PROV-01、PAY-01 可并行进行接口设计、独立适配和具备配
 
 DB-01 的环境/历史盘点与 COM-01 的授权/商户/政策准入持续跨任务推进，分别约束存量升级和商业开放。OPS-01 可提前建设指标、故障脚本与 runbook，最终依赖实际部署及业务链；ENG-01 不抢占安全/财务主链。PG 继续作为 gateway 容量/租约/健康/affinity 的权威后端，Redis 验收仅针对控制面认证限速/派生缓存。最后由 REL-01 在固定发行提交汇总全部适用任务与商业门禁，决定证据齐备的开放范围。
 
-并行以不共享写入热点为前提：schema/migration 编号、角色权限、共享 DTO、授权栅栏与财务锁序集中管理；同一文件或事务链的修改由单一任务负责，其他任务先依赖契约和测试夹具。前端按客户/平台及领域分工，后端按网关、策略、适配、支付与运维分工；跨域集成后重跑相应真实 PG 测试，禁止仅靠各自 mock 通过合并。所有并行协作遵守 2026-10-02 明确恢复的 active goal，按上述边界最大安全并行：设计与代码编辑仅由 GPT-6.1 Sol 负责，构建、测试与验证执行仅由 GPT-6 Luna max 负责。
+并行以不共享写入热点为前提：schema/migration 编号、角色权限、共享 DTO、授权栅栏与财务锁序集中管理；同一文件或事务链的修改由单一任务负责，其他任务先依赖契约和测试夹具。前端按客户/平台及领域分工，后端按网关、策略、适配、支付与运维分工；跨域集成后重跑相应真实 PG 测试，禁止仅靠各自 mock 通过合并。所有并行协作遵守 2026-10-02 明确恢复的 active goal，按上述边界最大安全并行（6 Sol源码lane＋2 Luna max验证lane）：设计与代码编辑仅由 GPT-6.1 Sol 负责，构建、测试与验证执行仅由 GPT-6 Luna max 负责；模型容量不足先报告，不以其他模型替代。
 
 ### 11.4 发布门禁与证据清单
 

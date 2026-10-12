@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
+import {
+  SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL,
+  saasAdvisoryKey,
+  sortAndDedupeAdvisoryKeys,
+} from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../db/types.js';
 import { hasPlatformRole } from './access/authorization.js';
 import { isPlatformAdminRole, type PlatformAdminActor, type PlatformAdminRole } from './access/types.js';
@@ -140,6 +144,41 @@ interface ApiKeyCapacityRow {
 interface SessionRow {
   readonly id: unknown;
   readonly user_id: unknown;
+}
+
+interface ApiKeyPrincipalRow {
+  readonly tenant_id: unknown;
+  readonly project_id: unknown;
+  readonly id: unknown;
+  readonly principal_user_id: unknown;
+  readonly execution_principal_type: unknown;
+  readonly execution_principal_id: unknown;
+}
+
+interface ApiKeyWriteRow extends ApiKeyCapacityRow, ApiKeyPrincipalRow {}
+
+type ApiKeyPrincipal =
+  | { readonly kind: 'member'; readonly id: string; readonly userId: string }
+  | { readonly kind: 'project_service'; readonly id: string; readonly userId: null };
+
+function keyPrincipal(
+  row: ApiKeyPrincipalRow,
+  scope: { readonly tenantId: string; readonly projectId?: string; readonly apiKeyId?: string },
+): ApiKeyPrincipal {
+  if (row.tenant_id !== scope.tenantId || row.project_id !== scope.projectId || row.id !== scope.apiKeyId) {
+    fail('STORAGE_ERROR', 'API key principal scope is inconsistent');
+  }
+  const id = row.execution_principal_id;
+  if (typeof id !== 'string' || !UUID_PATTERN.test(id)) {
+    fail('STORAGE_ERROR', 'API key execution principal is malformed');
+  }
+  if (row.execution_principal_type === 'member' && row.principal_user_id === id) {
+    return { kind: 'member', id, userId: id };
+  }
+  if (row.execution_principal_type === 'project_service' && row.principal_user_id === null && id === scope.projectId) {
+    return { kind: 'project_service', id, userId: null };
+  }
+  fail('STORAGE_ERROR', 'API key principal shape is inconsistent');
 }
 
 interface RoleRow {
@@ -380,30 +419,59 @@ async function authorizeActor(
   actor: PlatformAdminActor,
   write: boolean,
   scope: { readonly tenantId: string; readonly projectId?: string; readonly apiKeyId?: string },
-): Promise<void> {
+): Promise<ApiKeyPrincipal | undefined> {
   const acceptedRoles = write ? PLATFORM_WRITE_ROLES : PLATFORM_READ_ROLES;
   if (!hasPlatformRole(actor, acceptedRoles)) fail('FORBIDDEN', 'The platform role cannot manage capacity policies');
 
-  // Lock-order contract: transaction mode/timeouts, tenant -> project ->
-  // user/API-key fences, non-locking authority reads, mutable target-head row
-  // locks, audit inserts, then commit. The target fence is exclusive for a
-  // write and shared for a read, and is always acquired before FOR UPDATE.
-  // This path never row-locks authorization facts; the audit FK's KEY SHARE on
-  // saas_users is compatible with a normal disabled_at UPDATE's NO KEY UPDATE
-  // lock, and auth triggers never acquire capacity-head locks.
+  // Fresh owned TX: controls -> writer G -> tenant -> project -> plain key
+  // principal hint -> exclusive actor/execution-member U layer -> key K.
+  // Authority reads follow the fences; target-row locks follow live authority.
+  // Reads retain their original shared batch and never acquire writer G.
   await tx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
   await tx.query("SET LOCAL lock_timeout = '2s'");
   await tx.query("SET LOCAL statement_timeout = '10s'");
+  if (write) await tx.query(SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL);
   const mode: AdvisoryFenceMode = write ? 'exclusive' : 'shared';
   await lockAdvisoryFenceLayer(tx, [{ key: saasAdvisoryKey.tenant(scope.tenantId), mode }]);
   if (scope.projectId !== undefined) {
     await lockAdvisoryFenceLayer(tx, [{ key: saasAdvisoryKey.project(scope.tenantId, scope.projectId), mode }]);
   }
-  const subjectRequests: AdvisoryFenceRequest[] = [{ key: saasAdvisoryKey.user(actor.userId), mode: 'shared' }];
-  if (scope.apiKeyId !== undefined) {
-    subjectRequests.push({ key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId), mode });
+  let principal: ApiKeyPrincipal | undefined;
+  let principalFailure: CapacityPolicyError | undefined;
+  if (write) {
+    if (scope.apiKeyId !== undefined) {
+      const hint = await tx.query<ApiKeyPrincipalRow>(
+        `SELECT tenant_id, project_id, id, principal_user_id,
+                execution_principal_type, execution_principal_id
+           FROM saas_api_keys
+          WHERE tenant_id = $1 AND project_id = $2 AND id = $3
+          LIMIT 2`,
+        [scope.tenantId, scope.projectId, scope.apiKeyId],
+      );
+      try {
+        principal = keyPrincipal(oneRow(resultRows(hint, 'API key principal hint'), 'NOT_FOUND', 'API key'), scope);
+      } catch (error) {
+        if (!(error instanceof CapacityPolicyError)) throw error;
+        // Discovery is not an authorization oracle. Preserve live session/
+        // role rejection precedence, and never take K without a valid U set.
+        principalFailure = error;
+      }
+    }
+    const users = [actor.userId];
+    if (principal?.kind === 'member') users.push(principal.userId);
+    await lockAdvisoryFenceLayer(tx, users.map((userId) => ({ key: saasAdvisoryKey.user(userId), mode: 'exclusive' })));
+    if (scope.apiKeyId !== undefined && principalFailure === undefined) {
+      await lockAdvisoryFenceLayer(tx, [{
+        key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId), mode: 'exclusive',
+      }]);
+    }
+  } else {
+    const subjectRequests: AdvisoryFenceRequest[] = [{ key: saasAdvisoryKey.user(actor.userId), mode: 'shared' }];
+    if (scope.apiKeyId !== undefined) {
+      subjectRequests.push({ key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId), mode });
+    }
+    await lockAdvisoryFenceLayer(tx, subjectRequests);
   }
-  await lockAdvisoryFenceLayer(tx, subjectRequests);
 
   const sessionResult = await tx.query<SessionRow>(
     `SELECT s.id, s.user_id
@@ -450,6 +518,8 @@ async function authorizeActor(
   if (!hasPlatformRole({ ...actor, roles: assigned }, acceptedRoles)) {
     fail('FORBIDDEN', 'The platform role cannot manage capacity policies');
   }
+  if (principalFailure !== undefined) throw principalFailure;
+  return principal;
 }
 
 function tenantRecord(tenantId: string, row: TenantCapacityRow): CapacityPolicyRecord {
@@ -916,10 +986,11 @@ export class PlatformCapacityPolicyService {
     const apiKeyId = inputUuid(input?.apiKeyId, 'apiKeyId');
     const actor = write.actor;
     return runTransaction(this.database, async (tx) => {
-      await authorizeActor(tx, actor, true, { tenantId, projectId, apiKeyId });
-      const selected = await tx.query<ApiKeyCapacityRow>(
+      const principalHint = await authorizeActor(tx, actor, true, { tenantId, projectId, apiKeyId });
+      const selected = await tx.query<ApiKeyWriteRow>(
         `SELECT tenant_id, project_id, id, authz_version, requests_per_minute,
-                tokens_per_minute, max_concurrent_requests
+                tokens_per_minute, max_concurrent_requests, principal_user_id,
+                execution_principal_type, execution_principal_id
            FROM saas_api_keys
           WHERE tenant_id = $1 AND project_id = $2 AND id = $3
           LIMIT 2
@@ -927,6 +998,15 @@ export class PlatformCapacityPolicyService {
         [tenantId, projectId, apiKeyId],
       );
       const currentRow = oneRow(resultRows(selected, 'API key capacity policy'), 'NOT_FOUND', 'API key');
+      const principal = keyPrincipal(currentRow, { tenantId, projectId, apiKeyId });
+      if (
+        principalHint === undefined || principal.kind !== principalHint.kind ||
+        principal.id !== principalHint.id || principal.userId !== principalHint.userId
+      ) {
+        // A changed binding cannot be repaired by taking an earlier user lock
+        // here, after K/row locks. Roll back rather than admit a stale hint.
+        fail('STORAGE_ERROR', 'API key principal changed after its scope fence');
+      }
       const beforeRecord = apiKeyRecord(tenantId, projectId, apiKeyId, currentRow);
       if (beforeRecord.revision !== write.expectedRevision) {
         fail('CAS_CONFLICT', 'API key authorization revision conflict');

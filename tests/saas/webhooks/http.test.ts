@@ -91,6 +91,9 @@ async function createServer(
     readonly failCreate?: boolean;
     readonly deliveryRows?: readonly Record<string, unknown>[];
     readonly missingEndpointId?: string;
+    readonly mountReplayStore?: boolean;
+    readonly replayOutcome?: boolean | Error;
+    readonly replayDeliveryOwned?: boolean;
   } = {},
 ) {
   const calls: {
@@ -98,7 +101,8 @@ async function createServer(
     readonly actors: Array<{ readonly operation: string; readonly actor: unknown; readonly endpointId?: string }>;
     readonly listQueries: unknown[][];
     readonly deliveryQueries: Array<{ readonly sql: string; readonly values: unknown[] }>;
-  } = { contexts: [], actors: [], listQueries: [], deliveryQueries: [] };
+    readonly replays: Array<{ readonly actor: unknown; readonly deliveryId: string }>;
+  } = { contexts: [], actors: [], listQueries: [], deliveryQueries: [], replays: [] };
   const endpointService: CustomerWebhookHttpOptions['endpointService'] = {
     createEndpoint: async (actor, input) => {
       calls.actors.push({ operation: 'create', actor, endpointId: undefined });
@@ -165,6 +169,11 @@ async function createServer(
     },
     database: {
       query: async <Row>(sql: string, values: readonly unknown[] = []) => {
+        if (sql.includes('SELECT 1 FROM saas_customer_webhook_deliveries')) {
+          calls.deliveryQueries.push({ sql, values: [...values] });
+          const owned = settings.replayDeliveryOwned ?? true;
+          return { rows: (owned ? [{}] : []) as Row[], rowCount: owned ? 1 : 0 };
+        }
         if (sql.includes('FROM saas_customer_webhook_deliveries AS delivery')) {
           const parameters = [...values];
           calls.deliveryQueries.push({ sql, values: parameters });
@@ -198,6 +207,18 @@ async function createServer(
       },
     },
     endpointService,
+    ...(settings.mountReplayStore === false
+      ? {}
+      : {
+          deliveryStore: {
+            replayDeadLetter: async (actor, deliveryId) => {
+              calls.replays.push({ actor, deliveryId });
+              const outcome = settings.replayOutcome ?? true;
+              if (outcome instanceof Error) throw outcome;
+              return outcome;
+            },
+          },
+        }),
     publicOrigin: 'http://127.0.0.1:1',
   };
   let handler: CustomerWebhookHttpHandler;
@@ -530,4 +551,96 @@ test('maps service failures to safe responses without leaking protector or reque
   const text = await response.text();
   assert.doesNotMatch(text, /forbidden-secret-material|kms response/i);
   assert.match(text, /INTERNAL_ERROR/);
+});
+
+const DELIVERY_A = '55555555-5555-4555-8555-555555555555';
+
+test('dead-letter replay is manager-only, CSRF-protected, endpoint-bound and audited through the store', async () => {
+  const app = await createServer();
+  const replayPath = `${app.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`;
+  const response = await fetch(replayPath, { method: 'POST', headers: writeHeaders(app.origin), body: '{}' });
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { data?: Record<string, unknown> };
+  assert.deepEqual(body.data, { deliveryId: DELIVERY_A, replayed: true });
+  assert.equal(app.calls.replays.length, 1);
+  assert.equal(app.calls.replays[0]?.deliveryId, DELIVERY_A);
+  // The store received the tenant-scoped actor minted from the session.
+  const actor = app.calls.replays[0]?.actor as { tenantId?: string; actorUserId?: string; requestId?: string };
+  assert.equal(actor.tenantId, TENANT_A);
+  assert.equal(actor.actorUserId, USER_ID);
+  // The ownership probe binds the path delivery to the path endpoint first.
+  const ownership = app.calls.deliveryQueries.find((query) => query.sql.includes('SELECT 1'));
+  assert.ok(ownership);
+  assert.deepEqual(ownership.values, [TENANT_A, DELIVERY_A, ENDPOINT_A]);
+});
+
+test('dead-letter replay rejects viewers, cross-tenant deliveries and missing CSRF before touching the store', async () => {
+  const viewer = await createServer({ role: 'viewer' });
+  const viewerResponse = await fetch(
+    `${viewer.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'POST', headers: writeHeaders(viewer.origin), body: '{}' },
+  );
+  assert.equal(viewerResponse.status, 403);
+  assert.equal(viewer.calls.replays.length, 0);
+
+  const foreign = await createServer({ replayDeliveryOwned: false });
+  const foreignResponse = await fetch(
+    `${foreign.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'POST', headers: writeHeaders(foreign.origin), body: '{}' },
+  );
+  assert.equal(foreignResponse.status, 404);
+  assert.equal(foreign.calls.replays.length, 0);
+
+  const noCsrf = await createServer();
+  const noCsrfResponse = await fetch(
+    `${noCsrf.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'POST', headers: sessionHeaders(noCsrf.origin) },
+  );
+  assert.equal(noCsrfResponse.status, 403);
+  assert.equal(noCsrf.calls.replays.length, 0);
+});
+
+test('dead-letter replay maps ineligible, quota and unavailable outcomes to safe statuses', async () => {
+  const ineligible = await createServer({ replayOutcome: false });
+  const ineligibleResponse = await fetch(
+    `${ineligible.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'POST', headers: writeHeaders(ineligible.origin), body: '{}' },
+  );
+  assert.equal(ineligibleResponse.status, 409);
+  assert.match(await ineligibleResponse.text(), /WEBHOOK_STATE_CONFLICT/);
+
+  const quota = await createServer({ replayOutcome: new Error('WEBHOOK_TENANT_QUOTA_EXCEEDED') });
+  const quotaResponse = await fetch(
+    `${quota.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'POST', headers: writeHeaders(quota.origin), body: '{}' },
+  );
+  assert.equal(quotaResponse.status, 409);
+  const quotaText = await quotaResponse.text();
+  assert.doesNotMatch(quotaText, /TENANT_QUOTA_EXCEEDED/);
+
+  const unmounted = await createServer({ mountReplayStore: false });
+  const unmountedResponse = await fetch(
+    `${unmounted.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'POST', headers: writeHeaders(unmounted.origin), body: '{}' },
+  );
+  assert.equal(unmountedResponse.status, 503);
+  assert.match(await unmountedResponse.text(), /WEBHOOK_REPLAY_UNAVAILABLE/);
+});
+
+test('dead-letter replay rejects malformed delivery identifiers and non-POST methods', async () => {
+  const app = await createServer();
+  const malformed = await fetch(
+    `${app.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/not-a-uuid/replay`,
+    { method: 'POST', headers: writeHeaders(app.origin), body: '{}' },
+  );
+  assert.equal(malformed.status, 400);
+  assert.equal(app.calls.replays.length, 0);
+
+  const wrongMethod = await fetch(
+    `${app.origin}/console/api/v1/tenants/${TENANT_A}/webhooks/${ENDPOINT_A}/deliveries/${DELIVERY_A}/replay`,
+    { method: 'GET', headers: sessionHeaders(app.origin) },
+  );
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get('allow'), 'POST');
+  assert.equal(app.calls.replays.length, 0);
 });

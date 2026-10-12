@@ -4,7 +4,7 @@ const BASE = '/console/api/v1';
 const MAX_CURSOR_LENGTH = 2048;
 
 export type SaasWalletLedgerDirection = 'credit' | 'debit';
-export type SaasWalletLedgerType = 'top_up' | 'usage_charge';
+export type SaasWalletLedgerType = 'top_up' | 'usage_charge' | 'wallet_refund';
 
 export interface SaasWalletSnapshot {
   currency: string;
@@ -153,8 +153,14 @@ function parseLedgerEntry(value: unknown, currency: string): SaasWalletLedgerEnt
   if (candidate.direction !== 'credit' && candidate.direction !== 'debit') {
     return invalidResponse('账本条目中的 direction 无效');
   }
-  if (candidate.type !== 'top_up' && candidate.type !== 'usage_charge') {
+  if (candidate.type !== 'top_up' && candidate.type !== 'usage_charge' && candidate.type !== 'wallet_refund') {
     return invalidResponse('账本条目中的 type 无效');
+  }
+
+  if (candidate.type === 'wallet_refund') {
+    if (candidate.direction !== 'debit' || BigInt(minorUnits(candidate.amountMinorUnits, 'ledger.amountMinorUnits')) < 1n) {
+      return invalidResponse('钱包退款账目必须是正整数金额的 debit');
+    }
   }
 
   return {

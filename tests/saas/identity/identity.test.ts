@@ -1176,3 +1176,277 @@ test('project creation rechecks tenant membership after a simulated revocation f
   await expectCode(service.createProject(owner.id, tenant.id, { name: 'Must Not Exist' }), 'TENANT_ACCESS_DENIED');
   assert.equal(database.state.projects.filter((project) => project.tenant_id === tenant.id).length, before);
 });
+
+
+// These assertions observe the real service calls in the inherited scripted
+// database. Its transactionTail serializes callbacks; the separate lock model
+// below is explicitly NOT a PostgreSQL race, trigger, hash-collision or PG proof.
+const creationTenantExclusiveSql =
+  "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:tenant:' || $1::uuid::text, 0))";
+const creationProjectExclusiveSql =
+  "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:project:' || $1::uuid::text || ':' || $2::uuid::text, 0))";
+const creationUserExclusiveSql = 'SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0))';
+type CreationQueryTrace = FakeSaasDatabase['queryLog'][number];
+type CreationModelLock = { key: string; mode: 'shared' | 'exclusive' };
+
+function assertCreationStart(
+  queries: readonly CreationQueryTrace[],
+  tenantId: string,
+  projectId: string,
+  userId: string,
+): void {
+  assert.ok(queries.length > 3);
+  assert.deepEqual(queries.slice(0, 3).map(({ sql, values }) => ({ sql, values })), [
+    { sql: creationTenantExclusiveSql, values: [tenantId] },
+    { sql: creationProjectExclusiveSql, values: [tenantId, projectId] },
+    { sql: creationUserExclusiveSql, values: [userId] },
+  ]);
+  assert.equal(typeof queries[0]?.transactionId, 'number');
+  assert.equal(new Set(queries.map(({ transactionId }) => transactionId)).size, 1);
+  assert.ok(queries.every(({ sql }) => !sql.includes('pg_advisory_xact_lock_shared')));
+  assert.ok(queries.every(({ sql }) => !sql.includes('pg_advisory_xact_lock(1396788563, 46)')));
+  assert.equal(queries.filter(({ sql }) => sql.includes('pg_advisory_xact_lock')).length, 3);
+  assert.ok(queries.filter(({ sql }) => /^\s*INSERT /i.test(sql)).length > 0);
+  assert.ok(queries.every(({ sql }, index) => !/^\s*INSERT /i.test(sql) || index > 3));
+}
+
+function creationCounts(database: FakeSaasDatabase): number[] {
+  return [database.state.tenants.length, database.state.memberships.length,
+    database.state.projects.length, database.state.projectMemberships.length];
+}
+
+function creationModelLock(sql: string, values: readonly unknown[]): CreationModelLock {
+  const sharedTenantSql = creationTenantExclusiveSql.replace('pg_advisory_xact_lock(', 'pg_advisory_xact_lock_shared(');
+  const sharedUserSql = creationUserExclusiveSql.replace('pg_advisory_xact_lock(', 'pg_advisory_xact_lock_shared(');
+  if ((sql === creationTenantExclusiveSql || sql === sharedTenantSql)
+    && values.length === 1 && typeof values[0] === 'string') {
+    return { key: 'saas-authz:tenant:' + values[0], mode: sql === sharedTenantSql ? 'shared' : 'exclusive' };
+  }
+  if (sql === creationProjectExclusiveSql && values.length === 2
+    && typeof values[0] === 'string' && typeof values[1] === 'string') {
+    return { key: 'saas-authz:project:' + values[0] + ':' + values[1], mode: 'exclusive' };
+  }
+  if ((sql === creationUserExclusiveSql || sql === sharedUserSql)
+    && values.length === 1 && typeof values[0] === 'string') {
+    return { key: values[0], mode: sql === sharedUserSql ? 'shared' : 'exclusive' };
+  }
+  throw new Error('Unsupported creation advisory-model query');
+}
+
+class CreationAdvisoryModel {
+  private readonly holders = new Map<string, Map<string, 'shared' | 'exclusive'>>();
+
+  tryAcquire(transaction: string, request: CreationModelLock): boolean {
+    const holders = this.holders.get(request.key) ?? new Map<string, 'shared' | 'exclusive'>();
+    for (const [holder, mode] of holders) {
+      if (holder !== transaction && (request.mode === 'exclusive' || mode === 'exclusive')) return false;
+    }
+    holders.set(transaction, holders.get(transaction) === 'exclusive' ? 'exclusive' : request.mode);
+    this.holders.set(request.key, holders);
+    return true;
+  }
+
+  release(transaction: string): void {
+    for (const [key, holders] of this.holders) {
+      holders.delete(transaction);
+      if (holders.size === 0) this.holders.delete(key);
+    }
+  }
+}
+
+test('tenant creation takes exact T_X/new P_X/U_X before its fresh user read and all INSERTs (scripted SQL)', async () => {
+  const { database, service } = createFixture();
+  const owner = await createBootstrapAdmin(service);
+  const start = database.queryLog.length;
+  const tenant = await service.createTenant(owner.id, { name: 'Strongest Tenant' });
+  const queries = database.queryLog.slice(start);
+  assertCreationStart(queries, tenant.id, tenant.defaultProjectId, owner.id);
+  assert.match(queries[3]?.sql ?? '', /SELECT id FROM saas_users WHERE id = \$1 AND disabled_at IS NULL LIMIT 1/);
+  assert.deepEqual(queries[3]?.values, [owner.id]);
+  assert.doesNotMatch(queries[3]?.sql ?? '', /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
+  assert.equal(tenant.role, 'owner');
+});
+
+test('project creation takes exact T_X/new P_X/U_X before the fresh current-role read (scripted SQL)', async () => {
+  const { database, service } = createFixture();
+  const owner = await createBootstrapAdmin(service);
+  const tenant = await service.createTenant(owner.id, { name: 'Strongest Project Tenant' });
+  const start = database.queryLog.length;
+  const project = await service.createProject(owner.id, tenant.id, { name: 'Strongest Project' });
+  const queries = database.queryLog.slice(start);
+  assertCreationStart(queries, tenant.id, project.id, owner.id);
+  assert.notEqual(project.id, tenant.defaultProjectId);
+  assert.match(queries[3]?.sql ?? '', /SELECT m.role FROM saas_memberships m/);
+  assert.deepEqual(queries[3]?.values, [tenant.id, owner.id]);
+  assert.doesNotMatch(queries[3]?.sql ?? '', /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
+  assert.equal(project.role, 'owner');
+});
+
+test('tenant creation rechecks disablement after the exclusive actor fence without residual grants (scripted SQL)', async () => {
+  const { database, service } = createFixture();
+  const owner = await createBootstrapAdmin(service);
+  const before = creationCounts(database);
+  const start = database.queryLog.length;
+  let changed = false;
+  database.authorizationFenceHook = (sql, values) => {
+    if (sql === creationUserExclusiveSql && values[0] === owner.id) {
+      const actor = database.state.users.find(({ id }) => id === owner.id);
+      assert.ok(actor);
+      actor.disabled_at = initialTime;
+      changed = true;
+      database.authorizationFenceHook = undefined;
+    }
+  };
+  await expectCode(service.createTenant(owner.id, { name: 'Denied Strongest Tenant' }), 'TENANT_ACCESS_DENIED');
+  assert.equal(changed, true);
+  assert.deepEqual(creationCounts(database), before);
+  const queries = database.queryLog.slice(start);
+  assert.deepEqual(queries.slice(0, 3).map(({ sql }) => sql), [
+    creationTenantExclusiveSql, creationProjectExclusiveSql, creationUserExclusiveSql,
+  ]);
+  assert.equal(queries.length, 4);
+  assert.match(queries[3]?.sql ?? '', /disabled_at IS NULL/);
+  assert.ok(queries.every(({ sql }) => !/^\s*INSERT /i.test(sql)));
+});
+
+test('project creation rechecks disablement and live tenant role after U_X without residual grants (scripted SQL)', async () => {
+  const changes: readonly ('disabled' | 'viewer' | 'revoked')[] = ['disabled', 'viewer', 'revoked'];
+  for (const change of changes) {
+    const { database, service } = createFixture();
+    const owner = await createBootstrapAdmin(service);
+    const tenant = await service.createTenant(owner.id, { name: 'Changed Authority Tenant' });
+    const before = creationCounts(database);
+    const start = database.queryLog.length;
+    let changed = false;
+    database.authorizationFenceHook = (sql, values) => {
+      if (sql === creationUserExclusiveSql && values[0] === owner.id) {
+        const actor = database.state.users.find(({ id }) => id === owner.id);
+        const membership = database.state.memberships.find(
+          ({ tenant_id, user_id }) => tenant_id === tenant.id && user_id === owner.id,
+        );
+        assert.ok(actor && membership);
+        if (change === 'disabled') actor.disabled_at = initialTime;
+        if (change === 'viewer') membership.role = 'viewer';
+        if (change === 'revoked') membership.status = 'revoked';
+        changed = true;
+        database.authorizationFenceHook = undefined;
+      }
+    };
+    await expectCode(service.createProject(owner.id, tenant.id, { name: 'Denied Strongest Project' }),
+      change === 'viewer' ? 'INSUFFICIENT_TENANT_ROLE' : 'TENANT_ACCESS_DENIED');
+    assert.equal(changed, true);
+    assert.deepEqual(creationCounts(database), before);
+    const queries = database.queryLog.slice(start);
+    assert.deepEqual(queries.slice(0, 3).map(({ sql }) => sql), [
+      creationTenantExclusiveSql, creationProjectExclusiveSql, creationUserExclusiveSql,
+    ]);
+    assert.equal(queries.length, 4);
+    assert.match(queries[3]?.sql ?? '', /SELECT m.role FROM saas_memberships m/);
+    assert.ok(queries.every(({ sql }) => !/^\s*INSERT /i.test(sql)));
+  }
+});
+
+test('either creation aborts at each failed strongest scope without reads or residual DML (scripted SQL)', async () => {
+  const locks = [creationTenantExclusiveSql, creationProjectExclusiveSql, creationUserExclusiveSql];
+  const operations: readonly ('tenant' | 'project')[] = ['tenant', 'project'];
+  for (const operation of operations) {
+    for (const [failedIndex, failedSql] of locks.entries()) {
+      const { database, service } = createFixture();
+      const owner = await createBootstrapAdmin(service);
+      const tenant = operation === 'project'
+        ? await service.createTenant(owner.id, { name: 'Fence Failure Parent' }) : undefined;
+      const before = creationCounts(database);
+      const start = database.queryLog.length;
+      database.authorizationFenceHook = (sql) => {
+        if (sql === failedSql) throw new Error('Scripted strongest scope acquisition failed');
+      };
+      if (operation === 'tenant') {
+        await expectCode(service.createTenant(owner.id, { name: 'Fence Failed Tenant' }), 'IDENTITY_STORAGE_ERROR');
+      } else {
+        assert.ok(tenant);
+        await expectCode(service.createProject(owner.id, tenant.id, { name: 'Fence Failed Project' }), 'IDENTITY_STORAGE_ERROR');
+      }
+      database.authorizationFenceHook = undefined;
+      assert.deepEqual(creationCounts(database), before);
+      const queries = database.queryLog.slice(start);
+      assert.equal(queries.length, failedIndex + 1);
+      assert.deepEqual(queries.map(({ sql }) => sql), locks.slice(0, failedIndex + 1));
+      assert.ok(queries.every(({ sql }) => !/^\s*(?:INSERT|SELECT (?:id|m\.role) FROM)/i.test(sql)));
+    }
+  }
+});
+
+test('real creation traces avoid old shared-upgrade cycles in a deterministic lock model, not a PG race', async () => {
+  const { database, service } = createFixture();
+  const owner = await createBootstrapAdmin(service);
+  const tenantStartA = database.queryLog.length;
+  const tenantA = await service.createTenant(owner.id, { name: 'Model Tenant A' });
+  const tenantTraceA = database.queryLog.slice(tenantStartA);
+  const tenantStartB = database.queryLog.length;
+  const tenantB = await service.createTenant(owner.id, { name: 'Model Tenant B' });
+  const tenantTraceB = database.queryLog.slice(tenantStartB);
+  assertCreationStart(tenantTraceA, tenantA.id, tenantA.defaultProjectId, owner.id);
+  assertCreationStart(tenantTraceB, tenantB.id, tenantB.defaultProjectId, owner.id);
+  const tenantLocksA = tenantTraceA.slice(0, 3).map(({ sql, values }) => creationModelLock(sql, values));
+  const tenantLocksB = tenantTraceB.slice(0, 3).map(({ sql, values }) => creationModelLock(sql, values));
+  const userLock = creationModelLock(creationUserExclusiveSql, [owner.id]);
+  const sharedUser = creationModelLock(
+    creationUserExclusiveSql.replace('pg_advisory_xact_lock(', 'pg_advisory_xact_lock_shared('), [owner.id],
+  );
+  const oldTenant = new CreationAdvisoryModel();
+  assert.equal(oldTenant.tryAcquire('a', sharedUser), true);
+  assert.equal(oldTenant.tryAcquire('b', sharedUser), true);
+  assert.equal(oldTenant.tryAcquire('a', userLock), false);
+  assert.equal(oldTenant.tryAcquire('b', userLock), false);
+
+  const newTenant = new CreationAdvisoryModel();
+  for (const index of [0, 1]) {
+    const a = tenantLocksA[index], b = tenantLocksB[index];
+    assert.ok(a && b);
+    assert.equal(newTenant.tryAcquire('a', a), true);
+    assert.equal(newTenant.tryAcquire('b', b), true);
+  }
+  assert.equal(newTenant.tryAcquire('a', userLock), true);
+  assert.equal(newTenant.tryAcquire('b', userLock), false);
+  for (const lock of tenantLocksA) assert.equal(newTenant.tryAcquire('a', lock), true);
+  newTenant.release('a');
+  for (const lock of tenantLocksB) assert.equal(newTenant.tryAcquire('b', lock), true);
+
+  const projectStartA = database.queryLog.length;
+  const projectA = await service.createProject(owner.id, tenantA.id, { name: 'Model Project A' });
+  const projectTraceA = database.queryLog.slice(projectStartA);
+  const projectStartB = database.queryLog.length;
+  const projectB = await service.createProject(owner.id, tenantA.id, { name: 'Model Project B' });
+  const projectTraceB = database.queryLog.slice(projectStartB);
+  assertCreationStart(projectTraceA, tenantA.id, projectA.id, owner.id);
+  assertCreationStart(projectTraceB, tenantA.id, projectB.id, owner.id);
+  const projectLocksA = projectTraceA.slice(0, 3).map(({ sql, values }) => creationModelLock(sql, values));
+  const projectLocksB = projectTraceB.slice(0, 3).map(({ sql, values }) => creationModelLock(sql, values));
+  const tenantLock = creationModelLock(creationTenantExclusiveSql, [tenantA.id]);
+  const sharedTenant = creationModelLock(
+    creationTenantExclusiveSql.replace('pg_advisory_xact_lock(', 'pg_advisory_xact_lock_shared('), [tenantA.id],
+  );
+  const oldProject = new CreationAdvisoryModel();
+  assert.equal(oldProject.tryAcquire('a', sharedTenant), true);
+  assert.equal(oldProject.tryAcquire('b', sharedTenant), true);
+  assert.equal(oldProject.tryAcquire('a', tenantLock), false);
+  assert.equal(oldProject.tryAcquire('b', tenantLock), false);
+
+  const newProject = new CreationAdvisoryModel();
+  assert.equal(newProject.tryAcquire('a', tenantLock), true);
+  assert.equal(newProject.tryAcquire('b', tenantLock), false);
+  for (const lock of projectLocksA) assert.equal(newProject.tryAcquire('a', lock), true);
+  newProject.release('a');
+  for (const lock of projectLocksB) assert.equal(newProject.tryAcquire('b', lock), true);
+
+  assert.throws(() => creationModelLock('SELECT pg_advisory_xact_lock(1396788563, 46)', []),
+    /Unsupported creation advisory-model query/);
+  assert.throws(() => creationModelLock(creationTenantExclusiveSql + '; SELECT 1', [tenantA.id]),
+    /Unsupported creation advisory-model query/);
+  assert.throws(() => creationModelLock(creationProjectExclusiveSql, [tenantA.id]),
+    /Unsupported creation advisory-model query/);
+  assert.throws(() => creationModelLock(creationUserExclusiveSql, [owner.id, owner.id]),
+    /Unsupported creation advisory-model query/);
+  assert.throws(() => creationModelLock(creationUserExclusiveSql, [null]),
+    /Unsupported creation advisory-model query/);
+});

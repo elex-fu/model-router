@@ -569,3 +569,69 @@ function createCredentialValidationTargets(options) {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function canonicalModuleTarget(kind: 'chat' | 'messages' = 'chat', expiresAt: string | null = null): ApprovedCredentialValidationTarget {
+  const descriptor: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'> = {
+    schemaVersion: 2, providerId: 'custom', credentialType: 'api-key', model: 'reviewed-org/model-v1:variant',
+    capabilityVersion: 1, baseUrl: `https://${HOST}:8443/api/v1/`,
+    approvalReference: 'operator-review:canonical-v2', expiresAt,
+    ...(kind === 'chat' ? { productId: 'custom-openai', endpoint: '/v1/chat/completions', protocol: 'openai',
+      wirePath: 'chat/completions', wireProtocol: 'openai', authProfile: 'openai-bearer-v1' } as const :
+      { productId: 'custom-anthropic', endpoint: '/v1/messages', protocol: 'anthropic',
+        wirePath: 'messages', wireProtocol: 'anthropic', authProfile: 'anthropic-api-key-2023-06-01' } as const),
+  };
+  return { ...descriptor, evidenceSha256: credentialValidationTargetEvidenceSha256(descriptor) };
+}
+
+test('loader copies exact v2 data-only metadata alongside unchanged v1 without acquiring capability or rewriting endpoints', async () => {
+  const inputs = [target(), canonicalModuleTarget(), canonicalModuleTarget('messages')];
+  const loaded = await loadTargets(inputs);
+  assert.ok(loaded);
+  assert.equal(loaded.length, 3);
+  assert.equal(isApprovedCredentialValidationTargets(loaded), false, 'loaded metadata is not an authority registry');
+  const registry = compileApprovedCredentialValidationTargets(loaded);
+  for (const descriptor of inputs) {
+    const binding = resolveApprovedCredentialValidationTarget(registry, consumerJob(descriptor), NOW);
+    assert.ok(binding);
+    assert.equal(binding.endpoint, descriptor.endpoint);
+    assert.equal(binding.protocol, descriptor.protocol);
+    assert.equal(binding.evidenceSha256, descriptor.evidenceSha256);
+    assert.equal(Object.isFrozen(binding), true);
+    assert.equal(credentialValidationTargetRequestUrl(binding).pathname,
+      descriptor.productId === 'custom-anthropic' ? '/api/v1/messages' : '/api/v1/chat/completions');
+  }
+  assert.deepEqual({ ...loaded[0] }, inputs[0], 'legacy metadata retains exactly its original fields');
+});
+
+test('loader refuses incomplete, mixed, accessor and unreviewed v2 metadata without repairs or disclosure', async () => {
+  const original = canonicalModuleTarget();
+  for (const key of Object.keys(original)) {
+    const missing = { ...original };
+    Reflect.deleteProperty(missing, key);
+    await assertSafeError(() => loadTargets([missing]), 'TARGETS_INVALID');
+  }
+  for (const changes of [
+    { endpoint: '/v1/messages' }, { protocol: 'anthropic' }, { wirePath: 'messages' },
+    { wireProtocol: 'anthropic' }, { model: 'another/model' }, { evidenceSha256: 'f'.repeat(64) },
+    { requestUrl: DIAGNOSTIC }, { approved: true }, { schemaVersion: 1 },
+    { wirePath: '/v1/chat/completions' }, { wireProtocol: 'openai-compatible' },
+  ]) await assertSafeError(() => loadTargets([{ ...original, ...changes }]), 'TARGETS_INVALID');
+  let reads = 0;
+  const changing = Object.defineProperty({ ...original }, 'schemaVersion', {
+    enumerable: true, get() { reads += 1; throw new Error(DIAGNOSTIC); },
+  });
+  await assertSafeError(() => loadTargets([changing]), 'TARGETS_INVALID');
+  assert.equal(reads, 0);
+  const hidden = Object.defineProperty({ ...original }, 'wirePath', { value: original.wirePath, enumerable: false });
+  await assertSafeError(() => loadTargets([hidden]), 'TARGETS_INVALID');
+  await assertSafeError(() => loadTargets([original, { ...original }]), 'TARGETS_INVALID');
+});
+
+test('v2 exact-deadline expiry rejects the entire awaited module load, not just its canonical subset', async () => {
+  let now = NOW;
+  const original = canonicalModuleTarget('chat', new Date(NOW + 1).toISOString());
+  await assertSafeError(() => loadFactory(async () => {
+    await Promise.resolve(); now = NOW + 1; return [target(), original];
+  }, { now: () => now }), 'TARGETS_INVALID');
+  await assertSafeError(() => loadTargets([target(), canonicalModuleTarget('messages', new Date(NOW).toISOString())]), 'TARGETS_INVALID');
+});

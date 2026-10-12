@@ -271,39 +271,71 @@ test('projects only bounded declared MFA operator metadata and redacts email-dig
       action: 'platform_mfa.enrollment_token.denied',
       target_type: 'platform_mfa_enrollment_email_digest',
       target_id: digest,
-      operator_attestation_metadata: operatorMetadata({ reason_code: 'approved-enrollment', outcome: 'target-unavailable' }),
+      operator_attestation_metadata: operatorMetadata({
+        reason_code: 'approved-enrollment',
+        outcome: 'target-unavailable',
+      }),
     }),
-    ...['target-unavailable', 'verified-totp-present', 'enrollment-pending'].map(outcome => operatorRow({
-      action: 'platform_mfa.enrollment_token.denied',
-      operator_attestation_metadata: operatorMetadata({ operator_id: 'o'.repeat(96), outcome }),
-    })),
+    ...['target-unavailable', 'verified-totp-present', 'enrollment-pending'].map((outcome) =>
+      operatorRow({
+        action: 'platform_mfa.enrollment_token.denied',
+        operator_attestation_metadata: operatorMetadata({ operator_id: 'o'.repeat(96), outcome }),
+      }),
+    ),
   ]);
   const page = await new PlatformAuditHistoryQueryService(database, CURSOR_SECRET).list({ limit: 10 });
   assert.deepEqual(page.items[0]?.operatorAttestation, {
-    operatorId: 'ops:handoff-01', reasonCode: 'initial-enrollment', outcome: 'issued',
+    operatorId: 'ops:handoff-01',
+    reasonCode: 'initial-enrollment',
+    outcome: 'issued',
   });
   assert.equal(page.items[0]?.actorId, null);
   assert.equal(page.items[0]?.entityId, ACTOR_ID);
   assert.deepEqual(page.items[1]?.operatorAttestation, {
-    operatorId: 'ops:handoff-01', reasonCode: 'approved-enrollment', outcome: 'target-unavailable',
+    operatorId: 'ops:handoff-01',
+    reasonCode: 'approved-enrollment',
+    outcome: 'target-unavailable',
   });
   assert.equal(page.items[1]?.entityId, null);
-  assert.equal(page.items.slice(2).every(event => event.operatorAttestation?.operatorId.length === 96), true);
-  assert.doesNotMatch(JSON.stringify(page), /raw-UA-secret|payload-secret|192\.0\.2\.5|audience|actor_kind|workload_id|database_role|user_agent|source_ip/);
+  assert.equal(
+    page.items.slice(2).every((event) => event.operatorAttestation?.operatorId.length === 96),
+    true,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(page),
+    /raw-UA-secret|payload-secret|192\.0\.2\.5|audience|actor_kind|workload_id|database_role|user_agent|source_ip/,
+  );
   assert.equal(JSON.stringify(page).includes(digest), false);
   const sql = database.calls[0]?.sql ?? '';
   assert.match(sql, /CASE WHEN a\.tenant_id IS NULL AND a\.actor_user_id IS NULL/);
-  assert.match(sql, /a\.action IN \('platform_mfa\.enrollment_token\.issued', 'platform_mfa\.enrollment_token\.denied'\)/);
+  assert.match(
+    sql,
+    /a\.action IN \('platform_mfa\.enrollment_token\.issued', 'platform_mfa\.enrollment_token\.denied'\)/,
+  );
   assert.match(sql, /a\.entry_point = 'trusted_operator_cli:platform_mfa_enroll'/);
-  assert.match(sql, /octet_length\(a\.user_agent\) <= 1024\s+THEN a\.user_agent ELSE NULL END AS operator_attestation_metadata/);
+  assert.match(
+    sql,
+    /octet_length\(a\.user_agent\) <= 1024\s+THEN a\.user_agent ELSE NULL END AS operator_attestation_metadata/,
+  );
   assert.doesNotMatch(sql, /::json|jsonb_/); // Bound the SQL read before application deserialization.
 });
 
 test('omits malformed, oversize, forged, unrelated and prototype-bearing operator metadata without dropping safe rows', async () => {
   const raw = operatorMetadata();
   const badMetadata: unknown[] = [
-    undefined, null, {}, [], 42, '', '{', 'null', '[]', '"user-agent"',
-    raw + 'x', ' '.repeat(1025) + raw, raw + '界'.repeat(400),
+    undefined,
+    null,
+    {},
+    [],
+    42,
+    '',
+    '{',
+    'null',
+    '[]',
+    '"user-agent"',
+    raw + 'x',
+    ' '.repeat(1025) + raw,
+    raw + '界'.repeat(400),
     operatorMetadata({ audience: 'customer' }),
     operatorMetadata({ actor_kind: 'platform_user' }),
     operatorMetadata({ workload_id: 'saas:bootstrap-admin' }),
@@ -327,7 +359,7 @@ test('omits malformed, oversize, forged, unrelated and prototype-bearing operato
     raw.replace('"outcome":"issued"', '"unexpected":"issued"'),
   ];
   const badRows = [
-    ...badMetadata.map(operator_attestation_metadata => operatorRow({ operator_attestation_metadata })),
+    ...badMetadata.map((operator_attestation_metadata) => operatorRow({ operator_attestation_metadata })),
     operatorRow({ tenant_id: TENANT_ID }),
     operatorRow({ actor_user_id: ACTOR_ID }),
     operatorRow({ entry_point: 'platform_http' }),
@@ -339,8 +371,10 @@ test('omits malformed, oversize, forged, unrelated and prototype-bearing operato
     operatorRow({ action: 'platform_mfa.enrollment_token.denied' }),
     operatorRow({ target_type: 'platform_mfa_enrollment_email_digest', target_id: 'd'.repeat(64) }),
     operatorRow({
-      action: 'platform_mfa.enrollment_token.denied', target_type: 'platform_mfa_enrollment_email_digest',
-      target_id: 'd'.repeat(64), operator_attestation_metadata: operatorMetadata({ outcome: 'enrollment-pending' }),
+      action: 'platform_mfa.enrollment_token.denied',
+      target_type: 'platform_mfa_enrollment_email_digest',
+      target_id: 'd'.repeat(64),
+      operator_attestation_metadata: operatorMetadata({ outcome: 'enrollment-pending' }),
     }),
   ];
   const database = new FakeAuditExecutor();
@@ -357,10 +391,7 @@ test('omits malformed, oversize, forged, unrelated and prototype-bearing operato
 
 test('adding an operator projection leaves actor UUID predicates, cursor binding and old safe records unchanged', async () => {
   const database = new FakeAuditExecutor();
-  database.enqueue([
-    operatorRow(),
-    auditRow(ID_B, '2026-09-01T00:00:00.000Z', { user_agent: operatorMetadata() }),
-  ]);
+  database.enqueue([operatorRow(), auditRow(ID_B, '2026-09-01T00:00:00.000Z', { user_agent: operatorMetadata() })]);
   const service = new PlatformAuditHistoryQueryService(database, CURSOR_SECRET);
   const page = await service.list({ actorId: ACTOR_ID, limit: 1 });
   assert.match(database.calls[0]?.sql ?? '', /WHERE a\.actor_user_id = \$1/);

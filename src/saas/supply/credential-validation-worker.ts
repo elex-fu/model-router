@@ -9,6 +9,7 @@ import {
   withUnsealedProviderCredential,
 } from '../credentials/provider-crypto.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
+import { verifyCredentialValidationWorkerSchemaReadiness } from '../db/credential-validation-worker-schema-readiness.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import {
   credentialValidationCapabilityProtocol,
@@ -25,11 +26,11 @@ import {
   type PreparedCredentialValidationProbe,
 } from './credential-validation-http-transport.js';
 import {
-  credentialValidationJobSnapshotSha256,
+  type ApprovedCredentialValidationTargets,
   CredentialValidationTargetError,
+  credentialValidationJobSnapshotSha256,
   isApprovedCredentialValidationTargets,
   resolveApprovedCredentialValidationTarget,
-  type ApprovedCredentialValidationTargets,
 } from './credential-validation-targets.js';
 import type {
   CredentialValidationRequeueCapabilityEvidence,
@@ -44,6 +45,31 @@ export const CREDENTIAL_VALIDATION_MAX_ATTEMPTS = 5;
 export const CREDENTIAL_VALIDATION_POLL_INTERVAL_MS = 1_000;
 export const CREDENTIAL_VALIDATION_RETRY_BASE_MS = 1_000;
 export const CREDENTIAL_VALIDATION_RETRY_MAX_MS = 60_000;
+
+/**
+ * R5 credential quarantine (migration 097; design:
+ * docs/remaining-capability-plan-2026-10-11.md R5). This many CONSECUTIVE
+ * terminal health failures move an account from failed into quarantine.
+ */
+export const PROVIDER_ACCOUNT_QUARANTINE_FAILURE_THRESHOLD = 3;
+/** Default long cadence (6h) at which quarantined accounts are probed. */
+export const CREDENTIAL_VALIDATION_QUARANTINE_REVALIDATION_SECONDS = 21_600;
+/** Stable audit action emitted exactly once per actual quarantine entry. */
+export const PROVIDER_ACCOUNT_QUARANTINE_AUDIT_ACTION = 'provider_supply.account.quarantined' as const;
+
+/**
+ * Post-commit quarantine-entry audit fact. It carries stable identifiers and
+ * the terminal error code only — never provider or credential material.
+ */
+export interface ProviderAccountQuarantineAuditEvent {
+  readonly action: typeof PROVIDER_ACCOUNT_QUARANTINE_AUDIT_ACTION;
+  readonly ownerKind: CredentialValidationOwnerKind;
+  readonly tenantId: string | null;
+  readonly accountId: string;
+  readonly reasonCode: ProviderCredentialValidationErrorCode;
+  /** Database clock entry timestamp (ISO), as persisted by the guard-admitted UPDATE. */
+  readonly enteredAt: string;
+}
 
 export interface CredentialValidationLease {
   readonly job: ProviderCredentialValidationJobRecord;
@@ -69,7 +95,7 @@ export class CredentialValidationWorkerError extends Error {
 
 interface ValidationJobRow {
   id: string;
-  tenant_id: string;
+  tenant_id?: string;
   account_id: string;
   credential_id: string;
   credential_version: number | string;
@@ -94,7 +120,7 @@ interface ValidationJobRow {
 
 interface LockedAccountRow {
   id: string;
-  tenant_id: string;
+  tenant_id?: string;
   provider_id: string;
   product_id: string;
   credential_type: string;
@@ -109,7 +135,7 @@ interface LockedAccountRow {
 
 interface LockedCredentialRow {
   id: string;
-  tenant_id: string;
+  tenant_id?: string;
   account_id: string;
   provider_id: string;
   product_id: string;
@@ -122,7 +148,7 @@ interface LockedCredentialRow {
 }
 
 interface LockedVersionRow {
-  tenant_id: string;
+  tenant_id?: string;
   account_id: string;
   credential_id: string;
   version: number | string;
@@ -140,10 +166,55 @@ interface LockedVersionRow {
   expires_at: string | Date | null;
 }
 
-const JOB_COLUMNS = `id, tenant_id, account_id, credential_id, credential_version,
+const TENANT_JOB_COLUMNS = `id, tenant_id, account_id, credential_id, credential_version,
   provider_id, product_id, credential_type, allowed_models, target_model, target_endpoint,
   capability_version, idempotency_key, status, attempt_count, available_at, lease_until,
   lease_generation, last_error_code, completed_at, created_at, updated_at`;
+const PLATFORM_JOB_COLUMNS = `id, account_id, credential_id, credential_version,
+  provider_id, product_id, credential_type, allowed_models, target_model, target_endpoint,
+  capability_version, idempotency_key, status, attempt_count, available_at, lease_until,
+  lease_generation, last_error_code, completed_at, created_at, updated_at`;
+
+export type CredentialValidationOwnerKind = 'tenant' | 'platform';
+
+/** Table family + queue identity for one owner dimension of the validation worker. */
+interface CredentialValidationOwnerScope {
+  readonly ownerKind: CredentialValidationOwnerKind;
+  readonly supplyMode: 'byok' | 'platform';
+  readonly jobs: string;
+  readonly accounts: string;
+  readonly credentials: string;
+  readonly versions: string;
+  readonly wrappings: string;
+  readonly bindings: string;
+  readonly jobColumns: string;
+}
+
+const TENANT_OWNER_SCOPE: CredentialValidationOwnerScope = Object.freeze({
+  ownerKind: 'tenant',
+  supplyMode: 'byok',
+  jobs: 'saas_tenant_provider_credential_validation_jobs',
+  accounts: 'saas_tenant_provider_accounts',
+  credentials: 'saas_tenant_provider_credentials',
+  versions: 'saas_tenant_provider_credential_versions',
+  wrappings: 'saas_tenant_provider_credential_wrappings',
+  bindings: 'saas_tenant_provider_account_capabilities',
+  jobColumns: TENANT_JOB_COLUMNS,
+});
+const PLATFORM_OWNER_SCOPE: CredentialValidationOwnerScope = Object.freeze({
+  ownerKind: 'platform',
+  supplyMode: 'platform',
+  jobs: 'saas_platform_provider_credential_validation_jobs',
+  accounts: 'saas_platform_provider_accounts',
+  credentials: 'saas_platform_provider_credentials',
+  versions: 'saas_platform_provider_credential_versions',
+  wrappings: 'saas_platform_provider_credential_wrappings',
+  bindings: 'saas_platform_provider_account_capabilities',
+  jobColumns: PLATFORM_JOB_COLUMNS,
+});
+const CREDENTIAL_VALIDATION_OWNER_SCOPES: Readonly<
+  Record<CredentialValidationOwnerKind, CredentialValidationOwnerScope>
+> = Object.freeze({ tenant: TENANT_OWNER_SCOPE, platform: PLATFORM_OWNER_SCOPE });
 
 function workerError(code: CredentialValidationWorkerErrorCode): CredentialValidationWorkerError {
   return new CredentialValidationWorkerError(code);
@@ -185,11 +256,12 @@ function jobState(value: unknown): ProviderCredentialValidationJobState {
   throw workerError('STORE_UNAVAILABLE');
 }
 
-function mapJob(row: ValidationJobRow): ProviderCredentialValidationJobRecord {
+function mapJob(row: ValidationJobRow, scope: CredentialValidationOwnerScope): ProviderCredentialValidationJobRecord {
   if (!Array.isArray(row.allowed_models) || row.allowed_models.length === 0) throw workerError('STORE_UNAVAILABLE');
   return Object.freeze({
     id: safeText(row.id),
-    tenantId: safeText(row.tenant_id),
+    ownerKind: scope.ownerKind,
+    tenantId: scope.ownerKind === 'tenant' ? safeText(row.tenant_id) : null,
     accountId: safeText(row.account_id),
     credentialId: safeText(row.credential_id),
     credentialVersion: positiveInteger(row.credential_version),
@@ -227,6 +299,13 @@ function errorCode(value: ProviderCredentialValidationResult): ProviderCredentia
   return value.state === 'failed' ? value.errorCode : null;
 }
 
+/** In-memory R5 failure-counter identity: one consecutive-failure episode per account. */
+function quarantineFailureKey(
+  job: Pick<ProviderCredentialValidationJobRecord, 'ownerKind' | 'tenantId' | 'accountId'>,
+): string {
+  return `${job.ownerKind} ${job.tenantId ?? ''} ${job.accountId}`;
+}
+
 async function lockAdvisoryLayers(
   executor: SqlExecutor,
   layers: readonly (readonly string[])[],
@@ -241,8 +320,20 @@ async function lockAdvisoryLayers(
 }
 
 function workerAuthorityLockLayers(
-  job: Pick<ProviderCredentialValidationJobRecord, 'tenantId' | 'accountId' | 'credentialId' | 'credentialVersion'>,
+  job: Pick<
+    ProviderCredentialValidationJobRecord,
+    'ownerKind' | 'tenantId' | 'accountId' | 'credentialId' | 'credentialVersion'
+  >,
 ): readonly (readonly string[])[] {
+  if (job.ownerKind === 'platform') {
+    return [
+      [],
+      [saasAdvisoryKey.platformProviderAccount(job.accountId)],
+      [saasAdvisoryKey.platformProviderCredential(job.credentialId)],
+      [saasAdvisoryKey.credentialVersion('platform', job.accountId, job.credentialId, job.credentialVersion)],
+    ];
+  }
+  if (job.tenantId === null) throw workerError('STORE_UNAVAILABLE');
   return [
     [saasAdvisoryKey.tenant(job.tenantId)],
     [saasAdvisoryKey.tenantProviderAccount(job.tenantId, job.accountId)],
@@ -259,8 +350,49 @@ export interface PostgresCredentialValidationWorkerOptions {
   readonly deployment: string;
   readonly environment: string;
   readonly approvedTargets?: ApprovedCredentialValidationTargets;
+  /**
+   * Owner queues this store claims from, in poll order. Both owner dimensions
+   * are claimed by default (tenant/BYOK first); every claim runs the same
+   * fenced lease protocol against that owner's own table family.
+   */
+  readonly owners?: readonly CredentialValidationOwnerKind[];
+  /**
+   * R5 quarantine probe cadence in seconds (migration 097): terminal jobs of
+   * a QUARANTINED account become due once their last completion is older than
+   * this independent cadence (900..604800, default 6h), regardless of the
+   * account's own 084 revalidation interval. Verified/failed accounts keep
+   * their interval semantics unchanged.
+   */
+  readonly quarantineRevalidationSeconds?: number;
+  /**
+   * R5 quarantine-entry audit observer. Invoked at most once per actual
+   * failed -> quarantined transition, after the committing transaction; an
+   * observer exception can never terminate credential processing.
+   */
+  readonly onAccountQuarantined?: (event: ProviderAccountQuarantineAuditEvent) => void;
   /** Worker-owned lifetime only; cancellation never claims to cancel an external KMS call. */
   readonly signal?: AbortSignal;
+}
+
+const DEFAULT_CREDENTIAL_VALIDATION_OWNERS = [
+  'tenant',
+  'platform',
+] as const satisfies readonly CredentialValidationOwnerKind[];
+
+function ownerScopes(
+  owners: readonly CredentialValidationOwnerKind[] | undefined,
+): readonly CredentialValidationOwnerScope[] {
+  if (owners !== undefined && (!Array.isArray(owners) || owners.length === 0)) {
+    throw workerError('STORE_UNAVAILABLE');
+  }
+  const requested: readonly CredentialValidationOwnerKind[] = owners ?? DEFAULT_CREDENTIAL_VALIDATION_OWNERS;
+  const scopes: CredentialValidationOwnerScope[] = [];
+  for (const owner of requested) {
+    const scope = CREDENTIAL_VALIDATION_OWNER_SCOPES[owner];
+    if (scope === undefined || scopes.includes(scope)) throw workerError('STORE_UNAVAILABLE');
+    scopes.push(scope);
+  }
+  return Object.freeze(scopes);
 }
 
 /**
@@ -272,7 +404,21 @@ export class PostgresCredentialValidationWorkerStore {
   private readonly maxAttempts: number;
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
+  private readonly quarantineRevalidationSeconds: number;
   private readonly consumedLeases = new WeakSet<object>();
+  /**
+   * R5 consecutive terminal-failure counter, per account, in worker memory.
+   * No durable count column exists (the 035 job row is unique per credential
+   * version and recycled by the D3 sweep, and the restricted role's column
+   * manifest is pinned), so the count only ACCELERATES entry: the transition
+   * itself is re-gated atomically on the live validation_state inside the
+   * entry UPDATE and again by the 097 guard trigger, so a stale or split
+   * (multi-instance) count can never force a transition the database would
+   * reject — a worker restart merely delays entry, never mis-enters.
+   */
+  private readonly consecutiveTerminalFailures = new Map<string, number>();
+
+  private readonly scopes: readonly CredentialValidationOwnerScope[];
 
   constructor(
     private readonly database: SaasDatabase,
@@ -280,6 +426,7 @@ export class PostgresCredentialValidationWorkerStore {
     private readonly options: PostgresCredentialValidationWorkerOptions,
   ) {
     this.options = Object.freeze({ ...options });
+    this.scopes = ownerScopes(options.owners);
     this.leaseTtlMs = positiveBound(options.leaseTtlMs ?? CREDENTIAL_VALIDATION_LEASE_TTL_MS, 1_000, 120_000);
     this.maxAttempts = positiveBound(options.maxAttempts ?? CREDENTIAL_VALIDATION_MAX_ATTEMPTS, 1, 20);
     this.retryBaseMs = positiveBound(options.retryBaseMs ?? CREDENTIAL_VALIDATION_RETRY_BASE_MS, 100, 60_000);
@@ -287,6 +434,11 @@ export class PostgresCredentialValidationWorkerStore {
       options.retryMaxMs ?? CREDENTIAL_VALIDATION_RETRY_MAX_MS,
       this.retryBaseMs,
       300_000,
+    );
+    this.quarantineRevalidationSeconds = positiveBound(
+      options.quarantineRevalidationSeconds ?? CREDENTIAL_VALIDATION_QUARANTINE_REVALIDATION_SECONDS,
+      900,
+      604_800,
     );
     safeText(options.deployment);
     safeText(options.environment);
@@ -311,17 +463,32 @@ export class PostgresCredentialValidationWorkerStore {
   }
 
   async claimNext(): Promise<CredentialValidationLease | null> {
+    for (const scope of this.scopes) {
+      const lease = await this.claimNextInScope(scope);
+      if (lease) return lease;
+    }
+    return null;
+  }
+
+  private async claimNextInScope(scope: CredentialValidationOwnerScope): Promise<CredentialValidationLease | null> {
     return this.safeTransaction(async (tx) => {
       const candidates = await queryRows<{
         id: string;
-        tenant_id: string;
+        tenant_id?: string;
         account_id: string;
         credential_id: string;
         credential_version: number | string;
       }>(
         tx,
-        `SELECT id, tenant_id, account_id, credential_id, credential_version
+        scope.ownerKind === 'tenant'
+          ? `SELECT id, tenant_id, account_id, credential_id, credential_version
            FROM saas_tenant_provider_credential_validation_jobs
+          WHERE (status = 'queued' AND available_at <= clock_timestamp())
+             OR (status = 'leased' AND lease_until <= clock_timestamp())
+          ORDER BY available_at, created_at, id
+          LIMIT 1`
+          : `SELECT id, account_id, credential_id, credential_version
+           FROM saas_platform_provider_credential_validation_jobs
           WHERE (status = 'queued' AND available_at <= clock_timestamp())
              OR (status = 'leased' AND lease_until <= clock_timestamp())
           ORDER BY available_at, created_at, id
@@ -330,7 +497,8 @@ export class PostgresCredentialValidationWorkerStore {
       const candidate = candidates.rows[0];
       if (!candidate) return null;
       const candidateReference = {
-        tenantId: safeText(candidate.tenant_id),
+        ownerKind: scope.ownerKind,
+        tenantId: scope.ownerKind === 'tenant' ? safeText(candidate.tenant_id) : null,
         accountId: safeText(candidate.account_id),
         credentialId: safeText(candidate.credential_id),
         credentialVersion: positiveInteger(candidate.credential_version),
@@ -339,8 +507,8 @@ export class PostgresCredentialValidationWorkerStore {
 
       const lockedRows = await queryRows<ValidationJobRow>(
         tx,
-        `SELECT ${JOB_COLUMNS}
-           FROM saas_tenant_provider_credential_validation_jobs
+        `SELECT ${scope.jobColumns}
+           FROM ${scope.jobs}
           WHERE id = $1
             AND ((status = 'queued' AND available_at <= clock_timestamp())
               OR (status = 'leased' AND lease_until <= clock_timestamp()))
@@ -349,11 +517,11 @@ export class PostgresCredentialValidationWorkerStore {
       );
       const lockedRow = lockedRows.rows[0];
       if (!lockedRow) return null;
-      const lockedJob = mapJob(lockedRow);
+      const lockedJob = mapJob(lockedRow, scope);
       if (lockedJob.attemptCount >= this.maxAttempts) {
         await queryRows(
           tx,
-          `UPDATE saas_tenant_provider_credential_validation_jobs
+          `UPDATE ${scope.jobs}
               SET status = 'failed', lease_until = NULL,
                   lease_generation = lease_generation + 1,
                   last_error_code = 'attempt_limit', completed_at = clock_timestamp(),
@@ -366,7 +534,8 @@ export class PostgresCredentialValidationWorkerStore {
 
       const currentAuthority = await queryRows<{ id: string }>(
         tx,
-        `SELECT job.id
+        scope.ownerKind === 'tenant'
+          ? `SELECT job.id
            FROM saas_tenant_provider_credential_validation_jobs AS job
            JOIN saas_tenant_provider_credentials AS credential
              ON credential.tenant_id = job.tenant_id
@@ -392,13 +561,36 @@ export class PostgresCredentialValidationWorkerStore {
             AND (credential.expires_at IS NULL OR credential.expires_at > clock_timestamp())
             AND account.status IN ('pending', 'active')
             AND version.status = 'active'
+            AND (version.expires_at IS NULL OR version.expires_at > clock_timestamp())`
+          : `SELECT job.id
+           FROM saas_platform_provider_credential_validation_jobs AS job
+           JOIN saas_platform_provider_credentials AS credential
+             ON credential.id = job.credential_id
+           JOIN saas_platform_provider_accounts AS account
+             ON account.id = credential.account_id
+            AND account.provider_id = credential.provider_id
+            AND account.product_id = credential.product_id
+           JOIN saas_platform_provider_credential_versions AS version
+             ON version.account_id = credential.account_id
+            AND version.credential_id = credential.id
+            AND version.version = job.credential_version
+          WHERE job.id = $1
+            AND credential.account_id = job.account_id
+            AND credential.provider_id = job.provider_id
+            AND credential.product_id = job.product_id
+            AND credential.credential_type = job.credential_type
+            AND credential.current_version = job.credential_version
+            AND credential.status IN ('pending', 'active')
+            AND (credential.expires_at IS NULL OR credential.expires_at > clock_timestamp())
+            AND account.status IN ('pending', 'active')
+            AND version.status = 'active'
             AND (version.expires_at IS NULL OR version.expires_at > clock_timestamp())`,
         [lockedJob.id],
       );
       if (currentAuthority.rows.length !== 1) {
         await queryRows(
           tx,
-          `UPDATE saas_tenant_provider_credential_validation_jobs
+          `UPDATE ${scope.jobs}
               SET status = 'cancelled', lease_until = NULL,
                   lease_generation = lease_generation + 1,
                   last_error_code = 'credential_changed',
@@ -411,20 +603,110 @@ export class PostgresCredentialValidationWorkerStore {
 
       const claimed = await queryRows<ValidationJobRow>(
         tx,
-        `UPDATE saas_tenant_provider_credential_validation_jobs
+        `UPDATE ${scope.jobs}
             SET status = 'leased', attempt_count = attempt_count + 1,
                 lease_generation = lease_generation + 1,
                 lease_until = clock_timestamp() + ($2 * interval '1 millisecond'),
                 last_error_code = NULL, completed_at = NULL,
                 updated_at = clock_timestamp()
           WHERE id = $1
-         RETURNING ${JOB_COLUMNS}`,
+         RETURNING ${scope.jobColumns}`,
         [lockedJob.id, this.leaseTtlMs],
       );
       const row = claimed.rows[0];
       if (!row) return null;
-      const job = mapJob(row);
+      const job = mapJob(row, scope);
       return Object.freeze({ job, fencingToken: job.leaseGeneration });
+    });
+  }
+
+  /**
+   * D3 periodic revalidation (migration 084): terminal jobs for the current
+   * credential version of an active account with a configured cadence are
+   * transitioned back to 'queued' once their last completion is older than
+   * that cadence. 'cancelled' jobs stay cancelled on purpose — cancellation
+   * records an authority change (rights revocation, rotation) that claim-time
+   * fences re-evaluate, so requeueing it would only churn. The transition
+   * resets attempts, clears the completion shape (035 CHECK requires
+   * completed_at to be NULL outside terminal states) and bumps
+   * lease_generation so any still-held stale lease fails its revalidation
+   * fence. Due-ness is measured from the job's own completed_at: the worker
+   * role holds no grant on account last_validated_at/created_at, and the job
+   * timestamp covers failed validations uniformly.
+   *
+   * R5 (migration 097): a QUARANTINED account is requeued on the independent
+   * quarantine cadence instead — the account parked its 084 interval (it may
+   * not even have one) and sits at pending, so the quarantine branch admits
+   * pending/active account+credential rows, exactly the states the claim-time
+   * authority fences still accept. Verified/failed accounts keep the original
+   * active-only, own-interval predicate bit-for-bit.
+   */
+  async requeueDueRevalidations(batchSize: number): Promise<number> {
+    const limit = positiveBound(batchSize, 1, 1_000);
+    let requeued = 0;
+    for (const scope of this.scopes) {
+      requeued += await this.requeueDueRevalidationsInScope(scope, limit);
+    }
+    return requeued;
+  }
+
+  private async requeueDueRevalidationsInScope(
+    scope: CredentialValidationOwnerScope,
+    batchSize: number,
+  ): Promise<number> {
+    return this.safeTransaction(async (tx) => {
+      // Tenant families are keyed by (tenant_id, id); the platform families
+      // drop that dimension (mirrors the claim-time authority joins).
+      const accountJoin =
+        scope.ownerKind === 'tenant'
+          ? 'ON account.tenant_id = due.tenant_id AND account.id = due.account_id'
+          : 'ON account.id = due.account_id';
+      const credentialJoin =
+        scope.ownerKind === 'tenant'
+          ? 'ON credential.tenant_id = due.tenant_id AND credential.id = due.credential_id'
+          : 'ON credential.id = due.credential_id';
+      const { rows } = await queryRows<{ id: string }>(
+        tx,
+        `UPDATE ${scope.jobs} AS job
+            SET status = 'queued', attempt_count = 0,
+                available_at = clock_timestamp(),
+                lease_until = NULL,
+                lease_generation = job.lease_generation + 1,
+                last_error_code = NULL, completed_at = NULL,
+                updated_at = clock_timestamp()
+          WHERE job.id IN (
+            SELECT due.id
+              FROM ${scope.jobs} AS due
+              JOIN ${scope.accounts} AS account
+                ${accountJoin}
+              JOIN ${scope.credentials} AS credential
+                ${credentialJoin}
+             WHERE due.status IN ('verified', 'failed')
+               AND due.completed_at IS NOT NULL
+               AND due.credential_version = credential.current_version
+               AND (
+                 (account.validation_state <> 'quarantined'
+                   AND credential.status = 'active'
+                   AND account.status = 'active'
+                   AND account.revalidation_interval_seconds IS NOT NULL
+                   AND due.completed_at
+                       + make_interval(secs => account.revalidation_interval_seconds)
+                       <= clock_timestamp())
+                 OR (account.validation_state = 'quarantined'
+                   AND credential.status IN ('pending', 'active')
+                   AND account.status IN ('pending', 'active')
+                   AND due.completed_at
+                       + make_interval(secs => $2)
+                       <= clock_timestamp())
+               )
+             ORDER BY due.completed_at, due.id
+             LIMIT $1
+             FOR UPDATE OF due SKIP LOCKED
+          )
+          RETURNING job.id`,
+        [batchSize, this.quarantineRevalidationSeconds],
+      );
+      return rows.length;
     });
   }
 
@@ -438,19 +720,34 @@ export class PostgresCredentialValidationWorkerStore {
     version: LockedVersionRow;
   } | null> {
     const job = lease.job;
+    const scope = CREDENTIAL_VALIDATION_OWNER_SCOPES[job.ownerKind];
     await lockAdvisoryLayers(tx, workerAuthorityLockLayers(job), 'exclusive');
     const customTarget = this.options.approvedTargets
-      ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, job) : null;
+      ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, job)
+      : null;
     const expectedProtocol = credentialValidationCapabilityProtocol(job) ?? customTarget?.protocol ?? null;
     if (requireSupportedCapability && expectedProtocol === null) return null;
+    // A branded canonical target cannot be used on the old 035 no-slash schema.
+    // Same restricted worker/executor, before secret access, dispatch and completion.
+    if (customTarget?.schemaVersion === 2) {
+      await verifyCredentialValidationWorkerSchemaReadiness(tx, 'canonical-v2', scope.ownerKind);
+    }
     const accounts = await queryRows<LockedAccountRow>(
       tx,
-      `SELECT id, tenant_id, provider_id, product_id, credential_type, purpose,
+      scope.ownerKind === 'tenant'
+        ? `SELECT id, tenant_id, provider_id, product_id, credential_type, purpose,
               region, rights_id, rights_version, status, validation_state, authz_version
          FROM saas_tenant_provider_accounts
         WHERE tenant_id = $1 AND id = $2 AND provider_id = $3 AND product_id = $4
+        FOR UPDATE`
+        : `SELECT id, provider_id, product_id, credential_type, purpose,
+              region, rights_id, rights_version, status, validation_state, authz_version
+         FROM saas_platform_provider_accounts
+        WHERE id = $1 AND provider_id = $2 AND product_id = $3
         FOR UPDATE`,
-      [job.tenantId, job.accountId, job.providerId, job.productId],
+      scope.ownerKind === 'tenant'
+        ? [job.tenantId, job.accountId, job.providerId, job.productId]
+        : [job.accountId, job.providerId, job.productId],
     );
     const account = accounts.rows[0];
     if (!account || !['pending', 'active'].includes(account.status) || account.credential_type !== job.credentialType) {
@@ -460,7 +757,8 @@ export class PostgresCredentialValidationWorkerStore {
 
     const credentials = await queryRows<LockedCredentialRow>(
       tx,
-      `SELECT id, tenant_id, account_id, provider_id, product_id, credential_type,
+      scope.ownerKind === 'tenant'
+        ? `SELECT id, tenant_id, account_id, provider_id, product_id, credential_type,
               status, validation_state, current_version, expires_at, authz_version
          FROM saas_tenant_provider_credentials
         WHERE tenant_id = $1 AND id = $2 AND account_id = $3
@@ -468,16 +766,27 @@ export class PostgresCredentialValidationWorkerStore {
           AND current_version = $7
           AND status IN ('pending', 'active')
           AND (expires_at IS NULL OR expires_at > clock_timestamp())
+        FOR UPDATE`
+        : `SELECT id, account_id, provider_id, product_id, credential_type,
+              status, validation_state, current_version, expires_at, authz_version
+         FROM saas_platform_provider_credentials
+        WHERE id = $1 AND account_id = $2
+          AND provider_id = $3 AND product_id = $4 AND credential_type = $5
+          AND current_version = $6
+          AND status IN ('pending', 'active')
+          AND (expires_at IS NULL OR expires_at > clock_timestamp())
         FOR UPDATE`,
-      [
-        job.tenantId,
-        job.credentialId,
-        job.accountId,
-        job.providerId,
-        job.productId,
-        job.credentialType,
-        job.credentialVersion,
-      ],
+      scope.ownerKind === 'tenant'
+        ? [
+            job.tenantId,
+            job.credentialId,
+            job.accountId,
+            job.providerId,
+            job.productId,
+            job.credentialType,
+            job.credentialVersion,
+          ]
+        : [job.credentialId, job.accountId, job.providerId, job.productId, job.credentialType, job.credentialVersion],
     );
     const credential = credentials.rows[0];
     if (!credential) return null;
@@ -493,7 +802,7 @@ export class PostgresCredentialValidationWorkerStore {
           AND product.status = 'active'
           AND rights.rights_id = $3 AND rights.version = $4
           AND rights.provider_id = $1 AND rights.product_id = $2
-          AND rights.credential_type = $5 AND rights.supply_mode = 'byok'
+          AND rights.credential_type = $5 AND rights.supply_mode = '${scope.supplyMode}'
           AND rights.region = $6 AND rights.purpose = $7
           AND rights.status = 'active'
           AND rights.effective_at <= clock_timestamp()
@@ -522,7 +831,8 @@ export class PostgresCredentialValidationWorkerStore {
     if (expectedProtocol !== null) {
       const capabilities = await queryRows<{ version: number | string }>(
         tx,
-        `SELECT capability.version
+        scope.ownerKind === 'tenant'
+          ? `SELECT capability.version
            FROM saas_provider_products AS product
            JOIN saas_tenant_provider_account_capabilities AS binding
              ON binding.provider_id = product.provider_id
@@ -542,8 +852,47 @@ export class PostgresCredentialValidationWorkerStore {
             AND capability.protocol = $8
             AND capability.support_level = 'supported'
             AND capability.validation_state = 'verified'
-            ${customTarget ? `AND capability.evidence_sha256 = $9
-            AND ($10::timestamptz IS NULL OR $10::timestamptz > clock_timestamp())` : ''}
+            ${
+              customTarget
+                ? `AND capability.evidence_sha256 = $9
+            AND ($10::timestamptz IS NULL OR $10::timestamptz > clock_timestamp())`
+                : ''
+            }
+            AND NOT EXISTS (
+              SELECT 1 FROM saas_provider_capabilities AS newer
+               WHERE newer.provider_id = capability.provider_id
+                 AND newer.product_id = capability.product_id
+                 AND newer.model = capability.model
+                 AND newer.endpoint = capability.endpoint
+                 AND newer.version > capability.version
+            )
+          `
+          : `SELECT capability.version
+           FROM saas_provider_products AS product
+           JOIN saas_platform_provider_account_capabilities AS binding
+             ON binding.provider_id = product.provider_id
+            AND binding.product_id = product.product_id
+           JOIN saas_provider_capabilities AS capability
+             ON capability.provider_id = binding.provider_id
+            AND capability.product_id = binding.product_id
+            AND capability.model = binding.model
+            AND capability.endpoint = binding.endpoint
+            AND capability.version = binding.capability_version
+          WHERE product.provider_id = $1 AND product.product_id = $2
+            AND product.status = 'active'
+            AND binding.account_id = $3
+            AND binding.provider_id = $1 AND binding.product_id = $2
+            AND binding.model = $4 AND binding.endpoint = $5
+            AND binding.capability_version = $6
+            AND capability.protocol = $7
+            AND capability.support_level = 'supported'
+            AND capability.validation_state = 'verified'
+            ${
+              customTarget
+                ? `AND capability.evidence_sha256 = $8
+            AND ($9::timestamptz IS NULL OR $9::timestamptz > clock_timestamp())`
+                : ''
+            }
             AND NOT EXISTS (
               SELECT 1 FROM saas_provider_capabilities AS newer
                WHERE newer.provider_id = capability.provider_id
@@ -553,24 +902,36 @@ export class PostgresCredentialValidationWorkerStore {
                  AND newer.version > capability.version
             )
           `,
-        [
-          job.providerId,
-          job.productId,
-          job.tenantId,
-          job.accountId,
-          job.target.model,
-          job.target.endpoint,
-          job.target.version,
-          expectedProtocol,
-          ...(customTarget ? [customTarget.evidenceSha256, customTarget.expiresAt] : []),
-        ],
+        scope.ownerKind === 'tenant'
+          ? [
+              job.providerId,
+              job.productId,
+              job.tenantId,
+              job.accountId,
+              job.target.model,
+              job.target.endpoint,
+              job.target.version,
+              expectedProtocol,
+              ...(customTarget ? [customTarget.evidenceSha256, customTarget.expiresAt] : []),
+            ]
+          : [
+              job.providerId,
+              job.productId,
+              job.accountId,
+              job.target.model,
+              job.target.endpoint,
+              job.target.version,
+              expectedProtocol,
+              ...(customTarget ? [customTarget.evidenceSha256, customTarget.expiresAt] : []),
+            ],
       );
       if (capabilities.rows.length !== 1) return null;
     }
 
     const versions = await queryRows<LockedVersionRow>(
       tx,
-      `SELECT version_row.tenant_id, version_row.account_id, version_row.credential_id,
+      scope.ownerKind === 'tenant'
+        ? `SELECT version_row.tenant_id, version_row.account_id, version_row.credential_id,
               version_row.version, version_row.status, version_row.schema_version,
               version_row.context_version, version_row.algorithm, version_row.kms_purpose,
               COALESCE(wrapping.kms_key_id, version_row.kms_key_id) AS kms_key_id,
@@ -590,22 +951,115 @@ export class PostgresCredentialValidationWorkerStore {
         WHERE version_row.tenant_id = $1 AND version_row.account_id = $2
           AND version_row.credential_id = $3 AND version_row.version = $4
           AND version_row.status = 'active'
+          AND (version_row.expires_at IS NULL OR version_row.expires_at > clock_timestamp())`
+        : `SELECT version_row.account_id, version_row.credential_id,
+              version_row.version, version_row.status, version_row.schema_version,
+              version_row.context_version, version_row.algorithm, version_row.kms_purpose,
+              COALESCE(wrapping.kms_key_id, version_row.kms_key_id) AS kms_key_id,
+              COALESCE(wrapping.wrapping_revision, version_row.wrapping_revision) AS wrapping_revision,
+              COALESCE(wrapping.wrapped_dek, version_row.wrapped_dek) AS wrapped_dek,
+              version_row.nonce, version_row.ciphertext, version_row.auth_tag, version_row.expires_at
+         FROM saas_platform_provider_credential_versions AS version_row
+         LEFT JOIN LATERAL (
+           SELECT kms_key_id, wrapping_revision, wrapped_dek
+             FROM saas_platform_provider_credential_wrappings
+            WHERE account_id = version_row.account_id
+              AND credential_id = version_row.credential_id
+              AND credential_version = version_row.version
+            ORDER BY wrapping_revision DESC
+            LIMIT 1
+         ) AS wrapping ON TRUE
+        WHERE version_row.account_id = $1
+          AND version_row.credential_id = $2 AND version_row.version = $3
+          AND version_row.status = 'active'
           AND (version_row.expires_at IS NULL OR version_row.expires_at > clock_timestamp())`,
-      [job.tenantId, job.accountId, job.credentialId, job.credentialVersion],
+      scope.ownerKind === 'tenant'
+        ? [job.tenantId, job.accountId, job.credentialId, job.credentialVersion]
+        : [job.accountId, job.credentialId, job.credentialVersion],
     );
     const version = versions.rows[0];
     if (!version || version.kms_purpose !== account.purpose) return null;
 
+    const canonicalTarget = customTarget?.schemaVersion === 2;
     const jobs = await queryRows<{ id: string }>(
       tx,
-      `SELECT id
+      scope.ownerKind === 'tenant'
+        ? canonicalTarget
+          ? `SELECT id
          FROM saas_tenant_provider_credential_validation_jobs
         WHERE id = $1 AND tenant_id = $2 AND account_id = $3
           AND credential_id = $4 AND credential_version = $5
           AND status = 'leased' AND lease_generation = $6
           AND lease_until > clock_timestamp()
+          AND provider_id = $7 AND product_id = $8 AND credential_type = $9
+          AND target_model = $10 AND target_endpoint = $11 AND capability_version = $12
+          AND idempotency_key = $13 AND allowed_models = $14::text[]
+        FOR UPDATE`
+          : `SELECT id
+         FROM saas_tenant_provider_credential_validation_jobs
+        WHERE id = $1 AND tenant_id = $2 AND account_id = $3
+          AND credential_id = $4 AND credential_version = $5
+          AND status = 'leased' AND lease_generation = $6
+          AND lease_until > clock_timestamp()
+        FOR UPDATE`
+        : canonicalTarget
+          ? `SELECT id
+         FROM saas_platform_provider_credential_validation_jobs
+        WHERE id = $1 AND account_id = $2
+          AND credential_id = $3 AND credential_version = $4
+          AND status = 'leased' AND lease_generation = $5
+          AND lease_until > clock_timestamp()
+          AND provider_id = $6 AND product_id = $7 AND credential_type = $8
+          AND target_model = $9 AND target_endpoint = $10 AND capability_version = $11
+          AND idempotency_key = $12 AND allowed_models = $13::text[]
+        FOR UPDATE`
+          : `SELECT id
+         FROM saas_platform_provider_credential_validation_jobs
+        WHERE id = $1 AND account_id = $2
+          AND credential_id = $3 AND credential_version = $4
+          AND status = 'leased' AND lease_generation = $5
+          AND lease_until > clock_timestamp()
         FOR UPDATE`,
-      [job.id, job.tenantId, job.accountId, job.credentialId, job.credentialVersion, lease.fencingToken],
+      scope.ownerKind === 'tenant'
+        ? [
+            job.id,
+            job.tenantId,
+            job.accountId,
+            job.credentialId,
+            job.credentialVersion,
+            lease.fencingToken,
+            ...(canonicalTarget
+              ? [
+                  job.providerId,
+                  job.productId,
+                  job.credentialType,
+                  job.target.model,
+                  job.target.endpoint,
+                  job.target.version,
+                  job.idempotencyKey,
+                  job.allowedModels,
+                ]
+              : []),
+          ]
+        : [
+            job.id,
+            job.accountId,
+            job.credentialId,
+            job.credentialVersion,
+            lease.fencingToken,
+            ...(canonicalTarget
+              ? [
+                  job.providerId,
+                  job.productId,
+                  job.credentialType,
+                  job.target.model,
+                  job.target.endpoint,
+                  job.target.version,
+                  job.idempotencyKey,
+                  job.allowedModels,
+                ]
+              : []),
+          ],
     );
     if (jobs.rows.length !== 1) return null;
 
@@ -635,10 +1089,7 @@ export class PostgresCredentialValidationWorkerStore {
           await this.cancelLeaseForAuthorityChange(tx, lease);
           return null;
         }
-        const context: ProviderCredentialContext = createProviderCredentialContext({
-          ownerKind: 'tenant',
-          tenantId: account.tenant_id,
-          supplyMode: 'byok',
+        const contextFields = {
           deployment: this.options.deployment,
           environment: this.options.environment,
           purpose: account.purpose,
@@ -648,7 +1099,18 @@ export class PostgresCredentialValidationWorkerStore {
           accountId: account.id,
           credentialId: credential.id,
           credentialVersion: positiveInteger(version.version),
-        });
+        } as const;
+        const context: ProviderCredentialContext = createProviderCredentialContext(
+          lease.job.ownerKind === 'platform'
+            ? { ownerKind: 'platform', supplyMode: 'platform', ...contextFields }
+            : {
+                ownerKind: 'tenant',
+                // Missing tenant identity on a tenant-scope row is store corruption, never a default.
+                tenantId: safeText(account.tenant_id),
+                supplyMode: 'byok',
+                ...contextFields,
+              },
+        );
         const envelope: ProviderCredentialEnvelope = {
           schemaVersion: PROVIDER_CREDENTIAL_ENVELOPE_SCHEMA_VERSION,
           contextVersion: PROVIDER_CREDENTIAL_CONTEXT_VERSION,
@@ -686,7 +1148,7 @@ export class PostgresCredentialValidationWorkerStore {
   private async cancelLeaseForAuthorityChange(tx: SqlExecutor, lease: CredentialValidationLease): Promise<void> {
     await queryRows(
       tx,
-      `UPDATE saas_tenant_provider_credential_validation_jobs
+      `UPDATE ${CREDENTIAL_VALIDATION_OWNER_SCOPES[lease.job.ownerKind].jobs}
           SET status = 'cancelled', lease_until = NULL,
               lease_generation = lease_generation + 1,
               last_error_code = 'authority_changed',
@@ -709,8 +1171,17 @@ export class PostgresCredentialValidationWorkerStore {
   }
 
   async complete(lease: CredentialValidationLease, result: ProviderCredentialValidationResult): Promise<boolean> {
-    return this.safeTransaction(async (tx) => {
-      const requireTarget = result.state === 'verified' ||
+    const scope = CREDENTIAL_VALIDATION_OWNER_SCOPES[lease.job.ownerKind];
+    const jobs = scope.jobs;
+    const failureKey = quarantineFailureKey(lease.job);
+    // Post-commit effects only: the counter mutation and the audit observer
+    // must never apply to a rolled-back transaction.
+    let failureCount = 0;
+    let clearFailures = false;
+    let quarantineEntry: ProviderAccountQuarantineAuditEvent | null = null;
+    const completed = await this.safeTransaction(async (tx) => {
+      const requireTarget =
+        result.state === 'verified' ||
         (lease.job.providerId === 'custom' && result.errorCode !== 'adapter_unsupported');
       if (!(await this.lockLeaseForCompletion(tx, lease, requireTarget))) return false;
       const terminalState = result.state === 'verified' ? 'verified' : 'failed';
@@ -720,7 +1191,7 @@ export class PostgresCredentialValidationWorkerStore {
       const jobUpdate = terminal
         ? await queryRows<{ id: string }>(
             tx,
-            `UPDATE saas_tenant_provider_credential_validation_jobs
+            `UPDATE ${jobs}
                 SET status = $1, lease_until = NULL,
                     lease_generation = lease_generation + 1,
                     last_error_code = $2, completed_at = clock_timestamp(), updated_at = clock_timestamp()
@@ -731,7 +1202,7 @@ export class PostgresCredentialValidationWorkerStore {
           )
         : await queryRows<{ id: string }>(
             tx,
-            `UPDATE saas_tenant_provider_credential_validation_jobs
+            `UPDATE ${jobs}
                 SET status = 'queued', lease_until = NULL,
                     lease_generation = lease_generation + 1,
                     available_at = clock_timestamp() + ($1 * interval '1 millisecond'),
@@ -745,11 +1216,90 @@ export class PostgresCredentialValidationWorkerStore {
 
       if (result.state === 'verified') {
         await this.updateHealthState(tx, lease, 'verified', null);
-      } else if (terminal && result.errorCode !== 'adapter_unsupported' && result.errorCode !== 'provider_address_rejected') {
+        // A successful probe (R5: including a quarantine probe, which also
+        // exits quarantine) restarts the consecutive-failure count.
+        clearFailures = true;
+      } else if (
+        terminal &&
+        result.errorCode !== 'adapter_unsupported' &&
+        result.errorCode !== 'provider_address_rejected'
+      ) {
         await this.updateHealthState(tx, lease, 'failed', result.errorCode);
+        failureCount = (this.consecutiveTerminalFailures.get(failureKey) ?? 0) + 1;
+        if (failureCount >= PROVIDER_ACCOUNT_QUARANTINE_FAILURE_THRESHOLD) {
+          // Whether or not the UPDATE admits the transition (a stale count
+          // against an already-quarantined account is a no-op), the count has
+          // served its purpose for this quarantine episode.
+          clearFailures = true;
+          quarantineEntry = await this.enterQuarantine(tx, scope, lease.job, result.errorCode);
+        }
       }
       return true;
     }, true);
+    if (completed) {
+      if (clearFailures) this.consecutiveTerminalFailures.delete(failureKey);
+      else if (failureCount > 0) this.consecutiveTerminalFailures.set(failureKey, failureCount);
+      if (quarantineEntry) this.emitAccountQuarantined(quarantineEntry);
+    }
+    return completed;
+  }
+
+  /**
+   * R5 quarantine entry (migration 097). One statement migrates the terminal
+   * error code into the quarantine reason and stamps DB-clock entry time: the
+   * 035-style error shape forces validation_error_code to NULL outside
+   * 'failed', and the 097 guard admits entry only from 'failed' with a
+   * non-NULL entered_at. The WHERE re-gates on the live state, so a stale
+   * in-memory threshold can never force a transition the guard would reject;
+   * a no-op (zero rows) simply means no entry happened and no audit is due.
+   */
+  private async enterQuarantine(
+    tx: SqlExecutor,
+    scope: CredentialValidationOwnerScope,
+    job: ProviderCredentialValidationJobRecord,
+    reasonCode: ProviderCredentialValidationErrorCode,
+  ): Promise<ProviderAccountQuarantineAuditEvent | null> {
+    const entered = await queryRows<{ id: string; quarantine_entered_at: string | Date }>(
+      tx,
+      scope.ownerKind === 'tenant'
+        ? `UPDATE saas_tenant_provider_accounts
+              SET validation_state = 'quarantined', validation_error_code = NULL,
+                  quarantine_entered_at = clock_timestamp(), quarantine_reason_code = $5,
+                  updated_at = clock_timestamp(), authz_version = authz_version + 1
+            WHERE tenant_id = $1 AND id = $2 AND provider_id = $3 AND product_id = $4
+              AND status IN ('pending', 'active')
+              AND validation_state = 'failed'
+           RETURNING id, quarantine_entered_at`
+        : `UPDATE saas_platform_provider_accounts
+              SET validation_state = 'quarantined', validation_error_code = NULL,
+                  quarantine_entered_at = clock_timestamp(), quarantine_reason_code = $4,
+                  updated_at = clock_timestamp(), authz_version = authz_version + 1
+            WHERE id = $1 AND provider_id = $2 AND product_id = $3
+              AND status IN ('pending', 'active')
+              AND validation_state = 'failed'
+           RETURNING id, quarantine_entered_at`,
+      scope.ownerKind === 'tenant'
+        ? [job.tenantId, job.accountId, job.providerId, job.productId, reasonCode]
+        : [job.accountId, job.providerId, job.productId, reasonCode],
+    );
+    const row = entered.rows[0];
+    if (!row) return null;
+    return Object.freeze({
+      action: PROVIDER_ACCOUNT_QUARANTINE_AUDIT_ACTION,
+      ownerKind: scope.ownerKind,
+      tenantId: job.tenantId,
+      accountId: job.accountId,
+      reasonCode,
+      enteredAt: safeTimestamp(row.quarantine_entered_at),
+    });
+  }
+
+  private emitAccountQuarantined(event: ProviderAccountQuarantineAuditEvent): void {
+    try {
+      this.options.onAccountQuarantined?.(event);
+    } catch {
+      // An observer cannot terminate credential processing.
+    }
   }
 
   private async updateHealthState(
@@ -759,46 +1309,99 @@ export class PostgresCredentialValidationWorkerStore {
     errorCodeValue: ProviderCredentialValidationErrorCode | null,
   ): Promise<void> {
     const status = state === 'verified' ? 'active' : 'pending';
+    const job = lease.job;
+    // A terminal failure parks account+credential at pending/unverified, which
+    // the existing scheduler eligibility gates already exclude from dispatch:
+    // validation health drives scheduling with no extra linkage. A 401-class
+    // terminal auth failure (credential_rejected) additionally raises the R4
+    // force-refresh flag (migration 094): the OAuth token refresh worker
+    // consumes and clears it. The gateway never writes credential relations.
+    //
+    // R5 (migration 097) quarantine interplay on the ACCOUNT row (credentials
+    // carry no quarantine facts): a probe failure against a quarantined
+    // account must keep it quarantined — the 097 guard allows leaving
+    // quarantine only towards verified and keeps entry facts immutable — so
+    // the failure CASEs preserve state/facts and only advance
+    // last_validated_at; a probe success exits quarantine, which the guard
+    // admits only with both fact columns cleared in the same statement.
     const credential = await queryRows<{ id: string }>(
       tx,
-      `UPDATE saas_tenant_provider_credentials
+      job.ownerKind === 'tenant'
+        ? `UPDATE saas_tenant_provider_credentials
           SET status = $1, validation_state = $2, validation_error_code = $3,
               last_validated_at = clock_timestamp(), updated_at = clock_timestamp(),
-              authz_version = authz_version + 1
+              authz_version = authz_version + 1,
+              oauth_force_refresh_requested = CASE WHEN $3 = 'credential_rejected' THEN true
+                ELSE oauth_force_refresh_requested END
         WHERE tenant_id = $4 AND id = $5 AND account_id = $6
           AND provider_id = $7 AND product_id = $8
           AND current_version = $9 AND status IN ('pending', 'active')
+       RETURNING id`
+        : `UPDATE saas_platform_provider_credentials
+          SET status = $1, validation_state = $2, validation_error_code = $3,
+              last_validated_at = clock_timestamp(), updated_at = clock_timestamp(),
+              authz_version = authz_version + 1,
+              oauth_force_refresh_requested = CASE WHEN $3 = 'credential_rejected' THEN true
+                ELSE oauth_force_refresh_requested END
+        WHERE id = $4 AND account_id = $5
+          AND provider_id = $6 AND product_id = $7
+          AND current_version = $8 AND status IN ('pending', 'active')
        RETURNING id`,
-      [
-        status,
-        state,
-        errorCodeValue,
-        lease.job.tenantId,
-        lease.job.credentialId,
-        lease.job.accountId,
-        lease.job.providerId,
-        lease.job.productId,
-        lease.job.credentialVersion,
-      ],
+      job.ownerKind === 'tenant'
+        ? [
+            status,
+            state,
+            errorCodeValue,
+            job.tenantId,
+            job.credentialId,
+            job.accountId,
+            job.providerId,
+            job.productId,
+            job.credentialVersion,
+          ]
+        : [
+            status,
+            state,
+            errorCodeValue,
+            job.credentialId,
+            job.accountId,
+            job.providerId,
+            job.productId,
+            job.credentialVersion,
+          ],
     );
     const account = await queryRows<{ id: string }>(
       tx,
-      `UPDATE saas_tenant_provider_accounts
-          SET status = $1, validation_state = $2, validation_error_code = $3,
+      job.ownerKind === 'tenant'
+        ? `UPDATE saas_tenant_provider_accounts
+          SET status = $1,
+              validation_state = CASE WHEN validation_state = 'quarantined' AND $2 = 'failed'
+                THEN 'quarantined' ELSE $2 END,
+              validation_error_code = CASE WHEN validation_state = 'quarantined' AND $2 = 'failed'
+                THEN NULL ELSE $3 END,
+              quarantine_entered_at = CASE WHEN $2 = 'verified' THEN NULL ELSE quarantine_entered_at END,
+              quarantine_reason_code = CASE WHEN $2 = 'verified' THEN NULL ELSE quarantine_reason_code END,
               last_validated_at = clock_timestamp(), updated_at = clock_timestamp(),
               authz_version = authz_version + 1
         WHERE tenant_id = $4 AND id = $5 AND provider_id = $6 AND product_id = $7
           AND status IN ('pending', 'active')
+       RETURNING id`
+        : `UPDATE saas_platform_provider_accounts
+          SET status = $1,
+              validation_state = CASE WHEN validation_state = 'quarantined' AND $2 = 'failed'
+                THEN 'quarantined' ELSE $2 END,
+              validation_error_code = CASE WHEN validation_state = 'quarantined' AND $2 = 'failed'
+                THEN NULL ELSE $3 END,
+              quarantine_entered_at = CASE WHEN $2 = 'verified' THEN NULL ELSE quarantine_entered_at END,
+              quarantine_reason_code = CASE WHEN $2 = 'verified' THEN NULL ELSE quarantine_reason_code END,
+              last_validated_at = clock_timestamp(), updated_at = clock_timestamp(),
+              authz_version = authz_version + 1
+        WHERE id = $4 AND provider_id = $5 AND product_id = $6
+          AND status IN ('pending', 'active')
        RETURNING id`,
-      [
-        status,
-        state,
-        errorCodeValue,
-        lease.job.tenantId,
-        lease.job.accountId,
-        lease.job.providerId,
-        lease.job.productId,
-      ],
+      job.ownerKind === 'tenant'
+        ? [status, state, errorCodeValue, job.tenantId, job.accountId, job.providerId, job.productId]
+        : [status, state, errorCodeValue, job.accountId, job.providerId, job.productId],
     );
     if (credential.rows.length !== 1 || account.rows.length !== 1) leaseLost();
   }
@@ -807,6 +1410,13 @@ export class PostgresCredentialValidationWorkerStore {
 function positiveBound(value: number, min: number, max: number): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) throw workerError('STORE_UNAVAILABLE');
   return value;
+}
+
+export interface CredentialValidationRevalidationSweepOptions {
+  /** Minimum milliseconds between sweeps (1s .. 1h). */
+  readonly intervalMs: number;
+  /** Maximum terminal jobs requeued per owner scope per sweep (1 .. 1000). */
+  readonly batchSize: number;
 }
 
 export interface CredentialValidationWorkerOptions {
@@ -821,6 +1431,27 @@ export interface CredentialValidationWorkerOptions {
   readonly maxAttempts?: number;
   readonly retryBaseMs?: number;
   readonly retryMaxMs?: number;
+  /** Owner queues claimed in poll order; defaults to tenant/BYOK then platform. */
+  readonly owners?: readonly CredentialValidationOwnerKind[];
+  /**
+   * R5 quarantine probe cadence in seconds (migration 097): quarantined
+   * accounts are revalidated on this independent long cadence (900..604800,
+   * default 6h) instead of their 084 interval. Pass-through to the store.
+   */
+  readonly quarantineRevalidationSeconds?: number;
+  /**
+   * R5 quarantine-entry audit observer: at most one call per actual
+   * failed -> quarantined transition, after the committing transaction. It
+   * receives stable identifiers only, never provider or credential data.
+   */
+  readonly onAccountQuarantined?: (event: ProviderAccountQuarantineAuditEvent) => void;
+  /**
+   * D3 periodic revalidation sweep (migration 084). When set, each runOnce
+   * cycle first requeues terminal jobs whose account configured a revalidation
+   * cadence and whose last completion is older than that cadence, at most once
+   * per intervalMs. Absent disables the sweep (pre-D3 behavior).
+   */
+  readonly revalidationSweep?: CredentialValidationRevalidationSweepOptions;
   /** Receives only a stable cycle code. It never receives provider or credential data. */
   readonly onError?: (code: 'cycle_failed') => void;
 }
@@ -830,6 +1461,7 @@ export class CredentialValidationWorker {
   private readonly transport: CredentialValidationHttpTransport;
   private readonly halt = new AbortController();
   private readonly activeRuns = new Set<Promise<CredentialValidationWorkerResult>>();
+  private nextRevalidationSweepAt = 0;
   private closePromise?: Promise<void>;
 
   constructor(
@@ -838,7 +1470,10 @@ export class CredentialValidationWorker {
     private readonly options: CredentialValidationWorkerOptions,
   ) {
     this.options = Object.freeze({ ...options });
-    this.store = new PostgresCredentialValidationWorkerStore(database, kms, { ...this.options, signal: this.halt.signal });
+    this.store = new PostgresCredentialValidationWorkerStore(database, kms, {
+      ...this.options,
+      signal: this.halt.signal,
+    });
     this.transport = new CredentialValidationHttpTransport(this.options.transportTestOptions);
   }
 
@@ -846,19 +1481,26 @@ export class CredentialValidationWorker {
     if (this.halt.signal.aborted) return 'stale';
     const run = this.processOnce();
     this.activeRuns.add(run);
-    try { return await run; }
-    catch (error) { if (this.halt.signal.aborted) return 'stale'; throw error; }
-    finally { this.activeRuns.delete(run); }
+    try {
+      return await run;
+    } catch (error) {
+      if (this.halt.signal.aborted) return 'stale';
+      throw error;
+    } finally {
+      this.activeRuns.delete(run);
+    }
   }
 
   private async processOnce(): Promise<CredentialValidationWorkerResult> {
+    await this.maybeSweepRevalidations();
     const lease = await this.store.claimNext();
     if (!lease) return 'idle';
     if (this.halt.signal.aborted) return 'stale';
 
     let result: ProviderCredentialValidationResult;
     const customTarget = this.options.approvedTargets
-      ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, lease.job) : null;
+      ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, lease.job)
+      : null;
     if (!isSupportedTarget(lease.job) && !customTarget) {
       result = {
         state: 'failed',
@@ -895,7 +1537,9 @@ export class CredentialValidationWorker {
         result = {
           state: 'failed',
           errorCode: code,
-          retryable: !(error instanceof CredentialValidationTransportError && error.code === 'provider_address_rejected'),
+          retryable: !(
+            error instanceof CredentialValidationTransportError && error.code === 'provider_address_rejected'
+          ),
           adapterId: null,
           httpStatus: null,
           durationMs: 0,
@@ -912,6 +1556,22 @@ export class CredentialValidationWorker {
       if (error instanceof CredentialValidationWorkerError && error.code === 'LEASE_LOST') return 'stale';
       throw error;
     }
+  }
+
+  /**
+   * Option-gated D3 sweep. The interval gate is stamped before the store call
+   * so a failing sweep cannot spin hot inside run(); the cycle error path
+   * already throttles via the poll delay.
+   */
+  private async maybeSweepRevalidations(): Promise<void> {
+    const sweep = this.options.revalidationSweep;
+    if (!sweep) return;
+    const intervalMs = positiveBound(sweep.intervalMs, 1_000, 3_600_000);
+    const batchSize = positiveBound(sweep.batchSize, 1, 1_000);
+    const now = Date.now();
+    if (now < this.nextRevalidationSweepAt) return;
+    this.nextRevalidationSweepAt = now + intervalMs;
+    await this.store.requeueDueRevalidations(batchSize);
   }
 
   async run(): Promise<void> {
@@ -944,9 +1604,9 @@ export class CredentialValidationWorker {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.halt.abort();
-    this.closePromise = Promise.all([
-      this.transport.close(), Promise.allSettled([...this.activeRuns]),
-    ]).then(() => undefined);
+    this.closePromise = Promise.all([this.transport.close(), Promise.allSettled([...this.activeRuns])]).then(
+      () => undefined,
+    );
     return this.closePromise;
   }
 }
@@ -974,30 +1634,63 @@ export function prepareCredentialValidationRequeue(
   const protocol = credentialValidationCapabilityProtocol(job) ?? custom?.protocol;
   const hash = /^[0-9a-f]{64}$/;
   const safeActor = (value: unknown) => typeof value === 'string' && /^[\x21-\x7e]{1,256}$/.test(value);
-  if (!protocol || !capability || capability.providerId !== job.providerId || capability.productId !== job.productId ||
-    capability.model !== job.target.model || capability.endpoint !== job.target.endpoint ||
-    capability.capabilityVersion !== job.target.version || capability.protocol !== protocol ||
-    !hash.test(capability.evidenceSha256) || (custom && capability.evidenceSha256 !== custom.evidenceSha256) ||
-    !command || (job.state !== 'failed' && job.state !== 'cancelled') ||
-    command.jobId !== job.id || !Number.isSafeInteger(command.expectedLeaseGeneration) ||
-    command.expectedLeaseGeneration < 0 || command.expectedLeaseGeneration !== job.leaseGeneration ||
-    !hash.test(command.expectedSnapshotSha256) || command.expectedSnapshotSha256 !== credentialValidationJobSnapshotSha256(job) ||
-    !hash.test(command.idempotencyKey) || !safeActor(command.actorUserId) || !safeActor(command.requestId) ||
-    !['target_approved', 'retry_provider_validation'].includes(command.reasonCode)) throw new CredentialValidationTargetError();
+  // The 061 audited requeue channel is tenant-queue only: its DB writer binds
+  // tenant_id. Platform jobs never requeue here; their recovery is a fresh
+  // enqueue under the platform queue's own idempotency identity.
+  if (
+    job.ownerKind !== 'tenant' ||
+    job.tenantId === null ||
+    !protocol ||
+    !capability ||
+    capability.providerId !== job.providerId ||
+    capability.productId !== job.productId ||
+    capability.model !== job.target.model ||
+    capability.endpoint !== job.target.endpoint ||
+    capability.capabilityVersion !== job.target.version ||
+    capability.protocol !== protocol ||
+    !hash.test(capability.evidenceSha256) ||
+    (custom && capability.evidenceSha256 !== custom.evidenceSha256) ||
+    !command ||
+    (job.state !== 'failed' && job.state !== 'cancelled') ||
+    command.jobId !== job.id ||
+    !Number.isSafeInteger(command.expectedLeaseGeneration) ||
+    command.expectedLeaseGeneration < 0 ||
+    command.expectedLeaseGeneration !== job.leaseGeneration ||
+    !hash.test(command.expectedSnapshotSha256) ||
+    command.expectedSnapshotSha256 !== credentialValidationJobSnapshotSha256(job) ||
+    !hash.test(command.idempotencyKey) ||
+    !safeActor(command.actorUserId) ||
+    !safeActor(command.requestId) ||
+    !['target_approved', 'retry_provider_validation'].includes(command.reasonCode)
+  )
+    throw new CredentialValidationTargetError();
   return Object.freeze({
-    jobId: command.jobId, expectedLeaseGeneration: command.expectedLeaseGeneration,
-    expectedSnapshotSha256: command.expectedSnapshotSha256, idempotencyKey: command.idempotencyKey,
-    actorUserId: command.actorUserId, requestId: command.requestId, reasonCode: command.reasonCode,
-    tenantId: job.tenantId, credentialId: job.credentialId, credentialVersion: job.credentialVersion,
-    priorState: job.state, priorAttemptCount: job.attemptCount, priorErrorCode: job.lastErrorCode,
-    targetEvidenceSha256: capability.evidenceSha256, requiresAtomicAuditHistory: true,
+    jobId: command.jobId,
+    expectedLeaseGeneration: command.expectedLeaseGeneration,
+    expectedSnapshotSha256: command.expectedSnapshotSha256,
+    idempotencyKey: command.idempotencyKey,
+    actorUserId: command.actorUserId,
+    requestId: command.requestId,
+    reasonCode: command.reasonCode,
+    tenantId: job.tenantId,
+    credentialId: job.credentialId,
+    credentialVersion: job.credentialVersion,
+    priorState: job.state,
+    priorAttemptCount: job.attemptCount,
+    priorErrorCode: job.lastErrorCode,
+    targetEvidenceSha256: capability.evidenceSha256,
+    requiresAtomicAuditHistory: true,
   });
 }
 
 function delay(durationMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve(); };
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
     const timer = setTimeout(finish, durationMs);
     signal?.addEventListener('abort', finish, { once: true });
   });

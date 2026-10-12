@@ -8,11 +8,11 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import {
   SAAS_MIGRATION_AUDIT_URL_ENV,
-  saasMigrationAudit,
-  SaasMigrationAuditCommandError,
   type SaasMigrationAuditCommandDependencies,
+  SaasMigrationAuditCommandError,
   type SaasMigrationAuditCommandOptions,
   type SaasMigrationAuditCommandResult,
+  saasMigrationAudit,
 } from '../../src/cli/saas-migration-audit.js';
 import {
   getSaasMigrationAuditExpectations,
@@ -33,18 +33,31 @@ const catalogRows = [
 ];
 function baseline(overrides: Partial<SaasAuditCatalogBaseline> = {}): SaasAuditCatalogBaseline {
   return {
-    profile: SAAS_AUDIT_CATALOG_PROFILE, coverage: 'complete-profile', evidenceId: 'reviewed-fixture',
-    releaseId: 'release-fixture', schema: 'model_router_saas', postgresMajor: 15,
+    profile: SAAS_AUDIT_CATALOG_PROFILE,
+    coverage: 'complete-profile',
+    evidenceId: 'reviewed-fixture',
+    releaseId: 'release-fixture',
+    schema: 'model_router_saas',
+    postgresMajor: 15,
     migrationsChecksum: expectations.checksum,
-    objects: catalogRows.map(({ kind, identity, definition }) => ({ kind,
-      identityChecksum: hash(identity), definitionChecksum: hash(definition) })),
+    objects: catalogRows.map(({ kind, identity, definition }) => ({
+      kind,
+      identityChecksum: hash(identity),
+      definitionChecksum: hash(definition),
+    })),
     ...overrides,
   };
 }
 function commandOptions(overrides: Partial<SaasMigrationAuditCommandOptions> = {}): SaasMigrationAuditCommandOptions {
-  return { deploymentId: 'deployment-fixture', environmentId: 'environment-fixture',
-    database: 'audit_fixture', schema: 'model_router_saas', releaseId: 'release-fixture',
-    catalogBaseline: '/reviewed-fixture/catalog.json', ...overrides };
+  return {
+    deploymentId: 'deployment-fixture',
+    environmentId: 'environment-fixture',
+    database: 'audit_fixture',
+    schema: 'model_router_saas',
+    releaseId: 'release-fixture',
+    catalogBaseline: '/reviewed-fixture/catalog.json',
+    ...overrides,
+  };
 }
 
 interface PoolFixture {
@@ -61,7 +74,9 @@ class CliAuditPool implements SaasDatabasePool {
   connects = 0;
   ends = 0;
   constructor(readonly fixture: PoolFixture = {}) {}
-  query<Row>(): Promise<SqlResult<Row>> { throw new Error('Must check out a client'); }
+  query<Row>(): Promise<SqlResult<Row>> {
+    throw new Error('Must check out a client');
+  }
   async end(): Promise<void> {
     this.ends += 1;
     if (this.fixture.closeError) throw new Error(sensitiveText);
@@ -76,21 +91,35 @@ class CliAuditPool implements SaasDatabasePool {
         if (sql.startsWith('BEGIN') || sql.startsWith('SET LOCAL')) rows = [];
         else if (sql === 'ROLLBACK') {
           if (this.fixture.rollbackError) throw new Error(sensitiveText);
-        } else if (sql.includes('current_database()')) rows = [{ database: 'audit_fixture',
-          server_version_num: '150012', read_only: 'on', isolation: 'repeatable read', schema_present: true }];
+        } else if (sql.includes('current_database()'))
+          rows = [
+            {
+              database: 'audit_fixture',
+              server_version_num: '150012',
+              read_only: 'on',
+              isolation: 'repeatable read',
+              schema_present: true,
+            },
+          ];
         else if (sql.includes("c.relname = 'saas_schema_migrations'")) rows = [{ relkind: 'r' }];
         else if (sql.startsWith('SELECT version')) {
-          rows = expectations.migrations.map(({ version, name, checksum }) => ({ version, name,
-            checksum: version === this.fixture.driftVersion ? hash('historical-fixture') : checksum }));
-          if (this.fixture.unknownVersion !== undefined) rows.push({ version: this.fixture.unknownVersion,
-            name: sensitiveText, checksum: hash('unknown-fixture') });
+          rows = expectations.migrations.map(({ version, name, checksum }) => ({
+            version,
+            name,
+            checksum: version === this.fixture.driftVersion ? hash('historical-fixture') : checksum,
+          }));
+          if (this.fixture.unknownVersion !== undefined)
+            rows.push({ version: this.fixture.unknownVersion, name: sensitiveText, checksum: hash('unknown-fixture') });
         } else if (sql === SAAS_MIGRATION_AUDIT_CATALOG_SQL) {
-          rows = catalogRows.map((row, index) => this.fixture.catalogDrift && index === 0
-            ? { ...row, definition: sensitiveText } : row);
+          rows = catalogRows.map((row, index) =>
+            this.fixture.catalogDrift && index === 0 ? { ...row, definition: sensitiveText } : row,
+          );
         } else throw new Error('Unexpected query');
         return { rows: rows as Row[], rowCount: rows.length };
       },
-      release: (error) => { this.releases.push(error); },
+      release: (error) => {
+        this.releases.push(error);
+      },
     };
   }
 }
@@ -141,7 +170,11 @@ test('operator audit validates baseline before pool creation, reuses the snapsho
 });
 
 test('without a baseline it emits useful inventory and unverified nonzero status, with no file discovery', async () => {
-  const { deps, output, events } = harness(undefined, { readBaselineFile: async () => { throw new Error('must not read'); } });
+  const { deps, output, events } = harness(undefined, {
+    readBaselineFile: async () => {
+      throw new Error('must not read');
+    },
+  });
   const result = await saasMigrationAudit(commandOptions({ catalogBaseline: undefined }), deps);
   assert.deepEqual(events, ['create-pool']);
   assert.equal(result.status, 'blocked');
@@ -167,7 +200,10 @@ for (const fixture of [{ driftVersion: 22 }, { driftVersion: 23 }, { catalogDrif
 test('registry changes are reflected dynamically, with no fixed maximum migration version', async () => {
   const { deps } = harness();
   const result = await saasMigrationAudit(commandOptions(), deps);
-  assert.deepEqual(result.report?.migrations.map(({ version }) => version), expectations.migrations.map(({ version }) => version));
+  assert.deepEqual(
+    result.report?.migrations.map(({ version }) => version),
+    expectations.migrations.map(({ version }) => version),
+  );
   assert.equal(result.report?.expectedMigrationsChecksum, expectations.checksum);
 });
 
@@ -184,10 +220,14 @@ for (const field of ['deploymentId', 'environmentId', 'database', 'schema', 'rel
 }
 
 test('there is no fallback to the application database URL or PG environment variables', async () => {
-  const { deps, output, events } = harness(undefined, { env: {
-    MODEL_ROUTER_SAAS_DATABASE_URL: fakeUrl, PGHOST: 'ignored-fixture',
-    PGDATABASE: 'audit_fixture', PGPASSWORD: 'ignored-fixture-password',
-  } });
+  const { deps, output, events } = harness(undefined, {
+    env: {
+      MODEL_ROUTER_SAAS_DATABASE_URL: fakeUrl,
+      PGHOST: 'ignored-fixture',
+      PGDATABASE: 'audit_fixture',
+      PGPASSWORD: 'ignored-fixture-password',
+    },
+  });
   const result = await saasMigrationAudit(commandOptions(), deps);
   assert.equal(result.error?.code, 'AUDIT_URL_REQUIRED');
   assert.equal(result.exitCode, 2);
@@ -196,8 +236,11 @@ test('there is no fallback to the application database URL or PG environment var
 });
 
 for (const url of [
-  sensitiveText, 'not-a-url', 'https://fixture.invalid/audit_fixture',
-  'postgresql:///audit_fixture', 'postgresql://audit.example.invalid/audit_fixture',
+  sensitiveText,
+  'not-a-url',
+  'https://fixture.invalid/audit_fixture',
+  'postgresql:///audit_fixture',
+  'postgresql://audit.example.invalid/audit_fixture',
   'postgresql://fixture@audit.example.invalid/other_database',
   'postgresql://fixture@audit.example.invalid/audit_fixture?host=localhost',
   'postgresql://fixture@audit.example.invalid/audit_fixture?sslkey=/fixture/key',
@@ -222,7 +265,11 @@ test('explicit local plaintext policy requires both loopback and sslmode=disable
   let factoryCalls = 0;
   const { deps, output } = harness(pool, {
     env: { [SAAS_MIGRATION_AUDIT_URL_ENV]: localUrl },
-    createPool: (url) => { assert.equal(url, localUrl); factoryCalls += 1; return pool; },
+    createPool: (url) => {
+      assert.equal(url, localUrl);
+      factoryCalls += 1;
+      return pool;
+    },
   });
   const result = await saasMigrationAudit(commandOptions({ allowLocalPlaintext: true }), deps);
   assert.equal(result.exitCode, 0);
@@ -230,9 +277,11 @@ test('explicit local plaintext policy requires both loopback and sslmode=disable
   safeOutput(output, result);
   assert.ok(!output[0].includes(localUrl));
   for (const hostname of ['audit.example.invalid', '127.remote.example.invalid', '0.0.0.0']) {
-    const remote = harness(undefined, { env: {
-      [SAAS_MIGRATION_AUDIT_URL_ENV]: `postgresql://fixture@${hostname}:65432/audit_fixture?sslmode=disable`,
-    } });
+    const remote = harness(undefined, {
+      env: {
+        [SAAS_MIGRATION_AUDIT_URL_ENV]: `postgresql://fixture@${hostname}:65432/audit_fixture?sslmode=disable`,
+      },
+    });
     const rejected = await saasMigrationAudit(commandOptions({ allowLocalPlaintext: true }), remote.deps);
     assert.equal(rejected.error?.code, 'AUDIT_URL_INVALID');
     assert.deepEqual(remote.events, []);
@@ -242,14 +291,24 @@ test('explicit local plaintext policy requires both loopback and sslmode=disable
 test('loopback 5432 is not globally banned by CLI policy; this fixture never opens a real connection', async () => {
   const pool = new CliAuditPool();
   const url = 'postgresql://fixture@localhost:5432/audit_fixture?sslmode=verify-full';
-  const { deps, output } = harness(pool, { env: { [SAAS_MIGRATION_AUDIT_URL_ENV]: url },
-    createPool: (received) => { assert.equal(received, url); return pool; } });
+  const { deps, output } = harness(pool, {
+    env: { [SAAS_MIGRATION_AUDIT_URL_ENV]: url },
+    createPool: (received) => {
+      assert.equal(received, url);
+      return pool;
+    },
+  });
   const result = await saasMigrationAudit(commandOptions(), deps);
   assert.equal(result.exitCode, 0);
   safeOutput(output, result);
 });
 
-for (const text of ['{invalid', JSON.stringify({ secret: sensitiveText }), JSON.stringify(baseline({ objects: [] })), 'x'.repeat(16 * 1024 * 1024 + 1)]) {
+for (const text of [
+  '{invalid',
+  JSON.stringify({ secret: sensitiveText }),
+  JSON.stringify(baseline({ objects: [] })),
+  'x'.repeat(16 * 1024 * 1024 + 1),
+]) {
   test('invalid baseline content produces sanitized JSON before opening the pool', async () => {
     const { deps, output, events } = harness(undefined, { readBaselineFile: async () => text });
     const result = await saasMigrationAudit(commandOptions(), deps);
@@ -259,9 +318,15 @@ for (const text of ['{invalid', JSON.stringify({ secret: sensitiveText }), JSON.
   });
 }
 
-for (const changed of [{ releaseId: 'other-release' }, { schema: 'other_schema' }, { migrationsChecksum: hash('old-registry') }]) {
+for (const changed of [
+  { releaseId: 'other-release' },
+  { schema: 'other_schema' },
+  { migrationsChecksum: hash('old-registry') },
+]) {
   test('baseline binding mismatch fails before opening the pool', async () => {
-    const { deps, output, events } = harness(undefined, { readBaselineFile: async () => JSON.stringify(baseline(changed)) });
+    const { deps, output, events } = harness(undefined, {
+      readBaselineFile: async () => JSON.stringify(baseline(changed)),
+    });
     const result = await saasMigrationAudit(commandOptions(), deps);
     assert.equal(result.error?.code, 'BASELINE_BINDING_MISMATCH');
     assert.deepEqual(events, []);
@@ -270,7 +335,9 @@ for (const changed of [{ releaseId: 'other-release' }, { schema: 'other_schema' 
 }
 
 test('partial baseline remains unverified and never grants a successful CLI exit', async () => {
-  const { deps, output } = harness(undefined, { readBaselineFile: async () => JSON.stringify(baseline({ coverage: 'partial' })) });
+  const { deps, output } = harness(undefined, {
+    readBaselineFile: async () => JSON.stringify(baseline({ coverage: 'partial' })),
+  });
   const result = await saasMigrationAudit(commandOptions(), deps);
   assert.equal(result.exitCode, 1);
   assert.equal(result.report?.compatibility, 'unverified');
@@ -278,7 +345,11 @@ test('partial baseline remains unverified and never grants a successful CLI exit
 });
 
 test('baseline file read errors hide path, driver messages and body', async () => {
-  const { deps, output, events } = harness(undefined, { readBaselineFile: async () => { throw new Error(sensitiveText); } });
+  const { deps, output, events } = harness(undefined, {
+    readBaselineFile: async () => {
+      throw new Error(sensitiveText);
+    },
+  });
   const result = await saasMigrationAudit(commandOptions(), deps);
   assert.equal(result.error?.code, 'BASELINE_IO_FAILED');
   assert.deepEqual(events, []);
@@ -287,7 +358,11 @@ test('baseline file read errors hide path, driver messages and body', async () =
 });
 
 test('a factory failure is sanitized and never prints the connection configuration', async () => {
-  const { deps, output } = harness(undefined, { createPool: () => { throw new Error(sensitiveText); } });
+  const { deps, output } = harness(undefined, {
+    createPool: () => {
+      throw new Error(sensitiveText);
+    },
+  });
   const result = await saasMigrationAudit(commandOptions(), deps);
   assert.equal(result.error?.code, 'AUDIT_FAILED');
   assert.equal(result.exitCode, 2);
@@ -315,7 +390,11 @@ test('pool close failure overrides successful matching before reporting to opera
 });
 
 test('report sink failure throws only a generic error after pool close', async () => {
-  const { deps, pool } = harness(undefined, { writeLine: () => { throw new Error(sensitiveText); } });
+  const { deps, pool } = harness(undefined, {
+    writeLine: () => {
+      throw new Error(sensitiveText);
+    },
+  });
   await assert.rejects(saasMigrationAudit(commandOptions(), deps), (error: unknown) => {
     assert.ok(error instanceof SaasMigrationAuditCommandError);
     assert.ok(!error.message.includes(fakeUrl));
@@ -333,29 +412,163 @@ test('the default reader reads only the supplied file and does not promote or re
     const result = await saasMigrationAudit(commandOptions({ catalogBaseline: path }), deps);
     assert.equal(result.exitCode, 0);
     safeOutput(output, result);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('CLI registration documents explicit audit URL and target labels', async () => {
-  const result = await exec(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'saas:migration-audit', '--help'], {
-    cwd: process.cwd(), env: { PATH: process.env.PATH ?? '' },
-  });
-  for (const text of [SAAS_MIGRATION_AUDIT_URL_ENV, '--deployment-id', '--environment-id', '--database', '--schema', '--release-id', '--catalog-baseline', '--allow-local-plaintext']) {
+  const result = await exec(
+    process.execPath,
+    ['--import', 'tsx', 'src/cli/index.ts', 'saas:migration-audit', '--help'],
+    {
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH ?? '' },
+    },
+  );
+  for (const text of [
+    SAAS_MIGRATION_AUDIT_URL_ENV,
+    '--deployment-id',
+    '--environment-id',
+    '--database',
+    '--schema',
+    '--release-id',
+    '--catalog-baseline',
+    '--legacy-checksum',
+    '--allow-local-plaintext',
+  ]) {
     assert.ok(result.stdout.includes(text));
   }
 });
 
-test('real CLI action emits safe JSON and nonzero exit for missing input, without opening a database', async () => {
-  await assert.rejects(exec(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'saas:migration-audit'], {
-    cwd: process.cwd(), env: { PATH: process.env.PATH ?? '', [SAAS_MIGRATION_AUDIT_URL_ENV]: fakeUrl },
-  }), (error: unknown) => {
-    const result = error as Error & { code: number; stdout: string; stderr: string };
-    assert.equal(result.code, 2);
-    const output = JSON.parse(result.stdout) as SaasMigrationAuditCommandResult;
-    assert.equal(output.error?.code, 'INVALID_OPTIONS');
-    assert.equal(output.exitCode, 2);
-    assert.ok(!result.stdout.includes(fakeUrl));
-    assert.ok(!result.stderr.includes(fakeUrl));
-    return true;
+const legacyDriftChecksum = hash('historical-fixture');
+
+test('reviewed legacy 022/023 mappings annotate known history without granting compatibility', async () => {
+  const { deps, output } = harness(new CliAuditPool({ driftVersion: 22 }));
+  const result = await saasMigrationAudit(
+    commandOptions({
+      legacyChecksums: [`22=${legacyDriftChecksum}:release-2025-review`],
+    }),
+    deps,
+  );
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.report?.compatibility, 'mismatch');
+  const codes = result.report?.issues.map((issue) => code(issue)) ?? [];
+  assert.ok(codes.includes('CHECKSUM_MISMATCH_022_023'));
+  assert.ok(codes.includes('KNOWN_LEGACY_CHECKSUM'));
+  safeOutput(output, result);
+});
+
+test('legacy mappings for the wrong version or an unrecorded checksum are never annotated', async () => {
+  const { deps, output } = harness(new CliAuditPool({ driftVersion: 22 }));
+  const result = await saasMigrationAudit(
+    commandOptions({
+      legacyChecksums: [
+        `23=${legacyDriftChecksum}:release-2025-review`,
+        `22=${hash('unrecorded-history')}:release-2025-review`,
+      ],
+    }),
+    deps,
+  );
+  assert.equal(result.status, 'blocked');
+  const codes = result.report?.issues.map((issue) => code(issue)) ?? [];
+  assert.ok(codes.includes('CHECKSUM_MISMATCH_022_023'));
+  assert.ok(!codes.includes('KNOWN_LEGACY_CHECKSUM'));
+  safeOutput(output, result);
+});
+
+function code(issue: { code: string }): string {
+  return issue.code;
+}
+
+for (const legacyChecksums of [
+  [`24=${legacyDriftChecksum}:release-2025-review`],
+  ['22=not-a-sha:release-2025-review'],
+  [`22=${legacyDriftChecksum}`],
+  [`22=${legacyDriftChecksum}:`],
+  [`22=${legacyDriftChecksum}:bad evidence`],
+  [''],
+  ['not-a-mapping'],
+  [42],
+  [null],
+  Array.from({ length: 9 }, (_, index) => `22=${hash(`history-${index}`)}:release-2025-review`),
+  [`22=${legacyDriftChecksum}:release-2025-review`, `22=${legacyDriftChecksum}:release-2025-review`],
+  ['22='],
+] as const) {
+  test('malformed legacy checksum mappings fail closed before any baseline read or pool open', async () => {
+    const { deps, output, events, pool } = harness();
+    const result = await saasMigrationAudit(
+      commandOptions({
+        legacyChecksums: legacyChecksums as unknown as string[],
+      }),
+      deps,
+    );
+    assert.equal(result.error?.code, 'INVALID_OPTIONS');
+    assert.equal(result.exitCode, 2);
+    assert.equal(result.report, null);
+    assert.deepEqual(events, []);
+    assert.equal(pool.connects, 0);
+    safeOutput(output, result);
   });
+}
+
+test('real CLI action emits safe JSON and nonzero exit for missing input, without opening a database', async () => {
+  await assert.rejects(
+    exec(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'saas:migration-audit'], {
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH ?? '', [SAAS_MIGRATION_AUDIT_URL_ENV]: fakeUrl },
+    }),
+    (error: unknown) => {
+      const result = error as Error & { code: number; stdout: string; stderr: string };
+      assert.equal(result.code, 2);
+      const output = JSON.parse(result.stdout) as SaasMigrationAuditCommandResult;
+      assert.equal(output.error?.code, 'INVALID_OPTIONS');
+      assert.equal(output.exitCode, 2);
+      assert.ok(!result.stdout.includes(fakeUrl));
+      assert.ok(!result.stderr.includes(fakeUrl));
+      return true;
+    },
+  );
+});
+
+test('real CLI registration forwards --legacy-checksum mappings to the command layer', async () => {
+  await assert.rejects(
+    exec(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        'src/cli/index.ts',
+        'saas:migration-audit',
+        '--deployment-id',
+        'deployment-fixture',
+        '--environment-id',
+        'environment-fixture',
+        '--database',
+        'audit_fixture',
+        '--schema',
+        'model_router_saas',
+        '--release-id',
+        'release-fixture',
+        '--legacy-checksum',
+        'not-a-mapping',
+      ],
+      {
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH ?? '', [SAAS_MIGRATION_AUDIT_URL_ENV]: fakeUrl },
+      },
+    ),
+    (error: unknown) => {
+      const result = error as Error & { code: number; stdout: string; stderr: string };
+      assert.equal(result.code, 2);
+      const output = JSON.parse(result.stdout) as SaasMigrationAuditCommandResult;
+      // INVALID_OPTIONS (not AUDIT_URL_REQUIRED/INVALID) proves the mapping reached
+      // command-level validation: URL validation runs after option parsing.
+      assert.equal(output.error?.code, 'INVALID_OPTIONS');
+      assert.ok(!result.stdout.includes(fakeUrl));
+      assert.ok(!result.stderr.includes(fakeUrl));
+      return true;
+    },
+  );
 });

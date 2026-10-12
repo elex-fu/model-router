@@ -703,7 +703,10 @@ async function listCredentials(supply: SupplyPort, tenantId: string): Promise<re
 }
 
 function safeValidationState(value: unknown): ProviderValidationState {
-  if (value === 'verified' || value === 'failed' || value === 'unverified') return value;
+  // R5: the console projection distinguishes quarantined from failed.
+  if (value === 'verified' || value === 'failed' || value === 'unverified' || value === 'quarantined') {
+    return value;
+  }
   throw new Error('Provider supply returned an invalid validation state');
 }
 

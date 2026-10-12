@@ -1013,3 +1013,156 @@ test('capacity policy writes reject missing Origin/CSRF and return structured CA
     await app.close();
   }
 });
+
+const WEBHOOK_POLICY_PATH = `/admin/api/v1/webhooks/tenant-policies/${TENANT_ID}`;
+const WEBHOOK_POLICY_BODY = {
+  enabled: true,
+  maxActiveEndpoints: 5,
+  maxEventsPerMinute: 600,
+  maxPendingDeliveries: 5000,
+} as const;
+const WEBHOOK_POLICY_RECORD = {
+  tenantId: TENANT_ID,
+  ...WEBHOOK_POLICY_BODY,
+  revision: 3,
+  updatedAt: '2026-10-10T00:00:00.000Z',
+} as const;
+
+function makeWebhookPolicyOptions(
+  actor: PlatformAdminActor | undefined = WRITE_ACTOR,
+  configure?: (actor: unknown, tenantId: string, input: unknown) => Promise<unknown>,
+): ReturnType<typeof makeOptions> & { readonly policyCalls: unknown[][] } {
+  const base = makeWriteOptions(actor);
+  const policyCalls: unknown[][] = [];
+  return {
+    ...base,
+    webhookTenantPolicies: {
+      configure: async (configureActor: unknown, tenantId: string, input: unknown) => {
+        policyCalls.push([configureActor, tenantId, input]);
+        if (configure) return configure(configureActor, tenantId, input);
+        return WEBHOOK_POLICY_RECORD;
+      },
+    },
+    calls: base.calls,
+    policyCalls,
+  };
+}
+
+test('webhook tenant policy PUT is operations/superadmin gated, CSRF-protected, and returns the stored policy', async () => {
+  const options = makeWebhookPolicyOptions();
+  const app = await startHarness(options);
+  try {
+    const response = await app.request(`${app.base}${WEBHOOK_POLICY_PATH}`, {
+      ...writeInit(WEBHOOK_POLICY_BODY),
+      method: 'PUT',
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.data, WEBHOOK_POLICY_RECORD);
+    assert.equal(options.policyCalls.length, 1);
+    const [actor, tenantId, input] = options.policyCalls[0] as [
+      { actorUserId: string; requestId: string },
+      string,
+      unknown,
+    ];
+    assert.equal(actor.actorUserId, WRITE_ACTOR.userId);
+    assert.equal(actor.requestId, requestId(response.body));
+    assert.equal(tenantId, TENANT_ID);
+    assert.deepEqual(input, WEBHOOK_POLICY_BODY);
+
+    const denied = makeWebhookPolicyOptions({ ...WRITE_ACTOR, roles: ['finance'] });
+    const deniedApp = await startHarness(denied);
+    const deniedResponse = await deniedApp.request(`${deniedApp.base}${WEBHOOK_POLICY_PATH}`, {
+      ...writeInit(WEBHOOK_POLICY_BODY),
+      method: 'PUT',
+    });
+    assert.equal(deniedResponse.status, 403);
+    assert.equal(denied.policyCalls.length, 0);
+
+    const missingCsrf = await app.request(`${app.base}${WEBHOOK_POLICY_PATH}`, {
+      ...writeInit(WEBHOOK_POLICY_BODY, { 'x-csrf-token': '' }),
+      method: 'PUT',
+    });
+    assert.equal(missingCsrf.status, 403);
+    assert.equal(options.policyCalls.length, 1);
+
+    const wrongMethod = await app.request(`${app.base}${WEBHOOK_POLICY_PATH}`, {
+      ...writeInit(WEBHOOK_POLICY_BODY),
+      method: 'POST',
+    });
+    assert.equal(wrongMethod.status, 405);
+    assert.equal(wrongMethod.headers.get('allow'), 'PUT');
+  } finally {
+    await app.close();
+  }
+});
+
+test('webhook tenant policy PUT validates the tenant path and the full quota body fail-closed', async () => {
+  const options = makeWebhookPolicyOptions();
+  const app = await startHarness(options);
+  try {
+    const badTenant = await app.request(`${app.base}/admin/api/v1/webhooks/tenant-policies/not-a-uuid`, {
+      ...writeInit(WEBHOOK_POLICY_BODY),
+      method: 'PUT',
+    });
+    assert.equal(badTenant.status, 400);
+
+    for (const body of [
+      {},
+      { ...WEBHOOK_POLICY_BODY, unknown: true },
+      { enabled: true, maxActiveEndpoints: 5, maxEventsPerMinute: 600 },
+      { ...WEBHOOK_POLICY_BODY, enabled: 'yes' },
+      { ...WEBHOOK_POLICY_BODY, maxActiveEndpoints: 0 },
+      { ...WEBHOOK_POLICY_BODY, maxEventsPerMinute: 10_001 },
+      { ...WEBHOOK_POLICY_BODY, maxPendingDeliveries: 100_001 },
+    ]) {
+      const response = await app.request(`${app.base}${WEBHOOK_POLICY_PATH}`, { ...writeInit(body), method: 'PUT' });
+      assert.equal(response.status, 400, JSON.stringify(body));
+    }
+    assert.equal(options.policyCalls.length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('webhook tenant policy PUT maps service outcomes to safe statuses and 503s when unmounted', async () => {
+  const forbidden = makeWebhookPolicyOptions(WRITE_ACTOR, () => {
+    throw new Error('WEBHOOK_POLICY_FORBIDDEN');
+  });
+  const forbiddenApp = await startHarness(forbidden);
+  const forbiddenResponse = await forbiddenApp.request(`${forbiddenApp.base}${WEBHOOK_POLICY_PATH}`, {
+    ...writeInit(WEBHOOK_POLICY_BODY),
+    method: 'PUT',
+  });
+  assert.equal(forbiddenResponse.status, 403);
+
+  const belowUsage = makeWebhookPolicyOptions(WRITE_ACTOR, () => {
+    throw new Error('WEBHOOK_POLICY_BELOW_CURRENT_USAGE');
+  });
+  const belowUsageApp = await startHarness(belowUsage);
+  const belowUsageResponse = await belowUsageApp.request(`${belowUsageApp.base}${WEBHOOK_POLICY_PATH}`, {
+    ...writeInit(WEBHOOK_POLICY_BODY),
+    method: 'PUT',
+  });
+  assert.equal(belowUsageResponse.status, 409);
+  assert.equal(errorBody(belowUsageResponse.body).code, 'WEBHOOK_POLICY_BELOW_CURRENT_USAGE');
+
+  const leaking = makeWebhookPolicyOptions(WRITE_ACTOR, () => {
+    throw new Error('store exploded with tenant secret material');
+  });
+  const leakingApp = await startHarness(leaking);
+  const leakingResponse = await leakingApp.request(`${leakingApp.base}${WEBHOOK_POLICY_PATH}`, {
+    ...writeInit(WEBHOOK_POLICY_BODY),
+    method: 'PUT',
+  });
+  assert.equal(leakingResponse.status, 500);
+  assert.doesNotMatch(JSON.stringify(leakingResponse.body), /secret material/u);
+
+  const unmounted = makeWriteOptions();
+  const unmountedApp = await startHarness(unmounted);
+  const unmountedResponse = await unmountedApp.request(`${unmountedApp.base}${WEBHOOK_POLICY_PATH}`, {
+    ...writeInit(WEBHOOK_POLICY_BODY),
+    method: 'PUT',
+  });
+  assert.equal(unmountedResponse.status, 503);
+  assert.equal(errorBody(unmountedResponse.body).code, 'WEBHOOK_POLICY_UNAVAILABLE');
+});

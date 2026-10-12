@@ -3,8 +3,8 @@ import { randomBytes, randomUUID, scryptSync } from 'node:crypto';
 import { test } from 'node:test';
 import { Pool } from 'pg';
 import { type CredentialKeyProvider, encryptCredential } from '../../../../src/saas/credentials/crypto.js';
-import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import { SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
+import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import { runSaasMigrations } from '../../../../src/saas/db/migrate.js';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
 import { CUSTOMER_WEBHOOK_DELIVERY_SAAS_MIGRATION } from '../../../../src/saas/db/migrations/043_customer_webhook_delivery.js';
@@ -42,18 +42,30 @@ function guardedPostgresUrl(): string {
     parsed = new URL(realPostgresUrl);
     database = decodeURIComponent(parsed.pathname.slice(1));
     username = decodeURIComponent(parsed.username);
-  } catch { throw new Error('Legacy auth fixture PostgreSQL URL is invalid; details redacted'); }
+  } catch {
+    throw new Error('Legacy auth fixture PostgreSQL URL is invalid; details redacted');
+  }
   assert.ok(['postgres:', 'postgresql:'].includes(parsed.protocol), 'legacy auth fixture requires PostgreSQL');
   assert.ok(username.length > 0, 'legacy auth fixture requires an explicit schema-owner principal');
-  assert.ok(parsed.search === '' && parsed.hash === '', 'legacy auth fixture must not contain connection overrides or fragments');
+  assert.ok(
+    parsed.search === '' && parsed.hash === '',
+    'legacy auth fixture must not contain connection overrides or fragments',
+  );
   const hostname = parsed.hostname.toLowerCase();
   const port = Number(parsed.port);
   const ci = hostname === 'postgres' && port === 5432 && database === 'model_router_saas_ci';
-  const local = ['127.0.0.1', '[::1]'].includes(hostname) && Boolean(parsed.port)
-    && Number.isInteger(port) && port > 0 && port <= 65_535 && ![5432, 6432].includes(port)
-    && (database === 'model_router_saas_ci' || /^model_router_test_[a-zA-Z0-9_]+$/.test(database));
-  assert.ok(ci || local,
-    'legacy auth fixture requires designated CI postgres/model_router_saas_ci or an owned disposable exact-loopback database on an explicit nondefault port');
+  const local =
+    ['127.0.0.1', '[::1]'].includes(hostname) &&
+    Boolean(parsed.port) &&
+    Number.isInteger(port) &&
+    port > 0 &&
+    port <= 65_535 &&
+    ![5432, 6432].includes(port) &&
+    (database === 'model_router_saas_ci' || /^model_router_test_[a-zA-Z0-9_]+$/.test(database));
+  assert.ok(
+    ci || local,
+    'legacy auth fixture requires designated CI postgres/model_router_saas_ci or an owned disposable exact-loopback database on an explicit nondefault port',
+  );
   return realPostgresUrl;
 }
 
@@ -137,7 +149,8 @@ function blockingStage(statement: string): BlockingStage | undefined {
   if (statement === SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL.toLowerCase()) return 'issuance-writer';
   if (statement.startsWith('select pg_advisory_xact_lock_shared(')) return 'user-reader';
   if (statement.startsWith('insert into saas_platform_sessions')) return 'provisional-session';
-  if (statement.includes('from saas_platform_mfa_setup_tokens s') && statement.includes('for update of s')) return 'confirmation-setup';
+  if (statement.includes('from saas_platform_mfa_setup_tokens s') && statement.includes('for update of s'))
+    return 'confirmation-setup';
   return undefined;
 }
 
@@ -161,13 +174,19 @@ function observeTransactionalQueries(database: SaasDatabase): {
             if (backendPid === undefined && !statement.startsWith('set ')) {
               const identity = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
               const pid = identity.rows[0]?.pid;
-              assert.ok(typeof pid === 'number' && Number.isInteger(pid) && pid > 0, 'the service must use a real PostgreSQL backend');
+              assert.ok(
+                typeof pid === 'number' && Number.isInteger(pid) && pid > 0,
+                'the service must use a real PostgreSQL backend',
+              );
               backendPid = pid;
             }
             const stage = blockingStage(statement);
             if (backendPid !== undefined && stage) activeQueries.set(backendPid, stage);
-            try { return await tx.query<Row>(sql, values); }
-            finally { if (backendPid !== undefined) activeQueries.delete(backendPid); }
+            try {
+              return await tx.query<Row>(sql, values);
+            } finally {
+              if (backendPid !== undefined) activeQueries.delete(backendPid);
+            }
           },
         });
       });
@@ -180,10 +199,17 @@ function observeTransactionalQueries(database: SaasDatabase): {
 
   return {
     database: observed,
-    async waitUntilBlocked(stages: readonly BlockingStage[], pool: ScopedPool, blocker: SaasDatabaseClient): Promise<void> {
+    async waitUntilBlocked(
+      stages: readonly BlockingStage[],
+      pool: ScopedPool,
+      blocker: SaasDatabaseClient,
+    ): Promise<void> {
       const identity = await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
       const blockerPid = identity.rows[0]?.pid;
-      assert.ok(typeof blockerPid === 'number' && Number.isInteger(blockerPid) && blockerPid > 0, 'the fixture blocker must use a real PostgreSQL backend');
+      assert.ok(
+        typeof blockerPid === 'number' && Number.isInteger(blockerPid) && blockerPid > 0,
+        'the fixture blocker must use a real PostgreSQL backend',
+      );
       const deadline = Date.now() + 3_000;
       while (Date.now() < deadline) {
         for (const [backendPid, stage] of activeQueries) {
@@ -285,9 +311,13 @@ test('PostgreSQL role revocation serializes MFA enrollment and login', { skip: !
       enrollmentBlockerCommitted = true;
       await assert.rejects(
         enrollmentPromise,
-        (error: unknown) => error instanceof PlatformAuthError && error.code === 'MFA_ENROLLMENT_UNAVAILABLE' && error.status === 403,
+        (error: unknown) =>
+          error instanceof PlatformAuthError && error.code === 'MFA_ENROLLMENT_UNAVAILABLE' && error.status === 403,
       );
-      const enrollments = await pool.query<{ id: string }>('SELECT id FROM saas_platform_mfa_enrollment_tokens WHERE user_id = $1', [userId]);
+      const enrollments = await pool.query<{ id: string }>(
+        'SELECT id FROM saas_platform_mfa_enrollment_tokens WHERE user_id = $1',
+        [userId],
+      );
       assert.equal(enrollments.rows.length, 0, 'a revoked issuer target must receive no enrollment token');
     } finally {
       if (!enrollmentBlockerCommitted) await enrollmentBlocker.query('ROLLBACK').catch(() => undefined);

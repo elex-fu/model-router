@@ -21,6 +21,7 @@ import {
   type ProviderCredentialValidationResult,
 } from './credential-validation-adapters.js';
 import {
+  credentialValidationTargetProbeProfile,
   credentialValidationTargetRequestUrl,
   isApprovedCredentialValidationBinding,
 } from './credential-validation-targets.js';
@@ -165,8 +166,8 @@ export class CredentialValidationHttpTransport {
     if (!state || state.disposed || state.consumed || !state.connector) closed();
     state.consumed = true;
     const probe: CredentialValidationProbe = {
-      adapterId: state.binding.productId === 'custom-openai' ? 'custom-openai-chat-v1' : 'custom-anthropic-messages-v1',
-      model: state.binding.model, kind: state.binding.endpoint === 'messages' ? 'messages' : 'chat', custom: true,
+      ...credentialValidationTargetProbeProfile(state.binding),
+      model: state.binding.model, custom: true,
     };
     const startedAt = performance.now();
     const failure = (code: 'credential_format_invalid' | 'provider_timeout' | 'provider_network_error'): ProviderCredentialValidationResult => ({

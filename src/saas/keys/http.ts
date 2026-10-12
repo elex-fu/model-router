@@ -1,10 +1,18 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import type { SupplyMode } from '../gateway/contracts.js';
-import type { SaasIdentityService } from '../identity/service.js';
+import { assertCustomerKeyMutationSessionIssued, type SaasIdentityService } from '../identity/service.js';
+import type { CustomerKeyMutationSessionHandle } from '../identity/customer-key-mutation-session.js';
 import type { TenantContext } from '../identity/types.js';
 import type { KeyService } from './service.js';
 import type { ApiKeyMetadata, ApiKeyPrincipalKind, CreateApiKeyInput, CreatedApiKey } from './types.js';
+import type { KeyIpPolicySnapshot, ReplaceKeyIpPolicyInput } from './ip-policy-contract.js';
+import type {
+  KeyBudgetCounterSnapshot,
+  KeyBudgetPolicySnapshot,
+  KeyBudgetUsageSnapshot,
+  ReplaceKeyBudgetPolicyInput,
+} from './budget-policy-contract.js';
 
 const API_PREFIX = '/console/api/v1';
 const SESSION_COOKIE_NAME = 'mr_saas_session';
@@ -16,15 +24,26 @@ type JsonObject = Record<string, unknown>;
 export type SaasKeyHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 
 export interface SaasKeyHttpOptions {
-  readonly service: Pick<SaasIdentityService, 'getSession' | 'verifyCsrfToken' | 'authorizeProjectAccess'>;
-  readonly keyService?: Pick<KeyService, 'create' | 'list' | 'rotate' | 'revoke'>;
+  readonly service: Pick<SaasIdentityService, 'getSession' | 'verifyCsrfToken' | 'authorizeProjectAccess'> &
+    Partial<Pick<SaasIdentityService, 'issueKeyMutationSession'>>;
+  readonly keyService?: Pick<KeyService, 'create' | 'list' | 'rotate' | 'revoke' | 'getKeyIpPolicy' | 'getKeyBudgetPolicy'> &
+    Partial<
+      Pick<
+        KeyService,
+        | 'createAuthenticated'
+        | 'rotateAuthenticated'
+        | 'revokeAuthenticated'
+        | 'replaceKeyIpPolicyAuthenticated'
+        | 'replaceKeyBudgetPolicyAuthenticated'
+      >
+    >;
   readonly publicOrigin: string;
   readonly cookieSecure?: boolean;
   /** Accepted for composition compatibility; key routes do not issue sessions. */
   readonly sessionTtlSeconds?: number;
 }
 
-type KeyRoute = 'projectKeys' | 'keyRotate' | 'keyRevoke';
+type KeyRoute = 'projectKeys' | 'keyRotate' | 'keyRevoke' | 'keyIpPolicy' | 'keyBudgetPolicy';
 
 class HttpError extends Error {
   constructor(
@@ -263,16 +282,18 @@ function findRoute(
   path: string,
 ):
   | { route: 'projectKeys'; tenantId: string; projectId: string }
-  | { route: 'keyRotate' | 'keyRevoke'; tenantId: string; projectId: string; keyId: string }
+  | { route: 'keyRotate' | 'keyRevoke' | 'keyIpPolicy' | 'keyBudgetPolicy'; tenantId: string; projectId: string; keyId: string }
   | undefined {
-  const match = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/projects/([^/]+)/keys(?:/([^/]+)/(rotate|revoke))?$`).exec(
-    path,
-  );
+  const match = new RegExp(
+    `^${API_PREFIX}/tenants/([^/]+)/projects/([^/]+)/keys(?:/([^/]+)/(rotate|revoke|ip-policy|budget-policy))?$`,
+  ).exec(path);
   if (!match) return undefined;
   const tenantId = pathIdentifier(match[1], 'tenant');
   const projectId = pathIdentifier(match[2], 'project');
   if (!match[3]) return { route: 'projectKeys', tenantId, projectId };
   const keyId = pathIdentifier(match[3], 'key');
+  if (match[4] === 'ip-policy') return { route: 'keyIpPolicy', tenantId, projectId, keyId };
+  if (match[4] === 'budget-policy') return { route: 'keyBudgetPolicy', tenantId, projectId, keyId };
   return { route: match[4] === 'rotate' ? 'keyRotate' : 'keyRevoke', tenantId, projectId, keyId };
 }
 
@@ -304,6 +325,59 @@ function publicApiKey(value: ApiKeyMetadata | CreatedApiKey): JsonObject {
     supplyProfileAuthzVersion: value.supplyProfileAuthzVersion,
   };
   if ('secret' in value) data.secret = value.secret;
+  return data;
+}
+
+function publicIpPolicy(snapshot: KeyIpPolicySnapshot): JsonObject {
+  return {
+    tenantId: snapshot.tenantId,
+    projectId: snapshot.projectId,
+    keyId: snapshot.keyId,
+    version: snapshot.version,
+    authzVersion: snapshot.authzVersion,
+    policy: { mode: snapshot.policy.mode, rules: [...snapshot.policy.rules] },
+  };
+}
+
+function publicBudgetCounter(snapshot: KeyBudgetCounterSnapshot): JsonObject {
+  return { ...snapshot };
+}
+
+function publicBudgetUsage(usage: KeyBudgetUsageSnapshot): JsonObject {
+  return {
+    daily: publicBudgetCounter(usage.daily),
+    lifetime: publicBudgetCounter(usage.lifetime),
+  };
+}
+
+function publicBudgetPolicy(snapshot: KeyBudgetPolicySnapshot): JsonObject {
+  const data: JsonObject = {
+    tenantId: snapshot.tenantId,
+    projectId: snapshot.projectId,
+    keyId: snapshot.keyId,
+    lineageId: snapshot.lineageId,
+    version: snapshot.version,
+    authzVersion: snapshot.authzVersion,
+    supplyMode: snapshot.supplyMode,
+    tokenUnit: snapshot.tokenUnit,
+    tokenCountingSemanticsVersion: snapshot.tokenCountingSemanticsVersion,
+    currentWindow: snapshot.currentWindow,
+    tokenCaps: { daily: snapshot.tokenCaps.daily, lifetime: snapshot.tokenCaps.lifetime },
+    tokenUsage: publicBudgetUsage(snapshot.tokenUsage),
+  };
+  if (snapshot.supplyMode === 'byok' || snapshot.customerChargeBudget === null) {
+    data.customerChargeBudget = null;
+  } else {
+    data.customerChargeBudget = {
+      currency: snapshot.customerChargeBudget.currency,
+      unit: snapshot.customerChargeBudget.unit,
+      caps: {
+        daily: snapshot.customerChargeBudget.caps.daily,
+        lifetime: snapshot.customerChargeBudget.caps.lifetime,
+      },
+      usage: publicBudgetUsage(snapshot.customerChargeBudget.usage),
+    };
+  }
   return data;
 }
 
@@ -349,6 +423,19 @@ export function createSaasKeyHandler(options: SaasKeyHttpOptions): SaasKeyHttpHa
   const authorize = async (session: unknown, tenantId: string, projectId: string): Promise<TenantContext> =>
     options.service.authorizeProjectAccess({ userId: requireUserId(session), tenantId, projectId });
 
+  const issueMutation = async (req: IncomingMessage, token: string, context: TenantContext): Promise<CustomerKeyMutationSessionHandle> => {
+    if (typeof options.service.issueKeyMutationSession !== 'function') {
+      throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The key mutation authentication service is unavailable');
+    }
+    const csrf = cookieValue(req, CSRF_COOKIE_NAME);
+    if (!csrf) throw new HttpError(403, 'CSRF_REJECTED', 'A valid CSRF token is required');
+    // Only actual native-predicate IdentityService minting passes this WeakMap.
+    // Raw cookie/CSRF never enters the handle, business DTO, audit or log.
+    const handle = await options.service.issueKeyMutationSession(token, csrf);
+    assertCustomerKeyMutationSessionIssued(handle, context.userId);
+    return handle;
+  };
+
   return async (req, res) => {
     const requestId = `saas_key_${randomUUID()}`;
     try {
@@ -363,13 +450,15 @@ export function createSaasKeyHandler(options: SaasKeyHttpOptions): SaasKeyHttpHa
         projectKeys: ['GET', 'POST'],
         keyRotate: ['POST'],
         keyRevoke: ['POST'],
+        keyIpPolicy: ['GET', 'PUT'],
+        keyBudgetPolicy: ['GET', 'PUT'],
       };
       if (!methods[match.route].includes(method)) {
         requestMethodError(res, requestId, methods[match.route]);
         return true;
       }
 
-      if (method === 'POST') requireWriteBoundary(req, expectedOrigin, expectedHost);
+      if (method === 'POST' || method === 'PUT') requireWriteBoundary(req, expectedOrigin, expectedHost);
       const { token, session } = await getSession(req);
       if (method !== 'GET') await requireCsrf(req, token);
       if (!keyService) throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The key service is unavailable');
@@ -392,7 +481,11 @@ export function createSaasKeyHandler(options: SaasKeyHttpOptions): SaasKeyHttpHa
           ...(expiresAt === undefined ? {} : { expiresAt: expiresAt as string | null }),
         };
         const context = await authorize(session, match.tenantId, match.projectId);
-        const created = await keyService.create(context, input);
+        if (typeof keyService.createAuthenticated !== 'function') {
+          throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The authenticated key mutation service is unavailable');
+        }
+        const handle = await issueMutation(req, token, context);
+        const created = await keyService.createAuthenticated(context, input, handle);
         sendJson(res, 201, requestId, publicApiKey(created));
         return true;
       }
@@ -404,17 +497,81 @@ export function createSaasKeyHandler(options: SaasKeyHttpOptions): SaasKeyHttpHa
         return true;
       }
 
+      if (match.route === 'keyIpPolicy') {
+        const context = await authorize(session, match.tenantId, match.projectId);
+        if (method === 'GET') {
+          const snapshot = await keyService.getKeyIpPolicy(context, match.keyId);
+          sendJson(res, 200, requestId, publicIpPolicy(snapshot));
+          return true;
+        }
+        // The service boundary re-validates and canonicalizes the DTO; the CAS
+        // itself compares expectedVersion with the locked persisted head.
+        const body = parseStrictObject(
+          await readJson(req),
+          ['expectedVersion', 'policy'],
+          ['expectedVersion', 'policy'],
+        );
+        if (typeof keyService.replaceKeyIpPolicyAuthenticated !== 'function') {
+          throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The authenticated key mutation service is unavailable');
+        }
+        const handle = await issueMutation(req, token, context);
+        const replaced = await keyService.replaceKeyIpPolicyAuthenticated(
+          context,
+          match.keyId,
+          body as unknown as ReplaceKeyIpPolicyInput,
+          handle,
+        );
+        sendJson(res, 200, requestId, publicIpPolicy(replaced));
+        return true;
+      }
+
+      if (match.route === 'keyBudgetPolicy') {
+        const context = await authorize(session, match.tenantId, match.projectId);
+        if (method === 'GET') {
+          const snapshot = await keyService.getKeyBudgetPolicy(context, match.keyId);
+          sendJson(res, 200, requestId, publicBudgetPolicy(snapshot));
+          return true;
+        }
+        // The service boundary re-validates the strict DTO with the server-owned
+        // supply mode; the CAS compares expectedVersion with the locked head.
+        const body = parseStrictObject(
+          await readJson(req),
+          ['expectedVersion', 'tokenCaps', 'customerChargeCaps'],
+          ['expectedVersion', 'tokenCaps', 'customerChargeCaps'],
+        );
+        if (typeof keyService.replaceKeyBudgetPolicyAuthenticated !== 'function') {
+          throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The authenticated key mutation service is unavailable');
+        }
+        const handle = await issueMutation(req, token, context);
+        const replaced = await keyService.replaceKeyBudgetPolicyAuthenticated(
+          context,
+          match.keyId,
+          body as unknown as ReplaceKeyBudgetPolicyInput,
+          handle,
+        );
+        sendJson(res, 200, requestId, publicBudgetPolicy(replaced));
+        return true;
+      }
+
       await readEmptyJsonObject(req);
       const context = await authorize(session, match.tenantId, match.projectId);
       if (match.route === 'keyRotate') {
-        const rotated = await keyService.rotate(context, match.keyId);
+        if (typeof keyService.rotateAuthenticated !== 'function') {
+          throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The authenticated key mutation service is unavailable');
+        }
+        const handle = await issueMutation(req, token, context);
+        const rotated = await keyService.rotateAuthenticated(context, match.keyId, handle);
         sendJson(res, 201, requestId, publicApiKey(rotated));
         return true;
       }
       if (match.route !== 'keyRevoke') {
         throw new HttpError(500, 'INTERNAL_ERROR', 'The request could not be completed');
       }
-      const revoked = await keyService.revoke(context, match.keyId);
+      if (typeof keyService.revokeAuthenticated !== 'function') {
+        throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The authenticated key mutation service is unavailable');
+      }
+      const handle = await issueMutation(req, token, context);
+      const revoked = await keyService.revokeAuthenticated(context, match.keyId, handle);
       sendJson(res, 200, requestId, publicApiKey(revoked));
       return true;
     } catch (error) {

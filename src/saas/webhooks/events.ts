@@ -54,10 +54,31 @@ export interface UsageCompletedEventData {
   readonly total_tokens: number;
 }
 
+/**
+ * G4.5 announcement fan-out payload (design:
+ * docs/remaining-capability-plan-2026-10-11.md R8). Publishing a marketing
+ * announcement notifies every entitled tenant webhook endpoint; the webhook
+ * is the notification content itself, so the payload carries the full
+ * announcement projection (title and body included — the body is broadcast
+ * content by definition, never secret). `unpublish_at` is null for
+ * open-ended announcements. The event type stays `platform.maintenance`:
+ * the C-5 event-type list is not extended.
+ *
+ * NOTE: the migration 043 `saas_customer_webhook_events_payload_contract`
+ * CHECK still pins the reserved maintenance-window shape
+ * ({starts_at, ends_at, impact}) at head 095; no producer ever emitted that
+ * shape, so no stored payload is orphaned by this schema-v1 definition. The
+ * contract rewrite that admits this announcement shape is a follow-up
+ * migration owned by the migration writer.
+ */
 export interface PlatformMaintenanceEventData {
-  readonly starts_at: string;
-  readonly ends_at: string;
-  readonly impact: 'none' | 'degraded' | 'outage';
+  readonly announcement_id: string;
+  readonly kind: 'maintenance' | 'info' | 'billing';
+  readonly severity: 'info' | 'warning' | 'critical';
+  readonly title: string;
+  readonly body: string;
+  readonly publish_at: string;
+  readonly unpublish_at: string | null;
 }
 
 export type CustomerWebhookEventDataByType = {
@@ -246,19 +267,44 @@ export function validateCustomerWebhookEventData<T extends CustomerWebhookEventT
       } as CustomerWebhookEventDataByType[T];
     }
     case 'platform.maintenance': {
-      const record = plainRecord(value, ['starts_at', 'ends_at', 'impact']);
-      assertWebhookTimestamp(record.starts_at, 'starts_at');
-      assertWebhookTimestamp(record.ends_at, 'ends_at');
-      if (Date.parse(record.ends_at) <= Date.parse(record.starts_at)) {
-        throw new TypeError('maintenance end must follow its start');
+      const record = plainRecord(value, [
+        'announcement_id',
+        'kind',
+        'severity',
+        'title',
+        'body',
+        'publish_at',
+        'unpublish_at',
+      ]);
+      assertWebhookUuid(record.announcement_id, 'announcement_id');
+      if (record.kind !== 'maintenance' && record.kind !== 'info' && record.kind !== 'billing') {
+        throw new TypeError('maintenance announcement kind is invalid');
       }
-      if (record.impact !== 'none' && record.impact !== 'degraded' && record.impact !== 'outage') {
-        throw new TypeError('maintenance impact is invalid');
+      if (record.severity !== 'info' && record.severity !== 'warning' && record.severity !== 'critical') {
+        throw new TypeError('maintenance announcement severity is invalid');
+      }
+      // The bounds mirror the announcement table (migration 092).
+      if (typeof record.title !== 'string' || record.title.trim().length < 1 || record.title.length > 200) {
+        throw new TypeError('maintenance announcement title is invalid');
+      }
+      if (typeof record.body !== 'string' || record.body.trim().length < 1 || record.body.length > 8000) {
+        throw new TypeError('maintenance announcement body is invalid');
+      }
+      assertWebhookTimestamp(record.publish_at, 'publish_at');
+      if (record.unpublish_at !== null) {
+        assertWebhookTimestamp(record.unpublish_at, 'unpublish_at');
+        if (Date.parse(record.unpublish_at) <= Date.parse(record.publish_at)) {
+          throw new TypeError('maintenance announcement unpublish must follow its publish');
+        }
       }
       return {
-        starts_at: record.starts_at,
-        ends_at: record.ends_at,
-        impact: record.impact,
+        announcement_id: record.announcement_id,
+        kind: record.kind,
+        severity: record.severity,
+        title: record.title,
+        body: record.body,
+        publish_at: record.publish_at,
+        unpublish_at: record.unpublish_at,
       } as CustomerWebhookEventDataByType[T];
     }
     default: {

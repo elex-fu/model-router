@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import { effectiveWeight } from '../../../src/saas/gateway/health-score.js';
 import {
   PostgresProviderAccountScheduler,
   type PostgresProviderAccountSchedulerOptions,
@@ -147,6 +148,9 @@ function eligibilityRow(mode: Mode, accountId = 'account-a'): Row {
     account_status: 'active',
     account_validation_state: 'verified',
     account_authz_version: '4',
+    account_priority: 0,
+    account_weight: 1,
+    account_quota_state: null,
     credential_owner_kind: mode === 'byok' ? 'tenant' : 'platform',
     credential_supply_mode: mode,
     credential_id: `credential-${accountId}`,
@@ -248,6 +252,7 @@ interface FakeDatabaseState {
   routeRows?: Row[];
   readonly eligibilityRows?: ReadonlyMap<string, Row[]>;
   readonly inFlight?: ReadonlyMap<string, unknown>;
+  readonly rateWindows?: ReadonlyMap<string, Row[]>;
   readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
 }
 
@@ -265,6 +270,8 @@ class FakeDatabase implements SaasDatabase {
     } else if (sql.includes('postgres-provider-account-scheduler:platform-eligibility')) {
       const accountId = String(values[3]);
       rows = this.state.eligibilityRows?.get(accountId) ?? [eligibilityRow('platform', accountId)];
+    } else if (sql.includes('postgres-provider-account-scheduler:rate-window')) {
+      rows = this.state.rateWindows?.get(String(values[1])) ?? [{ requests: '0', tokens: '0' }];
     } else if (sql.includes('postgres-provider-account-scheduler:concurrency')) {
       rows = [{ in_flight: this.state.inFlight?.get(String(values[2])) ?? '0' }];
     } else {
@@ -362,12 +369,17 @@ test('platform eligibility binds all 22 authority parameters including the membe
   const result = await scheduler.select(input([platformCandidate]));
   assert.equal(result.decision, 'allow');
 
-  const query = state.statements.find(({ sql }) => sql.includes('postgres-provider-account-scheduler:platform-eligibility'));
+  const query = state.statements.find(({ sql }) =>
+    sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
+  );
   assert.ok(query);
   const parameterSlots = [...new Set(Array.from(query.sql.matchAll(/\$(\d+)\b/g), (match) => Number(match[1])))].sort(
     (left, right) => left - right,
   );
-  assert.deepEqual(parameterSlots, Array.from({ length: 22 }, (_, index) => index + 1));
+  assert.deepEqual(
+    parameterSlots,
+    Array.from({ length: 22 }, (_, index) => index + 1),
+  );
   assert.equal(query.values.length, 22);
   assert.equal(query.values[14], platformCandidate.poolMemberAccountAuthzVersion);
   assert.match(query.sql, /member\.account_authz_version\s*=\s*\$15\b/);
@@ -384,10 +396,15 @@ test('stale platform member account epochs are rejected', async () => {
   const result = await scheduler.select(input([staleMemberCandidate]));
   assert.equal(result.decision, 'reject');
   if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
-  const query = state.statements.find(({ sql }) => sql.includes('postgres-provider-account-scheduler:platform-eligibility'));
+  const query = state.statements.find(({ sql }) =>
+    sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
+  );
   assert.ok(query);
   assert.equal(query.values[14], staleMemberCandidate.poolMemberAccountAuthzVersion);
-  assert.equal(state.statements.some(({ sql }) => sql.includes(':concurrency')), false);
+  assert.equal(
+    state.statements.some(({ sql }) => sql.includes(':concurrency')),
+    false,
+  );
 });
 
 test('platform candidates must target the exact persisted route pool before downstream checks', async () => {
@@ -397,21 +414,28 @@ test('platform candidates must target the exact persisted route pool before down
   assert.equal(platformCandidate.poolId, 'pool-a');
   assert.notEqual(platformCandidate.poolId, route.upstream_id);
   let healthCalls = 0;
-  const { scheduler, state, input } = setup('platform', { routeRows: [route] }, {
-    health: {
-      async get(healthInput) {
-        healthCalls += 1;
-        return HEALTHY.get(healthInput);
+  const { scheduler, state, input } = setup(
+    'platform',
+    { routeRows: [route] },
+    {
+      health: {
+        async get(healthInput) {
+          healthCalls += 1;
+          return HEALTHY.get(healthInput);
+        },
       },
     },
-  });
+  );
 
   const result = await scheduler.select(input([platformCandidate]));
   assert.equal(result.decision, 'reject');
   if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
   assert.equal(state.statements.length, 1);
   assert.ok(state.statements[0]?.sql.includes('postgres-provider-account-scheduler:route'));
-  assert.equal(state.statements.some(({ sql }) => sql.includes('eligibility') || sql.includes(':concurrency')), false);
+  assert.equal(
+    state.statements.some(({ sql }) => sql.includes('eligibility') || sql.includes(':concurrency')),
+    false,
+  );
   assert.equal(healthCalls, 0);
 });
 
@@ -581,4 +605,480 @@ test('platform lease snapshots use account-wide ownership and an explicit observ
   const query = state.statements.find(({ sql }) => sql.includes(':concurrency'));
   assert.deepEqual(query?.values, ['platform', null, 'account-a']);
   assert.match(query?.sql ?? '', /owner_tenant_id IS NOT DISTINCT FROM \$2/);
+});
+
+test('eligibility SQL reads the persisted contract C-7 scheduling scalars from the account row', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const { scheduler, state, input } = setup(mode);
+      const result = await scheduler.select(input([candidate(mode)]));
+      assert.equal(result.decision, 'allow');
+      const eligibilitySql = state.statements.find(({ sql }) => sql.includes('eligibility'))?.sql;
+      assert.ok(eligibilitySql?.includes('account.priority AS account_priority'));
+      assert.ok(eligibilitySql?.includes('account.weight AS account_weight'));
+    });
+  }
+});
+
+test('eligibility SQL reads the persisted D4 quota signal from the account row', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const { scheduler, state, input } = setup(mode);
+      const result = await scheduler.select(input([candidate(mode)]));
+      assert.equal(result.decision, 'allow');
+      const eligibilitySql = state.statements.find(({ sql }) => sql.includes('eligibility'))?.sql;
+      assert.ok(eligibilitySql?.includes('account.quota_state AS account_quota_state'));
+      // The snapshot is read-only here: the eligibility path never writes it
+      // and never joins billing or settlement relations for it.
+      assert.doesNotMatch(eligibilitySql ?? '', /quota_remaining_minor_units|ledger|settlement/i);
+    });
+  }
+});
+
+test('an exhausted persisted quota snapshot denies only that candidate', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const rows = new Map([
+        ['account-a', [{ ...eligibilityRow(mode, 'account-a'), account_quota_state: 'exhausted' }]],
+        ['account-b', [eligibilityRow(mode, 'account-b')]],
+      ]);
+      const { scheduler, input } = setup(mode, { eligibilityRows: rows });
+      const result = await scheduler.select(input([candidate(mode, 'account-a'), candidate(mode, 'account-b')]));
+      assert.equal(result.decision, 'allow');
+      if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+    });
+  }
+
+  await t.test('every exhausted candidate leaves no eligible account without blocking', async () => {
+    const rows = new Map([
+      ['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_quota_state: 'exhausted' }]],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a')]));
+    assert.equal(result.decision, 'reject');
+    if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
+  });
+});
+
+test('null, unknown, and ok quota snapshots leave scheduling untouched', async (t) => {
+  for (const quotaState of [null, 'unknown', 'ok'] as const) {
+    await t.test(String(quotaState), async () => {
+      const rows = new Map([
+        ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_quota_state: quotaState }]],
+      ]);
+      const { scheduler, input } = setup('platform', { eligibilityRows: rows });
+      const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+      assert.equal(result.decision, 'allow');
+      if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+    });
+  }
+});
+
+test('a low persisted quota snapshot demotes but never removes the candidate', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const rows = new Map([['account-a', [{ ...eligibilityRow(mode, 'account-a'), account_quota_state: 'low' }]]]);
+      const { scheduler, input } = setup(mode, { eligibilityRows: rows });
+      const result = await scheduler.select(input([candidate(mode, 'account-a')]));
+      assert.equal(result.decision, 'allow');
+      if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+    });
+  }
+
+  await t.test('the demoted weight loses the deterministic draw it would win undemoted', async () => {
+    // account-a at weight 9 wins the fixed request-e draw undemoted; a 'low'
+    // snapshot demotes it to the contract minimum weight 1, flipping the same
+    // deterministic draw to account-b.
+    const rows = (quotaState: unknown) =>
+      new Map([
+        [
+          'account-a',
+          [{ ...eligibilityRow('platform', 'account-a'), account_weight: 9, account_quota_state: quotaState }],
+        ],
+        ['account-b', [eligibilityRow('platform', 'account-b')]],
+      ]);
+    const candidates = [candidate('platform', 'account-a'), candidate('platform', 'account-b')];
+    const undemoted = setup('platform', { eligibilityRows: rows(null) });
+    const undemotedResult = await undemoted.scheduler.select({
+      ...undemoted.input(candidates),
+      requestId: 'request-e',
+    });
+    assert.equal(undemotedResult.decision, 'allow');
+    if (undemotedResult.decision === 'allow') assert.equal(undemotedResult.value.accountId, 'account-a');
+
+    const demoted = setup('platform', { eligibilityRows: rows('low') });
+    const demotedResult = await demoted.scheduler.select({ ...demoted.input(candidates), requestId: 'request-e' });
+    assert.equal(demotedResult.decision, 'allow');
+    if (demotedResult.decision === 'allow') assert.equal(demotedResult.value.accountId, 'account-b');
+  });
+});
+
+test('malformed persisted quota signals block instead of silently defaulting', async (t) => {
+  const cases: Array<{ name: string; patch: Row }> = [
+    { name: 'unknown string state', patch: { account_quota_state: 'full' } },
+    { name: 'wrong case state', patch: { account_quota_state: 'LOW' } },
+    { name: 'empty string state', patch: { account_quota_state: '' } },
+    { name: 'numeric state', patch: { account_quota_state: 0 } },
+    { name: 'boolean state', patch: { account_quota_state: true } },
+    { name: 'object state', patch: { account_quota_state: { state: 'low' } } },
+    { name: 'array state', patch: { account_quota_state: ['low'] } },
+  ];
+  for (const { name, patch } of cases) {
+    await t.test(name, async () => {
+      const row = { ...eligibilityRow('platform'), ...patch };
+      const { scheduler, input } = setup('platform', { eligibilityRows: new Map([['account-a', [row]]]) });
+      const result = await scheduler.select(input([candidate('platform')]));
+      assert.equal(result.decision, 'block');
+      if (result.decision === 'block') assert.match(result.message, /quota signal is malformed/);
+    });
+  }
+});
+
+test('persisted priority outranks the neutral tie regardless of candidate order', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const rows = new Map([
+        ['account-a', [{ ...eligibilityRow(mode, 'account-a'), account_priority: 7, account_weight: 9 }]],
+        ['account-b', [eligibilityRow(mode, 'account-b')]],
+      ]);
+      const { scheduler, input } = setup(mode, { eligibilityRows: rows });
+      const candidates = [candidate(mode, 'account-a'), candidate(mode, 'account-b')];
+      const first = await scheduler.select(input(candidates));
+      const second = await scheduler.select(input([...candidates].reverse()));
+      assert.equal(first.decision, 'allow');
+      assert.equal(second.decision, 'allow');
+      if (first.decision === 'allow' && second.decision === 'allow') {
+        assert.equal(first.value.accountId, 'account-a');
+        assert.equal(second.value.accountId, 'account-a');
+      }
+    });
+  }
+});
+
+test('a heavier persisted weight wins the deterministic draw within one priority band', async () => {
+  // Total weight 1 + 9 = 10; the fixed requestId draws into the heavier row.
+  const rows = new Map([
+    ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_weight: 9 }]],
+    ['account-b', [eligibilityRow('platform', 'account-b')]],
+  ]);
+  const { scheduler, input } = setup('platform', { eligibilityRows: rows });
+  const seen = new Set<string>();
+  for (const requestId of ['request-a', 'request-b', 'request-c', 'request-d']) {
+    const result = await scheduler.select({
+      ...input([candidate('platform', 'account-a'), candidate('platform', 'account-b')]),
+      requestId,
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') seen.add(result.value.accountId);
+  }
+  // The draw is deterministic per requestId; across several draws the heavier
+  // account must appear, and no draw may error or fall back to blocking.
+  assert.ok(seen.has('account-a'));
+});
+
+test('malformed persisted scheduling scalars block instead of silently defaulting', async (t) => {
+  const cases: Array<{ name: string; patch: Row }> = [
+    { name: 'priority above the contract bound', patch: { account_priority: 1001 } },
+    { name: 'negative priority', patch: { account_priority: -1 } },
+    { name: 'fractional priority', patch: { account_priority: 0.5 } },
+    { name: 'zero weight', patch: { account_weight: 0 } },
+    { name: 'weight above the contract bound', patch: { account_weight: 10001 } },
+    { name: 'non-numeric weight', patch: { account_weight: 'heavy' } },
+    { name: 'null priority', patch: { account_priority: null } },
+  ];
+  for (const { name, patch } of cases) {
+    await t.test(name, async () => {
+      const row = { ...eligibilityRow('platform'), ...patch };
+      const { scheduler, input } = setup('platform', { eligibilityRows: new Map([['account-a', [row]]]) });
+      const result = await scheduler.select(input([candidate('platform')]));
+      assert.equal(result.decision, 'block');
+      if (result.decision === 'block') assert.match(result.message, /scheduling scalars are malformed/);
+    });
+  }
+
+  await t.test('text-form scalars within bounds are accepted', async () => {
+    const row = { ...eligibilityRow('byok'), account_priority: '1000', account_weight: '10000' };
+    const { scheduler, input } = setup('byok', { eligibilityRows: new Map([['account-a', [row]]]) });
+    const result = await scheduler.select(input([candidate('byok')]));
+    assert.equal(result.decision, 'allow');
+  });
+});
+
+test('eligibility SQL reads the persisted R6 rate limits and R7 health score without extra queries when unset', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const { scheduler, state, input } = setup(mode);
+      const result = await scheduler.select(input([candidate(mode)]));
+      assert.equal(result.decision, 'allow');
+      const eligibilitySql = state.statements.find(({ sql }) => sql.includes('eligibility'))?.sql;
+      assert.ok(eligibilitySql?.includes('account.rpm_limit AS account_rpm_limit'));
+      assert.ok(eligibilitySql?.includes('account.tpm_limit AS account_tpm_limit'));
+      assert.ok(eligibilitySql?.includes('health.health_score AS account_health_score'));
+      assert.match(eligibilitySql ?? '', /LEFT JOIN saas_provider_account_runtime_health health/);
+      // NULL limits keep the pre-R6 path exactly: no window read is issued.
+      assert.equal(
+        state.statements.some(({ sql }) => sql.includes(':rate-window')),
+        false,
+      );
+    });
+  }
+});
+
+test('the rate window query is a bounded single-index trailing-minute read with the injected clock', async () => {
+  const rows = new Map([['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_rpm_limit: 10 }]]]);
+  const { scheduler, state, input } = setup('byok', {
+    eligibilityRows: rows,
+    rateWindows: new Map([['account-a', [{ requests: '3', tokens: '42' }]]]),
+  });
+  const result = await scheduler.select(input([candidate('byok')]));
+  assert.equal(result.decision, 'allow');
+  const query = state.statements.find(({ sql }) => sql.includes(':rate-window'));
+  assert.ok(query);
+  assert.deepEqual(query.values, ['tenant', 'account-a', NOW]);
+  assert.match(query.sql, /window_start > \$3::timestamptz - interval '60 seconds'/);
+  assert.match(query.sql, /coalesce\(sum\(requests\), 0\)::text AS requests/);
+  assert.match(query.sql, /account_scope = \$1\s+AND account_id = \$2/);
+  assert.doesNotMatch(query.sql, /INSERT|UPDATE|DELETE/i);
+});
+
+test('an account at its rpm ceiling is denied without affecting siblings', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const rows = new Map([
+        ['account-a', [{ ...eligibilityRow(mode, 'account-a'), account_rpm_limit: 2 }]],
+        ['account-b', [eligibilityRow(mode, 'account-b')]],
+      ]);
+      const { scheduler, state, input } = setup(mode, {
+        eligibilityRows: rows,
+        rateWindows: new Map([['account-a', [{ requests: '2', tokens: '0' }]]]),
+      });
+      const result = await scheduler.select(input([candidate(mode, 'account-a'), candidate(mode, 'account-b')]));
+      assert.equal(result.decision, 'allow');
+      if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+      const scope = mode === 'byok' ? 'tenant' : 'platform';
+      const query = state.statements.find(({ sql }) => sql.includes(':rate-window'));
+      assert.deepEqual(query?.values, [scope, 'account-a', NOW]);
+    });
+  }
+
+  await t.test('every ceiling-exhausted candidate leaves no eligible account without blocking', async () => {
+    const rows = new Map([['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_rpm_limit: 2 }]]]);
+    const { scheduler, input } = setup('byok', {
+      eligibilityRows: rows,
+      rateWindows: new Map([['account-a', [{ requests: '5', tokens: '0' }]]]),
+    });
+    const result = await scheduler.select(input([candidate('byok', 'account-a')]));
+    assert.equal(result.decision, 'reject');
+    if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
+  });
+});
+
+test('an account at its tpm ceiling is denied on the token dimension', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const rows = new Map([['account-a', [{ ...eligibilityRow(mode, 'account-a'), account_tpm_limit: 100 }]]]);
+      const { scheduler, input } = setup(mode, {
+        eligibilityRows: rows,
+        rateWindows: new Map([['account-a', [{ requests: '0', tokens: '100' }]]]),
+      });
+      const result = await scheduler.select(input([candidate(mode, 'account-a')]));
+      assert.equal(result.decision, 'reject');
+      if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
+    });
+  }
+});
+
+test('limits above the trailing window keep the candidate eligible', async () => {
+  const rows = new Map([
+    ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_rpm_limit: 3, account_tpm_limit: 10_000 }]],
+  ]);
+  const { scheduler, input } = setup('platform', {
+    eligibilityRows: rows,
+    rateWindows: new Map([['account-a', [{ requests: '2', tokens: '9999' }]]]),
+  });
+  const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+});
+
+test('malformed persisted rate limits block instead of silently defaulting', async (t) => {
+  const cases: Array<{ name: string; patch: Row }> = [
+    { name: 'zero rpm limit', patch: { account_rpm_limit: 0 } },
+    { name: 'negative rpm limit', patch: { account_rpm_limit: -5 } },
+    { name: 'fractional tpm limit', patch: { account_tpm_limit: 1.5 } },
+    { name: 'text zero limit', patch: { account_rpm_limit: '0' } },
+    { name: 'non-numeric limit', patch: { account_tpm_limit: 'fast' } },
+    { name: 'boolean limit', patch: { account_rpm_limit: true } },
+    { name: 'limit above the contract bound', patch: { account_tpm_limit: 1_000_000_001 } },
+  ];
+  for (const { name, patch } of cases) {
+    await t.test(name, async () => {
+      const row = { ...eligibilityRow('platform'), ...patch };
+      const { scheduler, state, input } = setup('platform', {
+        eligibilityRows: new Map([['account-a', [row]]]),
+        rateWindows: new Map([['account-a', [{ requests: '0', tokens: '0' }]]]),
+      });
+      const result = await scheduler.select(input([candidate('platform')]));
+      assert.equal(result.decision, 'block');
+      if (result.decision === 'block') assert.match(result.message, /rate limits are malformed/);
+      // A malformed ceiling is rejected before any window read is issued.
+      assert.equal(
+        state.statements.some(({ sql }) => sql.includes(':rate-window')),
+        false,
+      );
+    });
+  }
+});
+
+test('a malformed or missing rate window blocks the whole selection', async (t) => {
+  await t.test('non-numeric sums', async () => {
+    const rows = new Map([['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_rpm_limit: 2 }]]]);
+    const { scheduler, input } = setup('byok', {
+      eligibilityRows: rows,
+      rateWindows: new Map([['account-a', [{ requests: 'many', tokens: '0' }]]]),
+    });
+    const result = await scheduler.select(input([candidate('byok')]));
+    assert.equal(result.decision, 'block');
+    if (result.decision === 'block') assert.match(result.message, /rate window is malformed/);
+  });
+
+  await t.test('negative sums', async () => {
+    const rows = new Map([['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_tpm_limit: 100 }]]]);
+    const { scheduler, input } = setup('byok', {
+      eligibilityRows: rows,
+      rateWindows: new Map([['account-a', [{ requests: '0', tokens: '-1' }]]]),
+    });
+    const result = await scheduler.select(input([candidate('byok')]));
+    assert.equal(result.decision, 'block');
+    if (result.decision === 'block') assert.match(result.message, /rate window is malformed/);
+  });
+
+  await t.test('window authority unavailable', async () => {
+    const rows = new Map([['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_rpm_limit: 2 }]]]);
+    const { scheduler, input } = setup('byok', {
+      eligibilityRows: rows,
+      rateWindows: new Map([['account-a', []]]),
+    });
+    const result = await scheduler.select(input([candidate('byok')]));
+    assert.equal(result.decision, 'block');
+    if (result.decision === 'block') assert.match(result.message, /rate window is unavailable/);
+  });
+});
+
+test('the R7 effectiveWeight seam halves, floors, and passes through', () => {
+  assert.equal(effectiveWeight(9, 0.5), 4);
+  assert.equal(effectiveWeight(100, 0), 5);
+  assert.equal(effectiveWeight(7, null), 7);
+  assert.equal(effectiveWeight(10, 1), 10);
+  // The contract minimum weight is never undercut, even at the 5% floor.
+  assert.equal(effectiveWeight(1, 0), 1);
+  assert.equal(effectiveWeight(3, 0.05), 1);
+});
+
+test('a persisted health score modulates the deterministic draw without blocking', async (t) => {
+  await t.test('a halved score flips at least one deterministic draw to the sibling', async () => {
+    const rowsFor = (healthScore: unknown) =>
+      new Map([
+        [
+          'account-a',
+          [
+            {
+              ...eligibilityRow('platform', 'account-a'),
+              account_weight: 9,
+              account_health_score: healthScore,
+            },
+          ],
+        ],
+        ['account-b', [eligibilityRow('platform', 'account-b')]],
+      ]);
+    const candidates = [candidate('platform', 'account-a'), candidate('platform', 'account-b')];
+    const pick = async (healthScore: unknown, requestId: string) => {
+      const { scheduler, input } = setup('platform', { eligibilityRows: rowsFor(healthScore) });
+      const result = await scheduler.select({ ...input(candidates), requestId });
+      assert.equal(result.decision, 'allow');
+      return result.decision === 'allow' ? result.value.accountId : null;
+    };
+    // Deterministic per requestId: a halved weight (9 -> 4 against 1) must
+    // lose at least one draw the full weight wins, and every draw is stable.
+    let flipped: string | null = null;
+    for (let index = 0; index < 100 && flipped === null; index += 1) {
+      const requestId = `request-scan-${index}`;
+      const full = await pick(null, requestId);
+      const halved = await pick('0.500', requestId);
+      assert.equal(await pick(null, requestId), full);
+      assert.equal(await pick('0.500', requestId), halved);
+      if (full === 'account-a' && halved === 'account-b') flipped = requestId;
+    }
+    assert.ok(flipped !== null, 'a halved health score must flip at least one deterministic draw');
+  });
+
+  await t.test('a zero score keeps the five-percent floor and never blocks the candidate', async () => {
+    const rows = new Map([
+      ['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_weight: 100, account_health_score: '0.000' }]],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a')]));
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+  });
+
+  await t.test('a NULL score keeps the pre-R7 selection exactly', async () => {
+    const rowsFor = (includeScore: boolean) =>
+      new Map([
+        [
+          'account-a',
+          [
+            includeScore
+              ? { ...eligibilityRow('platform', 'account-a'), account_weight: 9, account_health_score: null }
+              : { ...eligibilityRow('platform', 'account-a'), account_weight: 9 },
+          ],
+        ],
+        ['account-b', [eligibilityRow('platform', 'account-b')]],
+      ]);
+    const candidates = [candidate('platform', 'account-a'), candidate('platform', 'account-b')];
+    for (const requestId of ['request-a', 'request-b', 'request-c', 'request-d']) {
+      const absent = setup('platform', { eligibilityRows: rowsFor(false) });
+      const explicitNull = setup('platform', { eligibilityRows: rowsFor(true) });
+      const first = await absent.scheduler.select({ ...absent.input(candidates), requestId });
+      const second = await explicitNull.scheduler.select({ ...explicitNull.input(candidates), requestId });
+      assert.equal(first.decision, 'allow');
+      assert.equal(second.decision, 'allow');
+      if (first.decision === 'allow' && second.decision === 'allow') {
+        assert.equal(first.value.accountId, second.value.accountId);
+      }
+    }
+  });
+
+  await t.test('numeric and text scores inside the range are accepted', async () => {
+    for (const score of [0.5, '0.500', 1, '1.000', 0, '0']) {
+      const rows = new Map([
+        ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_health_score: score }]],
+      ]);
+      const { scheduler, input } = setup('platform', { eligibilityRows: rows });
+      const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+      assert.equal(result.decision, 'allow', `score ${String(score)} must stay eligible`);
+    }
+  });
+});
+
+test('malformed persisted health scores block instead of silently defaulting', async (t) => {
+  const cases: Array<{ name: string; score: unknown }> = [
+    { name: 'above one', score: '1.001' },
+    { name: 'numeric above one', score: 2 },
+    { name: 'negative', score: -0.1 },
+    { name: 'negative text', score: '-0.500' },
+    { name: 'non-numeric', score: 'healthy' },
+    { name: 'precision beyond numeric(4,3)', score: '0.1234' },
+    { name: 'object', score: { value: 0.5 } },
+    { name: 'NaN', score: Number.NaN },
+  ];
+  for (const { name, score } of cases) {
+    await t.test(name, async () => {
+      const row = { ...eligibilityRow('platform'), account_health_score: score };
+      const { scheduler, input } = setup('platform', { eligibilityRows: new Map([['account-a', [row]]]) });
+      const result = await scheduler.select(input([candidate('platform')]));
+      assert.equal(result.decision, 'block');
+      if (result.decision === 'block') assert.match(result.message, /health score is malformed/);
+    });
+  }
 });

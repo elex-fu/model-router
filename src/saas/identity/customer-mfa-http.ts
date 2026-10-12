@@ -1,19 +1,26 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { CustomerMfaError, type CustomerMfaOperations, type CustomerMfaSessionProof } from './customer-mfa-types.js';
 import type { SaasIdentityRateLimiter } from './http.js';
+import type { SaasIdentityService } from './service.js';
 
 const PREFIX = '/console/api/v1/auth/mfa';
 type Route = 'status' | 'start' | 'confirm' | 'revoke';
 class BoundaryError extends Error {
   constructor(readonly status: number, readonly code: string) { super('Customer MFA request rejected.'); }
 }
-export interface CustomerMfaHttpOptions {
-  readonly service: CustomerMfaOperations;
+interface CustomerMfaHttpBoundaryOptions {
   readonly publicOrigin: string;
+  /** Same effective Secure attribute as the existing identity cookie issuer. */
+  readonly cookieSecure?: boolean;
   /** Existing managed shared source limiter; DB service adds durable per-user limits. */
   readonly rateLimiter: SaasIdentityRateLimiter;
 }
+export type CustomerMfaHttpOptions = CustomerMfaHttpBoundaryOptions & (
+  { readonly service: CustomerMfaOperations; readonly sessionAuthority?: never } |
+  { readonly service?: undefined; readonly sessionAuthority: Pick<SaasIdentityService, 'getSession' | 'verifyCsrfToken'> }
+);
 function record(v: unknown): v is Record<string,unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
@@ -72,20 +79,39 @@ async function body(req:IncomingMessage,route:Exclude<Route,'status'>):Promise<R
   } finally {if(timer)clearTimeout(timer);joined?.fill(0);for(const c of chunks)c.fill(0);}
 }
 function text(value:unknown):string {if(typeof value!=='string')throw new BoundaryError(400,'INVALID_BODY');return value;}
-function reply(res:ServerResponse,status:number,requestId:string,data:unknown,errorCode?:string,cookies?:string[]):void {
+function reply(res:ServerResponse,status:number,requestId:string,data:unknown,errorCode?:string,cookies?:string[],
+  availability?:'deployment-unavailable-v1'):void {
   res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store',
     'x-content-type-options':'nosniff','referrer-policy':'no-referrer',
     ...(cookies?{'set-cookie':cookies}:{})});
-  res.end(JSON.stringify(errorCode?{error:{code:errorCode,message:'The customer MFA request could not be completed.',requestId}}
+  res.end(JSON.stringify(errorCode?{error:{code:errorCode,message:'The customer MFA request could not be completed.',requestId,
+    ...(availability===undefined?{}:{availability})}}
     :{data,meta:{requestId}}));
+}
+// Match deployment's numeric loopback contract; never accept hostname prefixes.
+function isLoopbackHostname(hostname:string):boolean {
+  const lower=hostname.toLowerCase();
+  const normalized=lower.startsWith('[')&&lower.endsWith(']')?lower.slice(1,-1):lower;
+  if(normalized==='localhost')return true;
+  if(isIP(normalized)===6)return normalized==='::1';
+  if(isIP(normalized)===4)return normalized.startsWith('127.');
+  return false;
 }
 export function createCustomerMfaHandler(options:CustomerMfaHttpOptions) {
   const url=new URL(options.publicOrigin);
-  if(url.username||url.password||url.search||url.hash||url.pathname!=='/'
-    ||(url.protocol!=='https:'&&!(url.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(url.hostname)))
-    ||typeof options.rateLimiter?.take!=='function')throw new TypeError('Invalid customer MFA deployment configuration');
-  const expiredCookies=['mr_saas_session=; HttpOnly','mr_saas_csrf='].map(c=>
-    c+'; SameSite=Strict; Path=/console/api/v1; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT'+(url.protocol==='https:'?'; Secure':''));
+  if(options.publicOrigin!==url.origin||url.username||url.password||url.search||url.hash||url.pathname!=='/'
+    ||(url.protocol!=='https:'&&!(url.protocol==='http:'&&isLoopbackHostname(url.hostname)))
+    ||typeof options.rateLimiter?.take!=='function'
+    ||(options.service===undefined&&(typeof options.sessionAuthority?.getSession!=='function'
+      ||typeof options.sessionAuthority.verifyCsrfToken!=='function')))
+    throw new TypeError('Invalid customer MFA deployment configuration');
+  const secure=url.protocol==='https:'||options.cookieSecure===true?'; Secure':'';
+  const expiry='; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT'+secure;
+  const expiredCookies=[
+    'mr_saas_session=; HttpOnly; SameSite=Strict; Path=/console/api/v1'+expiry,
+    'mr_saas_csrf=; SameSite=Strict; Path=/console'+expiry,
+    'mr_saas_csrf=; SameSite=Strict; Path=/console/api/v1'+expiry,
+  ];
   return async(req:IncomingMessage,res:ServerResponse):Promise<boolean>=>{
     const requestId=randomUUID();
     let path:URL;
@@ -110,6 +136,18 @@ export function createCustomerMfaHandler(options:CustomerMfaHttpOptions) {
         throw new BoundaryError(429,'RATE_LIMITED');
       }
       const proof=sessionProof(req);
+      if(options.service===undefined) {
+        // Existing live identity tables only. Missing schema never becomes a
+        // synthetic MFA status, readiness success or a permissive service port.
+        const authority=options.sessionAuthority;
+        if(!await authority.getSession(proof.sessionToken))throw new BoundaryError(401,'UNAUTHENTICATED');
+        if(!await authority.verifyCsrfToken(proof.sessionToken,proof.csrfToken))throw new BoundaryError(403,'CSRF_REJECTED');
+        // Do not read, retain or reflect passwords/TOTP from an unavailable POST.
+        // Close rather than drain an arbitrarily large attacker-supplied body.
+        if(route!=='status')res.setHeader('connection','close');
+        reply(res,503,requestId,null,'UNAVAILABLE',undefined,'deployment-unavailable-v1');
+        return true;
+      }
       if(route==='status') {
         const value=await options.service.status(proof);reply(res,200,requestId,{enabled:value.enabled});return true;
       }

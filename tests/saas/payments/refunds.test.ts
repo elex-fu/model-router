@@ -9,7 +9,16 @@ import type {
   PaymentProviderRefundResult,
   PaymentRefundOperationsPort,
 } from '../../../src/saas/payments/index.js';
+import {
+  createEasyPayPaymentProvider,
+  EASY_PAY_PROVIDER_KEY,
+} from '../../../src/saas/payments/providers/easypay/index.js';
 import { PaymentRefundService } from '../../../src/saas/payments/refunds.js';
+import type {
+  CustomerWebhookEventProducer,
+  RefundStatusChangedTransition,
+} from '../../../src/saas/webhooks/producers.js';
+import { startMockPsp } from './mock-psp.js';
 
 const TENANT_ID = '00000000-0000-4000-8000-000000000001';
 const ACTOR_ID = '00000000-0000-4000-8000-000000000002';
@@ -154,40 +163,49 @@ class FakeRefundDatabase {
     return this.transactionTraces.map((statements) => [...statements]);
   }
 
-  readonly walletTopUp = {
-    id: TOP_UP_ID,
-    tenant_id: TENANT_ID,
-    order_type: 'wallet_topup',
-    state: 'fulfilled',
-    provider_key: PROVIDER_KEY,
-    merchant_id: MERCHANT_ID,
-    provider_order_id: PROVIDER_ORDER_ID,
-    local_order_ref: 'local-top-up-1',
-    funding_reference: 'funding-ref-1',
-    amount_minor_units: '1000',
-    currency: 'USD',
-    funding_transaction_id: FUNDING_TX_ID,
-  };
+  readonly walletTopUp: Record<string, unknown>;
+  readonly servicePlanOrder: Record<string, unknown>;
 
-  readonly servicePlanOrder = {
-    id: PLAN_ORDER_ID,
-    tenant_id: TENANT_ID,
-    project_id: 'project-byok-1',
-    state: 'fulfilled',
-    subscription_id: 'subscription-byok-1',
-    provider_key: PROVIDER_KEY,
-    merchant_id: MERCHANT_ID,
-    provider_order_id: PROVIDER_ORDER_ID,
-    verified_provider_key: PROVIDER_KEY,
-    verified_merchant_id: MERCHANT_ID,
-    verified_amount_minor_units: '1200',
-    verified_currency: 'USD',
-    snapshot_id: 'snapshot-byok-1',
-    snapshot_price_minor_units: '1200',
-    snapshot_currency: 'USD',
-    snapshot_policy_version: 'policy-v1',
-    local_order_ref: PLAN_ORDER_ID,
-  };
+  constructor(identity: { providerKey?: string; merchantId?: string; providerOrderId?: string } = {}) {
+    const resolved = {
+      providerKey: identity.providerKey ?? PROVIDER_KEY,
+      merchantId: identity.merchantId ?? MERCHANT_ID,
+      providerOrderId: identity.providerOrderId ?? PROVIDER_ORDER_ID,
+    };
+    this.walletTopUp = {
+      id: TOP_UP_ID,
+      tenant_id: TENANT_ID,
+      order_type: 'wallet_topup',
+      state: 'fulfilled',
+      provider_key: resolved.providerKey,
+      merchant_id: resolved.merchantId,
+      provider_order_id: resolved.providerOrderId,
+      local_order_ref: 'local-top-up-1',
+      funding_reference: 'funding-ref-1',
+      amount_minor_units: '1000',
+      currency: 'USD',
+      funding_transaction_id: FUNDING_TX_ID,
+    };
+    this.servicePlanOrder = {
+      id: PLAN_ORDER_ID,
+      tenant_id: TENANT_ID,
+      project_id: 'project-byok-1',
+      state: 'fulfilled',
+      subscription_id: 'subscription-byok-1',
+      provider_key: resolved.providerKey,
+      merchant_id: resolved.merchantId,
+      provider_order_id: resolved.providerOrderId,
+      verified_provider_key: resolved.providerKey,
+      verified_merchant_id: resolved.merchantId,
+      verified_amount_minor_units: '1200',
+      verified_currency: 'USD',
+      snapshot_id: 'snapshot-byok-1',
+      snapshot_price_minor_units: '1200',
+      snapshot_currency: 'USD',
+      snapshot_policy_version: 'policy-v1',
+      local_order_ref: PLAN_ORDER_ID,
+    };
+  }
 
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     return this.execute<Row>(sql, values);
@@ -695,10 +713,12 @@ function uuidFactory(): () => string {
 
 function createService(
   database: FakeRefundDatabase,
-  provider = new FakeRefundProvider(),
+  provider: PaymentProviderRefundAdapter = new FakeRefundProvider(),
   now = { value: Date.parse('2026-09-29T00:00:00.000Z') },
+  webhookEvents?: CustomerWebhookEventProducer,
+  identity: { providerKey?: string; merchantId?: string } = {},
 ) {
-  provider.database = database;
+  if (provider instanceof FakeRefundProvider) provider.database = database;
   const operations: PaymentRefundOperationsPort = {
     async authorize(input, executor) {
       assert.equal(database.inTransaction, true, 'refund authorization must share the creation transaction');
@@ -716,14 +736,15 @@ function createService(
     postVerifiedWalletRefund: database.postFakeWalletRefund.bind(database),
   };
   return new PaymentRefundService(database, provider, {
-    providerKey: PROVIDER_KEY,
-    merchantId: MERCHANT_ID,
+    providerKey: identity.providerKey ?? PROVIDER_KEY,
+    merchantId: identity.merchantId ?? MERCHANT_ID,
     operations,
     walletRefundLedger,
     now: () => new Date(now.value),
     idFactory: uuidFactory(),
     leaseTtlMs: 1_000,
     reconcileDelayMs: 1_000,
+    ...(webhookEvents === undefined ? {} : { webhookEvents }),
   });
 }
 
@@ -1367,4 +1388,184 @@ test('effect insertion failure rolls back refund, audit, and provisional suspens
   assert.equal(database.state.audit.length, 0);
   assert.equal(provider.submitCalls.length, 0);
   assert.deepEqual(database.walletRelatedCalls(), []);
+});
+
+// --- F3: customer webhook producer wiring ---
+
+interface RecordedRefundTransition extends RefundStatusChangedTransition {
+  readonly inTransaction: boolean;
+}
+
+function recordingProducer(database: FakeRefundDatabase) {
+  const transitions: RecordedRefundTransition[] = [];
+  const producer: CustomerWebhookEventProducer = {
+    async refundStatusChanged(_tx, input) {
+      transitions.push({ ...input, inTransaction: database.inTransaction });
+    },
+    async servicePlanOrderStatusChanged() {
+      throw new Error('unexpected plan-order event on the refund path');
+    },
+  };
+  return { producer, transitions };
+}
+
+test('F3: a successful wallet refund emits exactly one in-transaction status event', async () => {
+  const database = new FakeRefundDatabase();
+  const provider = new FakeRefundProvider();
+  const { producer, transitions } = recordingProducer(database);
+  const service = createService(database, provider, undefined, producer);
+
+  const refund = await service.requestWalletTopUpRefund(walletRefund('refund-request-webhook', '400'));
+
+  assert.equal(refund.status, 'succeeded');
+  assert.equal(transitions.length, 1);
+  const event = transitions[0];
+  assert.ok(event);
+  assert.deepEqual(
+    {
+      tenantId: event.tenantId,
+      refundId: event.refundId,
+      status: event.status,
+      amountMinorUnits: event.amountMinorUnits,
+      currency: event.currency,
+      occurredAt: event.occurredAt,
+      inTransaction: event.inTransaction,
+    },
+    {
+      tenantId: TENANT_ID,
+      refundId: refund.id,
+      status: 'succeeded',
+      amountMinorUnits: 400,
+      currency: 'USD',
+      occurredAt: '2026-09-29T00:00:00.000Z',
+      inTransaction: true,
+    },
+  );
+  assert.match(event.transitionRef, /^[0-9a-f-]{36}$/);
+});
+
+test('F3: unchanged pending query outcomes never re-emit', async () => {
+  const database = new FakeRefundDatabase();
+  const provider = new FakeRefundProvider();
+  provider.submitResult = 'pending';
+  provider.queryResult = 'pending';
+  const now = { value: Date.parse('2026-09-29T00:00:00.000Z') };
+  const { producer, transitions } = recordingProducer(database);
+  const service = createService(database, provider, now, producer);
+
+  const refund = await service.requestWalletTopUpRefund(walletRefund('refund-request-pending', '250'));
+  assert.equal(refund.status, 'pending');
+  assert.deepEqual(
+    transitions.map((event) => event.status),
+    ['pending'],
+  );
+
+  now.value += 1_001;
+  const batch = await service.processPendingRefunds(10);
+  assert.equal(batch.queried, 1);
+  assert.deepEqual(
+    transitions.map((event) => event.status),
+    ['pending'],
+    'a pending-to-pending reconcile keeps the event count flat',
+  );
+});
+
+test('F3: an expired submitting claim emits unknown then the queried outcome', async () => {
+  const database = new FakeRefundDatabase();
+  const provider = new FakeRefundProvider();
+  provider.queryResult = 'pending';
+  const now = { value: Date.parse('2026-09-29T00:00:00.000Z') };
+  const { producer, transitions } = recordingProducer(database);
+  const service = createService(database, provider, now, producer);
+  const refund = await service.requestWalletTopUpRefund(walletRefund('refund-request-crash-hook', '200'));
+  assert.equal(refund.status, 'succeeded');
+
+  database.state.walletBalance = 1_000n;
+  database.state.ledgerPostings = [];
+  database.state.walletFreezes.push({
+    refund_order_id: refund.id,
+    tenant_id: TENANT_ID,
+    wallet_id: WALLET_ID,
+    currency: 'USD',
+    amount_minor_units: '200',
+  });
+  Object.assign(database.state.refunds[0], {
+    state: 'submitting',
+    lease_action: 'submit',
+    lease_token: 'expired-submit-token',
+    lease_expires_at: '2026-09-28T23:59:59.000Z',
+    provider_refund_id: null,
+    wallet_refund_transaction_id: null,
+    completed_at: null,
+    next_reconcile_at: '2026-09-29T00:00:00.000Z',
+  });
+  transitions.length = 0;
+
+  const batch = await service.processPendingRefunds();
+  assert.equal(batch.queried, 1);
+  assert.deepEqual(
+    transitions.map((event) => event.status),
+    ['unknown', 'pending'],
+  );
+  assert.ok(transitions.every((event) => event.inTransaction));
+});
+
+test('C4: an easypay refund stays provisional under permanent unknown queries — no resubmission, no wallet movement, operator-bound', async () => {
+  const psp = await startMockPsp();
+  try {
+    psp.setHandler('refund', () => ({ json: { code: 1 } }));
+    const now = { value: Date.parse('2026-09-29T00:00:00.000Z') };
+    const easypay = createEasyPayPaymentProvider({
+      pid: '1001',
+      pkey: 'test-merchant-pkey-0123456789abcdef',
+      apiBase: psp.url,
+      notifyUrl: 'https://app.example.com/payments/notify',
+      returnUrl: 'https://app.example.com/payments/return',
+      paymentType: 'alipay',
+      now: () => new Date(now.value),
+    });
+    const database = new FakeRefundDatabase({
+      providerKey: EASY_PAY_PROVIDER_KEY,
+      merchantId: '1001',
+      providerOrderId: 'TRADE-1',
+    });
+    const service = createService(database, easypay.refundAdapter, now, undefined, {
+      providerKey: EASY_PAY_PROVIDER_KEY,
+      merchantId: '1001',
+    });
+
+    const refund = await service.requestWalletTopUpRefund(walletRefund('easypay-refund-1', '400'));
+    assert.equal(refund.status, 'pending', 'PSP acceptance is provisional, never self-finalizing');
+    assert.equal(psp.calls.refund.length, 1);
+    assert.equal(
+      psp.calls.refund[0]?.key,
+      'test-merchant-pkey-0123456789abcdef',
+      'upstream protocol: the refund call carries the plaintext pkey (egress-allowlist red line)',
+    );
+    assert.equal(psp.calls.refund[0]?.out_trade_no, TOP_UP_ID);
+    assert.equal(psp.calls.refund[0]?.money, '4.00');
+    assert.equal(database.state.walletFreezes.length, 1, 'the freeze stays while the outcome is unproven');
+    assert.equal(database.state.ledgerPostings.length, 0);
+    assert.equal(database.state.walletBalance, 1_000n);
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      now.value += 2_000;
+      const batch = await service.processPendingRefunds();
+      assert.equal(batch.unresolved, 1);
+      assert.equal(psp.calls.refund.length, 1, 'reconciliation never resubmits the refund');
+      assert.equal(
+        psp.calls.query.length,
+        0,
+        'queryRefund is always local unknown — zero HTTP, zero fabricated outcomes',
+      );
+      assert.equal(database.state.ledgerPostings.length, 0);
+      assert.equal(database.state.walletFreezes.length, 1);
+      assert.equal(database.state.walletBalance, 1_000n);
+    }
+    const stored = database.state.refunds[0];
+    assert.equal(stored?.state, 'unknown', 'permanent unknown is explicit and operator-bound — never auto-released');
+    assert.equal(stored?.completed_at, null);
+  } finally {
+    await psp.close();
+  }
 });

@@ -5,9 +5,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 
 // ── .env loader (no external dependency) ──────────────────────────────
 function loadEnv(): Record<string, string> {
@@ -46,18 +43,39 @@ const fixture = {
 
 // ── test harness ──────────────────────────────────────────────────────
 function tmpConfigPath(): string {
-  return path.join(os.tmpdir(), `mr-cli-test-${randomUUID()}.json`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-cli-test-'));
+  return path.join(dir, `config-${randomUUID()}.json`);
 }
 
-async function run(args: string[], configPath: string): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((resolve) => {
+type CliFailureMode = 'signalled' | 'launch_failed' | 'execution_failed';
+interface CliResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+  exitMode: 'exited';
+}
+const cliCwd = process.cwd();
+const cliEntry = path.join(cliCwd, 'src', 'cli', 'index.ts');
+
+async function run(args: string[], configPath: string): Promise<CliResult> {
+  return new Promise((resolve, reject) => {
     const child = execFile(
-      'npx',
-      ['tsx', 'src/cli/index.ts', ...args, '--config', configPath],
-      { cwd: process.cwd(), timeout: 30_000 },
+      process.execPath,
+      ['--import', 'tsx', cliEntry, ...args, '--config', configPath],
+      { cwd: cliCwd, timeout: 30_000 },
       (error, stdout, stderr) => {
-        const code = error?.code && typeof error.code === 'number' ? error.code : 0;
-        resolve({ stdout, stderr, code });
+        const code = !error && child.exitCode === 0 ? 0
+          : error && typeof error.code === 'number' && error.code > 0 && error.code === child.exitCode
+            ? error.code : null;
+        if (code === null) {
+          const failureMode: CliFailureMode = child.signalCode !== null ? 'signalled'
+            : error?.code === 'ENOENT' || error?.code === 'EACCES' || error?.code === 'ENOEXEC'
+              ? 'launch_failed' : 'execution_failed';
+          // Do not return an ambiguous code even to a caller that permits nonzero exits.
+          reject(new Error(`CLI invocation failed (${failureMode})`));
+          return;
+        }
+        resolve({ stdout, stderr, code, exitMode: 'exited' });
       },
     );
   });
@@ -82,7 +100,7 @@ test('upstream:add, upstream:list, upstream:delete', async () => {
       ],
       configPath,
     );
-    assert.equal(addRes.code, 0, `upstream:add failed: ${addRes.stderr}`);
+    assert.equal(addRes.code, 0, `upstream:add failed (${addRes.exitMode})`);
     assert.ok(addRes.stdout.includes('Created upstream'));
 
     // list
@@ -108,7 +126,7 @@ test('key:create, key:list, key:disable, key:enable, key:rotate, key:delete', as
   try {
     // create
     const createRes = await run(['key:create', 'alice', '--upstreams', 'kimi-code', '--rpm', '30'], configPath);
-    assert.equal(createRes.code, 0, `key:create failed: ${createRes.stderr}`);
+    assert.equal(createRes.code, 0, `key:create failed (${createRes.exitMode})`);
     assert.ok(createRes.stdout.includes('Created proxy key'));
 
     // list (masked)
@@ -191,9 +209,8 @@ test('test <upstream> — real connectivity probe', {
     );
 
     const probeRes = await run(['test', env.UPSTREAM_NAME], configPath);
-    // We expect this to succeed with real credentials; if the network is
-    // unreachable or key invalid we surface the output so the user knows.
-    assert.equal(probeRes.code, 0, `Upstream probe failed. stdout: ${probeRes.stdout}\nstderr: ${probeRes.stderr}`);
+    // Keep the existing live opt-in, but never echo provider output on failure.
+    assert.equal(probeRes.code, 0, `Upstream probe failed (${probeRes.exitMode})`);
     assert.ok(probeRes.stdout.includes('OK'));
   } finally {
     if (fs.existsSync(configPath)) fs.unlinkSync(configPath);

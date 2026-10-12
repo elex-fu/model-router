@@ -3,10 +3,13 @@ import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   type ApiKeyMetadata,
+  type ApiKeyPrincipalKind,
   type ApiKeySupplyMode,
   type ConsoleBillableBasis,
   type ConsoleFinancialStatus,
   type ConsoleReconciliationState,
+  type CustomerPaymentOrderStatus,
+  type CustomerPaymentOrderSummary,
   type CustomerRefundStatus,
   type CustomerRefundSummary,
   type ConsoleQueryFilters,
@@ -32,6 +35,11 @@ import {
   type ServicePlanCatalogItem,
   type SessionResult,
   saasClient,
+  type TenantAnnouncement,
+  type TenantAnnouncementKind,
+  type TenantAnnouncementPage,
+  type TenantAnnouncementReadReceipt,
+  type TenantAnnouncementSeverity,
   type TenantByokCredential,
   type TenantByokCredentialCreateInput,
   type TenantByokCredentialLifecycleInput,
@@ -44,6 +52,9 @@ import { SaasWalletPage } from './saas-wallet';
 import { ServicePlanPurchase } from './service-plan-purchase';
 import { WorkspaceContent, WorkspaceInvitationAcceptance } from './saas-workspace';
 import { clearWorkspaceDrafts, workspaceMembersRootKey, workspaceRoleLabels } from './saas-workspace-state';
+import { CustomerMfaSettings } from './saas-customer-mfa';
+import { ApiKeyMetadataDetails, ApiKeyPrincipalSelector } from './saas-api-key-ui';
+export { isApiKeyPrincipalKind, keyPrincipalLabel } from './saas-api-key-ui';
 
 const tenantsKey = ['saas-console', 'tenants'] as const;
 const projectsRootKey = ['saas-console', 'projects'] as const;
@@ -53,9 +64,17 @@ const plansRootKey = ['saas-console', 'service-plans'] as const;
 const usageRootKey = ['saas-console', 'usage'] as const;
 const requestsRootKey = ['saas-console', 'requests'] as const;
 const customerRefundRootKey = ['saas-console', 'refunds'] as const;
+const customerPaymentOrderRootKey = ['saas-console', 'payment-orders'] as const;
 export const customerSessionsKey = ['saas-console', 'sessions'] as const;
 export const customerRefundHistoryKey = (tenantId: string, cursor?: string) =>
   [...customerRefundRootKey, tenantId, cursor ?? ''] as const;
+export const customerPaymentOrderHistoryKey = (tenantId: string, cursor?: string) =>
+  [...customerPaymentOrderRootKey, tenantId, cursor ?? ''] as const;
+const tenantAnnouncementsRootKey = ['saas-console', 'announcements'] as const;
+export const tenantAnnouncementsKey = (tenantId: string, cursor?: string) =>
+  [...tenantAnnouncementsRootKey, tenantId, 'page', cursor ?? ''] as const;
+export const tenantAnnouncementUnreadKey = (tenantId: string) =>
+  [...tenantAnnouncementsRootKey, tenantId, 'unread'] as const;
 export const customerWebhookRootKey = ['saas-console', 'webhooks'] as const;
 export const customerWebhookEndpointsKey = (tenantId: string) => [...customerWebhookRootKey, tenantId, 'endpoints'] as const;
 export const customerWebhookSecretsKey = (tenantId: string, endpointId: string) =>
@@ -82,6 +101,12 @@ export function parseModelScopes(value: string): { scopes: string[]; error?: str
 
 export function isApiKeySupplyMode(value: string): value is ApiKeySupplyMode {
   return value === 'byok' || value === 'platform';
+}
+
+/** UI hint only: the server rereads both current memberships in its write TX. */
+export function canIssueProjectServiceKey(tenantRole?: TenantRole, projectRole?: TenantRole): boolean {
+  return (tenantRole === 'owner' || tenantRole === 'admin') &&
+    (projectRole === 'owner' || projectRole === 'admin');
 }
 
 export function keyErrorMessage(error: unknown): string {
@@ -623,13 +648,26 @@ function ConsoleHeader({
     | 'keys'
     | 'credentials'
     | 'wallet'
+    | 'billing'
     | 'refunds'
+    | 'notifications'
     | 'security'
     | 'webhooks';
   onLogout: () => Promise<void>;
 }) {
   const tenants = useQuery({ queryKey: tenantsKey, queryFn: saasClient.getTenants, retry: false });
   const showRefunds = tenants.data?.some((tenant) => canViewCustomerRefunds(tenant.role)) ?? false;
+  const announcementBadgeTenantId = tenants.data?.[0]?.id;
+  const announcementBadge = useQuery({
+    queryKey: tenantAnnouncementUnreadKey(announcementBadgeTenantId ?? ''),
+    queryFn: ({ signal }) => {
+      if (!announcementBadgeTenantId) throw new Error('通知租户未选择');
+      return saasClient.getTenantAnnouncements(announcementBadgeTenantId, { limit: 100, signal });
+    },
+    enabled: Boolean(announcementBadgeTenantId),
+    retry: false,
+  });
+  const unreadAnnouncements = countUnreadAnnouncements(announcementBadge.data?.items);
   const [logoutError, setLogoutError] = useState<unknown>();
 
   async function logout() {
@@ -648,6 +686,19 @@ function ConsoleHeader({
         <nav aria-label="客户控制台导航">
           <Link to="/console" aria-current={active === 'workspace' ? 'page' : undefined}>
             工作空间
+          </Link>
+          {' · '}
+          <Link to="/console/notifications" aria-current={active === 'notifications' ? 'page' : undefined}>
+            通知
+            {unreadAnnouncements > 0 && (
+              <>
+                {' '}
+                <span className="badge warn" aria-hidden="true">
+                  {unreadAnnouncements}
+                </span>
+                <span className="sr-only">{`（${unreadAnnouncements} 条未读公告）`}</span>
+              </>
+            )}
           </Link>
           {' · '}
           <Link to="/console/catalog" aria-current={active === 'catalog' ? 'page' : undefined}>
@@ -680,6 +731,10 @@ function ConsoleHeader({
           {' · '}
           {showRefunds && (
             <>
+              <Link to="/console/billing" aria-current={active === 'billing' ? 'page' : undefined}>
+                账单
+              </Link>
+              {' · '}
               <Link to="/console/refunds" aria-current={active === 'refunds' ? 'page' : undefined}>
                 退款记录
               </Link>
@@ -968,6 +1023,12 @@ export function CustomerSessionsPage({
         <strong>当前会话提示</strong>
         <span>撤销标记为“当前”的会话会立即退出登录；之后需要重新登录。</span>
       </div>
+      <CustomerMfaSettings
+        sessionScope={sessionScope}
+        isCurrentSessionScope={isCurrentSessionScope}
+        onSignInRequired={onCurrentSessionRevoked}
+        onLogout={onLogout}
+      />
       <Panel
         title="登录会话"
         action={
@@ -1194,6 +1255,695 @@ function CustomerRefundErrorNotice({
 
 function customerRefundTypeLabel(refund: CustomerRefundSummary): string {
   return refund.refundType === 'wallet_topup' ? '钱包充值退款' : 'BYOK 服务计划退款';
+}
+
+const customerPaymentOrderStatusPresentation: Record<
+  CustomerPaymentOrderStatus,
+  { label: string; tone: 'neutral' | 'good' | 'bad' | 'warn'; hint?: string }
+> = {
+  created: {
+    label: '已创建 · 待支付',
+    tone: 'warn',
+    hint: '订单尚未支付；请前往钱包页继续或重新发起充值。',
+  },
+  pending: {
+    label: '支付处理中 · 尚未确认',
+    tone: 'warn',
+    hint: '支付结果尚未最终确认，请勿重复支付同一订单。',
+  },
+  provider_failed: { label: '支付失败', tone: 'bad' },
+  paid: {
+    label: '已支付 · 入账中',
+    tone: 'warn',
+    hint: '支付已确认，钱包入账正在完成；当前状态不是最终结果。',
+  },
+  fulfilling: {
+    label: '入账处理中 · 尚未完成',
+    tone: 'warn',
+    hint: '钱包入账仍在处理中；请勿重复支付同一订单。',
+  },
+  fulfilled: { label: '已入账', tone: 'good' },
+  cancelled: { label: '已取消', tone: 'neutral' },
+  reconciliation_pending: {
+    label: '对账确认中 · 尚未最终确认',
+    tone: 'warn',
+    hint: '服务端正在与支付渠道核对最终结果；请等待状态更新，请勿重复支付。',
+  },
+};
+
+function customerPaymentOrderErrorCopy(error: unknown): {
+  title: string;
+  message: string;
+  action: 'retry' | 'login';
+  actionLabel: string;
+} {
+  if (error instanceof SaasApiError && (error.status === 401 || error.code === 'UNAUTHENTICATED')) {
+    return {
+      title: '登录状态已过期',
+      message: '请重新登录后查看账单。',
+      action: 'login',
+      actionLabel: '返回登录',
+    };
+  }
+  if (error instanceof SaasApiError && (error.status === 403 || error.code === 'FORBIDDEN')) {
+    return {
+      title: '无权查看账单',
+      message: '当前账号无权查看所选租户的账单，请确认租户授权。',
+      action: 'retry',
+      actionLabel: '重试',
+    };
+  }
+  if (error instanceof SaasApiError && (error.code === 'CSRF_REJECTED' || error.code === 'ORIGIN_REJECTED')) {
+    return {
+      title: '安全校验失败',
+      message: '安全凭证可能已过期，请刷新页面后重试。',
+      action: 'retry',
+      actionLabel: '重试',
+    };
+  }
+  if (error instanceof SaasApiError && (error.status === 0 || error.code === 'NETWORK')) {
+    return {
+      title: '网络连接失败',
+      message: '暂时无法连接账单服务，请检查网络后重试。',
+      action: 'retry',
+      actionLabel: '重试',
+    };
+  }
+  return {
+    title: '账单读取失败',
+    message: '暂时无法读取账单，请稍后重试。',
+    action: 'retry',
+    actionLabel: '重试',
+  };
+}
+
+function CustomerPaymentOrderErrorNotice({
+  error,
+  onRetry,
+  onLogout,
+}: {
+  error: unknown;
+  onRetry: () => void;
+  onLogout: () => Promise<void>;
+}) {
+  const copy = customerPaymentOrderErrorCopy(error);
+  return (
+    <div className="notice error" role="alert">
+      <strong>{copy.title}</strong>
+      <span>{copy.message}</span>
+      <button
+        type="button"
+        onClick={() => {
+          if (copy.action === 'login') void onLogout().catch(() => {});
+          else onRetry();
+        }}
+      >
+        {copy.actionLabel}
+      </button>
+    </div>
+  );
+}
+
+function customerPaymentOrderTypeLabel(order: CustomerPaymentOrderSummary): string {
+  return order.orderType === 'wallet_topup' ? '钱包充值' : '订单';
+}
+
+export function countUnreadAnnouncements(items: readonly TenantAnnouncement[] | undefined): number {
+  if (!items) return 0;
+  let count = 0;
+  for (const item of items) {
+    if (item.readAt === null) count += 1;
+  }
+  return count;
+}
+
+/** Server read receipts are the only write path for readAt; merge by id, never invent one. */
+export function mergeAnnouncementReadReceipt(
+  items: readonly TenantAnnouncement[],
+  receipt: TenantAnnouncementReadReceipt,
+): TenantAnnouncement[] {
+  return items.map((item) => (item.id === receipt.announcementId ? { ...item, readAt: receipt.readAt } : item));
+}
+
+/**
+ * Optimistic read-receipt lifecycle: onPending applies the local read state
+ * immediately; onSettled always clears it, so a rejected request rolls the
+ * card back to unread while a confirmation first replaces the override with
+ * the server-acknowledged receipt.
+ */
+export async function performTenantAnnouncementMarkRead(
+  input: { tenantId: string; announcementId: string; optimisticReadAt: string },
+  dependencies: {
+    client?: Pick<typeof saasClient, 'markTenantAnnouncementRead'>;
+    onPending: (announcementId: string, optimisticReadAt: string) => void;
+    onConfirmed: (receipt: TenantAnnouncementReadReceipt) => void | Promise<void>;
+    onSettled: (announcementId: string) => void;
+  },
+): Promise<TenantAnnouncementReadReceipt> {
+  const client = dependencies.client ?? saasClient;
+  dependencies.onPending(input.announcementId, input.optimisticReadAt);
+  try {
+    const receipt = await client.markTenantAnnouncementRead(input.tenantId, input.announcementId);
+    await dependencies.onConfirmed(receipt);
+    return receipt;
+  } finally {
+    dependencies.onSettled(input.announcementId);
+  }
+}
+
+const tenantAnnouncementSeverityPresentation: Record<
+  TenantAnnouncementSeverity,
+  { label: string; tone: 'neutral' | 'warn' | 'bad' }
+> = {
+  critical: { label: '严重', tone: 'bad' },
+  warning: { label: '警告', tone: 'warn' },
+  info: { label: '提示', tone: 'neutral' },
+};
+
+const tenantAnnouncementKindLabels: Record<TenantAnnouncementKind, string> = {
+  maintenance: '维护',
+  info: '通知',
+  billing: '账单',
+};
+
+function tenantAnnouncementErrorCopy(error: unknown): {
+  title: string;
+  message: string;
+  action: 'retry' | 'login';
+  actionLabel: string;
+} {
+  if (error instanceof SaasApiError && (error.status === 401 || error.code === 'UNAUTHENTICATED')) {
+    return {
+      title: '登录状态已过期',
+      message: '请重新登录后查看通知。',
+      action: 'login',
+      actionLabel: '返回登录',
+    };
+  }
+  if (
+    error instanceof SaasApiError &&
+    (error.code === 'CSRF_REJECTED' || error.code === 'ORIGIN_REQUIRED' || error.code === 'ORIGIN_REJECTED')
+  ) {
+    return {
+      title: '安全校验失败',
+      message: '安全凭证可能已过期，请刷新页面后重试。',
+      action: 'retry',
+      actionLabel: '重试',
+    };
+  }
+  if (error instanceof SaasApiError && (error.status === 403 || error.code === 'FORBIDDEN')) {
+    return {
+      title: '无权查看通知',
+      message: '当前账号无权查看所选租户的通知，请确认租户授权。',
+      action: 'retry',
+      actionLabel: '重试',
+    };
+  }
+  if (error instanceof SaasApiError && (error.status === 0 || error.code === 'NETWORK')) {
+    return {
+      title: '网络连接失败',
+      message: '暂时无法连接通知服务，请检查网络后重试。',
+      action: 'retry',
+      actionLabel: '重试',
+    };
+  }
+  return {
+    title: '通知读取失败',
+    message: '暂时无法读取通知，请稍后重试。',
+    action: 'retry',
+    actionLabel: '重试',
+  };
+}
+
+function TenantAnnouncementErrorNotice({
+  error,
+  onRetry,
+  onLogout,
+}: {
+  error: unknown;
+  onRetry: () => void;
+  onLogout: () => Promise<void>;
+}) {
+  const copy = tenantAnnouncementErrorCopy(error);
+  return (
+    <div className="notice error" role="alert">
+      <strong>{copy.title}</strong>
+      <span>{copy.message}</span>
+      <button
+        type="button"
+        onClick={() => {
+          if (copy.action === 'login') void onLogout().catch(() => {});
+          else onRetry();
+        }}
+      >
+        {copy.actionLabel}
+      </button>
+    </div>
+  );
+}
+
+export function TenantNotificationsPage({ onLogout }: { onLogout: () => Promise<void> }) {
+  const queryClient = useQueryClient();
+  const tenants = useQuery({ queryKey: tenantsKey, queryFn: saasClient.getTenants, retry: false });
+  const [selectedTenantId, setSelectedTenantId] = useState('');
+  const [position, setPosition] = useState<{
+    tenantId: string;
+    cursors: Array<string | undefined>;
+    index: number;
+  }>({ tenantId: '', cursors: [undefined], index: 0 });
+  const [pendingReads, setPendingReads] = useState<ReadonlyMap<string, string>>(new Map());
+  const [readError, setReadError] = useState<{ announcementId: string; error: unknown } | undefined>();
+  const notificationTenants = useMemo(() => tenants.data ?? [], [tenants.data]);
+  const selectedTenant = notificationTenants.find((tenant) => tenant.id === selectedTenantId) ?? notificationTenants[0];
+  const tenantId = selectedTenant?.id;
+
+  useEffect(() => {
+    if (notificationTenants.some((tenant) => tenant.id === selectedTenantId)) return;
+    setSelectedTenantId(notificationTenants[0]?.id ?? '');
+  }, [notificationTenants, selectedTenantId]);
+
+  const currentPosition =
+    position.tenantId === tenantId
+      ? position
+      : { tenantId: tenantId ?? '', cursors: [undefined], index: 0 };
+  const cursor = currentPosition.cursors[currentPosition.index];
+  const announcements = useQuery({
+    queryKey: tenantAnnouncementsKey(tenantId ?? '', cursor),
+    queryFn: ({ signal }) => {
+      if (!tenantId) throw new Error('通知租户未选择');
+      return saasClient.getTenantAnnouncements(tenantId, { cursor, limit: 25, signal });
+    },
+    enabled: Boolean(tenantId),
+    retry: false,
+  });
+
+  function chooseTenant(nextTenantId: string) {
+    if (!notificationTenants.some((tenant) => tenant.id === nextTenantId)) return;
+    setSelectedTenantId(nextTenantId);
+    setPosition({ tenantId: nextTenantId, cursors: [undefined], index: 0 });
+    setPendingReads(new Map());
+    setReadError(undefined);
+  }
+
+  function goPrevious() {
+    if (currentPosition.index === 0) return;
+    setPosition({ ...currentPosition, index: currentPosition.index - 1 });
+  }
+
+  function goNext() {
+    const nextCursor = announcements.data?.nextCursor;
+    if (!tenantId || !nextCursor || nextCursor === cursor || announcements.isFetching) return;
+    const cursors = currentPosition.cursors.slice(0, currentPosition.index + 1);
+    cursors.push(nextCursor);
+    setPosition({ tenantId, cursors, index: currentPosition.index + 1 });
+  }
+
+  async function markRead(announcement: TenantAnnouncement) {
+    if (!tenantId || announcement.readAt !== null || pendingReads.has(announcement.id)) return;
+    setReadError(undefined);
+    try {
+      await performTenantAnnouncementMarkRead(
+        { tenantId, announcementId: announcement.id, optimisticReadAt: new Date().toISOString() },
+        {
+          onPending: (announcementId, optimisticReadAt) =>
+            setPendingReads((previous) => new Map(previous).set(announcementId, optimisticReadAt)),
+          onConfirmed: (receipt) => {
+            queryClient.setQueriesData<TenantAnnouncementPage>(
+              { queryKey: [...tenantAnnouncementsRootKey, tenantId, 'page'] },
+              (current) =>
+                current ? { ...current, items: mergeAnnouncementReadReceipt(current.items, receipt) } : current,
+            );
+            void queryClient.invalidateQueries({ queryKey: tenantAnnouncementUnreadKey(tenantId) });
+          },
+          onSettled: (announcementId) =>
+            setPendingReads((previous) => {
+              if (!previous.has(announcementId)) return previous;
+              const next = new Map(previous);
+              next.delete(announcementId);
+              return next;
+            }),
+        },
+      );
+    } catch (error) {
+      setReadError({ announcementId: announcement.id, error });
+    }
+  }
+
+  const hasPreviousPage = currentPosition.index > 0;
+  const hasNextPage = Boolean(announcements.data?.nextCursor && announcements.data.nextCursor !== cursor);
+
+  return (
+    <div className="saas-console">
+      <ConsoleHeader active="notifications" onLogout={onLogout} />
+      <div className="page-title">
+        <div>
+          <p className="eyebrow">NOTIFICATIONS · ANNOUNCEMENTS</p>
+          <h1>通知</h1>
+          <p>查看平台发布的维护、通知与账单公告；公告按严重程度与发布时间排序。</p>
+        </div>
+      </div>
+      <p className="muted">公告由平台运营发布；标记已读仅影响当前账号的已读状态。</p>
+
+      {tenants.isPending ? (
+        <div className="skeleton" role="status" aria-label="正在加载已授权租户">
+          <i />
+          <i />
+        </div>
+      ) : tenants.isError ? (
+        <TenantAnnouncementErrorNotice
+          error={tenants.error}
+          onRetry={() => void tenants.refetch()}
+          onLogout={onLogout}
+        />
+      ) : notificationTenants.length === 0 ? (
+        <div className="empty" role="status">当前账号没有已授权的租户。</div>
+      ) : selectedTenant && tenantId ? (
+        <>
+          {notificationTenants.length > 1 && (
+            <Field label="租户">
+              <select
+                aria-label="选择通知租户"
+                value={selectedTenant.id}
+                onChange={(event) => chooseTenant(event.target.value)}
+              >
+                {notificationTenants.map((tenant) => (
+                  <option key={tenant.id} value={tenant.id}>
+                    {tenant.name} · {roleLabels[tenant.role]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+
+          <Panel
+            title="平台公告"
+            action={
+              <button
+                type="button"
+                className="quiet"
+                disabled={announcements.isFetching}
+                onClick={() => void announcements.refetch()}
+              >
+                {announcements.isFetching ? '正在刷新…' : '刷新通知'}
+              </button>
+            }
+          >
+            {announcements.isPending ? (
+              <div className="skeleton" role="status" aria-label="正在加载通知">
+                <i />
+                <i />
+                <i />
+              </div>
+            ) : announcements.isError ? (
+              <TenantAnnouncementErrorNotice
+                error={announcements.error}
+                onRetry={() => void announcements.refetch()}
+                onLogout={onLogout}
+              />
+            ) : announcements.data?.items.length === 0 ? (
+              <div className="empty" role="status">当前没有可见的平台公告。</div>
+            ) : (
+              <>
+                <section className="saas-tenant-list" aria-label="公告列表">
+                  {announcements.data?.items.map((announcement) => {
+                    const pendingReadAt = pendingReads.get(announcement.id);
+                    const effectiveReadAt = announcement.readAt ?? pendingReadAt ?? null;
+                    const unread = effectiveReadAt === null;
+                    const severity = tenantAnnouncementSeverityPresentation[announcement.severity];
+                    return (
+                      <article className={unread ? 'saas-tenant-card unread' : 'saas-tenant-card'} key={announcement.id}>
+                        <div className="saas-tenant-heading">
+                          <div>
+                            <h3>{announcement.title}</h3>
+                            <small>
+                              公告 ID：<code>{announcement.id}</code>
+                            </small>
+                          </div>
+                          <div>
+                            <Badge tone={severity.tone}>{severity.label}</Badge>{' '}
+                            <Badge tone="neutral">{tenantAnnouncementKindLabels[announcement.kind]}</Badge>{' '}
+                            {unread ? <Badge tone="warn">未读</Badge> : <Badge tone="good">已读</Badge>}
+                          </div>
+                        </div>
+                        <p>{announcement.body}</p>
+                        <div className="summary-list">
+                          <div>
+                            <span>发布时间</span>
+                            <strong>
+                              <time dateTime={announcement.publishAt}>{customerSessionDate(announcement.publishAt)}</time>
+                            </strong>
+                          </div>
+                          <div>
+                            <span>展示截止</span>
+                            <strong>
+                              {announcement.unpublishAt ? (
+                                <time dateTime={announcement.unpublishAt}>
+                                  {customerSessionDate(announcement.unpublishAt)}
+                                </time>
+                              ) : '长期展示'}
+                            </strong>
+                          </div>
+                          <div>
+                            <span>已读时间</span>
+                            <strong>
+                              {effectiveReadAt ? (
+                                <time dateTime={effectiveReadAt}>{customerSessionDate(effectiveReadAt)}</time>
+                              ) : '尚未阅读'}
+                            </strong>
+                          </div>
+                        </div>
+                        {unread ? (
+                          <div className="actions">
+                            <button type="button" onClick={() => void markRead(announcement)}>
+                              标记已读
+                            </button>
+                          </div>
+                        ) : pendingReadAt !== undefined ? (
+                          <p className="muted" role="note">正在标记已读…</p>
+                        ) : null}
+                        {readError?.announcementId === announcement.id && (
+                          <TenantAnnouncementErrorNotice
+                            error={readError.error}
+                            onRetry={() => void markRead(announcement)}
+                            onLogout={onLogout}
+                          />
+                        )}
+                      </article>
+                    );
+                  })}
+                </section>
+                {(hasPreviousPage || hasNextPage) && (
+                  <nav className="actions" aria-label="通知分页">
+                    <span aria-live="polite">第 {currentPosition.index + 1} 页</span>
+                    <button type="button" disabled={!hasPreviousPage || announcements.isFetching} onClick={goPrevious}>
+                      上一页
+                    </button>
+                    <button type="button" disabled={!hasNextPage || announcements.isFetching} onClick={goNext}>
+                      下一页
+                    </button>
+                  </nav>
+                )}
+              </>
+            )}
+          </Panel>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+export function CustomerPaymentOrdersPage({ onLogout }: { onLogout: () => Promise<void> }) {
+  const tenants = useQuery({ queryKey: tenantsKey, queryFn: saasClient.getTenants, retry: false });
+  const [selectedTenantId, setSelectedTenantId] = useState('');
+  const [position, setPosition] = useState<{
+    tenantId: string;
+    cursors: Array<string | undefined>;
+    index: number;
+  }>({ tenantId: '', cursors: [undefined], index: 0 });
+  const billingTenants = useMemo(
+    () => tenants.data?.filter((tenant) => canViewCustomerRefunds(tenant.role)) ?? [],
+    [tenants.data],
+  );
+  const selectedTenant = billingTenants.find((tenant) => tenant.id === selectedTenantId) ?? billingTenants[0];
+  const tenantId = selectedTenant?.id;
+
+  useEffect(() => {
+    if (billingTenants.some((tenant) => tenant.id === selectedTenantId)) return;
+    setSelectedTenantId(billingTenants[0]?.id ?? '');
+  }, [billingTenants, selectedTenantId]);
+
+  const currentPosition =
+    position.tenantId === tenantId
+      ? position
+      : { tenantId: tenantId ?? '', cursors: [undefined], index: 0 };
+  const cursor = currentPosition.cursors[currentPosition.index];
+  const paymentOrders = useQuery({
+    queryKey: customerPaymentOrderHistoryKey(tenantId ?? '', cursor),
+    queryFn: ({ signal }) => {
+      if (!tenantId) throw new Error('账单租户未选择');
+      return saasClient.getCustomerPaymentOrders(tenantId, { cursor, limit: 25, signal });
+    },
+    enabled: Boolean(tenantId),
+    retry: false,
+  });
+
+  function chooseTenant(nextTenantId: string) {
+    if (!billingTenants.some((tenant) => tenant.id === nextTenantId)) return;
+    setSelectedTenantId(nextTenantId);
+    setPosition({ tenantId: nextTenantId, cursors: [undefined], index: 0 });
+  }
+
+  function goPrevious() {
+    if (currentPosition.index === 0) return;
+    setPosition({ ...currentPosition, index: currentPosition.index - 1 });
+  }
+
+  function goNext() {
+    const nextCursor = paymentOrders.data?.nextCursor;
+    if (!tenantId || !nextCursor || nextCursor === cursor || paymentOrders.isFetching) return;
+    const cursors = currentPosition.cursors.slice(0, currentPosition.index + 1);
+    cursors.push(nextCursor);
+    setPosition({ tenantId, cursors, index: currentPosition.index + 1 });
+  }
+
+  const hasPreviousPage = currentPosition.index > 0;
+  const hasNextPage = Boolean(paymentOrders.data?.nextCursor && paymentOrders.data.nextCursor !== cursor);
+
+  return (
+    <div className="saas-console">
+      <ConsoleHeader active="billing" onLogout={onLogout} />
+      <div className="page-title">
+        <div>
+          <p className="eyebrow">BILLING · PAYMENT ORDERS</p>
+          <h1>账单</h1>
+          <p>查看钱包充值订单的支付与入账状态及时间。BYOK 服务计划订单见服务计划目录，退款记录见退款页。</p>
+        </div>
+      </div>
+      <p className="muted">此页面为只读记录，不支持创建、取消、重试或重新提交订单。</p>
+
+      {tenants.isPending ? (
+        <div className="skeleton" role="status" aria-label="正在加载已授权租户">
+          <i />
+          <i />
+        </div>
+      ) : tenants.isError ? (
+        <CustomerPaymentOrderErrorNotice error={tenants.error} onRetry={() => void tenants.refetch()} onLogout={onLogout} />
+      ) : tenants.data?.length === 0 ? (
+        <div className="empty" role="status">当前账号没有已授权的租户。</div>
+      ) : billingTenants.length === 0 ? (
+        <div className="empty" role="status">
+          账单仅对租户所有者、管理员和账单管理员开放；当前账号没有符合条件的租户。
+        </div>
+      ) : selectedTenant && tenantId ? (
+        <>
+          {billingTenants.length > 1 && (
+            <Field label="租户">
+              <select
+                aria-label="选择账单租户"
+                value={selectedTenant.id}
+                onChange={(event) => chooseTenant(event.target.value)}
+              >
+                {billingTenants.map((tenant) => (
+                  <option key={tenant.id} value={tenant.id}>
+                    {tenant.name} · {roleLabels[tenant.role]}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+
+          <Panel
+            title="充值订单"
+            action={
+              <button type="button" className="quiet" disabled={paymentOrders.isFetching} onClick={() => void paymentOrders.refetch()}>
+                {paymentOrders.isFetching ? '正在刷新…' : '刷新账单'}
+              </button>
+            }
+          >
+            {paymentOrders.isPending ? (
+              <div className="skeleton" role="status" aria-label="正在加载账单">
+                <i />
+                <i />
+                <i />
+              </div>
+            ) : paymentOrders.isError ? (
+              <CustomerPaymentOrderErrorNotice
+                error={paymentOrders.error}
+                onRetry={() => void paymentOrders.refetch()}
+                onLogout={onLogout}
+              />
+            ) : paymentOrders.data?.items.length === 0 ? (
+              <div className="empty" role="status">暂无充值订单。</div>
+            ) : (
+              <>
+                <section className="saas-tenant-list" aria-label="充值订单列表">
+                  {paymentOrders.data?.items.map((paymentOrder) => {
+                    const presentation = customerPaymentOrderStatusPresentation[paymentOrder.status];
+                    return (
+                      <article className="saas-tenant-card" key={paymentOrder.id}>
+                        <div className="saas-tenant-heading">
+                          <div>
+                            <h3>{customerPaymentOrderTypeLabel(paymentOrder)}</h3>
+                            <small>订单 ID：<code>{paymentOrder.id}</code></small>
+                          </div>
+                          <Badge tone={presentation.tone}>{presentation.label}</Badge>
+                        </div>
+                        <div className="summary-list" aria-label={`${customerPaymentOrderTypeLabel(paymentOrder)}详情`}>
+                          <div>
+                            <span>充值金额</span>
+                            <strong>
+                              {paymentOrder.currency} {formatExactDecimal(paymentOrder.amountMinorUnits)}
+                              <small> · 最小货币单位</small>
+                            </strong>
+                          </div>
+                          <div>
+                            <span>创建时间</span>
+                            <strong><time dateTime={paymentOrder.createdAt}>{customerSessionDate(paymentOrder.createdAt)}</time></strong>
+                          </div>
+                          <div>
+                            <span>最近更新时间</span>
+                            <strong><time dateTime={paymentOrder.updatedAt}>{customerSessionDate(paymentOrder.updatedAt)}</time></strong>
+                          </div>
+                          <div>
+                            <span>支付时间</span>
+                            <strong>
+                              {paymentOrder.paidAt ? (
+                                <time dateTime={paymentOrder.paidAt}>{customerSessionDate(paymentOrder.paidAt)}</time>
+                              ) : '尚未支付'}
+                            </strong>
+                          </div>
+                          <div>
+                            <span>入账时间</span>
+                            <strong>
+                              {paymentOrder.fulfilledAt ? (
+                                <time dateTime={paymentOrder.fulfilledAt}>{customerSessionDate(paymentOrder.fulfilledAt)}</time>
+                              ) : '尚未入账'}
+                            </strong>
+                          </div>
+                        </div>
+                        {presentation.hint && <p className="muted" role="note">{presentation.hint}</p>}
+                      </article>
+                    );
+                  })}
+                </section>
+                {(hasPreviousPage || hasNextPage) && (
+                  <nav className="actions" aria-label="账单分页">
+                    <span aria-live="polite">第 {currentPosition.index + 1} 页</span>
+                    <button type="button" disabled={!hasPreviousPage || paymentOrders.isFetching} onClick={goPrevious}>
+                      上一页
+                    </button>
+                    <button type="button" disabled={!hasNextPage || paymentOrders.isFetching} onClick={goNext}>
+                      下一页
+                    </button>
+                  </nav>
+                )}
+              </>
+            )}
+          </Panel>
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 export function CustomerRefundsPage({ onLogout }: { onLogout: () => Promise<void> }) {
@@ -2115,18 +2865,6 @@ function ConsoleHome({ session, onLogout, onSessionExpired }: {
   );
 }
 
-function displayKeyDate(value: string | null): string {
-  return value ? new Date(value).toLocaleString('zh-CN') : '—';
-}
-
-function keyModeLabel(mode: ApiKeyMetadata['supplyMode']): string {
-  return mode === 'byok' ? 'BYOK' : '平台供给';
-}
-
-function keyStatusLabel(status: ApiKeyMetadata['status']): string {
-  return status === 'active' ? '有效' : '已撤销';
-}
-
 export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const queryClient = useQueryClient();
   const tenants = useQuery({ queryKey: tenantsKey, queryFn: saasClient.getTenants, retry: false });
@@ -2134,6 +2872,7 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
   const [name, setName] = useState('');
   const [scopeText, setScopeText] = useState('');
   const [supplyMode, setSupplyMode] = useState<ApiKeySupplyMode | ''>('');
+  const [principalKind, setPrincipalKind] = useState<ApiKeyPrincipalKind>('member');
   const [expiresAt, setExpiresAt] = useState('');
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState('');
@@ -2156,6 +2895,7 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
   const projectSelection = useProjectSelection(tenantId, projects.data, true);
   const projectId = projectSelection.selectedProjectId;
   const selectedProject = projectSelection.selectedProject;
+  const canIssueServiceKey = canIssueProjectServiceKey(selectedTenant?.role, selectedProject?.role);
   const keyListKey = [...apiKeysRootKey, tenantId ?? '', projectId ?? ''] as const;
   const canManage = Boolean(
     selectedTenant &&
@@ -2180,6 +2920,7 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
     setActionError(undefined);
     setActionKeyId('');
     setCreateError('');
+    setPrincipalKind('member');
   }, [projectId, tenantId]);
 
   function closeSecret() {
@@ -2204,6 +2945,10 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
     if (!tenantId || !projectId) return;
     if (!isApiKeySupplyMode(supplyMode)) {
       setCreateError('请选择供给模式。');
+      return;
+    }
+    if (principalKind === 'project_service' && !canIssueServiceKey) {
+      setCreateError('项目服务 Key 需要当前租户和项目两级 Owner 或 Admin；请核对权限。');
       return;
     }
     const scopes = parseModelScopes(scopeText);
@@ -2232,6 +2977,7 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
         name: name.trim(),
         modelScopes: scopes.scopes,
         supplyMode,
+        principalKind,
         ...(expiry ? { expiresAt: expiry } : {}),
       });
       setOneTimeSecret(created);
@@ -2249,6 +2995,10 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
   }
 
   async function rotateKey(key: ApiKeyMetadata) {
+    if (key.executionPrincipalType === 'project_service' && !canIssueServiceKey) {
+      setActionError(new SaasApiError(403, 'KEY_ACCESS_DENIED', '项目服务 Key 轮换需要两级 Owner 或 Admin。'));
+      return;
+    }
     if (!tenantId || !projectId || !window.confirm(`轮换“${key.name}”会立即撤销当前 key 并创建新的 secret，是否继续？`))
       return;
     setActionKeyId(key.id);
@@ -2387,6 +3137,7 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
                 <p className="muted">
                   请填写已获权益覆盖的精确模型标识，每行一个 scope。这里不伪造模型目录，最终范围由服务端供给权益校验。
                 </p>
+                <p className="muted">轮换继承原执行主体、scope 和供给权益；新建主体选项不会改绑已有 Key，服务端仍会重新校验。</p>
                 <form onSubmit={createKey}>
                   <Field label="名称">
                     <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
@@ -2413,6 +3164,11 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
                       onChange={(event) => setExpiresAt(event.target.value)}
                     />
                   </Field>
+                  <ApiKeyPrincipalSelector
+                    value={principalKind}
+                    canIssueServiceKey={canIssueServiceKey}
+                    onChange={setPrincipalKind}
+                  />
                   <Field label="模型范围" hint="必填；支持换行或逗号分隔，不能重复。">
                     <textarea
                       required
@@ -2501,52 +3257,12 @@ export function KeyManagementPage({ onLogout }: { onLogout: () => Promise<void> 
                   <div className="saas-tenant-list">
                     {keys.data?.map((key) => (
                       <article className="saas-tenant-card" key={key.id}>
-                        <div className="saas-tenant-heading">
-                          <div>
-                            <h3>{key.name}</h3>
-                            <small>
-                              <code>{key.prefix}</code>
-                            </small>
-                          </div>
-                          <Badge tone={key.status === 'active' ? 'good' : 'bad'}>{keyStatusLabel(key.status)}</Badge>
-                        </div>
-                        <div className="summary-list">
-                          <div>
-                            <span>供给模式</span>
-                            <Badge>{keyModeLabel(key.supplyMode)}</Badge>
-                          </div>
-                          <div>
-                            <span>模型范围</span>
-                            <span>
-                              {key.modelScopes.map((scope) => (
-                                <code key={scope}>{scope} </code>
-                              ))}
-                            </span>
-                          </div>
-                          <div>
-                            <span>创建时间</span>
-                            <strong>{displayKeyDate(key.createdAt)}</strong>
-                          </div>
-                          <div>
-                            <span>过期时间</span>
-                            <strong>{displayKeyDate(key.expiresAt)}</strong>
-                          </div>
-                          <div>
-                            <span>最近使用</span>
-                            <strong>{key.lastUsedAt ? displayKeyDate(key.lastUsedAt) : '尚未使用'}</strong>
-                          </div>
-                          {key.revokedAt && (
-                            <div>
-                              <span>撤销时间</span>
-                              <strong>{displayKeyDate(key.revokedAt)}</strong>
-                            </div>
-                          )}
-                        </div>
+                        <ApiKeyMetadataDetails apiKey={key} />
                         {canManage && key.status === 'active' && (
                           <div className="actions">
                             <button
                               type="button"
-                              disabled={Boolean(actionKeyId)}
+                              disabled={Boolean(actionKeyId) || (key.executionPrincipalType === 'project_service' && !canIssueServiceKey)}
                               onClick={() => {
                                 void rotateKey(key);
                               }}
@@ -4467,7 +5183,9 @@ export function SaasConsoleApp() {
     path !== '/console/requests' &&
     path !== '/console/webhooks' &&
     path !== '/console/wallet' &&
+    path !== '/console/billing' &&
     path !== '/console/refunds' &&
+    path !== '/console/notifications' &&
     path !== '/console/security' &&
     !isRequestDetail
   ) {
@@ -4501,7 +5219,9 @@ export function SaasConsoleApp() {
     queryClient.removeQueries({ queryKey: requestsRootKey });
     queryClient.removeQueries({ queryKey: customerSessionsKey });
     queryClient.removeQueries({ queryKey: customerRefundRootKey });
+    queryClient.removeQueries({ queryKey: customerPaymentOrderRootKey });
     queryClient.removeQueries({ queryKey: customerWebhookRootKey });
+    queryClient.removeQueries({ queryKey: tenantAnnouncementsRootKey });
     queryClient.removeQueries({ queryKey: workspaceMembersRootKey });
     queryClient.removeQueries({ queryKey: ['saas-wallet'] });
     navigate('/console/login', { replace: true });
@@ -4529,7 +5249,9 @@ export function SaasConsoleApp() {
   if (path === '/console/catalog') return <ServicePlanCatalogPage onLogout={logout} />;
   if (path === '/console/keys') return <KeyManagementPage onLogout={logout} />;
   if (path === '/console/webhooks') return <CustomerWebhooksPage onLogout={logout} />;
+  if (path === '/console/billing') return <CustomerPaymentOrdersPage onLogout={logout} />;
   if (path === '/console/refunds') return <CustomerRefundsPage onLogout={logout} />;
+  if (path === '/console/notifications') return <TenantNotificationsPage onLogout={logout} />;
   if (path === '/console/credentials') return <ByokCredentialsPage onLogout={logout} />;
   if (path === '/console/usage') return <UsagePage onLogout={logout} />;
   if (path === '/console/requests') return <RequestsPage onLogout={logout} />;

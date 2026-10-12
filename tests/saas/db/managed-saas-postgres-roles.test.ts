@@ -111,15 +111,47 @@ test('control-plane grants mirror the source-backed column, table and sequence m
   const webhookGrants = SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) =>
     table.startsWith('saas_customer_webhook_'),
   );
+  // F4: the platform configure path owns the policy row (quota columns, audit
+  // references and the optimistic revision); the entitlement whitelist and
+  // low-balance threshold stay at migration-seeded defaults.
   assert.deepEqual(
     webhookGrants.filter(
       ([table, , privilege]) => table === 'saas_customer_webhook_tenant_policies' && privilege === 'UPDATE',
     ),
-    [['saas_customer_webhook_tenant_policies', 'updated_at', 'UPDATE']],
+    [
+      ['saas_customer_webhook_tenant_policies', 'enabled', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'max_active_endpoints', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'max_events_per_minute', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'max_pending_deliveries', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'revision', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'updated_by_user_id', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'audit_event_id', 'UPDATE'],
+      ['saas_customer_webhook_tenant_policies', 'updated_at', 'UPDATE'],
+    ],
   );
-  assert.equal(
-    SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([table]) => table.startsWith('saas_customer_webhook_')),
-    false,
+  assert.deepEqual(
+    webhookGrants.filter(
+      ([table, , privilege]) => table === 'saas_customer_webhook_tenant_policies' && privilege === 'INSERT',
+    ),
+    [
+      ['saas_customer_webhook_tenant_policies', 'tenant_id', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'enabled', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'max_active_endpoints', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'max_events_per_minute', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'max_pending_deliveries', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'revision', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'updated_by_user_id', 'INSERT'],
+      ['saas_customer_webhook_tenant_policies', 'audit_event_id', 'INSERT'],
+    ],
+    'policy seeding never writes the entitlement whitelist or threshold columns',
+  );
+  // F4: retention pruning holds the only webhook table-level DELETE grants.
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.filter(([table]) => table.startsWith('saas_customer_webhook_')),
+    [
+      ['saas_customer_webhook_deliveries', 'DELETE'],
+      ['saas_customer_webhook_delivery_attempts', 'DELETE'],
+    ],
   );
   for (const immutableTable of ['saas_customer_webhook_events', 'saas_customer_webhook_endpoint_versions']) {
     assert.equal(
@@ -128,12 +160,19 @@ test('control-plane grants mirror the source-backed column, table and sequence m
       `${immutableTable} must not receive UPDATE`,
     );
   }
-  assert.equal(
-    webhookGrants.some(
+  // F3: the producer enqueue is mounted; the quota bootstrap INSERT is
+  // exactly the four producer columns and nothing else.
+  assert.deepEqual(
+    webhookGrants.filter(
       ([table, , privilege]) => table === 'saas_customer_webhook_tenant_usage' && privilege === 'INSERT',
     ),
-    false,
-    'event enqueue is not mounted in this composition',
+    [
+      ['saas_customer_webhook_tenant_usage', 'tenant_id', 'INSERT'],
+      ['saas_customer_webhook_tenant_usage', 'minute_bucket', 'INSERT'],
+      ['saas_customer_webhook_tenant_usage', 'events_in_bucket', 'INSERT'],
+      ['saas_customer_webhook_tenant_usage', 'pending_deliveries', 'INSERT'],
+    ],
+    'event enqueue grants stay column-scoped',
   );
 
   assert.doesNotMatch(
@@ -197,10 +236,14 @@ test('gateway grant template mirrors the exact column manifest and read allowlis
 test('gateway pricing template grants only exact snapshot INSERTs while worker and price versions remain unwritable', () => {
   const gatewayBlock = roleTemplate.match(/DO \$gateway_runtime_grants\$([\s\S]*?)\$gateway_runtime_grants\$/)?.[1];
   assert.ok(gatewayBlock);
-  const deployed = [...gatewayBlock.matchAll(/\('([^']+)', '([^']+)', '([^']+)'\)/g)]
-    .map((match) => [match[1], match[2], match[3]]);
+  const deployed = [...gatewayBlock.matchAll(/\('([^']+)', '([^']+)', '([^']+)'\)/g)].map((match) => [
+    match[1],
+    match[2],
+    match[3],
+  ]);
   const workerTemplate = readFileSync(
-    resolve(process.cwd(), 'deploy/managed-saas-validation-worker-role-grants.sql'), 'utf8',
+    resolve(process.cwd(), 'deploy/managed-saas-validation-worker-role-grants.sql'),
+    'utf8',
   );
   for (const [table, columnCount] of [
     ['saas_request_customer_price_snapshots', 30],
@@ -209,7 +252,10 @@ test('gateway pricing template grants only exact snapshot INSERTs while worker a
     const expected = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([relation]) => relation === table);
     assert.equal(expected.length, columnCount);
     assert.deepEqual(
-      deployed.filter(([relation]) => relation === table).map((grant) => grant.join('\t')).sort(),
+      deployed
+        .filter(([relation]) => relation === table)
+        .map((grant) => grant.join('\t'))
+        .sort(),
       expected.map((grant) => grant.join('\t')).sort(),
     );
     assert.ok(expected.every(([, , privilege]) => privilege === 'INSERT'));
@@ -218,23 +264,33 @@ test('gateway pricing template grants only exact snapshot INSERTs while worker a
       gatewayBlock,
       new RegExp(
         '\\bGRANT\\s+(?:ALL(?:\\s+PRIVILEGES)?|SELECT|INSERT|UPDATE|DELETE|TRUNCATE)' +
-        '(?:\\s*,\\s*(?:SELECT|INSERT|UPDATE|DELETE|TRUNCATE))*\\s+ON\\s+(?:TABLE\\s+)?' +
-        '(?:model_router_saas\\.)?' + table + '\\b', 'i',
+          '(?:\\s*,\\s*(?:SELECT|INSERT|UPDATE|DELETE|TRUNCATE))*\\s+ON\\s+(?:TABLE\\s+)?' +
+          '(?:model_router_saas\\.)?' +
+          table +
+          '\\b',
+        'i',
       ),
       'no table-wide snapshot grant',
     );
     assert.doesNotMatch(
-      workerTemplate, new RegExp('\\bGRANT\\b[^;]*\\bmodel_router_saas\\.' + table + '\\b', 'i'),
+      workerTemplate,
+      new RegExp('\\bGRANT\\b[^;]*\\bmodel_router_saas\\.' + table + '\\b', 'i'),
       'the dedicated validation worker receives no snapshot grant',
     );
   }
   for (const table of ['saas_customer_price_versions', 'saas_supplier_cost_versions'] as const) {
     assert.ok(gatewayBlock.includes("('" + table + "')"));
-    assert.equal(deployed.some(([relation, , privilege]) => relation === table && privilege !== 'SELECT'), false);
+    assert.equal(
+      deployed.some(([relation, , privilege]) => relation === table && privilege !== 'SELECT'),
+      false,
+    );
   }
   assert.deepEqual(
-    [...gatewayBlock.matchAll(/GRANT (USAGE|SELECT|UPDATE) ON SEQUENCE model_router_saas\.([a-z_]+) TO model_router_saas_gateway/g)]
-      .map((match) => [match[2], match[1]]),
+    [
+      ...gatewayBlock.matchAll(
+        /GRANT (USAGE|SELECT|UPDATE) ON SEQUENCE model_router_saas\.([a-z_]+) TO model_router_saas_gateway/g,
+      ),
+    ].map((match) => [match[2], match[1]]),
     [['saas_provider_account_lease_fencing_seq', 'USAGE']],
     'pricing adds no sequence grant',
   );
@@ -245,24 +301,57 @@ test('gateway pricing template grants only exact snapshot INSERTs while worker a
 test('gateway audit template grants only the six claim-proof SELECT columns and no broad read', () => {
   const gatewayBlock = roleTemplate.match(/DO \$gateway_runtime_grants\$([\s\S]*?)\$gateway_runtime_grants\$/)?.[1];
   assert.ok(gatewayBlock);
-  const auditGrants = [...gatewayBlock.matchAll(/\('saas_audit_events', '([^']+)', '(SELECT|INSERT|UPDATE)'\)/g)]
-    .map((match) => [match[1], match[2]]);
-  assert.deepEqual(auditGrants.filter(([, privilege]) => privilege === 'SELECT').map(([column]) => column).sort(),
-    ['action', 'id', 'occurred_at', 'target_id', 'target_type', 'tenant_id']);
-  assert.deepEqual(auditGrants.filter(([, privilege]) => privilege === 'INSERT').map(([column]) => column).sort(), [
-    'action', 'actor_user_id', 'entry_point', 'id', 'occurred_at', 'request_id', 'source_ip',
-    'target_id', 'target_type', 'tenant_id', 'user_agent',
-  ], 'existing audit INSERT contract is unchanged');
-  assert.equal(auditGrants.some(([, privilege]) => privilege === 'UPDATE'), false);
+  const auditGrants = [...gatewayBlock.matchAll(/\('saas_audit_events', '([^']+)', '(SELECT|INSERT|UPDATE)'\)/g)].map(
+    (match) => [match[1], match[2]],
+  );
+  assert.deepEqual(
+    auditGrants
+      .filter(([, privilege]) => privilege === 'SELECT')
+      .map(([column]) => column)
+      .sort(),
+    ['action', 'id', 'occurred_at', 'target_id', 'target_type', 'tenant_id'],
+  );
+  assert.deepEqual(
+    auditGrants
+      .filter(([, privilege]) => privilege === 'INSERT')
+      .map(([column]) => column)
+      .sort(),
+    [
+      'action',
+      'actor_user_id',
+      'entry_point',
+      'id',
+      'occurred_at',
+      'request_id',
+      'source_ip',
+      'target_id',
+      'target_type',
+      'tenant_id',
+      'user_agent',
+    ],
+    'existing audit INSERT contract is unchanged',
+  );
+  assert.equal(
+    auditGrants.some(([, privilege]) => privilege === 'UPDATE'),
+    false,
+  );
   for (const column of ['actor_user_id', 'source_ip', 'user_agent', 'entry_point', 'request_id']) {
-    assert.equal(auditGrants.some(([field, privilege]) => field === column && privilege === 'SELECT'), false);
+    assert.equal(
+      auditGrants.some(([field, privilege]) => field === column && privilege === 'SELECT'),
+      false,
+    );
   }
   assert.doesNotMatch(gatewayBlock, /\('saas_audit_events'\)/, 'never enumerate all audit columns for SELECT');
   assert.equal((SAAS_GATEWAY_RUNTIME_READ_TABLES as readonly string[]).includes('saas_audit_events'), false);
-  assert.doesNotMatch(gatewayBlock,
-    /\bGRANT\s+(?:ALL(?:\s+PRIVILEGES)?|SELECT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)\s+ON\s+(?:TABLE\s+)?model_router_saas\.saas_audit_events\b/i);
+  assert.doesNotMatch(
+    gatewayBlock,
+    /\bGRANT\s+(?:ALL(?:\s+PRIVILEGES)?|SELECT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)\s+ON\s+(?:TABLE\s+)?model_router_saas\.saas_audit_events\b/i,
+  );
   assert.doesNotMatch(gatewayBlock, /\bGRANT\s+EXECUTE\b/i);
-  assert.doesNotMatch(gatewayBlock, /TO model_router_saas_control_plane|TO model_router_saas_credential_validation_worker/);
+  assert.doesNotMatch(
+    gatewayBlock,
+    /TO model_router_saas_control_plane|TO model_router_saas_credential_validation_worker/,
+  );
 });
 
 test('control-plane owns the exact unknown-outcome columns and gateway owns none', () => {
@@ -381,17 +470,31 @@ test('gateway role receives no broad/default grants and health uses explicit col
 
 test('customer request read template is exactly CP eleven-column SELECT and rejects privilege mutations', () => {
   const expected = [
-    'id', 'tenant_id', 'project_id', 'public_model', 'protocol', 'supply_mode',
-    'execution_state', 'financial_status', 'reconciliation_state', 'created_at', 'updated_at',
-  ].map((column) => column + '\tSELECT').sort();
+    'id',
+    'tenant_id',
+    'project_id',
+    'public_model',
+    'protocol',
+    'supply_mode',
+    'execution_state',
+    'financial_status',
+    'reconciliation_state',
+    'created_at',
+    'updated_at',
+  ]
+    .map((column) => column + '\tSELECT')
+    .sort();
   const validate = (source: string): void => {
     const block = source.match(/DO \$control_plane_runtime_grants\$([\s\S]*?)\$control_plane_runtime_grants\$/)?.[1];
     assert.ok(block);
     const actual = [...block.matchAll(/\('saas_requests', '(SELECT|INSERT|UPDATE)', '([^']+)'\)/g)]
-      .flatMap((match) => match[2].split(/\s+/).map((column) => column + '\t' + match[1])).sort();
+      .flatMap((match) => match[2].split(/\s+/).map((column) => column + '\t' + match[1]))
+      .sort();
     assert.deepEqual(actual, expected);
-    assert.doesNotMatch(source,
-      /GRANT\s+(?:ALL(?:\s+PRIVILEGES)?|SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)\s+ON\s+(?:TABLE\s+)?model_router_saas\.saas_requests\s+TO\s+model_router_saas_control_plane\b/i);
+    assert.doesNotMatch(
+      source,
+      /GRANT\s+(?:ALL(?:\s+PRIVILEGES)?|SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)\s+ON\s+(?:TABLE\s+)?model_router_saas\.saas_requests\s+TO\s+model_router_saas_control_plane\b/i,
+    );
     assert.doesNotMatch(source, /GRANT\s+EXECUTE\s+ON\s+[^;]*TO\s+model_router_saas_control_plane\b/i);
   };
   validate(roleTemplate);
@@ -404,6 +507,8 @@ test('customer request read template is exactly CP eleven-column SELECT and reje
     roleTemplate.replace("('saas_requests', 'SELECT',", "('saas_requests', 'UPDATE',"),
     roleTemplate + '\nGRANT SELECT ON TABLE model_router_saas.saas_requests TO model_router_saas_control_plane;',
     roleTemplate + '\nGRANT UPDATE ON TABLE model_router_saas.saas_requests TO model_router_saas_control_plane;',
-    roleTemplate + '\nGRANT EXECUTE ON FUNCTION model_router_saas.saas_prepared_evidence_valid_input_buckets(text[]) TO model_router_saas_control_plane;',
-  ]) assert.throws(() => validate(mutated));
+    roleTemplate +
+      '\nGRANT EXECUTE ON FUNCTION model_router_saas.saas_prepared_evidence_valid_input_buckets(text[]) TO model_router_saas_control_plane;',
+  ])
+    assert.throws(() => validate(mutated));
 });

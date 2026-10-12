@@ -10,6 +10,8 @@ export type PaymentErrorCode =
   | 'WEBHOOK_INVALID'
   | 'PAYMENT_EVENT_CONFLICT'
   | 'FULFILLMENT_RETRYABLE'
+  | 'PROMO_UNAVAILABLE'
+  | 'PROMO_CODE_INVALID'
   | 'REFUND_NOT_FOUND'
   | 'REFUND_FORBIDDEN'
   | 'REFUND_STATE_CONFLICT'
@@ -29,6 +31,8 @@ const SAFE_MESSAGES: Record<PaymentErrorCode, string> = {
   WEBHOOK_INVALID: 'The payment webhook is invalid.',
   PAYMENT_EVENT_CONFLICT: 'The payment event conflicts with a previously received event.',
   FULFILLMENT_RETRYABLE: 'Payment fulfillment could not be completed and will be retried.',
+  PROMO_UNAVAILABLE: 'Promo codes are not available for this service.',
+  PROMO_CODE_INVALID: 'The promo code is invalid.',
   REFUND_NOT_FOUND: 'The refund was not found.',
   REFUND_FORBIDDEN: 'The operation is not permitted.',
   REFUND_STATE_CONFLICT: 'The refund conflicts with an existing request.',
@@ -49,6 +53,8 @@ const ERROR_STATUS: Record<PaymentErrorCode, number> = {
   WEBHOOK_INVALID: 400,
   PAYMENT_EVENT_CONFLICT: 409,
   FULFILLMENT_RETRYABLE: 503,
+  PROMO_UNAVAILABLE: 503,
+  PROMO_CODE_INVALID: 400,
   REFUND_NOT_FOUND: 404,
   REFUND_FORBIDDEN: 403,
   REFUND_STATE_CONFLICT: 409,

@@ -10,7 +10,9 @@ export type SaasMeteringErrorCode =
   | 'REQUEST_TRANSITION_INVALID'
   | 'USAGE_EVENT_NOT_FOUND'
   | 'USAGE_DUPLICATE_CONFLICT'
-  | 'USAGE_SETTLEMENT_CONFLICT';
+  | 'USAGE_SETTLEMENT_CONFLICT'
+  | 'USAGE_CORRECTION_CONFLICT'
+  | 'USAGE_CORRECTION_STATE_CONFLICT';
 
 const messages: Record<SaasMeteringErrorCode, string> = {
   METERING_INVALID_INPUT: 'The metering request contains invalid data.',
@@ -25,6 +27,8 @@ const messages: Record<SaasMeteringErrorCode, string> = {
   USAGE_EVENT_NOT_FOUND: 'The requested usage event was not found.',
   USAGE_DUPLICATE_CONFLICT: 'The usage event key is already bound to different canonical usage.',
   USAGE_SETTLEMENT_CONFLICT: 'The usage settlement key is already bound to a different effect.',
+  USAGE_CORRECTION_CONFLICT: 'The usage correction digest is already bound to a different correction.',
+  USAGE_CORRECTION_STATE_CONFLICT: 'The request is under reconciliation and cannot accept a usage correction.',
 };
 
 const statuses: Record<SaasMeteringErrorCode, number> = {
@@ -40,6 +44,8 @@ const statuses: Record<SaasMeteringErrorCode, number> = {
   USAGE_EVENT_NOT_FOUND: 404,
   USAGE_DUPLICATE_CONFLICT: 409,
   USAGE_SETTLEMENT_CONFLICT: 409,
+  USAGE_CORRECTION_CONFLICT: 409,
+  USAGE_CORRECTION_STATE_CONFLICT: 409,
 };
 
 export class SaasMeteringError extends Error {

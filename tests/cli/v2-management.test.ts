@@ -48,40 +48,110 @@ async function cliWithStdin(configPath: string, lines: string[], ...args: string
 
 async function ptyRun(command: string, args: string[], answers: Array<[string, string]>) {
   return new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-    const driver = `import json,os,pty,select,signal,sys,time
-argv=json.loads(sys.argv[1]); answers=json.loads(sys.argv[2]); pid,fd=pty.fork()
-if pid==0: os.execvp(argv[0],argv)
-out=bytearray(); index=0; deadline=time.monotonic()+10
-while time.monotonic()<deadline:
-  readable,_,_=select.select([fd],[],[],0.1)
-  if readable:
-    try: chunk=os.read(fd,4096)
-    except OSError: break
-    if not chunk: break
-    out.extend(chunk)
-    while index<len(answers) and answers[index][0].encode() in out:
-      answer=answers[index][1]
-      os.write(fd,answer.encode() if answer=='\\x03' else (answer+'\\n').encode()); index+=1
-  done,status=os.waitpid(pid,os.WNOHANG)
-  if done: break
-else: os.kill(pid,signal.SIGKILL)
+    const driver = `import errno,json,os,pty,select,signal,sys,time
+def interrupted(signum,frame):
+  raise RuntimeError('PTY driver interrupted')
+signal.signal(signal.SIGTERM,interrupted)
+argv=json.loads(sys.argv[1]); answers=json.loads(sys.argv[2])
+out=bytearray(); index=0; reaped=False; pid=None; fd=None
+def poll_child():
+  global reaped
+  old_mask=signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGTERM})
+  try:
+    if not reaped:
+      done,status=os.waitpid(pid,os.WNOHANG)
+      reaped=done==pid
+  finally: signal.pthread_sigmask(signal.SIG_SETMASK,old_mask)
+  return reaped
+def wait_child(seconds):
+  deadline=time.monotonic()+seconds
+  while not poll_child():
+    if time.monotonic()>=deadline: return False
+    time.sleep(0.01)
+  return True
+def signal_child(name):
+  if poll_child(): return
+  try: os.kill(pid,name)
+  except ProcessLookupError: pass # Still require waitpid confirmation below.
+previous_mask=signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGTERM})
+try:
+  pid,fd=pty.fork()
+  if pid==0:
+    signal.signal(signal.SIGTERM,signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+    os.execvp(argv[0],argv)
+  signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+  deadline=time.monotonic()+10
+  while time.monotonic()<deadline:
+    readable,_,_=select.select([fd],[],[],0.1)
+    if readable:
+      try: chunk=os.read(fd,4096)
+      except OSError as error:
+        if error.errno!=errno.EIO: raise
+        break
+      if not chunk: break
+      out.extend(chunk)
+      while index<len(answers) and answers[index][0].encode() in out:
+        answer=answers[index][1]
+        os.write(fd,answer.encode() if answer=='\\x03' else (answer+'\\n').encode()); index+=1
+    if poll_child(): break
+  else: raise TimeoutError('PTY interaction deadline')
+finally:
+  signal.signal(signal.SIGTERM,signal.SIG_IGN)
+  signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+  if pid is not None and pid>0:
+    try:
+      if not wait_child(2):
+        signal_child(signal.SIGTERM)
+        if not wait_child(2):
+          signal_child(signal.SIGKILL)
+          if not wait_child(2): raise RuntimeError('PTY fork reap deadline; cleanup unproved')
+    finally: os.close(fd)
 sys.stdout.buffer.write(out)
-sys.stderr.write('PTY_ANSWERS='+str(index)+'\\n')`;
+sys.stderr.write('PTY_ANSWERS='+str(index)+'\\nPTY_REAPED=1\\n')`;
     const child = spawn('python3', ['-c', driver, JSON.stringify([command, ...args]), JSON.stringify(answers)], {
       cwd: process.cwd(),
     });
     let output = '';
     let stderr = '';
+    let failure: Error | undefined;
+    let exited = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const hasExited = () => exited || child.exitCode !== null || child.signalCode !== null;
+    const signalDriver = (name: NodeJS.Signals) => {
+      if (hasExited()) return;
+      try { child.kill(name); }
+      catch { failure = new Error('PTY driver signal failed'); }
+    };
+    // The driver gets its own bounded fork-reap grace before any forced kill.
+    timer = setTimeout(() => {
+      failure = new Error('PTY driver deadline');
+      signalDriver('SIGTERM');
+      timer = setTimeout(() => {
+        signalDriver('SIGKILL');
+        timer = setTimeout(() => {
+          settled = true;
+          reject(new Error('PTY driver close deadline; fork cleanup unproved'));
+        }, 2_000);
+      }, 8_000);
+    }, 20_000);
     child.stdout.on('data', (chunk: Buffer) => {
       output += chunk.toString();
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.on('error', reject);
+    child.on('error', () => { failure = new Error('PTY driver lifecycle failed'); });
+    child.once('exit', () => { exited = true; });
     child.on('close', (code) => {
-      if (!stderr.includes(`PTY_ANSWERS=${answers.length}`))
-        reject(new Error(`PTY driver failed: ${stderr} ${output}`));
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (failure) reject(failure);
+      else if (code !== 0 || !stderr.split('\n').includes(`PTY_ANSWERS=${answers.length}`)
+        || !stderr.split('\n').includes('PTY_REAPED=1'))
+        reject(new Error('PTY driver failed or fork cleanup unproved'));
       else resolve({ code, output });
     });
   });

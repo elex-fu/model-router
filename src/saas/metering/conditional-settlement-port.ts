@@ -12,6 +12,8 @@ import type {
   NormalSuccessTransactionResult,
   NormalSuccessUncertaintyInput,
 } from '../gateway/dispatch-usage-settlement.js';
+import { keyBudgetTokenUnitsFromUsage } from '../keys/budget-store.js';
+import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import { SaasMeteringService } from './service.js';
 import type {
   AttemptRecord,
@@ -71,12 +73,103 @@ export interface ConditionalSettlementBilling {
   ): Promise<BillingReservationResult>;
 }
 
+/**
+ * KEY-BUD (contract C-4) budget counter resolution slice. Runs in the same
+ * settlement transaction as the billing settle; errors roll the transaction
+ * back. Absent disables budget accounting (pre-081 behavior).
+ */
+export interface ConditionalSettlementKeyBudget {
+  settle(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly requestId: string;
+      readonly actualTokenUnits: string;
+      readonly actualChargeMinorUnits: string;
+    },
+  ): Promise<boolean>;
+}
+
 export interface ConditionalSettlementPortOptions {
   readonly metering?: ConditionalSettlementMetering;
   readonly billing?: ConditionalSettlementBilling;
   /** Aliases useful to callers that name dependencies explicitly. */
   readonly meteringService?: ConditionalSettlementMetering;
   readonly billingService?: ConditionalSettlementBilling;
+  readonly keyBudget?: ConditionalSettlementKeyBudget;
+  /**
+   * F3: customer webhook producer invoked at the settlement terminal commit.
+   * Events enqueue inside the settlement transaction; absent disables them.
+   */
+  readonly webhookEvents?: CustomerWebhookEventProducer;
+}
+
+/** A settled request's project identity is authority data, never optional. */
+function settlementProjectId(value: unknown): string {
+  const projectId = text(value);
+  if (projectId === null) throw new Error('settled request is missing its project identity');
+  return projectId;
+}
+
+function settlementRowEpochMs(value: unknown): number {
+  const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
+  return Number.isFinite(ms) ? ms : Number.NaN;
+}
+
+/** Exact token counts arrive as decimal strings; unsafe values stay NaN so the producer drops them. */
+function settlementTokenCount(value: string | null): number {
+  if (value === null || !/^(0|[1-9][0-9]*)$/.test(value)) return Number.NaN;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
+}
+
+/**
+ * Emit request.completed + usage.completed for a settlement terminal commit.
+ * The terminal transition's own updated_at is the occurred_at so the pair is
+ * anchored to the committed state change; the transition ref is constant per
+ * settlement path because guarded transitions fire exactly once per request
+ * and replay paths return before this hook.
+ */
+async function emitSettlementTerminalEvents(
+  producer: CustomerWebhookEventProducer,
+  tx: SqlExecutor,
+  input: {
+    readonly tenantId: string;
+    readonly requestId: string;
+    readonly projectId: unknown;
+    readonly supplyMode: 'byok' | 'platform';
+    readonly requestCreatedAt: unknown;
+    readonly occurredAt: string;
+    readonly inputTokens: string | null;
+    readonly outputTokens: string | null;
+    readonly transitionRef: string;
+  },
+): Promise<void> {
+  const projectId = settlementProjectId(input.projectId);
+  const durationMs = Math.max(
+    0,
+    Math.round(Date.parse(input.occurredAt) - settlementRowEpochMs(input.requestCreatedAt)),
+  );
+  await producer.requestCompleted(tx, {
+    tenantId: input.tenantId,
+    requestId: input.requestId,
+    projectId,
+    supplyMode: input.supplyMode,
+    status: 'succeeded',
+    durationMs,
+    occurredAt: input.occurredAt,
+    transitionRef: input.transitionRef,
+  });
+  await producer.usageCompleted(tx, {
+    tenantId: input.tenantId,
+    requestId: input.requestId,
+    projectId,
+    supplyMode: input.supplyMode,
+    inputTokens: settlementTokenCount(input.inputTokens),
+    outputTokens: settlementTokenCount(input.outputTokens),
+    occurredAt: input.occurredAt,
+    transitionRef: input.transitionRef,
+  });
 }
 
 interface NormalSuccessStateRow {
@@ -102,6 +195,8 @@ interface NormalSuccessStateRow {
   readonly request_reconciliation_state: unknown;
   readonly request_financial_status: unknown;
   readonly request_state_version: unknown;
+  readonly request_project_id?: unknown;
+  readonly request_created_at?: unknown;
 }
 
 interface NormalSuccessHoldRow {
@@ -217,6 +312,8 @@ interface LockedStateRow {
   readonly financial_status: unknown;
   readonly reconciliation_state: unknown;
   readonly request_state_version: unknown;
+  readonly request_project_id?: unknown;
+  readonly request_created_at?: unknown;
 }
 
 interface HoldRow {
@@ -541,6 +638,8 @@ function admissionBusinessKey(tenantId: string, requestId: string): string {
 export class DurableConditionalSettlementPort implements ConditionalSettlementPort {
   private readonly metering: ConditionalSettlementMetering;
   private readonly billing: ConditionalSettlementBilling;
+  private readonly keyBudget: ConditionalSettlementKeyBudget | undefined;
+  private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
     private readonly database: SaasDatabase,
@@ -548,6 +647,15 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
   ) {
     this.metering = options.metering ?? options.meteringService ?? new SaasMeteringService(database);
     this.billing = options.billing ?? options.billingService ?? new PlatformWalletLedgerService();
+    this.keyBudget = options.keyBudget;
+    if (
+      options.webhookEvents !== undefined &&
+      (typeof options.webhookEvents.requestCompleted !== 'function' ||
+        typeof options.webhookEvents.usageCompleted !== 'function')
+    ) {
+      throw new TypeError('webhookEvents must implement the customer webhook event producer contract');
+    }
+    this.webhookEvents = options.webhookEvents;
   }
 
   async submit(input: ConditionalSettlementInput): Promise<ConditionalSettlementResult> {
@@ -593,7 +701,8 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
              r.route_public_model_version AS request_route_public_model_version,
              r.route_protocol AS request_route_protocol, r.route_target_mode AS request_route_target_mode,
              r.route_upstream_id, r.protocol AS request_protocol, r.execution_state AS request_result_state,
-             r.financial_status, r.reconciliation_state, r.state_version AS request_state_version
+             r.financial_status, r.reconciliation_state, r.state_version AS request_state_version,
+             r.project_id AS request_project_id, r.created_at AS request_created_at
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
            WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
@@ -712,6 +821,17 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
           return conflict(normalized.idempotencyKey);
         }
         if (settlement.state !== 'settled') return conflict(normalized.idempotencyKey);
+        // KEY-BUD (contract C-4): settle the per-request budget reservation
+        // with the reconciled actual amounts; replay and pre-081 drift are
+        // no-ops inside the store.
+        if (this.keyBudget) {
+          await this.keyBudget.settle(tx, {
+            tenantId: normalized.tenantId,
+            requestId: normalized.requestId,
+            actualTokenUnits: keyBudgetTokenUnitsFromUsage(normalized.usage),
+            actualChargeMinorUnits: normalized.charge.amountMinorUnits,
+          });
+        }
         if (terminal) {
           return {
             status: 'replayed',
@@ -752,6 +872,19 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
           expectedStateVersion: request.stateVersion,
           executor: tx,
         });
+        if (this.webhookEvents) {
+          await emitSettlementTerminalEvents(this.webhookEvents, tx, {
+            tenantId: normalized.tenantId,
+            requestId: normalized.requestId,
+            projectId: locked.request_project_id,
+            supplyMode: 'platform',
+            requestCreatedAt: locked.request_created_at,
+            occurredAt: request.updatedAt,
+            inputTokens: usageEvent.inputTotal,
+            outputTokens: usageEvent.outputTotal,
+            transitionRef: 'conditional-settlement',
+          });
+        }
         return {
           status: 'settled',
           settlementId: normalized.idempotencyKey,
@@ -771,6 +904,8 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
 export class DurableNormalSuccessSettlementPort implements NormalSuccessTransactionPort {
   private readonly metering: ConditionalSettlementMetering;
   private readonly billing: ConditionalSettlementBilling;
+  private readonly keyBudget: ConditionalSettlementKeyBudget | undefined;
+  private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
     private readonly database: SaasDatabase,
@@ -778,6 +913,15 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
   ) {
     this.metering = options.metering ?? options.meteringService ?? new SaasMeteringService(database);
     this.billing = options.billing ?? options.billingService ?? new PlatformWalletLedgerService();
+    this.keyBudget = options.keyBudget;
+    if (
+      options.webhookEvents !== undefined &&
+      (typeof options.webhookEvents.requestCompleted !== 'function' ||
+        typeof options.webhookEvents.usageCompleted !== 'function')
+    ) {
+      throw new TypeError('webhookEvents must implement the customer webhook event producer contract');
+    }
+    this.webhookEvents = options.webhookEvents;
   }
 
   async complete(input: NormalSuccessTransactionInput): Promise<NormalSuccessTransactionResult> {
@@ -833,7 +977,8 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
                 r.id AS request_id, r.tenant_id AS request_tenant_id, r.supply_mode AS request_supply_mode,
                 r.customer_price_version AS request_customer_price_version,
                 r.execution_state AS request_result_state, r.reconciliation_state AS request_reconciliation_state,
-                r.financial_status AS request_financial_status, r.state_version AS request_state_version
+                r.financial_status AS request_financial_status, r.state_version AS request_state_version,
+                r.project_id AS request_project_id, r.created_at AS request_created_at
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
           WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
@@ -862,16 +1007,20 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
         }
         const assertReplay = this.metering.assertUsageSettlementReplay;
         if (!assertReplay) throw new Error('normal-success replay verification capability is unavailable');
-        await assertReplay.call(this.metering, {
-          tenantId: input.tenantId,
-          requestId: input.requestId,
-          attemptId: input.attemptId,
-          supplyMode: input.supplyMode,
-          eventKey: input.usageEventKey,
-          settlementKey: input.settlementKey,
-          usageEvidenceRef: input.usageEvidenceRef,
-          usage: input.usage,
-        }, { executor: tx });
+        await assertReplay.call(
+          this.metering,
+          {
+            tenantId: input.tenantId,
+            requestId: input.requestId,
+            attemptId: input.attemptId,
+            supplyMode: input.supplyMode,
+            eventKey: input.usageEventKey,
+            settlementKey: input.settlementKey,
+            usageEvidenceRef: input.usageEvidenceRef,
+            usage: input.usage,
+          },
+          { executor: tx },
+        );
         if (input.supplyMode === 'platform') {
           const settledHold = await one<NormalSuccessHoldRow>(
             tx,
@@ -896,7 +1045,8 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
             stateText(settledHold.wallet_id) === null ||
             stateText(settledHold.idempotency_namespace) !== RESERVATION_NAMESPACE ||
             stateText(settledHold.business_key) !== admissionBusinessKey(input.tenantId, input.requestId) ||
-            !token(settledHold.amount_minor_units) || token(settledHold.amount_minor_units) === '0' ||
+            !token(settledHold.amount_minor_units) ||
+            token(settledHold.amount_minor_units) === '0' ||
             stateText(settledHold.state) !==
               (stateText(state.request_financial_status) === 'settled' ? 'settled' : 'reconciliation_pending') ||
             stateText(settledHold.price_snapshot_ref) !== input.priceSnapshotRef ||
@@ -909,17 +1059,25 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           }
           const charged = BigInt(input.chargeAmountMinorUnits as string);
           const held = BigInt(token(settledHold.amount_minor_units) as string);
-          if (stateText(settledHold.state) === 'settled'
-            ? charged > held || (charged === 0n
-              ? settledHold.ledger_transaction_id !== null : stateText(settledHold.ledger_transaction_id) === null)
-            : settledHold.ledger_transaction_id !== null) {
+          if (
+            stateText(settledHold.state) === 'settled'
+              ? charged > held ||
+                (charged === 0n
+                  ? settledHold.ledger_transaction_id !== null
+                  : stateText(settledHold.ledger_transaction_id) === null)
+              : settledHold.ledger_transaction_id !== null
+          ) {
             throw new Error('normal-success replay hold has inconsistent charge units or ledger reference');
           }
         }
         const attempt = await this.readAttempt(input.tenantId, input.requestId, input.attemptId, tx);
         if (
-          attempt.id !== input.attemptId || attempt.tenantId !== input.tenantId || attempt.requestId !== input.requestId ||
-          attempt.dispatchState !== 'sent' || attempt.resultState !== 'succeeded' || attempt.responseStarted !== true ||
+          attempt.id !== input.attemptId ||
+          attempt.tenantId !== input.tenantId ||
+          attempt.requestId !== input.requestId ||
+          attempt.dispatchState !== 'sent' ||
+          attempt.resultState !== 'succeeded' ||
+          attempt.responseStarted !== true ||
           attempt.stateVersion !== stateVersion(state.attempt_state_version)
         ) {
           throw new Error('normal-success replay attempt does not match its locked terminal state');
@@ -969,7 +1127,8 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           stateText(hold.wallet_id) === null ||
           stateText(hold.idempotency_namespace) !== RESERVATION_NAMESPACE ||
           stateText(hold.business_key) !== admissionBusinessKey(input.tenantId, input.requestId) ||
-          !token(hold.amount_minor_units) || token(hold.amount_minor_units) === '0' ||
+          !token(hold.amount_minor_units) ||
+          token(hold.amount_minor_units) === '0' ||
           stateText(hold.state) !== 'reserved' ||
           stateText(hold.currency) !== input.currency ||
           stateText(hold.price_snapshot_ref) !== input.priceSnapshotRef
@@ -1020,6 +1179,19 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
         billingState = billingResult.state;
       }
 
+      // KEY-BUD (contract C-4): the usage actually occurred, so resolve the
+      // per-request budget reservation with the ACTUAL amounts even when the
+      // wallet settlement froze into reconciliation_pending; replay and
+      // pre-081 drift are no-ops inside the store. BYOK settles charge '0'.
+      if (this.keyBudget) {
+        await this.keyBudget.settle(tx, {
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+          actualTokenUnits: keyBudgetTokenUnitsFromUsage(input.usage),
+          actualChargeMinorUnits: input.supplyMode === 'platform' ? (input.chargeAmountMinorUnits as string) : '0',
+        });
+      }
+
       const stateVersionAttempt = stateVersion(state.attempt_state_version);
       const stateVersionRequest = stateVersion(state.request_state_version);
       if (stateVersionAttempt === null || stateVersionRequest === null) {
@@ -1067,6 +1239,19 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           expectedFinancialStatus: 'pending',
           financialStatus: billingState as 'settled' | 'reconciliation_pending',
           expectedStateVersion: request.stateVersion,
+        });
+      }
+      if (this.webhookEvents) {
+        await emitSettlementTerminalEvents(this.webhookEvents, tx, {
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+          projectId: state.request_project_id,
+          supplyMode: input.supplyMode,
+          requestCreatedAt: state.request_created_at,
+          occurredAt: request.updatedAt,
+          inputTokens: usageEvent.inputTotal,
+          outputTokens: usageEvent.outputTotal,
+          transitionRef: 'normal-success-settlement',
         });
       }
       return {

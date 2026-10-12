@@ -14,8 +14,24 @@ const gates = {
   'pre-dispatch-compensation': { root: 'tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts', httpFixture: true },
   'concurrent-claim': { root: 'tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts', httpFixture: true },
   'normal-success-terminal-replay': { root: 'tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts', httpFixture: false },
+  'usage-correction-063': { root: 'tests/saas/metering/usage-correction.postgres.integration.test.ts', httpFixture: false },
+  'key-ip-policy-080': { root: 'tests/saas/keys/ip-policy.postgres.integration.test.ts', httpFixture: false },
+  'key-budget-policy-081': { root: 'tests/saas/keys/budget-policy.postgres.integration.test.ts', httpFixture: false },
+  'settlement-sigkill-crash': { root: 'tests/drills/settlement-sigkill-crash.postgres.integration.test.ts', httpFixture: false },
   'member-directory': { root: 'tests/saas/identity/tenant-member-directory.postgres.integration.test.ts', httpFixture: false },
   'member-directory-http': { root: 'tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts', httpFixture: false },
+  'dual-instance-failover': { root: 'tests/drills/dual-instance-failover.postgres.integration.test.ts', httpFixture: false },
+  'marketing-redeem-codes-089': { root: 'tests/saas/marketing/redeem-codes.postgres.integration.test.ts', httpFixture: false },
+  'marketing-promo-codes-090': { root: 'tests/saas/marketing/promo-codes.postgres.integration.test.ts', httpFixture: false },
+  'marketing-affiliate-091': { root: 'tests/saas/marketing/affiliate.postgres.integration.test.ts', httpFixture: false },
+  'marketing-announcements-092': { root: 'tests/saas/marketing/announcements.postgres.integration.test.ts', httpFixture: false },
+  'quota-sync-093': { root: 'tests/saas/supply/quota-sync-worker.postgres.integration.test.ts', httpFixture: false },
+  'oauth-token-refresh-094': { root: 'tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts', httpFixture: false },
+  'announcement-fanout-095': { root: 'tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts', httpFixture: false },
+  'account-quarantine-097': { root: 'tests/saas/supply/account-quarantine.postgres.integration.test.ts', httpFixture: false },
+  'rate-limit-scheduling-098': { root: 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts', httpFixture: false },
+  'health-score-098': { root: 'tests/saas/gateway/health-score.postgres.integration.test.ts', httpFixture: false },
+  'oauth-refresh-onboarding': { root: 'tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts', httpFixture: false },
 } as const;
 const databaseUrls = {
   migrator: 'postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci',
@@ -23,6 +39,11 @@ const databaseUrls = {
   gateway: 'postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci',
   validation_worker: 'postgresql://model_router_saas_validation_worker@postgres:5432/model_router_saas_ci',
 } as const;
+// CI-only synthetic envelope test key for the pilot software KMS module: not a
+// production secret, used only against the disposable CI database (the same
+// class as FIN057_FIXTURE_HMAC_HEX fixture bytes). Never read from the
+// supervisor environment, never a deployment value.
+const CI_SOFTWARE_KMS_MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 // Do not inherit PG*, provider/KMS/config URLs, user config or optional-gate
 // environment. The only endpoints passed to subprocesses are these literals.
 const childEnv = {
@@ -32,6 +53,9 @@ const childEnv = {
   MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: databaseUrls.migrator,
   MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: databaseUrls.control_plane,
   MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: databaseUrls.gateway,
+  MODEL_ROUTER_SAAS_GATEWAY_E2E_VALIDATION_WORKER_URL: databaseUrls.validation_worker,
+  MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY: CI_SOFTWARE_KMS_MASTER_KEY,
+  MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: 'software-local',
 };
 let phase = 'ci_guard';
 
@@ -90,7 +114,7 @@ async function main(): Promise<void> {
   phase = 'runtime_probes';
   await runtimeProbes();
   // Only these three roots need the actual dual-mode successful HTTP fixture.
-  // The other three seed independent legitimate rows, never a second bootstrap.
+  // The other roots seed independent legitimate rows, never a second bootstrap.
   if (gate.httpFixture) {
     phase = 'http_fixture';
     run('node', ['--import', 'tsx', '--test', 'tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts']);

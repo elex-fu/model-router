@@ -37,6 +37,9 @@ export const saasAdvisoryKey = {
   platformPool: (poolId: string): string => `saas_platform_pool:${utf8Hex(poolId)}`,
   supplyProfile: (tenantId: string, profileId: string): string =>
     `saas_supply_profile:${utf8Hex(tenantId)}:${utf8Hex(profileId)}`,
+  /** Serializes append-only usage corrections with reconciliation writers for one request. */
+  usageCorrectionRequest: (tenantId: string, requestId: string): string =>
+    `saas-metering:usage-correction:${utf8Hex(tenantId)}:${utf8Hex(requestId)}`,
 } as const;
 
 export const sortAndDedupeAdvisoryKeys = (keys: readonly string[]): string[] => [...new Set(keys)].sort();

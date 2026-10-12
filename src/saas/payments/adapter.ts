@@ -4,6 +4,8 @@ import type {
   PaymentProviderCheckoutRefreshResult,
   PaymentProviderCreateOrderInput,
   PaymentProviderCreateOrderResult,
+  PaymentProviderEventConfirmation,
+  PaymentProviderEventConfirmationInput,
   PaymentProviderOrderRecoveryInput,
   PaymentProviderRefundInput,
   PaymentProviderRefundQueryResult,
@@ -67,4 +69,12 @@ export interface PaymentProviderAdapter {
   recoverOrder?(input: PaymentProviderOrderRecoveryInput): Promise<PaymentProviderCreateOrderResult | null>;
   verifyWebhook(input: PaymentProviderWebhookVerificationInput): Promise<VerifiedPaymentProviderWebhook>;
   normalizeEvent(input: VerifiedPaymentProviderWebhook): NormalizedPaymentProviderEvent;
+  /**
+   * Optional provider-specific pre-fulfillment attestation for a signed event
+   * (red line for weak-signature PSPs such as EasyPay's MD5: signature alone
+   * never fulfills). Returning `confirmed: false` routes the event to the
+   * durable reconciliation queue; throwing signals a retryable confirmation
+   * failure. Adapters without this seam fulfill on signature verification.
+   */
+  confirmEvent?(input: PaymentProviderEventConfirmationInput): Promise<PaymentProviderEventConfirmation>;
 }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
 import { GATEWAY_METERING_SAAS_MIGRATION } from '../../../../src/saas/db/migrations/010_gateway_metering.js';
 import {
@@ -32,7 +33,7 @@ test('057 keeps the actual historical 010/054/055/056 source bytes frozen', () =
     ['055_prepared_evidence_optional_validity_scalars.ts', 'ed8ef3bfe1a3ddaa6d39111486429b3b86b193aee8dda01fe58e62634d8ba660'],
     ['056_restricted_role_check_and_platform_auth_execution.ts', '13e1e5330447ecfb78e137b7054d0ec384254e865e91e7e98004222fe450ac13'],
   ] as const) {
-    const source = readFileSync(new URL(`../../../../src/saas/db/migrations/${file}`, import.meta.url));
+    const source = readFileSync(new URL(`../../../../src/saas/db/migrations/${file}`, pathToFileURL(__filename)));
     assert.equal(createHash('sha256').update(source).digest('hex'), hash, file);
   }
 });

@@ -27,6 +27,7 @@ import type {
   UsageEventRecord,
   UsageSettlementRecord,
 } from '../../../src/saas/metering/types.js';
+import type { CustomerWebhookEventProducer } from '../../../src/saas/webhooks/producers.js';
 
 type Row = Record<string, unknown>;
 
@@ -123,6 +124,8 @@ function initialRow(overrides: Row = {}): Row {
     financial_status: 'pending',
     reconciliation_state: 'pending',
     request_state_version: 3,
+    request_project_id: 'project-1',
+    request_created_at: '2026-09-28T23:59:59.000Z',
     ...overrides,
   };
 }
@@ -357,8 +360,10 @@ class FakeMetering implements ConditionalSettlementMetering {
       this.database.state.settlementKey = input.settlementKey;
       this.database.state.normalSuccessEvidenceRef = input.normalSuccessEvidenceRef ?? null;
       this.database.state.usageSettlementCount += 1;
-    } else if (this.database.state.settlementKey !== input.settlementKey ||
-      this.database.state.normalSuccessEvidenceRef !== (input.normalSuccessEvidenceRef ?? null)) {
+    } else if (
+      this.database.state.settlementKey !== input.settlementKey ||
+      this.database.state.normalSuccessEvidenceRef !== (input.normalSuccessEvidenceRef ?? null)
+    ) {
       throw Object.assign(new Error('settlement conflict'), { code: 'USAGE_SETTLEMENT_CONFLICT' });
     }
     return {
@@ -390,14 +395,20 @@ class FakeMetering implements ConditionalSettlementMetering {
     this.database.state.row.request_result_state = input.resultState;
     this.database.state.row.reconciliation_state = input.reconciliationState;
     this.database.state.row.request_state_version = Number(input.expectedStateVersion ?? 0) + 1;
-    return { stateVersion: this.database.state.row.request_state_version } as unknown as RequestRecord;
+    return {
+      stateVersion: this.database.state.row.request_state_version,
+      updatedAt: '2026-09-29T00:00:00.000Z',
+    } as unknown as RequestRecord;
   }
 
   async transitionFinancialStatus(input: FinancialTransitionInput): Promise<RequestRecord> {
     this.requireExecutor(input.executor);
     this.database.state.row.financial_status = input.financialStatus;
     this.database.state.row.request_state_version = Number(input.expectedStateVersion ?? 0) + 1;
-    return { stateVersion: this.database.state.row.request_state_version } as unknown as RequestRecord;
+    return {
+      stateVersion: this.database.state.row.request_state_version,
+      updatedAt: '2026-09-29T00:00:00.000Z',
+    } as unknown as RequestRecord;
   }
 
   private requireExecutor(executor: SqlExecutor | undefined): asserts executor is SqlExecutor {
@@ -718,4 +729,136 @@ test('rejects BYOK reconciliation without touching a platform wallet or usage se
   assert.equal(harness.billing.callCount, 0);
   assert.equal(harness.database.state.ledgerTransactionCount, 0);
   assert.equal(harness.database.state.usageEventCount, 0);
+});
+
+interface RecordedWebhookCall {
+  readonly method: 'requestCompleted' | 'usageCompleted';
+  readonly input: Record<string, unknown>;
+}
+
+function recordingWebhookProducer(): {
+  readonly calls: RecordedWebhookCall[];
+  readonly producer: CustomerWebhookEventProducer;
+} {
+  const calls: RecordedWebhookCall[] = [];
+  const producer = {
+    requestCompleted: async (_tx: SqlExecutor, input: Record<string, unknown>) => {
+      calls.push({ method: 'requestCompleted', input });
+    },
+    usageCompleted: async (_tx: SqlExecutor, input: Record<string, unknown>) => {
+      calls.push({ method: 'usageCompleted', input });
+    },
+  } as unknown as CustomerWebhookEventProducer;
+  return { calls, producer };
+}
+
+test('F3: the conditional settlement terminal commit emits request and usage completion events', async () => {
+  const database = new FakeDatabase(initialState());
+  const metering = new FakeMetering(database);
+  const billing = new FakeBilling(database);
+  const { calls, producer } = recordingWebhookProducer();
+  const adapter = new DurableConditionalSettlementPort(database, { metering, billing, webhookEvents: producer });
+
+  const outcome = await adapter.submit(settlementInput());
+
+  assert.equal(outcome.status, 'settled');
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['requestCompleted', 'usageCompleted'],
+  );
+  const requestEvent = calls[0]?.input;
+  assert.equal(requestEvent?.tenantId, 'tenant-1');
+  assert.equal(requestEvent?.requestId, 'request-1');
+  assert.equal(requestEvent?.projectId, 'project-1');
+  assert.equal(requestEvent?.supplyMode, 'platform');
+  assert.equal(requestEvent?.status, 'succeeded');
+  // Terminal transition updated_at minus the stored request created_at.
+  assert.equal(requestEvent?.durationMs, 1000);
+  assert.equal(requestEvent?.occurredAt, '2026-09-29T00:00:00.000Z');
+  assert.equal(requestEvent?.transitionRef, 'conditional-settlement');
+  const usageEvent = calls[1]?.input;
+  assert.equal(usageEvent?.inputTokens, 12);
+  assert.equal(usageEvent?.outputTokens, 8);
+  assert.equal(usageEvent?.occurredAt, '2026-09-29T00:00:00.000Z');
+});
+
+test('F3: conditional settlement replays never re-emit terminal events', async () => {
+  const database = new FakeDatabase(initialState());
+  const metering = new FakeMetering(database);
+  const billing = new FakeBilling(database);
+  const { calls, producer } = recordingWebhookProducer();
+  const adapter = new DurableConditionalSettlementPort(database, { metering, billing, webhookEvents: producer });
+
+  const input = settlementInput();
+  await adapter.submit(input);
+  const replay = await adapter.submit(input);
+
+  assert.equal(replay.status, 'replayed');
+  assert.equal(calls.length, 2, 'only the first settlement emits');
+});
+
+test('F3: the normal-success terminal commit emits both events for byok supply', async () => {
+  const database = new FakeDatabase(
+    initialState({
+      row: initialRow({
+        supply_mode: 'byok',
+        account_owner_kind: 'tenant',
+        attempt_route_target_mode: 'tenant_account',
+        request_route_target_mode: 'tenant_account',
+        attempt_dispatch_state: 'sent',
+        attempt_result_state: 'pending',
+        response_started: true,
+        attempt_state_version: 6,
+        request_result_state: 'pending',
+        reconciliation_state: 'none',
+        financial_status: 'not_applicable',
+        request_state_version: 8,
+        attempt_customer_price_version: null,
+        request_customer_price_version: null,
+      }),
+      hold: null,
+    }),
+  );
+  const metering = new FakeMetering(database);
+  const billing = new FakeBilling(database);
+  const { calls, producer } = recordingWebhookProducer();
+  const port = new DurableNormalSuccessSettlementPort(database, { metering, billing, webhookEvents: producer });
+
+  const outcome = await port.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    supplyMode: 'byok',
+    responseStarted: true,
+    priceSnapshotRef: null,
+    reservationId: null,
+    currency: null,
+    customerPriceVersion: null,
+    chargeAmountMinorUnits: null,
+    usageEventKey: 'success-usage-event',
+    settlementKey: 'success-settlement',
+    usageEvidenceRef: 'e'.repeat(64),
+    usage: usage(),
+  });
+
+  assert.equal(outcome.kind, 'settled');
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['requestCompleted', 'usageCompleted'],
+  );
+  assert.equal(calls[0]?.input.supplyMode, 'byok');
+  assert.equal(calls[0]?.input.transitionRef, 'normal-success-settlement');
+  assert.equal(calls[1]?.input.supplyMode, 'byok');
+});
+
+test('F3: ports reject a producer that does not implement the contract', () => {
+  const database = new FakeDatabase(initialState());
+  assert.throws(
+    () => new DurableConditionalSettlementPort(database, { webhookEvents: {} as CustomerWebhookEventProducer }),
+    TypeError,
+  );
+  assert.throws(
+    () => new DurableNormalSuccessSettlementPort(database, { webhookEvents: {} as CustomerWebhookEventProducer }),
+    TypeError,
+  );
 });

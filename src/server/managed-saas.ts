@@ -7,6 +7,7 @@ import { PlatformWalletLedgerService } from '../saas/billing/service.js';
 import { SaasCatalogService } from '../saas/catalog/index.js';
 import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/console/http.js';
 import { SaasConsoleUsageQueryService } from '../saas/console/index.js';
+import { verifyCredentialValidationWorkerSchemaReadiness } from '../saas/db/credential-validation-worker-schema-readiness.js';
 import {
   closeSaasDatabase,
   createSaasDatabase,
@@ -29,16 +30,40 @@ import {
 } from '../saas/deployment.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
+import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
+import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
 import { createPostgresPreparationCapacityPort } from '../saas/gateway/postgres-preparation-capacity.js';
 import { createPostgresPreparationPorts } from '../saas/gateway/postgres-preparation-ports.js';
 import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provider-account-affinity.js';
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
+import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
 import { createSaasIdentityHandler, type SaasIdentityHttpOptions } from '../saas/identity/http.js';
 import { SaasIdentityService } from '../saas/identity/index.js';
+import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { createSaasKeyHandler, type SaasKeyHttpHandler } from '../saas/keys/http.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
+import { MarketingAffiliateService } from '../saas/marketing/affiliate.js';
+import {
+  createMarketingAffiliateCustomerHttpHandler,
+  createMarketingAffiliateOpsHttpHandler,
+  type MarketingAffiliateHttpHandler,
+} from '../saas/marketing/affiliate-http.js';
+import { MarketingAnnouncementService } from '../saas/marketing/announcements.js';
+import {
+  createMarketingAnnouncementCustomerHttpHandler,
+  createMarketingAnnouncementPlatformHttpHandler,
+  type MarketingAnnouncementHttpHandler,
+} from '../saas/marketing/announcements-http.js';
+import {
+  createMarketingCustomerRedeemHandler,
+  createMarketingOpsRedeemCodesHandler,
+  type MarketingRedeemHttpHandler,
+} from '../saas/marketing/http.js';
+import { MarketingPromoCodeService } from '../saas/marketing/promo-codes.js';
+import { createMarketingOpsPromoCodesHandler, type MarketingPromoHttpHandler } from '../saas/marketing/promo-http.js';
+import { MarketingRedeemCodeService } from '../saas/marketing/redeem-codes.js';
 import { SaasMeteringService } from '../saas/metering/service.js';
 import {
   createUnknownOutcomePlatformHttpHandler,
@@ -53,13 +78,20 @@ import {
   type UnknownOutcomeScannerHandle,
   type UnknownOutcomeScannerSchedulerOptions,
 } from '../saas/metering/unknown-outcome-scanner-scheduler.js';
+import { UsageCorrectionService } from '../saas/metering/usage-correction.js';
+import {
+  createUsageCorrectionPlatformHttpHandler,
+  type UsageCorrectionPlatformHttpHandler,
+} from '../saas/metering/usage-correction-platform-http.js';
 import type { PaymentProviderAdapter, PaymentProviderRefundAdapter } from '../saas/payments/adapter.js';
+import { SaasCustomerPaymentOrderQueryService } from '../saas/payments/customer-order-query.js';
 import {
   type CustomerRefundQueryContext,
   CustomerRefundQueryError,
   SaasCustomerRefundQueryService,
 } from '../saas/payments/customer-refund-query.js';
 import {
+  createSaasCustomerPaymentOrderHistoryHandler,
   createSaasCustomerRefundHistoryHandler,
   createSaasPaymentHandler,
   type SaasPaymentHttpHandler,
@@ -96,12 +128,26 @@ import {
 } from '../saas/platform/credential-rewrap-http.js';
 import { createPlatformCredentialRewrapOperations } from '../saas/platform/credential-rewrap-operations.js';
 import {
+  PlatformOperatorManagementService,
+  PlatformTenantLifecycleService,
+  PlatformUserGovernanceService,
+} from '../saas/platform/governance/index.js';
+import {
   createPlatformAdminReadHandler,
   type PlatformAdminCapacityPolicyTargetSelectors,
   type PlatformAdminReadHttpHandler,
 } from '../saas/platform/http/index.js';
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
 import { SaasPricingService } from '../saas/pricing/index.js';
+import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
+import {
+  assertCustomerMfaDeploymentConfiguration,
+  createCustomerMfaForDeployment,
+} from '../saas/runtime/customer-mfa-capability.js';
+import {
+  assertCustomerPasskeyDeploymentConfiguration,
+  createCustomerPasskeyForDeployment,
+} from '../saas/runtime/customer-passkey-capability.js';
 import {
   type LoadedProviderCredentialUnsealingKms,
   loadGatewayProviderCredentialUnsealingKms,
@@ -121,25 +167,45 @@ import {
   loadValidationWorkerProviderCredentialKms,
   SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/runtime/validation-worker-provider-credential-kms.js';
-import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
+import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
+import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
 import {
   type CredentialValidationWorkerHandle,
   type CredentialValidationWorkerOptions,
   startCredentialValidationWorker as startValidationWorkerLoop,
 } from '../saas/supply/credential-validation-worker.js';
-import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
-import { verifyCredentialValidationWorkerSchemaReadiness } from '../saas/db/credential-validation-worker-schema-readiness.js';
-import type { ApprovedCredentialValidationTarget } from '../saas/supply/types.js';
-import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
-import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
 import { type CustomerByokHttpHandler, createCustomerByokHttpHandler } from '../saas/supply/customer-http.js';
 import { ProviderSupplyService } from '../saas/supply/index.js';
+import {
+  type OauthCredentialRotator,
+  type OauthTokenRefreshWorkerHandle,
+  startOauthTokenRefreshWorker,
+} from '../saas/supply/oauth-token-refresh-worker.js';
+import {
+  type QuotaSyncWorkerHandle,
+  type QuotaSyncWorkerOptions,
+  startQuotaSyncWorker as startQuotaSyncWorkerLoop,
+} from '../saas/supply/quota-sync-worker.js';
+import type { ApprovedCredentialValidationTarget } from '../saas/supply/types.js';
+import {
+  type AnnouncementFanoutWorkerHandle,
+  createAnnouncementFanoutEventPort,
+  startAnnouncementFanoutWorker,
+} from '../saas/webhooks/announcement-fanout-worker.js';
 import { CustomerWebhookDeliveryWorker, type CustomerWebhookWorkerOptions } from '../saas/webhooks/delivery-worker.js';
 import type { CustomerWebhookEgressTransport } from '../saas/webhooks/egress-transport.js';
 import { CustomerWebhookEndpointService } from '../saas/webhooks/endpoint-service.js';
 import { type CustomerWebhookHttpHandler, createCustomerWebhookHandler } from '../saas/webhooks/http.js';
-import { PostgresCustomerWebhookDeliveryStore } from '../saas/webhooks/postgres-store.js';
+import { CustomerWebhookNotificationScanner } from '../saas/webhooks/notification-scanner.js';
+import {
+  CUSTOMER_WEBHOOK_DEFAULT_HISTORY_RETENTION_MS,
+  CUSTOMER_WEBHOOK_MAX_HISTORY_RETENTION_MS,
+  CUSTOMER_WEBHOOK_MIN_HISTORY_RETENTION_MS,
+  PostgresCustomerWebhookDeliveryStore,
+} from '../saas/webhooks/postgres-store.js';
+import { createCustomerWebhookEventProducer } from '../saas/webhooks/producers.js';
 import type { WebhookSigningSecretProtector } from '../saas/webhooks/signing-secret-protector.js';
+import { CustomerWebhookTenantPolicyService } from '../saas/webhooks/tenant-policy-service.js';
 import {
   createManagedSaasGatewayProductionComposition,
   type ManagedSaasGatewayComposition,
@@ -171,6 +237,12 @@ export interface ManagedSaasRuntime {
   readonly gateway: ManagedSaasGatewayComposition | null;
   /** Present only in the dedicated credential-validation-worker workload. */
   readonly credentialValidationWorker: CredentialValidationWorkerHandle | null;
+  /** D4 quota sync loop sharing the credential-validation-worker workload. */
+  readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
+  /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
+  readonly oauthTokenRefreshWorker: OauthTokenRefreshWorkerHandle | null;
+  /** G4.5 announcement fan-out loop; only when customer webhooks are enabled. */
+  readonly announcementFanoutWorker: AnnouncementFanoutWorkerHandle | null;
   /** Present only when the control-plane owns the unknown-outcome recovery loop. */
   readonly unknownOutcomeScanner: UnknownOutcomeScannerHandle | null;
   /** Only listeners assigned to this workload role are present and bound. */
@@ -202,6 +274,38 @@ export interface ManagedSaasCustomerWebhooksOptions {
   readonly egressTransport?: CustomerWebhookEgressTransport;
   readonly workerOptions?: CustomerWebhookWorkerOptions;
   readonly intervalMs?: number;
+  /**
+   * F3: periodic wallet.low_balance / api_key.expiring sweep. Absent disables
+   * the scanner (delivery of state-machine events is unaffected).
+   */
+  readonly notificationScan?: {
+    /** Bounded delay between completed sweeps (10s..1h; default 5min). */
+    readonly intervalMs?: number;
+    readonly batchSize?: number;
+    readonly expiringKeyWindowMs?: number;
+  };
+  /**
+   * F4: periodic pruneTerminalHistory pass over terminal delivery/attempt
+   * metadata. Absent disables retention pruning (immutable event facts and
+   * idempotency tombstones are never pruned either way).
+   */
+  readonly retentionPrune?: {
+    /** Bounded delay between completed prune passes (1min..24h; default 1h). */
+    readonly intervalMs?: number;
+    /** Terminal-row retention window (7..365 days; default 90 days). */
+    readonly retentionMs?: number;
+    /** Maximum deliveries pruned per pass (1..1000; default 100). */
+    readonly limit?: number;
+  };
+  /**
+   * G4.5: periodic platform.maintenance fan-out sweep over the announcement
+   * publish cursor. Absent uses the worker defaults (batch 10, 15s interval);
+   * publish itself stays O(1) either way.
+   */
+  readonly announcementFanout?: {
+    readonly intervalMs?: number;
+    readonly batchSize?: number;
+  };
 }
 
 export interface ManagedSaasUnknownOutcomeScannerOptions {
@@ -242,6 +346,9 @@ export interface ManagedSaasStartOptions {
   credentialValidationTargetsModuleImporter?: ProviderModuleImporter;
   /** Runtime module import seam; only the isolated gateway workload consults it. */
   gatewayRuntimeModuleImporter?: ProviderModuleImporter;
+  /** Trusted metadata-only customer MFA module; no operations/readiness override. */
+  customerMfaCapabilityModuleImporter?: ProviderModuleImporter;
+  customerPasskeyCapabilityModuleImporter?: ProviderModuleImporter;
   /** Dedicated decrypt-only KMS import seam; only the isolated gateway workload consults it. */
   gatewayProviderCredentialKmsImporter?: ProviderModuleImporter;
   /** Deterministic seam for the isolated validation loop. */
@@ -251,8 +358,43 @@ export interface ManagedSaasStartOptions {
     options: CredentialValidationWorkerOptions,
   ) => CredentialValidationWorkerHandle;
   /** Optional worker loop tuning or test fetch; deployment identity is always supplied by config. */
-  credentialValidationWorkerOptions?: Partial<Omit<CredentialValidationWorkerOptions,
-    'deployment' | 'environment' | 'approvedTargets' | 'transportTestOptions'>>;
+  credentialValidationWorkerOptions?: Partial<
+    Omit<CredentialValidationWorkerOptions, 'deployment' | 'environment' | 'approvedTargets' | 'transportTestOptions'>
+  >;
+  /** Deterministic seam for the D4 quota sync loop sharing the worker workload. */
+  startQuotaSyncWorker?: (
+    database: SaasDatabase,
+    kms: LoadedValidationWorkerProviderCredentialKms,
+    options: QuotaSyncWorkerOptions,
+  ) => QuotaSyncWorkerHandle;
+  /** Optional quota loop tuning or test fetch; deployment identity is always supplied by config. */
+  quotaSyncWorkerOptions?: Partial<Omit<QuotaSyncWorkerOptions, 'deployment' | 'environment'>>;
+  /**
+   * R4: the privileged rotation seam for the OAuth refresh worker. Rotation
+   * writes the new credential version chain through the audited supply path,
+   * which the restricted worker role cannot perform; a deployment wires this
+   * only where a control-plane-grade persistence entry and operator identity
+   * are available (combined/dev topologies or a reviewed cross-role
+   * composition). Absent means the refresh worker is not started.
+   */
+  oauthTokenRefreshRotator?: OauthCredentialRotator;
+  /** Optional refresh loop tuning; batchSize/pollIntervalMs bounds are enforced by the worker. */
+  oauthTokenRefreshWorkerOptions?: { readonly batchSize?: number; readonly pollIntervalMs?: number };
+  /**
+   * R4 production assembly (docs/oauth-refresh-production-assembly.md,
+   * decision A): run the OAuth refresh worker inside the control-plane
+   * workload with the audited rotation path. Both fields are required to
+   * enable; absence keeps the worker stopped (pre-R4 behavior). Mutually
+   * exclusive with oauthTokenRefreshRotator (the alternative worker-workload wiring).
+   */
+  oauthTokenRefresh?: {
+    /** Deployment-injected decrypt-only KMS for envelope unsealing (pilot: the software module instance). */
+    readonly unsealingKms: import('../saas/credentials/provider-crypto.js').ProviderCredentialUnsealingKms;
+    /** Existing saas_users identity for the rotation audit actor (bootstrap admin or a dedicated operations account). */
+    readonly operatorUserId: string;
+    readonly batchSize?: number;
+    readonly pollIntervalMs?: number;
+  };
   /** Trusted SDK metadata; mutually exclusive with the configured targets module. Neither source grants catalog approval. */
   credentialValidationTargets?: readonly ApprovedCredentialValidationTarget[];
   /** Requires the opaque Node-test-runner CA/address capability; never a production DNS/TLS override. */
@@ -453,6 +595,10 @@ function createCustomerHandler(
   customerWebhookHandler: CustomerWebhookHttpHandler | undefined,
   byokHandler: CustomerByokHttpHandler,
   refundHistoryHandler: SaasPaymentHttpHandler,
+  paymentOrderHistoryHandler: SaasPaymentHttpHandler,
+  marketingRedeemHandler: MarketingRedeemHttpHandler,
+  marketingAnnouncementsHandler: MarketingAnnouncementHttpHandler,
+  marketingAffiliateHandler: MarketingAffiliateHttpHandler,
   paymentHandler: SaasPaymentHttpHandler | undefined,
   webDistPath: string | undefined,
 ): RequestListener {
@@ -464,6 +610,10 @@ function createCustomerHandler(
         return;
       }
       if (await refundHistoryHandler(req, res)) return;
+      if (await paymentOrderHistoryHandler(req, res)) return;
+      if (await marketingRedeemHandler(req, res)) return;
+      if (await marketingAnnouncementsHandler(req, res)) return;
+      if (await marketingAffiliateHandler(req, res)) return;
       if (paymentHandler && (await paymentHandler(req, res))) return;
       if (isApiPath(pathname, CUSTOMER_API_PREFIX)) {
         if (await keyHandler(req, res)) return;
@@ -521,6 +671,11 @@ function createPlatformHandler(
   refundHandler: PlatformRefundHttpHandler | undefined,
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
   unknownOutcomeHandler: UnknownOutcomePlatformHttpHandler | undefined,
+  usageCorrectionHandler: UsageCorrectionPlatformHttpHandler | undefined,
+  marketingOpsRedeemCodesHandler: MarketingRedeemHttpHandler,
+  marketingOpsAnnouncementsHandler: MarketingAnnouncementHttpHandler,
+  marketingOpsPromoCodesHandler: MarketingPromoHttpHandler,
+  marketingOpsAffiliateHandler: MarketingAffiliateHttpHandler,
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
 ): RequestListener {
@@ -538,6 +693,11 @@ function createPlatformHandler(
         if (refundHandler && (await refundHandler(req, res))) return;
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
         if (unknownOutcomeHandler && (await unknownOutcomeHandler(req, res))) return;
+        if (usageCorrectionHandler && (await usageCorrectionHandler(req, res))) return;
+        if (await marketingOpsRedeemCodesHandler(req, res)) return;
+        if (await marketingOpsAnnouncementsHandler(req, res)) return;
+        if (await marketingOpsPromoCodesHandler(req, res)) return;
+        if (await marketingOpsAffiliateHandler(req, res)) return;
         if (await readHandler(req, res)) return;
         sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
         return;
@@ -731,6 +891,117 @@ function startCustomerWebhookDeliveryWorker(
   };
 }
 
+export interface CustomerWebhookNotificationScannerHandle {
+  readonly stop: () => Promise<void>;
+}
+
+function startCustomerWebhookNotificationScanner(
+  scanner: CustomerWebhookNotificationScanner,
+  options: { readonly intervalMs?: number } = {},
+): CustomerWebhookNotificationScannerHandle {
+  const intervalMs = options.intervalMs ?? 5 * 60 * 1000;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 10_000 || intervalMs > 60 * 60 * 1000) {
+    throw new RangeError('Customer webhook notification scan interval must be between 10000 and 3600000 ms');
+  }
+
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let running: Promise<void> | undefined;
+  const schedule = (delayMs: number): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      tick();
+    }, delayMs);
+    timer.unref();
+  };
+  const tick = (): void => {
+    if (stopped || running) return;
+    running = scanner
+      .runOnce()
+      .then(() => schedule(intervalMs))
+      .catch(() => {
+        console.error('model-router customer webhook notification scan cycle failed');
+        schedule(intervalMs);
+      })
+      .finally(() => {
+        running = undefined;
+      });
+  };
+  schedule(intervalMs);
+  return {
+    async stop(): Promise<void> {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      await running;
+    },
+  };
+}
+
+export interface CustomerWebhookRetentionPrunerHandle {
+  readonly stop: () => Promise<void>;
+}
+
+/**
+ * F4: bounded pruneTerminalHistory scheduling. Retention/limit bounds mirror
+ * the store's own validation so misconfiguration fails fast at startup
+ * instead of on the first tick.
+ */
+function startCustomerWebhookRetentionPruner(
+  store: Pick<PostgresCustomerWebhookDeliveryStore, 'pruneTerminalHistory'>,
+  options: { readonly intervalMs?: number; readonly retentionMs?: number; readonly limit?: number } = {},
+): CustomerWebhookRetentionPrunerHandle {
+  const intervalMs = options.intervalMs ?? 60 * 60 * 1000;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 60_000 || intervalMs > 24 * 60 * 60 * 1000) {
+    throw new RangeError('Customer webhook retention prune interval must be between 60000 and 86400000 ms');
+  }
+  const retentionMs = options.retentionMs ?? CUSTOMER_WEBHOOK_DEFAULT_HISTORY_RETENTION_MS;
+  if (
+    !Number.isSafeInteger(retentionMs) ||
+    retentionMs < CUSTOMER_WEBHOOK_MIN_HISTORY_RETENTION_MS ||
+    retentionMs > CUSTOMER_WEBHOOK_MAX_HISTORY_RETENTION_MS
+  ) {
+    throw new RangeError('Customer webhook retention window must be between 7 and 365 days');
+  }
+  const limit = options.limit ?? 100;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new RangeError('Customer webhook retention batch limit must be between 1 and 1000');
+  }
+
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let running: Promise<void> | undefined;
+  const schedule = (delayMs: number): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      tick();
+    }, delayMs);
+    timer.unref();
+  };
+  const tick = (): void => {
+    if (stopped || running) return;
+    running = store
+      .pruneTerminalHistory({ retentionMs, limit })
+      .then(() => schedule(intervalMs))
+      .catch(() => {
+        console.error('model-router customer webhook retention prune cycle failed');
+        schedule(intervalMs);
+      })
+      .finally(() => {
+        running = undefined;
+      });
+  };
+  schedule(intervalMs);
+  return {
+    async stop(): Promise<void> {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      await running;
+    },
+  };
+}
+
 async function closeAllResources(
   listeners: Iterable<Server>,
   gateway: ManagedSaasGatewayComposition | undefined,
@@ -739,7 +1010,11 @@ async function closeAllResources(
   providers: ManagedSaasProviders | undefined,
   unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined,
   paymentWorker: PaymentWebhookWorkerHandle | undefined,
+  oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined,
   customerWebhookWorker: CustomerWebhookDeliveryWorkerHandle | undefined,
+  customerWebhookScanner: CustomerWebhookNotificationScannerHandle | undefined,
+  customerWebhookPruner: CustomerWebhookRetentionPrunerHandle | undefined,
+  announcementFanoutWorker: AnnouncementFanoutWorkerHandle | undefined,
   refundWorker: PaymentRefundWorkerHandle | undefined,
   database: ManagedSaasDatabase | undefined,
   closeDatabase: (database: ManagedSaasDatabase) => Promise<void>,
@@ -747,7 +1022,11 @@ async function closeAllResources(
   const workerStops: Promise<void>[] = [];
   if (unknownOutcomeScanner) workerStops.push(unknownOutcomeScanner.stop());
   if (paymentWorker) workerStops.push(paymentWorker.stop());
+  if (oauthRefreshWorker) workerStops.push(oauthRefreshWorker.close());
   if (customerWebhookWorker) workerStops.push(customerWebhookWorker.stop());
+  if (customerWebhookScanner) workerStops.push(customerWebhookScanner.stop());
+  if (customerWebhookPruner) workerStops.push(customerWebhookPruner.stop());
+  if (announcementFanoutWorker) workerStops.push(announcementFanoutWorker.close());
   if (refundWorker) workerStops.push(refundWorker.stop());
   await Promise.allSettled(workerStops);
   await Promise.allSettled([...listeners].map((listener) => closeListener(listener)));
@@ -796,7 +1075,8 @@ async function startCredentialValidationWorkerRuntime(
   const targetsModuleImporter = targetsModuleData(options, 'credentialValidationTargetsModuleImporter');
   if (
     (configuredTargetsModule !== undefined &&
-      (typeof configuredTargetsModule !== 'string' || configuredTargetsModule.trim() === '' ||
+      (typeof configuredTargetsModule !== 'string' ||
+        configuredTargetsModule.trim() === '' ||
         configuredTargetsModule.trim() !== configuredTargetsModule)) ||
     targetsModuleData(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE) !== configuredTargetsModule
   ) {
@@ -806,9 +1086,11 @@ async function startCredentialValidationWorkerRuntime(
     throw new TypeError('Credential-validation worker SDK targets and targets module cannot both be configured');
   }
   let approvedTargets = compileApprovedCredentialValidationTargets(options.credentialValidationTargets ?? []);
-  if (options.credentialValidationWorkerTestTransport &&
-    (environment.NODE_ENV !== 'test' || !isProviderHttpTestAddressCapability(
-      options.credentialValidationWorkerTestTransport.addressCapability))) {
+  if (
+    options.credentialValidationWorkerTestTransport &&
+    (environment.NODE_ENV !== 'test' ||
+      !isProviderHttpTestAddressCapability(options.credentialValidationWorkerTestTransport.addressCapability))
+  ) {
     throw new TypeError('Credential-validation worker test transport is unavailable');
   }
   const configuredKmsModule = deployment.validationWorkerProviderCredentialDecryptKmsModule;
@@ -827,10 +1109,13 @@ async function startCredentialValidationWorkerRuntime(
     options.loadValidationWorkerKms ??
     ((env: DeploymentEnvironment) => loadValidationWorkerProviderCredentialKms({ env }));
   const startWorker = options.startCredentialValidationWorker ?? startValidationWorkerLoop;
+  const startQuotaWorker = options.startQuotaSyncWorker ?? startQuotaSyncWorkerLoop;
 
   let database: ManagedSaasDatabase | undefined;
   let kms: LoadedValidationWorkerProviderCredentialKms | undefined;
   let worker: CredentialValidationWorkerHandle | undefined;
+  let quotaWorker: QuotaSyncWorkerHandle | undefined;
+  let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
   const close = async (): Promise<void> => {
@@ -838,6 +1123,8 @@ async function startCredentialValidationWorkerRuntime(
       removeSignals?.();
       removeSignals = undefined;
       if (worker) await Promise.allSettled([worker.close()]);
+      if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
+      if (oauthRefreshWorker) await Promise.allSettled([oauthRefreshWorker.close()]);
       if (kms) await Promise.allSettled([Promise.resolve().then(() => kms?.close())]);
       if (database) await Promise.allSettled([closeDatabase(database)]);
     })();
@@ -895,12 +1182,32 @@ async function startCredentialValidationWorkerRuntime(
       deployment: deployment.deploymentId,
       environment: deployment.environmentId,
     });
+    // Track D4: the quota sync loop shares this workload's database role and
+    // decrypt-only KMS. Its snapshot writes never feed the billing path.
+    quotaWorker = startQuotaWorker(database, kms, {
+      ...options.quotaSyncWorkerOptions,
+      deployment: deployment.deploymentId,
+      environment: deployment.environmentId,
+    });
+    // Track R4: the OAuth refresh loop runs only when the deployment wires a
+    // privileged rotator (the restricted worker role cannot write the version
+    // chain). An absent rotator keeps pre-R4 behavior, documented at the option.
+    if (options.oauthTokenRefreshRotator) {
+      oauthRefreshWorker = startOauthTokenRefreshWorker(database, kms, options.oauthTokenRefreshRotator, {
+        ...(options.oauthTokenRefreshWorkerOptions ?? {}),
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      } as Parameters<typeof startOauthTokenRefreshWorker>[3]);
+    }
     const runtime: ManagedSaasRuntime = {
       deployment,
       database,
       providers: null,
       gateway: null,
       credentialValidationWorker: worker,
+      quotaSyncWorker: quotaWorker,
+      oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
+      announcementFanoutWorker: null,
       unknownOutcomeScanner: null,
       listeners: Object.freeze({}),
       close,
@@ -916,6 +1223,50 @@ async function startCredentialValidationWorkerRuntime(
 
 /**
  * Compose the hosted runtime without importing or constructing local config,
+/**
+ * R4 production assembly (decision A): the audited rotation seam used by the
+ * control-plane OAuth refresh worker. Dispatch follows the claimed credential's
+ * ownerKind — platform keeps the platform resolver path, while tenant (BYOK)
+ * rotations go through the operator-semantics tenant path (full reference from
+ * the claim, no TenantContext). Both paths audit the deployment-provided
+ * operator identity with the refresh-worker entry point.
+ */
+export function createManagedOauthTokenRefreshRotator(
+  supply: ProviderSupplyService,
+  operatorUserId: string,
+): OauthCredentialRotator {
+  return async (input) => {
+    const audit = { actorUserId: operatorUserId, entryPoint: 'oauth-token-refresh-worker' } as const;
+    const result =
+      input.ownerKind === 'tenant'
+        ? await supply.replaceTenantProviderCredentialSecretForOperator({
+            credential: {
+              ownerKind: 'tenant',
+              tenantId: operatorTenantId(input),
+              accountId: input.accountId,
+              credentialId: input.credentialId,
+            },
+            expectedVersion: input.expectedVersion,
+            secret: input.secret,
+            audit,
+          })
+        : await supply.replacePlatformProviderCredentialSecret({
+            credentialId: input.credentialId,
+            expectedVersion: input.expectedVersion,
+            secret: input.secret,
+            audit,
+          });
+    return { version: result.version.version };
+  };
+}
+
+function operatorTenantId(input: { readonly tenantId: string | null }): string {
+  if (input.tenantId === null) throw new Error('OAuth token refresh tenant rotation requires a tenantId');
+  return input.tenantId;
+}
+
+/**
+ * Compose the hosted runtime without importing or constructing local config,
  * SQLite, watcher, admin, or proxy state. Schema verification is deliberately
  * separate from migrations: server startup may prove readiness but never
  * changes the database schema.
@@ -925,6 +1276,8 @@ export async function startManagedSaasServer(
   options: ManagedSaasStartOptions = {},
 ): Promise<ManagedSaasRuntime> {
   if (deployment.mode !== 'managed-saas') throw new TypeError('managed SaaS deployment configuration is required');
+  assertCustomerMfaDeploymentConfiguration(deployment, options.environment ?? process.env);
+  assertCustomerPasskeyDeploymentConfiguration(deployment, options.environment ?? process.env);
   if (options.customerWebhooks?.enabled) {
     if (deployment.workloadRole !== 'combined' && deployment.workloadRole !== 'control-plane') {
       throw new TypeError('Customer webhook routes require a managed SaaS control-plane workload');
@@ -1001,7 +1354,11 @@ export async function startManagedSaasServer(
   let gatewayRuntimeModule: LoadedManagedSaasGatewayRuntimeModule | undefined;
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
+  let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let customerWebhookWorker: CustomerWebhookDeliveryWorkerHandle | undefined;
+  let customerWebhookScanner: CustomerWebhookNotificationScannerHandle | undefined;
+  let customerWebhookPruner: CustomerWebhookRetentionPrunerHandle | undefined;
+  let announcementFanoutWorker: AnnouncementFanoutWorkerHandle | undefined;
   let refundWorker: PaymentRefundWorkerHandle | undefined;
   const listeners = new Map<ListenerName, Server>();
   let closePromise: Promise<void> | undefined;
@@ -1019,7 +1376,11 @@ export async function startManagedSaasServer(
         providers,
         unknownOutcomeScanner,
         paymentWorker,
+        oauthRefreshWorker,
         customerWebhookWorker,
+        customerWebhookScanner,
+        customerWebhookPruner,
+        announcementFanoutWorker,
         refundWorker,
         database,
         closeDatabase,
@@ -1121,28 +1482,42 @@ export async function startManagedSaasServer(
       }
 
       const metering = new SaasMeteringService(database);
+      const billingLedger = new PlatformWalletLedgerService();
+      const capacityPort = createPostgresPreparationCapacityPort();
+      const gatewayClock = () => new Date();
+      const keyBudgetResolution = createKeyBudgetResolution();
       const preparationPorts = createPostgresPreparationPorts({
         database,
         metering,
-        billing: new PlatformWalletLedgerService(),
+        billing: billingLedger,
         guard: new PostgresRequestAdmissionGuard(database),
         authorizationPrelock: new PostgresSaasRequestAdmissionAuthorizationPrelock(),
         entitlement: new PostgresRequestPreparationEntitlementAdapter(
           runtimeDependencies.entitlementResolver,
           new ByokServicePlanService(database),
         ),
-        capacity: createPostgresPreparationCapacityPort(),
+        capacity: capacityPort,
+        keyBudget: createPostgresKeyBudgetAdmission({ now: gatewayClock }),
         payloadCompilerVersion: providerPayload.compilerVersion,
         usageEstimatorVersion: providerPayload.estimator.version,
+        now: gatewayClock,
       });
       gateway = createManagedSaasGatewayProductionComposition(database, {
         ...runtimeGatewayOptions,
         schedulerAffinity,
+        // F3: settlement terminal commits enqueue customer webhook events.
+        ...(options.customerWebhooks?.enabled ? { customerWebhooks: { enabled: true } } : {}),
         caller: preparationPorts.caller,
         entitlement: preparationPorts.entitlement,
         admission: preparationPorts.admission,
         attempt: preparationPorts.attempt,
-        compensation: preparationPorts.compensation,
+        // KEY-BUD (contract C-4): same port shape as preparationPorts.compensation
+        // plus the budget release hook; shares the capacity/billing instances.
+        compensation: new PostgresPreDispatchCompensation({
+          capacity: capacityPort,
+          billing: billingLedger,
+          keyBudget: keyBudgetResolution,
+        }),
         providerCredentialUnsealingKms: gatewayKms,
         credentialContext: {
           deployment: deployment.deploymentId,
@@ -1169,8 +1544,29 @@ export async function startManagedSaasServer(
 
       const customerDatabase = database;
       const identityService = new SaasIdentityService(database);
+      const customerMfaService = await createCustomerMfaForDeployment(database, {
+        deployment,
+        environment,
+        credentialKeyProvider: providers.credentialKeyProvider,
+        ...(options.customerMfaCapabilityModuleImporter === undefined
+          ? {}
+          : { importer: options.customerMfaCapabilityModuleImporter }),
+      });
+      const customerPasskeyService = await createCustomerPasskeyForDeployment(database, {
+        deployment,
+        environment,
+        credentialKeyProvider: providers.credentialKeyProvider,
+        ...(options.customerPasskeyCapabilityModuleImporter === undefined
+          ? {}
+          : { importer: options.customerPasskeyCapabilityModuleImporter }),
+      });
       const customerConsoleQueryService = new SaasConsoleUsageQueryService(database);
-      const customerPlanService = new ByokServicePlanService(database);
+      // F3: when customer webhooks are enabled, payments/plans state machines
+      // emit transition events through the entitlement-gated producer.
+      const webhookEventProducer = options.customerWebhooks?.enabled ? createCustomerWebhookEventProducer() : undefined;
+      const customerPlanService = new ByokServicePlanService(database, {
+        ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
+      });
       const platformCatalogService = new PlatformCatalogQueryService(database);
       const supplyProfileResolver = new PostgresSupplyProfileResolver(database);
       const providerSupplyService =
@@ -1196,6 +1592,8 @@ export async function startManagedSaasServer(
       });
       const customerIdentityOptions: SaasIdentityHttpOptions = {
         service: identityService,
+        ...(customerMfaService === undefined ? {} : { customerMfa: customerMfaService }),
+        ...(customerPasskeyService === undefined ? {} : { customerPasskey: customerPasskeyService }),
         keyService: customerKeyService,
         publicOrigin: deploymentListener(deployment, 'customer').origin,
         sessionTtlSeconds: customerSessionTtlSeconds,
@@ -1221,6 +1619,54 @@ export async function startManagedSaasServer(
         refundQueryService: new SaasCustomerRefundQueryService(database),
         publicOrigin: deploymentListener(deployment, 'customer').origin,
       });
+      const customerPaymentOrderHistoryHandler = createSaasCustomerPaymentOrderHistoryHandler({
+        service: {
+          getSession: (token) => identityService.getSession(token),
+          resolveTenantBillingContext: (input) => resolveCustomerRefundTenantContext(customerDatabase, input),
+        },
+        paymentOrderQueryService: new SaasCustomerPaymentOrderQueryService(database),
+        publicOrigin: deploymentListener(deployment, 'customer').origin,
+      });
+      // G1: balance-type redeem codes post into the platform wallet through the
+      // shared postVerifiedFunding port (idempotency namespace marketing.redeem).
+      // G1.5: subscription-type codes grant through the plans service's
+      // marketing grant port inside the redeem transaction (no wallet effects).
+      const marketingRedeemCodeService = new MarketingRedeemCodeService({
+        database,
+        fundingLedger: new PlatformWalletLedgerService(),
+        subscriptionGrants: customerPlanService,
+      });
+      const customerMarketingRedeemHandler = createMarketingCustomerRedeemHandler({
+        service: identityService,
+        redeemService: marketingRedeemCodeService,
+        publicOrigin: deploymentListener(deployment, 'customer').origin,
+      });
+      // G4: announcements. G4.5 wires the frozen no-op event port; the
+      // fan-out worker below produces the actual webhook events.
+      const marketingAnnouncementService = new MarketingAnnouncementService({
+        database,
+        events: createAnnouncementFanoutEventPort(),
+      });
+      const customerMarketingAnnouncementsHandler = createMarketingAnnouncementCustomerHttpHandler({
+        service: identityService,
+        operations: marketingAnnouncementService,
+        publicOrigin: deploymentListener(deployment, 'customer').origin,
+      });
+      // R1: promo codes feed the checkout pricing snapshot through the
+      // walletTopUpPromo port (priced inside the order transaction).
+      const marketingPromoCodeService = new MarketingPromoCodeService({ database });
+      // R2: affiliate rebates accrue at the wallet funding terminal through
+      // the walletFundingHook port (same fulfillment transaction, fail-closed).
+      const marketingAffiliateService = new MarketingAffiliateService({
+        database,
+        fundingLedger: new PlatformWalletLedgerService(),
+        inviteCodeSalt: `affiliate-invite-v1:${deployment.deploymentId}`,
+      });
+      const customerMarketingAffiliateHandler = createMarketingAffiliateCustomerHttpHandler({
+        service: identityService,
+        operations: marketingAffiliateService,
+        publicOrigin: deploymentListener(deployment, 'customer').origin,
+      });
       let customerWebhookHandler: CustomerWebhookHttpHandler | undefined;
       if (options.customerWebhooks?.enabled) {
         const protector = options.customerWebhooks.signingSecretProtector;
@@ -1242,10 +1688,62 @@ export async function startManagedSaasServer(
             : { intervalMs: options.customerWebhooks.intervalMs }),
           concurrency: options.customerWebhooks.workerOptions?.concurrency ?? 8,
         });
+        // F3: the scan-derived events (wallet.low_balance / api_key.expiring)
+        // are option-gated separately from delivery; the producer is shared.
+        if (options.customerWebhooks.notificationScan !== undefined) {
+          const notificationProducer = webhookEventProducer ?? createCustomerWebhookEventProducer();
+          customerWebhookScanner = startCustomerWebhookNotificationScanner(
+            new CustomerWebhookNotificationScanner(database, notificationProducer, {
+              ...(options.customerWebhooks.notificationScan.batchSize === undefined
+                ? {}
+                : { batchSize: options.customerWebhooks.notificationScan.batchSize }),
+              ...(options.customerWebhooks.notificationScan.expiringKeyWindowMs === undefined
+                ? {}
+                : { expiringKeyWindowMs: options.customerWebhooks.notificationScan.expiringKeyWindowMs }),
+            }),
+            {
+              ...(options.customerWebhooks.notificationScan.intervalMs === undefined
+                ? {}
+                : { intervalMs: options.customerWebhooks.notificationScan.intervalMs }),
+            },
+          );
+        }
+        // F4: terminal delivery/attempt retention pruning is option-gated
+        // separately; immutable event facts are never touched by the pruner.
+        if (options.customerWebhooks.retentionPrune !== undefined) {
+          customerWebhookPruner = startCustomerWebhookRetentionPruner(deliveryStore, {
+            ...(options.customerWebhooks.retentionPrune.intervalMs === undefined
+              ? {}
+              : { intervalMs: options.customerWebhooks.retentionPrune.intervalMs }),
+            ...(options.customerWebhooks.retentionPrune.retentionMs === undefined
+              ? {}
+              : { retentionMs: options.customerWebhooks.retentionPrune.retentionMs }),
+            ...(options.customerWebhooks.retentionPrune.limit === undefined
+              ? {}
+              : { limit: options.customerWebhooks.retentionPrune.limit }),
+          });
+        }
+        // G4.5: the announcement fan-out sweep produces platform.maintenance
+        // events from the publish cursor; publish itself stays O(1).
+        announcementFanoutWorker = startAnnouncementFanoutWorker(
+          database,
+          marketingAnnouncementService,
+          webhookEventProducer ?? createCustomerWebhookEventProducer(),
+          {
+            ...(options.customerWebhooks.announcementFanout?.batchSize === undefined
+              ? {}
+              : { batchSize: options.customerWebhooks.announcementFanout.batchSize }),
+            ...(options.customerWebhooks.announcementFanout?.intervalMs === undefined
+              ? {}
+              : { intervalMs: options.customerWebhooks.announcementFanout.intervalMs }),
+            onError: () => console.error('model-router announcement fan-out cycle failed'),
+          },
+        );
         customerWebhookHandler = createCustomerWebhookHandler({
           service: identityService,
           database,
           endpointService,
+          deliveryStore,
           publicOrigin: deploymentListener(deployment, 'customer').origin,
         });
       }
@@ -1265,6 +1763,9 @@ export async function startManagedSaasServer(
           checkoutRedirectPolicies: options.payments.checkoutRedirectPolicies,
           submissionLeaseTtlMs: options.payments.submissionLeaseTtlMs,
           servicePlanService: customerPlanService,
+          walletTopUpPromo: marketingPromoCodeService,
+          walletFundingHook: marketingAffiliateService,
+          ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
         });
         paymentWorker = startPaymentWebhookWorker(paymentService, {
           onError: () => console.error('model-router payment webhook worker cycle failed'),
@@ -1311,6 +1812,7 @@ export async function startManagedSaasServer(
           providerKey: options.payments.providerKey,
           merchantId: options.payments.merchantId,
           operations: createPlatformPaymentRefundOperations(),
+          ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
         });
         refundWorker = startPaymentRefundWorker(refundService, {
           onError: () => console.error('model-router payment refund reconciliation cycle failed'),
@@ -1323,7 +1825,43 @@ export async function startManagedSaasServer(
           authService: platformAuthService,
         });
       }
-      const platformOperationsService = new PlatformOperationsSummaryService(database);
+      // Const captures preserve the earlier undefined-narrowing inside probe closures.
+      const operationsDatabase = database;
+      const operationsProviders = providers;
+      const platformOperationsService = new PlatformOperationsSummaryService(database, {
+        probes: {
+          // The control-plane connection doubles as the PostgreSQL probe.
+          postgresql: async () => {
+            await operationsDatabase.query('SELECT 1');
+            return 'ok' as const;
+          },
+          redis: async () => {
+            await operationsProviders.redisReady();
+            return 'ok' as const;
+          },
+          kms: async () => {
+            await operationsProviders.credentialKeyReady();
+            return 'ok' as const;
+          },
+          // Worker liveness is a heartbeat signal: any validation-job write
+          // (claim, completion, requeue) in the last 10 minutes on either the
+          // tenant or platform queue. An idle queue reports 'degraded'.
+          worker: async () => {
+            const heartbeat = await operationsDatabase.query(
+              `SELECT 1 AS present
+                 FROM (
+                   SELECT 1 FROM saas_tenant_provider_credential_validation_jobs
+                    WHERE updated_at > clock_timestamp() - interval '10 minutes'
+                   UNION ALL
+                   SELECT 1 FROM saas_platform_provider_credential_validation_jobs
+                    WHERE updated_at > clock_timestamp() - interval '10 minutes'
+                 ) AS worker_heartbeat
+                LIMIT 1`,
+            );
+            return heartbeat.rows.length === 1 ? ('ok' as const) : ('degraded' as const);
+          },
+        },
+      });
       const platformCapacityPolicyService = new PlatformCapacityPolicyService(database);
       const capacityPolicyDatabase = database;
       const platformCapacityPolicyTargets: PlatformAdminCapacityPolicyTargetSelectors = {
@@ -1383,6 +1921,16 @@ export async function startManagedSaasServer(
         supply: providerSupplyService,
         capacityPolicies: platformCapacityPolicyService,
         capacityPolicyTargets: platformCapacityPolicyTargets,
+        governance: {
+          users: new PlatformUserGovernanceService(database),
+          tenants: new PlatformTenantLifecycleService(database),
+          operators: new PlatformOperatorManagementService(database),
+        },
+        // F4: platform-side webhook quota provisioning rides the same audited
+        // control-plane database; absent webhook capability leaves the route 503.
+        ...(options.customerWebhooks?.enabled
+          ? { webhookTenantPolicies: new CustomerWebhookTenantPolicyService(database) }
+          : {}),
         writeSecurity: {
           publicOrigin: deploymentListener(deployment, 'platform').origin,
           authService: platformAuthService,
@@ -1405,6 +1953,7 @@ export async function startManagedSaasServer(
       const recoveryWorkflow = createRecoveryWorkflow({
         database,
         metering: new SaasMeteringService(database),
+        keyBudget: createKeyBudgetResolution(),
         ...(workerOptions === undefined ? {} : { worker: workerOptions }),
       });
       const unknownOutcomePlatformHandler = createUnknownOutcomePlatformHttpHandler({
@@ -1417,6 +1966,84 @@ export async function startManagedSaasServer(
         publicOrigin: deploymentListener(deployment, 'platform').origin,
         authService: platformAuthService,
       });
+      const usageCorrectionService = new UsageCorrectionService(database, {
+        ledger: new PlatformWalletLedgerService(),
+        keyBudget: createKeyBudgetResolution(),
+      });
+      const usageCorrectionPlatformHandler = createUsageCorrectionPlatformHttpHandler({
+        access: platformAccessService,
+        operations: {
+          listCorrections: ({ tenantId, usageEventId, limit }) =>
+            usageCorrectionService.listUsageCorrections({
+              tenantId,
+              ...(usageEventId === undefined ? {} : { usageEventId }),
+              limit,
+            }),
+          recordCorrection: ({ actorUserId, ...input }) =>
+            usageCorrectionService.recordUsageCorrection({
+              ...input,
+              operatorIdentity: actorUserId,
+            }),
+        },
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+        authService: platformAuthService,
+      });
+      const marketingOpsRedeemCodesHandler = createMarketingOpsRedeemCodesHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        redeemCodes: marketingRedeemCodeService,
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      const marketingOpsAnnouncementsHandler = createMarketingAnnouncementPlatformHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        operations: marketingAnnouncementService,
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      const marketingOpsPromoCodesHandler = createMarketingOpsPromoCodesHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        promoCodes: marketingPromoCodeService,
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      const marketingOpsAffiliateHandler = createMarketingAffiliateOpsHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        operations: marketingAffiliateService,
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      // R4 production assembly (decision A): the OAuth refresh worker runs
+      // inside the control-plane workload with the audited rotation path.
+      // Enabling it requires the deployment-provided unsealing KMS and audit
+      // operator identity; it is mutually exclusive with the worker-workload rotator seam.
+      if (options.oauthTokenRefresh !== undefined) {
+        if (options.oauthTokenRefreshRotator !== undefined) {
+          throw new Error('Managed SaaS oauthTokenRefresh and oauthTokenRefreshRotator cannot both be configured');
+        }
+        if (!providerSupplyService) {
+          throw new Error('Managed SaaS OAuth token refresh requires the provider credential sealing KMS');
+        }
+        const refresh = options.oauthTokenRefresh;
+        // Decision A requires the audit actor to be an existing saas_users
+        // identity; the control-plane role already holds saas_users SELECT, so
+        // prove it once here and fail the whole startup otherwise.
+        const operator = await database.query<{ readonly id: unknown }>(
+          'SELECT id FROM saas_users WHERE id = $1 AND disabled_at IS NULL LIMIT 1',
+          [refresh.operatorUserId],
+        );
+        if (operator.rowCount !== 1 || typeof operator.rows[0]?.id !== 'string') {
+          throw new Error(
+            'Managed SaaS OAuth token refresh operatorUserId must reference an enabled saas_users identity',
+          );
+        }
+        const rotator = createManagedOauthTokenRefreshRotator(providerSupplyService, refresh.operatorUserId);
+        oauthRefreshWorker = startOauthTokenRefreshWorker(database, refresh.unsealingKms, rotator, {
+          ...(refresh.batchSize === undefined ? {} : { batchSize: refresh.batchSize }),
+          ...(refresh.pollIntervalMs === undefined ? {} : { pollIntervalMs: refresh.pollIntervalMs }),
+          deployment: deployment.deploymentId,
+          environment: deployment.environmentId,
+        } as Parameters<typeof startOauthTokenRefreshWorker>[3]);
+      }
       const startScanner = options.startUnknownOutcomeScanner ?? startUnknownOutcomeScanner;
       unknownOutcomeScanner = startScanner(recoveryWorkflow.worker, {
         ...(scannerOptions?.intervalMs === undefined ? {} : { intervalMs: scannerOptions.intervalMs }),
@@ -1434,6 +2061,10 @@ export async function startManagedSaasServer(
         customerWebhookHandler,
         customerByokHandler,
         customerRefundHistoryHandler,
+        customerPaymentOrderHistoryHandler,
+        customerMarketingRedeemHandler,
+        customerMarketingAnnouncementsHandler,
+        customerMarketingAffiliateHandler,
         paymentHandler,
         webDistPath,
       );
@@ -1442,6 +2073,11 @@ export async function startManagedSaasServer(
         platformRefundHandler,
         platformCredentialRewrapHandler,
         unknownOutcomePlatformHandler,
+        usageCorrectionPlatformHandler,
+        marketingOpsRedeemCodesHandler,
+        marketingOpsAnnouncementsHandler,
+        marketingOpsPromoCodesHandler,
+        marketingOpsAffiliateHandler,
         platformReadHandler,
         webDistPath,
       );
@@ -1470,6 +2106,9 @@ export async function startManagedSaasServer(
       providers: providers ?? null,
       gateway: gateway ?? null,
       credentialValidationWorker: null,
+      quotaSyncWorker: null,
+      oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
+      announcementFanoutWorker: announcementFanoutWorker ?? null,
       unknownOutcomeScanner: unknownOutcomeScanner ?? null,
       listeners: boundListeners,
       close,

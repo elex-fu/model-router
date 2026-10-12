@@ -588,3 +588,333 @@ test('refund effect seam uses the caller transaction and locks the original enti
   assert.match(lockCalls[4]?.sql ?? '', /for update/);
   database.assertConsumed();
 });
+
+test('F3: fulfillment emits paid/fulfilling/fulfilled transition events in order', async () => {
+  const transitions: Array<{
+    tenantId: string;
+    orderId: string;
+    status: string;
+    occurredAt: string;
+    transitionRef: string;
+  }> = [];
+  const database = new ScriptedDatabase();
+  database.queue('from saas_service_plan_orders', [orderRow()]);
+  database.queue('from saas_service_plan_snapshots', [snapshotRow()]);
+  database.queue(
+    "from saas_service_plan_subscriptions where tenant_id = $1 and project_id = $2 and status = 'active'",
+    [],
+  );
+  database.queue('from saas_supply_profiles', [
+    { id: PROFILE_ID, status: 'active', supply_mode: 'byok', model_scopes: ['model-a'], authz_version: 4 },
+  ]);
+  database.queue("set state = 'paid'", [orderRow({ state: 'paid', verified_settlement_id: 'settlement-1' })]);
+  database.queue("set state = 'fulfilling'", [
+    orderRow({ state: 'fulfilling', verified_settlement_id: 'settlement-1' }),
+  ]);
+  database.queue('insert into saas_project_entitlements', [entitlementRow()]);
+  database.queue('insert into saas_service_plan_subscriptions', [subscriptionRow()]);
+  database.queue("set state = 'fulfilled'", [fulfilledOrderRow()]);
+  database.queue('insert into saas_audit_events', []);
+
+  const webhookEvents = {
+    async refundStatusChanged() {
+      throw new Error('unexpected refund event on the plan path');
+    },
+    async servicePlanOrderStatusChanged(
+      _tx: unknown,
+      input: {
+        tenantId: string;
+        orderId: string;
+        status: 'pending' | 'paid' | 'fulfilling' | 'fulfilled' | 'cancelled' | 'reconciliation_pending';
+        occurredAt: string;
+        transitionRef: string;
+      },
+    ) {
+      transitions.push({ ...input });
+    },
+  };
+  const generatedIds = ['ref-paid', 'ref-fulfilling', ENTITLEMENT_ID, SUBSCRIPTION_ID, 'ref-fulfilled', 'audit'];
+  const scoped = new ByokServicePlanService(database, {
+    now: () => new Date(NOW),
+    idFactory: () => generatedIds.shift() ?? 'generated-id',
+    webhookEvents,
+  });
+  const fulfilled = await scoped.fulfillVerified({
+    kind: 'server_verified_service_plan_fulfillment',
+    orderId: ORDER_ID,
+    tenantId: TENANT_ID,
+    projectId: PROJECT_ID,
+    settlementId: 'settlement-1',
+    providerKey: 'provider-payments',
+    merchantId: 'merchant-1',
+    amountMinorUnits: '1200',
+    currency: 'USD',
+    fulfillmentReference: 'fulfillment-1',
+    fulfillmentEvidenceSha256: 'b'.repeat(64),
+    verifiedAt: NOW,
+  });
+
+  assert.equal(fulfilled.replayed, false);
+  assert.deepEqual(
+    transitions.map((event) => [event.status, event.transitionRef]),
+    [
+      ['paid', 'ref-paid'],
+      ['fulfilling', 'ref-fulfilling'],
+      ['fulfilled', 'ref-fulfilled'],
+    ],
+  );
+  assert.ok(transitions.every((event) => event.tenantId === TENANT_ID && event.orderId === ORDER_ID));
+  assert.equal(transitions[0]?.occurredAt, NOW);
+  database.assertConsumed();
+});
+
+test('G1.5 marketing grant writes a cancelled order shell, an active subscription chain and a distinguishable audit', async () => {
+  const database = new ScriptedDatabase();
+  database.queue('from saas_service_plan_orders', []);
+  database.queue('from saas_projects where tenant_id = $1 and is_default', [{ id: PROJECT_ID }]);
+  database.queue('from saas_service_plan_versions', [planVersionRow()]);
+  database.queue(
+    "from saas_service_plan_subscriptions where tenant_id = $1 and project_id = $2 and status = 'active'",
+    [],
+  );
+  database.queue('from saas_supply_profiles', [
+    { id: PROFILE_ID, status: 'active', supply_mode: 'byok', model_scopes: ['model-a'], authz_version: 4 },
+  ]);
+  database.queue('insert into saas_service_plan_orders', [
+    orderRow({ id: 'generated-order', client_request_id: 'marketing-redeem:code-1', state: 'cancelled' }),
+  ]);
+  database.queue('insert into saas_service_plan_snapshots', [
+    snapshotRow({ id: 'generated-snapshot', order_id: 'generated-order' }),
+  ]);
+  database.queue('insert into saas_project_entitlements', [entitlementRow({ id: 'generated-entitlement' })]);
+  database.queue('insert into saas_service_plan_subscriptions', [
+    subscriptionRow({
+      id: 'generated-subscription',
+      order_id: 'generated-order',
+      snapshot_id: 'generated-snapshot',
+      entitlement_id: 'generated-entitlement',
+    }),
+  ]);
+  database.queue('update saas_service_plan_orders set subscription_id', [
+    orderRow({
+      id: 'generated-order',
+      client_request_id: 'marketing-redeem:code-1',
+      state: 'cancelled',
+      subscription_id: 'generated-subscription',
+    }),
+  ]);
+  database.queue('insert into saas_audit_events', []);
+
+  const granted = await service(database, [
+    'generated-order',
+    'generated-snapshot',
+    'generated-entitlement',
+    'generated-subscription',
+    'audit',
+  ]).grantMarketingSubscription(database, {
+    tenantId: TENANT_ID,
+    userId: 'user-1',
+    servicePlanVersionId: PLAN_VERSION_ID,
+    grantRef: 'code-1',
+  });
+
+  assert.equal(granted.replayed, false);
+  assert.equal(granted.orderId, 'generated-order');
+  assert.equal(granted.projectId, PROJECT_ID);
+  assert.equal(granted.subscriptionId, 'generated-subscription');
+  assert.equal(granted.entitlementId, 'generated-entitlement');
+  assert.equal(granted.effectiveAt, NOW);
+  assert.equal(granted.expiresAt, '2026-10-28T00:00:00.000Z', 'the term starts at the redemption instant');
+
+  const orderInsert = database.calls.find(({ sql }) => sql.startsWith('insert into saas_service_plan_orders'));
+  assert.ok(orderInsert);
+  assert.match(orderInsert.sql, /'activation', null, \$5, 'cancelled', \$6, \$6/);
+  assert.deepEqual(orderInsert.values, [
+    granted.orderId,
+    TENANT_ID,
+    PROJECT_ID,
+    PLAN_VERSION_ID,
+    'marketing-redeem:code-1',
+    NOW,
+  ]);
+  const entitlementInsert = database.calls.find(({ sql }) => sql.startsWith('insert into saas_project_entitlements'));
+  assert.ok(entitlementInsert);
+  assert.match(entitlementInsert.sql, /'service_plan', \$8, \$9/);
+  const auditInsert = database.calls.find(({ sql }) => sql.startsWith('insert into saas_audit_events'));
+  assert.ok(auditInsert);
+  assert.deepEqual(auditInsert.values.slice(1, 5), [
+    TENANT_ID,
+    'user-1',
+    'service_plan.marketing_grant',
+    'service_plan',
+  ]);
+  assert.equal(
+    database.calls.some(({ sql }) => /saas_(?:payment|wallet|ledger)/i.test(sql)),
+    false,
+    'the grant never touches payment, wallet or ledger tables',
+  );
+  const writerFenceIndex = database.calls.findIndex(({ sql }) => sql.includes('pg_advisory_xact_lock(1396788563, 46)'));
+  const firstRowLockIndex = database.calls.findIndex(({ sql }) => /\bfor update\b/i.test(sql));
+  assert.ok(writerFenceIndex >= 0 && writerFenceIndex < firstRowLockIndex);
+  database.assertConsumed();
+});
+
+test('G1.5 marketing grant replays through the code-derived client request id without writes', async () => {
+  const database = new ScriptedDatabase();
+  database.queue('from saas_service_plan_orders', [
+    orderRow({ state: 'cancelled', subscription_id: SUBSCRIPTION_ID, client_request_id: 'marketing-redeem:code-1' }),
+  ]);
+  database.queue('from saas_service_plan_snapshots where tenant_id = $1 and order_id = $2', [snapshotRow()]);
+  database.queue('from saas_service_plan_subscriptions where tenant_id = $1 and project_id = $2 and id = $3', [
+    subscriptionRow(),
+  ]);
+  database.queue('from saas_service_plan_snapshots where tenant_id = $1 and id = $2', [snapshotRow()]);
+
+  const granted = await service(database).grantMarketingSubscription(database, {
+    tenantId: TENANT_ID,
+    userId: 'user-1',
+    servicePlanVersionId: PLAN_VERSION_ID,
+    grantRef: 'code-1',
+  });
+
+  assert.equal(granted.replayed, true);
+  assert.equal(granted.orderId, ORDER_ID);
+  assert.equal(granted.subscriptionId, SUBSCRIPTION_ID);
+  assert.equal(granted.entitlementId, ENTITLEMENT_ID);
+  assert.equal(granted.effectiveAt, NOW);
+  assert.equal(granted.expiresAt, '2026-10-28T00:00:00.000Z');
+  assert.equal(
+    database.calls.some(({ sql }) => sql.startsWith('insert into') || sql.startsWith('update ')),
+    false,
+    'a replay is a pure read',
+  );
+  database.assertConsumed();
+});
+
+test('G1.5 marketing grant rejects a colliding client request id with a foreign shape', async () => {
+  const database = new ScriptedDatabase();
+  database.queue('from saas_service_plan_orders', [
+    orderRow({ state: 'pending', client_request_id: 'marketing-redeem:code-1' }),
+  ]);
+  database.queue('from saas_service_plan_snapshots where tenant_id = $1 and order_id = $2', [snapshotRow()]);
+
+  await expectCode(
+    () =>
+      service(database).grantMarketingSubscription(database, {
+        tenantId: TENANT_ID,
+        userId: 'user-1',
+        servicePlanVersionId: PLAN_VERSION_ID,
+        grantRef: 'code-1',
+      }),
+    'ORDER_CONFLICT',
+  );
+  database.assertConsumed();
+});
+
+test('G1.5 marketing grant refuses to supersede an active subscription', async () => {
+  const database = new ScriptedDatabase();
+  database.queue('from saas_service_plan_orders', []);
+  database.queue('from saas_projects where tenant_id = $1 and is_default', [{ id: PROJECT_ID }]);
+  database.queue('from saas_service_plan_versions', [planVersionRow()]);
+  database.queue(
+    "from saas_service_plan_subscriptions where tenant_id = $1 and project_id = $2 and status = 'active'",
+    [subscriptionRow()],
+  );
+
+  await expectCode(
+    () =>
+      service(database).grantMarketingSubscription(database, {
+        tenantId: TENANT_ID,
+        userId: 'user-1',
+        servicePlanVersionId: PLAN_VERSION_ID,
+        grantRef: 'code-1',
+      }),
+    'ACTIVE_SUBSCRIPTION_EXISTS',
+  );
+  assert.equal(
+    database.calls.some(({ sql }) => sql.startsWith('insert into')),
+    false,
+  );
+  database.assertConsumed();
+});
+
+test('G1.5 marketing grant requires a published plan version and an active supply profile', async () => {
+  const missingVersion = new ScriptedDatabase();
+  missingVersion.queue('from saas_service_plan_orders', []);
+  missingVersion.queue('from saas_projects where tenant_id = $1 and is_default', [{ id: PROJECT_ID }]);
+  missingVersion.queue('from saas_service_plan_versions', []);
+  await expectCode(
+    () =>
+      service(missingVersion).grantMarketingSubscription(missingVersion, {
+        tenantId: TENANT_ID,
+        userId: 'user-1',
+        servicePlanVersionId: PLAN_VERSION_ID,
+        grantRef: 'code-1',
+      }),
+    'PLAN_VERSION_UNAVAILABLE',
+  );
+  missingVersion.assertConsumed();
+
+  const inactiveProfile = new ScriptedDatabase();
+  inactiveProfile.queue('from saas_service_plan_orders', []);
+  inactiveProfile.queue('from saas_projects where tenant_id = $1 and is_default', [{ id: PROJECT_ID }]);
+  inactiveProfile.queue('from saas_service_plan_versions', [planVersionRow()]);
+  inactiveProfile.queue(
+    "from saas_service_plan_subscriptions where tenant_id = $1 and project_id = $2 and status = 'active'",
+    [],
+  );
+  inactiveProfile.queue('from saas_supply_profiles', [
+    { id: PROFILE_ID, status: 'disabled', supply_mode: 'byok', model_scopes: ['model-a'], authz_version: 4 },
+  ]);
+  await expectCode(
+    () =>
+      service(inactiveProfile).grantMarketingSubscription(inactiveProfile, {
+        tenantId: TENANT_ID,
+        userId: 'user-1',
+        servicePlanVersionId: PLAN_VERSION_ID,
+        grantRef: 'code-1',
+      }),
+    'ENTITLEMENT_UNAVAILABLE',
+  );
+  inactiveProfile.assertConsumed();
+});
+
+test('G1.5 marketing grant validates input before any database call', async () => {
+  const database = new ScriptedDatabase();
+  await expectCode(
+    () =>
+      service(database).grantMarketingSubscription(database, {
+        tenantId: '',
+        userId: 'user-1',
+        servicePlanVersionId: PLAN_VERSION_ID,
+        grantRef: 'code-1',
+      }),
+    'INVALID_INPUT',
+  );
+  await expectCode(
+    () =>
+      service(database).grantMarketingSubscription(database, {
+        tenantId: TENANT_ID,
+        userId: 'user-1',
+        servicePlanVersionId: PLAN_VERSION_ID,
+        grantRef: '',
+      }),
+    'INVALID_INPUT',
+  );
+  assert.equal(database.calls.length, 0);
+});
+
+test('G1.5 marketing grant plan-version assertion accepts published and refuses anything else', async () => {
+  const published = new ScriptedDatabase();
+  published.queue('from saas_service_plan_versions', [planVersionRow()]);
+  await service(published).assertMarketingGrantPlanVersion(published, PLAN_VERSION_ID);
+  published.assertConsumed();
+
+  const retired = new ScriptedDatabase();
+  retired.queue('from saas_service_plan_versions', []);
+  await expectCode(
+    () => service(retired).assertMarketingGrantPlanVersion(retired, PLAN_VERSION_ID),
+    'PLAN_VERSION_UNAVAILABLE',
+  );
+  retired.assertConsumed();
+});

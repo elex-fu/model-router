@@ -261,3 +261,113 @@ test('rejects invalid currencies, page sizes, and malformed cursors', async () =
   }
   assert.equal(database.transactionCalls, 0);
 });
+
+test('projects wallet refunds as positive debit amounts across mixed read-only ledger pages', async () => {
+  const database = new RecordingDatabase();
+  const amount = '9223372036854775807';
+  database.ledgerEntries.splice(1, 0, {
+    ...ledgerRow(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad',
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbe',
+      '2026-09-28T02:30:00.000Z',
+      'wallet_refund',
+    ),
+    amount_minor_units: amount,
+  });
+  const service = new SaasCustomerWalletQueryService(database);
+  const first = await service.getWallet(context({ tenantRole: 'admin' }), { currency: 'USD', limit: 2 });
+  assert.deepEqual(first.ledger.items.map(({ type, direction }) => ({ type, direction })), [
+    { type: 'top_up', direction: 'credit' },
+    { type: 'wallet_refund', direction: 'debit' },
+  ]);
+  assert.equal(first.ledger.items[1]?.amountMinorUnits, amount);
+  assert.equal(typeof first.ledger.items[1]?.amountMinorUnits, 'string');
+  assert.equal(first.ledger.hasMore, true);
+  assert.ok(first.ledger.nextCursor);
+  const second = await service.getWallet(context({ tenantRole: 'admin' }), {
+    currency: 'USD', limit: 2, cursor: first.ledger.nextCursor,
+  });
+  assert.deepEqual(second.ledger.items.map((entry) => entry.type), ['usage_charge', 'usage_charge']);
+  assert.equal(second.ledger.hasMore, false);
+  assert.equal(second.ledger.nextCursor, null);
+  assert.deepEqual(second.wallet, first.wallet);
+  for (const { sql, values } of database.calls.filter(({ sql }) => sql.includes('FROM saas_ledger_entries AS e'))) {
+    assert.match(sql, /t\.id = e\.transaction_id AND t\.tenant_id = e\.tenant_id AND t\.currency = e\.currency/);
+    assert.match(sql, /e\.tenant_id = \$1 AND e\.wallet_id = \$2 AND e\.currency = \$3 AND e\.account_type = 'wallet'/);
+    assert.deepEqual(values.slice(0, 3), [TENANT_ID, WALLET_ID, 'USD']);
+  }
+  const serialized = JSON.stringify(first);
+  assert.equal(serialized.includes('private-psp-order'), false);
+  assert.equal(serialized.includes('internal-metadata-ref'), false);
+  assert.equal(serialized.includes('must-not-be-returned'), false);
+  assert.ok(database.calls.every(({ sql }) => !/\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP)\b/i.test(sql)));
+  assert.equal(database.calls.filter(({ sql }) => sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY').length, 2);
+});
+
+test('rejects wallet refund credit, invalid direction, unknown source, and nonpositive or lossy amounts', async () => {
+  for (const patch of [
+    { direction: 'credit' },
+    { direction: 'sideways' },
+    { source_type: 'supplier_cost' },
+    { source_type: 'wallet_refund_unrecognized' },
+    { amount_minor_units: '0' },
+    { amount_minor_units: '-25' },
+    { amount_minor_units: '1.5' },
+    { amount_minor_units: null },
+    { amount_minor_units: 9007199254740992 },
+    { amount_minor_units: '9223372036854775808' },
+  ]) {
+    const database = new RecordingDatabase();
+    database.ledgerEntries.splice(0, database.ledgerEntries.length, {
+      ...ledgerRow(
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad',
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbe',
+        '2026-09-28T02:30:00.000Z',
+        'wallet_refund',
+      ),
+      ...patch,
+    });
+    await assert.rejects(
+      new SaasCustomerWalletQueryService(database).getWallet(context(), { currency: 'USD' }),
+      isWalletQueryError('CUSTOMER_WALLET_STORAGE_ERROR'),
+    );
+  }
+});
+
+test('rejects foreign-currency refund rows and foreign-tenant refund page or cursor requests', async () => {
+  const database = new RecordingDatabase();
+  database.ledgerEntries.splice(0, database.ledgerEntries.length, {
+    ...ledgerRow(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad',
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbe',
+      '2026-09-28T02:30:00.000Z',
+      'wallet_refund',
+    ),
+    currency: 'EUR',
+  });
+  const service = new SaasCustomerWalletQueryService(database);
+  await assert.rejects(
+    service.getWallet(context(), { currency: 'USD' }),
+    isWalletQueryError('CUSTOMER_WALLET_STORAGE_ERROR'),
+  );
+  await assert.rejects(
+    service.getWallet(context({ tenantId: 'tenant-b' }), { currency: 'USD' }),
+    isWalletQueryError('CUSTOMER_WALLET_NOT_FOUND'),
+  );
+  const lookup = database.calls.filter(({ sql }) => sql.includes('FROM saas_wallets')).at(-1);
+  assert.deepEqual(lookup?.values, ['tenant-b', 'USD']);
+
+  database.ledgerEntries.splice(0, database.ledgerEntries.length,
+    ledgerRow('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      '2026-09-28T03:00:00.000Z', 'wallet_refund'),
+    ledgerRow('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc',
+      '2026-09-28T02:00:00.000Z', 'billing_settlement'),
+  );
+  const page = await service.getWallet(context(), { currency: 'USD', limit: 1 });
+  const callCount = database.calls.length;
+  await assert.rejects(
+    service.getWallet(context({ tenantId: 'tenant-b' }), { currency: 'USD', cursor: page.ledger.nextCursor }),
+    isWalletQueryError('CUSTOMER_WALLET_INVALID_INPUT'),
+  );
+  assert.equal(database.calls.length, callCount);
+});

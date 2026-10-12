@@ -7,6 +7,10 @@
 -- 058 only repairs two original row-trigger wrappers; this worker grant set
 -- is unchanged. It never grants credential current_version/expires_at UPDATE,
 -- job identity INSERT/UPDATE, migration-ledger access or routine EXECUTE.
+-- DEPLOYMENT NOTE (migration 093, Track D4): the quota sync worker shares
+-- this role and writes the account quota snapshot columns below. Re-apply
+-- this template after 093 is migrated; until then the worker runtime
+-- privilege probe fails closed by design.
 
 BEGIN;
 
@@ -160,23 +164,35 @@ GRANT SELECT (
 
 GRANT SELECT (
   id, tenant_id, provider_id, product_id, credential_type, region, purpose,
-  rights_id, rights_version, status, validation_state, authz_version
+  rights_id, rights_version, status, validation_state, revalidation_interval_seconds,
+  authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
 GRANT UPDATE (
   status, validation_state, validation_error_code, last_validated_at,
-  updated_at, authz_version
+  updated_at, authz_version,
+  quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
 
 GRANT SELECT (
   id, tenant_id, account_id, provider_id, product_id, credential_type, status,
-  validation_state, current_version, expires_at, authz_version
+  validation_state, current_version, expires_at, authz_version,
+  oauth_refresh_state, oauth_next_refresh_at, oauth_last_refresh_at,
+  oauth_force_refresh_requested, oauth_refresh_error_code
 ) ON TABLE model_router_saas.saas_tenant_provider_credentials
   TO model_router_saas_validation_worker;
+-- R4 #18 assembly A: the credential-validation worker is a pure signal
+-- role. It keeps SELECT on the five oauth_* columns (claim visibility) and
+-- UPDATE only on oauth_force_refresh_requested (the 401-class
+-- credential_rejected force signal); the refresh chain itself runs on the
+-- control-plane role, which owns every remaining oauth_* write.
 GRANT UPDATE (
   status, validation_state, validation_error_code, last_validated_at,
-  updated_at, authz_version
+  updated_at, authz_version,
+  oauth_force_refresh_requested
 ) ON TABLE model_router_saas.saas_tenant_provider_credentials
   TO model_router_saas_validation_worker;
 
@@ -191,6 +207,70 @@ GRANT SELECT (
   tenant_id, account_id, credential_id, credential_version,
   wrapping_revision, kms_key_id, wrapped_dek
 ) ON TABLE model_router_saas.saas_tenant_provider_credential_wrappings
+  TO model_router_saas_validation_worker;
+
+-- Platform-owner queue (migration 083): identical worker surface minus the
+-- tenant dimension. The worker polls the tenant queue first, then this one.
+GRANT SELECT (
+  id, account_id, credential_id, credential_version, provider_id,
+  product_id, credential_type, allowed_models, target_model, target_endpoint,
+  capability_version, idempotency_key, status, attempt_count, available_at,
+  lease_until, lease_generation, last_error_code, completed_at, created_at, updated_at
+) ON TABLE model_router_saas.saas_platform_provider_credential_validation_jobs
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  status, attempt_count, available_at, lease_until, lease_generation,
+  last_error_code, completed_at, updated_at
+) ON TABLE model_router_saas.saas_platform_provider_credential_validation_jobs
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  account_id, provider_id, product_id, model, endpoint, capability_version
+) ON TABLE model_router_saas.saas_platform_provider_account_capabilities
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  id, provider_id, product_id, credential_type, region, purpose,
+  rights_id, rights_version, status, validation_state, revalidation_interval_seconds,
+  authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  quarantine_entered_at, quarantine_reason_code
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  status, validation_state, validation_error_code, last_validated_at,
+  updated_at, authz_version,
+  quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  quarantine_entered_at, quarantine_reason_code
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  id, account_id, provider_id, product_id, credential_type, status,
+  validation_state, current_version, expires_at, authz_version,
+  oauth_refresh_state, oauth_next_refresh_at, oauth_last_refresh_at,
+  oauth_force_refresh_requested, oauth_refresh_error_code
+) ON TABLE model_router_saas.saas_platform_provider_credentials
+  TO model_router_saas_validation_worker;
+-- R4 #18 assembly A: signal-only oauth surface, identical to the tenant
+-- credential table above.
+GRANT UPDATE (
+  status, validation_state, validation_error_code, last_validated_at,
+  updated_at, authz_version,
+  oauth_force_refresh_requested
+) ON TABLE model_router_saas.saas_platform_provider_credentials
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  account_id, credential_id, version, status, schema_version,
+  context_version, algorithm, kms_purpose, kms_key_id, wrapping_revision,
+  wrapped_dek, nonce, ciphertext, auth_tag, expires_at
+) ON TABLE model_router_saas.saas_platform_provider_credential_versions
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  account_id, credential_id, credential_version,
+  wrapping_revision, kms_key_id, wrapped_dek
+) ON TABLE model_router_saas.saas_platform_provider_credential_wrappings
   TO model_router_saas_validation_worker;
 
 COMMIT;

@@ -158,7 +158,7 @@ async function persisted(tx: SqlExecutor, tenantId: string, key: string, request
 function job(row: Record<string, unknown>): ProviderCredentialValidationJobRecord {
   if (!Array.isArray(row.allowed_models) || row.allowed_models.length < 1 || row.allowed_models.length > 256) refuse('STORAGE_UNAVAILABLE');
   if (!['failed', 'cancelled'].includes(String(row.status)) || row.lease_until !== null || row.completed_at === null) refuse('STATE_CONFLICT');
-  return Object.freeze({ id: text(row.id), tenantId: text(row.tenant_id), accountId: text(row.account_id), credentialId: text(row.credential_id),
+  return Object.freeze({ id: text(row.id), ownerKind: 'tenant' as const, tenantId: text(row.tenant_id), accountId: text(row.account_id), credentialId: text(row.credential_id),
     credentialVersion: integer(row.credential_version, 1), providerId: text(row.provider_id), productId: text(row.product_id),
     credentialType: text(row.credential_type), allowedModels: Object.freeze(row.allowed_models.map(text)),
     target: Object.freeze({ model: text(row.target_model), endpoint: text(row.target_endpoint), version: integer(row.capability_version, 1) }),

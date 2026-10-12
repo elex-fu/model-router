@@ -15,7 +15,7 @@ function initializer(source: string, declaration: string): string {
 test('FIN057 admission and signed evidence use the same published route version', () => {
   // Source contract only: do not import the PG fixture or an integration root.
   const source = readFileSync(resolve(process.cwd(), 'tests/saas/metering/normal-success-postgres-fixture.ts'), 'utf8');
-  assert.match(source, /const route = await phase\('setup', \(\) => routes\.publish\(\{/);
+  assert.match(source, /const route = await phase\('setup', \(\) =>\s*routes\.publish\(\{/);
   const routeFacts = initializer(source, 'const routeFacts = {');
   assert.match(routeFacts, /\brouteConfigVersion:\s*route\.version\b/);
 

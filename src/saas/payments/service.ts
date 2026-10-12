@@ -5,6 +5,7 @@ import type { SqlExecutor, SqlResult } from '../db/types.js';
 import type { TenantContext } from '../identity/types.js';
 import { isServicePlanError } from '../plans/errors.js';
 import type { ServicePlanOrderRecord } from '../plans/types.js';
+import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import type { PaymentProviderAdapter } from './adapter.js';
 import {
   checkoutActionColumns,
@@ -26,6 +27,7 @@ import type {
   PaymentInboxOutcome,
   PaymentOrderRecord,
   PaymentOrderStatus,
+  PaymentProviderEventOrderFacts,
   PaymentProviderEventStatus,
   PaymentServiceOptions,
   PaymentWebhookHeaders,
@@ -83,6 +85,7 @@ interface PaymentOrderRow {
   provider_submission_state?: string | null;
   provider_submission_lease_token?: string | null;
   provider_submission_lease_expires_at?: StoredTimestamp | null;
+  original_amount_minor_units?: StoredMinorUnits | null;
 }
 
 interface PaymentInboxRow {
@@ -185,6 +188,7 @@ type PaymentOrderEntity = Omit<PaymentOrderRecord, 'checkout'> &
     readonly providerSubmissionState: string;
     readonly providerSubmissionLeaseToken: string | null;
     readonly providerSubmissionLeaseExpiresAt: string | null;
+    readonly originalAmountMinorUnits: string | null;
   };
 
 interface ServicePlanFulfillmentWork {
@@ -329,6 +333,10 @@ function mapOrderRow(row: PaymentOrderRow): PaymentOrderEntity {
     localOrderRef: normalizeText(row.local_order_ref),
     fundingReference: normalizeText(row.funding_reference),
     amountMinorUnits: parseStoredMinorUnits(row.amount_minor_units).toString(),
+    originalAmountMinorUnits:
+      row.original_amount_minor_units === null || row.original_amount_minor_units === undefined
+        ? null
+        : parseStoredMinorUnits(row.original_amount_minor_units).toString(),
     currency: normalizeCurrency(row.currency),
     status: mapStatus(row.state),
     providerOrderId: row.provider_order_id === null ? null : normalizeText(row.provider_order_id),
@@ -401,7 +409,8 @@ const ORDER_COLUMNS = `id, tenant_id, order_type, provider_key, merchant_id, cli
   local_order_ref, funding_reference, amount_minor_units, currency, state, provider_order_id,
   provider_attempts, provider_failure_code, funding_transaction_id, created_at, updated_at, paid_at, fulfilled_at,
   checkout_kind, checkout_url, checkout_text, checkout_expires_at,
-  provider_submission_state, provider_submission_lease_token, provider_submission_lease_expires_at`;
+  provider_submission_state, provider_submission_lease_token, provider_submission_lease_expires_at,
+  original_amount_minor_units`;
 
 const INBOX_COLUMNS = `id, provider_key, merchant_id, provider_event_id, event_type, provider_order_id,
   event_tenant_id, tenant_id, local_order_id, event_status, amount_minor_units, currency, occurred_at,
@@ -426,6 +435,9 @@ export class PaymentFulfillmentService {
   private readonly idFactory: () => string;
   private readonly walletFundingLedger: PaymentServiceOptions['walletFundingLedger'];
   private readonly servicePlanService: PaymentServiceOptions['servicePlanService'];
+  private readonly walletTopUpPromo: PaymentServiceOptions['walletTopUpPromo'];
+  private readonly walletFundingHook: PaymentServiceOptions['walletFundingHook'];
+  private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
   private readonly checkoutPolicy: NormalizedCheckoutPolicy;
   private readonly submissionLeaseTtlMs: number;
   private readonly maxProviderAttempts: number;
@@ -444,6 +456,24 @@ export class PaymentFulfillmentService {
     this.walletFundingLedger =
       options.walletFundingLedger ?? new PlatformWalletLedgerService({ now: this.now, idFactory: this.idFactory });
     this.servicePlanService = options.servicePlanService;
+    if (options.walletTopUpPromo !== undefined && typeof options.walletTopUpPromo.priceWalletTopUp !== 'function') {
+      throw new TypeError('walletTopUpPromo must implement the promo evaluator contract');
+    }
+    this.walletTopUpPromo = options.walletTopUpPromo;
+    if (
+      options.walletFundingHook !== undefined &&
+      typeof options.walletFundingHook.afterVerifiedFunding !== 'function'
+    ) {
+      throw new TypeError('walletFundingHook must implement the post-funding hook contract');
+    }
+    this.walletFundingHook = options.walletFundingHook;
+    if (
+      options.webhookEvents !== undefined &&
+      (options.webhookEvents === null || typeof options.webhookEvents.servicePlanOrderStatusChanged !== 'function')
+    ) {
+      throw new TypeError('webhookEvents must implement the customer webhook producer contract');
+    }
+    this.webhookEvents = options.webhookEvents;
     this.checkoutPolicy = normalizePaymentCheckoutOptions(options.checkout, options.checkoutRedirectPolicies);
     this.submissionLeaseTtlMs = options.submissionLeaseTtlMs ?? 60_000;
     this.maxProviderAttempts = options.maxProviderAttempts ?? DEFAULT_MAX_PROVIDER_ATTEMPTS;
@@ -484,16 +514,33 @@ export class PaymentFulfillmentService {
 
     const orderId = normalizeText(this.idFactory());
     const createdAt = this.currentDate().toISOString();
-    const inserted = await this.runTransaction((executor) =>
-      this.insertOrder(executor, {
+    const inserted = await this.runTransaction(async (executor) => {
+      // R1: a promo code is priced inside the order transaction (locked code
+      // row + usage insert + discounted amount), never after the fact.
+      let amountMinorUnits = normalized.amountMinorUnits;
+      let originalAmountMinorUnits: string | null = null;
+      if (normalized.promoCode !== undefined) {
+        if (!this.walletTopUpPromo) throw new PaymentError('PROMO_UNAVAILABLE');
+        const pricing = await this.walletTopUpPromo.priceWalletTopUp(executor, {
+          orderId,
+          tenantId: normalized.tenantId,
+          amountMinorUnits: normalized.amountMinorUnits.toString(),
+          currency: normalized.currency,
+          promoCode: normalized.promoCode,
+        });
+        amountMinorUnits = parseMinorUnits(pricing.amountMinorUnits);
+        originalAmountMinorUnits = normalizeText(pricing.originalAmountMinorUnits);
+      }
+      return this.insertOrder(executor, {
         id: orderId,
         tenantId: normalized.tenantId,
         clientRequestId: normalized.clientRequestId,
-        amountMinorUnits: normalized.amountMinorUnits,
+        amountMinorUnits,
         currency: normalized.currency,
         createdAt,
-      }),
-    );
+        originalAmountMinorUnits,
+      });
+    });
     if (inserted) return this.submitProviderOrder(inserted, false);
 
     existing = await this.findOrderByClientRequest(normalized.tenantId, normalized.clientRequestId);
@@ -1367,12 +1414,14 @@ export class PaymentFulfillmentService {
     readonly clientRequestId: string;
     readonly amountMinorUnits: bigint;
     readonly currency: string;
+    readonly promoCode: string | undefined;
   } {
     return {
       tenantId: normalizeText(input?.tenantId),
       clientRequestId: normalizeText(input?.clientRequestId),
       amountMinorUnits: parseMinorUnits(input?.amountMinorUnits),
       currency: normalizeCurrency(input?.currency),
+      promoCode: input?.promoCode === undefined ? undefined : normalizeText(input.promoCode),
     };
   }
 
@@ -1417,7 +1466,9 @@ export class PaymentFulfillmentService {
       order.providerKey !== this.providerKey ||
       order.merchantId !== this.merchantId ||
       order.currency !== input.currency ||
-      BigInt(order.amountMinorUnits) !== input.amountMinorUnits
+      // Promo orders freeze the discounted amount on the row; replay compares
+      // the customer's original (pre-discount) input amount.
+      BigInt(order.originalAmountMinorUnits ?? order.amountMinorUnits) !== input.amountMinorUnits
     ) {
       throw new PaymentError('IDEMPOTENCY_CONFLICT');
     }
@@ -1470,6 +1521,7 @@ export class PaymentFulfillmentService {
       readonly amountMinorUnits: bigint;
       readonly currency: string;
       readonly createdAt: string;
+      readonly originalAmountMinorUnits?: string | null;
     },
   ): Promise<PaymentOrderEntity | null> {
     try {
@@ -1477,8 +1529,8 @@ export class PaymentFulfillmentService {
         `INSERT INTO saas_payment_orders
           (id, tenant_id, order_type, provider_key, merchant_id, client_request_id,
            local_order_ref, funding_reference, amount_minor_units, currency, state,
-           provider_attempts, created_at, updated_at)
-         VALUES ($1, $2, 'wallet_topup', $3, $4, $5, $1, $1, $6, $7, 'created', 0, $8, $8)
+           provider_attempts, created_at, updated_at, original_amount_minor_units)
+         VALUES ($1::uuid, $2, 'wallet_topup', $3, $4, $5, $1, $1, $6, $7, 'created', 0, $8, $8, $9)
          ON CONFLICT (tenant_id, client_request_id) DO NOTHING
          RETURNING ${ORDER_COLUMNS}`,
         [
@@ -1490,6 +1542,7 @@ export class PaymentFulfillmentService {
           input.amountMinorUnits.toString(),
           input.currency,
           input.createdAt,
+          input.originalAmountMinorUnits ?? null,
         ],
       );
       return rowsHaveOne(result) && result.rows[0] ? mapOrderRow(result.rows[0]) : null;
@@ -1724,21 +1777,20 @@ export class PaymentFulfillmentService {
       const result = await executor.query<PaymentOrderRow>(
         `UPDATE saas_payment_orders
          SET state = 'pending', provider_order_id = $3, provider_failure_code = NULL,
-             checkout_kind = $6, checkout_url = $7, checkout_text = $8, checkout_expires_at = $9,
+             checkout_kind = $5, checkout_url = $6, checkout_text = $7, checkout_expires_at = $8,
              provider_submission_state = 'idle',
              provider_submission_lease_token = NULL,
              provider_submission_lease_expires_at = NULL,
              updated_at = $4
          WHERE tenant_id = $1 AND id = $2 AND state = 'created'
            AND provider_submission_state = 'submitting'
-           AND provider_submission_lease_token = $10
+           AND provider_submission_lease_token = $9
          RETURNING ${ORDER_COLUMNS}`,
         [
           order.tenantId,
           order.id,
           providerOrderId,
           this.currentDate().toISOString(),
-          order.id,
           columns.kind,
           columns.url,
           columns.text,
@@ -1792,6 +1844,7 @@ export class PaymentFulfillmentService {
     current: MappedServicePlanPaymentRow,
     leaseToken: string | null = current.providerSubmissionLeaseToken,
   ): Promise<void> {
+    const transitionedAt = this.currentDate().toISOString();
     const result = await executor.query<{ id: string }>(
       `UPDATE saas_service_plan_orders
        SET state = 'reconciliation_pending',
@@ -1807,9 +1860,19 @@ export class PaymentFulfillmentService {
            OR (provider_submission_state = 'idle' AND provider_submission_lease_token IS NULL)
          )
        RETURNING id`,
-      [current.tenant_id, current.project_id, current.id, this.currentDate().toISOString(), leaseToken],
+      [current.tenant_id, current.project_id, current.id, transitionedAt, leaseToken],
     );
-    if (rowsHaveOne(result)) return;
+    if (rowsHaveOne(result)) {
+      // F3: the transition event commits with the state change.
+      await this.webhookEvents?.servicePlanOrderStatusChanged(executor, {
+        tenantId: current.tenant_id,
+        orderId: current.id,
+        status: 'reconciliation_pending',
+        occurredAt: transitionedAt,
+        transitionRef: leaseToken ?? this.idFactory(),
+      });
+      return;
+    }
     const reread = await this.findServicePlanPaymentById(
       executor,
       current.tenant_id,
@@ -1904,6 +1967,40 @@ export class PaymentFulfillmentService {
     };
   }
 
+  /**
+   * Optional provider attestation before any 'succeeded' event fulfills
+   * (contract C-3: a signature-verified webhook alone never fulfills for
+   * weak-signature PSPs). Returns the reconciliation code when the provider
+   * actively declines to confirm; null when confirmed or no seam exists.
+   * A thrown adapter error propagates so the inbox claim retries.
+   */
+  private async eventUnconfirmedBeforeFulfillment(
+    event: NormalizedEvent,
+    order: PaymentProviderEventOrderFacts,
+  ): Promise<string | null> {
+    const confirmEvent = this.provider.confirmEvent;
+    if (typeof confirmEvent !== 'function') return null;
+    const confirmation = await confirmEvent.call(this.provider, {
+      event: {
+        providerEventId: event.providerEventId,
+        eventType: event.eventType,
+        providerOrderId: event.providerOrderId,
+        tenantId: event.tenantId,
+        merchantId: event.merchantId,
+        status: event.status,
+        amountMinorUnits: event.amountMinorUnits.toString(10),
+        currency: event.currency,
+        occurredAt: event.occurredAt,
+      },
+      order,
+    });
+    if (confirmation && typeof confirmation === 'object' && confirmation.confirmed === true) return null;
+    const code = confirmation && typeof confirmation === 'object' ? confirmation.code : undefined;
+    return typeof code === 'string' && code.length > 0 && code.length <= MAX_TEXT_LENGTH
+      ? code
+      : 'PROVIDER_UNCONFIRMED';
+  }
+
   private async processClaimedWebhook(inbox: PaymentInboxRow): Promise<ProcessedWebhook | null> {
     const leaseToken = inbox.lease_token;
     if (leaseToken === null) throw new PaymentError('PAYMENT_STORAGE_ERROR');
@@ -1946,7 +2043,18 @@ export class PaymentFulfillmentService {
         return this.finishInbox(executor, claimed, 'reconciliation', 'ORDER_FIELDS_MISMATCH');
       }
 
-      if (event.status === 'succeeded') return this.fulfillFromEvent(executor, claimed, order);
+      if (event.status === 'succeeded') {
+        const unconfirmed = await this.eventUnconfirmedBeforeFulfillment(event, {
+          localOrderId: order.localOrderRef,
+          tenantId: order.tenantId,
+          merchantId: order.merchantId,
+          amountMinorUnits: order.amountMinorUnits,
+          currency: order.currency,
+          providerOrderId: order.providerOrderId,
+        });
+        if (unconfirmed !== null) return this.finishInbox(executor, claimed, 'reconciliation', unconfirmed);
+        return this.fulfillFromEvent(executor, claimed, order);
+      }
       if (event.status === 'pending') {
         if (order.status === 'created' || order.status === 'provider_failed' || order.status === 'pending') {
           const pending = await this.updateOrderState(executor, order, 'pending', null, null);
@@ -2077,6 +2185,18 @@ export class PaymentFulfillmentService {
 
     if (event.status === 'succeeded') {
       if (order.state === 'pending') {
+        const unconfirmed = await this.eventUnconfirmedBeforeFulfillment(event, {
+          localOrderId: order.id,
+          tenantId: order.tenant_id,
+          merchantId: order.merchant_id ?? event.merchantId,
+          amountMinorUnits: order.snapshot_price_minor_units,
+          currency: normalizeCurrency(order.snapshot_currency),
+          providerOrderId: order.provider_order_id,
+        });
+        if (unconfirmed !== null) {
+          await this.markServicePlanReconciliation(executor, order);
+          return this.finishInbox(executor, inbox, 'reconciliation', unconfirmed, null, orderId);
+        }
         return { kind: 'service_plan_fulfillment', inbox, order, event };
       }
       if (
@@ -2210,6 +2330,23 @@ export class PaymentFulfillmentService {
       throw new PaymentError('FULFILLMENT_RETRYABLE');
     }
 
+    // R2: post-funding accrual hooks (e.g. affiliate rewards) share this
+    // transaction. A hook failure keeps fulfillment retryable — accrual is
+    // fail-closed and never silently skipped.
+    if (this.walletFundingHook) {
+      try {
+        await this.walletFundingHook.afterVerifiedFunding(executor, {
+          tenantId: order.tenantId,
+          currency: order.currency,
+          amountMinorUnits: order.amountMinorUnits,
+          sourceOrderRef: order.id,
+          fundingTransactionId: funding.transactionId,
+        });
+      } catch {
+        throw new PaymentError('FULFILLMENT_RETRYABLE');
+      }
+    }
+
     const fulfilled = await this.updateOrderState(
       executor,
       fulfilling,
@@ -2244,15 +2381,26 @@ export class PaymentFulfillmentService {
   }
 
   private async markServicePlanReconciliation(executor: SqlExecutor, order: ServicePlanPaymentRow): Promise<void> {
+    const transitionedAt = this.currentDate().toISOString();
     const result = await executor.query<{ id: string }>(
       `UPDATE saas_service_plan_orders
        SET state = 'reconciliation_pending', updated_at = $4
        WHERE tenant_id = $1 AND project_id = $2 AND id = $3
          AND state IN ('pending', 'paid', 'fulfilling')
        RETURNING id`,
-      [order.tenant_id, order.project_id, order.id, this.currentDate().toISOString()],
+      [order.tenant_id, order.project_id, order.id, transitionedAt],
     );
-    if (rowsHaveOne(result)) return;
+    if (rowsHaveOne(result)) {
+      // F3: the transition event commits with the state change.
+      await this.webhookEvents?.servicePlanOrderStatusChanged(executor, {
+        tenantId: order.tenant_id,
+        orderId: order.id,
+        status: 'reconciliation_pending',
+        occurredAt: transitionedAt,
+        transitionRef: this.idFactory(),
+      });
+      return;
+    }
     const current = await this.findServicePlanPaymentById(executor, order.tenant_id, order.project_id, order.id);
     if (!current || !['fulfilled', 'cancelled', 'reconciliation_pending'].includes(current.state)) {
       throw new PaymentError('PAYMENT_STORAGE_ERROR');

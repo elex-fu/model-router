@@ -542,34 +542,77 @@ test('orders migrations and holds a session advisory lock across the run', async
   );
 });
 
-test('the default migration runner applies the unique current 001-060 history and preserves the 050-052 segment', async () => {
+test('the default migration runner applies the unique current 001-060 + 063 + 080-085 + 087-098 history and preserves the 050-052 segment', async () => {
   const pool = new MigrationPool();
 
   await runSaasMigrations(pool);
 
-  const versions = Array.from({ length: 60 }, (_, index) => index + 1);
-  assert.deepEqual(SAAS_MIGRATIONS.map(({ version }) => version), versions);
-  assert.deepEqual(pool.applied.map(({ version }) => version), versions);
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 60);
-  assert.deepEqual(pool.applied.slice(49, 52).map(({ version }) => version), [50, 51, 52]);
-  assert.deepEqual(pool.applied.slice(49).map(({ name }) => name), [
-    'prepared_evidence_authorization_advisory_fences',
-    'unknown_outcome_support_ticket',
-    'commercial_authority_guard_rowtype_safety',
-    'commercial_authority_read_fences',
-    'trigger_only_trusted_execution',
-    'prepared_evidence_optional_validity_scalars',
-    'restricted_role_check_and_platform_auth_execution',
-    'normal_success_usage_evidence_reference',
-    'credential_validation_invalidation_trigger_execution',
-    'pre_dispatch_terminal_cancellation',
-    'prepared_evidence_claim_generated_account',
-  ]);
-  assert.equal(pool.applied.length, 60);
-  assert.deepEqual(pool.applied, SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
-    version, name, checksum: createHash('sha256').update(name).update('\0').update(sql).digest('hex'),
-  })), 'the runner must record the exact name-plus-NUL-plus-original-SQL checksum for every registered migration');
-  assert.deepEqual(pool.events.filter((event) => event.startsWith('record:')), versions.map((version) => `record:${version}`));
+  const versions = [
+    ...Array.from({ length: 60 }, (_, index) => index + 1),
+    63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98,
+  ];
+  assert.deepEqual(
+    SAAS_MIGRATIONS.map(({ version }) => version),
+    versions,
+  );
+  assert.deepEqual(
+    pool.applied.map(({ version }) => version),
+    versions,
+  );
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 79);
+  assert.deepEqual(
+    pool.applied.slice(49, 52).map(({ version }) => version),
+    [50, 51, 52],
+  );
+  assert.deepEqual(
+    pool.applied.slice(49).map(({ name }) => name),
+    [
+      'prepared_evidence_authorization_advisory_fences',
+      'unknown_outcome_support_ticket',
+      'commercial_authority_guard_rowtype_safety',
+      'commercial_authority_read_fences',
+      'trigger_only_trusted_execution',
+      'prepared_evidence_optional_validity_scalars',
+      'restricted_role_check_and_platform_auth_execution',
+      'normal_success_usage_evidence_reference',
+      'credential_validation_invalidation_trigger_execution',
+      'pre_dispatch_terminal_cancellation',
+      'prepared_evidence_claim_generated_account',
+      'usage_corrections',
+      'api_key_ip_policies',
+      'api_key_budgets',
+      'provider_account_scheduling_priority_weight',
+      'platform_credential_validation_jobs',
+      'provider_account_revalidation_interval',
+      'customer_passkey_ceremonies',
+      'customer_webhook_tenant_policy_entitlement',
+      'customer_webhook_event_types_check_rewrite',
+      'marketing_redeem_codes',
+      'marketing_promo_codes',
+      'marketing_affiliate',
+      'marketing_announcements',
+      'provider_account_quota_snapshots',
+      'provider_credential_oauth_refresh_state',
+      'marketing_announcement_fanout_cursor',
+      'customer_webhook_maintenance_payload_rewrite',
+      'provider_account_quarantine_state',
+      'provider_account_rate_counters_and_health_score',
+    ],
+  );
+  assert.equal(pool.applied.length, 79);
+  assert.deepEqual(
+    pool.applied,
+    SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
+      version,
+      name,
+      checksum: createHash('sha256').update(name).update('\0').update(sql).digest('hex'),
+    })),
+    'the runner must record the exact name-plus-NUL-plus-original-SQL checksum for every registered migration',
+  );
+  assert.deepEqual(
+    pool.events.filter((event) => event.startsWith('record:')),
+    versions.map((version) => `record:${version}`),
+  );
 });
 
 test('reruns are idempotent and still acquire and release the advisory lock', async () => {
@@ -674,7 +717,8 @@ test('initial schema preserves platform, membership, audit, and policy identity 
 
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    Array.from({ length: SAAS_MIGRATIONS.length }, (_, index) => index + 1),
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98],
+    'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );
   assert.ok(tableNames.length >= 14);
   assert.ok(tableNames.every((name) => name?.startsWith('saas_')));

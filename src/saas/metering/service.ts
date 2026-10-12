@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { PlatformWalletLedgerService } from '../billing/service.js';
 import type { SqlExecutor } from '../db/types.js';
 import type { ModelResolutionProvenance } from '../gateway/contracts.js';
+import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import {
   canonicalUsage,
   digestClientKey,
@@ -72,6 +73,11 @@ interface MeteringServiceOptions {
   readonly now?: () => Date;
   readonly idempotencyHmacSecret?: HmacSecret;
   readonly knownResponseBilling?: Pick<PlatformWalletLedgerService, 'markReconciliationPending'>;
+  /**
+   * F3: customer webhook producer invoked when a known non-success HTTP
+   * response terminally fails the request. Absent disables the event.
+   */
+  readonly webhookEvents?: Pick<CustomerWebhookEventProducer, 'requestCompleted'>;
 }
 
 export interface KnownNonSuccessHttpResponseInput {
@@ -98,6 +104,8 @@ interface KnownHttpResponseStateRow extends Row {
   readonly request_reconciliation_state: unknown;
   readonly request_financial_status: unknown;
   readonly request_state_version: unknown;
+  readonly request_project_id: unknown;
+  readonly request_created_at: unknown;
 }
 
 /**
@@ -1222,8 +1230,10 @@ function mapSettlement(row: Row): UsageSettlementRecord {
     attemptId: asIdentifier(row.attempt_id),
     settlementKeyDigest: asDigest(row.settlement_key_digest),
     settlementDigest: asDigest(row.settlement_digest),
-    normalSuccessEvidenceRef: row.normal_success_evidence_ref === null
-      ? null : asNormalSuccessEvidenceRef(row.normal_success_evidence_ref, 'METERING_STORAGE_ERROR'),
+    normalSuccessEvidenceRef:
+      row.normal_success_evidence_ref === null
+        ? null
+        : asNormalSuccessEvidenceRef(row.normal_success_evidence_ref, 'METERING_STORAGE_ERROR'),
     kind:
       row.kind === 'usage_recorded' || row.kind === 'platform_cost_observed'
         ? row.kind
@@ -1527,6 +1537,7 @@ export class SaasMeteringService {
   private readonly now: () => Date;
   private readonly idempotencyHmacSecret?: HmacSecret;
   private readonly knownResponseBilling: Pick<PlatformWalletLedgerService, 'markReconciliationPending'>;
+  private readonly webhookEvents?: Pick<CustomerWebhookEventProducer, 'requestCompleted'>;
 
   constructor(
     private readonly database: MeteringDatabase,
@@ -1535,6 +1546,10 @@ export class SaasMeteringService {
     this.now = options.now ?? (() => new Date());
     this.idempotencyHmacSecret = options.idempotencyHmacSecret;
     this.knownResponseBilling = options.knownResponseBilling ?? new PlatformWalletLedgerService();
+    if (options.webhookEvents !== undefined && typeof options.webhookEvents.requestCompleted !== 'function') {
+      throw new TypeError('webhookEvents must implement the customer webhook event producer contract');
+    }
+    this.webhookEvents = options.webhookEvents;
   }
 
   /** Transaction seam for a future gateway/wallet coordinator. */
@@ -2165,10 +2180,15 @@ export class SaasMeteringService {
     if (!resultTransitionAllowed(expectedResultState, resultState)) fail('ATTEMPT_TRANSITION_INVALID');
     // Only a never-dispatched, response-free attempt can acquire this terminal
     // failure. It cannot be manufactured by moving sent/uncertain work back.
-    const preDispatchFailure = expectedDispatchState === 'not_sent' && expectedResponseStarted === false &&
+    const preDispatchFailure =
+      expectedDispatchState === 'not_sent' &&
+      expectedResponseStarted === false &&
       (expectedResultState === 'pending' || expectedResultState === 'failed') &&
-      dispatchState === 'not_sent' && resultState === 'failed' && responseStarted === false;
-    if (dispatchState === 'not_sent' && resultState !== 'pending' && !preDispatchFailure) fail('ATTEMPT_TRANSITION_INVALID');
+      dispatchState === 'not_sent' &&
+      resultState === 'failed' &&
+      responseStarted === false;
+    if (dispatchState === 'not_sent' && resultState !== 'pending' && !preDispatchFailure)
+      fail('ATTEMPT_TRANSITION_INVALID');
     if (resultState === 'unknown' && dispatchState === 'not_sent') fail('ATTEMPT_TRANSITION_INVALID');
     if (
       (resultState === 'succeeded' || resultState === 'failed') &&
@@ -2266,7 +2286,8 @@ export class SaasMeteringService {
                 a.result_http_status AS attempt_result_http_status, a.state_version AS attempt_state_version,
                 r.id AS request_id, r.tenant_id AS request_tenant_id, r.supply_mode AS request_supply_mode,
                 r.execution_state AS request_result_state, r.reconciliation_state AS request_reconciliation_state,
-                r.financial_status AS request_financial_status, r.state_version AS request_state_version
+                r.financial_status AS request_financial_status, r.state_version AS request_state_version,
+                r.project_id AS request_project_id, r.created_at AS request_created_at
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
           WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
@@ -2366,6 +2387,28 @@ export class SaasMeteringService {
           expectedFinancialStatus: 'pending',
           financialStatus: 'reconciliation_pending',
           expectedStateVersion: request.stateVersion,
+        });
+      }
+      // F3: the request is terminally failed; notify inside the same
+      // transaction. The guarded transition above already fired, so the
+      // replay path (alreadyClassified) can never double-emit.
+      if (this.webhookEvents) {
+        const projectId = typeof state.request_project_id === 'string' ? state.request_project_id : null;
+        if (projectId === null) fail('METERING_STORAGE_ERROR');
+        const createdMs =
+          state.request_created_at instanceof Date
+            ? state.request_created_at.getTime()
+            : Date.parse(String(state.request_created_at));
+        const durationMs = Math.max(0, Math.round(Date.parse(request.updatedAt) - createdMs));
+        await this.webhookEvents.requestCompleted(tx, {
+          tenantId,
+          requestId,
+          projectId,
+          supplyMode,
+          status: 'failed',
+          durationMs,
+          occurredAt: request.updatedAt,
+          transitionRef: `http-failure-${input.resultHttpStatus}`,
         });
       }
       return attempt;
@@ -2584,8 +2627,10 @@ export class SaasMeteringService {
     );
     const kind = input.settlementKind ?? 'usage_recorded';
     if (kind !== 'usage_recorded' && kind !== 'platform_cost_observed') fail('METERING_INVALID_INPUT');
-    const normalSuccessEvidenceRef = input.normalSuccessEvidenceRef === undefined ? null
-      : asNormalSuccessEvidenceRef(input.normalSuccessEvidenceRef, 'METERING_INVALID_INPUT');
+    const normalSuccessEvidenceRef =
+      input.normalSuccessEvidenceRef === undefined
+        ? null
+        : asNormalSuccessEvidenceRef(input.normalSuccessEvidenceRef, 'METERING_INVALID_INPUT');
     if (normalSuccessEvidenceRef !== null && kind !== 'usage_recorded') fail('METERING_INVALID_INPUT');
 
     return this.write(options.executor, async (tx) => {
@@ -2604,9 +2649,15 @@ export class SaasMeteringService {
         kind,
         usageEventDigest: asDigest(usage.event_digest),
       };
-      const digest = normalSuccessEvidenceRef === null ? settlementDigest(digestIdentity)
-        : normalSuccessSettlementDigest({ ...digestIdentity, kind: 'usage_recorded',
-          settlementKeyDigest, usageEvidenceRef: normalSuccessEvidenceRef });
+      const digest =
+        normalSuccessEvidenceRef === null
+          ? settlementDigest(digestIdentity)
+          : normalSuccessSettlementDigest({
+              ...digestIdentity,
+              kind: 'usage_recorded',
+              settlementKeyDigest,
+              usageEvidenceRef: normalSuccessEvidenceRef,
+            });
       const inserted = await this.rows<Row>(
         tx,
         `INSERT INTO saas_usage_settlements
@@ -2646,12 +2697,19 @@ export class SaasMeteringService {
       const existingSettlement = mapSettlement(existing);
       // Persisted presence selects the algorithm. An omitted/different input ref
       // cannot downgrade a v1 row, and a legacy row cannot be silently upgraded.
-      const existingDigest = existingSettlement.normalSuccessEvidenceRef === null ? settlementDigest(digestIdentity)
-        : normalSuccessSettlementDigest({ ...digestIdentity, kind: 'usage_recorded', settlementKeyDigest,
-          usageEvidenceRef: existingSettlement.normalSuccessEvidenceRef });
+      const existingDigest =
+        existingSettlement.normalSuccessEvidenceRef === null
+          ? settlementDigest(digestIdentity)
+          : normalSuccessSettlementDigest({
+              ...digestIdentity,
+              kind: 'usage_recorded',
+              settlementKeyDigest,
+              usageEvidenceRef: existingSettlement.normalSuccessEvidenceRef,
+            });
       if (
         existingSettlement.tenantId !== tenantId ||
-        existingSettlement.requestId !== usage.request_id || existingSettlement.attemptId !== usage.attempt_id ||
+        existingSettlement.requestId !== usage.request_id ||
+        existingSettlement.attemptId !== usage.attempt_id ||
         existingSettlement.usageEventId !== usageEventId ||
         existingSettlement.settlementKeyDigest !== settlementKeyDigest ||
         existingSettlement.normalSuccessEvidenceRef !== normalSuccessEvidenceRef ||
@@ -2691,9 +2749,13 @@ export class SaasMeteringService {
     const usage = normalizeUsage(input.usage);
     const identity = { tenantId, requestId, attemptId, supplyMode };
     const eventDigest = usageEventDigest(identity, usage);
-    const dedupeKeyDigest = digestClientKey(asNonEmptyText(input.eventKey, 'eventKey', 4096), this.idempotencyHmacSecret);
+    const dedupeKeyDigest = digestClientKey(
+      asNonEmptyText(input.eventKey, 'eventKey', 4096),
+      this.idempotencyHmacSecret,
+    );
     const settlementKeyDigest = digestClientKey(
-      asNonEmptyText(input.settlementKey, 'settlementKey', 4096), this.idempotencyHmacSecret,
+      asNonEmptyText(input.settlementKey, 'settlementKey', 4096),
+      this.idempotencyHmacSecret,
     );
     const executor = options.executor ?? this.database;
     const row = await this.one<Row>(
@@ -2708,31 +2770,47 @@ export class SaasMeteringService {
     const stored = mapUsage(row);
     const storedUsage = normalizeUsage(stored);
     if (
-      stored.tenantId !== tenantId || stored.requestId !== requestId || stored.attemptId !== attemptId ||
-      stored.supplyMode !== supplyMode || stored.dedupeKeyDigest !== dedupeKeyDigest ||
-      stored.eventDigest !== eventDigest || stored.eventDigest !== usageEventDigest(identity, storedUsage) ||
+      stored.tenantId !== tenantId ||
+      stored.requestId !== requestId ||
+      stored.attemptId !== attemptId ||
+      stored.supplyMode !== supplyMode ||
+      stored.dedupeKeyDigest !== dedupeKeyDigest ||
+      stored.eventDigest !== eventDigest ||
+      stored.eventDigest !== usageEventDigest(identity, storedUsage) ||
       canonicalUsage(storedUsage) !== canonicalUsage(usage)
     ) {
       fail('USAGE_DUPLICATE_CONFLICT');
     }
     const settlement = await this.getUsageSettlement(tenantId, stored.id, { executor });
     if (
-      !settlement || settlement.tenantId !== tenantId || settlement.requestId !== requestId ||
-      settlement.attemptId !== attemptId || settlement.usageEventId !== stored.id ||
-      settlement.kind !== 'usage_recorded' || settlement.settlementKeyDigest !== settlementKeyDigest
+      !settlement ||
+      settlement.tenantId !== tenantId ||
+      settlement.requestId !== requestId ||
+      settlement.attemptId !== attemptId ||
+      settlement.usageEventId !== stored.id ||
+      settlement.kind !== 'usage_recorded' ||
+      settlement.settlementKeyDigest !== settlementKeyDigest
     ) {
       fail('USAGE_SETTLEMENT_CONFLICT');
     }
-    const digestIdentity = { tenantId, usageEventId: stored.id, kind: 'usage_recorded' as const,
-      usageEventDigest: stored.eventDigest };
+    const digestIdentity = {
+      tenantId,
+      usageEventId: stored.id,
+      kind: 'usage_recorded' as const,
+      usageEventDigest: stored.eventDigest,
+    };
     if (settlement.normalSuccessEvidenceRef === null) {
       if (supplyMode !== 'platform' || settlement.settlementDigest !== settlementDigest(digestIdentity)) {
         fail('USAGE_SETTLEMENT_CONFLICT');
       }
     } else if (
       settlement.normalSuccessEvidenceRef !== usageEvidenceRef ||
-      settlement.settlementDigest !== normalSuccessSettlementDigest({ ...digestIdentity, settlementKeyDigest,
-        usageEvidenceRef: settlement.normalSuccessEvidenceRef })
+      settlement.settlementDigest !==
+        normalSuccessSettlementDigest({
+          ...digestIdentity,
+          settlementKeyDigest,
+          usageEvidenceRef: settlement.normalSuccessEvidenceRef,
+        })
     ) {
       fail('USAGE_SETTLEMENT_CONFLICT');
     }

@@ -627,17 +627,28 @@ function mapObservation(row: RecoveryObservationRow): UnknownOutcomeCaseObservat
   };
 }
 
+/**
+ * KEY-BUD (contract C-4) budget counter resolution slice. Runs in the same
+ * operator-resolution transaction; errors roll the transaction back. Absent
+ * disables budget accounting (pre-081 behavior).
+ */
+export interface UnknownOutcomeRecoveryKeyBudget {
+  release(executor: SqlExecutor, input: { readonly tenantId: string; readonly requestId: string }): Promise<boolean>;
+}
+
 /** PostgreSQL implementation; provider I/O is deliberately absent from this repository. */
 export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeRecoveryRepository {
   private readonly idFactory: () => string;
+  private readonly keyBudget: UnknownOutcomeRecoveryKeyBudget | undefined;
 
   constructor(
     private readonly database: SaasDatabase,
     private readonly metering: SaasMeteringService,
     private readonly billing: PlatformWalletLedgerService = new PlatformWalletLedgerService(),
-    options: { readonly idFactory?: () => string } = {},
+    options: { readonly idFactory?: () => string; readonly keyBudget?: UnknownOutcomeRecoveryKeyBudget } = {},
   ) {
     this.idFactory = options.idFactory ?? randomUUID;
+    this.keyBudget = options.keyBudget;
   }
 
   async claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<readonly UnknownOutcomeRecoveryClaim[]> {
@@ -1241,6 +1252,13 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
         });
       }
 
+      // KEY-BUD (contract C-4): operator-resolved failure drops the admission
+      // budget reservation without recording usage, for both supply modes;
+      // replay and pre-081 drift are no-ops inside the store.
+      if (this.keyBudget) {
+        await this.keyBudget.release(tx, { tenantId: input.tenantId, requestId });
+      }
+
       const auditEventId = this.idFactory();
       await tx.query(
         `INSERT INTO saas_audit_events
@@ -1333,6 +1351,8 @@ export interface UnknownOutcomeRecoveryWorkflowOptions {
   readonly billing?: PlatformWalletLedgerService;
   readonly worker?: { readonly batchSize?: number; readonly leaseMs?: number; readonly maxAttempts?: number };
   readonly repository?: { readonly idFactory?: () => string };
+  /** KEY-BUD (contract C-4) budget resolution; absent disables budget accounting. */
+  readonly keyBudget?: UnknownOutcomeRecoveryKeyBudget;
 }
 
 /**
@@ -1343,6 +1363,7 @@ export interface UnknownOutcomeRecoveryWorkflowOptions {
 export function createUnknownOutcomeRecoveryWorkflow(input: UnknownOutcomeRecoveryWorkflowOptions) {
   const repository = new PostgresUnknownOutcomeRecoveryRepository(input.database, input.metering, input.billing, {
     idFactory: input.repository?.idFactory,
+    ...(input.keyBudget === undefined ? {} : { keyBudget: input.keyBudget }),
   });
   const authorization = input.authorization ?? new PostgresUnknownOutcomeOperatorAuthorizationAdapter(input.database);
   return {

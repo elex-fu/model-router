@@ -90,12 +90,14 @@ export interface PlatformOperationsMetrics {
     oldestUnprocessedAgeMs: string | null;
   };
   runtimeProbes: {
-    postgresql: 'unavailable' | 'not_configured';
-    redis: 'unavailable' | 'not_configured';
-    kms: 'unavailable' | 'not_configured';
-    worker: 'unavailable' | 'not_configured';
+    postgresql: PlatformRuntimeProbeStatus;
+    redis: PlatformRuntimeProbeStatus;
+    kms: PlatformRuntimeProbeStatus;
+    worker: PlatformRuntimeProbeStatus;
   };
 }
+
+export type PlatformRuntimeProbeStatus = 'ok' | 'degraded' | 'unavailable' | 'not_configured';
 
 export interface PlatformOperationsSummary {
   from: string;
@@ -616,6 +618,71 @@ export interface PlatformMfaEnrollmentStart {
   expiresAt: string;
 }
 
+export type PlatformGovernanceUserStatusFilter = 'active' | 'disabled';
+
+export interface PlatformGovernanceUserSummary {
+  id: string;
+  email: string;
+  displayName: string | null;
+  emailVerifiedAt: string | null;
+  disabledAt: string | null;
+  createdAt: string;
+}
+
+export interface PlatformGovernanceUserPage {
+  items: PlatformGovernanceUserSummary[];
+  nextCursor: string | null;
+}
+
+export interface PlatformGovernanceUserListQuery {
+  limit?: number;
+  cursor?: string;
+  emailContains?: string;
+  status?: PlatformGovernanceUserStatusFilter;
+  signal?: AbortSignal;
+}
+
+export type PlatformGovernanceTenantStatus = 'active' | 'suspended' | 'closed';
+
+export interface PlatformGovernanceTenantSummary {
+  id: string;
+  name: string;
+  slug: string;
+  status: PlatformGovernanceTenantStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlatformGovernanceTenantPage {
+  items: PlatformGovernanceTenantSummary[];
+  nextCursor: string | null;
+}
+
+export interface PlatformGovernanceTenantListQuery {
+  limit?: number;
+  cursor?: string;
+  slugContains?: string;
+  status?: PlatformGovernanceTenantStatus;
+  signal?: AbortSignal;
+}
+
+export type PlatformGovernanceTenantAction = 'suspend' | 'resume' | 'close';
+
+export interface PlatformGovernanceOperatorSummary {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  disabledAt: string | null;
+  roles: PlatformAdminRole[];
+}
+
+export interface PlatformGovernanceOperatorCreateInput {
+  email: string;
+  displayName?: string;
+  password: string;
+  role: PlatformAdminRole;
+}
+
 interface ApiEnvelope<T> {
   data?: T;
   error?: {
@@ -715,6 +782,176 @@ function parseEnrollment(value: unknown): PlatformMfaEnrollmentStart {
   };
 }
 
+const GOVERNANCE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+function invalidGovernanceResponse(message = '治理接口返回了无效响应'): never {
+  throw new PlatformApiError(200, 'INVALID_RESPONSE', message);
+}
+
+function governanceUuid(value: unknown): string {
+  if (typeof value !== 'string' || !GOVERNANCE_UUID_PATTERN.test(value)) return invalidGovernanceResponse();
+  return value.toLowerCase();
+}
+
+function governanceId(value: string, field: string): string {
+  if (typeof value !== 'string' || !GOVERNANCE_UUID_PATTERN.test(value) || value.trim() !== value) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', `请输入有效的${field}`);
+  }
+  return value.toLowerCase();
+}
+
+function governanceText(value: unknown, maximumLength = 255): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > maximumLength ||
+    [...value].some(character => character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f)
+  ) {
+    return invalidGovernanceResponse();
+  }
+  return value;
+}
+
+function governanceNullableText(value: unknown, maximumLength = 255): string | null {
+  return value === null ? null : governanceText(value, maximumLength);
+}
+
+function governanceTimestamp(value: unknown): string {
+  const timestamp = governanceText(value, 64);
+  if (!Number.isFinite(Date.parse(timestamp))) return invalidGovernanceResponse();
+  return timestamp;
+}
+
+function governanceNullableTimestamp(value: unknown): string | null {
+  return value === null ? null : governanceTimestamp(value);
+}
+
+/** The governance projection must never carry credential material; its presence fails closed. */
+function governanceWithoutSecrets(value: Record<string, unknown>): Record<string, unknown> {
+  if (
+    'password' in value ||
+    'passwordHash' in value ||
+    'password_hash' in value ||
+    'totpSecret' in value ||
+    'totp_secret' in value
+  ) {
+    return invalidGovernanceResponse('治理接口响应包含禁止字段');
+  }
+  return value;
+}
+
+function parseGovernanceUser(value: unknown): PlatformGovernanceUserSummary {
+  if (!isRecord(value)) return invalidGovernanceResponse();
+  const safe = governanceWithoutSecrets(value);
+  return {
+    id: governanceUuid(safe.id),
+    email: governanceText(safe.email, 320),
+    displayName: governanceNullableText(safe.displayName),
+    emailVerifiedAt: governanceNullableTimestamp(safe.emailVerifiedAt),
+    disabledAt: governanceNullableTimestamp(safe.disabledAt),
+    createdAt: governanceTimestamp(safe.createdAt),
+  };
+}
+
+function parseGovernanceCursor(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512) return invalidGovernanceResponse();
+  return value;
+}
+
+function parseGovernanceUserPage(value: unknown): PlatformGovernanceUserPage {
+  if (!isRecord(value) || !Array.isArray(value.items) || value.items.length > 100) {
+    return invalidGovernanceResponse();
+  }
+  return { items: value.items.map(parseGovernanceUser), nextCursor: parseGovernanceCursor(value.nextCursor) };
+}
+
+function parseGovernanceTenant(value: unknown): PlatformGovernanceTenantSummary {
+  if (
+    !isRecord(value) ||
+    (value.status !== 'active' && value.status !== 'suspended' && value.status !== 'closed')
+  ) {
+    return invalidGovernanceResponse();
+  }
+  return {
+    id: governanceUuid(value.id),
+    name: governanceText(value.name),
+    slug: governanceText(value.slug, 128),
+    status: value.status,
+    createdAt: governanceTimestamp(value.createdAt),
+    updatedAt: governanceTimestamp(value.updatedAt),
+  };
+}
+
+function parseGovernanceTenantPage(value: unknown): PlatformGovernanceTenantPage {
+  if (!isRecord(value) || !Array.isArray(value.items) || value.items.length > 100) {
+    return invalidGovernanceResponse();
+  }
+  return { items: value.items.map(parseGovernanceTenant), nextCursor: parseGovernanceCursor(value.nextCursor) };
+}
+
+function parseGovernanceOperator(value: unknown): PlatformGovernanceOperatorSummary {
+  if (!isRecord(value)) return invalidGovernanceResponse();
+  const safe = governanceWithoutSecrets(value);
+  if (
+    !Array.isArray(safe.roles) ||
+    safe.roles.length === 0 ||
+    safe.roles.length > PLATFORM_ADMIN_ROLES.length ||
+    safe.roles.some(role => !isPlatformAdminRole(role)) ||
+    new Set(safe.roles).size !== safe.roles.length
+  ) {
+    return invalidGovernanceResponse();
+  }
+  return {
+    userId: governanceUuid(safe.userId),
+    email: governanceText(safe.email, 320),
+    displayName: governanceNullableText(safe.displayName),
+    disabledAt: governanceNullableTimestamp(safe.disabledAt),
+    roles: [...safe.roles],
+  };
+}
+
+function parseGovernanceOperators(value: unknown): PlatformGovernanceOperatorSummary[] {
+  if (!isRecord(value) || !Array.isArray(value.items)) return invalidGovernanceResponse();
+  const items = value.items.map(parseGovernanceOperator);
+  if (new Set(items.map(item => item.userId)).size !== items.length) {
+    return invalidGovernanceResponse('治理接口返回了重复的操作员记录');
+  }
+  return items;
+}
+
+function parseGovernanceOk(value: unknown): { ok: true } {
+  if (!isRecord(value) || value.ok !== true) return invalidGovernanceResponse();
+  return { ok: true };
+}
+
+function governanceUserPath(userId: string, action: string): string {
+  return `/governance/users/${encodeURIComponent(governanceId(userId, '用户 ID'))}/${action}`;
+}
+
+function governanceTenantPath(tenantId: string, action: string): string {
+  return `/governance/tenants/${encodeURIComponent(governanceId(tenantId, '租户 ID'))}/${action}`;
+}
+
+function governanceOperatorRole(role: string): PlatformAdminRole {
+  if (!isPlatformAdminRole(role)) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', '请选择有效的平台角色');
+  }
+  return role;
+}
+
+function governanceOperatorPassword(value: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 12 ||
+    new TextEncoder().encode(value).length > 1024 ||
+    [...value].some(character => character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f)
+  ) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', '初始密码至少 12 个字符且不能超过 1024 字节');
+  }
+  return value;
+}
+
 function parseOperationsCount(value: unknown, field: string): string {
   if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) {
     throw new PlatformApiError(200, 'INVALID_RESPONSE', `运营摘要中的 ${field} 无效`);
@@ -801,8 +1038,8 @@ function parseOperationsMetrics(value: unknown, requestTotal: string): PlatformO
     throw new PlatformApiError(200, 'INVALID_RESPONSE', '运营摘要扩展指标无效');
   }
 
-  const probeStatus = (probe: unknown, field: string): 'unavailable' | 'not_configured' => {
-    if (probe !== 'unavailable' && probe !== 'not_configured') {
+  const probeStatus = (probe: unknown, field: string): PlatformRuntimeProbeStatus => {
+    if (probe !== 'ok' && probe !== 'degraded' && probe !== 'unavailable' && probe !== 'not_configured') {
       throw new PlatformApiError(200, 'INVALID_RESPONSE', `运营摘要中的 ${field} 无效`);
     }
     return probe;
@@ -2622,6 +2859,135 @@ export const platformClient = {
   listAuditEvents(query: PlatformAuditPageQuery = {}): Promise<PlatformAuditEventPage> {
     return request<unknown>(auditPath(query), { signal: query.signal })
       .then(parseAuditPage);
+  },
+
+  listGovernanceUsers(query: PlatformGovernanceUserListQuery = {}): Promise<PlatformGovernanceUserPage> {
+    const params = new URLSearchParams();
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.cursor !== undefined) params.set('cursor', query.cursor);
+    if (query.emailContains !== undefined && query.emailContains.trim() !== '') {
+      params.set('emailContains', query.emailContains.trim());
+    }
+    if (query.status !== undefined) params.set('status', query.status);
+    const encoded = params.toString();
+    return request<unknown>(`/governance/users${encoded ? `?${encoded}` : ''}`, { signal: query.signal })
+      .then(parseGovernanceUserPage);
+  },
+
+  setGovernanceUserDisabled(
+    userId: string,
+    disabled: boolean,
+    options: ReadRequestOptions = {},
+  ): Promise<{ ok: true }> {
+    return request<unknown>(governanceUserPath(userId, disabled ? 'disable' : 'enable'), {
+      ...options,
+      method: 'POST',
+      body: {},
+    }).then(parseGovernanceOk);
+  },
+
+  resetGovernanceUserPassword(
+    userId: string,
+    password: string,
+    options: ReadRequestOptions = {},
+  ): Promise<{ ok: true }> {
+    return request<unknown>(governanceUserPath(userId, 'password-reset'), {
+      ...options,
+      method: 'POST',
+      body: { password: governanceOperatorPassword(password) },
+    }).then(parseGovernanceOk);
+  },
+
+  resetGovernanceUserMfa(userId: string, options: ReadRequestOptions = {}): Promise<{ ok: true }> {
+    return request<unknown>(governanceUserPath(userId, 'mfa-reset'), {
+      ...options,
+      method: 'POST',
+      body: {},
+    }).then(parseGovernanceOk);
+  },
+
+  listGovernanceTenants(query: PlatformGovernanceTenantListQuery = {}): Promise<PlatformGovernanceTenantPage> {
+    const params = new URLSearchParams();
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.cursor !== undefined) params.set('cursor', query.cursor);
+    if (query.slugContains !== undefined && query.slugContains.trim() !== '') {
+      params.set('slugContains', query.slugContains.trim());
+    }
+    if (query.status !== undefined) params.set('status', query.status);
+    const encoded = params.toString();
+    return request<unknown>(`/governance/tenants${encoded ? `?${encoded}` : ''}`, { signal: query.signal })
+      .then(parseGovernanceTenantPage);
+  },
+
+  setGovernanceTenantStatus(
+    tenantId: string,
+    action: PlatformGovernanceTenantAction,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformGovernanceTenantSummary> {
+    return request<unknown>(governanceTenantPath(tenantId, action), {
+      ...options,
+      method: 'POST',
+      body: {},
+    }).then(parseGovernanceTenant);
+  },
+
+  takeoverGovernanceTenant(
+    tenantId: string,
+    targetUserId: string,
+    options: ReadRequestOptions = {},
+  ): Promise<{ ok: true }> {
+    return request<unknown>(governanceTenantPath(tenantId, 'takeover'), {
+      ...options,
+      method: 'POST',
+      body: { targetUserId: governanceId(targetUserId, '目标用户 ID') },
+    }).then(parseGovernanceOk);
+  },
+
+  listGovernanceOperators(options: ReadRequestOptions = {}): Promise<PlatformGovernanceOperatorSummary[]> {
+    return request<unknown>('/governance/operators', options).then(parseGovernanceOperators);
+  },
+
+  createGovernanceOperator(
+    input: PlatformGovernanceOperatorCreateInput,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformGovernanceOperatorSummary> {
+    const email = input.email.trim();
+    if (email.length === 0 || email.length > 320 || !email.includes('@')) {
+      throw new PlatformApiError(400, 'INVALID_INPUT', '请输入有效的操作员邮箱');
+    }
+    const displayName = input.displayName?.trim();
+    return request<unknown>('/governance/operators', {
+      ...options,
+      method: 'POST',
+      body: {
+        email,
+        ...(displayName === undefined || displayName === '' ? {} : { displayName }),
+        password: governanceOperatorPassword(input.password),
+        role: governanceOperatorRole(input.role),
+      },
+    }).then(parseGovernanceOperator);
+  },
+
+  grantGovernanceOperatorRole(
+    userId: string,
+    role: string,
+    options: ReadRequestOptions = {},
+  ): Promise<{ ok: true }> {
+    return request<unknown>(`/governance/operators/${encodeURIComponent(governanceId(userId, '用户 ID'))}/roles`, {
+      ...options,
+      method: 'POST',
+      body: { role: governanceOperatorRole(role) },
+    }).then(parseGovernanceOk);
+  },
+
+  revokeGovernanceOperatorRole(
+    userId: string,
+    role: string,
+    options: ReadRequestOptions = {},
+  ): Promise<{ ok: true }> {
+    const path =
+      `/governance/operators/${encodeURIComponent(governanceId(userId, '用户 ID'))}/roles/${encodeURIComponent(governanceOperatorRole(role))}`;
+    return request<unknown>(path, { ...options, method: 'DELETE' }).then(parseGovernanceOk);
   },
 };
 

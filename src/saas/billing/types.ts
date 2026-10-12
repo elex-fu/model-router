@@ -5,7 +5,7 @@ export type BillingTransactionExecutor = SqlExecutor;
 
 export type BillingReservationState = 'reserved' | 'settled' | 'released' | 'reconciliation_pending';
 
-export type LedgerTransactionSource = 'wallet_funding' | 'billing_settlement' | 'wallet_refund';
+export type LedgerTransactionSource = 'wallet_funding' | 'billing_settlement' | 'wallet_refund' | 'usage_correction';
 
 export interface WalletRecord {
   readonly id: string;
@@ -121,6 +121,20 @@ export interface VerifiedFundingInput {
   readonly idempotencyKey: string;
   readonly idempotencyNamespace?: string;
   readonly metadataRef?: string;
+}
+
+/**
+ * Signed wallet effect of an append-only usage correction (contract C-1.3).
+ * A positive delta credits the wallet (charge reduced); a negative delta
+ * debits it (additional charge). Zero is rejected here; event-only
+ * corrections never reach the ledger.
+ */
+export interface UsageCorrectionPostingInput {
+  readonly tenantId: string;
+  readonly currency: string;
+  readonly amountDeltaMinorUnits: bigint;
+  readonly correctionEventId: string;
+  readonly correctionDigest: string;
 }
 
 export interface FundingPostingResult {

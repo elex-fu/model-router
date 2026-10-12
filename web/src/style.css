@@ -11,3 +11,6 @@
 @media(prefers-color-scheme:dark){.byok-confirmation{background:#1a291f;border-color:#45604b}.byok-confirmation p{color:#b7c8b8}.byok-rotation-form{border-color:#324536}.byok-confirmation button.danger{background:#482a29;color:#ffcec8;border-color:#86443c}}
 .byok-loading{display:grid;gap:4px}.byok-loading>span{padding:0 10px 8px;color:#738078;font-size:12px}
 @media(prefers-color-scheme:dark){.byok-loading>span{color:#a8b9a9}}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.saas-tenant-card.unread{border-left:3px solid #d9a223}
+@media(prefers-color-scheme:dark){.saas-tenant-card.unread{border-left-color:#ffe0a2}}

@@ -53,6 +53,67 @@ export interface CustomerRefundPage {
   nextCursor: string | null;
 }
 
+export type CustomerPaymentOrderType = 'wallet_topup';
+export type CustomerPaymentOrderStatus =
+  | 'created'
+  | 'pending'
+  | 'provider_failed'
+  | 'paid'
+  | 'fulfilling'
+  | 'fulfilled'
+  | 'cancelled'
+  | 'reconciliation_pending';
+
+/** Customer-safe payment order metadata. Provider references and checkout internals are intentionally omitted. */
+export interface CustomerPaymentOrderSummary {
+  id: string;
+  orderType: CustomerPaymentOrderType;
+  amountMinorUnits: string;
+  currency: string;
+  status: CustomerPaymentOrderStatus;
+  createdAt: string;
+  updatedAt: string;
+  paidAt: string | null;
+  fulfilledAt: string | null;
+}
+
+export interface CustomerPaymentOrderPage {
+  items: CustomerPaymentOrderSummary[];
+  nextCursor: string | null;
+}
+
+export type TenantAnnouncementKind = 'maintenance' | 'info' | 'billing';
+export type TenantAnnouncementSeverity = 'info' | 'warning' | 'critical';
+
+/**
+ * Customer-safe announcement projection. Operator bookkeeping (status,
+ * version, createdByUserId, created/updated timestamps) is intentionally
+ * omitted; every retained field is validated before it can render.
+ */
+export interface TenantAnnouncement {
+  id: string;
+  kind: TenantAnnouncementKind;
+  severity: TenantAnnouncementSeverity;
+  title: string;
+  body: string;
+  publishAt: string;
+  unpublishAt: string | null;
+  readAt: string | null;
+}
+
+export interface TenantAnnouncementPage {
+  items: TenantAnnouncement[];
+  nextCursor: string | null;
+}
+
+export type TenantAnnouncementReadOutcome = 'marked' | 'already_read';
+
+export interface TenantAnnouncementReadReceipt {
+  outcome: TenantAnnouncementReadOutcome;
+  announcementId: string;
+  readAt: string;
+}
+
 export interface CustomerSessionRevocation {
   sessionId: string;
   revokedAt: string;
@@ -101,6 +162,53 @@ export interface SessionResult {
   session: SafeSession;
 }
 
+/** Exact customer-owned routes; these do not attest that login was MFA-assured. */
+export interface CustomerMfaStatus { enabled: boolean }
+export interface CustomerMfaStartInput { password: string; currentTotpCode?: string }
+export interface CustomerMfaConfirmInput extends CustomerMfaStartInput { confirmationToken: string; code: string }
+export interface CustomerMfaRevokeInput { password: string; code: string }
+export interface CustomerMfaEnrollment { confirmationToken: string; secret: string; otpauthUri: string; expiresAt: string }
+export interface CustomerMfaChanged { enabled: boolean; sessionsRevoked: number; signInRequired: true }
+
+const customerMfaErrorCodes = new Set([
+  'INVALID_INPUT', 'UNAUTHENTICATED', 'CSRF_REJECTED', 'REAUTH_REQUIRED', 'MFA_CODE_REJECTED',
+  'MFA_STATE_CONFLICT', 'ENROLLMENT_PENDING', 'ENROLLMENT_INVALID', 'RATE_LIMITED',
+  'AUTHORITY_CHANGED', 'UNAVAILABLE', 'INVALID_PATH', 'METHOD_NOT_ALLOWED', 'ORIGIN_REJECTED',
+  'JSON_REQUIRED', 'BODY_TOO_LARGE', 'INVALID_BODY', 'BODY_TIMEOUT',
+]);
+
+function invalidCustomerMfaResponse(): never {
+  throw new SaasApiError(200, 'INVALID_RESPONSE', 'MFA 服务响应无效；请核对状态，不要重复提交。');
+}
+
+function customerMfaStatusFromResponse(value: unknown): CustomerMfaStatus {
+  if (!isRecord(value) || typeof value.enabled !== 'boolean') return invalidCustomerMfaResponse();
+  return { enabled: value.enabled };
+}
+
+function customerMfaEnrollmentFromResponse(value: unknown): CustomerMfaEnrollment {
+  if (!isRecord(value) || typeof value.confirmationToken !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,256}$/.test(value.confirmationToken) || typeof value.secret !== 'string' ||
+    !/^[A-Z2-7]{16,128}$/.test(value.secret) || typeof value.otpauthUri !== 'string' ||
+    value.otpauthUri.length > 4096 || typeof value.expiresAt !== 'string' ||
+    value.expiresAt.length > 64 || !Number.isFinite(Date.parse(value.expiresAt))) return invalidCustomerMfaResponse();
+  try {
+    const uri = new URL(value.otpauthUri);
+    if (uri.protocol !== 'otpauth:' || uri.hostname !== 'totp' || uri.username || uri.password ||
+      uri.port || uri.hash || uri.searchParams.getAll('secret').length !== 1 ||
+      uri.searchParams.get('secret') !== value.secret) return invalidCustomerMfaResponse();
+  } catch { return invalidCustomerMfaResponse(); }
+  return { confirmationToken: value.confirmationToken, secret: value.secret,
+    otpauthUri: value.otpauthUri, expiresAt: value.expiresAt };
+}
+
+function customerMfaChangedFromResponse(value: unknown, enabled: boolean): CustomerMfaChanged {
+  if (!isRecord(value) || value.enabled !== enabled || value.signInRequired !== true ||
+    typeof value.sessionsRevoked !== 'number' || !Number.isSafeInteger(value.sessionsRevoked) ||
+    value.sessionsRevoked < 1) return invalidCustomerMfaResponse();
+  return { enabled, sessionsRevoked: value.sessionsRevoked, signInRequired: true };
+}
+
 export interface InvitationResult {
   invitationId: string;
   token: string;
@@ -110,11 +218,12 @@ export interface InvitationResult {
 export type ApiKeySupplyMode = 'byok' | 'platform';
 export type ApiKeyStatus = 'active' | 'revoked';
 
-export interface ApiKeyMetadata {
+export type ApiKeyPrincipalKind = 'member' | 'project_service';
+
+interface ApiKeyMetadataBase {
   id: string;
   tenantId: string;
   projectId: string;
-  principalUserId: string;
   supplyProfileId: string;
   supplyMode: ApiKeySupplyMode;
   name: string;
@@ -128,8 +237,78 @@ export interface ApiKeyMetadata {
   authzVersion: number;
 }
 
-export interface CreatedApiKey extends ApiKeyMetadata {
-  secret: string;
+/** Backend-owned execution binding, not the creator or current operator. */
+export type ApiKeyMetadata = ApiKeyMetadataBase & (
+  | { executionPrincipalType: 'member'; executionPrincipalId: string; principalUserId: string }
+  | { executionPrincipalType: 'project_service'; executionPrincipalId: string; principalUserId: null }
+);
+
+export type CreatedApiKey = ApiKeyMetadata & { secret: string };
+
+export interface CreateApiKeyInput {
+  name: string;
+  modelScopes: string[];
+  supplyMode: ApiKeySupplyMode;
+  /** Omitted preserves the backend's member default; IDs are never caller-selected. */
+  principalKind?: ApiKeyPrincipalKind;
+  expiresAt?: string | null;
+}
+
+function invalidApiKeyResponse(): never {
+  throw new SaasApiError(200, 'INVALID_RESPONSE', 'API Key 响应无效；请核对列表，不要重复创建或轮换。');
+}
+
+function apiKeyString(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') return invalidApiKeyResponse();
+  return value;
+}
+
+function apiKeyNullableString(value: unknown): string | null {
+  return value === null ? null : apiKeyString(value);
+}
+
+function apiKeyMetadataFromResponse(value: unknown, tenantId: string, projectId: string): ApiKeyMetadata {
+  if (!isRecord(value) || value.tenantId !== tenantId || value.projectId !== projectId ||
+    (value.supplyMode !== 'byok' && value.supplyMode !== 'platform') ||
+    (value.status !== 'active' && value.status !== 'revoked') ||
+    !Array.isArray(value.modelScopes) || value.modelScopes.length === 0 ||
+    typeof value.authzVersion !== 'number' || !Number.isSafeInteger(value.authzVersion) || value.authzVersion < 1) {
+    return invalidApiKeyResponse();
+  }
+  const executionPrincipalId = apiKeyString(value.executionPrincipalId);
+  const modelScopes = value.modelScopes.map((scope: unknown) => apiKeyString(scope));
+  const base: ApiKeyMetadataBase = {
+    id: apiKeyString(value.id), tenantId, projectId,
+    supplyProfileId: apiKeyString(value.supplyProfileId), supplyMode: value.supplyMode,
+    name: apiKeyString(value.name), prefix: apiKeyString(value.prefix), modelScopes, status: value.status,
+    createdAt: apiKeyString(value.createdAt), expiresAt: apiKeyNullableString(value.expiresAt),
+    revokedAt: apiKeyNullableString(value.revokedAt), lastUsedAt: apiKeyNullableString(value.lastUsedAt),
+    authzVersion: value.authzVersion,
+  };
+  if (value.executionPrincipalType === 'member' && typeof value.principalUserId === 'string' &&
+    value.principalUserId.trim() !== '' && executionPrincipalId === value.principalUserId) {
+    return { ...base, executionPrincipalType: 'member', executionPrincipalId, principalUserId: value.principalUserId };
+  }
+  if (value.executionPrincipalType === 'project_service' && value.principalUserId === null &&
+    executionPrincipalId === projectId) {
+    return { ...base, executionPrincipalType: 'project_service', executionPrincipalId, principalUserId: null };
+  }
+  return invalidApiKeyResponse();
+}
+
+function apiKeysFromResponse(value: unknown, tenantId: string, projectId: string): ApiKeyMetadata[] {
+  if (!Array.isArray(value)) return invalidApiKeyResponse();
+  return value.map((row: unknown) => apiKeyMetadataFromResponse(row, tenantId, projectId));
+}
+
+function createdApiKeyFromResponse(
+  value: unknown, tenantId: string, projectId: string, expectedKind?: ApiKeyPrincipalKind,
+): CreatedApiKey {
+  const metadata = apiKeyMetadataFromResponse(value, tenantId, projectId);
+  if (!isRecord(value) || (expectedKind !== undefined && metadata.executionPrincipalType !== expectedKind)) {
+    return invalidApiKeyResponse();
+  }
+  return { ...metadata, secret: apiKeyString(value.secret) };
 }
 
 export type TenantByokCredentialStatus = 'pending' | 'active' | 'disabled' | 'revoked';
@@ -461,6 +640,14 @@ export class SaasApiError extends Error {
   ) {
     super(message);
     this.name = 'SaasApiError';
+  }
+}
+
+/** Only the versioned authenticated absent-capability HTTP contract creates this. */
+export class CustomerMfaDeploymentUnavailableError extends SaasApiError {
+  constructor() {
+    super(503, 'UNAVAILABLE', '此部署当前不可使用客户 MFA；账号 MFA 状态未确认。');
+    this.name = 'CustomerMfaDeploymentUnavailableError';
   }
 }
 
@@ -806,16 +993,24 @@ function projectsFromResponse(value: unknown, tenantId: string): Project[] {
   return value.map(project => projectFromResponse(project, tenantId));
 }
 
+function tenantMemberFromResponse(value: unknown): TenantMember {
+  const member = value;
+  if (!isRecord(member) || typeof member.userId !== 'string' || !tenantMemberUserIdPattern.test(member.userId) ||
+    (member.displayName !== null && (typeof member.displayName !== 'string' || member.displayName.length > 120)) ||
+    typeof member.role !== 'string' || !projectRoles.has(member.role as TenantRole) ||
+    (member.status !== 'active' && member.status !== 'suspended' && member.status !== 'revoked' && member.status !== 'disabled')) return invalidWorkspaceResponse();
+  return { userId: member.userId, displayName: member.displayName, role: member.role as TenantRole, status: member.status };
+}
+
+function tenantMemberMutationFromResponse(value: unknown): TenantMember {
+  if (!isRecord(value)) return invalidWorkspaceResponse();
+  return tenantMemberFromResponse(value.member);
+}
+
 function tenantMemberPageFromResponse(value: unknown): TenantMemberPage {
   if (!isRecord(value) || !Array.isArray(value.items) || value.items.length > 100 ||
     (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || value.nextCursor.length > 1024 || !/^tm1\.[A-Za-z0-9_-]+$/.test(value.nextCursor)))) return invalidWorkspaceResponse();
-  const items: TenantMember[] = value.items.map(member => {
-    if (!isRecord(member) || typeof member.userId !== 'string' || !tenantMemberUserIdPattern.test(member.userId) ||
-      (member.displayName !== null && (typeof member.displayName !== 'string' || member.displayName.length > 120)) ||
-      typeof member.role !== 'string' || !projectRoles.has(member.role as TenantRole) ||
-      (member.status !== 'active' && member.status !== 'suspended' && member.status !== 'revoked' && member.status !== 'disabled')) return invalidWorkspaceResponse();
-    return { userId: member.userId, displayName: member.displayName, role: member.role as TenantRole, status: member.status };
-  });
+  const items: TenantMember[] = value.items.map(tenantMemberFromResponse);
   if (new Set(items.map(member => member.userId.toLowerCase())).size !== items.length) return invalidWorkspaceResponse();
   return { items, nextCursor: value.nextCursor };
 }
@@ -1063,6 +1258,148 @@ function customerRefundPageFromResponse(value: unknown): CustomerRefundPage {
   return { items: value.items.map(customerRefundFromResponse), nextCursor };
 }
 
+const customerPaymentOrderStatuses = new Set<CustomerPaymentOrderStatus>([
+  'created',
+  'pending',
+  'provider_failed',
+  'paid',
+  'fulfilling',
+  'fulfilled',
+  'cancelled',
+  'reconciliation_pending',
+]);
+
+function invalidCustomerPaymentOrderResponse(): never {
+  throw new SaasApiError(200, 'INVALID_RESPONSE', '服务返回了无效账单记录');
+}
+
+function customerPaymentOrderString(value: unknown, maximumLength = 255): string {
+  if (typeof value !== 'string' || value.trim() === '' || value.length > maximumLength) {
+    return invalidCustomerPaymentOrderResponse();
+  }
+  return value;
+}
+
+function customerPaymentOrderTimestamp(value: unknown): string {
+  const timestamp = customerPaymentOrderString(value, 64);
+  if (!Number.isFinite(Date.parse(timestamp))) return invalidCustomerPaymentOrderResponse();
+  return timestamp;
+}
+
+function customerPaymentOrderFromResponse(value: unknown): CustomerPaymentOrderSummary {
+  if (
+    !isRecord(value) ||
+    value.orderType !== 'wallet_topup' ||
+    typeof value.status !== 'string' ||
+    !customerPaymentOrderStatuses.has(value.status as CustomerPaymentOrderStatus) ||
+    typeof value.amountMinorUnits !== 'string' ||
+    !/^(0|[1-9]\d*)$/.test(value.amountMinorUnits) ||
+    typeof value.currency !== 'string' ||
+    !/^[A-Z]{3}$/.test(value.currency) ||
+    (value.paidAt !== null && typeof value.paidAt !== 'string') ||
+    (value.fulfilledAt !== null && typeof value.fulfilledAt !== 'string')
+  ) {
+    return invalidCustomerPaymentOrderResponse();
+  }
+
+  return {
+    id: customerPaymentOrderString(value.id),
+    orderType: 'wallet_topup',
+    amountMinorUnits: value.amountMinorUnits,
+    currency: value.currency,
+    status: value.status as CustomerPaymentOrderStatus,
+    createdAt: customerPaymentOrderTimestamp(value.createdAt),
+    updatedAt: customerPaymentOrderTimestamp(value.updatedAt),
+    paidAt: value.paidAt === null ? null : customerPaymentOrderTimestamp(value.paidAt),
+    fulfilledAt: value.fulfilledAt === null ? null : customerPaymentOrderTimestamp(value.fulfilledAt),
+  };
+}
+
+function customerPaymentOrderPageFromResponse(value: unknown): CustomerPaymentOrderPage {
+  if (!isRecord(value) || !Array.isArray(value.items)) return invalidCustomerPaymentOrderResponse();
+  const nextCursor = value.nextCursor;
+  if (nextCursor !== null && (typeof nextCursor !== 'string' || nextCursor.length === 0 || nextCursor.length > 256)) {
+    return invalidCustomerPaymentOrderResponse();
+  }
+  return { items: value.items.map(customerPaymentOrderFromResponse), nextCursor };
+}
+
+const tenantAnnouncementKinds = new Set<TenantAnnouncementKind>(['maintenance', 'info', 'billing']);
+const tenantAnnouncementSeverities = new Set<TenantAnnouncementSeverity>(['info', 'warning', 'critical']);
+const tenantAnnouncementUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function invalidTenantAnnouncementResponse(): never {
+  throw new SaasApiError(200, 'INVALID_RESPONSE', '服务返回了无效公告');
+}
+
+function tenantAnnouncementTimestamp(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64 || !Number.isFinite(Date.parse(value))) {
+    return invalidTenantAnnouncementResponse();
+  }
+  return value;
+}
+
+function tenantAnnouncementNullableTimestamp(value: unknown): string | null {
+  return value === null ? null : tenantAnnouncementTimestamp(value);
+}
+
+function tenantAnnouncementFromResponse(value: unknown): TenantAnnouncement {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    !tenantAnnouncementUuid.test(value.id) ||
+    typeof value.kind !== 'string' ||
+    !tenantAnnouncementKinds.has(value.kind as TenantAnnouncementKind) ||
+    typeof value.severity !== 'string' ||
+    !tenantAnnouncementSeverities.has(value.severity as TenantAnnouncementSeverity) ||
+    typeof value.title !== 'string' ||
+    value.title.trim() === '' ||
+    value.title.length > 200 ||
+    typeof value.body !== 'string' ||
+    value.body.trim() === '' ||
+    value.body.length > 8000
+  ) {
+    return invalidTenantAnnouncementResponse();
+  }
+  return {
+    id: value.id,
+    kind: value.kind as TenantAnnouncementKind,
+    severity: value.severity as TenantAnnouncementSeverity,
+    title: value.title,
+    body: value.body,
+    publishAt: tenantAnnouncementTimestamp(value.publishAt),
+    unpublishAt: tenantAnnouncementNullableTimestamp(value.unpublishAt),
+    readAt: tenantAnnouncementNullableTimestamp(value.readAt),
+  };
+}
+
+function tenantAnnouncementPageFromResponse(value: unknown): TenantAnnouncementPage {
+  if (!isRecord(value) || !Array.isArray(value.announcements) || value.announcements.length > 100) {
+    return invalidTenantAnnouncementResponse();
+  }
+  const nextCursor = value.nextCursor;
+  if (nextCursor !== null && (typeof nextCursor !== 'string' || nextCursor.length === 0 || nextCursor.length > 512)) {
+    return invalidTenantAnnouncementResponse();
+  }
+  return { items: value.announcements.map(tenantAnnouncementFromResponse), nextCursor };
+}
+
+function tenantAnnouncementReadReceiptFromResponse(value: unknown): TenantAnnouncementReadReceipt {
+  if (
+    !isRecord(value) ||
+    (value.outcome !== 'marked' && value.outcome !== 'already_read') ||
+    typeof value.announcementId !== 'string' ||
+    !tenantAnnouncementUuid.test(value.announcementId)
+  ) {
+    return invalidTenantAnnouncementResponse();
+  }
+  return {
+    outcome: value.outcome,
+    announcementId: value.announcementId,
+    readAt: tenantAnnouncementTimestamp(value.readAt),
+  };
+}
+
 function invalidServicePlanResponse(message = '服务返回了无效服务计划订单'): never {
   throw new SaasApiError(200, 'INVALID_RESPONSE', message);
 }
@@ -1246,10 +1583,13 @@ export function servicePlanOrderFromError(error: unknown, tenantId?: string): Se
 function cookieValue(name: string): string | undefined {
   if (typeof document === 'undefined') return undefined;
   const prefix = `${name}=`;
-  const entry = document.cookie.split(';').map(value => value.trim()).find(value => value.startsWith(prefix));
-  if (!entry) return undefined;
-  const value = entry.slice(prefix.length);
-  try { return decodeURIComponent(value); } catch { return value; }
+  const entries = document.cookie.split(';').map(value => value.trim()).filter(value => value.startsWith(prefix));
+  // Same-name cookies from two paths (even equal values) are ambiguous. Do not
+  // choose one, fall back to an envelope, or reinterpret malformed encoding.
+  if (entries.length !== 1) return undefined;
+  const value = entries[0]?.slice(prefix.length);
+  if (!value) return undefined;
+  try { return decodeURIComponent(value) || undefined; } catch { return undefined; }
 }
 
 function withQuery(path: string, values: object): string {
@@ -1271,13 +1611,19 @@ async function request<T>(
     sensitive?: boolean;
     redactErrors?: boolean;
     workspace?: boolean;
+    customerMfa?: boolean;
   } = {},
 ): Promise<T> {
   const method = options.method ?? 'GET';
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
-  if (method !== 'GET') {
+  if (method !== 'GET' || options.customerMfa) {
     const csrfToken = cookieValue('mr_saas_csrf');
+    // No guessed token, session-body fallback or invented bootstrap route. The
+    // paired identity issuer scopes only this double-submit cookie to /console.
+    if (options.customerMfa && (!csrfToken || !/^[A-Za-z0-9_-]{16,256}$/.test(csrfToken))) {
+      throw new SaasApiError(403, 'CSRF_REJECTED', '无法读取安全凭证，请刷新页面或重新登录。');
+    }
     if (csrfToken) headers['x-csrf-token'] = csrfToken;
   }
   if (options.idempotencyKey !== undefined) headers['Idempotency-Key'] = options.idempotencyKey;
@@ -1290,12 +1636,14 @@ async function request<T>(
       headers,
       credentials: 'same-origin',
       signal: options.signal,
+      ...(options.customerMfa ? { cache: 'no-store' as const, mode: 'same-origin' as const,
+        redirect: 'error' as const, referrerPolicy: 'no-referrer' as const } : {}),
     });
   } catch (error) {
     throw new SaasApiError(
       0,
       'NETWORK',
-      options.sensitive || options.redactErrors || options.workspace
+      options.sensitive || options.redactErrors || options.workspace || options.customerMfa
         ? '网络连接失败，请稍后重试。'
         : error instanceof Error
           ? error.message
@@ -1310,7 +1658,7 @@ async function request<T>(
     throw new SaasApiError(
       response.status,
       'INVALID_RESPONSE',
-      options.workspace
+      options.customerMfa ? 'MFA 服务响应无法读取。' : options.workspace
         ? '工作空间响应无法读取。'
         : options.sensitive || options.redactErrors
         ? options.sensitive
@@ -1328,20 +1676,25 @@ async function request<T>(
   }
   if (!response.ok) {
     const returnedCode = parsed?.error?.code;
+    if (options.customerMfa && response.status === 503 && isRecord(parsed) && isRecord(parsed.error) &&
+      parsed.error.code === 'UNAVAILABLE' && parsed.error.availability === 'deployment-unavailable-v1' &&
+      !Object.hasOwn(parsed, 'data') && response.headers.get('cache-control') === 'no-store') {
+      throw new CustomerMfaDeploymentUnavailableError();
+    }
     const safeSessionCode = returnedCode && customerSessionErrorCodes.has(returnedCode) ? returnedCode : 'HTTP_ERROR';
     const safeWorkspaceCode = typeof returnedCode === 'string' && workspaceErrorCodes.has(returnedCode) ? returnedCode : 'HTTP_ERROR';
     throw new SaasApiError(
       response.status,
-      options.workspace ? safeWorkspaceCode : options.sensitive ? 'HTTP_ERROR' : options.redactErrors ? safeSessionCode : (returnedCode ?? 'HTTP_ERROR'),
-      options.workspace
+      options.customerMfa ? (typeof returnedCode === 'string' && customerMfaErrorCodes.has(returnedCode) ? returnedCode : 'HTTP_ERROR') : options.workspace ? safeWorkspaceCode : options.sensitive ? 'HTTP_ERROR' : options.redactErrors ? safeSessionCode : (returnedCode ?? 'HTTP_ERROR'),
+      options.customerMfa ? 'MFA 请求未完成；请核对状态后再操作。' : options.workspace
         ? '工作空间请求失败，请稍后重试。'
         : options.sensitive
         ? '凭证请求失败，请稍后重试。'
         : options.redactErrors
           ? '会话请求失败，请稍后重试。'
           : (parsed?.error?.message ?? `请求失败 (${response.status})`),
-      options.sensitive || options.redactErrors || options.workspace ? undefined : parsed?.error?.details,
-      !options.sensitive && !options.redactErrors && !options.workspace && response.status === 503 && parsed && Object.hasOwn(parsed, 'data')
+      options.sensitive || options.redactErrors || options.workspace || options.customerMfa ? undefined : parsed?.error?.details,
+      !options.sensitive && !options.redactErrors && !options.workspace && !options.customerMfa && response.status === 503 && parsed && Object.hasOwn(parsed, 'data')
         ? parsed.data
         : undefined,
     );
@@ -1388,6 +1741,17 @@ function consoleRequestPageFromResponse(value: ConsolePage<ConsoleRequest>): Con
 }
 
 export const saasClient = {
+  getCustomerMfaStatus: (options: { signal?: AbortSignal } = {}) =>
+    request<unknown>('/auth/mfa', { ...options, customerMfa: true }).then(customerMfaStatusFromResponse),
+  startCustomerMfaEnrollment: (input: CustomerMfaStartInput, options: { signal?: AbortSignal } = {}) =>
+    request<unknown>('/auth/mfa/enrollment/start', { method: 'POST', body: input, ...options, customerMfa: true })
+      .then(customerMfaEnrollmentFromResponse),
+  confirmCustomerMfaEnrollment: (input: CustomerMfaConfirmInput, options: { signal?: AbortSignal } = {}) =>
+    request<unknown>('/auth/mfa/enrollment/confirm', { method: 'POST', body: input, ...options, customerMfa: true })
+      .then(value => customerMfaChangedFromResponse(value, true)),
+  revokeCustomerMfa: (input: CustomerMfaRevokeInput, options: { signal?: AbortSignal } = {}) =>
+    request<unknown>('/auth/mfa/revoke', { method: 'POST', body: input, ...options, customerMfa: true })
+      .then(value => customerMfaChangedFromResponse(value, false)),
   login: (input: { email: string; password: string }) =>
     request<SessionResult>('/auth/session', { method: 'POST', body: input }),
   getSession: () => request<SessionResult>('/auth/session'),
@@ -1420,6 +1784,31 @@ export const saasClient = {
       { signal, redactErrors: true },
     ).then(customerRefundPageFromResponse);
   },
+  getCustomerPaymentOrders: (
+    tenantId: string,
+    options: { cursor?: string; limit?: number; signal?: AbortSignal } = {},
+  ) => {
+    const { signal, ...filters } = options;
+    return request<unknown>(
+      withQuery(`/tenants/${encodeURIComponent(tenantId)}/payment-orders`, filters),
+      { signal, redactErrors: true },
+    ).then(customerPaymentOrderPageFromResponse);
+  },
+  getTenantAnnouncements: (
+    tenantId: string,
+    options: { cursor?: string; limit?: number; signal?: AbortSignal } = {},
+  ) => {
+    const { signal, ...filters } = options;
+    return request<unknown>(
+      withQuery(`/tenants/${encodeURIComponent(tenantId)}/announcements`, filters),
+      { signal, redactErrors: true },
+    ).then(tenantAnnouncementPageFromResponse);
+  },
+  markTenantAnnouncementRead: (tenantId: string, announcementId: string) =>
+    request<unknown>(
+      `/tenants/${encodeURIComponent(tenantId)}/announcements/${encodeURIComponent(announcementId)}/read`,
+      { method: 'POST', body: {}, redactErrors: true },
+    ).then(tenantAnnouncementReadReceiptFromResponse),
   getCustomerWebhookEndpoints: (
     tenantId: string,
     options: { cursor?: string; limit?: number; signal?: AbortSignal } = {},
@@ -1498,6 +1887,24 @@ export const saasClient = {
     const suffix = query.size ? `?${query.toString()}` : '';
     return request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/members${suffix}`, { signal: options.signal, workspace: true }).then(tenantMemberPageFromResponse);
   },
+  updateTenantMemberRole: (tenantId: string, userId: string, input: { role: TenantRole }) =>
+    request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}/role`, {
+      method: 'POST',
+      body: input,
+      workspace: true,
+    }).then(tenantMemberMutationFromResponse),
+  removeTenantMember: (tenantId: string, userId: string) =>
+    request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(userId)}/remove`, {
+      method: 'POST',
+      body: {},
+      workspace: true,
+    }).then(tenantMemberMutationFromResponse),
+  transferTenantOwnership: (tenantId: string, input: { userId: string }) =>
+    request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/ownership-transfer`, {
+      method: 'POST',
+      body: input,
+      workspace: true,
+    }).then(tenantMemberMutationFromResponse),
   createProject: (tenantId: string, input: { name: string; slug?: string }) =>
     request<unknown>(`/tenants/${encodeURIComponent(tenantId)}/projects`, {
       method: 'POST',
@@ -1555,23 +1962,26 @@ export const saasClient = {
     { method: 'POST', body: input },
   ).then(tenantByokWriteResultFromResponse),
   getApiKeys: (tenantId: string, projectId: string) =>
-    request<ApiKeyMetadata[]>(`/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/keys`),
-  createApiKey: (
-    tenantId: string,
-    projectId: string,
-    input: { name: string; modelScopes: string[]; supplyMode: ApiKeySupplyMode; expiresAt?: string | null },
-  ) => request<CreatedApiKey>(`/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/keys`, {
-    method: 'POST',
-    body: input,
-  }),
+    request<unknown>('/tenants/' + encodeURIComponent(tenantId) + '/projects/' + encodeURIComponent(projectId) + '/keys')
+      .then(value => apiKeysFromResponse(value, tenantId, projectId)),
+  createApiKey: (tenantId: string, projectId: string, input: CreateApiKeyInput) => {
+    if (input.principalKind !== undefined && input.principalKind !== 'member' && input.principalKind !== 'project_service') {
+      return Promise.reject(new SaasApiError(400, 'KEY_INVALID_INPUT', '请选择成员用户或项目服务执行主体。'));
+    }
+    const expectedKind = input.principalKind ?? 'member';
+    return request<unknown>('/tenants/' + encodeURIComponent(tenantId) + '/projects/' + encodeURIComponent(projectId) + '/keys', {
+      method: 'POST', body: input,
+    }).then(value => createdApiKeyFromResponse(value, tenantId, projectId, expectedKind));
+  },
+  /** Rotation takes no principal selector: the backend revalidates and inherits the stored binding. */
   rotateApiKey: (tenantId: string, projectId: string, keyId: string) =>
-    request<CreatedApiKey>(`/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/keys/${encodeURIComponent(keyId)}/rotate`, {
+    request<unknown>('/tenants/' + encodeURIComponent(tenantId) + '/projects/' + encodeURIComponent(projectId) + '/keys/' + encodeURIComponent(keyId) + '/rotate', {
       method: 'POST',
-    }),
+    }).then(value => createdApiKeyFromResponse(value, tenantId, projectId)),
   revokeApiKey: (tenantId: string, projectId: string, keyId: string) =>
-    request<ApiKeyMetadata>(`/tenants/${encodeURIComponent(tenantId)}/projects/${encodeURIComponent(projectId)}/keys/${encodeURIComponent(keyId)}/revoke`, {
+    request<unknown>('/tenants/' + encodeURIComponent(tenantId) + '/projects/' + encodeURIComponent(projectId) + '/keys/' + encodeURIComponent(keyId) + '/revoke', {
       method: 'POST',
-    }),
+    }).then(value => apiKeyMetadataFromResponse(value, tenantId, projectId)),
   getUsageSummary: (tenantId: string, filters: Required<Pick<ConsoleQueryFilters, 'from' | 'to'>> & Omit<ConsoleQueryFilters, 'from' | 'to'>) =>
     request<ConsoleUsageSummary | null>(withQuery(`/tenants/${encodeURIComponent(tenantId)}/usage`, filters)),
   listRequests: (

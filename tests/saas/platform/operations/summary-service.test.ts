@@ -265,3 +265,46 @@ test('wraps executor failures and malformed aggregate rows in a safe domain erro
     isOperationsError('OPERATIONS_STORAGE_ERROR'),
   );
 });
+
+test('wired runtime probes report their observed status without failing the summary', async () => {
+  const executor = new FakeExecutor();
+  const probeCalls: string[] = [];
+  const service = new PlatformOperationsSummaryService(executor, {
+    probes: {
+      postgresql: async () => {
+        probeCalls.push('postgresql');
+        return 'ok';
+      },
+      redis: async () => {
+        probeCalls.push('redis');
+        throw new Error('redis-secret-must-not-escape');
+      },
+      kms: async () => 'degraded',
+      // worker intentionally not wired -> not_configured
+    },
+  });
+
+  const summary = await service.getSummary({ from: '2026-09-01', to: '2026-09-02' });
+  assert.deepEqual(probeCalls.sort(), ['postgresql', 'redis']);
+  assert.equal(summary.metrics.runtimeProbes.postgresql, 'ok');
+  assert.equal(summary.metrics.runtimeProbes.redis, 'unavailable');
+  assert.equal(summary.metrics.runtimeProbes.kms, 'degraded');
+  assert.equal(summary.metrics.runtimeProbes.worker, 'not_configured');
+  assert.doesNotMatch(JSON.stringify(summary), /redis-secret/);
+});
+
+test('a probe returning an out-of-contract status is reported as unavailable', async () => {
+  const executor = new FakeExecutor();
+  const service = new PlatformOperationsSummaryService(executor, {
+    probes: {
+      postgresql: async () => 'not_configured' as 'ok',
+      redis: async () => 'mystery' as 'ok',
+    },
+  });
+
+  const summary = await service.getSummary({ from: '2026-09-01', to: '2026-09-02' });
+  assert.equal(summary.metrics.runtimeProbes.postgresql, 'unavailable');
+  assert.equal(summary.metrics.runtimeProbes.redis, 'unavailable');
+  assert.equal(summary.metrics.runtimeProbes.kms, 'not_configured');
+  assert.equal(summary.metrics.runtimeProbes.worker, 'not_configured');
+});

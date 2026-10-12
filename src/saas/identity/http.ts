@@ -1,23 +1,25 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
-import type { SupplyMode } from '../gateway/contracts.js';
-import type { KeyService } from '../keys/service.js';
-import type { ApiKeyMetadata, CreateApiKeyInput, CreatedApiKey } from '../keys/types.js';
+import { createSaasKeyHandler, type SaasKeyHttpOptions } from '../keys/http.js';
+import { createCustomerMfaHandler } from './customer-mfa-http.js';
+import type { CustomerMfaOperations } from './customer-mfa-types.js';
+import { createCustomerPasskeyHandler } from './customer-passkey-http.js';
+import type { CustomerPasskeyOperations } from './customer-passkey-types.js';
 import type {
   CustomerSessionRevocation,
   OtherCustomerSessionsRevocation,
   SaasIdentityService,
   SafeCustomerSession,
 } from './service.js';
-import type { SafeProject, TenantMemberPage, TenantMemberQuery } from './types.js';
-import { createCustomerMfaHandler } from './customer-mfa-http.js';
-import type { CustomerMfaOperations } from './customer-mfa-types.js';
+import type { SafeProject, SafeTenantMember, TenantMemberPage, TenantMemberQuery, TenantRole } from './types.js';
 
 const API_PREFIX = '/console/api/v1';
 const SESSION_PATH = `${API_PREFIX}/auth/session`;
 const SESSION_COOKIE_NAME = 'mr_saas_session';
 const CSRF_COOKIE_NAME = 'mr_saas_csrf';
 const COOKIE_PATH = API_PREFIX;
+// Only the non-authenticating double-submit value is visible to the portal.
+const CSRF_COOKIE_PATH = '/console';
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_LIMITER_KEYS = 10_000;
 
@@ -26,11 +28,13 @@ type JsonObject = Record<string, unknown>;
 
 export interface SaasIdentityHttpOptions {
   service: SaasIdentityService;
-  keyService?: Pick<KeyService, 'create' | 'list' | 'rotate' | 'revoke'>;
+  keyService?: SaasKeyHttpOptions['keyService'];
   publicOrigin: string;
   sessionTtlSeconds: number;
   /** Managed startup injects the genuine self-service producer after schema readiness. */
   customerMfa?: CustomerMfaOperations;
+  /** Managed startup injects the genuine passkey ceremony producer after schema readiness. */
+  customerPasskey?: CustomerPasskeyOperations;
   cookieSecure?: boolean;
   /** Managed composition must inject the shared limiter; omission is local-only compatibility behavior. */
   rateLimiter?: SaasIdentityRateLimiter;
@@ -225,11 +229,11 @@ type Route =
   | 'tenants'
   | 'tenantProjects'
   | 'tenantMembers'
+  | 'tenantMemberRole'
+  | 'tenantMemberRemove'
+  | 'tenantOwnershipTransfer'
   | 'tenantInvitations'
-  | 'acceptInvitation'
-  | 'projectKeys'
-  | 'keyRotate'
-  | 'keyRevoke';
+  | 'acceptInvitation';
 
 function pathIdentifier(encoded: string, name: string): string {
   let value: string;
@@ -253,7 +257,7 @@ function pathIdentifier(encoded: string, name: string): string {
 
 function findRoute(
   path: string,
-): { route: Route; tenantId?: string; projectId?: string; keyId?: string; sessionId?: string } | undefined {
+): { route: Route; tenantId?: string; sessionId?: string; memberUserId?: string } | undefined {
   if (path === SESSION_PATH) return { route: 'session' };
   if (path === `${API_PREFIX}/auth/sessions`) return { route: 'sessions' };
   if (path === `${API_PREFIX}/auth/sessions/revoke-others`) return { route: 'sessionsRevokeOthers' };
@@ -273,15 +277,27 @@ function findRoute(
   const membersMatch = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/members$`).exec(path);
   if (membersMatch) return { route: 'tenantMembers', tenantId: pathIdentifier(membersMatch[1], 'tenant') };
 
-  const keyMatch = new RegExp(
-    `^${API_PREFIX}/tenants/([^/]+)/projects/([^/]+)/keys(?:/([^/]+)/(rotate|revoke))?$`,
-  ).exec(path);
-  if (keyMatch) {
-    const tenantId = pathIdentifier(keyMatch[1], 'tenant');
-    const projectId = pathIdentifier(keyMatch[2], 'project');
-    if (!keyMatch[3]) return { route: 'projectKeys', tenantId, projectId };
-    const keyId = pathIdentifier(keyMatch[3], 'key');
-    return { route: keyMatch[4] === 'rotate' ? 'keyRotate' : 'keyRevoke', tenantId, projectId, keyId };
+  const memberRoleMatch = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/members/([^/]+)/role$`).exec(path);
+  if (memberRoleMatch) {
+    return {
+      route: 'tenantMemberRole',
+      tenantId: pathIdentifier(memberRoleMatch[1], 'tenant'),
+      memberUserId: pathIdentifier(memberRoleMatch[2], 'member'),
+    };
+  }
+
+  const memberRemoveMatch = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/members/([^/]+)/remove$`).exec(path);
+  if (memberRemoveMatch) {
+    return {
+      route: 'tenantMemberRemove',
+      tenantId: pathIdentifier(memberRemoveMatch[1], 'tenant'),
+      memberUserId: pathIdentifier(memberRemoveMatch[2], 'member'),
+    };
+  }
+
+  const ownershipMatch = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/ownership-transfer$`).exec(path);
+  if (ownershipMatch) {
+    return { route: 'tenantOwnershipTransfer', tenantId: pathIdentifier(ownershipMatch[1], 'tenant') };
   }
 
   const match = new RegExp(`^${API_PREFIX}/tenants/([^/]+)/invitations$`).exec(path);
@@ -377,10 +393,20 @@ function csrfCookieHeader(token: string, ttlSeconds: number, secure: boolean): s
   return [
     `${CSRF_COOKIE_NAME}=${encodeURIComponent(token)}`,
     'SameSite=Strict',
-    `Path=${COOKIE_PATH}`,
+    `Path=${CSRF_COOKIE_PATH}`,
     `Max-Age=${ttlSeconds}`,
     ...(secure ? ['Secure'] : []),
   ].join('; ');
+}
+
+function expiredCsrfCookies(secure: boolean): string[] {
+  const expiry = 'Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  const secureFlag = secure ? '; Secure' : '';
+  // Never accept two cookie values as alternatives. Remove both path identities
+  // before issuing one current value or completing an authenticated revocation.
+  return [CSRF_COOKIE_PATH, COOKIE_PATH].map(
+    (path) => `${CSRF_COOKIE_NAME}=; SameSite=Strict; Path=${path}; ${expiry}${secureFlag}`,
+  );
 }
 
 function expiredCookies(secure: boolean): string[] {
@@ -388,7 +414,7 @@ function expiredCookies(secure: boolean): string[] {
   const secureFlag = secure ? '; Secure' : '';
   return [
     `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=${COOKIE_PATH}; ${expiry}${secureFlag}`,
-    `${CSRF_COOKIE_NAME}=; SameSite=Strict; Path=${COOKIE_PATH}; ${expiry}${secureFlag}`,
+    ...expiredCsrfCookies(secure),
   ];
 }
 
@@ -419,28 +445,6 @@ function validateOptionalString(object: JsonObject, key: string): string | undef
   return nonEmptyString(object[key], key);
 }
 
-function modelScopes(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== 'string' || !item.trim())) {
-    throw new HttpError(400, 'INVALID_BODY', 'modelScopes must be a non-empty array of strings');
-  }
-  return value as string[];
-}
-
-function supplyMode(value: unknown): SupplyMode {
-  if (value !== 'byok' && value !== 'platform') {
-    throw new HttpError(400, 'INVALID_BODY', 'supplyMode must be byok or platform');
-  }
-  return value;
-}
-
-function publicApiKey(value: ApiKeyMetadata | CreatedApiKey): JsonObject {
-  const secret = 'secret' in value ? value.secret : undefined;
-  const metadata = safePublicValue(value, secret);
-  const data = asObject(metadata) ?? {};
-  if (secret !== undefined) data.secret = secret;
-  return data;
-}
-
 function publicProject(value: SafeProject): JsonObject {
   return {
     id: value.id,
@@ -463,31 +467,46 @@ function memberQuery(req: IncomingMessage, origin: string): TenantMemberQuery {
   const query: TenantMemberQuery = {};
   const limit = params.get('limit');
   if (limit !== null) {
-    if (!/^[1-9]\d{0,2}$/.test(limit) || Number(limit) > 100) throw new HttpError(400, 'REQUEST_REJECTED', 'The page size is invalid');
+    if (!/^[1-9]\d{0,2}$/.test(limit) || Number(limit) > 100)
+      throw new HttpError(400, 'REQUEST_REJECTED', 'The page size is invalid');
     query.limit = Number(limit);
   }
   const cursor = params.get('cursor');
   if (cursor !== null) {
-    if (!/^tm1\.[A-Za-z0-9_-]+$/.test(cursor) || cursor.length > 1024) throw new HttpError(400, 'REQUEST_REJECTED', 'The cursor is invalid');
+    if (!/^tm1\.[A-Za-z0-9_-]+$/.test(cursor) || cursor.length > 1024)
+      throw new HttpError(400, 'REQUEST_REJECTED', 'The cursor is invalid');
     query.cursor = cursor;
   }
   return query;
 }
 
-function publicMemberPage(value: TenantMemberPage): JsonObject {
-  if (!value || !Array.isArray(value.items) || value.items.length > 100 ||
-    (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || value.nextCursor.length > 1024 || !/^tm1\.[A-Za-z0-9_-]+$/.test(value.nextCursor)))) {
+function publicMember(member: SafeTenantMember): JsonObject {
+  if (
+    !member ||
+    typeof member.userId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(member.userId) ||
+    (member.displayName !== null && (typeof member.displayName !== 'string' || member.displayName.length > 120)) ||
+    !['owner', 'admin', 'developer', 'billing', 'viewer'].includes(member.role) ||
+    !['active', 'suspended', 'revoked', 'disabled'].includes(member.status)
+  ) {
     throw new HttpError(500, 'INTERNAL_ERROR', 'The request could not be completed');
   }
-  return { items: value.items.map(member => {
-    if (!member || typeof member.userId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(member.userId) ||
-      (member.displayName !== null && (typeof member.displayName !== 'string' || member.displayName.length > 120)) ||
-      !['owner', 'admin', 'developer', 'billing', 'viewer'].includes(member.role) ||
-      !['active', 'suspended', 'revoked', 'disabled'].includes(member.status)) {
-      throw new HttpError(500, 'INTERNAL_ERROR', 'The request could not be completed');
-    }
-    return { userId: member.userId, displayName: member.displayName, role: member.role, status: member.status };
-  }), nextCursor: value.nextCursor };
+  return { userId: member.userId, displayName: member.displayName, role: member.role, status: member.status };
+}
+
+function publicMemberPage(value: TenantMemberPage): JsonObject {
+  if (
+    !value ||
+    !Array.isArray(value.items) ||
+    value.items.length > 100 ||
+    (value.nextCursor !== null &&
+      (typeof value.nextCursor !== 'string' ||
+        value.nextCursor.length > 1024 ||
+        !/^tm1\.[A-Za-z0-9_-]+$/.test(value.nextCursor)))
+  ) {
+    throw new HttpError(500, 'INTERNAL_ERROR', 'The request could not be completed');
+  }
+  return { items: value.items.map(publicMember), nextCursor: value.nextCursor };
 }
 
 function publicCustomerSession(value: SafeCustomerSession): JsonObject {
@@ -585,8 +604,12 @@ async function enforceRateLimit(
   if (!Number.isSafeInteger(retryAfter) || retryAfter < 1) {
     throw new HttpError(503, 'RATE_LIMITER_UNAVAILABLE', 'The authentication service is temporarily unavailable.');
   }
-  throw new HttpError(429, scope === 'tenantMembers' ? 'RATE_LIMITED' : 'LOGIN_RATE_LIMITED',
-    scope === 'tenantMembers' ? 'Too many requests' : 'Too many login attempts', retryAfter);
+  throw new HttpError(
+    429,
+    scope === 'tenantMembers' ? 'RATE_LIMITED' : 'LOGIN_RATE_LIMITED',
+    scope === 'tenantMembers' ? 'Too many requests' : 'Too many login attempts',
+    retryAfter,
+  );
 }
 
 /**
@@ -616,9 +639,29 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
   const rateLimiter: SaasIdentityRateLimiter = options.rateLimiter ?? {
     take: async (key) => compatibilityLoginLimiter.take(key),
   };
-  const customerMfaHandler = options.customerMfa
-    ? createCustomerMfaHandler({ service: options.customerMfa, publicOrigin: options.publicOrigin, rateLimiter })
-    : undefined;
+  const customerMfaHandler = createCustomerMfaHandler({
+    ...(options.customerMfa === undefined ? { sessionAuthority: options.service } : { service: options.customerMfa }),
+    publicOrigin: options.publicOrigin,
+    rateLimiter,
+    cookieSecure: secureCookie,
+  });
+  const customerPasskeyHandler = createCustomerPasskeyHandler({
+    ...(options.customerPasskey === undefined
+      ? { sessionAuthority: options.service }
+      : { service: options.customerPasskey }),
+    publicOrigin: options.publicOrigin,
+    rateLimiter,
+    cookieSecure: secureCookie,
+  });
+  // One key HTTP owner, including standalone identity-handler mounts. It owns
+  // method/origin/host/session/CSRF/body checks and the genuine issuer/write port.
+  const keyHandler = createSaasKeyHandler({
+    service: options.service,
+    ...(options.keyService === undefined ? {} : { keyService: options.keyService }),
+    publicOrigin: options.publicOrigin,
+    cookieSecure: secureCookie,
+    sessionTtlSeconds: options.sessionTtlSeconds,
+  });
   const getSession = async (req: IncomingMessage): Promise<{ token: string; session: unknown }> => {
     const token = sessionTokenFromCookie(req);
     if (!token) throw new HttpError(401, 'UNAUTHENTICATED', 'Authentication is required');
@@ -656,7 +699,9 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
       path = routePath(req, expectedOrigin);
       if (path === undefined) throw new HttpError(400, 'INVALID_PATH', 'Request path is invalid');
       if (!path.startsWith(`${API_PREFIX}/`)) return false;
-      if (customerMfaHandler && await customerMfaHandler(req, res)) return true;
+      if (await customerMfaHandler(req, res)) return true;
+      if (await customerPasskeyHandler(req, res)) return true;
+      if (await keyHandler(req, res)) return true;
       const match = findRoute(path);
       if (!match) return false;
 
@@ -669,11 +714,11 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
         tenants: ['GET', 'POST'],
         tenantProjects: ['GET', 'POST'],
         tenantMembers: ['GET'],
+        tenantMemberRole: ['POST'],
+        tenantMemberRemove: ['POST'],
+        tenantOwnershipTransfer: ['POST'],
         tenantInvitations: ['POST'],
         acceptInvitation: ['POST'],
-        projectKeys: ['GET', 'POST'],
-        keyRotate: ['POST'],
-        keyRevoke: ['POST'],
       };
       if (!methods[match.route].includes(method)) {
         requestMethodError(res, requestId, methods[match.route]);
@@ -715,6 +760,7 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
             { session: safePublicValue(session, sessionToken) },
             {
               'set-cookie': [
+                ...expiredCsrfCookies(secureCookie),
                 sessionCookieHeader(sessionToken, options.sessionTtlSeconds, secureCookie),
                 csrfCookieHeader(csrfToken, options.sessionTtlSeconds, secureCookie),
               ],
@@ -825,6 +871,59 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
           return true;
         }
 
+        if (match.route === 'tenantMemberRole' && method === 'POST') {
+          const { token, session } = await getSession(req);
+          await requireCsrf(req, token);
+          if (!match.tenantId || !match.memberUserId) {
+            throw new HttpError(400, 'INVALID_PATH', 'The member path is invalid');
+          }
+          const actorUserId = requireUserId(session);
+          await enforceRateLimit(req, rateLimiter, 'tenantMembers', actorUserId);
+          const body = parseStrictObject(await readJson(req), ['role'], ['role']);
+          const role = nonEmptyString(body.role, 'role');
+          if (!['owner', 'admin', 'developer', 'billing', 'viewer'].includes(role)) {
+            throw new HttpError(400, 'INVALID_BODY', 'role must be owner, admin, developer, billing, or viewer');
+          }
+          const member = await options.service.updateTenantMemberRole(
+            actorUserId,
+            match.tenantId,
+            match.memberUserId,
+            role as TenantRole,
+          );
+          sendJson(res, 200, requestId, { member: publicMember(member) });
+          return true;
+        }
+
+        if (match.route === 'tenantMemberRemove' && method === 'POST') {
+          const { token, session } = await getSession(req);
+          await requireCsrf(req, token);
+          if (!match.tenantId || !match.memberUserId) {
+            throw new HttpError(400, 'INVALID_PATH', 'The member path is invalid');
+          }
+          const actorUserId = requireUserId(session);
+          await enforceRateLimit(req, rateLimiter, 'tenantMembers', actorUserId);
+          await readEmptyJsonObject(req);
+          const member = await options.service.removeTenantMember(actorUserId, match.tenantId, match.memberUserId);
+          sendJson(res, 200, requestId, { member: publicMember(member) });
+          return true;
+        }
+
+        if (match.route === 'tenantOwnershipTransfer' && method === 'POST') {
+          const { token, session } = await getSession(req);
+          await requireCsrf(req, token);
+          if (!match.tenantId) throw new HttpError(400, 'INVALID_PATH', 'The tenant identifier is invalid');
+          const actorUserId = requireUserId(session);
+          await enforceRateLimit(req, rateLimiter, 'tenantMembers', actorUserId);
+          const body = parseStrictObject(await readJson(req), ['userId'], ['userId']);
+          const member = await options.service.transferTenantOwnership(
+            actorUserId,
+            match.tenantId,
+            nonEmptyString(body.userId, 'userId'),
+          );
+          sendJson(res, 200, requestId, { member: publicMember(member) });
+          return true;
+        }
+
         if (match.route === 'tenantInvitations' && method === 'POST') {
           const { token, session } = await getSession(req);
           await requireCsrf(req, token);
@@ -857,64 +956,6 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
           const safeInvitation = asObject(safePublicValue(invitation, invitationToken)) ?? {};
           sendJson(res, 201, requestId, { ...safeInvitation, token: invitationToken });
           return true;
-        }
-
-        if (
-          (match.route === 'projectKeys' || match.route === 'keyRotate' || match.route === 'keyRevoke') &&
-          match.tenantId &&
-          match.projectId
-        ) {
-          const { token, session } = await getSession(req);
-          if (method !== 'GET') await requireCsrf(req, token);
-          const keyService = options.keyService;
-          if (!keyService) throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The key service is unavailable');
-          if (method === 'POST' && match.route === 'projectKeys') {
-            const body = parseStrictObject(
-              await readJson(req),
-              ['name', 'modelScopes', 'supplyMode', 'expiresAt'],
-              ['name', 'modelScopes', 'supplyMode'],
-            );
-            const expiresAt = Object.hasOwn(body, 'expiresAt') ? body.expiresAt : undefined;
-            if (expiresAt !== undefined && expiresAt !== null && typeof expiresAt !== 'string') {
-              throw new HttpError(400, 'INVALID_BODY', 'expiresAt must be a timestamp string or null');
-            }
-            const context = await options.service.authorizeProjectAccess({
-              userId: requireUserId(session),
-              tenantId: match.tenantId,
-              projectId: match.projectId,
-            });
-            const created = await keyService.create(context, {
-              name: nonEmptyString(body.name, 'name'),
-              modelScopes: modelScopes(body.modelScopes),
-              supplyMode: supplyMode(body.supplyMode),
-              ...(expiresAt === undefined ? {} : { expiresAt: expiresAt as string | null }),
-            } satisfies CreateApiKeyInput);
-            sendJson(res, 201, requestId, publicApiKey(created));
-            return true;
-          }
-
-          const context = await options.service.authorizeProjectAccess({
-            userId: requireUserId(session),
-            tenantId: match.tenantId,
-            projectId: match.projectId,
-          });
-          if (match.route === 'projectKeys' && method === 'GET') {
-            const listed = await keyService.list(context);
-            sendJson(res, 200, requestId, listed.map(publicApiKey));
-            return true;
-          }
-          await readEmptyJsonObject(req);
-          if (!match.keyId) throw new HttpError(400, 'INVALID_PATH', 'The key identifier is invalid');
-          if (match.route === 'keyRotate') {
-            const rotated = await keyService.rotate(context, match.keyId);
-            sendJson(res, 201, requestId, publicApiKey(rotated));
-            return true;
-          }
-          if (match.route === 'keyRevoke') {
-            const revoked = await keyService.revoke(context, match.keyId);
-            sendJson(res, 200, requestId, publicApiKey(revoked));
-            return true;
-          }
         }
 
         if (match.route === 'acceptInvitation' && method === 'POST') {

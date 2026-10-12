@@ -162,7 +162,7 @@ test('migration 050 is registered in append order and remains forward-only', () 
   assert.equal(SAAS_MIGRATIONS.filter(({ version }) => version === 50).length, 1);
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    Array.from({ length: 60 }, (_, index) => index + 1),
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98],
   );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);
   assert.doesNotMatch(migration.sql, /\bALTER\s+ROLE\b|\bSECURITY\s+DEFINER\b/i);

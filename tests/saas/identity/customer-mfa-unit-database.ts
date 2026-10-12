@@ -10,7 +10,7 @@ type Credential={id:string;user_id:string;encrypted_secret:Uint8Array;verified:b
 type Enrollment={id:string;user_id:string;session_id:string;credential_id:string;previous_credential_id:string|null;
   token_hash:string;password_digest:string;attempt_count:number;expires_at:number;closed:boolean;locked:boolean;consumed:boolean};
 type Command={id:string;user_id:string;session_id:string;operation:string;expires_at:number;outcome:string|null};
-type Session={id:string;user_id:string;token_hash:string;csrf_token_hash:string;revoked:boolean};
+type Session={id:string;user_id:string;token_hash:string;csrf_token_hash:string;revoked:boolean;created_at:string;expires_at:string};
 type State={passwordHash:string;disabled:boolean;platform:boolean;now:number;budget:number;
   sessions:Session[];credentials:Credential[];enrollments:Enrollment[];commands:Command[];
   events:Array<readonly unknown[]>;audits:Array<readonly unknown[]>;outbox:Array<readonly unknown[]>};
@@ -57,7 +57,9 @@ export class CustomerMfaUnitDatabase implements SaasDatabase {
       :sql.includes('pg_advisory_xact_lock(1396788563')?'writer':sql.includes('pg_advisory_xact_lock')?'user'
       :sql.includes('FROM saas_users WHERE email_canonical')?'identity-user'
       :sql.includes('SELECT id FROM saas_users')?'identity-authority'
-      :sql.includes('INSERT INTO saas_sessions')?'identity-session':'unsupported');
+      :sql.includes('INSERT INTO saas_sessions')?'identity-session'
+      :sql.includes('SELECT s.user_id, s.expires_at, s.created_at')?'identity-session-read'
+      :sql.includes('SELECT s.csrf_token_hash FROM saas_sessions')?'identity-csrf-read':'unsupported');
     this.trace.push({tag,tx:this.depth>0,values:[...args]});
     if(tag===this.failTag&&(!this.failOutcome||this.state.events.at(-1)?.[6]===this.failOutcome))
       throw new Error('synthetic sensitive database detail MUST NOT SURFACE');
@@ -75,7 +77,13 @@ export class CustomerMfaUnitDatabase implements SaasDatabase {
       case 'identity-authority':rows=a===this.userId&&b==='synthetic-customer@example.test'
         &&c===this.state.passwordHash&&!this.state.disabled?[{id:a}]:[];break;
       case 'identity-session':this.state.sessions.push({id:string(a),user_id:string(b),token_hash:string(c),
-        csrf_token_hash:string(d),revoked:false});break;
+        csrf_token_hash:string(d),revoked:false,created_at:string(e),expires_at:string(f)});break;
+      case 'identity-session-read':case 'identity-csrf-read':
+        if(session&&!session.revoked&&!this.state.disabled&&Date.parse(session.expires_at)>Date.parse(string(b))) {
+          rows=tag==='identity-csrf-read'?[{csrf_token_hash:session.csrf_token_hash}]
+            :[{user_id:session.user_id,created_at:session.created_at,expires_at:session.expires_at}];
+        }
+        break;
       case 'hint':rows=session?[{user_id:session.user_id}]:[];break;
       case 'current':rows=session&&!session.revoked&&!this.state.disabled&&session.csrf_token_hash===b&&session.user_id===c
         ?[{id:session.id,user_id:session.user_id,csrf_token_hash:session.csrf_token_hash,password_hash:this.state.passwordHash,

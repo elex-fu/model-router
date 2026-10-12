@@ -22,13 +22,13 @@ export class CircuitBreaker {
   private failureThreshold: number;
   private successThreshold: number;
   private recoveryTimeoutMs: number;
-  private minRequests: number;
 
   constructor(options: CircuitBreakerOptions = {}) {
     this.failureThreshold = options.failureThreshold ?? 5;
     this.successThreshold = options.successThreshold ?? 2;
     this.recoveryTimeoutMs = options.recoveryTimeoutMs ?? 30_000;
-    this.minRequests = options.minRequests ?? 3;
+    // Preserve the legacy option read without retaining unused state.
+    void (options.minRequests ?? 3);
   }
 
   /** Check if a request is allowed for the given upstream. */

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
 import { CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION } from '../../../../src/saas/db/migrations/035_credential_validation_jobs.js';
 import {
@@ -29,7 +30,7 @@ test('058 is the exact second forward after frozen 001-056; 057 retains its FIN 
     ['056_restricted_role_check_and_platform_auth_execution.ts', '13e1e5330447ecfb78e137b7054d0ec384254e865e91e7e98004222fe450ac13'],
     ['057_normal_success_usage_evidence_reference.ts', 'f718700b39171675983af642dddc4135e4d236e930c758a77fd9bb7c2aa73ca1'],
   ] as const) {
-    const source = readFileSync(new URL(`../../../../src/saas/db/migrations/${file}`, import.meta.url));
+    const source = readFileSync(new URL(`../../../../src/saas/db/migrations/${file}`, pathToFileURL(__filename)));
     assert.equal(createHash('sha256').update(source).digest('hex'), hash, file);
   }
 });

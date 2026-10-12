@@ -10,6 +10,27 @@ const ATTEMPT_STATUSES = ['pending', 'succeeded', 'failed', 'unknown'] as const;
 
 export type PlatformOperationsQueryExecutor = Pick<SqlExecutor, 'query'>;
 export type PlatformOperationsQueryDatabase = PlatformOperationsQueryExecutor;
+
+/**
+ * Runtime probe status: 'ok' (probe passed), 'degraded' (reachable but stale
+ * or weak signal), 'unavailable' (configured probe failed), 'not_configured'
+ * (no probe wired at composition).
+ */
+export type PlatformRuntimeProbeStatus = 'ok' | 'degraded' | 'unavailable' | 'not_configured';
+
+/** A probe returns its observed status; a thrown error maps to 'unavailable'. */
+export type PlatformRuntimeProbe = () => Promise<Exclude<PlatformRuntimeProbeStatus, 'not_configured'>>;
+
+export interface PlatformRuntimeProbes {
+  readonly postgresql?: PlatformRuntimeProbe;
+  readonly redis?: PlatformRuntimeProbe;
+  readonly kms?: PlatformRuntimeProbe;
+  readonly worker?: PlatformRuntimeProbe;
+}
+
+export interface PlatformOperationsSummaryServiceOptions {
+  readonly probes?: PlatformRuntimeProbes;
+}
 export type PlatformOperationsRequestStatus = (typeof REQUEST_STATUSES)[number];
 export type PlatformOperationsAttemptStatus = (typeof ATTEMPT_STATUSES)[number];
 
@@ -83,10 +104,10 @@ export interface PlatformOperationsSummary {
       readonly oldestUnprocessedAgeMs: string | null;
     };
     readonly runtimeProbes: {
-      readonly postgresql: 'not_configured';
-      readonly redis: 'not_configured';
-      readonly kms: 'not_configured';
-      readonly worker: 'not_configured';
+      readonly postgresql: PlatformRuntimeProbeStatus;
+      readonly redis: PlatformRuntimeProbeStatus;
+      readonly kms: PlatformRuntimeProbeStatus;
+      readonly worker: PlatformRuntimeProbeStatus;
     };
   };
 }
@@ -501,23 +522,53 @@ function mapSummary(row: Row, range: NormalizedRange): PlatformOperationsSummary
 }
 
 export class PlatformOperationsSummaryService {
-  constructor(private readonly database: PlatformOperationsQueryExecutor) {
+  private readonly probes: PlatformRuntimeProbes;
+
+  constructor(
+    private readonly database: PlatformOperationsQueryExecutor,
+    options: PlatformOperationsSummaryServiceOptions = {},
+  ) {
     if (!database || typeof database.query !== 'function') {
       throw new TypeError('database must implement the read-only operations query contract');
     }
+    this.probes = options.probes ?? {};
   }
 
   async getSummary(input: PlatformOperationsSummaryQuery): Promise<PlatformOperationsSummary> {
     const range = normalizeRange(input);
 
+    let summary: PlatformOperationsSummary;
     try {
       const result = await this.database.query<Row>(PLATFORM_OPERATIONS_SUMMARY_SQL, [range.from, range.to]);
       if (!result || !Array.isArray(result.rows) || result.rows.length !== 1) storage();
-      return mapSummary(result.rows[0], range);
+      summary = mapSummary(result.rows[0], range);
     } catch (error) {
       if (error instanceof PlatformOperationsSummaryError) throw error;
       throw new PlatformOperationsSummaryError('OPERATIONS_STORAGE_ERROR');
     }
+
+    const [postgresql, redis, kms, worker] = await Promise.all([
+      runProbe(this.probes.postgresql),
+      runProbe(this.probes.redis),
+      runProbe(this.probes.kms),
+      runProbe(this.probes.worker),
+    ]);
+    return {
+      ...summary,
+      metrics: { ...summary.metrics, runtimeProbes: { postgresql, redis, kms, worker } },
+    };
+  }
+}
+
+async function runProbe(probe: PlatformRuntimeProbe | undefined): Promise<PlatformRuntimeProbeStatus> {
+  if (probe === undefined) return 'not_configured';
+  try {
+    const status = await probe();
+    if (status !== 'ok' && status !== 'degraded' && status !== 'unavailable') return 'unavailable';
+    return status;
+  } catch {
+    // A failing probe must never take the whole summary down.
+    return 'unavailable';
   }
 }
 

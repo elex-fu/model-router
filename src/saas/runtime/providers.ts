@@ -123,6 +123,9 @@ export interface ManagedSaasProviders {
   readonly providerCredentialRewrappingKms?: LoadedProviderCredentialRewrappingKms;
   readonly platformAuthRateLimiter: ManagedRateLimiter;
   readonly customerAuthRateLimiter: ManagedRateLimiter;
+  /** Readiness probes for the operations summary runtime probes (E4). */
+  readonly redisReady: () => Promise<void>;
+  readonly credentialKeyReady: () => Promise<void>;
   close(): Promise<void>;
 }
 
@@ -507,6 +510,7 @@ export async function loadCredentialKeyProvider(
 
 interface LoadedRedisProvider {
   readonly createRateLimiter: (options: RedisRateLimiterOptions) => Promise<ManagedRateLimiter>;
+  readonly checkReady: () => Promise<void>;
   readonly close: () => Promise<void>;
 }
 
@@ -544,6 +548,9 @@ async function loadRedisProvider(
 
   return {
     close: cleanup,
+    checkReady: async () => {
+      await methods.checkReady();
+    },
     createRateLimiter: async (limiterOptions) => {
       let limiter: unknown;
       try {
@@ -636,6 +643,8 @@ export async function loadManagedSaasProviders(
         : { providerCredentialRewrappingKms: loadedProviderCredentialRewrappingKms }),
       platformAuthRateLimiter,
       customerAuthRateLimiter,
+      redisReady: () => loadedRedisProvider.checkReady(),
+      credentialKeyReady: () => loadedCredentialKeyProvider.checkReady(),
       close,
     };
   } catch (error) {

@@ -262,6 +262,39 @@ test('workspace client uses real existing write/read routes, CSRF and strict all
   assert.equal(calls[6]!.init.body, undefined);
 });
 
+test('workspace client member mutations use the E1 routes with CSRF and fail-closed member envelopes', async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { cookie: 'mr_saas_csrf=test_only_csrf' } });
+  const member = { userId, displayName: 'Managed', role: 'developer', status: 'active' };
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), init: init ?? {} });
+    return new Response(JSON.stringify({ data: { member: { ...member, passwordHash: poisoned } } }), { status: 200 });
+  };
+  const updated = await saasClient.updateTenantMemberRole(tenantA, userId, { role: 'developer' });
+  const removed = await saasClient.removeTenantMember(tenantA, userId);
+  const transferred = await saasClient.transferTenantOwnership(tenantA, { userId });
+  assert.deepEqual(updated, member); assert.deepEqual(removed, member); assert.deepEqual(transferred, member);
+  assert.equal(JSON.stringify([updated, removed, transferred]).includes(poisoned), false);
+  assert.deepEqual(calls.map(call => [call.url, call.init.method]), [
+    [`/console/api/v1/tenants/${tenantA}/members/${userId}/role`, 'POST'],
+    [`/console/api/v1/tenants/${tenantA}/members/${userId}/remove`, 'POST'],
+    [`/console/api/v1/tenants/${tenantA}/ownership-transfer`, 'POST'],
+  ]);
+  for (const call of calls) assert.equal(new Headers(call.init.headers).get('x-csrf-token'), 'test_only_csrf');
+  assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { role: 'developer' });
+  assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), {});
+  assert.deepEqual(JSON.parse(String(calls[2]!.init.body)), { userId });
+  for (const [request, data] of [
+    [() => saasClient.updateTenantMemberRole(tenantA, userId, { role: 'viewer' }), { member: { ...member, role: 'root' } }],
+    [() => saasClient.removeTenantMember(tenantA, userId), { member: { ...member, userId: 'not-a-uuid' } }],
+    [() => saasClient.transferTenantOwnership(tenantA, { userId }), { member: { ...member, status: 'unreviewed' } }],
+    [() => saasClient.transferTenantOwnership(tenantA, { userId }), { unexpected: member }],
+  ] as Array<[() => Promise<unknown>, unknown]>) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ data }), { status: 200 });
+    await assert.rejects(request, (error: unknown) => error instanceof SaasApiError && error.code === 'INVALID_RESPONSE' && !String(error).includes(poisoned));
+  }
+});
+
 test('workspace client rejects malformed success metadata and sanitizes network/HTTP failures including unknown codes', async () => {
   for (const [request, data] of [
     [() => saasClient.getTenants(), [{ ...owner, role: 'superadmin' }]],

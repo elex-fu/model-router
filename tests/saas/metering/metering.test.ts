@@ -466,6 +466,8 @@ class MemoryDatabase implements SaasDatabase {
         request_reconciliation_state: request.reconciliation_state,
         request_financial_status: request.financial_status,
         request_state_version: request.state_version,
+        request_project_id: request.project_id,
+        request_created_at: request.created_at,
       },
     ];
   }
@@ -1471,17 +1473,22 @@ test('usage preserves exact integers, compares canonical duplicates, and dedupli
   assert.equal(settlementReplay.id, settlement.id);
 
   const beforeReplay = database.dump();
-  await database.transaction((executor) => service.assertUsageSettlementReplay(
-    { ...input, settlementKey: 'settlement-1', usageEvidenceRef: 'e'.repeat(64) }, { executor },
-  ));
+  await database.transaction((executor) =>
+    service.assertUsageSettlementReplay(
+      { ...input, settlementKey: 'settlement-1', usageEvidenceRef: 'e'.repeat(64) },
+      { executor },
+    ),
+  );
   for (const changed of [
     { ...input, eventKey: 'new-provider-event', settlementKey: 'new-settlement' },
     { ...input, settlementKey: 'new-settlement' },
     { ...input, settlementKey: 'settlement-1', usage: usageInput({ outputTotal: '10' }) },
   ]) {
-    await assert.rejects(database.transaction((executor) => service.assertUsageSettlementReplay(
-      { ...changed, usageEvidenceRef: 'e'.repeat(64) }, { executor },
-    )));
+    await assert.rejects(
+      database.transaction((executor) =>
+        service.assertUsageSettlementReplay({ ...changed, usageEvidenceRef: 'e'.repeat(64) }, { executor }),
+      ),
+    );
   }
   assert.deepEqual(database.dump(), beforeReplay, 'read-only replay must preserve the actual unit writer facts');
 
@@ -1506,22 +1513,43 @@ test('read-only usage replay uses the same private HMAC as the actual unit write
   assert.equal(admission.kind, 'created');
   if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected prepared admission');
   const original: RecordUsageEventInput & { eventKey: string; settlementKey: string; usageEvidenceRef: string } = {
-    tenantId: 'tenant-a', requestId: admission.request.id, attemptId: admission.initialAttempt.id,
-    supplyMode: 'byok', eventKey: 'synthetic-provider-event', settlementKey: 'synthetic-settlement', usage: usageInput(),
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: admission.initialAttempt.id,
+    supplyMode: 'byok',
+    eventKey: 'synthetic-provider-event',
+    settlementKey: 'synthetic-settlement',
+    usage: usageInput(),
     usageEvidenceRef: 'e'.repeat(64),
   };
   const event = await service.recordUsageEvent(original);
   await service.createUsageSettlement({
-    tenantId: original.tenantId, usageEventId: event.id, settlementKey: original.settlementKey,
+    tenantId: original.tenantId,
+    usageEventId: event.id,
+    settlementKey: original.settlementKey,
     normalSuccessEvidenceRef: original.usageEvidenceRef,
   });
   const before = database.dump();
   await database.transaction((executor) => service.assertUsageSettlementReplay(original, { executor }));
-  const wrongHmacService = new SaasMeteringService(database, { now: fixedNow, idempotencyHmacSecret: 'different-synthetic-key' });
-  await assert.rejects(database.transaction((executor) => wrongHmacService.assertUsageSettlementReplay(original, { executor })));
-  await assert.rejects(database.transaction((executor) => service.assertUsageSettlementReplay({
-    ...original, eventKey: 'another-event', settlementKey: 'another-settlement',
-  }, { executor })));
+  const wrongHmacService = new SaasMeteringService(database, {
+    now: fixedNow,
+    idempotencyHmacSecret: 'different-synthetic-key',
+  });
+  await assert.rejects(
+    database.transaction((executor) => wrongHmacService.assertUsageSettlementReplay(original, { executor })),
+  );
+  await assert.rejects(
+    database.transaction((executor) =>
+      service.assertUsageSettlementReplay(
+        {
+          ...original,
+          eventKey: 'another-event',
+          settlementKey: 'another-settlement',
+        },
+        { executor },
+      ),
+    ),
+  );
   assert.deepEqual(database.dump(), before);
 });
 
@@ -1530,19 +1558,32 @@ test('normal-success writer persists bound ref, preserves idempotency and reject
   const admission = await service.admitRequest(requestInput({ initialAttempt: preparedByokAttempt() }));
   assert.equal(admission.kind, 'created');
   if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected prepared attempt');
-  const usageInputValue = { tenantId: 'tenant-a', requestId: admission.request.id,
-    attemptId: admission.initialAttempt.id, supplyMode: 'byok' as const, eventKey: 'bound-event', usage: usageInput() };
+  const usageInputValue = {
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: admission.initialAttempt.id,
+    supplyMode: 'byok' as const,
+    eventKey: 'bound-event',
+    usage: usageInput(),
+  };
   const event = await service.recordUsageEvent(usageInputValue);
-  const boundInput = { tenantId: 'tenant-a', usageEventId: event.id, settlementKey: 'bound-key',
-    normalSuccessEvidenceRef: 'e'.repeat(64) };
+  const boundInput = {
+    tenantId: 'tenant-a',
+    usageEventId: event.id,
+    settlementKey: 'bound-key',
+    normalSuccessEvidenceRef: 'e'.repeat(64),
+  };
   const first = await service.createUsageSettlement(boundInput);
   assert.equal(first.normalSuccessEvidenceRef, boundInput.normalSuccessEvidenceRef);
   assert.equal((await service.createUsageSettlement(boundInput)).id, first.id);
   const before = database.dump();
   for (const changed of [
-    { normalSuccessEvidenceRef: undefined }, { normalSuccessEvidenceRef: 'f'.repeat(64) },
-    { settlementKey: 'other-key' }, { settlementKind: 'platform_cost_observed' as const },
-  ]) await assert.rejects(service.createUsageSettlement({ ...boundInput, ...changed }));
+    { normalSuccessEvidenceRef: undefined },
+    { normalSuccessEvidenceRef: 'f'.repeat(64) },
+    { settlementKey: 'other-key' },
+    { settlementKind: 'platform_cost_observed' as const },
+  ])
+    await assert.rejects(service.createUsageSettlement({ ...boundInput, ...changed }));
   assert.deepEqual(database.dump(), before);
 
   const legacyEvent = await service.recordUsageEvent({ ...usageInputValue, eventKey: 'legacy-event' });
@@ -1551,8 +1592,14 @@ test('normal-success writer persists bound ref, preserves idempotency and reject
   assert.equal(legacy.normalSuccessEvidenceRef, null, 'non-normal writer remains legacy by default');
   const beforeUpgrade = database.dump();
   await assert.rejects(service.createUsageSettlement({ ...legacyInput, normalSuccessEvidenceRef: 'e'.repeat(64) }));
-  await assert.rejects(service.assertUsageSettlementReplay({ ...usageInputValue, eventKey: 'legacy-event',
-    settlementKey: 'legacy-key', usageEvidenceRef: 'e'.repeat(64) }));
+  await assert.rejects(
+    service.assertUsageSettlementReplay({
+      ...usageInputValue,
+      eventKey: 'legacy-event',
+      settlementKey: 'legacy-key',
+      usageEvidenceRef: 'e'.repeat(64),
+    }),
+  );
   assert.deepEqual(database.dump(), beforeUpgrade, 'legacy history must not be rewritten or backfilled');
 });
 
@@ -1562,16 +1609,26 @@ test('never-dispatched failure is terminal and still requires the original versi
   assert.equal(admission.kind, 'created');
   if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected initial attempt');
   const original = admission.initialAttempt;
-  const transition = { tenantId: 'tenant-a', requestId: admission.request.id, attemptId: original.id,
-    expectedDispatchState: 'not_sent' as const, expectedResultState: 'pending' as const,
-    expectedResponseStarted: false, expectedStateVersion: original.stateVersion,
-    dispatchState: 'not_sent' as const, resultState: 'failed' as const, responseStarted: false };
+  const transition = {
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: original.id,
+    expectedDispatchState: 'not_sent' as const,
+    expectedResultState: 'pending' as const,
+    expectedResponseStarted: false,
+    expectedStateVersion: original.stateVersion,
+    dispatchState: 'not_sent' as const,
+    resultState: 'failed' as const,
+    responseStarted: false,
+  };
   const before = database.dump();
   await assert.rejects(service.transitionAttempt({ ...transition, expectedStateVersion: original.stateVersion + 1 }));
   for (const changed of [
-    { resultState: 'succeeded' as const }, { resultState: 'unknown' as const, unknownReason: 'synthetic' },
+    { resultState: 'succeeded' as const },
+    { resultState: 'unknown' as const, unknownReason: 'synthetic' },
     { responseStarted: true },
-  ]) await assert.rejects(service.transitionAttempt({ ...transition, ...changed }));
+  ])
+    await assert.rejects(service.transitionAttempt({ ...transition, ...changed }));
   assert.deepEqual(database.dump(), before);
   const failed = await service.transitionAttempt(transition);
   assert.equal(failed.dispatchState, 'not_sent');
@@ -1581,12 +1638,22 @@ test('never-dispatched failure is terminal and still requires the original versi
   assert.equal(failed.stateVersion, original.stateVersion + 1);
   const terminal = database.dump();
   await assert.rejects(service.transitionAttempt(transition), (error: unknown) => {
-    assertMeteringError('ATTEMPT_TRANSITION_INVALID', error); return true;
+    assertMeteringError('ATTEMPT_TRANSITION_INVALID', error);
+    return true;
   });
   for (const changed of [
-    { dispatchState: 'dispatching' as const }, { resultState: 'pending' as const }, { responseStarted: true },
-  ]) await assert.rejects(service.transitionAttempt({ ...transition, expectedResultState: 'failed',
-    expectedStateVersion: failed.stateVersion, ...changed }));
+    { dispatchState: 'dispatching' as const },
+    { resultState: 'pending' as const },
+    { responseStarted: true },
+  ])
+    await assert.rejects(
+      service.transitionAttempt({
+        ...transition,
+        expectedResultState: 'failed',
+        expectedStateVersion: failed.stateVersion,
+        ...changed,
+      }),
+    );
   assert.deepEqual(database.dump(), terminal, 'failure may not be redispatched or have its response flag fabricated');
 });
 
@@ -1595,12 +1662,26 @@ test('pre-dispatch failure exception cannot move dispatching work to a never-sen
   const admission = await service.admitRequest(requestInput({ initialAttempt: preparedByokAttempt() }));
   if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected initial attempt');
   const identity = { tenantId: 'tenant-a', requestId: admission.request.id, attemptId: admission.initialAttempt.id };
-  const dispatching = await service.transitionAttempt({ ...identity, expectedDispatchState: 'not_sent',
-    expectedResultState: 'pending', expectedResponseStarted: false, dispatchState: 'dispatching' });
+  const dispatching = await service.transitionAttempt({
+    ...identity,
+    expectedDispatchState: 'not_sent',
+    expectedResultState: 'pending',
+    expectedResponseStarted: false,
+    dispatchState: 'dispatching',
+  });
   const before = database.dump();
-  await assert.rejects(service.transitionAttempt({ ...identity, expectedDispatchState: 'dispatching',
-    expectedResultState: 'pending', expectedResponseStarted: false, expectedStateVersion: dispatching.stateVersion,
-    dispatchState: 'not_sent', resultState: 'failed', responseStarted: false }));
+  await assert.rejects(
+    service.transitionAttempt({
+      ...identity,
+      expectedDispatchState: 'dispatching',
+      expectedResultState: 'pending',
+      expectedResponseStarted: false,
+      expectedStateVersion: dispatching.stateVersion,
+      dispatchState: 'not_sent',
+      resultState: 'failed',
+      responseStarted: false,
+    }),
+  );
   assert.deepEqual(database.dump(), before);
 });
 
@@ -1628,4 +1709,55 @@ test('new metering admission requires an exact route authority snapshot and neve
     return true;
   });
   assert.deepEqual(database.dump(), emptyState());
+});
+
+test('F3: a terminally failed request emits request.completed inside the same transaction', async () => {
+  const database = new MemoryDatabase();
+  const calls: Array<Record<string, unknown>> = [];
+  const service = new SaasMeteringService(database, {
+    now: fixedNow,
+    webhookEvents: {
+      requestCompleted: async (_tx, input) => {
+        calls.push(input as Record<string, unknown>);
+      },
+    },
+  });
+  const admission = await service.admitRequest(requestInput({ initialAttempt: preparedByokAttempt() }));
+  assert.equal(admission.kind, 'created');
+  if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected attempt');
+  await service.transitionAttempt({
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: admission.initialAttempt.id,
+    expectedDispatchState: 'not_sent',
+    expectedResultState: 'pending',
+    expectedResponseStarted: false,
+    dispatchState: 'dispatching',
+  });
+
+  const input = {
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: admission.initialAttempt.id,
+    resultHttpStatus: 502,
+    responseStarted: false,
+  } as const;
+  await service.recordKnownNonSuccessHttpResponse(input);
+  await service.recordKnownNonSuccessHttpResponse(input);
+
+  assert.equal(calls.length, 1, 'the guarded terminal transition emits exactly once');
+  assert.deepEqual(calls[0], {
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    projectId: 'project-a',
+    supplyMode: 'byok',
+    status: 'failed',
+    durationMs: 0,
+    occurredAt: '2026-09-28T00:00:00.000Z',
+    transitionRef: 'http-failure-502',
+  });
+});
+
+test('F3: the metering service rejects a producer that does not implement the contract', () => {
+  assert.throws(() => new SaasMeteringService(new MemoryDatabase(), { webhookEvents: {} as never }), TypeError);
 });

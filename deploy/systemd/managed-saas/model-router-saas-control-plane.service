@@ -1,0 +1,46 @@
+[Unit]
+# Managed SaaS control-plane workload: customer (/console) + platform (/admin)
+# listeners. Startup is the fail-closed probe: the process runs the schema
+# readiness and least-privilege ACL verification before it binds any listener
+# and exits non-zero on any mismatch, so Restart=on-failure is intentional —
+# never mask a failing gate with Restart=always or wrapper scripts.
+Description=model-router managed SaaS control-plane (customer+platform listeners)
+After=network-online.target
+Wants=network-online.target
+# PostgreSQL/Redis may be remote; order only when they are local units.
+After=postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=model-router
+Group=model-router
+WorkingDirectory=/opt/model-router
+# Secrets live only in these files (install 0400 root:model-router):
+#   common.env                        — deployment/environment IDs, KMS module
+#                                       specifiers, Redis URL, listener binds
+#   control-plane.env                 — MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL
+#                                       and any control-plane-only modules
+EnvironmentFile=/etc/model-router-saas/common.env
+EnvironmentFile=/etc/model-router-saas/control-plane.env
+Environment=NODE_ENV=production
+Environment=MODEL_ROUTER_DEPLOYMENT_MODE=managed-saas
+ExecStart=/usr/bin/node /opt/model-router/dist/cli/index.js start --role control-plane
+Restart=on-failure
+RestartSec=5s
+# Watchdog only against hangs; a gate failure must stay a clean exit, not a kill.
+TimeoutStartSec=120s
+TimeoutStopSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Managed SaaS state lives in PostgreSQL/Redis; no writable local paths.
+
+[Install]
+WantedBy=multi-user.target

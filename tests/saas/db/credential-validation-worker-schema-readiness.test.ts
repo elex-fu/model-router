@@ -28,7 +28,8 @@ test('worker structural readiness uses one real catalog query and inert expected
       assert.doesNotMatch(sql, /(?:^|;)\s*(?:INSERT|UPDATE|DELETE|GRANT|ALTER|CREATE|TRUNCATE|DROP)\b/im);
       assert.ok(values && values.length === 1 && typeof values[0] === 'string');
       const contract = JSON.parse(values[0]);
-      assert.equal(contract.tables.length, 9);
+      // 9 tenant/BYOK relations + the 6-relation 083 platform-owner family.
+      assert.equal(contract.tables.length, 15);
       assert.ok(contract.columns.some((column: { column_name: string; type_name: string }) =>
         column.column_name === 'evidence_sha256' && column.type_name === 'text'));
       assert.ok(contract.keys.some((key: { kind: string; name: string }) => key.kind === 'f' && key.name.endsWith('_version_fk')));
@@ -46,6 +47,8 @@ test('worker structural readiness uses one real catalog query and inert expected
       assert.deepEqual(elevated.map((routine: { signature: string }) => routine.signature).sort(), [
         'saas_invalidate_account_credential_validation_jobs()',
         'saas_invalidate_credential_validation_jobs()',
+        'saas_platform_invalidate_account_credential_validation_jobs()',
+        'saas_platform_invalidate_credential_validation_jobs()',
         'saas_prepared_evidence_authorization_writer_fence()',
       ]);
       for (const routine of elevated) assert.deepEqual(routine.config, ['search_path=pg_catalog, model_router_saas, pg_temp']);
@@ -96,4 +99,54 @@ test('driver errors are sanitized without pretending a missing metadata privileg
     async query() { throw Object.assign(new Error(sensitive), { code: '42501', detail: sensitive }); },
   }), (error: unknown) => error instanceof SaasCredentialValidationWorkerSchemaReadinessError &&
     !JSON.stringify(error).includes(sensitive) && !error.message.includes(sensitive) && !Object.hasOwn(error, 'cause'));
+});
+
+import { CANONICAL_CREDENTIAL_VALIDATION_ENDPOINT_EXPRESSION } from '../../../src/saas/db/credential-validation-worker-schema-readiness.js';
+
+test('canonical v2 requires the exact grouped validated endpoint CHECK on the same restricted worker catalog query', async () => {
+  let calls = 0;
+  await verifyCredentialValidationWorkerSchemaReadiness({
+    async query<Row>(sql: string, values?: readonly unknown[]) {
+      calls += 1;
+      assert.equal(sql, SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL);
+      assert.ok(values && values.length === 1 && typeof values[0] === 'string');
+      const contract = JSON.parse(values[0]);
+      assert.deepEqual(contract.endpointChecks, [{
+        table_name: 'saas_tenant_provider_credential_validation_jobs',
+        name: 'saas_tenant_provider_credential_validation_jobs_endpoint_shape'.slice(0, 63),
+        expression: CANONICAL_CREDENTIAL_VALIDATION_ENDPOINT_EXPRESSION,
+      }]);
+      assert.match(contract.endpointChecks[0].expression, /provider_id = 'custom'::text/);
+      assert.match(contract.endpointChecks[0].expression, /credential_type = 'api-key'::text/);
+      assert.match(contract.endpointChecks[0].expression, /custom-openai/);
+      assert.match(contract.endpointChecks[0].expression, /custom-anthropic/);
+      assert.match(contract.endpointChecks[0].expression, /\/v1\/chat\/completions/);
+      assert.match(contract.endpointChecks[0].expression, /\/v1\/messages/);
+      assert.equal(contract.routines.filter((routine: { definer: boolean }) => routine.definer).length, 5);
+      assert.ok(contract.triggers.some((trigger: { name: string; type: number }) =>
+        trigger.name === 'saas_tenant_provider_credential_validation_jobs_identity_immutable'.slice(0, 63) && trigger.type === 19));
+      return { rows: [ready as Row], rowCount: 1 };
+    },
+  }, 'canonical-v2');
+  assert.equal(calls, 1);
+  assert.match(SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL, /endpoint_checks/);
+  assert.ok(SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL.includes(
+    "= pg_catalog.regexp_replace(e.expression, '[[:space:]]', '', 'g'))) AS checks_ready,"));
+  assert.match(SAAS_CREDENTIAL_VALIDATION_WORKER_SCHEMA_READINESS_SQL,
+    /regexp_replace\(pg_catalog\.pg_get_expr\(k\.conbin, k\.conrelid\), '\[\[:space:\]\]', '', 'g'\)/);
+});
+
+test('canonical schema drift/missing CHECK is fail-closed; legacy mode retains the original noncanonical contract', async () => {
+  await assert.rejects(verifyCredentialValidationWorkerSchemaReadiness(executor([{ ...ready, checks_ready: false }]), 'canonical-v2'),
+    (error: unknown) => error instanceof SaasCredentialValidationWorkerSchemaReadinessError &&
+      JSON.stringify(error.failedChecks) === JSON.stringify(['checks_ready']));
+  await assert.rejects(verifyCredentialValidationWorkerSchemaReadiness(executor([]), 'canonical-v2'),
+    SaasCredentialValidationWorkerSchemaReadinessError);
+  await verifyCredentialValidationWorkerSchemaReadiness({
+    async query<Row>(_sql: string, values?: readonly unknown[]) {
+      assert.ok(values && typeof values[0] === 'string');
+      assert.deepEqual(JSON.parse(values[0]).endpointChecks, []);
+      return { rows: [ready as Row], rowCount: 1 };
+    },
+  });
 });

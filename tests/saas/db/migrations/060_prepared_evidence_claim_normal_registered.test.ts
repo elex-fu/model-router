@@ -5,42 +5,58 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 
 // Source contracts only. Never import the PG root, fixtures or runtime modules.
+// Source matching is whitespace-tolerant because biome-formatted sources wrap
+// long lines; every marker still pins the exact token sequence in order.
 const rootPath = 'tests/saas/db/migrations/060_prepared_evidence_claim_generated_account.postgres.integration.test.ts';
 const source = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
+const collapse = (text: string): string =>
+  text.replace(/\s+/g, ' ').replace(/, \)/g, ')').replace(/ \)/g, ')').replace(/\( /g, '(');
+const has = (text: string, marker: string): boolean => collapse(text).includes(collapse(marker));
 function section(text: string, start: string, end: string): string {
-  const offset = text.indexOf(start);
+  const flat = collapse(text);
+  const head = collapse(start);
+  const offset = flat.indexOf(head);
   assert.ok(offset >= 0, `missing source boundary: ${start}`);
-  assert.equal(text.lastIndexOf(start), offset, 'source boundary must be unique');
-  const finish = text.indexOf(end, offset + start.length);
+  assert.equal(flat.lastIndexOf(head), offset, 'source boundary must be unique');
+  const tail = collapse(end);
+  const finish = flat.indexOf(tail, offset + head.length);
   assert.ok(finish > offset, `missing following source boundary: ${end}`);
-  return text.slice(offset, finish);
+  return flat.slice(offset, finish);
 }
 function inOrder(text: string, markers: readonly string[]): void {
+  const flat = collapse(text);
   let previous = -1;
   for (const marker of markers) {
-    const next = text.indexOf(marker, previous + 1);
+    const head = collapse(marker);
+    const next = flat.indexOf(head, previous + 1);
     assert.ok(next > previous, `missing ordered source operation: ${marker}`);
     previous = next;
   }
 }
-const firstChild = "await t.test('exact one-field forward repair preserves owner/security/ACL/binding and historical ledger'";
-const signedChild = "await t.test('real signed service claim commits one binding/version/audit and repeat claim is denied'";
+const firstChild =
+  "await t.test('exact one-field forward repair preserves owner/security/ACL/binding and historical ledger'";
+const signedChild =
+  "await t.test('real signed service claim commits one binding/version/audit and repeat claim is denied'";
 
 test('normal 060 requires default full schema verification and the exact complete registered ledger before any child', () => {
   const root = source(rootPath);
-  assert.match(root, /import \{ SAAS_MIGRATIONS \} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/saas\/db\/migrations\/001_initial_schema\.js'/);
+  assert.match(
+    root,
+    /import \{ SAAS_MIGRATIONS \} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/saas\/db\/migrations\/001_initial_schema\.js'/,
+  );
   const ledger = section(root, 'async function registeredLedger(', 'async function catalog(');
   for (const required of [
     'assert.equal(migration.version, 60)',
     "assert.equal(migration.name, 'prepared_evidence_claim_generated_account')",
     'assert.equal(SAAS_MIGRATIONS[59], migration,',
     'SAAS_MIGRATIONS.map(({ version }) => version)',
-    'Array.from({ length: 60 }, (_, index) => index + 1)',
+    '[...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98]',
     'SAAS_MIGRATIONS.map(({ version, name, sql }) =>',
     "createHash('sha256').update(name).update('\\0').update(sql).digest('hex')",
     'SELECT version, name, checksum FROM model_router_saas.saas_schema_migrations ORDER BY version ASC',
     'assert.deepEqual(applied.rows, expected,',
-  ]) assert.ok(ledger.includes(required), required);
+  ])
+    assert.ok(has(ledger, required), required);
   inOrder(root, [
     "test('normal registered 060 real restricted PostgreSQL generated-account claim regression'",
     "await phase('readiness', () => cancellationDatabases())",
@@ -48,10 +64,16 @@ test('normal 060 requires default full schema verification and the exact complet
     "await phase('readiness', () => registeredLedger(migrator))",
     firstChild,
   ]);
-  const connection = section(source('tests/saas/gateway/pre-dispatch-postgres-fixture.ts'),
-    'export async function cancellationDatabases()', 'export async function cancellationTransaction');
-  assert.ok(connection.includes('await databases[0]!.verifySchema()'));
-  assert.doesNotMatch(root, /SAAS_MIGRATIONS\.(?:filter|slice)|runSaasMigrations|verifySaasMigrations|\.migrate\s*\(|createSaasDatabase/);
+  const connection = section(
+    source('tests/saas/gateway/pre-dispatch-postgres-fixture.ts'),
+    'export async function cancellationDatabases()',
+    'export async function cancellationTransaction',
+  );
+  assert.ok(has(connection, 'await databases[0]!.verifySchema()'));
+  assert.doesNotMatch(
+    root,
+    /SAAS_MIGRATIONS\.(?:filter|slice)|runSaasMigrations|verifySaasMigrations|\.migrate\s*\(|createSaasDatabase/,
+  );
   assert.doesNotMatch(root, /verifySchema\s*:\s*(?:async|\([^)]*\)\s*=>)|verifySchema\s*=/);
   assert.doesNotMatch(root, /\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+(?:model_router_saas\.)?saas_schema_migrations\b/i);
 });
@@ -89,11 +111,21 @@ test('the first child runs the frozen forward SQL only after a trusted local his
   ]);
   assert.equal(root.split('CREATE OR REPLACE FUNCTION').length, 2, 'one test-local historical reconstruction only');
   assert.equal(child.split('throw rollbackSentinel').length, 2);
-  assert.equal(child.split('await tx.query(').length, 4, 'only lock, historical body and frozen migration may be written');
+  assert.equal(
+    child.split('await tx.query(').length,
+    4,
+    'only lock, historical body and frozen migration may be written',
+  );
   assert.doesNotMatch(child, /(?:migrator|gateway)\.query\((?:`|')[^`']*(?:CREATE|ALTER|UPDATE|INSERT|DELETE)/i);
-  assert.doesNotMatch(child, /\b(?:GRANT|REVOKE|SECURITY DEFINER|ALTER ROLE|ALTER TABLE|DISABLE TRIGGER|COMMIT|SAVEPOINT)\b/);
-  assert.doesNotMatch(child, /\.sql\.(?:replace|slice)|Object\.assign|sqlState\(error\)|error\.(?:message|stack|detail|cause)/);
-  assert.ok(root.includes('it is not a 059-to-060 CLI upgrade proof. All real claims use deployed 060.'));
+  assert.doesNotMatch(
+    child,
+    /\b(?:GRANT|REVOKE|SECURITY DEFINER|ALTER ROLE|ALTER TABLE|DISABLE TRIGGER|COMMIT|SAVEPOINT)\b/,
+  );
+  assert.doesNotMatch(
+    child,
+    /\.sql\.(?:replace|slice)|Object\.assign|sqlState\(error\)|error\.(?:message|stack|detail|cause)/,
+  );
+  assert.ok(has(root, 'it is not a 059-to-060 CLI upgrade proof. All real claims use deployed 060.'));
 });
 
 test('catalog comparisons retain every function field except source plus trigger bindings, relation authority and the entire historical ledger', () => {
@@ -102,21 +134,28 @@ test('catalog comparisons retain every function field except source plus trigger
   for (const required of [
     "to_jsonb(p) - 'prosrc' AS metadata",
     'jsonb_agg(to_jsonb(t) ORDER BY t.oid) FROM pg_trigger t WHERE t.tgfoid = p.oid',
-    "'acl'", 'c.relowner, c.relacl', "'columns'", 'to_jsonb(a)',
-    "'constraints'", 'to_jsonb(c)', "'triggers'", 'to_jsonb(t)',
+    "'acl'",
+    'c.relowner, c.relacl',
+    "'columns'",
+    'to_jsonb(a)',
+    "'constraints'",
+    'to_jsonb(c)',
+    "'triggers'",
+    'to_jsonb(t)',
     'jsonb_agg(to_jsonb(m) ORDER BY m.version) FROM model_router_saas.saas_schema_migrations m',
     "'model_router_saas.saas_attempts_guard_prepared_evidence_claim_pool()'::regprocedure",
-  ]) assert.ok(catalog.includes(required), required);
+  ])
+    assert.ok(has(catalog, required), required);
   assert.doesNotMatch(catalog, /WHERE m\.version|LIMIT|jsonb_strip_nulls/);
   const child = section(root, firstChild, signedChild);
-  assert.ok(child.includes('assert.deepEqual({ ...after, source: before.source }, before,'));
-  assert.ok(child.includes('assert.deepEqual(after, deployed,'));
-  assert.ok(child.includes('assert.deepEqual(await catalog(migrator), deployed,'));
+  assert.ok(has(child, 'assert.deepEqual({ ...after, source: before.source }, before,'));
+  assert.ok(has(child, 'assert.deepEqual(after, deployed,'));
+  assert.ok(has(child, 'assert.deepEqual(await catalog(migrator), deployed,'));
 });
 
 test('all six native proofs and original finite fixture diagnostics remain mandatory under the unchanged disposable role gate', () => {
   const root = source(rootPath);
-  const children = [...root.matchAll(/await t\.test\('([^']+)'/g)].map((match) => match[1]);
+  const children = [...collapse(root).matchAll(/await t\.test\('([^']+)'/g)].map((match) => match[1]);
   assert.deepEqual(children, [
     'exact one-field forward repair preserves owner/security/ACL/binding and historical ledger',
     'real signed service claim commits one binding/version/audit and repeat claim is denied',
@@ -142,13 +181,24 @@ test('all six native proofs and original finite fixture diagnostics remain manda
     "assert.equal(fixture.bindingAcks, 1); assert.equal(fixture.auditAcks, 1); assert.equal(fixture.boundVersion, '2')",
     "sqlState(error) === '55000'",
     "finally { await phase('cleanup', () => Promise.all(databases.map((database) => database.close())))",
-  ]) assert.ok(root.includes(required), required);
+  ])
+    assert.ok(has(root, required), required);
   assert.equal([...root.matchAll(/\bskip:/g)].length, 1);
   assert.doesNotMatch(root, /testNamePattern|\.skip\(|\.only\(/);
   const diagnostic = section(root, '// Exact finite vocabulary', '// Normal complete CLI 060');
-  assert.match(diagnostic, /const nativeStates = \['42501', '55000', '55006', '23502', '23503', '23505', '23514',\s*'42P01', '42703', '42P08', '42883', '42601', '40P01', '40001', '55P03', '57014'\] as const/);
-  assert.doesNotMatch(diagnostic, /error\.(?:message|stack|detail|cause)|Object\.getOwnPropertyDescriptor\(error, '(?:stack|detail|cause)'\)/);
-  const refusal = section(root, "await t.test('nonhistorical function lineage", '  } catch (error) {\n    // No driver');
+  assert.match(
+    diagnostic,
+    /const nativeStates = \[ ?'42501', '55000', '55006', '23502', '23503', '23505', '23514', ?'42P01', '42703', '42P08', '42883', '42601', '40P01', '40001', '55P03', '57014', ?\] as const/,
+  );
+  assert.doesNotMatch(
+    diagnostic,
+    /error\.(?:message|stack|detail|cause)|Object\.getOwnPropertyDescriptor\(error, '(?:stack|detail|cause)'\)/,
+  );
+  const refusal = section(
+    root,
+    "await t.test('nonhistorical function lineage",
+    '  } catch (error) {\n    // No driver',
+  );
   inOrder(refusal, [
     'const before = await catalog(migrator)',
     'assert.equal(before.source, PREPARED_EVIDENCE_CLAIM_ACCOUNT_SOURCE)',
@@ -162,7 +212,14 @@ test('all six native proofs and original finite fixture diagnostics remain manda
 
 test('normal 060 adaptation retains the accepted signed fixture and its existing source contract without a shared helper override', () => {
   for (const [path, expected] of [
-    ['tests/saas/metering/normal-success-postgres-fixture.ts', '8f2ec8929b1c29613ec354847c29db6af8beec7f0446fafe816727180bbc93e7'],
-    ['tests/saas/metering/normal-success-postgres-fixture.test.ts', '964d3d1ba9168ea50b142de920790f2d96685acaaba08522b168d155c7f1db50'],
-  ] as const) assert.equal(createHash('sha256').update(source(path)).digest('hex'), expected, path);
+    [
+      'tests/saas/metering/normal-success-postgres-fixture.ts',
+      '2180bd5d1ba9dd2f5ec062965b32db85d0711ad2c0b7d05c4c51beb3d444b6fe',
+    ],
+    [
+      'tests/saas/metering/normal-success-postgres-fixture.test.ts',
+      'd92bd6ca901c02af7f87a466ac4eb25f290842b71a7d89709c513c5fa7774a92',
+    ],
+  ] as const)
+    assert.equal(createHash('sha256').update(source(path)).digest('hex'), expected, path);
 });

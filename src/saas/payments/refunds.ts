@@ -7,6 +7,7 @@ import {
 } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
 import { ByokServicePlanService } from '../plans/service.js';
+import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import type { PaymentProviderRefundAdapter } from './adapter.js';
 import { PaymentError } from './errors.js';
 import type {
@@ -135,6 +136,8 @@ export interface PaymentRefundServiceOptions {
   readonly merchantId: string;
   readonly operations: PaymentRefundOperationsPort;
   readonly walletRefundLedger?: PaymentWalletRefundLedger;
+  /** F3: optional customer webhook producer; when absent no events are emitted. */
+  readonly webhookEvents?: CustomerWebhookEventProducer;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
   readonly leaseTtlMs?: number;
@@ -194,6 +197,13 @@ function mapRefundStatus(value: unknown): PaymentRefundStatus {
   )
     return value;
   throw new PaymentError('PAYMENT_STORAGE_ERROR');
+}
+
+/** Event payloads carry safe-integer numbers; absurd stored amounts fail closed. */
+function storedMinorUnitsNumber(value: unknown): number {
+  const parsed = parseStoredMinorUnits(value);
+  if (parsed < 1n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) throw new PaymentError('PAYMENT_STORAGE_ERROR');
+  return Number(parsed);
 }
 
 function mapRefundRow(row: RefundRow): RefundRow {
@@ -330,6 +340,7 @@ export class PaymentRefundService {
   private readonly idFactory: () => string;
   private readonly walletRefundLedger: PaymentWalletRefundLedger;
   private readonly servicePlans: ByokServicePlanService;
+  private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
   private readonly leaseTtlMs: number;
   private readonly reconcileDelayMs: number;
 
@@ -345,6 +356,13 @@ export class PaymentRefundService {
     }
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+    if (
+      options.webhookEvents !== undefined &&
+      (options.webhookEvents === null || typeof options.webhookEvents.refundStatusChanged !== 'function')
+    ) {
+      throw new TypeError('webhookEvents must implement the customer webhook producer contract');
+    }
+    this.webhookEvents = options.webhookEvents;
     this.servicePlans = new ByokServicePlanService(database, {
       now: this.now,
       idFactory: this.idFactory,
@@ -1012,6 +1030,18 @@ export class PaymentRefundService {
         [refundId, nextState, token, addMs(now, this.leaseTtlMs), now.toISOString()],
       );
       if (!rowsHaveOne(updated)) throw new PaymentError('PAYMENT_STORAGE_ERROR');
+      if (this.webhookEvents && row.state !== nextState) {
+        // F3: the transition event commits with the state change (or rolls back with it).
+        await this.webhookEvents.refundStatusChanged(executor, {
+          tenantId: row.tenant_id,
+          refundId,
+          status: mapRefundStatus(nextState),
+          amountMinorUnits: storedMinorUnitsNumber(row.amount_minor_units),
+          currency: row.currency,
+          occurredAt: now.toISOString(),
+          transitionRef: token,
+        });
+      }
       return { row: mapRefundRow(updated.rows[0]), leaseToken: token };
     });
   }
@@ -1107,6 +1137,19 @@ export class PaymentRefundService {
       );
       if (!rowsHaveOne(updated)) throw new PaymentError('PAYMENT_STORAGE_ERROR');
       const finalized = mapRefundRow(updated.rows[0]);
+      if (this.webhookEvents && row.state !== status) {
+        // F3: emit only on a real state change; pending/unknown re-query loops
+        // that keep the same state stay silent.
+        await this.webhookEvents.refundStatusChanged(executor, {
+          tenantId: row.tenant_id,
+          refundId,
+          status,
+          amountMinorUnits: storedMinorUnitsNumber(finalized.amount_minor_units),
+          currency: finalized.currency,
+          occurredAt: normalizeTimestamp(finalized.updated_at),
+          transitionRef: leaseToken,
+        });
+      }
       if (row.refund_type === 'wallet_topup' && (status === 'succeeded' || status === 'failed')) {
         await executor.query('DELETE FROM saas_refund_wallet_freezes WHERE refund_order_id = $1', [refundId]);
       }

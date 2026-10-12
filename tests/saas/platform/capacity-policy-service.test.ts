@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import type { PlatformAdminActor } from '../../../src/saas/platform/access/types.js';
 import {
@@ -15,6 +16,21 @@ const API_KEY_ID = '00000000-0000-4000-8000-000000000003';
 const USER_ID = '00000000-0000-4000-8000-000000000004';
 const SESSION_ID = '00000000-0000-4000-8000-000000000005';
 const REQUEST_ID = '00000000-0000-4000-8000-000000000006';
+const MEMBER_ID = '00000000-0000-4000-8000-000000000000';
+const ENTRY_CONTROLS = [
+  'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+  "SET LOCAL lock_timeout = '2s'",
+  "SET LOCAL statement_timeout = '10s'",
+] as const;
+const WRITER_G = 'SELECT pg_advisory_xact_lock(1396788563, 46)';
+const SHARED_FENCE = 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))';
+const EXCLUSIVE_FENCE = 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))';
+const KEY_HINT =
+  'SELECT tenant_id, project_id, id, principal_user_id, execution_principal_type, execution_principal_id FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 LIMIT 2';
+const KEY_READ =
+  'SELECT tenant_id, project_id, id, authz_version, requests_per_minute, tokens_per_minute, max_concurrent_requests FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 LIMIT 2';
+const KEY_LOCKED =
+  'SELECT tenant_id, project_id, id, authz_version, requests_per_minute, tokens_per_minute, max_concurrent_requests, principal_user_id, execution_principal_type, execution_principal_id FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 LIMIT 2 FOR UPDATE';
 const POLICY_LIMITS: CapacityPolicyLimits = {
   requestsPerMinute: 120,
   tokensPerMinute: 120_000,
@@ -78,6 +94,9 @@ function initialState(): FakeState {
         project_id: PROJECT_ID,
         id: API_KEY_ID,
         authz_version: '1',
+        principal_user_id: MEMBER_ID,
+        execution_principal_type: 'member',
+        execution_principal_id: MEMBER_ID,
         ...emptyLimits(),
         key_hash: 'never-selected',
       },
@@ -108,6 +127,8 @@ class CapacityPolicyDatabase implements SaasDatabase {
   malformedProjectRows = false;
   malformedPolicyRows = false;
   malformedKeyRows = false;
+  lockedPrincipalOverride: Row | null = null;
+  private transactionStart: number | null = null;
 
   async query<RowType>(_sql: string, _values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
     throw new Error('Capacity policy service must use the transaction executor');
@@ -116,6 +137,8 @@ class CapacityPolicyDatabase implements SaasDatabase {
   async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
     this.transactions += 1;
     const before = clone(this.state);
+    assert.equal(this.transactionStart, null, 'the fake driver requires one owned transaction');
+    this.transactionStart = this.statements.length;
     const tx: SqlExecutor = {
       query: <RowType>(sql: string, values: readonly unknown[] = []) => this.execute<RowType>(sql, values),
     };
@@ -124,6 +147,8 @@ class CapacityPolicyDatabase implements SaasDatabase {
     } catch (error) {
       this.state = before;
       throw error;
+    } finally {
+      this.transactionStart = null;
     }
   }
 
@@ -135,15 +160,96 @@ class CapacityPolicyDatabase implements SaasDatabase {
   private async execute<RowType>(sql: string, values: readonly unknown[]): Promise<SqlResult<RowType>> {
     const statement = norm(sql);
     const lower = statement.toLowerCase();
+    assert.notEqual(this.transactionStart, null, 'SQL must use the active owned executor');
+    const start = this.transactionStart;
+    assert.ok(start !== null);
+    const preceding = this.statements.slice(start);
     this.statements.push({ sql: statement, values: [...values] });
 
-    if (
-      lower.startsWith('set transaction isolation level') ||
-      lower.startsWith('set local ') ||
-      lower.startsWith('select pg_advisory_xact_lock_shared') ||
-      lower.startsWith('select pg_advisory_xact_lock(')
-    ) {
+    if (preceding.length < ENTRY_CONTROLS.length) {
+      assert.equal(statement, ENTRY_CONTROLS[preceding.length], 'fresh isolation/timeouts must be first');
+      assert.equal(values.length, 0);
       return result<RowType>([]);
+    }
+    if (statement === WRITER_G) {
+      assert.equal(preceding.length, 3, 'G must precede all scope discovery/fences');
+      assert.equal(values.length, 0);
+      return result<RowType>([]);
+    }
+    if (statement === SHARED_FENCE || statement === EXCLUSIVE_FENCE) {
+      assert.equal(values.length, 1);
+      const key = values[0];
+      assert.ok(
+        [
+          saasAdvisoryKey.tenant(TENANT_ID),
+          saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
+          USER_ID,
+          MEMBER_ID,
+          saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
+        ].includes(String(key)),
+        'only exact fixture scope fences are accepted',
+      );
+      const writing = preceding[3]?.sql === WRITER_G;
+      assert.equal(statement, writing ? EXCLUSIVE_FENCE : SHARED_FENCE);
+      if (key === saasAdvisoryKey.tenant(TENANT_ID)) {
+        assert.equal(preceding.length, writing ? 4 : 3);
+      } else {
+        assert.ok(preceding.some((entry) => entry.values[0] === saasAdvisoryKey.tenant(TENANT_ID)));
+      }
+      if (writing && (key === USER_ID || key === MEMBER_ID)) {
+        assert.equal(
+          preceding.some((entry) => entry.values[0] === saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID)),
+          false,
+          'U cannot be acquired after K',
+        );
+        const priorUsers = preceding.filter(
+          (entry) => entry.sql === EXCLUSIVE_FENCE && (entry.values[0] === USER_ID || entry.values[0] === MEMBER_ID),
+        );
+        assert.equal(
+          priorUsers.some((entry) => entry.values[0] === key),
+          false,
+          'U is deduplicated',
+        );
+        assert.ok(
+          priorUsers.every((entry) => String(entry.values[0]) < String(key)),
+          'U layer is sorted',
+        );
+      }
+      if (writing && key === saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID)) {
+        this.requireWriterFences(preceding, true);
+      }
+      return result<RowType>([]);
+    }
+
+    if (statement === KEY_HINT || statement === KEY_LOCKED) {
+      this.requireWriterFences(preceding, statement === KEY_LOCKED);
+      assert.deepEqual(values, [TENANT_ID, PROJECT_ID, API_KEY_ID]);
+      assert.ok(
+        preceding.some(
+          (entry) =>
+            entry.sql === EXCLUSIVE_FENCE && entry.values[0] === saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
+        ),
+      );
+      if (statement === KEY_LOCKED) {
+        assert.ok(
+          preceding.some((entry) => entry.values[0] === saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID)),
+        );
+      } else {
+        assert.equal(
+          preceding.some((entry) => entry.values[0] === USER_ID || entry.values[0] === MEMBER_ID),
+          false,
+          'hint precedes the user layer',
+        );
+      }
+      const rows = this.state.apiKeys
+        .filter((row) => row.tenant_id === values[0] && row.project_id === values[1] && row.id === values[2])
+        .map((row) =>
+          statement === KEY_LOCKED && this.lockedPrincipalOverride !== null
+            ? { ...row, ...this.lockedPrincipalOverride }
+            : { ...row },
+        );
+      if (this.malformedKeyRows && rows[0]) rows.push({ ...rows[0] });
+      return result(rows as RowType[]);
     }
 
     if (lower.startsWith('select s.id, s.user_id from saas_platform_sessions as s')) {
@@ -164,6 +270,7 @@ class CapacityPolicyDatabase implements SaasDatabase {
       return result(rows as RowType[]);
     }
     if (lower.startsWith('update saas_tenants')) {
+      this.requireWriterFences(preceding, true);
       if (this.failOn === 'tenant-update') throw new Error('injected tenant update failure');
       const [tenantId, requestsPerMinute, tokensPerMinute, concurrency, expectedRevision] = values;
       const row = this.state.tenants.find(
@@ -198,6 +305,7 @@ class CapacityPolicyDatabase implements SaasDatabase {
       return result(rows as RowType[]);
     }
     if (lower.startsWith('insert into saas_project_inference_policy_versions')) {
+      this.requireWriterFences(preceding, true);
       const [
         tenantId,
         projectId,
@@ -239,6 +347,7 @@ class CapacityPolicyDatabase implements SaasDatabase {
       ] as RowType[]);
     }
     if (lower.startsWith('update saas_projects')) {
+      this.requireWriterFences(preceding, true);
       if (this.failOn === 'project-head-update') throw new Error('injected project head update failure');
       const [tenantId, projectId, nextVersion, expectedVersion] = values;
       const row = this.state.projects.find(
@@ -251,7 +360,7 @@ class CapacityPolicyDatabase implements SaasDatabase {
       row.inference_policy_version = String(nextVersion);
       return result([row] as RowType[]);
     }
-    if (lower.startsWith('select tenant_id, project_id, id, authz_version, requests_per_minute')) {
+    if (statement === KEY_READ) {
       const [tenantId, projectId, apiKeyId] = values;
       const rows = this.state.apiKeys.filter(
         (row) => row.tenant_id === tenantId && row.project_id === projectId && row.id === apiKeyId,
@@ -260,6 +369,8 @@ class CapacityPolicyDatabase implements SaasDatabase {
       return result(rows as RowType[]);
     }
     if (lower.startsWith('update saas_api_keys')) {
+      this.requireWriterFences(preceding, true);
+      assert.ok(preceding.some((entry) => entry.sql === KEY_LOCKED));
       if (this.failOn === 'api-key-update') throw new Error('injected API key update failure');
       const [tenantId, projectId, apiKeyId, requestsPerMinute, tokensPerMinute, concurrency, expectedRevision] = values;
       const row = this.state.apiKeys.find(
@@ -331,7 +442,31 @@ class CapacityPolicyDatabase implements SaasDatabase {
       });
       return result([{ audit_event_id: auditEventId }] as RowType[]);
     }
-    throw new Error(`Unexpected SQL: ${statement}`);
+    throw new Error('Unexpected capacity-policy SQL');
+  }
+
+  private requireWriterFences(
+    preceding: readonly { readonly sql: string; readonly values: readonly unknown[] }[],
+    users: boolean,
+  ): void {
+    assert.equal(preceding[3]?.sql, WRITER_G);
+    const hasFence = (key: string) =>
+      preceding.some((entry) => entry.sql === EXCLUSIVE_FENCE && entry.values[0] === key);
+    assert.ok(hasFence(saasAdvisoryKey.tenant(TENANT_ID)));
+    if (
+      preceding.some(
+        (entry) => entry.sql === KEY_HINT || entry.values[0] === saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
+      )
+    ) {
+      assert.ok(hasFence(saasAdvisoryKey.project(TENANT_ID, PROJECT_ID)));
+    }
+    if (users) {
+      assert.ok(hasFence(USER_ID));
+      const row = this.state.apiKeys[0];
+      if (preceding.some((entry) => entry.sql === KEY_HINT) && row?.execution_principal_type === 'member') {
+        assert.ok(typeof row.execution_principal_id === 'string' && hasFence(row.execution_principal_id));
+      }
+    }
   }
 
   private latestPolicyVersion(tenantId: string, projectId: string): string | null {
@@ -399,11 +534,16 @@ test('tenant capacity write uses row lock, revision CAS, and one atomic non-secr
     after_tokens_per_minute: POLICY_LIMITS.tokensPerMinute,
     after_max_concurrent_requests: POLICY_LIMITS.maxConcurrentRequests,
   });
-  const advisoryStatements = database.statements.filter(({ sql }) => sql.startsWith('SELECT pg_advisory_xact_lock'));
+  const advisoryStatements = database.statements.filter(({ sql }) => sql === SHARED_FENCE || sql === EXCLUSIVE_FENCE);
   assert.deepEqual(
     advisoryStatements.map(({ values }) => values[0]),
     [`saas-authz:tenant:${TENANT_ID}`, USER_ID],
   );
+  assert.deepEqual(
+    database.statements.slice(0, 4).map(({ sql }) => sql),
+    [...ENTRY_CONTROLS, WRITER_G],
+  );
+  assert.ok(advisoryStatements.every(({ sql }) => sql === EXCLUSIVE_FENCE));
   const lastFenceIndex = database.statements.reduce(
     (index, { sql }, current) => (sql.startsWith('SELECT pg_advisory_xact_lock') ? current : index),
     -1,
@@ -428,6 +568,38 @@ test('tenant capacity write uses row lock, revision CAS, and one atomic non-secr
     database.statements.findIndex(({ sql }) => sql.startsWith('INSERT INTO saas_audit_events')) <
       database.statements.findIndex(({ sql }) => sql.startsWith('INSERT INTO saas_capacity_policy_audit_details')),
   );
+  // The scripted driver does not approve arbitrary SQL prefixes or late G.
+  for (const invalid of [
+    async (tx: SqlExecutor) => {
+      await tx.query('SELECT 1');
+    },
+    async (tx: SqlExecutor) => {
+      await tx.query('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+    },
+    async (tx: SqlExecutor) => {
+      for (const sql of ENTRY_CONTROLS) await tx.query(sql);
+      await tx.query(EXCLUSIVE_FENCE, [saasAdvisoryKey.tenant(TENANT_ID)]);
+    },
+    async (tx: SqlExecutor) => {
+      for (const sql of ENTRY_CONTROLS) await tx.query(sql);
+      await tx.query(WRITER_G, [USER_ID]);
+    },
+    async (tx: SqlExecutor) => {
+      for (const sql of ENTRY_CONTROLS) await tx.query(sql);
+      await tx.query(SHARED_FENCE, [saasAdvisoryKey.tenant(TENANT_ID)]);
+      await tx.query(WRITER_G);
+    },
+    async (tx: SqlExecutor) => {
+      for (const sql of ENTRY_CONTROLS) await tx.query(sql);
+      await tx.query(WRITER_G);
+      await tx.query('SELECT pg_advisory_xact_lock(1, 46)');
+    },
+  ]) {
+    const rejected = new CapacityPolicyDatabase();
+    const original = clone(rejected.state);
+    await assert.rejects(rejected.transaction(invalid));
+    assert.deepEqual(rejected.state, original);
+  }
 });
 
 test('tenant, project, and API-key read APIs return only metadata and identify unconfigured scopes', async () => {
@@ -448,6 +620,10 @@ test('tenant, project, and API-key read APIs return only metadata and identify u
   assert.equal(key?.revisionKind, 'api_key_authz');
   assert.equal(JSON.stringify(key).includes('key_hash'), false);
   assert.ok(database.statements.every(({ sql }) => !/key_hash|prefix/i.test(sql)));
+  assert.equal(
+    database.statements.some(({ sql }) => sql === WRITER_G || sql === EXCLUSIVE_FENCE || sql === KEY_HINT),
+    false,
+  );
 });
 
 test('project policy write appends a new immutable version, copies non-capacity policy state, and switches the head', async () => {
@@ -521,6 +697,14 @@ test('project policy write appends a new immutable version, copies non-capacity 
       /SELECT source\.tenant_id, source\.project_id, \$4, source\.status/i.test(sql),
     ),
   );
+  assert.deepEqual(
+    database.statements.slice(0, 4).map(({ sql }) => sql),
+    [...ENTRY_CONTROLS, WRITER_G],
+  );
+  assert.deepEqual(
+    database.statements.filter(({ sql }) => sql === EXCLUSIVE_FENCE).map(({ values }) => values[0]),
+    [saasAdvisoryKey.tenant(TENANT_ID), saasAdvisoryKey.project(TENANT_ID, PROJECT_ID), USER_ID],
+  );
 });
 
 test('API-key write increments authz_version so stale authorization caches are invalidated', async () => {
@@ -541,6 +725,126 @@ test('API-key write increments authz_version so stale authorization caches are i
     database.statements.find(({ sql }) => sql.startsWith('UPDATE saas_api_keys'))?.sql ?? '',
     /authz_version = authz_version \+ 1/,
   );
+  assert.deepEqual(
+    database.statements.slice(0, 4).map(({ sql }) => sql),
+    [...ENTRY_CONTROLS, WRITER_G],
+  );
+  assert.deepEqual(
+    database.statements.filter(({ sql }) => sql === EXCLUSIVE_FENCE).map(({ values }) => values[0]),
+    [
+      saasAdvisoryKey.tenant(TENANT_ID),
+      saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
+      MEMBER_ID,
+      USER_ID,
+      saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
+    ],
+  );
+  const hintIndex = database.statements.findIndex(({ sql }) => sql === KEY_HINT);
+  const memberIndex = database.statements.findIndex(
+    ({ sql, values }) => sql === EXCLUSIVE_FENCE && values[0] === MEMBER_ID,
+  );
+  const keyIndex = database.statements.findIndex(
+    ({ sql, values }) =>
+      sql === EXCLUSIVE_FENCE && values[0] === saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
+  );
+  const sessionIndex = database.statements.findIndex(({ sql }) => sql.includes('FROM saas_platform_sessions'));
+  const lockedIndex = database.statements.findIndex(({ sql }) => sql === KEY_LOCKED);
+  assert.ok(
+    hintIndex > 0 &&
+      hintIndex < memberIndex &&
+      memberIndex < keyIndex &&
+      keyIndex < sessionIndex &&
+      sessionIndex < lockedIndex,
+  );
+  assert.doesNotMatch(database.statements[hintIndex]?.sql ?? '', /FOR UPDATE|FOR SHARE/);
+
+  for (const principal of [
+    { principal_user_id: USER_ID, execution_principal_type: 'member', execution_principal_id: USER_ID },
+    { principal_user_id: null, execution_principal_type: 'project_service', execution_principal_id: PROJECT_ID },
+  ]) {
+    const variant = createService();
+    Object.assign(variant.database.state.apiKeys[0], principal, { created_by_user_id: MEMBER_ID });
+    const record = await variant.service.setApiKeyPolicy({
+      tenantId: TENANT_ID,
+      projectId: PROJECT_ID,
+      apiKeyId: API_KEY_ID,
+      ...setBase(),
+    });
+    assert.equal(record.revision, '2');
+    assert.deepEqual(
+      variant.database.statements.filter(({ sql }) => sql === EXCLUSIVE_FENCE).map(({ values }) => values[0]),
+      [
+        saasAdvisoryKey.tenant(TENANT_ID),
+        saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
+        USER_ID,
+        saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
+      ],
+    );
+    assert.equal(variant.database.state.apiKeys[0]?.principal_user_id, principal.principal_user_id);
+    assert.equal(variant.database.state.auditEvents.length, 1);
+    assert.equal(variant.database.state.auditDetails.length, 1);
+  }
+
+  for (const malformed of [
+    { principal_user_id: null },
+    { execution_principal_type: 'unverified' },
+    { execution_principal_id: PROJECT_ID },
+    { principal_user_id: null, execution_principal_type: 'project_service', execution_principal_id: MEMBER_ID },
+    { execution_principal_id: undefined },
+  ]) {
+    const denied = createService();
+    Object.assign(denied.database.state.apiKeys[0], malformed);
+    const before = clone(denied.database.state);
+    await assert.rejects(
+      denied.service.setApiKeyPolicy({
+        tenantId: TENANT_ID,
+        projectId: PROJECT_ID,
+        apiKeyId: API_KEY_ID,
+        ...setBase(),
+      }),
+      (error: unknown) => assertCapacityError(error, 'STORAGE_ERROR'),
+    );
+    assert.deepEqual(denied.database.state, before);
+    assert.equal(
+      denied.database.statements.some(({ sql }) => sql === KEY_LOCKED || /^UPDATE /.test(sql)),
+      false,
+    );
+  }
+  const changed = createService();
+  changed.database.lockedPrincipalOverride = { principal_user_id: USER_ID, execution_principal_id: USER_ID };
+  const beforeChange = clone(changed.database.state);
+  await assert.rejects(
+    changed.service.setApiKeyPolicy({ tenantId: TENANT_ID, projectId: PROJECT_ID, apiKeyId: API_KEY_ID, ...setBase() }),
+    (error: unknown) => assertCapacityError(error, 'STORAGE_ERROR'),
+  );
+  assert.deepEqual(changed.database.state, beforeChange);
+  const rowLock = changed.database.statements.findIndex(({ sql }) => sql === KEY_LOCKED);
+  assert.ok(rowLock > 0);
+  assert.equal(
+    changed.database.statements
+      .slice(rowLock + 1)
+      .some(({ sql }) => sql === EXCLUSIVE_FENCE || /^UPDATE |^INSERT /.test(sql)),
+    false,
+    'changed principal rolls back without late prelocks',
+  );
+
+  for (const missingKind of ['missing', 'foreign', 'ambiguous'] as const) {
+    const denied = createService();
+    if (missingKind === 'missing') denied.database.state.apiKeys = [];
+    if (missingKind === 'foreign') Object.assign(denied.database.state.apiKeys[0], { project_id: TENANT_ID });
+    if (missingKind === 'ambiguous') denied.database.malformedKeyRows = true;
+    const before = clone(denied.database.state);
+    await assert.rejects(
+      denied.service.setApiKeyPolicy({
+        tenantId: TENANT_ID,
+        projectId: PROJECT_ID,
+        apiKeyId: API_KEY_ID,
+        ...setBase(),
+      }),
+      (error: unknown) => assertCapacityError(error, missingKind === 'ambiguous' ? 'AMBIGUOUS' : 'NOT_FOUND'),
+    );
+    assert.deepEqual(denied.database.state, before);
+  }
 });
 
 test('support-readonly cannot write and stale actor roles are rejected against the database', async () => {
@@ -560,6 +864,28 @@ test('support-readonly cannot write and stale actor roles are rejected against t
     assertCapacityError(error, 'FORBIDDEN'),
   );
   assert.equal(second.database.statements.filter(({ sql }) => sql.includes('FROM saas_tenants')).length, 0);
+  for (const scope of ['tenant', 'project', 'api_key'] as const) {
+    const denied = createService();
+    denied.database.state.roles = [{ role: 'security' }];
+    const before = clone(denied.database.state);
+    const operation =
+      scope === 'tenant'
+        ? denied.service.setTenantPolicy({ tenantId: TENANT_ID, ...setBase() })
+        : scope === 'project'
+          ? denied.service.setProjectPolicy({ tenantId: TENANT_ID, projectId: PROJECT_ID, ...setBase() })
+          : denied.service.setApiKeyPolicy({
+              tenantId: TENANT_ID,
+              projectId: PROJECT_ID,
+              apiKeyId: API_KEY_ID,
+              ...setBase(),
+            });
+    await assert.rejects(operation, (error: unknown) => assertCapacityError(error, 'FORBIDDEN'));
+    assert.deepEqual(denied.database.state, before);
+    assert.equal(
+      denied.database.statements.some(({ sql }) => /FOR UPDATE|^UPDATE |^INSERT /.test(sql)),
+      false,
+    );
+  }
 });
 
 test('expired/revoked platform sessions cannot read or write even with a claimed operations role', async () => {
@@ -575,6 +901,26 @@ test('expired/revoked platform sessions cannot read or write even with a claimed
     database.statements.some(({ sql }) => sql.includes('FROM saas_tenants')),
     false,
   );
+  for (const missingKey of [false, true]) {
+    const denied = createService();
+    Object.assign(denied.database.state.sessions[0], { revoked_at: '2026-09-28T00:00:00.000Z' });
+    if (missingKey) denied.database.state.apiKeys = [];
+    const before = clone(denied.database.state);
+    await assert.rejects(
+      denied.service.setApiKeyPolicy({
+        tenantId: TENANT_ID,
+        projectId: PROJECT_ID,
+        apiKeyId: API_KEY_ID,
+        ...setBase(),
+      }),
+      (error: unknown) => assertCapacityError(error, 'FORBIDDEN'),
+    );
+    assert.deepEqual(denied.database.state, before);
+    assert.equal(
+      denied.database.statements.some(({ sql }) => /FOR UPDATE|^UPDATE |^INSERT /.test(sql)),
+      false,
+    );
+  }
 });
 
 test('stale tenant, project, and API-key revisions conflict before audit or mutation', async () => {

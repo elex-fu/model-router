@@ -227,6 +227,48 @@ export interface CreateWalletTopUpInput {
   readonly clientRequestId: string;
   readonly amountMinorUnits: MinorUnitInput;
   readonly currency: string;
+  /** R1 (090): optional promo code, evaluated inside the order transaction. */
+  readonly promoCode?: string;
+}
+
+/**
+ * R1 (090): optional checkout promo evaluation port, consulted inside the
+ * wallet top-up order transaction before the order row is inserted. The
+ * returned discounted amount is frozen on the order; the original amount is
+ * persisted insert-only so client-request replay compares the customer's
+ * original input. Absent port + promoCode present fails closed.
+ */
+export interface WalletTopUpPromoEvaluator {
+  priceWalletTopUp(
+    executor: SqlExecutor,
+    input: {
+      readonly orderId: string;
+      readonly tenantId: string;
+      readonly amountMinorUnits: string;
+      readonly currency: string;
+      readonly promoCode: string;
+    },
+  ): Promise<{ readonly amountMinorUnits: string; readonly originalAmountMinorUnits: string }>;
+}
+
+/**
+ * R2 (091): optional post-funding hook, invoked inside the fulfillment
+ * transaction after the verified funding posting and before the fulfilled
+ * transition. Implementations must be idempotent per sourceOrderRef (the
+ * path replays on inbox retries); a throw makes fulfillment retryable —
+ * accrual is fail-closed, never silently skipped.
+ */
+export interface WalletFundingHook {
+  afterVerifiedFunding(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly currency: string;
+      readonly amountMinorUnits: string;
+      readonly sourceOrderRef: string;
+      readonly fundingTransactionId: string;
+    },
+  ): Promise<void>;
 }
 
 export interface ReadWalletTopUpInput {
@@ -344,6 +386,31 @@ export interface NormalizedPaymentProviderEvent {
   readonly occurredAt: string | Date;
 }
 
+/** Service-side immutable order facts handed to a provider pre-fulfillment confirmation. */
+export interface PaymentProviderEventOrderFacts {
+  readonly localOrderId: string;
+  readonly tenantId: string;
+  readonly merchantId: string;
+  readonly amountMinorUnits: string;
+  readonly currency: string;
+  readonly providerOrderId: string | null;
+}
+
+export interface PaymentProviderEventConfirmationInput {
+  readonly event: NormalizedPaymentProviderEvent;
+  readonly order: PaymentProviderEventOrderFacts;
+}
+
+/**
+ * Provider attestation outcome. `confirmed: false` routes the event to the
+ * durable reconciliation queue without fulfilling; a thrown error signals a
+ * retryable confirmation failure (e.g. the provider requery is unreachable).
+ */
+export interface PaymentProviderEventConfirmation {
+  readonly confirmed: boolean;
+  readonly code?: string;
+}
+
 export interface PaymentWebhookResult {
   readonly outcome: PaymentInboxOutcome;
   readonly replayed: boolean;
@@ -379,6 +446,12 @@ export interface PaymentServiceOptions {
   readonly idFactory?: () => string;
   readonly walletFundingLedger?: PaymentWalletFundingLedger;
   readonly servicePlanService?: ServicePlanPaymentService;
+  /** R1 (090): optional checkout promo evaluator; required when a promoCode is supplied. */
+  readonly walletTopUpPromo?: WalletTopUpPromoEvaluator;
+  /** R2 (091): optional post-funding hook; accrual failure makes fulfillment retryable. */
+  readonly walletFundingHook?: WalletFundingHook;
+  /** F3: optional customer webhook producer; when absent no events are emitted. */
+  readonly webhookEvents?: import('../webhooks/producers.js').CustomerWebhookEventProducer;
   readonly checkout?: PaymentCheckoutOptions;
   /** Compatibility alias for callers that configure payment policy directly. */
   readonly checkoutRedirectPolicies?: readonly PaymentCheckoutRedirectPolicy[];
