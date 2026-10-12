@@ -85,6 +85,10 @@ When adding new `UpstreamConfig` fields:
 - Round-robin key selection replaced Fisher-Yates shuffle
 
 ### Security
+- **Never write secrets in code — no exceptions, including tests.** No API keys, webhook secrets, private keys, merchant IDs, or tokens as source literals anywhere in the repo (`src/`, `tests/`, `deploy/`, `docs/`, scripts). GitHub push protection / secret scanning blocks or alerts on provider-shaped patterns (`sk_*`, `rk_*`, `whsec_*`, `wx*` merchant IDs, PEM private-key blocks, etc.)
+  - Real secrets live only in local files: `~/.model-router/` (config.json, master.key), deployment-target environment variables, or the gitignored `secrets.local.md` registry
+  - Test fixtures that must carry provider-shaped values (mock Stripe/WeChat/Alipay key material) assemble them at runtime — split string concatenation (`` `whsec_${'...'}` ``) or base64 body + armor rebuild (`wrapTestPrivateKey` in `tests/saas/payments/mock-wxpay.ts`); never as contiguous literals
+  - Before committing payment/credential-related changes, scan: `grep -rnE "(sk|rk)_(test|live)_|whsec_|BEGIN PRIVATE KEY" src/ tests/ deploy/`
 - Never log full API keys; use `redactSecrets()` before writing to logs
 - `passThroughAuth` requires careful proxy key setup (client's auth token must be registered as a proxy key)
 - `--trust-proxy` should only be used behind a trusted reverse proxy
