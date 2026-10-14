@@ -1,0 +1,5 @@
+# Runtime secrets and operator-supplied trusted modules never get committed.
+.env
+.verify.env.*
+modules/
+backup-*.dump

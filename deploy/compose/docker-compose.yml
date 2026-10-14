@@ -1,0 +1,215 @@
+# Managed SaaS multi-instance deployment (Phase 4, sub2api parity plan).
+#
+# Topology mirrors src/saas/deployment.ts and the systemd units in
+# deploy/systemd/managed-saas/:
+#   control-plane                 customer /console + platform /admin listeners
+#   gateway (xN, --scale-able)    /v1 listener only
+#   credential-validation-worker  no listener
+#
+# Per-role environment isolation is enforced HERE, not just in the app: the
+# deployment parser fail-closes on cross-role settings (for example a gateway
+# that sees MODEL_ROUTER_SAAS_REDIS_URL or the control-plane database URL),
+# so each workload service receives exactly the variables its role permits —
+# the compose equivalent of the per-role env files under /etc/model-router-saas.
+#
+# Redis is cache/coordination only (auth rate limiting); PostgreSQL remains
+# the sole authoritative ledger. See deploy/compose/README.md for the full
+# bring-up sequence (roles template -> saas:migrate -> re-apply templates).
+#
+# Managed SaaS listeners expose no /healthz route (only the local-mode proxy
+# has one), so workload healthchecks are TCP probes against the bound ports;
+# the credential-validation-worker owns no listener and is probed by liveness
+# of its main process only.
+
+name: model-router-saas
+
+x-workload: &workload
+  build:
+    context: ../..
+    dockerfile: deploy/compose/Dockerfile
+  image: model-router-saas:local
+  init: true
+  # Fail-closed contract (same as systemd Restart=on-failure): gate failures
+  # must stay failed for an operator, never hot-loop.
+  restart: on-failure
+  stop_grace_period: 45s
+  volumes:
+    # Trusted operator modules (platform TOTP KMS provider, gateway runtime
+    # module, optional capability modules) are never baked into the image.
+    - ./modules:/opt/model-router-modules:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-model_router_saas}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/compose/.env}
+      # Consumed exactly once by 10-role-passwords.sh during first-boot initdb.
+      POSTGRES_MIGRATOR_PASSWORD: ${POSTGRES_MIGRATOR_PASSWORD:?set POSTGRES_MIGRATOR_PASSWORD in deploy/compose/.env}
+      POSTGRES_CONTROL_PLANE_PASSWORD: ${POSTGRES_CONTROL_PLANE_PASSWORD:?set POSTGRES_CONTROL_PLANE_PASSWORD in deploy/compose/.env}
+      POSTGRES_GATEWAY_PASSWORD: ${POSTGRES_GATEWAY_PASSWORD:?set POSTGRES_GATEWAY_PASSWORD in deploy/compose/.env}
+      POSTGRES_VALIDATION_WORKER_PASSWORD: ${POSTGRES_VALIDATION_WORKER_PASSWORD:?set POSTGRES_VALIDATION_WORKER_PASSWORD in deploy/compose/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # First-boot bootstrap (runs only on an empty data volume).
+      - ./init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - ./role-passwords.sh:/docker-entrypoint-initdb.d/10-role-passwords.sh:ro
+      # Authoritative runtime grant manifests; applied around `saas:migrate`
+      # with the psql commands in README.md (never at container start).
+      - ../../deploy/managed-saas-postgres-roles.sql:/opt/templates/managed-saas-postgres-roles.sql:ro
+      - ../../deploy/managed-saas-validation-worker-role-grants.sql:/opt/templates/managed-saas-validation-worker-role-grants.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-model_router_saas}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Cache/coordination only (control-plane auth rate limiting); nothing here
+    # is authoritative, so no persistence is configured.
+    command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One-shot explicit migration runner (`docker compose run --rm migrate`).
+  # Server startup never runs migrations; this is the compose form of the
+  # hand-executed `saas:migrate` management command.
+  migrate:
+    <<: *workload
+    profiles: ["ops"]
+    restart: "no"
+    command: ["saas:migrate"]
+    environment:
+      MODEL_ROUTER_SAAS_DATABASE_URL: postgresql://model_router_saas_migrator:${POSTGRES_MIGRATOR_PASSWORD}@postgres:5432/${POSTGRES_DB:-model_router_saas}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    <<: *workload
+    command: ["start", "--role", "control-plane"]
+    environment:
+      NODE_ENV: production
+      MODEL_ROUTER_DEPLOYMENT_MODE: managed-saas
+      MODEL_ROUTER_SAAS_WORKLOAD_ROLE: control-plane
+      MODEL_ROUTER_SAAS_DEPLOYMENT_ID: ${MODEL_ROUTER_SAAS_DEPLOYMENT_ID:?set MODEL_ROUTER_SAAS_DEPLOYMENT_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_ENVIRONMENT_ID: ${MODEL_ROUTER_SAAS_ENVIRONMENT_ID:?set MODEL_ROUTER_SAAS_ENVIRONMENT_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL: postgresql://model_router_saas_control_plane:${POSTGRES_CONTROL_PLANE_PASSWORD}@postgres:5432/${POSTGRES_DB:-model_router_saas}
+      MODEL_ROUTER_SAAS_REDIS_URL: ${MODEL_ROUTER_SAAS_REDIS_URL:-redis://redis:6379}
+      MODEL_ROUTER_SAAS_REDIS_PROVIDER: ${MODEL_ROUTER_SAAS_REDIS_PROVIDER:-./dist/saas/runtime/redis-rate-limit-provider.js}
+      # Operator-supplied trusted module exporting createCredentialKeyProvider
+      # (platform TOTP); see deploy/README.md. Mount it under ./modules/.
+      MODEL_ROUTER_SAAS_KMS_PROVIDER: ${MODEL_ROUTER_SAAS_KMS_PROVIDER:?set MODEL_ROUTER_SAAS_KMS_PROVIDER (trusted platform TOTP KMS module) in deploy/compose/.env}
+      # Pilot-only software KMS wiring; see deploy/README.md ("Pilot-only
+      # software provider-credential KMS") before any non-pilot use.
+      SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE: ${SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE:-./dist/saas/runtime/software-provider-credential-kms.js}
+      SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE: ${SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE:-./dist/saas/runtime/software-provider-credential-rewrapping-kms.mjs}
+      MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID: ${MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID:?set MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY:?set MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID:-}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_PREVIOUS_MASTER_KEYS: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_PREVIOUS_MASTER_KEYS:-}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT:-false}
+      MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS: ${MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS:-0.0.0.0}
+      MODEL_ROUTER_SAAS_CUSTOMER_PORT: ${MODEL_ROUTER_SAAS_CUSTOMER_PORT:-15005}
+      MODEL_ROUTER_SAAS_CUSTOMER_ORIGIN: ${MODEL_ROUTER_SAAS_CUSTOMER_ORIGIN:?set MODEL_ROUTER_SAAS_CUSTOMER_ORIGIN (https) in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_PLATFORM_BIND_ADDRESS: ${MODEL_ROUTER_SAAS_PLATFORM_BIND_ADDRESS:-0.0.0.0}
+      MODEL_ROUTER_SAAS_PLATFORM_PORT: ${MODEL_ROUTER_SAAS_PLATFORM_PORT:-15006}
+      MODEL_ROUTER_SAAS_PLATFORM_ORIGIN: ${MODEL_ROUTER_SAAS_PLATFORM_ORIGIN:?set MODEL_ROUTER_SAAS_PLATFORM_ORIGIN (https) in deploy/compose/.env}
+    ports:
+      - "${CUSTOMER_HOST_PORT:-15005}:${MODEL_ROUTER_SAAS_CUSTOMER_PORT:-15005}"
+      - "${PLATFORM_HOST_PORT:-15006}:${MODEL_ROUTER_SAAS_PLATFORM_PORT:-15006}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # No /healthz in managed SaaS mode; probe both bound listeners via TCP.
+      test: ["CMD", "node", "-e", "const net=require('node:net');const ports=[process.env.MODEL_ROUTER_SAAS_CUSTOMER_PORT,process.env.MODEL_ROUTER_SAAS_PLATFORM_PORT].filter(Boolean);let left=ports.length;for(const p of ports){const s=net.connect({host:'127.0.0.1',port:Number(p)},()=>{s.destroy();if(--left===0)process.exit(0)});s.on('error',()=>process.exit(1))}setTimeout(()=>process.exit(1),3000).unref()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  gateway:
+    <<: *workload
+    command: ["start", "--role", "gateway"]
+    deploy:
+      # Scale with `docker compose up -d --scale gateway=3` (keep
+      # GATEWAY_HOST_PORT_START..END wide enough for the replica count).
+      replicas: ${GATEWAY_REPLICAS:-1}
+    environment:
+      NODE_ENV: production
+      MODEL_ROUTER_DEPLOYMENT_MODE: managed-saas
+      MODEL_ROUTER_SAAS_WORKLOAD_ROLE: gateway
+      MODEL_ROUTER_SAAS_DEPLOYMENT_ID: ${MODEL_ROUTER_SAAS_DEPLOYMENT_ID:?set MODEL_ROUTER_SAAS_DEPLOYMENT_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_ENVIRONMENT_ID: ${MODEL_ROUTER_SAAS_ENVIRONMENT_ID:?set MODEL_ROUTER_SAAS_ENVIRONMENT_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: postgresql://model_router_saas_gateway:${POSTGRES_GATEWAY_PASSWORD}@postgres:5432/${POSTGRES_DB:-model_router_saas}
+      SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE: ${SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE:-./dist/saas/runtime/software-provider-credential-kms.js}
+      # Operator-supplied trusted module exporting createManagedSaasGatewayRuntime;
+      # see deploy/README.md. Mount it under ./modules/.
+      MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE: ${MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE:?set MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE (trusted gateway runtime module) in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY:?set MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID:-}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_PREVIOUS_MASTER_KEYS: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_PREVIOUS_MASTER_KEYS:-}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT:-false}
+      MODEL_ROUTER_SAAS_GATEWAY_BIND_ADDRESS: ${MODEL_ROUTER_SAAS_GATEWAY_BIND_ADDRESS:-0.0.0.0}
+      MODEL_ROUTER_SAAS_GATEWAY_PORT: ${MODEL_ROUTER_SAAS_GATEWAY_PORT:-15007}
+      MODEL_ROUTER_SAAS_GATEWAY_ORIGIN: ${MODEL_ROUTER_SAAS_GATEWAY_ORIGIN:?set MODEL_ROUTER_SAAS_GATEWAY_ORIGIN (https) in deploy/compose/.env}
+    ports:
+      # One host port per replica out of this inclusive range.
+      - "${GATEWAY_HOST_PORT_START:-15007}-${GATEWAY_HOST_PORT_END:-15009}:${MODEL_ROUTER_SAAS_GATEWAY_PORT:-15007}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # No /healthz in managed SaaS mode; probe the /v1 listener via TCP.
+      test: ["CMD", "node", "-e", "const net=require('node:net');const s=net.connect({host:'127.0.0.1',port:Number(process.env.MODEL_ROUTER_SAAS_GATEWAY_PORT||15007)},()=>{s.destroy();process.exit(0)});s.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),3000).unref()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  credential-validation-worker:
+    <<: *workload
+    command: ["start", "--role", "credential-validation-worker"]
+    environment:
+      NODE_ENV: production
+      MODEL_ROUTER_DEPLOYMENT_MODE: managed-saas
+      MODEL_ROUTER_SAAS_WORKLOAD_ROLE: credential-validation-worker
+      MODEL_ROUTER_SAAS_DEPLOYMENT_ID: ${MODEL_ROUTER_SAAS_DEPLOYMENT_ID:?set MODEL_ROUTER_SAAS_DEPLOYMENT_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_ENVIRONMENT_ID: ${MODEL_ROUTER_SAAS_ENVIRONMENT_ID:?set MODEL_ROUTER_SAAS_ENVIRONMENT_ID in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL: postgresql://model_router_saas_validation_worker:${POSTGRES_VALIDATION_WORKER_PASSWORD}@postgres:5432/${POSTGRES_DB:-model_router_saas}
+      SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE: ${SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE:-./dist/saas/runtime/software-provider-credential-kms.js}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY:?set MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY in deploy/compose/.env}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID:-}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_PREVIOUS_MASTER_KEYS: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_PREVIOUS_MASTER_KEYS:-}
+      MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT: ${MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT:-false}
+      # Optional trusted static credential-validation target metadata module;
+      # uncomment the matching environment entry to enable it.
+      # MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE: /opt/model-router-modules/credential-validation-targets.mjs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # This role owns no listener; its readiness gates (schema + runtime
+      # privileges + KMS) run before it claims any work, and container
+      # liveness is tied to the workload process (docker-init exits with it),
+      # so probing the process tree is the honest in-container check.
+      test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  postgres-data:
