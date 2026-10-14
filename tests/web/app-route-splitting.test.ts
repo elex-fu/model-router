@@ -10,6 +10,7 @@ import { adminPageKey, RouteLoading, RoutePageBoundary } from '../../web/src/app
 const source = ts.createSourceFile('App.tsx', readFileSync(new URL('../../web/src/app/App.tsx', import.meta.url), 'utf8'),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const pages = {
+  Landing: 'landing',
   Login: 'auth', Setup: 'auth', Overview: 'overview', Upstreams: 'upstreams', RoutesPage: 'routes',
   Keys: 'keys', Usage: 'usage', Requests: 'requests', Playground: 'playground', Connect: 'connect',
   Accounts: 'accounts', Settings: 'settings', SetupGuide: 'setup-guide',
@@ -80,10 +81,10 @@ test('all existing admin route paths and list/detail module identities remain in
 
   const boundaries = [...nodes(source, ts.isJsxOpeningElement), ...nodes(source, ts.isJsxSelfClosingElement)]
     .filter(item => item.tagName.getText(source) === 'RoutePageBoundary');
-  assert.equal(boundaries.length, 4);
+  assert.equal(boundaries.length, 5, 'the public homepage has its own presentation boundary');
   assert.ok(boundaries.every(item => !item.attributes.properties.some(prop => ts.isJsxAttribute(prop) && prop.name.getText(source) === 'key')),
     'navigation must not remount the auth/session shell or healthy SaaS roots');
-  for (const namespace of ['console', 'platform']) {
+  for (const namespace of ['home', 'console', 'platform']) {
     assert.ok(boundaries.some(item => item.attributes.properties.some(prop => ts.isJsxAttribute(prop)
       && prop.name.getText(source) === 'pageKey' && prop.initializer && ts.isStringLiteral(prop.initializer) && prop.initializer.text === namespace)),
     'SaaS page keys must remain namespace-stable across deep links, tenant selection and query changes');

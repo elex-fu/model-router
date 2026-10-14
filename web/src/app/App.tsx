@@ -10,6 +10,7 @@ import { clearSafeDraft } from './safe-drafts';
 
 // Stable component identities; native imports run only when their existing
 // route/auth branch renders. No preload, new auth gate, or feature-state cache.
+const Landing = lazy(() => import('../features/landing').then(module => ({ default: module.Landing })));
 const Login = lazy(() => import('../features/auth').then(module => ({ default: module.Login })));
 const Setup = lazy(() => import('../features/auth').then(module => ({ default: module.Setup })));
 const Overview = lazy(() => import('../features/overview').then(module => ({ default: module.Overview })));
@@ -31,6 +32,7 @@ const returnRoutes = /^\/(?:overview|upstreams(?:\/[^/]+)?|routes|keys|usage|req
 function safeReturnPath(pathname: string) { return returnRoutes.test(pathname) ? pathname : '/overview'; }
 export function App() {
   const { pathname } = useLocation();
+  if (pathname === '/') return <RoutePageBoundary pageKey="home" resetKey={pathname}><Landing/></RoutePageBoundary>;
   const isSaasConsole = pathname === '/console' || pathname === '/console/keys' || pathname.startsWith('/console/');
   const isSaasPlatform = pathname === '/platform' || pathname.startsWith('/platform/');
   if (isSaasConsole) return <RoutePageBoundary pageKey="console" resetKey={pathname}><SaasConsoleApp/></RoutePageBoundary>;
@@ -42,8 +44,13 @@ function AdminApp() {
   const location = useLocation(); const navigate = useNavigate(); const qc = useQueryClient();
   const [online, setOnline] = useState(() => navigator.onLine);
   const [conflict, setConflict] = useState(false);
+  const [loginInFlight, setLoginInFlight] = useState(false);
   const boot = useQuery({ queryKey: ['bootstrap'], queryFn: async () => (await get<{ initialized: boolean }>('/bootstrap')).data, retry: false });
   const session = useQuery({ queryKey: ['session'], queryFn: async () => (await get<{ userId: string }>('/session')).data, retry: false, enabled: boot.data?.initialized === true });
+
+  useEffect(() => {
+    if (location.pathname !== '/login') setLoginInFlight(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     const sync = () => {
@@ -69,7 +76,7 @@ function AdminApp() {
     const onApiState = (event: Event) => {
       const state = (event as CustomEvent<ApiState>).detail;
       if (state === 'config-conflict') { setConflict(true); return; }
-      if (state !== 'unauthorized' || location.pathname === '/login') return;
+      if (state !== 'unauthorized' || ['/login', '/register', '/setup'].includes(location.pathname)) return;
       const initialized = qc.getQueryData<{ initialized: boolean }>(['bootstrap']);
       qc.clear();
       if (initialized) qc.setQueryData(['bootstrap'], initialized);
@@ -84,8 +91,9 @@ function AdminApp() {
   let content;
   if (boot.isPending) content = <div className="center">正在连接管理服务…</div>;
   else if (boot.error) content = <div className="center"><ErrorNotice error={boot.error} onRetry={() => boot.refetch()}/></div>;
+  else if (location.pathname === '/register' || location.pathname === '/setup') content = <Setup initialized={boot.data?.initialized === true}/>;
   else if (!boot.data?.initialized) content = location.pathname === '/setup' ? <Setup/> : <Navigate to="/setup" replace/>;
-  else if (location.pathname === '/login') content = session.data?.userId ? <Navigate to={safeReturnPath((location.state as { from?: string } | null)?.from ?? '/overview')} replace/> : <Login/>;
+  else if (location.pathname === '/login') content = session.data?.userId && !loginInFlight ? <Navigate to={safeReturnPath((location.state as { from?: string } | null)?.from ?? '/overview')} replace/> : <Login onBusyChange={setLoginInFlight}/>;
   else if (session.isPending) content = <div className="center">正在检查会话…</div>;
   else if (session.error || !session.data?.userId) content = <Navigate to="/login" replace state={{ from: safeReturnPath(location.pathname) }}/>;
   else content = <Routes><Route path="/login" element={<Navigate to="/overview" replace/>}/><Route path="/setup" element={<Navigate to="/setup/guide" replace/>}/><Route element={<Shell online={online}/> }><Route path="/overview" element={<Overview/>}/><Route path="/upstreams" element={<Upstreams/>}/><Route path="/upstreams/:id" element={<Upstreams/>}/><Route path="/routes" element={<RoutesPage/>}/><Route path="/keys" element={<Keys/>}/><Route path="/usage" element={<Usage/>}/><Route path="/requests" element={<Requests/>}/><Route path="/requests/:id" element={<Requests/>}/><Route path="/playground" element={<Playground/>}/><Route path="/connect" element={<Connect/>}/><Route path="/accounts" element={<Accounts/>}/><Route path="/settings" element={<Settings/>}/><Route path="/setup/guide" element={<SetupGuide/>}/><Route path="*" element={<Navigate to="/overview" replace/>}/></Route></Routes>;

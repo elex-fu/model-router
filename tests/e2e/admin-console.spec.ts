@@ -41,12 +41,22 @@ test('first-run setup, login, navigation, config save and revision conflict', as
     const configUrl = `${siteOrigin}/admin/api/v1/config`;
 
     await page.goto(site);
+    await expect(page.getByRole('heading', { name: /让每个模型，\s*各尽其能。/ })).toBeVisible();
+    await expect(page.getByLabel('初始化令牌')).toHaveCount(0);
+    await expect(page.getByLabel('密码', { exact: true })).toHaveCount(0);
+    await page.getByRole('link', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '创建管理员' })).toBeVisible();
     await page.getByLabel('初始化令牌').fill('local-e2e-bootstrap-token');
     await page.getByLabel('管理员用户名').fill('admin');
     await page.getByLabel('管理员密码').fill('long-e2e-password');
     await page.getByRole('button', { name: '创建管理员' }).click();
     await expect(page.getByRole('heading', { name: '登录' })).toBeVisible();
+
+    await page.getByRole('navigation', { name: '账号入口' }).getByRole('link', { name: '首次注册', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '实例已完成注册' })).toBeVisible();
+    await expect(page.getByLabel('管理员密码')).toHaveCount(0);
+    await page.getByRole('link', { name: '前往登录' }).click();
+    await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();
 
     await page.getByLabel('用户名').fill('admin');
     await page.getByLabel('密码').fill('long-e2e-password');

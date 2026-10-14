@@ -25,6 +25,13 @@ test('admin static assets, SPA fallback and traversal boundary', async () => {
   assert.ok(address && typeof address !== 'string');
   const base = `http://127.0.0.1:${address.port}`;
   try {
+    const home = await fetch(base);
+    assert.equal(home.status, 200);
+    assert.match(await home.text(), /console/);
+    const head = await fetch(base, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), '');
+    assert.equal((await fetch(base, { method: 'POST' })).status, 404);
     const root = await fetch(`${base}/admin/`);
     assert.equal(root.status, 200);
     assert.match(await root.text(), /console/);

@@ -1,0 +1,13 @@
+.request-back {
+  flex-shrink: 0;
+  border: 1px solid #cbd5cb;
+  border-radius: 8px;
+  padding: 9px 13px;
+  font-size: 13px;
+}
+.request-detail-summary > div > :last-child {
+  min-width: 0;
+  max-width: 72%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}

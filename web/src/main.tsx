@@ -7,5 +7,5 @@ import './style.css';
 
 const client = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 5000, refetchOnWindowFocus: true } } });
 const pathname = window.location.pathname;
-const basename = pathname === '/console' || pathname.startsWith('/console/') ? '/' : '/admin';
+const basename = pathname === '/' || pathname === '/console' || pathname.startsWith('/console/') ? '/' : '/admin';
 createRoot(document.getElementById('root')!).render(<React.StrictMode><QueryClientProvider client={client}><BrowserRouter basename={basename}><App /></BrowserRouter></QueryClientProvider></React.StrictMode>);

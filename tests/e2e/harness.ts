@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import type { Page } from '@playwright/test';
 import type { ViteDevServer } from 'vite';
 import { createServer as createViteServer } from 'vite';
-import type { AdminServerOptions } from '../../src/admin/server';
+import type { AdminServerOptions } from '../../dist/admin/server.js';
 
 export async function startConsole(
   page: Page,
@@ -98,7 +98,7 @@ export async function startConsole(
 }
 
 export async function setupAndLogin(page: Page, site: string) {
-  await page.goto(site);
+  await page.goto(new URL('/admin/setup', site).toString());
   await page.getByLabel('初始化令牌').fill('local-e2e-bootstrap-token');
   await page.getByLabel('管理员用户名').fill('admin');
   await page.getByLabel('管理员密码').fill('long-e2e-password');

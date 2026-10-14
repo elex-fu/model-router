@@ -1,0 +1,36 @@
+.mr-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  color: #162d29;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 23px;
+  font-weight: 700;
+  letter-spacing: -1px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.mr-brand:hover {
+  text-decoration: none;
+}
+.mr-brand-symbol {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  background: #0c7a67;
+  color: #fff;
+}
+.mr-mark {
+  display: block;
+  width: 26px;
+  height: 26px;
+}
+.mr-brand-light {
+  color: #fff;
+}
+.mr-brand-light .mr-brand-symbol {
+  background: #d8f7e9;
+  color: #17634e;
+}

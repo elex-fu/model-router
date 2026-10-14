@@ -632,6 +632,7 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     const requestId = `admin_${randomUUID()}`;
     try {
       const url = new URL(req.url ?? '/', 'http://admin.local');
+      if (url.pathname === '/') return serveStatic(req, res, '/admin/', options.webDistPath);
       if (options.saasIdentityHandler && isConsoleApiPath(url.pathname)) {
         const handled = await handleSaasIdentity(options.saasIdentityHandler, req, res);
         if (!handled && !res.headersSent)

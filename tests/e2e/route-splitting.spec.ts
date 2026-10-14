@@ -40,7 +40,7 @@ test('auth gating defers feature modules; pending routes keep Shell, then cache 
   const app = await startConsole(page); const seen = observe(page);
   let release = () => {};
   try {
-    await page.goto(app.site);
+    await page.goto(`${app.origin}/admin/setup`);
     await expect(page.getByRole('heading', { name: '创建管理员' })).toBeVisible();
     expect([...seen.modules.keys()]).toEqual(['auth']);
     await page.getByLabel('初始化令牌').fill('local-e2e-bootstrap-token');
@@ -53,8 +53,8 @@ test('auth gating defers feature modules; pending routes keep Shell, then cache 
     const loginStarted = seen.checkpoint();
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '初始引导' })).toBeVisible();
-    // Unchanged legacy Login awaits session invalidation before config+guide
-    // navigation. AdminApp may first navigate a now-authenticated /login to
+    // Login resolves its target before session invalidation. AdminApp may
+    // first navigate a now-authenticated /login to
     // its default overview. This optional authorized race is not preloading.
     const authorizedModules = ['auth', 'setup-guide', 'overview'];
     expect(seen.modules.has('auth')).toBe(true); expect(seen.modules.has('setup-guide')).toBe(true);
@@ -105,14 +105,13 @@ test('deep-link filters survive reload; revoked session still gates the module a
     await expect(page.getByRole('heading', { name: '初始引导' })).toBeVisible();
     const path = '/admin/requests/eng-route-missing'; const filters = '?status=failed&model=eng-model&keyId=eng-key';
     await page.goto(app.origin + path + filters);
-    await expect(page.getByRole('heading', { name: '请求日志', exact: true })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '请求详情', exact: true })).toBeVisible();
-    await expect(page.getByLabel('模型筛选')).toHaveValue('eng-model');
-    await expect(page.getByLabel('Key ID 筛选')).toHaveValue('eng-key');
+    await expect(page.getByRole('heading', { name: '请求详情', exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '请求日志', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: '返回请求日志' })).toHaveAttribute('href', '/admin/requests' + filters);
     expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(path + filters);
     await page.reload();
     await expect(page.getByRole('heading', { name: '请求详情', exact: true })).toBeVisible();
-    await expect(page.getByLabel('模型筛选')).toHaveValue('eng-model');
+    await expect(page.getByRole('link', { name: '返回请求日志' })).toHaveAttribute('href', '/admin/requests' + filters);
     expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(path + filters);
     await page.getByRole('button', { name: '退出登录', exact: true }).click();
     await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible();

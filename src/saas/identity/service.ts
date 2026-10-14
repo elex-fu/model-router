@@ -1675,12 +1675,13 @@ export class SaasIdentityService {
       if (pending.rows.length > 0) fail(409, 'INVITATION_PENDING');
 
       const expiry = new Date(now.getTime() + ttlSeconds * 1000);
+      // accepted_by_user_id is UPDATE-only for the control-plane role; its initial value defaults to NULL.
       await this.query(
         tx,
         `INSERT INTO saas_invitations
          (tenant_id, id, invited_email, role, token_hash, created_by_user_id,
-          accepted_by_user_id, created_at, expires_at, accepted_at, revoked_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, NULL, NULL)`,
+          created_at, expires_at, accepted_at, revoked_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL)`,
         [tenantId, invitationId, email, input.role, tokenHash, actorUserId, now.toISOString(), expiry.toISOString()],
         'INVITATION_PENDING',
       );
