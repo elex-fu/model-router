@@ -589,3 +589,118 @@ M（D5 限流调度）收尾验收 → 主线统一组合（R5 选项/R7 乘子�
 
 ## 下一任务
 全套件终审后的 R 系列收官评估剩余挂账（计数器 retention、BYOK TPM token 估计接缝、遗留 NULL 回填运营评审）。
+
+## 2026-10-12 追加：PROV-01 部分证据——Kimi Code 固定目标真实上游代理链路实测（主线手工验证，已完成）
+
+**性质**：真实 provider 受控目标实测（非 mock、非 PG 重放）；PROV-01 §11.1 目标"Kimi Code 固定目标的实际验证"的代理链路部分证据。**范围限定**：仅覆盖单租户 V2 代理核心（proxy.ts 路径），不含 SaaS managed-gateway 商业链路（需独立 PG 部署形态）、不含商业权利登记。
+
+### 环境
+- 配置：`~/.model-router/config.json`（revision 8，instanceId `model-router-kimi-code`），单一上游 kimi-code（`https://api.kimi.com/coding/v1`，anthropic 协议，x-api-key）；`config:validate` valid。
+- 凭证：Kimi Code API key（inline secret，本机文件，未入仓库；CONFIG-GUIDE.md 建议后续转 env/加密 Secret 并轮换——该 key 曾长期明文存于本机 JSON）。
+- 服务：`npm run dev -- start`，代理 127.0.0.1:15005 / 管理 127.0.0.1:15006；healthz 三项 ok。验证窗口 2026-10-12 ~14:3x–14:51 UTC。
+
+### 实测矩阵（全部通过）
+1. **非流式 a→a 直通**：`/v1/messages`，HTTP 200，thinking 块+signature 完整透传，`max_tokens` 语义正确（stop_reason=max_tokens）。
+2. **模型重写**：客户端请求 `kimi-code` → attempts 表 `resolved_model=kimi-for-coding`（经 `kimi-code-route`）。
+3. **流式 SSE**：53 data 块，message_start→message_delta→message_stop 完整，usage 从 `message_delta` 透传。
+4. **上游 usage 归集**：attempts `usage_json` input 98 / output 64（含 thinking_tokens 61），`source=upstream`、`semanticsVersion=v1`。
+5. **鉴权拒绝**：错误 proxy key → 401。
+6. **模型白名单**：proxy key 限定 `--models kimi-code`，请求 deepseek → 404 `No available upstream`（not_found_error，Anthropic 错误格式）。
+7. **未知模型**：`no-such-model` → 404 同构。
+8. **用量落库**：requests 表 rejected(401/404)/completed(200) 状态、route_id/final_upstream_id/duration 归属正确；quota_admissions 13 条、live_request_minute 20 行；usage_daily_rollups 0（日汇总周期任务未触发，分钟级已就位，符合预期）。
+
+### 过程发现（两条，均已定性）
+1. **live 冒烟测试形态缺口**：`tests/integration/kimi-live.test.ts` 硬编码 Kimi 开放平台（`api.moonshot.cn/v1`，openai 协议）——用 Kimi Code key 跑 `test:live:kimi` 必 401。直连隔离验证：同 key 对 `api.kimi.com/coding/v1` 200 / 对 `api.moonshot.cn` 401，key 有效、非代理缺陷。**缺口**：live 冒烟无 Kimi Code（anthropic 形态）变体；本次手工验证提供等价证据，测试补齐列挂账。
+2. **CLI key:create 与运行中服务互斥**：V2 server 运行时 CLI 拒绝写配置（提示走 admin console/API）。设计自洽，但运维流程需知晓：改配置先停服务或用管理台。
+
+### 挂账（新增）
+- live 冒烟补 Kimi Code 形态（`tests/integration/kimi-code-live.test.ts` 候选，含 a→o 桥接可选变体）。
+- `~/.model-router/config.json` inline secret 迁移 env/加密 Secret + key 轮换（本机操作，不涉仓库）。
+- PROV-01 其余出口保持 OPEN：DeepSeek Anthropic 固定目标实测、自定义 OpenAI/Anthropic 适配证据、revalidation service/history 实际接线、商业权利登记。
+
+## 下一任务
+R 系列收官评估（PROV-01 剩余出口：DeepSeek Anthropic 实测 → 自定义适配证据 → 商业权利登记）。
+
+## 2026-10-12 追加（二）：Kimi Code 多 key 调度 + 双向桥接 + 留存清理实测（主线手工验证，已完成）
+
+**性质**：单租户 V2 代理核心运维能力实测（真实上游），接续同日 Kimi Code 首轮验证。配置 revision 8→12（本机 `~/.model-router/config.json`，daemon 模式运行）。
+
+### 实测矩阵（全部通过）
+1. **多 key 轮转**：kimi-code 上游双 credential（同一把 key 注册两次，env 引用），8 请求 → attempts `credential_id` 精确 4:4 交替（round-robin）。
+2. **401 failover**：credential-b 换坏 key 后 8 请求——客户端 16/16 全 200，attempts 记录 b 3×401（`retryable_upstream_error`，kimi-* profile 401 可重试语义实证）+ 同请求自动换 a 成功，failover 对客户端完全透明。
+3. **cooldown 隔离**：b 连续 3 败（23:34:18/27/29）后进入 5 分钟冷却，期间流量全走 a；到期（23:39:29+）b 被重新选中→401→failures 4≥3 立即再冷却。KeyPool 语义（maxFailures=3 / cooldownMs=5min，`keyPool.ts:31-35`）逐项实证。
+4. **热加载**：revision 9（多 credential）/ 11（proxy key 白名单）免重启即时生效；revision 12 命中 restart-required（`storage.requestRetentionDays` 在 `restartFieldsFor` 清单内，属设计行为），日志明确提示 `requires restart; runtime snapshot retained`。
+5. **o→a 桥接（kimi-code 以 OpenAI 协议暴露）**：非流式 chat.completion 信封 + system 消息传递 + usage 三字段映射；流式 7 chunk、增量 content 拼接、finish_reason=stop、usage 尾包、`[DONE]`。thinking 块静默丢弃（OpenAI 格式无对应，预期行为）。
+6. **a→o 桥接（本地 Ollama 真实 OpenAI 上游）**：auth:none + 空 credentials 路径；非流式 Anthropic 信封（content 块/stop_reason=end_turn/usage 映射）；流式完整事件序列 message_start→content_block_*→message_delta→message_stop，15 个 text_delta 拼接完整。
+7. **留存清理真实删除证据**：requestRetentionDays 临时改 1 → daemon 启动即执行 `Purged 11 log rows` + `Archived and purged 11 V2 request details`（9-27 的 11 条旧行真实删除：requests 16→5、attempts 13→2）；确认后恢复 30（重启加载，无再删除——行为正确）。03:00 定时清理待 soak 周期观察。
+8. **secret 迁移**：inline → `{type:"env", name:"KIMI_CODE_API_KEY"}`，config.json 零明文 key，env 启动 daemon 后全链路正常。**待用户手动**：Kimi Code 控制台轮换该 key（曾长期明文存本机 JSON）。
+9. **网络错误 failover（计划外收获）**：恢复验证期间 b 出现 1×504 `connect_timeout`（kimi.com 偶发，与 9-27 唯一失败同因），自动重试救回，客户端无感——重试机制对连接错误同样有效。
+
+### 新增运维资产
+- `scripts/ops/soak-monitor.mjs`：小时级巡检（daemon RSS/socket 按状态统计/三库+WAL 体积/行数趋势/healthz+全链路探针/warn 阈值），JSONL 输出 `~/.model-router/soak/inspect-*.jsonl`，`--once`/`--watch` 双模式，probe key 经 `SOAK_PROXY_KEY` env（不落代码）。已启动 watch 长跑（首周期：RSS 131.5MB 稳定、CLOSE_WAIT=0、probe=200）。
+- 首轮验证发现的 live 冒烟形态缺口（Kimi Code 无内置冒烟）本轮以手工矩阵补齐等价证据。
+
+### 代码缺口挂账（本轮实证发现，未修只登记）
+1. `minute/hour/dailyRetentionDays` 死配置：无后端消费方，分钟桶实际按 requestRetentionDays（30 天）清理（`v2-runtime.ts:102` 唯一映射）。
+2. telemetry.sqlite 无 VACUUM 路径：purge 删行后文件不缩（logs.sqlite 有 CLI `maintenance:vacuum`，telemetry 无）。
+3. 无 /metrics / 进程内存端点：healthz 仅 db+recorder；soak 监控被迫走 OS 层（ps/lsof/stat）。
+4. KeyPool cooldown/maxFailures/strategy 硬编码（`new KeyPool()` 无参，`index.ts:236`），不可经配置调整。
+5. o→a 桥接无走代理的流式集成测试（单测 15 用例含流式；`proxy.test.ts:981` 仅非流式）——本轮真实上游流式已实证，测试补齐列挂账。
+6. Ollama 冷加载（~34s 模型装载）期间代理 10s `connectTimeoutMs` 不足 → 504 connect_timeout；暖模型后 1.5s 正常。本地/慢上游场景建议允许 per-upstream connectTimeout 覆盖。
+7. Ollama 流式响应不含 usage（input/output_tokens=0），`missingUsagePolicy: retain-reservation` 生效——跨上游 usage 语义差异实证，扣费按预留口径处理符合设计。
+
+## 下一任务
+soak 长跑（≥3 天，每小时巡检 JSONL + 次日 03:00 定时清理观察）→ 汇总趋势报告（RSS/连接/WAL 膨胀/清理执行）→ PROV-01 剩余出口不变。
+
+## 2026-10-13 追加：双上游压测 + LongCat 接入验证（主线手工验证，已完成）
+
+**性质**：单租户 V2 代理（a）真实上游压测（Ollama 本地 / Kimi Code 云端 / LongCat 云端）与第三方 OpenAI/Anthropic 兼容平台接入验证（PROV-01 自定义适配证据的部分补充）。配置 revision 13→15（LongCat 引入 + 两次修正）。
+
+### A. 压测（新增 `scripts/ops/bench-ollama.mjs`，多模型档案制）
+1. **Ollama 并发 8 × 10 分钟持续**：稳定 1.00 req/s（上游串行推理为瓶颈）；首分钟 p50 6070ms → 末段 3924ms（-35%，模型热缓存加速，非代理因素）；**10 分钟 6644 次 429 全部快速失败（246ms 恒定），零 5xx 零超时**——"上游慢 + 客户端激进重试"最恶劣形态下过载保护稳定；压测后 RSS 22MB 零残留。
+2. **Kimi Code 标准 + 并发 4 × 3 分钟持续**：标准模式并发 8 全成功（吞吐 1.77 req/s）；持续段三分钟 p50 平稳（2167-2396ms 波动 <10%）；**KeyPool 双 credential 持续负载下精确 50:50 轮转（119/119）**；流式 156 SSE 事件 4/4 成功；TTFB p50=1483ms。token 消耗 ~37k 全部上游回传落库。
+3. **代理资源画像**：满载工作集 ~55MB（结束后 10s 内回落 22MB）；CPU 空闲归零；a→o 桥接并发下无 SSE 损坏。
+4. 已知问题：脚本内嵌逐分钟资源采样在持续压测循环中失效（execFile 回调被饿死）——资源结论以外部采样为准；待改独立采样进程。
+
+### B. LongCat（api.longcat.chat）接入——第三方双格式平台首个实测
+- **端点探测结论**（无文档抓取条件下的黑盒实证）：OpenAI 格式 `https://api.longcat.chat/openai`、Anthropic 格式 `https://api.longcat.chat/anthropic`，两者均 **`Authorization: Bearer` 鉴权**（Anthropic 端点不读 x-api-key：仅传 x-api-key 时报 `missing_api_key`，传 Bearer 假 key 报 `incorrect api key`）。
+- **接入形态**：`provider: custom` + `protocol: anthropic` + **`auth.mode: bearer`**（proxy.ts 鉴权分支实证支持 bearer×anthropic 组合，发 Bearer + anthropic-version）；模型 `LongCat-2.5-Preview` / `LongCat-2.0`；route 双客户端协议（anthropic+openai）。
+- **验证矩阵全通过**：a→a 非流式（thinking+text 双块透传，usage 14/32）；a→a 流式（81 事件完整诗歌生成）；o→a 桥接（OpenAI 客户端 → LongCat Anthropic 端点，chat.completion 信封 + usage 映射）；压测并发 8 全成功（p50 3480ms / TTFB 1946ms，比 kimi-code 慢 ~30%，Preview 版 thinking 较长）；usage 56/62 reported（余为 429 拒绝）。token 消耗 730 in / 3705 out。
+- **两个接入坑（配置修正记录）**：① baseUrl 必须含 `/v1`（`joinApiUrl` 按 baseUrl+endpoint 拼接，`/anthropic` + `messages` → 404；正确值 `https://api.longcat.chat/anthropic/v1`）；② 手改 config.json 若 bump revision 失败被拒后，下次修改跨步会被 `advance exactly one revision` 拒绝，重启 daemon 直接加载磁盘最新即恢复。
+- 凭证现状：inline（用户手填），建议转 env/加密 Secret。
+
+### 挂账更新
+- bench 脚本持续模式资源采样改独立进程（本轮已知问题④的延伸）。
+- LongCat 凭证 inline → env/加密 Secret 迁移（同 kimi-code 迁移惯例）。
+- LongCat OpenAI 格式端点（`longcat-openai` upstream，已配置禁用态）未实测——如需 o→o 直通证据再启用。
+
+## 下一任务
+soak 长跑继续（至 ≥3 天出趋势报告）→ PROV-01 剩余出口：DeepSeek Anthropic 实测 → 自定义适配证据登记（本轮 LongCat 已补一份）→ 商业权利登记。
+
+## 2026-10-13 追加（二）：LongCat 加重持续压测 + RPM 限流根因实证（主线手工验证，已完成）
+
+**性质**：接续同日首轮压测，对免费上游 LongCat 做更大时长持续负载（c=8 × 15min，max_tokens=128）；期间定位并实证了此前多轮压测 429 的真实根因。配置 revision 15→16（热加载）。
+
+### A. RPM 根因实证（重要修正）
+- **现象**：首轮 15min 压测（进程中止前 4 分钟数据）每分钟 ~55 ok + 数百×429；此前 Ollama c=8×10min 亦有 6644×429。
+- **根因**：验证用代理 key `verify-full-chain` 创建时带 `rpm: 60`——8 worker 以 ~5s/请求的节奏自然需求 ~92 req/min，超限后 429 快速失败（~250ms）→ worker 立即重试 → 放大 churn。**此前"429 边界恰好在并发限制 10"的归因需修正：ramp 测试的 429 混入了 RPM=60 污染**，真实并发边界（`defaultMaxConcurrentRequests: 10`）尚无干净证据。
+- **处置**：revision 15→16 将该 key rpm 提至 600（proxyKeys 不在 `restartFieldsFor`，热加载日志确认 `applied external config revision 16`）。重跑后 15 分钟全程 **0×429**，吞吐 55/min → 77/min（+40%），根因闭环。
+- **结论**：代理限流器行为正确（按配置精确拦截），属验证配置问题而非代理缺陷；压测前需核对 key 的 rpm 配额。
+
+### B. 15 分钟持续压测结果（c=8，全程 0×429）
+- **总量**：attempts 1257 = 1164×200（92.6%）+ 93×504（7.4%）；持续吞吐 1.28 req/s（≈77/min）。
+- **延迟无退化**：全程 p50=5256ms / p90=7257ms / p99=9508ms / max=10621ms；首分钟 p50=5435ms → 末分钟 p50=4849ms（略升）；逐分钟 p50 稳定于 4.8–5.6s。
+- **资源画像**（外部 ps 采样，每 2min）：RSS 141→138MB，全程 127–145MB 区间波动无增长趋势；CPU 0–3%。结合首轮中止后观察（负载结束 RSS 173→68MB）：**前一日"178MB 空闲不收缩"疑虑澄清——V8 惰性 GC，负载中堆涨、闲后回收，无泄漏信号**。
+- **token 消耗**：1164 条 completed 合计 input 15,132 + output 118,186（`usage_json` 上游回报，`source=upstream`）。
+
+### C. 504 connect_timeout 定性（93 次，7.4%）
+- attempts `retry_reason` 全为 `connect_timeout`：代理到 `api.longcat.chat` 的 TCP/TLS 连接超过 `connectTimeoutMs=10s`。
+- 定性为上游/网络侧现象（持续负载下免费层对新连接接纳变慢），非代理缺陷；与 10-12 Kimi Code 偶发 504 同型。客户端侧由调用方重试兜底（bench 脚本不重试，故直接计数）。
+
+### 挂账更新
+- ramp 测试（c=12/16）在无 RPM 污染下重跑，取真实并发边界（10）干净证据。
+- per-upstream `connectTimeoutMs` 覆盖能力（LongCat 7.4% connect_timeout + Ollama 冷加载 34s 两例共同支撑）。
+- bench 外部采样脚本修正：临时采样器 SQL 时间窗笔误（`now*1000-120` 为 120ms 而非 120s），请求速率列失效；资源列（ps）不受影响。正式化时一并修。
+
+## 下一任务
+soak 长跑继续（至 ≥3 天出趋势报告）→ ramp 干净复测（可选）→ PROV-01 剩余出口不变。
