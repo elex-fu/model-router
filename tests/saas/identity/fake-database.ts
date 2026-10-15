@@ -19,6 +19,7 @@ interface FakeState {
   bootstrapTokens: Array<Record<string, unknown>>;
   invitations: Array<Record<string, unknown>>;
   oauthIdentities: Array<Record<string, unknown>>;
+  emailVerificationCodes: Array<Record<string, unknown>>;
 }
 
 function copy<T>(value: T): T {
@@ -48,6 +49,7 @@ export class FakeSaasDatabase {
     bootstrapTokens: [],
     invitations: [],
     oauthIdentities: [],
+    emailVerificationCodes: [],
   };
   failNextProjectInsert = false;
   failNextProjectMembershipInsert = false;
@@ -92,6 +94,8 @@ export class FakeSaasDatabase {
       return result<Row>();
     }
     if (statement.startsWith('select set_config(')) return result<Row>();
+    // SET LOCAL timeouts issued by the marketing/verification transactions.
+    if (statement.startsWith('set local ')) return result<Row>();
 
     if (statement.startsWith('select initialized, initialized_at from saas_platform_state')) {
       return result<Row>([{ ...this.state.platformState } as Row]);
@@ -200,6 +204,75 @@ export class FakeSaasDatabase {
       });
       return result<Row>([{ id: a } as Row]);
     }
+
+    // R4 (106) registration admission: saas_email_verification_codes.
+    if (statement.startsWith('insert into saas_email_verification_codes')) {
+      // (id, email_canonical, purpose, code_hash, 0, expires_at, NULL, created_ip, created_at)
+      this.state.emailVerificationCodes.push({
+        id: a,
+        email_canonical: b,
+        purpose: c,
+        code_hash: d,
+        attempts: 0,
+        expires_at: e,
+        consumed_at: null,
+        created_ip: f ?? null,
+        created_at: g,
+      });
+      return result<Row>();
+    }
+    if (statement.startsWith('select created_at from saas_email_verification_codes')) {
+      const candidates = this.state.emailVerificationCodes
+        .filter((row) => row.purpose === a && row.email_canonical === b)
+        .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+      return result<Row>(candidates[0] ? [{ created_at: candidates[0].created_at } as Row] : []);
+    }
+    if (statement.startsWith('select id, code_hash, attempts, expires_at from saas_email_verification_codes')) {
+      const candidates = this.state.emailVerificationCodes
+        .filter((row) => row.purpose === a && row.email_canonical === b && row.consumed_at === null)
+        .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+      const row = candidates[0];
+      return result<Row>(
+        row
+          ? [{ id: row.id, code_hash: row.code_hash, attempts: row.attempts, expires_at: row.expires_at } as Row]
+          : [],
+      );
+    }
+    if (statement.startsWith('delete from saas_email_verification_codes')) {
+      if (statement.includes('id = $1')) {
+        const before = this.state.emailVerificationCodes.length;
+        this.state.emailVerificationCodes = this.state.emailVerificationCodes.filter((row) => row.id !== a);
+        void before;
+        return result<Row>();
+      }
+      const cutoff = new Date(String(c)).getTime();
+      this.state.emailVerificationCodes = this.state.emailVerificationCodes.filter(
+        (row) =>
+          !(row.purpose === a && row.email_canonical === b && new Date(String(row.expires_at)).getTime() < cutoff),
+      );
+      return result<Row>();
+    }
+    if (statement.startsWith('update saas_email_verification_codes set attempts')) {
+      const row = this.state.emailVerificationCodes.find((candidate) => candidate.id === a && candidate.attempts < b);
+      if (row) row.attempts = Number(row.attempts) + 1;
+      return result<Row>();
+    }
+    if (statement.startsWith('update saas_email_verification_codes set consumed_at')) {
+      const row = this.state.emailVerificationCodes.find(
+        (candidate) => candidate.id === a && candidate.consumed_at === null,
+      );
+      if (!row) return result<Row>();
+      row.consumed_at = b;
+      return result<Row>([{ id: row.id } as Row]);
+    }
+    // R4 password reset: update the stored hash for an active account.
+    if (statement.startsWith('update saas_users set password_hash')) {
+      const user = this.state.users.find((row) => row.id === a && row.disabled_at === null);
+      if (!user) return result<Row>();
+      user.password_hash = b;
+      user.updated_at = c;
+      return result<Row>([{ id: user.id } as Row]);
+    }
     if (statement.startsWith('insert into saas_platform_role_assignments')) {
       this.state.platformRoleAssignments.push({
         user_id: a,
@@ -239,6 +312,15 @@ export class FakeSaasDatabase {
     if (statement.startsWith('select s.csrf_token_hash from saas_sessions')) {
       const session = this.validSession(String(a), String(b));
       return result<Row>(session ? [{ csrf_token_hash: session.csrf_token_hash } as Row] : []);
+    }
+    if (statement.startsWith('update saas_sessions set revoked_at = $2 where user_id = $1')) {
+      // R4 password reset: revoke every session of the user (a = user id,
+      // b = now). The revokeOthers $3 shape is deliberately NOT handled here:
+      // identity.test.ts wraps this fake with its own emulation for it.
+      for (const session of this.state.sessions) {
+        if (session.user_id === a && session.revoked_at === null) session.revoked_at = b;
+      }
+      return result<Row>();
     }
     if (statement.startsWith('update saas_sessions set revoked_at')) {
       const session = this.state.sessions.find((row) => row.token_hash === a);

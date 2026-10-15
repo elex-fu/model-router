@@ -162,6 +162,13 @@ export interface SessionResult {
   session: SafeSession;
 }
 
+/** R4 registration admission descriptor (GET /auth/register/options). */
+export interface RegistrationAdmissionOptions {
+  mode: 'open' | 'invite' | 'closed';
+  emailVerificationRequired: boolean;
+  turnstile: { enabled: boolean; siteKey?: string };
+}
+
 /** Exact customer-owned routes; these do not attest that login was MFA-assured. */
 export interface CustomerMfaStatus { enabled: boolean }
 export interface CustomerMfaStartInput { password: string; currentTotpCode?: string }
@@ -1752,9 +1759,25 @@ export const saasClient = {
   revokeCustomerMfa: (input: CustomerMfaRevokeInput, options: { signal?: AbortSignal } = {}) =>
     request<unknown>('/auth/mfa/revoke', { method: 'POST', body: input, ...options, customerMfa: true })
       .then(value => customerMfaChangedFromResponse(value, false)),
-  login: (input: { email: string; password: string }) =>
-    request<SessionResult>('/auth/session', { method: 'POST', body: input }),
+  login: (input: { email: string; password: string; captchaToken?: string }) =>
+    request<SessionResult>('/auth/session', { method: 'POST', body: input, redactErrors: true }),
   getSession: () => request<SessionResult>('/auth/session'),
+  getRegistrationOptions: (options: { signal?: AbortSignal } = {}) =>
+    request<RegistrationAdmissionOptions>('/auth/register/options', { ...options, redactErrors: true }),
+  sendRegistrationCode: (input: { email: string }) =>
+    request<{ sent: boolean }>('/auth/register/send-code', { method: 'POST', body: input, redactErrors: true }),
+  register: (input: {
+    email: string;
+    password: string;
+    displayName?: string;
+    verificationCode?: string;
+    inviteCode?: string;
+    captchaToken?: string;
+  }) => request<SessionResult>('/auth/register', { method: 'POST', body: input, redactErrors: true }),
+  sendPasswordResetCode: (input: { email: string }) =>
+    request<{ sent: boolean }>('/auth/password-reset/send-code', { method: 'POST', body: input, redactErrors: true }),
+  confirmPasswordReset: (input: { email: string; code: string; newPassword: string }) =>
+    request<{ reset: boolean }>('/auth/password-reset/confirm', { method: 'POST', body: input, redactErrors: true }),
   logout: () => request<{ loggedOut: boolean }>('/auth/session', { method: 'DELETE' }),
   getCustomerSessions: () =>
     request<unknown>('/auth/sessions', { redactErrors: true }).then(customerSessionsFromResponse),

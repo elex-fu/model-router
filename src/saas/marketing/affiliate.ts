@@ -493,6 +493,19 @@ export class MarketingAffiliateService {
     });
   }
 
+  /**
+   * R4 registration admission gate: resolve an invite code to its inviter
+   * tenant without binding. Pure read; the code must be shape-valid or it
+   * resolves to null (the registration surface treats a shape failure the
+   * same as an unknown code — no existence oracle beyond "resolvable").
+   */
+  async resolveInviteCode(code: string): Promise<string | null> {
+    if (typeof code !== 'string') throw new MarketingAffiliateError('AFFILIATE_INVALID_INPUT');
+    const normalized = code.trim().toUpperCase();
+    if (!INVITE_CODE.test(normalized)) return null;
+    return this.resolveInviter(this.database, normalized);
+  }
+
   /** Customer view: own invite code, attribution count and keyset-paged rewards. */
   async getMyAffiliate(
     context: { tenantId: string; userId: string },

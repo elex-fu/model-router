@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 import type { CredentialKeyMaterial, CredentialKeyProvider } from '../../../src/saas/credentials/crypto.js';
 import type { ManagedSaasDeploymentConfig } from '../../../src/saas/deployment.js';
 import {
+  CUSTOMER_AUTH_CODE_SEND_RATE_LIMIT,
+  CUSTOMER_AUTH_CODE_SEND_RATE_WINDOW_MS,
   CUSTOMER_AUTH_NAMESPACE,
   CUSTOMER_AUTH_RATE_LIMIT,
   CUSTOMER_AUTH_RATE_WINDOW_MS,
@@ -145,10 +147,15 @@ test('loads exact named contracts, freezes only the copied KMS environment, prob
   assert.deepEqual(redisFactoryOptions, { url: REDIS_URL, keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX });
   assert.equal(kmsReadyCalls, 1);
   assert.equal(redisReadyCalls, 1);
-  assert.equal(limiterOptions.length, 2);
+  assert.equal(limiterOptions.length, 3);
   assert.deepEqual(limiterOptions, [
     { namespace: PLATFORM_AUTH_NAMESPACE, limit: PLATFORM_AUTH_RATE_LIMIT, windowMs: PLATFORM_AUTH_RATE_WINDOW_MS },
     { namespace: CUSTOMER_AUTH_NAMESPACE, limit: CUSTOMER_AUTH_RATE_LIMIT, windowMs: CUSTOMER_AUTH_RATE_WINDOW_MS },
+    {
+      namespace: CUSTOMER_AUTH_NAMESPACE,
+      limit: CUSTOMER_AUTH_CODE_SEND_RATE_LIMIT,
+      windowMs: CUSTOMER_AUTH_CODE_SEND_RATE_WINDOW_MS,
+    },
   ]);
   assert.equal(Object.hasOwn(providers, 'gateway'), false);
   assert.equal(providers.providerCredentialSealingKms, undefined);

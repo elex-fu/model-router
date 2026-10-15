@@ -65,6 +65,9 @@ export const PLATFORM_AUTH_RATE_LIMIT = 10;
 export const CUSTOMER_AUTH_RATE_LIMIT = 10;
 export const PLATFORM_AUTH_RATE_WINDOW_MS = 15 * 60_000;
 export const CUSTOMER_AUTH_RATE_WINDOW_MS = 15 * 60_000;
+/** R4 registration admission: verification-code send window (new-api rule). */
+export const CUSTOMER_AUTH_CODE_SEND_RATE_LIMIT = 2;
+export const CUSTOMER_AUTH_CODE_SEND_RATE_WINDOW_MS = 30_000;
 
 export interface CredentialKeyProviderFactoryOptions {
   readonly env: ProviderEnvironment;
@@ -123,6 +126,8 @@ export interface ManagedSaasProviders {
   readonly providerCredentialRewrappingKms?: LoadedProviderCredentialRewrappingKms;
   readonly platformAuthRateLimiter: ManagedRateLimiter;
   readonly customerAuthRateLimiter: ManagedRateLimiter;
+  /** R4 registration admission: dedicated 2/30s per-IP code-send window. */
+  readonly customerAuthCodeSendRateLimiter: ManagedRateLimiter;
   /** Readiness probes for the operations summary runtime probes (E4). */
   readonly redisReady: () => Promise<void>;
   readonly credentialKeyReady: () => Promise<void>;
@@ -595,6 +600,15 @@ export async function loadManagedSaasProviders(
       limit: CUSTOMER_AUTH_RATE_LIMIT,
       windowMs: CUSTOMER_AUTH_RATE_WINDOW_MS,
     });
+    // R4 registration admission: the dedicated 2-per-30-seconds per-IP fixed
+    // window for email verification-code sends (new-api rule). Same Redis
+    // key namespace family; the limit/window are part of the key, so this is
+    // an independent keyspace from the shared customer-auth window.
+    const customerAuthCodeSendRateLimiter = await redisProvider.createRateLimiter({
+      namespace: CUSTOMER_AUTH_NAMESPACE,
+      limit: CUSTOMER_AUTH_CODE_SEND_RATE_LIMIT,
+      windowMs: CUSTOMER_AUTH_CODE_SEND_RATE_WINDOW_MS,
+    });
     providerCredentialSealingKms = await loadProviderCredentialSealingKms(options);
     if (config.providerCredentialRewrappingKmsModule !== undefined) {
       const configuredModule =
@@ -643,6 +657,7 @@ export async function loadManagedSaasProviders(
         : { providerCredentialRewrappingKms: loadedProviderCredentialRewrappingKms }),
       platformAuthRateLimiter,
       customerAuthRateLimiter,
+      customerAuthCodeSendRateLimiter,
       redisReady: () => loadedRedisProvider.checkReady(),
       credentialKeyReady: () => loadedCredentialKeyProvider.checkReady(),
       close,

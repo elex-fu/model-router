@@ -28,6 +28,7 @@ import {
   type CustomerSessionRevocation,
   type OtherCustomerSessionsRevocation,
   type Project,
+  type RegistrationAdmissionOptions,
   SaasApiError,
   type SafeCustomerSession,
   type SafeSession,
@@ -626,6 +627,401 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (result: SessionResul
         </Field>
         <SaveButton busy={busy}>登录</SaveButton>
       </form>
+      <p className="muted auth-form-note">
+        <Link to="/console/forgot-password">忘记密码？</Link>
+        <span aria-hidden="true"> · </span>
+        <Link to="/console/register">注册新账户</Link>
+      </p>
+    </AuthFrame>
+  );
+}
+
+/** R4: Cloudflare Turnstile widget (loaded on demand, token single-use). */
+interface TurnstileApi {
+  render: (
+    element: HTMLElement,
+    options: {
+      sitekey: string;
+      callback: (token: string) => void;
+      'expired-callback': () => void;
+      'error-callback': () => void;
+    },
+  ) => string;
+  remove: (widgetId: string) => void;
+}
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
+}
+
+let turnstileScript: Promise<void> | undefined;
+
+function loadTurnstile(): Promise<void> {
+  turnstileScript ??= new Promise<void>((resolve, reject) => {
+    if (window.turnstile) {
+      resolve();
+      return;
+    }
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[data-model-router-turnstile="1"]',
+    );
+    const script = existing ?? document.createElement('script');
+    script.dataset.modelRouterTurnstile = '1';
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', () => resolve());
+    script.addEventListener('error', () => {
+      turnstileScript = undefined;
+      reject(new Error('无法加载人机验证组件，请检查网络后重试。'));
+    });
+    if (!existing) document.head.appendChild(script);
+  });
+  return turnstileScript;
+}
+
+function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (token: string) => void }) {
+  const container = useRef<HTMLDivElement>(null);
+  const widgetId = useRef<string | undefined>(undefined);
+  const tokenListener = useRef(onToken);
+  tokenListener.current = onToken;
+
+  useEffect(() => {
+    let active = true;
+    void loadTurnstile()
+      .then(() => {
+        if (!active || !container.current || !window.turnstile) return;
+        widgetId.current = window.turnstile.render(container.current, {
+          sitekey: siteKey,
+          callback: (token) => tokenListener.current(token),
+          'expired-callback': () => tokenListener.current(''),
+          'error-callback': () => tokenListener.current(''),
+        });
+      })
+      .catch(() => {
+        if (active) tokenListener.current('');
+      });
+    return () => {
+      active = false;
+      if (widgetId.current !== undefined) {
+        window.turnstile?.remove(widgetId.current);
+        widgetId.current = undefined;
+      }
+    };
+  }, [siteKey]);
+
+  return <div ref={container} className="turnstile-slot" />;
+}
+
+/** 60-second resend countdown shared by the code-send buttons. */
+function useResendCooldown(): [number, (seconds: number) => void] {
+  const [cooldown, setCooldown] = useState(0);
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setTimeout(() => setCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
+  return [cooldown, setCooldown];
+}
+
+function RegisterPage({ onAuthenticated }: { onAuthenticated: (result: SessionResult) => void }) {
+  const [options, setOptions] = useState<RegistrationAdmissionOptions>();
+  const [optionsError, setOptionsError] = useState<unknown>();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [captchaToken, setCaptchaToken] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  const [cooldown, setCooldown] = useResendCooldown();
+  const [sending, setSending] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const [notice, setNotice] = useState<string>();
+
+  useEffect(() => {
+    const controller = new AbortController();
+    saasClient
+      .getRegistrationOptions({ signal: controller.signal })
+      .then((value) => setOptions(value))
+      .catch((cause) => {
+        if (controller.signal.aborted) return;
+        setOptionsError(cause);
+      });
+    return () => controller.abort();
+  }, []);
+
+  async function sendCode() {
+    setSending(true);
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      await saasClient.sendRegistrationCode({ email });
+      setCodeSent(true);
+      setCooldown(60);
+      setNotice('验证码已发送，请查收邮箱（注意垃圾邮件文件夹）。');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(undefined);
+    try {
+      const result = await saasClient.register({
+        email,
+        password,
+        ...(displayName.trim() === '' ? {} : { displayName: displayName.trim() }),
+        ...(verificationCode.trim() === '' ? {} : { verificationCode: verificationCode.trim() }),
+        ...(inviteCode.trim() === '' ? {} : { inviteCode: inviteCode.trim() }),
+        ...(captchaToken === '' ? {} : { captchaToken }),
+      });
+      setPassword('');
+      onAuthenticated(result);
+    } catch (err) {
+      setError(err);
+      // A failed submit consumes the captcha token; force a fresh solve.
+      setCaptchaToken('');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (optionsError !== undefined) {
+    return (
+      <AuthFrame subtitle="客户控制台">
+        <h1>注册</h1>
+        <ErrorNotice error={optionsError} />
+        <p className="muted">
+          <Link to="/console/login">返回登录</Link>
+        </p>
+      </AuthFrame>
+    );
+  }
+  if (options === undefined) {
+    return (
+      <AuthFrame subtitle="客户控制台">
+        <h1>注册</h1>
+        <p className="muted">正在加载注册配置…</p>
+      </AuthFrame>
+    );
+  }
+  if (options.mode === 'closed') {
+    return (
+      <AuthFrame subtitle="客户控制台">
+        <h1>注册</h1>
+        <p className="muted">当前未开放注册。如需账户，请联系平台管理员或使用邀请链接。</p>
+        <Link className="button-link primary" to="/console/login">
+          前往登录
+        </Link>
+      </AuthFrame>
+    );
+  }
+
+  const needsCode = options.emailVerificationRequired;
+  const turnstileEnabled = options.turnstile.enabled && options.turnstile.siteKey !== undefined;
+
+  return (
+    <AuthFrame subtitle="客户控制台">
+      <h1>注册</h1>
+      <p className="muted">
+        {options.mode === 'invite'
+          ? '凭邀请码注册一个新账户。'
+          : '注册一个新账户，开始使用模型服务。'}
+      </p>
+      <ErrorNotice error={error} />
+      {notice === undefined ? null : (
+        <div className="notice" role="status">
+          <span>{notice}</span>
+        </div>
+      )}
+      <form onSubmit={submit}>
+        <Field label="邮箱">
+          <input
+            required
+            type="email"
+            autoComplete="username"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </Field>
+        {needsCode ? (
+          <Field label="邮箱验证码" hint="6 位数字，发送后 15 分钟内有效">
+            <div className="inline-controls">
+              <input
+                required
+                inputMode="numeric"
+                pattern="[0-9]{6}"
+                maxLength={6}
+                autoComplete="one-time-code"
+                value={verificationCode}
+                onChange={(event) => setVerificationCode(event.target.value)}
+              />
+              <button
+                type="button"
+                disabled={sending || cooldown > 0 || email.trim() === ''}
+                onClick={() => void sendCode()}
+              >
+                {cooldown > 0 ? `重发 (${cooldown}s)` : codeSent ? '重新发送' : '发送验证码'}
+              </button>
+            </div>
+          </Field>
+        ) : null}
+        <Field label="密码" hint="至少 12 个字符">
+          <input
+            required
+            type="password"
+            minLength={12}
+            autoComplete="new-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </Field>
+        <Field label="昵称（可选）">
+          <input
+            autoComplete="nickname"
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+          />
+        </Field>
+        <Field
+          label={options.mode === 'invite' ? '邀请码' : '邀请码（可选）'}
+          hint={options.mode === 'invite' ? undefined : '填写邀请码可为邀请人带来奖励'}
+        >
+          <input
+            required={options.mode === 'invite'}
+            value={inviteCode}
+            onChange={(event) => setInviteCode(event.target.value)}
+          />
+        </Field>
+        {turnstileEnabled && options.turnstile.siteKey !== undefined ? (
+          <TurnstileWidget siteKey={options.turnstile.siteKey} onToken={setCaptchaToken} />
+        ) : null}
+        <SaveButton busy={busy}>注册</SaveButton>
+      </form>
+      <p className="muted auth-form-note">
+        已有账户？<Link to="/console/login">直接登录</Link>
+      </p>
+    </AuthFrame>
+  );
+}
+
+function ForgotPasswordPage() {
+  const [email, setEmail] = useState('');
+  const [code, setCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  const [done, setDone] = useState(false);
+  const [cooldown, setCooldown] = useResendCooldown();
+  const [sending, setSending] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const [notice, setNotice] = useState<string>();
+
+  async function sendCode() {
+    setSending(true);
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      await saasClient.sendPasswordResetCode({ email });
+      setCodeSent(true);
+      setCooldown(60);
+      setNotice('重置码已发送。若该邮箱已注册，你将收到一封包含 6 位验证码的邮件。');
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(undefined);
+    try {
+      await saasClient.confirmPasswordReset({ email, code: code.trim(), newPassword });
+      setDone(true);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <AuthFrame subtitle="客户控制台">
+        <h1>密码已重置</h1>
+        <p className="muted">密码已更新，所有已登录会话均已失效。请使用新密码重新登录。</p>
+        <Link className="button-link primary" to="/console/login">
+          前往登录
+        </Link>
+      </AuthFrame>
+    );
+  }
+
+  return (
+    <AuthFrame subtitle="客户控制台">
+      <h1>重置密码</h1>
+      <p className="muted">输入账户邮箱，我们将发送 6 位验证码（30 分钟内有效）。</p>
+      <ErrorNotice error={error} />
+      {notice === undefined ? null : (
+        <div className="notice" role="status">
+          <span>{notice}</span>
+        </div>
+      )}
+      <form onSubmit={submit}>
+        <Field label="邮箱">
+          <input
+            required
+            type="email"
+            autoComplete="username"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </Field>
+        <Field label="验证码">
+          <div className="inline-controls">
+            <input
+              required
+              inputMode="numeric"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              autoComplete="one-time-code"
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+            />
+            <button
+              type="button"
+              disabled={sending || cooldown > 0 || email.trim() === ''}
+              onClick={() => void sendCode()}
+            >
+              {cooldown > 0 ? `重发 (${cooldown}s)` : codeSent ? '重新发送' : '发送验证码'}
+            </button>
+          </div>
+        </Field>
+        <Field label="新密码" hint="至少 12 个字符">
+          <input
+            required
+            type="password"
+            minLength={12}
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+          />
+        </Field>
+        <SaveButton busy={busy}>重置密码</SaveButton>
+      </form>
+      <p className="muted auth-form-note">
+        <Link to="/console/login">返回登录</Link>
+      </p>
     </AuthFrame>
   );
 }
@@ -5171,6 +5567,44 @@ export function SaasConsoleApp() {
         }}
       />
     );
+  }
+
+  if (path === '/console/register') {
+    if (sessionStatus === 'checking') return <div className="center">正在检查会话…</div>;
+    if (sessionStatus === 'authenticated' && session) return <Navigate to="/console" replace />;
+    if (sessionStatus === 'error') {
+      return (
+        <AuthFrame subtitle="客户控制台">
+          <h1>暂时无法检查会话</h1>
+          <ErrorNotice error={sessionError} onRetry={() => setSessionCheck((value) => value + 1)} />
+        </AuthFrame>
+      );
+    }
+    return (
+      <RegisterPage
+        onAuthenticated={(result) => {
+          sessionGeneration.current += 1;
+          sessionScope.current = result.session;
+          setSession(result.session);
+          setSessionError(undefined);
+          setSessionStatus('authenticated');
+          navigate('/console', { replace: true });
+        }}
+      />
+    );
+  }
+
+  if (path === '/console/forgot-password') {
+    if (sessionStatus === 'checking') return <div className="center">正在检查会话…</div>;
+    if (sessionStatus === 'error') {
+      return (
+        <AuthFrame subtitle="客户控制台">
+          <h1>暂时无法检查会话</h1>
+          <ErrorNotice error={sessionError} onRetry={() => setSessionCheck((value) => value + 1)} />
+        </AuthFrame>
+      );
+    }
+    return <ForgotPasswordPage />;
   }
 
   const isRequestDetail = /^\/console\/requests\/[^/]+$/.test(path);

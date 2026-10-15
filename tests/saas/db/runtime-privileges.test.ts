@@ -513,6 +513,9 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_obs_alert_rules', 'DELETE'],
     // R1 (105): billing group account-pool membership replacement.
     ['saas_billing_group_account_pools', 'DELETE'],
+    // R4 (106): verification-code expiry pruning and delivery-failure
+    // compensation delete code rows.
+    ['saas_email_verification_codes', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });
@@ -1432,6 +1435,52 @@ test('customer reconciliation read does not relax startup rejection of missing o
     await assert.rejects(
       verifySaasRuntimeDatabasePrivileges(databaseReturning(safeRow(unsafe))),
       SaasRuntimePrivilegeError,
+    );
+  }
+});
+
+test('108 grants the control plane only the opencode_go protocol rules column, never the usage scheduling columns', () => {
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const privilege of ['SELECT', 'UPDATE'] as const) {
+      assert.ok(
+        SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+          ([relation, column, granted]) =>
+            relation === table && column === 'opencode_go_protocol_rules' && granted === privilege,
+        ),
+        `missing ${privilege} ${table}.opencode_go_protocol_rules`,
+      );
+    }
+    // The usage worker owns the scheduling snapshot columns; the control
+    // plane never reads or writes them (gateway reads stay dynamic).
+    for (const column of [
+      'opencode_go_rolling_5h_used_percent',
+      'opencode_go_rolling_5h_reset_at',
+      'opencode_go_weekly_used_percent',
+      'opencode_go_weekly_reset_at',
+      'opencode_go_monthly_used_percent',
+      'opencode_go_monthly_reset_at',
+      'opencode_go_usage_updated_at',
+      'opencode_go_usage_next_due_at',
+      'opencode_go_usage_failure_count',
+      'opencode_go_rate_limited_until',
+    ]) {
+      assert.equal(
+        SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
+        false,
+        `unexpected control-plane grant ${table}.${column}`,
+      );
+      assert.equal(
+        SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
+        false,
+        `unexpected gateway write grant ${table}.${column}`,
+      );
+    }
+    assert.equal(
+      SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
+        ([relation, field]) => relation === table && field === 'opencode_go_protocol_rules',
+      ),
+      false,
+      'gateway reads protocol_rules through the dynamic all-column read-table grants only',
     );
   }
 });

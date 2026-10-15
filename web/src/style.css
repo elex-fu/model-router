@@ -16,3 +16,5 @@
 @media(prefers-color-scheme:dark){.saas-tenant-card.unread{border-left-color:#ffe0a2}}
 .ops-qps-live{display:grid;gap:14px}.ops-qps-figure{display:flex;align-items:baseline;gap:8px}.ops-qps-figure strong{font-size:34px;letter-spacing:-.04em;font-variant-numeric:tabular-nums}.ops-qps-figure span{color:#738078;font-size:13px}.ops-qps-meta{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:#66766b;font-variant-numeric:tabular-nums}.quiet-note{margin:12px 0 0;font-size:11px;color:#8a958c}
 @media(prefers-color-scheme:dark){.ops-qps-figure span,.ops-qps-meta{color:#a8b9a9}.quiet-note{color:#a8b9a9}}
+.inline-controls{display:flex;gap:9px;align-items:center}.inline-controls input{flex:1;min-width:0}.inline-controls button{white-space:nowrap}.turnstile-slot{margin:4px 0 12px;min-height:65px;display:flex;align-items:flex-start}
+.auth-form-note{margin-top:14px}

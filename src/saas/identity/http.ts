@@ -7,12 +7,15 @@ import { createCustomerPasskeyHandler } from './customer-passkey-http.js';
 import type { CustomerPasskeyOperations } from './customer-passkey-types.js';
 import { createOAuthLoginHandler } from './oauth-login/oauth-login-http.js';
 import type { OAuthLoginService } from './oauth-login/oauth-login-service.js';
+import { createRegistrationHandler } from './register-http.js';
+import type { RegistrationService } from './register-service.js';
 import type {
   CustomerSessionRevocation,
   OtherCustomerSessionsRevocation,
   SaasIdentityService,
   SafeCustomerSession,
 } from './service.js';
+import type { CaptchaProof } from './turnstile-service.js';
 import type { SafeProject, SafeTenantMember, TenantMemberPage, TenantMemberQuery, TenantRole } from './types.js';
 
 const API_PREFIX = '/console/api/v1';
@@ -39,6 +42,14 @@ export interface SaasIdentityHttpOptions {
   customerPasskey?: CustomerPasskeyOperations;
   /** Managed startup injects the social login service after provider configuration. */
   oauthLogin?: { service: OAuthLoginService };
+  /** Managed startup injects the R4 public registration service when configured. */
+  registration?: {
+    service: RegistrationService;
+    /** Dedicated 2/30s per-IP code-send limiter (Redis-backed when available). */
+    sendRateLimiter?: SaasIdentityRateLimiter;
+  };
+  /** R4 captcha proof; mounted at login (register/password-reset own theirs). */
+  captcha?: CaptchaProof;
   cookieSecure?: boolean;
   /** Managed composition must inject the shared limiter; omission is local-only compatibility behavior. */
   rateLimiter?: SaasIdentityRateLimiter;
@@ -667,6 +678,20 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
           rateLimiter,
           cookieSecure: secureCookie,
         });
+  const registrationHandler =
+    options.registration === undefined
+      ? undefined
+      : createRegistrationHandler({
+          service: options.registration.service,
+          publicOrigin: options.publicOrigin,
+          sessionTtlSeconds: options.sessionTtlSeconds,
+          rateLimiter,
+          ...(options.registration.sendRateLimiter === undefined
+            ? {}
+            : { sendRateLimiter: options.registration.sendRateLimiter }),
+          cookieSecure: secureCookie,
+        });
+  const captchaProof = options.captcha === undefined ? undefined : options.captcha;
   // One key HTTP owner, including standalone identity-handler mounts. It owns
   // method/origin/host/session/CSRF/body checks and the genuine issuer/write port.
   const keyHandler = createSaasKeyHandler({
@@ -715,6 +740,7 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
       if (!path.startsWith(`${API_PREFIX}/`)) return false;
       if (await customerMfaHandler(req, res)) return true;
       if (await customerPasskeyHandler(req, res)) return true;
+      if (registrationHandler !== undefined && (await registrationHandler(req, res))) return true;
       if (oauthLoginHandler !== undefined && (await oauthLoginHandler(req, res))) return true;
       if (await keyHandler(req, res)) return true;
       const match = findRoute(path);
@@ -747,11 +773,23 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
 
         if (match.route === 'session' && method === 'POST') {
           await enforceRateLimit(req, rateLimiter, match.route);
-          const body = parseStrictObject(
-            await readJson(req),
-            ['email', 'password', 'activeTenantId'],
-            ['email', 'password'],
-          );
+          // R4: when a captcha proof is wired, login requires it too. The
+          // disabled backend passes through, so unwired deployments are
+          // byte-identical to the pre-R4 contract.
+          const sessionBodyKeys =
+            captchaProof === undefined
+              ? (['email', 'password', 'activeTenantId'] as const)
+              : (['email', 'password', 'activeTenantId', 'captchaToken'] as const);
+          const body = parseStrictObject(await readJson(req), sessionBodyKeys, ['email', 'password']);
+          if (
+            captchaProof !== undefined &&
+            !(await captchaProof.verify({
+              token: typeof body.captchaToken === 'string' ? body.captchaToken : undefined,
+              remoteIp: peerAddress(req),
+            }))
+          ) {
+            throw new HttpError(403, 'CAPTCHA_REJECTED', 'Human verification failed. Please try again.');
+          }
           const email = nonEmptyString(body.email, 'email').trim().toLowerCase();
           await enforceRateLimit(req, rateLimiter, match.route, email);
           const activeTenantId = validateOptionalString(body, 'activeTenantId');
