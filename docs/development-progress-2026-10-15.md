@@ -61,6 +61,26 @@
 
 **验证**:全量单测 4227/4209 通过 0 失败(18 opt-in 跳过);新增 57 例(lifecycle 12/顺序矩阵 17/settings 5/HTTP 边界 11/turnstile 6/rewards 6);tsc server+web 干净;web 构建通过。
 
+## R5 Claude 订阅池(任务 #31,已完成,5279e42)
+
+四步全落地:
+- **共享层提取** `src/saas/gateway/oauth-subscription/`(identity-namespace/health-classifier/quota-pause/transport-skeleton/pkce)——codex 五文件变为纯 import 改写/委托 shim,**110 codex 测试零修改通过**(回归 78/78 复核)。
+- **品类包**:gateway/claude(10 文件,含 billing 指纹逐字节移植、system 三块重写+迁移前消毒[比 sub2api 更严]、cache_control≤4 剥离顺序、unified 429 分类、双向下行桥)+ platform/claude-oauth(PKCE 绑号/credentials.json 导入/管理 HTTP/审计 sink)。80/80 新测试。
+- **迁移 100**(099 预留槽):claude 4 窗 utilization/reset + 会话窗 + cli_version_override,099 scheduling-signal 风格;刷新 worker per-adapter passthrough(codex 轮换字节不变)。
+- **claude-code-validator** 纯模块(9/9),组执法留给 R1 后续。
+- Beta 集以方案黑盒集为准(当前 sub2api 源已漂移),常量 env 可覆盖。
+
+## R3 出口代理(任务 #29,已完成,658c84d + a05698c)
+
+迁移 107(编号仲裁:105/106 被 R1/R4 占)。要点:
+- **SOCKS 原生实现零新依赖**(socks-proxy-agent 是 http.Agent 生态无法作 undici Dispatcher):buildConnector 连接器,RFC 1928/1929,CONNECT 用 ATYP 0x03 DOMAINNAME(socks5h 远端 DNS 由构造保证),TLS-over-tunnel,错误零凭据;mock SOCKS5 服务实证域名(非解析 IP)到达代理。
+- **undici 6.28.1 接线修正**(方案笔误):ProxyAgent 隧道覆盖内层 connect,钉扎经 `proxyTls.lookup`(源码验证)。
+- **三路同出口**:转发(resolver→dispatch profile→transport SSRF 同白名单钉扎,EGRESS_PROXY_INVALID fail-closed)、OAuth refresh(claim 事务内解析,坏代理 egress_proxy_unavailable 退避**绝不直连**)、探测(同工厂)。
+- 密封信封 CHECK 拒绝 username/password 明文键;`ON DELETE RESTRICT` 防删在用代理静默换出口 IP;redact.ts 代理 URL 全量脱敏。
+- 探测+清扫 worker:SKIP LOCKED 逐代理 claim-probe-write;经代理打双探针;过期按 fallback_mode 迁移(none=告警/proxy=环安全备份链/direct=解绑),来源溯源+审计;dead 降权至 1(资格信号非剔除)。
+- 顺带修复 3 个存量 undici 类型漂移 tsc 错误(upstream-actions asyncIterator、proxy.ts dispatcher×2)——全树 tsc 归零。
+- **验证**:丢弃式 PG 18 真库(001→108 迁移+角色对账+探针;CHECK 拒 socks4/明文凭据/自备份);全量 4368 单测+246 集成 0 失败;30 新测试。
+
 ## 进行中
 
-R5b-4(#24)、R3(#29 出口代理,迁移 107)、R5(#31 Claude 池,迁移 100)三路并行。
+R6(#32 测活+Redis 热状态,迁移 109)与 R7(#33 调度策略)并行——R6 禁改调度器、R7 独占调度器,文件域隔离。R5b-6(#26 测试收尾)待两者落地后执行(跨 R5b 全链 + PG 门禁复跑)。
