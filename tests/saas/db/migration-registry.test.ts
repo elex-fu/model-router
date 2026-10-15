@@ -67,6 +67,7 @@ import { BILLING_GROUPS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/1
 import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/106_registration_admission.js';
 import { EGRESS_PROXIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/107_egress_proxies.js';
 import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/108_provider_account_opencode_go_scheduling.js';
+import { PROBE_MONITORS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/109_probe_monitors.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -131,6 +132,7 @@ test('SaaS migration registry keeps a stable append order with only documented g
       106,
       107,
       108,
+      109,
     ],
   );
 });
@@ -184,9 +186,10 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     REGISTRATION_ADMISSION_SAAS_MIGRATION,
     EGRESS_PROXIES_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
+  PROBE_MONITORS_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 89);
+  assert.equal(SAAS_MIGRATIONS.length, 90);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -237,6 +240,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'registration_admission',
       'egress_proxies',
       'provider_account_opencode_go_scheduling',
+      'probe_monitors',
     ],
   );
   assert.deepEqual(
@@ -272,10 +276,11 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       106,
       107,
       108,
+      109,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 89);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 89);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 90);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 90);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -365,7 +370,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 89);
+  assert.equal(SAAS_MIGRATIONS.length, 90);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -402,6 +407,7 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     REGISTRATION_ADMISSION_SAAS_MIGRATION,
     EGRESS_PROXIES_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
+    PROBE_MONITORS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -478,6 +484,12 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[88], PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[88]?.version, 108);
   assert.equal(SAAS_MIGRATIONS[88]?.name, 'provider_account_opencode_go_scheduling');
+  // 109: R6a active probing — per-account probe monitors + run history and
+  // the probe_temp_unschedulable_until scheduling signal. The plan reserved
+  // 107 for this workstream; R3 egress proxies took it, so 109 follows 108.
+  assert.equal(SAAS_MIGRATIONS[89], PROBE_MONITORS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[89]?.version, 109);
+  assert.equal(SAAS_MIGRATIONS[89]?.name, 'probe_monitors');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

@@ -7,6 +7,9 @@
 -- 058 only repairs two original row-trigger wrappers; this worker grant set
 -- is unchanged. It never grants credential current_version/expires_at UPDATE,
 -- job identity INSERT/UPDATE, migration-ledger access or routine EXECUTE.
+-- R6a (109) widened INSERT to exactly two append-only observation tables:
+-- saas_probe_runs (probe history) and saas_audit_events (best-effort alert
+-- records); every other INSERT grant on this role remains forbidden.
 -- DEPLOYMENT NOTE (migration 093, Track D4): the quota sync worker shares
 -- this role and writes the account quota snapshot columns below. Re-apply
 -- this template after 093 is migrated; until then the worker runtime
@@ -176,7 +179,8 @@ GRANT SELECT (
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   claude_usage_updated_at, claude_5h_reset_at,
-  quarantine_entered_at, quarantine_reason_code
+  quarantine_entered_at, quarantine_reason_code,
+  egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
 GRANT UPDATE (
@@ -193,7 +197,8 @@ GRANT UPDATE (
   claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
   claude_7d_oi_utilization, claude_7d_oi_reset_at,
   claude_usage_updated_at, claude_session_window_start, claude_session_window_end,
-  quarantine_entered_at, quarantine_reason_code
+  quarantine_entered_at, quarantine_reason_code,
+  probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
 
@@ -255,7 +260,8 @@ GRANT SELECT (
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   claude_usage_updated_at, claude_5h_reset_at,
-  quarantine_entered_at, quarantine_reason_code
+  quarantine_entered_at, quarantine_reason_code,
+  egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;
 GRANT UPDATE (
@@ -272,7 +278,8 @@ GRANT UPDATE (
   claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
   claude_7d_oi_utilization, claude_7d_oi_reset_at,
   claude_usage_updated_at, claude_session_window_start, claude_session_window_end,
-  quarantine_entered_at, quarantine_reason_code
+  quarantine_entered_at, quarantine_reason_code,
+  probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;
 
@@ -303,6 +310,49 @@ GRANT SELECT (
   account_id, credential_id, credential_version,
   wrapping_revision, kms_key_id, wrapped_dek
 ) ON TABLE model_router_saas.saas_platform_provider_credential_wrappings
+  TO model_router_saas_validation_worker;
+
+-- R6a (migration 109) active probing: the probe monitor worker shares this
+-- workload (R3 egress-proxy probe-worker precedent). It claims due
+-- saas_probe_monitors rows, appends saas_probe_runs history, resolves the
+-- account's egress proxy for the probe request, and writes the
+-- probe_temp_unschedulable_until signal on both account owner tables.
+-- Run-history retention DELETE stays on the control-plane role: this role
+-- holds no table-level grants by contract. The audit INSERT below carries
+-- the worker's best-effort unschedule/recovery alert records (the R3
+-- sweep-audit precedent; a failed insert never rolls back probe results).
+-- Re-apply this template after running migration 109 on a database that
+-- predates it; until then the worker runtime privilege probe fails closed
+-- by design.
+
+GRANT SELECT (
+  id, owner_scope_key, owner_kind, owner_tenant_id, account_id,
+  provider_category, probe_interval_seconds, challenge_prompt, challenge_answer,
+  failure_threshold, consecutive_failures, last_result, enabled,
+  next_due_at, probe_requested_at
+) ON TABLE model_router_saas.saas_probe_monitors
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  consecutive_failures, last_result, last_result_detail, last_run_at,
+  next_due_at, probe_requested_at, updated_at
+) ON TABLE model_router_saas.saas_probe_monitors
+  TO model_router_saas_validation_worker;
+
+GRANT INSERT (
+  id, monitor_id, triggered_by, result, detail, http_status, latency_ms, created_at
+) ON TABLE model_router_saas.saas_probe_runs
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  id, name, protocol, host, port, auth_sealed_envelope, status, expires_at,
+  fallback_mode, backup_proxy_id, last_probe_at, last_probe_latency_ms,
+  last_probe_ip, last_probe_quality
+) ON TABLE model_router_saas.saas_egress_proxies
+  TO model_router_saas_validation_worker;
+
+GRANT INSERT (
+  id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, entry_point
+) ON TABLE model_router_saas.saas_audit_events
   TO model_router_saas_validation_worker;
 
 COMMIT;

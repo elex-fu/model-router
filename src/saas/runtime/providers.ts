@@ -1,4 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import type { RedisConcurrencySlots, RedisRuntimeCache, RedisRuntimeCacheOptions } from './redis-concurrency-slots.js';
+
+export type {
+  RedisCacheEntry,
+  RedisConcurrencySlotDecision,
+  RedisConcurrencySlots,
+  RedisRuntimeCache,
+  RedisRuntimeCacheOptions,
+} from './redis-concurrency-slots.js';
+
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -102,6 +112,14 @@ export interface RedisProviderFactoryOptions {
 
 export interface RedisProvider {
   createRateLimiter(options: RedisRateLimiterOptions): ProviderAwaitable<ManagedRateLimiter>;
+  /**
+   * R6b Redis hot state: the concurrency-slot scheduling pre-check and the
+   * bounded runtime cache (sticky sessions, token-decrypt cache). Both are
+   * fail-open decorations over the same connection management — PostgreSQL
+   * stays authoritative (PG lease / 041 affinity / sealed envelopes).
+   */
+  createSlotClient(): ProviderAwaitable<RedisConcurrencySlots>;
+  createCacheClient(options?: RedisRuntimeCacheOptions): ProviderAwaitable<RedisRuntimeCache>;
   checkReady(): ProviderAwaitable<void>;
   close(): ProviderAwaitable<void>;
 }
@@ -150,6 +168,8 @@ export type ProviderLoaderErrorCode =
   | 'REDIS_READINESS_FAILED'
   | 'REDIS_RATE_LIMITER_FACTORY_FAILED'
   | 'REDIS_RATE_LIMITER_INVALID'
+  | 'REDIS_SLOT_CLIENT_FACTORY_FAILED'
+  | 'REDIS_CACHE_CLIENT_FACTORY_FAILED'
   | 'PROVIDER_CREDENTIAL_KMS_CONFIGURATION_INVALID'
   | 'PROVIDER_CREDENTIAL_KMS_MODULE_LOAD_FAILED'
   | 'PROVIDER_CREDENTIAL_KMS_MODULE_EXPORT_INVALID'
@@ -173,6 +193,8 @@ const SAFE_ERROR_MESSAGES: Record<ProviderLoaderErrorCode, string> = {
   CREDENTIAL_PROBE_FAILED: 'Credential provider encryption readiness probe failed',
   REDIS_READINESS_FAILED: 'Redis provider readiness check failed',
   REDIS_RATE_LIMITER_FACTORY_FAILED: 'Redis rate limiter factory failed',
+  REDIS_SLOT_CLIENT_FACTORY_FAILED: 'Redis hot-state slot client factory failed',
+  REDIS_CACHE_CLIENT_FACTORY_FAILED: 'Redis hot-state cache client factory failed',
   REDIS_RATE_LIMITER_INVALID: 'Redis rate limiter returned an invalid contract',
   PROVIDER_CREDENTIAL_KMS_CONFIGURATION_INVALID: 'Provider credential KMS configuration is invalid',
   PROVIDER_CREDENTIAL_KMS_MODULE_LOAD_FAILED: 'Provider credential KMS module could not be loaded',
@@ -205,6 +227,8 @@ interface RedisMethods {
   readonly createRateLimiter: UnknownFunction;
   readonly checkReady: UnknownFunction;
   readonly close: UnknownFunction;
+  readonly createSlotClient?: UnknownFunction;
+  readonly createCacheClient?: UnknownFunction;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -423,7 +447,10 @@ function redisMethods(value: unknown): RedisMethods | undefined {
   const checkReady = boundMethod(value, 'checkReady');
   const close = boundMethod(value, 'close');
   if (!createRateLimiter || !checkReady || !close) return undefined;
-  return { createRateLimiter, checkReady, close };
+  // R6b hot-state clients are optional so pre-R6 provider modules keep loading.
+  const createSlotClient = boundMethod(value, 'createSlotClient');
+  const createCacheClient = boundMethod(value, 'createCacheClient');
+  return { createRateLimiter, checkReady, close, createSlotClient, createCacheClient };
 }
 
 async function credentialReadinessProbe(provider: CredentialKeyProvider): Promise<void> {
@@ -515,8 +542,37 @@ export async function loadCredentialKeyProvider(
 
 interface LoadedRedisProvider {
   readonly createRateLimiter: (options: RedisRateLimiterOptions) => Promise<ManagedRateLimiter>;
+  /** Present when the provider module implements the R6b hot-state clients. */
+  readonly createSlotClient: (() => Promise<RedisConcurrencySlots>) | undefined;
+  readonly createCacheClient: ((options?: RedisRuntimeCacheOptions) => Promise<RedisRuntimeCache>) | undefined;
   readonly checkReady: () => Promise<void>;
   readonly close: () => Promise<void>;
+}
+
+function slotClientFactory(method: UnknownFunction | undefined): (() => Promise<RedisConcurrencySlots>) | undefined {
+  if (method === undefined) return undefined;
+  return async () => {
+    try {
+      return (await method()) as RedisConcurrencySlots;
+    } catch (error) {
+      if (isProviderLoaderError(error)) throw error;
+      throw providerError('REDIS_SLOT_CLIENT_FACTORY_FAILED');
+    }
+  };
+}
+
+function cacheClientFactory(
+  method: UnknownFunction | undefined,
+): ((options?: RedisRuntimeCacheOptions) => Promise<RedisRuntimeCache>) | undefined {
+  if (method === undefined) return undefined;
+  return async (cacheOptions?: RedisRuntimeCacheOptions) => {
+    try {
+      return (await method(cacheOptions)) as RedisRuntimeCache;
+    } catch (error) {
+      if (isProviderLoaderError(error)) throw error;
+      throw providerError('REDIS_CACHE_CLIENT_FACTORY_FAILED');
+    }
+  };
 }
 
 async function loadRedisProvider(
@@ -556,6 +612,8 @@ async function loadRedisProvider(
     checkReady: async () => {
       await methods.checkReady();
     },
+    createSlotClient: slotClientFactory(methods.createSlotClient),
+    createCacheClient: cacheClientFactory(methods.createCacheClient),
     createRateLimiter: async (limiterOptions) => {
       let limiter: unknown;
       try {

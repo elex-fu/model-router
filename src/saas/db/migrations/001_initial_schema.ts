@@ -86,6 +86,7 @@ import { BILLING_GROUPS_SAAS_MIGRATION } from './105_billing_groups.js';
 import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from './106_registration_admission.js';
 import { EGRESS_PROXIES_SAAS_MIGRATION } from './107_egress_proxies.js';
 import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_provider_account_opencode_go_scheduling.js';
+import { PROBE_MONITORS_SAAS_MIGRATION } from './109_probe_monitors.js';
 
 export interface SaasMigration {
   version: number;
@@ -564,4 +565,12 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // jsonb rule table (multi-protocol adaptive routing). Scheduling signal
   // only, never billing; 107 is taken by R3 egress proxies above.
   PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
+  // 109: R6a active probing — the per-account probe monitors (arithmetic
+  // few-shot challenge, consecutive-failure threshold) plus the append-only
+  // run history with worker-side 30-day retention, and the
+  // probe_temp_unschedulable_until scheduling signal on both account owner
+  // tables (probe-success-only recovery). The plan reserved 107 for this
+  // workstream; R3 egress proxies took it (documented re-arbitration), so
+  // 109 is the next free slot after the applied 108 head.
+  PROBE_MONITORS_SAAS_MIGRATION,
 ];

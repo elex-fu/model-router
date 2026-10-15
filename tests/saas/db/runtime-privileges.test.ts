@@ -518,6 +518,10 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_email_verification_codes', 'DELETE'],
     // R3 (107): proxy registry lifecycle; in-use proxies are FK-protected.
     ['saas_egress_proxies', 'DELETE'],
+    // R6a (109): probe monitor lifecycle (runs cascade with the monitor) and
+    // the 30-day probe run retention cleanup (control-plane retention loop).
+    ['saas_probe_monitors', 'DELETE'],
+    ['saas_probe_runs', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });
@@ -548,7 +552,7 @@ test('role template mirrors the control-plane manifest and grants no broad table
   );
   assert.doesNotMatch(
     sql,
-    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b|saas_billing_group_account_pools\b|saas_email_verification_codes\b|saas_egress_proxies\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
+    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b|saas_billing_group_account_pools\b|saas_email_verification_codes\b|saas_egress_proxies\b|saas_probe_monitors\b|saas_probe_runs\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
   assert.doesNotMatch(
     sql,

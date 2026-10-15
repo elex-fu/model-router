@@ -1,4 +1,4 @@
-import { createDecipheriv } from 'node:crypto';
+import { createDecipheriv, createHash } from 'node:crypto';
 import {
   createProviderCredentialContext,
   createProviderCredentialEncryptionContext,
@@ -18,6 +18,7 @@ import type {
   StoredProviderCredentialVersion,
 } from '../supply/types.js';
 import type { ProviderCredentialUnsealingKms } from './gateway-provider-credential-kms.js';
+import { REDIS_TOKEN_CACHE_TTL_MS } from './redis-concurrency-slots.js';
 
 const MAX_CONTEXT_FIELD_BYTES = 256;
 const MAX_KMS_KEY_ID_BYTES = 512;
@@ -76,6 +77,23 @@ export interface GatewayProviderCredentialUnsealInput {
 export interface GatewayProviderCredentialUnsealerOptions {
   readonly deployment: string;
   readonly environment: string;
+  /**
+   * R6b opt-in decrypt cache (plan §R6b-3): a short-TTL cache for the
+   * unsealed credential keyed by the sealed envelope digest, so a key
+   * rotation (different ciphertext) misses by construction. Absent keeps
+   * the byte-identical pre-R6b path. Implementations must be fail-open: a
+   * cache error is a miss, never a decryption failure. The plaintext value
+   * must be materialized as a FRESH Buffer per hit because this unsealer
+   * zeroizes the buffer it hands to the callback.
+   */
+  readonly decryptCache?: GatewayProviderCredentialDecryptCache;
+  /** Cache TTL in milliseconds; defaults to the plan's 60 seconds. */
+  readonly decryptCacheTtlMs?: number;
+}
+
+export interface GatewayProviderCredentialDecryptCache {
+  get(key: string): Promise<Buffer | null>;
+  set(key: string, value: Buffer, ttlMs: number): Promise<void>;
 }
 
 interface ParsedEnvelope {
@@ -361,6 +379,24 @@ function decryptGcm(parsed: ParsedEnvelope, dataKey: Buffer, aad: Buffer): Buffe
   }
 }
 
+/** Digest of the sealed envelope + canonical context: the R6b decrypt cache key material. */
+function decryptCacheKey(parsed: ParsedEnvelope, aad: Buffer): string {
+  return createHash('sha256')
+    .update('model-router:gateway-decrypt-cache:v1\0')
+    .update(parsed.kmsKeyId)
+    .update('\0')
+    .update(parsed.wrappedDek)
+    .update('\0')
+    .update(parsed.nonce)
+    .update('\0')
+    .update(parsed.ciphertext)
+    .update('\0')
+    .update(parsed.authTag)
+    .update('\0')
+    .update(aad)
+    .digest('hex');
+}
+
 /**
  * Gateway-only provider credential primitive. It accepts the decrypt facade,
  * never a control-plane sealing KMS, and exposes plaintext only to the callback.
@@ -368,6 +404,8 @@ function decryptGcm(parsed: ParsedEnvelope, dataKey: Buffer, aad: Buffer): Buffe
 export class GatewayProviderCredentialUnsealer {
   private readonly kms: ProviderCredentialUnsealingKms;
   private readonly options: GatewayProviderCredentialUnsealerOptions;
+  private readonly decryptCache: GatewayProviderCredentialDecryptCache | undefined;
+  private readonly decryptCacheTtlMs: number;
 
   constructor(kms: ProviderCredentialUnsealingKms, options: GatewayProviderCredentialUnsealerOptions) {
     let decryptDataKey: unknown;
@@ -389,8 +427,23 @@ export class GatewayProviderCredentialUnsealer {
       if (error instanceof GatewayProviderCredentialUnsealerError) throw error;
       throw runtimeError('INVALID_INPUT');
     }
+    const decryptCache =
+      options.decryptCache === undefined
+        ? undefined
+        : typeof options.decryptCache.get === 'function' && typeof options.decryptCache.set === 'function'
+          ? options.decryptCache
+          : undefined;
+    const decryptCacheTtlMs =
+      typeof options.decryptCacheTtlMs === 'number' &&
+      Number.isSafeInteger(options.decryptCacheTtlMs) &&
+      options.decryptCacheTtlMs >= 1 &&
+      options.decryptCacheTtlMs <= 3_600_000
+        ? options.decryptCacheTtlMs
+        : REDIS_TOKEN_CACHE_TTL_MS;
     this.kms = kms;
     this.options = Object.freeze({ deployment, environment });
+    this.decryptCache = decryptCache;
+    this.decryptCacheTtlMs = decryptCacheTtlMs;
   }
 
   async withCredential<T>(
@@ -410,6 +463,28 @@ export class GatewayProviderCredentialUnsealer {
       aad = createCanonicalAad(normalized.context);
       wrappedDek = Buffer.from(parsed.wrappedDek);
 
+      // R6b decrypt cache (opt-in): the key binds the sealed envelope bytes
+      // to the canonical AAD context, so any rotation or context change is a
+      // different key by construction. A hit must materialize a FRESH buffer
+      // (the finally block below zeroizes what the callback received).
+      if (this.decryptCache !== undefined) {
+        const cacheKey = decryptCacheKey(parsed, aad);
+        let cached: Buffer | null = null;
+        try {
+          cached = await this.decryptCache.get(cacheKey);
+        } catch {
+          cached = null;
+        }
+        if (cached !== null && cached.length > 0 && cached.length <= MAX_PROVIDER_CREDENTIAL_PLAINTEXT_BYTES) {
+          plaintext = Buffer.from(cached);
+          try {
+            return await callback(plaintext);
+          } catch {
+            throw runtimeError('CALLBACK_FAILED');
+          }
+        }
+      }
+
       try {
         returnedDataKey = await this.kms.decryptDataKey({
           kmsKeyId: parsed.kmsKeyId,
@@ -421,6 +496,14 @@ export class GatewayProviderCredentialUnsealer {
       }
       dataKey = copyDataKey(returnedDataKey);
       plaintext = decryptGcm(parsed, dataKey, aad);
+      if (this.decryptCache !== undefined) {
+        // Best-effort fill: a failed set is only a missed speedup, and the
+        // value never outlives the TTL. Copy so the zeroization below does
+        // not clobber the stored representation the cache owns.
+        const cacheKey = decryptCacheKey(parsed, aad);
+        const cachedCopy = Buffer.from(plaintext);
+        void this.decryptCache.set(cacheKey, cachedCopy, this.decryptCacheTtlMs).catch(() => undefined);
+      }
       try {
         return await callback(plaintext);
       } catch {

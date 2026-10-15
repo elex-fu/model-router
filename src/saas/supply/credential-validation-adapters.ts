@@ -226,6 +226,43 @@ function modelIdentifier(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
 }
 
+export interface FixedCredentialProbeEndpoint {
+  readonly adapterId: string;
+  readonly url: string;
+  readonly probe: 'models' | 'messages' | 'chat';
+}
+
+/**
+ * R6a active probing: resolves the protocol-owned FIXED_ADAPTERS endpoint
+ * for an account binding without constructing a validation job. The probe
+ * service (account-probe-service.ts) uses this for the api-key category so
+ * probe traffic hits exactly the allowlisted fixed endpoints — products
+ * absent from the table fail closed, exactly like credential validation.
+ */
+export function resolveFixedCredentialProbeEndpoint(input: {
+  readonly providerId: string;
+  readonly productId: string;
+  readonly credentialType: string;
+  readonly capabilityEndpoint: string;
+}): FixedCredentialProbeEndpoint | null {
+  if (
+    typeof input?.providerId !== 'string' ||
+    typeof input?.productId !== 'string' ||
+    typeof input?.credentialType !== 'string' ||
+    typeof input?.capabilityEndpoint !== 'string'
+  ) {
+    return null;
+  }
+  const adapter = FIXED_ADAPTERS.find(
+    (candidate) =>
+      candidate.providerId === input.providerId &&
+      candidate.productId === input.productId &&
+      candidate.credentialType === input.credentialType &&
+      candidate.capabilityEndpoint === input.capabilityEndpoint,
+  );
+  return adapter === undefined ? null : { adapterId: adapter.adapterId, url: adapter.url, probe: adapter.probe };
+}
+
 function asciiCredential(secret: Buffer): string | null {
   if (secret.length < 1 || secret.length > 4_096) return null;
   for (const byte of secret) {

@@ -144,7 +144,15 @@ test('deployment grant script exposes only the worker role’s column-scoped per
   assert.doesNotMatch(sql, /GRANT\s+(?:INSERT|UPDATE|DELETE)\b[^;]*saas_tenant_provider_credential_wrappings/is);
   assert.doesNotMatch(sql, /GRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s*,/i);
   assert.doesNotMatch(sql, /GRANT\s+DELETE\b/i);
-  assert.doesNotMatch(sql, /GRANT\s+INSERT\b/i);
+  // R6a (109): INSERT exists only for the probe monitor worker's append-only
+  // observation records — run history and best-effort alert audit rows. No
+  // other table may gain an INSERT grant on this role.
+  for (const match of sql.matchAll(/GRANT\s+INSERT\s*\(([^)]*)\)\s*ON TABLE model_router_saas\.(\w+)/gis)) {
+    assert.ok(
+      match[2] === 'saas_probe_runs' || match[2] === 'saas_audit_events',
+      `unexpected INSERT grant on ${match[2]}`,
+    );
+  }
   assert.match(sql, /REVOKE EXECUTE ON ALL FUNCTIONS/);
   assert.match(sql, /migrations include version 058/);
   assert.doesNotMatch(
@@ -261,4 +269,110 @@ test('108 grants the OpenCode Go usage worker its scheduling columns on both acc
       ),
     );
   }
+});
+
+test('109 grants the probe monitor worker its claim/write surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  for (const column of [
+    'id',
+    'owner_scope_key',
+    'owner_kind',
+    'owner_tenant_id',
+    'account_id',
+    'provider_category',
+    'probe_interval_seconds',
+    'challenge_prompt',
+    'challenge_answer',
+    'failure_threshold',
+    'consecutive_failures',
+    'last_result',
+    'enabled',
+    'next_due_at',
+    'probe_requested_at',
+  ]) {
+    assert.ok(
+      SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('saas_probe_monitors', '${column}', 'SELECT')`),
+      `probe manifest missing SELECT saas_probe_monitors.${column}`,
+    );
+  }
+  assert.match(
+    workerGrantSql,
+    /GRANT SELECT \([^)]*\bprobe_requested_at\b[^)]*\)\s+ON TABLE model_router_saas\.saas_probe_monitors/,
+  );
+  for (const column of [
+    'consecutive_failures',
+    'last_result',
+    'last_result_detail',
+    'last_run_at',
+    'next_due_at',
+    'probe_requested_at',
+    'updated_at',
+  ]) {
+    assert.ok(
+      SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('saas_probe_monitors', '${column}', 'UPDATE')`),
+      `probe manifest missing UPDATE saas_probe_monitors.${column}`,
+    );
+  }
+  assert.match(
+    workerGrantSql,
+    /GRANT UPDATE \([^)]*\blast_result_detail\b[^)]*\)\s+ON TABLE model_router_saas\.saas_probe_monitors/,
+  );
+  // Run history is INSERT-only for the worker; retention DELETE stays on the
+  // control-plane role (this role holds no table-level grants by contract).
+  for (const column of [
+    'id',
+    'monitor_id',
+    'triggered_by',
+    'result',
+    'detail',
+    'http_status',
+    'latency_ms',
+    'created_at',
+  ]) {
+    assert.ok(
+      SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('saas_probe_runs', '${column}', 'INSERT')`),
+      `probe manifest missing INSERT saas_probe_runs.${column}`,
+    );
+  }
+  assert.match(
+    workerGrantSql,
+    /GRANT INSERT \([^)]*\btriggered_by\b[^)]*\)\s+ON TABLE model_router_saas\.saas_probe_runs/,
+  );
+  assert.doesNotMatch(
+    SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+    /\('saas_probe_runs', '[^']+', '(?:SELECT|UPDATE)'\)/,
+  );
+  assert.doesNotMatch(workerGrantSql, /GRANT (?:SELECT|UPDATE|DELETE)[^;]*saas_probe_runs/);
+  // The account unschedulable signal and the egress-proxy join column.
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const [column, privilege] of [
+      ['egress_proxy_id', 'SELECT'],
+      ['probe_temp_unschedulable_until', 'SELECT'],
+      ['probe_temp_unschedulable_until', 'UPDATE'],
+    ] as const) {
+      assert.ok(
+        SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', '${privilege}')`),
+        `probe manifest missing ${privilege} ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(
+          `GRANT ${privilege} \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`,
+        ),
+      );
+    }
+  }
+  // The probe resolves the account's egress proxy (read-only) and records
+  // best-effort alert audit rows.
+  assert.match(
+    workerGrantSql,
+    /GRANT SELECT \([^)]*\bauth_sealed_envelope\b[^)]*\)\s+ON TABLE model_router_saas\.saas_egress_proxies/,
+  );
+  assert.match(
+    workerGrantSql,
+    /GRANT INSERT \([^)]*\bentry_point\b[^)]*\)\s+ON TABLE model_router_saas\.saas_audit_events/,
+  );
 });

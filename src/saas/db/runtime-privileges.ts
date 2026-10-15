@@ -528,6 +528,79 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'last_probe_quality',
     'updated_at',
   ]),
+  // R6a (109) probe monitors: the control plane owns the monitor registry
+  // (admin trigger/list surface) and reads the run history; the probe
+  // monitor worker claims and writes through the validation-worker grants.
+  ...columnGrants('saas_probe_monitors', 'SELECT', [
+    'id',
+    'owner_scope_key',
+    'owner_kind',
+    'owner_tenant_id',
+    'account_id',
+    'provider_category',
+    'probe_interval_seconds',
+    'challenge_prompt',
+    'challenge_answer',
+    'failure_threshold',
+    'consecutive_failures',
+    'last_result',
+    'last_result_detail',
+    'last_run_at',
+    'next_due_at',
+    'probe_requested_at',
+    'enabled',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_probe_monitors', 'INSERT', [
+    'id',
+    'owner_scope_key',
+    'owner_kind',
+    'owner_tenant_id',
+    'account_id',
+    'provider_category',
+    'probe_interval_seconds',
+    'challenge_prompt',
+    'challenge_answer',
+    'failure_threshold',
+    'next_due_at',
+    'probe_requested_at',
+    'enabled',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_probe_monitors', 'UPDATE', [
+    'probe_interval_seconds',
+    'challenge_prompt',
+    'challenge_answer',
+    'failure_threshold',
+    'enabled',
+    'next_due_at',
+    'probe_requested_at',
+    'updated_at',
+  ]),
+  // R6a (109) probe run history is append-only: SELECT + INSERT only, with
+  // retention cleanup as an explicit table-level DELETE grant below.
+  ...columnGrants('saas_probe_runs', 'SELECT', [
+    'id',
+    'monitor_id',
+    'triggered_by',
+    'result',
+    'detail',
+    'http_status',
+    'latency_ms',
+    'created_at',
+  ]),
+  ...columnGrants('saas_probe_runs', 'INSERT', [
+    'id',
+    'monitor_id',
+    'triggered_by',
+    'result',
+    'detail',
+    'http_status',
+    'latency_ms',
+    'created_at',
+  ]),
   // R4 (106) registration admission: the identity control plane issues,
   // verifies, consumes and prunes email verification codes. No gateway
   // access — the table is never read outside the control plane.
@@ -1077,6 +1150,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // R3 (107): per-account egress proxy binding + expiry-migration provenance.
     'egress_proxy_id',
     'proxy_fallback_origin_id',
+    // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
+    // (written by the probe monitor worker; consumed by R7 scheduling).
+    'probe_temp_unschedulable_until',
   ]),
   ...columnGrants('saas_tenant_provider_accounts', 'INSERT', [
     'tenant_id',
@@ -1123,6 +1199,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // R3 (107): the expiry sweep rebinds accounts per fallback_mode.
     'egress_proxy_id',
     'proxy_fallback_origin_id',
+    // 109 (R6a): probe monitor worker unschedule/recovery writes.
+    'probe_temp_unschedulable_until',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -1166,6 +1244,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // R3 (107): per-account egress proxy binding + expiry-migration provenance.
     'egress_proxy_id',
     'proxy_fallback_origin_id',
+    // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
+    // (written by the probe monitor worker; consumed by R7 scheduling).
+    'probe_temp_unschedulable_until',
   ]),
   ...columnGrants('saas_platform_provider_accounts', 'INSERT', [
     'id',
@@ -1211,6 +1292,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // R3 (107): the expiry sweep rebinds accounts per fallback_mode.
     'egress_proxy_id',
     'proxy_fallback_origin_id',
+    // 109 (R6a): probe monitor worker unschedule/recovery writes.
+    'probe_temp_unschedulable_until',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -3019,6 +3102,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // R3 (107): proxy registry lifecycle. In-use proxies are protected by the
   // egress_proxy_id FK (ON DELETE RESTRICT); only unbound proxies delete.
   ['saas_egress_proxies', 'DELETE'],
+  // R6a (109): probe monitor lifecycle (runs cascade with the monitor) and
+  // the 30-day probe run retention cleanup.
+  ['saas_probe_monitors', 'DELETE'],
+  ['saas_probe_runs', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */

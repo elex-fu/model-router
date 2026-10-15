@@ -1,5 +1,17 @@
 import { createHash } from 'node:crypto';
-import type { ManagedRateLimiter, RedisProvider, RedisProviderFactoryOptions, RedisRateLimiterOptions } from './providers.js';
+import type {
+  ManagedRateLimiter,
+  RedisConcurrencySlots,
+  RedisProvider,
+  RedisProviderFactoryOptions,
+  RedisRateLimiterOptions,
+  RedisRuntimeCache,
+} from './providers.js';
+import {
+  createRedisConcurrencySlots,
+  createRedisRuntimeCache,
+  type RedisRuntimeCacheOptions,
+} from './redis-concurrency-slots.js';
 import { RedisRespClient, RedisRespError } from './redis-resp-client.js';
 
 // https://redis.io/docs/latest/commands/eval/
@@ -28,21 +40,34 @@ export const AUTH_RATE_LIMIT_SCRIPT = [
 ].join('\n');
 
 function limiterOptions(options: RedisRateLimiterOptions): void {
-  if (options === null || typeof options !== 'object' || Array.isArray(options) ||
-      Object.keys(options).some((key) => !['namespace', 'limit', 'windowMs'].includes(key)) ||
-      !['customer-auth', 'platform-auth'].includes(options.namespace) ||
-      !Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 1_000_000 ||
-      !Number.isSafeInteger(options.windowMs) || options.windowMs < 1 || options.windowMs > 86_400_000) {
+  if (
+    options === null ||
+    typeof options !== 'object' ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => !['namespace', 'limit', 'windowMs'].includes(key)) ||
+    !['customer-auth', 'platform-auth'].includes(options.namespace) ||
+    !Number.isSafeInteger(options.limit) ||
+    options.limit < 1 ||
+    options.limit > 1_000_000 ||
+    !Number.isSafeInteger(options.windowMs) ||
+    options.windowMs < 1 ||
+    options.windowMs > 86_400_000
+  ) {
     throw new RedisRespError('REDIS_INVALID_LIMITER');
   }
 }
 
 /** Named export for the existing trusted dynamic provider loader; no gateway use. */
 export async function createRedisProvider(options: RedisProviderFactoryOptions): Promise<RedisProvider> {
-  if (options === null || typeof options !== 'object' || Array.isArray(options) ||
-      Object.keys(options).some((key) => !['url', 'keyPrefix'].includes(key)) ||
-      typeof options.url !== 'string' || typeof options.keyPrefix !== 'string' ||
-      !/^[a-zA-Z0-9][a-zA-Z0-9:._-]{0,127}$/.test(options.keyPrefix)) {
+  if (
+    options === null ||
+    typeof options !== 'object' ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => !['url', 'keyPrefix'].includes(key)) ||
+    typeof options.url !== 'string' ||
+    typeof options.keyPrefix !== 'string' ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9:._-]{0,127}$/.test(options.keyPrefix)
+  ) {
     throw new RedisRespError('REDIS_INVALID_OPTIONS');
   }
   const prefix = options.keyPrefix;
@@ -59,36 +84,81 @@ function rateLimitProvider(client: RedisRespClient, prefix: string): RedisProvid
   }
   return {
     createRateLimiter(configuration): ManagedRateLimiter {
-      requireOpen(); limiterOptions(configuration);
+      requireOpen();
+      limiterOptions(configuration);
       // Copy primitives; callers cannot mutate a live limiter's policy.
       const { namespace, limit, windowMs } = configuration;
       return {
         async take(key): Promise<number | undefined> {
           requireOpen();
-          if (typeof key !== 'string' || key.length === 0 || key.length > 4_096 ||
-              key.includes('\0') || Buffer.byteLength(key) > 4_096 || Buffer.from(key).toString('utf8') !== key) {
+          if (
+            typeof key !== 'string' ||
+            key.length === 0 ||
+            key.length > 4_096 ||
+            key.includes('\0') ||
+            Buffer.byteLength(key) > 4_096 ||
+            Buffer.from(key).toString('utf8') !== key
+          ) {
             throw new RedisRespError('REDIS_INVALID_KEY');
           }
-          const digest = createHash('sha256').update('model-router:auth-rate-limit:v1\0')
-            .update(prefix).update('\0').update(namespace).update('\0')
-            .update(String(limit)).update('\0').update(String(windowMs)).update('\0').update(key).digest('hex');
+          const digest = createHash('sha256')
+            .update('model-router:auth-rate-limit:v1\0')
+            .update(prefix)
+            .update('\0')
+            .update(namespace)
+            .update('\0')
+            .update(String(limit))
+            .update('\0')
+            .update(String(windowMs))
+            .update('\0')
+            .update(key)
+            .digest('hex');
           const redisKey = prefix + ':auth-rate-limit:v1:' + namespace + ':' + limit + ':' + windowMs + ':' + digest;
-          const reply = await client.command(['EVAL', AUTH_RATE_LIMIT_SCRIPT, '1', redisKey, String(limit), String(windowMs)]);
+          const reply = await client.command([
+            'EVAL',
+            AUTH_RATE_LIMIT_SCRIPT,
+            '1',
+            redisKey,
+            String(limit),
+            String(windowMs),
+          ]);
           if (!Array.isArray(reply) || reply.length !== 2) client.invalidate('REDIS_PROTOCOL_ERROR');
           const [allowed, ttl] = reply;
-          if ((allowed !== 0 && allowed !== 1) || typeof ttl !== 'number' ||
-              !Number.isSafeInteger(ttl) || ttl < 1 || ttl > windowMs) client.invalidate('REDIS_PROTOCOL_ERROR');
+          if (
+            (allowed !== 0 && allowed !== 1) ||
+            typeof ttl !== 'number' ||
+            !Number.isSafeInteger(ttl) ||
+            ttl < 1 ||
+            ttl > windowMs
+          )
+            client.invalidate('REDIS_PROTOCOL_ERROR');
           // HTTP callers consume Retry-After SECONDS, not Redis PTTL milliseconds.
           return allowed === 1 ? undefined : Math.ceil(ttl / 1_000);
         },
       };
     },
+    // R6b: the scheduling pre-check and hot cache clients reuse the same
+    // connection (one RESP client per provider); both fail open on any
+    // Redis error — the PG lease/affinity/envelope paths stay authoritative.
+    createSlotClient(): RedisConcurrencySlots {
+      requireOpen();
+      return createRedisConcurrencySlots(client, { keyPrefix: prefix });
+    },
+    createCacheClient(cacheOptions?: RedisRuntimeCacheOptions): RedisRuntimeCache {
+      requireOpen();
+      return createRedisRuntimeCache(client, {
+        keyPrefix: cacheOptions?.keyPrefix ?? prefix,
+      });
+    },
     async checkReady(): Promise<void> {
       requireOpen();
-      if (await client.command(['PING']) !== 'PONG') client.invalidate('REDIS_PROTOCOL_ERROR');
+      if ((await client.command(['PING'])) !== 'PONG') client.invalidate('REDIS_PROTOCOL_ERROR');
     },
     close(): Promise<void> {
-      if (closing === undefined) { closed = true; closing = client.close(); }
+      if (closing === undefined) {
+        closed = true;
+        closing = client.close();
+      }
       return closing;
     },
   };

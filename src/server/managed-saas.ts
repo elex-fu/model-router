@@ -132,6 +132,11 @@ import { type PaymentWebhookWorkerHandle, startPaymentWebhookWorker } from '../s
 import { createSaasPlanCatalogHandler, type SaasPlanHttpHandler } from '../saas/plans/http.js';
 import { ByokServicePlanService } from '../saas/plans/service.js';
 import { createPlatformAdminAccessService } from '../saas/platform/access/index.js';
+import {
+  type AccountProbeHttpHandler,
+  createAccountProbeHttpHandler,
+  createPostgresProbeMonitorAdminStore,
+} from '../saas/platform/account-probe-http.js';
 import { PlatformAuditQueryService } from '../saas/platform/audit/index.js';
 import {
   createPlatformAdminAuthHandler,
@@ -223,6 +228,13 @@ import {
   startOpencodeGoUsageWorker,
 } from '../saas/supply/opencode-go-usage-worker.js';
 import {
+  PostgresProbeMonitorStore,
+  type ProbeMonitorWorkerHandle,
+  type ProbeMonitorWorkerOptions,
+  startProbeMonitorWorker,
+  startProbeRunRetentionWorker,
+} from '../saas/supply/probe-monitor-worker.js';
+import {
   type QuotaSyncWorkerHandle,
   type QuotaSyncWorkerOptions,
   startQuotaSyncWorker as startQuotaSyncWorkerLoop,
@@ -284,6 +296,10 @@ export interface ManagedSaasRuntime {
   readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
   /** R3 egress-proxy probe + expiry-sweep loop; same workload as quota sync. */
   readonly egressProxyProbeWorker: EgressProxyProbeWorkerHandle | null;
+  /** R6a scheduled probe monitor loop; same workload as quota sync. */
+  readonly probeMonitorWorker: ProbeMonitorWorkerHandle | null;
+  /** R6a probe run retention loop; control-plane workload only. */
+  readonly probeRunRetentionWorker: ProbeMonitorWorkerHandle | null;
   /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
   readonly oauthTokenRefreshWorker: OauthTokenRefreshWorkerHandle | null;
   /** G4.5 announcement fan-out loop; only when customer webhooks are enabled. */
@@ -424,6 +440,20 @@ export interface ManagedSaasStartOptions {
   opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
   /** R3: optional egress-proxy probe/sweep loop tuning. */
   egressProxyProbeWorkerOptions?: EgressProxyProbeWorkerOptions;
+  /** R6a: deterministic seam for the probe monitor loop on the worker workload. */
+  startProbeMonitorWorker?: (
+    store: PostgresProbeMonitorStore,
+    options: ProbeMonitorWorkerOptions,
+  ) => ProbeMonitorWorkerHandle;
+  /** R6a: optional probe monitor loop tuning. */
+  probeMonitorWorkerOptions?: ProbeMonitorWorkerOptions;
+  /** R6a: deterministic seam for the control-plane probe run retention loop. */
+  startProbeRunRetentionWorker?: (
+    database: SaasDatabase,
+    options: ProbeMonitorWorkerOptions,
+  ) => ProbeMonitorWorkerHandle;
+  /** R6a: optional probe run retention loop tuning. */
+  probeRunRetentionWorkerOptions?: ProbeMonitorWorkerOptions;
   /**
    * R4: the privileged rotation seam for the OAuth refresh worker. Rotation
    * writes the new credential version chain through the audited supply path,
@@ -726,6 +756,7 @@ function createPlatformHandler(
   refundHandler: PlatformRefundHttpHandler | undefined,
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
   codexOauthHandler: CodexOauthHttpHandler | undefined,
+  accountProbeHandler: AccountProbeHttpHandler | undefined,
   unknownOutcomeHandler: UnknownOutcomePlatformHttpHandler | undefined,
   usageCorrectionHandler: UsageCorrectionPlatformHttpHandler | undefined,
   marketingOpsRedeemCodesHandler: MarketingRedeemHttpHandler,
@@ -751,6 +782,7 @@ function createPlatformHandler(
         if (refundHandler && (await refundHandler(req, res))) return;
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
         if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
+        if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
         if (unknownOutcomeHandler && (await unknownOutcomeHandler(req, res))) return;
         if (usageCorrectionHandler && (await usageCorrectionHandler(req, res))) return;
         if (await marketingOpsRedeemCodesHandler(req, res)) return;
@@ -1207,6 +1239,7 @@ async function startCredentialValidationWorkerRuntime(
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let egressProxyProbeWorker: EgressProxyProbeWorkerHandle | undefined;
+  let probeMonitorWorker: ProbeMonitorWorkerHandle | undefined;
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
   const close = async (): Promise<void> => {
@@ -1218,6 +1251,7 @@ async function startCredentialValidationWorkerRuntime(
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
       if (oauthRefreshWorker) await Promise.allSettled([oauthRefreshWorker.close()]);
       if (egressProxyProbeWorker) await Promise.allSettled([egressProxyProbeWorker.close()]);
+      if (probeMonitorWorker) await Promise.allSettled([probeMonitorWorker.close()]);
       if (kms) await Promise.allSettled([Promise.resolve().then(() => kms?.close())]);
       if (database) await Promise.allSettled([closeDatabase(database)]);
     })();
@@ -1308,6 +1342,21 @@ async function startCredentialValidationWorkerRuntime(
       }),
       options.egressProxyProbeWorkerOptions,
     );
+    // Track R6a: the probe monitor loop shares this workload's database role
+    // and decrypt-only KMS (the only non-gateway runtime with credential
+    // unsealing), exactly like the R3 proxy probe loop. Each due monitor is
+    // claimed, probed and written in one SKIP LOCKED transaction; the probe
+    // derives the probe_temp_unschedulable_until scheduling signal with
+    // probe-success-only recovery. A deployment without monitors simply
+    // idles; run-history retention pruning runs on the control-plane role.
+    probeMonitorWorker = (options.startProbeMonitorWorker ?? startProbeMonitorWorker)(
+      new PostgresProbeMonitorStore(database, kms, {
+        ...(options.probeMonitorWorkerOptions ?? {}),
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      }),
+      options.probeMonitorWorkerOptions ?? {},
+    );
     // Track R4: the OAuth refresh loop runs only when the deployment wires a
     // privileged rotator (the restricted worker role cannot write the version
     // chain). An absent rotator keeps pre-R4 behavior, documented at the option.
@@ -1327,6 +1376,8 @@ async function startCredentialValidationWorkerRuntime(
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
       egressProxyProbeWorker,
+      probeMonitorWorker: probeMonitorWorker ?? null,
+      probeRunRetentionWorker: null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: null,
       unknownOutcomeScanner: null,
@@ -1476,6 +1527,7 @@ export async function startManagedSaasServer(
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
+  let probeRunRetentionWorker: ProbeMonitorWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let customerWebhookWorker: CustomerWebhookDeliveryWorkerHandle | undefined;
@@ -1494,6 +1546,7 @@ export async function startManagedSaasServer(
       await Promise.allSettled([
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
+        ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
       ]);
       await closeAllResources(
         listeners.values(),
@@ -2017,6 +2070,17 @@ export async function startManagedSaasServer(
             publicOrigin: deploymentListener(deployment, 'platform').origin,
           })
         : undefined;
+      // R6a active probing admin surface: the trigger/list endpoints run on
+      // the control-plane role (monitor registry CRUD). The probe itself
+      // executes asynchronously in the probe monitor worker on the
+      // credential-validation-worker workload, so the trigger only marks the
+      // monitor due; no credential ever passes through this handler.
+      const accountProbeHandler = createAccountProbeHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        store: createPostgresProbeMonitorAdminStore(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
       let platformRefundHandler: PlatformRefundHttpHandler | undefined;
       if (options.payments?.refundAdapter) {
         const refundService = new PaymentRefundService(database, options.payments.refundAdapter, {
@@ -2282,6 +2346,14 @@ export async function startManagedSaasServer(
       alertEvaluatorWorker = startAlertEvaluatorWorker(database, {
         onError: (error) => console.error('model-router managed observability alert evaluator cycle failed', error),
       });
+      // R6a: probe run retention (30 days) prunes on the control-plane role —
+      // the validation-worker role that appends the history rows holds no
+      // table-level grants by contract, so the DELETE lives here next to the
+      // observability retention loops.
+      probeRunRetentionWorker = (options.startProbeRunRetentionWorker ?? startProbeRunRetentionWorker)(database, {
+        ...(options.probeRunRetentionWorkerOptions ?? {}),
+        onError: () => console.error('model-router managed probe run retention cycle failed'),
+      });
 
       handlers.customer = createCustomerHandler(
         customerKeyHandler,
@@ -2303,6 +2375,7 @@ export async function startManagedSaasServer(
         platformRefundHandler,
         platformCredentialRewrapHandler,
         codexOauthHandler,
+        accountProbeHandler,
         unknownOutcomePlatformHandler,
         usageCorrectionPlatformHandler,
         marketingOpsRedeemCodesHandler,
@@ -2341,6 +2414,8 @@ export async function startManagedSaasServer(
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
       egressProxyProbeWorker: null,
+      probeMonitorWorker: null,
+      probeRunRetentionWorker: probeRunRetentionWorker ?? null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: announcementFanoutWorker ?? null,
       unknownOutcomeScanner: unknownOutcomeScanner ?? null,

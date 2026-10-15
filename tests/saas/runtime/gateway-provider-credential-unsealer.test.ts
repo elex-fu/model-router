@@ -289,3 +289,97 @@ test('maps callback failures and zeroizes both callback plaintext and data key',
   assert.deepEqual(callbackBuffer, Buffer.alloc(callbackBuffer.length));
   assert.deepEqual(gateway.returnedKeys[0], Buffer.alloc(32));
 });
+
+test('R6b decrypt cache: a hit skips the KMS and materializes a fresh buffer per call', async (t) => {
+  const { input, gateway } = await fixture();
+  const cacheEntries = new Map<string, Buffer>();
+  const cacheCalls: Array<{ kind: 'get' | 'set'; key: string; ttlMs?: number }> = [];
+  const unsealer = new GatewayProviderCredentialUnsealer(gatewayFacade(gateway), {
+    ...OPTIONS,
+    decryptCache: {
+      async get(key) {
+        cacheCalls.push({ kind: 'get', key });
+        const value = cacheEntries.get(key);
+        return value === undefined ? null : Buffer.from(value);
+      },
+      async set(key, value, ttlMs) {
+        cacheCalls.push({ kind: 'set', key, ttlMs });
+        cacheEntries.set(key, Buffer.from(value));
+      },
+    },
+    decryptCacheTtlMs: 60_000,
+  });
+
+  // First call: cache miss, full KMS+GCM path, best-effort fill.
+  assert.equal(await unsealer.withCredential(input, (plaintext) => plaintext.toString('utf8')), SECRET);
+  assert.equal(gateway.calls, 1);
+  const fill = cacheCalls.find((call) => call.kind === 'set');
+  assert.ok(fill);
+  assert.equal(fill.ttlMs, 60_000);
+  assert.equal(cacheEntries.get(fill.key)?.toString('utf8'), SECRET);
+
+  // Second call: cache hit, zero KMS calls, plaintext identical.
+  assert.equal(await unsealer.withCredential(input, (plaintext) => plaintext.toString('utf8')), SECRET);
+  assert.equal(gateway.calls, 1, 'the KMS is not consulted on a cache hit');
+  // Third call: the hit materializes a FRESH buffer (the callback-owned copy
+  // was zeroized after each call without clobbering the stored value).
+  assert.equal(await unsealer.withCredential(input, (plaintext) => plaintext.toString('utf8')), SECRET);
+  assert.equal(gateway.calls, 1);
+  void t;
+});
+
+test('R6b decrypt cache: rotation or a different credential is a different key by construction', async (t) => {
+  const { input, gateway, sealer } = await fixture();
+  // A rotation: the same secret re-sealed under the same KMS produces a
+  // fresh envelope (new data key, nonce, ciphertext).
+  const rotated = await sealProviderCredential(Buffer.from(SECRET), sealingContext(), sealer, KMS_KEY_ID);
+  const rotatedInput: GatewayProviderCredentialUnsealInput = {
+    account,
+    credential,
+    version: storedVersion(rotated),
+  };
+  const cacheEntries = new Map<string, Buffer>();
+  const keys: string[] = [];
+  const unsealer = new GatewayProviderCredentialUnsealer(gatewayFacade(gateway), {
+    ...OPTIONS,
+    decryptCache: {
+      async get(key) {
+        return cacheEntries.get(key) ?? null;
+      },
+      async set(key, value) {
+        keys.push(key);
+        cacheEntries.set(key, Buffer.from(value));
+      },
+    },
+  });
+  await unsealer.withCredential(input, () => 1);
+  // A rotated envelope (fresh seal of the same secret) misses the cache.
+  await unsealer.withCredential(rotatedInput, () => 2);
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[0], keys[1]);
+  void t;
+});
+
+test('R6b decrypt cache: a failing cache is a miss, never a decryption failure', async () => {
+  const { input, gateway } = await fixture();
+  const unsealer = new GatewayProviderCredentialUnsealer(gatewayFacade(gateway), {
+    ...OPTIONS,
+    decryptCache: {
+      async get() {
+        throw new Error('redis unavailable');
+      },
+      async set() {
+        throw new Error('redis unavailable');
+      },
+    },
+  });
+  assert.equal(await unsealer.withCredential(input, (plaintext) => plaintext.toString('utf8')), SECRET);
+  assert.equal(gateway.calls, 1);
+});
+
+test('R6b decrypt cache: absent cache keeps the byte-identical pre-R6b path', async () => {
+  const { input, gateway } = await fixture();
+  const unsealer = new GatewayProviderCredentialUnsealer(gatewayFacade(gateway), OPTIONS);
+  assert.equal(await unsealer.withCredential(input, (plaintext) => plaintext.toString('utf8')), SECRET);
+  assert.equal(gateway.calls, 1);
+});
