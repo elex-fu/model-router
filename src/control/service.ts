@@ -17,6 +17,7 @@ import {
   type ValidationResult,
 } from '../config/v2-service.js';
 import { resolveRoute } from '../router/routes.js';
+import { diffSettings } from '../saas/observability/settings-diff.js';
 import type { ControlStore } from './store.js';
 
 export { ConfigConflictError, ConfigValidationError };
@@ -123,9 +124,7 @@ function redactDiffValues(changes: ConfigDiff[]): ConfigDiff[] {
   );
 }
 
-function secretReferences(
-  config: ConfigV2,
-): Array<{ path: string; source: SecretSource }> {
+function secretReferences(config: ConfigV2): Array<{ path: string; source: SecretSource }> {
   return config.upstreams.flatMap((upstream) => [
     ...upstream.credentials.map((credential) => ({
       path: `upstreams.${upstream.id}.credentials.${credential.id}.secret`,
@@ -267,8 +266,7 @@ export class ControlService {
     const collect = (value: unknown): void => {
       const parsed = configV2Schema.safeParse(value);
       if (!parsed.success) throw new Error('Cannot collect orphaned secrets: malformed current or historical config');
-      for (const { source } of secretReferences(parsed.data))
-        if (source.type === 'secret') references.add(source.id);
+      for (const { source } of secretReferences(parsed.data)) if (source.type === 'secret') references.add(source.id);
     };
     collect(config);
     for (const row of this.store.configHistoryRows()) {
@@ -624,6 +622,9 @@ export class ControlService {
     const validated = await this.config.validate(object(restored) ? { ...restored, revision: expected + 1 } : restored);
     if (!validated.valid || !validated.config) throw new ConfigValidationError(validated.errors);
     const changes = diff(previous, validated.config);
+    // Phase 3 audit enhancement: a key-level human-readable settings diff
+    // (secret-shaped paths redacted) recorded next to the structural journal.
+    const changeSummary = diffSettings(previous, validated.config);
     const commitId = randomUUID();
     this.activeCommit = { id: commitId, actor, paths: changes.map((item) => item.path) };
     let updated: ConfigV2;
@@ -702,9 +703,13 @@ export class ControlService {
         persistedRevision: result.persistedRevision,
         effectiveRevision: result.effectiveRevision,
         restartRequiredFields,
+        changeSummary,
         ...(applyError ? { applyError } : {}),
       },
     };
+    if (changeSummary.length > 0) {
+      this.store.audit(actor, 'config.change_summary', { revision: updated.revision, changes: changeSummary });
+    }
     this.dispatchEvent(event);
     if (!applyError) this.publishUpstreamChange(previous, updated);
     return result;

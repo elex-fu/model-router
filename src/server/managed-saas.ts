@@ -83,6 +83,18 @@ import {
   createUsageCorrectionPlatformHttpHandler,
   type UsageCorrectionPlatformHttpHandler,
 } from '../saas/metering/usage-correction-platform-http.js';
+import {
+  type AlertEvaluatorWorkerHandle,
+  type ChannelStatusWorkerHandle,
+  createObservabilityHttpHandler,
+  getChannelStatusPage,
+  ObservabilityAlertService,
+  type ObservabilityHttpHandler,
+  refreshSaasRuntimeGauges,
+  renderSaasMetrics,
+  startAlertEvaluatorWorker,
+  startChannelStatusWorker,
+} from '../saas/observability/index.js';
 import type { PaymentProviderAdapter, PaymentProviderRefundAdapter } from '../saas/payments/adapter.js';
 import { SaasCustomerPaymentOrderQueryService } from '../saas/payments/customer-order-query.js';
 import {
@@ -676,6 +688,7 @@ function createPlatformHandler(
   marketingOpsAnnouncementsHandler: MarketingAnnouncementHttpHandler,
   marketingOpsPromoCodesHandler: MarketingPromoHttpHandler,
   marketingOpsAffiliateHandler: MarketingAffiliateHttpHandler,
+  observabilityHandler: ObservabilityHttpHandler,
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
 ): RequestListener {
@@ -686,6 +699,7 @@ function createPlatformHandler(
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
         return;
       }
+      if (await observabilityHandler(req, res)) return;
       if (isApiPath(pathname, PLATFORM_API_PREFIX)) {
         if (pathname === PLATFORM_ADMIN_AUTH_PREFIX || pathname.startsWith(`${PLATFORM_ADMIN_AUTH_PREFIX}/`)) {
           if (await authHandler(req, res)) return;
@@ -717,6 +731,29 @@ function createGatewayHandler(gatewayHandler?: SaasGatewayHttpHandler): RequestL
       const pathname = requestPath(req);
       if (!pathname) {
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
+        return;
+      }
+      // Phase 3 observability: read-only Prometheus exposition on the gateway
+      // listener. Unauthenticated by design (counters only, no secrets);
+      // deployments should restrict scraper network access.
+      if (pathname === '/metrics') {
+        if ((req.method ?? '').toUpperCase() !== 'GET') {
+          req.resume();
+          sendJsonError(res, 405, 'METHOD_NOT_ALLOWED', 'Only GET is supported for metrics');
+          return;
+        }
+        req.resume();
+        try {
+          const body = Buffer.from(await renderSaasMetrics(), 'utf8');
+          res.writeHead(200, {
+            'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+            'content-length': String(body.length),
+            'cache-control': 'no-store',
+          });
+          res.end(body);
+        } catch {
+          sendJsonError(res, 500, 'INTERNAL_ERROR', 'The request could not be completed');
+        }
         return;
       }
       if (isMountedPath(pathname, GATEWAY_MOUNT)) {
@@ -1353,6 +1390,8 @@ export async function startManagedSaasServer(
   let gatewayKms: LoadedProviderCredentialUnsealingKms | undefined;
   let gatewayRuntimeModule: LoadedManagedSaasGatewayRuntimeModule | undefined;
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
+  let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
+  let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let customerWebhookWorker: CustomerWebhookDeliveryWorkerHandle | undefined;
@@ -1368,6 +1407,10 @@ export async function startManagedSaasServer(
     closePromise ??= (async () => {
       removeSignals?.();
       removeSignals = undefined;
+      await Promise.allSettled([
+        ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
+        ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
+      ]);
       await closeAllResources(
         listeners.values(),
         gateway,
@@ -2053,6 +2096,25 @@ export async function startManagedSaasServer(
         onFailed: (count) => console.error(`model-router managed unknown-outcome scanner failed claims: ${count}`),
       });
 
+      // Phase 3 observability: read-only metrics/SSE/status surface on the
+      // control-plane listener plus the two single-leader workers behind it.
+      const observabilityDatabase = database;
+      const observabilityAlertService = new ObservabilityAlertService(observabilityDatabase);
+      const observabilityHandler = createObservabilityHttpHandler({
+        access: platformAccessService,
+        channelStatus: (query) => getChannelStatusPage(observabilityDatabase, query),
+        alertRules: () => observabilityAlertService.listRules(),
+        alertEvents: (limit) => observabilityAlertService.listEvents(limit),
+        refreshMetrics: () => refreshSaasRuntimeGauges(observabilityDatabase),
+      });
+      channelStatusWorker = startChannelStatusWorker(database, {
+        onError: (phase, error) =>
+          console.error(`model-router managed observability channel-status ${phase} cycle failed`, error),
+      });
+      alertEvaluatorWorker = startAlertEvaluatorWorker(database, {
+        onError: (error) => console.error('model-router managed observability alert evaluator cycle failed', error),
+      });
+
       handlers.customer = createCustomerHandler(
         customerKeyHandler,
         customerIdentityHandler,
@@ -2078,6 +2140,7 @@ export async function startManagedSaasServer(
         marketingOpsAnnouncementsHandler,
         marketingOpsPromoCodesHandler,
         marketingOpsAffiliateHandler,
+        observabilityHandler,
         platformReadHandler,
         webDistPath,
       );
