@@ -54,6 +54,10 @@ async function installIdentity(page: Page, input: Partial<FixtureState> = {}) {
     directoryReads: [], unexpected: [], ...input,
   };
   await page.route('**/console/api/v1/**', async route => {
+    // Request ledger: every console API call reachable from the tested views must have a
+    // handler below; anything else lands in state.unexpected and fails the strict ledger
+    // assertions. Whenever the console adds/removes an initial API call (e.g. the header
+    // announcements badge), update this ledger in the same change to prevent drift.
     const request = route.request(); const url = new URL(request.url()); const method = request.method();
     const send = (data: unknown, status = 200) => route.fulfill({ status, json: { data } });
     const deny = (status: number) => {
@@ -95,6 +99,12 @@ async function installIdentity(page: Page, input: Partial<FixtureState> = {}) {
       if (state.memberError) return deny(state.memberError);
       return url.searchParams.has('cursor') ? send({ items: [{ userId: disabledId, displayName: null, role: 'billing', status: 'disabled' }], nextCursor: null }) :
         send({ items: [{ userId, displayName: 'Current owner', role: 'owner', status: 'active', email: unsafeBody, passwordHash: unsafeBody, session: unsafeBody, key: unsafeBody }], nextCursor });
+    }
+    const announcementMatch = /^\/console\/api\/v1\/tenants\/([^/]+)\/announcements$/.exec(url.pathname);
+    if (announcementMatch && method === 'GET') {
+      expect(url.searchParams.get('limit')).toBe('100');
+      expect([...url.searchParams.keys()].every(key => key === 'limit' || key === 'cursor')).toBe(true);
+      return send({ announcements: [], nextCursor: null });
     }
     if (url.pathname === `/console/api/v1/tenants/${tenantA}/invitations` && method === 'POST') {
       state.issued++;
