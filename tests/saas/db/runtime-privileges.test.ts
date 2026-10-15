@@ -507,6 +507,10 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     // F4: retention pruning deletes bounded terminal delivery/attempt metadata.
     ['saas_customer_webhook_deliveries', 'DELETE'],
     ['saas_customer_webhook_delivery_attempts', 'DELETE'],
+    // P3 observability: metrics retention pruning and operator rule deletion.
+    ['saas_obs_channel_metrics_1m', 'DELETE'],
+    ['saas_obs_channel_metrics_hourly', 'DELETE'],
+    ['saas_obs_alert_rules', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });
@@ -537,7 +541,7 @@ test('role template mirrors the control-plane manifest and grants no broad table
   );
   assert.doesNotMatch(
     sql,
-    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
+    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
   assert.doesNotMatch(
     sql,

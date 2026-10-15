@@ -588,6 +588,20 @@ BEGIN
       ('tenant_oauth_identities', 'SELECT', 'id provider_type provider_subject tenant_user_id email created_at updated_at'),
       ('tenant_oauth_identities', 'INSERT', 'id provider_type provider_subject tenant_user_id email created_at updated_at'),
       ('tenant_oauth_identities', 'UPDATE', 'email updated_at'),
+      ('saas_obs_channel_metrics_1m', 'SELECT', 'bucket_at provider_id route_id model error_category requests errors upstream_affected'),
+      ('saas_obs_channel_metrics_1m', 'INSERT', 'bucket_at provider_id route_id model error_category requests errors upstream_affected'),
+      ('saas_obs_channel_metrics_1m', 'UPDATE', 'requests errors upstream_affected'),
+      ('saas_obs_channel_metrics_hourly', 'SELECT', 'bucket_at provider_id route_id model error_category requests errors upstream_affected'),
+      ('saas_obs_channel_metrics_hourly', 'INSERT', 'bucket_at provider_id route_id model error_category requests errors upstream_affected'),
+      ('saas_obs_channel_metrics_hourly', 'UPDATE', 'requests errors upstream_affected'),
+      ('saas_obs_channel_metrics_watermark', 'SELECT', 'watermark_key last_bucket_at'),
+      ('saas_obs_channel_metrics_watermark', 'INSERT', 'watermark_key last_bucket_at'),
+      ('saas_obs_channel_metrics_watermark', 'UPDATE', 'last_bucket_at'),
+      ('saas_obs_alert_rules', 'SELECT', 'id name enabled metric operator threshold window_minutes sustained_minutes cooldown_minutes notify_email webhook_url last_triggered_at created_at'),
+      ('saas_obs_alert_rules', 'INSERT', 'id name enabled metric operator threshold window_minutes sustained_minutes cooldown_minutes notify_email webhook_url'),
+      ('saas_obs_alert_rules', 'UPDATE', 'name enabled metric operator threshold window_minutes sustained_minutes cooldown_minutes notify_email webhook_url last_triggered_at'),
+      ('saas_obs_alert_events', 'SELECT', 'id rule_id triggered_at resolved_at payload'),
+      ('saas_obs_alert_events', 'INSERT', 'id rule_id triggered_at payload'),
       ('saas_platform_mfa_enrollment_tokens', 'SELECT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'INSERT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'UPDATE', 'consumed_at'),
@@ -810,7 +824,10 @@ BEGIN
       ('saas_refund_wallet_freezes', 'DELETE'),
       ('saas_platform_role_assignments', 'DELETE'),
       ('saas_customer_webhook_deliveries', 'DELETE'),
-      ('saas_customer_webhook_delivery_attempts', 'DELETE')
+      ('saas_customer_webhook_delivery_attempts', 'DELETE'),
+      ('saas_obs_channel_metrics_1m', 'DELETE'),
+      ('saas_obs_channel_metrics_hourly', 'DELETE'),
+      ('saas_obs_alert_rules', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
