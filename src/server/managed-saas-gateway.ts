@@ -921,7 +921,14 @@ export function createOpenCodeGoProtocolRoutingAuthority(
         },
       });
     },
-  };
+    /**
+     * Composition introspection contract: the decorator stays transparent to
+     * instanceof-style checks by exposing the wrapped adapter. Real gateway
+     * E2E fixtures unwrap one optional layer before asserting the concrete
+     * authority class; anything deeper is a composition bug they must catch.
+     */
+    underlyingAuthority: authority,
+  } as RequestPreparationAuthorityPort & { readonly underlyingAuthority: RequestPreparationAuthorityPort };
 }
 
 /**

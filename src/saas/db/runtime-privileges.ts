@@ -2457,6 +2457,14 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'result_http_status',
     'created_at',
     'updated_at',
+    // Observability channel-status aggregation (P3): per-attempt error
+    // taxonomy and attribution columns the 1m rollup reads under this role.
+    'provider_id',
+    'upstream_id',
+    'route_config_id',
+    'resolved_model',
+    'dispatch_state',
+    'unknown_reason',
   ]),
   ...columnGrants('saas_usage_events', 'SELECT', [
     'id',

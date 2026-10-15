@@ -277,7 +277,13 @@ function observePreparationFailures(
   };
   const authority = dependency('authority');
   const scheduler = dependency('scheduler');
-  assert.ok(authority instanceof PostgresRequestPreparationAuthorityAdapter);
+  // R5b-2 composition transparency: the production authority may carry one
+  // optional OpenCode Go protocol-routing decorator. Unwrap exactly one such
+  // layer before asserting the concrete adapter; a deeper chain is a
+  // composition bug this gate must catch.
+  const authorityUnderlyingDescriptor = Object.getOwnPropertyDescriptor(authority, 'underlyingAuthority');
+  const concreteAuthority: unknown = authorityUnderlyingDescriptor?.value ?? authority;
+  assert.ok(concreteAuthority instanceof PostgresRequestPreparationAuthorityAdapter);
   assert.ok(scheduler instanceof PostgresProviderAccountScheduler);
   const nativeSchedulerDescriptor = Object.getOwnPropertyDescriptor(scheduler, 'scheduler');
   assert.ok(nativeSchedulerDescriptor && Object.hasOwn(nativeSchedulerDescriptor, 'value'));
