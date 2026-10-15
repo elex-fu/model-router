@@ -76,6 +76,10 @@ import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from './095_marketing_an
 import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from './096_customer_webhook_maintenance_payload_rewrite.js';
 import { PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION } from './097_provider_account_quarantine_state.js';
 import { PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION } from './098_provider_account_rate_counters_and_health_score.js';
+import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from './102_obs_channel_metrics.js';
+import { OBS_ALERTS_SAAS_MIGRATION } from './103_obs_alerts.js';
+import { IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION } from './101_identity_oauth_identities.js';
+import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from './099_provider_account_codex_scheduling.js';
 
 export interface SaasMigration {
   version: number;
@@ -508,4 +512,18 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // scheduling reads the trailing window) + R7/D6 continuous health score and
   // half-open probe state. NULL keeps pre-R6/R7 behavior for existing rows.
   PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION,
+  // 099: P1b Codex subscription scheduling signals — the 5h/7d usage
+  // snapshots parsed from x-codex rate-limit headers, the per-account
+  // auto-pause thresholds and the opt-in identity fingerprint mode/seed
+  // (default off; the seed is an identity-derivation input, never credential
+  // material). Scheduling signal only, never billing; plan metadata stays
+  // inside the sealed credential envelope, so no migration 100 is needed.
+  PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION,
+  // 100: reserved (P1b consumed 099 with no second migration). 101 is sub2api
+  // parity Phase 2 (COM-01): social OAuth login identity bindings.
+  IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
+  // 102/103: sub2api parity Phase 3 observability — passive channel metrics
+  // rollup (1m + hourly + watermark cursor) and alert rules/events.
+  OBS_CHANNEL_METRICS_SAAS_MIGRATION,
+  OBS_ALERTS_SAAS_MIGRATION,
 ];

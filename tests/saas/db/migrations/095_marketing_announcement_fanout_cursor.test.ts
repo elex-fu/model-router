@@ -7,7 +7,7 @@ import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from '../../../../src/sa
 const migration = MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('095 registers after 094 with the documented gaps; 098 is the current forward', () => {
+test('095 registers after 094 with the documented gaps; 103 is the current forward', () => {
   assert.equal(migration.version, 95);
   assert.equal(migration.name, 'marketing_announcement_fanout_cursor');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
@@ -15,7 +15,7 @@ test('095 registers after 094 with the documented gaps; 098 is the current forwa
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
-  assert.equal(registered.at(-1), 98);
+  assert.equal(registered.at(-1), 103);
   assert.equal(SAAS_MIGRATIONS[75], migration);
 });
 

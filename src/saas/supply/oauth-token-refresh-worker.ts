@@ -11,6 +11,11 @@ import {
   withUnsealedProviderCredential,
 } from '../credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import {
+  CODEX_OAUTH_CLIENT_ID,
+  CODEX_OAUTH_REFRESH_SCOPE,
+  CODEX_OAUTH_TOKEN_ENDPOINT,
+} from '../platform/codex-oauth/oauth.js';
 
 /**
  * Track R4 OAuth account token auto-refresh worker (design:
@@ -94,6 +99,12 @@ export interface OauthTokenRefreshFailure {
   readonly adapterId: string | null;
   readonly httpStatus: number | null;
   readonly durationMs: number;
+  /**
+   * RFC 6749 §5.2 error code from the token endpoint's rejection body
+   * (e.g. 'invalid_grant'), or null when the body carried none. Structured
+   * provider signal only: never token material.
+   */
+  readonly providerError: string | null;
 }
 
 export type OauthTokenRefreshResult = OauthTokenRefreshSuccess | OauthTokenRefreshFailure;
@@ -136,6 +147,12 @@ interface FixedOauthTokenAdapter {
   readonly tokenEndpoint: string;
   /** Public (non-confidential) OAuth client id required by the refresh grant. */
   readonly clientId: string;
+  /**
+   * Optional scope narrowing the provider's refresh grant requires; null
+   * sends no scope parameter (the endpoint then keeps the original grant's
+   * scopes).
+   */
+  readonly refreshScope: string | null;
 }
 
 /*
@@ -154,14 +171,24 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     adapterId: 'anthropic-claude-code-oauth-v1',
     tokenEndpoint: 'https://console.anthropic.com/v1/oauth/token',
     clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+    refreshScope: null,
   }),
   Object.freeze({
     providerId: 'openai',
     productId: 'codex-cli',
     credentialType: 'oauth',
     adapterId: 'openai-codex-oauth-v1',
-    tokenEndpoint: 'https://auth.openai.com/oauth/token',
-    clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
+    // P1b Codex binding (docs/sub2api-parity-upgrade-plan-2026-10-15.md
+    // Phase 1.3): the constants live in platform/codex-oauth/oauth.ts so the
+    // binding flow and the refresh grant can never drift apart. The refresh
+    // scope drops offline_access — the refresh token already exists. The
+    // refresh_token grant response only overwrites the stored refresh token
+    // when the endpoint truly returns a new one (OpenAI rotation semantics),
+    // which requestOauthTokenRefresh plus the caller's
+    // `refreshToken ?? previousRefreshToken` already implement.
+    tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
+    clientId: CODEX_OAUTH_CLIENT_ID,
+    refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
   }),
 ]);
 
@@ -169,7 +196,12 @@ export function resolveOauthTokenAdapter(credential: {
   readonly providerId: string;
   readonly productId: string;
   readonly credentialType: string;
-}): { readonly adapterId: string; readonly tokenEndpoint: string; readonly clientId: string } | null {
+}): {
+  readonly adapterId: string;
+  readonly tokenEndpoint: string;
+  readonly clientId: string;
+  readonly refreshScope: string | null;
+} | null {
   return (
     FIXED_OAUTH_TOKEN_ADAPTERS.find(
       (candidate) =>
@@ -186,8 +218,9 @@ function failedResult(
   adapterId: string | null,
   httpStatus: number | null,
   durationMs: number,
+  providerError: string | null = null,
 ): OauthTokenRefreshFailure {
-  return { state: 'failed', errorCode, retryable, adapterId, httpStatus, durationMs };
+  return { state: 'failed', errorCode, retryable, adapterId, httpStatus, durationMs, providerError };
 }
 
 function canonicalAdapterUrl(value: string): URL | null {
@@ -345,6 +378,29 @@ function parseTokenEndpointResponse(
 }
 
 /**
+ * Best-effort RFC 6749 §5.2 error-code extraction from a rejection body.
+ * Bounded, never throws, never surfaces anything but a short printable code.
+ */
+async function providerRejectionCode(response: Response, signal: AbortSignal): Promise<string | null> {
+  const body = await boundedResponseBody(response, signal);
+  if (body.state !== 'ok') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body.bytes));
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const code = (parsed as Fields).error;
+  if (typeof code !== 'string' || code.length < 1 || code.length > 64) return null;
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code.charCodeAt(index);
+    if (char < 0x21 || char > 0x7e) return null;
+  }
+  return code;
+}
+
+/**
  * Calls the fixed provider OAuth token endpoint with the refresh_token grant.
  * Every failure mode returns state 'failed'; this function never throws and
  * never surfaces token material in its results beyond the parsed secrets,
@@ -368,7 +424,10 @@ export async function requestOauthTokenRefresh(
 
   const deadline = AbortSignal.timeout(OAUTH_TOKEN_REFRESH_TIMEOUT_MS);
   const timeoutSignal = signal ? AbortSignal.any([deadline, signal]) : deadline;
-  const form = `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}&client_id=${encodeURIComponent(adapter.clientId)}`;
+  const form =
+    `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}` +
+    `&client_id=${encodeURIComponent(adapter.clientId)}` +
+    (adapter.refreshScope === null ? '' : `&scope=${encodeURIComponent(adapter.refreshScope)}`);
   let response: Response;
   try {
     timeoutSignal.throwIfAborted();
@@ -409,9 +468,27 @@ export async function requestOauthTokenRefresh(
     return failedResult('provider_redirect_rejected', false, adapter.adapterId, response.status, elapsed());
   }
   if (response.status < 200 || response.status >= 300) {
-    cancelResponseBody(response);
     if (response.status === 400 || response.status === 401 || response.status === 403) {
-      return failedResult('credential_rejected', false, adapter.adapterId, response.status, elapsed());
+      // Structured rejection signal (RFC 6749 §5.2, e.g. 'invalid_grant') so
+      // callers can distinguish a rotated refresh token from a revoked one.
+      //
+      // TODO(P1b/R4 refresh-race recovery, sub2api's tryRecoverFromRefreshRace):
+      // sub2api re-reads the account credential and validates the new refresh
+      // token when a refresh hits invalid_grant. This worker's claim design
+      // already covers that race structurally and a dedicated re-read is not
+      // implementable without changing the claim transaction: the credential
+      // row is locked FOR UPDATE (SKIP LOCKED lease) from claim through the
+      // token call, and the envelope unsealed in that same transaction is the
+      // CURRENT credential version — so a concurrent rotation is either
+      // blocked by the lease or already committed and re-read by the next
+      // claim (including the stale-'refreshing' reclamation). An invalid_grant
+      // observed while holding the lease can therefore only mean genuine
+      // revocation; the failure ladder re-claims (and thus re-reads the
+      // envelope, validating whatever refresh token is now current) after the
+      // backoff. Do not add an in-transaction re-read here: it would observe
+      // the same locked row.
+      const providerError = await providerRejectionCode(response, timeoutSignal);
+      return failedResult('credential_rejected', false, adapter.adapterId, response.status, elapsed(), providerError);
     }
     if (response.status === 429) {
       return failedResult('provider_rate_limited', true, adapter.adapterId, response.status, elapsed());

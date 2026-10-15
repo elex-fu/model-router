@@ -7,7 +7,7 @@ import { PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION } from '../../../../src
 const migration = PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('098 registers after 097 as the current forward with the documented gaps', () => {
+test('098 registers after 097 ahead of later forwards with the documented gaps', () => {
   assert.equal(migration.version, 98);
   assert.equal(migration.name, 'provider_account_rate_counters_and_health_score');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
@@ -15,7 +15,7 @@ test('098 registers after 097 as the current forward with the documented gaps', 
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
-  assert.equal(registered.at(-1), 98);
+  assert.equal(registered.at(-1), 103);
   assert.equal(SAAS_MIGRATIONS[78], migration);
 });
 
@@ -38,10 +38,19 @@ test('098 creates the PG-authoritative per-account per-second counter store', ()
 
 test('098 adds nullable rpm/tpm caps and the continuous health score with backward-compatible NULLs', () => {
   for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
-    assert.match(commands, new RegExp(`ALTER TABLE ${table}\\s+ADD COLUMN rpm_limit integer,\\s+ADD COLUMN tpm_limit integer`));
-    assert.match(commands, new RegExp(`ADD CONSTRAINT ${table}_rpm_limit_positive\\s+CHECK \\(rpm_limit IS NULL OR rpm_limit > 0\\)`));
-    assert.match(commands, new RegExp(`ADD CONSTRAINT ${table}_tpm_limit_positive\\s+CHECK \\(tpm_limit IS NULL OR tpm_limit > 0\\)`));
-    assert.doesNotMatch(commands, new RegExp(`ADD COLUMN rpm_limit integer NOT NULL`));
+    assert.match(
+      commands,
+      new RegExp(`ALTER TABLE ${table}\\s+ADD COLUMN rpm_limit integer,\\s+ADD COLUMN tpm_limit integer`),
+    );
+    assert.match(
+      commands,
+      new RegExp(`ADD CONSTRAINT ${table}_rpm_limit_positive\\s+CHECK \\(rpm_limit IS NULL OR rpm_limit > 0\\)`),
+    );
+    assert.match(
+      commands,
+      new RegExp(`ADD CONSTRAINT ${table}_tpm_limit_positive\\s+CHECK \\(tpm_limit IS NULL OR tpm_limit > 0\\)`),
+    );
+    assert.doesNotMatch(commands, /ADD COLUMN rpm_limit integer NOT NULL/);
   }
   assert.match(commands, /ALTER TABLE saas_provider_account_runtime_health\s+ADD COLUMN health_score numeric\(4,3\),/);
   assert.match(commands, /ADD COLUMN half_open_probe_at timestamptz/);

@@ -468,6 +468,7 @@ test('token endpoint status and transport failures map to stable error codes', a
       adapterId: null,
       httpStatus: null,
       durationMs: 0,
+      providerError: null,
     });
   });
 });

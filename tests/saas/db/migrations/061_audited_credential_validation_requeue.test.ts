@@ -37,14 +37,14 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   assert.equal(
     SAAS_MIGRATIONS.length,
-    79,
-    '060 active + 063 + 080-085 + 087/088 + 089-092 marketing + 093 D4 + 094 R4 + 095 R8 + 096 payload rewrite + 097 quarantine + 098 rate/health registered; audited061 registration remains an explicit later gate',
+    83,
+    '060 active + 063 + 080-085 + 087/088 + 089-092 marketing + 093 D4 + 094 R4 + 095 R8 + 096 payload rewrite + 097 quarantine + 098 rate/health + 099 codex scheduling + 101-103 registered; audited061 registration remains an explicit later gate',
   );
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98],
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103],
   );
-  assert.equal(SAAS_MIGRATIONS.at(-19), USAGE_CORRECTIONS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[60], USAGE_CORRECTIONS_SAAS_MIGRATION);
   assert.ok(!SAAS_MIGRATIONS.includes(migration));
   for (const [file, expected] of [
     ['035_credential_validation_jobs.ts', '5dce54853124a8bae3ff9f4e43ddd4787f1f77ac07e39fdab484279c8ad410d9'],

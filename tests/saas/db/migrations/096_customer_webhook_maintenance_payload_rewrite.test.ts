@@ -8,7 +8,7 @@ import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from '../
 const migration = CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('096 registers after 095 with the documented gaps; 098 is the current forward', () => {
+test('096 registers after 095 with the documented gaps; 103 is the current forward', () => {
   assert.equal(migration.version, 96);
   assert.equal(migration.name, 'customer_webhook_maintenance_payload_rewrite');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
@@ -16,7 +16,7 @@ test('096 registers after 095 with the documented gaps; 098 is the current forwa
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
-  assert.equal(registered.at(-1), 98);
+  assert.equal(registered.at(-1), 103);
   assert.equal(SAAS_MIGRATIONS[76], migration);
 });
 
@@ -57,7 +57,10 @@ test('096 fails closed on drift or pre-existing maintenance events, under one gu
     /IF EXISTS \(SELECT 1 FROM model_router_saas\.saas_customer_webhook_events\s+WHERE event_type = 'platform\.maintenance'\)\s+THEN RAISE EXCEPTION 'Migration 096 found pre-existing platform\.maintenance events; operator review required'/,
   );
   assert.match(commands, /LOCK TABLE model_router_saas\.saas_customer_webhook_events IN ACCESS EXCLUSIVE MODE/);
-  assert.match(commands, /DROP CONSTRAINT saas_customer_webhook_events_payload_contract,\s+ADD CONSTRAINT saas_customer_webhook_events_payload_contract CHECK/);
+  assert.match(
+    commands,
+    /DROP CONSTRAINT saas_customer_webhook_events_payload_contract,\s+ADD CONSTRAINT saas_customer_webhook_events_payload_contract CHECK/,
+  );
   assert.match(commands, /'Migration 096 validated constraint shape or pg_catalog-only postcondition failed'/);
   assert.match(commands, /'Migration 096 exceeded its one-CHECK catalog and unchanged ACL contract'/);
 });

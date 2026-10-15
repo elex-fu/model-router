@@ -57,6 +57,10 @@ import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from '../../../src/saas/
 import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/096_customer_webhook_maintenance_payload_rewrite.js';
 import { PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/097_provider_account_quarantine_state.js';
 import { PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION } from '../../../src/saas/db/migrations/098_provider_account_rate_counters_and_health_score.js';
+import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/099_provider_account_codex_scheduling.js';
+import { IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/101_identity_oauth_identities.js';
+import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/102_obs_channel_metrics.js';
+import { OBS_ALERTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/103_obs_alerts.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -90,7 +94,7 @@ test('SaaS migration registry keeps a stable append order with only documented g
   // (docs/contracts-m0-freeze.md).
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98],
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103],
   );
 });
 
@@ -133,9 +137,13 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION,
+    IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
+    OBS_CHANNEL_METRICS_SAAS_MIGRATION,
+    OBS_ALERTS_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 79);
+  assert.equal(SAAS_MIGRATIONS.length, 83);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -176,14 +184,18 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'customer_webhook_maintenance_payload_rewrite',
       'provider_account_quarantine_state',
       'provider_account_rate_counters_and_health_score',
+      'provider_account_codex_scheduling',
+      'identity_oauth_identities',
+      'obs_channel_metrics',
+      'obs_alert_rules_and_events',
     ],
   );
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98],
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 79);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 79);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 83);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 83);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -273,7 +285,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 79);
+  assert.equal(SAAS_MIGRATIONS.length, 83);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -300,6 +312,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION,
+    IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
+    OBS_CHANNEL_METRICS_SAAS_MIGRATION,
+    OBS_ALERTS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -341,6 +357,19 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[77]?.name, 'provider_account_quarantine_state');
   assert.equal(SAAS_MIGRATIONS[78]?.version, 98);
   assert.equal(SAAS_MIGRATIONS[78]?.name, 'provider_account_rate_counters_and_health_score');
+  assert.equal(SAAS_MIGRATIONS[79]?.version, 99);
+  assert.equal(SAAS_MIGRATIONS[79]?.name, 'provider_account_codex_scheduling');
+  // 100 stays reserved (P1b consumed only 099); 101 is the Phase 2 OAuth table.
+  assert.equal(SAAS_MIGRATIONS[80], IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[80]?.version, 101);
+  assert.equal(SAAS_MIGRATIONS[80]?.name, 'identity_oauth_identities');
+  // 102/103: Phase 3 observability (channel metrics rollup, alert rules).
+  assert.equal(SAAS_MIGRATIONS[81], OBS_CHANNEL_METRICS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[81]?.version, 102);
+  assert.equal(SAAS_MIGRATIONS[81]?.name, 'obs_channel_metrics');
+  assert.equal(SAAS_MIGRATIONS[82], OBS_ALERTS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[82]?.version, 103);
+  assert.equal(SAAS_MIGRATIONS[82]?.name, 'obs_alert_rules_and_events');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

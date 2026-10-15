@@ -205,6 +205,27 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'consumed_at',
     'closed_at',
   ]),
+  // P2 social login bindings (migration 101): control-plane reads the binding
+  // key and inserts rows; UPDATE covers only the support-facing email column.
+  ...columnGrants('tenant_oauth_identities', 'SELECT', [
+    'id',
+    'provider_type',
+    'provider_subject',
+    'tenant_user_id',
+    'email',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('tenant_oauth_identities', 'INSERT', [
+    'id',
+    'provider_type',
+    'provider_subject',
+    'tenant_user_id',
+    'email',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('tenant_oauth_identities', 'UPDATE', ['email', 'updated_at']),
   ...columnGrants('saas_platform_mfa_enrollment_tokens', 'SELECT', [
     'id',
     'user_id',
