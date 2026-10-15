@@ -18,7 +18,6 @@ interface FakeState {
   platformRoleAssignments: Array<Record<string, unknown>>;
   bootstrapTokens: Array<Record<string, unknown>>;
   invitations: Array<Record<string, unknown>>;
-  oauthIdentities: Array<Record<string, unknown>>;
 }
 
 function copy<T>(value: T): T {
@@ -47,7 +46,6 @@ export class FakeSaasDatabase {
     platformRoleAssignments: [],
     bootstrapTokens: [],
     invitations: [],
-    oauthIdentities: [],
   };
   failNextProjectInsert = false;
   failNextProjectMembershipInsert = false;
@@ -169,36 +167,13 @@ export class FakeSaasDatabase {
         email_canonical: canonical,
         password_hash: c,
         display_name: d,
-        // The OAuth registration insert passes the provider-verified timestamp
-        // as $5; identity-service inserts keep the 5-param NULL shape.
-        email_verified_at: statement.includes('values ($1, $2, $3, $4, $5, null, $6, $6)') ? e : null,
+        email_verified_at: null,
         disabled_at: null,
-        created_at: statement.includes('values ($1, $2, $3, $4, $5, null, $6, $6)') ? f : e,
-        updated_at: statement.includes('values ($1, $2, $3, $4, $5, null, $6, $6)') ? f : e,
+        created_at: e,
+        updated_at: e,
       };
       this.state.users.push(user);
       return result<Row>([user as Row]);
-    }
-    if (statement.startsWith('select o.tenant_user_id as user_id, u.disabled_at from tenant_oauth_identities')) {
-      const binding = this.state.oauthIdentities.find((row) => row.provider_type === a && row.provider_subject === b);
-      if (!binding) return result<Row>();
-      const user = this.state.users.find((row) => row.id === binding.tenant_user_id);
-      return result<Row>(user ? [{ user_id: user.id, disabled_at: user.disabled_at ?? null } as Row] : []);
-    }
-    if (statement.startsWith('insert into tenant_oauth_identities')) {
-      if (this.state.oauthIdentities.some((row) => row.provider_type === b && row.provider_subject === c)) {
-        throw uniqueError();
-      }
-      this.state.oauthIdentities.push({
-        id: a,
-        provider_type: b,
-        provider_subject: c,
-        tenant_user_id: d,
-        email: e,
-        created_at: f,
-        updated_at: f,
-      });
-      return result<Row>([{ id: a } as Row]);
     }
     if (statement.startsWith('insert into saas_platform_role_assignments')) {
       this.state.platformRoleAssignments.push({

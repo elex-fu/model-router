@@ -848,6 +848,11 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     };
     let dispatched: PreparedEvidenceDispatchResult;
     const dispatchStartedAtMs = Date.now();
+    // Route label is best-effort: the handler-level prepared contract does not
+    // guarantee evidenceInput, so observability must never break dispatch.
+    const dispatchRoute = isRecord(prepared.evidenceInput) && typeof prepared.evidenceInput.routeConfigId === 'string'
+      ? prepared.evidenceInput.routeConfigId
+      : 'unknown';
     try {
       dispatched = await dispatch.dispatch({
         evidenceId: prepared.evidence.evidenceId,
@@ -858,13 +863,13 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       });
       const attemptStatus = dispatched.kind === 'sent' ? (dispatched.transport.resultHttpStatus ?? null) : null;
       recordGatewayAttemptOutcome({
-        route: prepared.evidenceInput.routeConfigId,
+        route: dispatchRoute,
         ok: dispatched.kind === 'sent' && attemptStatus !== null && attemptStatus >= 200 && attemptStatus < 300,
         durationMs: Date.now() - dispatchStartedAtMs,
       });
     } catch {
       recordGatewayAttemptOutcome({
-        route: prepared.evidenceInput.routeConfigId,
+        route: dispatchRoute,
         ok: false,
         durationMs: Date.now() - dispatchStartedAtMs,
       });
