@@ -212,10 +212,10 @@ export async function cancellationSnapshot(migrator: SqlExecutor, fixture: Await
     `SELECT r.execution_state, r.financial_status, r.reconciliation_state, r.state_version AS request_version,
       a.dispatch_state, a.result_state, a.response_started, a.state_version AS attempt_version,
       c.state AS capacity_state, i.state AS idempotency_state,
-      (SELECT state FROM saas_billing_reservations WHERE tenant_id = r.tenant_id AND request_id = r.id) AS hold_state,
-      (SELECT count(*)::text FROM saas_audit_events WHERE tenant_id = r.tenant_id AND request_id = r.id
+      (SELECT state FROM saas_billing_reservations WHERE tenant_id = r.tenant_id AND request_id = r.id::text) AS hold_state,
+      (SELECT count(*)::text FROM saas_audit_events WHERE tenant_id = r.tenant_id AND request_id = r.id::text
         AND action = 'saas.request.pre_dispatch_released') AS released_audits,
-      (SELECT count(*)::text FROM saas_audit_events WHERE tenant_id = r.tenant_id AND request_id = r.id
+      (SELECT count(*)::text FROM saas_audit_events WHERE tenant_id = r.tenant_id AND request_id = r.id::text
         AND action = 'saas.request.pre_dispatch_retained') AS retained_audits,
       (SELECT count(*)::text FROM saas_ledger_transactions WHERE tenant_id = r.tenant_id AND source_type = 'billing_settlement') AS settlements,
       (SELECT jsonb_agg(jsonb_build_array(id, currency, posted_balance_minor_units) ORDER BY id)

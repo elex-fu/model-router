@@ -353,8 +353,8 @@ test('R4 OAuth token refresh runs end-to-end on the control-plane role with real
   const gateway = observedDatabase(gatewayUrl);
   const worker = observedDatabase(workerUrl());
   const env = softwareKmsEnv();
-  const sealingKms = createProviderCredentialSealingKms({ env });
-  const unsealingKms: ProviderCredentialUnsealingKms = createCredentialValidationWorkerUnsealingKms({ env });
+  const sealingKms = await createProviderCredentialSealingKms({ env });
+  const unsealingKms: ProviderCredentialUnsealingKms = await createCredentialValidationWorkerUnsealingKms({ env });
 
   const persistence = new ProviderSupplyPersistenceService(new PostgresProviderSupplyRepository(control.database), {
     deployment: DEPLOYMENT,

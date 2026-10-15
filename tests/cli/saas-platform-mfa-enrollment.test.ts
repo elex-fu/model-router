@@ -211,7 +211,11 @@ test('plaintext requires both explicit opt-in and loopback; private CIDR is not 
 test('a supplied prompt does not bypass the production TTY requirement', async () => {
   const result = await exec(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
-    import { saasPlatformMfaEnroll, SaasPlatformMfaEnrollmentError } from './src/cli/saas-platform-mfa-enrollment.ts';
+    // The repo ships CJS (no package "type": "module"), so a tsx-compiled .ts
+    // exposes its exports on the default interop object, not as lexed named
+    // exports; destructure from the default import.
+    import mfaModule from './src/cli/saas-platform-mfa-enrollment.ts';
+    const { saasPlatformMfaEnroll, SaasPlatformMfaEnrollmentError } = mfaModule;
     const calls = [];
     await assert.rejects(saasPlatformMfaEnroll({
       env: {},

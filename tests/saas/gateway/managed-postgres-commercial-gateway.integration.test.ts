@@ -1570,6 +1570,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       // Contract C-7: explicit non-default scalars prove the 064 columns round-trip.
       priority: 5,
       weight: 7,
+      revalidationIntervalSeconds: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     });
@@ -2437,6 +2438,8 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       },
       platformAuthRateLimiter: { take: async () => undefined },
       customerAuthRateLimiter: { take: async () => undefined },
+      redisReady: async () => {},
+      credentialKeyReady: async () => {},
       close: async () => {},
     };
     controlPlaneRuntime = await startManagedSaasServer(controlPlaneDeployment, {

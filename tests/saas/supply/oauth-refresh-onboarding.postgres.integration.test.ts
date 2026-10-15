@@ -220,7 +220,7 @@ test('#18a OAuth credential onboarding persists and inherits the refresh schedul
   const migrator = observedDatabase(migratorUrl);
   const control = observedDatabase(controlUrl);
   const gateway = observedDatabase(gatewayUrl);
-  const sealingKms: ProviderCredentialSealingKms = createProviderCredentialSealingKms({ env: softwareKmsEnv() });
+  const sealingKms: ProviderCredentialSealingKms = await createProviderCredentialSealingKms({ env: softwareKmsEnv() });
   const serviceOn = (database: SaasDatabase) =>
     new ProviderSupplyPersistenceService(new PostgresProviderSupplyRepository(database), {
       deployment: DEPLOYMENT,

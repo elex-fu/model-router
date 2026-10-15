@@ -78,6 +78,7 @@ test('G1 marketing redeem codes run end-to-end under the restricted control-plan
         { code: codes[0] as string },
       );
       assert.equal(result.outcome, 'redeemed');
+      if (result.kind !== 'balance') throw new Error('expected a balance redemption');
       assert.equal(result.amountMinorUnits, '2500');
 
       const wallet = await migrator.database.query<{ posted_balance_minor_units: string }>(
@@ -97,6 +98,7 @@ test('G1 marketing redeem codes run end-to-end under the restricted control-plan
         { code: codes[0] as string },
       );
       assert.equal(replay.outcome, 'replayed');
+      if (replay.kind !== 'balance') throw new Error('expected a balance replay');
       assert.equal(replay.ledgerTransactionId, result.ledgerTransactionId);
       const balanceAfterReplay = await migrator.database.query<{ posted_balance_minor_units: string }>(
         `SELECT posted_balance_minor_units FROM model_router_saas.saas_wallets WHERE tenant_id = $1 AND currency = 'CNY'`,

@@ -172,12 +172,12 @@ async function snapshot(migrator: SqlExecutor, fixture: Fixture): Promise<ClaimS
           WHERE tenant_id = $1 AND request_id = $2),
         'idempotency', (SELECT jsonb_agg(to_jsonb(i) ORDER BY i.key_digest) FROM saas_gateway_request_idempotency_keys i
           WHERE tenant_id = $1 AND request_id = $2),
-        'holds', (SELECT jsonb_agg(to_jsonb(h) ORDER BY h.id) FROM saas_billing_reservations h WHERE tenant_id = $1 AND request_id = $2),
+        'holds', (SELECT jsonb_agg(to_jsonb(h) ORDER BY h.id) FROM saas_billing_reservations h WHERE tenant_id = $1 AND request_id = $2::text),
         'wallets', (SELECT jsonb_agg(to_jsonb(w) ORDER BY w.id) FROM saas_wallets w WHERE tenant_id = $1),
         'ledger', (SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id) FROM saas_ledger_transactions l WHERE tenant_id = $1)
       )::text AS resources,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('state', state) ORDER BY id)
-        FROM saas_billing_reservations WHERE tenant_id = $1 AND request_id = $2), '[]'::jsonb) AS holds
+        FROM saas_billing_reservations WHERE tenant_id = $1 AND request_id = $2::text), '[]'::jsonb) AS holds
      FROM saas_attempts a JOIN saas_prepared_request_evidence e
        ON e.tenant_id = a.tenant_id AND e.request_id = a.request_id AND e.attempt_id = a.id
      WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3 AND e.id = $4`,

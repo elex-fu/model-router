@@ -632,11 +632,12 @@ export class FakePaymentProvider implements PaymentProviderAdapter {
   get confirmEvent():
     | ((input: PaymentProviderEventConfirmationInput) => Promise<PaymentProviderEventConfirmation>)
     | undefined {
-    if (this.confirmEventResult === 'absent') return undefined;
+    const outcome = this.confirmEventResult;
+    if (outcome === 'absent') return undefined;
     return async (input) => {
       this.confirmCalls.push(input);
       if (this.confirmEventError) throw this.confirmEventError;
-      return this.confirmEventResult ?? { confirmed: true };
+      return outcome ?? { confirmed: true };
     };
   }
 

@@ -443,8 +443,8 @@ test('R5 credential quarantine runs end-to-end under the restricted worker role 
   const gateway = observedDatabase(gatewayUrl);
   const worker = observedDatabase(workerUrl());
   const env = softwareKmsEnv();
-  const sealingKms = createProviderCredentialSealingKms({ env });
-  const unsealingKms: ProviderCredentialUnsealingKms = createCredentialValidationWorkerUnsealingKms({ env });
+  const sealingKms = await createProviderCredentialSealingKms({ env });
+  const unsealingKms: ProviderCredentialUnsealingKms = await createCredentialValidationWorkerUnsealingKms({ env });
 
   const audits: ProviderAccountQuarantineAuditEvent[] = [];
   let probeStatus = 401;
