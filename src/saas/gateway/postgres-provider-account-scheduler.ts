@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { SaasDatabase } from '../db/index.js';
 import type { GatewayProtocol } from './contracts.js';
 import { effectiveWeight, parseHealthScoreColumn } from './health-score.js';
@@ -14,6 +15,7 @@ import {
   type ProviderAccountSchedulerPort,
   type ProviderAccountSchedulerRevalidatedRoute,
   type ProviderAccountSchedulerRights,
+  type ProviderAccountSchedulerSelectionTrace,
 } from './provider-account-scheduler.js';
 import type {
   RequestPreparationCaller,
@@ -75,6 +77,19 @@ interface EligibilityRow extends Row {
   account_tpm_limit: unknown;
   account_health_score: unknown;
   account_egress_proxy_quality: unknown;
+  /* R7 (migrations 099/100/108): quota-window scheduling signals. */
+  account_codex_5h_reset_at?: unknown;
+  account_codex_7d_reset_at?: unknown;
+  account_codex_usage_updated_at?: unknown;
+  account_claude_5h_reset_at?: unknown;
+  account_claude_7d_reset_at?: unknown;
+  account_claude_7d_sonnet_reset_at?: unknown;
+  account_claude_7d_oi_reset_at?: unknown;
+  account_claude_usage_updated_at?: unknown;
+  account_opencode_go_rolling_5h_reset_at?: unknown;
+  account_opencode_go_weekly_reset_at?: unknown;
+  account_opencode_go_monthly_reset_at?: unknown;
+  account_opencode_go_usage_updated_at?: unknown;
   credential_owner_kind: unknown;
   credential_supply_mode: unknown;
   credential_id: unknown;
@@ -219,6 +234,18 @@ SELECT product.status AS product_status,
        account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
        health.health_score AS account_health_score,
        egress_proxy.last_probe_quality AS account_egress_proxy_quality,
+       account.codex_5h_reset_at AS account_codex_5h_reset_at,
+       account.codex_7d_reset_at AS account_codex_7d_reset_at,
+       account.codex_usage_updated_at AS account_codex_usage_updated_at,
+       account.claude_5h_reset_at AS account_claude_5h_reset_at,
+       account.claude_7d_reset_at AS account_claude_7d_reset_at,
+       account.claude_7d_sonnet_reset_at AS account_claude_7d_sonnet_reset_at,
+       account.claude_7d_oi_reset_at AS account_claude_7d_oi_reset_at,
+       account.claude_usage_updated_at AS account_claude_usage_updated_at,
+       account.opencode_go_rolling_5h_reset_at AS account_opencode_go_rolling_5h_reset_at,
+       account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
+       account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
+       account.opencode_go_usage_updated_at AS account_opencode_go_usage_updated_at,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -344,6 +371,18 @@ SELECT product.status AS product_status,
        account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
        health.health_score AS account_health_score,
        egress_proxy.last_probe_quality AS account_egress_proxy_quality,
+       account.codex_5h_reset_at AS account_codex_5h_reset_at,
+       account.codex_7d_reset_at AS account_codex_7d_reset_at,
+       account.codex_usage_updated_at AS account_codex_usage_updated_at,
+       account.claude_5h_reset_at AS account_claude_5h_reset_at,
+       account.claude_7d_reset_at AS account_claude_7d_reset_at,
+       account.claude_7d_sonnet_reset_at AS account_claude_7d_sonnet_reset_at,
+       account.claude_7d_oi_reset_at AS account_claude_7d_oi_reset_at,
+       account.claude_usage_updated_at AS account_claude_usage_updated_at,
+       account.opencode_go_rolling_5h_reset_at AS account_opencode_go_rolling_5h_reset_at,
+       account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
+       account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
+       account.opencode_go_usage_updated_at AS account_opencode_go_usage_updated_at,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -526,6 +565,22 @@ SELECT coalesce(sum(requests), 0)::text AS requests,
    AND account_id = $2
    AND window_start > $3::timestamptz - interval '60 seconds'`;
 
+/*
+ * R7 cost-priority signal: the candidate's supplier cost version carries the
+ * exact rational per-token rates. The blended input+output rate is combined
+ * with pure bigint arithmetic so the scheduler's cross-multiplication compare
+ * stays exact. Only read when the cost-priority strategy is enabled; the
+ * default (strategy-free) path never issues this statement. A missing row
+ * (no such cost version) is a null signal, not an error; a malformed rate
+ * blocks the whole selection, mirroring the health-score fail-closed rule.
+ */
+const SUPPLIER_COST_RATE_SQL = `/* postgres-provider-account-scheduler:supplier-cost-rate */
+SELECT input_rate_numerator_minor_units, input_rate_denominator_units,
+       output_rate_numerator_minor_units, output_rate_denominator_units
+  FROM saas_supplier_cost_versions
+ WHERE id = $1
+ LIMIT 1`;
+
 function isRecord(value: unknown): value is Row {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -630,6 +685,72 @@ function rateWindowSum(value: unknown): bigint | null {
 function timestamp(value: unknown): Date | null {
   const parsed = value instanceof Date ? new Date(value.getTime()) : typeof value === 'string' ? new Date(value) : null;
   return parsed && Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+/** Exact non-negative integer as persisted by PostgreSQL (bigint/text/safe number). */
+function exactNonNegativeBigInt(value: unknown): bigint | null {
+  try {
+    const parsed =
+      typeof value === 'bigint'
+        ? value
+        : typeof value === 'number' && Number.isSafeInteger(value)
+          ? BigInt(value)
+          : typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
+            ? BigInt(value)
+            : null;
+    return parsed !== null && parsed >= 0n ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * R7 soonest-reset signal: the earliest upcoming quota-window reset across
+ * the observed codex (099), claude (100), and opencode-go (108) snapshot
+ * families. A window only counts when its family carries a refresh stamp
+ * (usage_updated_at) — a reset without one is not a trustworthy snapshot —
+ * and when the reset is still in the future. The staleness horizon itself
+ * is enforced by the core scheduler (snapshotMaxAgeMs), keeping every R7
+ * threshold in one testable place. NULL columns (never observed) produce no
+ * signal at all, exactly the pre-R7 behavior.
+ */
+function soonestQuotaReset(row: EligibilityRow, now: Date): { resetAt: Date; observedAt: Date } | null {
+  const families: ReadonlyArray<{ resets: readonly unknown[]; updated: unknown }> = [
+    {
+      resets: [row.account_codex_5h_reset_at, row.account_codex_7d_reset_at],
+      updated: row.account_codex_usage_updated_at,
+    },
+    {
+      resets: [
+        row.account_claude_5h_reset_at,
+        row.account_claude_7d_reset_at,
+        row.account_claude_7d_sonnet_reset_at,
+        row.account_claude_7d_oi_reset_at,
+      ],
+      updated: row.account_claude_usage_updated_at,
+    },
+    {
+      resets: [
+        row.account_opencode_go_rolling_5h_reset_at,
+        row.account_opencode_go_weekly_reset_at,
+        row.account_opencode_go_monthly_reset_at,
+      ],
+      updated: row.account_opencode_go_usage_updated_at,
+    },
+  ];
+  let best: { resetAt: Date; observedAt: Date } | null = null;
+  for (const family of families) {
+    const observedAt = timestamp(family.updated);
+    if (observedAt === null) continue;
+    for (const raw of family.resets) {
+      const resetAt = timestamp(raw);
+      if (resetAt === null || resetAt.getTime() <= now.getTime()) continue;
+      if (best === null || resetAt.getTime() < best.resetAt.getTime()) {
+        best = { resetAt, observedAt };
+      }
+    }
+  }
+  return best;
 }
 
 function currentWindow(effectiveAt: unknown, expiresAt: unknown, now: Date): boolean {
@@ -918,7 +1039,10 @@ function inputScopeIsInvalid(input: ProviderAccountSchedulerInput): boolean {
 }
 
 class PostgresEligibilityAuthority {
-  constructor(private readonly database: SaasDatabase) {}
+  constructor(
+    private readonly database: SaasDatabase,
+    private readonly options: { readonly supplierCostRates: boolean } = { supplierCostRates: false },
+  ) {}
 
   async revalidate(input: {
     readonly caller: RequestPreparationCaller;
@@ -1070,6 +1194,51 @@ class PostgresEligibilityAuthority {
         } catch {
           return { decision: 'block', reason: 'persisted account health score is malformed' };
         }
+        // R7 (plan §R7 items 1–2): scheduling-only signals — the soonest
+        // upcoming quota-window reset (099/100/108 columns, always surfaced;
+        // NULL = never observed = no signal) and, when the cost-priority
+        // strategy is enabled, the candidate's exact rational supplier rate
+        // read from saas_supplier_cost_versions. Neither ever enters the
+        // billing path (093 quota-snapshot precedent).
+        const quotaReset = soonestQuotaReset(row, input.now);
+        let supplierCostRate: {
+          numeratorMinorUnits: bigint | number | string;
+          denominatorUnits: bigint | number | string;
+        } | null = null;
+        if (this.options.supplierCostRates && nonEmpty(input.candidate.supplierCostVersion)) {
+          const rateResult = await tx.query<{
+            input_rate_numerator_minor_units: unknown;
+            input_rate_denominator_units: unknown;
+            output_rate_numerator_minor_units: unknown;
+            output_rate_denominator_units: unknown;
+          }>(SUPPLIER_COST_RATE_SQL, [input.candidate.supplierCostVersion]);
+          if (rateResult.rows.length > 1) {
+            return { decision: 'block', reason: 'persisted supplier cost version is ambiguous' };
+          }
+          if (rateResult.rows.length === 1) {
+            const rate = rateResult.rows[0];
+            const inputNumerator = exactNonNegativeBigInt(rate.input_rate_numerator_minor_units);
+            const inputDenominator = exactNonNegativeBigInt(rate.input_rate_denominator_units);
+            const outputNumerator = exactNonNegativeBigInt(rate.output_rate_numerator_minor_units);
+            const outputDenominator = exactNonNegativeBigInt(rate.output_rate_denominator_units);
+            if (
+              inputNumerator === null ||
+              inputDenominator === null ||
+              outputNumerator === null ||
+              outputDenominator === null ||
+              inputDenominator === 0n ||
+              outputDenominator === 0n
+            ) {
+              return { decision: 'block', reason: 'persisted supplier cost rate is malformed' };
+            }
+            // Blended input+output rate: inNum/outDen + outNum/inDen over the
+            // common denominator — pure bigint arithmetic, never floating point.
+            supplierCostRate = {
+              numeratorMinorUnits: inputNumerator * outputDenominator + outputNumerator * inputDenominator,
+              denominatorUnits: inputDenominator * outputDenominator,
+            };
+          }
+        }
         return {
           decision: 'allow',
           candidate: input.candidate,
@@ -1084,6 +1253,11 @@ class PostgresEligibilityAuthority {
           // Contract C-7: persisted scheduling scalars (082), never inferred.
           priority,
           weight: adjustedWeight,
+          scheduling: {
+            soonestResetAt: quotaReset === null ? null : quotaReset.resetAt,
+            soonestResetObservedAt: quotaReset === null ? null : quotaReset.observedAt,
+            supplierCostRate,
+          },
         };
       });
     } catch {
@@ -1253,6 +1427,23 @@ const MISSING_AFFINITY: ProviderAccountSchedulerAffinityPort = {
   },
 };
 
+/*
+ * R7 observability (plan §R7 item 5): one append-only saas_audit_events row
+ * per strategy-enabled selection, targeting the attempt this selection
+ * prepared (request-scoped when the caller did not allocate an attempt id).
+ * The action carries the discriminated strategy dimensions so operators can
+ * filter by prefix. The write is best-effort by design: the selection has
+ * already been made and is separately authorized and audited downstream, so
+ * an observability insert failure must never turn into an availability
+ * failure — it is swallowed, not allowed to block dispatch.
+ */
+const SCHEDULER_SELECTION_AUDIT_SQL = `/* postgres-provider-account-scheduler:selection-audit */
+INSERT INTO saas_audit_events
+  (id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, entry_point, request_id)
+VALUES ($1, $2, NULL, $3, $4, $5, $6, 'provider_account_scheduler', $7)`;
+
+const SCHEDULER_SELECTION_AUDIT_ACTION = 'provider_account_scheduler.selection';
+
 /**
  * PostgreSQL revalidation for the commercial gateway. Every eligible account
  * must match the current route, explicit rights, verified account-bound
@@ -1264,6 +1455,8 @@ const MISSING_AFFINITY: ProviderAccountSchedulerAffinityPort = {
 export class PostgresProviderAccountScheduler implements ProviderAccountSchedulerPort {
   private readonly scheduler: ProviderAccountScheduler;
   private readonly healthAuthorityConfigured: boolean;
+  private readonly database: SaasDatabase;
+  private readonly now: () => Date;
 
   constructor(options: PostgresProviderAccountSchedulerOptions) {
     if (
@@ -1273,8 +1466,14 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
     ) {
       throw new TypeError('a transactional PostgreSQL SaaS database is required');
     }
+    this.database = options.database;
+    this.now = options.now ?? (() => new Date());
     this.healthAuthorityConfigured = options.health !== undefined;
-    const eligibility = new PostgresEligibilityAuthority(options.database);
+    const eligibility = new PostgresEligibilityAuthority(options.database, {
+      // Only the cost-priority strategy needs an extra authority read; the
+      // default (strategy-free) path never issues the supplier-cost query.
+      supplierCostRates: options.strategies?.costPriority?.enabled === true,
+    });
     this.scheduler = new ProviderAccountScheduler(
       {
         eligibility,
@@ -1299,7 +1498,41 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
         ),
       );
     }
-    return this.scheduler.select(input);
+    return this.scheduler.select(input).then((decision) => {
+      // R7: record the chosen strategy dimensions on the attempt audit. The
+      // trace exists only when a strategy is enabled, so the default path
+      // performs no extra write.
+      if (decision.decision === 'allow' && decision.scheduling) {
+        void this.recordSelectionAudit(input, decision.scheduling);
+      }
+      return decision;
+    });
+  }
+
+  /** Best-effort observability write; see SCHEDULER_SELECTION_AUDIT_SQL. */
+  private async recordSelectionAudit(
+    input: ProviderAccountSchedulerInput,
+    trace: ProviderAccountSchedulerSelectionTrace,
+  ): Promise<void> {
+    const occurredAt = this.now();
+    if (!(occurredAt instanceof Date) || !Number.isFinite(occurredAt.getTime())) return;
+    const action =
+      trace.reasons.length > 0
+        ? `${SCHEDULER_SELECTION_AUDIT_ACTION}:${trace.reasons.join('+')}`
+        : SCHEDULER_SELECTION_AUDIT_ACTION;
+    try {
+      await this.database.query(SCHEDULER_SELECTION_AUDIT_SQL, [
+        randomUUID(),
+        input.caller.tenantId,
+        action,
+        input.attemptId === undefined ? 'saas_requests' : 'saas_attempts',
+        input.attemptId === undefined ? input.requestId : input.attemptId,
+        occurredAt.toISOString(),
+        input.requestId,
+      ]);
+    } catch {
+      // Observability only: the selection decision stands.
+    }
   }
 
   bindAffinity(

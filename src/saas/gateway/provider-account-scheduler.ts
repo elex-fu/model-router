@@ -17,6 +17,26 @@ import {
  * health or concurrency snapshot as permission to send traffic: the durable
  * request/attempt authority and the fenced provider-account lease remain the
  * final dispatch guards.
+ *
+ * R7 scheduling strategies (plan §R7, docs/token-resale-implementation-plan-
+ * 2026-10-15.md; sub2api's four-level filter as the reference model): every
+ * strategy is behind an option with default-off/default-neutral, so the
+ * default selection order — priority tier, health rank, load-ratio order,
+ * deterministic weighted draw — is byte-identical to the pre-R7 behavior
+ * (proven by the golden-fixture regression test). When enabled they compose
+ * as: soonest-reset promotion (a filter) → the ordered comparator registry
+ * [cost-priority?, load-ratio, lru?] → the tail (seeded in-group shuffle
+ * when LRU is on, otherwise the unchanged weighted draw with the optional
+ * latency coefficient folded into the effective weights).
+ *
+ * Signal sources: quota-window resets come from the 099 codex / 100 claude /
+ * 108 opencode-go account columns surfaced by the PostgreSQL eligibility
+ * queries; supplier rates from saas_supplier_cost_versions via the
+ * candidate's supplierCostVersion; the LRU last-used signal is the runtime
+ * health authority's observedAt; latency comes from the optional health
+ * `latencyMs` field, which the runtime health authority is expected to
+ * populate once the R6 probe/latency signals land — until then the latency
+ * coefficient stays neutral by construction.
  */
 
 export interface ProviderAccountSchedulerRights {
@@ -48,6 +68,32 @@ export interface ProviderAccountSchedulerEligibilityAllowed {
   readonly priority: number;
   /** Positive integer used by deterministic weighted choice. */
   readonly weight: number;
+  /**
+   * R7 scheduling signals (plan §R7, tasks #33): point-in-time, non-secret
+   * scheduling-only facts revalidated by the same authority. Every field is
+   * optional so pre-R7 eligibility ports keep working unchanged; absent or
+   * null means "no signal" and every strategy skips the candidate. These
+   * never enter the billing path (093/099/100/108 precedent).
+   */
+  readonly scheduling?: {
+    /**
+     * Earliest upcoming quota-window reset across the observed codex (099),
+     * claude (100), and opencode-go (108) snapshot families, paired with the
+     * refresh stamp of the family that produced it. Null when no family has
+     * both an upcoming reset and a refresh stamp.
+     */
+    readonly soonestResetAt?: Date | string | null;
+    readonly soonestResetObservedAt?: Date | string | null;
+    /**
+     * Blended input+output supplier rate (minor units per token) as an exact
+     * rational, read from saas_supplier_cost_versions via the candidate's
+     * supplierCostVersion. Null when the candidate carries no cost version.
+     */
+    readonly supplierCostRate?: {
+      readonly numeratorMinorUnits: bigint | number | string;
+      readonly denominatorUnits: bigint | number | string;
+    } | null;
+  };
 }
 
 export interface ProviderAccountSchedulerRevalidatedRoute {
@@ -110,6 +156,14 @@ export interface ProviderAccountSchedulerHealthAllowed {
     readonly status: 'healthy' | 'degraded' | 'cooldown' | 'unhealthy';
     readonly observedAt: string | Date;
     readonly cooldownUntil?: string | Date | null;
+    /**
+     * R7 latency awareness (plan §R7 item 4): optional upstream latency
+     * observation in milliseconds. Absent/null keeps the weight modulation
+     * exactly neutral; the runtime health authority is expected to populate
+     * it from its latency signals when available (probe/observability
+     * integration). Malformed values fail closed like every other health fact.
+     */
+    readonly latencyMs?: number | null;
   };
 }
 
@@ -239,6 +293,12 @@ export interface ProviderAccountSchedulerDependencies {
 
 export interface ProviderAccountSchedulerInput {
   readonly requestId: string;
+  /**
+   * R7 observability: the attempt this selection prepares, when the caller
+   * (request preparation) has already allocated it. Optional and purely
+   * informational — it never influences selection.
+   */
+  readonly attemptId?: string;
   readonly caller: RequestPreparationCaller;
   readonly entitlement: RequestPreparationEntitlement;
   readonly candidates: readonly RequestPreparationCandidateAuthority[];
@@ -260,9 +320,92 @@ export interface ProviderAccountSchedulerPort {
   ): Promise<ProviderAccountSchedulerAffinityBindDecision>;
 }
 
+/**
+ * R7 scheduling-strategy toggles (plan §R7, docs/token-resale-implementation-
+ * plan-2026-10-15.md). Every strategy is default-off/default-neutral so the
+ * default selection order — priority tier, health rank, load-ratio order,
+ * deterministic weighted draw — is byte-identical to the pre-R7 behavior.
+ */
+export interface ProviderAccountSchedulerSoonestResetStrategyOptions {
+  /** Default false: no promotion, pre-R7 behavior. */
+  readonly enabled?: boolean;
+  /**
+   * Use-it-or-lose-it horizon: a quota window counts as imminent when it
+   * resets strictly less than this many milliseconds from now.
+   * Default 30 minutes.
+   */
+  readonly windowMs?: number;
+  /**
+   * Stale-snapshot guard: a window's reset only counts while the snapshot
+   * family that observed it was refreshed within this many milliseconds.
+   * Default 30 minutes.
+   */
+  readonly snapshotMaxAgeMs?: number;
+}
+
+export interface ProviderAccountSchedulerStrategiesOptions {
+  /**
+   * Soonest-reset promotion: after candidate filtering, accounts whose
+   * quota-window snapshot (099 codex / 100 claude / 108 opencode-go columns)
+   * resets within the horizon are promoted ahead of the rest of their
+   * priority tier.
+   */
+  readonly soonestReset?: ProviderAccountSchedulerSoonestResetStrategyOptions;
+  /**
+   * Cost priority: within the promoted tier, order candidates by their
+   * saas_supplier_cost_versions rate ascending (exact rational compare;
+   * subscription pools at ~0 cost sort ahead of pay-as-you-go keys).
+   */
+  readonly costPriority?: { readonly enabled?: boolean };
+  /**
+   * LRU tie-break + in-group shuffle: orders by least-recently-used first
+   * (runtime-health observedAt as the last-used signal; never-used first)
+   * and replaces the deterministic-draw tail with a seeded shuffle inside
+   * groups that tie on the whole comparator chain (anti-thundering-herd).
+   * The shuffle seed derives from the request identity, so runs stay
+   * reproducible; the deterministic draw remains the default tail.
+   */
+  readonly lru?: { readonly enabled?: boolean };
+  /**
+   * Latency awareness: folds the health authority's latency signal into the
+   * effective draw weight — weight × (1 − coefficient × min(1, latency /
+   * 30s)), floored at the 0.05 multiplier. Default 0 keeps every weight
+   * exactly unchanged.
+   */
+  readonly latencyWeightCoefficient?: number;
+}
+
+/**
+ * Observability record attached to an allowed selection when any R7 strategy
+ * is enabled: which tail algorithm chose the account and which strategy
+ * dimensions actually discriminated the outcome.
+ */
+export interface ProviderAccountSchedulerSelectionTrace {
+  readonly strategy: string;
+  readonly reasons: readonly string[];
+}
+
 export interface ProviderAccountSchedulerOptions {
   readonly now?: () => Date;
   readonly maxHealthAgeMs?: number;
+  readonly strategies?: ProviderAccountSchedulerStrategiesOptions;
+}
+
+/** Exact non-negative integer as persisted by PostgreSQL (bigint/text/safe number). */
+function exactNonNegativeInteger(value: unknown): bigint | null {
+  try {
+    const parsed =
+      typeof value === 'bigint'
+        ? value
+        : typeof value === 'number' && Number.isSafeInteger(value)
+          ? BigInt(value)
+          : typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
+            ? BigInt(value)
+            : null;
+    return parsed !== null && parsed >= 0n ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 interface EligibleCandidate {
@@ -274,12 +417,32 @@ interface EligibleCandidate {
   readonly healthRank: number;
   readonly accountId: string;
   readonly route?: ProviderAccountSchedulerRevalidatedRoute;
+  /** R7 scheduling signals; null means "no signal" and every strategy skips the candidate. */
+  readonly soonestResetAt: Date | null;
+  readonly soonestResetObservedAt: Date | null;
+  readonly supplierCost: { readonly numeratorMinorUnits: bigint; readonly denominatorUnits: bigint } | null;
+  /** LRU signal: the health authority's last observation time (never-used = null). */
+  readonly lastUsedAt: Date | null;
+  /** R7 latency signal in milliseconds; null keeps the weight modulation neutral. */
+  readonly latencyMs: number | null;
 }
 
 const DEFAULT_MAX_HEALTH_AGE_MS = 30_000;
 const MAX_HEALTH_AGE_MS = 86_400_000;
 const MAX_IDENTIFIER_LENGTH = 512;
 const POSITIVE_INTEGER_MAX = 1_000_000_000;
+
+/* R7 (plan §R7) strategy defaults and bounds. */
+/** Use-it-or-lose-it horizon: quota windows resetting sooner than this are imminent. */
+const SOONEST_RESET_DEFAULT_WINDOW_MS = 30 * 60_000;
+/** Stale-snapshot guard: resets only count while their family snapshot is this fresh. */
+const SOONEST_RESET_DEFAULT_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
+/** Latency at which the R7 latency penalty saturates (p99-scale upstream latency). */
+const LATENCY_REFERENCE_MS = 30_000;
+/** Multiplier floor (0.05) mirroring HEALTH_SCORE_WEIGHT_FLOOR in health-score.ts. */
+const LATENCY_MULTIPLIER_FLOOR_MILLI = 50;
+/** Upper bound on a plausible health-authority latency observation. */
+const LATENCY_MS_MAX = 3_600_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -491,7 +654,7 @@ function healthValue(
   decision: ProviderAccountSchedulerHealthDecision,
   now: Date,
   maxHealthAgeMs: number,
-): { readonly rank: number } | 'deny' | 'block' {
+): { readonly rank: number; readonly observedAt: Date; readonly latencyMs: number | null } | 'deny' | 'block' {
   if (
     !isRecord(decision) ||
     (decision.decision !== 'allow' && decision.decision !== 'deny' && decision.decision !== 'block')
@@ -514,12 +677,20 @@ function healthValue(
   if (!observedAt || observedAt.getTime() > now.getTime() || now.getTime() - observedAt.getTime() > maxHealthAgeMs) {
     return 'block';
   }
+  // R7: the optional latency signal must be a plausible non-negative duration;
+  // anything else is authority drift and fails closed like the other facts.
+  const latencyMs = value.latencyMs;
+  if (latencyMs !== undefined && latencyMs !== null) {
+    if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs) || latencyMs < 0 || latencyMs > LATENCY_MS_MAX) {
+      return 'block';
+    }
+  }
   const cooldownUntil =
     value.cooldownUntil === undefined || value.cooldownUntil === null ? null : date(value.cooldownUntil);
   if (value.cooldownUntil !== undefined && value.cooldownUntil !== null && cooldownUntil === null) return 'block';
   if (cooldownUntil && cooldownUntil.getTime() > now.getTime()) return 'deny';
   if (value.status === 'cooldown' || value.status === 'unhealthy') return 'deny';
-  return { rank: healthStatusRank(value.status) };
+  return { rank: healthStatusRank(value.status), observedAt, latencyMs: latencyMs ?? null };
 }
 
 function validRights(
@@ -541,6 +712,23 @@ function validRights(
     withinWindow(rights.effectiveAt, now) &&
     notExpired(rights.expiresAt, now)
   );
+}
+
+function validSchedulingSignals(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const resetAt = value.soonestResetAt;
+  if (resetAt !== undefined && resetAt !== null && date(resetAt) === null) return false;
+  const observedAt = value.soonestResetObservedAt;
+  if (observedAt !== undefined && observedAt !== null && date(observedAt) === null) return false;
+  const rate = value.supplierCostRate;
+  if (rate !== undefined && rate !== null) {
+    if (!isRecord(rate)) return false;
+    const numerator = exactNonNegativeInteger(rate.numeratorMinorUnits);
+    const denominator = exactNonNegativeInteger(rate.denominatorUnits);
+    if (numerator === null || denominator === null || denominator === 0n) return false;
+  }
+  return true;
 }
 
 function validEligibility(
@@ -568,24 +756,92 @@ function validEligibility(
     typeof value.priority !== 'number' ||
     !Number.isSafeInteger(value.priority) ||
     value.priority < 0 ||
-    value.priority > POSITIVE_INTEGER_MAX
+    value.priority > POSITIVE_INTEGER_MAX ||
+    !validSchedulingSignals(value.scheduling)
   ) {
     return false;
   }
   return true;
 }
 
-function compareLoad(left: EligibleCandidate, right: EligibleCandidate): number {
+function compareLoadRatio(left: EligibleCandidate, right: EligibleCandidate): number {
   const leftNumerator = BigInt(left.inFlight) * BigInt(right.concurrencyLimit);
   const rightNumerator = BigInt(right.inFlight) * BigInt(left.concurrencyLimit);
-  if (leftNumerator !== rightNumerator) return leftNumerator < rightNumerator ? -1 : 1;
+  return leftNumerator < rightNumerator ? -1 : leftNumerator > rightNumerator ? 1 : 0;
+}
+
+function compareLoad(left: EligibleCandidate, right: EligibleCandidate): number {
+  const ratio = compareLoadRatio(left, right);
+  if (ratio !== 0) return ratio;
   return left.accountId.localeCompare(right.accountId);
 }
 
-function effectiveWeight(candidate: EligibleCandidate): bigint {
+/**
+ * R7 cost-priority comparator: exact rational cross-multiplication of the
+ * blended input+output supplier rate (minor units per token). Unknown cost —
+ * no supplier cost version (BYOK candidates) or a missing snapshot row —
+ * sorts after every known rate, so unpriced supply is never rewarded.
+ */
+function compareSupplierCost(left: EligibleCandidate, right: EligibleCandidate): number {
+  if (left.supplierCost === null) return right.supplierCost === null ? 0 : 1;
+  if (right.supplierCost === null) return -1;
+  const leftNumerator = left.supplierCost.numeratorMinorUnits * right.supplierCost.denominatorUnits;
+  const rightNumerator = right.supplierCost.numeratorMinorUnits * left.supplierCost.denominatorUnits;
+  return leftNumerator < rightNumerator ? -1 : leftNumerator > rightNumerator ? 1 : 0;
+}
+
+/**
+ * R7 LRU comparator: least recently used first. A null last-used signal
+ * (never observed by the health authority) counts as the least recently
+ * used, mirroring the sub2api "LastUsedAt empty is smallest" rule.
+ */
+function compareLastUsed(left: EligibleCandidate, right: EligibleCandidate): number {
+  if (left.lastUsedAt === null) return right.lastUsedAt === null ? 0 : -1;
+  if (right.lastUsedAt === null) return 1;
+  const leftTime = left.lastUsedAt.getTime();
+  const rightTime = right.lastUsedAt.getTime();
+  return leftTime < rightTime ? -1 : leftTime > rightTime ? 1 : 0;
+}
+
+/** One entry in the ordered R7 strategy registry applied before the account-id tie-break. */
+interface OrderingStrategy {
+  readonly name: 'cost-priority' | 'load' | 'lru';
+  readonly compare: (left: EligibleCandidate, right: EligibleCandidate) => number;
+}
+
+function compareByStrategies(
+  left: EligibleCandidate,
+  right: EligibleCandidate,
+  strategies: readonly OrderingStrategy[],
+): number {
+  for (const strategy of strategies) {
+    const order = strategy.compare(left, right);
+    if (order !== 0) return order;
+  }
+  return 0;
+}
+
+/**
+ * R7 latency multiplier in per-mille: 1000 = exactly today's weight. The
+ * penalty saturates at LATENCY_REFERENCE_MS and the multiplier never drops
+ * below the 0.05 floor, mirroring the health-score weight floor.
+ */
+function latencyMultiplierMilli(latencyMs: number | null, coefficient: number): number {
+  if (coefficient <= 0 || latencyMs === null) return 1000;
+  const penalty = Math.min(1, latencyMs / LATENCY_REFERENCE_MS);
+  const milli = Math.round(1000 * (1 - coefficient * penalty));
+  return Math.max(LATENCY_MULTIPLIER_FLOOR_MILLI, Math.min(1000, milli));
+}
+
+function effectiveWeight(candidate: EligibleCandidate, latencyWeightCoefficient: number): bigint {
   const numerator = BigInt(candidate.weight) * BigInt(candidate.concurrencyLimit);
   const denominator = BigInt(candidate.concurrencyLimit + candidate.inFlight);
-  return numerator / denominator > 0n ? numerator / denominator : 1n;
+  const base = numerator / denominator > 0n ? numerator / denominator : 1n;
+  const multiplierMilli = latencyMultiplierMilli(candidate.latencyMs, latencyWeightCoefficient);
+  // multiplierMilli === 1000 returns the exact pre-R7 value (and the exact draw).
+  if (multiplierMilli === 1000) return base;
+  const adjusted = (base * BigInt(multiplierMilli)) / 1000n;
+  return adjusted > 0n ? adjusted : 1n;
 }
 
 function deterministicDraw(seed: string, totalWeight: bigint): bigint {
@@ -593,14 +849,8 @@ function deterministicDraw(seed: string, totalWeight: bigint): bigint {
   return BigInt(`0x${digest.slice(0, 16)}`) % totalWeight;
 }
 
-function chooseWeighted(
-  candidates: readonly EligibleCandidate[],
-  requestId: string,
-  input: ProviderAccountSchedulerInput,
-): EligibleCandidate {
-  const ordered = [...candidates].sort(compareLoad);
-  const totalWeight = ordered.reduce((total, candidate) => total + effectiveWeight(candidate), 0n);
-  const seed = [
+function selectionSeed(requestId: string, input: ProviderAccountSchedulerInput): string {
+  return [
     requestId,
     input.caller.tenantId,
     input.caller.projectId,
@@ -610,17 +860,125 @@ function chooseWeighted(
     input.publicModel,
     input.protocol,
   ].join('\u001f');
+}
+
+function drawWeighted(
+  ordered: readonly EligibleCandidate[],
+  seed: string,
+  latencyWeightCoefficient: number,
+): EligibleCandidate {
+  const totalWeight = ordered.reduce(
+    (total, candidate) => total + effectiveWeight(candidate, latencyWeightCoefficient),
+    0n,
+  );
   let draw = deterministicDraw(seed, totalWeight);
   for (const candidate of ordered) {
-    const weight = effectiveWeight(candidate);
+    const weight = effectiveWeight(candidate, latencyWeightCoefficient);
     if (draw < weight) return candidate;
     draw -= weight;
   }
   return ordered[ordered.length - 1] as EligibleCandidate;
 }
 
+function chooseWeighted(
+  candidates: readonly EligibleCandidate[],
+  requestId: string,
+  input: ProviderAccountSchedulerInput,
+): EligibleCandidate {
+  const ordered = [...candidates].sort(compareLoad);
+  return drawWeighted(ordered, selectionSeed(requestId, input), 0);
+}
+
+/** Deterministic sha256-counter PRNG; reproducible for a fixed seed. */
+function seededRandom(seed: string): () => number {
+  let counter = 0;
+  return () => {
+    const digest = createHash('sha256').update(`${seed}\u001f${counter++}`, 'utf8').digest('hex');
+    return Number(BigInt(`0x${digest.slice(0, 13)}`)) / 2 ** 52;
+  };
+}
+
+function fisherYatesShuffle<T>(items: T[], random: () => number): void {
+  for (let index = items.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    const held = items[index];
+    items[index] = items[swap] as T;
+    items[swap] = held as T;
+  }
+}
+
+/**
+ * R7 LRU tail: candidates are already in a total order extending the
+ * strategy chain; groups that tie on the whole chain are shuffled with the
+ * request-derived seed (anti-thundering-herd) and the first candidate wins.
+ * Groups of one are untouched, so any strict chain order is preserved.
+ */
+function chooseByChainOrder(
+  ordered: readonly EligibleCandidate[],
+  strategies: readonly OrderingStrategy[],
+  seed: string,
+): EligibleCandidate {
+  const groups: EligibleCandidate[][] = [];
+  for (const candidate of ordered) {
+    const current = groups[groups.length - 1];
+    if (current && compareByStrategies(current[0] as EligibleCandidate, candidate, strategies) === 0) {
+      current.push(candidate);
+    } else {
+      groups.push([candidate]);
+    }
+  }
+  const flattened: EligibleCandidate[] = [];
+  for (const group of groups) {
+    if (group.length > 1) fisherYatesShuffle(group, seededRandom(seed));
+    flattened.push(...group);
+  }
+  return flattened[0] as EligibleCandidate;
+}
+
 function schedulerBlock(message: string): RequestPreparationDecision<never> {
   return blockRequestPreparation('capability_unavailable', message);
+}
+
+/** Resolved R7 strategy configuration; every default preserves pre-R7 behavior. */
+interface ResolvedStrategies {
+  readonly anyEnabled: boolean;
+  readonly soonestResetEnabled: boolean;
+  readonly soonestResetWindowMs: number;
+  readonly soonestResetSnapshotMaxAgeMs: number;
+  readonly costPriorityEnabled: boolean;
+  readonly lruEnabled: boolean;
+  readonly latencyWeightCoefficient: number;
+}
+
+/** A provided strategy window must be a positive safe integer; absent falls back. */
+function positiveMsOption(value: unknown, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError('scheduler strategy windows must be positive safe integers');
+  }
+  return value;
+}
+
+function resolveStrategies(options: ProviderAccountSchedulerStrategiesOptions | undefined): ResolvedStrategies {
+  const soonestReset = options?.soonestReset;
+  const windowMs = positiveMsOption(soonestReset?.windowMs, SOONEST_RESET_DEFAULT_WINDOW_MS);
+  const snapshotMaxAgeMs = positiveMsOption(soonestReset?.snapshotMaxAgeMs, SOONEST_RESET_DEFAULT_SNAPSHOT_MAX_AGE_MS);
+  const coefficient = options?.latencyWeightCoefficient ?? 0;
+  if (typeof coefficient !== 'number' || !Number.isFinite(coefficient) || coefficient < 0 || coefficient > 1) {
+    throw new TypeError('scheduler latency weight coefficient must be a finite number in [0, 1]');
+  }
+  const soonestResetEnabled = soonestReset?.enabled === true;
+  const costPriorityEnabled = options?.costPriority?.enabled === true;
+  const lruEnabled = options?.lru?.enabled === true;
+  return {
+    anyEnabled: soonestResetEnabled || costPriorityEnabled || lruEnabled || coefficient > 0,
+    soonestResetEnabled,
+    soonestResetWindowMs: windowMs,
+    soonestResetSnapshotMaxAgeMs: snapshotMaxAgeMs,
+    costPriorityEnabled,
+    lruEnabled,
+    latencyWeightCoefficient: coefficient,
+  };
 }
 
 /**
@@ -631,6 +989,17 @@ function schedulerBlock(message: string): RequestPreparationDecision<never> {
 export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
   private readonly now: () => Date;
   private readonly maxHealthAgeMs: number;
+  private readonly strategies: ResolvedStrategies;
+  /**
+   * R7 strategy registry: the ordered comparators applied before the
+   * account-id tie-break when strategies are enabled. Cost priority leads
+   * (commercial tiering inside the priority tier), the existing load-ratio
+   * order balances within a cost tier, and LRU breaks load ties — the exact
+   * sub2api filter order the plan prescribes. With no strategies enabled the
+   * registry is the single load-ratio entry and the selection path is
+   * byte-identical to pre-R7.
+   */
+  private readonly orderingStrategies: readonly OrderingStrategy[];
 
   constructor(
     private readonly dependencies: ProviderAccountSchedulerDependencies,
@@ -641,6 +1010,16 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       options.maxHealthAgeMs !== undefined && Number.isSafeInteger(options.maxHealthAgeMs) && options.maxHealthAgeMs > 0
         ? Math.min(options.maxHealthAgeMs, MAX_HEALTH_AGE_MS)
         : DEFAULT_MAX_HEALTH_AGE_MS;
+    this.strategies = resolveStrategies(options.strategies);
+    const chain: OrderingStrategy[] = [];
+    if (this.strategies.costPriorityEnabled) {
+      chain.push({ name: 'cost-priority', compare: compareSupplierCost });
+    }
+    chain.push({ name: 'load', compare: compareLoadRatio });
+    if (this.strategies.lruEnabled) {
+      chain.push({ name: 'lru', compare: compareLastUsed });
+    }
+    this.orderingStrategies = chain;
   }
 
   async select(
@@ -655,6 +1034,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         !isRecord(input.caller) ||
         !isRecord(input.entitlement) ||
         !nonEmpty(input.requestId) ||
+        (input.attemptId !== undefined && !nonEmpty(input.attemptId)) ||
         !nonEmpty(input.publicModel) ||
         !nonEmpty(input.caller.tenantId) ||
         !nonEmpty(input.caller.projectId) ||
@@ -754,6 +1134,24 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
             healthRank: healthResult.rank,
             accountId: eligibility.candidate.accountId,
             route: eligibility.route,
+            // R7 scheduling signals: absent columns/ports stay null and every
+            // strategy skips the candidate, preserving pre-R7 behavior.
+            soonestResetAt: date(eligibility.scheduling?.soonestResetAt),
+            soonestResetObservedAt: date(eligibility.scheduling?.soonestResetObservedAt),
+            supplierCost:
+              eligibility.scheduling?.supplierCostRate === undefined ||
+              eligibility.scheduling?.supplierCostRate === null
+                ? null
+                : {
+                    numeratorMinorUnits: exactNonNegativeInteger(
+                      eligibility.scheduling.supplierCostRate.numeratorMinorUnits,
+                    ) as bigint,
+                    denominatorUnits: exactNonNegativeInteger(
+                      eligibility.scheduling.supplierCostRate.denominatorUnits,
+                    ) as bigint,
+                  },
+            lastUsedAt: healthResult.observedAt,
+            latencyMs: healthResult.latencyMs,
           });
         }
 
@@ -792,15 +1190,91 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         if (affinityAccountId !== null && !preferred) {
           return schedulerBlock('persisted provider account affinity target is no longer eligible');
         }
-        if (preferred) return allowRequestPreparation(preferred.candidate);
-        const selected = chooseWeighted(ranked, input.requestId, input);
-        return allowRequestPreparation(selected.candidate);
+        if (preferred) {
+          return allowRequestPreparation(
+            preferred.candidate,
+            this.strategies.anyEnabled ? { strategy: 'affinity', reasons: ['affinity'] } : undefined,
+          );
+        }
+        if (!this.strategies.anyEnabled) {
+          return allowRequestPreparation(chooseWeighted(ranked, input.requestId, input).candidate);
+        }
+        const selected = this.chooseByStrategyRegistry(ranked, input, now);
+        return allowRequestPreparation(selected.candidate.candidate, selected.trace);
       } catch {
         return schedulerBlock('provider account scheduler failed closed');
       }
     } catch {
       return schedulerBlock('provider account scheduler failed closed');
     }
+  }
+
+  /**
+   * R7 strategy composition (plan §R7): soonest-reset promotion first (a
+   * filter, not a comparator), then the ordered comparator registry
+   * [cost-priority?, load, lru?], then the tail — the seeded in-group
+   * shuffle when LRU is enabled, otherwise the unchanged deterministic
+   * weighted draw (with the optional latency coefficient folded into the
+   * effective weights). The returned trace names the tail algorithm and the
+   * strategy dimensions that actually discriminated the outcome.
+   */
+  private chooseByStrategyRegistry(
+    ranked: readonly EligibleCandidate[],
+    input: ProviderAccountSchedulerInput,
+    now: Date,
+  ): { readonly candidate: EligibleCandidate; readonly trace: ProviderAccountSchedulerSelectionTrace } {
+    const reasons: string[] = [];
+    let pool = ranked;
+    if (this.strategies.soonestResetEnabled) {
+      const imminent = pool.filter((candidate) => this.isImminentReset(candidate, now));
+      if (imminent.length > 0 && imminent.length < pool.length) {
+        pool = imminent;
+        reasons.push('soonest-reset');
+      }
+    }
+    const chain = this.orderingStrategies;
+    const ordered = [...pool].sort(
+      (left, right) => compareByStrategies(left, right, chain) || left.accountId.localeCompare(right.accountId),
+    );
+    for (const strategy of chain) {
+      if (strategy.name === 'load') continue;
+      const discriminates = ordered.some((left) =>
+        ordered.some((right) => left !== right && strategy.compare(left, right) !== 0),
+      );
+      if (discriminates) reasons.push(strategy.name);
+    }
+    if (
+      this.strategies.latencyWeightCoefficient > 0 &&
+      ordered.some((candidate) => candidate.latencyMs !== null && candidate.latencyMs > 0)
+    ) {
+      reasons.push('latency-weight');
+    }
+    if (this.strategies.lruEnabled) {
+      const seed = selectionSeed(input.requestId, input);
+      const chosen = chooseByChainOrder(ordered, chain, `${seed}strategy-shuffle`);
+      return { candidate: chosen, trace: { strategy: 'lru-order+seeded-shuffle', reasons } };
+    }
+    return {
+      candidate: drawWeighted(ordered, selectionSeed(input.requestId, input), this.strategies.latencyWeightCoefficient),
+      trace: { strategy: 'weighted-draw', reasons },
+    };
+  }
+
+  /**
+   * Use-it-or-lose-it predicate: the account's soonest observed quota-window
+   * reset is upcoming, strictly inside the horizon, and backed by a snapshot
+   * refreshed within the staleness bound. Any missing signal skips the
+   * account (pre-R7 behavior for that candidate).
+   */
+  private isImminentReset(candidate: EligibleCandidate, now: Date): boolean {
+    const resetAt = candidate.soonestResetAt;
+    const observedAt = candidate.soonestResetObservedAt;
+    if (resetAt === null || observedAt === null) return false;
+    const resetTime = resetAt.getTime();
+    const observedTime = observedAt.getTime();
+    if (observedTime > now.getTime()) return false;
+    if (now.getTime() - observedTime > this.strategies.soonestResetSnapshotMaxAgeMs) return false;
+    return resetTime > now.getTime() && resetTime - now.getTime() < this.strategies.soonestResetWindowMs;
   }
 
   async bindAffinity(

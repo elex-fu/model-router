@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { SqlExecutor } from '../db/types.js';
 import type { ApiKeyPrincipalKind, AuthenticatedApiKey } from '../keys/types.js';
+import type { ClientAddressResolution } from './client-address.js';
 import type {
   AuthorizedPlatformUpstreamCandidate,
   AuthorizedUpstreamCandidate,
@@ -18,9 +19,11 @@ import {
   type PreparedRequestEvidenceRecord,
   type PreparedRequestUsageEnvelope,
 } from './prepared-request-evidence-service.js';
-import type { ProviderAccountSchedulerPort } from './provider-account-scheduler.js';
+import type {
+  ProviderAccountSchedulerPort,
+  ProviderAccountSchedulerSelectionTrace,
+} from './provider-account-scheduler.js';
 import type { GatewayRequestIdempotencyClaimed } from './request-idempotency.js';
-import type { ClientAddressResolution } from './client-address.js';
 
 /** Exact integers are kept at the orchestration boundary; no floating point is accepted. */
 export type RequestPreparationExactInteger = bigint | number | string;
@@ -65,6 +68,13 @@ export type RequestPreparationFailureCode =
 export interface RequestPreparationAllowed<T> {
   readonly decision: 'allow';
   readonly value: T;
+  /**
+   * R7 scheduling observability: present only when the scheduler selected
+   * with an R7 strategy enabled; names the tail algorithm and the strategy
+   * dimensions that discriminated the outcome. Absent for every default
+   * (strategy-free) selection.
+   */
+  readonly scheduling?: ProviderAccountSchedulerSelectionTrace;
 }
 
 export interface RequestPreparationRejected {
@@ -90,8 +100,11 @@ export interface CanonicalRequestStatusReference {
   readonly status: 'in_progress' | 'unknown' | 'completed';
 }
 
-export function allowRequestPreparation<T>(value: T): RequestPreparationAllowed<T> {
-  return { decision: 'allow', value };
+export function allowRequestPreparation<T>(
+  value: T,
+  scheduling?: ProviderAccountSchedulerSelectionTrace,
+): RequestPreparationAllowed<T> {
+  return { decision: 'allow', value, ...(scheduling ? { scheduling } : {}) };
 }
 
 export function rejectRequestPreparation(
@@ -1944,6 +1957,7 @@ export class SaasRequestPreparationService {
       const schedulerDecision = await this.invokeDecision('authority', () =>
         scheduler.select({
           requestId: ids.requestId,
+          attemptId: ids.attemptId,
           caller,
           entitlement,
           candidates,

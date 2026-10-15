@@ -55,7 +55,10 @@ import {
   PostgresProviderAccountLeaseService,
   type ProviderAccountLeaseServiceOptions,
 } from '../saas/gateway/provider-account-lease-service.js';
-import type { ProviderAccountSchedulerAffinityPort } from '../saas/gateway/provider-account-scheduler.js';
+import type {
+  ProviderAccountSchedulerAffinityPort,
+  ProviderAccountSchedulerStrategiesOptions,
+} from '../saas/gateway/provider-account-scheduler.js';
 import {
   isProviderHttpTestAddressCapability,
   type ProviderHttpTestAddressCapability,
@@ -666,6 +669,12 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly timeoutMs: number;
   readonly maxConcurrency: number;
   readonly leaseTtlMs: number;
+  /**
+   * R7 scheduling-strategy toggles (plan §R7). Optional and default-off, so
+   * the default account-selection order is byte-identical to the pre-R7
+   * behavior; operators enable individual strategies per deployment.
+   */
+  readonly schedulerStrategies?: ProviderAccountSchedulerStrategiesOptions;
   readonly maxBodyBytes: number;
   readonly entryPoint: string;
   /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
@@ -1121,6 +1130,7 @@ export function createManagedSaasGatewayProductionComposition(
     health: runtimeHealthStore,
     affinity: options.schedulerAffinity,
     leaseConcurrencyLimit: options.maxConcurrency,
+    strategies: options.schedulerStrategies,
   });
 
   const routes = new SaasRouteConfigService(database);
