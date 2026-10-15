@@ -142,9 +142,10 @@
 
 ### 遗留问题(非本次改动面,已定性)
 
-1. **validation-worker-lifecycle 门禁本地确定性失败**:"the second claim must belong to the same real CLI worker backend" —— 观测到第二次阻塞 claim 来自不同 backend PID(worker 重连)。`git log` 证实 P1a–P1c 提交均未触碰 `src/cli/`、`tests/cli/` 与 credential-validation 链路;判断为 PG 18.6/macOS 本地环境差异,待 CI(Linux,PG 15+18 矩阵)复跑确认。
-2. **migrations.test.ts 6 例 scoped-schema 失败(存量)**:迁移 050 的 DO 块硬编码 `model_router_saas.` schema 限定符,与该测试的 scoped-schema harness 不兼容,任何数据库上都失败;CI 不对该文件跑 PG 门禁;P 系列提交未触碰该区域。建议后续单独修(将 050 的 DO 块改为 search_path 友好写法)。
-3. **CI build-and-test 红始自 10-12(早于本方案)**:上述 3/4 修复后,本地等价命令全绿;以本次推送后的 CI 运行结果为准。
+1. **validation-worker-lifecycle 门禁确定性失败(存量缺陷,CI 证实)**:"the second claim must belong to the same real CLI worker backend" —— 观测到第二次阻塞 claim 来自不同 backend PID(worker 重连)。**已排除本地环境差异**:推送 e51a0d0 后的 CI 运行 38675903183 中,该门在 Linux 的 PG 15 与 PG 18 两个矩阵 job 上以完全相同的断言失败,与本机 PG 18.6 失败逐字一致。`git log` 证实 P1a–P1c 提交均未触碰 `src/cli/`、`tests/cli/` 与 credential-validation 链路(测试文件最后改动 0068796)。定性为存量仓库缺陷,建议单独排查 worker 在 ACCESS EXCLUSIVE 锁等待期间的连接保活/重连逻辑。
+2. **saas-workspace 浏览器 E2E 3 例失败(存量,e98ef9b 引入)**:CI 运行 38675903183 的 build-and-test 在离线测试修复后首次跑到浏览器 E2E,`tests/e2e/saas-workspace.spec.ts:122/172/198` 严格请求台账断言出现意外的 `GET /console/api/v1/tenants/…/announcements`。溯源:announcements 拉取由 e98ef9b(2026-10-12,wave 3/4)加入 `web/src/features/saas-console.tsx`,而 spec(9f5c1c6,2026-10-04)从未更新台账期望,全文无一处 `announcements`——确定性失败,与环境无关。该失败在 bb9452a(P1a 之前)即存在,只是当时同一 job 的离线测试先行失败、浏览器 E2E 未执行而未暴露。P 系列提交未触碰该 spec 与 console 功能。
+3. **migrations.test.ts 6 例 scoped-schema 失败(存量)**:迁移 050 的 DO 块硬编码 `model_router_saas.` schema 限定符,与该测试的 scoped-schema harness 不兼容,任何数据库上都失败;CI 不对该文件跑 PG 门禁;P 系列提交未触碰该区域。建议后续单独修(将 050 的 DO 块改为 search_path 友好写法)。
+4. **CI 红始自 10-12(早于本方案),剩余阻塞均为存量**:本次修复(严格类型检查 23 错、CJS interop 3 例、PG fixture 类型错误)推送后,CI 运行 38675903183 确认:离线测试全绿、严格类型检查 0 错、PG 电池推进至门禁阶段;剩余红灯仅为上述 ①② 两项存量缺陷。仓库近 50 次 CI 运行(回溯至 09-29)无绿色基线,上述存量缺陷建议立项单独修复。
 
 ### 环境受限项(本机无法执行,需对应环境)
 
