@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
+import { isSaasBillingGroupsError } from '../billing/groups/errors.js';
+import { multiplyMinorUnits } from '../billing/groups/multiplier.js';
+import { modelPricingOverrideDigest, serializeAppliedModelPricingOverride } from '../billing/groups/override.js';
 import { MAX_MINOR_UNITS, normalizeCurrency } from '../billing/money.js';
 import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
@@ -77,7 +80,9 @@ const CUSTOMER_SNAPSHOT_COLUMNS = `
   rounding_version, rounding_mode, rounding_boundary, hold_input_total, hold_input_uncached,
   hold_input_cache_read, hold_input_cache_write, hold_input_cache_write_5m, hold_input_cache_write_1h,
   hold_input_output_total, hold_input_reasoning_output, hold_amount_minor_units, wallet_hold_required,
-  admission_expires_at, idempotency_key, snapshot_digest, created_at`;
+  admission_expires_at, idempotency_key, snapshot_digest, created_at,
+  billing_group_id, rate_multiplier_num, rate_multiplier_den, peak_applied,
+  model_pricing_override_digest, model_pricing_override`;
 
 const SUPPLIER_SNAPSHOT_COLUMNS = `
   id, tenant_id, request_id, attempt_id, supplier_cost_version, platform_account_id,
@@ -515,6 +520,14 @@ function mapCustomerSnapshot(row: CustomerSnapshotRow): CustomerPriceSnapshotRec
   if (!MAX_DIGEST.test(snapshotDigest)) fail('PRICING_STORAGE_ERROR');
   const holdAmountMinorUnits = parseStoredInteger(row.hold_amount_minor_units);
   const walletHoldRequired = storedBoolean(row, 'wallet_hold_required');
+  // R1 billing-group freeze columns. They are absent on snapshots created
+  // before migration 105; absent values resolve to the neutral terms.
+  const billingGroupId = storedOptionalText(row, 'billing_group_id', 128);
+  const overrideDigest = storedOptionalText(row, 'model_pricing_override_digest', 64);
+  if (overrideDigest !== null && !MAX_DIGEST.test(overrideDigest)) fail('PRICING_STORAGE_ERROR');
+  const rateMultiplierNum = storedMultiplierPart(row, 'rate_multiplier_num');
+  const rateMultiplierDen = storedMultiplierPart(row, 'rate_multiplier_den');
+  const peakApplied = row.peak_applied === undefined ? false : storedBoolean(row, 'peak_applied');
   return {
     id: storedText(row, 'id', 255),
     tenantId: storedText(row, 'tenant_id', 255),
@@ -539,7 +552,31 @@ function mapCustomerSnapshot(row: CustomerSnapshotRow): CustomerPriceSnapshotRec
     idempotencyKey: storedText(row, 'idempotency_key'),
     snapshotDigest,
     createdAt: storedTimestamp(row, 'created_at'),
+    billingGroupId,
+    rateMultiplier: { numerator: rateMultiplierNum, denominator: rateMultiplierDen },
+    peakApplied,
+    modelPricingOverrideDigest: overrideDigest,
+    modelPricingOverride: row.model_pricing_override === undefined ? null : row.model_pricing_override,
   };
+}
+
+function storedOptionalText(row: Row, key: string, maxLength: number): string | null {
+  const value = row[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) fail('PRICING_STORAGE_ERROR');
+  return value;
+}
+
+function storedMultiplierPart(row: Row, key: string): bigint {
+  const value = row[key];
+  if (value === null || value === undefined) return 1n;
+  if (typeof value === 'bigint') return value > 0n ? value : fail('PRICING_STORAGE_ERROR');
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return BigInt(value);
+  if (typeof value === 'string' && /^[1-9][0-9]*$/.test(value.trim())) {
+    const parsed = BigInt(value.trim());
+    return parsed > 0n ? parsed : fail('PRICING_STORAGE_ERROR');
+  }
+  return fail('PRICING_STORAGE_ERROR');
 }
 
 function mapSupplierSnapshot(row: SupplierSnapshotRow): SupplierCostSnapshotRecord {
@@ -695,6 +732,96 @@ function mapStorageError(
 ): SaasPricingError {
   if (error instanceof SaasPricingError) return error;
   return new SaasPricingError(isUniqueViolation(error) ? conflict : 'PRICING_STORAGE_ERROR');
+}
+
+interface NormalizedBillingGroupSnapshot {
+  readonly billingGroupId: string;
+  readonly rateMultiplier: { readonly numerator: bigint; readonly denominator: bigint };
+  readonly peakApplied: boolean;
+  readonly override: {
+    readonly model: string;
+    readonly rates: RateSet;
+    readonly digest: string;
+    readonly storedJson: string;
+  } | null;
+}
+
+function snapshotMultiplierPart(value: unknown): bigint {
+  let parsed: bigint;
+  if (typeof value === 'bigint') parsed = value;
+  else if (typeof value === 'number' && Number.isSafeInteger(value)) parsed = BigInt(value);
+  else if (typeof value === 'string' && /^[1-9][0-9]*$/.test(value.trim()) && value.trim().length <= 30) {
+    parsed = BigInt(value.trim());
+  } else fail('INVALID_INPUT');
+  if (parsed <= 0n || parsed > MAX_MINOR_UNITS) fail('INVALID_INPUT');
+  return parsed;
+}
+
+/**
+ * Validates the admission-time billing-group terms. The override digest is
+ * recomputed from the normalized rates so a mismatched caller digest fails
+ * closed before anything is persisted.
+ */
+function normalizeSnapshotBillingGroup(
+  value: CreateCustomerPriceSnapshotInput['billingGroup'],
+): NormalizedBillingGroupSnapshot | null {
+  if (value === undefined || value === null) return null;
+  if (
+    typeof value.billingGroupId !== 'string' ||
+    value.billingGroupId.trim().length === 0 ||
+    value.billingGroupId.length > 128
+  ) {
+    fail('INVALID_INPUT');
+  }
+  const rateMultiplier = {
+    numerator: snapshotMultiplierPart(value.rateMultiplier?.numerator),
+    denominator: snapshotMultiplierPart(value.rateMultiplier?.denominator),
+  };
+  let override: NormalizedBillingGroupSnapshot['override'] = null;
+  if (value.modelPricingOverride !== undefined && value.modelPricingOverride !== null) {
+    const model = value.modelPricingOverride.model;
+    if (typeof model !== 'string' || model.trim().length === 0 || model.length > 255) fail('INVALID_INPUT');
+    const rates = normalizeRates(value.modelPricingOverride.rates);
+    const digest = modelPricingOverrideDigest(model, rates);
+    if (value.modelPricingOverride.digest !== digest) fail('INVALID_INPUT');
+    override = {
+      model,
+      rates,
+      digest,
+      storedJson: serializeAppliedModelPricingOverride({ model, rates, digest }),
+    };
+  }
+  return {
+    billingGroupId: value.billingGroupId,
+    rateMultiplier,
+    peakApplied: value.peakApplied === true,
+    override,
+  };
+}
+
+function snapshotDigestMaterial(billingGroup: NormalizedBillingGroupSnapshot | null): Record<string, unknown> {
+  if (billingGroup === null) return {};
+  return {
+    billingGroup: {
+      billingGroupId: billingGroup.billingGroupId,
+      rateMultiplierNumerator: billingGroup.rateMultiplier.numerator.toString(10),
+      rateMultiplierDenominator: billingGroup.rateMultiplier.denominator.toString(10),
+      peakApplied: billingGroup.peakApplied,
+      modelPricingOverrideDigest: billingGroup.override?.digest ?? null,
+    },
+  };
+}
+
+/**
+ * The group model-pricing override replaces the price-row rates before the
+ * snapshot hold calculation; every other price identity field is untouched.
+ */
+function effectiveSnapshotPrice(
+  price: CustomerPriceVersionRecord,
+  billingGroup: NormalizedBillingGroupSnapshot | null,
+): CustomerPriceVersionRecord {
+  if (billingGroup === null || billingGroup.override === null) return price;
+  return { ...price, rates: billingGroup.override.rates };
 }
 
 export class SaasPricingService {
@@ -1318,6 +1445,7 @@ export class SaasPricingService {
     const idempotencyKey = normalizeText(input.idempotencyKey);
     const holdInput = normalizeHoldInput(input.holdInput);
     const admissionExpiresAt = normalizeTimestamp(input.admissionExpiresAt);
+    const billingGroup = normalizeSnapshotBillingGroup(input.billingGroup);
     const createdAt = this.currentDate().toISOString();
     if (new Date(admissionExpiresAt).getTime() <= new Date(createdAt).getTime()) fail('INVALID_WINDOW');
     const snapshotDigest = digest({
@@ -1327,6 +1455,7 @@ export class SaasPricingService {
       holdInput: Object.fromEntries(Object.entries(holdInput).map(([key, value]) => [key, value.toString(10)])),
       admissionExpiresAt,
       idempotencyKey,
+      ...snapshotDigestMaterial(billingGroup),
     });
 
     return this.write(options.executor, async (tx) => {
@@ -1364,8 +1493,26 @@ export class SaasPricingService {
       ) {
         fail('PRICE_VERSION_NOT_EFFECTIVE');
       }
-      const calculation = calculatePriceVersion(price, priceHoldInputToUsage(holdInput), { requireComplete: true });
+      const calculation = calculatePriceVersion(
+        effectiveSnapshotPrice(price, billingGroup),
+        priceHoldInputToUsage(holdInput),
+        {
+          requireComplete: true,
+        },
+      );
       if (calculation.amountMinorUnits <= 0n) fail('ZERO_PRICE_NOT_RESERVABLE');
+      // R1 outer group multiplier: an exact rational multiply on top of the
+      // effective price. Holds round up so the reservation is never short.
+      let holdAmountMinorUnits = calculation.amountMinorUnits;
+      if (billingGroup !== null) {
+        try {
+          holdAmountMinorUnits = multiplyMinorUnits(calculation.amountMinorUnits, billingGroup.rateMultiplier, 'ceil');
+        } catch (error) {
+          if (isSaasBillingGroupsError(error) && error.code === 'AMOUNT_OVERFLOW') fail('PRICE_AMOUNT_OVERFLOW');
+          fail('INVALID_INPUT');
+        }
+        if (holdAmountMinorUnits <= 0n) fail('ZERO_PRICE_NOT_RESERVABLE');
+      }
       const walletHoldRequired = true;
       const id = normalizeId(this.idFactory());
       const values = [
@@ -1393,12 +1540,18 @@ export class SaasPricingService {
         holdInput.cacheWrite1h,
         holdInput.outputTotal,
         holdInput.reasoningOutput,
-        calculation.amountMinorUnits,
+        holdAmountMinorUnits,
         walletHoldRequired,
         admissionExpiresAt,
         idempotencyKey,
         snapshotDigest,
         createdAt,
+        billingGroup?.billingGroupId ?? null,
+        billingGroup?.rateMultiplier.numerator ?? 1n,
+        billingGroup?.rateMultiplier.denominator ?? 1n,
+        billingGroup?.peakApplied ?? false,
+        billingGroup?.override?.digest ?? null,
+        billingGroup?.override?.storedJson ?? null,
       ];
       const rows = await this.query<CustomerSnapshotRow>(
         tx,

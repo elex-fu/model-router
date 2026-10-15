@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { SettleBillingInput } from '../../../src/saas/billing/types.js';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
 import { createRequestAdmissionReservationBusinessKey } from '../../../src/saas/gateway/admission.js';
 import {
@@ -18,9 +19,12 @@ import type {
   RecordUsageEventInput,
   RecordUsageSettlementInput,
 } from '../../../src/saas/metering/types.js';
-import type { SettleBillingInput } from '../../../src/saas/billing/types.js';
 import { normalizeRates } from '../../../src/saas/pricing/calculator.js';
-import type { CustomerPriceVersionRecord, RateSetInput } from '../../../src/saas/pricing/types.js';
+import type {
+  CustomerPriceSnapshotRecord,
+  CustomerPriceVersionRecord,
+  RateSetInput,
+} from '../../../src/saas/pricing/types.js';
 import type { NormalizedUsage } from '../../../src/telemetry/usage.js';
 
 const rateSet = normalizeRates({
@@ -53,6 +57,41 @@ const customerPrice: CustomerPriceVersionRecord = {
   expiresAt: null,
   idempotencyKey: 'price-key-v1',
   definitionDigest: 'd'.repeat(64),
+  createdAt: '2026-09-01T00:00:00.000Z',
+};
+
+const priceSnapshotRecord: CustomerPriceSnapshotRecord = {
+  id: 'snapshot-1',
+  tenantId: 'tenant-1',
+  requestId: 'request-1',
+  customerPriceVersion: 'price-v1',
+  publicModelId: 'model-1',
+  publicModelVersion: 1,
+  providerId: 'provider-1',
+  productId: 'product-1',
+  protocol: 'openai',
+  endpoint: 'chat-completions',
+  currency: 'USD',
+  commercialPolicyVersion: 'policy-v1',
+  calculatorVersion: 'calculator-v1',
+  roundingVersion: 'rounding-v1',
+  roundingMode: 'half_up',
+  roundingBoundary: 'total',
+  holdInput: {
+    inputTotal: 10n,
+    inputUncached: 10n,
+    cacheRead: 0n,
+    cacheWrite: 0n,
+    cacheWrite5m: 0n,
+    cacheWrite1h: 0n,
+    outputTotal: 10n,
+    reasoningOutput: 0n,
+  },
+  holdAmountMinorUnits: 100n,
+  walletHoldRequired: true,
+  admissionExpiresAt: '2026-09-01T00:05:00.000Z',
+  idempotencyKey: 'admission-1',
+  snapshotDigest: 'a'.repeat(64),
   createdAt: '2026-09-01T00:00:00.000Z',
 };
 
@@ -164,6 +203,10 @@ test('platform coordinator calculates from the server-selected price and passes 
         assert.equal(id, 'price-v1');
         return customerPrice;
       },
+      async getCustomerPriceSnapshot(id) {
+        assert.equal(id, 'snapshot-1');
+        return priceSnapshotRecord;
+      },
     },
     transactionSpy((input) => {
       committed = input;
@@ -192,6 +235,9 @@ test('BYOK coordinator records upstream usage without resolving a price or creat
     {
       async getCustomerPriceVersion() {
         throw new Error('BYOK must not resolve platform prices');
+      },
+      async getCustomerPriceSnapshot() {
+        throw new Error('BYOK must not resolve platform price snapshots');
       },
     },
     transactionSpy((input) => {
@@ -227,6 +273,9 @@ test('incomplete usage and a mismatched server price fail closed before the tran
     {
       async getCustomerPriceVersion() {
         return { ...customerPrice, providerId: 'other-provider' };
+      },
+      async getCustomerPriceSnapshot() {
+        return priceSnapshotRecord;
       },
     },
     transactionSpy(() => {

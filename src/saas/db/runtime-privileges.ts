@@ -373,6 +373,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'requests_per_minute',
     'tokens_per_minute',
     'max_concurrent_requests',
+    'default_billing_group_id',
   ]),
   ...columnGrants('saas_tenants', 'INSERT', ['id', 'name', 'slug', 'status', 'created_at', 'updated_at']),
   ...columnGrants('saas_tenants', 'UPDATE', [
@@ -383,11 +384,99 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'max_concurrent_requests',
     'capacity_policy_revision',
     'updated_at',
+    'default_billing_group_id',
   ]),
   ...columnGrants('saas_memberships', 'SELECT', ['tenant_id', 'user_id', 'role', 'status', 'revoked_at']),
   ...columnGrants('saas_memberships', 'INSERT', ['tenant_id', 'user_id', 'role', 'created_at', 'updated_at']),
   // E1 member management: role change / revocation / ownership transfer.
   ...columnGrants('saas_memberships', 'UPDATE', ['role', 'status', 'revoked_at', 'updated_at']),
+  // R1 (105) billing groups: the control plane manages group heads and
+  // account-pool bindings; the gateway reads groups at admission only.
+  ...columnGrants('saas_billing_groups', 'SELECT', [
+    'id',
+    'display_name',
+    'rate_multiplier_num',
+    'rate_multiplier_den',
+    'topup_multiplier_num',
+    'topup_multiplier_den',
+    'peak_enabled',
+    'peak_start',
+    'peak_end',
+    'peak_multiplier_num',
+    'peak_multiplier_den',
+    'model_pricing',
+    'rpm_limit',
+    'daily_limit_minor_units',
+    'weekly_limit_minor_units',
+    'monthly_limit_minor_units',
+    'profit_min_margin_num',
+    'profit_min_margin_den',
+    'profit_safety_buffer_num',
+    'profit_safety_buffer_den',
+    'claude_code_only',
+    'fallback_group_id',
+    'supported_model_scopes',
+    'status',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_billing_groups', 'INSERT', [
+    'id',
+    'display_name',
+    'rate_multiplier_num',
+    'rate_multiplier_den',
+    'topup_multiplier_num',
+    'topup_multiplier_den',
+    'peak_enabled',
+    'peak_start',
+    'peak_end',
+    'peak_multiplier_num',
+    'peak_multiplier_den',
+    'model_pricing',
+    'rpm_limit',
+    'daily_limit_minor_units',
+    'weekly_limit_minor_units',
+    'monthly_limit_minor_units',
+    'profit_min_margin_num',
+    'profit_min_margin_den',
+    'profit_safety_buffer_num',
+    'profit_safety_buffer_den',
+    'claude_code_only',
+    'fallback_group_id',
+    'supported_model_scopes',
+    'status',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_billing_groups', 'UPDATE', [
+    'display_name',
+    'rate_multiplier_num',
+    'rate_multiplier_den',
+    'topup_multiplier_num',
+    'topup_multiplier_den',
+    'peak_enabled',
+    'peak_start',
+    'peak_end',
+    'peak_multiplier_num',
+    'peak_multiplier_den',
+    'model_pricing',
+    'rpm_limit',
+    'daily_limit_minor_units',
+    'weekly_limit_minor_units',
+    'monthly_limit_minor_units',
+    'profit_min_margin_num',
+    'profit_min_margin_den',
+    'profit_safety_buffer_num',
+    'profit_safety_buffer_den',
+    'claude_code_only',
+    'fallback_group_id',
+    'supported_model_scopes',
+    'status',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_billing_group_account_pools', 'SELECT', ['group_id', 'account_id', 'priority', 'created_at']),
+  ...columnGrants('saas_billing_group_account_pools', 'INSERT', ['group_id', 'account_id', 'priority']),
+  ...columnGrants('saas_billing_group_account_pools', 'UPDATE', ['priority']),
   ...columnGrants('saas_projects', 'SELECT', [
     'tenant_id',
     'id',
@@ -506,6 +595,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'requests_per_minute',
     'tokens_per_minute',
     'max_concurrent_requests',
+    'billing_group_id',
   ]),
   ...columnGrants('saas_api_keys', 'INSERT', [
     'id',
@@ -531,6 +621,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'model_scope_version',
     'entitlement_authz_version',
     'supply_profile_authz_version',
+    'billing_group_id',
   ]),
   ...columnGrants('saas_api_keys', 'UPDATE', [
     'status',
@@ -545,6 +636,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'requests_per_minute',
     'tokens_per_minute',
     'max_concurrent_requests',
+    'billing_group_id',
   ]),
   // KEY-IP (080): one versioned head row per key. The key service replaces the
   // policy under a CAS on version and never deletes; created keys insert their
@@ -891,6 +983,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_remaining_minor_units',
     'quota_currency',
     'quota_checked_at',
+    // 108 (R5b): the control plane owns the adaptive-routing rule table;
+    // the usage scheduling columns are worker-written and stay off this
+    // manifest (the gateway reads them through the dynamic read-table grants).
+    'opencode_go_protocol_rules',
     'quarantine_entered_at',
     'quarantine_reason_code',
     'rpm_limit',
@@ -934,6 +1030,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_remaining_minor_units',
     'quota_currency',
     'quota_checked_at',
+    // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
+    // bump, mirroring the 047/082 repository pattern.
+    'opencode_go_protocol_rules',
     'rpm_limit',
     'tpm_limit',
     'updated_at',
@@ -964,6 +1063,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_remaining_minor_units',
     'quota_currency',
     'quota_checked_at',
+    // 108 (R5b): the control plane owns the adaptive-routing rule table.
+    'opencode_go_protocol_rules',
     'quarantine_entered_at',
     'quarantine_reason_code',
     'rpm_limit',
@@ -1006,6 +1107,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_remaining_minor_units',
     'quota_currency',
     'quota_checked_at',
+    // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
+    // bump, mirroring the 047/082 repository pattern.
+    'opencode_go_protocol_rules',
     'rpm_limit',
     'tpm_limit',
     'updated_at',
@@ -2808,6 +2912,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   ['saas_obs_channel_metrics_1m', 'DELETE'],
   ['saas_obs_channel_metrics_hourly', 'DELETE'],
   ['saas_obs_alert_rules', 'DELETE'],
+  // R1 (105): billing group account-pool membership replacement.
+  ['saas_billing_group_account_pools', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */
@@ -3222,6 +3328,7 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_gateway_capacity_reservations',
   'saas_usage_events',
   'saas_usage_settlements',
+  'saas_billing_groups',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -3275,6 +3382,12 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'idempotency_key',
       'snapshot_digest',
       'created_at',
+      'billing_group_id',
+      'rate_multiplier_num',
+      'rate_multiplier_den',
+      'peak_applied',
+      'model_pricing_override_digest',
+      'model_pricing_override',
     ] as const
   ).map((column) => ['saas_request_customer_price_snapshots', column, 'INSERT'] as const),
   ...(

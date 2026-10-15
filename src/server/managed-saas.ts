@@ -3,6 +3,7 @@ import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
+import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
 import { PlatformWalletLedgerService } from '../saas/billing/service.js';
 import { SaasCatalogService } from '../saas/catalog/index.js';
 import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/console/http.js';
@@ -135,7 +136,7 @@ import { PlatformAdminAuthService } from '../saas/platform/auth/service.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
-import { createCodexOauthHttpHandler, type CodexOauthHttpHandler } from '../saas/platform/codex-oauth/http.js';
+import { type CodexOauthHttpHandler, createCodexOauthHttpHandler } from '../saas/platform/codex-oauth/http.js';
 import {
   createPostgresCodexCatalogBindingResolver,
   createProviderSupplyCodexCredentialSink,
@@ -1807,6 +1808,11 @@ export async function startManagedSaasServer(
       });
       let paymentHandler = options.paymentHandler;
       if (options.payments) {
+        // R1 (105): wallet topup conversion through the tenant's default
+        // billing-group topup multiplier. Amount-tier discounts come from the
+        // saas.payments.topup.amount_tier_discounts settings value; no
+        // platform settings store exists yet, so none are configured here.
+        const billingGroupsService = new SaasBillingGroupsService(database);
         const paymentService = new PaymentFulfillmentService(database, options.payments.adapter, {
           providerKey: options.payments.providerKey,
           merchantId: options.payments.merchantId,
@@ -1816,6 +1822,9 @@ export async function startManagedSaasServer(
           servicePlanService: customerPlanService,
           walletTopUpPromo: marketingPromoCodeService,
           walletFundingHook: marketingAffiliateService,
+          topupCredit: {
+            resolveTopupCredit: (executor, input) => billingGroupsService.resolveTopupCredit(executor, input),
+          },
           ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
         });
         paymentWorker = startPaymentWebhookWorker(paymentService, {

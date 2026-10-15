@@ -1,15 +1,20 @@
+import { composeGroupMultiplier, evaluateProfitControl, resolveBillingGroupId } from '../billing/groups/multiplier.js';
+import { resolveModelPricingOverride } from '../billing/groups/override.js';
+import { mapBillingGroupRow } from '../billing/groups/record.js';
+import type { BillingGroupRecord } from '../billing/groups/types.js';
 import type { ProviderEligibilityResult } from '../catalog/index.js';
 import { SaasCatalogError, SaasCatalogService } from '../catalog/index.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { isIpAllowed } from '../keys/ip-policy.js';
 import type {
   AttemptRecord,
   AuthorizationBindingInput,
   InitialAttemptInput,
   RequestRecord,
 } from '../metering/types.js';
+import { calculatePriceVersion } from '../pricing/calculator.js';
 import { SaasPricingError, SaasPricingService } from '../pricing/index.js';
-import { isIpAllowed } from '../keys/ip-policy.js';
 import type {
   PlatformRequestAdmissionHoldEvidence,
   SaasRequestAdmissionGuard,
@@ -18,7 +23,11 @@ import type {
   SaasRequestAdmissionPlatformPriceHoldFacts,
 } from './admission.js';
 import type { ConservativePriceHold } from './hold-calculator.js';
-import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from './hold-calculator.js';
+import {
+  applyGroupMultiplierToHold,
+  calculateConservativePriceHold,
+  INPUT_BILLING_BUCKETS,
+} from './hold-calculator.js';
 
 type Row = Record<string, unknown>;
 
@@ -1415,6 +1424,36 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       customerPrice.roundingBoundary !== customerPolicy.rounding_boundary
     )
       deny('PRICE_UNAVAILABLE');
+    // R1 billing groups: resolve the key's group (key binding, then the
+    // tenant default, then the seeded 'default'), compose the outer
+    // multiplier (rate × peak when the request time is inside the peak
+    // window), and apply the group-level per-model price override — the
+    // override replaces the price-row rates with the highest priority.
+    const billingGroupId = resolveBillingGroupId(
+      typeof key.billing_group_id === 'string' ? key.billing_group_id : null,
+      typeof tenant.default_billing_group_id === 'string' ? tenant.default_billing_group_id : null,
+    );
+    const billingGroupRows = await rows(
+      executor,
+      `/* postgres-request-admission:billing-group */
+      SELECT * FROM saas_billing_groups WHERE id = $1 LIMIT 2`,
+      [billingGroupId],
+    );
+    if (billingGroupRows.length !== 1) deny('PRICE_UNAVAILABLE');
+    let billingGroup: BillingGroupRecord;
+    try {
+      billingGroup = mapBillingGroupRow(billingGroupRows[0]);
+    } catch {
+      storage();
+    }
+    if (billingGroup.status !== 'active') deny('PRICE_UNAVAILABLE');
+    const composedGroupMultiplier = composeGroupMultiplier(billingGroup, finalAt);
+    const modelPricingOverride = resolveModelPricingOverride(
+      billingGroup.modelPricing,
+      requiredText(request.routePublicModelId),
+    );
+    const effectiveCustomerPrice =
+      modelPricingOverride === null ? customerPrice : { ...customerPrice, rates: modelPricingOverride.rates };
     const supplierCurrency = assertOutputPriceIdentity(
       supplierIdentityRow ?? storage(),
       {
@@ -1450,17 +1489,45 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     )
       deny('PRICE_UNAVAILABLE');
     let conservative: ConservativePriceHold;
+    let conservativeHold: ConservativePriceHold;
     try {
-      conservative = calculateConservativePriceHold(customerPrice, {
+      conservative = calculateConservativePriceHold(effectiveCustomerPrice, {
         inputUpperBound: evidence.inputTotal,
         outputUpperBound: evidence.outputTotal,
         feasibleInputBuckets: INPUT_BILLING_BUCKETS,
       });
+      // R1: the group multiplier is an exact outer rational multiply on the
+      // conservative hold; holds round up so the reservation is never short.
+      conservativeHold = applyGroupMultiplierToHold(conservative, composedGroupMultiplier.multiplier);
     } catch (error) {
       if (error instanceof SaasPricingError) throw error;
+      // SaasBillingGroupsError (invalid multiplier / overflow) also denies.
       deny('PRICE_UNAVAILABLE');
     }
-    if (conservative.calculation.amountMinorUnits <= 0n) deny('PRICE_UNAVAILABLE');
+    if (conservativeHold.calculation.amountMinorUnits <= 0n) deny('PRICE_UNAVAILABLE');
+    // R1 profit control (sub2api rule): refuse when the group-adjusted
+    // customer charge would be at or below the supplier cost floor
+    // cost × (1 − minMargin − safetyBuffer). Evaluated on the conservative
+    // witness amounts; a precise settlement-side check needs supplier usage
+    // facts the normal-success snapshot does not yet carry (documented gap).
+    if (billingGroup.profitMinMargin !== null && billingGroup.profitSafetyBuffer !== null) {
+      if (customerPrice.currency !== supplierCost.currency) deny('PRICE_UNAVAILABLE');
+      let supplierWitnessCost: bigint;
+      try {
+        supplierWitnessCost = calculatePriceVersion(supplierCost, conservative.witness, {
+          requireComplete: true,
+        }).amountMinorUnits;
+      } catch {
+        deny('PRICE_UNAVAILABLE');
+      }
+      const profitControl = evaluateProfitControl({
+        customerChargeMinorUnits: conservativeHold.calculation.amountMinorUnits,
+        supplierCostMinorUnits: supplierWitnessCost,
+        minMargin: billingGroup.profitMinMargin,
+        safetyBuffer: billingGroup.profitSafetyBuffer,
+      });
+      if (!profitControl.allowed) deny('PRICE_UNAVAILABLE');
+    }
     const snapshot = await this.pricing.createCustomerPriceSnapshot(
       {
         tenantId: request.tenantId,
@@ -1469,6 +1536,19 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         holdInput: conservative.witness,
         admissionExpiresAt: evidence.admissionExpiresAt,
         idempotencyKey: request.id,
+        billingGroup: {
+          billingGroupId: billingGroup.id,
+          rateMultiplier: composedGroupMultiplier.multiplier,
+          peakApplied: composedGroupMultiplier.peakApplied,
+          modelPricingOverride:
+            modelPricingOverride === null
+              ? null
+              : {
+                  model: modelPricingOverride.model,
+                  rates: modelPricingOverride.rates,
+                  digest: modelPricingOverride.digest,
+                },
+        },
       },
       { executor },
     );

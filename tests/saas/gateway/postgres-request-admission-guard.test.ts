@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import type { ClientAddressResolution } from '../../../src/saas/gateway/client-address.js';
 import {
   PostgresRequestAdmissionGuard,
   PostgresRequestAdmissionGuardError,
 } from '../../../src/saas/gateway/postgres-request-admission-guard.js';
 import type { AttemptRecord, RequestRecord } from '../../../src/saas/metering/types.js';
-import type { ClientAddressResolution } from '../../../src/saas/gateway/client-address.js';
 
 type Row = Record<string, unknown>;
 const NOW = new Date('2026-09-28T00:00:00.000Z');
@@ -310,6 +310,35 @@ function makeFixture(supplyMode: 'byok' | 'platform'): Fixture {
   const supplierCost = priceRow('supplier');
   const rows: Record<string, Row | Row[]> = {
     tenant: { id: 'tenant-a', status: 'active' },
+    // R1 (105): neutral seeded default billing group (1/1 multipliers).
+    'billing-group': {
+      id: 'default',
+      display_name: 'Default',
+      rate_multiplier_num: '1',
+      rate_multiplier_den: '1',
+      topup_multiplier_num: '1',
+      topup_multiplier_den: '1',
+      peak_enabled: false,
+      peak_start: null,
+      peak_end: null,
+      peak_multiplier_num: null,
+      peak_multiplier_den: null,
+      model_pricing: null,
+      rpm_limit: null,
+      daily_limit_minor_units: null,
+      weekly_limit_minor_units: null,
+      monthly_limit_minor_units: null,
+      profit_min_margin_num: null,
+      profit_min_margin_den: null,
+      profit_safety_buffer_num: null,
+      profit_safety_buffer_den: null,
+      claude_code_only: false,
+      fallback_group_id: null,
+      supported_model_scopes: null,
+      status: 'active',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    },
     project: { tenant_id: 'tenant-a', id: 'project-a', inference_policy_version: 1, inference_policy_status: 'active' },
     'project-policy': { tenant_id: 'tenant-a', project_id: 'project-a', version: 1, status: 'active' },
     principal: { id: 'user-a', disabled_at: null, anonymized_at: null },
@@ -598,6 +627,12 @@ class FakeExecutor implements SqlExecutor {
         idempotency_key: values[27],
         snapshot_digest: values[28],
         created_at: values[29],
+        billing_group_id: values[30],
+        rate_multiplier_num: values[31],
+        rate_multiplier_den: values[32],
+        peak_applied: values[33],
+        model_pricing_override_digest: values[34],
+        model_pricing_override: values[35],
       };
       this.fixture.snapshot = row;
       return { rows: [row] as RowType[], rowCount: 1 };
@@ -720,6 +755,75 @@ test('platform admission revalidates authorities and writes only the customer pr
   const [write] = writes;
   assert.ok(write);
   assert.match(write.toLowerCase(), /^insert into saas_request_customer_price_snapshots/);
+});
+
+test('platform admission multiplies the hold by the key billing group and freezes it on the snapshot', async () => {
+  const fixture = makeFixture('platform');
+  fixture.rows.key = { ...fixture.rows.key, billing_group_id: 'vip' };
+  fixture.rows['billing-group'] = {
+    ...(fixture.rows['billing-group'] as Row),
+    id: 'vip',
+    display_name: 'VIP',
+    rate_multiplier_num: '3',
+    rate_multiplier_den: '2',
+  };
+  const result = await run(fixture);
+  assert.equal(result.platformPriceHold?.customerPriceVersion, 'price-v1');
+  // Conservative hold for 10 input + 2 output at rate 1 is 12; × 3/2 ceil = 18.
+  assert.equal(result.platformPriceHold?.amountMinorUnits, 18n);
+  assert.equal(fixture.snapshot?.billing_group_id, 'vip');
+  assert.equal(fixture.snapshot?.rate_multiplier_num, 3n);
+  assert.equal(fixture.snapshot?.rate_multiplier_den, 2n);
+  assert.equal(fixture.snapshot?.peak_applied, false);
+  assert.equal(fixture.snapshot?.model_pricing_override_digest, null);
+  assert.equal(fixture.snapshot?.model_pricing_override, null);
+  assert.equal(fixture.snapshot?.hold_amount_minor_units, 18n);
+  // The group row is read after every admission fence, without row locks.
+  const groupStatement = fixture.statements.find((statement) =>
+    statement.includes('postgres-request-admission:billing-group'),
+  );
+  assert.ok(groupStatement);
+  assert.doesNotMatch(groupStatement, /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
+});
+
+test('platform admission applies the group model pricing override with the highest priority', async () => {
+  const fixture = makeFixture('platform');
+  fixture.rows.key = { ...fixture.rows.key, billing_group_id: 'vip' };
+  fixture.rows['billing-group'] = {
+    ...(fixture.rows['billing-group'] as Row),
+    id: 'vip',
+    display_name: 'VIP',
+    rate_multiplier_num: '1',
+    rate_multiplier_den: '1',
+    model_pricing: {
+      'public-model-a': {
+        input: { num: '10', den: '1' },
+        cache_read: { num: '10', den: '1' },
+        cache_write: { num: '10', den: '1' },
+        cache_write_5m: { num: '10', den: '1' },
+        cache_write_1h: { num: '10', den: '1' },
+        output: { num: '10', den: '1' },
+      },
+    },
+  };
+  const result = await run(fixture);
+  // The override replaces the price-row rates before the hold calculation:
+  // 10 input + 2 output at rate 10 = 120, × 1/1 = 120.
+  assert.equal(result.platformPriceHold?.amountMinorUnits, 120n);
+  assert.match(String(fixture.snapshot?.model_pricing_override_digest), /^[0-9a-f]{64}$/);
+  assert.ok(fixture.snapshot?.model_pricing_override);
+});
+
+test('platform admission denies when the billing group is missing or inactive', async () => {
+  const missing = makeFixture('platform');
+  missing.rows.key = { ...missing.rows.key, billing_group_id: 'ghost' };
+  missing.rows['billing-group'] = [];
+  await assert.rejects(run(missing), /price could not be proven current/);
+
+  const inactive = makeFixture('platform');
+  inactive.rows.key = { ...inactive.rows.key, billing_group_id: 'vip' };
+  inactive.rows['billing-group'] = { ...(inactive.rows['billing-group'] as Row), id: 'vip', status: 'disabled' };
+  await assert.rejects(run(inactive), /price could not be proven current/);
 });
 
 test('fake-SQL admission takes ordered shared fences before authority reads', async () => {
@@ -1061,8 +1165,7 @@ test('an allowlist denies out-of-policy, unresolved and absent client address ev
     fixture.rows['key-ip-policy'] = ipPolicyHead('allowlist', ['203.0.113.0/24']);
     await assert.rejects(
       () => run(fixture, 'platform', clientAddress ?? null),
-      (error: unknown) =>
-        error instanceof PostgresRequestAdmissionGuardError && error.code === 'CALLER_DENIED',
+      (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'CALLER_DENIED',
     );
     assert.equal(fixture.snapshot, null);
   }

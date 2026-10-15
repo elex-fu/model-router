@@ -511,6 +511,8 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_obs_channel_metrics_1m', 'DELETE'],
     ['saas_obs_channel_metrics_hourly', 'DELETE'],
     ['saas_obs_alert_rules', 'DELETE'],
+    // R1 (105): billing group account-pool membership replacement.
+    ['saas_billing_group_account_pools', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });
@@ -898,6 +900,12 @@ test('gateway pricing snapshots have exactly the service INSERT columns and keep
         'idempotency_key',
         'snapshot_digest',
         'created_at',
+        'billing_group_id',
+        'rate_multiplier_num',
+        'rate_multiplier_den',
+        'peak_applied',
+        'model_pricing_override_digest',
+        'model_pricing_override',
       ],
     ],
     [

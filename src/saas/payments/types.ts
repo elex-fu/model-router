@@ -1,3 +1,4 @@
+import type { AppliedTopupConversion } from '../billing/groups/types.js';
 import type { MinorUnitInput } from '../billing/money.js';
 import type { VerifiedFundingInput } from '../billing/types.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
@@ -267,8 +268,28 @@ export interface WalletFundingHook {
       readonly amountMinorUnits: string;
       readonly sourceOrderRef: string;
       readonly fundingTransactionId: string;
+      /** R1 (105): the topup conversion applied to this funding, when one was applied. */
+      readonly appliedTopup?: AppliedTopupConversion;
     },
   ): Promise<void>;
+}
+
+/**
+ * R1 (105): converts a verified payment amount into wallet credit using the
+ * tenant's default billing-group topup multiplier and the configured
+ * amount-tier discounts. Called inside the fulfillment transaction; the
+ * first successful posting wins on replay, so a later group edit never
+ * reprices a fulfilled order.
+ */
+export interface PaymentTopupCreditPort {
+  resolveTopupCredit(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly currency: string;
+      readonly paidMinorUnits: bigint;
+    },
+  ): Promise<AppliedTopupConversion>;
 }
 
 export interface ReadWalletTopUpInput {
@@ -450,6 +471,8 @@ export interface PaymentServiceOptions {
   readonly walletTopUpPromo?: WalletTopUpPromoEvaluator;
   /** R2 (091): optional post-funding hook; accrual failure makes fulfillment retryable. */
   readonly walletFundingHook?: WalletFundingHook;
+  /** R1 (105): optional topup credit conversion (billing-group topup multiplier). */
+  readonly topupCredit?: PaymentTopupCreditPort;
   /** F3: optional customer webhook producer; when absent no events are emitted. */
   readonly webhookEvents?: import('../webhooks/producers.js').CustomerWebhookEventProducer;
   readonly checkout?: PaymentCheckoutOptions;

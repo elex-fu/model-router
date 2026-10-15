@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { AppliedTopupConversion } from '../billing/groups/types.js';
+import type { MinorUnitInput } from '../billing/money.js';
 import { normalizeCurrency, parseMinorUnits, parseStoredMinorUnits } from '../billing/money.js';
 import { PlatformWalletLedgerService } from '../billing/service.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
@@ -437,6 +439,7 @@ export class PaymentFulfillmentService {
   private readonly servicePlanService: PaymentServiceOptions['servicePlanService'];
   private readonly walletTopUpPromo: PaymentServiceOptions['walletTopUpPromo'];
   private readonly walletFundingHook: PaymentServiceOptions['walletFundingHook'];
+  private readonly topupCredit: PaymentServiceOptions['topupCredit'];
   private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
   private readonly checkoutPolicy: NormalizedCheckoutPolicy;
   private readonly submissionLeaseTtlMs: number;
@@ -467,6 +470,10 @@ export class PaymentFulfillmentService {
       throw new TypeError('walletFundingHook must implement the post-funding hook contract');
     }
     this.walletFundingHook = options.walletFundingHook;
+    if (options.topupCredit !== undefined && typeof options.topupCredit.resolveTopupCredit !== 'function') {
+      throw new TypeError('topupCredit must implement the topup credit conversion contract');
+    }
+    this.topupCredit = options.topupCredit;
     if (
       options.webhookEvents !== undefined &&
       (options.webhookEvents === null || typeof options.webhookEvents.servicePlanOrderStatusChanged !== 'function')
@@ -2315,12 +2322,29 @@ export class PaymentFulfillmentService {
     if (!fulfilling) throw new PaymentError('PAYMENT_STORAGE_ERROR');
 
     let funding: Awaited<ReturnType<NonNullable<PaymentServiceOptions['walletFundingLedger']>['postVerifiedFunding']>>;
+    // R1 (105): the wallet credit is the paid amount converted through the
+    // tenant's billing-group topup multiplier (and amount-tier discounts when
+    // configured). Without a port this is the identity conversion.
+    let creditMinorUnits: MinorUnitInput = order.amountMinorUnits;
+    let appliedTopup: AppliedTopupConversion | undefined;
+    if (this.topupCredit) {
+      try {
+        appliedTopup = await this.topupCredit.resolveTopupCredit(executor, {
+          tenantId: order.tenantId,
+          currency: order.currency,
+          paidMinorUnits: BigInt(order.amountMinorUnits),
+        });
+        creditMinorUnits = appliedTopup.creditMinorUnits;
+      } catch {
+        throw new PaymentError('FULFILLMENT_RETRYABLE');
+      }
+    }
     try {
       if (!this.walletFundingLedger) throw new PaymentError('FULFILLMENT_RETRYABLE');
       funding = await this.walletFundingLedger.postVerifiedFunding(executor, {
         tenantId: order.tenantId,
         currency: order.currency,
-        amountMinorUnits: order.amountMinorUnits,
+        amountMinorUnits: creditMinorUnits,
         sourceOrderRef: order.id,
         idempotencyKey: order.id,
         idempotencyNamespace: FUNDING_NAMESPACE,
@@ -2341,6 +2365,7 @@ export class PaymentFulfillmentService {
           amountMinorUnits: order.amountMinorUnits,
           sourceOrderRef: order.id,
           fundingTransactionId: funding.transactionId,
+          ...(appliedTopup ? { appliedTopup } : {}),
         });
       } catch {
         throw new PaymentError('FULFILLMENT_RETRYABLE');

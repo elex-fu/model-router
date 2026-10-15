@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BillableUsageEnvelope, InputBillingBucket } from '../../../src/saas/gateway/hold-calculator.js';
-import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from '../../../src/saas/gateway/hold-calculator.js';
+import {
+  applyGroupMultiplierToHold,
+  calculateConservativePriceHold,
+  INPUT_BILLING_BUCKETS,
+} from '../../../src/saas/gateway/hold-calculator.js';
 import { calculatePriceVersion, normalizeRates } from '../../../src/saas/pricing/calculator.js';
 import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
 import type {
@@ -281,4 +285,57 @@ test('the selected witness dominates every small integer split across feasible b
       assert.ok(splitPrice.amountMinorUnits <= hold.calculation.amountMinorUnits);
     }
   }
+});
+
+test('applyGroupMultiplierToHold is an exact outer rational multiply that never shortens the hold', () => {
+  const priceVersion = customerVersion({
+    rates: rates({
+      input: rate(1n, 3n),
+      cache_read: rate(2n, 5n),
+      cache_write: rate(1n, 2n),
+      cache_write_5m: rate(1n, 2n),
+      cache_write_1h: rate(1n, 2n),
+      output: rate(1n, 7n),
+    }),
+  });
+  const hold = calculateConservativePriceHold(priceVersion, envelope(5n, 2n));
+  const base = hold.calculation.amountMinorUnits;
+  assert.ok(base > 0n);
+
+  // The neutral multiplier is the identity.
+  const neutral = applyGroupMultiplierToHold(hold, { numerator: 1n, denominator: 1n });
+  assert.equal(neutral.calculation.amountMinorUnits, base);
+  assert.equal(neutral.witness, hold.witness);
+
+  // Holds round up: ceil(base × 3/2) >= base × 3/2 and covers every
+  // group-adjusted charge of the same witness under any rounding mode.
+  const multiplied = applyGroupMultiplierToHold(hold, { numerator: 3n, denominator: 2n });
+  const exactNumerator = base * 3n;
+  assert.ok(multiplied.calculation.amountMinorUnits * 2n >= exactNumerator);
+  assert.ok(multiplied.calculation.amountMinorUnits * 2n < exactNumerator + 2n);
+  for (const roundingMode of ['floor', 'ceil', 'half_up', 'half_even'] as const) {
+    const settled = calculatePriceVersion(
+      { ...priceVersion, roundingMode },
+      {
+        inputTotal: hold.witness.inputTotal,
+        inputUncached: hold.witness.inputUncached,
+        cacheRead: hold.witness.cacheRead,
+        cacheWrite: hold.witness.cacheWrite,
+        cacheWrite5m: hold.witness.cacheWrite5m,
+        cacheWrite1h: hold.witness.cacheWrite1h,
+        outputTotal: hold.witness.outputTotal,
+        reasoningOutput: hold.witness.reasoningOutput,
+      },
+    );
+    // (settled × 3/2) <= hold × 3/2 <= ceil(hold × 3/2) for any rounding.
+    assert.ok(settled.amountMinorUnits * 3n <= base * 3n);
+  }
+
+  // The unrounded rational is scaled without premature rounding.
+  assert.equal(multiplied.calculation.unroundedNumerator, hold.calculation.unroundedNumerator * 3n);
+  assert.equal(multiplied.calculation.unroundedDenominator, hold.calculation.unroundedDenominator * 2n);
+
+  // A non-positive multiplier is rejected fail-closed.
+  assert.throws(() => applyGroupMultiplierToHold(hold, { numerator: 0n, denominator: 1n }));
+  assert.throws(() => applyGroupMultiplierToHold(hold, { numerator: 1n, denominator: 0n }));
 });

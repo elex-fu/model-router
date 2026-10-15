@@ -551,6 +551,21 @@ $runtime_column_acl_normalization$;
 -- only after this template AND deploy/managed-saas-validation-worker-role-grants.sql
 -- are re-applied on a database that already ran an older revision. Until
 -- then the gateway/worker runtime privilege probes fail closed by design.
+-- DEPLOYMENT NOTE (migration 108, R5b): the control plane owns the
+-- opencode_go_protocol_rules column on both provider account tables (the
+-- adaptive-routing rule table; admin mutation bumps authz_version). The
+-- opencode-go usage scheduling columns are worker-written only: they are
+-- granted in deploy/managed-saas-validation-worker-role-grants.sql (the
+-- usage worker shares the credential-validation-worker role like the quota
+-- sync worker) and are readable by the gateway through the dynamic
+-- all-current-columns grants below. Re-apply both templates after 108.
+-- DEPLOYMENT NOTE (migration 105, R1 billing groups): the gateway reads
+-- saas_billing_groups at admission through the dynamic all-current-columns
+-- read grant below, and inserts the six new customer price snapshot
+-- multiplier columns through the fixed column manifest; the control plane
+-- manages the group and account-pool relations. Re-apply this template after
+-- running migration 105 on a database that predates it — until then the
+-- gateway runtime privilege probe fails closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -608,9 +623,17 @@ BEGIN
       ('saas_platform_mfa_setup_tokens', 'SELECT', 'id user_id credential_id token_hash attempt_count attempt_limit created_at expires_at consumed_at locked_at'),
       ('saas_platform_mfa_setup_tokens', 'INSERT', 'id user_id credential_id token_hash attempt_count attempt_limit created_at expires_at consumed_at locked_at'),
       ('saas_platform_mfa_setup_tokens', 'UPDATE', 'attempt_count locked_at consumed_at'),
-      ('saas_tenants', 'SELECT', 'id name slug slug_canonical status created_at updated_at capacity_policy_revision requests_per_minute tokens_per_minute max_concurrent_requests'),
+      ('saas_tenants', 'SELECT', 'id name slug slug_canonical status created_at updated_at capacity_policy_revision requests_per_minute tokens_per_minute max_concurrent_requests default_billing_group_id'),
       ('saas_tenants', 'INSERT', 'id name slug status created_at updated_at'),
-      ('saas_tenants', 'UPDATE', 'status requests_per_minute tokens_per_minute max_concurrent_requests capacity_policy_revision updated_at'),
+      ('saas_tenants', 'UPDATE', 'status requests_per_minute tokens_per_minute max_concurrent_requests capacity_policy_revision updated_at default_billing_group_id'),
+      -- R1 (105) billing groups: the control plane manages group heads and
+      -- account-pool bindings; the gateway reads groups at admission only.
+      ('saas_billing_groups', 'SELECT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status created_at updated_at'),
+      ('saas_billing_groups', 'INSERT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status created_at updated_at'),
+      ('saas_billing_groups', 'UPDATE', 'display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status updated_at'),
+      ('saas_billing_group_account_pools', 'SELECT', 'group_id account_id priority created_at'),
+      ('saas_billing_group_account_pools', 'INSERT', 'group_id account_id priority'),
+      ('saas_billing_group_account_pools', 'UPDATE', 'priority'),
       ('saas_memberships', 'SELECT', 'tenant_id user_id role status revoked_at'),
       ('saas_memberships', 'INSERT', 'tenant_id user_id role created_at updated_at'),
       ('saas_memberships', 'UPDATE', 'role status revoked_at updated_at'),
@@ -625,9 +648,9 @@ BEGIN
       ('saas_invitations', 'UPDATE', 'accepted_by_user_id accepted_at revoked_at'),
       ('saas_project_inference_policy_versions', 'SELECT', 'tenant_id project_id version status changed_by_user_id created_at requests_per_minute tokens_per_minute max_concurrent_requests'),
       ('saas_project_inference_policy_versions', 'INSERT', 'tenant_id project_id version status changed_by_user_id created_at requests_per_minute tokens_per_minute max_concurrent_requests'),
-      ('saas_api_keys', 'SELECT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id rotated_by_user_id revoked_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests'),
-      ('saas_api_keys', 'INSERT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version'),
-      ('saas_api_keys', 'UPDATE', 'status revoked_at revoked_by_user_id rotated_by_user_id last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests'),
+      ('saas_api_keys', 'SELECT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id rotated_by_user_id revoked_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests billing_group_id'),
+      ('saas_api_keys', 'INSERT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version billing_group_id'),
+      ('saas_api_keys', 'UPDATE', 'status revoked_at revoked_by_user_id rotated_by_user_id last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests billing_group_id'),
       ('saas_api_key_ip_policies', 'SELECT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
       ('saas_api_key_ip_policies', 'INSERT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
       ('saas_api_key_ip_policies', 'UPDATE', 'version mode rules updated_at'),
@@ -658,12 +681,12 @@ BEGIN
       ('saas_project_entitlements', 'INSERT', 'id tenant_id project_id supply_profile_id supply_mode status model_scopes authz_version created_at updated_at last_audited_at disabled_at effective_at expires_at superseded_at source_type source_ref service_plan_snapshot_id'),
       ('saas_project_entitlements', 'UPDATE', 'status disabled_at superseded_at authz_version updated_at last_audited_at'),
       ('saas_supply_profiles', 'SELECT', 'tenant_id id supply_mode status model_scopes authz_version'),
-      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at'),
       ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit created_at updated_at'),
-      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at rpm_limit tpm_limit updated_at disabled_at revoked_at'),
-      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at'),
+      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules rpm_limit tpm_limit updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at'),
       ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit created_at updated_at'),
-      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at rpm_limit tpm_limit updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules rpm_limit tpm_limit updated_at disabled_at revoked_at'),
       ('saas_tenant_provider_account_capabilities', 'SELECT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_tenant_provider_account_capabilities', 'INSERT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_platform_provider_account_capabilities', 'SELECT', 'account_id provider_id product_id model endpoint capability_version'),
@@ -827,7 +850,8 @@ BEGIN
       ('saas_customer_webhook_delivery_attempts', 'DELETE'),
       ('saas_obs_channel_metrics_1m', 'DELETE'),
       ('saas_obs_channel_metrics_hourly', 'DELETE'),
-      ('saas_obs_alert_rules', 'DELETE')
+      ('saas_obs_alert_rules', 'DELETE'),
+      ('saas_billing_group_account_pools', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
@@ -902,7 +926,8 @@ BEGIN
       ('saas_billing_spending_freezes'), ('saas_ledger_transactions'),
       ('saas_gateway_request_idempotency_keys'), ('saas_prepared_request_evidence'),
       ('saas_provider_account_leases'), ('saas_gateway_capacity_reservations'),
-      ('saas_usage_events'), ('saas_usage_settlements')
+      ('saas_usage_events'), ('saas_usage_settlements'),
+      ('saas_billing_groups')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -965,6 +990,12 @@ BEGIN
       ('saas_request_customer_price_snapshots', 'idempotency_key', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'snapshot_digest', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'created_at', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'billing_group_id', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'rate_multiplier_num', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'rate_multiplier_den', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'peak_applied', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'model_pricing_override_digest', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'model_pricing_override', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'tenant_id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'request_id', 'INSERT'),

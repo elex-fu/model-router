@@ -226,6 +226,31 @@ export interface CreateCustomerPriceSnapshotInput {
   readonly holdInput: PriceHoldInput;
   readonly admissionExpiresAt: string | Date;
   readonly idempotencyKey: string;
+  /**
+   * R1 billing-group terms composed at admission. When present the hold
+   * amount is the effective price (group model-pricing override applied)
+   * multiplied by the composed group rate multiplier, and all terms are
+   * frozen onto the snapshot row.
+   */
+  readonly billingGroup?: SnapshotBillingGroupInput;
+}
+
+/** Admission-time billing-group multiplier terms (rational, never floats). */
+export interface SnapshotRateMultiplier {
+  readonly numerator: bigint;
+  readonly denominator: bigint;
+}
+
+export interface SnapshotBillingGroupInput {
+  readonly billingGroupId: string;
+  readonly rateMultiplier: SnapshotRateMultiplier;
+  readonly peakApplied: boolean;
+  /** The applied group-level per-model price override, if any. */
+  readonly modelPricingOverride?: {
+    readonly model: string;
+    readonly rates: RateSetInput;
+    readonly digest: string;
+  } | null;
 }
 
 export interface CreateSupplierCostSnapshotInput {
@@ -273,6 +298,17 @@ export interface CustomerPriceSnapshotRecord {
   readonly idempotencyKey: string;
   readonly snapshotDigest: string;
   readonly createdAt: string;
+  /**
+   * R1 billing-group terms frozen at admission. Absent on snapshots created
+   * before billing groups existed; a null billingGroupId with the neutral
+   * multiplier keeps those settlements unchanged.
+   */
+  readonly billingGroupId?: string | null;
+  readonly rateMultiplier?: SnapshotRateMultiplier;
+  readonly peakApplied?: boolean;
+  readonly modelPricingOverrideDigest?: string | null;
+  /** Canonical stored override value (parsed by the billing-groups codec). */
+  readonly modelPricingOverride?: unknown;
 }
 
 export interface SupplierCostSnapshotRecord {

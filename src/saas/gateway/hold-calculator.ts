@@ -1,3 +1,5 @@
+import { multiplyMinorUnits } from '../billing/groups/multiplier.js';
+import type { RationalMultiplier } from '../billing/groups/types.js';
 import { calculatePriceVersion, normalizeRates, normalizeUsage } from '../pricing/calculator.js';
 import { SaasPricingError } from '../pricing/errors.js';
 import type {
@@ -165,5 +167,27 @@ export function calculateConservativePriceHold(
     inputUpperBound,
     outputUpperBound,
     calculation,
+  };
+}
+
+/**
+ * R1 billing-group outer multiplier: a pure wrapper over the conservative
+ * hold. The internal selection logic is untouched; only the final amount is
+ * multiplied by the exact rational group multiplier, rounding up so the hold
+ * is never short of the worst-case group-adjusted charge.
+ */
+export function applyGroupMultiplierToHold(
+  hold: ConservativePriceHold,
+  groupMultiplier: RationalMultiplier,
+): ConservativePriceHold {
+  const amountMinorUnits = multiplyMinorUnits(hold.calculation.amountMinorUnits, groupMultiplier, 'ceil');
+  return {
+    ...hold,
+    calculation: {
+      ...hold.calculation,
+      amountMinorUnits,
+      unroundedNumerator: hold.calculation.unroundedNumerator * groupMultiplier.numerator,
+      unroundedDenominator: hold.calculation.unroundedDenominator * groupMultiplier.denominator,
+    },
   };
 }

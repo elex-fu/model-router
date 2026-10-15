@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { NormalizedUsage } from '../../telemetry/usage.js';
+import { multiplyMinorUnits } from '../billing/groups/multiplier.js';
+import { snapshotBillingGroupTerms } from '../billing/groups/snapshot.js';
 import type { AttemptRecord, UsageValues } from '../metering/types.js';
 import { calculatePriceVersion } from '../pricing/calculator.js';
-import type { CustomerPriceVersionRecord } from '../pricing/types.js';
+import type { CustomerPriceSnapshotRecord, CustomerPriceVersionRecord } from '../pricing/types.js';
 import type { GatewayProtocol, SupplyMode } from './contracts.js';
 
 /** Server-selected commercial and reservation facts carried from preparation to dispatch. */
@@ -72,6 +74,8 @@ export interface NormalSuccessTransactionPort {
 
 export interface NormalSuccessPricingPort {
   getCustomerPriceVersion(id: string): Promise<CustomerPriceVersionRecord>;
+  /** Reads the immutable admission snapshot so settlement never re-queries the group table. */
+  getCustomerPriceSnapshot(id: string): Promise<CustomerPriceSnapshotRecord>;
 }
 
 export interface NormalSuccessSettlementPort {
@@ -125,7 +129,11 @@ function assertUsage(usage: NormalizedUsage): asserts usage is NormalSuccessObse
   }
 }
 
-function assertPriceIdentity(price: CustomerPriceVersionRecord, snapshot: NormalSuccessSettlementSnapshot): void {
+function assertPriceIdentity(
+  price: CustomerPriceVersionRecord,
+  snapshot: NormalSuccessSettlementSnapshot,
+  priceSnapshot: CustomerPriceSnapshotRecord,
+): void {
   if (
     price.id !== snapshot.customerPriceVersion ||
     price.kind !== 'customer' ||
@@ -138,6 +146,18 @@ function assertPriceIdentity(price: CustomerPriceVersionRecord, snapshot: Normal
     price.currency !== snapshot.currency
   ) {
     throw new Error('selected customer price does not match the prepared quote');
+  }
+  // R1: the frozen admission snapshot — not the mutable billing group — is
+  // the multiplier authority. Its identity and multiplier terms must match
+  // the prepared quote, and the terms must be well-formed.
+  const snapshotRateMultiplier = priceSnapshot.rateMultiplier ?? { numerator: 1n, denominator: 1n };
+  if (
+    priceSnapshot.id !== snapshot.priceSnapshotRef ||
+    priceSnapshot.customerPriceVersion !== snapshot.customerPriceVersion ||
+    snapshotRateMultiplier.numerator <= 0n ||
+    snapshotRateMultiplier.denominator <= 0n
+  ) {
+    throw new Error('admission price snapshot does not match the prepared quote');
   }
 }
 
@@ -168,9 +188,18 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
         throw new Error('platform settlement quote is incomplete');
       }
       const price = await this.pricing.getCustomerPriceVersion(snapshot.customerPriceVersion);
-      assertPriceIdentity(price, snapshot);
+      const priceSnapshot = await this.pricing.getCustomerPriceSnapshot(snapshot.priceSnapshotRef);
+      assertPriceIdentity(price, snapshot, priceSnapshot);
+      // Admission-time billing-group terms, read from the immutable snapshot
+      // row (never the group table): a later group edit cannot reprice this
+      // settlement.
+      const billingGroupTerms = snapshotBillingGroupTerms(priceSnapshot);
+      const effectivePrice =
+        billingGroupTerms.modelPricingOverride === null
+          ? price
+          : { ...price, rates: billingGroupTerms.modelPricingOverride.rates };
       const calculation = calculatePriceVersion(
-        price,
+        effectivePrice,
         {
           inputTotal: input.usage.inputTotal,
           inputUncached: input.usage.inputUncached,
@@ -184,7 +213,11 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
         { requireComplete: false },
       );
       if (!calculation.complete) throw new Error('provider usage is insufficient for the selected price');
-      chargeAmountMinorUnits = calculation.amountMinorUnits.toString(10);
+      chargeAmountMinorUnits = multiplyMinorUnits(
+        calculation.amountMinorUnits,
+        billingGroupTerms.rateMultiplier,
+        price.roundingMode,
+      ).toString(10);
     } else if (
       snapshot.customerPriceVersion !== null ||
       snapshot.reservationId !== null ||
