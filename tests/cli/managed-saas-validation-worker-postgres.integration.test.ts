@@ -333,8 +333,20 @@ async function disposeChild(child: CliChild | undefined, fixture: Fixture): Prom
   } catch (cause) { throw safeFailure(cause, 'owned-cli-cleanup'); }
 }
 
+/** Every worker-role client backend besides the observer's own querying session
+ *  belongs to the single spawned CLI: the observer pool is capped at one session,
+ *  the migrator pool uses a different role, and the preflight proved the target
+ *  held no other worker sessions before the child started. */
+async function cliSessionPids(observer: SaasDatabase): Promise<ReadonlySet<number>> {
+  const result = await observer.query<{ pid: number }>(
+    `SELECT pid FROM pg_catalog.pg_stat_activity
+      WHERE datname = current_database() AND usename = current_user AND pid <> pg_backend_pid()
+        AND backend_type = 'client backend'`);
+  check(result.rows.length >= 1, 'real CLI worker backends must be observable');
+  return new Set(result.rows.map((row) => row.pid));
+}
 async function blockActualClaim(migrator: SaasDatabase, observer: SaasDatabase, child: CliChild,
-  fixture: Fixture, expectedPid?: number): Promise<number> {
+  fixture: Fixture, allowedPids?: ReadonlySet<number>): Promise<number> {
   return migrator.transaction(async (tx) => {
     await tx.query("SET LOCAL lock_timeout = '3s'");
     await tx.query("SET LOCAL statement_timeout = '20s'");
@@ -363,10 +375,17 @@ async function blockActualClaim(migrator: SaasDatabase, observer: SaasDatabase, 
                 AND waiting.relation = $2::oid AND waiting.mode = 'AccessShareLock' AND NOT waiting.granted
                 AND holding.pid = $1 AND holding.mode = 'AccessExclusiveLock' AND holding.granted)`,
         [ownerPid, relation, CLAIM_QUERY]);
-      check(blocked.rows.length <= 1, 'exclusive empty-queue fixture must have exactly one CLI worker backend');
+      check(blocked.rows.length <= 1, 'exclusive empty-queue fixture must have exactly one blocked CLI claim backend');
       const pid = blocked.rows[0]?.pid;
-      if (pid !== undefined && expectedPid !== undefined) check(pid === expectedPid,
-        'the second claim must belong to the same real CLI worker backend');
+      // Since D4 landed the quota-sync loop in this same workload, two 1s
+      // phase-aligned pollers share one LIFO pg pool, so claim transactions
+      // legitimately alternate pooled backends between polling cycles. A
+      // backend PID is therefore NOT a CLI process identity. The same
+      // still-running CLI is proven instead: the blocked claim must reuse a
+      // backend that already belonged to the child before this barrier (a
+      // restarted CLI would only ever show brand-new backend PIDs).
+      if (pid !== undefined && allowedPids !== undefined) check(allowedPids.has(pid),
+        'each real claim must reuse a backend of the same still-running CLI worker');
       return pid;
     }, child);
   });
@@ -483,14 +502,19 @@ test('standard production CLI: native metadata/decrypt-only KMS and restricted r
         check(JSON.stringify(events(fixture)) === JSON.stringify(START_EVENTS.slice(0, 5)),
           'actual metadata import/factory must precede KMS import/factory/first readiness');
         const readyPid = await observeReadyBackend(observer, running);
+        check(readyPid !== undefined, 'the real CLI privilege probe backend must be observable');
         localPhase = 'first-real-claim';
-        const pid = await blockActualClaim(migrator, observer, running, fixture, readyPid);
+        const pid = await blockActualClaim(migrator, observer, running, fixture);
         await observeCommit(observer, running, pid);
         check(JSON.stringify(events(fixture)) === JSON.stringify(START_EVENTS),
           'both real KMS readiness checks must complete before the real worker claim');
         localPhase = 'second-real-claim';
-        await blockActualClaim(migrator, observer, running, fixture, pid);
-        await observeCommit(observer, running, pid);
+        // Snapshot the child's pooled backends after the first committed claim:
+        // the co-located quota-sync loop has cycled by now, so this set covers
+        // every backend the second claim may legitimately alternate onto.
+        const cliBackends = await cliSessionPids(observer);
+        const secondPid = await blockActualClaim(migrator, observer, running, fixture, cliBackends);
+        await observeCommit(observer, running, secondPid);
         check(running.alive(), 'normal CLI must remain alive after real empty-queue polling');
         localPhase = 'sigterm-cleanup';
         check(running.process.kill('SIGTERM'), 'send SIGTERM only to the exact owned live CLI process');
