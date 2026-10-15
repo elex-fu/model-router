@@ -37,23 +37,51 @@ function job(overrides: Partial<ProviderCredentialValidationJobRecord> = {}): Pr
 }
 
 const messagesTargets = [
-  { providerId: 'kimi', productId: 'kimi-code', model: 'kimi-for-coding',
-    url: 'https://api.kimi.com/coding/v1/messages', adapterId: 'kimi-code-messages-v1' },
-  { providerId: 'kimi', productId: 'kimi-code-global', model: 'kimi-for-coding',
-    url: 'https://api.kimi.ai/coding/v1/messages', adapterId: 'kimi-code-global-messages-v1' },
-  { providerId: 'deepseek', productId: 'deepseek-anthropic', model: 'deepseek-flash',
-    url: 'https://api.deepseek.com/anthropic/v1/messages', adapterId: 'deepseek-anthropic-messages-v1' },
+  {
+    providerId: 'kimi',
+    productId: 'kimi-code',
+    model: 'kimi-for-coding',
+    url: 'https://api.kimi.com/coding/v1/messages',
+    adapterId: 'kimi-code-messages-v1',
+  },
+  {
+    providerId: 'kimi',
+    productId: 'kimi-code-global',
+    model: 'kimi-for-coding',
+    url: 'https://api.kimi.ai/coding/v1/messages',
+    adapterId: 'kimi-code-global-messages-v1',
+  },
+  {
+    providerId: 'deepseek',
+    productId: 'deepseek-anthropic',
+    model: 'deepseek-flash',
+    url: 'https://api.deepseek.com/anthropic/v1/messages',
+    adapterId: 'deepseek-anthropic-messages-v1',
+  },
 ] as const;
 
-function messagesJob(fixture: typeof messagesTargets[number] = messagesTargets[0]): ProviderCredentialValidationJobRecord {
-  return job({ providerId: fixture.providerId, productId: fixture.productId,
-    allowedModels: [fixture.model], target: { model: fixture.model, endpoint: 'messages', version: 1 } });
+function messagesJob(
+  fixture: (typeof messagesTargets)[number] = messagesTargets[0],
+): ProviderCredentialValidationJobRecord {
+  return job({
+    providerId: fixture.providerId,
+    productId: fixture.productId,
+    allowedModels: [fixture.model],
+    target: { model: fixture.model, endpoint: 'messages', version: 1 },
+  });
 }
 
 function message(model = 'kimi-for-coding') {
-  return { id: 'msg-local-test', type: 'message', role: 'assistant', model,
-    content: [{ type: 'text', text: 'OK' }], stop_reason: 'end_turn', stop_sequence: null,
-    usage: { input_tokens: 5, output_tokens: 1 } };
+  return {
+    id: 'msg-local-test',
+    type: 'message',
+    role: 'assistant',
+    model,
+    content: [{ type: 'text', text: 'OK' }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 1 },
+  };
 }
 
 function jsonResponse(value: unknown = message()): Response {
@@ -168,28 +196,48 @@ test('Kimi Code CN/global and DeepSeek Anthropic use fixed truthful non-stream M
       assert.equal(isSupportedCredentialValidationTarget(candidate), true);
       assert.equal(credentialValidationCapabilityProtocol(candidate), 'anthropic-compatible');
       let calls = 0;
-      const result = await validateProviderCredential(candidate, Buffer.from('unit-test-api-key'), async (url, init) => {
-        calls += 1;
-        assert.equal(url.href, fixture.url);
-        assert.equal(url.search, '');
-        assert.equal(url.username, '');
-        assert.equal(url.password, '');
-        assert.equal(init.method, 'POST', 'Anthropic products must never fall back to GET models or OpenAI');
-        assert.equal(init.redirect, 'manual');
-        assert.ok(init.signal);
-        assert.equal(init.signal.aborted, false);
-        assert.deepEqual(Object.fromEntries(new Headers(init.headers)), {
-          accept: 'application/json', 'anthropic-version': '2023-06-01', 'content-type': 'application/json',
-          'user-agent': 'model-router', 'x-api-key': 'unit-test-api-key',
-        }, 'no Bearer auth, cookies, proxy credentials, beta or impersonated client headers');
-        assert.ok(typeof init.body === 'string');
-        assert.deepEqual(JSON.parse(init.body), { model: fixture.model, max_tokens: 8, stream: false,
-          messages: [{ role: 'user', content: 'Reply with OK.' }] });
-        assert.equal(init.body.includes('unit-test-api-key'), false);
-        return jsonResponse(message(fixture.model));
-      });
+      const result = await validateProviderCredential(
+        candidate,
+        Buffer.from('unit-test-api-key'),
+        async (url, init) => {
+          calls += 1;
+          assert.equal(url.href, fixture.url);
+          assert.equal(url.search, '');
+          assert.equal(url.username, '');
+          assert.equal(url.password, '');
+          assert.equal(init.method, 'POST', 'Anthropic products must never fall back to GET models or OpenAI');
+          assert.equal(init.redirect, 'manual');
+          assert.ok(init.signal);
+          assert.equal(init.signal.aborted, false);
+          assert.deepEqual(
+            Object.fromEntries(new Headers(init.headers)),
+            {
+              accept: 'application/json',
+              'anthropic-version': '2023-06-01',
+              'content-type': 'application/json',
+              'user-agent': 'model-router',
+              'x-api-key': 'unit-test-api-key',
+            },
+            'no Bearer auth, cookies, proxy credentials, beta or impersonated client headers',
+          );
+          assert.ok(typeof init.body === 'string');
+          assert.deepEqual(JSON.parse(init.body), {
+            model: fixture.model,
+            max_tokens: 8,
+            stream: false,
+            messages: [{ role: 'user', content: 'Reply with OK.' }],
+          });
+          assert.equal(init.body.includes('unit-test-api-key'), false);
+          return jsonResponse(message(fixture.model));
+        },
+      );
       assert.equal(calls, 1);
-      assert.deepEqual(result, { state: 'verified', adapterId: fixture.adapterId, httpStatus: 200, durationMs: result.durationMs });
+      assert.deepEqual(result, {
+        state: 'verified',
+        adapterId: fixture.adapterId,
+        httpStatus: 200,
+        durationMs: result.durationMs,
+      });
       assert.equal(JSON.stringify(result).includes('unit-test-api-key'), false);
       assert.equal(JSON.stringify(result).includes('OK'), false);
     });
@@ -198,9 +246,24 @@ test('Kimi Code CN/global and DeepSeek Anthropic use fixed truthful non-stream M
 
 test('all three existing Chat models adapters retain GET/Bearer behavior and adapter identities', async () => {
   for (const fixture of [
-    { providerId: 'kimi', productId: 'kimi-platform', url: 'https://api.moonshot.cn/v1/models', adapterId: 'kimi-platform-models-v1' },
-    { providerId: 'kimi', productId: 'kimi-platform-global', url: 'https://api.moonshot.ai/v1/models', adapterId: 'kimi-platform-global-models-v1' },
-    { providerId: 'deepseek', productId: 'deepseek-chat', url: 'https://api.deepseek.com/models', adapterId: 'deepseek-chat-models-v1' },
+    {
+      providerId: 'kimi',
+      productId: 'kimi-platform',
+      url: 'https://api.moonshot.cn/v1/models',
+      adapterId: 'kimi-platform-models-v1',
+    },
+    {
+      providerId: 'kimi',
+      productId: 'kimi-platform-global',
+      url: 'https://api.moonshot.ai/v1/models',
+      adapterId: 'kimi-platform-global-models-v1',
+    },
+    {
+      providerId: 'deepseek',
+      productId: 'deepseek-chat',
+      url: 'https://api.deepseek.com/models',
+      adapterId: 'deepseek-chat-models-v1',
+    },
   ]) {
     const candidate = job({ providerId: fixture.providerId, productId: fixture.productId });
     assert.equal(credentialValidationCapabilityProtocol(candidate), 'openai-compatible');
@@ -209,7 +272,9 @@ test('all three existing Chat models adapters retain GET/Bearer behavior and ada
       assert.equal(init.method, 'GET');
       assert.equal(init.body, undefined);
       assert.deepEqual(Object.fromEntries(new Headers(init.headers)), {
-        accept: 'application/json', authorization: 'Bearer unit-test-api-key', 'user-agent': 'model-router',
+        accept: 'application/json',
+        authorization: 'Bearer unit-test-api-key',
+        'user-agent': 'model-router',
       });
       return new Response(null, { status: 200 });
     });
@@ -223,19 +288,37 @@ test('malformed model/version, mismatched endpoint/protocol, credential type and
   const protocolOverride = { ...base.target, protocol: 'openai-compatible' };
   const urlOverride = { ...base.target, url: 'https://127.0.0.1:5432/messages?key=unit-test-api-key' };
   const invalid = [
-    ...['', ' not-trimmed', 'with space', 'with\r\nheader', 'with\u0000nul', 'https://127.0.0.1/messages',
-      'model?key=unit-test-api-key', 'x'.repeat(257)].map((model) => ({ ...base, allowedModels: [model], target: { ...base.target, model } })),
-    ...[0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map((version) => ({ ...base, target: { ...base.target, version } })),
+    ...[
+      '',
+      ' not-trimmed',
+      'with space',
+      'with\r\nheader',
+      'with\u0000nul',
+      'https://127.0.0.1/messages',
+      'model?key=unit-test-api-key',
+      'x'.repeat(257),
+    ].map((model) => ({ ...base, allowedModels: [model], target: { ...base.target, model } })),
+    ...[0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map((version) => ({
+      ...base,
+      target: { ...base.target, version },
+    })),
     { ...base, allowedModels: ['some-other-model'] },
-    { ...base, credentialType: 'bearer' }, { ...base, credentialType: 'oauth' },
+    { ...base, credentialType: 'bearer' },
+    { ...base, credentialType: 'oauth' },
     { ...base, providerId: 'deepseek' },
     { ...base, target: { ...base.target, endpoint: 'chat-completions' } },
     { ...base, target: { ...base.target, endpoint: 'anthropic-compatible' } },
     { ...base, target: { ...base.target, endpoint: 'https://api.kimi.com/coding/v1/messages?redirect=127.0.0.1' } },
-    { ...base, target: protocolOverride }, { ...base, target: urlOverride },
-    { ...base, productId: 'kimi-platform' }, { ...base, productId: 'kimi-platform-global' },
+    { ...base, target: protocolOverride },
+    { ...base, target: urlOverride },
+    { ...base, productId: 'kimi-platform' },
+    { ...base, productId: 'kimi-platform-global' },
     { ...base, providerId: 'deepseek', productId: 'deepseek-chat' },
-    ...['custom-openai', 'custom-anthropic', 'custom-responses'].map((productId) => ({ ...base, providerId: 'custom', productId })),
+    ...['custom-openai', 'custom-anthropic', 'custom-responses'].map((productId) => ({
+      ...base,
+      providerId: 'custom',
+      productId,
+    })),
   ];
   let calls = 0;
   for (const candidate of invalid) {
@@ -245,32 +328,58 @@ test('malformed model/version, mismatched endpoint/protocol, credential type and
       calls += 1;
       return jsonResponse();
     });
-    assert.deepEqual(result, { state: 'failed', errorCode: 'adapter_unsupported', retryable: false,
-      adapterId: null, httpStatus: null, durationMs: 0 });
+    assert.deepEqual(result, {
+      state: 'failed',
+      errorCode: 'adapter_unsupported',
+      retryable: false,
+      adapterId: null,
+      httpStatus: null,
+      durationMs: 0,
+    });
   }
   assert.equal(calls, 0);
 });
 
 test('job URL/DNS/header hints cannot redirect a supported fixed probe or impersonate another client', async () => {
-  const candidate = { ...messagesJob(), url: 'http://127.0.0.1:5432/admin?api_key=bad', dnsOverride: '127.0.0.1',
-    headers: { authorization: 'Bearer wrong', 'user-agent': 'claude-code/99', cookie: 'secret' } };
-  const result = await validateProviderCredential(candidate, Buffer.from('unit-test-api-key?not-a-query'), async (url, init) => {
-    assert.equal(url.href, messagesTargets[0].url);
-    assert.equal(url.search, '');
-    assert.deepEqual(Object.fromEntries(new Headers(init.headers)), {
-      accept: 'application/json', 'anthropic-version': '2023-06-01', 'content-type': 'application/json',
-      'user-agent': 'model-router', 'x-api-key': 'unit-test-api-key?not-a-query',
-    });
-    return jsonResponse();
-  });
+  const candidate = {
+    ...messagesJob(),
+    url: 'http://127.0.0.1:5432/admin?api_key=bad',
+    dnsOverride: '127.0.0.1',
+    headers: { authorization: 'Bearer wrong', 'user-agent': 'claude-code/99', cookie: 'secret' },
+  };
+  const result = await validateProviderCredential(
+    candidate,
+    Buffer.from('unit-test-api-key?not-a-query'),
+    async (url, init) => {
+      assert.equal(url.href, messagesTargets[0].url);
+      assert.equal(url.search, '');
+      assert.deepEqual(Object.fromEntries(new Headers(init.headers)), {
+        accept: 'application/json',
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        'user-agent': 'model-router',
+        'x-api-key': 'unit-test-api-key?not-a-query',
+      });
+      return jsonResponse();
+    },
+  );
   assert.equal(result.state, 'verified');
 });
 
 test('empty, whitespace/control/non-ASCII and overlarge credentials never reach the Messages transport', async () => {
   let calls = 0;
-  for (const secret of [Buffer.alloc(0), Buffer.from('with space'), Buffer.from('key\r\nx-api-key: injected'),
-    Buffer.from('key\u0000nul'), Buffer.from('秘密'), Buffer.alloc(4_097, 65)]) {
-    const result = await validateProviderCredential(messagesJob(), secret, async () => { calls += 1; return jsonResponse(); });
+  for (const secret of [
+    Buffer.alloc(0),
+    Buffer.from('with space'),
+    Buffer.from('key\r\nx-api-key: injected'),
+    Buffer.from('key\u0000nul'),
+    Buffer.from('秘密'),
+    Buffer.alloc(4_097, 65),
+  ]) {
+    const result = await validateProviderCredential(messagesJob(), secret, async () => {
+      calls += 1;
+      return jsonResponse();
+    });
     assert.equal(result.state, 'failed');
     if (result.state !== 'failed') throw new Error('expected credential format failure');
     assert.equal(result.errorCode, 'credential_format_invalid');
@@ -280,22 +389,37 @@ test('empty, whitespace/control/non-ASCII and overlarge credentials never reach 
 
 test('Messages redirects and HTTP credential/rate/provider errors never verify or disclose response data', async () => {
   for (const [status, code, retryable] of [
-    [301, 'provider_redirect_rejected', false], [307, 'provider_redirect_rejected', false],
-    [401, 'credential_rejected', false], [403, 'credential_rejected', false],
-    [404, 'provider_endpoint_unsupported', false], [405, 'provider_endpoint_unsupported', false],
-    [429, 'provider_rate_limited', true], [500, 'provider_unavailable', true],
+    [301, 'provider_redirect_rejected', false],
+    [307, 'provider_redirect_rejected', false],
+    [401, 'credential_rejected', false],
+    [403, 'credential_rejected', false],
+    [404, 'provider_endpoint_unsupported', false],
+    [405, 'provider_endpoint_unsupported', false],
+    [429, 'provider_rate_limited', true],
+    [500, 'provider_unavailable', true],
   ] as const) {
     let calls = 0;
-    const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async (_url, init) => {
-      calls += 1;
-      assert.equal(init.redirect, 'manual');
-      return new Response('sensitive-provider-body unit-test-api-key', {
-        status, headers: { location: 'http://127.0.0.1:5432/admin?secret=unit-test-api-key' },
-      });
-    });
+    const result = await validateProviderCredential(
+      messagesJob(),
+      Buffer.from('unit-test-api-key'),
+      async (_url, init) => {
+        calls += 1;
+        assert.equal(init.redirect, 'manual');
+        return new Response('sensitive-provider-body unit-test-api-key', {
+          status,
+          headers: { location: 'http://127.0.0.1:5432/admin?secret=unit-test-api-key' },
+        });
+      },
+    );
     assert.equal(calls, 1);
-    assert.deepEqual(result, { state: 'failed', errorCode: code, retryable, adapterId: messagesTargets[0].adapterId,
-      httpStatus: status, durationMs: result.durationMs });
+    assert.deepEqual(result, {
+      state: 'failed',
+      errorCode: code,
+      retryable,
+      adapterId: messagesTargets[0].adapterId,
+      httpStatus: status,
+      durationMs: result.durationMs,
+    });
     assert.equal(JSON.stringify(result).includes('sensitive-provider-body'), false);
     assert.equal(JSON.stringify(result).includes('unit-test-api-key'), false);
     assert.equal(JSON.stringify(result).includes('127.0.0.1'), false);
@@ -304,32 +428,61 @@ test('Messages redirects and HTTP credential/rate/provider errors never verify o
 
 test('Messages success requires a complete legitimate JSON envelope, not HTML, errors or malformed usage', async () => {
   const good = message();
-  const invalid = [null, [], {}, { object: 'list', data: [] }, { type: 'error', error: { message: 'unit-test-api-key' } },
-    { ...good, error: { message: 'provider failure' } }, { ...good, type: 'message_start' },
-    { ...good, role: 'user' }, { ...good, id: '' }, { ...good, model: null },
-    { ...good, content: [] }, { ...good, content: [{ type: 'text', text: 123 }] },
+  const invalid = [
+    null,
+    [],
+    {},
+    { object: 'list', data: [] },
+    { type: 'error', error: { message: 'unit-test-api-key' } },
+    { ...good, error: { message: 'provider failure' } },
+    { ...good, type: 'message_start' },
+    { ...good, role: 'user' },
+    { ...good, id: '' },
+    { ...good, model: null },
+    { ...good, content: [] },
+    { ...good, content: [{ type: 'text', text: 123 }] },
     { ...good, content: [{ type: 'tool_use', id: 'tool-a' }] },
-    { ...good, stop_reason: null }, { ...good, stop_reason: ['end_turn'] },
-    { ...good, usage: { input_tokens: 5 } }, { ...good, usage: { input_tokens: -1, output_tokens: 1 } },
+    { ...good, stop_reason: null },
+    { ...good, stop_reason: ['end_turn'] },
+    { ...good, usage: { input_tokens: 5 } },
+    { ...good, usage: { input_tokens: -1, output_tokens: 1 } },
     { ...good, usage: { input_tokens: 5, output_tokens: 1.5 } },
     { ...good, usage: { input_tokens: 5, output_tokens: '1' } },
     { ...good, usage: { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1 } },
   ];
   const wireBodies = invalid.map((value) => JSON.stringify(value));
-  wireBodies.push('<html>unit-test-api-key sensitive-provider-body</html>', JSON.stringify(good).slice(0, -1),
-    `${JSON.stringify(good)} trailing garbage`);
+  wireBodies.push(
+    '<html>unit-test-api-key sensitive-provider-body</html>',
+    JSON.stringify(good).slice(0, -1),
+    `${JSON.stringify(good)} trailing garbage`,
+  );
   for (const wire of wireBodies) {
-    const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () =>
-      new Response(wire, { status: 200, headers: { 'content-type': 'application/json' } }));
-    assert.deepEqual(result, { state: 'failed', errorCode: 'provider_response_invalid', retryable: false,
-      adapterId: messagesTargets[0].adapterId, httpStatus: 200, durationMs: result.durationMs });
+    const result = await validateProviderCredential(
+      messagesJob(),
+      Buffer.from('unit-test-api-key'),
+      async () => new Response(wire, { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    assert.deepEqual(result, {
+      state: 'failed',
+      errorCode: 'provider_response_invalid',
+      retryable: false,
+      adapterId: messagesTargets[0].adapterId,
+      httpStatus: 200,
+      durationMs: result.durationMs,
+    });
     assert.equal(JSON.stringify(result).includes('unit-test-api-key'), false);
     assert.equal(JSON.stringify(result).includes('sensitive-provider-body'), false);
   }
-  for (const response of [new Response(null, { status: 204 }),
+  for (const response of [
+    new Response(null, { status: 204 }),
     new Response(JSON.stringify(good), { headers: { 'content-type': 'text/html' } }),
-    new Response(new Uint8Array([0xff]), { headers: { 'content-type': 'application/json' } })]) {
-    const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () => response);
+    new Response(new Uint8Array([0xff]), { headers: { 'content-type': 'application/json' } }),
+  ]) {
+    const result = await validateProviderCredential(
+      messagesJob(),
+      Buffer.from('unit-test-api-key'),
+      async () => response,
+    );
     assert.equal(result.state, 'failed');
     if (result.state !== 'failed') throw new Error('expected envelope failure');
     assert.equal(result.errorCode, 'provider_response_invalid');
@@ -337,12 +490,20 @@ test('Messages success requires a complete legitimate JSON envelope, not HTML, e
 });
 
 test('bounded Messages envelopes accept max-token completion and canonical model aliases without capability claims', async () => {
-  for (const content of [[{ type: 'text', text: 'O' }], [{ type: 'thinking', thinking: 'A short thought', signature: 'local-signature' }],
-    [{ type: 'redacted_thinking', data: 'local-redacted-data' }]]) {
+  for (const content of [
+    [{ type: 'text', text: 'O' }],
+    [{ type: 'thinking', thinking: 'A short thought', signature: 'local-signature' }],
+    [{ type: 'redacted_thinking', data: 'local-redacted-data' }],
+  ]) {
     const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () =>
-      jsonResponse({ ...message('kimi-canonical-model'), content, stop_reason: 'max_tokens' }));
-    assert.deepEqual(result, { state: 'verified', adapterId: messagesTargets[0].adapterId,
-      httpStatus: 200, durationMs: result.durationMs });
+      jsonResponse({ ...message('kimi-canonical-model'), content, stop_reason: 'max_tokens' }),
+    );
+    assert.deepEqual(result, {
+      state: 'verified',
+      adapterId: messagesTargets[0].adapterId,
+      httpStatus: 200,
+      durationMs: result.durationMs,
+    });
   }
 });
 
@@ -350,20 +511,40 @@ test('Messages waits for EOF even after a full JSON prefix and supports split UT
   const lifetime = new AbortController();
   let sourceController!: ReadableStreamDefaultController<Uint8Array>;
   let announceWait!: () => void;
-  const waiting = new Promise<void>((resolve) => { announceWait = resolve; });
+  const waiting = new Promise<void>((resolve) => {
+    announceWait = resolve;
+  });
   const bytes = new TextEncoder().encode(JSON.stringify({ ...message(), content: [{ type: 'text', text: '你好' }] }));
   let index = 0;
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) { sourceController = controller; },
-    pull(controller) {
-      if (index < bytes.length) controller.enqueue(bytes.subarray(index, ++index));
-      else { announceWait(); return new Promise<void>(() => {}); }
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        sourceController = controller;
+      },
+      pull(controller) {
+        if (index < bytes.length) controller.enqueue(bytes.subarray(index, ++index));
+        else {
+          announceWait();
+          return new Promise<void>(() => {});
+        }
+      },
     },
-  }, { highWaterMark: 0 });
+    { highWaterMark: 0 },
+  );
   let completed = false;
-  const pending = validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () =>
-    new Response(body, { headers: { 'content-type': 'application/json' } }), lifetime.signal).then((result) => { completed = true; return result; });
-  t.after(async () => { lifetime.abort(); await pending; });
+  const pending = validateProviderCredential(
+    messagesJob(),
+    Buffer.from('unit-test-api-key'),
+    async () => new Response(body, { headers: { 'content-type': 'application/json' } }),
+    lifetime.signal,
+  ).then((result) => {
+    completed = true;
+    return result;
+  });
+  t.after(async () => {
+    lifetime.abort();
+    await pending;
+  });
   await waitForValidationFixtureSignal(waiting, pending);
   assert.equal(completed, false, 'complete prefix must not verify before successful body EOF');
   sourceController.close();
@@ -373,27 +554,51 @@ test('Messages waits for EOF even after a full JSON prefix and supports split UT
 test('Messages response cap applies to declared, absent and dishonest Content-Length and cancels oversize bodies', async () => {
   const encoder = new TextEncoder();
   const template = message();
-  const bytes = encoder.encode(JSON.stringify({ ...template, content: [{ type: 'text', text: 'x'.repeat(
-    PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES - encoder.encode(JSON.stringify({ ...template, content: [{ type: 'text', text: '' }] })).byteLength,
-  ) }] }));
+  const bytes = encoder.encode(
+    JSON.stringify({
+      ...template,
+      content: [
+        {
+          type: 'text',
+          text: 'x'.repeat(
+            PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES -
+              encoder.encode(JSON.stringify({ ...template, content: [{ type: 'text', text: '' }] })).byteLength,
+          ),
+        },
+      ],
+    }),
+  );
   assert.equal(bytes.byteLength, PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES);
-  const atCap = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () =>
-    new Response(bytes, { headers: { 'content-type': 'application/json' } }));
+  const atCap = await validateProviderCredential(
+    messagesJob(),
+    Buffer.from('unit-test-api-key'),
+    async () => new Response(bytes, { headers: { 'content-type': 'application/json' } }),
+  );
   assert.equal(atCap.state, 'verified');
   for (const length of [undefined, '1', '4097']) {
     let cancelled = false;
     let index = 0;
     const chunks = [bytes, encoder.encode(' ')];
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        const chunk = chunks[index++];
-        if (chunk) controller.enqueue(chunk); else controller.close();
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          const chunk = chunks[index++];
+          if (chunk) controller.enqueue(chunk);
+          else controller.close();
+        },
+        cancel() {
+          cancelled = true;
+        },
       },
-      cancel() { cancelled = true; },
-    }, { highWaterMark: 0 });
+      { highWaterMark: 0 },
+    );
     const headers = new Headers({ 'content-type': 'application/json' });
     if (length) headers.set('content-length', length);
-    const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () => new Response(body, { headers }));
+    const result = await validateProviderCredential(
+      messagesJob(),
+      Buffer.from('unit-test-api-key'),
+      async () => new Response(body, { headers }),
+    );
     assert.equal(result.state, 'failed');
     if (result.state !== 'failed') throw new Error('expected capped response failure');
     assert.equal(result.errorCode, 'provider_response_too_large');
@@ -407,13 +612,20 @@ test('Messages transport/read errors surface only stable health codes, never pro
       const failure = new Error('sensitive-provider-body unit-test-api-key');
       if (phase === 'fetch') throw failure;
       let sent = false;
-      return new Response(new ReadableStream<Uint8Array>({
-        pull(controller) {
-          if (!sent) { sent = true; controller.enqueue(new TextEncoder().encode(JSON.stringify(message()))); }
-          else controller.error(failure);
-        },
-      }, { highWaterMark: 0 }),
-        { headers: { 'content-type': 'application/json' } });
+      return new Response(
+        new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (!sent) {
+                sent = true;
+                controller.enqueue(new TextEncoder().encode(JSON.stringify(message())));
+              } else controller.error(failure);
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { headers: { 'content-type': 'application/json' } },
+      );
     });
     assert.equal(result.state, 'failed');
     if (result.state !== 'failed') throw new Error('expected sanitized transport failure');
@@ -432,21 +644,40 @@ test('Messages uses the unchanged five-second deadline and cannot verify a body 
   });
   let cancelled = false;
   let sent = false;
-  const body = new ReadableStream<Uint8Array>({
-    pull(output) {
-      if (!sent) { sent = true; output.enqueue(new TextEncoder().encode(JSON.stringify(message()))); return; }
-      controller.abort(new DOMException('local deadline', 'TimeoutError'));
-      return new Promise<void>(() => {});
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(output) {
+        if (!sent) {
+          sent = true;
+          output.enqueue(new TextEncoder().encode(JSON.stringify(message())));
+          return;
+        }
+        controller.abort(new DOMException('local deadline', 'TimeoutError'));
+        return new Promise<void>(() => {});
+      },
+      cancel() {
+        cancelled = true;
+      },
     },
-    cancel() { cancelled = true; },
-  }, { highWaterMark: 0 });
-  const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async (_url, init) => {
-    assert.strictEqual(init.signal, controller.signal);
-    return new Response(body, { headers: { 'content-type': 'application/json' } });
-  });
+    { highWaterMark: 0 },
+  );
+  const result = await validateProviderCredential(
+    messagesJob(),
+    Buffer.from('unit-test-api-key'),
+    async (_url, init) => {
+      assert.strictEqual(init.signal, controller.signal);
+      return new Response(body, { headers: { 'content-type': 'application/json' } });
+    },
+  );
   assert.equal(cancelled, true);
-  assert.deepEqual(result, { state: 'failed', errorCode: 'provider_timeout', retryable: true,
-    adapterId: messagesTargets[0].adapterId, httpStatus: 200, durationMs: result.durationMs });
+  assert.deepEqual(result, {
+    state: 'failed',
+    errorCode: 'provider_timeout',
+    retryable: true,
+    adapterId: messagesTargets[0].adapterId,
+    httpStatus: 200,
+    durationMs: result.durationMs,
+  });
 });
 
 test('Messages fetch deadline and late successful responses stay failed and cancel the response', async (t) => {
@@ -457,8 +688,14 @@ test('Messages fetch deadline and late successful responses stay failed and canc
     const result = await validateProviderCredential(messagesJob(), Buffer.from('unit-test-api-key'), async () => {
       controller.abort(new DOMException('sensitive-provider-body unit-test-api-key', 'TimeoutError'));
       if (!lateResponse) throw controller.signal.reason;
-      return new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }),
-        { headers: { 'content-type': 'application/json' } });
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      );
     });
     assert.equal(result.state, 'failed');
     if (result.state !== 'failed') throw new Error('expected fetch deadline failure');
@@ -468,4 +705,102 @@ test('Messages fetch deadline and late successful responses stay failed and canc
     assert.equal(JSON.stringify(result).includes('unit-test-api-key'), false);
     t.mock.restoreAll();
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* R5b-4: opencode-go probe registration (R6 registry placeholder)     */
+/* ------------------------------------------------------------------ */
+
+function opencodeGoJob(
+  overrides: Partial<ProviderCredentialValidationJobRecord> = {},
+): ProviderCredentialValidationJobRecord {
+  return job({
+    providerId: 'opencode-go',
+    productId: 'opencode-go-zen',
+    allowedModels: ['glm-5.3'],
+    target: { model: 'glm-5.3', endpoint: 'opencode-go-zen', version: 1 },
+    ...overrides,
+  });
+}
+
+function chatCompletion(model = 'glm-5.3'): Response {
+  return jsonResponse({
+    id: 'chatcmpl-local-test',
+    object: 'chat.completion',
+    created: 1,
+    model,
+    choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+  });
+}
+
+test('opencode-go registers a fixed Chat Completions probe with Bearer auth (glm-5.3 default test model)', async () => {
+  const candidate = opencodeGoJob();
+  assert.equal(isSupportedCredentialValidationTarget(candidate), true);
+  assert.equal(credentialValidationCapabilityProtocol(candidate), 'openai-compatible');
+  let calls = 0;
+  const result = await validateProviderCredential(candidate, Buffer.from('unit-test-api-key'), async (url, init) => {
+    calls += 1;
+    assert.equal(url.href, 'https://opencode.ai/zen/go/v1/chat/completions');
+    assert.equal(url.search, '');
+    assert.equal(init.method, 'POST', 'the subscription pool probes the Chat Completions endpoint, not GET /models');
+    assert.equal(init.redirect, 'manual');
+    assert.deepEqual(
+      Object.fromEntries(new Headers(init.headers)),
+      {
+        accept: 'application/json',
+        authorization: 'Bearer unit-test-api-key',
+        'content-type': 'application/json',
+        'user-agent': 'model-router',
+      },
+      'openai-bearer-v1 auth profile like the kimi/deepseek API-key precedents',
+    );
+    assert.ok(typeof init.body === 'string');
+    assert.deepEqual(JSON.parse(init.body), {
+      model: 'glm-5.3',
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+    });
+    return chatCompletion();
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(result, {
+    state: 'verified',
+    adapterId: 'opencode-go-zen-chat-v1',
+    httpStatus: 200,
+    durationMs: result.durationMs,
+  });
+  assert.equal(JSON.stringify(result).includes('unit-test-api-key'), false);
+});
+
+test('opencode-go probe fails closed on mismatched product, credential type or endpoint', async () => {
+  const invalid = [
+    opencodeGoJob({ productId: 'opencode-go-zen-v2' }),
+    opencodeGoJob({ providerId: 'opencode' }),
+    opencodeGoJob({ credentialType: 'oauth' }),
+    opencodeGoJob({ target: { model: 'glm-5.3', endpoint: 'chat-completions', version: 1 } }),
+    opencodeGoJob({ target: { model: 'grok-4.7', endpoint: 'opencode-go-zen', version: 1 } }),
+    opencodeGoJob({
+      target: { model: 'glm-5.3', endpoint: 'https://opencode.ai/zen/go/v1/chat/completions', version: 1 },
+    }),
+  ];
+  let calls = 0;
+  for (const candidate of invalid) {
+    assert.equal(isSupportedCredentialValidationTarget(candidate), false, JSON.stringify(candidate.target));
+    assert.equal(credentialValidationCapabilityProtocol(candidate), null);
+    const result = await validateProviderCredential(candidate, Buffer.from('unit-test-api-key'), async () => {
+      calls += 1;
+      return chatCompletion();
+    });
+    assert.deepEqual(result, {
+      state: 'failed',
+      errorCode: 'adapter_unsupported',
+      retryable: false,
+      adapterId: null,
+      httpStatus: null,
+      durationMs: 0,
+    });
+  }
+  assert.equal(calls, 0);
 });

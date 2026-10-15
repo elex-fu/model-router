@@ -20,11 +20,13 @@ import {
 import { OPENCODE_GO_ENDPOINT, OPENCODE_GO_PROVIDER_ID } from '../saas/gateway/opencode-go/catalog-identity.js';
 import {
   DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
+  isOpenCodeGoCrossResponsesRoute,
   type OpenCodeGoProtocolRule,
   openCodeGoProviderOperationForProtocol,
   resolveOpenCodeGoProtocol,
   resolveOpenCodeGoProtocolRulesFromConfig,
 } from '../saas/gateway/opencode-go/protocol-rules.js';
+import { openCodeGoFixedRequestHeaders } from '../saas/gateway/opencode-go/transport-headers.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
   type ProviderAccountRuntimeHealthWriter,
@@ -904,7 +906,12 @@ export function createOpenCodeGoProtocolRoutingAuthority(
   };
 }
 
-function createProviderPayloadCompiler(
+/**
+ * Exported for direct testing (the production composition is the only other
+ * caller): the production payload-compile wrapper that applies OpenCode Go
+ * protocol routing and its Responses-bridge restriction.
+ */
+export function createProviderPayloadCompiler(
   options: ManagedSaasGatewayProductionOptions,
 ): RequestPreparationPayloadCompiler {
   const payloadOptions = options.providerPayload;
@@ -974,6 +981,22 @@ function createProviderPayloadCompiler(
       // operation); an unsupported client→provider bridge pair then fails
       // closed inside the compiler as a capability_unavailable block.
       const routedRoute = applyOpenCodeGoProtocolRouting(route, input.authority.candidate, openCodeGoProtocolRules);
+      // R5b-4 (closes R5b-2 gap 3): the generic cross→Responses bridges are
+      // passthrough stubs, so a Responses-routed OpenCode Go model requested
+      // through any other client protocol fails closed with the
+      // capability-style error instead of forwarding a wrong-shaped payload.
+      // Real Responses conversion is future work (only the codex compile
+      // layer owns it today).
+      if (
+        input.authority.candidate.providerId === OPENCODE_GO_PROVIDER_ID &&
+        isOpenCodeGoCrossResponsesRoute(routedRoute.clientProtocol, routedRoute.providerProtocol)
+      ) {
+        return {
+          decision: 'block',
+          code: 'capability_unsupported',
+          message: 'opencode-go responses-routed models require a responses client protocol',
+        };
+      }
       return compiler.compile({
         ...input,
         clientProtocol: routedRoute.clientProtocol,
@@ -1140,6 +1163,11 @@ export function createManagedSaasGatewayProductionComposition(
     ...(options.providerHttpTestAddressCapability === undefined
       ? {}
       : { testAddressCapability: options.providerHttpTestAddressCapability }),
+    // R5b-4 (closes R5b-2 gap 2): anthropic-routed OpenCode Go requests carry
+    // anthropic-version. The resolver keys on the signed endpoint scope plus
+    // the signed provider protocol, so every other provider keeps its exact
+    // previous header set.
+    resolveFixedRequestHeaders: openCodeGoFixedRequestHeaders,
     timeoutMs: options.timeoutMs,
   });
   // P1c codex dispatch split: the codex transport takes over exactly the

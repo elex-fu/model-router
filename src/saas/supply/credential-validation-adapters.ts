@@ -1,7 +1,8 @@
 import { performance } from 'node:perf_hooks';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { ProviderCredentialValidationJobRecord } from './types.js';
+import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
+import type { ProviderCredentialValidationJobRecord } from './types.js';
 
 export const PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS = 5_000;
 export const PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 4_096;
@@ -74,7 +75,7 @@ interface FixedProviderValidationAdapter {
   readonly capabilityProtocol: string;
   readonly adapterId: string;
   readonly url: string;
-  readonly probe: 'models' | 'messages';
+  readonly probe: 'models' | 'messages' | 'chat';
 }
 
 /*
@@ -85,8 +86,27 @@ interface FixedProviderValidationAdapter {
  * catalog capabilities or commercial rights. Messages bindings follow:
  * https://www.kimi.com/code/docs/en/ (CN/global /coding/v1/messages)
  * https://api-docs.deepseek.com/guides/anthropic_api/ (/anthropic/v1/messages)
+ *
+ * R5b-4 (plan §R5b task #24, "R6 未动工前先在注册表占位"): the OpenCode Go
+ * subscription pool registers its Chat Completions probe here — the R6 probe
+ * framework's opencode-go category placeholder. The capability endpoint is
+ * the opencode-go catalog endpoint scope (`opencode-go-zen`, the binding
+ * account capability rows carry), the wire probe is the pinned Chat
+ * Completions endpoint with the default test model supplied by the job
+ * (sub2api `DefaultOpenCodeGoTestModel` glm-5.3), and the auth profile is
+ * openai-bearer-v1 like the kimi/deepseek API-key precedents.
  */
 const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze([
+  Object.freeze({
+    providerId: 'opencode-go',
+    productId: 'opencode-go-zen',
+    credentialType: 'api-key',
+    capabilityEndpoint: 'opencode-go-zen',
+    capabilityProtocol: 'openai-compatible',
+    adapterId: 'opencode-go-zen-chat-v1',
+    url: OPENCODE_GO_CHAT_COMPLETIONS_URL,
+    probe: 'chat',
+  }),
   Object.freeze({
     providerId: 'kimi',
     productId: 'kimi-platform',
@@ -181,11 +201,13 @@ function canonicalAdapterUrl(value: string): URL | null {
 
 function resolveAdapter(job: ProviderCredentialValidationJobRecord): FixedProviderValidationAdapter | null {
   if (
-    !job.target || !modelIdentifier(job.target.model) ||
+    !job.target ||
+    !modelIdentifier(job.target.model) ||
     Object.keys(job.target).some((key) => !['model', 'endpoint', 'version'].includes(key)) ||
     !Array.isArray(job.allowedModels) ||
     !job.allowedModels.includes(job.target.model) ||
-    !Number.isSafeInteger(job.target.version) || job.target.version < 1
+    !Number.isSafeInteger(job.target.version) ||
+    job.target.version < 1
   ) {
     return null;
   }
@@ -227,20 +249,32 @@ type BoundedBodyResult =
   | { readonly state: 'read_error' }
   | { readonly state: 'timeout' };
 
-async function boundedResponseBody(response: ProviderCredentialValidationResponse, signal: AbortSignal, capture: boolean): Promise<BoundedBodyResult> {
-  if (signal.aborted) { cancelResponseBody(response); return { state: 'timeout' }; }
+async function boundedResponseBody(
+  response: ProviderCredentialValidationResponse,
+  signal: AbortSignal,
+  capture: boolean,
+): Promise<BoundedBodyResult> {
+  if (signal.aborted) {
+    cancelResponseBody(response);
+    return { state: 'timeout' };
+  }
   if (!response.body) return { state: 'ok', bytes: capture ? new Uint8Array() : null };
   const reader = response.body.getReader();
   const buffer = capture ? new Uint8Array(PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES) : null;
   let bytesRead = 0;
-  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
   signal.addEventListener('abort', cancel, { once: true });
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (signal.aborted) return { state: 'timeout' };
       if (done) return { state: 'ok', bytes: buffer?.subarray(0, bytesRead) ?? null };
-      if (!(value instanceof Uint8Array)) { cancel(); return { state: 'read_error' }; }
+      if (!(value instanceof Uint8Array)) {
+        cancel();
+        return { state: 'read_error' };
+      }
       if (value.byteLength > PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES - bytesRead) {
         cancel();
         return { state: 'too_large' };
@@ -263,7 +297,7 @@ async function boundedResponseBody(response: ProviderCredentialValidationRespons
 
 type Fields = Record<string, unknown>;
 function record(value: unknown): Fields | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Fields : null;
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Fields) : null;
 }
 
 function counter(value: unknown): value is number {
@@ -273,24 +307,41 @@ function counter(value: unknown): value is number {
 // This validates only the bounded probe's Messages envelope, not model
 // capabilities or financial usage. Providers may return a canonical model ID
 // for an alias; the requested model still comes solely from the allowed job.
-function validMessageResponse(response: ProviderCredentialValidationResponse, bytes: Uint8Array, custom: boolean): boolean {
+function validMessageResponse(
+  response: ProviderCredentialValidationResponse,
+  bytes: Uint8Array,
+  custom: boolean,
+): boolean {
   if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return false;
   try {
     const body = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
-    if (!body || body.type !== 'message' || body.role !== 'assistant' ||
-      !modelIdentifier(body.id) || !(custom ? isCustomCredentialValidationModel(body.model) : modelIdentifier(body.model)) ||
+    if (
+      !body ||
+      body.type !== 'message' ||
+      body.role !== 'assistant' ||
+      !modelIdentifier(body.id) ||
+      !(custom ? isCustomCredentialValidationModel(body.model) : modelIdentifier(body.model)) ||
       (body.error !== undefined && body.error !== null) ||
-      typeof body.stop_reason !== 'string' || !['end_turn', 'max_tokens', 'stop_sequence', 'refusal'].includes(body.stop_reason) ||
+      typeof body.stop_reason !== 'string' ||
+      !['end_turn', 'max_tokens', 'stop_sequence', 'refusal'].includes(body.stop_reason) ||
       (body.stop_sequence !== undefined && body.stop_sequence !== null && typeof body.stop_sequence !== 'string') ||
-      !Array.isArray(body.content) || body.content.length < 1) return false;
-    if (!body.content.every((value: unknown) => {
-      const block = record(value);
-      if (!block) return false;
-      if (block.type === 'text') return typeof block.text === 'string';
-      if (block.type === 'thinking') return typeof block.thinking === 'string' &&
-        (block.signature === undefined || typeof block.signature === 'string');
-      return block.type === 'redacted_thinking' && typeof block.data === 'string';
-    })) return false;
+      !Array.isArray(body.content) ||
+      body.content.length < 1
+    )
+      return false;
+    if (
+      !body.content.every((value: unknown) => {
+        const block = record(value);
+        if (!block) return false;
+        if (block.type === 'text') return typeof block.text === 'string';
+        if (block.type === 'thinking')
+          return (
+            typeof block.thinking === 'string' && (block.signature === undefined || typeof block.signature === 'string')
+          );
+        return block.type === 'redacted_thinking' && typeof block.data === 'string';
+      })
+    )
+      return false;
     const usage = record(body.usage);
     if (!usage || !counter(usage.input_tokens) || !counter(usage.output_tokens)) return false;
     let total = usage.input_tokens + usage.output_tokens;
@@ -312,23 +363,49 @@ function validChatResponse(response: ProviderCredentialValidationResponse, bytes
   if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return false;
   try {
     const body = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
-    if (!body || !modelIdentifier(body.id) || body.object !== 'chat.completion' || !counter(body.created) ||
-      !isCustomCredentialValidationModel(body.model) || (body.error !== undefined && body.error !== null) ||
-      !Array.isArray(body.choices) || body.choices.length !== 1) return false;
+    if (
+      !body ||
+      !modelIdentifier(body.id) ||
+      body.object !== 'chat.completion' ||
+      !counter(body.created) ||
+      !isCustomCredentialValidationModel(body.model) ||
+      (body.error !== undefined && body.error !== null) ||
+      !Array.isArray(body.choices) ||
+      body.choices.length !== 1
+    )
+      return false;
     const choice = record(body.choices[0]);
     const message = record(choice?.message);
-    if (!choice || choice.index !== 0 || !message || message.role !== 'assistant' ||
-      typeof message.content !== 'string' || (message.tool_calls !== undefined && message.tool_calls !== null) ||
-      typeof choice.finish_reason !== 'string' || !['stop', 'length', 'content_filter'].includes(choice.finish_reason)) return false;
+    if (
+      !choice ||
+      choice.index !== 0 ||
+      !message ||
+      message.role !== 'assistant' ||
+      typeof message.content !== 'string' ||
+      (message.tool_calls !== undefined && message.tool_calls !== null) ||
+      typeof choice.finish_reason !== 'string' ||
+      !['stop', 'length', 'content_filter'].includes(choice.finish_reason)
+    )
+      return false;
     const usage = record(body.usage);
-    return !!usage && counter(usage.prompt_tokens) && counter(usage.completion_tokens) && counter(usage.total_tokens) &&
+    return (
+      !!usage &&
+      counter(usage.prompt_tokens) &&
+      counter(usage.completion_tokens) &&
+      counter(usage.total_tokens) &&
       Number.isSafeInteger(usage.prompt_tokens + usage.completion_tokens) &&
-      usage.total_tokens === usage.prompt_tokens + usage.completion_tokens;
-  } catch { return false; }
+      usage.total_tokens === usage.prompt_tokens + usage.completion_tokens
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Protocol-owned allowlist; never merges job/operator/client supplied headers. */
-export function createCredentialValidationProbeRequest(probe: CredentialValidationProbe, secret: Buffer): CredentialValidationProbeRequest | null {
+export function createCredentialValidationProbeRequest(
+  probe: CredentialValidationProbe,
+  secret: Buffer,
+): CredentialValidationProbeRequest | null {
   const token = asciiCredential(secret);
   if (token === null) return null;
   const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'model-router' };
@@ -340,11 +417,18 @@ export function createCredentialValidationProbeRequest(probe: CredentialValidati
   }
   if (probe.kind !== 'models') headers['content-type'] = 'application/json';
   return {
-    method: probe.kind === 'models' ? 'GET' : 'POST', headers,
-    ...(probe.kind === 'models' ? {} : { body: JSON.stringify({
-      model: probe.model, max_tokens: 8, stream: false,
-      messages: [{ role: 'user', content: 'Reply with OK.' }],
-    }) }),
+    method: probe.kind === 'models' ? 'GET' : 'POST',
+    headers,
+    ...(probe.kind === 'models'
+      ? {}
+      : {
+          body: JSON.stringify({
+            model: probe.model,
+            max_tokens: 8,
+            stream: false,
+            messages: [{ role: 'user', content: 'Reply with OK.' }],
+          }),
+        }),
     redirect: 'manual',
   };
 }
@@ -378,20 +462,39 @@ export async function readCredentialValidationProbeResponse(
     return failed('provider_response_too_large', false, probe.adapterId, response.status, completedDurationMs);
   }
   if (bodyResult.state === 'read_error' || bodyResult.state === 'timeout') {
-    return failed(bodyResult.state === 'timeout' ? 'provider_timeout' : 'provider_network_error', true,
-      probe.adapterId, response.status, completedDurationMs);
+    return failed(
+      bodyResult.state === 'timeout' ? 'provider_timeout' : 'provider_network_error',
+      true,
+      probe.adapterId,
+      response.status,
+      completedDurationMs,
+    );
   }
   if (success) {
-    if (probe.kind !== 'models' && (!bodyResult.bytes || !(probe.kind === 'messages'
-      ? validMessageResponse(response, bodyResult.bytes, probe.custom) : validChatResponse(response, bodyResult.bytes)))) {
+    if (
+      probe.kind !== 'models' &&
+      (!bodyResult.bytes ||
+        !(probe.kind === 'messages'
+          ? validMessageResponse(response, bodyResult.bytes, probe.custom)
+          : validChatResponse(response, bodyResult.bytes)))
+    ) {
       return failed('provider_response_invalid', false, probe.adapterId, response.status, completedDurationMs);
     }
-    return { state: 'verified', adapterId: probe.adapterId, httpStatus: response.status, durationMs: completedDurationMs };
+    return {
+      state: 'verified',
+      adapterId: probe.adapterId,
+      httpStatus: response.status,
+      durationMs: completedDurationMs,
+    };
   }
-  if (response.status === 401 || response.status === 403) return failed('credential_rejected', false, probe.adapterId, response.status, completedDurationMs);
-  if (response.status === 404 || response.status === 405) return failed('provider_endpoint_unsupported', false, probe.adapterId, response.status, completedDurationMs);
-  if (response.status === 429) return failed('provider_rate_limited', true, probe.adapterId, response.status, completedDurationMs);
-  if (response.status >= 500) return failed('provider_unavailable', true, probe.adapterId, response.status, completedDurationMs);
+  if (response.status === 401 || response.status === 403)
+    return failed('credential_rejected', false, probe.adapterId, response.status, completedDurationMs);
+  if (response.status === 404 || response.status === 405)
+    return failed('provider_endpoint_unsupported', false, probe.adapterId, response.status, completedDurationMs);
+  if (response.status === 429)
+    return failed('provider_rate_limited', true, probe.adapterId, response.status, completedDurationMs);
+  if (response.status >= 500)
+    return failed('provider_unavailable', true, probe.adapterId, response.status, completedDurationMs);
   return failed('provider_endpoint_unsupported', false, probe.adapterId, response.status, completedDurationMs);
 }
 
@@ -407,7 +510,12 @@ export async function validateProviderCredential(
 
   const url = canonicalAdapterUrl(adapter.url);
   if (!url) return failed('adapter_unsupported', false, adapter.adapterId, null, 0);
-  const probe: CredentialValidationProbe = { adapterId: adapter.adapterId, kind: adapter.probe, model: job.target.model, custom: false };
+  const probe: CredentialValidationProbe = {
+    adapterId: adapter.adapterId,
+    kind: adapter.probe,
+    model: job.target.model,
+    custom: false,
+  };
   const init = createCredentialValidationProbeRequest(probe, secret);
   if (!init) return failed('credential_format_invalid', false, adapter.adapterId, null, 0);
 

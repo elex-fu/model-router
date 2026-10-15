@@ -10,15 +10,18 @@
  *   `api-key` (platform-pool subscription key in the existing sealed
  *   envelope — no OAuth extension), supply mode `platform`, region `global`,
  *   purpose `inference`;
- * - protocol `openai-compatible` and endpoint scope `opencode-go-zen` for the
- *   R5b-1 catalog rows: the pool's default/test traffic is Chat Completions
- *   (sub2api `DefaultOpenCodeGoTestModel` `glm-5.3` is a Chat Completions
- *   catalog id). R5b-2's per-model protocol routing will re-derive the
- *   upstream protocol per request; it must keep this provider/product/
- *   credential triple stable.
+ * - catalog capability rows carry the model's rule-resolved native protocol
+ *   spelled as a `GatewayProtocol` ('responses' | 'openai' | 'anthropic'),
+ *   never the supply-validation vocabulary ('openai-compatible'): the
+ *   production authority adapter matches `capability.protocol` against the
+ *   route's client protocol, which is always a GatewayProtocol. R5b-2's
+ *   per-model protocol routing keeps this provider/product/credential triple
+ *   stable while re-deriving the upstream protocol per request.
  * - the upstream host is pinned to OPENCODE_GO_BASE_URL
  *   (https://opencode.ai/zen/go); transports must never take a client- or
- *   account-supplied base URL for this provider.
+ *   account-supplied base URL for this provider. The wire paths below are the
+ *   sub2api OpenAI-format layout (chat base = base + /v1), so the Chat
+ *   Completions and models endpoints are pinned here too.
  */
 
 export const OPENCODE_GO_PROVIDER_ID = 'opencode-go';
@@ -28,8 +31,6 @@ export const OPENCODE_GO_CREDENTIAL_TYPE = 'api-key';
 export const OPENCODE_GO_SUPPLY_MODE = 'platform' as const;
 export const OPENCODE_GO_REGION = 'global';
 export const OPENCODE_GO_PURPOSE = 'inference';
-/** Default catalog protocol for the R5b-1 capability rows (Chat Completions). */
-export const OPENCODE_GO_PROTOCOL = 'openai-compatible';
 /**
  * Catalog endpoint scope; also the R5b-2 dispatch split key for OpenCode Go
  * traffic (mirrors CODEX_ENDPOINT for the codex transport split).
@@ -37,4 +38,16 @@ export const OPENCODE_GO_PROTOCOL = 'openai-compatible';
 export const OPENCODE_GO_ENDPOINT = 'opencode-go-zen';
 /** Pinned upstream base for the OpenCode Zen/Go subscription gateway. */
 export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go';
+/**
+ * Pinned Chat Completions endpoint (R5b-4 probe registration): the sub2api
+ * OpenAI-format chat base for the Go plan is base + `/v1`.
+ */
+export const OPENCODE_GO_CHAT_COMPLETIONS_PATH = '/v1/chat/completions';
+export const OPENCODE_GO_CHAT_COMPLETIONS_URL = `${OPENCODE_GO_BASE_URL}${OPENCODE_GO_CHAT_COMPLETIONS_PATH}`;
+/**
+ * Pinned upstream model-list endpoint (R5b-4 catalog sync): the sub2api
+ * OpenAI-format models base for the Go plan is base + `/v1`.
+ */
+export const OPENCODE_GO_MODELS_PATH = '/v1/models';
+export const OPENCODE_GO_MODELS_URL = `${OPENCODE_GO_BASE_URL}${OPENCODE_GO_MODELS_PATH}`;
 export const OPENCODE_GO_DISPLAY_NAME = 'OpenCode Go (Zen subscription)';

@@ -10,6 +10,7 @@ import {
 } from '../../../../src/saas/gateway/opencode-go/catalog-identity.js';
 import {
   DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
+  isOpenCodeGoCrossResponsesRoute,
   type OpenCodeGoProtocolRule,
   resolveOpenCodeGoProtocolRulesFromConfig,
 } from '../../../../src/saas/gateway/opencode-go/protocol-rules.js';
@@ -44,6 +45,7 @@ import {
   createManagedSaasGatewayComposition,
   createManagedSaasGatewayProductionComposition,
   createOpenCodeGoProtocolRoutingAuthority,
+  createProviderPayloadCompiler,
   type ManagedSaasGatewayCompositionDependencies,
   type ManagedSaasGatewayProductionOptions,
 } from '../../../../src/server/managed-saas-gateway.js';
@@ -149,7 +151,11 @@ function modelResolution(resolvedModel: string): ModelResolutionProvenance {
   };
 }
 
-function opencodeGoAuthority(resolvedModel: string): RequestPreparationAuthority {
+function opencodeGoAuthority(
+  resolvedModel: string,
+  clientProtocol: 'openai' | 'responses' = 'openai',
+): RequestPreparationAuthority {
+  const clientOperation = clientProtocol === 'responses' ? 'responses' : 'chat.completions';
   return {
     route: {
       tenantId: 'tenant-a',
@@ -159,12 +165,12 @@ function opencodeGoAuthority(resolvedModel: string): RequestPreparationAuthority
       publicModelVersion: 1,
       routeConfigId: 'route-a',
       routeConfigVersion: 1,
-      protocol: 'openai',
+      protocol: clientProtocol,
       // The pre-R5b-2 single-protocol shape the production adapter emits
       // today (providerProtocol mirrors the client route protocol).
-      providerProtocol: 'openai',
-      clientOperation: 'chat.completions',
-      providerOperation: 'chat.completions',
+      providerProtocol: clientProtocol,
+      clientOperation,
+      providerOperation: clientOperation,
       targetMode: 'tenant_account',
       upstreamId: 'upstream-opencode-go',
       endpoint: OPENCODE_GO_ENDPOINT,
@@ -185,7 +191,7 @@ function opencodeGoAuthority(resolvedModel: string): RequestPreparationAuthority
       dispatchProfileId: 'dispatch-a',
       supplyProfileAuthzVersion: 1,
       resolvedModel,
-      protocol: 'openai',
+      protocol: clientProtocol,
       endpoint: OPENCODE_GO_ENDPOINT,
       supplierCostVersion: null,
       providerId: OPENCODE_GO_PROVIDER_ID,
@@ -328,12 +334,15 @@ function evidenceRecord(input: PreparedRequestEvidenceInput): PreparedRequestEvi
   };
 }
 
-function preparationInput(): RequestPreparationInput {
+function preparationInput(protocol: 'openai' | 'responses' = 'openai'): RequestPreparationInput {
   return {
     authenticatedCaller: authenticatedCaller(),
     publicModel: PUBLIC_MODEL,
-    protocol: 'openai',
-    clientRequest: { model: PUBLIC_MODEL, messages: [{ role: 'user', content: 'hello' }] },
+    protocol,
+    clientRequest:
+      protocol === 'responses'
+        ? { model: PUBLIC_MODEL, input: 'hello' }
+        : { model: PUBLIC_MODEL, messages: [{ role: 'user', content: 'hello' }] },
     audit: { entryPoint: 'opencode-go-protocol-dispatch-test' },
   };
 }
@@ -393,6 +402,48 @@ interface PreparedCapture {
   readonly providerOperation: string | undefined;
   readonly endpoint: string | undefined;
   readonly outcome: string;
+  readonly stage?: string;
+  readonly code?: string;
+}
+
+/**
+ * The production payload compiler (createProviderPayloadCompiler) wired with
+ * an echoing runtime route resolver — the same pass-through a deployment
+ * implements when its route resolver echoes the (decorated) authority. This
+ * is the layer the R5b-4 Responses-bridge restriction lives in.
+ */
+function productionRoutingPayloadCompiler(
+  rules?: readonly OpenCodeGoProtocolRule[],
+): RequestPreparationPayloadCompiler {
+  return createProviderPayloadCompiler({
+    providerPreparationRoute: async ({ authority }) => ({
+      clientProtocol: authority.route.protocol,
+      providerProtocol: authority.route.providerProtocol ?? authority.candidate.protocol,
+      clientOperation: authority.route.clientOperation ?? 'chat.completions',
+      providerOperation: authority.route.providerOperation ?? 'chat.completions',
+      modelResolution: modelResolution(authority.candidate.resolvedModel),
+    }),
+    providerPayload: {
+      estimator: {
+        version: 'test-estimator-v1',
+        estimate: async () => ({
+          inputTotalUpperBound: 12,
+          inputUncachedUpperBound: 12,
+          cacheReadUpperBound: 0,
+          cacheWriteUpperBound: 0,
+          cacheWrite5mUpperBound: 0,
+          cacheWrite1hUpperBound: 0,
+          outputTotalUpperBound: 4,
+          reasoningOutputUpperBound: 0,
+          feasibleInputBuckets: ['input'],
+        }),
+      },
+      modelCompatibility: async () => true,
+      maxPayloadBytes: 1024 * 1024,
+      compilerVersion: 'test-compiler-v1',
+    },
+    ...(rules === undefined ? {} : { opencodeGoProtocolRouting: { rules } }),
+  } as unknown as ManagedSaasGatewayProductionOptions);
 }
 
 /**
@@ -403,7 +454,12 @@ interface PreparedCapture {
 async function prepareWithRouting(
   authority: RequestPreparationAuthority,
   rules?: readonly OpenCodeGoProtocolRule[],
+  options: {
+    readonly payload?: RequestPreparationPayloadCompiler;
+    readonly clientProtocol?: 'openai' | 'responses';
+  } = {},
 ): Promise<PreparedCapture> {
+  const payload = options.payload ?? productionLikePayloadCompiler();
   const decoratedAuthority: RequestPreparationAuthorityPort = createOpenCodeGoProtocolRoutingAuthority(
     { resolve: async () => allowRequestPreparation(authority) },
     rules ?? DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
@@ -415,7 +471,7 @@ async function prepareWithRouting(
       caller: { validate: async () => allowRequestPreparation(caller()) },
       entitlement: { resolve: async () => allowRequestPreparation(entitlement()) },
       authority: decoratedAuthority,
-      payload: productionLikePayloadCompiler(),
+      payload,
       admission: { authorizeAndReserve: async (input) => allowRequestPreparation(admission(input)) },
       attempt: { persist: async (input) => allowRequestPreparation(attemptRecord(input)) },
       transaction: { transaction: async (work) => work({ query: async () => ({ rows: [], rowCount: 0 }) }) },
@@ -453,12 +509,14 @@ async function prepareWithRouting(
     entryPoint: 'opencode-go-protocol-dispatch-test',
   });
   try {
-    const result = await composition.preparation.prepare(preparationInput());
+    const result = await composition.preparation.prepare(preparationInput(options.clientProtocol));
+    const failure = result.outcome === 'blocked' || result.outcome === 'rejected' ? result : null;
     return {
       providerProtocol: captured?.providerProtocol,
       providerOperation: captured?.providerOperation,
       endpoint: captured?.endpoint,
       outcome: result.outcome,
+      ...(failure ? { stage: failure.stage, code: failure.code } : {}),
     };
   } finally {
     await composition.close();
@@ -502,6 +560,91 @@ test('a configured rule table overrides the built-in default table', async () =>
   assert.equal((await prepareWithRouting(opencodeGoAuthority('kimi-k3'), rules)).providerProtocol, 'responses');
   // Unmatched models still fall back to Chat Completions under a custom table.
   assert.equal((await prepareWithRouting(opencodeGoAuthority('grok-4.7'), rules)).providerProtocol, 'openai');
+});
+
+/* ------------------------------------------------------------------ */
+/* R5b-4 gap 3: Responses-bridge restriction (fail closed)             */
+/* ------------------------------------------------------------------ */
+
+test('isOpenCodeGoCrossResponsesRoute gates exactly the cross-protocol Responses pairs', () => {
+  assert.equal(isOpenCodeGoCrossResponsesRoute('openai', 'responses'), true);
+  assert.equal(isOpenCodeGoCrossResponsesRoute('anthropic', 'responses'), true);
+  assert.equal(isOpenCodeGoCrossResponsesRoute('gemini', 'responses'), true);
+  // Same-protocol Responses and every non-Responses routing stay open.
+  assert.equal(isOpenCodeGoCrossResponsesRoute('responses', 'responses'), false);
+  assert.equal(isOpenCodeGoCrossResponsesRoute('openai', 'openai'), false);
+  assert.equal(isOpenCodeGoCrossResponsesRoute('openai', 'anthropic'), false);
+  assert.equal(isOpenCodeGoCrossResponsesRoute('anthropic', 'anthropic'), false);
+});
+
+test('a responses-routed model from an openai client is blocked at the compile layer', async () => {
+  // The compiler's SUPPORTED_BRIDGE_PAIRS gate alone would let the
+  // openai->responses passthrough stub through with a wrong-shaped payload;
+  // the production compile wrapper must fail closed with the
+  // capability-style error instead.
+  const capture = await prepareWithRouting(opencodeGoAuthority('grok-4.7'), undefined, {
+    payload: productionRoutingPayloadCompiler(),
+  });
+  assert.equal(capture.outcome, 'blocked', JSON.stringify(capture));
+  assert.equal(capture.stage, 'payload');
+  assert.equal(capture.code, 'capability_unsupported');
+});
+
+test('an anthropic client requesting a responses-routed model is blocked at the compile layer', async () => {
+  // Same gate from the anthropic side: the anthropic->responses passthrough
+  // stub must not forward an unconverted Anthropic body to the Responses API.
+  const anthropicAuthority: RequestPreparationAuthority = {
+    ...opencodeGoAuthority('gpt-5.6-luna'),
+    route: {
+      ...opencodeGoAuthority('gpt-5.6-luna').route,
+      protocol: 'anthropic',
+      providerProtocol: 'anthropic',
+      clientOperation: 'messages',
+      providerOperation: 'messages',
+    },
+    candidate: { ...opencodeGoAuthority('gpt-5.6-luna').candidate, protocol: 'anthropic' },
+  };
+  // The fixture preparation input only carries openai/responses bodies; call
+  // the compile wrapper directly for the anthropic-client shape.
+  const compiler = productionRoutingPayloadCompiler();
+  const decision = await compiler.compile({
+    caller: caller(),
+    entitlement: entitlement(),
+    authority: anthropicAuthority,
+    clientRequest: { model: PUBLIC_MODEL, messages: [{ role: 'user', content: 'hello' }] },
+  });
+  assert.equal(decision.decision, 'block');
+  if (decision.decision === 'block') {
+    assert.equal(decision.code, 'capability_unsupported');
+  }
+});
+
+test('a responses client requesting a responses-routed model still prepares', async () => {
+  const capture = await prepareWithRouting(opencodeGoAuthority('grok-4.7', 'responses'), undefined, {
+    payload: productionRoutingPayloadCompiler(),
+    clientProtocol: 'responses',
+  });
+  assert.equal(capture.outcome, 'prepared', JSON.stringify(capture));
+  assert.equal(capture.providerProtocol, 'responses');
+  assert.equal(capture.providerOperation, 'responses');
+  assert.equal(capture.endpoint, OPENCODE_GO_ENDPOINT);
+});
+
+test('the compile-layer restriction leaves non-responses cross-protocol routing intact', async () => {
+  // glm-5.3 (chat-completions native) and minimax-m3 (anthropic native) both
+  // keep preparing through the production compile wrapper from an openai
+  // client: only the Responses cross pair is restricted.
+  for (const scenario of [
+    { resolvedModel: 'glm-5.3', protocol: 'openai', operation: 'chat.completions' },
+    { resolvedModel: 'minimax-m3', protocol: 'anthropic', operation: 'messages' },
+  ]) {
+    const capture = await prepareWithRouting(opencodeGoAuthority(scenario.resolvedModel), undefined, {
+      payload: productionRoutingPayloadCompiler(),
+    });
+    assert.equal(capture.outcome, 'prepared', JSON.stringify(capture));
+    assert.equal(capture.providerProtocol, scenario.protocol, scenario.resolvedModel);
+    assert.equal(capture.providerOperation, scenario.operation, scenario.resolvedModel);
+  }
 });
 
 test('non-opencode-go providers keep their authority route untouched (regression)', async () => {

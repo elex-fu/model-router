@@ -120,6 +120,37 @@ export interface ProviderHttpEndpointPolicy {
   readonly allowedPorts: readonly number[];
 }
 
+/**
+ * R5b-4: signed dispatch facts the fixed-request-header resolver keys on.
+ * Mirrors the dispatch-profile resolve input's protocol dimensions without
+ * the per-request identifiers.
+ */
+export interface ProviderHttpFixedRequestHeadersInput {
+  /** The signed client protocol from the prepared evidence. */
+  readonly protocol: PreparedEvidenceTransportRequest['evidence']['protocol'];
+  /** The signed endpoint descriptor; it is not a URL source. */
+  readonly endpoint: string;
+  /** The signed provider-side protocol (bridge output); absent on legacy evidence. */
+  readonly providerProtocol?: PreparedEvidenceTransportRequest['evidence']['providerProtocol'];
+  /** The signed provider-side operation; absent on legacy evidence. */
+  readonly providerOperation?: PreparedEvidenceTransportRequest['evidence']['providerOperation'];
+}
+
+/**
+ * R5b-4 per-protocol fixed-header extension: deployment-owned additional
+ * non-authentication request headers, resolved from the signed dispatch
+ * facts (endpoint scope + provider protocol). Returning null/undefined adds
+ * nothing. The resolver may never return credential header names — the
+ * credential injection always wins and the allowlist is enforced.
+ */
+export type ProviderHttpFixedRequestHeadersResolver = (
+  input: ProviderHttpFixedRequestHeadersInput,
+) =>
+  | Readonly<Record<string, string>>
+  | null
+  | undefined
+  | PromiseLike<Readonly<Record<string, string>> | null | undefined>;
+
 export interface ProviderHttpTransportOptions {
   /** Undici-compatible adapter that forwards the required dispatcher unchanged. */
   readonly fetch: ProviderHttpFetch;
@@ -138,6 +169,12 @@ export interface ProviderHttpTransportOptions {
   readonly maxPayloadBytes?: number;
   /** Defaults to a small provider-authentication allowlist. */
   readonly allowedCredentialHeaderNames?: readonly string[];
+  /**
+   * R5b-4: optional deployment-owned additional fixed request headers keyed
+   * on the signed endpoint scope and provider protocol. Unset (the default
+   * for every existing composition) keeps the exact previous header set.
+   */
+  readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
 }
 
 export type ProviderHttpTransportErrorCode =
@@ -148,6 +185,7 @@ export type ProviderHttpTransportErrorCode =
   | 'PAYLOAD_BINDING_MISMATCH'
   | 'CREDENTIAL_UNAVAILABLE'
   | 'CREDENTIAL_INVALID'
+  | 'FIXED_REQUEST_HEADERS_INVALID'
   | 'ABORTED'
   | 'TIMEOUT'
   | 'NETWORK_ERROR'
@@ -180,6 +218,7 @@ interface NormalizedOptions {
   readonly timeoutMs: number;
   readonly maxPayloadBytes: number;
   readonly allowedCredentialHeaderNames: ReadonlySet<string>;
+  readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
 }
 
 interface RequestContext {
@@ -302,6 +341,58 @@ function hasHeaderControl(value: string): boolean {
   return false;
 }
 
+const MAX_FIXED_REQUEST_HEADERS = 8;
+const MAX_FIXED_HEADER_NAME_LENGTH = 128;
+const MAX_FIXED_HEADER_VALUE_BYTES = 1_024;
+
+/**
+ * R5b-4: validates and lowercases one fixed-header record. The reserved
+ * names (credential allowlist + the transport-owned accept/content-type/
+ * content-length/host set) are refused so the extension can never smuggle a
+ * second authentication header or override the fixed request policy; the
+ * credential injection still runs last and wins.
+ */
+function normalizeFixedRequestHeaders(
+  value: unknown,
+  allowedCredentialHeaderNames: ReadonlySet<string>,
+): Readonly<Record<string, string>> {
+  if (value === null || value === undefined) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    fail('FIXED_REQUEST_HEADERS_INVALID', 'fixed request headers must be a record');
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_FIXED_REQUEST_HEADERS) {
+    fail('FIXED_REQUEST_HEADERS_INVALID', 'too many fixed request headers');
+  }
+  const headers: Record<string, string> = {};
+  for (const [rawName, rawValue] of entries) {
+    const name = rawName.toLowerCase();
+    if (
+      rawName.length === 0 ||
+      rawName.length > MAX_FIXED_HEADER_NAME_LENGTH ||
+      !HEADER_NAME.test(name) ||
+      name === 'accept' ||
+      name === 'content-type' ||
+      name === 'content-length' ||
+      name === 'host' ||
+      allowedCredentialHeaderNames.has(name)
+    ) {
+      fail('FIXED_REQUEST_HEADERS_INVALID', 'fixed request header name is not allowed');
+    }
+    if (typeof rawValue !== 'string' || rawValue.length === 0 || hasHeaderControl(rawValue)) {
+      fail('FIXED_REQUEST_HEADERS_INVALID', 'fixed request header value is invalid');
+    }
+    if (Buffer.byteLength(rawValue, 'utf8') > MAX_FIXED_HEADER_VALUE_BYTES) {
+      fail('FIXED_REQUEST_HEADERS_INVALID', 'fixed request header value is too large');
+    }
+    if (Object.hasOwn(headers, name)) {
+      fail('FIXED_REQUEST_HEADERS_INVALID', 'duplicate fixed request header');
+    }
+    headers[name] = rawValue;
+  }
+  return headers;
+}
+
 function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOptions {
   if (!options || typeof options.fetch !== 'function') fail('INVALID_INPUT', 'an injected fetch adapter is required');
   if (typeof options.resolveDispatchProfile !== 'function') {
@@ -319,6 +410,9 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     !isProviderHttpTestAddressCapability(options.testAddressCapability)
   ) {
     fail('INVALID_INPUT', 'the local provider address capability is unavailable');
+  }
+  if (options.resolveFixedRequestHeaders !== undefined && typeof options.resolveFixedRequestHeaders !== 'function') {
+    fail('INVALID_INPUT', 'a fixed request header resolver must be callable');
   }
   const timeoutMs = boundedPositiveInteger(options.timeoutMs, 'timeoutMs', MAX_TIMEOUT_MS);
   const maxPayloadBytes = boundedPositiveInteger(
@@ -352,6 +446,9 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     timeoutMs,
     maxPayloadBytes,
     allowedCredentialHeaderNames,
+    ...(options.resolveFixedRequestHeaders === undefined
+      ? {}
+      : { resolveFixedRequestHeaders: options.resolveFixedRequestHeaders }),
   };
 }
 
@@ -723,6 +820,27 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
       } catch {
         fail('ENDPOINT_POLICY_VIOLATION', 'dispatch profile host did not resolve exclusively to public addresses');
       }
+      // R5b-4: deployment-owned per-protocol fixed headers (e.g. the OpenCode
+      // Go anthropic-version header), resolved from the signed dispatch facts
+      // before any credential material exists.
+      let fixedRequestHeaders: Readonly<Record<string, string>> = {};
+      if (this.options.resolveFixedRequestHeaders) {
+        try {
+          fixedRequestHeaders = normalizeFixedRequestHeaders(
+            await this.options.resolveFixedRequestHeaders({
+              protocol: input.evidence.protocol,
+              endpoint: input.evidence.endpoint,
+              providerProtocol: input.evidence.providerProtocol,
+              providerOperation: input.evidence.providerOperation,
+            }),
+            this.options.allowedCredentialHeaderNames,
+          );
+        } catch (error) {
+          assertActive(context);
+          if (error instanceof ProviderHttpTransportError) throw error;
+          fail('FIXED_REQUEST_HEADERS_INVALID', 'fixed request header resolution failed');
+        }
+      }
       let callbackUsed = false;
       let result: PreparedEvidenceTransportResponse | undefined;
       try {
@@ -733,7 +851,15 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
           const headerName = normalizeHeaderName(credential?.headerName, this.options.allowedCredentialHeaderNames);
           const headerValue = normalizeHeaderValue(credential?.value);
           try {
-            result = await this.sendFetch(context, target, pinnedAddress, body, headerName, headerValue.value);
+            result = await this.sendFetch(
+              context,
+              target,
+              pinnedAddress,
+              body,
+              headerName,
+              headerValue.value,
+              fixedRequestHeaders,
+            );
             return result;
           } finally {
             headerValue.clear?.fill(0);
@@ -767,8 +893,15 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     body: Buffer,
     credentialHeaderName: string,
     credentialHeaderValue: string,
+    fixedRequestHeaders: Readonly<Record<string, string>> = {},
   ): Promise<PreparedEvidenceTransportResponse> {
     const headers = new Headers(FIXED_REQUEST_HEADERS);
+    // R5b-4 per-protocol fixed headers sit between the transport-owned fixed
+    // pair and the credential header, so the credential always wins and the
+    // fixed pair can never be removed — only extended.
+    for (const [name, value] of Object.entries(fixedRequestHeaders)) {
+      headers.set(name, value);
+    }
     headers.set(credentialHeaderName, credentialHeaderValue);
     let connector: ProviderHttpPinnedConnector;
     try {
