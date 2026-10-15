@@ -134,6 +134,12 @@ import {
 import { PlatformAdminAuthService } from '../saas/platform/auth/service.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
+import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
+import { createCodexOauthHttpHandler, type CodexOauthHttpHandler } from '../saas/platform/codex-oauth/http.js';
+import {
+  createPostgresCodexCatalogBindingResolver,
+  createProviderSupplyCodexCredentialSink,
+} from '../saas/platform/codex-oauth/supply-sink.js';
 import {
   createPlatformCredentialRewrapHttpHandler,
   type PlatformCredentialRewrapHttpHandler,
@@ -682,6 +688,7 @@ function createPlatformHandler(
   authHandler: PlatformAdminAuthHttpHandler,
   refundHandler: PlatformRefundHttpHandler | undefined,
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
+  codexOauthHandler: CodexOauthHttpHandler | undefined,
   unknownOutcomeHandler: UnknownOutcomePlatformHttpHandler | undefined,
   usageCorrectionHandler: UsageCorrectionPlatformHttpHandler | undefined,
   marketingOpsRedeemCodesHandler: MarketingRedeemHttpHandler,
@@ -706,6 +713,7 @@ function createPlatformHandler(
         }
         if (refundHandler && (await refundHandler(req, res))) return;
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
+        if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
         if (unknownOutcomeHandler && (await unknownOutcomeHandler(req, res))) return;
         if (usageCorrectionHandler && (await usageCorrectionHandler(req, res))) return;
         if (await marketingOpsRedeemCodesHandler(req, res)) return;
@@ -1849,6 +1857,23 @@ export async function startManagedSaasServer(
               authService: platformAuthService,
             })
           : undefined;
+      // P1c Codex OAuth account binding surface (Phase 1.2 mount): available
+      // exactly when the supply service (sealing + audited account/credential
+      // creation) is wired. The sink resolves the openai-codex catalog binding
+      // from the control-plane database and fails closed until the provider is
+      // registered (saas/catalog/codex-registration.ts).
+      const codexOauthHandler = providerSupplyService
+        ? createCodexOauthHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            service: new CodexOAuthBindingService({ sessionStore: new InMemoryBindingSessionStore() }),
+            sink: createProviderSupplyCodexCredentialSink({
+              supply: providerSupplyService,
+              resolveCatalogBinding: createPostgresCodexCatalogBindingResolver(database),
+            }),
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+          })
+        : undefined;
       let platformRefundHandler: PlatformRefundHttpHandler | undefined;
       if (options.payments?.refundAdapter) {
         const refundService = new PaymentRefundService(database, options.payments.refundAdapter, {
@@ -2134,6 +2159,7 @@ export async function startManagedSaasServer(
         platformAuthHandler,
         platformRefundHandler,
         platformCredentialRewrapHandler,
+        codexOauthHandler,
         unknownOutcomePlatformHandler,
         usageCorrectionPlatformHandler,
         marketingOpsRedeemCodesHandler,

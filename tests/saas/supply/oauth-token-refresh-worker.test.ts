@@ -217,7 +217,10 @@ function recordingRotator(recorded: Array<{ input: OauthCredentialRotationInput;
 }
 
 test('OAuth credential material parses only the refresh token and rejects non-material', () => {
-  assert.deepEqual(parseOauthCredentialMaterial(Buffer.from(OLD_MATERIAL)), { refreshToken: 'rfrsh-old-token' });
+  assert.deepEqual(parseOauthCredentialMaterial(Buffer.from(OLD_MATERIAL)), {
+    refreshToken: 'rfrsh-old-token',
+    passthrough: {},
+  });
   for (const rejected of [
     '{not json',
     '[1,2]',
@@ -243,6 +246,45 @@ test('OAuth credential material parses only the refresh token and rejects non-ma
     'refresh_token',
     'token_type',
   ]);
+  // P1c codex envelope passthrough: known ChatGPT metadata fields survive the
+  // parse and are re-emitted by the builder; unknown keys never leak through.
+  const codexEnvelope = JSON.stringify({
+    access_token: 'accs-old',
+    refresh_token: 'rfrsh-old',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    chatgpt_account_id: 'acct-1',
+    chatgpt_user_id: 'user-1',
+    plan_type: 'pro',
+    client_id: 'app_client',
+    email: 'oper@example.test',
+    unknown_extra: 'dropped',
+  });
+  assert.deepEqual(parseOauthCredentialMaterial(Buffer.from(codexEnvelope)), {
+    refreshToken: 'rfrsh-old',
+    passthrough: {
+      chatgpt_account_id: 'acct-1',
+      chatgpt_user_id: 'user-1',
+      plan_type: 'pro',
+      client_id: 'app_client',
+    },
+  });
+  const rebuilt = buildOauthCredentialMaterial({
+    accessToken: 'accs-new',
+    refreshToken: 'rfrsh-new',
+    expiresInSeconds: 3600,
+    passthrough: { chatgpt_account_id: 'acct-1', chatgpt_user_id: 'user-1', plan_type: 'pro', client_id: 'app_client' },
+  });
+  assert.deepEqual(JSON.parse(rebuilt.toString('utf8')), {
+    access_token: 'accs-new',
+    refresh_token: 'rfrsh-new',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    chatgpt_account_id: 'acct-1',
+    chatgpt_user_id: 'user-1',
+    plan_type: 'pro',
+    client_id: 'app_client',
+  });
 });
 
 test('failure backoff doubles from one minute up to the six-hour cap, statelessly', () => {
@@ -327,6 +369,7 @@ test('a well-formed token response contributes exactly access/refresh/expiry', a
     accessToken: 'accs-new-token',
     refreshToken: 'rfrsh-new-token',
     expiresInSeconds: 3600,
+    passthrough: {},
     adapterId: 'anthropic-claude-code-oauth-v1',
     httpStatus: 200,
     durationMs: result.durationMs,
@@ -574,9 +617,9 @@ test('store claims one due credential, refreshes, rotates and schedules the next
       assert.match(candidate.sql, /credential\.status = 'active' AND account\.status = 'active'/);
       assert.match(candidate.sql, /credential\.oauth_force_refresh_requested = true/);
       assert.match(candidate.sql, /ORDER BY credential\.oauth_force_refresh_requested DESC/);
-      assert.deepEqual(candidate.values[0], ['anthropic', 'openai']);
-      assert.deepEqual(candidate.values[1], ['claude-code', 'codex-cli']);
-      assert.deepEqual(candidate.values[2], ['oauth', 'oauth']);
+      assert.deepEqual(candidate.values[0], ['anthropic', 'openai', 'openai-codex']);
+      assert.deepEqual(candidate.values[1], ['claude-code', 'codex-cli', 'codex-chatgpt']);
+      assert.deepEqual(candidate.values[2], ['oauth', 'oauth', 'oauth']);
       assert.equal(candidate.values[3], OAUTH_REFRESH_STALE_REFRESHING_MS);
       const lock = state.statements.find(({ sql }) => sql.includes('FOR UPDATE OF credential SKIP LOCKED'));
       assert.ok(lock, 'the claim must take the row lock without waiting');

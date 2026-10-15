@@ -84,6 +84,7 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
+import { CODEX_ENDPOINT } from '../saas/gateway/codex/catalog-identity.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
@@ -583,6 +584,12 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly providerTargetRoute: ManagedSaasProviderTargetRouteResolver;
   /** Test-runner-only capability for pinned local HTTPS integration upstreams. */
   readonly providerHttpTestAddressCapability?: ProviderHttpTestAddressCapability;
+  /**
+   * P1c: the codex transport (CodexPreparedEvidenceTransport). When set,
+   * prepared evidence routed to the codex catalog endpoint is dispatched
+   * through it instead of the generic provider HTTP transport.
+   */
+  readonly codexEvidenceTransport?: PreparedEvidenceTransport;
   readonly providerCredentialUnsealingKms: ProviderCredentialUnsealingKms;
   readonly credentialContext: GatewayProviderCredentialUnsealerOptions;
   /**
@@ -716,6 +723,27 @@ function validateEndpointPolicy(policy: ProviderHttpEndpointPolicy): void {
       throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
     }
   }
+}
+
+/**
+ * P1c codex dispatch split: prepared evidence whose signed endpoint scope is
+ * the codex catalog endpoint (`codex-responses`, provider protocol
+ * `responses`) is routed to the codex transport instead of the generic
+ * provider HTTP transport. The endpoint descriptor comes from the signed
+ * prepared evidence, so the split is catalog-driven, never client-supplied.
+ */
+function createEndpointRoutingTransport(
+  defaultTransport: PreparedEvidenceTransport,
+  route: { readonly endpoint: string; readonly transport: PreparedEvidenceTransport },
+): PreparedEvidenceTransport {
+  return {
+    async send(input) {
+      if (input.evidence.endpoint === route.endpoint && input.evidence.providerProtocol === 'responses') {
+        return route.transport.send(input);
+      }
+      return defaultTransport.send(input);
+    },
+  };
 }
 
 function createProviderPayloadCompiler(
@@ -933,6 +961,19 @@ export function createManagedSaasGatewayProductionComposition(
       : { testAddressCapability: options.providerHttpTestAddressCapability }),
     timeoutMs: options.timeoutMs,
   });
+  // P1c codex dispatch split: the codex transport takes over exactly the
+  // signed `codex-responses` endpoint scope; every other provider keeps the
+  // generic transport path unchanged.
+  if (options.codexEvidenceTransport !== undefined) {
+    requireDependency(options.codexEvidenceTransport, 'send');
+  }
+  const dispatchTransport =
+    options.codexEvidenceTransport === undefined
+      ? transport
+      : createEndpointRoutingTransport(transport, {
+          endpoint: CODEX_ENDPOINT,
+          transport: options.codexEvidenceTransport,
+        });
   const payload = createProviderPayloadCompiler(options);
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
@@ -961,7 +1002,7 @@ export function createManagedSaasGatewayProductionComposition(
       evidence: evidence as PreparedRequestEvidenceDispatchPort,
       metering,
       leaseProvider,
-      transport,
+      transport: dispatchTransport,
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
     },

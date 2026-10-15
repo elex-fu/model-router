@@ -34,7 +34,9 @@ import {
  *   excluded by the due scan itself, keeps NULL oauth state semantics, and
  *   never hot-loops;
  * - the token endpoint response contributes exactly access_token,
- *   refresh_token and expires_in; every other field is discarded;
+ *   refresh_token and expires_in — plus, for the codex bindings only, the
+ *   ChatGPT envelope metadata fields the gateway must keep (see
+ *   CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS); every other field is discarded;
  * - plaintext token material never leaves this module unsealed: it is not
  *   logged, not embedded in errors or outcomes, and the new secret buffer is
  *   zeroed after the rotation attempt;
@@ -87,6 +89,11 @@ export interface OauthTokenRefreshSuccess {
   readonly refreshToken: string | null;
   /** null means the endpoint gave no expiry; the default TTL schedules the next refresh. */
   readonly expiresInSeconds: number | null;
+  /**
+   * Codex envelope metadata the endpoint returned (rare; the refresh grant
+   * normally answers tokens only). Non-codex bindings never populate this.
+   */
+  readonly passthrough: Readonly<Record<string, string>>;
   readonly adapterId: string;
   readonly httpStatus: number;
   readonly durationMs: number;
@@ -153,7 +160,28 @@ interface FixedOauthTokenAdapter {
    * scopes).
    */
   readonly refreshScope: string | null;
+  /**
+   * Codex bindings carry ChatGPT account metadata inside the sealed envelope
+   * that the gateway must keep after a rotation (`chatgpt-account-id` header,
+   * identity namespace). These envelope fields are passed through from the old
+   * secret on rotation — the token response overrides them when it carries a
+   * fresh value. Anthropic bindings keep the strict token-only contract.
+   */
+  readonly passthroughFields: readonly string[];
 }
+
+/**
+ * Envelope fields the codex bindings preserve across a rotation (P1c): the
+ * gateway needs chatgpt_account_id/user_id (identity namespace + account
+ * header), plan_type and client_id (R4 refresh grant continuity) even though
+ * the refresh-token response never returns them.
+ */
+export const CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Object.freeze([
+  'chatgpt_account_id',
+  'chatgpt_user_id',
+  'plan_type',
+  'client_id',
+]);
 
 /*
  * The only verified OAuth token bindings. Both are public OAuth clients
@@ -172,6 +200,7 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     tokenEndpoint: 'https://console.anthropic.com/v1/oauth/token',
     clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
     refreshScope: null,
+    passthroughFields: [],
   }),
   Object.freeze({
     providerId: 'openai',
@@ -189,8 +218,33 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
     clientId: CODEX_OAUTH_CLIENT_ID,
     refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
+    passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+  }),
+  Object.freeze({
+    // P1c catalog identity for ChatGPT-backed Codex subscription accounts
+    // (src/saas/gateway/codex/catalog-registration.ts). Same upstream grant as
+    // the codex-cli binding above; registered separately so the catalog
+    // provider (openai-codex) and the legacy CLI identity both stay
+    // refreshable.
+    providerId: 'openai-codex',
+    productId: 'codex-chatgpt',
+    credentialType: 'oauth',
+    adapterId: 'openai-codex-oauth-v2',
+    tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
+    clientId: CODEX_OAUTH_CLIENT_ID,
+    refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
+    passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
   }),
 ]);
+
+/** Envelope fields a binding preserves across rotation; empty for anthropic. */
+export function oauthEnvelopePassthroughFields(credential: {
+  readonly providerId: string;
+  readonly productId: string;
+  readonly credentialType: string;
+}): readonly string[] {
+  return resolveOauthTokenAdapter(credential)?.passthroughFields ?? [];
+}
 
 export function resolveOauthTokenAdapter(credential: {
   readonly providerId: string;
@@ -201,6 +255,7 @@ export function resolveOauthTokenAdapter(credential: {
   readonly tokenEndpoint: string;
   readonly clientId: string;
   readonly refreshScope: string | null;
+  readonly passthroughFields: readonly string[];
 } | null {
   return (
     FIXED_OAUTH_TOKEN_ADAPTERS.find(
@@ -261,10 +316,16 @@ function record(value: unknown): Fields | null {
 
 /**
  * The OAuth credential envelope plaintext contract: one compact JSON object
- * carrying exactly access_token, refresh_token, token_type and (optionally)
- * expires_in. Anything else is not OAuth material for this worker.
+ * carrying at least refresh_token (token_type/access_token/expires_in per the
+ * rotation contract) plus, for codex bindings, the ChatGPT account metadata
+ * fields listed in CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS. Anything else is
+ * not OAuth material for this worker.
  */
-export function parseOauthCredentialMaterial(secret: Uint8Array): { readonly refreshToken: string } | null {
+export function parseOauthCredentialMaterial(secret: Uint8Array): {
+  readonly refreshToken: string;
+  /** Codex envelope metadata present in the old secret; keyed by field name. */
+  readonly passthrough: Readonly<Record<string, string>>;
+} | null {
   let body: Fields | null;
   try {
     body = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(secret)));
@@ -274,13 +335,26 @@ export function parseOauthCredentialMaterial(secret: Uint8Array): { readonly ref
   if (!body) return null;
   const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : null;
   if (refreshToken === null) return null;
-  return { refreshToken };
+  const passthrough: Record<string, string> = {};
+  for (const field of CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS) {
+    const value = body[field];
+    if (typeof value === 'string' && value.length > 0) passthrough[field] = value;
+  }
+  return { refreshToken, passthrough };
 }
 
+/**
+ * Builds the next envelope version. The base contract stays exactly
+ * access_token/refresh_token/token_type/expires_in; `passthrough` carries the
+ * codex binding metadata (merged from the old envelope and, when the endpoint
+ * returned a fresh value, the token response) so a rotation never strips the
+ * fields the gateway needs to keep serving the account.
+ */
 export function buildOauthCredentialMaterial(input: {
   readonly accessToken: string;
   readonly refreshToken: string;
   readonly expiresInSeconds: number | null;
+  readonly passthrough?: Readonly<Record<string, string>>;
 }): Buffer {
   const material: Fields = {
     access_token: input.accessToken,
@@ -288,6 +362,11 @@ export function buildOauthCredentialMaterial(input: {
     token_type: 'Bearer',
   };
   if (input.expiresInSeconds !== null) material.expires_in = input.expiresInSeconds;
+  const passthrough = input.passthrough ?? {};
+  for (const field of CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS) {
+    const value = passthrough[field];
+    if (typeof value === 'string' && value.length > 0) material[field] = value;
+  }
   return Buffer.from(JSON.stringify(material), 'utf8');
 }
 
@@ -348,10 +427,15 @@ async function boundedResponseBody(response: Response, signal: AbortSignal): Pro
   }
 }
 
-/** Only access_token, refresh_token and expires_in survive; everything else is discarded. */
+/** Only access_token, refresh_token and expires_in survive plus codex passthrough metadata. */
 function parseTokenEndpointResponse(
   bytes: Uint8Array,
-): { accessToken: string; refreshToken: string | null; expiresInSeconds: number | null } | null {
+): {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresInSeconds: number | null;
+  passthrough: Record<string, string>;
+} | null {
   let body: Fields | null;
   try {
     body = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
@@ -374,7 +458,14 @@ function parseTokenEndpointResponse(
     if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > OAUTH_REFRESH_MAX_EXPIRES_IN_SECONDS) return null;
     expiresInSeconds = parsed;
   }
-  return { accessToken, refreshToken, expiresInSeconds };
+  const passthrough: Record<string, string> = {};
+  for (const field of CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS) {
+    const value = body[field];
+    // A non-string (or empty) value is discarded rather than trusted: the
+    // old envelope's copy stays authoritative.
+    if (typeof value === 'string' && value.length > 0) passthrough[field] = value;
+  }
+  return { accessToken, refreshToken, expiresInSeconds, passthrough };
 }
 
 /**
@@ -524,6 +615,7 @@ export async function requestOauthTokenRefresh(
     accessToken: parsed.accessToken,
     refreshToken: parsed.refreshToken,
     expiresInSeconds: parsed.expiresInSeconds,
+    passthrough: parsed.passthrough,
     adapterId: adapter.adapterId,
     httpStatus: response.status,
     durationMs: elapsed(),
@@ -1112,12 +1204,21 @@ export class PostgresOauthTokenRefreshWorkerStore {
           result = { kind: 'failed', errorCode: refresh.errorCode };
           return;
         }
+        // P1c codex envelope passthrough: preserve the ChatGPT account
+        // metadata fields the gateway needs (identity namespace, account
+        // header) from the old envelope; a value the endpoint actually
+        // returned wins. Anthropic bindings keep the strict token-only
+        // rotation contract (empty merge input).
+        const preserveMetadata = oauthEnvelopePassthroughFields(ref).length > 0;
         result = {
           kind: 'refreshed',
           newSecret: buildOauthCredentialMaterial({
             accessToken: refresh.accessToken,
             refreshToken: refresh.refreshToken ?? material.refreshToken,
             expiresInSeconds: refresh.expiresInSeconds,
+            ...(preserveMetadata
+              ? { passthrough: { ...material.passthrough, ...refresh.passthrough } }
+              : {}),
           }),
           expiresInSeconds: refresh.expiresInSeconds,
         };

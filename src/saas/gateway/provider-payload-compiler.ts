@@ -121,6 +121,22 @@ export interface ProviderUsageUpperBoundEstimator {
 export type ProviderUsageEstimator = ProviderUsageUpperBoundEstimator;
 export type ProviderUsageEstimatorInput = ProviderUsageUpperBoundEstimatorInput;
 
+/**
+ * P1c provider request transform hook: applied to the bridge-transformed
+ * provider body before validation and serialization. Codex traffic installs
+ * `codexProviderRequestTransform` here (instructions injection + the codex
+ * OAuth transform); every other provider leaves it unset and keeps the exact
+ * previous payload bytes.
+ */
+export type ProviderRequestTransform = (input: {
+  readonly providerId: string;
+  readonly productId: string;
+  readonly clientProtocol: GatewayProtocol;
+  readonly providerProtocol: GatewayProtocol;
+  readonly providerOperation: string;
+  readonly body: Record<string, unknown>;
+}) => unknown;
+
 export interface ProviderModelCompatibilityInput {
   readonly providerId: string;
   readonly productId: string;
@@ -156,6 +172,9 @@ export interface ProviderPayloadCompilerOptions {
   /** Required catalog-backed compatibility assertion. */
   readonly modelCompatibility?: ProviderModelCompatibilityChecker;
   readonly isModelCompatible?: ProviderModelCompatibilityChecker;
+
+  /** P1c provider-layer request transform (codex compile step); unset = none. */
+  readonly providerRequestTransform?: ProviderRequestTransform;
 
   /**
    * Identity is safe only when requested == mapped == resolved. A mapped
@@ -231,6 +250,7 @@ interface NormalizedCompilerOptions {
   readonly modelResolution: ProviderModelResolutionSource | null;
   readonly compatibility: ProviderModelCompatibilityChecker | null;
   readonly allowIdentityModelResolution: boolean;
+  readonly providerRequestTransform: ProviderRequestTransform | null;
 }
 
 interface JsonObject {
@@ -257,6 +277,10 @@ const SUPPORTED_BRIDGE_PAIRS = new Set<string>([
   'openai->anthropic',
   'anthropic->gemini',
   'anthropic->responses',
+  // P1c: chat.completions clients against a Responses provider (Codex). The
+  // generic bridge for this pair is a passthrough; the codex compile layer
+  // (gateway/codex/payload.ts) owns the actual request conversion.
+  'openai->responses',
 ]);
 
 const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
@@ -393,6 +417,11 @@ function normalizeOptions(options: ProviderPayloadCompilerOptions): NormalizedCo
   if (compatibilityValue !== null && typeof compatibilityValue !== 'function') compilerFailure('INVALID_INPUT');
   if (compatibilityValue === null) compilerFailure('MODEL_INCOMPATIBLE');
   const compatibility = compatibilityValue as ProviderModelCompatibilityChecker;
+  const providerRequestTransformValue: unknown = configured.providerRequestTransform ?? null;
+  if (providerRequestTransformValue !== null && typeof providerRequestTransformValue !== 'function') {
+    compilerFailure('INVALID_INPUT');
+  }
+  const providerRequestTransform = providerRequestTransformValue as ProviderRequestTransform | null;
   if (
     configured.allowIdentityModelResolution !== undefined &&
     typeof configured.allowIdentityModelResolution !== 'boolean'
@@ -412,6 +441,7 @@ function normalizeOptions(options: ProviderPayloadCompilerOptions): NormalizedCo
     modelResolution,
     compatibility,
     allowIdentityModelResolution: configured.allowIdentityModelResolution ?? true,
+    providerRequestTransform,
   };
 }
 
@@ -912,7 +942,22 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       let transformed: unknown;
       try {
         transformed = bridge.transformRequest(normalizedRequest.body);
-      } catch {
+        // P1c provider-layer hook (codex compile step): applied to the
+        // bridge-transformed body; an unset hook keeps the exact previous
+        // payload bytes.
+        if (this.options.providerRequestTransform !== null) {
+          if (!isRecord(transformed)) compilerFailure('TRANSFORM_FAILED');
+          transformed = this.options.providerRequestTransform({
+            providerId,
+            productId,
+            clientProtocol: route.clientProtocol,
+            providerProtocol: route.providerProtocol,
+            providerOperation: route.providerOperation,
+            body: transformed,
+          });
+        }
+      } catch (error) {
+        if (error instanceof ProviderPayloadCompilerError) throw error;
         compilerFailure('TRANSFORM_FAILED');
       }
       const providerBody = validateTransformedPayload(transformed, resolvedModel);
