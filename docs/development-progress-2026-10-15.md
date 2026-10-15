@@ -13,10 +13,54 @@
 
 **验证**:本地一次性 PG 18.6 集群(角色 SQL → 迁移 001–103 → 角色重放 → validation-worker 授权),门禁连续 4/4 全绿(3 tests × 4 runs);tests/cli 全目录逐文件绿;`npx tsc --noEmit` 0 错。CI PG15 矩阵由推送后运行确认。
 
-## R0-2 saas-workspace 浏览器 E2E 台账漂移(任务 #20,进行中)
+## R0-2 saas-workspace 浏览器 E2E 台账漂移(任务 #20,已完成,d1fee4e)
 
-根因已确证(e98ef9b 加 announcements 拉取,spec 9f5c1c6 台账未同步);修复进行中,完成后登记。
+**根因维持原判**(e98ef9b 加 announcements 拉取,spec 9f5c1c6 台账未同步):拉取来自 `ConsoleHeader`(`web/src/features/saas-console.tsx`)的通知徽标 `useQuery`——每个已认证 console 视图(含三个失败测试所测的 workspace 首页)都会发 `getTenantAnnouncements(tenants[0].id, { limit: 100 })`;登录前不触发(accept/login 页用 `AuthFrame` 无 header)。产品行为合法,按方案默认修测试侧。
 
-## R1 分组倍率 / R5b OpenCode Go 订阅池(并行开发中)
+**修复**(spec +10 行):per-tenant announcements 处理器,与 members 条目同款严格风格(`limit=100`、query 仅 limit/cursor、空有效分页使徽标渲染 0 且无新 DOM);route handler 头部补台账维护责任注释防再漂移。台账审计:受测视图可达的 console 拉取(session/tenants×2/projects/members/announcements)全部有账,无遗漏。
 
-R1(#27)与 R5b-1(#21)并行开发进行中,完成后按提交登记。
+**验证**:spec 全量 5/5 本地通过(Playwright);`npx tsc --noEmit` 0 错;仅 spec 一个文件变更。前瞻注记:若未来 spec 测 `/console/notifications` 页,该页 announcements 拉取用 `limit=25`,需另立台账条目。
+
+**R0 整体**:两项存量 CI 缺陷修复完毕(#19/#20),CI 绿色基线恢复条件就绪(以推送后 CI 运行为准)。R1 及以后阶段的回归信号有效。
+
+## R1 分组倍率(任务 #27,已完成,4e9d27e)
+
+迁移 **105**(104 被并行 R2 embeddings 占用,串行 fail-closed 排序,093/095 仲裁先例;方案预留的 105 出口代理由 R3 落地时再仲裁)。要点:
+- `saas_billing_groups`(有理数倍率 CHECK>0、高峰窗、model_pricing JSONB、profit margin+buffer、claude_code_only、fallback 禁自引用)+ 组账号池(platform 账号 text PK)+ keys/tenants 组列 + 快照 **6+1 列**——比方案多一列 `model_pricing_override jsonb`:digest 无法在结算时重建被覆盖费率,不存费率就得重查可变组表,违反冻结红线;结算侧对存储费率重验 digest,不匹配 fail-closed 进对账。
+- 结算改为经新端口方法 `getCustomerPriceSnapshot` 取不可变快照行,应用冻结倍率+冻结覆盖费率;**组表在结算路径永不查询**。快照 digest 纳入组材料:组编辑后重放在途请求 fail-closed(SNAPSHOT_CONFLICT)而非静默改价。
+- profit_control 修正方案笔误:拒绝条件是 `customerCharge ≤ supplierCost × (1−margin−buffer)`(任务文本写反会拒绝有利定价);在 admission 对保守 witness 金额评估。
+- 充值:`PaymentTopupCreditPort`,credit = paid × topup 倍率 × 档位折扣(向下取整永不超发);档位折扣 settings 键已实现但平台 settings store 尚不存在,当前为注入式选项(缺口已记录)。
+- 授权镜像同提交(roles.sql + runtime-privileges,mirror 测试列数 30→36)。
+- 已存未执法(后续):rpm/daily/weekly/monthly 限额、claude_code_only、fallback_group、model scopes——与 claude_code_validator 及调度器消费组池的后续任务配对;结算侧 profit control 待 supplier usage 事实进结算快照。
+
+**验证**:全量单测 4145 通过 0 失败(18 PG 门禁跳过);groups 17/17;mirror 108/108;tsc 0 错。
+
+## R2 embeddings(任务 #28,已完成,804d2ef)
+
+迁移 **104**(与 R1 并行落地的编号错位,树内注释已记录)。关键设计决议:embeddings 是 openai 协议族的 **operation**(server-owned、path-derived `clientOperation`),非新协议——方案接线点描述的是 operation,且 DB 在 ~8 张表 CHECK 钉死 protocol 枚举,新协议值需全部拓宽,operation 模型只需放宽 029 的一处 provenance CHECK。全链:ROUTES+clientOperation → preparation 校验(operationAllowedForProtocol 仅 (openai, embeddings))→ payload 编译器能力门(非 openai provider → 404 CAPABILITY_UNSUPPORTED;catalog rights 不兼容 → 404)→ embeddings 估计器(chars/4 上界、output 0、仅 input 桶)→ JSON usage observer(prompt_tokens ?? total_tokens、严格 list 信封)→ 结算。旧 BYOK 面 clientProtocolFromPath 分支 + 非 openai 上游 422(镜像 /v1/responses/compact 门)。未触碰 admission/hold/settlement 文件(估计器经 runtime module 依赖注入)。**验证**:全量 4390 测试 0 失败;新 embeddings 7/7(含全链 e2e 与 404 负向);12 个冻结注册表测试文件更新至 104/105。
+
+## R5b OpenCode Go 订阅池(任务 #21/#22/#23 已完成)
+
+- **R5b-1**(fe10456):catalog 注册(credential api-key、平台池、endpoint scope `opencode-go-zen`、钉 `https://opencode.ai/zen/go`)+ 29 模型 fallback 目录(grok/glm/kimi/longcat/deepseek/mimo/minimax/muse-spark/qwen/hy/omen,sub2api 逐项对拍)+ `normalizeOpenCodeGoModelId`(trim→lowercase→按序剥一次三种前缀,重复前缀不二剥)。19/19 测试。仓库无注册表索引——注册模块为独立库模块,消费方直接 import 身份常量(与 codex 同构),本层无需 DB 迁移。
+- **R5b-2**(d03c4ae):`protocol_rules` 多协议自适应路由。纯路由模块(Go 默认表+Zen 变体数据化、归一化后精确/后缀 glob/裸 * 匹配、first-match、chat-completions 兜底、严格校验 ≤64);authority 装饰器在 modelMap 后、签名前重写 `providerProtocol/providerOperation`,编译层同源推导为一致性层(两者不可能不一致);`createEndpointRoutingTransport` 泛化为路由表,codex 语义逐字节不变;dispatch-profile 输入携带签名协议供 per-protocol provider-target 绑定。**已识别后续缺口**(列入 R5b-4):capability protocol 拼写 'openai-compatible' 需与 GatewayProtocol 对齐否则候选过不了 authority 校验;anthropic 路由需 anthropic-version 头(挂点已留);Responses 桥为透传桩需 transform 或限制。27/27 新测试+触面 306/306 回归。
+- **R5b-3**(40f057b):配额快照 usage worker(percent-only API、15min/5min 下限/debounce 1min/≤20 账号/并发 4/singleflight、FOR UPDATE SKIP LOCKED 逐账号 claim 即租约(仓库先例,无 Redis)、用尽窗口→最晚未来 reset 冷却、429→Retry-After 否则仅失败退避、指数退避±10% 抖动)。store 接口隔离 worker 与迁移 108;PG store+启动注册归 #25。29/29 测试。
+
+- **R5b-5**(c6c0d87):迁移 108(双账号表 usage 快照列 + `opencode_go_protocol_rules` jsonb,≤64 数组形状 CHECK,due 部分索引;099 scheduling-signal 风格)+ PG store(SKIP LOCKED 逐账号 claim 即租约、quota-sync 同款 KMS 解封、快照/失败/冷却写、protocol_rules 047/082 CAS 管理面)+ 启动注册(credential-validation-worker workload,quota worker 同款)。授权镜像同提交:control-plane 独占 protocol_rules;worker 有 due 三列 SELECT + 10 列 UPDATE、被拒 protocol_rules 读(真库实证)。**含并行 R4 的 106 迁移文件与 001 注册项**以保持提交态注册表一致(…104,105,106,108),R4 其余产出单独提交。**验证**:丢弃式 PG 18.6 真库全链(001→108 迁移、角色对账、控制面/worker 活探针、store 全操作、CAS 1→2、陈旧 CAS 落空);离线 15/15 新测试、tsc 0 错。
+
+## R4 注册准入(任务 #30,已完成,1773d98)
+
+迁移 106 表结构已随 c6c0d87 入库;本提交为服务/HTTP/UI 层。要点:
+- 验证码服务:6 位 crypto 码、TTL 15/30min、60s 冷却、≤5 次、常量时间比较、一次性核销、PG 为准。**自测抓出真缺陷**:尝试计数器自增原在事务内抛错回滚(等于无限试码)——改为先提交自增再抛拒绝。
+- Turnstile:siteverify POST + CaptchaProof 归一抽象(腾讯预留、构造即 fail-closed);开关关闭=放行。
+- SMTP:**零新依赖**——最小 net/tls 客户端(EHLO/机会 STARTTLS 带证书校验/AUTH PLAIN/LOGIN/dot-stuffing);EmailSender seam 可后换动态 provider。
+- Settings:仓库无平台 settings store(billing-groups 同判例)——保留键登记 + 严格解析器,受管模式经 `MODEL_ROUTER_SAAS_REGISTRATION_*` env;秘密 env-only。默认全部 fail-closed(mode=closed、必须验证、turnstile off、奖励全 0)。
+- 注册顺序:mode→邀请码→域名名单→Turnstile→验证码→原子创建;邮箱存在性探针在 captcha/验证码**之前**(常见失败不烧码);2/30s per-IP 发送窗口。密码重置:核销即证明,单 fenced 事务改哈希+吊销全部会话;未知邮箱静默 no-op(无账户预言机)。
+- 注册后置 best-effort 个人租户(affiliate/钱包租户域);三段奖励经 postVerifiedFunding 独立命名空间,幂等键锚定不可变 user id。
+- UI 在 saas-console.tsx(auth.tsx 是 admin 门户,未触碰):RegisterPage/ForgotPasswordPage/登录链接。
+- 授权镜像同提交:control-plane S/I/U+DELETE,gateway 零授权;mirror 测试更新。
+
+**验证**:全量单测 4227/4209 通过 0 失败(18 opt-in 跳过);新增 57 例(lifecycle 12/顺序矩阵 17/settings 5/HTTP 边界 11/turnstile 6/rewards 6);tsc server+web 干净;web 构建通过。
+
+## 进行中
+
+R5b-4(#24)、R3(#29 出口代理,迁移 107)、R5(#31 Claude 池,迁移 100)三路并行。
