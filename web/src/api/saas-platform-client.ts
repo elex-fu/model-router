@@ -2989,6 +2989,105 @@ export const platformClient = {
       `/governance/operators/${encodeURIComponent(governanceId(userId, '用户 ID'))}/roles/${encodeURIComponent(governanceOperatorRole(role))}`;
     return request<unknown>(path, { ...options, method: 'DELETE' }).then(parseGovernanceOk);
   },
+
+  /** Phase 3 observability: passive channel status availability rollup. */
+  listOpsChannelStatus(days: number, options: ReadRequestOptions = {}): Promise<OpsChannelStatusPage> {
+    return request<unknown>(`/ops/channel-status?days=${encodeURIComponent(String(days))}`, options).then(
+      parseOpsChannelStatus,
+    );
+  },
 };
+
+export interface OpsChannelErrorCategoryBreakdown {
+  readonly category: string;
+  readonly errors: number;
+}
+
+export interface OpsChannelStatusRow {
+  readonly providerId: string;
+  readonly routeId: string;
+  readonly model: string;
+  readonly requests: number;
+  readonly errors: number;
+  readonly upstreamAffected: number;
+  readonly availability: number;
+  readonly lastErrorAt: string | null;
+  readonly topErrorCategories: readonly OpsChannelErrorCategoryBreakdown[];
+}
+
+export interface OpsChannelStatusPage {
+  readonly taxonomyVersion: string;
+  readonly rangeDays: number;
+  readonly generatedAt: string;
+  readonly channels: readonly OpsChannelStatusRow[];
+}
+
+export interface OpsQpsRouteSnapshot {
+  readonly route: string;
+  readonly requests: number;
+  readonly ok: number;
+  readonly failed: number;
+  readonly qps: number;
+}
+
+export interface OpsQpsSnapshot {
+  readonly generatedAt: string;
+  readonly bucketMs: number;
+  readonly windowSeconds: number;
+  readonly qps: number;
+  readonly statusCounts: { readonly ok: number; readonly failed: number };
+  readonly routes: readonly OpsQpsRouteSnapshot[];
+}
+
+function parseOpsChannelStatus(value: unknown): OpsChannelStatusPage {
+  if (
+    !isRecord(value) ||
+    typeof value.taxonomyVersion !== 'string' ||
+    typeof value.rangeDays !== 'number' ||
+    typeof value.generatedAt !== 'string' ||
+    !Array.isArray(value.channels)
+  ) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '通道状态响应无效');
+  }
+  const channels: OpsChannelStatusRow[] = [];
+  for (const channel of value.channels) {
+    if (
+      !isRecord(channel) ||
+      typeof channel.providerId !== 'string' ||
+      typeof channel.routeId !== 'string' ||
+      typeof channel.model !== 'string' ||
+      typeof channel.requests !== 'number' ||
+      typeof channel.errors !== 'number' ||
+      typeof channel.upstreamAffected !== 'number' ||
+      typeof channel.availability !== 'number' ||
+      !Array.isArray(channel.topErrorCategories)
+    ) {
+      throw new PlatformApiError(200, 'INVALID_RESPONSE', '通道状态行无效');
+    }
+    const categories: OpsChannelErrorCategoryBreakdown[] = [];
+    for (const entry of channel.topErrorCategories) {
+      if (isRecord(entry) && typeof entry.category === 'string' && typeof entry.errors === 'number') {
+        categories.push({ category: entry.category, errors: entry.errors });
+      }
+    }
+    channels.push({
+      providerId: channel.providerId,
+      routeId: channel.routeId,
+      model: channel.model,
+      requests: channel.requests,
+      errors: channel.errors,
+      upstreamAffected: channel.upstreamAffected,
+      availability: channel.availability,
+      lastErrorAt: typeof channel.lastErrorAt === 'string' ? channel.lastErrorAt : null,
+      topErrorCategories: categories,
+    });
+  }
+  return {
+    taxonomyVersion: value.taxonomyVersion,
+    rangeDays: value.rangeDays,
+    generatedAt: value.generatedAt,
+    channels,
+  };
+}
 
 export const saasPlatformClient = platformClient;

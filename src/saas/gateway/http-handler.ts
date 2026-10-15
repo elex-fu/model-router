@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import type { AuthenticatedApiKey } from '../keys/types.js';
-import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
+import {
+  beginGatewayInflightRequest,
+  recordGatewayAttemptOutcome,
+  recordGatewayRequestEnd,
+} from '../observability/metrics.js';
 import { resolveClientAddress } from './client-address.js';
+import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceClientStream,
   PreparedEvidenceDispatchInput,
@@ -491,7 +496,12 @@ export class NodePreparedEvidenceClientStream implements PreparedEvidenceClientS
     this.response.once('close', this.onResponseClose);
     this.response.once('error', this.onResponseError);
     // Cancellation can occur during awaited preparation, before listeners exist.
-    if (this.request.aborted || (!this.request.complete && this.request.destroyed) || this.response.destroyed || this.response.writableEnded) {
+    if (
+      this.request.aborted ||
+      (!this.request.complete && this.request.destroyed) ||
+      this.response.destroyed ||
+      this.response.writableEnded
+    ) {
       this.controller.abort();
     }
   }
@@ -822,12 +832,22 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       client.dispose();
       return true;
     }
+    // Phase 3 observability: in-flight watermark for the admitted request and
+    // a request counter on response close; both are in-memory and never block
+    // the dispatch path. Attached only once the request is truly dispatched so
+    // the pre-dispatch cancellation path stays listener-free.
+    const endInflight = beginGatewayInflightRequest();
+    res.once('close', () => {
+      endInflight();
+      recordGatewayRequestEnd(path, res.statusCode ?? 0);
+    });
     const dispatchAudit: PreparedRequestEvidenceAudit = {
       ...auditContext,
       actorUserId: authenticatedCaller.authorization.principalId,
       requestId,
     };
     let dispatched: PreparedEvidenceDispatchResult;
+    const dispatchStartedAtMs = Date.now();
     try {
       dispatched = await dispatch.dispatch({
         evidenceId: prepared.evidence.evidenceId,
@@ -836,7 +856,18 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         audit: dispatchAudit,
         client,
       });
+      const attemptStatus = dispatched.kind === 'sent' ? (dispatched.transport.resultHttpStatus ?? null) : null;
+      recordGatewayAttemptOutcome({
+        route: prepared.evidenceInput.routeConfigId,
+        ok: dispatched.kind === 'sent' && attemptStatus !== null && attemptStatus >= 200 && attemptStatus < 300,
+        durationMs: Date.now() - dispatchStartedAtMs,
+      });
     } catch {
+      recordGatewayAttemptOutcome({
+        route: prepared.evidenceInput.routeConfigId,
+        ok: false,
+        durationMs: Date.now() - dispatchStartedAtMs,
+      });
       const cause = client.signal.aborted ? 'client_cancelled' : 'dispatch_failed';
       client.abort();
       await compensate(cause);
