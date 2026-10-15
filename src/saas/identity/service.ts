@@ -828,6 +828,76 @@ export class SaasIdentityService {
     return session ? { token, csrfToken, session } : undefined;
   }
 
+  /**
+   * Active-account email probe for the OAuth login adoption decision. Returns
+   * the user id only; no password or role data leaves the service.
+   */
+  async findUserAccountByEmail(email: string): Promise<{ userId: string } | undefined> {
+    const user = await this.findUserByEmail(normalizeEmail(email));
+    if (!user || user.disabled_at !== null) return undefined;
+    return { userId: user.id };
+  }
+
+  /**
+   * Password proof for OAuth account adoption: same uniform-undefined contract
+   * as login for unknown users, disabled accounts, and wrong passwords.
+   */
+  async verifyAccountPasswordByEmail(email: string, password: string): Promise<{ userId: string } | undefined> {
+    const normalizedEmail = tryNormalizeEmail(email);
+    const candidatePassword = typeof password === 'string' && password.length <= 1024 ? password : '';
+    const user = normalizedEmail ? await this.findUserByEmail(normalizedEmail) : undefined;
+    const passwordMatches = await verifyPassword(candidatePassword, user?.password_hash);
+    if (!user || !passwordMatches || user.disabled_at !== null) return undefined;
+    return { userId: user.id };
+  }
+
+  /**
+   * Issue a session for an already-authenticated active user (OAuth login,
+   * registration, and adoption completion). Same fence family and insert shape
+   * as login; the password proof happened at the caller.
+   */
+  async issueSessionForUser(
+    userId: string,
+    ttlSeconds: number,
+  ): Promise<{ token: string; csrfToken: string; session: SafeSession } | undefined> {
+    validateId(userId);
+    validateTtl(ttlSeconds, MAX_SESSION_TTL_SECONDS);
+    const token = issueOpaqueToken();
+    const csrfToken = issueOpaqueToken();
+    const now = this.currentDate();
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+
+    const session = await this.transaction(async (tx) => {
+      // Migration046 does NOT trigger customer session INSERT. Acquire G
+      // explicitly first, then the user fence, mirroring login.
+      await this.fenceAuthorizationWriters(tx);
+      await this.fenceUserAuthorization(tx, userId);
+      const activeUser = await this.query<{ id: string }>(
+        tx,
+        `SELECT id FROM saas_users WHERE id = $1 AND disabled_at IS NULL LIMIT 1`,
+        [userId],
+      );
+      if (activeUser.rows.length === 0) return undefined;
+
+      const createdAt = this.currentDate().toISOString();
+      await this.query(
+        tx,
+        `INSERT INTO saas_sessions
+         (id, user_id, token_hash, csrf_token_hash, created_at, expires_at, revoked_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NULL)`,
+        [randomUUID(), userId, hashToken(token), hashToken(csrfToken), createdAt, expiresAt.toISOString()],
+      );
+      return {
+        userId,
+        activeTenantId: null,
+        expiresAt: expiresAt.toISOString(),
+        createdAt,
+      } satisfies SafeSession;
+    });
+
+    return session ? { token, csrfToken, session } : undefined;
+  }
+
   async getSession(token: string): Promise<SafeSession | undefined> {
     if (!tokenLooksPresent(token)) return undefined;
     const now = this.currentDate().toISOString();

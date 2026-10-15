@@ -5,6 +5,8 @@ import { createCustomerMfaHandler } from './customer-mfa-http.js';
 import type { CustomerMfaOperations } from './customer-mfa-types.js';
 import { createCustomerPasskeyHandler } from './customer-passkey-http.js';
 import type { CustomerPasskeyOperations } from './customer-passkey-types.js';
+import { createOAuthLoginHandler } from './oauth-login/oauth-login-http.js';
+import type { OAuthLoginService } from './oauth-login/oauth-login-service.js';
 import type {
   CustomerSessionRevocation,
   OtherCustomerSessionsRevocation,
@@ -35,6 +37,8 @@ export interface SaasIdentityHttpOptions {
   customerMfa?: CustomerMfaOperations;
   /** Managed startup injects the genuine passkey ceremony producer after schema readiness. */
   customerPasskey?: CustomerPasskeyOperations;
+  /** Managed startup injects the social login service after provider configuration. */
+  oauthLogin?: { service: OAuthLoginService };
   cookieSecure?: boolean;
   /** Managed composition must inject the shared limiter; omission is local-only compatibility behavior. */
   rateLimiter?: SaasIdentityRateLimiter;
@@ -653,6 +657,16 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
     rateLimiter,
     cookieSecure: secureCookie,
   });
+  const oauthLoginHandler =
+    options.oauthLogin === undefined
+      ? undefined
+      : createOAuthLoginHandler({
+          service: options.oauthLogin.service,
+          publicOrigin: options.publicOrigin,
+          sessionTtlSeconds: options.sessionTtlSeconds,
+          rateLimiter,
+          cookieSecure: secureCookie,
+        });
   // One key HTTP owner, including standalone identity-handler mounts. It owns
   // method/origin/host/session/CSRF/body checks and the genuine issuer/write port.
   const keyHandler = createSaasKeyHandler({
@@ -701,6 +715,7 @@ export function createSaasIdentityHandler(options: SaasIdentityHttpOptions): Htt
       if (!path.startsWith(`${API_PREFIX}/`)) return false;
       if (await customerMfaHandler(req, res)) return true;
       if (await customerPasskeyHandler(req, res)) return true;
+      if (oauthLoginHandler !== undefined && (await oauthLoginHandler(req, res))) return true;
       if (await keyHandler(req, res)) return true;
       const match = findRoute(path);
       if (!match) return false;
