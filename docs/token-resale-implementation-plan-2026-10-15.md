@@ -9,21 +9,47 @@
 - **new-api**(QuantumNous/new-api@main,Go):分组倍率计费公式(代码级精确)、渠道 abilities/AutoBan、注册准入、预扣-结算-退款三段式、充值分组倍率
 - **model-router 现状接线点**:计费/传输/调度/控制台的最小侵入位置(全部带文件:行号,见各阶段)
 
-**实施顺序**(用户拍板,双路线并集):
+**实施顺序**(用户拍板,双路线并集;R5b 于 2026-10-15 由 R8a 提升为正式阶段,R0 为开工前置):
 
 ```
+R0 存量 CI 缺陷修复(前置)     — lifecycle 门禁 + saas-workspace 浏览器 E2E,回归信号保真
 R1 分组倍率(商业骨架)        — new-api 计费内核 + sub2api 三层分组
 R2 embeddings 端点           — 全品类的第一步,桥接工作量最小
 R3 出口代理(生存线)          — per-account egress proxy + 探测 + 过期迁移
 R4 注册准入(开卖前提)        — 公开注册 + 邮箱验证码 + Turnstile + 注册开关
 R5 Claude 订阅池(核心品类)   — oauth-subscription 共享层提取 + Claude 品类包
+R5b OpenCode Go 订阅池        — API key 品类 + 多协议自适应路由(复用 R5 共享层)
 R6 主动测活 + Redis 热状态   — 手动/定时探测 + 并发槽 ZSET + 粘性快路径
 R7 调度策略丰富化            — 成本/soonest-reset/LRU 维度
-R8 Gemini 订阅池(后续)       — 同模板第三品类
+R8 OpenRouter 兜底 + Gemini  — 按量 overflow 渠道 + 同模板第三品类(后续)
 R9 P5 性能/混沌基准          — 需 Docker 环境
 ```
 
 **红线继承**:PG 权威/Redis 缓存协调;密封凭证不降级为明文(代理口令同样密封);密钥不落代码(CLAUDE.md 安全约束);fail-closed 语义不破;倍率/计费全部走有理数,禁止 float;消费日志必须携带计费时刻的倍率快照(new-api 对账教训)。
+
+---
+
+## R0 — 存量 CI 缺陷修复(开工前置)
+
+**为什么必须先修**:R1–R7 全部以 CI 回归信号为准绳;两项存量缺陷使仓库自 09-29 起无绿色基线(CI 运行 38675903183 证实),不修则后续每个阶段的"全绿"结论都无法成立。两项均已在 P5 e2e 中定性为存量(与 P 系列提交无关),溯源链完整,见 `docs/test-cases-sub2api-parity-2026-10-15.md` 遗留问题 1/2。
+
+### R0-1 validation-worker-lifecycle 门禁(任务 #19)
+
+**症状**:"the second claim must belong to the same real CLI worker backend" —— 第二次阻塞 claim 来自不同 backend PID,即 worker 在等待 `ACCESS EXCLUSIVE` 锁期间连接断开并重连。CI PG15+PG18 双矩阵相同断言失败,与本机 PG18.6 逐字一致;测试文件自 0068796 未改动。
+
+**排查方向**:worker 连接保活/重连逻辑——锁等待超过某阈值后 socket 被对端或中间层回收,客户端库自动重连产生新 backend PID;测试断言"同一会话内两次 claim 属于同一 backend"因此失败。修法二选一(以排查结论为准):① worker 侧修保活(keepalive/锁等待期间禁止重连);② 若重连是设计内行为,则修测试断言为逻辑等价表述(claim 的业务身份而非 backend PID)。
+
+**验收**:该门在 PG15+PG18 本地复刻电池与 CI 双绿。
+
+### R0-2 saas-workspace 浏览器 E2E 台账(任务 #20)
+
+**症状**:`tests/e2e/saas-workspace.spec.ts:122/172/198` 严格请求台账断言意外出现 `GET /console/api/v1/tenants/…/announcements`。
+
+**根因**(已确证):announcements 拉取由 e98ef9b(2026-10-12)加入 `web/src/features/saas-console.tsx`,而 spec(9f5c1c6,2026-10-04)台账期望从未同步——spec 全文无一处 `announcements`。确定性失败,与环境无关。
+
+**修法**:更新 spec 台账期望纳入 announcements 拉取(按现行 console 行为);若评审认为 announcements 不应在登录首屏急切拉取,则改为惰性加载并同步台账——以 console 功能意图为准,默认前者(对齐实现与测试)。
+
+**验收**:CI build-and-test 浏览器 E2E 全绿;台账与实现再次漂移的防护(在 spec 头注释标注台账维护责任)。
 
 ---
 
@@ -284,6 +310,38 @@ src/saas/platform/claude-oauth/
 
 ---
 
+## R5b — OpenCode Go 订阅池(API key 品类 + 多协议自适应路由)
+
+> 2026-10-15 由 R8a 提升为正式阶段。定位:接入成本全品类最低的订阅转售品类,且是平台"同一账号按模型分协议"能力的载体。排在 R5 之后(复用其共享层与品类包模板),R6 之前(探针框架为其注册品类)。
+
+### 勘察结论(sub2api `opencode_go` 平台,代码级)
+
+OpenCode Go 是 OpenCode Zen 的订阅网关转售——**纯 API key 供给**(`AccountTypeAPIKey`,账号 credentials 存官方订阅 key,无 OAuth/伪装),同一 key 按模型分流 Responses / Chat Completions / Anthropic Messages 三种原生端点;配额窗口 rolling 5h / weekly / monthly,经 `GET https://opencode.ai/zen/go/v1/usage`(Bearer key)拉取;leader-locked usage worker(默认 15min 间隔、5min 硬下限、debounce 1min、singleflight、每轮 ≤20 账号、并发 4、leader lock TTL 2min);协议路由表 `protocol_rules`(pattern→protocol,精确 ID 或后缀 glob,first-match-wins,≤64 条,内建 `grok-*`→Responses 等默认表);模型 ID 规范化剥 `opencode-go/`、`opencode_go/`、`opencode/` 前缀;fallback 模型目录 ~30 个(GLM/Kimi/DeepSeek/Qwen/LongCat/MiniMax/MiMo/Grok);默认测活模型 `glm-5.3`(Chat Completions 目录 ID);平台枚举在 group_handler 注册(`anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite`)。
+
+### 任务拆解(全部复用既有框架,零新基础设施)
+
+| 任务 | 内容 | 依赖 |
+|---|---|---|
+| **R5b-1** catalog 注册 + 模型目录(#21) | `opencode-go` provider 注册(同 `codex-registration.ts` 模式):endpoint 钉 `https://opencode.ai/zen/go`;凭证形态 = 平台池 API key(既有密封信封,无 OAuth 扩展);fallback 模型目录内置;模型 ID 前缀规范化 | —(R0 完成后开工) |
+| **R5b-2** protocol_rules 多协议路由(#22) | provider 配置 `protocol_rules`(pattern→protocol,精确 ID 或后缀 glob,first-match-wins,≤64 条,内建默认表,管理面可编辑);dispatch 按解析后模型名 first-match 选 signed endpoint → 既有 per-endpoint payload 编译接管(三协议下行 P1c 已通);规则表变更 bump authzVersion(047/082 模式) | R5b-1 |
+| **R5b-3** 配额快照 worker(#23) | `src/saas/supply/opencode-go-usage-worker.ts`:leader 锁 SKIP LOCKED;15min/5min 下限/debounce/singleflight/每轮 ≤20/并发 4/lock TTL 2min;拉 `/usage` 写账号快照列(rolling_5h/weekly/monthly used+reset,scheduling-signal-only);429/窗口用尽 → `rate_limited_until` 精确冷却 | R5b-1 |
+| **R5b-4** 目录同步 + 测活注册(#24) | `/v1/models` 上游同步(1min TTL/5min stale,同 codex 目录机制),fallback 兜底;规范化进 modelMap;R6 探针框架注册 opencode-go 品类(默认 glm-5.3,Chat Completions 端点;R6 未动工前先在注册表占位) | R5b-1, R5b-2 |
+| **R5b-5** 迁移 108 + 授权镜像(#25) | `108_provider_account_opencode_go_scheduling.ts`:账号表配额快照列 + provider `protocol_rules` 列;同步 `deploy/managed-saas-postgres-roles.sql` + `runtime-privileges.ts` + 镜像测试(P3 教训:授权与迁移同提交) | R5b-2, R5b-3 |
+| **R5b-6** 测试 + 证据(#26) | 单测(规则匹配/glob/上限/默认表、ID 规范化、usage 解析、窗口→冷却映射);PG 门禁(迁移 108 + 授权 + 快照写入);集成(mock `opencode.ai/zen/go` 三端点:key→协议分流→转发→usage→配额暂停全链);progress 登记 + 测试用例文档 | R5b-2~5 |
+
+### 设计要点
+
+1. **与 R5 的关系**:R5b 不需要 oauth-subscription 共享层的 OAuth/PKCE 部分,但复用其 `health-classifier`/`quota-pause`/transport 骨架(钉 host + 凭证注入 + SSE drain + 快照节流写)——若 R5 尚未动工,R5b 可按 codex 包同构方式先落地,待 R5 提取共享层时一并归并(不阻塞)。
+2. **protocol_rules 是唯一新机制**:规则表挂 provider 配置(JSONB),不进 PricingIdentity;解析发生在 modelMap 之后、endpoint 签名之前;规则变更 = 调度输入变更 → bump authzVersion。
+3. **配额窗口三维**:rolling_5h/weekly/monthly 各自 used+reset,调度信号语义与 099/100 列完全一致;窗口用尽写 `rate_limited_until`(reset 时刻精确冷却),不写死 error。
+4. **计费**:上游订阅成本≈0,R7 成本优先调度自然让 opencode-go 池优先于按量 key;usage 解析走既有 per-endpoint json/sse observer(三协议均已通)。
+
+### 价值定位
+
+接入成本全品类最低(粘贴 key),商业差异化最大——一个订阅 key = 国产模型全家桶(GLM/Kimi/DeepSeek/Qwen),正是中文分销客户的核心购买动机;多协议路由机制同时让平台第一次具备"同一账号按模型分协议"的能力,为后续任何聚合型供给铺路。
+
+---
+
 ## R6 — 主动测活 + Redis 热状态
 
 ### 6a 主动测活
@@ -323,23 +381,9 @@ src/saas/platform/claude-oauth/
 
 ---
 
-## R8 — 供给品类扩展(OpenCode Go / OpenRouter / Gemini)
+## R8 — OpenRouter 兜底供给 + Gemini 订阅池(后续)
 
-### 8a OpenCode Go 订阅池(建议优先级最高,可在 R5 后插位为 R5b)
-
-**勘察结论**(sub2api `opencode_go` 平台,代码级):OpenCode Go 是 OpenCode Zen 的订阅网关转售——**纯 API key 供给**(`AccountTypeAPIKey`,账号 credentials 存官方订阅 key,无 OAuth/伪装),同一 key 按模型分流 Responses/Chat Completions/Anthropic Messages 三种原生端点;配额窗口 rolling 5h/weekly/monthly,经 `GET https://opencode.ai/zen/go/v1/usage`(Bearer key)拉取;leader-locked usage worker(默认 15min 间隔、5min 硬下限、debounce 1min、singleflight、每轮 ≤20 账号、并发 4、leader lock TTL 2min);协议路由表 `protocol_rules`(pattern→protocol,精确 ID 或后缀 glob,first-match-wins,≤64 条,内建 `grok-*`→Responses 等默认表);模型 ID 规范化剥 `opencode-go/`、`opencode_go/`、`opencode/` 前缀;fallback 模型目录 ~30 个(GLM/Kimi/DeepSeek/Qwen/LongCat/MiniMax/MiMo/Grok);默认测活模型 `glm-5.3`。
-
-**设计**(全部复用既有框架,零新基础设施):
-1. **catalog 注册** `opencode-go` provider(同 codex-registration 模式):endpoint 钉 `https://opencode.ai/zen/go`,凭证形态 = 平台池 API key(现有密封信封,无 OAuth 扩展)。
-2. **多协议自适应路由**(本品类唯一的新机制):provider 配置加 `protocol_rules` 列(pattern→protocol JSONB,内建默认表,管理面可编辑);dispatch 时按解析后模型名 first-match 选 signed endpoint → 既有 per-endpoint payload 编译直接接管(三协议下行在 P1c 已全通)。规则表变更 bump authzVersion。
-3. **配额快照 worker**:`src/saas/supply/opencode-go-usage-worker.ts`(leader 锁 SKIP LOCKED 既有模式):按 15min/5min 下限/debounce/singleflight 语义拉 `/usage`,写账号调度快照列(rolling_5h/weekly/monthly used+reset,scheduling-signal-only,同 099/100 列风格);429/窗口用尽 → rate_limited_until 精确冷却。
-4. **模型目录**:`/v1/models` 从上游同步(1min TTL/5min stale,同 codex 模型目录机制),fallback 内置目录;模型 ID 规范化进 modelMap。
-5. **测活**:R6 探针框架注册 opencode-go 品类(默认模型 glm-5.3,Chat Completions 端点)。
-6. **迁移 108 `108_provider_account_opencode_go_scheduling.ts`**:账号表配额快照列 + provider `protocol_rules` 列。
-
-**价值定位**:接入成本全品类最低(粘贴 key),但商业差异化最大——一个订阅 key = 国产模型全家桶(GLM/Kimi/DeepSeek/Qwen),正是中文分销客户的核心购买动机;多协议路由机制同时让平台第一次具备"同一账号按模型分协议"的能力,为后续任何聚合型供给铺路。
-
-### 8b OpenRouter 兜底供给渠道(小工作量,建议并入 R2 或 R7)
+### 8a OpenRouter 兜底供给渠道(小工作量,建议并入 R2 或 R7)
 
 **定性**:OpenRouter 是按量付费聚合 API,**不是订阅品类**(无配额窗口可转售;sub2api 全库无实现,仅测试里出现 `openrouter/gpt-5` 公开模型命名)。引入形态 = 兜底供给渠道。
 
@@ -349,7 +393,7 @@ src/saas/platform/claude-oauth/
 3. usage 字段差异( OpenRouter 归一化 usage 对象)进 json-usage-observer 的 per-provider 分派。
 4. 公开模型命名 `openrouter/<model>` 经 modelMap 既有能力映射。
 
-### 8c Gemini 订阅池(原占位,优先级最后)
+### 8b Gemini 订阅池(原占位,优先级最后)
 
 同 R5 模板第三品类:Gemini CLI OAuth(code_assist endpoint,loadCodeAssist/onboardUser 流程)、AI Studio key 池、Gemini 协议(`/v1beta/*`,proxy.ts 已有路径雏形)、usage 配额(项目级每日)。在 R5 共享层稳定后启动,方案单列。
 
@@ -370,6 +414,7 @@ src/saas/platform/claude-oauth/
 | 105 | saas_egress_proxies + 账号代理列 | R3 |
 | 106 | saas_email_verification_codes | R4 |
 | 107 | saas_probe_monitors + saas_probe_runs | R6a |
+| 108 | 账号表 opencode_go 配额快照列 + provider protocol_rules 列 | R5b |
 
 每个迁移同步:`deploy/managed-saas-postgres-roles.sql` 最小权限授权 + `runtime-privileges.ts` 清单 + 镜像测试(e2e 抓过的 P3 教训,授权必须与迁移同提交)。
 
@@ -384,11 +429,14 @@ src/saas/platform/claude-oauth/
 | `src/saas/identity/{email-sender,email-verification-service,turnstile-service,register-http}.ts` | 新建 | R4 |
 | `src/saas/gateway/oauth-subscription/`(共享层) | 提取重构(codex 行为不变) | R5 |
 | `src/saas/gateway/claude/`、`src/saas/platform/claude-oauth/` | 新建 | R5 |
+| `src/saas/catalog/opencode-go-registration.ts`、`src/saas/gateway/opencode-go/`(协议规则/目录) | 新建 | R5b |
+| `src/saas/supply/opencode-go-usage-worker.ts` | 新建 | R5b |
 | `src/saas/supply/account-probe-service.ts`、probe worker | 新建 | R6a |
 | `src/saas/runtime/redis-concurrency-slots.ts`、sticky 快路径 | 新建+扩展 | R6b |
 | `provider-account-scheduler.ts` 策略维度 | 扩展(默认行为不变) | R7 |
 | `web/src/features/{saas-platform,saas-console,auth,keys}.tsx` | 扩展(组管理/测活按钮/注册页) | R1/R4/R6 |
-| `tests/saas/{billing/groups,gateway/claude,identity/registration,supply/egress-proxy,runtime/redis-slots}` | 新建 | 全 |
+| `src/cli/` worker 保活/重连(R0-1 排查后定)、`tests/e2e/saas-workspace.spec.ts` 台账 | 修复 | R0 |
+| `tests/saas/{billing/groups,gateway/claude,gateway/opencode-go,identity/registration,supply/egress-proxy,runtime/redis-slots}` | 新建 | 全 |
 
 ## 风险与红线
 
@@ -397,17 +445,19 @@ src/saas/platform/claude-oauth/
 3. **出口代理安全**:口令密封;URL 永不进日志;socks5h 远端 DNS 语义必须验证(否则降级建议 http 代理);代理本身也是 SSRF 面,白名单校验不豁免。
 4. **注册准入防刷**:验证码/邀请码/Turnstile 三层都可选,但开公网前至少开邮箱验证 + IP 限流;affiliate 奖励设最小转换阈值。
 5. **ToS/法律**:订阅转售违反 Anthropic/OpenAI ToS,文档与控制台明示,立场同 parity 方案。
-6. **CI 存量缺陷**(lifecycle 门禁、saas-workspace 浏览器 E2E)必须先修——否则 R1-R7 的回归信号全部失真,建议在 R1 动工前作为第 0 步立项修复。
+6. **CI 存量缺陷**(lifecycle 门禁、saas-workspace 浏览器 E2E)已立项为 R0 前置修复(任务 #19/#20)——修复完成前 R1 不动工,否则后续阶段的回归信号全部失真。
 
 ## 验证总清单
 
+0. R0:lifecycle 门禁 PG15+PG18 双绿(本地复刻电池 + CI);saas-workspace 浏览器 E2E 全绿;CI 恢复绿色基线。
 1. 分组:三组建组 + 池绑定,同模型同 key 不同组价格正确分层;高峰时段倍率;profit_control 触发拒绝;改组后旧请求结算按原倍率。
 2. embeddings:三协议客户 OpenAI 入站全链(usage/计费/hold),非 OpenAI provider 404。
 3. 代理:三协议(http/socks5h/https)账号出口 IP 正确(经探针回显);转发/刷新/测活三路同出口;过期迁移 + 凭据零泄露(grep 日志)。
 4. 注册:开放/邀请/关闭三模式;验证码 TTL/冷却/尝试上限;Turnstile 开关;域名名单;affiliate 注册路径绑定与奖励入账。
 5. Claude 池:真实账号绑号 → 三协议下行(流式+非流式)→ usage/计费落库;429 窗口精确冷却;刷新竞态无 invalid_grant 风暴;指纹块与 sub2api 对拍逐字节一致。
-6. 测活:手动按钮全品类;定时监控自动禁用/恢复;探针费用不进用户账本。
+5b. OpenCode Go 池:平台池 key → 按 protocol_rules 三协议分流(grok→Responses 等)→ usage/计费落库;rolling 5h/weekly/monthly 快照写入与窗口用尽精确冷却;模型目录同步与 fallback;规则表变更 authzVersion 失效。
+6. 测活:手动按钮全品类(含 opencode-go);定时监控自动禁用/恢复;探针费用不进用户账本。
 7. Redis:并发槽竞争正确性;Redis 宕机 fail-open;粘性跨实例一致。
-8. `npx tsc --noEmit` + `npm test` 全绿;PG 门禁全绿(CI 存量缺陷修复后);安全扫描无密钥字面量(含代理口令)。
+8. `npx tsc --noEmit` + `npm test` 全绿;PG 门禁全绿;安全扫描无密钥字面量(含代理口令)。
 
 每阶段完成后登记 `docs/development-progress-*.md` 证据,并补测试用例文档(沿用 `test-cases-sub2api-parity-2026-10-15.md` 格式)。
