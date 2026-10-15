@@ -200,6 +200,12 @@ import {
   startCredentialValidationWorker as startValidationWorkerLoop,
 } from '../saas/supply/credential-validation-worker.js';
 import { type CustomerByokHttpHandler, createCustomerByokHttpHandler } from '../saas/supply/customer-http.js';
+import {
+  type EgressProxyProbeWorkerHandle,
+  type EgressProxyProbeWorkerOptions,
+  PostgresEgressProxyProbeWorkerStore,
+  startEgressProxyProbeWorker,
+} from '../saas/supply/egress-proxy-probe-worker.js';
 import { ProviderSupplyService } from '../saas/supply/index.js';
 import {
   type OauthCredentialRotator,
@@ -276,6 +282,8 @@ export interface ManagedSaasRuntime {
   readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
   /** R5b OpenCode Go usage-snapshot loop; same workload as quota sync. */
   readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
+  /** R3 egress-proxy probe + expiry-sweep loop; same workload as quota sync. */
+  readonly egressProxyProbeWorker: EgressProxyProbeWorkerHandle | null;
   /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
   readonly oauthTokenRefreshWorker: OauthTokenRefreshWorkerHandle | null;
   /** G4.5 announcement fan-out loop; only when customer webhooks are enabled. */
@@ -414,6 +422,8 @@ export interface ManagedSaasStartOptions {
   ) => OpencodeGoUsageStore;
   /** Optional usage loop tuning or test fetch; deployment identity always reaches the store. */
   opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
+  /** R3: optional egress-proxy probe/sweep loop tuning. */
+  egressProxyProbeWorkerOptions?: EgressProxyProbeWorkerOptions;
   /**
    * R4: the privileged rotation seam for the OAuth refresh worker. Rotation
    * writes the new credential version chain through the audited supply path,
@@ -1196,6 +1206,7 @@ async function startCredentialValidationWorkerRuntime(
   let quotaWorker: QuotaSyncWorkerHandle | undefined;
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
+  let egressProxyProbeWorker: EgressProxyProbeWorkerHandle | undefined;
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
   const close = async (): Promise<void> => {
@@ -1206,6 +1217,7 @@ async function startCredentialValidationWorkerRuntime(
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
       if (oauthRefreshWorker) await Promise.allSettled([oauthRefreshWorker.close()]);
+      if (egressProxyProbeWorker) await Promise.allSettled([egressProxyProbeWorker.close()]);
       if (kms) await Promise.allSettled([Promise.resolve().then(() => kms?.close())]);
       if (database) await Promise.allSettled([closeDatabase(database)]);
     })();
@@ -1283,6 +1295,19 @@ async function startCredentialValidationWorkerRuntime(
       }),
       options.opencodeGoUsageWorkerOptions,
     );
+    // Track R3: the egress-proxy probe/sweep loop shares this workload's
+    // database role and decrypt-only KMS, exactly like the quota sync loop.
+    // Probes measure the exit IP the provider sees; the expiry sweep is the
+    // only path that rebinds accounts (fallback_mode), so probe jitter never
+    // migrates traffic. A deployment without proxies simply idles.
+    egressProxyProbeWorker = startEgressProxyProbeWorker(
+      new PostgresEgressProxyProbeWorkerStore(database, kms, {
+        ...(options.egressProxyProbeWorkerOptions ?? {}),
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      }),
+      options.egressProxyProbeWorkerOptions,
+    );
     // Track R4: the OAuth refresh loop runs only when the deployment wires a
     // privileged rotator (the restricted worker role cannot write the version
     // chain). An absent rotator keeps pre-R4 behavior, documented at the option.
@@ -1301,6 +1326,7 @@ async function startCredentialValidationWorkerRuntime(
       credentialValidationWorker: worker,
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
+      egressProxyProbeWorker,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: null,
       unknownOutcomeScanner: null,
@@ -1624,6 +1650,12 @@ export async function startManagedSaasServer(
           deployment: deployment.deploymentId,
           environment: deployment.environmentId,
         },
+        // R3 egress proxies: enable the per-account egress resolution on the
+        // production composition. The gateway reads saas_egress_proxies and
+        // the accounts' FK columns through the dynamic read grant; until the
+        // roles template is re-applied after migration 107 the runtime
+        // privilege probe fails closed by design.
+        egressProxyResolution: { enabled: true },
       });
       try {
         await gatewayRuntimeModule.checkReady();
@@ -2308,6 +2340,7 @@ export async function startManagedSaasServer(
       credentialValidationWorker: null,
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
+      egressProxyProbeWorker: null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: announcementFanoutWorker ?? null,
       unknownOutcomeScanner: unknownOutcomeScanner ?? null,

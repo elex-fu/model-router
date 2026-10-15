@@ -32,6 +32,7 @@ import {
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
 import { PostgresProviderAccountScheduler } from '../saas/gateway/postgres-provider-account-scheduler.js';
+import { PostgresProviderEgressProxyResolver } from '../saas/gateway/postgres-provider-egress-proxy-resolver.js';
 import {
   PostgresRequestPreparationAuthorityAdapter,
   type PostgresRequestPreparationAuthorityAdapterDependencies,
@@ -647,6 +648,14 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly providerCredentialUnsealingKms: ProviderCredentialUnsealingKms;
   readonly credentialContext: GatewayProviderCredentialUnsealerOptions;
   /**
+   * R3 egress proxies: when enabled, the composition resolves each claimed
+   * account's bound egress proxy (shared lookup with the OAuth refresh
+   * worker) and tunnels the provider request through it. Unset keeps the
+   * exact pre-R3 direct-egress behavior — the escape hatch for deployments
+   * that have not yet re-applied the roles template after migration 107.
+   */
+  readonly egressProxyResolution?: { readonly enabled?: boolean };
+  /**
    * F3: when enabled, settlement terminal commits and terminal request
    * failures enqueue customer webhook events inside their own transactions.
    */
@@ -1012,6 +1021,12 @@ export function createProviderPayloadCompiler(
 
 function createProviderDispatchProfileResolver(
   options: ManagedSaasGatewayProductionOptions,
+  resolveEgressProxy?: (input: {
+    readonly tenantId: string;
+    readonly supplyMode: 'byok' | 'platform' | undefined;
+    readonly accountOwnerKind: 'tenant' | 'platform' | undefined;
+    readonly accountId: string;
+  }) => Promise<{ readonly url: string } | null>,
 ): ConstructorParameters<typeof ProviderHttpTransport>[0]['resolveDispatchProfile'] {
   requireDependency(options.providerTargetResolver, 'resolve');
   requireCallable(options.providerTargetRoute);
@@ -1031,7 +1046,18 @@ function createProviderDispatchProfileResolver(
       throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
     }
     const url = target.url ?? target.targetUrl;
-    return typeof url === 'string' && url.length > 0 ? { url } : null;
+    if (typeof url !== 'string' || url.length === 0) return null;
+    if (resolveEgressProxy === undefined) return { url };
+    // R3: the per-account egress proxy rides on the dispatch profile. The
+    // resolver's failures propagate — a bound proxy that cannot be read must
+    // fail the dispatch, never silently direct-egress the account.
+    const egressProxy = await resolveEgressProxy({
+      tenantId: input.tenantId,
+      supplyMode: input.supplyMode,
+      accountOwnerKind: input.accountOwnerKind,
+      accountId: input.accountId,
+    });
+    return egressProxy === null ? { url } : { url, egressProxy };
   };
 }
 
@@ -1155,9 +1181,24 @@ export function createManagedSaasGatewayProductionComposition(
     unsealer,
     resolveAuthenticationHeader: options.resolveAuthenticationHeader,
   });
+  // R3 egress proxies: resolve the account's bound proxy through the shared
+  // lookup so forwarding, OAuth refresh, and probes provably share one exit
+  // IP. The resolver is optional only so pre-107 deployments that have not
+  // re-applied the roles template keep the direct-egress path until the
+  // probe SQL is satisfied; production wiring always provides it.
+  const egressProxyResolver = options.egressProxyResolution?.enabled
+    ? new PostgresProviderEgressProxyResolver({
+        database,
+        kms: options.providerCredentialUnsealingKms,
+        credentialContext: options.credentialContext,
+      })
+    : undefined;
   const transport = new ProviderHttpTransport({
     fetch: options.fetch,
-    resolveDispatchProfile: createProviderDispatchProfileResolver(options),
+    resolveDispatchProfile: createProviderDispatchProfileResolver(
+      options,
+      egressProxyResolver === undefined ? undefined : egressProxyResolver.resolveEgressProxy.bind(egressProxyResolver),
+    ),
     resolveCredential: credentialResolver.resolveCredential,
     endpointPolicy: options.endpointPolicy,
     ...(options.providerHttpTestAddressCapability === undefined

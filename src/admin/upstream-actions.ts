@@ -89,11 +89,16 @@ export class UpstreamActions {
       });
       const chunks: Uint8Array[] = [];
       let size = 0;
-      if (response.body)
-        for await (const chunk of response.body) {
+      // The DOM-lib ReadableStream type predates the async-iterable body that
+      // Node's fetch returns; the runtime object is async-iterable.
+      const responseBody = response.body as
+        | (AsyncIterable<Uint8Array> & { cancel(): Promise<void> })
+        | null;
+      if (responseBody)
+        for await (const chunk of responseBody) {
           size += chunk.length;
           if (size > 1_000_000) {
-            await response.body.cancel().catch(() => undefined);
+            await responseBody.cancel().catch(() => undefined);
             throw new ControlError(502, 'UPSTREAM_RESPONSE_TOO_LARGE', 'Upstream response exceeded 1 MB');
           }
           chunks.push(chunk);

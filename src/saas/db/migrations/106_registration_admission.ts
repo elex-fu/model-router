@@ -30,7 +30,8 @@ import type { SaasMigration } from './001_initial_schema.js';
  * the platform settings surface, not in this migration.
  *
  * Numbered 106 per the plan's migration table; 108 is concurrently taken by
- * R5b (opencode-go scheduling) and 107 stays free for R6a.
+ * R5b (opencode-go scheduling). 107 was free at landing time and is now
+ * taken by R3 egress proxies (107_egress_proxies.ts).
  */
 const registrationAdmissionSql = `
 CREATE TABLE saas_email_verification_codes (

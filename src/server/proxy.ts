@@ -1997,7 +1997,7 @@ async function trySingleUpstream(options: {
       signal: localCtl.signal,
       dispatcher: upstreamAgent,
       redirect: 'manual',
-    });
+    } as Parameters<typeof fetch>[1]);
     startPhase('first_byte_timeout', firstByteTimeoutMs);
   } catch (err: any) {
     const result = failure(err);
@@ -2068,7 +2068,7 @@ async function trySingleUpstream(options: {
           signal: localCtl.signal,
           dispatcher: upstreamAgent,
           redirect: 'manual',
-        });
+        } as Parameters<typeof fetch>[1]);
         startPhase('first_byte_timeout', firstByteTimeoutMs);
       } catch (err: any) {
         const result = failure(err);

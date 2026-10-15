@@ -53,3 +53,18 @@ test('redactSecrets: masks GitHub OAuth tokens', () => {
   assert.equal(redactSecrets('token gho_abcdefghijklmnopqrst'), 'token ***');
   assert.equal(redactSecrets('token ghs_abcdefghijklmnopqrstuv'), 'token ***');
 });
+
+test('redactSecrets: replaces credential-bearing proxy URLs wholesale', () => {
+  const msg = 'egress via http://user:secret@proxy.example:8080 failed';
+  assert.equal(redactSecrets(msg), 'egress via [redacted-proxy-url] failed');
+});
+
+test('redactSecrets: masks socks5h proxy URLs with encoded userinfo', () => {
+  assert.equal(redactSecrets('socks5h://u%40x:p%40ss@10.0.0.1:1080'), '[redacted-proxy-url]');
+  assert.equal(redactSecrets('https://proxyuser@proxy.internal:3128 timeout'), '[redacted-proxy-url] timeout');
+});
+
+test('redactSecrets: leaves credential-free URLs intact', () => {
+  assert.equal(redactSecrets('https://api.example.com/v1'), 'https://api.example.com/v1');
+  assert.equal(redactSecrets('http://proxy.example:8080'), 'http://proxy.example:8080');
+});

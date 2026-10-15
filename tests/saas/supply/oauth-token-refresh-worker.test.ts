@@ -6,6 +6,7 @@ import {
   sealProviderCredential,
 } from '../../../src/saas/credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import { sealEgressProxyCredentials } from '../../../src/saas/supply/egress-proxy-seal.js';
 import {
   buildOauthCredentialMaterial,
   OAUTH_REFRESH_MAX_BACKOFF_MS,
@@ -145,6 +146,10 @@ class FakeDatabase implements SaasDatabase {
     if (sql.includes('FOR UPDATE OF credential SKIP LOCKED')) {
       // The lock select re-reads exactly what the candidate select just returned.
       rows = this.state.lockedRows ?? this.lastCandidateRows;
+    } else if (sql.includes('JOIN saas_egress_proxies AS proxy')) {
+      // R3: the per-account egress lookup. Accounts in this fixture carry no
+      // proxy binding, so the refresh runs on the direct path.
+      rows = [];
     } else if (sql.includes('_provider_credential_versions')) {
       rows = this.state.versionQueue ? (this.state.versionQueue.shift() ?? []) : this.state.versionRows;
     } else if (sql.includes('_provider_credentials')) {
@@ -617,9 +622,9 @@ test('store claims one due credential, refreshes, rotates and schedules the next
       assert.match(candidate.sql, /credential\.status = 'active' AND account\.status = 'active'/);
       assert.match(candidate.sql, /credential\.oauth_force_refresh_requested = true/);
       assert.match(candidate.sql, /ORDER BY credential\.oauth_force_refresh_requested DESC/);
-      assert.deepEqual(candidate.values[0], ['anthropic', 'openai', 'openai-codex']);
-      assert.deepEqual(candidate.values[1], ['claude-code', 'codex-cli', 'codex-chatgpt']);
-      assert.deepEqual(candidate.values[2], ['oauth', 'oauth', 'oauth']);
+      assert.deepEqual(candidate.values[0], ['anthropic', 'anthropic-claude', 'openai', 'openai-codex']);
+      assert.deepEqual(candidate.values[1], ['claude-code', 'claude-subscription', 'codex-cli', 'codex-chatgpt']);
+      assert.deepEqual(candidate.values[2], ['oauth', 'oauth', 'oauth', 'oauth']);
       assert.equal(candidate.values[3], OAUTH_REFRESH_STALE_REFRESHING_MS);
       const lock = state.statements.find(({ sql }) => sql.includes('FOR UPDATE OF credential SKIP LOCKED'));
       assert.ok(lock, 'the claim must take the row lock without waiting');
@@ -1009,4 +1014,138 @@ test('a stale finalize guard loses the lease instead of marking a foreign versio
     store.refreshNext(async () => ({ version: 2 })),
     (error: unknown) => error instanceof OauthTokenRefreshWorkerError && error.code === 'LEASE_LOST',
   );
+});
+
+test('a bound egress proxy tunnels the refresh fetch and preserves the sealed refresh token', async () => {
+  const versionRow = await sealFixtureCredential('tenant', 'credential-a');
+  const state = fakeState('tenant', versionRow);
+  // The account lookup finds a bound proxy with sealed credentials.
+  const sealedProxy = await sealEgressProxyCredentials(
+    { username: 'proxyuser', password: 'proxypass' },
+    { proxyId: 'proxy-a', deployment: DEPLOYMENT, environment: ENVIRONMENT },
+    sealingKms,
+    'r4-fixture-kms',
+  );
+  const originalQuery = FakeDatabase.prototype.query;
+  FakeDatabase.prototype.query = async function queryPatch<RowType>(
+    sql: string,
+    values: readonly unknown[] = [],
+  ): Promise<SqlResult<RowType>> {
+    if (sql.includes('JOIN saas_egress_proxies AS proxy')) {
+      return {
+        rows: [
+          {
+            id: 'proxy-a',
+            name: 'primary',
+            protocol: 'socks5',
+            host: 'egress.example',
+            port: 1080,
+            auth_sealed_envelope: sealedProxy,
+            status: 'active',
+            expires_at: null,
+            fallback_mode: 'none',
+            backup_proxy_id: null,
+            last_probe_at: null,
+            last_probe_latency_ms: null,
+            last_probe_ip: null,
+            last_probe_quality: null,
+          },
+        ] as RowType[],
+        rowCount: 1,
+      };
+    }
+    return originalQuery.call(this, sql, values) as Promise<SqlResult<RowType>>;
+  };
+  try {
+    const seenDispatchers: unknown[] = [];
+    const store = new PostgresOauthTokenRefreshWorkerStore(
+      new FakeDatabase(state),
+      unsealingKms,
+      storeOptions({
+        fetch: async (url, init) => {
+          seenDispatchers.push(init.dispatcher);
+          assert.equal(url.protocol, 'https:');
+          return jsonResponse(tokenSuccess);
+        },
+        createEgressConnection: async (proxy) => {
+          // socks5 upgrades to socks5h before the dispatcher is built.
+          assert.equal(proxy.url, 'socks5h://proxyuser:proxypass@egress.example:1080');
+          return { dispatcher: { tunneled: true } as never, close: async () => {}, destroy: async () => {} };
+        },
+      }),
+    );
+    const outcome = await store.refreshNext(async () => ({ version: 2 }));
+    assert.deepEqual(outcome, {
+      outcome: 'refreshed',
+      ownerKind: 'tenant',
+      credentialId: 'credential-a',
+      version: 2,
+    });
+    assert.equal(seenDispatchers.length, 1);
+    assert.deepEqual(seenDispatchers[0], { tunneled: true });
+  } finally {
+    FakeDatabase.prototype.query = originalQuery;
+  }
+});
+
+test('a bound egress proxy that cannot be established fails the refresh instead of direct-egressing', async () => {
+  const versionRow = await sealFixtureCredential('tenant', 'credential-a');
+  const state = fakeState('tenant', versionRow);
+  const originalQuery = FakeDatabase.prototype.query;
+  FakeDatabase.prototype.query = async function queryPatch<RowType>(
+    sql: string,
+    values: readonly unknown[] = [],
+  ): Promise<SqlResult<RowType>> {
+    if (sql.includes('JOIN saas_egress_proxies AS proxy')) {
+      return {
+        rows: [
+          {
+            id: 'proxy-a',
+            name: 'primary',
+            protocol: 'http',
+            host: 'egress.example',
+            port: 3128,
+            auth_sealed_envelope: null,
+            status: 'active',
+            expires_at: null,
+            fallback_mode: 'none',
+            backup_proxy_id: null,
+            last_probe_at: null,
+            last_probe_latency_ms: null,
+            last_probe_ip: null,
+            last_probe_quality: null,
+          },
+        ] as RowType[],
+        rowCount: 1,
+      };
+    }
+    return originalQuery.call(this, sql, values) as Promise<SqlResult<RowType>>;
+  };
+  try {
+    let fetchCalls = 0;
+    const store = new PostgresOauthTokenRefreshWorkerStore(
+      new FakeDatabase(state),
+      unsealingKms,
+      storeOptions({
+        fetch: async () => {
+          fetchCalls += 1;
+          return jsonResponse(tokenSuccess);
+        },
+        createEgressConnection: async () => {
+          throw new Error('proxy unreachable');
+        },
+      }),
+    );
+    const outcome = await store.refreshNext(async () => ({ version: 2 }));
+    assert.deepEqual(outcome, {
+      outcome: 'failed',
+      ownerKind: 'tenant',
+      credentialId: 'credential-a',
+      errorCode: 'egress_proxy_unavailable',
+    });
+    // The token endpoint was never contacted on the direct path.
+    assert.equal(fetchCalls, 0);
+  } finally {
+    FakeDatabase.prototype.query = originalQuery;
+  }
 });

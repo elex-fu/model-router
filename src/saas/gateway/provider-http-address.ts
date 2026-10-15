@@ -1,6 +1,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { Agent, type Dispatcher } from 'undici';
+import { Agent, type buildConnector, type Dispatcher, ProxyAgent } from 'undici';
+import { createSocks5HConnector } from './provider-http-socks5-connector.js';
 
 export interface ProviderHttpResolvedAddress {
   readonly address: string;
@@ -12,9 +13,31 @@ export type ProviderHttpAddressResolver = (
   signal: AbortSignal,
 ) => Promise<readonly ProviderHttpResolvedAddress[]>;
 
+/** A deployment-resolved egress proxy descriptor (URL carries credentials). */
+export interface ProviderHttpEgressProxyDescriptor {
+  /** The complete proxy URL, credentials included; it is never logged. */
+  readonly url: string;
+}
+
+/** A validated, address-pinned egress proxy ready for a dispatcher. */
+export interface ProviderHttpEgressProxyTarget {
+  /** The normalized wire URL (socks5 upgraded to socks5h); never logged. */
+  readonly url: string;
+  readonly hostname: string;
+  readonly port: number;
+  /** The whitelist-validated pinned proxy address. */
+  readonly address: string;
+  readonly family: 4 | 6;
+  readonly protocol: 'http' | 'https' | 'socks5h';
+  readonly username: string;
+  readonly password: string;
+}
+
 export interface ProviderHttpConnectorInput extends ProviderHttpResolvedAddress {
   readonly hostname: string;
   readonly port: number;
+  /** R3: when set, the connector tunnels through this egress proxy. */
+  readonly proxy?: ProviderHttpEgressProxyTarget;
 }
 
 export interface ProviderHttpPinnedConnector {
@@ -282,7 +305,17 @@ export const createPinnedProviderHttpConnector: ProviderHttpPinnedConnectorFacto
   hostname,
   address,
   family,
+  proxy,
 }) => {
+  if (proxy !== undefined) {
+    // The destination TLS upgrade happens over the tunnel socket (no local
+    // DNS), but the pinned lookup is still attached to requestTls so any
+    // undici code path that would resolve the destination locally stays
+    // pinned to the validated address.
+    return createEgressProxyDispatcher(proxy, {
+      requestTls: { lookup: createPinnedProviderLookup(hostname, { address, family }) },
+    });
+  }
   const agent = new Agent({
     connect: { lookup: createPinnedProviderLookup(hostname, { address, family }) },
     connections: 1,
@@ -294,3 +327,190 @@ export const createPinnedProviderHttpConnector: ProviderHttpPinnedConnectorFacto
     destroy: (error) => agent.destroy(error ?? null),
   };
 };
+
+/**
+ * R3 egress proxies: validate a proxy URL (protocol whitelist, socks5 →
+ * socks5h upgrade, bounded host/port, no path/query/hash) without ever
+ * including the URL in an error message. Percent-encoded userinfo is kept
+ * encoded; ProxyAgent decodes it for the Basic auth header and the socks
+ * connector decodes it for RFC 1929.
+ */
+export function validateEgressProxyUrl(value: unknown): {
+  readonly url: string;
+  readonly hostname: string;
+  readonly port: number;
+  readonly protocol: 'http' | 'https' | 'socks5h';
+  readonly username: string;
+  readonly password: string;
+} {
+  if (typeof value !== 'string' || value === '' || value !== value.trim() || value.includes('\u0000')) {
+    throw new ProviderHttpEgressProxyError();
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new ProviderHttpEgressProxyError();
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  const wireProtocol =
+    protocol === 'http:'
+      ? 'http'
+      : protocol === 'https:'
+        ? 'https'
+        : protocol === 'socks5:' || protocol === 'socks5h:'
+          ? 'socks5h'
+          : null;
+  if (wireProtocol === null) throw new ProviderHttpEgressProxyError();
+  // Non-special schemes (socks5/socks5h) parse with an empty path; http/https
+  // parse with '/'. Both mean "no path component"; anything else is invalid.
+  if ((parsed.pathname !== '/' && parsed.pathname !== '') || parsed.search !== '' || parsed.hash !== '') {
+    throw new ProviderHttpEgressProxyError();
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === '' || hostname.includes('%') || hostname.length > 255 || hostname.startsWith('[')) {
+    throw new ProviderHttpEgressProxyError();
+  }
+  const port = parsed.port === '' ? (wireProtocol === 'https' ? 443 : 80) : Number(parsed.port);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new ProviderHttpEgressProxyError();
+  // Rebuild under the wire protocol so socks5:// becomes socks5h:// and the
+  // port is always explicit (URL serialization drops default ports).
+  const userinfo = parsed.username === '' ? '' : `${parsed.username}:${parsed.password}@`;
+  return {
+    url: `${wireProtocol}://${userinfo}${hostname}:${port}`,
+    hostname,
+    port,
+    protocol: wireProtocol,
+    username: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+  };
+}
+
+/**
+ * Validate a proxy descriptor and pin its host address through the same
+ * whitelist mechanism as provider endpoints: literal IPs must be global
+ * (loopback only under the test capability), names must resolve exclusively
+ * to global addresses, and exactly one address is pinned to close the
+ * rebinding window between validation and connection.
+ */
+export async function resolveEgressProxyTarget(
+  proxy: ProviderHttpEgressProxyDescriptor,
+  options: {
+    readonly resolveAddresses: ProviderHttpAddressResolver;
+    readonly testCapability?: ProviderHttpTestAddressCapability;
+    readonly signal?: AbortSignal;
+  },
+): Promise<ProviderHttpEgressProxyTarget> {
+  const validated = validateEgressProxyUrl(proxy?.url);
+  let resolved: readonly ProviderHttpResolvedAddress[] = [];
+  if (isIP(validated.hostname) === 0) {
+    try {
+      resolved = await options.resolveAddresses(validated.hostname, options.signal ?? new AbortController().signal);
+    } catch {
+      throw new ProviderHttpEgressProxyError();
+    }
+  }
+  let pinned: ProviderHttpResolvedAddress;
+  try {
+    pinned = selectPinnedProviderAddress(validated.hostname, resolved, options.testCapability);
+  } catch {
+    throw new ProviderHttpEgressProxyError();
+  }
+  return {
+    url: validated.url,
+    hostname: validated.hostname,
+    port: validated.port,
+    address: pinned.address,
+    family: pinned.family,
+    protocol: validated.protocol,
+    username: validated.username,
+    password: validated.password,
+  };
+}
+
+/** Safe error for every egress-proxy validation failure; never carries the URL. */
+export class ProviderHttpEgressProxyError extends Error {
+  constructor() {
+    super('the egress proxy configuration is invalid');
+    this.name = 'ProviderHttpEgressProxyError';
+  }
+}
+
+/**
+ * Build the per-request dispatcher for one validated egress proxy.
+ *
+ * http/https proxies use undici's ProxyAgent with CONNECT tunneling: the
+ * proxy's own connection is pinned to the whitelist-validated address via
+ * proxyTls.lookup, and connections: 1 keeps the per-request short-lived
+ * dispatcher semantics (the inner Agent collapses to a single Client).
+ * socks5h proxies use the dedicated RFC 1928/1929 connector — the domain is
+ * sent to the proxy, so destination DNS happens remotely by construction.
+ */
+export function createEgressProxyDispatcher(
+  target: ProviderHttpEgressProxyTarget,
+  options: {
+    /** Destination TLS options (pinned lookup in the transport; test CA in tests). */
+    readonly requestTls?: buildConnector.BuildOptions;
+  } = {},
+): ProviderHttpPinnedConnector {
+  if (target.protocol === 'socks5h') {
+    const destinationCa = (options.requestTls as { readonly ca?: unknown } | undefined)?.ca;
+    const agent = new Agent({
+      connect: createSocks5HConnector({
+        address: target.address,
+        family: target.family,
+        port: target.port,
+        ...(target.username === '' ? {} : { username: target.username, password: target.password }),
+        ...(typeof destinationCa === 'string' ? { tlsOptions: { ca: destinationCa } } : {}),
+      }),
+      connections: 1,
+      maxRedirections: 0,
+    });
+    return {
+      dispatcher: agent,
+      close: () => agent.close(),
+      destroy: (error) => agent.destroy(error ?? null),
+    };
+  }
+  const agent = new ProxyAgent({
+    uri: target.url,
+    connections: 1,
+    maxRedirections: 0,
+    // Pin the proxy's own connection to the validated address.
+    proxyTls: {
+      lookup: createPinnedProviderLookup(target.hostname, { address: target.address, family: target.family }),
+    },
+    ...(options.requestTls === undefined ? {} : { requestTls: options.requestTls }),
+  });
+  return {
+    dispatcher: agent,
+    close: () => agent.close(),
+    destroy: (error) => agent.destroy(error ?? null),
+  };
+}
+
+/**
+ * One-shot async egress connection used by the non-transport paths (OAuth
+ * refresh worker, probe worker): validate + pin the proxy, build the
+ * dispatcher. The caller must close/destroy the returned connector when its
+ * requests complete; the URL never outlives the call site.
+ */
+export async function createProviderEgressProxyConnection(
+  proxy: ProviderHttpEgressProxyDescriptor,
+  options: {
+    readonly resolveAddresses?: ProviderHttpAddressResolver;
+    readonly testCapability?: ProviderHttpTestAddressCapability;
+    readonly signal?: AbortSignal;
+    readonly requestTls?: buildConnector.BuildOptions;
+  } = {},
+): Promise<ProviderHttpPinnedConnector> {
+  const target = await resolveEgressProxyTarget(proxy, {
+    resolveAddresses: options.resolveAddresses ?? resolveProviderHttpAddresses,
+    ...(options.testCapability === undefined ? {} : { testCapability: options.testCapability }),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  return createEgressProxyDispatcher(
+    target,
+    options.requestTls === undefined ? {} : { requestTls: options.requestTls },
+  );
+}

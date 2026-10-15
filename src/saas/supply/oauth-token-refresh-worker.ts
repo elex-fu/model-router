@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import type { Dispatcher } from 'undici';
 import {
   createProviderCredentialContext,
   PROVIDER_CREDENTIAL_CONTEXT_VERSION,
@@ -11,11 +12,22 @@ import {
   withUnsealedProviderCredential,
 } from '../credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import type { ProviderHttpPinnedConnector } from '../gateway/provider-http-address.js';
+import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
+import {
+  CLAUDE_OAUTH_CLIENT_ID,
+  CLAUDE_OAUTH_REFRESH_SCOPE,
+  CLAUDE_OAUTH_TOKEN_ENDPOINT,
+  CLAUDE_OAUTH_TOKEN_USER_AGENT,
+} from '../platform/claude-oauth/oauth.js';
 import {
   CODEX_OAUTH_CLIENT_ID,
   CODEX_OAUTH_REFRESH_SCOPE,
   CODEX_OAUTH_TOKEN_ENDPOINT,
 } from '../platform/codex-oauth/oauth.js';
+import { readEgressProxyForAccount } from './egress-proxy-lookup.js';
+import { assembleEgressProxyUrl } from './egress-proxy-record.js';
+import { withUnsealedEgressProxyCredentials } from './egress-proxy-seal.js';
 
 /**
  * Track R4 OAuth account token auto-refresh worker (design:
@@ -71,6 +83,7 @@ export type OauthTokenRefreshErrorCode =
   | 'credential_format_invalid'
   | 'credential_unavailable'
   | 'credential_rejected'
+  | 'egress_proxy_unavailable'
   | 'provider_endpoint_unsupported'
   | 'provider_rate_limited'
   | 'provider_unavailable'
@@ -144,7 +157,20 @@ export interface OauthCredentialRotationResult {
 
 export type OauthCredentialRotator = (input: OauthCredentialRotationInput) => Promise<OauthCredentialRotationResult>;
 
-export type OauthTokenRefreshFetch = (url: URL, init: RequestInit) => Promise<Response>;
+/**
+ * R3 egress proxies: the refresh fetch init can carry the per-account egress
+ * dispatcher, aligned to the generic transport's ProviderHttpFetch shape. A
+ * bound account's refresh call must leave through the same proxy as its
+ * forwarding traffic (sub2api: mixed exit IPs trip provider risk control).
+ */
+export type OauthTokenRefreshFetchInit = RequestInit & {
+  readonly dispatcher?: Dispatcher;
+};
+
+export type OauthTokenRefreshFetch = (url: URL, init: OauthTokenRefreshFetchInit) => Promise<Response>;
+
+/** Test seam over the egress dispatcher factory; production uses the real connector. */
+export type OauthTokenRefreshEgressConnectionFactory = typeof createProviderEgressProxyConnection;
 
 interface FixedOauthTokenAdapter {
   readonly providerId: string;
@@ -165,9 +191,16 @@ interface FixedOauthTokenAdapter {
    * that the gateway must keep after a rotation (`chatgpt-account-id` header,
    * identity namespace). These envelope fields are passed through from the old
    * secret on rotation — the token response overrides them when it carries a
-   * fresh value. Anthropic bindings keep the strict token-only contract.
+   * fresh value. Claude bindings keep their own (organization/account
+   * coordinates) field list.
    */
   readonly passthroughFields: readonly string[];
+  /**
+   * User-Agent for the refresh grant. The default keeps the historical
+   * router identity; the Claude binding pins the captured client (axios)
+   * because the platform.claude.com endpoint fingerprints non-CLI callers.
+   */
+  readonly userAgent: string;
 }
 
 /**
@@ -181,6 +214,19 @@ export const CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Object
   'chatgpt_user_id',
   'plan_type',
   'client_id',
+]);
+
+/**
+ * Envelope fields the Claude subscription binding preserves across a
+ * rotation (R5): the gateway needs organization_uuid/account_uuid (identity
+ * namespace, account selection) and email (display) even though the refresh
+ * response never returns them. client_id is shared with the codex list.
+ */
+export const CLAUDE_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Object.freeze([
+  'organization_uuid',
+  'account_uuid',
+  'client_id',
+  'email',
 ]);
 
 /*
@@ -201,6 +247,25 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
     refreshScope: null,
     passthroughFields: [],
+    userAgent: 'model-router',
+  }),
+  Object.freeze({
+    // R5 Claude Code subscription category package
+    // (src/saas/gateway/claude/catalog-identity.ts). Same public OAuth client
+    // as the legacy claude-code identity above but the platform.claude.com
+    // token endpoint the current CLI uses (the plan §R5 black-box constants);
+    // the captured axios UA keeps the grant off non-CLI fingerprints. The
+    // organization/account envelope metadata survives rotations through
+    // CLAUDE_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS.
+    providerId: 'anthropic-claude',
+    productId: 'claude-subscription',
+    credentialType: 'oauth',
+    adapterId: 'anthropic-claude-subscription-oauth-v1',
+    tokenEndpoint: CLAUDE_OAUTH_TOKEN_ENDPOINT,
+    clientId: CLAUDE_OAUTH_CLIENT_ID,
+    refreshScope: CLAUDE_OAUTH_REFRESH_SCOPE,
+    passthroughFields: CLAUDE_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+    userAgent: CLAUDE_OAUTH_TOKEN_USER_AGENT,
   }),
   Object.freeze({
     providerId: 'openai',
@@ -219,6 +284,7 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     clientId: CODEX_OAUTH_CLIENT_ID,
     refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
     passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+    userAgent: 'model-router',
   }),
   Object.freeze({
     // P1c catalog identity for ChatGPT-backed Codex subscription accounts
@@ -234,6 +300,7 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     clientId: CODEX_OAUTH_CLIENT_ID,
     refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
     passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+    userAgent: 'model-router',
   }),
 ]);
 
@@ -256,6 +323,7 @@ export function resolveOauthTokenAdapter(credential: {
   readonly clientId: string;
   readonly refreshScope: string | null;
   readonly passthroughFields: readonly string[];
+  readonly userAgent: string;
 } | null {
   return (
     FIXED_OAUTH_TOKEN_ADAPTERS.find(
@@ -321,9 +389,12 @@ function record(value: unknown): Fields | null {
  * fields listed in CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS. Anything else is
  * not OAuth material for this worker.
  */
-export function parseOauthCredentialMaterial(secret: Uint8Array): {
+export function parseOauthCredentialMaterial(
+  secret: Uint8Array,
+  fields: readonly string[] = CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+): {
   readonly refreshToken: string;
-  /** Codex envelope metadata present in the old secret; keyed by field name. */
+  /** Binding envelope metadata present in the old secret; keyed by field name. */
   readonly passthrough: Readonly<Record<string, string>>;
 } | null {
   let body: Fields | null;
@@ -336,7 +407,7 @@ export function parseOauthCredentialMaterial(secret: Uint8Array): {
   const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : null;
   if (refreshToken === null) return null;
   const passthrough: Record<string, string> = {};
-  for (const field of CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS) {
+  for (const field of fields) {
     const value = body[field];
     if (typeof value === 'string' && value.length > 0) passthrough[field] = value;
   }
@@ -350,12 +421,15 @@ export function parseOauthCredentialMaterial(secret: Uint8Array): {
  * returned a fresh value, the token response) so a rotation never strips the
  * fields the gateway needs to keep serving the account.
  */
-export function buildOauthCredentialMaterial(input: {
-  readonly accessToken: string;
-  readonly refreshToken: string;
-  readonly expiresInSeconds: number | null;
-  readonly passthrough?: Readonly<Record<string, string>>;
-}): Buffer {
+export function buildOauthCredentialMaterial(
+  input: {
+    readonly accessToken: string;
+    readonly refreshToken: string;
+    readonly expiresInSeconds: number | null;
+    readonly passthrough?: Readonly<Record<string, string>>;
+  },
+  fields: readonly string[] = CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+): Buffer {
   const material: Fields = {
     access_token: input.accessToken,
     refresh_token: input.refreshToken,
@@ -363,7 +437,7 @@ export function buildOauthCredentialMaterial(input: {
   };
   if (input.expiresInSeconds !== null) material.expires_in = input.expiresInSeconds;
   const passthrough = input.passthrough ?? {};
-  for (const field of CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS) {
+  for (const field of fields) {
     const value = passthrough[field];
     if (typeof value === 'string' && value.length > 0) material[field] = value;
   }
@@ -430,6 +504,7 @@ async function boundedResponseBody(response: Response, signal: AbortSignal): Pro
 /** Only access_token, refresh_token and expires_in survive plus codex passthrough metadata. */
 function parseTokenEndpointResponse(
   bytes: Uint8Array,
+  fields: readonly string[] = CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
 ): {
   accessToken: string;
   refreshToken: string | null;
@@ -459,7 +534,7 @@ function parseTokenEndpointResponse(
     expiresInSeconds = parsed;
   }
   const passthrough: Record<string, string> = {};
-  for (const field of CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS) {
+  for (const field of fields) {
     const value = body[field];
     // A non-string (or empty) value is discarded rather than trusted: the
     // old envelope's copy stays authoritative.
@@ -527,7 +602,7 @@ export async function requestOauthTokenRefresh(
       headers: {
         accept: 'application/json',
         'content-type': 'application/x-www-form-urlencoded',
-        'user-agent': 'model-router',
+        'user-agent': adapter.userAgent,
       },
       body: form,
       redirect: 'manual',
@@ -606,7 +681,7 @@ export async function requestOauthTokenRefresh(
       elapsed(),
     );
   }
-  const parsed = parseTokenEndpointResponse(bodyResult.bytes);
+  const parsed = parseTokenEndpointResponse(bodyResult.bytes, adapter.passthroughFields);
   if (!parsed) {
     return failedResult('provider_response_invalid', false, adapter.adapterId, response.status, elapsed());
   }
@@ -758,6 +833,8 @@ export interface PostgresOauthTokenRefreshWorkerStoreOptions {
   readonly defaultTokenTtlMs?: number;
   /** Test/custom seam; production uses the global fetch with fixed adapter URLs. */
   readonly fetch?: OauthTokenRefreshFetch;
+  /** Test seam; production uses createProviderEgressProxyConnection. */
+  readonly createEgressConnection?: OauthTokenRefreshEgressConnectionFactory;
   /** Worker-owned lifetime; an abort rolls the in-flight claim back. */
   readonly signal?: AbortSignal;
 }
@@ -846,6 +923,7 @@ export class PostgresOauthTokenRefreshWorkerStore {
   private readonly scopes: readonly OauthRefreshOwnerScope[];
   private readonly staleRefreshingMs: number;
   private readonly defaultTokenTtlMs: number;
+  private readonly createEgressConnection: OauthTokenRefreshEgressConnectionFactory;
 
   constructor(
     private readonly database: SaasDatabase,
@@ -866,6 +944,9 @@ export class PostgresOauthTokenRefreshWorkerStore {
       60_000,
       86_400_000,
     );
+    const egressConnectionFactory = options.createEgressConnection ?? createProviderEgressProxyConnection;
+    if (typeof egressConnectionFactory !== 'function') throw workerError('STORE_UNAVAILABLE');
+    this.createEgressConnection = egressConnectionFactory;
   }
 
   private async safeTransaction<T>(work: (executor: SqlExecutor) => Promise<T>): Promise<T> {
@@ -1179,13 +1260,56 @@ export class PostgresOauthTokenRefreshWorkerStore {
       authTag: safeText(version.auth_tag),
     };
 
+    // R3 egress proxies: resolve the account's bound proxy through the same
+    // shared lookup the gateway dispatch profile uses, so refresh traffic
+    // leaves through the identical exit IP. A bound proxy that cannot be
+    // resolved or established fails this attempt (retryable backoff) — never
+    // a silent direct-egress fallback.
+    let egressConnection: ProviderHttpPinnedConnector | null = null;
+    const baseFetch: OauthTokenRefreshFetch = this.options.fetch ?? ((url, init) => fetch(url, init));
+    let fetcher: OauthTokenRefreshFetch = baseFetch;
+    try {
+      const proxyRecord = await readEgressProxyForAccount(tx, {
+        ownerKind: scope.ownerKind,
+        ...(scope.ownerKind === 'tenant' ? { tenantId: ref.tenantId ?? undefined } : {}),
+        accountId: ref.accountId,
+      });
+      if (proxyRecord !== null) {
+        const proxyUrl = await withUnsealedEgressProxyCredentials(
+          proxyRecord.authSealedEnvelope,
+          {
+            deployment: this.options.deployment,
+            environment: this.options.environment,
+            proxyId: proxyRecord.id,
+          },
+          this.kms,
+          (credentials) =>
+            assembleEgressProxyUrl({
+              protocol: proxyRecord.protocol,
+              host: proxyRecord.host,
+              port: proxyRecord.port,
+              ...(credentials.username === undefined ? {} : { username: credentials.username }),
+              ...(credentials.password === undefined ? {} : { password: credentials.password }),
+            }).url,
+        );
+        egressConnection = await this.createEgressConnection(
+          { url: proxyUrl },
+          ...(this.options.signal === undefined ? [] : [{ signal: this.options.signal }]),
+        );
+        const connection = egressConnection;
+        fetcher = (url, init) => baseFetch(url, { ...init, dispatcher: connection.dispatcher });
+      }
+    } catch {
+      return { kind: 'failed', errorCode: 'egress_proxy_unavailable' };
+    }
+
     let result:
       | { readonly kind: 'failed'; readonly errorCode: OauthTokenRefreshErrorCode }
       | { readonly kind: 'refreshed'; readonly newSecret: Buffer; readonly expiresInSeconds: number | null }
       | undefined;
     try {
       await withUnsealedProviderCredential(envelope, context, this.kms, async (secret) => {
-        const material = parseOauthCredentialMaterial(secret);
+        const material = parseOauthCredentialMaterial(secret, oauthEnvelopePassthroughFields(ref));
         if (!material) {
           result = { kind: 'failed', errorCode: 'credential_unavailable' };
           return;
@@ -1194,37 +1318,39 @@ export class PostgresOauthTokenRefreshWorkerStore {
           result = { kind: 'failed', errorCode: 'credential_format_invalid' };
           return;
         }
-        const refresh = await requestOauthTokenRefresh(
-          ref,
-          material.refreshToken,
-          this.options.fetch,
-          this.options.signal,
-        );
+        const refresh = await requestOauthTokenRefresh(ref, material.refreshToken, fetcher, this.options.signal);
         if (refresh.state === 'failed') {
           result = { kind: 'failed', errorCode: refresh.errorCode };
           return;
         }
-        // P1c codex envelope passthrough: preserve the ChatGPT account
+        // P1c codex / R5 claude envelope passthrough: preserve the account
         // metadata fields the gateway needs (identity namespace, account
         // header) from the old envelope; a value the endpoint actually
-        // returned wins. Anthropic bindings keep the strict token-only
-        // rotation contract (empty merge input).
+        // returned wins. Bindings without passthrough fields keep the strict
+        // token-only rotation contract (empty merge input).
         const preserveMetadata = oauthEnvelopePassthroughFields(ref).length > 0;
         result = {
           kind: 'refreshed',
-          newSecret: buildOauthCredentialMaterial({
-            accessToken: refresh.accessToken,
-            refreshToken: refresh.refreshToken ?? material.refreshToken,
-            expiresInSeconds: refresh.expiresInSeconds,
-            ...(preserveMetadata
-              ? { passthrough: { ...material.passthrough, ...refresh.passthrough } }
-              : {}),
-          }),
+          newSecret: buildOauthCredentialMaterial(
+            {
+              accessToken: refresh.accessToken,
+              refreshToken: refresh.refreshToken ?? material.refreshToken,
+              expiresInSeconds: refresh.expiresInSeconds,
+              ...(preserveMetadata ? { passthrough: { ...material.passthrough, ...refresh.passthrough } } : {}),
+            },
+            oauthEnvelopePassthroughFields(ref),
+          ),
           expiresInSeconds: refresh.expiresInSeconds,
         };
       });
     } catch {
       return { kind: 'failed', errorCode: 'credential_unavailable' };
+    } finally {
+      if (egressConnection !== null) {
+        const connection = egressConnection;
+        egressConnection = null;
+        void connection.close().catch(() => undefined);
+      }
     }
     return result ?? { kind: 'failed', errorCode: 'credential_unavailable' };
   }

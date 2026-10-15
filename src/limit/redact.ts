@@ -4,6 +4,11 @@ const SECRET_PATTERNS = [
   { re: /(x-api-key\s*[:=]\s*)[^\s]+/gi, replacement: '$1***' },
   { re: /(api-key\s*[:=]\s*)[^\s]+/gi, replacement: '$1***' },
   { re: /\b(gh[ousr]_[A-Za-z0-9]{20,})/g, replacement: '***' },
+  // R3 egress proxies: a proxy URL carries Basic credentials in its userinfo
+  // component. The whole URL is replaced — the scheme/host alone would still
+  // identify the operator's proxy infrastructure, and the credentials must
+  // never survive into any log or error path.
+  { re: /\b(?:https?|socks5h?):\/\/[^\s"'/@]+@[^\s"']+/gi, replacement: '[redacted-proxy-url]' },
 ];
 
 export function redactSecrets<T extends string | null | undefined>(value: T): T {

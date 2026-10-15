@@ -477,6 +477,57 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ...columnGrants('saas_billing_group_account_pools', 'SELECT', ['group_id', 'account_id', 'priority', 'created_at']),
   ...columnGrants('saas_billing_group_account_pools', 'INSERT', ['group_id', 'account_id', 'priority']),
   ...columnGrants('saas_billing_group_account_pools', 'UPDATE', ['priority']),
+  // R3 (107) egress proxies: the control plane manages the proxy registry
+  // and runs the probe/sweep worker (last_probe_* writes); the gateway and
+  // the OAuth refresh worker read through the dynamic read-table grants.
+  ...columnGrants('saas_egress_proxies', 'SELECT', [
+    'id',
+    'name',
+    'protocol',
+    'host',
+    'port',
+    'auth_sealed_envelope',
+    'status',
+    'expires_at',
+    'fallback_mode',
+    'backup_proxy_id',
+    'last_probe_at',
+    'last_probe_latency_ms',
+    'last_probe_ip',
+    'last_probe_quality',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_egress_proxies', 'INSERT', [
+    'id',
+    'name',
+    'protocol',
+    'host',
+    'port',
+    'auth_sealed_envelope',
+    'status',
+    'expires_at',
+    'fallback_mode',
+    'backup_proxy_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_egress_proxies', 'UPDATE', [
+    'name',
+    'protocol',
+    'host',
+    'port',
+    'auth_sealed_envelope',
+    'status',
+    'expires_at',
+    'fallback_mode',
+    'backup_proxy_id',
+    'last_probe_at',
+    'last_probe_latency_ms',
+    'last_probe_ip',
+    'last_probe_quality',
+    'updated_at',
+  ]),
   // R4 (106) registration admission: the identity control plane issues,
   // verifies, consumes and prunes email verification codes. No gateway
   // access — the table is never read outside the control plane.
@@ -1011,6 +1062,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // the usage scheduling columns are worker-written and stay off this
     // manifest (the gateway reads them through the dynamic read-table grants).
     'opencode_go_protocol_rules',
+    // 100 (R5): the operator's per-account CLI pin override rides the same
+    // control-plane scheduling surface; the usage snapshot columns are
+    // worker-written and stay off this manifest.
+    'claude_cli_version_override',
     'quarantine_entered_at',
     'quarantine_reason_code',
     'rpm_limit',
@@ -1019,6 +1074,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
     'disabled_at',
     'revoked_at',
+    // R3 (107): per-account egress proxy binding + expiry-migration provenance.
+    'egress_proxy_id',
+    'proxy_fallback_origin_id',
   ]),
   ...columnGrants('saas_tenant_provider_accounts', 'INSERT', [
     'tenant_id',
@@ -1038,6 +1096,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'weight',
     'rpm_limit',
     'tpm_limit',
+    'egress_proxy_id',
     'created_at',
     'updated_at',
   ]),
@@ -1057,8 +1116,13 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
     // bump, mirroring the 047/082 repository pattern.
     'opencode_go_protocol_rules',
+    // 100 (R5): admin CLI-pin mutation rides the same CAS pattern.
+    'claude_cli_version_override',
     'rpm_limit',
     'tpm_limit',
+    // R3 (107): the expiry sweep rebinds accounts per fallback_mode.
+    'egress_proxy_id',
+    'proxy_fallback_origin_id',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -1089,6 +1153,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_checked_at',
     // 108 (R5b): the control plane owns the adaptive-routing rule table.
     'opencode_go_protocol_rules',
+    // 100 (R5): the operator's per-account CLI pin override.
+    'claude_cli_version_override',
     'quarantine_entered_at',
     'quarantine_reason_code',
     'rpm_limit',
@@ -1097,6 +1163,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
     'disabled_at',
     'revoked_at',
+    // R3 (107): per-account egress proxy binding + expiry-migration provenance.
+    'egress_proxy_id',
+    'proxy_fallback_origin_id',
   ]),
   ...columnGrants('saas_platform_provider_accounts', 'INSERT', [
     'id',
@@ -1115,6 +1184,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'weight',
     'rpm_limit',
     'tpm_limit',
+    'egress_proxy_id',
     'created_at',
     'updated_at',
   ]),
@@ -1134,8 +1204,13 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
     // bump, mirroring the 047/082 repository pattern.
     'opencode_go_protocol_rules',
+    // 100 (R5): admin CLI-pin mutation rides the same CAS pattern.
+    'claude_cli_version_override',
     'rpm_limit',
     'tpm_limit',
+    // R3 (107): the expiry sweep rebinds accounts per fallback_mode.
+    'egress_proxy_id',
+    'proxy_fallback_origin_id',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -2941,6 +3016,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // R4 (106): verification-code expiry pruning and delivery-failure
   // compensation delete code rows.
   ['saas_email_verification_codes', 'DELETE'],
+  // R3 (107): proxy registry lifecycle. In-use proxies are protected by the
+  // egress_proxy_id FK (ON DELETE RESTRICT); only unbound proxies delete.
+  ['saas_egress_proxies', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */
@@ -3356,6 +3434,8 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_usage_events',
   'saas_usage_settlements',
   'saas_billing_groups',
+  // R3 (107): the dispatch profile resolves the account's egress proxy.
+  'saas_egress_proxies',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [

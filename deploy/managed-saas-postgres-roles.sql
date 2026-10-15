@@ -553,7 +553,13 @@ $runtime_column_acl_normalization$;
 -- then the gateway/worker runtime privilege probes fail closed by design.
 -- DEPLOYMENT NOTE (migration 108, R5b): the control plane owns the
 -- opencode_go_protocol_rules column on both provider account tables (the
--- adaptive-routing rule table; admin mutation bumps authz_version). The
+-- adaptive-routing rule table; admin mutation bumps authz_version).
+-- DEPLOYMENT NOTE (migration 100, R5): the control plane likewise owns the
+-- claude_cli_version_override column on both provider account tables (the
+-- operator's CLI pin override; admin mutation bumps authz_version). The
+-- claude usage snapshot/session-window columns are worker-written only:
+-- they are granted in deploy/managed-saas-validation-worker-role-grants.sql
+-- (the usage worker's role). The
 -- opencode-go usage scheduling columns are worker-written only: they are
 -- granted in deploy/managed-saas-validation-worker-role-grants.sql (the
 -- usage worker shares the credential-validation-worker role like the quota
@@ -572,6 +578,13 @@ $runtime_column_acl_normalization$;
 -- grant on it. Re-apply this template after running migration 106 on a
 -- database that predates it — until then the control-plane runtime privilege
 -- probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 107, R3 egress proxies): the control plane
+-- manages saas_egress_proxies and the accounts' egress binding columns
+-- (including the probe/sweep worker's last_probe_* and expiry-migration
+-- writes); the gateway and the OAuth refresh worker read the proxy table
+-- through the dynamic all-current-columns read grant below. Re-apply this
+-- template after running migration 107 on a database that predates it —
+-- until then the runtime privilege probes fail closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -640,6 +653,12 @@ BEGIN
       ('saas_billing_group_account_pools', 'SELECT', 'group_id account_id priority created_at'),
       ('saas_billing_group_account_pools', 'INSERT', 'group_id account_id priority'),
       ('saas_billing_group_account_pools', 'UPDATE', 'priority'),
+      -- R3 (107) egress proxies: the control plane manages the proxy registry
+      -- and runs the probe/sweep worker; the gateway and the OAuth refresh
+      -- worker read through the dynamic read-table grant below.
+      ('saas_egress_proxies', 'SELECT', 'id name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id last_probe_at last_probe_latency_ms last_probe_ip last_probe_quality created_at updated_at'),
+      ('saas_egress_proxies', 'INSERT', 'id name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id created_at updated_at'),
+      ('saas_egress_proxies', 'UPDATE', 'name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id last_probe_at last_probe_latency_ms last_probe_ip last_probe_quality updated_at'),
       -- R4 (106) registration admission: the identity control plane issues,
       -- verifies, consumes and prunes email verification codes. No gateway
       -- access — the table is never read outside the control plane.
@@ -693,12 +712,12 @@ BEGIN
       ('saas_project_entitlements', 'INSERT', 'id tenant_id project_id supply_profile_id supply_mode status model_scopes authz_version created_at updated_at last_audited_at disabled_at effective_at expires_at superseded_at source_type source_ref service_plan_snapshot_id'),
       ('saas_project_entitlements', 'UPDATE', 'status disabled_at superseded_at authz_version updated_at last_audited_at'),
       ('saas_supply_profiles', 'SELECT', 'tenant_id id supply_mode status model_scopes authz_version'),
-      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at'),
-      ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit created_at updated_at'),
-      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules rpm_limit tpm_limit updated_at disabled_at revoked_at'),
-      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at'),
-      ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit created_at updated_at'),
-      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules rpm_limit tpm_limit updated_at disabled_at revoked_at'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id'),
+      ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id created_at updated_at'),
+      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id'),
+      ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id created_at updated_at'),
+      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id updated_at disabled_at revoked_at'),
       ('saas_tenant_provider_account_capabilities', 'SELECT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_tenant_provider_account_capabilities', 'INSERT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_platform_provider_account_capabilities', 'SELECT', 'account_id provider_id product_id model endpoint capability_version'),
@@ -864,7 +883,10 @@ BEGIN
       ('saas_obs_channel_metrics_hourly', 'DELETE'),
       ('saas_obs_alert_rules', 'DELETE'),
       ('saas_billing_group_account_pools', 'DELETE'),
-      ('saas_email_verification_codes', 'DELETE')
+      ('saas_email_verification_codes', 'DELETE'),
+      -- R3 (107): proxy registry lifecycle; in-use proxies are protected by
+      -- the egress_proxy_id FK (ON DELETE RESTRICT).
+      ('saas_egress_proxies', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
@@ -940,7 +962,9 @@ BEGIN
       ('saas_gateway_request_idempotency_keys'), ('saas_prepared_request_evidence'),
       ('saas_provider_account_leases'), ('saas_gateway_capacity_reservations'),
       ('saas_usage_events'), ('saas_usage_settlements'),
-      ('saas_billing_groups')
+      ('saas_billing_groups'),
+      -- R3 (107): the dispatch profile resolves the account's egress proxy.
+      ('saas_egress_proxies')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)

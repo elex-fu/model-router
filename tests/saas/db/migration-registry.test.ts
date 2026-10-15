@@ -58,12 +58,14 @@ import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from '../
 import { PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/097_provider_account_quarantine_state.js';
 import { PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION } from '../../../src/saas/db/migrations/098_provider_account_rate_counters_and_health_score.js';
 import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/099_provider_account_codex_scheduling.js';
+import { PROVIDER_ACCOUNT_CLAUDE_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/100_provider_account_claude_scheduling.js';
 import { IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/101_identity_oauth_identities.js';
 import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/102_obs_channel_metrics.js';
 import { OBS_ALERTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/103_obs_alerts.js';
 import { OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/104_openai_embeddings_operation.js';
 import { BILLING_GROUPS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/105_billing_groups.js';
 import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/106_registration_admission.js';
+import { EGRESS_PROXIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/107_egress_proxies.js';
 import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/108_provider_account_opencode_go_scheduling.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
@@ -120,12 +122,14 @@ test('SaaS migration registry keeps a stable append order with only documented g
       97,
       98,
       99,
+      100,
       101,
       102,
       103,
       104,
       105,
       106,
+      107,
       108,
     ],
   );
@@ -171,16 +175,18 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_CLAUDE_SCHEDULING_SAAS_MIGRATION,
     IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
     OBS_CHANNEL_METRICS_SAAS_MIGRATION,
     OBS_ALERTS_SAAS_MIGRATION,
     OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
     BILLING_GROUPS_SAAS_MIGRATION,
     REGISTRATION_ADMISSION_SAAS_MIGRATION,
+    EGRESS_PROXIES_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 87);
+  assert.equal(SAAS_MIGRATIONS.length, 89);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -222,12 +228,14 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'provider_account_quarantine_state',
       'provider_account_rate_counters_and_health_score',
       'provider_account_codex_scheduling',
+      'provider_account_claude_scheduling',
       'identity_oauth_identities',
       'obs_channel_metrics',
       'obs_alert_rules_and_events',
       'openai_embeddings_operation',
       'billing_groups',
       'registration_admission',
+      'egress_proxies',
       'provider_account_opencode_go_scheduling',
     ],
   );
@@ -255,17 +263,19 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       97,
       98,
       99,
+      100,
       101,
       102,
       103,
       104,
       105,
       106,
+      107,
       108,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 87);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 87);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 89);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 89);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -355,7 +365,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 87);
+  assert.equal(SAAS_MIGRATIONS.length, 89);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -383,12 +393,14 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_CLAUDE_SCHEDULING_SAAS_MIGRATION,
     IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
     OBS_CHANNEL_METRICS_SAAS_MIGRATION,
     OBS_ALERTS_SAAS_MIGRATION,
     OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
     BILLING_GROUPS_SAAS_MIGRATION,
     REGISTRATION_ADMISSION_SAAS_MIGRATION,
+    EGRESS_PROXIES_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
@@ -434,34 +446,38 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[79]?.version, 99);
   assert.equal(SAAS_MIGRATIONS[79]?.name, 'provider_account_codex_scheduling');
   // 100 stays reserved (P1b consumed only 099); 101 is the Phase 2 OAuth table.
-  assert.equal(SAAS_MIGRATIONS[80], IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[80]?.version, 101);
-  assert.equal(SAAS_MIGRATIONS[80]?.name, 'identity_oauth_identities');
+  assert.equal(SAAS_MIGRATIONS[81], IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[81]?.version, 101);
+  assert.equal(SAAS_MIGRATIONS[81]?.name, 'identity_oauth_identities');
   // 102/103: Phase 3 observability (channel metrics rollup, alert rules).
-  assert.equal(SAAS_MIGRATIONS[81], OBS_CHANNEL_METRICS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[81]?.version, 102);
-  assert.equal(SAAS_MIGRATIONS[81]?.name, 'obs_channel_metrics');
-  assert.equal(SAAS_MIGRATIONS[82], OBS_ALERTS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[82]?.version, 103);
-  assert.equal(SAAS_MIGRATIONS[82]?.name, 'obs_alert_rules_and_events');
+  assert.equal(SAAS_MIGRATIONS[82], OBS_CHANNEL_METRICS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[82]?.version, 102);
+  assert.equal(SAAS_MIGRATIONS[82]?.name, 'obs_channel_metrics');
+  assert.equal(SAAS_MIGRATIONS[83], OBS_ALERTS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[83]?.version, 103);
+  assert.equal(SAAS_MIGRATIONS[83]?.name, 'obs_alert_rules_and_events');
   // 104: R2 embeddings endpoint — OpenAI-family embeddings operation pairs.
-  assert.equal(SAAS_MIGRATIONS[83], OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[83]?.version, 104);
-  assert.equal(SAAS_MIGRATIONS[83]?.name, 'openai_embeddings_operation');
+  assert.equal(SAAS_MIGRATIONS[84], OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[84]?.version, 104);
+  assert.equal(SAAS_MIGRATIONS[84]?.name, 'openai_embeddings_operation');
   // 105: R1 billing groups (parallel workstream).
-  assert.equal(SAAS_MIGRATIONS[84], BILLING_GROUPS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[84]?.version, 105);
-  assert.equal(SAAS_MIGRATIONS[84]?.name, 'billing_groups');
+  assert.equal(SAAS_MIGRATIONS[85], BILLING_GROUPS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[85]?.version, 105);
+  assert.equal(SAAS_MIGRATIONS[85]?.name, 'billing_groups');
   // 108: R5b OpenCode Go scheduling (usage snapshots + protocol rules);
   // 107 stays available for parallel workstreams.
   // 106: R4 registration admission (email verification codes) landed after
   // 108 was registered, so it slots in directly ahead of it.
-  assert.equal(SAAS_MIGRATIONS[85], REGISTRATION_ADMISSION_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[85]?.version, 106);
-  assert.equal(SAAS_MIGRATIONS[85]?.name, 'registration_admission');
-  assert.equal(SAAS_MIGRATIONS[86], PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS[86]?.version, 108);
-  assert.equal(SAAS_MIGRATIONS[86]?.name, 'provider_account_opencode_go_scheduling');
+  assert.equal(SAAS_MIGRATIONS[86], REGISTRATION_ADMISSION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[86]?.version, 106);
+  assert.equal(SAAS_MIGRATIONS[86]?.name, 'registration_admission');
+  // 107: R3 egress proxies — the per-account egress survival line.
+  assert.equal(SAAS_MIGRATIONS[87], EGRESS_PROXIES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[87]?.version, 107);
+  assert.equal(SAAS_MIGRATIONS[87]?.name, 'egress_proxies');
+  assert.equal(SAAS_MIGRATIONS[88], PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[88]?.version, 108);
+  assert.equal(SAAS_MIGRATIONS[88]?.name, 'provider_account_opencode_go_scheduling');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

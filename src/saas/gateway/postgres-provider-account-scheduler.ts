@@ -74,6 +74,7 @@ interface EligibilityRow extends Row {
   account_rpm_limit: unknown;
   account_tpm_limit: unknown;
   account_health_score: unknown;
+  account_egress_proxy_quality: unknown;
   credential_owner_kind: unknown;
   credential_supply_mode: unknown;
   credential_id: unknown;
@@ -217,6 +218,7 @@ SELECT product.status AS product_status,
        account.quota_state AS account_quota_state,
        account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
        health.health_score AS account_health_score,
+       egress_proxy.last_probe_quality AS account_egress_proxy_quality,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -290,6 +292,10 @@ SELECT product.status AS product_status,
   LEFT JOIN saas_provider_account_runtime_health health
     ON health.owner_scope_key = $1::text AND health.account_id = account.id
    AND health.owner_kind = 'tenant'
+  /* R3 (migration 107): the account's egress proxy probe quality demotes the
+   * scheduling weight only — never eligibility. PK lookups stay free. */
+  LEFT JOIN saas_egress_proxies egress_proxy
+    ON egress_proxy.id = account.egress_proxy_id
  WHERE product.provider_id = $4 AND product.product_id = $5 AND product.status = 'active'
    AND profile.supply_mode = 'byok' AND profile.status = 'active'
    AND profile.authz_version = $12 AND profile.model_scopes @> ARRAY[$15]::text[]
@@ -337,6 +343,7 @@ SELECT product.status AS product_status,
        account.quota_state AS account_quota_state,
        account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
        health.health_score AS account_health_score,
+       egress_proxy.last_probe_quality AS account_egress_proxy_quality,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -440,6 +447,9 @@ SELECT product.status AS product_status,
   LEFT JOIN saas_provider_account_runtime_health health
     ON health.owner_scope_key = 'platform' AND health.account_id = account.id
    AND health.owner_kind = 'platform'
+  /* R3 (migration 107): see the BYOK query above. */
+  LEFT JOIN saas_egress_proxies egress_proxy
+    ON egress_proxy.id = account.egress_proxy_id
  WHERE product.provider_id = $5 AND product.product_id = $6 AND product.status = 'active'
    AND profile.supply_mode = 'platform' AND profile.status = 'active'
    AND profile.authz_version = $13 AND profile.model_scopes @> ARRAY[$21]::text[]
@@ -1043,12 +1053,20 @@ class PostgresEligibilityAuthority {
         // health-score module (agent N's R7 formula) throws on any malformed
         // persisted shape, which maps to the fail-closed scheduling block
         // instead of a guess.
+        // R3 (migration 107): a 'dead' egress proxy demotes the account to
+        // the contract minimum weight — an eligibility signal only. Proxy
+        // jitter must never remove an account (that would migrate traffic
+        // across exit IPs and trip the provider risk control this feature
+        // exists to prevent); anything but a known quality is ignored so a
+        // probe write in flight cannot block scheduling.
+        const egressProxyQuality = row.account_egress_proxy_quality;
+        const deadEgressProxy = egressProxyQuality === 'dead';
         let adjustedWeight: number;
         try {
           const healthScore = parseHealthScoreColumn(row.account_health_score);
           // D4: a 'low' quota snapshot demotes to the contract minimum
           // weight; the R7 health multiplier then applies on top of it.
-          adjustedWeight = effectiveWeight(quotaSignal === 'low' ? 1 : weight, healthScore);
+          adjustedWeight = effectiveWeight(quotaSignal === 'low' || deadEgressProxy ? 1 : weight, healthScore);
         } catch {
           return { decision: 'block', reason: 'persisted account health score is malformed' };
         }

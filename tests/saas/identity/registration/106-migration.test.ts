@@ -10,7 +10,7 @@ const migration = REGISTRATION_ADMISSION_SAAS_MIGRATION;
 const sql = migration.sql;
 const commands = sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('106 registers between 105 and the concurrent 108 track', () => {
+test('106 registers between 105 and the concurrent 107/108 tracks', () => {
   assert.equal(migration.version, 106);
   assert.equal(migration.name, 'registration_admission');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
@@ -18,8 +18,7 @@ test('106 registers between 105 and the concurrent 108 track', () => {
   const index = registered.indexOf(106);
   assert.ok(index > 0, '106 is registered');
   assert.equal(registered[index - 1], 105, '106 lands directly after 105');
-  assert.equal(registered[index + 1], 108, '106 lands directly before the R5b track');
-  assert.equal(registered.includes(107), false, '107 stays reserved for R6a');
+  assert.equal(registered[index + 1], 107, '106 lands directly before the R3 egress-proxy track');
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });
 

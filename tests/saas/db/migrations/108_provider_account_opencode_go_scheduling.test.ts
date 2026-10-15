@@ -7,20 +7,20 @@ import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../..
 const migration = PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('108 registers after 105/106 in forward order and leaves 107 unoccupied', () => {
+test('108 registers after 105/106/107 in forward order', () => {
   assert.equal(migration.version, 108);
   assert.equal(migration.name, 'provider_account_opencode_go_scheduling');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  // Stable append position: 108 follows the 105/106 forwards directly; the
-  // R4 registration-admission migration (106) landed after 108 was reserved
-  // and slots in ahead of it. 107 stays available for the next workstream.
+  // Stable append position: 108 follows the 105/106/107 forwards directly;
+  // the R4 registration-admission migration (106) landed after 108 was
+  // reserved and slots in ahead of it, and R3 egress proxies took 107.
   assert.equal(registered.includes(105), true);
   assert.equal(registered.includes(106), true);
   assert.equal(registered.indexOf(108), registered.lastIndexOf(108));
   assert.equal(registered.indexOf(108) > registered.indexOf(106), true);
+  assert.equal(registered.indexOf(108) > registered.indexOf(107), true);
   assert.equal(SAAS_MIGRATIONS[registered.indexOf(108)], migration);
-  assert.equal(registered.includes(107), false);
 });
 
 test('108 adds nullable OpenCode Go scheduling signal columns to both account owner families', () => {

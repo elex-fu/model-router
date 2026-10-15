@@ -11,10 +11,12 @@ import {
   createPinnedProviderHttpTestConnectorFactory,
   isProviderHttpTestAddressCapability,
   type ProviderHttpAddressResolver,
+  type ProviderHttpEgressProxyTarget,
   type ProviderHttpPinnedConnector,
   type ProviderHttpPinnedConnectorFactory,
   type ProviderHttpResolvedAddress,
   type ProviderHttpTestAddressCapability,
+  resolveEgressProxyTarget,
   resolveProviderHttpAddresses,
   selectPinnedProviderAddress,
 } from './provider-http-address.js';
@@ -56,6 +58,13 @@ export interface ProviderHttpDispatchProfile {
   readonly url?: string;
   /** Compatibility spelling for resolver implementations that call this targetUrl. */
   readonly targetUrl?: string;
+  /**
+   * R3 egress proxies: the per-account egress proxy URL assembled by the
+   * resolver (credentials unsealed at resolution time). The URL exists only
+   * for the lifetime of this dispatch and never enters logs; an absent value
+   * keeps the exact pre-R3 direct-egress behavior.
+   */
+  readonly egressProxy?: { readonly url: string };
 }
 
 export interface ProviderHttpDispatchProfileResolveInput {
@@ -77,6 +86,14 @@ export interface ProviderHttpDispatchProfileResolveInput {
    */
   readonly providerProtocol?: PreparedEvidenceTransportRequest['evidence']['providerProtocol'];
   readonly providerOperation?: PreparedEvidenceTransportRequest['evidence']['providerOperation'];
+  /**
+   * R3: the claimed evidence's supply mode and account owner kind, used to
+   * resolve the account's egress proxy from the correct owner-scoped table.
+   * Legacy evidence omits accountOwnerKind; the supply mode alone determines
+   * the owner kind in that case.
+   */
+  readonly supplyMode?: PreparedEvidenceTransportRequest['evidence']['supplyMode'];
+  readonly accountOwnerKind?: PreparedEvidenceTransportRequest['evidence']['accountOwnerKind'];
   readonly signal: AbortSignal;
 }
 
@@ -182,6 +199,7 @@ export type ProviderHttpTransportErrorCode =
   | 'PROFILE_UNAVAILABLE'
   | 'PROFILE_INVALID'
   | 'ENDPOINT_POLICY_VIOLATION'
+  | 'EGRESS_PROXY_INVALID'
   | 'PAYLOAD_BINDING_MISMATCH'
   | 'CREDENTIAL_UNAVAILABLE'
   | 'CREDENTIAL_INVALID'
@@ -512,6 +530,28 @@ function targetUrlFromProfile(profile: ProviderHttpDispatchProfile | null): stri
   return url;
 }
 
+/**
+ * R3: normalize the profile's egress-proxy descriptor. The shape check is
+ * deliberately strict (one url key, non-empty string); address validation
+ * and pinning happen in resolveEgressProxyTarget with safe error messages
+ * that never echo the URL or its credentials.
+ */
+function egressProxyFromProfile(profile: ProviderHttpDispatchProfile | null): { readonly url: string } | null {
+  if (!profile || typeof profile !== 'object') fail('PROFILE_UNAVAILABLE', 'dispatch profile is unavailable');
+  const proxy = (profile as { readonly egressProxy?: unknown }).egressProxy;
+  if (proxy === undefined || proxy === null) return null;
+  if (
+    typeof proxy !== 'object' ||
+    Object.keys(proxy).length !== 1 ||
+    typeof (proxy as { readonly url?: unknown }).url !== 'string'
+  ) {
+    fail('EGRESS_PROXY_INVALID', 'dispatch profile egress proxy is invalid');
+  }
+  const url = (proxy as { readonly url: string }).url;
+  if (url === '') fail('EGRESS_PROXY_INVALID', 'dispatch profile egress proxy is invalid');
+  return { url };
+}
+
 function validateTargetUrl(value: string, policy: NormalizedEndpointPolicy): ValidatedTarget {
   if (value !== value.trim()) fail('ENDPOINT_POLICY_VIOLATION', 'dispatch profile target is not a valid URL');
   for (let index = 0; index < value.length; index += 1) {
@@ -692,6 +732,8 @@ function profileInput(
     endpoint: request.evidence.endpoint,
     providerProtocol: request.evidence.providerProtocol,
     providerOperation: request.evidence.providerOperation,
+    supplyMode: request.evidence.supplyMode,
+    accountOwnerKind: request.evidence.accountOwnerKind,
     signal,
   };
 }
@@ -820,6 +862,28 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
       } catch {
         fail('ENDPOINT_POLICY_VIOLATION', 'dispatch profile host did not resolve exclusively to public addresses');
       }
+      // R3 egress proxies: validate + whitelist-pin the account's proxy host
+      // through the same address policy as the provider endpoint itself. A
+      // malformed or non-public proxy fails closed — never a silent fallback
+      // to direct egress (that would change the account's exit IP).
+      let egressProxy: ProviderHttpEgressProxyTarget | undefined;
+      const proxyDescriptor = egressProxyFromProfile(profile);
+      if (proxyDescriptor !== null) {
+        try {
+          egressProxy = await resolveEgressProxyTarget(proxyDescriptor, {
+            resolveAddresses: this.options.resolveAddresses,
+            ...(this.options.testAddressCapability === undefined
+              ? {}
+              : { testCapability: this.options.testAddressCapability }),
+            signal: context.signal,
+          });
+        } catch (error) {
+          assertActive(context);
+          if (error instanceof ProviderHttpTransportError) throw error;
+          fail('EGRESS_PROXY_INVALID', 'dispatch profile egress proxy is invalid');
+        }
+      }
+      assertActive(context);
       // R5b-4: deployment-owned per-protocol fixed headers (e.g. the OpenCode
       // Go anthropic-version header), resolved from the signed dispatch facts
       // before any credential material exists.
@@ -859,6 +923,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
               headerName,
               headerValue.value,
               fixedRequestHeaders,
+              egressProxy,
             );
             return result;
           } finally {
@@ -894,6 +959,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     credentialHeaderName: string,
     credentialHeaderValue: string,
     fixedRequestHeaders: Readonly<Record<string, string>> = {},
+    egressProxy?: ProviderHttpEgressProxyTarget,
   ): Promise<PreparedEvidenceTransportResponse> {
     const headers = new Headers(FIXED_REQUEST_HEADERS);
     // R5b-4 per-protocol fixed headers sit between the transport-owned fixed
@@ -910,6 +976,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         port: target.port,
         address: pinnedAddress.address,
         family: pinnedAddress.family,
+        ...(egressProxy === undefined ? {} : { proxy: egressProxy }),
       });
       if (
         !connector ||
@@ -929,7 +996,9 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     try {
       response = await this.options.fetch(target.url, {
         method: 'POST',
-        headers,
+        // The DOM-lib Headers type predates undici's structurally stricter
+        // HeadersInit; the instance is a plain header bag at runtime.
+        headers: headers as unknown as Parameters<ProviderHttpFetch>[1]['headers'],
         body,
         redirect: 'manual',
         signal: context.signal,

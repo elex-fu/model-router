@@ -102,6 +102,9 @@ class FakeDatabase implements SaasDatabase {
     let rows: Row[];
     if (sql.includes('FOR UPDATE OF credential SKIP LOCKED')) {
       rows = this.state.candidateRows;
+    } else if (sql.includes('JOIN saas_egress_proxies AS proxy')) {
+      // R3: accounts in this fixture carry no egress proxy binding.
+      rows = [];
     } else if (sql.includes('_provider_credential_versions')) {
       rows = this.state.versionRows;
     } else if (sql.includes('_provider_credentials')) {
