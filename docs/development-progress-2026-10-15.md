@@ -81,6 +81,40 @@
 - 顺带修复 3 个存量 undici 类型漂移 tsc 错误(upstream-actions asyncIterator、proxy.ts dispatcher×2)——全树 tsc 归零。
 - **验证**:丢弃式 PG 18 真库(001→108 迁移+角色对账+探针;CHECK 拒 socks4/明文凭据/自备份);全量 4368 单测+246 集成 0 失败;30 新测试。
 
-## 进行中
+## R6 主动测活 + Redis 热状态(任务 #32,已完成,85a6448)
 
-R6(#32 测活+Redis 热状态,迁移 109)与 R7(#33 调度策略)并行——R6 禁改调度器、R7 独占调度器,文件域隔离。R5b-6(#26 测试收尾)待两者落地后执行(跨 R5b 全链 + PG 门禁复跑)。
+- **6a**:迁移 109(probe monitors/runs,owner-scoped,算术挑战,失败阈值→temp_unschedulable 24h,恢复仅探针成功);probe service 四品类(claude 全伪装/codex/opencode-go glm-5.3/api-key 固定适配器),全部经 R3 出口代理;探针用量只进 run detail,永不入计费。管理 API `/admin/api/v1/probe-monitors/{trigger,list}`。
+- **6b**:并发槽(sub2api 同构 Lua ZSET,成员=请求 ID 分摘要,PG 租约仍是最终准入,Redis 故障 fail-open);粘性快路径(1h TTL,sessionHash 优先级,PG 亲和回源回填);token 解密缓存(60s,信封+AAD 摘要为键,轮换天然失效);RedisProvider 接口扩 slot/cache client。调度器集成点文档化留给 R7 域(红线遵守)。
+- **验证**:真库 90 迁移+双角色模板;全量 4450 单测+246 集成 0 失败;startup 55/55。
+
+## R7 调度策略(任务 #33,已完成,ee561f3)
+
+策略注册表(soonest-reset 过滤→比较链[成本,负载,LRU]→尾部[LRU 开启时种子洗牌/否则原确定性加权]);信号:12 个 099/100/108 重置列(最早未来重置+30min 严格<+陈旧守卫)、supplier_cost 有理数交叉相乘比较(1/3 vs 10^18/3×10^18 浮点相等但有理可分)、健康 observedAt 作 LRU、latencyMs 千分比折入权重(系数 0=逐位不变)。**默认行为金样回归**:改动前调度器捕获的 fixture 硬编码进测试,默认选项与空 strategies 都精确复现。选择理由审计(best-effort)。4405 单测 0 失败。
+
+## R5b-6 收官验证(任务 #26,已完成,eca9142)
+
+最终 PG 门禁清扫(全新丢弃式 PG 18 库,90 迁移+双角色模板)抓出两个真实缺陷并修复:
+1. **R5b-2 回归**:opencode-go authority 装饰器(纯对象)使商业网关 E2E 的组合 introspection 断言(`instanceof PostgresRequestPreparationAuthorityAdapter`)失败——此前的 bootstrap-409 全是 DB 状态污染的红鲱鱼(该门每全新库一次性)。修复:装饰器暴露 `underlyingAuthority` 透明性合同,门禁解包恰一层后断言(更深链仍是门禁要抓的组合缺陷)。
+2. **P3 授权缺口**(与 parity e2e 抓到的观测缺口同类):channel-status 1m 聚合在 control-plane 角色下读 saas_attempts 的 6 个归类/归因列,但 SELECT 授权一个都没带——聚合器每轮记 `permission denied`(worker 吞掉所以测试一直绿)。roles.sql + runtime-privileges 双侧修复。
+
+**门禁矩阵终态**(同一最终 schema):commercial-gateway E2E exit 0(干净库)、concurrent-claim 6/6、validation-worker lifecycle 3/3、mirror 109/109、全量单测 4450/0 失败、集成 246/0 失败、tsc 全绿。
+
+## 全方案完成汇总(R0–R7 + R5b)
+
+| 阶段 | 提交 | 迁移 |
+|---|---|---|
+| R0-1 lifecycle 门禁 | 49880b2 | — |
+| R0-2 浏览器 E2E 台账 | d1fee4e | — |
+| R1 分组倍率 | 4e9d27e | 105 |
+| R2 embeddings | 804d2ef | 104 |
+| R3 出口代理 | 658c84d+a05698c | 107 |
+| R4 注册准入 | 1773d98 | 106 |
+| R5 Claude 池 | 5279e42 | 100 |
+| R5b OpenCode Go(6 任务) | fe10456/d03c4ae/40f057b/c6c0d87/c5ba296 | 108 |
+| R6 测活+Redis | 85a6448 | 109 |
+| R7 调度策略 | ee561f3 | — |
+| R5b-6 收官修复 | eca9142 | — |
+
+迁移编号终局:100(claude)/104(embeddings)/105(billing groups)/106(registration)/107(egress)/108(opencode-go)/109(probe)——104/105 相对方案表的错位已在树内注释记录。
+
+**留档的后续项**(非阻塞,均已在代码/文档标注):控制台 UI(组管理页/代理 CRUD/测活按钮/目录同步挂载面)、平台 settings store(充值档位折扣/注册配置受管面)、Responses 桥真转换、R6 调度器消费探针列与并发槽预检的接线、040 半开探针路径、组池调度消费与 claude_code_only 执法、结算侧 profit control、OpenRouter 兜底(R8a)、Gemini 池(R8b)、R9 Docker 基准。
