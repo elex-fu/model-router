@@ -7,7 +7,7 @@ import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from '../../../../sr
 const migration = PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('099 registers after 098 in forward order and leaves 100 unoccupied', () => {
+test('099 registers after 098 in forward order with 100 taken by the claude family', () => {
   assert.equal(migration.version, 99);
   assert.equal(migration.name, 'provider_account_codex_scheduling');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
@@ -19,9 +19,9 @@ test('099 registers after 098 in forward order and leaves 100 unoccupied', () =>
   // after 098 (later phases may append further forwards).
   assert.equal(SAAS_MIGRATIONS[78]?.version, 98);
   assert.equal(SAAS_MIGRATIONS[79], migration);
-  // No migration 100: the plan's account-plan metadata lives inside the
-  // sealed credential envelope, so 100 stays available (no stranded numbers).
-  assert.equal(registered.includes(100), false);
+  // Migration 100 now exists: R5 took the slot 099's header reserved for the
+  // claude scheduling-column family (it lands directly after 099).
+  assert.equal(registered.includes(100), true);
 });
 
 test('099 adds nullable codex scheduling signal columns to both account owner families', () => {

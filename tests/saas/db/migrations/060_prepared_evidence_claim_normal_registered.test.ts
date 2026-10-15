@@ -10,7 +10,13 @@ import { test } from 'node:test';
 const rootPath = 'tests/saas/db/migrations/060_prepared_evidence_claim_generated_account.postgres.integration.test.ts';
 const source = (path: string) => readFileSync(resolve(process.cwd(), path), 'utf8');
 const collapse = (text: string): string =>
-  text.replace(/\s+/g, ' ').replace(/, \)/g, ')').replace(/ \)/g, ')').replace(/\( /g, '(');
+  text
+    .replace(/\s+/g, ' ')
+    .replace(/, \)/g, ')')
+    .replace(/ \)/g, ')')
+    .replace(/\( /g, '(')
+    .replace(/\[ /g, '[')
+    .replace(/, \]/g, ']');
 const has = (text: string, marker: string): boolean => collapse(text).includes(collapse(marker));
 function section(text: string, start: string, end: string): string {
   const flat = collapse(text);
@@ -50,7 +56,7 @@ test('normal 060 requires default full schema verification and the exact complet
     "assert.equal(migration.name, 'prepared_evidence_claim_generated_account')",
     'assert.equal(SAAS_MIGRATIONS[59], migration,',
     'SAAS_MIGRATIONS.map(({ version }) => version)',
-    '[...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105, 106, 108]',
+    '[...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108]',
     'SAAS_MIGRATIONS.map(({ version, name, sql }) =>',
     "createHash('sha256').update(name).update('\\0').update(sql).digest('hex')",
     'SELECT version, name, checksum FROM model_router_saas.saas_schema_migrations ORDER BY version ASC',
@@ -188,7 +194,7 @@ test('all six native proofs and original finite fixture diagnostics remain manda
   const diagnostic = section(root, '// Exact finite vocabulary', '// Normal complete CLI 060');
   assert.match(
     diagnostic,
-    /const nativeStates = \[ ?'42501', '55000', '55006', '23502', '23503', '23505', '23514', ?'42P01', '42703', '42P08', '42883', '42601', '40P01', '40001', '55P03', '57014', ?\] as const/,
+    /const nativeStates = \[ ?'42501', '55000', '55006', '23502', '23503', '23505', '23514', ?'42P01', '42703', '42P08', '42883', '42601', '40P01', '40001', '55P03', '57014',? ?\] as const/,
   );
   assert.doesNotMatch(
     diagnostic,

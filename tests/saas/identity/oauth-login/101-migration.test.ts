@@ -9,15 +9,15 @@ const migration = IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION;
 const sql = migration.sql;
 const commands = sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('101 registers after 099 with 100 reserved, ahead of later concurrent tracks', () => {
+test('101 registers after the claude-family 100, ahead of later concurrent tracks', () => {
   assert.equal(migration.version, 101);
   assert.equal(migration.name, 'identity_oauth_identities');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
   const index = registered.indexOf(101);
   assert.ok(index > 0, '101 is registered');
-  assert.equal(registered[index - 1], 99, '101 lands directly after 099');
-  assert.equal(registered.includes(100), false, '100 stays reserved');
+  assert.equal(registered[index - 1], 100, '101 lands directly after 100');
+  assert.equal(registered.includes(100), true, '100 holds the R5 claude scheduling family 099 reserved it for');
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });
 
