@@ -61,6 +61,8 @@ import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from '../../../src/s
 import { IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/101_identity_oauth_identities.js';
 import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/102_obs_channel_metrics.js';
 import { OBS_ALERTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/103_obs_alerts.js';
+import { OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/104_openai_embeddings_operation.js';
+import { BILLING_GROUPS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/105_billing_groups.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -94,7 +96,7 @@ test('SaaS migration registry keeps a stable append order with only documented g
   // (docs/contracts-m0-freeze.md).
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103],
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105],
   );
 });
 
@@ -141,9 +143,11 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
     OBS_CHANNEL_METRICS_SAAS_MIGRATION,
     OBS_ALERTS_SAAS_MIGRATION,
+    OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
+    BILLING_GROUPS_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 83);
+  assert.equal(SAAS_MIGRATIONS.length, 85);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -188,14 +192,16 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'identity_oauth_identities',
       'obs_channel_metrics',
       'obs_alert_rules_and_events',
+      'openai_embeddings_operation',
+      'billing_groups',
     ],
   );
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103],
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 83);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 83);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 85);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 85);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -285,7 +291,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 83);
+  assert.equal(SAAS_MIGRATIONS.length, 85);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -316,6 +322,8 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION,
     OBS_CHANNEL_METRICS_SAAS_MIGRATION,
     OBS_ALERTS_SAAS_MIGRATION,
+    OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
+    BILLING_GROUPS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -370,6 +378,14 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[82], OBS_ALERTS_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[82]?.version, 103);
   assert.equal(SAAS_MIGRATIONS[82]?.name, 'obs_alert_rules_and_events');
+  // 104: R2 embeddings endpoint — OpenAI-family embeddings operation pairs.
+  assert.equal(SAAS_MIGRATIONS[83], OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[83]?.version, 104);
+  assert.equal(SAAS_MIGRATIONS[83]?.name, 'openai_embeddings_operation');
+  // 105: R1 billing groups (parallel workstream).
+  assert.equal(SAAS_MIGRATIONS[84], BILLING_GROUPS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[84]?.version, 105);
+  assert.equal(SAAS_MIGRATIONS[84]?.name, 'billing_groups');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

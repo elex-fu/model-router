@@ -22,7 +22,7 @@ test('migration 034 registers after the immutable 033 history', () => {
   assert.equal(SAAS_MIGRATIONS.filter(({ version }) => version === 34).length, 1);
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103],
+    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105],
   );
 });
 

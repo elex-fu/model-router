@@ -15,7 +15,8 @@ test('095 registers after 094 with the documented gaps; 103 is the current forwa
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
-  assert.equal(registered.at(-1), 103);
+  // 104 (R2 embeddings operation) and 105 (R1 billing groups) follow at the tail.
+  assert.equal(registered.at(-1), 105);
   assert.equal(SAAS_MIGRATIONS[75], migration);
 });
 

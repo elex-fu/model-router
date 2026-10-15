@@ -378,6 +378,14 @@ function operationForProtocol(protocol: PreparedEvidenceProtocol): string {
   }
 }
 
+/**
+ * R2: the OpenAI protocol family additionally hosts the embeddings
+ * operation; no other protocol accepts a second operation.
+ */
+function operationAllowedForProtocol(protocol: PreparedEvidenceProtocol, operation: string): boolean {
+  return operation === operationForProtocol(protocol) || (protocol === 'openai' && operation === 'embeddings');
+}
+
 function provenanceDigest(value: unknown, label: string): string {
   if (value === undefined || value === null) fail('AUTHORITY_MISMATCH', `${label} is required provenance`);
   return digest(value, label);
@@ -681,10 +689,10 @@ function normalizeInput(
     if (normalized.clientOperation === undefined || normalized.providerOperation === undefined) {
       fail('AUTHORITY_MISMATCH', 'client and provider operation provenance is required');
     }
-    if (normalized.clientOperation !== operationForProtocol(normalized.protocol)) {
+    if (!operationAllowedForProtocol(normalized.protocol, normalized.clientOperation)) {
       fail('AUTHORITY_MISMATCH', 'client operation does not match evidence protocol');
     }
-    if (normalized.providerOperation !== operationForProtocol(normalized.providerProtocol)) {
+    if (!operationAllowedForProtocol(normalized.providerProtocol, normalized.providerOperation)) {
       fail('AUTHORITY_MISMATCH', 'provider operation does not match provider protocol');
     }
     if (normalized.requestFingerprint === undefined) {

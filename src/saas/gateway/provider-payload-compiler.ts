@@ -30,7 +30,14 @@ const PROTOCOLS = new Set<GatewayProtocol>(['anthropic', 'openai', 'gemini', 're
 const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
 
 /** Canonical provider operations understood by this compiler. */
-export type ProviderPayloadOperation = 'chat.completions' | 'messages' | 'responses' | 'generateContent';
+export type ProviderPayloadOperation = 'chat.completions' | 'messages' | 'responses' | 'generateContent' | 'embeddings';
+
+/**
+ * R2: the OpenAI protocol family additionally hosts the embeddings
+ * operation. It is passthrough-only (openai -> openai) and is never bridged
+ * onto another provider protocol.
+ */
+const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['chat.completions', 'embeddings']);
 
 /**
  * A server-owned route description. It contains no URL, credential, or caller
@@ -201,6 +208,7 @@ export interface ProviderCompiledPayload extends RequestPreparationCompiledPaylo
 export type ProviderPayloadCompilerFailureCode =
   | 'INVALID_INPUT'
   | 'UNSUPPORTED_OPERATION'
+  | 'CAPABILITY_UNSUPPORTED'
   | 'MODEL_RESOLUTION_UNAVAILABLE'
   | 'MODEL_INCOMPATIBLE'
   | 'ESTIMATOR_UNAVAILABLE'
@@ -212,6 +220,7 @@ export type ProviderPayloadCompilerFailureCode =
 const SAFE_FAILURE_MESSAGES: Readonly<Record<ProviderPayloadCompilerFailureCode, string>> = Object.freeze({
   INVALID_INPUT: 'Provider payload compiler input is invalid',
   UNSUPPORTED_OPERATION: 'Provider protocol operation is not supported',
+  CAPABILITY_UNSUPPORTED: 'The provider does not support the requested operation',
   MODEL_RESOLUTION_UNAVAILABLE: 'Provider model resolution is unavailable',
   MODEL_INCOMPATIBLE: 'Provider model compatibility is unavailable',
   ESTIMATOR_UNAVAILABLE: 'Provider usage upper-bound estimator is unavailable',
@@ -353,6 +362,7 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'messages') return 'messages';
   if (value === 'responses') return 'responses';
   if (value === 'generateContent') return 'generateContent';
+  if (value === 'embeddings') return 'embeddings';
   compilerFailure('UNSUPPORTED_OPERATION');
 }
 
@@ -364,6 +374,9 @@ function canonicalOperationForProtocol(protocol: GatewayProtocol): ProviderPaylo
 }
 
 function protocolOperationMatches(protocol: GatewayProtocol, operation: ProviderPayloadOperation): boolean {
+  // The OpenAI family accepts the embeddings operation in addition to its
+  // canonical chat operation; no other protocol can serve embeddings.
+  if (protocol === 'openai') return OPENAI_FAMILY_OPERATIONS.has(operation);
   return canonicalOperationForProtocol(protocol) === operation;
 }
 
@@ -485,6 +498,14 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   const normalizedClientOperation = normalizeOperation(
     clientOperation ?? canonicalOperationForProtocol(resolvedClientProtocol),
   );
+  // R2 capability matrix: embeddings is open only to OpenAI-protocol-family
+  // providers. A provider that can never serve the operation is reported as
+  // an unsupported capability, not as a transient outage. Checked before the
+  // generic operation/bridge pair validation so the family mismatch is never
+  // shadowed by an UNSUPPORTED_OPERATION fallback.
+  if (normalizedClientOperation === 'embeddings' && resolvedProviderProtocol !== 'openai') {
+    compilerFailure('CAPABILITY_UNSUPPORTED');
+  }
   if (
     !protocolOperationMatches(resolvedClientProtocol, normalizedClientOperation) ||
     !protocolOperationMatches(resolvedProviderProtocol, normalizedProviderOperation)
@@ -632,6 +653,13 @@ function validateClientBody(body: unknown, route: NormalizedRoute, publicModel: 
   if (model !== publicModel) compilerFailure('INVALID_INPUT');
   assertJsonCompatible(body);
 
+  // R2: an embeddings request carries the OpenAI embeddings `input` field
+  // (text, text pieces, or pre-tokenized id vectors) instead of messages.
+  if (route.clientOperation === 'embeddings') {
+    if (!Object.hasOwn(body, 'input')) compilerFailure('INVALID_INPUT');
+    assertJsonCompatible(body.input);
+    return body;
+  }
   if (route.clientProtocol === 'responses') {
     if (!Object.hasOwn(body, 'input')) compilerFailure('INVALID_INPUT');
     assertJsonCompatible(body.input);
@@ -827,9 +855,11 @@ function safeDecision(error: ProviderPayloadCompilerError): RequestPreparationDe
   const payloadCode =
     error.code === 'ESTIMATOR_UNAVAILABLE' || error.code === 'USAGE_BOUND_INVALID'
       ? 'payload_bounds_unavailable'
-      : error.code === 'UNSUPPORTED_OPERATION' || error.code === 'MODEL_INCOMPATIBLE'
-        ? 'capability_unavailable'
-        : 'payload_invalid';
+      : error.code === 'CAPABILITY_UNSUPPORTED'
+        ? 'capability_unsupported'
+        : error.code === 'UNSUPPORTED_OPERATION' || error.code === 'MODEL_INCOMPATIBLE'
+          ? 'capability_unavailable'
+          : 'payload_invalid';
   return blockRequestPreparation(payloadCode, error.message);
 }
 
@@ -857,6 +887,10 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
   }
 
   async compile(input: ProviderPayloadCompilerInput): Promise<RequestPreparationDecision<ProviderCompiledPayload>> {
+    // R2: catalog-rights incompatibility for the embeddings operation is a
+    // missing capability (404 at the HTTP boundary), unlike chat-model
+    // incompatibility which stays a closed 503.
+    let embeddingsOperation = false;
     try {
       if (this.configurationError !== null || this.options === null) {
         throw this.configurationError ?? new ProviderPayloadCompilerError('INVALID_INPUT');
@@ -868,6 +902,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       const candidate = authority.candidate;
       if (!isRecord(candidate)) compilerFailure('INVALID_INPUT');
       const route = normalizeRoute(input, this.options);
+      embeddingsOperation = route.providerOperation === 'embeddings';
       if (
         !isProtocol(authority.route.protocol) ||
         authority.route.protocol !== route.clientProtocol ||
@@ -987,7 +1022,15 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         fingerprint: requestFingerprint,
       });
     } catch (error) {
-      if (error instanceof ProviderPayloadCompilerError) return safeDecision(error);
+      if (error instanceof ProviderPayloadCompilerError) {
+        if (error.code === 'MODEL_INCOMPATIBLE' && embeddingsOperation) {
+          return blockRequestPreparation(
+            'capability_unsupported',
+            'The provider does not support the requested operation',
+          );
+        }
+        return safeDecision(error);
+      }
       return safeDecision(new ProviderPayloadCompilerError('INVALID_INPUT'));
     }
   }

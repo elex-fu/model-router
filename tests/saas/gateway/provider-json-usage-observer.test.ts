@@ -254,3 +254,91 @@ test('upstream failure after a complete JSON prefix preserves the stream failure
   await assert.rejects(drain(observed.body), (error: unknown) => error === failure);
   assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'stream_error' });
 });
+
+test('R2: embeddings JSON reports input-only usage from prompt_tokens ?? total_tokens', async () => {
+  const embeddings = { providerProtocol: 'openai', providerOperation: 'embeddings' } as const;
+  const embeddingsEnvelope = (usage: unknown) => ({
+    object: 'list',
+    model: 'text-embedding-3-small',
+    data: [{ object: 'embedding', index: 0, embedding: [0.1, -0.2] }],
+    usage,
+  });
+
+  const reported = await observe(embeddingsEnvelope({ prompt_tokens: 7, total_tokens: 7 }), embeddings);
+  assert.deepEqual(reported, {
+    state: 'reported',
+    usage: {
+      inputTotal: 7,
+      inputUncached: 7,
+      cacheRead: null,
+      cacheWrite: null,
+      cacheWrite5m: null,
+      cacheWrite1h: null,
+      outputTotal: 0,
+      reasoningOutput: 0,
+      status: 'reported',
+      source: 'upstream',
+      semanticsVersion: 'v1',
+    },
+  });
+
+  const totalOnly = await observe(embeddingsEnvelope({ total_tokens: 9 }), embeddings);
+  assert.equal(totalOnly.state, 'reported');
+  if (totalOnly.state === 'reported') assert.equal(totalOnly.usage.inputTotal, 9);
+});
+
+test('R2: embeddings usage stays unknown for malformed envelopes and inconsistent or unknown counters', async () => {
+  const embeddings = { providerProtocol: 'openai', providerOperation: 'embeddings' } as const;
+  const cases: Array<{ readonly name: string; readonly body: unknown; readonly reason: string }> = [
+    { name: 'chat envelope', body: envelope({ prompt_tokens: 3 }), reason: 'malformed_body' },
+    {
+      name: 'empty data list',
+      body: { object: 'list', data: [], usage: { prompt_tokens: 3, total_tokens: 3 } },
+      reason: 'malformed_body',
+    },
+    {
+      name: 'inconsistent totals',
+      body: {
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [1] }],
+        usage: { prompt_tokens: 3, total_tokens: 4 },
+      },
+      reason: 'invalid_usage',
+    },
+    {
+      name: 'output counters are not embeddings usage',
+      body: {
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [1] }],
+        usage: { prompt_tokens: 3, completion_tokens: 1 },
+      },
+      reason: 'invalid_usage',
+    },
+    {
+      name: 'no usage at all',
+      body: { object: 'list', data: [{ object: 'embedding', index: 0, embedding: [1] }] },
+      reason: 'no_usage',
+    },
+    {
+      name: 'empty usage object',
+      body: {
+        object: 'list',
+        data: [{ object: 'embedding', index: 0, embedding: [1] }],
+        usage: {},
+      },
+      reason: 'invalid_usage',
+    },
+  ];
+  for (const { name, body, reason } of cases) {
+    const observation = await observe(body, embeddings);
+    assert.deepEqual(observation, { state: 'unknown', usage: null, reason }, name);
+  }
+
+  // The operation never changes the chat observer: an embeddings operation on
+  // another protocol family is unsupported, not a usage source.
+  const mismatched = await observe(envelope(), {
+    providerProtocol: 'anthropic',
+    providerOperation: 'embeddings',
+  });
+  assert.deepEqual(mismatched, { state: 'unknown', usage: null, reason: 'unsupported_protocol_operation' });
+});

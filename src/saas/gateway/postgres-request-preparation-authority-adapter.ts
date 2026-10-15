@@ -169,6 +169,26 @@ function operationForProtocol(protocol: RequestPreparationAuthority['route']['pr
   }
 }
 
+/**
+ * R2: the OpenAI protocol family additionally hosts the embeddings
+ * operation. The trusted HTTP boundary derives it from the request path;
+ * the authority records it as server-owned route provenance. Any other
+ * operation mismatch fails closed.
+ */
+function routeOperations(
+  protocol: RequestPreparationAuthority['route']['protocol'],
+  clientOperation: string | undefined,
+): { readonly clientOperation: string; readonly providerOperation: string } {
+  const canonical = operationForProtocol(protocol);
+  if (clientOperation === undefined || clientOperation === canonical) {
+    return { clientOperation: canonical, providerOperation: canonical };
+  }
+  if (protocol === 'openai' && clientOperation === 'embeddings') {
+    return { clientOperation: 'embeddings', providerOperation: 'embeddings' };
+  }
+  fail('route');
+}
+
 function nullableText(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'string' || value.trim() === '' || value !== value.trim()) fail('account');
@@ -396,6 +416,7 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
     readonly entitlement: RequestPreparationEntitlement;
     readonly publicModel: string;
     readonly protocol: RequestPreparationAuthority['route']['protocol'];
+    readonly clientOperation?: string;
   }): Promise<RequestPreparationDecision<RequestPreparationAuthority>> {
     if (
       !matchesInput(input.caller, input.entitlement) ||
@@ -617,8 +638,7 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
             routeConfigVersion: version(route.version),
             protocol: route.protocol,
             providerProtocol: route.protocol,
-            clientOperation: operationForProtocol(route.protocol),
-            providerOperation: operationForProtocol(route.protocol),
+            ...routeOperations(route.protocol, input.clientOperation),
             targetMode: route.targetMode,
             upstreamId: route.upstreamId,
             endpoint: route.endpoint,

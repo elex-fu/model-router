@@ -42,6 +42,7 @@ model-router backup:restore <backupId> --config <配置文件绝对路径> --exp
 
 - **双向协议桥接**：客户端可走 Anthropic（`/v1/messages`）或 OpenAI（`/v1/chat/completions`）协议，上游可选 Anthropic 或 OpenAI；4 种 client/upstream 组合（`a→a` `o→o` `a→o` `o→a`）全部可用
 - **OpenAI Responses API**：支持 `/v1/responses` 与 `/v1/responses/compact`，兼容 Codex CLI
+- **OpenAI Embeddings API**：支持 `/v1/embeddings`（透传，仅对 OpenAI 协议族上游开放；用量取 `usage.prompt_tokens`，输出恒为 0）
 - **modelMap 模型重写**：在 upstream 上配置 `pattern → realModel` 映射，支持精确匹配 + glob 通配（`*`、`?`），可让客户端用任意名字调用上游
 - **同 upstream 多 Key 自动调度**：每个 upstream 支持配置多个 API Key，请求时轮询调度；某个 Key 连续失败 3 次后自动冷却 5 分钟，同 upstream 内兜底切换到其它 Key
 - **多 upstream 故障降级 + 熔断器**：同一 model 可挂多个 upstream，失败自动降级到其它 upstream；每个 upstream 独立 Circuit Breaker（Closed/Open/HalfOpen），防止故障扩散
@@ -220,7 +221,7 @@ client = OpenAI(
 )
 ```
 
-代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` / `/v1/responses*` → OpenAI；其它 path 返回 404。代理鉴权同时接受 `x-api-key: <key>` 与 `Authorization: Bearer <key>`。
+代理按请求 path 自动决定 clientProto：`/v1/messages` → Anthropic，`/v1/chat/completions` / `/v1/responses*` / `/v1/embeddings` → OpenAI；其它 path 返回 404。`/v1/embeddings` 仅在 upstream 协议为 OpenAI 时透传（上游路径固定为 `embeddings`），其它协议返回 422 `unsupported_capability`。代理鉴权同时接受 `x-api-key: <key>` 与 `Authorization: Bearer <key>`。
 
 #### 流式响应
 

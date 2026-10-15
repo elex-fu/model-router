@@ -50,6 +50,7 @@ export type RequestPreparationFailureCode =
   | 'payload_invalid'
   | 'payload_bounds_unavailable'
   | 'capability_unavailable'
+  | 'capability_unsupported'
   | 'canonicalization_failed'
   | 'signing_failed'
   | 'attempt_persistence_failed'
@@ -152,6 +153,13 @@ export interface RequestPreparationInput {
   readonly authenticatedCaller: AuthenticatedApiKey;
   readonly publicModel: string;
   readonly protocol: GatewayProtocol;
+  /**
+   * Server-owned, path-derived client operation override (R2 embeddings).
+   * Only a trusted HTTP boundary may set it; request bodies never do. It must
+   * be an operation the protocol family understands or preparation fails
+   * closed on capability.
+   */
+  readonly clientOperation?: string;
   readonly clientRequest: unknown;
   /** Opaque client dedupe key; it grants no pricing or authorization authority. */
   readonly idempotencyKey?: string;
@@ -255,6 +263,8 @@ export interface RequestPreparationAuthorityPort {
     readonly entitlement: RequestPreparationEntitlement;
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
+    /** Server-owned path-derived operation override (R2 embeddings). */
+    readonly clientOperation?: string;
   }): Promise<RequestPreparationDecision<RequestPreparationAuthority>>;
 }
 
@@ -616,7 +626,17 @@ function canonicalOperationForProtocol(protocol: GatewayProtocol): string {
 function normalizeOperationForProtocol(value: unknown, protocol: GatewayProtocol): string | null {
   if (typeof value !== 'string' || value.trim() === '' || value.includes('\u0000')) return null;
   const normalized = value === 'chat/completions' ? 'chat.completions' : value;
-  return normalized === canonicalOperationForProtocol(protocol) ? normalized : null;
+  return operationAllowedForProtocol(protocol, normalized) ? normalized : null;
+}
+
+/**
+ * R2: the OpenAI protocol family additionally hosts the embeddings
+ * operation. Every other protocol still accepts only its canonical
+ * operation, so an embeddings request can never be bridged onto an
+ * Anthropic/Gemini/Responses provider.
+ */
+function operationAllowedForProtocol(protocol: GatewayProtocol, operation: string): boolean {
+  return operation === canonicalOperationForProtocol(protocol) || (protocol === 'openai' && operation === 'embeddings');
 }
 
 interface RequestPreparationRouteFacts {
@@ -629,17 +649,30 @@ interface RequestPreparationRouteFacts {
 function routeFacts(
   authority: RequestPreparationAuthority,
   clientProtocol: GatewayProtocol,
+  clientOperationOverride?: string,
 ): RequestPreparationRouteFacts {
   const providerProtocol = authority.route.providerProtocol ?? authority.candidate.protocol;
+  // The trusted-boundary operation override wins over authority-derived
+  // canonical defaults: an OpenAI-family route serves both chat and
+  // embeddings, so the path-derived operation is the discriminating fact.
+  const override = normalizeOperationForProtocol(clientOperationOverride, clientProtocol);
+  const clientOperation =
+    override ??
+    normalizeOperationForProtocol(authority.route.clientOperation, clientProtocol) ??
+    canonicalOperationForProtocol(clientProtocol);
+  // A non-canonical family operation (embeddings) carries to the provider
+  // side unchanged; the payload compiler's capability gate rejects provider
+  // protocols that cannot serve it.
+  const providerOperation =
+    override !== null && override !== canonicalOperationForProtocol(clientProtocol)
+      ? override
+      : (normalizeOperationForProtocol(authority.route.providerOperation, providerProtocol) ??
+        canonicalOperationForProtocol(providerProtocol));
   return {
     clientProtocol,
     providerProtocol,
-    clientOperation:
-      normalizeOperationForProtocol(authority.route.clientOperation, clientProtocol) ??
-      canonicalOperationForProtocol(clientProtocol),
-    providerOperation:
-      normalizeOperationForProtocol(authority.route.providerOperation, providerProtocol) ??
-      canonicalOperationForProtocol(providerProtocol),
+    clientOperation,
+    providerOperation,
   };
 }
 
@@ -1877,6 +1910,7 @@ export class SaasRequestPreparationService {
         entitlement,
         publicModel: input.publicModel,
         protocol: input.protocol,
+        clientOperation: input.clientOperation,
       }),
     );
     if (authorityDecision.decision !== 'allow') return decisionFailure('authority', authorityDecision);
@@ -2010,7 +2044,7 @@ export class SaasRequestPreparationService {
       return failure('blocked', 'authority', modelResolutionResult.code, modelResolutionResult.message, ids);
     }
     const modelResolution = modelResolutionResult;
-    const preparationRoute = routeFacts(authority, input.protocol);
+    const preparationRoute = routeFacts(authority, input.protocol, input.clientOperation);
     const payloadFacts: RequestPreparationPayloadFacts = { ...preparationRoute, modelResolution };
 
     const payloadDecision = await this.invokeDecision('payload', () =>

@@ -34,7 +34,17 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   ['/v1/chat/completions', 'openai'],
   ['/v1/responses', 'responses'],
   ['/v1/messages', 'anthropic'],
+  // R2: the OpenAI embeddings operation rides the OpenAI inbound protocol
+  // family; the per-route client operation below distinguishes it from chat.
+  ['/v1/embeddings', 'openai'],
 ]);
+
+/**
+ * Server-owned client operation overrides for routes whose protocol hosts
+ * more than one canonical operation. Values are never read from the request
+ * body; only this trusted HTTP boundary may set them.
+ */
+const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([['/v1/embeddings', 'embeddings']]);
 
 /** The only authentication capability accepted by the hosted HTTP boundary. */
 export interface ProxyKeyAuthenticator {
@@ -415,6 +425,12 @@ function preparationError(result: RequestPreparationResult): GatewayHttpError {
   if (result.outcome !== 'prepared' && result.code === 'idempotency_replay') {
     return new GatewayHttpError(409, 'IDEMPOTENCY_REPLAY_UNAVAILABLE');
   }
+  // R2 capability matrix: a provider that can never serve the requested
+  // operation (e.g. embeddings outside the OpenAI protocol family) is a
+  // missing capability, not an outage.
+  if (result.outcome !== 'prepared' && result.code === 'capability_unsupported') {
+    return new GatewayHttpError(404, 'CAPABILITY_UNSUPPORTED');
+  }
   if (result.outcome === 'rejected') return new GatewayHttpError(403, 'REQUEST_REJECTED');
   return new GatewayHttpError(503, 'REQUEST_BLOCKED');
 }
@@ -780,6 +796,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         authenticatedCaller,
         publicModel: model,
         protocol,
+        // Server-owned, path-derived operation override (R2 embeddings);
+        // absent for every route with a single canonical operation.
+        clientOperation: ROUTE_CLIENT_OPERATIONS.get(path),
         clientRequest: body,
         idempotencyKey: requestIdempotencyKey,
         audit: auditContext,

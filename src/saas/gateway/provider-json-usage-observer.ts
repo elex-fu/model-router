@@ -27,7 +27,7 @@ export interface ProviderJsonObservedStream {
   getObservation(): ProviderJsonUsageObservation | null;
 }
 
-type JsonProtocol = 'openai' | 'anthropic' | 'responses';
+type JsonProtocol = 'openai' | 'anthropic' | 'responses' | 'embeddings';
 type Fields = Record<string, unknown>;
 
 // Counter names and required fields follow the existing SSE observer's strict
@@ -35,6 +35,8 @@ type Fields = Record<string, unknown>;
 // come from telemetry/usage. Responses uses the compiler's canonical operation.
 // Additional dimensions (e.g. audio/prediction counters, server tool usage or
 // vendor extensions) deliberately remain unknown until explicitly supported.
+// Embeddings (R2) is the OpenAI family's second operation: usage carries
+// prompt_tokens (and total_tokens == prompt_tokens) with no output counters.
 const counterShapes = {
   openai: {
     required: ['prompt_tokens', 'completion_tokens'], optional: ['total_tokens', 'cached_tokens'],
@@ -47,6 +49,9 @@ const counterShapes = {
   responses: {
     required: ['input_tokens', 'output_tokens'], optional: ['total_tokens', 'cached_tokens'],
     details: { input_tokens_details: ['cached_tokens'], output_tokens_details: ['reasoning_tokens'] },
+  },
+  embeddings: {
+    required: [], optional: ['prompt_tokens', 'total_tokens'], details: {},
   },
 } satisfies Record<JsonProtocol, {
   required: readonly string[]; optional: readonly string[]; details: Record<string, readonly string[]>;
@@ -64,6 +69,7 @@ function selectedProtocol(evidence: ProviderJsonUsageEvidence): JsonProtocol | n
   if (evidence.providerProtocol === 'openai' && evidence.providerOperation === 'chat.completions') return 'openai';
   if (evidence.providerProtocol === 'anthropic' && evidence.providerOperation === 'messages') return 'anthropic';
   if (evidence.providerProtocol === 'responses' && evidence.providerOperation === 'responses') return 'responses';
+  if (evidence.providerProtocol === 'openai' && evidence.providerOperation === 'embeddings') return 'embeddings';
   return null;
 }
 
@@ -121,13 +127,55 @@ function validEnvelope(protocol: JsonProtocol, body: Fields): boolean {
     return body.type === 'message' && body.role === 'assistant' && Array.isArray(body.content) &&
       typeof body.stop_reason === 'string' && body.stop_reason.length > 0;
   }
+  if (protocol === 'embeddings') {
+    // OpenAI embeddings responses are a non-empty list envelope of embedding
+    // vectors; vector contents stay opaque byte passthrough to the client.
+    return body.object === 'list' && Array.isArray(body.data) && body.data.length > 0;
+  }
   return body.object === 'response' && body.status === 'completed' && Array.isArray(body.output) &&
     (body.incomplete_details === undefined || body.incomplete_details === null);
+}
+
+/**
+ * R2 embeddings usage: the OpenAI embeddings operation reports only input
+ * tokens (`prompt_tokens`, with `total_tokens` equal to it) and produces no
+ * output, so the normalized report is `{ input: prompt_tokens ?? total_tokens,
+ * output: 0 }`. Any other counter name stays unknown and invalid.
+ */
+function embeddingsTrustedUsage(raw: Fields): NormalSuccessObservedUsage | null {
+  const shape = counterShapes.embeddings;
+  const allowedNames = [...shape.required, ...shape.optional];
+  for (const [name, counter] of Object.entries(raw)) {
+    if (!allowedNames.includes(name) || !token(counter)) return null;
+  }
+  const counter = (name: 'prompt_tokens' | 'total_tokens'): number | null => {
+    const value = raw[name];
+    return token(value) ? value : null;
+  };
+  const prompt = counter('prompt_tokens');
+  const total = Object.hasOwn(raw, 'total_tokens') ? counter('total_tokens') : null;
+  if (prompt === null && total === null) return null;
+  if (prompt !== null && total !== null && prompt !== total) return null;
+  const input = prompt ?? total;
+  return Object.freeze({
+    inputTotal: input,
+    inputUncached: input,
+    cacheRead: null,
+    cacheWrite: null,
+    cacheWrite5m: null,
+    cacheWrite1h: null,
+    outputTotal: 0,
+    reasoningOutput: 0,
+    status: 'reported',
+    source: 'upstream',
+    semanticsVersion: 'v1',
+  });
 }
 
 function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObservedUsage | null {
   const raw = record(value);
   if (!raw) return null;
+  if (protocol === 'embeddings') return embeddingsTrustedUsage(raw);
   const shape: { required: readonly string[]; optional: readonly string[]; details: Record<string, readonly string[]> } =
     counterShapes[protocol];
   const scalarNames = [...shape.required, ...shape.optional];

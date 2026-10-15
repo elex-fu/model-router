@@ -2206,3 +2206,78 @@ test('integration: oauth config resolves token dynamically', async () => {
     await tokenServer.close();
   }
 });
+
+test('integration: /v1/embeddings passes through to an OpenAI-protocol upstream as /v1/embeddings', async () => {
+  const upstream = await startMockUpstream(() => ({
+    status: 200,
+    body: {
+      object: 'list',
+      model: 'text-embedding-3-small',
+      data: [{ object: 'embedding', index: 0, embedding: [0.1, -0.2] }],
+      usage: { prompt_tokens: 5, total_tokens: 5 },
+    },
+  }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'custom-openai',
+        protocol: 'openai',
+        baseUrl: `${upstream.baseUrl}/v1`,
+        apiKeys: ['up-key'],
+        models: ['text-embedding-3-small'],
+        enabled: true,
+      },
+    ]),
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'text-embedding-3-small', input: 'hello world' }),
+    });
+    const responseText = await res.text();
+    assert.equal(res.status, 200, responseText);
+    const body = JSON.parse(responseText) as { object: string; usage: { prompt_tokens: number } };
+    assert.equal(body.object, 'list');
+    assert.equal(body.usage.prompt_tokens, 5);
+    assert.equal(upstream.calls.length, 1);
+    assert.equal(upstream.calls[0].url, '/v1/embeddings');
+    assert.equal(upstream.calls[0].method, 'POST');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});
+
+test('integration: /v1/embeddings fails closed with 422 for a non-OpenAI upstream without forwarding', async () => {
+  const upstream = await startMockUpstream(() => ({ status: 200, body: { ok: true } }));
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'custom-anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: ['up-key'],
+        models: ['claude-embedding-fallback'],
+        enabled: true,
+      },
+    ]),
+  );
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-embedding-fallback', input: 'hello world' }),
+    });
+    const responseText = await res.text();
+    assert.equal(res.status, 422, responseText);
+    const body = JSON.parse(responseText) as { error?: { message?: string } };
+    assert.equal(body.error?.message, 'unsupported_capability');
+    assert.equal(upstream.calls.length, 0, 'the non-OpenAI upstream must never receive embeddings traffic');
+  } finally {
+    await proxy.close();
+    await upstream.close();
+  }
+});

@@ -213,6 +213,9 @@ function clientProtocolFromPath(path: string): Protocol | null {
   if (pathname === '/v1/messages') return 'anthropic';
   if (pathname === '/v1/chat/completions') return 'openai';
   if (pathname === '/v1/responses' || pathname === '/v1/responses/compact') return 'responses';
+  // R2: embeddings rides the OpenAI inbound protocol family; the upstream
+  // gate in trySingleUpstream keeps it passthrough-only for OpenAI upstreams.
+  if (pathname === '/v1/embeddings') return 'openai';
   if (path.startsWith('/v1beta/')) return 'gemini';
   return null;
 }
@@ -1816,13 +1819,21 @@ async function trySingleUpstream(options: {
     cleanupSignal();
     return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: 'unsupported_capability' };
   }
+  // R2: embeddings is OpenAI-family only; an upstream outside the family can
+  // never serve it, so fail closed instead of bridging.
+  if (clientPath === '/v1/embeddings' && upstream.protocol !== 'openai') {
+    cleanupSignal();
+    return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: 'unsupported_capability' };
+  }
   const compactEndpoint = configuredCompactEndpoint ?? '';
   const endpoint =
     clientPath === '/v1/responses/compact'
       ? compactEndpoint
       : clientPath === '/v1/responses'
         ? (upstream.endpoint ?? 'responses')
-        : (upstream.endpoint ?? profile.endpoint);
+        : clientPath === '/v1/embeddings'
+          ? 'embeddings'
+          : (upstream.endpoint ?? profile.endpoint);
   let upstreamUrl: URL;
   try {
     // Legacy bases without an API prefix retain their old /v1 target.

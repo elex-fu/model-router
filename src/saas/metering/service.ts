@@ -569,6 +569,17 @@ function operationForProtocol(protocol: 'anthropic' | 'openai' | 'gemini' | 'res
   }
 }
 
+/**
+ * R2: the OpenAI protocol family additionally hosts the embeddings
+ * operation; no other protocol accepts a second operation.
+ */
+function operationAllowedForProtocol(
+  protocol: 'anthropic' | 'openai' | 'gemini' | 'responses',
+  operation: string,
+): boolean {
+  return operation === operationForProtocol(protocol) || (protocol === 'openai' && operation === 'embeddings');
+}
+
 function asInputDigest(value: unknown): string {
   if (typeof value !== 'string' || !HEX_DIGEST.test(value)) fail('METERING_INVALID_INPUT');
   return value.toLowerCase();
@@ -633,8 +644,8 @@ function normalizeAttemptProvenance(
     128,
   );
   if (
-    clientOperation !== operationForProtocol(clientProtocol) ||
-    providerOperation !== operationForProtocol(providerProtocol)
+    !operationAllowedForProtocol(clientProtocol, clientOperation) ||
+    !operationAllowedForProtocol(providerProtocol, providerOperation)
   ) {
     fail('METERING_INVALID_INPUT');
   }

@@ -318,3 +318,69 @@ test('does not expose credentials or estimator error details in failure messages
   assert.equal(credentialBody.decision, 'block');
   assert.equal(credentialBody.decision === 'block' && credentialBody.message.includes(secret), false);
 });
+
+test('R2: compiles an embeddings request with input-only bounds and a passthrough OpenAI provider route', async () => {
+  const compiled = allowed(
+    await createProviderPayloadCompiler(
+      options({
+        operation: 'embeddings',
+        clientOperation: 'embeddings',
+        estimator: {
+          version: 'embeddings-v1',
+          estimate: () => ({
+            inputTotalUpperBound: 3,
+            inputUncachedUpperBound: 3,
+            cacheReadUpperBound: 0,
+            cacheWriteUpperBound: 0,
+            cacheWrite5mUpperBound: 0,
+            cacheWrite1hUpperBound: 0,
+            outputTotalUpperBound: 0,
+            reasoningOutputUpperBound: 0,
+            feasibleInputBuckets: ['input'],
+          }),
+        },
+      }),
+    ).compile(input({ model: 'public-alias', input: 'hello world' })),
+  );
+  assert.equal(compiled.providerProtocol, 'openai');
+  assert.equal(compiled.providerOperation, 'embeddings');
+  assert.equal(compiled.usage.outputTotalUpperBound, '0');
+  assert.equal(compiled.usage.inputTotalUpperBound, '3');
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(compiled.payloadBytes)), {
+    input: 'hello world',
+    model: 'provider-model',
+  });
+});
+
+test('R2: rejects embeddings bodies without the OpenAI embeddings input field', async () => {
+  const missingInput = await createProviderPayloadCompiler(
+    options({ operation: 'embeddings', clientOperation: 'embeddings' }),
+  ).compile(input({ model: 'public-alias', messages: [{ role: 'user', content: 'chat-shaped' }] }));
+  assert.equal(missingInput.decision, 'block');
+  if (missingInput.decision === 'block') assert.equal(missingInput.code, 'payload_invalid');
+
+  const tokenIds = await createProviderPayloadCompiler(
+    options({ operation: 'embeddings', clientOperation: 'embeddings' }),
+  ).compile(input({ model: 'public-alias', input: [1, 2, 3] }));
+  assert.equal(tokenIds.decision, 'allow', 'pre-tokenized id vectors are valid embeddings input');
+});
+
+test('R2: an embeddings request for a non-OpenAI provider protocol fails closed as capability_unsupported', async () => {
+  const bridged = await createProviderPayloadCompiler(
+    options({ operation: 'embeddings', clientOperation: 'embeddings', providerProtocol: 'anthropic' }),
+  ).compile(input({ model: 'public-alias', input: 'hello' }));
+  assert.equal(bridged.decision, 'block');
+  if (bridged.decision === 'block') assert.equal(bridged.code, 'capability_unsupported');
+});
+
+test('R2: catalog-rights incompatibility for embeddings fails closed as capability_unsupported', async () => {
+  const incompatible = await createProviderPayloadCompiler(
+    options({
+      operation: 'embeddings',
+      clientOperation: 'embeddings',
+      modelCompatibility: async (check) => check.providerOperation !== 'embeddings',
+    }),
+  ).compile(input({ model: 'public-alias', input: 'hello' }));
+  assert.equal(incompatible.decision, 'block');
+  if (incompatible.decision === 'block') assert.equal(incompatible.code, 'capability_unsupported');
+});

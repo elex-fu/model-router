@@ -76,10 +76,13 @@ import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from './095_marketing_an
 import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from './096_customer_webhook_maintenance_payload_rewrite.js';
 import { PROVIDER_ACCOUNT_QUARANTINE_SAAS_MIGRATION } from './097_provider_account_quarantine_state.js';
 import { PROVIDER_ACCOUNT_RATE_AND_HEALTH_SAAS_MIGRATION } from './098_provider_account_rate_counters_and_health_score.js';
+import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from './099_provider_account_codex_scheduling.js';
+import { IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION } from './101_identity_oauth_identities.js';
 import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from './102_obs_channel_metrics.js';
 import { OBS_ALERTS_SAAS_MIGRATION } from './103_obs_alerts.js';
-import { IDENTITY_OAUTH_IDENTITIES_SAAS_MIGRATION } from './101_identity_oauth_identities.js';
-import { PROVIDER_ACCOUNT_CODEX_SCHEDULING_SAAS_MIGRATION } from './099_provider_account_codex_scheduling.js';
+import { OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION } from './104_openai_embeddings_operation.js';
+import { BILLING_GROUPS_SAAS_MIGRATION } from './105_billing_groups.js';
+import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_provider_account_opencode_go_scheduling.js';
 
 export interface SaasMigration {
   version: number;
@@ -526,4 +529,19 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // rollup (1m + hourly + watermark cursor) and alert rules/events.
   OBS_CHANNEL_METRICS_SAAS_MIGRATION,
   OBS_ALERTS_SAAS_MIGRATION,
+  // 104: R2 embeddings endpoint — the OpenAI protocol family additionally
+  // hosts the embeddings operation; widens 029's provenance-shape CHECK.
+  OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
+  // 105: R1 billing groups — new-api/sub2api group multipliers as an OUTER
+  // rational multiplier snapshotted at admission (settlement never re-queries
+  // the group table), account-pool M2M, key/tenant group binding, and the
+  // topup multiplier skeleton. Numbered 105 because R2 consumed the plan's
+  // 104 slot first (fail-closed serial ordering).
+  BILLING_GROUPS_SAAS_MIGRATION,
+  // 108: R5b OpenCode Go scheduling — the rolling-5h/weekly/monthly usage
+  // window snapshots plus the attempt-stamp/next-due/failure-streak/cooldown
+  // columns the usage worker claims through, and the opencode_go_protocol_rules
+  // jsonb rule table (multi-protocol adaptive routing). Scheduling signal
+  // only, never billing; 106/107 stay available for parallel workstreams.
+  PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
 ];
