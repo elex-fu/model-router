@@ -10,7 +10,14 @@
  * `secondary`, but which is which varies. The normalization rule is
  * `window_minutes ≤ 360 ⇒ 5h window`; a primary wider than that is the 7d
  * window and the secondary is the 5h one.
+ *
+ * R5 step 1: the pause gate (`classifyQuotaPause`) now delegates to the
+ * shared oauth-subscription/quota-pause.ts kernel; the codex flat snapshot
+ * shape, the two-window thresholds and the two-hour staleness bound stay
+ * pinned here so behavior is unchanged.
  */
+
+import { classifyQuotaPauseWindows } from '../oauth-subscription/quota-pause.js';
 
 /** Maximum window length (minutes) still considered the 5-hour bucket. */
 export const CODEX_5H_WINDOW_MAX_MINUTES = 360;
@@ -150,22 +157,9 @@ export interface QuotaPauseThresholds {
 
 export type QuotaPauseDecision = 'paused' | 'active' | 'probe-allowed';
 
-function windowTripsThreshold(
-  usedPercent: number | null,
-  resetAtMs: number | null,
-  threshold: number,
-  nowMs: number,
-): boolean {
-  if (usedPercent === null) return false;
-  if (usedPercent < threshold) return false;
-  // A window whose reset deadline already passed is stale by definition;
-  // trusting it would wedge the account for a whole window it never entered.
-  if (resetAtMs !== null && resetAtMs <= nowMs) return false;
-  return true;
-}
-
 /**
- * Scheduling gate over a persisted quota snapshot:
+ * Scheduling gate over a persisted quota snapshot (shared
+ * oauth-subscription/quota-pause.ts semantics, codex window family):
  *
  * - a snapshot older than two hours no longer gates — it returns
  *   `probe-allowed` so the scheduler may admit exactly one self-healing
@@ -179,19 +173,16 @@ export function classifyQuotaPause(
   thresholds: QuotaPauseThresholds,
   nowMs: number,
 ): QuotaPauseDecision {
-  if (!Number.isFinite(snapshot?.observedAtMs)) return 'probe-allowed';
-  if (nowMs - snapshot.observedAtMs > CODEX_QUOTA_SNAPSHOT_MAX_AGE_MS) return 'probe-allowed';
-  const trips5h = windowTripsThreshold(
-    snapshot.used5hPercent,
-    snapshot.reset5hAtMs,
-    thresholds.pause5hUsedPercent,
+  return classifyQuotaPauseWindows(
+    {
+      observedAtMs: snapshot.observedAtMs,
+      windows: [
+        { usedPercent: snapshot.used5hPercent, resetAtMs: snapshot.reset5hAtMs },
+        { usedPercent: snapshot.used7dPercent, resetAtMs: snapshot.reset7dAtMs },
+      ],
+    },
+    [thresholds.pause5hUsedPercent, thresholds.pause7dUsedPercent],
     nowMs,
+    CODEX_QUOTA_SNAPSHOT_MAX_AGE_MS,
   );
-  const trips7d = windowTripsThreshold(
-    snapshot.used7dPercent,
-    snapshot.reset7dAtMs,
-    thresholds.pause7dUsedPercent,
-    nowMs,
-  );
-  return trips5h || trips7d ? 'paused' : 'active';
 }

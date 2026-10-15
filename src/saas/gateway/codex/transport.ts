@@ -1,12 +1,24 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Dispatcher } from 'undici';
 import { normalizeUsage } from '../../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from '../dispatch-usage-settlement.js';
+import {
+  cancelResponseBody,
+  createDrainingRelay,
+  flattenHeaders,
+  headerValueHasControlCharacters,
+  MAX_HEADER_VALUE_BYTES,
+  QuotaSnapshotWriteThrottle,
+  boundedErrorBody as skeletonBoundedErrorBody,
+} from '../oauth-subscription/transport-skeleton.js';
 import type {
   PreparedEvidenceTransport,
   PreparedEvidenceTransportRequest,
   PreparedEvidenceTransportResponse,
 } from '../prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../prepared-request-evidence-service.js';
+import type { ProviderHttpAddressResolver, ProviderHttpPinnedConnector } from '../provider-http-address.js';
+import { createProviderEgressProxyConnection } from '../provider-http-address.js';
 import { type CodexUpstreamErrorClassification, classifyUpstreamError, shouldFailover } from './health.js';
 import {
   accountIdentityNamespace,
@@ -49,7 +61,6 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_SNAPSHOT_MIN_INTERVAL_MS = 30_000;
 const MAX_ERROR_BODY_BYTES = 32_768;
 const MAX_DRAIN_BUFFER_BYTES = 8 * 1024 * 1024;
-const MAX_HEADER_VALUE_BYTES = 4_096;
 const SHA256 = /^[0-9a-f]{64}$/;
 
 /** The unsealed ChatGPT account facts the transport needs (envelope subset). */
@@ -106,6 +117,13 @@ export interface CodexTransportRequest extends CodexRequestIdentityContext {
   readonly accountId: string;
   readonly credentialId: string;
   readonly credentialVersion: string;
+  /**
+   * R3: the claimed evidence's owner scope, threaded from the prepared
+   * evidence so the egress-proxy resolver reads the correct owner-scoped
+   * account table (same shared lookup as the generic transport).
+   */
+  readonly accountOwnerKind?: 'tenant' | 'platform';
+  readonly supplyMode?: 'byok' | 'platform';
   /** The codex-transformed outbound body (applyCodexOAuthTransform applied). */
   readonly body: unknown;
   /**
@@ -170,9 +188,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function printableHeaderValue(value: unknown, name: string): string | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   if (Buffer.byteLength(value, 'utf8') > MAX_HEADER_VALUE_BYTES) return null;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x1f || code === 0x7f) fail('INVALID_INPUT', `passthrough header ${name} carries control characters`);
+  if (headerValueHasControlCharacters(value)) {
+    fail('INVALID_INPUT', `passthrough header ${name} carries control characters`);
   }
   return value;
 }
@@ -255,12 +272,38 @@ function findEventBoundary(buffer: string): { index: number; length: number } | 
   return { index: lf, length: 2 };
 }
 
+/**
+ * R3 egress proxies: the codex fetch init carries the per-account egress
+ * dispatcher when the account is proxy-bound (aligned to the generic
+ * transport's ProviderHttpFetch shape). The dispatcher is optional so test
+ * and non-proxy compositions keep the exact previous direct fetch.
+ */
+export type CodexHttpTransportFetchInit = RequestInit & {
+  readonly dispatcher?: Dispatcher;
+};
+
+export type CodexHttpTransportFetch = (url: string, init: CodexHttpTransportFetchInit) => Promise<Response>;
+
+export type CodexEgressProxyResolver = (input: {
+  readonly accountId: string;
+  readonly accountOwnerKind: 'tenant' | 'platform' | undefined;
+  readonly supplyMode: 'byok' | 'platform' | undefined;
+  readonly signal: AbortSignal;
+}) => Promise<{ readonly url: string } | null>;
+
 export interface CodexHttpTransportOptions {
   /** Undici-compatible adapter; tests inject a local mock upstream. */
-  readonly fetch: (url: string, init: RequestInit) => Promise<Response>;
+  readonly fetch: CodexHttpTransportFetch;
   /** Injectable override of the pinned endpoint (tests use a local mock). */
   readonly baseUrl?: string;
   readonly resolveCredential: CodexCredentialResolver;
+  /**
+   * R3: per-account egress proxy (same resolver the generic transport's
+   * dispatch profile uses). Unset keeps direct egress.
+   */
+  readonly resolveEgressProxy?: CodexEgressProxyResolver;
+  /** Injectable address resolver for deterministic egress-proxy tests. */
+  readonly resolveEgressAddresses?: ProviderHttpAddressResolver;
   readonly writeQuotaSnapshot?: CodexQuotaSnapshotSink;
   readonly recordAccountHealth?: CodexAccountHealthSink;
   readonly timeoutMs?: number;
@@ -269,9 +312,11 @@ export interface CodexHttpTransportOptions {
 }
 
 interface NormalizedTransportOptions {
-  readonly fetch: (url: string, init: RequestInit) => Promise<Response>;
+  readonly fetch: CodexHttpTransportFetch;
   readonly baseUrl: URL;
   readonly resolveCredential: CodexCredentialResolver;
+  readonly resolveEgressProxy: CodexEgressProxyResolver | null;
+  readonly resolveEgressAddresses: ProviderHttpAddressResolver | null;
   readonly writeQuotaSnapshot: CodexQuotaSnapshotSink | null;
   readonly recordAccountHealth: CodexAccountHealthSink | null;
   readonly timeoutMs: number;
@@ -285,7 +330,7 @@ interface NormalizedTransportOptions {
  */
 export class CodexHttpTransport {
   private readonly options: NormalizedTransportOptions;
-  private readonly lastSnapshotWriteMs = new Map<string, number>();
+  private readonly snapshotThrottle: QuotaSnapshotWriteThrottle;
 
   constructor(options: CodexHttpTransportOptions) {
     if (!options || typeof options.fetch !== 'function') fail('INVALID_INPUT', 'an injected fetch adapter is required');
@@ -305,12 +350,21 @@ export class CodexHttpTransport {
       fetch: options.fetch,
       baseUrl,
       resolveCredential: options.resolveCredential,
+      resolveEgressProxy:
+        options.resolveEgressProxy !== undefined && typeof options.resolveEgressProxy === 'function'
+          ? options.resolveEgressProxy
+          : null,
+      resolveEgressAddresses:
+        options.resolveEgressAddresses !== undefined && typeof options.resolveEgressAddresses === 'function'
+          ? options.resolveEgressAddresses
+          : null,
       writeQuotaSnapshot: options.writeQuotaSnapshot ?? null,
       recordAccountHealth: options.recordAccountHealth ?? null,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       snapshotMinIntervalMs: options.snapshotMinIntervalMs ?? DEFAULT_SNAPSHOT_MIN_INTERVAL_MS,
       nowMs: options.nowMs ?? (() => Date.now()),
     };
+    this.snapshotThrottle = new QuotaSnapshotWriteThrottle(this.options.snapshotMinIntervalMs, this.options.nowMs);
   }
 
   async send(request: CodexTransportRequest): Promise<CodexTransportResult> {
@@ -382,6 +436,40 @@ export class CodexHttpTransport {
 
     const headers = this.buildHeaders(request, passthrough, credential);
     const bodyBytes = Buffer.from(JSON.stringify(request.body), 'utf8');
+    // R3 egress proxies: the account's bound proxy (same record the generic
+    // transport and the refresh worker use) tunnels this request. A bound
+    // proxy that cannot be established fails the request — never a silent
+    // direct-egress fallback, which would change the account's exit IP.
+    let egress: ProviderHttpPinnedConnector | null = null;
+    if (this.options.resolveEgressProxy !== null) {
+      try {
+        const proxy = await this.options.resolveEgressProxy({
+          accountId: request.accountId,
+          accountOwnerKind: request.accountOwnerKind,
+          supplyMode: request.supplyMode,
+          signal: controller.signal,
+        });
+        if (proxy !== null) {
+          egress = await createProviderEgressProxyConnection(proxy, {
+            ...(this.options.resolveEgressAddresses === null
+              ? {}
+              : { resolveAddresses: this.options.resolveEgressAddresses }),
+            signal: controller.signal,
+          });
+        }
+      } catch (error) {
+        if (error instanceof CodexHttpTransportError) throw error;
+        if (timedOut()) fail('TIMEOUT', 'codex transport timed out');
+        if (controller.signal.aborted) fail('ABORTED', 'codex transport was aborted');
+        fail('NETWORK_ERROR', 'codex egress proxy could not be established');
+      }
+    }
+    const disposeEgress = (error?: Error): void => {
+      if (egress === null) return;
+      const connection = egress;
+      egress = null;
+      void (error === undefined ? connection.close() : connection.destroy(error)).catch(() => undefined);
+    };
     let response: Response;
     try {
       response = await this.options.fetch(this.options.baseUrl.toString(), {
@@ -390,20 +478,25 @@ export class CodexHttpTransport {
         body: bodyBytes,
         redirect: 'manual',
         signal: controller.signal,
+        ...(egress === null ? {} : { dispatcher: egress.dispatcher }),
       });
     } catch {
+      disposeEgress(new Error('codex upstream request failed'));
       if (timedOut()) fail('TIMEOUT', 'codex transport timed out');
       if (controller.signal.aborted) fail('ABORTED', 'codex transport was aborted');
       fail('NETWORK_ERROR', 'codex upstream request failed');
     }
     if (!response || typeof response.status !== 'number' || !Number.isInteger(response.status)) {
+      disposeEgress(new Error('codex upstream returned an invalid response'));
       fail('INVALID_RESPONSE', 'codex upstream returned an invalid response');
     }
     if (response.status >= 300 && response.status <= 399) {
+      disposeEgress(new Error('codex upstream redirect was rejected'));
       void cancelResponseBody(response);
       fail('REDIRECT_REJECTED', 'codex upstream redirect was rejected');
     }
     if (response.status < 100 || response.status > 599) {
+      disposeEgress(new Error('codex upstream returned an invalid status'));
       void cancelResponseBody(response);
       fail('INVALID_RESPONSE', 'codex upstream returned an invalid status');
     }
@@ -412,7 +505,8 @@ export class CodexHttpTransport {
     const quotaSnapshotWritten = this.maybeWriteQuotaSnapshot(request.accountId, responseHeaders, response.status);
 
     if (response.status < 200 || response.status >= 300) {
-      const bodyText = await boundedErrorBody(response, controller.signal);
+      const bodyText = await skeletonBoundedErrorBody(response, controller.signal, MAX_ERROR_BODY_BYTES);
+      disposeEgress();
       const classification = classifyUpstreamError({
         status: response.status,
         bodyText: bodyText ?? '',
@@ -425,6 +519,7 @@ export class CodexHttpTransport {
 
     const body = response.body ?? null;
     if (body === null) {
+      disposeEgress();
       return {
         ok: true,
         status: response.status,
@@ -434,7 +529,16 @@ export class CodexHttpTransport {
         quotaSnapshotWritten,
       };
     }
-    const relay = createDrainingRelay(body, controller.signal);
+    const relay = createDrainingRelay(body, controller.signal, new ResponsesUsageWatcher(), {
+      maxDrainBufferBytes: MAX_DRAIN_BUFFER_BYTES,
+      errorMessage: 'codex drain buffer exceeded',
+    });
+    // R3: the tunnel stays open until the drain pump finishes (usage resolves
+    // in the pump's finally, including on abort and drain-buffer overflow).
+    void relay.usage.then(
+      () => disposeEgress(),
+      () => disposeEgress(new Error('codex upstream stream failed')),
+    );
     return {
       ok: true,
       status: response.status,
@@ -519,9 +623,7 @@ export class CodexHttpTransport {
     const snapshot = parseCodexRateLimitHeaders(headers as Record<string, string>);
     if (snapshot === null) return false;
     const nowMs = this.options.nowMs();
-    const last = this.lastSnapshotWriteMs.get(accountId);
-    if (last !== undefined && nowMs - last < this.options.snapshotMinIntervalMs) return false;
-    this.lastSnapshotWriteMs.set(accountId, nowMs);
+    if (!this.snapshotThrottle.shouldWrite(accountId)) return false;
     // Best-effort by contract: persistence failures never affect the response.
     void Promise.resolve()
       .then(() => this.options.writeQuotaSnapshot?.({ accountId, snapshot, observedAtMs: nowMs, fromStatus: status }))
@@ -554,166 +656,6 @@ function normalizePassthroughHeaders(value: unknown): Readonly<Record<string, st
     if (headerValue !== null) normalized[name] = headerValue;
   }
   return normalized;
-}
-
-function flattenHeaders(response: Response): Record<string, string> {
-  const headers: Record<string, string> = {};
-  response.headers.forEach((value, name) => {
-    headers[name.toLowerCase()] = value;
-  });
-  return headers;
-}
-
-async function boundedErrorBody(response: Response, signal: AbortSignal): Promise<string | null> {
-  if (!response.body) return null;
-  const reader = response.body.getReader();
-  const buffer = new Uint8Array(MAX_ERROR_BODY_BYTES);
-  let bytesRead = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!(value instanceof Uint8Array)) break;
-      if (value.byteLength > buffer.byteLength - bytesRead) {
-        try {
-          await reader.cancel();
-        } catch {
-          // The truncated text is still the classification input.
-        }
-        break;
-      }
-      buffer.set(value, bytesRead);
-      bytesRead += value.byteLength;
-    }
-  } catch {
-    if (signal.aborted) return null;
-    return null;
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // The reader may already be released.
-    }
-  }
-  return new TextDecoder('utf-8', { fatal: false }).decode(buffer.subarray(0, bytesRead));
-}
-
-function cancelResponseBody(response: Response): void {
-  try {
-    void response.body?.cancel().catch(() => undefined);
-  } catch {
-    // Nothing to observe on a rejected redirect body.
-  }
-}
-
-/**
- * SSE relay with client-disconnect drain: chunks flow to the client while it
- * reads; after the client cancels, the pump keeps consuming the upstream so
- * the terminal `response.completed` usage is still collected (bounded by
- * MAX_DRAIN_BUFFER_BYTES of discarded buffering).
- */
-function createDrainingRelay(
-  upstream: ReadableStream<Uint8Array>,
-  signal: AbortSignal,
-): {
-  readonly stream: ReadableStream<Uint8Array>;
-  readonly usage: Promise<CodexResponsesUsage | null>;
-} {
-  const reader = upstream.getReader();
-  const watcher = new ResponsesUsageWatcher();
-  let resolveUsage!: (usage: CodexResponsesUsage | null) => void;
-  const usage = new Promise<CodexResponsesUsage | null>((resolve) => {
-    resolveUsage = resolve;
-  });
-  const queue: Uint8Array[] = [];
-  let queuedBytes = 0;
-  let pumpDone = false;
-  let pumpError: unknown = null;
-  let waiters: Array<() => void> = [];
-  let clientCancelled = false;
-  let upstreamCancelled = false;
-
-  const notify = (): void => {
-    const current = waiters;
-    waiters = [];
-    for (const waiter of current) waiter();
-  };
-
-  const cancelUpstream = (reason: unknown): void => {
-    if (upstreamCancelled) return;
-    upstreamCancelled = true;
-    void reader.cancel(reason).catch(() => undefined);
-  };
-
-  const pump = (async (): Promise<void> => {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!(value instanceof Uint8Array)) continue;
-        watcher.feed(value);
-        if (watcher.observed !== null && clientCancelled) {
-          // Usage collected and the client is gone: stop draining early.
-          cancelUpstream(undefined);
-          break;
-        }
-        if (clientCancelled) {
-          queuedBytes += value.byteLength;
-          if (queuedBytes > MAX_DRAIN_BUFFER_BYTES) {
-            cancelUpstream(new Error('codex drain buffer exceeded'));
-            break;
-          }
-          continue;
-        }
-        queue.push(value);
-        notify();
-      }
-    } catch (error) {
-      pumpError = error;
-    } finally {
-      pumpDone = true;
-      notify();
-      resolveUsage(watcher.observed);
-    }
-  })();
-
-  const stream = new ReadableStream<Uint8Array>(
-    {
-      async pull(controller) {
-        while (true) {
-          if (queue.length > 0) {
-            const chunk = queue.shift();
-            if (chunk !== undefined) {
-              controller.enqueue(chunk);
-              return;
-            }
-          }
-          if (pumpDone) {
-            if (pumpError !== null && !signal.aborted) {
-              controller.error(pumpError instanceof Error ? pumpError : new Error('codex upstream stream failed'));
-              return;
-            }
-            controller.close();
-            return;
-          }
-          await new Promise<void>((resolve) => {
-            waiters.push(resolve);
-          });
-        }
-      },
-      async cancel(reason) {
-        clientCancelled = true;
-        queue.length = 0;
-        // Deliberately NOT cancelling the upstream here: the pump keeps
-        // draining until usage arrives or the bounded buffer trips.
-        void pump;
-        void reason;
-      },
-    },
-    { highWaterMark: 0 },
-  );
-
-  return { stream, usage };
 }
 
 /**
@@ -750,6 +692,8 @@ export class CodexPreparedEvidenceTransport implements PreparedEvidenceTransport
       accountId: evidence.accountId,
       credentialId: evidence.credentialId,
       credentialVersion: evidence.credentialVersion,
+      accountOwnerKind: evidence.accountOwnerKind,
+      supplyMode: evidence.supplyMode,
       body,
       signal: input.signal,
     });

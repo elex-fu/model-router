@@ -1,4 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import {
+  type PkceAuthorizeUrlInput,
+  type PkceError,
+  buildPkceAuthorizeUrl,
+  createPkcePair as sharedCreatePkcePair,
+  decodeIdTokenPayload as sharedDecodeIdTokenPayload,
+} from '../../gateway/oauth-subscription/pkce.js';
 
 /**
  * Phase 1b Codex OAuth account binding (design:
@@ -30,10 +37,7 @@ export const CODEX_OAUTH_USER_AGENT = 'codex_cli_rs/0.146.0 (Mac OS X 15.0; arm6
 /** The id_token payload is validated against the local clock with this skew. */
 export const CODEX_ID_TOKEN_CLOCK_SKEW_MS = 120_000;
 
-const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
-const CODEX_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth';
-
-export type CodexOauthErrorCode =
+const CODEX_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth';export type CodexOauthErrorCode =
   | 'ID_TOKEN_MALFORMED'
   | 'ID_TOKEN_EXPIRED'
   | 'ID_TOKEN_CLAIMS_MISSING'
@@ -79,10 +83,10 @@ export function constantTimeEqualText(left: string, right: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-/** S256 code challenge for an ASCII verifier (RFC 7636). */
-export function computePkceChallenge(codeVerifier: string): string {
-  return createHash('sha256').update(codeVerifier, 'utf8').digest('base64url');
-}
+// R5 step 1: the S256 computation lives in the shared
+// gateway/oauth-subscription/pkce.ts kernel; the codex CLI verifier shape
+// (64 random bytes as 128 lowercase hex characters) is pinned here.
+export { computePkceChallenge } from '../../gateway/oauth-subscription/pkce.js';
 
 export interface CodexPkcePair {
   /** 64 random bytes as 128 lowercase hex characters (the Codex CLI shape). */
@@ -92,8 +96,7 @@ export interface CodexPkcePair {
 }
 
 export function createPkcePair(): CodexPkcePair {
-  const codeVerifier = randomBytes(64).toString('hex');
-  return { codeVerifier, codeChallenge: computePkceChallenge(codeVerifier) };
+  return sharedCreatePkcePair({ verifierBytes: 64, verifierEncoding: 'hex' });
 }
 
 export interface CodexAuthorizeUrlInput {
@@ -109,16 +112,16 @@ export function buildAuthorizeUrl(input: CodexAuthorizeUrlInput): URL {
   if (typeof input.codeChallenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.codeChallenge)) {
     throw codexOauthError('PKCE_INVALID');
   }
-  const url = new URL(CODEX_OAUTH_AUTHORIZE_ENDPOINT);
-  url.searchParams.set('response_type', 'code');
-  url.searchParams.set('client_id', CODEX_OAUTH_CLIENT_ID);
-  url.searchParams.set('redirect_uri', CODEX_OAUTH_REDIRECT_URI);
-  url.searchParams.set('scope', CODEX_OAUTH_AUTH_SCOPES);
-  url.searchParams.set('state', input.state);
-  url.searchParams.set('code_challenge', input.codeChallenge);
-  url.searchParams.set('code_challenge_method', 'S256');
-  url.searchParams.set(CODEX_OAUTH_SIMPLIFIED_FLOW, 'true');
-  return url;
+  const shared: PkceAuthorizeUrlInput = {
+    endpoint: CODEX_OAUTH_AUTHORIZE_ENDPOINT,
+    clientId: CODEX_OAUTH_CLIENT_ID,
+    redirectUri: CODEX_OAUTH_REDIRECT_URI,
+    scope: CODEX_OAUTH_AUTH_SCOPES,
+    state: input.state,
+    codeChallenge: input.codeChallenge,
+    extraParams: { [CODEX_OAUTH_SIMPLIFIED_FLOW]: 'true' },
+  };
+  return buildPkceAuthorizeUrl(shared);
 }
 
 /** Claims this router needs from the id_token's `https://api.openai.com/auth` object. */
@@ -154,20 +157,16 @@ function organizationIds(value: unknown): readonly string[] {
 }
 
 function decodeIdTokenPayload(idToken: string): Record<string, unknown> {
-  const segments = idToken.split('.');
-  if (segments.length !== 3 || segments.some((segment) => !BASE64URL_SEGMENT.test(segment))) {
-    throw codexOauthError('ID_TOKEN_MALFORMED');
-  }
-  let payload: unknown;
   try {
-    payload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
-  } catch {
-    throw codexOauthError('ID_TOKEN_MALFORMED');
+    return sharedDecodeIdTokenPayload(idToken);
+  } catch (error) {
+    if (isPkceError(error)) throw codexOauthError('ID_TOKEN_MALFORMED');
+    throw error;
   }
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw codexOauthError('ID_TOKEN_MALFORMED');
-  }
-  return payload as Record<string, unknown>;
+}
+
+function isPkceError(error: unknown): error is PkceError {
+  return error instanceof Error && error.name === 'PkceError';
 }
 
 /**

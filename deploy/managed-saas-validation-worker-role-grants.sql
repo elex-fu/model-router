@@ -175,6 +175,7 @@ GRANT SELECT (
   rights_id, rights_version, status, validation_state, revalidation_interval_seconds,
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
+  claude_usage_updated_at, claude_5h_reset_at,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
@@ -187,6 +188,11 @@ GRANT UPDATE (
   opencode_go_monthly_used_percent, opencode_go_monthly_reset_at,
   opencode_go_usage_updated_at, opencode_go_usage_next_due_at,
   opencode_go_usage_failure_count, opencode_go_rate_limited_until,
+  claude_5h_utilization, claude_5h_reset_at,
+  claude_7d_utilization, claude_7d_reset_at,
+  claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
+  claude_7d_oi_utilization, claude_7d_oi_reset_at,
+  claude_usage_updated_at, claude_session_window_start, claude_session_window_end,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
@@ -248,6 +254,7 @@ GRANT SELECT (
   rights_id, rights_version, status, validation_state, revalidation_interval_seconds,
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
+  claude_usage_updated_at, claude_5h_reset_at,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;
@@ -260,6 +267,11 @@ GRANT UPDATE (
   opencode_go_monthly_used_percent, opencode_go_monthly_reset_at,
   opencode_go_usage_updated_at, opencode_go_usage_next_due_at,
   opencode_go_usage_failure_count, opencode_go_rate_limited_until,
+  claude_5h_utilization, claude_5h_reset_at,
+  claude_7d_utilization, claude_7d_reset_at,
+  claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
+  claude_7d_oi_utilization, claude_7d_oi_reset_at,
+  claude_usage_updated_at, claude_session_window_start, claude_session_window_end,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;

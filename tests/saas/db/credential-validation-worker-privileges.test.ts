@@ -54,10 +54,14 @@ test('worker privilege probe grants only the documented column-level snapshot an
     SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
     /'saas_provider_capabilities', 'validation_state', 'SELECT'/,
   );
-  assert.match(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
-    /'saas_provider_capabilities', 'evidence_sha256', 'SELECT'/);
-  assert.doesNotMatch(SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
-    /'saas_provider_capabilities', '(?:evidence_ref|evidence_version)', 'SELECT'/);
+  assert.match(
+    SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+    /'saas_provider_capabilities', 'evidence_sha256', 'SELECT'/,
+  );
+  assert.doesNotMatch(
+    SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+    /'saas_provider_capabilities', '(?:evidence_ref|evidence_version)', 'SELECT'/,
+  );
   assert.match(
     SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
     /'saas_tenant_provider_account_capabilities', 'capability_version', 'SELECT'/,
@@ -103,7 +107,10 @@ test('worker privilege probe rejects broad grants, unsafe roles and malformed pr
 
 test('worker SELECT never implies INSERT/UPDATE/REFERENCES on the same column', () => {
   const sql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
-  assert.match(sql, /CROSS JOIN \(VALUES \('SELECT'\), \('INSERT'\), \('UPDATE'\), \('REFERENCES'\)\) AS actual\(privilege_type\)/);
+  assert.match(
+    sql,
+    /CROSS JOIN \(VALUES \('SELECT'\), \('INSERT'\), \('UPDATE'\), \('REFERENCES'\)\) AS actual\(privilege_type\)/,
+  );
   assert.match(sql, /has_column_privilege\(current_user, relation\.oid, attribute\.attname, actual\.privilege_type\)/);
   assert.match(sql, /expected\.privilege_type = actual\.privilege_type/);
   assert.doesNotMatch(sql, /expected\.privilege_type IN \('SELECT', 'INSERT', 'UPDATE', 'REFERENCES'\)/);
@@ -124,7 +131,10 @@ test('deployment grant script exposes only the worker role’s column-scoped per
   assert.match(sql, /GRANT UPDATE \(/);
   assert.match(sql, /ON TABLE model_router_saas\.saas_provider_rights/);
   assert.match(sql, /ON TABLE model_router_saas\.saas_provider_capabilities/);
-  assert.match(sql, /GRANT SELECT \(\s*provider_id, product_id, model, endpoint, protocol, version, support_level,\s*validation_state, evidence_sha256\s*\) ON TABLE model_router_saas\.saas_provider_capabilities\s+TO model_router_saas_validation_worker;/);
+  assert.match(
+    sql,
+    /GRANT SELECT \(\s*provider_id, product_id, model, endpoint, protocol, version, support_level,\s*validation_state, evidence_sha256\s*\) ON TABLE model_router_saas\.saas_provider_capabilities\s+TO model_router_saas_validation_worker;/,
+  );
   assert.match(sql, /ON TABLE model_router_saas\.saas_tenant_provider_account_capabilities/);
   assert.match(
     sql,
@@ -137,6 +147,118 @@ test('deployment grant script exposes only the worker role’s column-scoped per
   assert.doesNotMatch(sql, /GRANT\s+INSERT\b/i);
   assert.match(sql, /REVOKE EXECUTE ON ALL FUNCTIONS/);
   assert.match(sql, /migrations include version 058/);
-  assert.doesNotMatch(sql, /GRANT UPDATE \([^)]*\b(?:current_version|expires_at)\b[^)]*\) ON TABLE model_router_saas\.saas_tenant_provider_credentials/s);
+  assert.doesNotMatch(
+    sql,
+    /GRANT UPDATE \([^)]*\b(?:current_version|expires_at)\b[^)]*\) ON TABLE model_router_saas\.saas_tenant_provider_credentials/s,
+  );
   assert.doesNotMatch(sql, /GRANT\s+EXECUTE\b/i);
+});
+
+test('100 grants the Claude usage worker its scheduling columns on both account tables only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const column of ['claude_usage_updated_at', 'claude_5h_reset_at']) {
+      assert.ok(
+        SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', 'SELECT')`),
+        `probe manifest missing SELECT ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT SELECT \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    for (const column of [
+      'claude_5h_utilization',
+      'claude_5h_reset_at',
+      'claude_7d_utilization',
+      'claude_7d_reset_at',
+      'claude_7d_sonnet_utilization',
+      'claude_7d_sonnet_reset_at',
+      'claude_7d_oi_utilization',
+      'claude_7d_oi_reset_at',
+      'claude_usage_updated_at',
+      'claude_session_window_start',
+      'claude_session_window_end',
+    ]) {
+      assert.ok(
+        SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The control plane owns the operator's CLI pin override; the usage
+    // worker never reads or writes it.
+    assert.doesNotMatch(
+      SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+      new RegExp(`\\('${table}', 'claude_cli_version_override', '(?:SELECT|INSERT|UPDATE|REFERENCES)'\\)`),
+    );
+    assert.doesNotMatch(
+      workerGrantSql,
+      new RegExp(
+        `GRANT (?:SELECT|UPDATE) \\([^)]*\\bclaude_cli_version_override\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`,
+      ),
+    );
+  }
+});
+
+test('108 grants the OpenCode Go usage worker its scheduling columns on both account tables only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const column of [
+      'opencode_go_usage_next_due_at',
+      'opencode_go_usage_updated_at',
+      'opencode_go_rate_limited_until',
+    ]) {
+      assert.ok(
+        SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', 'SELECT')`),
+        `probe manifest missing SELECT ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT SELECT \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    for (const column of [
+      'opencode_go_rolling_5h_used_percent',
+      'opencode_go_rolling_5h_reset_at',
+      'opencode_go_weekly_used_percent',
+      'opencode_go_weekly_reset_at',
+      'opencode_go_monthly_used_percent',
+      'opencode_go_monthly_reset_at',
+      'opencode_go_usage_updated_at',
+      'opencode_go_usage_next_due_at',
+      'opencode_go_usage_failure_count',
+      'opencode_go_rate_limited_until',
+    ]) {
+      assert.ok(
+        SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The control plane owns the adaptive-routing rule table; the usage
+    // worker never reads or writes protocol_rules.
+    assert.doesNotMatch(
+      SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
+      new RegExp(`\\('${table}', 'opencode_go_protocol_rules', '(?:SELECT|INSERT|UPDATE|REFERENCES)'\\)`),
+    );
+    assert.doesNotMatch(
+      workerGrantSql,
+      new RegExp(
+        `GRANT (?:SELECT|UPDATE) \\([^)]*\\bopencode_go_protocol_rules\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`,
+      ),
+    );
+  }
 });
