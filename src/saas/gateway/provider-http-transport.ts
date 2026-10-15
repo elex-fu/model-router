@@ -18,8 +18,8 @@ import {
   resolveProviderHttpAddresses,
   selectPinnedProviderAddress,
 } from './provider-http-address.js';
-import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
 import { observeProviderJsonUsage } from './provider-json-usage-observer.js';
+import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
 
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -69,6 +69,14 @@ export interface ProviderHttpDispatchProfileResolveInput {
   readonly protocol: PreparedEvidenceTransportRequest['evidence']['protocol'];
   /** The signed endpoint descriptor; it is not a URL source for this transport. */
   readonly endpoint: string;
+  /**
+   * R5b-2: the signed provider-side protocol and operation (bridge output).
+   * Present on 029+ evidence; legacy evidence omits them. Multi-protocol
+   * providers (OpenCode Go: responses | openai | anthropic on one endpoint
+   * scope) key their per-protocol provider-target bindings on this pair.
+   */
+  readonly providerProtocol?: PreparedEvidenceTransportRequest['evidence']['providerProtocol'];
+  readonly providerOperation?: PreparedEvidenceTransportRequest['evidence']['providerOperation'];
   readonly signal: AbortSignal;
 }
 
@@ -585,6 +593,8 @@ function profileInput(
     upstreamId: request.evidence.upstreamId,
     protocol: request.evidence.protocol,
     endpoint: request.evidence.endpoint,
+    providerProtocol: request.evidence.providerProtocol,
+    providerOperation: request.evidence.providerOperation,
     signal,
   };
 }

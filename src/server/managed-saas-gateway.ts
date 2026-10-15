@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
+import { CODEX_ENDPOINT } from '../saas/gateway/codex/catalog-identity.js';
 import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from '../saas/gateway/contracts.js';
 import {
@@ -16,6 +17,14 @@ import {
   type RequestPreparationPort,
   type SaasGatewayHttpHandler,
 } from '../saas/gateway/http-handler.js';
+import { OPENCODE_GO_ENDPOINT, OPENCODE_GO_PROVIDER_ID } from '../saas/gateway/opencode-go/catalog-identity.js';
+import {
+  DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
+  type OpenCodeGoProtocolRule,
+  openCodeGoProviderOperationForProtocol,
+  resolveOpenCodeGoProtocol,
+  resolveOpenCodeGoProtocolRulesFromConfig,
+} from '../saas/gateway/opencode-go/protocol-rules.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
   type ProviderAccountRuntimeHealthWriter,
@@ -65,6 +74,7 @@ import {
   GatewayRequestIdempotencyStore,
 } from '../saas/gateway/request-idempotency.js';
 import {
+  allowRequestPreparation,
   blockRequestPreparation,
   type RequestPreparationAdmissionPort,
   type RequestPreparationAttemptPort,
@@ -84,7 +94,6 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
-import { CODEX_ENDPOINT } from '../saas/gateway/codex/catalog-identity.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
@@ -590,6 +599,49 @@ export interface ManagedSaasGatewayProductionOptions {
    * through it instead of the generic provider HTTP transport.
    */
   readonly codexEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * R5b-2: multi-protocol adaptive routing for the OpenCode Go subscription
+   * pool. For prepared requests whose authority candidate is the `opencode-go`
+   * provider, the provider protocol is re-derived per request from the
+   * normalized, post-modelMap resolved model id via the protocol rule table —
+   * after modelMap resolution and before payload compilation and endpoint
+   * signing, exactly the plan §R5b task #22 contract. The derivation is
+   * applied consistently at two layers (the authority route facts that the
+   * signed evidence statement carries, and the payload-compile route), so the
+   * two can never disagree and `validatePayload` always matches. The
+   * per-protocol dispatch key is the signed endpoint scope `opencode-go-zen`
+   * plus the signed `providerProtocol` (the same pair the codex split keys
+   * on); the generic transport's provider-target bindings then select the
+   * upstream URL per protocol. When this option is unset the built-in default
+   * table applies, so the feature is live for any deployment that routes
+   * `opencode-go` traffic; every other provider keeps its exact previous
+   * behavior.
+   */
+  readonly opencodeGoProtocolRouting?: {
+    /**
+     * Explicit resolved rule table; omitted → fall through to `config`, then
+     * the built-in default table. An empty array intentionally routes
+     * everything to Chat Completions.
+     */
+    readonly rules?: readonly OpenCodeGoProtocolRule[];
+    /**
+     * Raw provider-config value for the rule table — the migration-108
+     * `protocol_rules` JSONB column (or the sub2api credentials-map wrapper).
+     * Used only when `rules` is unset; absent or malformed values fall back to
+     * the built-in default table (sub2api semantics).
+     */
+    readonly config?: unknown;
+  };
+  /**
+   * R5b-2 mount point: when set, prepared evidence whose signed endpoint
+   * scope is the OpenCode Go catalog endpoint (`opencode-go-zen`, any of the
+   * three native provider protocols) is dispatched through this transport
+   * instead of the generic provider HTTP transport — the direct analog of
+   * `codexEvidenceTransport`. Unset keeps OpenCode Go traffic on the generic
+   * transport, which already serves all three protocols via per-protocol
+   * provider-target bindings.
+   */
+  readonly opencodeGoEvidenceTransport?: PreparedEvidenceTransport;
   readonly providerCredentialUnsealingKms: ProviderCredentialUnsealingKms;
   readonly credentialContext: GatewayProviderCredentialUnsealerOptions;
   /**
@@ -725,23 +777,129 @@ function validateEndpointPolicy(policy: ProviderHttpEndpointPolicy): void {
   }
 }
 
+/** One signed-endpoint dispatch split; `providerProtocol` further narrows it when set. */
+interface EndpointRoutingRoute {
+  /** Signed catalog endpoint scope from the prepared evidence. */
+  readonly endpoint: string;
+  /** Optional signed provider protocol that must also match (codex: 'responses'). */
+  readonly providerProtocol?: string;
+  readonly transport: PreparedEvidenceTransport;
+}
+
 /**
- * P1c codex dispatch split: prepared evidence whose signed endpoint scope is
- * the codex catalog endpoint (`codex-responses`, provider protocol
- * `responses`) is routed to the codex transport instead of the generic
- * provider HTTP transport. The endpoint descriptor comes from the signed
- * prepared evidence, so the split is catalog-driven, never client-supplied.
+ * Endpoint-scoped dispatch split. Prepared evidence is routed to the first
+ * matching entry (signed endpoint scope, optionally narrowed by the signed
+ * provider protocol) instead of the generic provider HTTP transport. The
+ * endpoint descriptor comes from the signed prepared evidence, so the split
+ * is catalog-driven, never client-supplied.
+ *
+ * P1c: the codex transport takes over exactly the signed `codex-responses`
+ * endpoint scope with provider protocol `responses`; every other provider
+ * keeps the generic transport path unchanged. R5b-2: an OpenCode Go transport
+ * (when mounted) takes over the signed `opencode-go-zen` endpoint scope for
+ * all three native provider protocols.
  */
 function createEndpointRoutingTransport(
   defaultTransport: PreparedEvidenceTransport,
-  route: { readonly endpoint: string; readonly transport: PreparedEvidenceTransport },
+  routes: readonly EndpointRoutingRoute[],
 ): PreparedEvidenceTransport {
   return {
     async send(input) {
-      if (input.evidence.endpoint === route.endpoint && input.evidence.providerProtocol === 'responses') {
-        return route.transport.send(input);
+      for (const route of routes) {
+        if (
+          input.evidence.endpoint === route.endpoint &&
+          (route.providerProtocol === undefined || input.evidence.providerProtocol === route.providerProtocol)
+        ) {
+          return route.transport.send(input);
+        }
       }
       return defaultTransport.send(input);
+    },
+  };
+}
+
+/**
+ * R5b-2 rule-table resolution for the composition: explicit resolved rules
+ * first, then the raw provider-config value (the migration-108 JSONB column
+ * or the sub2api credentials-map wrapper) through
+ * `resolveOpenCodeGoProtocolRulesFromConfig`, then the built-in default table.
+ * An explicitly empty `rules` array is honored (everything → Chat Completions).
+ */
+function resolveOpenCodeGoProtocolRules(
+  routing: ManagedSaasGatewayProductionOptions['opencodeGoProtocolRouting'],
+  fallback: readonly OpenCodeGoProtocolRule[],
+): readonly OpenCodeGoProtocolRule[] {
+  if (routing?.rules !== undefined) return routing.rules;
+  if (routing?.config !== undefined) {
+    return resolveOpenCodeGoProtocolRulesFromConfig(routing.config) ?? fallback;
+  }
+  return fallback;
+}
+
+/**
+ * R5b-2 OpenCode Go adaptive protocol routing (plan §R5b task #22): after
+ * modelMap resolution, the resolved provider model id is normalized and run
+ * through the protocol rule table; the matched native protocol and its
+ * canonical provider operation replace the route's provider-side protocol
+ * before payload compilation and endpoint signing. Non-OpenCode-Go
+ * candidates keep the route untouched. The three native protocols use the
+ * repository's existing GatewayProtocol spellings ('responses' |
+ * 'openai'=Chat Completions | 'anthropic'=Anthropic Messages), so the
+ * existing per-protocol bridges and usage observers take over unchanged.
+ *
+ * Exported for direct testing; production wiring is the two call sites in
+ * this module (the authority decorator below and the payload-compile route).
+ */
+export function applyOpenCodeGoProtocolRouting(
+  route: ManagedSaasProviderPreparationRoute,
+  candidate: { readonly providerId: string; readonly resolvedModel: string },
+  rules: readonly OpenCodeGoProtocolRule[],
+): ManagedSaasProviderPreparationRoute {
+  if (candidate.providerId !== OPENCODE_GO_PROVIDER_ID) return route;
+  const protocol = resolveOpenCodeGoProtocol(rules, candidate.resolvedModel);
+  return {
+    ...route,
+    providerProtocol: protocol,
+    providerOperation: openCodeGoProviderOperationForProtocol(protocol),
+  };
+}
+
+/**
+ * R5b-2 OpenCode Go adaptive protocol routing, authority layer: the resolved
+ * protocol is written into `authority.route.providerProtocol` — the field the
+ * preparation service's route facts, `validatePayload` and the signed
+ * prepared-evidence statement all derive from — so the per-request protocol
+ * decision is signed and later dispatch (endpoint scope + providerProtocol
+ * keys, per-protocol provider-target bindings, usage observers) sees exactly
+ * one consistent value. Non-OpenCode-Go authorities pass through unchanged.
+ * Together with `applyOpenCodeGoProtocolRouting` (the payload-compile layer
+ * that keeps the compiled payload on the same protocol even when a
+ * deployment's runtime route resolver is OpenCode-Go-unaware) the two layers
+ * can never disagree, so `validatePayload` always matches.
+ *
+ * Exported for direct testing; the production composition wraps the
+ * PostgreSQL authority adapter with it unconditionally (non-OpenCode-Go
+ * resolves pass through unchanged, so no other provider's behavior moves).
+ */
+export function createOpenCodeGoProtocolRoutingAuthority(
+  authority: RequestPreparationAuthorityPort,
+  rules: readonly OpenCodeGoProtocolRule[],
+): RequestPreparationAuthorityPort {
+  return {
+    async resolve(input) {
+      const decision = await authority.resolve(input);
+      if (decision.decision !== 'allow') return decision;
+      const value = decision.value;
+      if (value.candidate.providerId !== OPENCODE_GO_PROVIDER_ID) return decision;
+      const protocol = resolveOpenCodeGoProtocol(rules, value.candidate.resolvedModel);
+      return allowRequestPreparation({
+        ...value,
+        route: {
+          ...value.route,
+          providerProtocol: protocol,
+          providerOperation: openCodeGoProviderOperationForProtocol(protocol),
+        },
+      });
     },
   };
 }
@@ -759,6 +917,14 @@ function createProviderPayloadCompiler(
   requirePositiveInteger(payloadOptions.maxPayloadBytes);
   requireText(payloadOptions.compilerVersion);
   requireCallable(options.providerPreparationRoute);
+
+  // R5b-2: the OpenCode Go rule table is resolved once per composition —
+  // explicit rules, then the raw provider-config value (the migration-108
+  // JSONB column), then the built-in default table.
+  const openCodeGoProtocolRules = resolveOpenCodeGoProtocolRules(
+    options.opencodeGoProtocolRouting,
+    DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
+  );
 
   const compiler = new ProviderPayloadCompiler({
     estimator: payloadOptions.estimator,
@@ -802,14 +968,20 @@ function createProviderPayloadCompiler(
           message: 'provider preparation route is incomplete',
         };
       }
+      // R5b-2: OpenCode Go candidates re-derive the provider protocol from
+      // the post-modelMap resolved model id. The override stays within the
+      // validated route invariants (native GatewayProtocol + canonical
+      // operation); an unsupported client→provider bridge pair then fails
+      // closed inside the compiler as a capability_unavailable block.
+      const routedRoute = applyOpenCodeGoProtocolRouting(route, input.authority.candidate, openCodeGoProtocolRules);
       return compiler.compile({
         ...input,
-        clientProtocol: route.clientProtocol,
-        providerProtocol: route.providerProtocol,
-        clientOperation: route.clientOperation,
-        providerOperation: route.providerOperation,
-        operation: route.providerOperation,
-        modelResolution: route.modelResolution,
+        clientProtocol: routedRoute.clientProtocol,
+        providerProtocol: routedRoute.providerProtocol,
+        clientOperation: routedRoute.clientOperation,
+        providerOperation: routedRoute.providerOperation,
+        operation: routedRoute.providerOperation,
+        modelResolution: routedRoute.modelResolution,
       } as ProviderPayloadCompilerInput);
     },
   };
@@ -913,8 +1085,17 @@ export function createManagedSaasGatewayProductionComposition(
     catalog,
     byokEntitlements,
   };
-  const authority: RequestPreparationAuthorityPort = new PostgresRequestPreparationAuthorityAdapter(
-    authorityDependencies,
+  // R5b-2: OpenCode Go prepared requests re-derive their provider protocol
+  // per request from the protocol rule table (after modelMap resolution,
+  // before endpoint signing): explicit rules, then the raw provider-config
+  // value (the migration-108 JSONB column), then the built-in default table.
+  const openCodeGoProtocolRules = resolveOpenCodeGoProtocolRules(
+    options.opencodeGoProtocolRouting,
+    DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
+  );
+  const authority: RequestPreparationAuthorityPort = createOpenCodeGoProtocolRoutingAuthority(
+    new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
+    openCodeGoProtocolRules,
   );
 
   const evidence = new SaasPreparedRequestEvidenceService(database, {
@@ -962,18 +1143,29 @@ export function createManagedSaasGatewayProductionComposition(
     timeoutMs: options.timeoutMs,
   });
   // P1c codex dispatch split: the codex transport takes over exactly the
-  // signed `codex-responses` endpoint scope; every other provider keeps the
-  // generic transport path unchanged.
+  // signed `codex-responses` endpoint scope (provider protocol `responses`);
+  // every other provider keeps the generic transport path unchanged.
+  // R5b-2: an OpenCode Go transport, when mounted, takes over the signed
+  // `opencode-go-zen` endpoint scope for all three native provider protocols.
   if (options.codexEvidenceTransport !== undefined) {
     requireDependency(options.codexEvidenceTransport, 'send');
   }
+  if (options.opencodeGoEvidenceTransport !== undefined) {
+    requireDependency(options.opencodeGoEvidenceTransport, 'send');
+  }
+  const endpointRoutingRoutes: EndpointRoutingRoute[] = [];
+  if (options.codexEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: CODEX_ENDPOINT,
+      providerProtocol: 'responses',
+      transport: options.codexEvidenceTransport,
+    });
+  }
+  if (options.opencodeGoEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: OPENCODE_GO_ENDPOINT, transport: options.opencodeGoEvidenceTransport });
+  }
   const dispatchTransport =
-    options.codexEvidenceTransport === undefined
-      ? transport
-      : createEndpointRoutingTransport(transport, {
-          endpoint: CODEX_ENDPOINT,
-          transport: options.codexEvidenceTransport,
-        });
+    endpointRoutingRoutes.length === 0 ? transport : createEndpointRoutingTransport(transport, endpointRoutingRoutes);
   const payload = createProviderPayloadCompiler(options);
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
