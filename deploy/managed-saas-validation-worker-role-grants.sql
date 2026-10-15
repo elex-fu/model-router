@@ -11,6 +11,14 @@
 -- this role and writes the account quota snapshot columns below. Re-apply
 -- this template after 093 is migrated; until then the worker runtime
 -- privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 108, R5b): the OpenCode Go usage worker also
+-- shares this role (same workload as the quota sync worker). It claims due
+-- accounts through the opencode_go_usage_* scheduling columns — the due
+-- predicate reads next_due_at/updated_at/rate_limited_until, and the claim,
+-- snapshot, failure and cooldown writes cover every opencode_go_ column
+-- below. The opencode_go_protocol_rules column is deliberately absent: the
+-- control-plane role owns the adaptive-routing rule table. Re-apply this
+-- template after 108 is migrated.
 
 BEGIN;
 
@@ -166,6 +174,7 @@ GRANT SELECT (
   id, tenant_id, provider_id, product_id, credential_type, region, purpose,
   rights_id, rights_version, status, validation_state, revalidation_interval_seconds,
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
@@ -173,6 +182,11 @@ GRANT UPDATE (
   status, validation_state, validation_error_code, last_validated_at,
   updated_at, authz_version,
   quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  opencode_go_rolling_5h_used_percent, opencode_go_rolling_5h_reset_at,
+  opencode_go_weekly_used_percent, opencode_go_weekly_reset_at,
+  opencode_go_monthly_used_percent, opencode_go_monthly_reset_at,
+  opencode_go_usage_updated_at, opencode_go_usage_next_due_at,
+  opencode_go_usage_failure_count, opencode_go_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
   TO model_router_saas_validation_worker;
@@ -233,6 +247,7 @@ GRANT SELECT (
   id, provider_id, product_id, credential_type, region, purpose,
   rights_id, rights_version, status, validation_state, revalidation_interval_seconds,
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;
@@ -240,6 +255,11 @@ GRANT UPDATE (
   status, validation_state, validation_error_code, last_validated_at,
   updated_at, authz_version,
   quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
+  opencode_go_rolling_5h_used_percent, opencode_go_rolling_5h_reset_at,
+  opencode_go_weekly_used_percent, opencode_go_weekly_reset_at,
+  opencode_go_monthly_used_percent, opencode_go_monthly_reset_at,
+  opencode_go_usage_updated_at, opencode_go_usage_next_due_at,
+  opencode_go_usage_failure_count, opencode_go_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;

@@ -477,6 +477,30 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ...columnGrants('saas_billing_group_account_pools', 'SELECT', ['group_id', 'account_id', 'priority', 'created_at']),
   ...columnGrants('saas_billing_group_account_pools', 'INSERT', ['group_id', 'account_id', 'priority']),
   ...columnGrants('saas_billing_group_account_pools', 'UPDATE', ['priority']),
+  // R4 (106) registration admission: the identity control plane issues,
+  // verifies, consumes and prunes email verification codes. No gateway
+  // access — the table is never read outside the control plane.
+  ...columnGrants('saas_email_verification_codes', 'SELECT', [
+    'id',
+    'email_canonical',
+    'purpose',
+    'code_hash',
+    'attempts',
+    'expires_at',
+    'consumed_at',
+    'created_ip',
+    'created_at',
+  ]),
+  ...columnGrants('saas_email_verification_codes', 'INSERT', [
+    'id',
+    'email_canonical',
+    'purpose',
+    'code_hash',
+    'expires_at',
+    'created_ip',
+    'created_at',
+  ]),
+  ...columnGrants('saas_email_verification_codes', 'UPDATE', ['attempts', 'consumed_at']),
   ...columnGrants('saas_projects', 'SELECT', [
     'tenant_id',
     'id',
@@ -2914,6 +2938,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   ['saas_obs_alert_rules', 'DELETE'],
   // R1 (105): billing group account-pool membership replacement.
   ['saas_billing_group_account_pools', 'DELETE'],
+  // R4 (106): verification-code expiry pruning and delivery-failure
+  // compensation delete code rows.
+  ['saas_email_verification_codes', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */

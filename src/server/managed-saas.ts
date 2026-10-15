@@ -39,8 +39,13 @@ import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provid
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
 import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
+import { ConsoleEmailSender, SmtpEmailSender } from '../saas/identity/email-sender.js';
+import { EmailVerificationService } from '../saas/identity/email-verification-service.js';
 import { createSaasIdentityHandler, type SaasIdentityHttpOptions } from '../saas/identity/http.js';
 import { SaasIdentityService } from '../saas/identity/index.js';
+import { RegistrationService } from '../saas/identity/register-service.js';
+import { parseRegistrationAdmissionSettings } from '../saas/identity/registration-settings.js';
+import { createCaptchaProof } from '../saas/identity/turnstile-service.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { createSaasKeyHandler, type SaasKeyHttpHandler } from '../saas/keys/http.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
@@ -65,6 +70,7 @@ import {
 import { MarketingPromoCodeService } from '../saas/marketing/promo-codes.js';
 import { createMarketingOpsPromoCodesHandler, type MarketingPromoHttpHandler } from '../saas/marketing/promo-http.js';
 import { MarketingRedeemCodeService } from '../saas/marketing/redeem-codes.js';
+import { MarketingRegistrationRewards } from '../saas/marketing/registration-rewards.js';
 import { SaasMeteringService } from '../saas/metering/service.js';
 import {
   createUnknownOutcomePlatformHttpHandler,
@@ -201,6 +207,16 @@ import {
   startOauthTokenRefreshWorker,
 } from '../saas/supply/oauth-token-refresh-worker.js';
 import {
+  PostgresOpencodeGoUsageStore,
+  type PostgresOpencodeGoUsageStoreOptions,
+} from '../saas/supply/opencode-go-usage-store-postgres.js';
+import {
+  type OpencodeGoUsageStore,
+  type OpencodeGoUsageWorkerHandle,
+  type OpencodeGoUsageWorkerOptions,
+  startOpencodeGoUsageWorker,
+} from '../saas/supply/opencode-go-usage-worker.js';
+import {
   type QuotaSyncWorkerHandle,
   type QuotaSyncWorkerOptions,
   startQuotaSyncWorker as startQuotaSyncWorkerLoop,
@@ -258,6 +274,8 @@ export interface ManagedSaasRuntime {
   readonly credentialValidationWorker: CredentialValidationWorkerHandle | null;
   /** D4 quota sync loop sharing the credential-validation-worker workload. */
   readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
+  /** R5b OpenCode Go usage-snapshot loop; same workload as quota sync. */
+  readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
   /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
   readonly oauthTokenRefreshWorker: OauthTokenRefreshWorkerHandle | null;
   /** G4.5 announcement fan-out loop; only when customer webhooks are enabled. */
@@ -388,6 +406,14 @@ export interface ManagedSaasStartOptions {
   ) => QuotaSyncWorkerHandle;
   /** Optional quota loop tuning or test fetch; deployment identity is always supplied by config. */
   quotaSyncWorkerOptions?: Partial<Omit<QuotaSyncWorkerOptions, 'deployment' | 'environment'>>;
+  /** Deterministic seam for the R5b OpenCode Go usage store backing the worker loop. */
+  createOpencodeGoUsageStore?: (
+    database: SaasDatabase,
+    kms: LoadedValidationWorkerProviderCredentialKms,
+    options: PostgresOpencodeGoUsageStoreOptions,
+  ) => OpencodeGoUsageStore;
+  /** Optional usage loop tuning or test fetch; deployment identity always reaches the store. */
+  opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
   /**
    * R4: the privileged rotation seam for the OAuth refresh worker. Rotation
    * writes the new credential version chain through the audited supply path,
@@ -1156,11 +1182,19 @@ async function startCredentialValidationWorkerRuntime(
     ((env: DeploymentEnvironment) => loadValidationWorkerProviderCredentialKms({ env }));
   const startWorker = options.startCredentialValidationWorker ?? startValidationWorkerLoop;
   const startQuotaWorker = options.startQuotaSyncWorker ?? startQuotaSyncWorkerLoop;
+  const createUsageStore =
+    options.createOpencodeGoUsageStore ??
+    ((
+      database: SaasDatabase,
+      kms: LoadedValidationWorkerProviderCredentialKms,
+      storeOptions: PostgresOpencodeGoUsageStoreOptions,
+    ) => new PostgresOpencodeGoUsageStore(database, kms, storeOptions));
 
   let database: ManagedSaasDatabase | undefined;
   let kms: LoadedValidationWorkerProviderCredentialKms | undefined;
   let worker: CredentialValidationWorkerHandle | undefined;
   let quotaWorker: QuotaSyncWorkerHandle | undefined;
+  let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
@@ -1170,6 +1204,7 @@ async function startCredentialValidationWorkerRuntime(
       removeSignals = undefined;
       if (worker) await Promise.allSettled([worker.close()]);
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
+      if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
       if (oauthRefreshWorker) await Promise.allSettled([oauthRefreshWorker.close()]);
       if (kms) await Promise.allSettled([Promise.resolve().then(() => kms?.close())]);
       if (database) await Promise.allSettled([closeDatabase(database)]);
@@ -1235,6 +1270,19 @@ async function startCredentialValidationWorkerRuntime(
       deployment: deployment.deploymentId,
       environment: deployment.environmentId,
     });
+    // R5b (task #25): the OpenCode Go usage-snapshot loop shares this
+    // workload's database role and decrypt-only KMS, exactly like the quota
+    // sync loop. Its SKIP LOCKED claim and snapshot writes are scheduling
+    // signals only and never feed the billing path; the due scan itself
+    // filters on the compile-time fixed opencode-go binding triple, so a
+    // deployment without opencode-go accounts simply idles every round.
+    opencodeGoUsageWorker = startOpencodeGoUsageWorker(
+      createUsageStore(database, kms, {
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      }),
+      options.opencodeGoUsageWorkerOptions,
+    );
     // Track R4: the OAuth refresh loop runs only when the deployment wires a
     // privileged rotator (the restricted worker role cannot write the version
     // chain). An absent rotator keeps pre-R4 behavior, documented at the option.
@@ -1252,6 +1300,7 @@ async function startCredentialValidationWorkerRuntime(
       gateway: null,
       credentialValidationWorker: worker,
       quotaSyncWorker: quotaWorker,
+      opencodeGoUsageWorker: opencodeGoUsageWorker,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: null,
       unknownOutcomeScanner: null,
@@ -1642,6 +1691,58 @@ export async function startManagedSaasServer(
         publicOrigin: deploymentListener(deployment, 'customer').origin,
         sessionTtlSeconds: customerSessionTtlSeconds,
       });
+      // R2: affiliate rebates accrue at the wallet funding terminal through
+      // the walletFundingHook port (same fulfillment transaction, fail-closed).
+      const marketingAffiliateService = new MarketingAffiliateService({
+        database,
+        fundingLedger: new PlatformWalletLedgerService(),
+        inviteCodeSalt: `affiliate-invite-v1:${deployment.deploymentId}`,
+      });
+      // R4 registration admission (public register + password reset). The
+      // admission switches come from the deployment settings surface (env in
+      // managed mode; no platform settings store exists yet — the billing
+      // groups saas.payments.* precedent). Secrets stay env-only and are
+      // resolved here, never persisted. Unconfigured SMTP degrades to the
+      // console sender (the alerts.ts behavior) so nothing dials out by
+      // surprise; default mode is fail-closed (closed).
+      const registrationSettings = parseRegistrationAdmissionSettings(process.env);
+      const registrationEmailSender =
+        registrationSettings.smtp === undefined
+          ? new ConsoleEmailSender()
+          : new SmtpEmailSender({
+              host: registrationSettings.smtp.host,
+              port: registrationSettings.smtp.port,
+              ...(registrationSettings.smtp.secure === undefined ? {} : { secure: registrationSettings.smtp.secure }),
+              ...(registrationSettings.smtp.username === undefined
+                ? {}
+                : { username: registrationSettings.smtp.username }),
+              ...(registrationSettings.smtp.password === undefined
+                ? {}
+                : { password: registrationSettings.smtp.password }),
+              from: registrationSettings.smtp.from,
+            });
+      const registrationCaptcha = createCaptchaProof(
+        registrationSettings.turnstile.enabled && registrationSettings.turnstile.secret !== undefined
+          ? { backend: 'turnstile', secret: registrationSettings.turnstile.secret }
+          : { backend: 'disabled' },
+      );
+      const registrationService = new RegistrationService({
+        database,
+        identity: identityService,
+        verification: new EmailVerificationService({
+          database,
+          emailSender: registrationEmailSender,
+        }),
+        captcha: registrationCaptcha,
+        settings: registrationSettings,
+        sessionTtlSeconds: customerSessionTtlSeconds,
+        affiliate: new MarketingRegistrationRewards({
+          database,
+          affiliate: marketingAffiliateService,
+          fundingLedger: new PlatformWalletLedgerService(),
+          rewards: registrationSettings.rewards,
+        }),
+      });
       const customerIdentityOptions: SaasIdentityHttpOptions = {
         service: identityService,
         ...(customerMfaService === undefined ? {} : { customerMfa: customerMfaService }),
@@ -1650,6 +1751,11 @@ export async function startManagedSaasServer(
         publicOrigin: deploymentListener(deployment, 'customer').origin,
         sessionTtlSeconds: customerSessionTtlSeconds,
         rateLimiter: providers.customerAuthRateLimiter as ManagedRateLimiter,
+        registration: {
+          service: registrationService,
+          sendRateLimiter: providers.customerAuthCodeSendRateLimiter as ManagedRateLimiter,
+        },
+        captcha: registrationCaptcha,
       };
       const customerIdentityHandler = createSaasIdentityHandler(customerIdentityOptions);
       const customerPlanHandler = createSaasPlanCatalogHandler({
@@ -1707,13 +1813,9 @@ export async function startManagedSaasServer(
       // R1: promo codes feed the checkout pricing snapshot through the
       // walletTopUpPromo port (priced inside the order transaction).
       const marketingPromoCodeService = new MarketingPromoCodeService({ database });
-      // R2: affiliate rebates accrue at the wallet funding terminal through
-      // the walletFundingHook port (same fulfillment transaction, fail-closed).
-      const marketingAffiliateService = new MarketingAffiliateService({
-        database,
-        fundingLedger: new PlatformWalletLedgerService(),
-        inviteCodeSalt: `affiliate-invite-v1:${deployment.deploymentId}`,
-      });
+      // R2: affiliate service is constructed with the R4 registration wiring
+      // above (the registration rewards adapter shares it); only the customer
+      // HTTP handler mounts here.
       const customerMarketingAffiliateHandler = createMarketingAffiliateCustomerHttpHandler({
         service: identityService,
         operations: marketingAffiliateService,
@@ -2205,6 +2307,7 @@ export async function startManagedSaasServer(
       gateway: gateway ?? null,
       credentialValidationWorker: null,
       quotaSyncWorker: null,
+      opencodeGoUsageWorker: null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: announcementFanoutWorker ?? null,
       unknownOutcomeScanner: unknownOutcomeScanner ?? null,

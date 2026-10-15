@@ -48,9 +48,9 @@ import { CUSTOMER_PASSKEY_CEREMONIES_SAAS_MIGRATION } from '../../../src/saas/db
 import { CUSTOMER_WEBHOOK_TENANT_POLICY_ENTITLEMENT_SAAS_MIGRATION } from '../../../src/saas/db/migrations/087_customer_webhook_tenant_policy_entitlement.js';
 import { CUSTOMER_WEBHOOK_EVENT_TYPES_CHECK_REWRITE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/088_customer_webhook_event_types_check_rewrite.js';
 import { MARKETING_REDEEM_CODES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/089_marketing_redeem_codes.js';
-import { MARKETING_ANNOUNCEMENTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/092_marketing_announcements.js';
 import { MARKETING_PROMO_CODES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/090_marketing_promo_codes.js';
 import { MARKETING_AFFILIATE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/091_marketing_affiliate.js';
+import { MARKETING_ANNOUNCEMENTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/092_marketing_announcements.js';
 import { PROVIDER_ACCOUNT_QUOTA_SNAPSHOTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/093_provider_account_quota_snapshots.js';
 import { PROVIDER_CREDENTIAL_OAUTH_REFRESH_SAAS_MIGRATION } from '../../../src/saas/db/migrations/094_provider_credential_oauth_refresh_state.js';
 import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from '../../../src/saas/db/migrations/095_marketing_announcement_fanout_cursor.js';
@@ -63,6 +63,8 @@ import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from '../../../src/saas/db/migrati
 import { OBS_ALERTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/103_obs_alerts.js';
 import { OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/104_openai_embeddings_operation.js';
 import { BILLING_GROUPS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/105_billing_groups.js';
+import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/106_registration_admission.js';
+import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/108_provider_account_opencode_go_scheduling.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -96,7 +98,36 @@ test('SaaS migration registry keeps a stable append order with only documented g
   // (docs/contracts-m0-freeze.md).
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105],
+    [
+      ...Array.from({ length: 60 }, (_, index) => index + 1),
+      63,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      108,
+    ],
   );
 });
 
@@ -145,9 +176,11 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     OBS_ALERTS_SAAS_MIGRATION,
     OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
     BILLING_GROUPS_SAAS_MIGRATION,
+    REGISTRATION_ADMISSION_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 85);
+  assert.equal(SAAS_MIGRATIONS.length, 87);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -194,14 +227,45 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'obs_alert_rules_and_events',
       'openai_embeddings_operation',
       'billing_groups',
+      'registration_admission',
+      'provider_account_opencode_go_scheduling',
     ],
   );
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
-    [...Array.from({ length: 60 }, (_, index) => index + 1), 63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105],
+    [
+      ...Array.from({ length: 60 }, (_, index) => index + 1),
+      63,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      108,
+    ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 85);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 85);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 87);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 87);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -291,7 +355,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 85);
+  assert.equal(SAAS_MIGRATIONS.length, 87);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -324,6 +388,8 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     OBS_ALERTS_SAAS_MIGRATION,
     OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION,
     BILLING_GROUPS_SAAS_MIGRATION,
+    REGISTRATION_ADMISSION_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -386,6 +452,16 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[84], BILLING_GROUPS_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[84]?.version, 105);
   assert.equal(SAAS_MIGRATIONS[84]?.name, 'billing_groups');
+  // 108: R5b OpenCode Go scheduling (usage snapshots + protocol rules);
+  // 107 stays available for parallel workstreams.
+  // 106: R4 registration admission (email verification codes) landed after
+  // 108 was registered, so it slots in directly ahead of it.
+  assert.equal(SAAS_MIGRATIONS[85], REGISTRATION_ADMISSION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[85]?.version, 106);
+  assert.equal(SAAS_MIGRATIONS[85]?.name, 'registration_admission');
+  assert.equal(SAAS_MIGRATIONS[86], PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[86]?.version, 108);
+  assert.equal(SAAS_MIGRATIONS[86]?.name, 'provider_account_opencode_go_scheduling');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

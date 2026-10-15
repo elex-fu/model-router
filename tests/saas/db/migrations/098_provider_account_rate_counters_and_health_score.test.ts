@@ -15,8 +15,9 @@ test('098 registers after 097 ahead of later forwards with the documented gaps',
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
-  // 104 (R2 embeddings operation) and 105 (R1 billing groups) follow at the tail.
-  assert.equal(registered.at(-1), 105);
+  // 104 (R2 embeddings), 105 (R1 billing groups), 106 (R4 registration
+  // admission) and 108 (R5b OpenCode Go scheduling) follow at the tail.
+  assert.equal(registered.at(-1), 108);
   assert.equal(SAAS_MIGRATIONS[78], migration);
 });
 

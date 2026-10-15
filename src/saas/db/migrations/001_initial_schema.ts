@@ -82,6 +82,7 @@ import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from './102_obs_channel_metrics.js
 import { OBS_ALERTS_SAAS_MIGRATION } from './103_obs_alerts.js';
 import { OPENAI_EMBEDDINGS_OPERATION_SAAS_MIGRATION } from './104_openai_embeddings_operation.js';
 import { BILLING_GROUPS_SAAS_MIGRATION } from './105_billing_groups.js';
+import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from './106_registration_admission.js';
 import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_provider_account_opencode_go_scheduling.js';
 
 export interface SaasMigration {
@@ -538,10 +539,17 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // topup multiplier skeleton. Numbered 105 because R2 consumed the plan's
   // 104 slot first (fail-closed serial ordering).
   BILLING_GROUPS_SAAS_MIGRATION,
+  // 106: R4 registration admission — the durable email-verification-code
+  // ledger (hash-only storage, purpose isolation, attempt bounds, one-time
+  // consume). Admission switches (registration mode / Turnstile / SMTP /
+  // domain lists) live in the settings surface, not the schema. 107 stays
+  // free for R6a; 108 (R5b opencode-go scheduling) already landed, so 106
+  // slots in ahead of it per the fail-closed serial-ordering rule.
+  REGISTRATION_ADMISSION_SAAS_MIGRATION,
   // 108: R5b OpenCode Go scheduling — the rolling-5h/weekly/monthly usage
   // window snapshots plus the attempt-stamp/next-due/failure-streak/cooldown
   // columns the usage worker claims through, and the opencode_go_protocol_rules
   // jsonb rule table (multi-protocol adaptive routing). Scheduling signal
-  // only, never billing; 106/107 stay available for parallel workstreams.
+  // only, never billing; 107 stays available for the next workstream.
   PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
 ];

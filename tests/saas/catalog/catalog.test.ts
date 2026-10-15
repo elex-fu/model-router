@@ -591,7 +591,7 @@ test('migration 008 defines bounded append-only catalog tables and registry vers
   // (docs/contracts-m0-freeze.md migration registry).
   assert.deepEqual(versions, [
     ...Array.from({ length: 60 }, (_, index) => index + 1),
-    63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105,
+    63, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 101, 102, 103, 104, 105, 106, 108,
   ]);
   assert.equal(SAAS_MIGRATIONS[7], PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION);
   assert.match(PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION.sql, /CREATE TABLE saas_provider_capabilities/);

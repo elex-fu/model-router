@@ -566,6 +566,12 @@ $runtime_column_acl_normalization$;
 -- manages the group and account-pool relations. Re-apply this template after
 -- running migration 105 on a database that predates it — until then the
 -- gateway runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 106, R4 registration admission): the identity
+-- control plane owns saas_email_verification_codes exclusively (issue,
+-- verify-and-consume, attempt counting, expiry pruning); the gateway has no
+-- grant on it. Re-apply this template after running migration 106 on a
+-- database that predates it — until then the control-plane runtime privilege
+-- probe fails closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -634,6 +640,12 @@ BEGIN
       ('saas_billing_group_account_pools', 'SELECT', 'group_id account_id priority created_at'),
       ('saas_billing_group_account_pools', 'INSERT', 'group_id account_id priority'),
       ('saas_billing_group_account_pools', 'UPDATE', 'priority'),
+      -- R4 (106) registration admission: the identity control plane issues,
+      -- verifies, consumes and prunes email verification codes. No gateway
+      -- access — the table is never read outside the control plane.
+      ('saas_email_verification_codes', 'SELECT', 'id email_canonical purpose code_hash attempts expires_at consumed_at created_ip created_at'),
+      ('saas_email_verification_codes', 'INSERT', 'id email_canonical purpose code_hash expires_at created_ip created_at'),
+      ('saas_email_verification_codes', 'UPDATE', 'attempts consumed_at'),
       ('saas_memberships', 'SELECT', 'tenant_id user_id role status revoked_at'),
       ('saas_memberships', 'INSERT', 'tenant_id user_id role created_at updated_at'),
       ('saas_memberships', 'UPDATE', 'role status revoked_at updated_at'),
@@ -851,7 +863,8 @@ BEGIN
       ('saas_obs_channel_metrics_1m', 'DELETE'),
       ('saas_obs_channel_metrics_hourly', 'DELETE'),
       ('saas_obs_alert_rules', 'DELETE'),
-      ('saas_billing_group_account_pools', 'DELETE')
+      ('saas_billing_group_account_pools', 'DELETE'),
+      ('saas_email_verification_codes', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
