@@ -202,6 +202,13 @@ export interface ManagedSaasGatewayCompositionDependencies {
   readonly entryPoint: string;
   /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
   readonly trustedProxyCidrs?: readonly string[];
+  /**
+   * Roadmap batch 2 §2.1: enable the sticky-session scheduling seam at the
+   * HTTP boundary. Only compositions that wire an account scheduler with
+   * affinity binding (the managed production gateway always does) may set
+   * this; default false keeps preparation input byte-identical.
+   */
+  readonly stickyScheduling?: boolean;
 }
 
 export interface ManagedSaasGatewayComposition {
@@ -546,6 +553,7 @@ export function createManagedSaasGatewayComposition(
     maxBodyBytes: dependencies.maxBodyBytes,
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
+    ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
   });
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
@@ -1438,6 +1446,10 @@ export function createManagedSaasGatewayProductionComposition(
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
     trustedProxyCidrs: options.trustedProxyCidrs,
+    // Batch 2 §2.1: the production composition always wires the scheduler
+    // with the affinity port (required above), so the sticky-session
+    // scheduling seam is unconditionally live here.
+    stickyScheduling: true,
   });
 }
 

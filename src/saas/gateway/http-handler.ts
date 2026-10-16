@@ -22,6 +22,7 @@ import type {
   RequestPreparationPreparedResult,
   RequestPreparationResult,
 } from './request-preparation-service.js';
+import { stickySchedulingContext } from './sticky-session-reference.js';
 
 const GATEWAY_PREFIX = '/v1';
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -105,6 +106,17 @@ export interface SaasGatewayHttpOptions {
    * (default) means only the socket peer is ever used as the client address.
    */
   readonly trustedProxyCidrs?: readonly string[];
+  /**
+   * Roadmap batch 2 §2.1: when true, this trusted boundary derives the merged
+   * sticky-session reference (sub2api口径: metadata.user_id session UUID →
+   * conversation_id → prompt_cache_key/ephemeral content → content fallback)
+   * and fills input.scheduling.sessionId for the account scheduler's
+   * affinity resolution. Default false keeps the boundary byte-identical:
+   * a scheduling context REQUIRES the full scheduling chain (an account
+   * scheduler with affinity binding), so only compositions that wire one
+   * (the managed production gateway always does) may enable it.
+   */
+  readonly stickyScheduling?: boolean;
 }
 
 /** Server-created request identity passed by a trusted composition boundary. */
@@ -870,6 +882,39 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       );
       return true;
     }
+    // Resolved at the trusted HTTP boundary only; the admission guard
+    // fails closed on a non-disabled key IP policy without it. Also the
+    // sticky-session content fallback's client discriminator.
+    const clientAddress = resolveClientAddress(
+      req.socket?.remoteAddress ?? '',
+      req.headers['x-forwarded-for'],
+      options.trustedProxyCidrs ?? [],
+    );
+    /*
+     * Roadmap batch 2 §2.1 (task #5): the sticky-session scheduling seam.
+     * The merged sessionHash derivation (sub2api口径: metadata.user_id
+     * session UUID → conversation_id → prompt_cache_key/ephemeral content →
+     * content fallback) runs here at the trusted boundary — the only place
+     * that sees the parsed body, inbound headers, client address, and key
+     * identity together — and fills input.scheduling.sessionId with one
+     * opaque reference. Absent any session signal the field stays undefined
+     * and the default preparation path is byte-identical. The reference is
+     * request-scoped scheduler input only: never logged, never audited, and
+     * HMACed by the durable affinity store before any SQL.
+     */
+    const scheduling = options.stickyScheduling
+      ? stickySchedulingContext({
+          protocol,
+          headers: req.headers,
+          body,
+          clientIp: clientAddress.status === 'resolved' ? clientAddress.address : null,
+          userAgent: oneHeader(req, 'user-agent') ?? null,
+          proxyKeyId: authenticatedCaller.metadata.id,
+          // Stateless operations (embeddings) never pin content-derived
+          // sessions (the sub2api /v1/images precedent).
+          stateless: ROUTE_CLIENT_OPERATIONS.has(path),
+        })
+      : undefined;
     let prepared: RequestPreparationResult;
     try {
       prepared = await preparation.prepare({
@@ -882,13 +927,8 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         clientRequest: body,
         idempotencyKey: requestIdempotencyKey,
         audit: auditContext,
-        // Resolved at the trusted HTTP boundary only; the admission guard
-        // fails closed on a non-disabled key IP policy without it.
-        clientAddress: resolveClientAddress(
-          req.socket?.remoteAddress ?? '',
-          req.headers['x-forwarded-for'],
-          options.trustedProxyCidrs ?? [],
-        ),
+        ...(scheduling ? { scheduling } : {}),
+        clientAddress,
         // G1 (task #41): server-collected, bounded Claude Code client
         // evidence for the scheduler's claude_code_only enforcement (F2);
         // the clientAddress precedent — only this boundary may set it.

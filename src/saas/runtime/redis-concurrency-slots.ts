@@ -88,6 +88,12 @@ export interface RedisRuntimeCache {
    * argument is the full sliding window, not a delta.
    */
   getAndRefreshTtl(key: string, ttlMs: number): Promise<RedisCacheEntry>;
+  /**
+   * Sticky-path clear (batch 2 §2.1): best-effort single-key delete. Never
+   * throws — a failed clear only leaves a stale cache row that the next
+   * resolve re-checks against eligibility anyway.
+   */
+  delete(key: string): Promise<void>;
 }
 
 export interface RedisRuntimeCacheOptions {
@@ -144,6 +150,12 @@ export const REDIS_CACHE_GET_SLIDING_SCRIPT = [
   'end',
   'return value',
 ].join('\n');
+
+/**
+ * Sticky-path clear (batch 2 §2.1 shouldClearStickySession): a single-key
+ * DEL. A miss deletes nothing and never errors — clearing is idempotent.
+ */
+export const REDIS_CACHE_DELETE_SCRIPT = 'return redis.call("DEL", KEYS[1])';
 
 export const REDIS_SLOT_DEFAULT_KEY_TTL_MS = 600_000;
 /** Sticky mapping TTL: the plan's 1 hour, refreshed on every hit (idle bound). */
@@ -332,6 +344,15 @@ export function createRedisRuntimeCache(
         // Same fail-open posture as get/set: an unavailable Redis only costs
         // the sticky fast path, never the request.
         return { state: 'unavailable', value: null };
+      }
+    },
+    async delete(key) {
+      try {
+        if (safeRedisString(key, MAX_KEY_BYTES) === null) return;
+        await client.command(['EVAL', REDIS_CACHE_DELETE_SCRIPT, '1', key]);
+      } catch {
+        // Best-effort clear: a stale row is re-checked against eligibility
+        // on every read and PG re-decides, so a failed delete is harmless.
       }
     },
   };

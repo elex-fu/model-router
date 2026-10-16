@@ -5,7 +5,7 @@ import { createRedisStickyProviderAccountAffinity } from '../../../src/saas/gate
 import type { RedisCacheEntry, RedisRuntimeCache } from '../../../src/saas/runtime/redis-concurrency-slots.js';
 
 interface CacheCall {
-  readonly kind: 'get' | 'get-refresh' | 'set';
+  readonly kind: 'get' | 'get-refresh' | 'set' | 'delete';
   readonly key: string;
   readonly value?: Buffer;
   readonly ttlMs?: number;
@@ -13,7 +13,7 @@ interface CacheCall {
 
 function fakeCache(
   entries: Map<string, Buffer> = new Map(),
-  behavior: { readonly failGets?: boolean; readonly failSets?: boolean } = {},
+  behavior: { readonly failGets?: boolean; readonly failSets?: boolean; readonly failDeletes?: boolean } = {},
 ): { cache: RedisRuntimeCache; calls: CacheCall[] } {
   const calls: CacheCall[] = [];
   const cache: RedisRuntimeCache = {
@@ -33,6 +33,11 @@ function fakeCache(
       calls.push({ kind: 'set', key, value: Buffer.from(value), ttlMs });
       if (behavior.failSets) throw new Error('redis set failed');
       entries.set(key, Buffer.from(value));
+    },
+    async delete(key): Promise<void> {
+      calls.push({ kind: 'delete', key });
+      if (behavior.failDeletes) throw new Error('redis delete failed');
+      entries.delete(key);
     },
   };
   return { cache, calls };
@@ -170,6 +175,101 @@ test('an ineligible hit, a miss and an unavailable Redis all fall back to the PG
   );
   assert.deepEqual(await none.resolve(resolveInput({ context: {} }) as never), { decision: 'allow', accountId: null });
   assert.equal(noReference.calls.length, 0);
+});
+
+test('an inner stale decision clears the Redis mapping and degrades to load balancing', async () => {
+  // Learn the sticky key through a miss + backfill.
+  const learned = new Map<string, Buffer>();
+  const learnCache = fakeCache(learned);
+  const learn = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'allow', accountId: 'account-1' };
+      },
+    },
+    { cache: learnCache.cache, keyPrefix: 'model-router:saas' },
+  );
+  await learn.resolve(resolveInput() as never);
+  const key = learnCache.calls.find((call) => call.kind === 'set')?.key;
+  assert.ok(key);
+
+  // PG says the binding is cleared (target unschedulable): the decorator
+  // forwards 'stale' and DELETES the Redis copy (shouldClearStickySession).
+  const staleCache = fakeCache(new Map([[key, Buffer.from('account-9')]]));
+  const stale = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'stale' } as const;
+      },
+    },
+    { cache: staleCache.cache, keyPrefix: 'model-router:saas' },
+  );
+  assert.deepEqual(await stale.resolve(resolveInput() as never), { decision: 'stale' });
+  const del = staleCache.calls.find((call) => call.kind === 'delete');
+  assert.ok(del, 'a stale inner decision clears the Redis mapping');
+  assert.equal(del.key, key);
+  assert.equal(staleCache.calls.filter((call) => call.kind === 'set').length, 0, 'no backfill on stale');
+
+  // A failed delete never fails the resolve: the decision is still stale and
+  // the leftover row is re-checked against eligibility on every later read.
+  const failedDeleteCache = fakeCache(new Map([[key, Buffer.from('account-9')]]), { failDeletes: true });
+  const failedDelete = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'stale' } as const;
+      },
+    },
+    { cache: failedDeleteCache.cache, keyPrefix: 'model-router:saas' },
+  );
+  assert.deepEqual(await failedDelete.resolve(resolveInput() as never), { decision: 'stale' });
+
+  // Stale without any Redis entry: forwarded unchanged. The clear is still
+  // issued (idempotent DEL — a racing writer's row is stale by definition).
+  const emptyCache = fakeCache();
+  const emptyStale = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'stale' } as const;
+      },
+    },
+    { cache: emptyCache.cache, keyPrefix: 'model-router:saas' },
+  );
+  assert.deepEqual(await emptyStale.resolve(resolveInput() as never), { decision: 'stale' });
+  assert.equal(emptyCache.calls.filter((call) => call.kind === 'delete').length, 1);
+});
+
+test('an ineligible hit over a PG miss clears the drifted Redis mapping', async () => {
+  const learned = new Map<string, Buffer>();
+  const learnCache = fakeCache(learned);
+  const learn = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'allow', accountId: 'account-1' };
+      },
+    },
+    { cache: learnCache.cache, keyPrefix: 'model-router:saas' },
+  );
+  await learn.resolve(resolveInput() as never);
+  const key = learnCache.calls.find((call) => call.kind === 'set')?.key;
+  assert.ok(key);
+
+  // The Redis row is ineligible AND PG holds no active binding (its row
+  // expired first): the drift is deleted instead of resurrected.
+  const driftCache = fakeCache(new Map([[key, Buffer.from('account-9')]]));
+  const drift = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'allow', accountId: null };
+      },
+    },
+    { cache: driftCache.cache, keyPrefix: 'model-router:saas' },
+  );
+  assert.deepEqual(await drift.resolve(resolveInput() as never), { decision: 'allow', accountId: null });
+  assert.ok(
+    driftCache.calls.find((call) => call.kind === 'delete'),
+    'drifted Redis row is cleared',
+  );
+  assert.equal(driftCache.calls.filter((call) => call.kind === 'set').length, 0);
 });
 
 test('bind forwards to PG and backfills the mapping; previousResponseId ranks below sessionId', async () => {

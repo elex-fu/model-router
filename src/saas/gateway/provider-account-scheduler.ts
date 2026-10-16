@@ -262,6 +262,20 @@ export interface ProviderAccountSchedulerAffinityAllowed {
   readonly accountId: string | null;
 }
 
+/**
+ * Roadmap batch 2 §2.1 (task #5) — the shouldClearStickySession semantics:
+ * the authority held a binding for this request's affinity reference,
+ * revalidated its target against the caller's eligible snapshot, found it
+ * unschedulable (unhealthy, cooling down, or revoked), and CLEARED the
+ * binding. The selection must degrade to load balancing instead of failing
+ * closed — unlike 'allow' with an account that is no longer eligible, which
+ * stays a hard block (an authority that recommends a target it did not
+ * validate against the snapshot is an inconsistency, not a clean downgrade).
+ */
+export interface ProviderAccountSchedulerAffinityStale {
+  readonly decision: 'stale';
+}
+
 export interface ProviderAccountSchedulerAffinityBlocked {
   readonly decision: 'block';
   readonly reason: string;
@@ -269,12 +283,16 @@ export interface ProviderAccountSchedulerAffinityBlocked {
 
 export type ProviderAccountSchedulerAffinityDecision =
   | ProviderAccountSchedulerAffinityAllowed
+  | ProviderAccountSchedulerAffinityStale
   | ProviderAccountSchedulerAffinityBlocked;
 
 export interface ProviderAccountSchedulerAffinityPort {
   /**
    * Resolves only a server-validated opaque affinity reference. The returned
    * account is merely a preference and is checked again against all filters.
+   * A 'stale' decision means the authority found a binding, verified its
+   * target against eligibleAccountIds, cleared it, and the caller must
+   * degrade to load balancing (batch 2 §2.1 shouldClearStickySession).
    */
   resolve(input: {
     readonly caller: RequestPreparationCaller;
@@ -1234,6 +1252,23 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       try {
         let affinityAccountId: string | null = null;
         if (hasAffinityReference(input.scheduling)) {
+          /*
+           * Roadmap batch 2 §2.1 (task #5) — the sticky three-state gate
+           * (sub2api CheckWindowCostSchedulability semantics, MVP scope):
+           *  1. a sticky hit whose account is healthy and not cooling down
+           *     is already inside `eligible` (the check chain ran first) and
+           *     is selected directly — model routing beats stickiness beats
+           *     load balancing;
+           *  2. a binding whose target is no longer schedulable is cleared
+           *     by the authority ('stale') and the selection DEGRADES to the
+           *     normal ranking chain — the session re-binds to whatever the
+           *     load balancer picks instead of rejecting the request;
+           *  3. no binding at all → the normal ranking chain.
+           * The sub2api wait/queue state and the window-cost reserve band
+           * (limit+reserve) are deliberately NOT implemented here: they need
+           * the 5h window-cost aggregation pipeline owned by task #6, so
+           * this branch only distinguishes schedulable / cleared / absent.
+           */
           const scope = affinityScopeFromSelection(input, eligible);
           if (!scope) return schedulerBlock('provider account affinity route scope is unavailable or stale');
           const affinity = await this.dependencies.affinity?.resolve({
@@ -1245,14 +1280,20 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
             scope,
             eligibleAccountIds: eligible.map(({ accountId }) => accountId),
           });
-          if (!isRecord(affinity) || (affinity.decision !== 'allow' && affinity.decision !== 'block')) {
+          if (
+            !isRecord(affinity) ||
+            (affinity.decision !== 'allow' && affinity.decision !== 'block' && affinity.decision !== 'stale')
+          ) {
             return schedulerBlock('provider account affinity authority returned an invalid decision');
           }
           if (affinity.decision === 'block') return schedulerBlock(affinity.reason);
-          if (affinity.accountId !== null && !nonEmpty(affinity.accountId)) {
-            return schedulerBlock('provider account affinity returned an invalid account');
+          if (affinity.decision === 'allow') {
+            if (affinity.accountId !== null && !nonEmpty(affinity.accountId)) {
+              return schedulerBlock('provider account affinity returned an invalid account');
+            }
+            affinityAccountId = affinity.accountId;
           }
-          affinityAccountId = affinity.accountId;
+          // 'stale': the cleared binding degrades to load balancing below.
         }
 
         /*

@@ -21,20 +21,23 @@ import type {
  *   (GET+PEXPIRE in one atomic EVAL): a hit whose account is still in
  *   eligibleAccountIds returns immediately (the fast path) and its 1h window
  *   is refreshed, so the TTL bounds session IDLENESS, not absolute mapping
- *   age. A miss, an ineligible hit, or an unavailable Redis falls back to the
- *   inner PG affinity source, and a successful allow with a non-null account
- *   is backfilled into Redis with the 1h TTL. (The atomic refresh cannot be
- *   conditional on the caller's eligible set — an ineligible hit may extend
- *   a stale row's lifetime, which is harmless: eligibility is re-checked on
- *   every read and PG re-decides.)
+ *   age. A miss falls back to the inner PG affinity source, and a successful
+ *   allow with a non-null account is backfilled into Redis with the 1h TTL.
+ *   An ineligible hit also falls back to PG; whatever PG then decides, the
+ *   stale Redis row is cleared (shouldClearStickySession, batch 2 §2.1): a
+ *   PG 'stale' (binding cleared, degrade to load balancing) or a PG miss
+ *   both delete the key, and a PG allow overwrites it via the backfill.
+ *   (The atomic refresh cannot be conditional on the caller's eligible set —
+ *   an ineligible hit may extend a stale row's lifetime, which is harmless:
+ *   eligibility is re-checked on every read and PG re-decides.)
  * - bind(): always forwards to the inner port (PG stays authoritative) and
  *   backfills the Redis mapping afterwards.
  * - The sessionHash priority is sub2api's — session-id → conversation_id →
- *   prompt_cache_key → content-hash fallback. The affinity scheduling context
- *   carries sessionId and previousResponseId today; richer inbound sources
- *   (headers/body) require the http-handler scheduling seam, which nothing
- *   populates yet — computeStickySessionHash is the single shared
- *   implementation for that future seam.
+ *   prompt_cache_key → content-hash fallback. The http-handler scheduling
+ *   seam (sticky-session-reference.ts) derives that reference at the trusted
+ *   boundary and fills input.scheduling.sessionId;
+ *   computeStickySessionHash is the single shared implementation of the
+ *   priority chain.
  * - Invalidation: the RESP client deliberately has no SUBSCRIBE, so PubSub
  *   invalidation is NOT wired (documented deviation). The sliding 1h TTL
  *   bounds Redis↔PG drift for idle sessions and the PG source remains
@@ -123,9 +126,15 @@ export function createRedisStickyProviderAccountAffinity(
     void cache.set(key, Buffer.from(accountId, 'utf8'), ttlMs).catch(() => undefined);
   };
 
+  const clear = (key: string | null): void => {
+    if (key === null) return;
+    void cache.delete(key).catch(() => undefined);
+  };
+
   return {
     async resolve(input): Promise<ProviderAccountSchedulerAffinityDecision> {
       const key = stickyKey(input as AffinityResolveInput);
+      let staleHit = false;
       if (key !== null) {
         // Sliding-TTL read: a hit atomically refreshes the 1h idle window
         // (REDIS_CACHE_GET_SLIDING_SCRIPT) before eligibility is checked.
@@ -136,12 +145,28 @@ export function createRedisStickyProviderAccountAffinity(
             return { decision: 'allow', accountId };
           }
           // Ineligible hit: fall through to the authoritative PG source,
-          // which also performs its own CAS invalidation of the stale row.
+          // which performs its own CAS invalidation of the stale row. The
+          // Redis copy is drift whatever PG decides, so remember to clear.
+          staleHit = true;
         }
       }
       const decision = await inner.resolve(input);
       if (decision.decision === 'allow') {
-        backfill(key, decision.accountId);
+        if (decision.accountId !== null) {
+          // Overwrites any stale drift with PG's authoritative mapping.
+          backfill(key, decision.accountId);
+        } else if (staleHit) {
+          // PG holds no active binding: the ineligible Redis row is pure
+          // drift (e.g. PG's row expired first) — drop it.
+          clear(key);
+        }
+        return decision;
+      }
+      if (decision.decision === 'stale') {
+        // PG cleared the binding (target no longer schedulable): drop the
+        // stale Redis copy too and let the caller degrade to load balancing.
+        clear(key);
+        return decision;
       }
       return decision;
     },

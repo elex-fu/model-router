@@ -245,6 +245,10 @@ function harness(
     ) => Promise<PreparedEvidenceDispatchResult>;
     readonly modelDiscovery?: (authenticatedCaller: AuthenticatedApiKey) => Promise<readonly string[]>;
     readonly maxBodyBytes?: number;
+    /** Batch 2 §2.1: enable the sticky scheduling seam at the boundary. */
+    readonly stickyScheduling?: boolean;
+    /** Constructor options for the inbound FakeRequest (url/body/headers). */
+    readonly request?: ConstructorParameters<typeof FakeRequest>[0];
   } = {},
 ): {
   readonly handler: ReturnType<typeof createSaasGatewayHandler>;
@@ -259,7 +263,7 @@ function harness(
   const dispatchInputs: PreparedEvidenceDispatchInput[] = [];
   const keys: string[] = [];
   const modelDiscoveryInputs: AuthenticatedApiKey[] = [];
-  const request = new FakeRequest({});
+  const request = new FakeRequest(options.request ?? {});
   const response = new FakeResponse();
   const key = authenticatedApiKey();
   const authenticator: ProxyKeyAuthenticator = {
@@ -297,6 +301,7 @@ function harness(
     preDispatchCompensation: options.preDispatchCompensation,
     modelDiscovery,
     maxBodyBytes: options.maxBodyBytes,
+    ...(options.stickyScheduling ? { stickyScheduling: true } : {}),
   });
   const requestId =
     options.preparationResult?.outcome === 'prepared' ? options.preparationResult.requestId : 'request-1';
@@ -802,4 +807,97 @@ test('client evidence never leaks into error responses', async () => {
   for (const value of [BILLING_ATTRIBUTION_BLOCK, 'claude-cli/1.0.34', 'billing group', 'Claude Code']) {
     assert.equal(body.includes(value), false);
   }
+});
+
+/*
+ * Roadmap batch 2 §2.1 (task #5): the http-handler scheduling seam. The
+ * trusted boundary derives the merged sessionHash reference and fills
+ * input.scheduling.sessionId; the preparation service forwards it to the
+ * account scheduler, whose affinity resolution binds/reads it (the
+ * http-handler → preparation → scheduler chain's first link).
+ */
+
+test('derives the sticky scheduling reference from an anthropic metadata.user_id body', async () => {
+  const session = '11111111-2222-3333-4444-555555555555';
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/messages',
+      body: JSON.stringify({
+        model: 'public-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        metadata: { user_id: `user_${'a'.repeat(64)}_account__session_${session}` },
+      }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  const scheduling = setup.preparationInputs[0]?.scheduling;
+  assert.deepEqual(scheduling, { sessionId: session });
+});
+
+test('derives the sticky scheduling reference from an openai session-id header over the body', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/chat/completions',
+      headers: { 'session-id': 'sess-header-1' },
+      body: JSON.stringify({ model: 'public-model', prompt_cache_key: 'pc-key', messages: [] }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.deepEqual(setup.preparationInputs[0]?.scheduling, { sessionId: 'sess-header-1' });
+});
+
+test('content-derived fallback references are deterministic sha-256 values', async () => {
+  const body = JSON.stringify({
+    model: 'public-model',
+    messages: [{ role: 'user', content: 'hello there' }],
+  });
+  const first = harness({ stickyScheduling: true, request: { url: '/v1/chat/completions', body } });
+  assert.equal(await first.handler(asRequest(first.request), asResponse(first.response)), true);
+  const second = harness({ stickyScheduling: true, request: { url: '/v1/chat/completions', body } });
+  assert.equal(await second.handler(asRequest(second.request), asResponse(second.response)), true);
+  const firstSession = first.preparationInputs[0]?.scheduling?.sessionId;
+  const secondSession = second.preparationInputs[0]?.scheduling?.sessionId;
+  assert.ok(firstSession);
+  assert.match(firstSession, /^[0-9a-f]{64}$/);
+  assert.equal(firstSession, secondSession);
+});
+
+test('stateless embeddings requests carry no sticky scheduling reference', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: { url: '/v1/embeddings', body: JSON.stringify({ model: 'public-model', input: 'embed me' }) },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+  // The server-owned operation override still rides along unchanged.
+  assert.equal(setup.preparationInputs[0]?.clientOperation, 'embeddings');
+});
+
+test('anthropic bodies without text leave scheduling undefined', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/messages',
+      body: JSON.stringify({ model: 'public-model', metadata: {} }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+});
+
+test('the sticky scheduling seam is opt-in: the default boundary never sets input.scheduling', async () => {
+  const setup = harness({
+    request: {
+      url: '/v1/messages',
+      body: JSON.stringify({
+        model: 'public-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        metadata: { user_id: `user_${'a'.repeat(64)}_account__session_11111111-2222-3333-4444-555555555555` },
+      }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
 });
