@@ -681,7 +681,7 @@ SELECT input_rate_numerator_minor_units, input_rate_denominator_units,
  * back to "unrestricted", which would bypass pool narrowing.
  */
 const BILLING_GROUP_SQL = `/* postgres-provider-account-scheduler:billing-group */
-SELECT g.id, g.claude_code_only, g.fallback_group_id
+SELECT g.id, g.claude_code_only, g.fallback_group_id, g.supported_model_scopes
   FROM saas_api_keys k
   JOIN saas_tenants t ON t.id = k.tenant_id
   JOIN saas_billing_groups g ON g.id = COALESCE(k.billing_group_id, t.default_billing_group_id, 'default')
@@ -690,16 +690,22 @@ SELECT g.id, g.claude_code_only, g.fallback_group_id
 
 /* F2: the fallback group's own flags, read only on the enforcement failure path. */
 const BILLING_GROUP_BY_ID_SQL = `/* postgres-provider-account-scheduler:billing-group-by-id */
-SELECT id, claude_code_only, fallback_group_id
+SELECT id, claude_code_only, fallback_group_id, supported_model_scopes
   FROM saas_billing_groups
  WHERE id = $1
  LIMIT 2`;
 
-/** F2: the resolved billing-group facts the wrapper enforces. */
+/**
+ * F2/R1: the resolved billing-group facts the wrapper enforces.
+ * supportedModelScopes (roadmap 1.3, phase 4) is null when the group is
+ * unrestricted; entries are exact public model ids (the key model-scopes
+ * semantics — no globs).
+ */
 interface ResolvedBillingGroup {
   readonly id: string;
   readonly claudeCodeOnly: boolean;
   readonly fallbackGroupId: string | null;
+  readonly supportedModelScopes: readonly string[] | null;
 }
 
 function parseBillingGroupRow(row: unknown): ResolvedBillingGroup | null {
@@ -707,13 +713,26 @@ function parseBillingGroupRow(row: unknown): ResolvedBillingGroup | null {
   const id = row.id;
   const claudeCodeOnly = row.claude_code_only;
   const fallbackGroupId = row.fallback_group_id;
+  const supportedModelScopes = row.supported_model_scopes;
   if (!nonEmpty(id)) return null;
   if (typeof claudeCodeOnly !== 'boolean') return null;
   if (fallbackGroupId !== null && fallbackGroupId !== undefined && !nonEmpty(fallbackGroupId)) return null;
+  let scopes: readonly string[] | null = null;
+  if (supportedModelScopes !== null && supportedModelScopes !== undefined) {
+    if (
+      !Array.isArray(supportedModelScopes) ||
+      supportedModelScopes.length === 0 ||
+      supportedModelScopes.some((scope) => !nonEmpty(scope))
+    ) {
+      return null;
+    }
+    scopes = supportedModelScopes;
+  }
   return {
     id,
     claudeCodeOnly,
     fallbackGroupId: fallbackGroupId === null || fallbackGroupId === undefined ? null : (fallbackGroupId as string),
+    supportedModelScopes: scopes,
   };
 }
 
@@ -1894,10 +1913,15 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
   }
 
   /**
-   * F2: resolves the effective billing group for one platform selection and
-   * applies the claude_code_only enforcement (R5 validator) with the
-   * one-hop fallback routing. Group resolution failure blocks the whole
-   * selection — an unresolvable group must never silently widen the domain.
+   * F2 + R1 (roadmap 1.3, phase 4): resolves the effective billing group for
+   * one platform selection and applies the claude_code_only enforcement (R5
+   * validator) and the supported_model_scopes gate (the requested public
+   * model must be an exact entry; null scopes are unrestricted), walking the
+   * fallback chain with cycle detection when either gate fails. Group
+   * resolution failure blocks the whole selection — an unresolvable group
+   * must never silently widen the domain. The fallback reroutes SCHEDULING
+   * only (pool narrowing); pricing stays on the key's own group terms, the
+   * F2 semantics.
    */
   private async resolveBillingGroupForSelection(
     input: ProviderAccountSchedulerInput,
@@ -1917,37 +1941,57 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
           decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
         };
       }
-      let effectiveGroupId = group.id;
-      if (group.claudeCodeOnly && this.hasClaudeSubscriptionCandidate(input)) {
-        if (!this.claudeCodeClientPasses(input)) {
-          if (group.fallbackGroupId === null) {
-            return {
-              decision: rejectRequestPreparation(
-                'account_denied',
-                'the request’s billing group admits only Claude Code clients on this provider',
-              ),
-            };
-          }
-          const fallback = await this.queryBillingGroup(BILLING_GROUP_BY_ID_SQL, [group.fallbackGroupId]);
-          if (fallback === 'block') {
-            return {
-              decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
-            };
-          }
-          // One hop only: a fallback that is itself claude_code_only would
-          // reroute third-party traffic into another restricted pool — reject.
-          if (fallback.claudeCodeOnly) {
-            return {
-              decision: rejectRequestPreparation(
-                'account_denied',
-                'the request’s billing group admits only Claude Code clients on this provider',
-              ),
-            };
-          }
-          effectiveGroupId = group.fallbackGroupId;
-        }
+      const requestedModel = (input as { publicModel?: unknown }).publicModel;
+      // A scope-restricted group with an unresolvable requested model can
+      // never be verified — fail closed rather than waive the gate.
+      if (group.supportedModelScopes !== null && !nonEmpty(requestedModel)) {
+        return {
+          decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
+        };
       }
-      return { decision: 'allow', billingGroupId: effectiveGroupId };
+      const visited = new Set<string>();
+      let current: ResolvedBillingGroup = group;
+      // The chain is finite: every hop is a DISTINCT group id (a repeated id
+      // is a cycle and blocks below), and the fallback FK graph is finite.
+      for (;;) {
+        if (visited.has(current.id)) {
+          // A cyclic fallback chain is control-plane drift; it can never
+          // resolve, so blocking (not rejecting) is the fail-closed shape.
+          return {
+            decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
+          };
+        }
+        visited.add(current.id);
+        const claudeViolation =
+          current.claudeCodeOnly && this.hasClaudeSubscriptionCandidate(input) && !this.claudeCodeClientPasses(input);
+        const scopeViolation =
+          current.supportedModelScopes !== null && !current.supportedModelScopes.includes(requestedModel as string);
+        if (!claudeViolation && !scopeViolation) {
+          return { decision: 'allow', billingGroupId: current.id };
+        }
+        if (current.fallbackGroupId === null) {
+          return claudeViolation
+            ? {
+                decision: rejectRequestPreparation(
+                  'account_denied',
+                  'the request’s billing group admits only Claude Code clients on this provider',
+                ),
+              }
+            : {
+                decision: rejectRequestPreparation(
+                  'route_denied',
+                  'the request’s billing group does not admit the requested model',
+                ),
+              };
+        }
+        const next = await this.queryBillingGroup(BILLING_GROUP_BY_ID_SQL, [current.fallbackGroupId]);
+        if (next === 'block') {
+          return {
+            decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
+          };
+        }
+        current = next;
+      }
     } catch {
       return {
         decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
