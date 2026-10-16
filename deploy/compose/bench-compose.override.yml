@@ -1,0 +1,66 @@
+# bench-compose.override.yml — R9 performance/chaos bench overlay (plan §R9).
+#
+# Usage (explicit opt-in; the base stack never picks this up by accident):
+#   docker compose -f docker-compose.yml -f bench-compose.override.yml \
+#     --profile bench up -d mock-upstream
+#
+# What this overlay adds:
+#
+#   mock-upstream   Programmable HTTPS mock provider (deploy/compose/
+#                   mock-upstream.mjs) on the `bench` compose profile. TLS is
+#                   mandatory because the gateway's provider HTTP transport
+#                   hard-requires https:// targets. Control plane (stats,
+#                   fault injection) rides a separate plain-HTTP listener on
+#                   the compose network.
+#
+#   gateway         + NODE_EXTRA_CA_CERTS=/bench-certs/mock-cert.pem so the
+#                   gateway's default fetch trusts the bench CA (the deployment
+#                   parser permits non-role env names; only cross-role
+#                   settings fail-close). Applied to every replica.
+#
+# The mock NEVER satisfies the operator prerequisites by itself: the gateway
+# only routes through the operator-supplied trusted runtime module
+# (MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE), which must resolve provider
+# accounts onto https://mock-upstream:8443/v1/... . See BENCH.md for the full
+# prerequisite list and the exact command sequence.
+
+services:
+  mock-upstream:
+    image: node:22.16.0-alpine
+    profiles: ["bench"]
+    init: true
+    restart: unless-stopped
+    command: ["node", "/mock/mock-upstream.mjs"]
+    environment:
+      MOCK_TLS_CERT: /bench-certs/mock-cert.pem
+      MOCK_TLS_KEY: /bench-key/mock-key.pem
+      MOCK_PORT: "8443"
+      MOCK_CONTROL_PORT: "8080"
+    volumes:
+      - ./mock-upstream.mjs:/mock/mock-upstream.mjs:ro
+      # Operator-generated bench TLS material (never committed):
+      #   ./bench/certs/mock-cert.pem  — self-signed cert for CN=mock-upstream
+      #   ./bench/certs/mock-key.pem   — matching private key
+      - ./bench/certs:/bench-certs:ro
+      - ./bench/certs:/bench-key:ro
+    ports:
+      # Published so the bench driver can measure the zero-latency direct
+      # baseline from the host. Restrict to loopback when the host is shared.
+      - "${MOCK_HOST_PORT:-18443}:8443"
+      - "${MOCK_CONTROL_HOST_PORT:-18080}:8080"
+    healthcheck:
+      # Provider listener self-probe (TLS with the bench cert; in-container
+      # verification is disabled — trust is established at the gateway via
+      # NODE_EXTRA_CA_CERTS, not here).
+      test: ["CMD", "node", "-e", "const t=require('node:tls').connect({host:'127.0.0.1',port:8443,rejectUnauthorized:false},()=>{t.end();process.exit(0)});t.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),3000).unref()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  gateway:
+    environment:
+      # Trust the bench mock's self-signed certificate (pilot bench only).
+      NODE_EXTRA_CA_CERTS: /bench-certs/mock-cert.pem
+    volumes:
+      - ./bench/certs:/bench-certs:ro

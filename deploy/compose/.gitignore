@@ -3,3 +3,7 @@
 .verify.env.*
 modules/
 backup-*.dump
+
+# Bench TLS material and reports (generated on the bench host; see BENCH.md).
+bench/certs/
+bench/reports/
