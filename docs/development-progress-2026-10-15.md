@@ -129,4 +129,14 @@
 | F6 R8a OpenRouter 兜底 | abe1eea | — | OpenAI 零桥接 + HTTP-Referer/X-Title;官方价 → supplier_cost_versions(有理数精确转换,内容寻址幂等键免迁移,价变恰追加一版);R7 成本优先天然排订阅池前 |
 | F7 R9 基准套件 | 927b80d | — | bench/chaos 双驱动 + 可编程 HTTPS mock(bench_seq 损坏检测 + maxInFlight 超发 oracle);mock 本地实测 11/11,损坏检测 91764 流实证;执行需 Docker 主机(BENCH.md runbook) |
 
-**终态**:全树 tsc 干净;4730 单测 + 246 集成 0 失败;迁移 001–111。留档待办:claudeCodeClient HTTP 边界字段转发、OpenRouter worker 启用所需 worker 角色列 INSERT 授权、registerPublicModelAlias 23505 重映射修复、F1 密封秘密的解密消费(控制面无解密 KMS)、R9 执行(需 Docker 主机)。
+## G 系列:留档待办清偿(2026-10-16)
+
+| 任务 | 提交 | 迁移 | 证据 |
+|---|---|---|---|
+| G1 claudeCodeClient HTTP 边界转发 | 19895fa | — | http-handler 采集 UA/anthropic-*/x-app/x-stenders 等证据(2048 字符上限,超限/空/多值丢弃)→ 准备服务条件展开 → F2 执法 seam;缺席保持缺席;不落日志;seam 默认 off;gateway 目录 688 测试 0 失败 |
+| G2 OpenRouter worker INSERT 授权 | 91aff19 | — | 两镜像文件补 7 张 catalog 表列级 INSERT+SELECT;一个记录在案的 EXECUTE 例外(saas_catalog_valid_scope,CHECK 约束以插入角色执行,实测 42501);探针新增正列 fail-closed;实测 PG 18.6 5/5(探针/全列插入/负向/真实 worker 轮/幂等重灌);夹具补列 0e69845 |
+| G3 23505 语义错误码 | 5b8e019 | — | storageError 保留原始驱动错误为 cause;按约束名匹配的 conflictError 恢复 4 处被包装器遮蔽的语义码(alias/product/capability/rights);FakeCatalogDatabase 发射真实 23505/constraint;56/56 |
+| G4 密封秘密解密消费 | 28ee5ca | — | withSettingSecret 闭环:按 key 消费者白名单(registration-admission)、类型化 UNSEALING_UNAVAILABLE/UNSEAL_FAILED、审计事件在明文交接前同事务落库(审计失败即拒交接);注册准入 combined workload 注入 gateway 解封 KMS,store-first over env,失败回落 deny-all;拆分控制面保持 env-only;28/28 |
+| G5 R9 基准执行 | 9fa565e | — | colima 全 8 容器栈(gateway×3)+ operator 运行时模块;**实测 FAIL:6/6 bench + 6/6 chaos 阈值未达**——p99 337.5ms、TTFB 761ms、0× 扩展、故障窗 25–88 次派发;但已服务流 235,776 chunk 零损坏、全混沌场景零连接泄漏、kill-postgres 免重启恢复;**14 项产品发现(P1–P14)+ 修复顺序**存 `deploy/compose/bench/reports/R9-RESULTS.md`;全部凭据 bench 本地随机、gitignored |
+
+**G 系列终态**:全树 tsc 干净;4750 单测 0 失败;秘密扫描干净。R9 基准揭示了负载下的结构性问题(P5b 时钟偏移负年龄、P10 卡死执行行毒化并发账本、P2 ~3s 证据重取规划、P3/P4 池上限+准入串行、P5a 半开探针未接线、P6 writeFailed 永久闩锁、P8 无故障快速撤离、P1 SSRF 无运营者白名单)——按 R9-RESULTS.md §6 顺序修复后需重跑基准。
