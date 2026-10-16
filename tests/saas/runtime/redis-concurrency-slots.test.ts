@@ -9,6 +9,7 @@ import {
   createRedisConcurrencySlots,
   createRedisRuntimeCache,
   REDIS_CACHE_GET_SCRIPT,
+  REDIS_CACHE_GET_SLIDING_SCRIPT,
   REDIS_CACHE_SET_SCRIPT,
   REDIS_SLOT_RELEASE_SCRIPT,
   REDIS_SLOT_SCRIPT,
@@ -283,6 +284,82 @@ test('runtime cache disconnect fails open to unavailable', async (t) => {
   assert.deepEqual(await cache.get('any-key'), { state: 'unavailable', value: null });
 });
 
+test('sliding get refreshes the TTL only on a hit, in one whitelisted single-key EVAL', async (t) => {
+  // Semantic fake of the sliding script: the TTL is refreshed exactly when
+  // the value still exists, mirroring the GET-then-PEXPIRE Lua body.
+  const stored = new Map<string, { value: string; ttl: number }>();
+  let expires: string[] = [];
+  const peer = await fixture(t, (command, socket) => {
+    if (command[1] === REDIS_CACHE_GET_SLIDING_SCRIPT) {
+      assert.equal(command[2], '1', 'sliding read must stay single-key');
+      const entry = stored.get(command[3] ?? '');
+      if (entry === undefined) {
+        socket.write('$-1\r\n');
+        return;
+      }
+      entry.ttl = Number(command[4]);
+      expires.push(command[3] ?? '');
+      socket.write(`$${Buffer.byteLength(entry.value)}\r\n${entry.value}\r\n`);
+      return;
+    }
+    assert.equal(command[1], REDIS_CACHE_SET_SCRIPT);
+    stored.set(command[3] ?? '', { value: command[4] ?? '', ttl: Number(command[5]) });
+    socket.write(':1\r\n');
+  });
+  const client = await RedisRespClient.connect(peer.url);
+  t.after(() => client.close());
+  const cache = createRedisRuntimeCache(client, { keyPrefix: PREFIX });
+  const key = `${PREFIX}:sticky:v1:slide`;
+  const sliding = async () => {
+    expires = [];
+    return cache.getAndRefreshTtl(key, 3_600_000);
+  };
+
+  // A miss returns miss and never expires anything (no resurrect).
+  assert.deepEqual(await sliding(), { state: 'miss', value: null });
+  assert.deepEqual(expires, []);
+
+  // Seed via the ordinary set path, then a hit returns the value AND the
+  // stored TTL is atomically refreshed to the full sliding window.
+  await cache.set(key, Buffer.from('account-7'), 60_000);
+  const hit = await sliding();
+  assert.equal(hit.state, 'hit');
+  assert.equal(hit.value?.toString('utf8'), 'account-7');
+  assert.deepEqual(expires, [key]);
+  assert.equal(stored.get(key)?.ttl, 3_600_000);
+
+  // The command that reached the wire is exactly the whitelisted EVAL shape
+  // (numkeys '1' + one ARGV) — anything else would have been rejected by the
+  // RESP client's allowlist before a single byte was sent.
+  const slidingCommand = peer.commands.find((command) => command[1] === REDIS_CACHE_GET_SLIDING_SCRIPT);
+  assert.ok(slidingCommand);
+  assert.deepEqual(slidingCommand.slice(2), ['1', key, '3600000']);
+
+  // Malformed TTL input degrades to a miss (shape) without sending EVAL.
+  const before = peer.commands.length;
+  assert.deepEqual(await cache.getAndRefreshTtl(key, 0), { state: 'miss', value: null });
+  assert.deepEqual(await cache.getAndRefreshTtl(key, 86_400_001), { state: 'miss', value: null });
+  assert.deepEqual(await cache.getAndRefreshTtl('', 60_000), { state: 'miss', value: null });
+  assert.equal(peer.commands.length, before);
+});
+
+test('sliding get fails open to unavailable on disconnects and malformed replies', async (t) => {
+  // Non-bulk reply shapes (integer, array) are contract violations for a
+  // GET-style script and degrade to 'unavailable'; a plain disconnect too.
+  for (const reply of [':1\r\n', '*1\r\n:1\r\n']) {
+    const peer = await fixture(t, (_command, socket) => socket.write(reply));
+    const client = await RedisRespClient.connect(peer.url);
+    const cache = createRedisRuntimeCache(client, { keyPrefix: PREFIX });
+    assert.deepEqual(await cache.getAndRefreshTtl('any-key', 3_600_000), { state: 'unavailable', value: null });
+    await client.close();
+  }
+  const peer = await fixture(t, (_command, socket) => socket.destroy());
+  const client = await RedisRespClient.connect(peer.url);
+  t.after(() => client.close());
+  const cache = createRedisRuntimeCache(client, { keyPrefix: PREFIX });
+  assert.deepEqual(await cache.getAndRefreshTtl('any-key', 3_600_000), { state: 'unavailable', value: null });
+});
+
 test('sticky sessionHash priority follows session-id, conversation_id, prompt_cache_key, content hash', () => {
   assert.equal(
     computeStickySessionHash({
@@ -371,6 +448,12 @@ test('Lua source contract: one key, server TIME scores, lazy eviction, refresh-o
   assert.doesNotMatch(REDIS_SLOT_SCRIPT, /EVALSHA|redis\.log/);
   assert.match(REDIS_SLOT_RELEASE_SCRIPT, /redis\.call\("ZREM", KEYS\[1\], ARGV\[1\]\)/);
   assert.doesNotMatch(REDIS_SLOT_RELEASE_SCRIPT, /KEYS\[(?!1\])/);
+  // Sliding sticky read: GET first, PEXPIRE only on a hit, single key.
+  assert.match(REDIS_CACHE_GET_SLIDING_SCRIPT, /local value = redis\.call\("GET", KEYS\[1\]\)/);
+  assert.match(REDIS_CACHE_GET_SLIDING_SCRIPT, /if value then/);
+  assert.match(REDIS_CACHE_GET_SLIDING_SCRIPT, /redis\.call\("PEXPIRE", KEYS\[1\], ttl\)/);
+  assert.doesNotMatch(REDIS_CACHE_GET_SLIDING_SCRIPT, /KEYS\[(?!1\])/);
+  assert.doesNotMatch(REDIS_CACHE_GET_SLIDING_SCRIPT, /EVALSHA|redis\.log|SET|DEL/);
   const source = readFileSync(resolve(process.cwd(), 'src/saas/runtime/redis-concurrency-slots.ts'), 'utf8');
   const client = readFileSync(resolve(process.cwd(), 'src/saas/runtime/redis-resp-client.ts'), 'utf8');
   assert.doesNotMatch(source + client, /process\.env|console\.|createRequire|child_process/);

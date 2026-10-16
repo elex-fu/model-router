@@ -17,11 +17,16 @@ import type {
  * affinity source).
  *
  * Semantics:
- * - resolve(): the Redis sticky key is checked FIRST; a hit whose account is
- *   still in eligibleAccountIds returns immediately (the fast path). A miss,
- *   an ineligible hit, or an unavailable Redis falls back to the inner PG
- *   affinity source, and a successful allow with a non-null account is
- *   backfilled into Redis with the 1h TTL.
+ * - resolve(): the Redis sticky key is checked FIRST with a sliding-TTL read
+ *   (GET+PEXPIRE in one atomic EVAL): a hit whose account is still in
+ *   eligibleAccountIds returns immediately (the fast path) and its 1h window
+ *   is refreshed, so the TTL bounds session IDLENESS, not absolute mapping
+ *   age. A miss, an ineligible hit, or an unavailable Redis falls back to the
+ *   inner PG affinity source, and a successful allow with a non-null account
+ *   is backfilled into Redis with the 1h TTL. (The atomic refresh cannot be
+ *   conditional on the caller's eligible set — an ineligible hit may extend
+ *   a stale row's lifetime, which is harmless: eligibility is re-checked on
+ *   every read and PG re-decides.)
  * - bind(): always forwards to the inner port (PG stays authoritative) and
  *   backfills the Redis mapping afterwards.
  * - The sessionHash priority is sub2api's — session-id → conversation_id →
@@ -31,10 +36,10 @@ import type {
  *   populates yet — computeStickySessionHash is the single shared
  *   implementation for that future seam.
  * - Invalidation: the RESP client deliberately has no SUBSCRIBE, so PubSub
- *   invalidation is NOT wired (documented deviation). The 1h TTL bounds
- *   Redis↔PG drift and the PG source remains authoritative on every miss;
- *   the PG affinity resolver additionally CAS-invalidates a stale target
- *   itself when it is no longer eligible.
+ *   invalidation is NOT wired (documented deviation). The sliding 1h TTL
+ *   bounds Redis↔PG drift for idle sessions and the PG source remains
+ *   authoritative on every miss; the PG affinity resolver additionally
+ *   CAS-invalidates a stale target itself when it is no longer eligible.
  *
  * STRICT ROLE: this is a cache/coordination layer only. PG (the 041 table)
  * stays the durable affinity source of record; every Redis decision is
@@ -120,7 +125,9 @@ export function createRedisStickyProviderAccountAffinity(
     async resolve(input): Promise<ProviderAccountSchedulerAffinityDecision> {
       const key = stickyKey(input as AffinityResolveInput);
       if (key !== null) {
-        const entry = await cache.get(key);
+        // Sliding-TTL read: a hit atomically refreshes the 1h idle window
+        // (REDIS_CACHE_GET_SLIDING_SCRIPT) before eligibility is checked.
+        const entry = await cache.getAndRefreshTtl(key, ttlMs);
         if (entry.state === 'hit' && entry.value !== null) {
           const accountId = entry.value.toString('utf8');
           if ((input.eligibleAccountIds as readonly string[]).includes(accountId)) {

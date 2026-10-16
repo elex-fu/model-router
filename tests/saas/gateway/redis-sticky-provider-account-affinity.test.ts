@@ -5,7 +5,7 @@ import { createRedisStickyProviderAccountAffinity } from '../../../src/saas/gate
 import type { RedisCacheEntry, RedisRuntimeCache } from '../../../src/saas/runtime/redis-concurrency-slots.js';
 
 interface CacheCall {
-  readonly kind: 'get' | 'set';
+  readonly kind: 'get' | 'get-refresh' | 'set';
   readonly key: string;
   readonly value?: Buffer;
   readonly ttlMs?: number;
@@ -19,6 +19,12 @@ function fakeCache(
   const cache: RedisRuntimeCache = {
     async get(key): Promise<RedisCacheEntry> {
       calls.push({ kind: 'get', key });
+      if (behavior.failGets) return { state: 'unavailable', value: null };
+      const value = entries.get(key);
+      return value === undefined ? { state: 'miss', value: null } : { state: 'hit', value: Buffer.from(value) };
+    },
+    async getAndRefreshTtl(key, ttlMs): Promise<RedisCacheEntry> {
+      calls.push({ kind: 'get-refresh', key, ttlMs });
       if (behavior.failGets) return { state: 'unavailable', value: null };
       const value = entries.get(key);
       return value === undefined ? { state: 'miss', value: null } : { state: 'hit', value: Buffer.from(value) };
@@ -41,7 +47,7 @@ function resolveInput(overrides: Record<string, unknown> = {}): Record<string, u
   };
 }
 
-test('a sticky hit whose account is still eligible short-circuits the PG affinity source', async () => {
+test('a sticky hit whose account is still eligible short-circuits PG and slides the TTL', async () => {
   let innerResolves = 0;
   const inner = {
     async resolve() {
@@ -58,13 +64,18 @@ test('a sticky hit whose account is still eligible short-circuits the PG affinit
   });
   const missDecision = await learn.resolve(resolveInput() as never);
   assert.deepEqual(missDecision, { decision: 'allow', accountId: 'account-2' });
+  // A miss is still a sliding-read miss: the lookup itself refreshes nothing.
+  const missRead = missCache.calls.find((call) => call.kind === 'get-refresh');
+  assert.ok(missRead);
+  assert.equal(missRead.ttlMs, 3_600_000);
   const setCall = missCache.calls.find((call) => call.kind === 'set');
   assert.ok(setCall);
   assert.equal(setCall.ttlMs, 3_600_000);
   assert.equal(setCall.value?.toString('utf8'), 'account-2');
 
-  // Seed the learned key with a still-eligible account: the Redis hit wins
-  // and the PG source is never consulted.
+  // Seed the learned key with a still-eligible account: the Redis hit wins,
+  // the PG source is never consulted, and the hit SLIDES the TTL window
+  // (one get-refresh with the full 1h TTL, no rewrite of the mapping).
   const before = innerResolves;
   const hitCache = fakeCache(new Map([[setCall.key, Buffer.from('account-1')]]));
   const sticky = createRedisStickyProviderAccountAffinity(inner as never, {
@@ -74,7 +85,22 @@ test('a sticky hit whose account is still eligible short-circuits the PG affinit
   const hitDecision = await sticky.resolve(resolveInput() as never);
   assert.deepEqual(hitDecision, { decision: 'allow', accountId: 'account-1' });
   assert.equal(innerResolves, before, 'the PG affinity source is not consulted on a valid hit');
+  const hitRead = hitCache.calls.find((call) => call.kind === 'get-refresh');
+  assert.ok(hitRead, 'a hit is served through the sliding-TTL read');
+  assert.equal(hitRead.key, setCall.key);
+  assert.equal(hitRead.ttlMs, 3_600_000, 'the hit refreshes the full 1h sliding window');
   assert.equal(hitCache.calls.filter((call) => call.kind === 'set').length, 0, 'a hit does not rewrite the mapping');
+  assert.equal(hitCache.calls.filter((call) => call.kind === 'get').length, 0, 'the sticky path never plain-GETs');
+
+  // A custom ttlMs option drives the sliding refresh too (same window as set).
+  const customTtlCache = fakeCache(new Map([[setCall.key, Buffer.from('account-1')]]));
+  const customTtl = createRedisStickyProviderAccountAffinity(inner as never, {
+    cache: customTtlCache.cache,
+    keyPrefix: 'model-router:saas',
+    ttlMs: 3_600_000 / 2,
+  });
+  await customTtl.resolve(resolveInput() as never);
+  assert.equal(customTtlCache.calls.find((call) => call.kind === 'get-refresh')?.ttlMs, 1_800_000);
 });
 
 test('an ineligible hit, a miss and an unavailable Redis all fall back to the PG source', async () => {

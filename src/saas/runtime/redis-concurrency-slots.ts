@@ -28,11 +28,14 @@ import type { RedisRespClient, RedisRespValue } from './redis-resp-client.js';
  * - a key-level PEXPIRE is the double insurance against a lost release.
  *
  * Sticky semantics: mr:sticky:{pool}:{sessionHash} → accountId with a 1h
- * TTL. The sessionHash priority is sub2api's: session-id header →
- * conversation_id → prompt_cache_key → content-hash fallback. Binding
- * changes invalidate by TTL expiry: the RESP client deliberately has no
- * SUBSCRIBE, so PubSub invalidation is NOT wired — the 1h TTL bounds drift
- * and the PG affinity source remains authoritative (documented deviation).
+ * SLIDING TTL — every read that still hits refreshes the window atomically
+ * (GET+PEXPIRE in one script), so the 1h bound applies to idle sessions
+ * rather than to the mapping's absolute age. The sessionHash priority is
+ * sub2api's: session-id header → conversation_id → prompt_cache_key →
+ * content-hash fallback. Binding changes invalidate by TTL expiry: the RESP
+ * client deliberately has no SUBSCRIBE, so PubSub invalidation is NOT wired
+ * — the sliding TTL bounds drift for active sessions and the PG affinity
+ * source remains authoritative (documented deviation).
  *
  * Token-decrypt cache: 60s TTL keyed by the sealed envelope digest, so a
  * key rotation (different ciphertext) misses by construction. Cached
@@ -79,6 +82,12 @@ export interface RedisCacheEntry {
 export interface RedisRuntimeCache {
   get(key: string): Promise<RedisCacheEntry>;
   set(key: string, value: Buffer, ttlMs: number): Promise<void>;
+  /**
+   * Sticky-path read: returns the value and atomically refreshes the key's
+   * TTL on a hit (the idle window slides); a miss touches nothing. The TTL
+   * argument is the full sliding window, not a delta.
+   */
+  getAndRefreshTtl(key: string, ttlMs: number): Promise<RedisCacheEntry>;
 }
 
 export interface RedisRuntimeCacheOptions {
@@ -120,8 +129,24 @@ export const REDIS_CACHE_SET_SCRIPT = ['redis.call("SET", KEYS[1], ARGV[1], "PX"
   '\n',
 );
 
+/**
+ * Sliding sticky read: GET + PEXPIRE in ONE atomic single-key script. The
+ * refresh happens only when the key still exists (a miss touches nothing and
+ * never resurrects an expired mapping). Single key by construction, so the
+ * RESP client's EVAL allowlist (numkeys === '1') admits it as-is.
+ */
+export const REDIS_CACHE_GET_SLIDING_SCRIPT = [
+  'local value = redis.call("GET", KEYS[1])',
+  'if value then',
+  '  local ttl = tonumber(ARGV[1])',
+  '  if not ttl then return redis.error_reply("SLIDING_TTL_STATE") end',
+  '  redis.call("PEXPIRE", KEYS[1], ttl)',
+  'end',
+  'return value',
+].join('\n');
+
 export const REDIS_SLOT_DEFAULT_KEY_TTL_MS = 600_000;
-/** Sticky mapping TTL: the plan's 1 hour (drift bound without PubSub). */
+/** Sticky mapping TTL: the plan's 1 hour, refreshed on every hit (idle bound). */
 export const REDIS_STICKY_TTL_MS = 60 * 60_000;
 /** Token-decrypt cache TTL: the plan's 60 seconds (rotation-bounded). */
 export const REDIS_TOKEN_CACHE_TTL_MS = 60_000;
@@ -295,6 +320,20 @@ export function createRedisRuntimeCache(
         await client.command(['EVAL', REDIS_CACHE_SET_SCRIPT, '1', key, value.toString('base64'), String(ttl)]);
       } catch {
         // Best-effort cache fill: a missed write is only a missed speedup.
+      }
+    },
+    async getAndRefreshTtl(key, ttlMs) {
+      try {
+        if (safeRedisString(key, MAX_KEY_BYTES) === null) return { state: 'miss', value: null };
+        const ttl = validatePositiveInteger(ttlMs, 1, 86_400_000);
+        if (ttl === null) return { state: 'miss', value: null };
+        return replyToCacheEntry(
+          await client.command(['EVAL', REDIS_CACHE_GET_SLIDING_SCRIPT, '1', key, String(ttl)]),
+        );
+      } catch {
+        // Same fail-open posture as get/set: an unavailable Redis only costs
+        // the sticky fast path, never the request.
+        return { state: 'unavailable', value: null };
       }
     },
   };
