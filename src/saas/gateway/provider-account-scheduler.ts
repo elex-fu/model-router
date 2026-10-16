@@ -330,6 +330,14 @@ export interface ProviderAccountSchedulerDependencies {
    * persisted health rows, and the billing/lease authorities stay exactly as
    * authoritative as before. Absent (the default) keeps the selection path
    * byte-identical (golden-fixture red line).
+   *
+   * P17 (R9 re-run finding): the hint is also never an admission deny. When
+   * exclusion would empty the ENTIRE otherwise-eligible candidate set (the
+   * all-accounts-faulted chaos scenario), the selection degrades to
+   * dispatching anyway — fail-open passthrough for that one request — so the
+   * client observes the provider's real status instead of a gateway 403. The
+   * durable PG health classification and its cooldowns remain the only
+   * authoritative admission gate; see collectEligibleCandidates.
    */
   readonly failureFeedback?: ProviderAccountSchedulerFailureFeedbackPort;
 }
@@ -1193,117 +1201,37 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         return schedulerBlock('provider account affinity storage is unavailable');
       }
 
-      const attempted = new Set(input.scheduling?.attemptedAccountIds ?? []);
-      const seenAccounts = new Set<string>();
-      const eligible: EligibleCandidate[] = [];
+      const firstPass = await this.collectEligibleCandidates(input, now, input.candidates, {
+        ignoreFailureFeedback: false,
+      });
+      if (firstPass.outcome === 'blocked') return schedulerBlock(firstPass.reason);
+      let eligible = firstPass.eligible;
+      /*
+       * P17 (R9 re-run finding): fail-open passthrough when the in-process
+       * failure-feedback cooldown would empty the entire viable candidate
+       * set. Exclusions are computed per selection: pass one skips cooled
+       * candidates exactly like a health deny (preserving the H5c 3–6×
+       * fault-window dispatch reduction whenever any non-excluded candidate
+       * survives), and only when NO candidate survived does the selection
+       * re-run the excluded candidates with the hint cleared — the request
+       * then dispatches and the provider's real status reaches the client.
+       * The durable PG health classification (checked inside the fallback
+       * pass like any other) stays the authoritative admission gate: if the
+       * excluded candidates also fail eligibility/health/concurrency there,
+       * the selection still rejects exactly as before.
+       */
+      if (eligible.length === 0 && firstPass.failureFeedbackSkipped.length > 0) {
+        const fallbackPass = await this.collectEligibleCandidates(input, now, firstPass.failureFeedbackSkipped, {
+          ignoreFailureFeedback: true,
+        });
+        if (fallbackPass.outcome === 'blocked') return schedulerBlock(fallbackPass.reason);
+        eligible = fallbackPass.eligible;
+      }
+
+      if (eligible.length === 0)
+        return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
 
       try {
-        for (const candidate of input.candidates) {
-          const rawCandidate: unknown = candidate;
-          if (!isRecord(rawCandidate) || !nonEmpty(rawCandidate.accountId)) {
-            return schedulerBlock('candidate authority is invalid');
-          }
-          const candidateValue = rawCandidate as unknown as RequestPreparationCandidateAuthority;
-          if (seenAccounts.has(candidateValue.accountId))
-            return schedulerBlock('candidate authority contains duplicate accounts');
-          seenAccounts.add(candidateValue.accountId);
-          if (attempted.has(candidateValue.accountId)) continue;
-          if (!candidateMatchesScope(input.caller, candidateValue)) continue;
-          // H5c (P8): an in-process post-failure cooldown removes only this
-          // candidate, exactly like a health deny — never the whole selection.
-          if (this.dependencies.failureFeedback?.isExcluded({ candidate: candidateValue, now })) continue;
-
-          const eligibility = await this.dependencies.eligibility.revalidate({
-            caller: input.caller,
-            entitlement: input.entitlement,
-            candidate: candidateValue,
-            publicModel: input.publicModel,
-            protocol: input.protocol,
-            route: input.route,
-            billingGroupId: input.billingGroupId,
-            now,
-          });
-          if (
-            !isRecord(eligibility) ||
-            (eligibility.decision !== 'allow' && eligibility.decision !== 'deny' && eligibility.decision !== 'block')
-          ) {
-            return schedulerBlock('provider eligibility authority returned an invalid decision');
-          }
-          if (eligibility.decision === 'block') return schedulerBlock(eligibility.reason);
-          if (eligibility.decision === 'deny') continue;
-          if (!validEligibility(eligibility, candidateValue, input, now)) {
-            return schedulerBlock('provider eligibility authority returned an invalid candidate');
-          }
-
-          const health = await this.dependencies.health.get({
-            caller: input.caller,
-            candidate: eligibility.candidate,
-            now,
-          });
-          const healthResult = healthValue(health, now, this.maxHealthAgeMs);
-          if (healthResult === 'block') return schedulerBlock('provider account health authority is unavailable');
-          if (healthResult === 'deny') continue;
-
-          const concurrency = await this.dependencies.concurrency.get({
-            caller: input.caller,
-            candidate: eligibility.candidate,
-            requestId: input.requestId,
-            now,
-          });
-          if (
-            !isRecord(concurrency) ||
-            (concurrency.decision !== 'allow' && concurrency.decision !== 'deny' && concurrency.decision !== 'block')
-          ) {
-            return schedulerBlock('provider account concurrency authority returned an invalid decision');
-          }
-          if (concurrency.decision === 'block') return schedulerBlock(concurrency.reason);
-          if (concurrency.decision === 'deny') continue;
-          if (
-            !isRecord(concurrency.value) ||
-            !nonNegativeInteger(concurrency.value.inFlight) ||
-            !positiveInteger(concurrency.value.limit) ||
-            concurrency.value.inFlight >= concurrency.value.limit
-          ) {
-            if (isRecord(concurrency.value) && concurrency.value.inFlight >= concurrency.value.limit) continue;
-            return schedulerBlock('provider account concurrency authority is invalid');
-          }
-
-          eligible.push({
-            candidate: eligibility.candidate,
-            priority: eligibility.priority,
-            weight: eligibility.weight,
-            inFlight: concurrency.value.inFlight,
-            concurrencyLimit: concurrency.value.limit,
-            healthRank: healthResult.rank,
-            accountId: eligibility.candidate.accountId,
-            route: eligibility.route,
-            // R7 scheduling signals: absent columns/ports stay null and every
-            // strategy skips the candidate, preserving pre-R7 behavior.
-            soonestResetAt: date(eligibility.scheduling?.soonestResetAt),
-            soonestResetObservedAt: date(eligibility.scheduling?.soonestResetObservedAt),
-            supplierCost:
-              eligibility.scheduling?.supplierCostRate === undefined ||
-              eligibility.scheduling?.supplierCostRate === null
-                ? null
-                : {
-                    numeratorMinorUnits: exactNonNegativeInteger(
-                      eligibility.scheduling.supplierCostRate.numeratorMinorUnits,
-                    ) as bigint,
-                    denominatorUnits: exactNonNegativeInteger(
-                      eligibility.scheduling.supplierCostRate.denominatorUnits,
-                    ) as bigint,
-                  },
-            lastUsedAt: healthResult.observedAt,
-            latencyMs: healthResult.latencyMs,
-            // F2: the billing-group pool tier; null keeps the ranking exactly
-            // the pre-F2 priority/health chain (golden-fixture red line).
-            groupPriority: groupPoolPrioritySignal(eligibility.scheduling?.groupPoolPriority),
-          });
-        }
-
-        if (eligible.length === 0)
-          return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
-
         let affinityAccountId: string | null = null;
         if (hasAffinityReference(input.scheduling)) {
           const scope = affinityScopeFromSelection(input, eligible);
@@ -1371,6 +1299,165 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     } catch {
       return schedulerBlock('provider account scheduler failed closed');
     }
+  }
+
+  /**
+   * One pass of the per-candidate check chain: duplicate/scope validation →
+   * H5c failure-feedback exclusion → eligibility revalidation → health →
+   * concurrency. Every authority decision keeps its exact pre-P17 meaning:
+   * a candidate-level deny removes only that candidate, an authority block
+   * aborts the whole selection (surfaced as the 'blocked' outcome), and an
+   * in-process feedback exclusion skips the candidate before the eligibility
+   * round trip (the cheap normal path).
+   *
+   * `ignoreFailureFeedback` is the P17 fail-open fallback: when the feedback
+   * cooldown excluded every candidate in the first pass, the selection
+   * re-runs exactly those candidates with the hint cleared, so the in-process
+   * cooldown can never turn "all accounts faulted" into a gateway admission
+   * rejection — the durable PG health classification checked in this same
+   * chain remains the only authoritative gate. `failureFeedbackSkipped`
+   * carries the excluded candidates (in encounter order) for that fallback.
+   */
+  private async collectEligibleCandidates(
+    input: ProviderAccountSchedulerInput,
+    now: Date,
+    candidates: readonly RequestPreparationCandidateAuthority[],
+    options: { readonly ignoreFailureFeedback: boolean },
+  ): Promise<
+    | { readonly outcome: 'blocked'; readonly reason: string }
+    | {
+        readonly outcome: 'collected';
+        readonly eligible: EligibleCandidate[];
+        readonly failureFeedbackSkipped: RequestPreparationCandidateAuthority[];
+      }
+  > {
+    const attempted = new Set(input.scheduling?.attemptedAccountIds ?? []);
+    const seenAccounts = new Set<string>();
+    const eligible: EligibleCandidate[] = [];
+    const failureFeedbackSkipped: RequestPreparationCandidateAuthority[] = [];
+    // select() has already validated these; the local bindings keep the same
+    // narrowing for the extracted loop body and fail closed defensively.
+    const eligibilityPort = this.dependencies.eligibility;
+    const healthPort = this.dependencies.health;
+    const concurrencyPort = this.dependencies.concurrency;
+    if (!eligibilityPort || !healthPort || !concurrencyPort) {
+      return { outcome: 'blocked', reason: 'provider account scheduler storage ports are unavailable' };
+    }
+
+    for (const candidate of candidates) {
+      const rawCandidate: unknown = candidate;
+      if (!isRecord(rawCandidate) || !nonEmpty(rawCandidate.accountId)) {
+        return { outcome: 'blocked', reason: 'candidate authority is invalid' };
+      }
+      const candidateValue = rawCandidate as unknown as RequestPreparationCandidateAuthority;
+      if (seenAccounts.has(candidateValue.accountId)) {
+        return { outcome: 'blocked', reason: 'candidate authority contains duplicate accounts' };
+      }
+      seenAccounts.add(candidateValue.accountId);
+      if (attempted.has(candidateValue.accountId)) continue;
+      if (!candidateMatchesScope(input.caller, candidateValue)) continue;
+      // H5c (P8): an in-process post-failure cooldown removes only this
+      // candidate, exactly like a health deny — never the whole selection.
+      // P17: skipped candidates are remembered so the caller can fail open
+      // when this hint emptied the entire viable candidate set.
+      if (
+        !options.ignoreFailureFeedback &&
+        this.dependencies.failureFeedback?.isExcluded({ candidate: candidateValue, now })
+      ) {
+        failureFeedbackSkipped.push(candidateValue);
+        continue;
+      }
+
+      const eligibility = await eligibilityPort.revalidate({
+        caller: input.caller,
+        entitlement: input.entitlement,
+        candidate: candidateValue,
+        publicModel: input.publicModel,
+        protocol: input.protocol,
+        route: input.route,
+        billingGroupId: input.billingGroupId,
+        now,
+      });
+      if (
+        !isRecord(eligibility) ||
+        (eligibility.decision !== 'allow' && eligibility.decision !== 'deny' && eligibility.decision !== 'block')
+      ) {
+        return { outcome: 'blocked', reason: 'provider eligibility authority returned an invalid decision' };
+      }
+      if (eligibility.decision === 'block') return { outcome: 'blocked', reason: eligibility.reason };
+      if (eligibility.decision === 'deny') continue;
+      if (!validEligibility(eligibility, candidateValue, input, now)) {
+        return { outcome: 'blocked', reason: 'provider eligibility authority returned an invalid candidate' };
+      }
+
+      const health = await healthPort.get({
+        caller: input.caller,
+        candidate: eligibility.candidate,
+        now,
+      });
+      const healthResult = healthValue(health, now, this.maxHealthAgeMs);
+      if (healthResult === 'block') {
+        return { outcome: 'blocked', reason: 'provider account health authority is unavailable' };
+      }
+      if (healthResult === 'deny') continue;
+
+      const concurrency = await concurrencyPort.get({
+        caller: input.caller,
+        candidate: eligibility.candidate,
+        requestId: input.requestId,
+        now,
+      });
+      if (
+        !isRecord(concurrency) ||
+        (concurrency.decision !== 'allow' && concurrency.decision !== 'deny' && concurrency.decision !== 'block')
+      ) {
+        return { outcome: 'blocked', reason: 'provider account concurrency authority returned an invalid decision' };
+      }
+      if (concurrency.decision === 'block') return { outcome: 'blocked', reason: concurrency.reason };
+      if (concurrency.decision === 'deny') continue;
+      if (
+        !isRecord(concurrency.value) ||
+        !nonNegativeInteger(concurrency.value.inFlight) ||
+        !positiveInteger(concurrency.value.limit) ||
+        concurrency.value.inFlight >= concurrency.value.limit
+      ) {
+        if (isRecord(concurrency.value) && concurrency.value.inFlight >= concurrency.value.limit) continue;
+        return { outcome: 'blocked', reason: 'provider account concurrency authority is invalid' };
+      }
+
+      eligible.push({
+        candidate: eligibility.candidate,
+        priority: eligibility.priority,
+        weight: eligibility.weight,
+        inFlight: concurrency.value.inFlight,
+        concurrencyLimit: concurrency.value.limit,
+        healthRank: healthResult.rank,
+        accountId: eligibility.candidate.accountId,
+        route: eligibility.route,
+        // R7 scheduling signals: absent columns/ports stay null and every
+        // strategy skips the candidate, preserving pre-R7 behavior.
+        soonestResetAt: date(eligibility.scheduling?.soonestResetAt),
+        soonestResetObservedAt: date(eligibility.scheduling?.soonestResetObservedAt),
+        supplierCost:
+          eligibility.scheduling?.supplierCostRate === undefined || eligibility.scheduling?.supplierCostRate === null
+            ? null
+            : {
+                numeratorMinorUnits: exactNonNegativeInteger(
+                  eligibility.scheduling.supplierCostRate.numeratorMinorUnits,
+                ) as bigint,
+                denominatorUnits: exactNonNegativeInteger(
+                  eligibility.scheduling.supplierCostRate.denominatorUnits,
+                ) as bigint,
+              },
+        lastUsedAt: healthResult.observedAt,
+        latencyMs: healthResult.latencyMs,
+        // F2: the billing-group pool tier; null keeps the ranking exactly
+        // the pre-F2 priority/health chain (golden-fixture red line).
+        groupPriority: groupPoolPrioritySignal(eligibility.scheduling?.groupPoolPriority),
+      });
+    }
+
+    return { outcome: 'collected', eligible, failureFeedbackSkipped };
   }
 
   /**

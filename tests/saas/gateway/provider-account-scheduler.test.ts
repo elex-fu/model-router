@@ -469,7 +469,7 @@ test('failure feedback excludes only the cooled candidate from selection (H5c)',
   if (recovered.decision === 'allow') assert.equal(recovered.value.accountId, 'account-a');
 });
 
-test('failure feedback cooling every candidate rejects the request without blocking the authority (H5c)', async () => {
+test('failure feedback cooling every candidate fails open and dispatches anyway (P17)', async () => {
   const candidates = [candidate('account-a'), candidate('account-b')];
   const result = await scheduler({
     eligibility: eligibilityPort(
@@ -486,11 +486,93 @@ test('failure feedback cooling every candidate rejects the request without block
       },
     },
   }).select(baseInput(candidates));
+  // The in-process cooldown is a routing hint, never an admission deny: with
+  // every candidate cooled the request still dispatches so the client sees
+  // the provider's real status instead of a gateway rejection.
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') {
+    assert.ok(['account-a', 'account-b'].includes(result.value.accountId));
+  }
+});
+
+test('failure feedback cooling every candidate still rejects when the durable authorities deny (P17)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    // The durable health classification stays the authoritative gate: a
+    // cooldown/unhealthy row denies the candidate even in the fail-open pass.
+    health: healthPort(
+      new Map([
+        ['account-a', 'unhealthy'],
+        ['account-b', 'cooldown'],
+      ]),
+    ),
+    concurrency: concurrencyPort(new Map()),
+    failureFeedback: {
+      isExcluded() {
+        return true;
+      },
+    },
+  }).select(baseInput(candidates));
   assert.deepEqual(result, {
     decision: 'reject',
     code: 'account_denied',
     message: 'no eligible provider account is available',
   });
+});
+
+test('a partially excluded candidate set never consults eligibility for cooled accounts (P17)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  let revalidations = 0;
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+      {
+        async revalidate(input) {
+          revalidations += 1;
+          return eligibilityPort(new Map([[input.candidate.accountId, { priority: 1, weight: 1 }]])).revalidate(input);
+        },
+      },
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    failureFeedback: {
+      isExcluded(input) {
+        return input.candidate.accountId === 'account-a';
+      },
+    },
+  }).select(baseInput(candidates));
+  // Normal case: the survivor keeps the exclusion effective and the cooled
+  // account is skipped before the eligibility round trip.
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  assert.equal(revalidations, 1);
+});
+
+test('an excluded candidate is fail-open dispatched when the only other candidate fails eligibility (P17)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    // account-b is durably ineligible; account-a is only in-process cooled —
+    // every otherwise-eligible candidate is excluded, so the hint is cleared.
+    eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    failureFeedback: {
+      isExcluded(input) {
+        return input.candidate.accountId === 'account-a';
+      },
+    },
+  }).select(baseInput(candidates));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
 });
 
 test('absent failure feedback keeps the default selection path (golden-fixture red line, H5c)', async () => {

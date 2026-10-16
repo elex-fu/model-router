@@ -133,7 +133,7 @@ export interface ProviderAccountHealthSchedulingPort {
  * probe dispatch lease (its token is necessarily newer), dispatch, and
  * record the probe outcome through the normal lease-authorized write.
  * 'closed' conflates every losing case (still cooling, probe in flight,
- * healthy row, missing row) — the caller must not probe.
+ * healthy row) — the caller must not probe.
  *
  * H5a (R9 bench finding P5a): the admission gate additionally admits a
  * STALE fresh-state row — `state` in ('healthy','degraded') whose
@@ -143,6 +143,16 @@ export interface ProviderAccountHealthSchedulingPort {
  * longer than the freshness bound permanently walled the account behind
  * 'stale or malformed'. The single-winner CAS, the 30 s crash-recovery
  * lease, and the fence ordering all apply unchanged to this branch.
+ *
+ * P18 (R9 re-run finding): a candidate with NO health row at all (a
+ * freshly seeded deployment — rows cannot be deleted, so a missing row
+ * means "never observed") is also admitted, via a one-time cold-start
+ * prime INSERT executed only when the UPDATE above matched no row. The
+ * prime claims the single-winner probe slot atomically through the
+ * primary key (ON CONFLICT DO NOTHING: exactly one concurrent process
+ * wins; every loser and every existing-row losing case is 'closed'), and
+ * the winner's lease-authorized probe outcome immediately rewrites the
+ * row into a normal healthy row. See PRIME_COLD_START_PROBE_SQL.
  */
 export interface ProviderAccountHalfOpenProbeAdmissionPort {
   tryAdmitHalfOpenProbe(input: {
@@ -326,6 +336,46 @@ const ADMIT_HALF_OPEN_PROBE_SQL = `
        OR current_health.half_open_probe_at + 30000::bigint * interval '1 millisecond'
             <= observation.observed_at)
      AND current_health.source_fencing_token < observation.fencing_token
+  RETURNING revision`;
+
+/*
+ * P18 (R9 re-run finding P18): the zero-row cold-start prime, attempted only
+ * after the admission UPDATE above matched no row. Health rows are
+ * DELETE-proof (migration 040), so a missing row means the account has never
+ * been observed — a freshly seeded deployment. Before this prime, such an
+ * account classified as 'unknown' (fail-closed block) forever and needed an
+ * external warmer to write its first row.
+ *
+ * The prime row encodes "cold-start probe pending" under the migration-040
+ * CHECK shape: a cooldown-state row is the only form that both (a) denies
+ * plain scheduling readers while the probe is in flight (state 'cooldown'
+ * with a live cooldown_until fails every admission branch, so losers stay
+ * 'closed' — single winner) and (b) becomes re-admittable on its own after
+ * the 30 s crash-recovery window if the winner dies before recording an
+ * outcome (the expired-cooldown branch of ADMIT_HALF_OPEN_PROBE_SQL). The
+ * failure_count = 1 / probe failure outcome are the minimum the 040 CHECK
+ * constraint requires of a cooldown row, not real failure evidence; nothing
+ * in the product reads last_outcome, and the winner's lease-authorized
+ * probe-success outcome immediately rewrites the row into a clean healthy
+ * row (failure_count = 0, cooldown_until = NULL, health_score seeded from
+ * NULL straight to 1.000), erasing the encoding entirely. A crashed prime
+ * expires exactly like any half-open probe admission.
+ */
+const PRIME_COLD_START_PROBE_SQL = `
+  INSERT INTO ${HEALTH_TABLE}
+    (owner_scope_key, owner_kind, owner_tenant_id, account_id, state, failure_count,
+     observed_at, cooldown_until, last_outcome, source_fencing_token, revision, health_score,
+     half_open_probe_at)
+  SELECT $1::text, $2, $3, $4, 'cooldown', 1,
+         observation.observed_at,
+         observation.observed_at + 30000::bigint * interval '1 millisecond',
+         'probe_protocol_failure', observation.fencing_token, 1, NULL,
+         observation.observed_at
+    FROM (
+      SELECT clock_timestamp() AS observed_at,
+             nextval('saas_provider_account_lease_fencing_seq') AS fencing_token
+    ) observation
+  ON CONFLICT (owner_scope_key, account_id) DO NOTHING
   RETURNING revision`;
 
 function invalidInput(): never {
@@ -670,10 +720,16 @@ export class PostgresProviderAccountRuntimeHealthStore
 
   /**
    * R7/D6 half-open probe admission: at most one concurrent probe per
-   * account. Losing cases (still cooling, live probe, healthy or missing
-   * row) all return 'closed'. A storage failure closes this runtime to
-   * future selections for a bounded window (H5b), mirroring
-   * recordRuntimeOutcome.
+   * account. Losing cases (still cooling, live probe, healthy row) all
+   * return 'closed'. A storage failure closes this runtime to future
+   * selections for a bounded window (H5b), mirroring recordRuntimeOutcome.
+   *
+   * P18 (R9 re-run finding): when the admission UPDATE matches no row, the
+   * account has never been observed (rows are DELETE-proof), so a one-time
+   * cold-start prime INSERT is attempted in the same transaction. The
+   * primary-key ON CONFLICT DO NOTHING keeps it single-winner against both
+   * a concurrent prime and any existing row that merely failed the UPDATE's
+   * admission conditions — every one of those cases still returns 'closed'.
    */
   async tryAdmitHalfOpenProbe(input: {
     readonly candidate: ProviderAccountRuntimeHealthCandidate;
@@ -686,21 +742,39 @@ export class PostgresProviderAccountRuntimeHealthStore
         ? Math.min(input.staleAfterMs, MAX_HEALTH_AGE_MS)
         : this.maxHealthAgeMs;
     try {
-      const result = await this.database.transaction((tx: SqlExecutor) =>
-        tx.query<RevisionRow>(ADMIT_HALF_OPEN_PROBE_SQL, [
+      const admitted = await this.database.transaction(async (tx: SqlExecutor) => {
+        const update = await tx.query<RevisionRow>(ADMIT_HALF_OPEN_PROBE_SQL, [
           scope.ownerScopeKey,
           scope.ownerKind,
           scope.ownerTenantId,
           scope.accountId,
           staleAfterMs,
-        ]),
-      );
+        ]);
+        if (update.rows.length === 1) {
+          if (!validRevision(update.rows[0].revision)) throw storageError();
+          return 'admitted' as const;
+        }
+        if (update.rows.length > 1) throw storageError();
+        // The UPDATE cannot match a missing row: attempt the cold-start prime.
+        // An existing row that simply failed the admission conditions loses
+        // here too (primary-key conflict), which is exactly the 'closed' case.
+        const prime = await tx.query<RevisionRow>(PRIME_COLD_START_PROBE_SQL, [
+          scope.ownerScopeKey,
+          scope.ownerKind,
+          scope.ownerTenantId,
+          scope.accountId,
+        ]);
+        if (prime.rows.length === 1) {
+          if (!validRevision(prime.rows[0].revision)) throw storageError();
+          return 'admitted' as const;
+        }
+        if (prime.rows.length > 1) throw storageError();
+        return 'closed' as const;
+      });
       // A completed admission statement (including a losing CAS) proves the
       // storage path works; H5b: the bounded latch resets immediately.
       this.storageRecovered();
-      if (result.rows.length === 0) return 'closed';
-      if (result.rows.length !== 1 || !validRevision(result.rows[0].revision)) throw storageError();
-      return 'admitted';
+      return admitted;
     } catch {
       this.storageFailed();
       throw storageError();

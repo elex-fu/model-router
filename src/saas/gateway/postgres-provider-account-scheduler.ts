@@ -226,14 +226,16 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
    * scheduling path so runtime health self-heals. When provided, the wrapper
    * replaces the plain health port with a self-healing adapter: a candidate
    * whose scheduling view is merely STALE (a well-formed row older than the
-   * freshness bound) gets a single-winner half-open probe admission; the
-   * winner acquires a short-lived account lease and records a lease-authorized
-   * probe outcome (the exact probe pattern of the reference E2E), refreshing
-   * the row, and is then schedulable. This is NOT a billing event and never
+   * freshness bound) — or, P18 (R9 re-run), has NO row at all (a never-
+   * observed account on a freshly seeded deployment) — gets a single-winner
+   * half-open probe admission; the winner acquires a short-lived account
+   * lease and records a lease-authorized probe outcome (the exact probe
+   * pattern of the reference E2E), refreshing (or cold-start priming) the
+   * row, and is then schedulable. This is NOT a billing event and never
    * bypasses billing admission: the request still passes every eligibility,
    * concurrency, billing, and fenced-lease check. Losers (probe already in
    * flight) are denied for this candidate only. Absent keeps the plain port
-   * (fail-closed on stale rows), byte-identical to before.
+   * (fail-closed on stale and unknown rows), byte-identical to before.
    */
   readonly healthProbe?: {
     readonly store: ProviderAccountHealthSchedulingPort &
@@ -1592,19 +1594,22 @@ const MISSING_AFFINITY: ProviderAccountSchedulerAffinityPort = {
  * unavailable') until an external primer ran (the R9 bench shipped a
  * health-warmer shell script for exactly this).
  *
- * This adapter keeps the fail-closed posture for everything except the one
- * condition that is genuinely self-healable: a well-formed row whose
- * observation is merely OLD. For that case only, it admits a half-open probe
- * through the existing single-winner CAS, and the winner performs the
- * reference-E2E probe pattern — acquire an account lease, record a
- * lease-authorized probe outcome, release — which refreshes the row's
- * observed_at. The probe outcome is justified by the eligibility
- * revalidation that ran immediately before this port is consulted in the
- * same selection (account active, credential verified, rights active,
- * capability verified); it claims nothing about the provider endpoint. If
- * the account is actually faulted, the dispatch failure feedback (H5c)
- * cools it again within a couple of dispatches, and a genuinely failing
- * probe outcome re-enters the durable cooldown path.
+ * This adapter keeps the fail-closed posture for everything except the two
+ * conditions that are genuinely self-healable: a well-formed row whose
+ * observation is merely OLD, and — P18 (R9 re-run finding) — a candidate
+ * with NO row at all (a freshly seeded deployment; rows are DELETE-proof,
+ * so a missing row means "never observed" and previously blocked forever).
+ * For both cases it admits a half-open probe through the existing
+ * single-winner CAS (the zero-row case through the P18 cold-start prime),
+ * and the winner performs the reference-E2E probe pattern — acquire an
+ * account lease, record a lease-authorized probe outcome, release — which
+ * refreshes (or creates) the row's observed_at. The probe outcome is
+ * justified by the eligibility revalidation that ran immediately before
+ * this port is consulted in the same selection (account active, credential
+ * verified, rights active, capability verified); it claims nothing about
+ * the provider endpoint. If the account is actually faulted, the dispatch
+ * failure feedback (H5c) cools it again within a couple of dispatches, and
+ * a genuinely failing probe outcome re-enters the durable cooldown path.
  */
 class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
   constructor(
@@ -1643,24 +1648,31 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
       }
       // Stale per this scheduler's (possibly tighter) bound: fall through to
       // the half-open probe path below.
-    } else if (view.code !== 'stale') {
-      // Everything but staleness keeps the fail-closed block: unknown rows,
-      // malformed data (including genuinely future timestamps), an
-      // unavailable authority, or invalid input.
+      return this.probeCandidate(input.candidate, input.now, 'stale');
+    }
+    // Everything but staleness and the zero-row cold start keeps the
+    // fail-closed block: malformed data (including genuinely future
+    // timestamps), an unavailable authority, or invalid input.
+    if (view.code !== 'stale' && view.code !== 'unknown') {
       return { decision: 'block', reason: view.reason };
     }
-    return this.probeStaleCandidate(input.candidate, input.now);
+    // P18: a missing row is the one-time built-in cold-start priming case —
+    // the same single-winner CAS + lease + probe-outcome pattern, with the
+    // store's prime INSERT creating the row the probe then refreshes.
+    return this.probeCandidate(input.candidate, input.now, view.code === 'unknown' ? 'unobserved' : 'stale');
   }
 
   /**
-   * Single-winner half-open probe for one stale candidate. The winner
-   * records a lease-authorized probe outcome and becomes schedulable; every
-   * loser (probe in flight, storage blip, no free lease slot) is denied for
-   * this candidate only — never a whole-selection block.
+   * Single-winner half-open probe for one stale (or never-observed)
+   * candidate. The winner records a lease-authorized probe outcome and
+   * becomes schedulable; every loser (probe in flight, storage blip, no free
+   * lease slot) is denied for this candidate only — never a whole-selection
+   * block.
    */
-  private async probeStaleCandidate(
+  private async probeCandidate(
     candidate: RequestPreparationCandidateAuthority,
     now: Date,
+    cause: 'stale' | 'unobserved',
   ): Promise<ProviderAccountSchedulerHealthDecision> {
     let admitted: 'admitted' | 'closed';
     try {
@@ -1671,7 +1683,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     if (admitted !== 'admitted') {
       return {
         decision: 'deny',
-        reason: 'provider account runtime health is stale and a half-open probe is already in flight',
+        reason: `provider account runtime health is ${cause} and a half-open probe is already in flight`,
       };
     }
     const attemptId = randomUUID();
@@ -1692,7 +1704,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
       if (lease === null) {
         return {
           decision: 'deny',
-          reason: 'provider account runtime health is stale and the probe lease is unavailable',
+          reason: `provider account runtime health is ${cause} and the probe lease is unavailable`,
         };
       }
       try {
@@ -1705,7 +1717,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
         if (applied !== 'applied') {
           return {
             decision: 'deny',
-            reason: 'provider account runtime health is stale and the probe outcome was fenced out',
+            reason: `provider account runtime health is ${cause} and the probe outcome was fenced out`,
           };
         }
       } finally {
@@ -1722,7 +1734,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     } catch {
       return {
         decision: 'deny',
-        reason: 'provider account runtime health is stale and the half-open probe failed',
+        reason: `provider account runtime health is ${cause} and the half-open probe failed`,
       };
     }
   }

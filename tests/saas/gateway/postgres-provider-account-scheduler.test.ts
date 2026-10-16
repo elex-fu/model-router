@@ -1277,6 +1277,66 @@ test('non-stale scheduling view blocks keep the fail-closed whole-selection bloc
   assert.deepEqual(calls.admissions, []);
 });
 
+/* ------------------------------------------------------------------ */
+/* P18 (R9 re-run finding): zero-row cold-start probe wiring           */
+/* ------------------------------------------------------------------ */
+
+function unknownView(): ProviderAccountHealthSchedulingView {
+  return {
+    decision: 'block',
+    reason: 'provider account runtime health is unknown',
+    code: 'unknown',
+  };
+}
+
+test('a zero-row scheduling view is cold-start primed by a half-open probe (P18)', async () => {
+  const { store, calls } = probeStore(() => unknownView(), 'admitted');
+  let releases = 0;
+  const leaseProvider = {
+    async acquire() {
+      return {
+        fencingToken: '9003',
+        release: async () => {
+          releases += 1;
+        },
+      };
+    },
+  };
+  const { scheduler, input } = setup('byok', {}, { healthProbe: { store, leaseProvider } });
+  const result = await scheduler.select(input([candidate('byok')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+  // The cold-start prime rides the same admission call as the stale path.
+  assert.deepEqual(calls.admissions, [{ accountId: 'account-a', staleAfterMs: 60_000 }]);
+  assert.equal(calls.outcomes.length, 1);
+  assert.equal(calls.outcomes[0]?.fencingToken, '9003');
+  assert.deepEqual(calls.outcomes[0]?.evidence, { source: 'probe', result: 'success' });
+  assert.equal(releases, 1);
+});
+
+test('a losing cold-start prime admission denies only the unobserved candidate (P18)', async () => {
+  const { store, calls } = probeStore(
+    (accountId) => (accountId === 'account-a' ? unknownView() : allowView()),
+    'closed',
+  );
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    { healthProbe: { store, leaseProvider: { acquire: async () => null } } },
+  );
+  const result = await scheduler.select(input([candidate('byok'), candidate('byok', 'account-b')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  assert.deepEqual(calls.admissions, [{ accountId: 'account-a', staleAfterMs: 60_000 }]);
+  assert.deepEqual(calls.outcomes, []);
+
+  // The concurrent winner's prime will create the row; until then the lone
+  // unobserved candidate rejects (candidate deny), never blocks.
+  const single = await scheduler.select(input([candidate('byok')]));
+  assert.equal(single.decision, 'reject');
+  if (single.decision === 'reject') assert.equal(single.code, 'account_denied');
+});
+
 test('failureFeedback is forwarded to the core scheduler and cools only the faulted account (H5c)', async () => {
   const { scheduler, input } = setup(
     'byok',

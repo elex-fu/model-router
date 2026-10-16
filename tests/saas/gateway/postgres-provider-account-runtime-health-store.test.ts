@@ -153,6 +153,35 @@ class FakeExecutor implements SqlExecutor {
       this.database.health.set(key, next);
       return result([{ revision: next.revision.toString() } as Row]);
     }
+    if (statement.startsWith('INSERT INTO saas_provider_account_runtime_health')) {
+      // P18: the cold-start prime. The primary key is the single-winner fence:
+      // an existing row (any state) loses exactly like a failed admission CAS.
+      if (this.database.failHealthWrites) throw new Error('runtime health admission write failed');
+      assert.match(statement, /ON CONFLICT \(owner_scope_key, account_id\) DO NOTHING/i);
+      assert.match(statement, /nextval\('saas_provider_account_lease_fencing_seq'\)/i);
+      const [ownerScopeKey, ownerKind, ownerTenantId, accountId] = values;
+      const fencingToken = BigInt(this.database.fencingSeq++);
+      const key = `${String(ownerScopeKey)}${String.fromCharCode(0)}${String(accountId)}`;
+      if (this.database.health.has(key)) return result([] as Row[]);
+      const observedAt = new Date(this.database.now);
+      const row: StoredHealth = {
+        ownerScopeKey: String(ownerScopeKey),
+        ownerKind: ownerKind as StoredHealth['ownerKind'],
+        ownerTenantId: ownerTenantId as string | null,
+        accountId: String(accountId),
+        state: 'cooldown',
+        failureCount: 1,
+        observedAt,
+        cooldownUntil: new Date(observedAt.getTime() + 30_000),
+        lastOutcome: 'probe_protocol_failure',
+        sourceFence: fencingToken,
+        revision: 1n,
+        healthScore: null,
+        halfOpenProbeAt: new Date(observedAt),
+      };
+      this.database.health.set(key, row);
+      return result([{ revision: '1' } as Row]);
+    }
     if (statement.startsWith('WITH observation AS ( SELECT clock_timestamp() AS observed_at ), authorized_lease AS')) {
       if (this.database.failHealthWrites) throw new Error('runtime health write failed');
       assert.match(statement, /WHERE current_health\.source_fencing_token < EXCLUDED\.source_fencing_token/i);
@@ -726,7 +755,11 @@ test('half-open admission is single-winner and probe outcomes drive recovery or 
   assert.equal(row?.lastOutcome, 'gateway_network_failure');
   assert.equal(row?.healthScore, '0.800');
   assert.equal(row?.revision, 2n);
-  assert.equal(row?.sourceFence, 1001n, 'the losing active-cooldown attempt burned sequence value 1000');
+  assert.equal(
+    row?.sourceFence,
+    1002n,
+    'the losing active-cooldown attempt burned two sequence values: the failed UPDATE and the P18 prime insert that lost on the primary key',
+  );
 
   // A concurrent second admission loses while the probe lease is live.
   assert.equal(await admit(health, account), 'closed');
@@ -783,12 +816,15 @@ test('half-open admission is single-winner and probe outcomes drive recovery or 
   database.now = new Date(secondExpiry.getTime() + 2000);
   assert.equal(await admit(health, account), 'admitted');
 
-  // A healthy or unknown row never admits a probe.
+  // A healthy row never admits a probe.
   const healthyToken = nextToken(database);
   seedLease(database, account, healthyToken);
   await record(health, account, healthyToken, { source: 'probe', result: 'success' });
   assert.equal(await admit(health, account), 'closed', 'a healthy row is not probe-eligible');
-  assert.equal(await admit(health, candidate(TENANT_A, 'other-account')), 'closed', 'unknown health stays closed');
+  // P18: a zero-row account now admits the one-time cold-start prime
+  // instead of staying closed forever (covered in full below).
+  assert.equal(await admit(health, candidate(TENANT_A, 'other-account')), 'admitted');
+  assert.equal(await admit(health, candidate(TENANT_A, 'other-account')), 'closed', 'the prime is single-winner');
 
   // A crashed probe (admission without a recorded outcome) blocks further
   // probes only until the crash-recovery lease expires.
@@ -1010,6 +1046,78 @@ test('a stale healthy row admits exactly one half-open probe and keeps the binar
   database.now = NOW;
   seedHealth(database, account, { observedAt: new Date(NOW.getTime() - 1_000) });
   assert.equal(await admit(health, account), 'closed');
+});
+
+/* ------------------------------------------------------------------ */
+/* P18 (R9 re-run finding): zero-row cold-start priming                */
+/* ------------------------------------------------------------------ */
+
+test('a zero-row account admits exactly one cold-start prime that the probe outcome completes (P18)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  database.now = NOW;
+
+  // No row at all: the prime creates the pending-probe row.
+  assert.equal(await admit(health, account), 'admitted');
+  let row = healthRow(database, account);
+  assert.ok(row);
+  assert.equal(row.state, 'cooldown');
+  assert.equal(row.failureCount, 1);
+  assert.equal(row.cooldownUntil?.getTime(), NOW.getTime() + 30_000);
+  assert.equal(row.halfOpenProbeAt?.getTime(), NOW.getTime());
+  assert.equal(row.healthScore, null);
+  assert.equal(row.revision, 1n);
+  // Two sequence values burned: the losing UPDATE attempt and the prime.
+  assert.equal(row.sourceFence, 1001n);
+
+  // The live prime denies plain scheduling readers (fail-closed) and is
+  // single-winner: the cooldown state blocks every admission branch.
+  const view = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(view.decision, 'allow');
+  if (view.decision === 'allow') {
+    assert.equal(view.value.status, 'cooldown');
+    assert.equal(view.value.cooldownUntil?.getTime(), NOW.getTime() + 30_000);
+  }
+  assert.equal(await admit(health, account), 'closed');
+
+  // Crash recovery: an abandoned prime expires with the 30s lease window.
+  database.now = new Date(NOW.getTime() + 29_999);
+  assert.equal(await admit(health, account), 'closed');
+  database.now = new Date(NOW.getTime() + 30_000);
+  assert.equal(await admit(health, account), 'admitted');
+
+  // The winner's lease-authorized probe outcome rewrites the prime into a
+  // clean healthy row: the cooldown encoding is erased entirely (revision 3
+  // = prime, crash-recovery re-admission, probe outcome).
+  const probeToken = nextToken(database);
+  seedLease(database, account, probeToken);
+  assert.equal(await record(health, account, probeToken, { source: 'probe', result: 'success' }), 'applied');
+  row = healthRow(database, account);
+  assert.ok(row);
+  assert.equal(row.state, 'healthy');
+  assert.equal(row.failureCount, 0);
+  assert.equal(row.cooldownUntil, null);
+  assert.equal(row.healthScore, '1.000', 'a NULL score seeds the EMA at the optimistic 1.000');
+  assert.equal(row.lastOutcome, 'probe_success');
+  assert.equal(row.revision, 3n);
+
+  // The completed row behaves like any healthy row: no further admission.
+  assert.equal(await admit(health, account), 'closed');
+});
+
+test('a cold-start prime never inserts over an existing row (P18)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  // A fresh healthy row fails the admission UPDATE branches; the prime
+  // INSERT then loses on the primary key and the call stays 'closed'.
+  seedHealth(database, account, { observedAt: new Date(NOW.getTime() - 1_000) });
+  database.now = NOW;
+  const callsBefore = database.calls.length;
+  assert.equal(await admit(health, account), 'closed');
+  assert.equal(database.calls.length, callsBefore + 2, 'the update ran, then the prime insert lost on the PK');
+  assert.equal(healthRow(database, account)?.revision, 1n);
 });
 
 /* ------------------------------------------------------------------ */
