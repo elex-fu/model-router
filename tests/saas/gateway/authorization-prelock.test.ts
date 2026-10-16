@@ -149,6 +149,12 @@ function validRows(): AuthorityRows {
   };
 }
 
+/**
+ * Fake executor for the two-statement prelock: one batched advisory-fence
+ * statement (unnest over the ordered key list) and one merged authority-fact
+ * read whose row carries each fact as the jsonb_agg aggregate the real
+ * statement returns (an array of zero, one, or two row objects).
+ */
 class RecordingExecutor implements SqlExecutor {
   readonly statements: Array<{ sql: string; values: readonly unknown[] }> = [];
 
@@ -164,16 +170,20 @@ class RecordingExecutor implements SqlExecutor {
 
     let rows: Row[];
     if (normalized.includes('pg_advisory_xact_lock_shared')) rows = [];
-    else if (normalized.includes('from saas_tenants')) rows = this.rows.tenant;
-    else if (normalized.includes('from saas_projects')) rows = this.rows.project;
-    else if (normalized.includes('from saas_project_inference_policy_versions')) rows = this.rows.policy;
-    else if (normalized.includes('from saas_users')) rows = this.rows.principal;
-    else if (normalized.includes('from saas_project_memberships')) rows = this.rows.projectMembership;
-    else if (normalized.includes('from saas_memberships')) rows = this.rows.tenantMembership;
-    else if (normalized.includes('from saas_api_keys')) rows = this.rows.key;
-    else if (normalized.includes('from saas_project_entitlements')) rows = this.rows.entitlementAndProfile;
-    else if (normalized.includes('clock_timestamp()')) rows = this.rows.clock;
-    else throw new Error(`unexpected SQL: ${sql}`);
+    else if (normalized.includes('clock_timestamp()')) {
+      rows = [
+        {
+          tenant: this.rows.tenant,
+          project: this.rows.project,
+          policy: this.rows.policy,
+          principal_user: this.rows.principal,
+          tenant_membership: this.rows.tenantMembership,
+          project_membership: this.rows.projectMembership,
+          api_key: this.rows.key,
+          now: this.rows.clock[0]?.now,
+        },
+      ];
+    } else throw new Error(`unexpected SQL: ${sql}`);
 
     return { rows: rows as RowType[], rowCount: rows.length };
   }
@@ -189,21 +199,8 @@ function makeExecutor(overrides: Partial<AuthorityRows> = {}, failure?: string):
 
 function authorityStep(sql: string, values: readonly unknown[] = []): string {
   const normalized = sql.toLowerCase();
-  if (normalized.includes('saas-authz:tenant:')) return 'tenant-fence';
-  if (normalized.includes('saas-authz:project:')) return 'project-fence';
-  if (normalized.includes('pg_advisory_xact_lock_shared') && String(values[0]).startsWith('saas-authz:api-key:')) {
-    return 'key-fence';
-  }
-  if (normalized.includes('pg_advisory_xact_lock_shared')) return 'user-fence';
-  if (normalized.includes('from saas_tenants')) return 'tenant';
-  if (normalized.includes('from saas_projects')) return 'project';
-  if (normalized.includes('from saas_project_inference_policy_versions')) return 'policy';
-  if (normalized.includes('from saas_users')) return 'principal';
-  if (normalized.includes('from saas_memberships')) return 'tenant-membership';
-  if (normalized.includes('from saas_project_memberships')) return 'project-membership';
-  if (normalized.includes('from saas_api_keys')) return 'key';
-  if (normalized.includes('from saas_project_entitlements')) return 'entitlement-profile';
-  if (normalized.includes('clock_timestamp()')) return 'database-clock';
+  if (normalized.includes('pg_advisory_xact_lock_shared')) return 'fence-batch';
+  if (normalized.includes('clock_timestamp()')) return 'authority-read';
   return 'unexpected';
 }
 
@@ -216,96 +213,42 @@ async function assertDenied(operation: Promise<void>, message?: RegExp): Promise
   });
 }
 
-test('prelock fences all SELECT-only authority before separate plain reads', async () => {
+test('prelock takes one batched fence statement then one merged authority read', async () => {
   const executor = makeExecutor();
   const prelock = new PostgresSaasRequestAdmissionAuthorizationPrelock();
 
   await prelock.prelock(input(executor));
 
-  assert.deepEqual(
-    executor.statements.map(({ sql, values }) => ({
-      sql: sql.replace(/\s+/g, ' ').trim(),
-      values: [...values],
-    })),
-    [
-      {
-        sql: "SELECT pg_advisory_xact_lock_shared( hashtextextended('saas-authz:tenant:' || $1::uuid::text, 0) )",
-        values: ['tenant-a'],
-      },
-      { sql: 'SELECT id, status FROM saas_tenants WHERE id = $1 LIMIT 2', values: ['tenant-a'] },
-      {
-        sql: "SELECT pg_advisory_xact_lock_shared( hashtextextended('saas-authz:project:' || $1::uuid::text || ':' || $2::uuid::text, 0) )",
-        values: ['tenant-a', 'project-a'],
-      },
-      {
-        sql: 'SELECT tenant_id, id, inference_policy_version, inference_policy_status FROM saas_projects WHERE tenant_id = $1 AND id = $2 LIMIT 2',
-        values: ['tenant-a', 'project-a'],
-      },
-      {
-        sql: 'SELECT tenant_id, project_id, version, status FROM saas_project_inference_policy_versions WHERE tenant_id = $1 AND project_id = $2 AND version = $3 LIMIT 2',
-        values: ['tenant-a', 'project-a', '1'],
-      },
-      {
-        sql: 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text, 0))',
-        values: ['user-a'],
-      },
-      {
-        sql: 'SELECT id, disabled_at, anonymized_at FROM saas_users WHERE id = $1 LIMIT 2',
-        values: ['user-a'],
-      },
-      {
-        sql: 'SELECT tenant_id, user_id, role, status, revoked_at FROM saas_memberships WHERE tenant_id = $1 AND user_id = $2 LIMIT 2',
-        values: ['tenant-a', 'user-a'],
-      },
-      {
-        sql: 'SELECT tenant_id, project_id, user_id, role, status, revoked_at FROM saas_project_memberships WHERE tenant_id = $1 AND project_id = $2 AND user_id = $3 LIMIT 2',
-        values: ['tenant-a', 'project-a', 'user-a'],
-      },
-      {
-        sql: 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))',
-        values: ['saas-authz:api-key:74656e616e742d61:70726f6a6563742d61:6b65792d61'],
-      },
-      {
-        sql: 'SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type, execution_principal_id, entitlement_id, supply_profile_id, supply_mode, model_scopes, status, revoked_at, expires_at, authz_version, model_scope_version, entitlement_authz_version, supply_profile_authz_version FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 LIMIT 2',
-        values: ['tenant-a', 'project-a', 'key-a'],
-      },
-      { sql: 'SELECT clock_timestamp() AS now', values: [] },
-    ],
+  assert.equal(executor.statements.length, 2, 'the prelock must be exactly two statements');
+  const [fence, read] = executor.statements as [{ sql: string; values: unknown[] }, { sql: string; values: unknown[] }];
+  assert.match(
+    fence.sql,
+    /pg_advisory_xact_lock_shared\(hashtextextended\(fence_key, 0\)\) from unnest\(\$1::text\[\]\) as fence_key/i,
   );
-
-  assert.deepEqual(
-    executor.statements.map(({ sql, values }) => authorityStep(sql, values)),
+  // Explicit order: tenant -> project -> user -> API key (the API-key key is
+  // KeyService/migration 050's UTF-8 hex business-layer key).
+  assert.deepEqual(fence.values, [
     [
-      'tenant-fence',
-      'tenant',
-      'project-fence',
-      'project',
-      'policy',
-      'user-fence',
-      'principal',
-      'tenant-membership',
-      'project-membership',
-      'key-fence',
-      'key',
-      'database-clock',
+      'saas-authz:tenant:tenant-a',
+      'saas-authz:project:tenant-a:project-a',
+      'user-a',
+      'saas-authz:api-key:74656e616e742d61:70726f6a6563742d61:6b65792d61',
     ],
-  );
+  ]);
+  assert.match(read.sql, /clock_timestamp\(\) as now/i);
+  for (const table of [
+    'saas_tenants',
+    'saas_projects',
+    'saas_project_inference_policy_versions',
+    'saas_users',
+    'saas_memberships',
+    'saas_project_memberships',
+    'saas_api_keys',
+  ]) {
+    assert.match(read.sql, new RegExp(`from ${table}`, 'i'), `${table} must be read in the merged statement`);
+  }
   const rowLockedSql = executor.statements.filter(({ sql }) => /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i.test(sql));
   assert.equal(rowLockedSql.length, 0);
-  assert.doesNotMatch(
-    executor.statements.find(({ sql }) => /saas_project_inference_policy_versions/i.test(sql))?.sql ?? '',
-    /FOR SHARE|FOR UPDATE|FOR KEY SHARE/i,
-  );
-  for (const table of ['saas_tenants', 'saas_projects', 'saas_users', 'saas_memberships', 'saas_project_memberships']) {
-    assert.doesNotMatch(
-      executor.statements.find(({ sql }) => sql.toLowerCase().includes(`from ${table}`))?.sql ?? '',
-      /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i,
-    );
-  }
-  assert.match(executor.statements.at(-1)?.sql ?? '', /clock_timestamp\(\)/i);
-  assert.equal(executor.statements.at(-1)?.values.length, 0);
-  assert.match(executor.statements.find((statement) => /saas_users/i.test(statement.sql))?.sql ?? '', /anonymized_at/i);
-  assert.match(executor.statements.find((statement) => /saas_api_keys/i.test(statement.sql))?.sql ?? '', /revoked_at/i);
   const allSql = executor.statements.map(({ sql }) => sql).join('\n');
   assert.doesNotMatch(allSql, /statement_timestamp\(\)|membership\.expires_at/i);
   assert.doesNotMatch(allSql, /saas_project_entitlements|saas_supply_profiles/i);
@@ -335,7 +278,9 @@ test('prelock rejects request/snapshot identity, scope, and epoch mismatches bef
     const currentKey = authenticatedKey(current.currentKey);
     await assertDenied(prelockCall(executor, currentRequest, currentKey), /mismatch|scope/);
     if (current.label === 'project policy version') {
-      assert.equal(executor.statements.length, 4, `${current.label} did not reach the project policy head`);
+      // The mismatch is only visible in the merged authority read, so the
+      // fence statement and the read statement have both been issued.
+      assert.equal(executor.statements.length, 2, `${current.label} did not reach the authority read`);
     } else {
       assert.equal(executor.statements.length, 0, `${current.label} opened a SQL query`);
     }
@@ -362,6 +307,11 @@ test('prelock rejects disabled, anonymized, revoked, and non-inference membershi
       label: 'anonymized user',
       rows: { principal: [{ id: 'user-a', disabled_at: null, anonymized_at: now }] },
       message: /anonymized/,
+    },
+    {
+      label: 'missing user',
+      rows: { principal: [] },
+      message: /principal is missing or ambiguous/,
     },
     {
       label: 'revoked tenant membership',
@@ -402,7 +352,7 @@ test('prelock rejects disabled, anonymized, revoked, and non-inference membershi
   for (const current of cases) {
     const executor = makeExecutor(current.rows);
     await assertDenied(prelockCall(executor, request(), authenticatedKey()), current.message);
-    assert.ok(executor.statements.length >= 3, `${current.label} did not reach its authority row`);
+    assert.equal(executor.statements.length, 2, `${current.label} did not reach the authority read`);
   }
 });
 
@@ -469,7 +419,10 @@ test('prelock fails closed for suspended, disabled, or missing project policy ro
   for (const current of cases) {
     const executor = makeExecutor(current.rows);
     await assertDenied(prelockCall(executor, request(), authenticatedKey()), current.message);
-    assert.doesNotMatch(executor.statements.map(({ sql }) => sql).join('\n'), /saas_api_keys|clock_timestamp\(\)/i);
+    assert.doesNotMatch(
+      executor.statements.map(({ sql }) => sql).join('\n'),
+      /saas_project_entitlements|saas_supply_profiles/i,
+    );
   }
 });
 
@@ -483,12 +436,12 @@ test('replay-shaped admission still revalidates the current project policy befor
     /project inference policy is not active/,
   );
   assert.deepEqual(
-    executor.statements.map(({ sql }) => authorityStep(sql)),
-    ['tenant-fence', 'tenant', 'project-fence', 'project', 'policy'],
+    executor.statements.map(({ sql, values }) => authorityStep(sql, values)),
+    ['fence-batch', 'authority-read'],
   );
 });
 
-test('project-service prelock checks project policy and key binding without creator membership', async () => {
+test('project-service prelock validates the key binding without member authority', async () => {
   const rows = validRows();
   rows.key = [
     {
@@ -498,6 +451,11 @@ test('project-service prelock checks project policy and key binding without crea
       execution_principal_id: 'project-a',
     },
   ];
+  // The merged read fetches user/membership facts unconditionally, but a
+  // project-service principal never validates them: even missing rows pass.
+  rows.principal = [];
+  rows.tenantMembership = [];
+  rows.projectMembership = [];
   const executor = makeExecutor(rows);
   const currentRequest = request({ principalKind: 'project_service', principalId: 'project-a' });
   const currentKey = authenticatedKey({ principalKind: 'project_service', principalId: 'project-a' });
@@ -506,13 +464,15 @@ test('project-service prelock checks project policy and key binding without crea
   await prelock.prelock(input(executor, currentRequest, currentKey));
   assert.deepEqual(
     executor.statements.map(({ sql, values }) => authorityStep(sql, values)),
-    ['tenant-fence', 'tenant', 'project-fence', 'project', 'policy', 'key-fence', 'key', 'database-clock'],
+    ['fence-batch', 'authority-read'],
   );
-  assert.equal(
-    executor.statements.some(({ sql }) => /saas_users|saas_memberships/i.test(sql)),
-    false,
-  );
-  assert.equal(executor.statements.at(-1)?.sql.includes('clock_timestamp()'), true);
+  // A project-service principal is not fenced on a user key.
+  const fenceKeys = (executor.statements[0]?.values[0] ?? []) as string[];
+  assert.deepEqual(fenceKeys, [
+    'saas-authz:tenant:tenant-a',
+    'saas-authz:project:tenant-a:project-a',
+    'saas-authz:api-key:74656e616e742d61:70726f6a6563742d61:6b65792d61',
+  ]);
 });
 
 test('prelock wraps database failures as fail-closed storage errors', async () => {
@@ -525,7 +485,7 @@ test('prelock wraps database failures as fail-closed storage errors', async () =
   );
 });
 
-test('prelock waits for the key fence before reading revocation, epochs, or expiry', async () => {
+test('prelock waits for the fence batch before reading revocation, epochs, or expiry', async () => {
   for (const mutation of [
     { status: 'revoked', revoked_at: now },
     { authz_version: 12 },
@@ -545,7 +505,7 @@ test('prelock waits for the key fence before reading revocation, epochs, or expi
     });
     const waitingExecutor: SqlExecutor = {
       async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
-        if (authorityStep(sql, values) === 'key-fence') {
+        if (authorityStep(sql, values) === 'fence-batch') {
           reachedFence();
           await blocked;
         }
@@ -555,26 +515,21 @@ test('prelock waits for the key fence before reading revocation, epochs, or expi
     const operation = new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(waitingExecutor));
     const rejection = assertDenied(operation, /not active|mismatch|expired/);
     await reached;
-    assert.equal(
-      executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)),
-      false,
-    );
+    // While the fence batch is still waiting, no authority fact has been read.
+    assert.equal(executor.statements.length, 0);
     executor.rows.key = [{ ...executor.rows.key[0], ...mutation }];
     releaseFence();
     await rejection;
     const steps = executor.statements.map(({ sql, values }) => authorityStep(sql, values));
-    assert.equal(steps.indexOf('key'), steps.indexOf('key-fence') + 1);
-    if ('expires_at' in mutation) {
-      assert.equal(steps.at(-1), 'database-clock');
-    }
+    assert.deepEqual(steps, ['fence-batch', 'authority-read']);
   }
 });
 
-test('prelock fails closed when the API-key advisory fence cannot be acquired', async () => {
+test('prelock fails closed when the advisory fence batch cannot be acquired', async () => {
   const executor = makeExecutor();
   const failingExecutor: SqlExecutor = {
     async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
-      if (authorityStep(sql, values) === 'key-fence') throw new Error('injected fence failure');
+      if (authorityStep(sql, values) === 'fence-batch') throw new Error('injected fence failure');
       return executor.query<RowType>(sql, values);
     },
   };
@@ -582,10 +537,7 @@ test('prelock fails closed when the API-key advisory fence cannot be acquired', 
     new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(failingExecutor)),
     (error: unknown) => error instanceof SaasAdmissionAuthorizationError && error.code === 'storage_failure',
   );
-  assert.equal(
-    executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)),
-    false,
-  );
+  assert.equal(executor.statements.length, 0, 'no authority read may run without the fences');
 });
 
 test('prelock checks expiry with the database clock after a fence wait even when the key is unchanged', async () => {
@@ -601,7 +553,7 @@ test('prelock checks expiry with the database clock after a fence wait even when
   });
   const waitingExecutor: SqlExecutor = {
     async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
-      if (authorityStep(sql, values) === 'key-fence') {
+      if (authorityStep(sql, values) === 'fence-batch') {
         reachedFence();
         await blocked;
       }
@@ -612,17 +564,36 @@ test('prelock checks expiry with the database clock after a fence wait even when
   const operation = new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(waitingExecutor));
   const rejection = assertDenied(operation, /API key is expired/);
   await reached;
-  assert.equal(
-    executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)),
-    false,
-  );
+  assert.equal(executor.statements.length, 0);
   // The persisted expiry does not change; wall-clock time reaches it while waiting.
   executor.rows.clock = [{ now: expiresAt }];
   releaseFence();
   await rejection;
   assert.equal(executor.rows.key[0]?.expires_at, expiresAt);
   assert.deepEqual(
-    executor.statements.slice(-3).map(({ sql, values }) => authorityStep(sql, values)),
-    ['key-fence', 'key', 'database-clock'],
+    executor.statements.map(({ sql, values }) => authorityStep(sql, values)),
+    ['fence-batch', 'authority-read'],
   );
+});
+
+test('prelock normalizes UUID-shaped fence ids like the uuid cast did', async () => {
+  const executor = makeExecutor();
+  const upperTenant = 'AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA';
+  const currentRequest = request({
+    tenantId: upperTenant,
+    projectId: 'project-a',
+  });
+  const currentKey = authenticatedKey({ tenantId: upperTenant });
+  // The tenant fact row mismatches, so this denies — but the fence key must
+  // already be lowercase (matching migration 046's uuid::text derivation).
+  await assertDenied(prelockCall(executor, currentRequest, currentKey), /mismatch/);
+  const fenceKeys = (executor.statements[0]?.values[0] ?? []) as string[];
+  assert.deepEqual(fenceKeys, [
+    `saas-authz:tenant:${upperTenant.toLowerCase()}`,
+    `saas-authz:project:${upperTenant.toLowerCase()}:project-a`,
+    'user-a',
+    // The API-key key is KeyService's UTF-8 hex of the raw business-layer id
+    // (no uuid normalization — unchanged behavior).
+    'saas-authz:api-key:41414141414141412d414141412d414141412d414141412d414141414141414141414141:70726f6a6563742d61:6b65792d61',
+  ]);
 });

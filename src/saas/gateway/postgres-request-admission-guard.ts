@@ -651,15 +651,25 @@ async function acquireAdmissionFences(
   request: RequestRecord,
   candidate: AttemptRecord,
 ): Promise<void> {
-  for (const [layer, keys] of admissionFenceLayers(request, candidate)) {
-    for (const key of sortAndDedupeAdvisoryKeys(keys)) {
-      await rows(
-        executor,
-        `/* postgres-request-admission:fence-${layer} */ SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`,
-        [key],
-      );
+  // One batched statement takes every shared fence. unnest emits the keys in
+  // array order and pg_advisory_xact_lock_shared holds each lock as the row is
+  // scanned, so the acquisition order is byte-identical to the previous
+  // one-statement-per-key form: layers in their fixed order, each layer's
+  // helper-generated key text sorted, deduplicated globally by first
+  // occurrence. Concurrent admission and authorization changes therefore keep
+  // converging on the same lock order, and every post-wait SELECT still uses a
+  // fresh READ COMMITTED snapshot (the fence statement reads no table rows).
+  const keys: string[] = [];
+  for (const [, layerKeys] of admissionFenceLayers(request, candidate)) {
+    for (const key of sortAndDedupeAdvisoryKeys(layerKeys)) {
+      if (!keys.includes(key)) keys.push(key);
     }
   }
+  await rows(
+    executor,
+    `/* postgres-request-admission:fence-batch */ SELECT pg_advisory_xact_lock_shared(hashtextextended(fence_key, 0)) FROM unnest($1::text[]) AS fence_key`,
+    [keys],
+  );
 }
 
 async function lockOne(

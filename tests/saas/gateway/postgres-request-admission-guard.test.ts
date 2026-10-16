@@ -592,7 +592,14 @@ class FakeExecutor implements SqlExecutor {
     const stage = /postgres-request-admission:([a-z-]+)/.exec(sql)?.[1];
     if (lower.includes('select clock_timestamp')) return { rows: [{ locked_at: NOW }] as RowType[], rowCount: 1 };
     if (lower.includes('pg_advisory_xact_lock')) {
-      this.fixture.fenceKeys.push(String(values[0]));
+      // The fence batch passes the ordered key list as one text-array
+      // parameter; record the keys in array (acquisition) order.
+      const keys = values[0];
+      if (Array.isArray(keys)) {
+        for (const key of keys) this.fixture.fenceKeys.push(String(key));
+      } else {
+        this.fixture.fenceKeys.push(String(values[0]));
+      }
       return { rows: [], rowCount: 0 };
     }
     if (lower.startsWith('insert into saas_request_customer_price_snapshots')) {

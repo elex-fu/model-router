@@ -138,6 +138,26 @@ function exactlyOne<RowType>(result: SqlResult<RowType>, label: string): RowType
   return result.rows[0];
 }
 
+/** The jsonb_agg counterpart of exactlyOne: null is missing, two elements are ambiguous. */
+function jsonbOne(value: unknown, label: string): Row {
+  if (!Array.isArray(value) || value.length !== 1 || typeof value[0] !== 'object' || value[0] === null) {
+    deny(`SaaS admission authorization ${label} is missing or ambiguous`);
+  }
+  return value[0] as Row;
+}
+
+/**
+ * The advisory fence keys must equal migration 046/047's trigger derivation
+ * ('<prefix>' || id::uuid::text). PostgreSQL's uuid cast renders the
+ * canonical lowercase form, so invalid or non-canonical ids are rejected the
+ * same way the previous statement-level uuid cast errored (storage failure).
+ */
+function canonicalUuid(value: string): string {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)
+    ? value.toLowerCase()
+    : value;
+}
+
 function assertMembership(row: Row, tenantId: string, projectId: string | null, userId: string, label: string): void {
   sameText(row.tenant_id, tenantId, `${label}.tenant_id`);
   if (projectId !== null) sameText(row.project_id, projectId, `${label}.project_id`);
@@ -155,19 +175,32 @@ interface LockedKey {
   readonly scopes: string[];
 }
 
+/** The merged authority-fact read result: the locked key row and the database clock. */
+interface AuthorityFacts {
+  readonly key: LockedKey;
+  readonly now: unknown;
+}
+
 /**
  * PostgreSQL implementation of the admission authorization prelock.
  *
  * Mutable tenant/project/user/membership authority is protected by the
- * transaction-scoped advisory fences installed by migrations 046/047/050. Reads
- * use separate READ COMMITTED statements after those fences and never tuple-
- * lock the SELECT-only facts. The immutable policy version is plain-read
- * behind the project fence. The API key is also plain-read after the matching
- * shared fence: 050 fences every INSERT/UPDATE/DELETE using both old and new
- * identities, and KeyService takes that exclusive fence before target row locks.
- * This requires READ COMMITTED and holds every fence until transaction end.
- * This order precedes metering/idempotency so replay visibility cannot bypass
- * the current project and key authorization.
+ * transaction-scoped advisory fences installed by migrations 046/047/050. The
+ * fence acquisition is one batched statement (an unnest over the ordered key
+ * list); locks are taken in row order, so the acquisition order is exactly
+ * tenant -> project -> user -> API key, identical to the previous one-statement-
+ * per-fence form. Reads never tuple-lock the SELECT-only facts: they run as one
+ * merged statement AFTER the fence statement completes, so every fact is read
+ * from a READ COMMITTED snapshot taken after the last fence wait (a snapshot
+ * taken before a blocked fence could retain pre-revocation facts — that is why
+ * the fence statement and the read statement must stay separate). The immutable
+ * policy version is plain-read behind the project fence. The API key is also
+ * plain-read after the matching shared fence: 050 fences every
+ * INSERT/UPDATE/DELETE using both old and new identities, and KeyService takes
+ * that exclusive fence before target row locks. This requires READ COMMITTED
+ * and holds every fence until transaction end. This order precedes
+ * metering/idempotency so replay visibility cannot bypass the current project
+ * and key authorization.
  */
 export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasRequestAdmissionAuthorizationPrelock {
   async prelock(input: SaasRequestAdmissionAuthorizationPrelockInput): Promise<void> {
@@ -186,23 +219,30 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
         deny('SaaS admission authorization transaction executor is required');
       }
 
-      // Explicit order: tenant -> project -> immutable policy -> user -> memberships -> API key.
-      // Each advisory wait completes before its corresponding READ COMMITTED authority SELECT.
-      await this.lockTenant(executor, request.tenantId);
-      await this.lockProject(executor, request.tenantId, request.projectId, request.projectPolicyVersion);
-      if (authorization.principalKind === 'member') {
-        await this.lockUser(executor, authorization.principalId);
-        await this.lockTenantMembership(executor, request.tenantId, authorization.principalId);
-        await this.lockProjectMembership(executor, request.tenantId, request.projectId, authorization.principalId);
-      } else if (authorization.principalId !== request.projectId) {
-        deny('SaaS project-service principal is not bound to its project');
-      }
-      const key = await this.lockApiKey(executor, request, authorization);
+      // Explicit order: tenant -> project -> (user) -> API key. The batched
+      // fence statement acquires the shared locks in array order. Tenant,
+      // project, and user keys must match migration 046/047's trigger key
+      // derivation ('<prefix>' || id::uuid::text), so they are canonicalized
+      // to the lowercase UUID form PostgreSQL's uuid cast produces; an invalid
+      // UUID fails exactly like the previous statement's uuid cast did.
+      const fenceKeys = [
+        `saas-authz:tenant:${canonicalUuid(request.tenantId)}`,
+        `saas-authz:project:${canonicalUuid(request.tenantId)}:${canonicalUuid(request.projectId)}`,
+        ...(authorization.principalKind === 'member' ? [canonicalUuid(authorization.principalId)] : []),
+        saasAdvisoryKey.apiKey(request.tenantId, request.projectId, authorization.keyId),
+      ];
+      await this.query<Row>(
+        executor,
+        'SELECT pg_advisory_xact_lock_shared(hashtextextended(fence_key, 0)) FROM unnest($1::text[]) AS fence_key',
+        [fenceKeys],
+      );
+
+      const facts = await this.readAuthorityFacts(executor, request, authorization);
 
       // This is deliberately after the key advisory-fence wait and fresh read. Do not use
       // statement_timestamp(), whose value may predate that wait.
-      const now = await this.databaseClock(executor);
-      this.assertCurrentKey(key, request, now);
+      const now = timestampMillis(facts.now, 'database clock');
+      this.assertCurrentKey(facts.key, request, now);
 
       // Entitlement/profile validity, including effective/expiry windows and
       // an already-bound superseded entitlement, remains the later guard's
@@ -258,134 +298,106 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     }
   }
 
-  private async lockTenant(executor: SqlExecutor, tenantId: string): Promise<void> {
-    await this.fenceTenant(executor, tenantId);
-    const result = await this.query<Row>(
-      executor,
-      `SELECT id, status
-       FROM saas_tenants
-       WHERE id = $1
-       LIMIT 2`,
-      [tenantId],
-    );
-    const row = exactlyOne(result, 'tenant');
-    sameText(row.id, tenantId, 'tenant.id');
-    if (row.status !== 'active') deny('SaaS tenant is not active');
-  }
-
-  private async lockProject(
-    executor: SqlExecutor,
-    tenantId: string,
-    projectId: string,
-    projectPolicyVersion: unknown,
-  ): Promise<void> {
-    await this.fenceProject(executor, tenantId, projectId);
-    const result = await this.query<Row>(
-      executor,
-      `SELECT tenant_id, id, inference_policy_version, inference_policy_status
-       FROM saas_projects
-       WHERE tenant_id = $1 AND id = $2
-       LIMIT 2`,
-      [tenantId, projectId],
-    );
-    const row = exactlyOne(result, 'project');
-    sameText(row.tenant_id, tenantId, 'project.tenant_id');
-    sameText(row.id, projectId, 'project.id');
-    const requestedVersion = requireVersion(projectPolicyVersion, 'projectPolicyVersion');
-    sameVersion(row.inference_policy_version, requestedVersion, 'project.inference_policy_version');
-    if (row.inference_policy_status !== 'active') deny('SaaS project inference policy is not active');
-
-    const policy = await this.query<Row>(
-      executor,
-      `SELECT tenant_id, project_id, version, status
-       FROM saas_project_inference_policy_versions
-       WHERE tenant_id = $1 AND project_id = $2 AND version = $3
-       LIMIT 2`,
-      [tenantId, projectId, requestedVersion],
-    );
-    const policyRow = exactlyOne(policy, 'project inference policy');
-    sameText(policyRow.tenant_id, tenantId, 'project inference policy.tenant_id');
-    sameText(policyRow.project_id, projectId, 'project inference policy.project_id');
-    sameVersion(policyRow.version, requestedVersion, 'project inference policy.version');
-    if (policyRow.status !== 'active') deny('SaaS project inference policy is not active');
-  }
-
-  private async lockUser(executor: SqlExecutor, userId: string): Promise<void> {
-    await this.fenceUser(executor, userId);
-    const result = await this.query<Row>(
-      executor,
-      `SELECT id, disabled_at, anonymized_at
-       FROM saas_users
-       WHERE id = $1
-       LIMIT 2`,
-      [userId],
-    );
-    const row = exactlyOne(result, 'principal');
-    sameText(row.id, userId, 'principal.id');
-    if (row.disabled_at !== null) deny('SaaS principal user is disabled');
-    if (row.anonymized_at !== null) deny('SaaS principal user is anonymized');
-  }
-
-  private async lockTenantMembership(executor: SqlExecutor, tenantId: string, userId: string): Promise<void> {
-    const result = await this.query<Row>(
-      executor,
-      `SELECT tenant_id, user_id, role, status, revoked_at
-       FROM saas_memberships
-       WHERE tenant_id = $1 AND user_id = $2
-       LIMIT 2`,
-      [tenantId, userId],
-    );
-    const row = exactlyOne(result, 'tenant membership');
-    assertMembership(row, tenantId, null, userId, 'tenant membership');
-    if (typeof row.role !== 'string' || !INFERENCE_PROJECT_ROLES.has(row.role)) {
-      deny('SaaS tenant membership role cannot perform inference');
-    }
-  }
-
-  private async lockProjectMembership(
-    executor: SqlExecutor,
-    tenantId: string,
-    projectId: string,
-    userId: string,
-  ): Promise<void> {
-    const result = await this.query<Row>(
-      executor,
-      `SELECT tenant_id, project_id, user_id, role, status, revoked_at
-       FROM saas_project_memberships
-       WHERE tenant_id = $1 AND project_id = $2 AND user_id = $3
-       LIMIT 2`,
-      [tenantId, projectId, userId],
-    );
-    const row = exactlyOne(result, 'project membership');
-    assertMembership(row, tenantId, projectId, userId, 'project membership');
-    if (typeof row.role !== 'string' || !INFERENCE_PROJECT_ROLES.has(row.role)) {
-      deny('SaaS project membership role cannot perform inference');
-    }
-  }
-
-  private async lockApiKey(
+  /**
+   * One merged READ COMMITTED statement reads every authority fact after the
+   * fence statement has completed. Each fact is aggregated with jsonb_agg over
+   * the same `LIMIT 2` shape the per-table statements used, so the missing (0
+   * rows) / exactly-one / ambiguous (>1 row) distinction is preserved verbatim.
+   * For a project-service principal the user/membership facts are fetched but
+   * never validated (the previous form did not read them at all); the
+   * validation below runs in the original order tenant -> project -> policy ->
+   * user -> memberships -> API key, so every denial is identical.
+   */
+  private async readAuthorityFacts(
     executor: SqlExecutor,
     request: CreateRequestInput,
     authorization: ApiKeyAuthorizationSnapshot,
-  ): Promise<LockedKey> {
-    // Match KeyService and migration 050's UTF-8 hex business-layer key.
-    // Keep the wait and read in separate statements: a READ COMMITTED snapshot
-    // taken before a blocked fence could otherwise retain pre-revocation facts.
-    await this.query<Row>(executor, 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))', [
-      saasAdvisoryKey.apiKey(request.tenantId, request.projectId, authorization.keyId),
-    ]);
+  ): Promise<AuthorityFacts> {
+    const requestedVersion = requireVersion(request.projectPolicyVersion, 'projectPolicyVersion');
+    // For a project-service principal the user/membership facts are read but
+    // never validated (the previous form did not read them at all); the
+    // principal id equals the project id in that case.
+    const principalId = authorization.principalId;
+    const member = authorization.principalKind === 'member';
     const result = await this.query<Row>(
       executor,
-      `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
-              execution_principal_id, entitlement_id, supply_profile_id, supply_mode,
-              model_scopes, status, revoked_at, expires_at, authz_version, model_scope_version,
-              entitlement_authz_version, supply_profile_authz_version
-       FROM saas_api_keys
-       WHERE tenant_id = $1 AND project_id = $2 AND id = $3
-       LIMIT 2`,
-      [request.tenantId, request.projectId, authorization.keyId],
+      `SELECT
+         (SELECT jsonb_agg(t) FROM (
+            SELECT id, status FROM saas_tenants WHERE id = $1 LIMIT 2
+          ) t) AS tenant,
+         (SELECT jsonb_agg(p) FROM (
+            SELECT tenant_id, id, inference_policy_version, inference_policy_status
+              FROM saas_projects WHERE tenant_id = $1 AND id = $2 LIMIT 2
+          ) p) AS project,
+         (SELECT jsonb_agg(v) FROM (
+            SELECT tenant_id, project_id, version, status
+              FROM saas_project_inference_policy_versions
+             WHERE tenant_id = $1 AND project_id = $2 AND version = $3 LIMIT 2
+          ) v) AS policy,
+         (SELECT jsonb_agg(u) FROM (
+            SELECT id, disabled_at, anonymized_at FROM saas_users WHERE id = $4 LIMIT 2
+          ) u) AS principal_user,
+         (SELECT jsonb_agg(m) FROM (
+            SELECT tenant_id, user_id, role, status, revoked_at
+              FROM saas_memberships WHERE tenant_id = $1 AND user_id = $4 LIMIT 2
+          ) m) AS tenant_membership,
+         (SELECT jsonb_agg(m) FROM (
+            SELECT tenant_id, project_id, user_id, role, status, revoked_at
+              FROM saas_project_memberships
+             WHERE tenant_id = $1 AND project_id = $2 AND user_id = $4 LIMIT 2
+          ) m) AS project_membership,
+         (SELECT jsonb_agg(k) FROM (
+            SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
+                   execution_principal_id, entitlement_id, supply_profile_id, supply_mode,
+                   model_scopes, status, revoked_at, expires_at, authz_version, model_scope_version,
+                   entitlement_authz_version, supply_profile_authz_version
+              FROM saas_api_keys
+             WHERE tenant_id = $1 AND project_id = $2 AND id = $5 LIMIT 2
+          ) k) AS api_key,
+         clock_timestamp() AS now`,
+      [request.tenantId, request.projectId, requestedVersion, principalId, authorization.keyId],
     );
-    const row = exactlyOne(result, 'API key');
+    const facts = exactlyOne(result, 'authority bundle');
+    const tenant = jsonbOne(facts.tenant, 'tenant');
+    sameText(tenant.id, request.tenantId, 'tenant.id');
+    if (tenant.status !== 'active') deny('SaaS tenant is not active');
+
+    const project = jsonbOne(facts.project, 'project');
+    sameText(project.tenant_id, request.tenantId, 'project.tenant_id');
+    sameText(project.id, request.projectId, 'project.id');
+    sameVersion(project.inference_policy_version, requestedVersion, 'project.inference_policy_version');
+    if (project.inference_policy_status !== 'active') deny('SaaS project inference policy is not active');
+
+    const policy = jsonbOne(facts.policy, 'project inference policy');
+    sameText(policy.tenant_id, request.tenantId, 'project inference policy.tenant_id');
+    sameText(policy.project_id, request.projectId, 'project inference policy.project_id');
+    sameVersion(policy.version, requestedVersion, 'project inference policy.version');
+    if (policy.status !== 'active') deny('SaaS project inference policy is not active');
+
+    if (member) {
+      const user = jsonbOne(facts.principal_user, 'principal');
+      sameText(user.id, principalId, 'principal.id');
+      if (user.disabled_at !== null) deny('SaaS principal user is disabled');
+      if (user.anonymized_at !== null) deny('SaaS principal user is anonymized');
+
+      const tenantMembership = jsonbOne(facts.tenant_membership, 'tenant membership');
+      assertMembership(tenantMembership, request.tenantId, null, principalId, 'tenant membership');
+      if (typeof tenantMembership.role !== 'string' || !INFERENCE_PROJECT_ROLES.has(tenantMembership.role)) {
+        deny('SaaS tenant membership role cannot perform inference');
+      }
+
+      const projectMembership = jsonbOne(facts.project_membership, 'project membership');
+      assertMembership(projectMembership, request.tenantId, request.projectId, principalId, 'project membership');
+      if (typeof projectMembership.role !== 'string' || !INFERENCE_PROJECT_ROLES.has(projectMembership.role)) {
+        deny('SaaS project membership role cannot perform inference');
+      }
+    }
+
+    const key = this.validateApiKeyRow(jsonbOne(facts.api_key, 'API key'), request, authorization);
+    return { key: { row: key, scopes: key.model_scopes as string[] }, now: facts.now };
+  }
+
+  private validateApiKeyRow(row: Row, request: CreateRequestInput, authorization: ApiKeyAuthorizationSnapshot): Row {
     sameText(row.id, authorization.keyId, 'key.id');
     sameText(row.tenant_id, authorization.tenantId, 'key.tenant_id');
     sameText(row.project_id, authorization.projectId, 'key.project_id');
@@ -410,39 +422,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
       authorization.supplyProfileAuthzVersion,
       'key.supply_profile_authz_version',
     );
-    return { row, scopes };
-  }
-
-  private async databaseClock(executor: SqlExecutor): Promise<number> {
-    const result = await this.query<{ now: unknown }>(executor, 'SELECT clock_timestamp() AS now', []);
-    const row = exactlyOne(result, 'database clock');
-    return timestampMillis(row.now, 'database clock');
-  }
-
-  private async fenceTenant(executor: SqlExecutor, tenantId: string): Promise<void> {
-    await this.query<Row>(
-      executor,
-      `SELECT pg_advisory_xact_lock_shared(
-         hashtextextended('saas-authz:tenant:' || $1::uuid::text, 0)
-       )`,
-      [tenantId],
-    );
-  }
-
-  private async fenceProject(executor: SqlExecutor, tenantId: string, projectId: string): Promise<void> {
-    await this.query<Row>(
-      executor,
-      `SELECT pg_advisory_xact_lock_shared(
-         hashtextextended('saas-authz:project:' || $1::uuid::text || ':' || $2::uuid::text, 0)
-       )`,
-      [tenantId, projectId],
-    );
-  }
-
-  private async fenceUser(executor: SqlExecutor, userId: string): Promise<void> {
-    await this.query<Row>(executor, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text, 0))`, [
-      userId,
-    ]);
+    return { ...row, model_scopes: scopes };
   }
 
   private assertCurrentKey(key: LockedKey, request: CreateRequestInput, now: number): void {
