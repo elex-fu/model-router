@@ -12,9 +12,10 @@
 # so each workload service receives exactly the variables its role permits —
 # the compose equivalent of the per-role env files under /etc/model-router-saas.
 #
-# Redis is cache/coordination only (auth rate limiting); PostgreSQL remains
-# the sole authoritative ledger. See deploy/compose/README.md for the full
-# bring-up sequence (roles template -> saas:migrate -> re-apply templates).
+# Redis is cache/coordination only (control-plane auth rate limiting, gateway
+# sticky-session fast path); PostgreSQL remains the sole authoritative ledger.
+# See deploy/compose/README.md for the full bring-up sequence (roles template
+# -> saas:migrate -> re-apply templates).
 #
 # Managed SaaS listeners expose no /healthz route (only the local-mode proxy
 # has one), so workload healthchecks are TCP probes against the bound ports;
@@ -70,8 +71,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # Cache/coordination only (control-plane auth rate limiting); nothing here
-    # is authoritative, so no persistence is configured.
+    # Cache/coordination only (control-plane auth rate limiting, gateway
+    # sticky-session fast path); nothing here is authoritative, so no
+    # persistence is configured.
     command: ["redis-server", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -165,11 +167,20 @@ services:
       MODEL_ROUTER_SAAS_GATEWAY_BIND_ADDRESS: ${MODEL_ROUTER_SAAS_GATEWAY_BIND_ADDRESS:-0.0.0.0}
       MODEL_ROUTER_SAAS_GATEWAY_PORT: ${MODEL_ROUTER_SAAS_GATEWAY_PORT:-15007}
       MODEL_ROUTER_SAAS_GATEWAY_ORIGIN: ${MODEL_ROUTER_SAAS_GATEWAY_ORIGIN:?set MODEL_ROUTER_SAAS_GATEWAY_ORIGIN (https) in deploy/compose/.env}
+      # Gateway-scoped Redis (sticky-session fast path only; PG affinity
+      # stays authoritative and every Redis error fails open). The dedicated
+      # gateway spelling keeps the control-plane REDIS_URL/REDIS_PROVIDER
+      # pair rejected for this role. Comment this entry out for a pure-PG
+      # gateway (no Redis dependency); an explicitly EMPTY value fails
+      # startup closed by parser contract.
+      MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL: ${MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL:-redis://redis:6379}
     ports:
       # One host port per replica out of this inclusive range.
       - "${GATEWAY_HOST_PORT_START:-15007}-${GATEWAY_HOST_PORT_END:-15009}:${MODEL_ROUTER_SAAS_GATEWAY_PORT:-15007}"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       # No /healthz in managed SaaS mode; probe the /v1 listener via TCP.

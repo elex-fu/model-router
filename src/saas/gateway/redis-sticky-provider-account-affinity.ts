@@ -48,10 +48,12 @@ import type {
  *
  * Integration point (R7 / combined deployments): the decorator wraps the
  * PostgresProviderAccountAffinity instance handed to the gateway
- * composition as schedulerAffinity. The dedicated gateway workload cannot
- * hold a Redis connection by deployment contract, so the decoration is only
- * available where the Redis provider is loaded (combined/control-plane
- * topologies) — absent a cache, construct the inner port directly.
+ * composition as schedulerAffinity. The dedicated gateway workload may hold
+ * ONE core-owned Redis connection when the gateway-scoped deployment
+ * setting (MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL) is present — core loads it
+ * and passes the cache client here; absent the setting, the pure-PG path
+ * runs unchanged (combined/control-plane topologies wire the shared Redis
+ * provider's cache client instead).
  */
 
 export interface RedisStickyAffinityOptions {

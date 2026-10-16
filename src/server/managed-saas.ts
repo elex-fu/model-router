@@ -219,10 +219,13 @@ import {
 } from '../saas/runtime/gateway-runtime-module.js';
 import {
   loadManagedSaasProviders,
+  MANAGED_SAAS_REDIS_KEY_PREFIX,
   type ManagedRateLimiter,
   type ManagedSaasProviders,
   type ProviderModuleImporter,
+  type RedisProvider,
 } from '../saas/runtime/providers.js';
+import { createRedisProvider } from '../saas/runtime/redis-rate-limit-provider.js';
 import {
   type LoadedValidationWorkerProviderCredentialKms,
   loadValidationWorkerProviderCredentialKms,
@@ -1611,6 +1614,9 @@ export async function startManagedSaasServer(
   let gateway: ManagedSaasGatewayComposition | undefined;
   let gatewayKms: LoadedProviderCredentialUnsealingKms | undefined;
   let gatewayRuntimeModule: LoadedManagedSaasGatewayRuntimeModule | undefined;
+  // Gateway-scoped Redis (optional MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL):
+  // one core-owned RESP connection for the sticky-session hot path.
+  let gatewayRedis: RedisProvider | undefined;
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
@@ -1652,6 +1658,8 @@ export async function startManagedSaasServer(
         database,
         closeDatabase,
       );
+      // The gateway composition closes first; its Redis connection follows.
+      if (gatewayRedis) await Promise.allSettled([gatewayRedis.close()]);
     })();
     await closePromise;
   };
@@ -1723,6 +1731,23 @@ export async function startManagedSaasServer(
       });
       if (!gatewayKms) throw new Error('Managed SaaS gateway credential KMS is unavailable');
 
+      // Optional gateway-scoped Redis (deployment contract change, roadmap
+      // batch 2 §2.0): a configured-but-unreachable Redis fails startup
+      // closed, mirroring the control-plane provider readiness posture.
+      // Once loaded it only accelerates the sticky-session fast path — PG
+      // affinity stays authoritative and every cache error fails open.
+      if (deployment.gatewayRedisUrl !== undefined) {
+        try {
+          gatewayRedis = await createRedisProvider({
+            url: deployment.gatewayRedisUrl,
+            keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX,
+          });
+          await gatewayRedis.checkReady();
+        } catch {
+          throw new Error('Managed SaaS gateway Redis provider is unavailable');
+        }
+      }
+
       const runtimeDependencies = gatewayRuntimeModule.dependencies;
       const { schedulerAuthorities, ...runtimeGatewayOptions } = runtimeDependencies;
       if (
@@ -1780,9 +1805,19 @@ export async function startManagedSaasServer(
             : providerHttpEgressAllowlist.entries.join(', ')
         }`,
       );
+      // Gateway-scoped Redis decorates the PG affinity port with the R6b
+      // sticky fast path (sliding 1h TTL; PG remains authoritative).
+      const gatewayStickyCache =
+        gatewayRedis === undefined
+          ? undefined
+          : {
+              cache: await gatewayRedis.createCacheClient(),
+              keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX,
+            };
       gateway = createManagedSaasGatewayProductionComposition(database, {
         ...runtimeGatewayOptions,
         schedulerAffinity,
+        ...(gatewayStickyCache ? { schedulerAffinityStickyCache: gatewayStickyCache } : {}),
         // F3: settlement terminal commits enqueue customer webhook events.
         ...(options.customerWebhooks?.enabled ? { customerWebhooks: { enabled: true } } : {}),
         caller: preparationPorts.caller,

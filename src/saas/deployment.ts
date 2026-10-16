@@ -15,6 +15,7 @@ export const MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL = 'MODEL_ROUTER_SAAS_GATEWAY
 export const MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL =
   'MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL' as const;
 export const MODEL_ROUTER_SAAS_REDIS_URL = 'MODEL_ROUTER_SAAS_REDIS_URL' as const;
+export const MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL = 'MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL' as const;
 export const MODEL_ROUTER_SAAS_REDIS_PROVIDER = 'MODEL_ROUTER_SAAS_REDIS_PROVIDER' as const;
 export const MODEL_ROUTER_SAAS_KMS_PROVIDER = 'MODEL_ROUTER_SAAS_KMS_PROVIDER' as const;
 export const SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE = 'SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE' as const;
@@ -74,6 +75,7 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
     gatewayDatabaseUrl: MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
     validationWorkerDatabaseUrl: MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
     redisUrl: MODEL_ROUTER_SAAS_REDIS_URL,
+    gatewayRedisUrl: MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
     redisProviderModule: MODEL_ROUTER_SAAS_REDIS_PROVIDER,
     credentialProviderModule: MODEL_ROUTER_SAAS_KMS_PROVIDER,
     providerCredentialSealingKmsModule: SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
@@ -141,6 +143,7 @@ export const SAAS_DEPLOYMENT_ENV_NAMES = deepFreeze([
   MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
   MODEL_ROUTER_SAAS_REDIS_URL,
+  MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
   MODEL_ROUTER_SAAS_REDIS_PROVIDER,
   MODEL_ROUTER_SAAS_KMS_PROVIDER,
   SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
@@ -190,6 +193,12 @@ export interface ManagedSaasDeploymentConfig {
   readonly workloadRole: ManagedSaasWorkloadRole;
   readonly postgresUrl: string;
   readonly redisUrl?: string;
+  /**
+   * Gateway-scoped optional Redis URL (sticky-session hot path only; the
+   * control-plane redisUrl/redisProviderModule pair stays separate). Present
+   * only for the gateway workload; every other role fails closed on it.
+   */
+  readonly gatewayRedisUrl?: string;
   /** Opaque trusted module spec; loading and capability checks belong to composition. */
   readonly redisProviderModule?: string;
   /** Opaque trusted module spec; loading and capability checks belong to composition. */
@@ -636,6 +645,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
       MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
       MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
       MODEL_ROUTER_SAAS_REDIS_URL,
+      MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
       MODEL_ROUTER_SAAS_REDIS_PROVIDER,
       MODEL_ROUTER_SAAS_KMS_PROVIDER,
       SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
@@ -653,6 +663,10 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
       );
     }
   } else {
+    // The gateway keeps rejecting the control-plane Redis pair (a gateway
+    // must not load the control-plane Redis provider module or its URL
+    // spelling); its own optional gateway-scoped URL is parsed separately
+    // below. Every non-gateway role likewise rejects the gateway spelling.
     const forbiddenSettings = gateway
       ? [
           MODEL_ROUTER_SAAS_DATABASE_URL,
@@ -669,6 +683,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
             .flatMap(([, listener]) => Object.values(listener)),
         ]
       : [
+          MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
           MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
           SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
           MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
@@ -709,6 +724,18 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
         'trusted Redis-provider module spec',
         'INVALID_PROVIDER_MODULE',
       );
+  // Gateway-scoped Redis: optional, hot-path cache only (the sticky-session
+  // fast path). Absent ⇒ the pure-PG affinity path, exactly as before.
+  const gatewayRedisUrl =
+    gateway && isPresent(environment, MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL)
+      ? validateServiceUrl(
+          environment,
+          MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
+          ['redis:', 'rediss:'],
+          'Redis URL',
+          'INVALID_REDIS_URL',
+        )
+      : undefined;
   const credentialProviderModule = !usesControlPlaneProviders
     ? undefined
     : requiredSetting(
@@ -839,6 +866,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
     workloadRole,
     postgresUrl,
     ...(redisUrl === undefined ? {} : { redisUrl }),
+    ...(gatewayRedisUrl === undefined ? {} : { gatewayRedisUrl }),
     ...(redisProviderModule === undefined ? {} : { redisProviderModule }),
     ...(credentialProviderModule === undefined ? {} : { credentialProviderModule }),
     ...(providerCredentialRewrappingKmsModule === undefined ? {} : { providerCredentialRewrappingKmsModule }),
