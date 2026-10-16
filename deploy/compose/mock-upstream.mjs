@@ -278,7 +278,9 @@ async function handleProviderRequest(req, res) {
         bench_stream_id: streamId,
         content: [{ type: 'text', text }],
         stop_reason: 'end_turn',
-        usage: { input_tokens: 8, output_tokens: shape.chunks },
+        // The JSON usage observer requires the full anthropic counter set
+        // (cache_read/cache_creation included) or settlement fails closed.
+        usage: { input_tokens: 8, output_tokens: shape.chunks, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
       });
     } else {
       sendJson(res, 200, {
@@ -303,7 +305,10 @@ async function handleProviderRequest(req, res) {
     connection: 'keep-alive',
   });
   if (protocol === 'anthropic') {
-    res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', bench_stream_id: streamId, message: { id, model } })}\n\n`);
+    // The managed gateway's SSE usage observer (provider-sse-usage-observer.ts)
+    // fail-closes to usage_missing/unknown unless message_start carries the
+    // full input usage triple — mirror the real Anthropic wire shape.
+    res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', bench_stream_id: streamId, message: { id, model, usage: { input_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })}\n\n`);
     res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0 })}\n\n`);
   }
 
@@ -314,7 +319,10 @@ async function handleProviderRequest(req, res) {
       protocol === 'anthropic'
         ? anthropicDelta(seq, streamId, shape.content)
         : openaiChunk(id, model, seq, streamId, shape.content);
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    // Anthropic wire format: every SSE event carries an `event:` line; the
+    // gateway's usage observer rejects events without one (malformed_event).
+    const eventLine = protocol === 'anthropic' ? 'event: content_block_delta\n' : '';
+    res.write(`${eventLine}data: ${JSON.stringify(payload)}\n\n`);
     rec.sseChunks += 1;
     if (abortAfter >= 0 && seq + 1 >= abortAfter) {
       rec.abortedStreams += 1;
@@ -331,9 +339,16 @@ async function handleProviderRequest(req, res) {
   rec.byStatus[200] = (rec.byStatus[200] ?? 0) + 1;
   if (protocol === 'anthropic') {
     res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
-    res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' } })}\n\n`);
+    // message_delta must carry output_tokens or the observer fails closed.
+    res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: shape.chunks } })}\n\n`);
     res.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
   } else {
+    // Terminal usage chunk (OpenAI include_usage wire shape: empty choices +
+    // usage object). Without it the gateway's SSE usage observer reports
+    // no_usage and settlement fail-closes the attempt to unknown, which
+    // poisons the concurrency ledger — every streamed request would count as
+    // in-flight forever.
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [], usage: { prompt_tokens: 8, completion_tokens: shape.chunks, total_tokens: 8 + shape.chunks } })}\n\n`);
     res.write('data: [DONE]\n\n');
   }
   res.end();

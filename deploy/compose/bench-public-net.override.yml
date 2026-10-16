@@ -1,0 +1,51 @@
+# bench-public-net.override.yml — R9 SSRF-workaround network overlay.
+#
+# Why this exists (product behavior, documented in R9-RESULTS.md):
+#   src/saas/gateway/provider-http-address.ts fail-closes provider dispatch
+#   unless the provider hostname resolves EXCLUSIVELY to global (public)
+#   addresses — the built-in deny CIDR list covers 10/8, 172.16/12,
+#   192.168/16, loopback, link-local, CGNAT, etc. The default compose network
+#   hands out 172.x addresses, so any dispatch to a container on it is
+#   blocked (ProviderHttpAddressPolicyError → attempt 'dispatch_uncertain').
+#
+# Workaround (bench-only, no product change): put the mock upstream on an
+# extra bridge network whose subnet is 192.0.2.0/24 (TEST-NET-1, RFC 5737) —
+# the one documentation range NOT in the deny list. The mock keeps its
+# default-network membership for the credential-validation worker; the
+# gateway reaches it via the alias 'bench-provider.internal', which exists
+# ONLY on this network and therefore resolves exclusively to 192.0.2.10.
+#
+# Usage: append to the bench bring-up:
+#   docker-compose -f docker-compose.yml -f bench-compose.override.yml \
+#     -f bench-public-net.override.yml --profile bench up -d --wait
+
+services:
+  mock-upstream:
+    networks:
+      # Keep default membership (credential-validation worker reaches the
+      # mock over it); the alias below only exists on bench_provider_net.
+      default: {}
+      bench_provider_net:
+        aliases:
+          - bench-provider.internal
+        ipv4_address: 192.0.2.10
+
+  gateway:
+    environment:
+      # Bench diagnostics only: enables per-transaction SQL trace logging in
+      # the trusted runtime module (module-side flag; harmless in the bench).
+      # Kept OFF during measurement runs; flip to "1" for debugging.
+      BENCH_TRACE_TX: "0"
+    networks:
+      # Base compose declares no networks, so without this the override would
+      # drop the gateway off the implicit default network (postgres/redis/
+      # control-plane all live there).
+      default: {}
+      bench_provider_net: {}
+
+networks:
+  bench_provider_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.0.2.0/24

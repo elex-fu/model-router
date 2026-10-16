@@ -1,0 +1,496 @@
+{
+  "tool": "chaos-gateway",
+  "startedAt": "2026-10-16T12:03:07.343Z",
+  "config": {
+    "composeDir": "/Users/lex/play/model-router/deploy/compose",
+    "composeFiles": "docker-compose.yml,bench-compose.override.yml,bench-public-net.override.yml",
+    "faultAccounts": 4,
+    "faultConcurrency": 16,
+    "faultSeconds": 120,
+    "faultWarmupSeconds": 15,
+    "faultModeSeconds": 20,
+    "faultCooldownSeconds": 30,
+    "faultModes": "401,429,403,midstream",
+    "faultMinSuccessRate": 0.9,
+    "classificationMaxRequestsDuringFault": 5,
+    "killInflight": 40,
+    "killChunks": 200,
+    "killChunkDelayMs": 100,
+    "killPostRequests": 200,
+    "drainSeconds": 30,
+    "pgDownSeconds": 30,
+    "pgProbeIntervalMs": 500,
+    "pgMaxFailMs": 5000,
+    "pgRecoveryTimeoutSeconds": 120,
+    "pgRecoveryProbes": 60,
+    "tokenConcurrency": 8,
+    "tokenSeconds": 120,
+    "tokenWarmupSeconds": 10,
+    "tokenRecoverySeconds": 30,
+    "tokenMaxRefreshBurst": 3,
+    "soakHours": 24,
+    "soakSampleSeconds": 60,
+    "soakConcurrency": 8,
+    "soakRssGrowthPct": 50,
+    "soakFdGrowth": 100,
+    "requestTimeoutMs": 60000,
+    "out": "/Users/lex/play/model-router/deploy/compose/bench/reports/chaos-3inst.json",
+    "noFail": false,
+    "gatewayUrls": [
+      "http://127.0.0.1:15007",
+      "http://127.0.0.1:15008",
+      "http://127.0.0.1:15009"
+    ],
+    "scenarioList": [
+      "account-faults",
+      "kill-instance",
+      "kill-postgres"
+    ]
+  },
+  "scenarios": {
+    "account-faults": {
+      "warmupSnapshot": {
+        "bench-anthropic-account-1": {
+          "requests": 42,
+          "currentInFlight": 0,
+          "maxInFlight": 1
+        },
+        "bench-anthropic-account-2": {
+          "requests": 39,
+          "currentInFlight": 0,
+          "maxInFlight": 1
+        },
+        "bench-anthropic-account-3": {
+          "requests": 34,
+          "currentInFlight": 0,
+          "maxInFlight": 1
+        },
+        "bench-anthropic-account-4": {
+          "requests": 45,
+          "currentInFlight": 0,
+          "maxInFlight": 1
+        }
+      },
+      "phases": [
+        {
+          "mode": "401",
+          "requestsDuringFault": {
+            "bench-anthropic-account-1": 74,
+            "bench-anthropic-account-2": 84,
+            "bench-anthropic-account-3": 72,
+            "bench-anthropic-account-4": 74
+          },
+          "maxRequestsDuringFault": 84
+        },
+        {
+          "mode": "429",
+          "requestsDuringFault": {
+            "bench-anthropic-account-1": 77,
+            "bench-anthropic-account-2": 75,
+            "bench-anthropic-account-3": 85,
+            "bench-anthropic-account-4": 88
+          },
+          "maxRequestsDuringFault": 88
+        },
+        {
+          "mode": "403",
+          "requestsDuringFault": {
+            "bench-anthropic-account-1": 69,
+            "bench-anthropic-account-2": 54,
+            "bench-anthropic-account-3": 62,
+            "bench-anthropic-account-4": 56
+          },
+          "maxRequestsDuringFault": 69
+        },
+        {
+          "mode": "midstream",
+          "requestsDuringFault": {
+            "bench-anthropic-account-1": 47,
+            "bench-anthropic-account-2": 65,
+            "bench-anthropic-account-3": 51,
+            "bench-anthropic-account-4": 33
+          },
+          "maxRequestsDuringFault": 65
+        }
+      ],
+      "traffic": {
+        "total": 1661,
+        "ok": 521,
+        "failed": 1140,
+        "statuses": {
+          "200": 521,
+          "401": 304,
+          "403": 244,
+          "429": 325,
+          "502": 3,
+          "503": 169,
+          "transport": 95
+        }
+      },
+      "postWarmupSuccessRate": 0.2555,
+      "drained": {
+        "bench-anthropic-account-1": {
+          "currentInFlight": 0
+        },
+        "bench-anthropic-account-2": {
+          "currentInFlight": 0
+        },
+        "bench-anthropic-account-3": {
+          "currentInFlight": 0
+        },
+        "bench-anthropic-account-4": {
+          "currentInFlight": 0
+        }
+      }
+    },
+    "kill-instance": {
+      "victim": "model-router-saas-gateway-1",
+      "inFlight": {
+        "completed": 0,
+        "broken": 40
+      },
+      "postKill": {
+        "requests": 200,
+        "failures": 43,
+        "statuses": {
+          "200": 157,
+          "403": 21,
+          "503": 22
+        }
+      },
+      "reachableUrlsAfterKill": [
+        "http://127.0.0.1:15007",
+        "http://127.0.0.1:15008"
+      ],
+      "leakedAccounts": 0
+    },
+    "kill-postgres": {
+      "pgDownSeconds": 30,
+      "outageProbeCount": 41,
+      "outageStatusCounts": {
+        "200": 21,
+        "503": 3,
+        "transport:ECONNREFUSED": 16,
+        "transport:UND_ERR_SOCKET": 1
+      },
+      "outageViolations": 38,
+      "recovered": true,
+      "recoveryStatuses": {
+        "200": 1,
+        "transport": 1
+      }
+    }
+  },
+  "violations": [
+    {
+      "scenario": "account-faults",
+      "metric": "requests to faulted account during 401 window",
+      "value": 84,
+      "threshold": 5,
+      "unit": ""
+    },
+    {
+      "scenario": "account-faults",
+      "metric": "requests to faulted account during 429 window",
+      "value": 88,
+      "threshold": 5,
+      "unit": ""
+    },
+    {
+      "scenario": "account-faults",
+      "metric": "requests to faulted account during 403 window",
+      "value": 69,
+      "threshold": 5,
+      "unit": ""
+    },
+    {
+      "scenario": "account-faults",
+      "metric": "requests to faulted account during midstream window",
+      "value": 65,
+      "threshold": 5,
+      "unit": ""
+    },
+    {
+      "scenario": "account-faults",
+      "metric": "post-warmup success rate",
+      "value": 0.2555,
+      "threshold": 0.9,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-instance",
+      "metric": "new-request failures after kill",
+      "value": 43,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "transport error during PG outage (expected a clean fail-closed HTTP error)",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "kill-postgres",
+      "metric": "200 served during PG outage",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    }
+  ],
+  "dockerHostRequired": true,
+  "finishedAt": "2026-10-16T12:07:24.247Z"
+}
