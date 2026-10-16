@@ -436,3 +436,88 @@ test('invalid probe requests fail closed with INVALID_INPUT', async () => {
     (error: unknown) => error instanceof Error && error.name === 'AccountProbeServiceError',
   );
 });
+
+test('gemini probe posts the Code Assist v1internal:generateContent challenge with the dispatch wrap', async () => {
+  const h = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-gemini',
+      product_id: 'gemini-subscription',
+      credential_type: 'oauth',
+    }),
+    secret: JSON.stringify({
+      access_token: 'gemini-access-token',
+      refresh_token: 'gemini-refresh-token',
+      project_id: 'project-1',
+    }),
+    response: new Response(
+      JSON.stringify({
+        response: {
+          candidates: [{ content: { parts: [{ text: '17' }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 2 },
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  });
+  const outcome = await h.probe('tenant', 'gemini');
+  assert.deepEqual(
+    { ...outcome, latencyMs: 0 },
+    {
+      category: 'ok',
+      httpStatus: 200,
+      latencyMs: 0,
+      resetAt: null,
+      usage: { inputTokens: 9, outputTokens: 2 },
+      reason: null,
+    },
+  );
+  const request = h.requests[0];
+  assert.ok(request);
+  assert.equal(request.url, 'https://cloudcode-pa.googleapis.com/v1internal:generateContent');
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.headers?.authorization, 'Bearer gemini-access-token');
+  assert.equal(request.init.headers?.['user-agent'], 'GeminiCLI/0.1.5 (Windows; AMD64)');
+  assert.equal(request.init.redirect, 'manual');
+  // The {model, project, request} dispatch wrap the v1internal endpoint needs.
+  const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
+  assert.equal(body.model, 'gemini-2.5-flash');
+  assert.equal(body.project, 'project-1');
+  const inner = body.request as Record<string, unknown>;
+  assert.deepEqual(inner.contents, [{ role: 'user', parts: [{ text: CHALLENGE.prompt }] }]);
+  assert.equal(request.init.dispatcher, undefined);
+});
+
+test('gemini probe classifies upstream 429 and 401 through the shared taxonomy', async () => {
+  const h = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-gemini',
+      product_id: 'gemini-subscription',
+      credential_type: 'oauth',
+    }),
+    secret: JSON.stringify({
+      access_token: 'gemini-access-token',
+      refresh_token: 'gemini-refresh-token',
+      project_id: 'project-1',
+    }),
+  });
+  h.setResponse(new Response('rate limited', { status: 429, headers: { 'retry-after': '30' } }));
+  const rateLimited = await h.probe('tenant', 'gemini');
+  assert.equal(rateLimited.category, 'rate_limited');
+  assert.equal(rateLimited.resetAt, new Date(1_000_000 + 30_000).toISOString());
+  h.setResponse(new Response('unauthorized', { status: 401 }));
+  const revoked = await h.probe('tenant', 'gemini');
+  assert.equal(revoked.category, 'auth_revoked');
+  // A credential envelope without a project id is invalid, never a guess.
+  const malformed = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-gemini',
+      product_id: 'gemini-subscription',
+      credential_type: 'oauth',
+    }),
+    secret: JSON.stringify({ access_token: 'gemini-access-token', refresh_token: 'gemini-refresh-token' }),
+  });
+  const invalid = await malformed.probe('tenant', 'gemini');
+  assert.equal(invalid.category, 'error');
+  assert.equal(invalid.reason, 'credential_invalid');
+  assert.equal(malformed.requests.length, 0);
+});

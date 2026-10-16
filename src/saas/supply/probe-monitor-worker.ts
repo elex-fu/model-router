@@ -137,7 +137,11 @@ function mapMonitorRow(row: MonitorRow): ProbeMonitorRecord | null {
     interval === null ||
     threshold === null ||
     failures === null ||
-    (category !== 'claude' && category !== 'codex' && category !== 'opencode-go' && category !== 'api-key')
+    (category !== 'claude' &&
+      category !== 'codex' &&
+      category !== 'opencode-go' &&
+      category !== 'api-key' &&
+      category !== 'gemini')
   ) {
     return null;
   }

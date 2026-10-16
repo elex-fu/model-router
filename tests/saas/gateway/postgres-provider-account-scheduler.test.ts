@@ -253,6 +253,8 @@ interface FakeDatabaseState {
   readonly eligibilityRows?: ReadonlyMap<string, Row[]>;
   readonly inFlight?: ReadonlyMap<string, unknown>;
   readonly rateWindows?: ReadonlyMap<string, Row[]>;
+  /** F2: resolved billing-group rows; defaults to the seeded neutral group. */
+  readonly groupRows?: Row[];
   readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
 }
 
@@ -262,7 +264,9 @@ class FakeDatabase implements SaasDatabase {
   async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
     this.state.statements.push({ sql, values });
     let rows: Row[] = [];
-    if (sql.includes('postgres-provider-account-scheduler:route')) {
+    if (sql.includes('postgres-provider-account-scheduler:billing-group')) {
+      rows = this.state.groupRows ?? [{ id: 'default', claude_code_only: false, fallback_group_id: null }];
+    } else if (sql.includes('postgres-provider-account-scheduler:route')) {
       rows = this.state.routeRows ?? [routeRow(this.state.mode)];
     } else if (sql.includes('postgres-provider-account-scheduler:byok-eligibility')) {
       const accountId = String(values[2]);
@@ -363,7 +367,7 @@ test('PostgreSQL scheduler admits only persisted BYOK and platform account autho
   }
 });
 
-test('platform eligibility binds all 22 authority parameters including the member account epoch', async () => {
+test('platform eligibility binds all 23 authority parameters including the member account epoch and the F2 group', async () => {
   const { scheduler, state, input } = setup('platform');
   const platformCandidate = candidate('platform');
   const result = await scheduler.select(input([platformCandidate]));
@@ -378,12 +382,14 @@ test('platform eligibility binds all 22 authority parameters including the membe
   );
   assert.deepEqual(
     parameterSlots,
-    Array.from({ length: 22 }, (_, index) => index + 1),
+    Array.from({ length: 23 }, (_, index) => index + 1),
   );
-  assert.equal(query.values.length, 22);
+  assert.equal(query.values.length, 23);
   assert.equal(query.values[14], platformCandidate.poolMemberAccountAuthzVersion);
   assert.match(query.sql, /member\.account_authz_version\s*=\s*\$15\b/);
   assert.match(query.sql, /member\.account_authz_version\s*=\s*account\.authz_version\b/);
+  // F2: $23 is the server-resolved billing group narrowing the pool domain.
+  assert.equal(query.values[22], 'default');
 });
 
 test('stale platform member account epochs are rejected', async () => {
@@ -430,8 +436,11 @@ test('platform candidates must target the exact persisted route pool before down
   const result = await scheduler.select(input([platformCandidate]));
   assert.equal(result.decision, 'reject');
   if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
-  assert.equal(state.statements.length, 1);
-  assert.ok(state.statements[0]?.sql.includes('postgres-provider-account-scheduler:route'));
+  // F2: the billing-group resolution runs once before the route read; the
+  // candidate is still rejected before any eligibility or concurrency read.
+  assert.equal(state.statements.length, 2);
+  assert.ok(state.statements[0]?.sql.includes('postgres-provider-account-scheduler:billing-group'));
+  assert.ok(state.statements[1]?.sql.includes('postgres-provider-account-scheduler:route'));
   assert.equal(
     state.statements.some(({ sql }) => sql.includes('eligibility') || sql.includes(':concurrency')),
     false,

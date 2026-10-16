@@ -22,6 +22,10 @@ import { claudeMetadataUserId } from '../gateway/claude/transport.js';
 import { buildCanonicalIdentity } from '../gateway/codex/identity.js';
 import { CODEX_FALLBACK_INSTRUCTIONS } from '../gateway/codex/instructions.js';
 import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
+import { GEMINI_CLI_BASE_URL } from '../gateway/gemini/catalog-identity.js';
+import { GEMINI_CLI_USER_AGENT } from '../gateway/gemini/constants.js';
+import { normalizeGeminiTierId } from '../gateway/gemini/identity.js';
+import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { OPENCODE_GO_TEST_MODEL } from '../gateway/opencode-go/model-catalog.js';
 import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
@@ -46,6 +50,9 @@ import { parseRetryAfterMs } from './opencode-go-usage-worker.js';
  *   codex_cli_rs identity headers (gateway/codex/** read-only imports).
  * - opencode-go: the Chat Completions probe with the pinned test model
  *   glm-5.3 (the R5b-4 credential-validation FIXED_ADAPTERS precedent).
+ * - gemini: the Code Assist v1internal:generateContent probe with the pinned
+ *   GeminiCLI user agent and the `{model, project, request}` dispatch wrap —
+ *   gateway/gemini/** is reused READ-ONLY exactly like the claude probe.
  * - api-key: the existing credential-validation fixed-adapter endpoints
  *   (kimi/deepseek and friends); chat/messages probes carry the arithmetic
  *   few-shot challenge, models probes keep their list semantics.
@@ -77,7 +84,7 @@ import { parseRetryAfterMs } from './opencode-go-usage-worker.js';
  * gateway/codex/** are imported read-only and never modified.
  */
 
-export type AccountProbeCategory = 'claude' | 'codex' | 'opencode-go' | 'api-key';
+export type AccountProbeCategory = 'claude' | 'codex' | 'opencode-go' | 'api-key' | 'gemini';
 export type AccountProbeResultCategory = 'ok' | 'rate_limited' | 'auth_revoked' | 'banned' | 'error';
 
 export interface AccountProbeUsage {
@@ -117,6 +124,7 @@ export interface AccountProbeServiceOptions {
   readonly maxResponseBytes?: number;
   readonly claudeProbeModel?: string;
   readonly codexProbeModel?: string;
+  readonly geminiProbeModel?: string;
   readonly fetch?: (url: string, init: AccountProbeFetchInit) => Promise<Response>;
   readonly createConnection?: AccountProbeConnectionFactory;
   readonly signal?: AbortSignal;
@@ -138,6 +146,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const DEFAULT_CLAUDE_PROBE_MODEL = 'claude-haiku-4-5';
 const DEFAULT_CODEX_PROBE_MODEL = 'gpt-5.3-codex';
+const DEFAULT_GEMINI_PROBE_MODEL = 'gemini-2.5-flash';
 const PROBE_PROXY_KEY_ID = 'probe';
 
 const ACCOUNT_TABLES = Object.freeze({
@@ -240,6 +249,8 @@ export function accountProbeCategoryForProvider(providerId: string): AccountProb
       return 'codex';
     case 'opencode-go':
       return 'opencode-go';
+    case 'google-gemini':
+      return 'gemini';
     default:
       return 'api-key';
   }
@@ -270,19 +281,30 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<st
 function usageTokens(body: unknown): AccountProbeUsage | null {
   if (!isRecord(body)) return null;
   const usage = body.usage;
-  if (!isRecord(usage)) return null;
-  const anthropicInput = nonNegativeInteger(usage.input_tokens);
-  const anthropicOutput = nonNegativeInteger(usage.output_tokens);
-  if (anthropicInput >= 0 || anthropicOutput >= 0) {
-    return {
-      inputTokens: Math.max(0, anthropicInput),
-      outputTokens: Math.max(0, anthropicOutput),
-    };
+  if (isRecord(usage)) {
+    const anthropicInput = nonNegativeInteger(usage.input_tokens);
+    const anthropicOutput = nonNegativeInteger(usage.output_tokens);
+    if (anthropicInput >= 0 || anthropicOutput >= 0) {
+      return {
+        inputTokens: Math.max(0, anthropicInput),
+        outputTokens: Math.max(0, anthropicOutput),
+      };
+    }
+    const openaiInput = nonNegativeInteger(usage.prompt_tokens);
+    const openaiOutput = nonNegativeInteger(usage.completion_tokens);
+    if (openaiInput >= 0 || openaiOutput >= 0) {
+      return { inputTokens: Math.max(0, openaiInput), outputTokens: Math.max(0, openaiOutput) };
+    }
   }
-  const openaiInput = nonNegativeInteger(usage.prompt_tokens);
-  const openaiOutput = nonNegativeInteger(usage.completion_tokens);
-  if (openaiInput >= 0 || openaiOutput >= 0) {
-    return { inputTokens: Math.max(0, openaiInput), outputTokens: Math.max(0, openaiOutput) };
+  // Gemini native (usageMetadata; unwrapped when the Code Assist envelope carries it).
+  const geminiInner = isRecord(body.response) ? (body.response as Record<string, unknown>) : body;
+  const metadata = geminiInner.usageMetadata;
+  if (isRecord(metadata)) {
+    const geminiPrompt = nonNegativeInteger(metadata.promptTokenCount);
+    const geminiOutput = nonNegativeInteger(metadata.candidatesTokenCount);
+    if (geminiPrompt >= 0 || geminiOutput >= 0) {
+      return { inputTokens: Math.max(0, geminiPrompt), outputTokens: Math.max(0, geminiOutput) };
+    }
   }
   return null;
 }
@@ -323,6 +345,19 @@ function firstResponsesText(body: unknown): string | null {
   return null;
 }
 
+/** Gemini native text: candidates[0].content.parts[].text (unwrapped when wrapped). */
+function firstGeminiText(body: unknown): string | null {
+  if (!isRecord(body)) return null;
+  const inner = isRecord(body.response) ? (body.response as Record<string, unknown>) : body;
+  if (!isRecord(inner) || !Array.isArray(inner.candidates) || !isRecord(inner.candidates[0])) return null;
+  const content = (inner.candidates[0] as Record<string, unknown>).content;
+  if (!isRecord(content) || !Array.isArray(content.parts)) return null;
+  for (const part of content.parts) {
+    if (isRecord(part) && typeof part.text === 'string' && part.text.trim() !== '') return part.text;
+  }
+  return null;
+}
+
 function modelsListLooksValid(body: unknown): boolean {
   return isRecord(body) && Array.isArray(body.data);
 }
@@ -339,6 +374,7 @@ export function createAccountProbeService(
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const claudeProbeModel = options.claudeProbeModel ?? DEFAULT_CLAUDE_PROBE_MODEL;
   const codexProbeModel = options.codexProbeModel ?? DEFAULT_CODEX_PROBE_MODEL;
+  const geminiProbeModel = options.geminiProbeModel ?? DEFAULT_GEMINI_PROBE_MODEL;
   const fetcher = options.fetch ?? ((url, init) => fetch(url, init));
   const connectionFactory = options.createConnection ?? createProviderEgressProxyConnection;
   const now = options.now ?? Date.now;
@@ -557,7 +593,7 @@ export function createAccountProbeService(
     readonly method: 'GET' | 'POST';
     readonly headers: Readonly<Record<string, string>>;
     readonly body: string | null;
-    readonly responseKind: 'claude' | 'responses' | 'chat' | 'messages' | 'models';
+    readonly responseKind: 'claude' | 'responses' | 'chat' | 'messages' | 'models' | 'gemini';
   }
 
   function buildClaudeProbe(
@@ -624,6 +660,34 @@ export function createAccountProbeService(
         store: false,
       }),
       responseKind: 'responses',
+    };
+  }
+
+  function buildGeminiProbe(
+    request: AccountProbeRequest,
+    accessToken: string,
+    projectId: string,
+    _tierId: string | null,
+  ): BuiltProbeRequest {
+    const { body } = applyGeminiCodeAssistTransform(
+      {
+        model: geminiProbeModel,
+        contents: [{ role: 'user', parts: [{ text: request.challengePrompt }] }],
+        generationConfig: { maxOutputTokens: 512 },
+      },
+      { projectId },
+    );
+    return {
+      url: `${GEMINI_CLI_BASE_URL}/v1internal:generateContent`,
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
+        'user-agent': GEMINI_CLI_USER_AGENT,
+      },
+      body: JSON.stringify(body),
+      responseKind: 'gemini',
     };
   }
 
@@ -794,7 +858,9 @@ export function createAccountProbeService(
           ? firstAnthropicText(parsed)
           : built.responseKind === 'chat'
             ? firstChatText(parsed)
-            : firstResponsesText(parsed);
+            : built.responseKind === 'gemini'
+              ? firstGeminiText(parsed)
+              : firstResponsesText(parsed);
       const match = challengeMatches(request.challengeAnswer, extracted);
       if (match === 'ok') {
         return { category: 'ok', httpStatus: response.status, latencyMs, resetAt: null, usage, reason: null };
@@ -830,7 +896,8 @@ export function createAccountProbeService(
         (request.category !== 'claude' &&
           request.category !== 'codex' &&
           request.category !== 'opencode-go' &&
-          request.category !== 'api-key') ||
+          request.category !== 'api-key' &&
+          request.category !== 'gemini') ||
         typeof request.challengePrompt !== 'string' ||
         typeof request.challengeAnswer !== 'string' ||
         !/^[0-9]{1,6}$/.test(request.challengeAnswer)
@@ -849,7 +916,25 @@ export function createAccountProbeService(
 
       return withUnsealedAccountCredential(binding, async (secret) => {
         let built: BuiltProbeRequest | null = null;
-        if (request.category === 'claude' || request.category === 'codex') {
+        if (request.category === 'gemini') {
+          let material: Record<string, unknown>;
+          try {
+            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+          } catch {
+            return probeError('credential_invalid');
+          }
+          const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
+          const projectId = typeof material.project_id === 'string' ? material.project_id : null;
+          if (accessToken === null || accessToken === '' || projectId === null || projectId === '') {
+            return probeError('credential_invalid');
+          }
+          built = buildGeminiProbe(
+            request,
+            accessToken,
+            projectId,
+            typeof material.tier_id === 'string' ? normalizeGeminiTierId(material.tier_id) : null,
+          );
+        } else if (request.category === 'claude' || request.category === 'codex') {
           let material: Record<string, unknown>;
           try {
             material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;

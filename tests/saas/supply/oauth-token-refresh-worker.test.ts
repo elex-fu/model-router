@@ -6,9 +6,12 @@ import {
   sealProviderCredential,
 } from '../../../src/saas/credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import { GEMINI_OAUTH_CLIENT_SECRET_ENV } from '../../../src/saas/platform/gemini-oauth/oauth.js';
 import { sealEgressProxyCredentials } from '../../../src/saas/supply/egress-proxy-seal.js';
 import {
   buildOauthCredentialMaterial,
+  GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+  geminiOauthTokenAdapters,
   OAUTH_REFRESH_MAX_BACKOFF_MS,
   OAUTH_REFRESH_MIN_BACKOFF_MS,
   OAUTH_REFRESH_STALE_REFRESHING_MS,
@@ -1148,4 +1151,96 @@ test('a bound egress proxy that cannot be established fails the refresh instead 
   } finally {
     FakeDatabase.prototype.query = originalQuery;
   }
+});
+
+test('the F4 gemini adapter is absent without a client secret and complete with one', () => {
+  // Fail-closed: no secret in the environment means no adapter, so gemini
+  // credentials are excluded by the due scan rather than refreshed against a
+  // grant missing its secret.
+  assert.deepEqual(geminiOauthTokenAdapters(null), []);
+  const adapters = geminiOauthTokenAdapters('test-installed-app-secret');
+  assert.equal(adapters.length, 1);
+  const adapter = adapters[0];
+  assert.ok(adapter);
+  assert.equal(adapter.providerId, 'google-gemini');
+  assert.equal(adapter.productId, 'gemini-subscription');
+  assert.equal(adapter.credentialType, 'oauth');
+  assert.equal(adapter.adapterId, 'google-gemini-oauth-v1');
+  assert.equal(adapter.tokenEndpoint, 'https://oauth2.googleapis.com/token');
+  assert.equal(adapter.clientId, '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com');
+  // Google's installed-app clients require client_secret in the refresh grant.
+  assert.equal(adapter.clientSecret, 'test-installed-app-secret');
+  // Refresh grants send no scope: the original grant's scopes persist.
+  assert.equal(adapter.refreshScope, null);
+  assert.deepEqual(adapter.passthroughFields, ['project_id', 'tier_id', 'client_id', 'email']);
+  assert.equal(adapter.userAgent, 'model-router');
+
+  // With the environment unconfigured (this suite's import-time assumption,
+  // shared with the adapter-registry test above), the gemini triple is not
+  // resolvable through the module-level adapter list.
+  if (process.env[GEMINI_OAUTH_CLIENT_SECRET_ENV] === undefined) {
+    assert.equal(
+      resolveOauthTokenAdapter({
+        providerId: 'google-gemini',
+        productId: 'gemini-subscription',
+        credentialType: 'oauth',
+      }),
+      null,
+    );
+  }
+});
+
+test('GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS preserves the dispatch-wrap metadata across rotations', () => {
+  assert.deepEqual(GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS, ['project_id', 'tier_id', 'client_id', 'email']);
+  // The pure parse/build pair round-trips a gemini envelope: the gateway needs
+  // project_id (the v1internal dispatch wrap), tier_id (the 429 cooldown
+  // policy) and client_id (refresh grant continuity) even though the
+  // refresh-token response never returns them.
+  const geminiEnvelope = JSON.stringify({
+    access_token: 'accs-gemini-old',
+    refresh_token: 'rfrsh-gemini-old',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    project_id: 'project-1',
+    tier_id: 'gcp_standard',
+    client_id: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+    email: 'operator@example.test',
+    unknown_extra: 'dropped',
+  });
+  assert.deepEqual(
+    parseOauthCredentialMaterial(Buffer.from(geminiEnvelope), GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS),
+    {
+      refreshToken: 'rfrsh-gemini-old',
+      passthrough: {
+        project_id: 'project-1',
+        tier_id: 'gcp_standard',
+        client_id: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+        email: 'operator@example.test',
+      },
+    },
+  );
+  const rebuilt = buildOauthCredentialMaterial(
+    {
+      accessToken: 'accs-gemini-new',
+      refreshToken: 'rfrsh-gemini-new',
+      expiresInSeconds: 3600,
+      passthrough: {
+        project_id: 'project-1',
+        tier_id: 'gcp_standard',
+        client_id: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+        email: 'operator@example.test',
+      },
+    },
+    GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+  );
+  assert.deepEqual(JSON.parse(rebuilt.toString('utf8')), {
+    access_token: 'accs-gemini-new',
+    refresh_token: 'rfrsh-gemini-new',
+    token_type: 'Bearer',
+    expires_in: 3600,
+    project_id: 'project-1',
+    tier_id: 'gcp_standard',
+    client_id: '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
+    email: 'operator@example.test',
+  });
 });

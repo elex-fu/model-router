@@ -179,6 +179,7 @@ GRANT SELECT (
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   claude_usage_updated_at, claude_5h_reset_at,
+  gemini_usage_updated_at, gemini_daily_reset_at, gemini_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code,
   egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
@@ -197,6 +198,12 @@ GRANT UPDATE (
   claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
   claude_7d_oi_utilization, claude_7d_oi_reset_at,
   claude_usage_updated_at, claude_session_window_start, claude_session_window_end,
+  gemini_shared_daily_used, gemini_shared_daily_limit,
+  gemini_pro_daily_used, gemini_pro_daily_limit,
+  gemini_flash_daily_used, gemini_flash_daily_limit,
+  gemini_minute_used, gemini_minute_limit,
+  gemini_daily_reset_at, gemini_usage_updated_at,
+  gemini_rate_limited_until, gemini_tier_id,
   quarantine_entered_at, quarantine_reason_code,
   probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
@@ -260,6 +267,7 @@ GRANT SELECT (
   authz_version, quota_state, quota_remaining_minor_units, quota_currency, quota_checked_at,
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   claude_usage_updated_at, claude_5h_reset_at,
+  gemini_usage_updated_at, gemini_daily_reset_at, gemini_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code,
   egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
@@ -278,6 +286,12 @@ GRANT UPDATE (
   claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
   claude_7d_oi_utilization, claude_7d_oi_reset_at,
   claude_usage_updated_at, claude_session_window_start, claude_session_window_end,
+  gemini_shared_daily_used, gemini_shared_daily_limit,
+  gemini_pro_daily_used, gemini_pro_daily_limit,
+  gemini_flash_daily_used, gemini_flash_daily_limit,
+  gemini_minute_used, gemini_minute_limit,
+  gemini_daily_reset_at, gemini_usage_updated_at,
+  gemini_rate_limited_until, gemini_tier_id,
   quarantine_entered_at, quarantine_reason_code,
   probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts

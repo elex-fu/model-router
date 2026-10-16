@@ -25,6 +25,12 @@ import {
   CODEX_OAUTH_REFRESH_SCOPE,
   CODEX_OAUTH_TOKEN_ENDPOINT,
 } from '../platform/codex-oauth/oauth.js';
+import {
+  GEMINI_OAUTH_CLIENT_ID,
+  GEMINI_OAUTH_TOKEN_ENDPOINT,
+  GEMINI_OAUTH_TOKEN_USER_AGENT,
+  resolveGeminiOauthClientSecret,
+} from '../platform/gemini-oauth/oauth.js';
 import { readEgressProxyForAccount } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
 import { withUnsealedEgressProxyCredentials } from './egress-proxy-seal.js';
@@ -187,6 +193,14 @@ interface FixedOauthTokenAdapter {
    */
   readonly refreshScope: string | null;
   /**
+   * Google's installed-app clients require client_secret in the token
+   * refresh grant (the Gemini CLI binding). The value arrives from the
+   * deployment environment, never a source literal; undefined (the default)
+   * sends no client_secret parameter so every existing grant stays
+   * byte-identical.
+   */
+  readonly clientSecret?: string;
+  /**
    * Codex bindings carry ChatGPT account metadata inside the sealed envelope
    * that the gateway must keep after a rotation (`chatgpt-account-id` header,
    * identity namespace). These envelope fields are passed through from the old
@@ -302,7 +316,54 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
     userAgent: 'model-router',
   }),
+  ...geminiOauthTokenAdapters(),
 ]);
+
+/**
+ * Envelope fields the Gemini subscription binding preserves across a
+ * rotation (F4): the gateway needs project_id (the v1internal dispatch
+ * wrap), tier_id (the 429 cooldown policy) and client_id (refresh grant
+ * continuity) even though the refresh-token response never returns them.
+ * email is shared with the claude list.
+ */
+export const GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Object.freeze([
+  'project_id',
+  'tier_id',
+  'client_id',
+  'email',
+]);
+
+/**
+ * The F4 Gemini Code Assist subscription adapter
+ * (src/saas/gateway/gemini/catalog-identity.ts). Google's public
+ * installed-app client refreshes at oauth2.googleapis.com and REQUIRES
+ * client_secret in the grant; that value is provider-shaped, so it lives
+ * only in the MODEL_ROUTER_GEMINI_OAUTH_CLIENT_SECRET environment variable
+ * (the platform binding service reads the same variable). When the
+ * environment is unconfigured the adapter is absent and gemini credentials
+ * are excluded by the due scan — fail-closed, never guessed, and no refresh
+ * is ever attempted that could burn the refresh token against a grant
+ * missing its secret.
+ */
+export function geminiOauthTokenAdapters(
+  clientSecret: string | null = resolveGeminiOauthClientSecret(),
+): readonly FixedOauthTokenAdapter[] {
+  if (clientSecret === null) return [];
+  return [
+    Object.freeze({
+      providerId: 'google-gemini',
+      productId: 'gemini-subscription',
+      credentialType: 'oauth',
+      adapterId: 'google-gemini-oauth-v1',
+      tokenEndpoint: GEMINI_OAUTH_TOKEN_ENDPOINT,
+      clientId: GEMINI_OAUTH_CLIENT_ID,
+      refreshScope: null,
+      passthroughFields: GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+      userAgent: GEMINI_OAUTH_TOKEN_USER_AGENT,
+      clientSecret,
+    }),
+  ];
+}
 
 /** Envelope fields a binding preserves across rotation; empty for anthropic. */
 export function oauthEnvelopePassthroughFields(credential: {
@@ -324,6 +385,7 @@ export function resolveOauthTokenAdapter(credential: {
   readonly refreshScope: string | null;
   readonly passthroughFields: readonly string[];
   readonly userAgent: string;
+  readonly clientSecret?: string;
 } | null {
   return (
     FIXED_OAUTH_TOKEN_ADAPTERS.find(
@@ -593,7 +655,10 @@ export async function requestOauthTokenRefresh(
   const form =
     `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}` +
     `&client_id=${encodeURIComponent(adapter.clientId)}` +
-    (adapter.refreshScope === null ? '' : `&scope=${encodeURIComponent(adapter.refreshScope)}`);
+    (adapter.refreshScope === null ? '' : `&scope=${encodeURIComponent(adapter.refreshScope)}`) +
+    (adapter.clientSecret === undefined || adapter.clientSecret === null || adapter.clientSecret === ''
+      ? ''
+      : `&client_secret=${encodeURIComponent(adapter.clientSecret)}`);
   let response: Response;
   try {
     timeoutSignal.throwIfAborted();
