@@ -507,6 +507,8 @@ async function registeredLedger(executor: SqlExecutor): Promise<void> {
       107,
       108,
       109,
+      110,
+      111,
     ],
     'complete normal 001-060 plus 063, 080, 081 and 082 registry required',
   );

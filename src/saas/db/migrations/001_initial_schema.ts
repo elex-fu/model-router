@@ -87,6 +87,8 @@ import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from './106_registration_admiss
 import { EGRESS_PROXIES_SAAS_MIGRATION } from './107_egress_proxies.js';
 import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_provider_account_opencode_go_scheduling.js';
 import { PROBE_MONITORS_SAAS_MIGRATION } from './109_probe_monitors.js';
+import { PLATFORM_SETTINGS_SAAS_MIGRATION } from './110_platform_settings.js';
+import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provider_account_gemini_scheduling.js';
 
 export interface SaasMigration {
   version: number;
@@ -573,4 +575,19 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // workstream; R3 egress proxies took it (documented re-arbitration), so
   // 109 is the next free slot after the applied 108 head.
   PROBE_MONITORS_SAAS_MIGRATION,
+  // 110: F1 platform settings store — the platform-owned mutable runtime
+  // configuration surface (one versioned row per settings key, CAS on
+  // version, KMS-sealed envelopes for secret-suffixed keys, no plaintext
+  // secret columns). Registration admission and topup amount-tier discounts
+  // consume it store-first with env fallback; 111 is being registered
+  // concurrently by the Gemini OAuth workstream (both tails are valid next
+  // applications under the fail-closed serial ordering rule).
+  PLATFORM_SETTINGS_SAAS_MIGRATION,
+  // 111: F4 Gemini subscription scheduling — the tier-shaped daily/minute
+  // quota windows (shared or per-model-class pro/flash, Pacific-midnight
+  // reset), the 429 cooldown deadline, the loadCodeAssist tier id, and the
+  // probe-category CHECK rewrite that admits the 'gemini' probe category on
+  // the migration-109 monitors table. Scheduling signal only, never billing;
+  // 110 is taken by the parallel F1 platform-settings workstream above.
+  PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
 ];

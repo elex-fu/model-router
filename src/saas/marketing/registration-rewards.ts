@@ -41,6 +41,13 @@ export interface MarketingRegistrationRewardsOptions {
   readonly affiliate: MarketingAffiliateService;
   readonly fundingLedger: MarketingAffiliateFundingLedger;
   readonly rewards: RegistrationRewardSettings;
+  /**
+   * F1 platform settings store: dynamic store-first reward resolution. When
+   * present it supersedes the static snapshot at attribution time; a resolver
+   * failure fails closed to the constructor snapshot (rewards already granted
+   * under earlier settings are immutable wallet facts and never repriced).
+   */
+  readonly rewardsResolver?: () => Promise<RegistrationRewardSettings>;
   readonly idFactory?: () => string;
   readonly now?: () => Date;
 }
@@ -87,8 +94,17 @@ export class MarketingRegistrationRewards implements RegistrationAffiliatePort {
       inviterTenantId = bound.inviterTenantId;
     }
 
+    let rewards = this.options.rewards;
+    if (this.options.rewardsResolver !== undefined) {
+      try {
+        rewards = await this.options.rewardsResolver();
+      } catch (error) {
+        console.error('model-router registration rewards resolution failed; using the startup snapshot', error);
+        rewards = this.options.rewards;
+      }
+    }
     const { currency, grantMinorUnits, codeFillerMinorUnits, codeOwnerMinorUnits, codeOwnerMinThresholdMinorUnits } =
-      this.options.rewards;
+      rewards;
 
     // Tiers 1 and 2: the invitee's wallet (registration grant, code filler).
     const grant = BigInt(grantMinorUnits);

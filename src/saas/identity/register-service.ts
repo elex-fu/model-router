@@ -8,7 +8,7 @@ import type { EmailVerificationService } from './email-verification-service.js';
 import { EmailVerificationError, normalizeEmailCanonical } from './email-verification-service.js';
 import { hashPassword } from './password.js';
 import type { RegistrationAdmissionSettings } from './registration-settings.js';
-import { isEmailDomainAdmitted } from './registration-settings.js';
+import { isEmailDomainAdmitted, parseRegistrationAdmissionSettings } from './registration-settings.js';
 import type { CaptchaProof } from './turnstile-service.js';
 
 /**
@@ -113,6 +113,15 @@ export interface RegistrationServiceOptions {
   readonly verification: EmailVerificationService;
   readonly captcha: CaptchaProof;
   readonly settings: RegistrationAdmissionSettings;
+  /**
+   * F1 platform settings store: dynamic store-first settings resolution. When
+   * present, every admission decision re-resolves the merged store+env
+   * configuration (a store hit wins); the static `settings` snapshot remains
+   * the constructor-validated fallback. Resolvers that themselves fail
+   * (misconfigured store overlay, unreadable store) must fail closed — the
+   * managed wiring resolves to the fail-closed defaults in that case.
+   */
+  readonly settingsResolver?: () => Promise<RegistrationAdmissionSettings>;
   readonly sessionTtlSeconds: number;
   readonly affiliate?: RegistrationAffiliatePort;
   readonly now?: () => Date;
@@ -187,6 +196,23 @@ export class RegistrationService {
       });
   }
 
+  /**
+   * The effective admission settings: the store-first resolver when wired,
+   * otherwise the constructor snapshot. Fail-closed — a resolver failure
+   * degrades to the strict parser's empty-source defaults (closed mode, no
+   * Turnstile, no SMTP, zero rewards) rather than admitting traffic against
+   * an unverifiable configuration.
+   */
+  private async currentSettings(): Promise<RegistrationAdmissionSettings> {
+    if (this.options.settingsResolver === undefined) return this.options.settings;
+    try {
+      return await this.options.settingsResolver();
+    } catch (error) {
+      console.error('model-router registration settings resolution failed; failing closed', error);
+      return parseRegistrationAdmissionSettings({});
+    }
+  }
+
   /** Public admission descriptor consumed by the console register view. */
   admissionDescriptor(): {
     readonly mode: 'open' | 'invite' | 'closed';
@@ -194,6 +220,23 @@ export class RegistrationService {
     readonly turnstile: { readonly enabled: boolean; readonly siteKey?: string };
   } {
     const settings = this.options.settings;
+    return {
+      mode: settings.mode,
+      emailVerificationRequired: settings.emailVerificationRequired,
+      turnstile: {
+        enabled: settings.turnstile.enabled,
+        ...(settings.turnstile.siteKey === undefined ? {} : { siteKey: settings.turnstile.siteKey }),
+      },
+    };
+  }
+
+  /**
+   * Store-first admission descriptor (F1): resolves the effective settings the
+   * same way the admission decisions do, so the public options endpoint never
+   * advertises a mode the register endpoints would not honor.
+   */
+  async resolveAdmissionDescriptor(): Promise<ReturnType<RegistrationService['admissionDescriptor']>> {
+    const settings = await this.currentSettings();
     return {
       mode: settings.mode,
       emailVerificationRequired: settings.emailVerificationRequired,
@@ -219,7 +262,7 @@ export class RegistrationService {
    * the sender.
    */
   async sendRegistrationCode(input: { readonly email: unknown; readonly createdIp?: string }): Promise<void> {
-    const settings = this.options.settings;
+    const settings = await this.currentSettings();
     if (settings.mode === 'closed') fail(403, 'REGISTRATION_CLOSED');
     const email = normalizeEmailCanonical(input?.email);
     if (!isEmailDomainAdmitted(settings, email)) fail(403, 'EMAIL_DOMAIN_REJECTED');
@@ -231,7 +274,7 @@ export class RegistrationService {
   }
 
   async register(input: RegistrationInput): Promise<RegistrationSession> {
-    const settings = this.options.settings;
+    const settings = await this.currentSettings();
     if (settings.mode === 'closed') fail(403, 'REGISTRATION_CLOSED');
 
     const inviteCode = normalizeInviteCode(input?.inviteCode);

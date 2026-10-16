@@ -1,18 +1,21 @@
 /**
  * R4 registration admission (plan §R4): the runtime admission-switch surface.
  *
- * There is no platform settings store yet (the documented repo posture — see
- * the billing-groups `saas.payments.topup.amount_tier_discounts` precedent),
- * so this module follows the same two-part convention:
+ * Since F1 (task #34) the platform settings store exists, and this module is
+ * the single source of its registration grammar:
  *
- * 1. Reserved settings-key constants below name the future store keys, and
+ * 1. Reserved settings-key constants below name the store keys, and
  *    `parseRegistrationAdmissionSettings` is the single strict normalizer for
  *    their values (fail-closed defaults, no silent coercion).
- * 2. Managed deployments source the values from the environment (the
- *    `src/saas/deployment.ts` settings surface). `environmentValues` adapts
- *    `process.env` to the parser's input; secrets (SMTP password, Turnstile
- *    secret) live only in the environment and are resolved at call time —
- *    the OAuth `OAuthSecretSource` posture — never embedded in config files.
+ *    `parseRegistrationSettingValue` applies the same per-key grammar to one
+ *    store value at a time, and `resolveRegistrationAdmissionSettings`
+ *    resolves store-first (a present store value wins) with env fallback —
+ *    an empty store keeps the exact pre-F1 env/default behavior.
+ * 2. Secrets (SMTP password, Turnstile secret) live only in the environment
+ *    and are resolved at call time — the OAuth `OAuthSecretSource` posture —
+ *    never embedded in config files. The store accepts them only as KMS
+ *    sealed envelopes and the control plane (which holds no credential-
+ *    unsealing KMS) does not consume them (documented F1 deviation).
  *
  * Defaults are fail-closed: registration is CLOSED, Turnstile is off
  * (pass-through), the domain lists are empty, and all registration reward
@@ -264,4 +267,161 @@ export function isEmailDomainAdmitted(
   if (settings.emailDomainDenylist.includes(domain)) return false;
   if (settings.emailDomainAllowlist.length > 0 && !settings.emailDomainAllowlist.includes(domain)) return false;
   return true;
+}
+
+/**
+ * Settings keys whose values are secrets. In the platform settings store they
+ * are stored only as KMS sealed envelopes and are never consumed by the
+ * control plane (the control-plane workload holds no credential-unsealing
+ * KMS): registration secrets remain env-only until a consumer with an
+ * unsealing KMS exists (documented F1 deviation).
+ */
+export const REGISTRATION_SECRET_SETTINGS_KEYS: ReadonlySet<string> = new Set([
+  REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+  REGISTRATION_SETTINGS_KEYS.smtpPassword,
+]);
+
+/** Maps each reserved settings key to the env var backing it in managed mode. */
+const REGISTRATION_SETTINGS_ENV_BY_KEY: Readonly<Record<string, string>> = Object.freeze(
+  Object.fromEntries(
+    (
+      [
+        ['mode', 'mode'],
+        ['emailVerificationRequired', 'emailVerification'],
+        ['emailDomainAllowlist', 'domainAllowlist'],
+        ['emailDomainDenylist', 'domainDenylist'],
+        ['turnstileEnabled', 'turnstileEnabled'],
+        ['turnstileSiteKey', 'turnstileSiteKey'],
+        ['turnstileSecret', 'turnstileSecret'],
+        ['smtpHost', 'smtpHost'],
+        ['smtpPort', 'smtpPort'],
+        ['smtpSecure', 'smtpSecure'],
+        ['smtpUsername', 'smtpUsername'],
+        ['smtpPassword', 'smtpPassword'],
+        ['smtpFrom', 'smtpFrom'],
+        ['rewardCurrency', 'rewardCurrency'],
+        ['rewardGrant', 'rewardGrant'],
+        ['rewardCodeFiller', 'rewardCodeFiller'],
+        ['rewardCodeOwner', 'rewardCodeOwner'],
+        ['rewardCodeOwnerMinThreshold', 'rewardCodeOwnerMinThreshold'],
+      ] as const
+    ).map(([settingsField, envField]) => [REGISTRATION_SETTINGS_KEYS[settingsField], REGISTRATION_ENV_VARS[envField]]),
+  ),
+);
+
+const SETTINGS_DOMAIN_LIST_MAX_ENTRIES = 128;
+
+function parseDomainListValue(value: unknown, name: string): string {
+  if (typeof value !== 'string') throw new RegistrationSettingsError(`${name} must be a string`);
+  const domains = parseDomainList(value, name);
+  if (domains.length > SETTINGS_DOMAIN_LIST_MAX_ENTRIES) {
+    throw new RegistrationSettingsError(`${name} exceeds ${SETTINGS_DOMAIN_LIST_MAX_ENTRIES} domains`);
+  }
+  return domains.join(',');
+}
+
+function parseBooleanValue(value: unknown, name: string): string {
+  if (value !== 'true' && value !== 'false') {
+    throw new RegistrationSettingsError(`${name} must be "true" or "false"`);
+  }
+  return value;
+}
+
+function parseBoundedText(value: unknown, name: string, min: number, max: number): string {
+  if (typeof value !== 'string' || value.trim() !== value || value.length < min || value.length > max) {
+    throw new RegistrationSettingsError(`${name} must be trimmed text between ${min} and ${max} characters`);
+  }
+  if ([...value].some((character) => character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f)) {
+    throw new RegistrationSettingsError(`${name} contains control characters`);
+  }
+  return value;
+}
+
+/**
+ * F1 platform settings store: the strict single-value normalizer for one
+ * registration settings-store value. It enforces exactly the per-key grammar
+ * of `parseRegistrationAdmissionSettings` (same helpers, fail-closed, no
+ * silent coercion) so the store can never hold a value the full parser would
+ * reject on its own merits.
+ *
+ * Cross-field rules (Turnstile needs site key + secret together, SMTP needs
+ * host + From, allow/deny disjointness) are deliberately NOT enforced here:
+ * the store mutates one key at a time, and the merged store+env configuration
+ * is validated by the full parser at resolution time
+ * (`resolveRegistrationAdmissionSettings`), which stays fail-closed.
+ *
+ * Secret-suffixed keys (Turnstile secret, SMTP password) have no plain-value
+ * grammar — they are sealed envelopes in the store, never plaintext.
+ */
+export function parseRegistrationSettingValue(key: string, value: unknown): string {
+  switch (key) {
+    case REGISTRATION_SETTINGS_KEYS.mode:
+      if (value !== 'open' && value !== 'invite' && value !== 'closed') {
+        throw new RegistrationSettingsError(`${key} must be "open", "invite" or "closed"`);
+      }
+      return value;
+    case REGISTRATION_SETTINGS_KEYS.emailVerificationRequired:
+    case REGISTRATION_SETTINGS_KEYS.turnstileEnabled:
+    case REGISTRATION_SETTINGS_KEYS.smtpSecure:
+      return parseBooleanValue(value, key);
+    case REGISTRATION_SETTINGS_KEYS.emailDomainAllowlist:
+    case REGISTRATION_SETTINGS_KEYS.emailDomainDenylist:
+      return parseDomainListValue(value, key);
+    case REGISTRATION_SETTINGS_KEYS.turnstileSiteKey:
+    case REGISTRATION_SETTINGS_KEYS.smtpHost:
+    case REGISTRATION_SETTINGS_KEYS.smtpUsername:
+      return parseBoundedText(value, key, 1, 255);
+    case REGISTRATION_SETTINGS_KEYS.smtpFrom:
+      return parseBoundedText(value, key, 3, 254);
+    case REGISTRATION_SETTINGS_KEYS.smtpPort: {
+      if (typeof value !== 'string' || !/^[0-9]{1,5}$/.test(value)) {
+        throw new RegistrationSettingsError(`${key} must be a TCP port`);
+      }
+      const port = Number(value);
+      if (port < 1 || port > 65535) throw new RegistrationSettingsError(`${key} must be a TCP port`);
+      return value;
+    }
+    case REGISTRATION_SETTINGS_KEYS.rewardCurrency: {
+      if (typeof value !== 'string' || !/^[A-Za-z]{3}$/.test(value)) {
+        throw new RegistrationSettingsError(`${key} must be an ISO-4217 code`);
+      }
+      return value.toUpperCase();
+    }
+    case REGISTRATION_SETTINGS_KEYS.rewardGrant:
+    case REGISTRATION_SETTINGS_KEYS.rewardCodeFiller:
+    case REGISTRATION_SETTINGS_KEYS.rewardCodeOwner:
+    case REGISTRATION_SETTINGS_KEYS.rewardCodeOwnerMinThreshold:
+      if (typeof value !== 'string') {
+        throw new RegistrationSettingsError(`${key} must be a non-negative integer minor-units amount`);
+      }
+      return parseMinorUnits(value, key);
+    case REGISTRATION_SETTINGS_KEYS.turnstileSecret:
+    case REGISTRATION_SETTINGS_KEYS.smtpPassword:
+      throw new RegistrationSettingsError(`${key} is a secret settings key; secrets are stored as sealed envelopes`);
+    default:
+      throw new RegistrationSettingsError(`${key} is not a reserved registration settings key`);
+  }
+}
+
+/**
+ * F1 platform settings store: store-first registration settings resolution.
+ *
+ * `store` carries the platform settings store's plain (non-secret) values
+ * keyed by settings key; `env` is the process environment (or an equivalent
+ * record keyed by env var name). A present, non-empty store value wins over
+ * the environment; an empty store keeps the current env/default behavior
+ * exactly (the F1 fail-closed posture). The merged record then runs through
+ * the unmodified strict parser, so every cross-field rule and every
+ * fail-closed default of the env path applies identically.
+ */
+export function resolveRegistrationAdmissionSettings(
+  store: Readonly<Record<string, string | undefined>>,
+  env: Readonly<Record<string, string | undefined>>,
+): RegistrationAdmissionSettings {
+  const merged: Record<string, string | undefined> = {};
+  for (const [settingsKey, envVar] of Object.entries(REGISTRATION_SETTINGS_ENV_BY_KEY)) {
+    const storeValue = store[settingsKey];
+    merged[envVar] = typeof storeValue === 'string' && storeValue !== '' ? storeValue : env[envVar];
+  }
+  return parseRegistrationAdmissionSettings(merged);
 }

@@ -819,3 +819,65 @@ test('resolveTopupCredit converts through the tenant default group', async () =>
   assert.equal(conversion.creditMinorUnits, 2090n);
   assert.deepEqual(conversion.topupMultiplier, { numerator: 11n, denominator: 10n });
 });
+
+test('resolveTopupCredit accepts a call-time tiers override (F1 store-first consumption)', async () => {
+  const { database } = fakeDatabase();
+  // No tiers injected at construction: an empty store keeps the no-discounts
+  // default, and the call-time override (the platform settings store value)
+  // supplies the tiers without rebuilding the service.
+  const service = new SaasBillingGroupsService(database as never);
+  const executor = {
+    query: async <Row>(sql: string): Promise<SqlResult<Row>> => ({
+      rows: [
+        {
+          id: 'default',
+          display_name: 'Default',
+          rate_multiplier_num: '1',
+          rate_multiplier_den: '1',
+          topup_multiplier_num: '1',
+          topup_multiplier_den: '1',
+          peak_enabled: false,
+          peak_start: null,
+          peak_end: null,
+          peak_multiplier_num: null,
+          peak_multiplier_den: null,
+          model_pricing: null,
+          rpm_limit: null,
+          daily_limit_minor_units: null,
+          weekly_limit_minor_units: null,
+          monthly_limit_minor_units: null,
+          profit_min_margin_num: null,
+          profit_min_margin_den: null,
+          profit_safety_buffer_num: null,
+          profit_safety_buffer_den: null,
+          claude_code_only: false,
+          fallback_group_id: null,
+          supported_model_scopes: null,
+          status: 'active',
+          created_at: '2026-10-15T00:00:00Z',
+          updated_at: '2026-10-15T00:00:00Z',
+        },
+      ] as Row[],
+      rowCount: 1,
+    }),
+  };
+  const neutral = await service.resolveTopupCredit(executor, {
+    tenantId: 'tenant-1',
+    paidMinorUnits: 2000n,
+    currency: 'USD',
+  });
+  assert.equal(neutral.creditMinorUnits, 2000n, 'no tiers and no override: identity conversion');
+
+  const conversion = await service.resolveTopupCredit(
+    executor,
+    { tenantId: 'tenant-1', paidMinorUnits: 2000n, currency: 'USD' },
+    {
+      tiers: parseTopupAmountTierDiscounts([
+        { thresholdMinorUnits: '1000', discountNumerator: 95, discountDenominator: 100 },
+      ]),
+    },
+  );
+  // 2000 × 95/100 = 1900.
+  assert.equal(conversion.creditMinorUnits, 1900n);
+  assert.deepEqual(conversion.tierDiscount, { numerator: 95n, denominator: 100n });
+});

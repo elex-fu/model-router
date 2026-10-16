@@ -1,0 +1,141 @@
+import {
+  parseTopupAmountTierDiscounts,
+  TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY,
+} from '../../billing/groups/multiplier.js';
+import type { TopupAmountTier } from '../../billing/groups/types.js';
+import {
+  parseRegistrationSettingValue,
+  REGISTRATION_SECRET_SETTINGS_KEYS,
+  REGISTRATION_SETTINGS_KEYS,
+} from '../../identity/registration-settings.js';
+
+/**
+ * F1 platform settings store (task #34): the typed key registry.
+ *
+ * The key space is closed: only registered keys can be written, and every
+ * registered key carries a strict fail-closed parser (the R4
+ * registration-settings grammar and the R1 billing-groups amount-tier
+ * grammar, verbatim). This consolidates the two reserved-key records that
+ * previously lived apart (registration-settings.ts's
+ * REGISTRATION_SETTINGS_KEYS and multiplier.ts's
+ * TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY) into one registry the service
+ * and the admin API share.
+ *
+ * Secret-suffixed keys (kind 'sealed') accept only KMS sealed envelopes in
+ * the store — never plaintext — mirroring the egress-proxy
+ * auth_sealed_envelope convention.
+ */
+
+export type PlatformSettingKind = 'plain' | 'sealed';
+
+export interface PlatformSettingDefinition {
+  readonly key: string;
+  readonly kind: PlatformSettingKind;
+  readonly description: string;
+  /**
+   * Strict single-value normalizer (fail-closed). Returns the JSON-serialized
+   * form stored under the {"value": ...} envelope.
+   */
+  readonly parse: (value: unknown) => unknown;
+}
+
+/** Registration reward amounts are already covered by the per-key grammar above. */
+
+const MAX_TOPUP_TIER_DISCOUNTS = 16;
+
+function parseTopupAmountTierDiscountsSetting(value: unknown): unknown {
+  const tiers = parseTopupAmountTierDiscounts(value);
+  if (tiers.length > MAX_TOPUP_TIER_DISCOUNTS) {
+    throw new Error(`amount-tier discounts are limited to ${MAX_TOPUP_TIER_DISCOUNTS} tiers`);
+  }
+  return tiers.map((tier) => ({
+    thresholdMinorUnits: tier.thresholdMinorUnits.toString(),
+    discountNumerator: tier.discountMultiplier.numerator.toString(),
+    discountDenominator: tier.discountMultiplier.denominator.toString(),
+  }));
+}
+
+function registrationPlainDefinition(key: string, description: string): PlatformSettingDefinition {
+  return {
+    key,
+    kind: 'plain',
+    description,
+    parse: (value) => parseRegistrationSettingValue(key, value),
+  };
+}
+
+const REGISTRATION_SETTING_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
+  [REGISTRATION_SETTINGS_KEYS.mode]: 'Registration admission mode: open, invite or closed (default closed).',
+  [REGISTRATION_SETTINGS_KEYS.emailVerificationRequired]:
+    'Whether registration and password reset require an emailed verification code (default true).',
+  [REGISTRATION_SETTINGS_KEYS.emailDomainAllowlist]:
+    'Comma-separated email-domain allowlist; empty admits every non-denied domain.',
+  [REGISTRATION_SETTINGS_KEYS.emailDomainDenylist]: 'Comma-separated email-domain denylist; the denylist always wins.',
+  [REGISTRATION_SETTINGS_KEYS.turnstileEnabled]:
+    'Cloudflare Turnstile switch; enabling requires a site key and a secret at resolution time.',
+  [REGISTRATION_SETTINGS_KEYS.turnstileSiteKey]: 'Cloudflare Turnstile site key (public).',
+  [REGISTRATION_SETTINGS_KEYS.smtpHost]: 'SMTP relay hostname for verification emails.',
+  [REGISTRATION_SETTINGS_KEYS.smtpPort]: 'SMTP relay port (default 587).',
+  [REGISTRATION_SETTINGS_KEYS.smtpSecure]: 'Implicit TLS from the first byte (port 465 style).',
+  [REGISTRATION_SETTINGS_KEYS.smtpUsername]: 'SMTP AUTH username.',
+  [REGISTRATION_SETTINGS_KEYS.smtpFrom]: 'From address for verification emails.',
+  [REGISTRATION_SETTINGS_KEYS.rewardCurrency]: 'ISO-4217 currency for registration rewards (default USD).',
+  [REGISTRATION_SETTINGS_KEYS.rewardGrant]: 'Registration grant in minor units (default 0).',
+  [REGISTRATION_SETTINGS_KEYS.rewardCodeFiller]: 'Invite-code filler reward in minor units (default 0).',
+  [REGISTRATION_SETTINGS_KEYS.rewardCodeOwner]: 'Invite-code owner reward in minor units (default 0).',
+  [REGISTRATION_SETTINGS_KEYS.rewardCodeOwnerMinThreshold]:
+    'Minimum converted spend before the code-owner reward posts, in minor units (default 0).',
+});
+
+const DEFINITIONS: readonly PlatformSettingDefinition[] = [
+  ...Object.values(REGISTRATION_SETTINGS_KEYS)
+    .filter((key) => !REGISTRATION_SECRET_SETTINGS_KEYS.has(key))
+    .map((key) => registrationPlainDefinition(key, REGISTRATION_SETTING_DESCRIPTIONS[key] ?? key)),
+  {
+    key: REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+    kind: 'sealed',
+    description:
+      'Cloudflare Turnstile siteverify secret (sealed envelope; control-plane consumption is env-only until an unsealing KMS is wired).',
+    parse: () => {
+      throw new Error('sealed settings keys have no plain-value grammar');
+    },
+  },
+  {
+    key: REGISTRATION_SETTINGS_KEYS.smtpPassword,
+    kind: 'sealed',
+    description:
+      'SMTP AUTH password (sealed envelope; control-plane consumption is env-only until an unsealing KMS is wired).',
+    parse: () => {
+      throw new Error('sealed settings keys have no plain-value grammar');
+    },
+  },
+  {
+    key: TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY,
+    kind: 'plain',
+    description:
+      'Wallet-topup amount-tier discounts: an ascending list of { thresholdMinorUnits, discountNumerator, discountDenominator } entries; at or above a threshold the credit is multiplied by numerator/denominator (no greater than one).',
+    parse: parseTopupAmountTierDiscountsSetting,
+  },
+];
+
+const DEFINITIONS_BY_KEY: ReadonlyMap<string, PlatformSettingDefinition> = new Map(
+  DEFINITIONS.map((definition) => [definition.key, definition]),
+);
+
+/** All registered settings definitions (admin listing surface). */
+export const PLATFORM_SETTING_DEFINITIONS: readonly PlatformSettingDefinition[] = Object.freeze([...DEFINITIONS]);
+
+/** The reserved registration settings keys that consume the store store-first. */
+export const PLATFORM_REGISTRATION_SETTINGS_KEYS: readonly string[] = Object.freeze(
+  Object.values(REGISTRATION_SETTINGS_KEYS).filter((key) => !REGISTRATION_SECRET_SETTINGS_KEYS.has(key)),
+);
+
+export function getPlatformSettingDefinition(key: string): PlatformSettingDefinition | undefined {
+  if (typeof key !== 'string') return undefined;
+  return DEFINITIONS_BY_KEY.get(key);
+}
+
+/** Re-parses a stored topup-tier value into the billing-groups tier shape. */
+export function parseStoredTopupAmountTierDiscounts(value: unknown): readonly TopupAmountTier[] {
+  return parseTopupAmountTierDiscounts(value);
+}

@@ -311,7 +311,9 @@ export function createRegistrationHandler(options: RegistrationHttpOptions): Htt
       }
 
       if (route === 'registerOptions') {
-        reply(res, 200, requestId, options.service.admissionDescriptor());
+        // F1: store-first resolution so the advertised mode always matches the
+        // admission decisions the register endpoints actually enforce.
+        reply(res, 200, requestId, await options.service.resolveAdmissionDescriptor());
         return true;
       }
 

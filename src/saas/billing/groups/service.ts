@@ -286,10 +286,15 @@ export class SaasBillingGroupsService {
    * the first successful posting wins on replay (postVerifiedFunding is
    * idempotent per order), so a later group edit never reprices a fulfilled
    * order.
+   *
+   * F1: `options.tiers` overrides the constructor-injected amount-tier
+   * discounts (the platform settings store resolves them store-first at call
+   * time; deployments without the store keep the injected value).
    */
   async resolveTopupCredit(
     executor: SqlExecutor,
     input: { readonly tenantId: string; readonly paidMinorUnits: bigint; readonly currency: string },
+    options: { readonly tiers?: readonly TopupAmountTier[] } = {},
   ): Promise<AppliedTopupConversion> {
     if (typeof input.tenantId !== 'string' || typeof input.paidMinorUnits !== 'bigint' || input.paidMinorUnits < 0n) {
       fail('INVALID_INPUT');
@@ -318,7 +323,7 @@ export class SaasBillingGroupsService {
     return computeTopupCredit({
       paidMinorUnits: input.paidMinorUnits,
       topupMultiplier: group.topupMultiplier,
-      tiers: this.topupTiers,
+      tiers: options.tiers ?? this.topupTiers,
     });
   }
 

@@ -3,9 +3,12 @@ import { test } from 'node:test';
 import {
   isEmailDomainAdmitted,
   parseRegistrationAdmissionSettings,
+  parseRegistrationSettingValue,
   REGISTRATION_ENV_VARS,
+  REGISTRATION_SECRET_SETTINGS_KEYS,
   REGISTRATION_SETTINGS_KEYS,
   RegistrationSettingsError,
+  resolveRegistrationAdmissionSettings,
 } from '../../../../src/saas/identity/registration-settings.js';
 
 /** R4 registration admission: the strict settings normalizer (fail-closed defaults). */
@@ -126,4 +129,111 @@ test('every reserved settings key lives in the saas.identity.registration namesp
     assert.match(key, /^saas\.identity\.registration\.[a-z0-9_.]+$/, `namespaced key: ${key}`);
   }
   assert.equal(Object.keys(REGISTRATION_SETTINGS_KEYS).length, 18);
+});
+
+test('parseRegistrationSettingValue enforces the same per-key grammar, fail-closed', () => {
+  const key = REGISTRATION_SETTINGS_KEYS;
+  assert.equal(parseRegistrationSettingValue(key.mode, 'invite'), 'invite');
+  assert.equal(parseRegistrationSettingValue(key.emailVerificationRequired, 'false'), 'false');
+  assert.equal(
+    parseRegistrationSettingValue(key.emailDomainAllowlist, ' Example.COM , trusted.test '),
+    'example.com,trusted.test',
+  );
+  assert.equal(parseRegistrationSettingValue(key.smtpPort, '465'), '465');
+  assert.equal(parseRegistrationSettingValue(key.rewardCurrency, 'eur'), 'EUR');
+  assert.equal(parseRegistrationSettingValue(key.rewardGrant, '1500'), '1500');
+  for (const [settingsKey, value] of [
+    [key.mode, 'public'],
+    [key.emailVerificationRequired, 'yes'],
+    [key.emailDomainAllowlist, 'not a domain'],
+    [key.turnstileSiteKey, ' has space '],
+    [key.smtpPort, '99999'],
+    [key.rewardCurrency, 'dollars'],
+    [key.rewardGrant, '-5'],
+    ['saas.identity.registration.unknown', 'x'],
+  ] as const) {
+    assert.throws(
+      () => parseRegistrationSettingValue(settingsKey, value),
+      (error: unknown) => error instanceof RegistrationSettingsError,
+      `${settingsKey} = ${JSON.stringify(value)} must fail closed`,
+    );
+  }
+  for (const secretKey of REGISTRATION_SECRET_SETTINGS_KEYS) {
+    assert.throws(
+      () => parseRegistrationSettingValue(secretKey, 'plaintext-secret'),
+      (error: unknown) => error instanceof RegistrationSettingsError,
+      'secret keys have no plaintext grammar',
+    );
+  }
+});
+
+test('store-first resolution: a store hit wins, an empty store keeps the env posture', () => {
+  const key = REGISTRATION_SETTINGS_KEYS;
+  const envBaseline = env({
+    [REGISTRATION_ENV_VARS.mode]: 'closed',
+    [REGISTRATION_ENV_VARS.domainDenylist]: 'burner.test',
+    [REGISTRATION_ENV_VARS.rewardGrant]: '100',
+  });
+  // Empty store: exactly the env behavior.
+  const fallback = resolveRegistrationAdmissionSettings({}, envBaseline);
+  assert.equal(fallback.mode, 'closed');
+  assert.deepEqual(fallback.emailDomainDenylist, ['burner.test']);
+  assert.equal(fallback.rewards.grantMinorUnits, '100');
+  // Store hit wins over env for the same key; env-only keys stay env-backed.
+  const overridden = resolveRegistrationAdmissionSettings(
+    {
+      [key.mode]: 'open',
+      [key.emailDomainDenylist]: 'spam.test',
+    },
+    envBaseline,
+  );
+  assert.equal(overridden.mode, 'open');
+  assert.deepEqual(overridden.emailDomainDenylist, ['spam.test']);
+  assert.equal(overridden.rewards.grantMinorUnits, '100', 'untouched keys keep the env value');
+  // An empty-string store value is treated as absent (env fallback), matching
+  // the env parser's blank-means-default semantics.
+  const blank = resolveRegistrationAdmissionSettings({ [key.mode]: '' }, envBaseline);
+  assert.equal(blank.mode, 'closed');
+});
+
+test('store-first resolution keeps the full parser cross-field rules fail-closed', () => {
+  const envBaseline = env();
+  // Enabling Turnstile from the store without any secret anywhere fails
+  // exactly like the env-only path would.
+  assert.throws(
+    () => resolveRegistrationAdmissionSettings({ [REGISTRATION_SETTINGS_KEYS.turnstileEnabled]: 'true' }, envBaseline),
+    (error: unknown) => error instanceof RegistrationSettingsError,
+  );
+  // With the secret still env-backed, the store-side enable works.
+  const enabled = resolveRegistrationAdmissionSettings(
+    { [REGISTRATION_SETTINGS_KEYS.turnstileEnabled]: 'true' },
+    env({
+      [REGISTRATION_ENV_VARS.turnstileSiteKey]: 'unit-site-key',
+      [REGISTRATION_ENV_VARS.turnstileSecret]: 'unit-secret',
+    }),
+  );
+  assert.deepEqual(enabled.turnstile, { enabled: true, siteKey: 'unit-site-key', secret: 'unit-secret' });
+});
+
+test('registration store-first fail-closed wiring: resolution failure degrades to closed defaults', async () => {
+  // Mirrors managed-saas.ts's resolveRegistrationSettingsFailClosed: a broken
+  // overlay (a value the strict parser rejects) must degrade to the parser's
+  // empty-source defaults rather than admitting traffic.
+  const { RegistrationService } = await import('../../../../src/saas/identity/register-service.js');
+  const brokenOverlay = { 'saas.identity.registration.mode': 'not-a-mode' };
+  const service = new RegistrationService({
+    database: { transaction: async () => undefined } as never,
+    identity: { findUserAccountByEmail: async () => undefined } as never,
+    verification: { issueCode: async () => undefined, verifyCode: async () => undefined } as never,
+    captcha: { backend: 'disabled', verify: async () => true },
+    settings: parseRegistrationAdmissionSettings(env({ [REGISTRATION_ENV_VARS.mode]: 'open' })),
+    settingsResolver: async () => resolveRegistrationAdmissionSettings(brokenOverlay, env()),
+    sessionTtlSeconds: 3600,
+  });
+  const descriptor = await service.resolveAdmissionDescriptor();
+  assert.equal(descriptor.mode, 'closed', 'a broken overlay fails closed, ignoring the open env snapshot');
+  await assert.rejects(
+    service.sendRegistrationCode({ email: 'user@example.test' }),
+    (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'REGISTRATION_CLOSED',
+  );
 });

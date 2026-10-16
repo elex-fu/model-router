@@ -248,6 +248,8 @@ test('migration 051 is registered in append order and remains forward-only', () 
       107,
       108,
       109,
+      110,
+      111,
     ],
   );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);

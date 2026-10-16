@@ -18,7 +18,7 @@ test('109 registers directly after the applied 108 head as the R6a forward', () 
   const index = registered.indexOf(109);
   assert.ok(index > 0, '109 is registered');
   assert.equal(registered[index - 1], 108, '109 lands directly after the 108 head');
-  assert.equal(registered.at(-1), 109, '109 is the registry tail');
+  assert.equal(registered.at(-1), 111, 'the F1 and Gemini forwards follow 109');
   assert.equal(registered.indexOf(109), registered.lastIndexOf(109));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

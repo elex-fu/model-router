@@ -68,6 +68,8 @@ import { REGISTRATION_ADMISSION_SAAS_MIGRATION } from '../../../src/saas/db/migr
 import { EGRESS_PROXIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/107_egress_proxies.js';
 import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/108_provider_account_opencode_go_scheduling.js';
 import { PROBE_MONITORS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/109_probe_monitors.js';
+import { PLATFORM_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/110_platform_settings.js';
+import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/111_provider_account_gemini_scheduling.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -133,6 +135,8 @@ test('SaaS migration registry keeps a stable append order with only documented g
       107,
       108,
       109,
+      110,
+      111,
     ],
   );
 });
@@ -186,10 +190,12 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     REGISTRATION_ADMISSION_SAAS_MIGRATION,
     EGRESS_PROXIES_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
-  PROBE_MONITORS_SAAS_MIGRATION,
+    PROBE_MONITORS_SAAS_MIGRATION,
+    PLATFORM_SETTINGS_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 90);
+  assert.equal(SAAS_MIGRATIONS.length, 92);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -241,6 +247,8 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'egress_proxies',
       'provider_account_opencode_go_scheduling',
       'probe_monitors',
+      'platform_settings',
+      'provider_account_gemini_scheduling',
     ],
   );
   assert.deepEqual(
@@ -277,10 +285,12 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       107,
       108,
       109,
+      110,
+      111,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 90);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 90);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 92);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 92);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -370,7 +380,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 90);
+  assert.equal(SAAS_MIGRATIONS.length, 92);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -408,6 +418,8 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     EGRESS_PROXIES_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION,
     PROBE_MONITORS_SAAS_MIGRATION,
+    PLATFORM_SETTINGS_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -490,6 +502,16 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[89], PROBE_MONITORS_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[89]?.version, 109);
   assert.equal(SAAS_MIGRATIONS[89]?.name, 'probe_monitors');
+  // 110: F1 platform settings store — the platform-owned mutable runtime
+  // configuration surface (registration admission, topup tier discounts);
+  // 111 is being registered concurrently by the Gemini OAuth workstream.
+  assert.equal(SAAS_MIGRATIONS[90], PLATFORM_SETTINGS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[90]?.version, 110);
+  assert.equal(SAAS_MIGRATIONS[90]?.name, 'platform_settings');
+  // 111: F4 Gemini subscription scheduling (parallel workstream tail).
+  assert.equal(SAAS_MIGRATIONS[91], PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[91]?.version, 111);
+  assert.equal(SAAS_MIGRATIONS[91]?.name, 'provider_account_gemini_scheduling');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

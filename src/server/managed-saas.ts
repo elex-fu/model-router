@@ -39,13 +39,17 @@ import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provid
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
 import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
-import { ConsoleEmailSender, SmtpEmailSender } from '../saas/identity/email-sender.js';
+import { ConsoleEmailSender, type EmailSender, SmtpEmailSender } from '../saas/identity/email-sender.js';
 import { EmailVerificationService } from '../saas/identity/email-verification-service.js';
 import { createSaasIdentityHandler, type SaasIdentityHttpOptions } from '../saas/identity/http.js';
 import { SaasIdentityService } from '../saas/identity/index.js';
 import { RegistrationService } from '../saas/identity/register-service.js';
-import { parseRegistrationAdmissionSettings } from '../saas/identity/registration-settings.js';
-import { createCaptchaProof } from '../saas/identity/turnstile-service.js';
+import {
+  parseRegistrationAdmissionSettings,
+  type RegistrationAdmissionSettings,
+  resolveRegistrationAdmissionSettings,
+} from '../saas/identity/registration-settings.js';
+import { type CaptchaProof, createCaptchaProof } from '../saas/identity/turnstile-service.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { createSaasKeyHandler, type SaasKeyHttpHandler } from '../saas/keys/http.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
@@ -168,6 +172,11 @@ import {
   type PlatformAdminReadHttpHandler,
 } from '../saas/platform/http/index.js';
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
+import {
+  createPlatformSettingsHttpHandler,
+  type PlatformSettingsHttpHandler,
+  PlatformSettingsService,
+} from '../saas/platform/settings/index.js';
 import { SaasPricingService } from '../saas/pricing/index.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
@@ -757,6 +766,7 @@ function createPlatformHandler(
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
   codexOauthHandler: CodexOauthHttpHandler | undefined,
   accountProbeHandler: AccountProbeHttpHandler | undefined,
+  platformSettingsHandler: PlatformSettingsHttpHandler,
   unknownOutcomeHandler: UnknownOutcomePlatformHttpHandler | undefined,
   usageCorrectionHandler: UsageCorrectionPlatformHttpHandler | undefined,
   marketingOpsRedeemCodesHandler: MarketingRedeemHttpHandler,
@@ -783,6 +793,7 @@ function createPlatformHandler(
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
         if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
         if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
+        if (await platformSettingsHandler(req, res)) return;
         if (unknownOutcomeHandler && (await unknownOutcomeHandler(req, res))) return;
         if (usageCorrectionHandler && (await usageCorrectionHandler(req, res))) return;
         if (await marketingOpsRedeemCodesHandler(req, res)) return;
@@ -1783,34 +1794,81 @@ export async function startManagedSaasServer(
         fundingLedger: new PlatformWalletLedgerService(),
         inviteCodeSalt: `affiliate-invite-v1:${deployment.deploymentId}`,
       });
-      // R4 registration admission (public register + password reset). The
-      // admission switches come from the deployment settings surface (env in
-      // managed mode; no platform settings store exists yet — the billing
-      // groups saas.payments.* precedent). Secrets stay env-only and are
-      // resolved here, never persisted. Unconfigured SMTP degrades to the
+      // R4 registration admission (public register + password reset), with
+      // F1 platform settings store consumption (task #34). Non-secret
+      // admission switches resolve store-first (a store hit wins) with env
+      // fallback — an empty store keeps the exact pre-F1 env/default posture.
+      // Secrets (SMTP password, Turnstile secret) stay env-only: the control
+      // plane holds no credential-unsealing KMS, so sealed envelopes in the
+      // store are not consumable here (documented deviation); they are never
+      // persisted as plaintext anywhere. Unconfigured SMTP degrades to the
       // console sender (the alerts.ts behavior) so nothing dials out by
       // surprise; default mode is fail-closed (closed).
+      const platformSettingsService = new PlatformSettingsService(database, {
+        ...(providers?.providerCredentialSealingKms && deployment.providerCredentialKmsKeyId
+          ? {
+              sealingKms: providers.providerCredentialSealingKms,
+              kmsKeyId: deployment.providerCredentialKmsKeyId,
+              sealContext: {
+                deployment: deployment.deploymentId,
+                environment: deployment.environmentId,
+              },
+            }
+          : {}),
+      });
+      // The env snapshot stays the constructor-validated fallback; the live
+      // resolver merges the store overlay over the environment on every
+      // admission decision. A resolution failure (unreadable store or a
+      // misconfigured overlay) fails closed to the parser's empty-source
+      // defaults rather than admitting traffic against an unverifiable
+      // configuration.
       const registrationSettings = parseRegistrationAdmissionSettings(process.env);
-      const registrationEmailSender =
-        registrationSettings.smtp === undefined
-          ? new ConsoleEmailSender()
-          : new SmtpEmailSender({
-              host: registrationSettings.smtp.host,
-              port: registrationSettings.smtp.port,
-              ...(registrationSettings.smtp.secure === undefined ? {} : { secure: registrationSettings.smtp.secure }),
-              ...(registrationSettings.smtp.username === undefined
-                ? {}
-                : { username: registrationSettings.smtp.username }),
-              ...(registrationSettings.smtp.password === undefined
-                ? {}
-                : { password: registrationSettings.smtp.password }),
-              from: registrationSettings.smtp.from,
-            });
-      const registrationCaptcha = createCaptchaProof(
-        registrationSettings.turnstile.enabled && registrationSettings.turnstile.secret !== undefined
-          ? { backend: 'turnstile', secret: registrationSettings.turnstile.secret }
-          : { backend: 'disabled' },
-      );
+      const resolveRegistrationSettingsFailClosed = async (): Promise<RegistrationAdmissionSettings> => {
+        try {
+          return resolveRegistrationAdmissionSettings(
+            await platformSettingsService.readRegistrationSettingsOverlay(),
+            process.env,
+          );
+        } catch (error) {
+          console.error('model-router registration settings resolution failed; failing closed', error);
+          return parseRegistrationAdmissionSettings({});
+        }
+      };
+      const registrationEmailSender: EmailSender = {
+        send: async (message) => {
+          const settings = await resolveRegistrationSettingsFailClosed();
+          const sender =
+            settings.smtp === undefined
+              ? new ConsoleEmailSender()
+              : new SmtpEmailSender({
+                  host: settings.smtp.host,
+                  port: settings.smtp.port,
+                  secure: settings.smtp.secure,
+                  ...(settings.smtp.username === undefined ? {} : { username: settings.smtp.username }),
+                  ...(settings.smtp.password === undefined ? {} : { password: settings.smtp.password }),
+                  from: settings.smtp.from,
+                });
+          return sender.send(message);
+        },
+      };
+      // The captcha proof re-resolves per verification so a store-side
+      // turnstile.enabled flip can never diverge from the proof backend the
+      // register endpoints actually enforce (fail-open hole otherwise).
+      const registrationCaptcha: CaptchaProof = {
+        backend: registrationSettings.turnstile.enabled ? 'turnstile' : 'disabled',
+        verify: async (input) => {
+          const settings = await resolveRegistrationSettingsFailClosed();
+          const proof = createCaptchaProof(
+            settings.turnstile.enabled && settings.turnstile.secret !== undefined
+              ? { backend: 'turnstile', secret: settings.turnstile.secret }
+              : { backend: 'disabled' },
+          );
+          return proof.verify({
+            token: input.token,
+            ...(input.remoteIp === undefined ? {} : { remoteIp: input.remoteIp }),
+          });
+        },
+      };
       const registrationService = new RegistrationService({
         database,
         identity: identityService,
@@ -1820,12 +1878,14 @@ export async function startManagedSaasServer(
         }),
         captcha: registrationCaptcha,
         settings: registrationSettings,
+        settingsResolver: resolveRegistrationSettingsFailClosed,
         sessionTtlSeconds: customerSessionTtlSeconds,
         affiliate: new MarketingRegistrationRewards({
           database,
           affiliate: marketingAffiliateService,
           fundingLedger: new PlatformWalletLedgerService(),
           rewards: registrationSettings.rewards,
+          rewardsResolver: async () => (await resolveRegistrationSettingsFailClosed()).rewards,
         }),
       });
       const customerIdentityOptions: SaasIdentityHttpOptions = {
@@ -1996,9 +2056,11 @@ export async function startManagedSaasServer(
       let paymentHandler = options.paymentHandler;
       if (options.payments) {
         // R1 (105): wallet topup conversion through the tenant's default
-        // billing-group topup multiplier. Amount-tier discounts come from the
-        // saas.payments.topup.amount_tier_discounts settings value; no
-        // platform settings store exists yet, so none are configured here.
+        // billing-group topup multiplier. F1: amount-tier discounts resolve
+        // store-first from the saas.payments.topup.amount_tier_discounts
+        // platform settings key (an empty store keeps the no-discounts
+        // default). A store read failure fails the fulfillment closed
+        // (FULFILLMENT_RETRYABLE) — never a silent discount skip.
         const billingGroupsService = new SaasBillingGroupsService(database);
         const paymentService = new PaymentFulfillmentService(database, options.payments.adapter, {
           providerKey: options.payments.providerKey,
@@ -2010,7 +2072,10 @@ export async function startManagedSaasServer(
           walletTopUpPromo: marketingPromoCodeService,
           walletFundingHook: marketingAffiliateService,
           topupCredit: {
-            resolveTopupCredit: (executor, input) => billingGroupsService.resolveTopupCredit(executor, input),
+            resolveTopupCredit: async (executor, input) => {
+              const tiers = await platformSettingsService.readTopupAmountTierDiscounts();
+              return billingGroupsService.resolveTopupCredit(executor, input, { tiers });
+            },
           },
           ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
         });
@@ -2079,6 +2144,17 @@ export async function startManagedSaasServer(
         access: platformAccessService,
         authService: platformAuthService,
         store: createPostgresProbeMonitorAdminStore(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      // F1 platform settings admin surface (task #34): GET/PUT
+      // /admin/api/v1/platform-settings on the control-plane role — the only
+      // role with grants on saas_platform_settings. Secret values are sealed
+      // at write time and never echoed; every mutation is audited with a
+      // redacted before/after diff.
+      const platformSettingsAdminHandler = createPlatformSettingsHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: platformSettingsService,
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
       let platformRefundHandler: PlatformRefundHttpHandler | undefined;
@@ -2376,6 +2452,7 @@ export async function startManagedSaasServer(
         platformCredentialRewrapHandler,
         codexOauthHandler,
         accountProbeHandler,
+        platformSettingsAdminHandler,
         unknownOutcomePlatformHandler,
         usageCorrectionPlatformHandler,
         marketingOpsRedeemCodesHandler,
