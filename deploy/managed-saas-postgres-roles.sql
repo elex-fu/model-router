@@ -620,6 +620,16 @@ $runtime_column_acl_normalization$;
 -- mutation is an audited version-CAS UPDATE. Re-apply this template after
 -- running migration 110 on a database that predates it — until then the
 -- control-plane runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 114, R1 billing-group limit enforcement
+-- phase 3): the gateway owns the new saas_billing_group_spend_counters and
+-- saas_billing_group_spend_reservations relations (the KEY-BUD counters
+-- pattern at group scope), UPDATEs the settled amount on
+-- saas_api_key_budget_reservations (the rolling 5h/7d window evidence), and
+-- reads the new charge_5h/charge_7d policy columns through the dynamic
+-- all-current-columns grant; the control plane manages the new policy
+-- columns through its manifest above. Re-apply this template after running
+-- migration 114 on a database that predates it — until then the runtime
+-- privilege probes fail closed by design.
 -- DEPLOYMENT NOTE (migration 113, R1 billing-group limit enforcement
 -- phase 2): the gateway owns the new saas_billing_group_rate_counters table
 -- (per-group per-second admission counters, the 098 account-counter pattern
@@ -761,9 +771,9 @@ BEGIN
       ('saas_api_key_ip_policies', 'SELECT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
       ('saas_api_key_ip_policies', 'INSERT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
       ('saas_api_key_ip_policies', 'UPDATE', 'version mode rules updated_at'),
-      ('saas_api_key_budget_policies', 'SELECT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime created_at updated_at'),
-      ('saas_api_key_budget_policies', 'INSERT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime created_at updated_at'),
-      ('saas_api_key_budget_policies', 'UPDATE', 'version token_daily token_lifetime charge_daily charge_lifetime updated_at'),
+      ('saas_api_key_budget_policies', 'SELECT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d created_at updated_at'),
+      ('saas_api_key_budget_policies', 'INSERT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d created_at updated_at'),
+      ('saas_api_key_budget_policies', 'UPDATE', 'version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d updated_at'),
       ('saas_api_key_budget_counters', 'SELECT', 'tenant_id project_id lineage_id window_kind day token_settled token_outstanding_reserved charge_settled charge_outstanding_reserved charge_currency created_at updated_at'),
       ('saas_api_key_budget_counters', 'UPDATE', 'token_settled charge_settled updated_at'),
       ('saas_api_key_budget_reservations', 'SELECT', 'tenant_id project_id lineage_id request_id day token_units charge_minor_units charge_currency state created_at updated_at'),
@@ -1071,7 +1081,11 @@ BEGIN
       ('saas_egress_proxies'),
       -- R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
       -- RPM admission counters (capacity-side rate evidence, never billing).
-      ('saas_billing_group_rate_counters')
+      ('saas_billing_group_rate_counters'),
+      -- R1 (114, roadmap 1.3): the gateway reserves and resolves the billing
+      -- group spend windows (the KEY-BUD counters pattern at group scope).
+      ('saas_billing_group_spend_counters'),
+      ('saas_billing_group_spend_reservations')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1227,6 +1241,39 @@ BEGIN
       ('saas_billing_group_rate_counters', 'window_start', 'INSERT'),
       ('saas_billing_group_rate_counters', 'requests', 'INSERT'),
       ('saas_billing_group_rate_counters', 'requests', 'UPDATE'),
+      -- R1 (114, roadmap 1.3): the gateway reserves the group spend windows at
+      -- admission and resolves them at settlement/compensation/correction.
+      ('saas_billing_group_spend_counters', 'billing_group_id', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'window_kind', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'window_start', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'charge_settled', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'charge_currency', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'billing_group_id', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'window_kind', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'window_start', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'charge_currency', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'UPDATE'),
+      ('saas_billing_group_spend_counters', 'charge_settled', 'UPDATE'),
+      ('saas_billing_group_spend_reservations', 'tenant_id', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'request_id', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'billing_group_id', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'window_kind', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'window_start', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'amount_minor_units', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'charge_currency', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'state', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'tenant_id', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'request_id', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'billing_group_id', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'window_kind', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'window_start', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'amount_minor_units', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'charge_currency', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'state', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'settled_amount_minor_units', 'UPDATE'),
+      ('saas_billing_group_spend_reservations', 'state', 'UPDATE'),
       ('saas_gateway_provider_account_affinity', 'tenant_id', 'INSERT'),
       ('saas_gateway_provider_account_affinity', 'project_id', 'INSERT'),
       ('saas_gateway_provider_account_affinity', 'supply_profile_id', 'INSERT'),
@@ -1432,6 +1479,9 @@ BEGIN
       ('saas_api_key_budget_reservations', 'created_at', 'INSERT'),
       ('saas_api_key_budget_reservations', 'updated_at', 'INSERT'),
       ('saas_api_key_budget_reservations', 'state', 'UPDATE'),
+      -- R1 (114, roadmap 1.3): settle records the ACTUAL charge on the
+      -- reservation row (the rolling 5h/7d windows read it back).
+      ('saas_api_key_budget_reservations', 'settled_charge_minor_units', 'UPDATE'),
       ('saas_api_key_budget_reservations', 'updated_at', 'UPDATE'),
       ('saas_provider_account_leases', 'id', 'INSERT'), ('saas_provider_account_leases', 'tenant_id', 'INSERT'),
       ('saas_provider_account_leases', 'owner_kind', 'INSERT'),

@@ -504,6 +504,12 @@ function preparationError(result: RequestPreparationResult): GatewayHttpError {
     if (result.code === 'rate_limited' || result.code === 'quota_exceeded') {
       return new GatewayHttpError(429, 'RATE_LIMITED');
     }
+    // R1 (roadmap 1.3, phase 3): spend ceilings (the wallet hold, the KEY-BUD
+    // budget, and the billing-group daily/weekly/monthly spend windows) are
+    // payment-required rejections — 402.
+    if (result.code === 'budget_exceeded' || result.code === 'hold_denied') {
+      return new GatewayHttpError(402, 'PAYMENT_REQUIRED');
+    }
     return new GatewayHttpError(403, 'REQUEST_REJECTED');
   }
   return new GatewayHttpError(503, 'REQUEST_BLOCKED');

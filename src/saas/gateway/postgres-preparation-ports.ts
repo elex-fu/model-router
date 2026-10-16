@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { SaasBillingError } from '../billing/errors.js';
+import { isSaasBillingGroupsError } from '../billing/groups/errors.js';
 import type { PlatformWalletLedgerService } from '../billing/service.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import type { AuthenticatedApiKey } from '../keys/types.js';
@@ -14,6 +15,10 @@ import {
   SaasRequestAdmissionService,
 } from './admission.js';
 import type { SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
+import {
+  BillingGroupSpendAdmissionDeniedError,
+  type BillingGroupSpendAdmissionPort,
+} from './postgres-billing-group-spend.js';
 import { PostgresPreDispatchCompensation } from './postgres-pre-dispatch-compensation.js';
 import type { KeyBudgetAdmissionPort } from './postgres-preparation-budget.js';
 import {
@@ -108,6 +113,14 @@ export interface PostgresPreparationPortsOptions {
    * rollback releases everything. Absent disables budget accounting.
    */
   readonly keyBudget?: KeyBudgetAdmissionPort;
+  /**
+   * R1 (roadmap 1.3, phase 3) billing-group daily/weekly/monthly spend
+   * reservation. Runs in the same transaction after the billing hold and the
+   * KEY-BUD reservation, reading the frozen ceilings from this request's
+   * price snapshot; a denial rejects the admission and the rollback releases
+   * everything. Absent disables group spend accounting.
+   */
+  readonly billingGroupSpend?: BillingGroupSpendAdmissionPort;
   /** Used when the production composition has not already claimed this request. */
   readonly idempotencyStore?: GatewayRequestIdempotencyStore;
   readonly payloadCompilerVersion: string;
@@ -828,6 +841,22 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
               : null,
           });
         }
+        // R1 (roadmap 1.3, phase 3): the group spend windows reserve the same
+        // platform hold, after billing.reserve on this admission transaction.
+        // Only fresh admissions reserve; replays carry the original rows.
+        if (result.kind === 'created' && options.billingGroupSpend) {
+          await options.billingGroupSpend.reserve(executor, {
+            tenantId: resolvedCaller.tenantId,
+            requestId: canonicalRequestId,
+            supplyMode: resolvedCaller.supplyMode,
+            charge: holdReservation
+              ? {
+                  currency: holdReservation.currency,
+                  amountMinorUnits: String(holdReservation.amountMinorUnits),
+                }
+              : null,
+          });
+        }
         const persistedAttempt =
           result.kind === 'created'
             ? result.initialAttempt
@@ -955,6 +984,16 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
             code: 'budget_exceeded',
             message: 'The API key budget is exhausted.',
           };
+        }
+        if (error instanceof BillingGroupSpendAdmissionDeniedError) {
+          return {
+            decision: 'reject',
+            code: 'budget_exceeded',
+            message: 'The billing group spend limit is exhausted.',
+          };
+        }
+        if (isSaasBillingGroupsError(error) && error.code.startsWith('GROUP_SPEND_')) {
+          return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
         }
         if (
           (error instanceof SaasBillingError && error.code === 'INSUFFICIENT_FUNDS') ||

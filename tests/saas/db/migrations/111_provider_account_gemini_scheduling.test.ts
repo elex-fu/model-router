@@ -17,7 +17,7 @@ test('111 registers directly after 110 as the applied head (the slot 110 documen
   const index = registered.indexOf(111);
   assert.ok(index > 0, '111 is registered');
   assert.equal(registered[index - 1], 110, '111 lands directly after 110');
-  assert.equal(registered.at(-1), 113, '111 is the applied head');
+  assert.equal(registered.at(-1), 114, '111 is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 111).length, 1);

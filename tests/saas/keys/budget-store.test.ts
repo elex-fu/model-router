@@ -430,6 +430,8 @@ test('selectKeyBudgetPolicyHead and selectKeyBudgetCounters normalize rows and t
     tokenLifetime: null,
     chargeDaily: null,
     chargeLifetime: null,
+    charge5h: null,
+    charge7d: null,
   });
   assert.ok(normalized(database.statements.at(-1) ?? '').endsWith('for update'));
   const counters = await selectKeyBudgetCounters(database, 'tenant-1', 'key-1', DAY);

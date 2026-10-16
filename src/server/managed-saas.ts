@@ -53,6 +53,8 @@ import {
 } from '../saas/identity/registration-settings.js';
 import { type CaptchaProof, createCaptchaProof } from '../saas/identity/turnstile-service.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
+import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgres-billing-group-spend.js';
 import { createSaasKeyHandler, type SaasKeyHttpHandler } from '../saas/keys/http.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
@@ -1778,6 +1780,7 @@ export async function startManagedSaasServer(
       const capacityPort = createPostgresPreparationCapacityPort();
       const gatewayClock = () => new Date();
       const keyBudgetResolution = createKeyBudgetResolution();
+      const billingGroupSpendResolution = createBillingGroupSpendResolution();
       const preparationPorts = createPostgresPreparationPorts({
         database,
         metering,
@@ -1790,6 +1793,7 @@ export async function startManagedSaasServer(
         ),
         capacity: capacityPort,
         keyBudget: createPostgresKeyBudgetAdmission({ now: gatewayClock }),
+        billingGroupSpend: createPostgresBillingGroupSpendAdmission({ now: gatewayClock }),
         payloadCompilerVersion: providerPayload.compilerVersion,
         usageEstimatorVersion: providerPayload.estimator.version,
         now: gatewayClock,
@@ -1830,6 +1834,7 @@ export async function startManagedSaasServer(
           capacity: capacityPort,
           billing: billingLedger,
           keyBudget: keyBudgetResolution,
+          billingGroupSpend: billingGroupSpendResolution,
         }),
         providerCredentialUnsealingKms: gatewayKms,
         credentialContext: {
@@ -2497,6 +2502,7 @@ export async function startManagedSaasServer(
         database,
         metering: new SaasMeteringService(database),
         keyBudget: createKeyBudgetResolution(),
+        billingGroupSpend: createBillingGroupSpendResolution(),
         ...(workerOptions === undefined ? {} : { worker: workerOptions }),
       });
       const unknownOutcomePlatformHandler = createUnknownOutcomePlatformHttpHandler({
@@ -2512,6 +2518,7 @@ export async function startManagedSaasServer(
       const usageCorrectionService = new UsageCorrectionService(database, {
         ledger: new PlatformWalletLedgerService(),
         keyBudget: createKeyBudgetResolution(),
+        billingGroupSpend: createBillingGroupSpendResolution(),
       });
       const usageCorrectionPlatformHandler = createUsageCorrectionPlatformHttpHandler({
         access: platformAccessService,

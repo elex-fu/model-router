@@ -1,3 +1,4 @@
+import { keyBudgetRollingCutoffs } from '../billing/groups/spend-windows.js';
 import { MAX_MINOR_UNITS } from '../billing/money.js';
 import type { SqlExecutor } from '../db/types.js';
 import type { KeyBudgetUtcDay } from './budget-policy-contract.js';
@@ -143,6 +144,9 @@ export interface KeyBudgetPolicyHead {
   readonly tokenLifetime: string | null;
   readonly chargeDaily: string | null;
   readonly chargeLifetime: string | null;
+  /** R1 (roadmap 1.3, phase 3): rolling USD windows; NULL = unlimited. */
+  readonly charge5h: string | null;
+  readonly charge7d: string | null;
 }
 
 interface PolicyHeadRow {
@@ -155,6 +159,8 @@ interface PolicyHeadRow {
   token_lifetime: string | number | null;
   charge_daily: string | number | null;
   charge_lifetime: string | number | null;
+  charge_5h: string | number | null;
+  charge_7d: string | number | null;
 }
 
 function nullableAmount(value: unknown): string | null {
@@ -183,7 +189,8 @@ export async function selectKeyBudgetPolicyHead(
 ): Promise<KeyBudgetPolicyHead | null> {
   const result = await executor.query<PolicyHeadRow>(
     `SELECT tenant_id, project_id, key_id, lineage_id, version,
-            token_daily, token_lifetime, charge_daily, charge_lifetime
+            token_daily, token_lifetime, charge_daily, charge_lifetime,
+            charge_5h, charge_7d
        FROM saas_api_key_budget_policies
       WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3
       LIMIT 2${lock === 'UPDATE' ? ' FOR UPDATE' : ''}`,
@@ -202,6 +209,8 @@ export async function selectKeyBudgetPolicyHead(
     tokenLifetime: nullableAmount(row.token_lifetime),
     chargeDaily: nullableAmount(row.charge_daily),
     chargeLifetime: nullableAmount(row.charge_lifetime),
+    charge5h: nullableAmount(row.charge_5h),
+    charge7d: nullableAmount(row.charge_7d),
   };
 }
 
@@ -275,6 +284,59 @@ export async function selectKeyBudgetCounters(
     }
   }
   return { daily: counterWindow(daily), lifetime: counterWindow(lifetime) };
+}
+
+export interface KeyBudgetRollingChargeWindows {
+  /** Trailing 5-hour charge total (settled + outstanding), currency-matched. */
+  readonly fiveHour: string;
+  /** Trailing 7-day charge total (settled + outstanding), currency-matched. */
+  readonly sevenDay: string;
+}
+
+/**
+ * R1 (roadmap 1.3, phase 3): the TRUE rolling 5h/7d USD windows — the
+ * trailing sum over the lineage's reservation ledger. Outstanding rows
+ * contribute their reserved amount; settled rows contribute their ACTUAL
+ * amount (settled_charge_minor_units, migration 114; pre-114 settled rows
+ * fall back to the reserved amount — conservative, never short). Released
+ * rows never count. Call this AFTER reserveKeyBudgetCounters so the current
+ * request's row is included; the caller re-exposes the new reservation the
+ * same way the daily/lifetime windows do.
+ */
+export async function selectKeyBudgetRollingChargeWindows(
+  executor: SqlExecutor,
+  input: {
+    readonly tenantId: string;
+    readonly lineageId: string;
+    readonly chargeCurrency: string;
+    readonly now: Date;
+  },
+): Promise<KeyBudgetRollingChargeWindows> {
+  const cutoffs = keyBudgetRollingCutoffs(input.now);
+  const result = await executor.query<{ five_hour_total: string | number; seven_day_total: string | number }>(
+    `SELECT
+       COALESCE(SUM(CASE WHEN created_at >= $4::timestamptz THEN effective_charge_minor_units ELSE 0 END), 0)::text AS five_hour_total,
+       COALESCE(SUM(effective_charge_minor_units), 0)::text AS seven_day_total
+     FROM (
+       SELECT CASE
+                WHEN state = 'settled' AND settled_charge_minor_units IS NOT NULL
+                  THEN settled_charge_minor_units
+                ELSE charge_minor_units
+              END AS effective_charge_minor_units,
+              created_at
+         FROM saas_api_key_budget_reservations
+        WHERE tenant_id = $1 AND lineage_id = $2 AND charge_currency = $3
+          AND state IN ('outstanding', 'settled')
+          AND created_at >= $5::timestamptz
+     ) rolling`,
+    [input.tenantId, input.lineageId, input.chargeCurrency, cutoffs.fiveHour, cutoffs.sevenDay],
+  );
+  const row = result.rows[0];
+  if (!row || result.rows.length !== 1) fail('STORAGE_ERROR');
+  return {
+    fiveHour: parseKeyBudgetAmount(row.five_hour_total),
+    sevenDay: parseKeyBudgetAmount(row.seven_day_total),
+  };
 }
 
 export interface KeyBudgetReservationFacts {
@@ -507,9 +569,9 @@ export async function settleKeyBudgetReservation(
   );
   const updated = await executor.query(
     `UPDATE saas_api_key_budget_reservations
-       SET state = 'settled', updated_at = clock_timestamp()
+       SET state = 'settled', settled_charge_minor_units = $3::bigint, updated_at = clock_timestamp()
      WHERE tenant_id = $1 AND request_id = $2 AND state = 'outstanding'`,
-    [reservation.tenantId, reservation.requestId],
+    [reservation.tenantId, reservation.requestId, parseKeyBudgetAmount(actualChargeMinorUnits)],
   );
   if (updated.rowCount !== 1) fail('RESERVATION_STATE_CONFLICT');
   return true;

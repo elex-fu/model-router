@@ -91,6 +91,7 @@ import { PLATFORM_SETTINGS_SAAS_MIGRATION } from './110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provider_account_gemini_scheduling.js';
 import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from './112_billing_group_snapshot_limits.js';
 import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from './113_billing_group_rate_counters.js';
+import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from './114_billing_group_spend_windows.js';
 
 export interface SaasMigration {
   version: number;
@@ -605,4 +606,11 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // atomically upserts this counter inside the admission fence; a rejection
   // rolls back with the transaction.
   BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
+  // 114: R1 billing-group limit enforcement phase 3 — the group
+  // daily/weekly/monthly spend counters and per-request reservations (the
+  // KEY-BUD reserve-first-then-check pattern at group scope, UTC calendar
+  // buckets), plus the API key 5h/7d rolling USD caps on the budget policy
+  // head and the settled-amount column + lineage/created_at index that let
+  // the reservation ledger answer trailing-window sums exactly.
+  BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
 ];

@@ -870,6 +870,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'token_lifetime',
     'charge_daily',
     'charge_lifetime',
+    'charge_5h',
+    'charge_7d',
     'created_at',
     'updated_at',
   ]),
@@ -883,6 +885,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'token_lifetime',
     'charge_daily',
     'charge_lifetime',
+    'charge_5h',
+    'charge_7d',
     'created_at',
     'updated_at',
   ]),
@@ -892,6 +896,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'token_lifetime',
     'charge_daily',
     'charge_lifetime',
+    'charge_5h',
+    'charge_7d',
     'updated_at',
   ]),
   ...columnGrants('saas_api_key_budget_counters', 'SELECT', [
@@ -3652,6 +3658,10 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
   // RPM admission counters (capacity-side rate evidence, never billing).
   'saas_billing_group_rate_counters',
+  // R1 (114, roadmap 1.3): the gateway reserves and resolves the billing
+  // group spend windows (the KEY-BUD counters pattern at group scope).
+  'saas_billing_group_spend_counters',
+  'saas_billing_group_spend_reservations',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -3819,6 +3829,39 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_billing_group_rate_counters', 'window_start', 'INSERT'],
   ['saas_billing_group_rate_counters', 'requests', 'INSERT'],
   ['saas_billing_group_rate_counters', 'requests', 'UPDATE'],
+  // R1 (114, roadmap 1.3): the gateway reserves the group spend windows at
+  // admission and resolves them at settlement/compensation/correction.
+  ['saas_billing_group_spend_counters', 'billing_group_id', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'window_kind', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'window_start', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'charge_settled', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'charge_currency', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'billing_group_id', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'window_kind', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'window_start', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'charge_currency', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'UPDATE'],
+  ['saas_billing_group_spend_counters', 'charge_settled', 'UPDATE'],
+  ['saas_billing_group_spend_reservations', 'tenant_id', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'request_id', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'billing_group_id', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'window_kind', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'window_start', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'amount_minor_units', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'charge_currency', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'state', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'tenant_id', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'request_id', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'billing_group_id', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'window_kind', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'window_start', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'amount_minor_units', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'charge_currency', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'state', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'settled_amount_minor_units', 'UPDATE'],
+  ['saas_billing_group_spend_reservations', 'state', 'UPDATE'],
   // Affinity resolution reads only its scoped key and target state; inserts create the full
   // immutable identity, while UPDATE is limited to binding/lifecycle fields.
   ...(
@@ -4130,7 +4173,9 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'updated_at',
     ] as const
   ).map((column) => ['saas_api_key_budget_reservations', column, 'INSERT'] as const),
-  ...(['state', 'updated_at'] as const).map(
+  // R1 (114, roadmap 1.3): settle records the ACTUAL charge on the
+  // reservation row (the rolling 5h/7d windows read it back).
+  ...(['state', 'settled_charge_minor_units', 'updated_at'] as const).map(
     (column) => ['saas_api_key_budget_reservations', column, 'UPDATE'] as const,
   ),
   // The lease adapter writes only lease identity at creation and lifecycle timestamps thereafter.

@@ -109,6 +109,7 @@ import {
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
@@ -1291,6 +1292,9 @@ export function createManagedSaasGatewayProductionComposition(
     new SaasPricingService(database),
     new DurableNormalSuccessSettlementPort(database, {
       keyBudget: createKeyBudgetResolution(),
+      // R1 (roadmap 1.3, phase 3): group spend windows settle with the
+      // ACTUAL group-multiplied charge at the settlement terminal commit.
+      billingGroupSpend: createBillingGroupSpendResolution(),
       ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
     }),
   );

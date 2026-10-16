@@ -90,6 +90,23 @@ export interface ConditionalSettlementKeyBudget {
   ): Promise<boolean>;
 }
 
+/**
+ * R1 (roadmap 1.3, phase 3): the billing-group spend windows resolve with the
+ * ACTUAL platform charge (settled reservations contribute their actual
+ * amount). BYOK has no group spend rows and the store is a no-op.
+ */
+export interface ConditionalSettlementBillingGroupSpend {
+  settle(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly requestId: string;
+      readonly actualChargeMinorUnits: string;
+      readonly actualChargeCurrency: string;
+    },
+  ): Promise<boolean>;
+}
+
 export interface ConditionalSettlementPortOptions {
   readonly metering?: ConditionalSettlementMetering;
   readonly billing?: ConditionalSettlementBilling;
@@ -97,6 +114,7 @@ export interface ConditionalSettlementPortOptions {
   readonly meteringService?: ConditionalSettlementMetering;
   readonly billingService?: ConditionalSettlementBilling;
   readonly keyBudget?: ConditionalSettlementKeyBudget;
+  readonly billingGroupSpend?: ConditionalSettlementBillingGroupSpend;
   /**
    * F3: customer webhook producer invoked at the settlement terminal commit.
    * Events enqueue inside the settlement transaction; absent disables them.
@@ -639,6 +657,7 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
   private readonly metering: ConditionalSettlementMetering;
   private readonly billing: ConditionalSettlementBilling;
   private readonly keyBudget: ConditionalSettlementKeyBudget | undefined;
+  private readonly billingGroupSpend: ConditionalSettlementBillingGroupSpend | undefined;
   private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
@@ -648,6 +667,7 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
     this.metering = options.metering ?? options.meteringService ?? new SaasMeteringService(database);
     this.billing = options.billing ?? options.billingService ?? new PlatformWalletLedgerService();
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
     if (
       options.webhookEvents !== undefined &&
       (typeof options.webhookEvents.requestCompleted !== 'function' ||
@@ -832,6 +852,14 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
             actualChargeMinorUnits: normalized.charge.amountMinorUnits,
           });
         }
+        if (this.billingGroupSpend) {
+          await this.billingGroupSpend.settle(tx, {
+            tenantId: normalized.tenantId,
+            requestId: normalized.requestId,
+            actualChargeMinorUnits: normalized.charge.amountMinorUnits,
+            actualChargeCurrency: normalized.charge.currency,
+          });
+        }
         if (terminal) {
           return {
             status: 'replayed',
@@ -905,6 +933,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
   private readonly metering: ConditionalSettlementMetering;
   private readonly billing: ConditionalSettlementBilling;
   private readonly keyBudget: ConditionalSettlementKeyBudget | undefined;
+  private readonly billingGroupSpend: ConditionalSettlementBillingGroupSpend | undefined;
   private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
@@ -914,6 +943,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
     this.metering = options.metering ?? options.meteringService ?? new SaasMeteringService(database);
     this.billing = options.billing ?? options.billingService ?? new PlatformWalletLedgerService();
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
     if (
       options.webhookEvents !== undefined &&
       (typeof options.webhookEvents.requestCompleted !== 'function' ||
@@ -1189,6 +1219,14 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           requestId: input.requestId,
           actualTokenUnits: keyBudgetTokenUnitsFromUsage(input.usage),
           actualChargeMinorUnits: input.supplyMode === 'platform' ? (input.chargeAmountMinorUnits as string) : '0',
+        });
+      }
+      if (this.billingGroupSpend && input.supplyMode === 'platform') {
+        await this.billingGroupSpend.settle(tx, {
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+          actualChargeMinorUnits: input.chargeAmountMinorUnits as string,
+          actualChargeCurrency: input.currency as string,
         });
       }
 

@@ -97,11 +97,29 @@ export interface UsageCorrectionKeyBudget {
   ): Promise<boolean>;
 }
 
+/**
+ * R1 (roadmap 1.3, phase 3): a non-negative settled charge delta moves the
+ * settled side of the billing group spend windows of the original admission;
+ * a missing row is pre-114 drift (no-op). Negative corrections stay
+ * conservative (the window stays consumed), mirroring KEY-BUD.
+ */
+export interface UsageCorrectionBillingGroupSpend {
+  correct(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly requestId: string;
+      readonly chargeSettledDelta: string;
+    },
+  ): Promise<boolean>;
+}
+
 export interface UsageCorrectionServiceOptions {
   readonly now?: () => Date;
   readonly idFactory?: () => string;
   readonly ledger?: UsageCorrectionLedgerPort;
   readonly keyBudget?: UsageCorrectionKeyBudget;
+  readonly billingGroupSpend?: UsageCorrectionBillingGroupSpend;
 }
 
 type Row = Record<string, unknown>;
@@ -326,6 +344,7 @@ export class UsageCorrectionService {
   private readonly idFactory: () => string;
   private readonly ledger: UsageCorrectionLedgerPort | undefined;
   private readonly keyBudget: UsageCorrectionKeyBudget | undefined;
+  private readonly billingGroupSpend: UsageCorrectionBillingGroupSpend | undefined;
 
   constructor(database: MeteringDatabase, options: UsageCorrectionServiceOptions = {}) {
     this.database = database;
@@ -333,6 +352,7 @@ export class UsageCorrectionService {
     this.idFactory = options.idFactory ?? randomUUID;
     this.ledger = options.ledger;
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
   }
 
   /**
@@ -504,6 +524,13 @@ export class UsageCorrectionService {
             });
           }
         }
+      }
+      if (this.billingGroupSpend && delta > 0n) {
+        await this.billingGroupSpend.correct(tx, {
+          tenantId,
+          requestId,
+          chargeSettledDelta: delta.toString(10),
+        });
       }
       // Contract C-1.4: every created correction appends a platform audit row
       // in the same transaction; replays add nothing.
