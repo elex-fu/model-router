@@ -1,0 +1,231 @@
+{
+  "tool": "bench-gateway",
+  "startedAt": "2026-10-16T13:31:09.174Z",
+  "config": {
+    "protocol": "openai",
+    "model": "bench-model",
+    "maxTokens": 8,
+    "requests": 300,
+    "streamSamples": 100,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "sseChunkDelayMs": 0,
+    "inflight": 200,
+    "concurrencySeconds": 60,
+    "accountLimit": 64,
+    "precisionAccounts": "bench-account-1,bench-account-2,bench-account-3,bench-account-4",
+    "precisionInflight": 200,
+    "scalingSeconds": 60,
+    "scalingInflight": 200,
+    "baselineReport": "deploy/compose/bench/reports/bench-1inst-scaling-rerun.json",
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "out": "deploy/compose/bench/reports/bench-3inst-rerun.json",
+    "noFail": false,
+    "gatewayUrls": [
+      "http://127.0.0.1:15007",
+      "http://127.0.0.1:15008",
+      "http://127.0.0.1:15009"
+    ],
+    "instanceCount": 3
+  },
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 300,
+        "p50": 2.58,
+        "p90": 3.22,
+        "p99": 5.25,
+        "max": 14.37
+      },
+      "gateway": {
+        "n": 300,
+        "p50": 153.99,
+        "p90": 166.65,
+        "p99": 190.38,
+        "max": 195.59
+      },
+      "p99OverheadMs": 185.13
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 4.07,
+        "p90": 4.78,
+        "p99": 7.51,
+        "max": 7.51
+      },
+      "gateway": {
+        "n": 99,
+        "p50": 152.75,
+        "p90": 164.83,
+        "p99": 188.94,
+        "max": 188.94
+      },
+      "gatewayErrors": 1,
+      "ttfbOverheadMs": 181.43
+    },
+    "sse-integrity": {
+      "minutes": 10,
+      "concurrency": 20,
+      "streams": 9962,
+      "corruptStreams": 95,
+      "chunks": 631488,
+      "corruptChunks": 0,
+      "reasons": {
+        "status 503": 48,
+        "status 502": 47
+      }
+    },
+    "concurrency": {
+      "inflight": 200,
+      "seconds": 65.2,
+      "statuses": {
+        "200": 439,
+        "403": 5,
+        "502": 42,
+        "503": 1134
+      },
+      "transportErrors": 0,
+      "errors": {},
+      "perUrl": [
+        {
+          "url": "http://127.0.0.1:15007",
+          "requests": 540
+        },
+        {
+          "url": "http://127.0.0.1:15008",
+          "requests": 540
+        },
+        {
+          "url": "http://127.0.0.1:15009",
+          "requests": 540
+        }
+      ],
+      "latency": {
+        "n": 439,
+        "p50": 14207.96,
+        "p90": 20473.29,
+        "p99": 26382.86,
+        "max": 30602.02
+      },
+      "throughputRps": 6.73
+    },
+    "precision": {
+      "accountLimit": 64,
+      "saturationInflight": 200,
+      "clientStatuses": {
+        "200": 359,
+        "403": 4,
+        "502": 55,
+        "503": 1195
+      },
+      "perAccount": {
+        "bench-account-1": {
+          "maxInFlight": 2,
+          "requests": 85,
+          "byStatus": {
+            "200": 85
+          }
+        },
+        "bench-account-2": {
+          "maxInFlight": 1,
+          "requests": 79,
+          "byStatus": {
+            "200": 79
+          }
+        },
+        "bench-account-3": {
+          "maxInFlight": 1,
+          "requests": 107,
+          "byStatus": {
+            "200": 107
+          }
+        },
+        "bench-account-4": {
+          "maxInFlight": 1,
+          "requests": 88,
+          "byStatus": {
+            "200": 88
+          }
+        }
+      },
+      "overIssueAccounts": 0
+    },
+    "scaling": {
+      "instanceCount": 3,
+      "inflight": 200,
+      "seconds": 68.7,
+      "throughputRps": 4.9,
+      "statuses": {
+        "200": 337,
+        "403": 37,
+        "502": 55,
+        "503": 1119
+      },
+      "latency": {
+        "n": 337,
+        "p50": 14667.57,
+        "p90": 20483.63,
+        "p99": 32977.38,
+        "max": 33009.25
+      },
+      "baseline": {
+        "file": "deploy/compose/bench/reports/bench-1inst-scaling-rerun.json",
+        "instanceCount": 1,
+        "throughputRps": 9.94
+      },
+      "ratio": 0.493
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 185.13,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "stream errors",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 181.43,
+      "threshold": 10,
+      "unit": "ms"
+    },
+    {
+      "scenario": "sse-integrity",
+      "metric": "corrupt streams",
+      "value": 95,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "concurrency",
+      "metric": "unexpected 5xx",
+      "value": 1176,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "scaling",
+      "metric": "throughput ratio",
+      "value": 0.493,
+      "threshold": 2.7,
+      "unit": "x"
+    }
+  ]
+}
