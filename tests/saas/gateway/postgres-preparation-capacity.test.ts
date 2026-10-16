@@ -9,6 +9,7 @@ import {
   CONCURRENCY_INFLIGHT_HORIZON_SECONDS,
   PostgresPreparationCapacityAdapter,
 } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
+import type { PostgresPreparationCapacityReservation } from '../../../src/saas/gateway/postgres-preparation-ports.js';
 import type { RequestPreparationDecision } from '../../../src/saas/gateway/request-preparation-service.js';
 
 const capacity = new PostgresPreparationCapacityAdapter();
@@ -209,14 +210,30 @@ test('reserve uses the passed executor, persists exact scope and is idempotent b
     executor.statements.some(({ sql }) => /saas_wallet|billing_reservation|ledger/i.test(sql)),
     false,
   );
-  const locks = executor.statements
-    .filter(({ sql }) => sql.includes('pg_advisory_xact_lock'))
-    .map(({ values }) => String(values[0]));
-  assert.deepEqual(locks.slice(0, 3), [
-    `model-router:request-capacity:tenant:${baseInput.tenantId}`,
-    `model-router:request-capacity:project:${baseInput.tenantId}:${baseInput.projectId}`,
-    `model-router:request-capacity:key:${baseInput.tenantId}:${baseInput.projectId}:${baseInput.proxyKeyId}`,
-  ]);
+  // R9 P4/P16: exactly ONE exclusive fence remains — the tenant scope. The
+  // project/key fences were provably redundant (every admission always took
+  // the tenant fence first, so the tenant fence alone serializes the same
+  // admission pairs; see takeScopeLock). The fence must be acquired AFTER
+  // the per-request replay check and the authority read, and BEFORE the
+  // shared-counter CTE — only the counter read-check-write needs mutual
+  // exclusion.
+  const statements = executor.statements.map(({ sql }) => sql);
+  const lockIndex = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
+  const authorityIndex = statements.findIndex((sql) => sql.includes('FROM saas_tenants t'));
+  const countIndex = statements.findIndex((sql) => sql.trimStart().startsWith('WITH existing AS'));
+  assert.ok(lockIndex >= 0, 'expected exactly one capacity advisory lock');
+  assert.equal(
+    statements.filter((sql) => sql.includes('pg_advisory_xact_lock')).length,
+    1,
+    'expected the tenant fence to be the only capacity advisory lock',
+  );
+  assert.equal(executor.statements[lockIndex]?.values[0], `model-router:request-capacity:tenant:${baseInput.tenantId}`);
+  assert.ok(authorityIndex >= 0 && authorityIndex < lockIndex, 'authority read must run before the fence');
+  assert.ok(countIndex > lockIndex, 'the shared-counter CTE must run inside the fence');
+  assert.ok(
+    statements.findIndex((sql) => sql.includes('FROM saas_gateway_capacity_reservations')) < lockIndex,
+    'the per-request replay check runs before the fence',
+  );
 });
 
 test('reserve rejects a tenant/request replay bound to another key or request fingerprint', async () => {
@@ -375,7 +392,7 @@ async function seedMinimalCapacitySchema(client: PoolClient): Promise<void> {
     );
     CREATE TABLE saas_requests (
       tenant_id uuid NOT NULL, id uuid NOT NULL PRIMARY KEY, project_id uuid NOT NULL,
-      proxy_key_id uuid NOT NULL, execution_state text NOT NULL, financial_status text NOT NULL,
+      proxy_key_id uuid NOT NULL, supply_mode text NOT NULL, execution_state text NOT NULL, financial_status text NOT NULL,
       reconciliation_state text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
       UNIQUE (tenant_id, id),
       FOREIGN KEY (tenant_id, project_id) REFERENCES saas_projects (tenant_id, id),
@@ -445,11 +462,21 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
         [tenantId, projectId, keyId],
       );
       for (let index = 0; index < requests.length; index += 1) {
+        // Scenario repair (the in-flight CTE counts seeded pending rows and
+        // the attempts trigger forbids seeding dispatched attempts without a
+        // reservation): only request 0 starts in-flight. Requests 1 and 2 are
+        // the later admission candidates, so their REQUEST rows are seeded
+        // terminal — the CTE excludes them via execution_state while their
+        // attempts stay trigger-legal 'not_sent'. The original uniform
+        // 'pending' seeding predated the attempts-state subquery and made
+        // phase 1 over-limit; the gate was always skipped, so the drift went
+        // unnoticed.
+        const inFlight = index === 0;
         await setup.query(
           `INSERT INTO saas_requests
-             (tenant_id, id, project_id, proxy_key_id, execution_state, financial_status, reconciliation_state)
-           VALUES ($1, $2, $3, $4, 'pending', 'not_applicable', 'none')`,
-          [tenantId, requests[index], projectId, keyId],
+             (tenant_id, id, project_id, proxy_key_id, supply_mode, execution_state, financial_status, reconciliation_state)
+           VALUES ($1, $2, $3, $4, 'byok', $5, 'not_applicable', 'none')`,
+          [tenantId, requests[index], projectId, keyId, inFlight ? 'pending' : 'succeeded'],
         );
         await setup.query(
           `INSERT INTO saas_attempts
@@ -460,8 +487,8 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
       }
       await setup.query(
         `INSERT INTO saas_requests
-           (tenant_id, id, project_id, proxy_key_id, execution_state, financial_status, reconciliation_state)
-         VALUES ($1, $2, $3, $4, 'pending', 'not_applicable', 'none')`,
+           (tenant_id, id, project_id, proxy_key_id, supply_mode, execution_state, financial_status, reconciliation_state)
+         VALUES ($1, $2, $3, $4, 'byok', 'pending', 'not_applicable', 'none')`,
         [tenantId, legacyActiveRequest, projectId, keyId],
       );
       await setup.query(
@@ -475,8 +502,8 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
       for (const [index, staleRequest] of staleRequests.entries()) {
         await setup.query(
           `INSERT INTO saas_requests
-             (tenant_id, id, project_id, proxy_key_id, execution_state, financial_status, reconciliation_state, updated_at)
-           VALUES ($1, $2, $3, $4, 'pending', 'not_applicable', 'none', clock_timestamp() - interval '700 seconds')`,
+             (tenant_id, id, project_id, proxy_key_id, supply_mode, execution_state, financial_status, reconciliation_state, updated_at)
+           VALUES ($1, $2, $3, $4, 'byok', 'pending', 'not_applicable', 'none', clock_timestamp() - interval '700 seconds')`,
           [tenantId, staleRequest, projectId, keyId],
         );
         await setup.query(
@@ -560,18 +587,9 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
       // concurrency limit of 2 — only the fresh legacy row remains — while a
       // fresh unknown row still occupies (verified above). Without the
       // horizon predicate this reserve would be rejected as rate_limited.
-      await clientOne.query('BEGIN');
-      await clientOne.query(
-        `UPDATE saas_requests SET execution_state = 'succeeded', reconciliation_state = 'resolved'
-          WHERE tenant_id = $1 AND id = $2`,
-        [tenantId, requests[1]],
-      );
-      await clientOne.query(
-        `UPDATE saas_attempts SET dispatch_state = 'sent', result_state = 'succeeded'
-          WHERE tenant_id = $1 AND id = $2`,
-        [tenantId, attempts[1]],
-      );
-      await clientOne.query('COMMIT');
+      // Requests 1 and 2 are terminal from the seed (see the scenario repair
+      // above); dispatching their attempts here would fire the reservation
+      // trigger, and their terminal state is exactly what the scenario needs.
       await clientTwo.query('BEGIN');
       const thirdInput = {
         ...baseInput,
@@ -587,6 +605,420 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
     } finally {
       clientOne.release();
       clientTwo.release();
+    }
+  } finally {
+    if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  }
+});
+
+/**
+ * R9 P4/P16 fence-semantics proof (live PostgreSQL). These tests exercise the
+ * real capacity path — real advisory fence, real count CTE, real reservation
+ * INSERT — under genuine cross-connection concurrency. They exist to prove
+ * the de-serialized admission design (single tenant-scope exclusive fence,
+ * acquired after the per-request replay check and per-scope authority read)
+ * preserves the fail-closed limit invariants:
+ *   1. N competing admissions against a limit of K admit exactly K — never
+ *      more (the double-spend red line).
+ *   2. Competing admissions for the SAME request serialize on the fence and
+ *      the ON CONFLICT/raced path: exactly one reservation row is created.
+ *   3. A rolled-back admission leaves no counter residue.
+ *   4. The fence is tenant-scoped: different tenants never serialize on each
+ *      other's capacity fence.
+ */
+async function seedTwoTenantCapacityWorld(
+  client: PoolClient,
+  options: {
+    readonly schema: string;
+    readonly tenantIds: readonly string[];
+    readonly projectId: string;
+    readonly keyIds: readonly string[];
+    readonly keyRpm: number;
+  },
+): Promise<void> {
+  await client.query(`SET search_path TO "${options.schema}"`);
+  for (const [index, tenantId] of options.tenantIds.entries()) {
+    const keyId = options.keyIds[index];
+    if (!keyId) throw new Error('seedTwoTenantCapacityWorld requires one key per tenant');
+    await client.query(
+      `INSERT INTO saas_tenants
+         (id, status, requests_per_minute, tokens_per_minute, max_concurrent_requests)
+       VALUES ($1, 'active', 1000, 1000000, 1000)`,
+      [tenantId],
+    );
+    await client.query(
+      `INSERT INTO saas_projects (tenant_id, id, inference_policy_version, inference_policy_status)
+       VALUES ($1, $2, 1, 'active')`,
+      [tenantId, options.projectId],
+    );
+    await client.query(
+      `INSERT INTO saas_project_inference_policy_versions
+         (tenant_id, project_id, version, status, requests_per_minute, tokens_per_minute, max_concurrent_requests)
+       VALUES ($1, $2, 1, 'active', 1000, 1000000, 1000)`,
+      [tenantId, options.projectId],
+    );
+    await client.query(
+      `INSERT INTO saas_api_keys
+         (tenant_id, project_id, id, status, authz_version, supply_mode,
+            requests_per_minute, tokens_per_minute, max_concurrent_requests)
+       VALUES ($1, $2, $3, 'active', 1, 'byok', $4, 1000000, 1000)`,
+      [tenantId, options.projectId, keyId, options.keyRpm],
+    );
+  }
+}
+
+/**
+ * Seeds the metering-side rows a real admission would have created before
+ * the capacity reservation runs: saas_gateway_capacity_reservations carries
+ * DEFERRABLE foreign keys onto saas_requests and saas_attempts, so every
+ * admitted (tenant, request, attempt) needs both rows to exist at COMMIT.
+ */
+async function seedRequestAndAttempt(
+  client: PoolClient,
+  options: {
+    readonly tenantId: string;
+    readonly projectId: string;
+    readonly keyId: string;
+    readonly requestId: string;
+    readonly attemptId: string;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO saas_requests
+       (tenant_id, id, project_id, proxy_key_id, supply_mode, execution_state, financial_status, reconciliation_state)
+     VALUES ($1, $2, $3, $4, 'byok', 'pending', 'not_applicable', 'none')`,
+    [options.tenantId, options.requestId, options.projectId, options.keyId],
+  );
+  await client.query(
+    `INSERT INTO saas_attempts
+       (tenant_id, id, request_id, dispatch_state, result_state, response_started)
+     VALUES ($1, $2, $3, 'not_sent', 'pending', false)`,
+    [options.tenantId, options.attemptId, options.requestId],
+  );
+}
+
+test('optional PostgreSQL fence proof: 20 competing admissions admit exactly the key RPM limit, never more', {
+  skip: isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL).skipReason,
+}, async () => {
+  const target = isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL);
+  assert.ok(target.connectionString);
+  const pool = new PgPool({ connectionString: target.connectionString, max: 24 });
+  const schema = `capacity_fence_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+  const tenantId = randomUUID();
+  const projectId = randomUUID();
+  const keyId = randomUUID();
+  const KEY_RPM_LIMIT = 10;
+  const COMPETING = 20;
+  const requestIds = Array.from({ length: COMPETING }, () => randomUUID());
+  const attemptIds = Array.from({ length: COMPETING }, () => randomUUID());
+  let created = false;
+  try {
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    const setup = await pool.connect();
+    try {
+      await setup.query(`SET search_path TO "${schema}"`);
+      await seedMinimalCapacitySchema(setup);
+      await seedTwoTenantCapacityWorld(setup, {
+        schema,
+        tenantIds: [tenantId],
+        projectId,
+        keyIds: [keyId],
+        keyRpm: KEY_RPM_LIMIT,
+      });
+      for (const [index, requestId] of requestIds.entries()) {
+        await seedRequestAndAttempt(setup, {
+          tenantId,
+          projectId,
+          keyId,
+          requestId,
+          attemptId: attemptIds[index] ?? randomUUID(),
+        });
+      }
+    } finally {
+      setup.release();
+    }
+
+    // COMPETING independent connections each run one full reserve() inside
+    // their own transaction and commit as soon as it allows — the same shape
+    // as real gateway admissions. All transactions start before any of them
+    // commits, so every admission's counter read overlaps the others and the
+    // only thing that can prevent over-admission is the exclusive fence.
+    const clients = await Promise.all(Array.from({ length: COMPETING }, () => pool.connect()));
+    const decisions: RequestPreparationDecision<PostgresPreparationCapacityReservation>[] = [];
+    try {
+      const tasks = clients.map(async (client, index) => {
+        await client.query(`SET search_path TO "${schema}"`);
+        await client.query('BEGIN');
+        const input = {
+          ...baseInput,
+          tenantId,
+          projectId,
+          proxyKeyId: keyId,
+          requestId: requestIds[index],
+          attemptId: attemptIds[index] ?? randomUUID(),
+        };
+        const decision = await capacity.reserve(new PgExecutor(client), input);
+        if (decision.decision === 'allow') await client.query('COMMIT');
+        else await client.query('ROLLBACK');
+        return decision;
+      });
+      decisions.push(...(await Promise.all(tasks)));
+    } finally {
+      for (const client of clients) client.release();
+    }
+
+    const allowed = decisions.filter((decision) => decision.decision === 'allow');
+    const rejected = decisions.filter((decision) => decision.decision === 'reject');
+    assert.equal(allowed.length, KEY_RPM_LIMIT, 'exactly the limit may be admitted, never more');
+    assert.equal(rejected.length, COMPETING - KEY_RPM_LIMIT);
+    for (const decision of rejected) {
+      if (decision.decision === 'reject') assert.equal(decision.code, 'rate_limited');
+    }
+    const rows = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM "${schema}".saas_gateway_capacity_reservations WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    assert.equal(rows.rows[0]?.count, String(KEY_RPM_LIMIT));
+  } finally {
+    if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  }
+});
+
+test('optional PostgreSQL fence proof: competing same-request admissions create exactly one reservation', {
+  skip: isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL).skipReason,
+}, async () => {
+  const target = isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL);
+  assert.ok(target.connectionString);
+  const pool = new PgPool({ connectionString: target.connectionString, max: 4 });
+  const schema = `capacity_replay_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+  const tenantId = randomUUID();
+  const projectId = randomUUID();
+  const keyId = randomUUID();
+  const requestId = randomUUID();
+  const attemptId = randomUUID();
+  let created = false;
+  try {
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    const setup = await pool.connect();
+    try {
+      await setup.query(`SET search_path TO "${schema}"`);
+      await seedMinimalCapacitySchema(setup);
+      await seedTwoTenantCapacityWorld(setup, {
+        schema,
+        tenantIds: [tenantId],
+        projectId,
+        keyIds: [keyId],
+        keyRpm: 10,
+      });
+      await seedRequestAndAttempt(setup, { tenantId, projectId, keyId, requestId, attemptId });
+    } finally {
+      setup.release();
+    }
+
+    const clientOne = await pool.connect();
+    const clientTwo = await pool.connect();
+    try {
+      for (const client of [clientOne, clientTwo]) {
+        await client.query(`SET search_path TO "${schema}"`);
+        await client.query('BEGIN');
+      }
+      const input = {
+        ...baseInput,
+        tenantId,
+        projectId,
+        proxyKeyId: keyId,
+        requestId,
+        attemptId,
+      };
+      // Deterministic fence-serialized replay: the first admission inserts and
+      // holds the fence until COMMIT; the second one queues behind it and must
+      // observe the committed reservation (via the replay check or the
+      // ON CONFLICT raced re-read), never insert a second row.
+      const first = await capacity.reserve(new PgExecutor(clientOne), input);
+      const secondPromise = capacity.reserve(new PgExecutor(clientTwo), input);
+      await clientOne.query('COMMIT');
+      const second = await secondPromise;
+      await clientTwo.query('COMMIT');
+
+      assert.equal(first.decision, 'allow');
+      assert.equal(second.decision, 'allow');
+      if (first.decision === 'allow' && second.decision === 'allow') {
+        assert.equal(second.value.quotaReservation.reference, first.value.quotaReservation.reference);
+        assert.equal(second.value.rateReservation.reference, first.value.rateReservation.reference);
+      }
+      const rows = await pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM "${schema}".saas_gateway_capacity_reservations
+          WHERE tenant_id = $1 AND request_id = $2`,
+        [tenantId, requestId],
+      );
+      assert.equal(rows.rows[0]?.count, '1');
+    } finally {
+      clientOne.release();
+      clientTwo.release();
+    }
+  } finally {
+    if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  }
+});
+
+test('optional PostgreSQL fence proof: a rolled-back admission leaves no rate-window residue', {
+  skip: isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL).skipReason,
+}, async () => {
+  const target = isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL);
+  assert.ok(target.connectionString);
+  const pool = new PgPool({ connectionString: target.connectionString, max: 4 });
+  const schema = `capacity_rollback_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+  const tenantId = randomUUID();
+  const projectId = randomUUID();
+  const keyId = randomUUID();
+  const abortedRequestId = randomUUID();
+  const abortedAttemptId = randomUUID();
+  const afterRequestId = randomUUID();
+  const afterAttemptId = randomUUID();
+  let created = false;
+  try {
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    const setup = await pool.connect();
+    try {
+      await setup.query(`SET search_path TO "${schema}"`);
+      await seedMinimalCapacitySchema(setup);
+      await seedTwoTenantCapacityWorld(setup, {
+        schema,
+        tenantIds: [tenantId],
+        projectId,
+        keyIds: [keyId],
+        keyRpm: 1,
+      });
+      await seedRequestAndAttempt(setup, {
+        tenantId,
+        projectId,
+        keyId,
+        requestId: abortedRequestId,
+        attemptId: abortedAttemptId,
+      });
+      await seedRequestAndAttempt(setup, {
+        tenantId,
+        projectId,
+        keyId,
+        requestId: afterRequestId,
+        attemptId: afterAttemptId,
+      });
+    } finally {
+      setup.release();
+    }
+
+    const clientOne = await pool.connect();
+    const clientTwo = await pool.connect();
+    try {
+      for (const client of [clientOne, clientTwo]) {
+        await client.query(`SET search_path TO "${schema}"`);
+      }
+      // Admission 1 reserves against an RPM limit of 1, then the transaction
+      // fails and rolls back. The reservation insert must disappear with it.
+      await clientOne.query('BEGIN');
+      const aborted = await capacity.reserve(new PgExecutor(clientOne), {
+        ...baseInput,
+        tenantId,
+        projectId,
+        proxyKeyId: keyId,
+        requestId: abortedRequestId,
+        attemptId: abortedAttemptId,
+      });
+      assert.equal(aborted.decision, 'allow');
+      await clientOne.query('ROLLBACK');
+
+      // Admission 2, against the same single-request window, must still be
+      // admissible: the rolled-back reservation does not consume the limit.
+      await clientTwo.query('BEGIN');
+      const after = await capacity.reserve(new PgExecutor(clientTwo), {
+        ...baseInput,
+        tenantId,
+        projectId,
+        proxyKeyId: keyId,
+        requestId: afterRequestId,
+        attemptId: afterAttemptId,
+      });
+      assert.equal(after.decision, 'allow');
+      await clientTwo.query('COMMIT');
+
+      const rows = await pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM "${schema}".saas_gateway_capacity_reservations WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      assert.equal(rows.rows[0]?.count, '1');
+    } finally {
+      clientOne.release();
+      clientTwo.release();
+    }
+  } finally {
+    if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  }
+});
+
+test('optional PostgreSQL fence proof: different tenants do not serialize on each other', {
+  skip: isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL).skipReason,
+}, async () => {
+  const target = isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL);
+  assert.ok(target.connectionString);
+  const pool = new PgPool({ connectionString: target.connectionString, max: 4 });
+  const schema = `capacity_tenants_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+  const tenantIds = [randomUUID(), randomUUID()];
+  const projectId = randomUUID();
+  const keyIds = [randomUUID(), randomUUID()];
+  const seededRequestIds = tenantIds.map(() => randomUUID());
+  const seededAttemptIds = tenantIds.map(() => randomUUID());
+  let created = false;
+  try {
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    const setup = await pool.connect();
+    try {
+      await setup.query(`SET search_path TO "${schema}"`);
+      await seedMinimalCapacitySchema(setup);
+      await seedTwoTenantCapacityWorld(setup, { schema, tenantIds, projectId, keyIds, keyRpm: 1 });
+      for (const [index, tenantId] of tenantIds.entries()) {
+        await seedRequestAndAttempt(setup, {
+          tenantId,
+          projectId,
+          keyId: keyIds[index] ?? randomUUID(),
+          requestId: seededRequestIds[index] ?? randomUUID(),
+          attemptId: seededAttemptIds[index] ?? randomUUID(),
+        });
+      }
+    } finally {
+      setup.release();
+    }
+
+    // Both tenants have an RPM limit of 1. Each tenant's first admission is
+    // admissible independently; the tenant-scoped fences must not interact.
+    const clients = await Promise.all(tenantIds.map(() => pool.connect()));
+    try {
+      const tasks = clients.map(async (client, index) => {
+        await client.query(`SET search_path TO "${schema}"`);
+        await client.query('BEGIN');
+        const decision = await capacity.reserve(new PgExecutor(client), {
+          ...baseInput,
+          tenantId: tenantIds[index],
+          projectId,
+          proxyKeyId: keyIds[index],
+          requestId: seededRequestIds[index],
+          attemptId: seededAttemptIds[index],
+        });
+        if (decision.decision === 'allow') await client.query('COMMIT');
+        else await client.query('ROLLBACK');
+        return decision;
+      });
+      const decisions = await Promise.all(tasks);
+      for (const decision of decisions) assert.equal(decision.decision, 'allow');
+    } finally {
+      for (const client of clients) client.release();
     }
   } finally {
     if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);

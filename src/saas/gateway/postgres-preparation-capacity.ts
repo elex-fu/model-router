@@ -186,9 +186,54 @@ async function queryRows<T extends Row>(
   return result.rows;
 }
 
-async function takeScopeLock(executor: SqlExecutor, scope: string, id: string): Promise<void> {
+/**
+ * R9 P4/P16 (de-serialized admission): the capacity scope fence is a single
+ * tenant-scoped EXCLUSIVE transaction advisory lock, and it is acquired as
+ * late as possible — immediately before the shared-counter read — so the
+ * exclusive window covers only: counter CTE → limit check → reservation
+ * INSERT → raced re-read (plus whatever the caller still does before COMMIT).
+ *
+ * Why one tenant-scoped fence is sufficient (equivalence proof):
+ * the previous design took three fences in stable order
+ * tenant → project(tenant:project) → key(tenant:project:key). Every admission
+ * always took the tenant fence first, so the set of admission pairs serialized
+ * by the three-fence stack was exactly the set serialized by the tenant fence
+ * alone (project/key scopes are strict subsets of the tenant scope: two
+ * admissions sharing a project or key necessarily share the tenant). Dropping
+ * the project/key fences removes two lock round trips and two lock-manager
+ * queue entries per admission without changing which admissions can run
+ * concurrently — the mutual-exclusion invariant behind every limit check
+ * (tenant, project, and key RPM/TPM/concurrency) is preserved verbatim.
+ *
+ * Why the fence is acquired after the replay check and the authority read:
+ * neither touches shared mutable capacity state. The replay check reads this
+ * request's own reservation row (unique key tenant_id+request_id); a
+ * concurrent duplicate admission that passes the empty replay check is
+ * serialized by the fence before its INSERT and resolved by the existing
+ * ON CONFLICT (tenant_id, request_id) DO NOTHING + raced re-read path below.
+ * The authority read (limits, statuses, versions) is protected by the
+ * admission authorization prelock's SHARED authz fences, which the caller
+ * acquires before this port runs — strictly stronger isolation than the old
+ * order, where the authority read ran before any authz fence was held.
+ * Only the read-check-write of the shared counters (CTE over
+ * saas_requests/saas_attempts/saas_gateway_capacity_reservations) requires
+ * mutual exclusion, so only it sits inside the fence.
+ *
+ * Lock ordering (deadlock safety): admission is the sole taker of the
+ * `model-router:request-capacity:*` advisory namespace. All locks acquired
+ * before this fence (idempotency row, shared authz fences, per-request
+ * metering rows, per-candidate guard rows, the billing wallet row) are taken
+ * in the same relative order by every admission, and no other transaction
+ * class (control plane, settlement, compensation, release) ever takes a
+ * capacity advisory lock — so no wait cycle can pass through this fence.
+ * Within a tenant, the exclusive fence linearizes every post-fence writer,
+ * which additionally guarantees that per-key rows touched after the fence
+ * (key budgets, this reservation INSERT) are never held by two admissions
+ * at once.
+ */
+async function takeScopeLock(executor: SqlExecutor, tenantId: string): Promise<void> {
   await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
-    `model-router:request-capacity:${scope}:${id}`,
+    `model-router:request-capacity:tenant:${tenantId}`,
   ]);
 }
 
@@ -270,11 +315,8 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
     }
 
     try {
-      /* Stable tenant -> project -> key lock order serializes every shared bucket. */
-      await takeScopeLock(executor, 'tenant', input.tenantId);
-      await takeScopeLock(executor, 'project', `${input.tenantId}:${input.projectId}`);
-      await takeScopeLock(executor, 'key', `${input.tenantId}:${input.projectId}:${input.proxyKeyId}`);
-
+      /* Per-request replay check, then per-scope authority: both run OUTSIDE
+         the exclusive fence (see takeScopeLock for the proof). */
       const existingRows = await queryRows<ReservationRow>(
         executor,
         `SELECT tenant_id, project_id, proxy_key_id, request_id, supply_mode,
@@ -375,6 +417,12 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
       if (keyAuthzVersion === null || policyVersion === null) {
         return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
       }
+
+      /* R9 P4/P16: the exclusive tenant-scope fence starts HERE. Everything
+         above is per-request or protected by the caller's shared authz
+         fences; everything below reads or writes shared capacity state and
+         must stay inside the fence until COMMIT. */
+      await takeScopeLock(executor, input.tenantId);
 
       const countRows = await queryRows<Row>(
         executor,

@@ -661,30 +661,6 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
         return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
       }
       const expiresAt = new Date(observedNow.getTime() + admissionTtlMs);
-      let capacityResult: RequestPreparationDecision<PostgresPreparationCapacityReservation>;
-      try {
-        capacityResult = await options.capacity.reserve(executor, {
-          tenantId: resolvedCaller.tenantId,
-          projectId: resolvedCaller.projectId,
-          proxyKeyId: resolvedCaller.proxyKeyId,
-          requestId: canonicalRequestId,
-          attemptId: input.attemptId,
-          supplyMode: resolvedCaller.supplyMode,
-          payloadBounds: input.payloadBounds,
-          idempotencyScopeKey,
-          requestFingerprint,
-          requestFingerprintVersion,
-        });
-      } catch {
-        return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
-      }
-      if (!isDecision<PostgresPreparationCapacityReservation>(capacityResult)) {
-        return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
-      }
-      if (capacityResult.decision !== 'allow') return capacityResult;
-      if (!safeCapacityResult(capacityResult.value)) {
-        return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
-      }
 
       const modelResolution = canonicalModelResolution({ publicModel: authority.route.publicModel, authority });
       if (!modelResolution) {
@@ -870,6 +846,49 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
               resolvedCaller.supplyMode === 'platform' ? admissionHoldEvidence(input.payloadBounds, expiresAt) : null,
             clientAddress: input.clientAddress ?? null,
           });
+        }
+        /* R9 P4/P16 (de-serialized admission): the capacity reservation — and
+           with it the exclusive tenant-scope advisory fence that serializes
+           the shared-counter read-check-write — is the LAST reservation this
+           stage acquires. The authorization prelock's shared fences, the
+           metering request/attempt inserts, the admission guard, the account
+           rate counter, the outbox and audit writes, and the per-wallet
+           billing hold all run BEFORE it, so none of that work sits inside
+           the capacity fence. This changes no committed state ordering: the
+           whole stage is one caller-owned transaction, and every reject path
+           (including a capacity rate/quota rejection) still rolls the
+           transaction back through RequestPreparationTransactionRollback,
+           removing the metering and billing writes exactly as before. The
+           one observable difference is error precedence: a request that
+           fails both the guard and a capacity limit now reports the guard
+           failure, because the guard runs first. Lock-order safety: only
+           admission takes the `model-router:request-capacity:*` advisory
+           namespace, and within a tenant the exclusive fence linearizes
+           every later writer (key budget, reservation INSERT), so no wait
+           cycle can form. */
+        let capacityResult: RequestPreparationDecision<PostgresPreparationCapacityReservation>;
+        try {
+          capacityResult = await options.capacity.reserve(executor, {
+            tenantId: resolvedCaller.tenantId,
+            projectId: resolvedCaller.projectId,
+            proxyKeyId: resolvedCaller.proxyKeyId,
+            requestId: canonicalRequestId,
+            attemptId: input.attemptId,
+            supplyMode: resolvedCaller.supplyMode,
+            payloadBounds: input.payloadBounds,
+            idempotencyScopeKey,
+            requestFingerprint,
+            requestFingerprintVersion,
+          });
+        } catch {
+          return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
+        }
+        if (!isDecision<PostgresPreparationCapacityReservation>(capacityResult)) {
+          return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
+        }
+        if (capacityResult.decision !== 'allow') return capacityResult;
+        if (!safeCapacityResult(capacityResult.value)) {
+          return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
         }
         const deadlineAtMs = expiresAt.getTime();
         const admission: RequestPreparationAdmission = {

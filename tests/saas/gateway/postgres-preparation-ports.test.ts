@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import {
-  createPostgresPreparationPorts,
-  type PostgresPreparationPortsOptions,
-} from '../../../src/saas/gateway/postgres-preparation-ports.js';
-import {
   KeyBudgetAdmissionDeniedError,
   type KeyBudgetAdmissionFacts,
   type KeyBudgetAdmissionPort,
 } from '../../../src/saas/gateway/postgres-preparation-budget.js';
+import {
+  createPostgresPreparationPorts,
+  type PostgresPreparationPortsOptions,
+} from '../../../src/saas/gateway/postgres-preparation-ports.js';
 import { GatewayRequestIdempotencyStore } from '../../../src/saas/gateway/request-idempotency.js';
 import {
   allowRequestPreparation,
@@ -20,7 +20,12 @@ import {
   type RequestPreparationPayloadBounds,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
-import type { AttemptRecord, CreateRequestInput, RequestAdmission, RequestRecord } from '../../../src/saas/metering/types.js';
+import type {
+  AttemptRecord,
+  CreateRequestInput,
+  RequestAdmission,
+  RequestRecord,
+} from '../../../src/saas/metering/types.js';
 import {
   createManagedSaasGatewayProductionComposition,
   type ManagedSaasGatewayProductionOptions,
@@ -281,30 +286,66 @@ function setup(
       }
       if (sql.includes('FROM saas_requests WHERE') && sql.includes('FOR UPDATE')) {
         const request = requests.get(String(values[1]));
-        const row = request && request.tenantId === values[0] ? {
-          id: request.id, project_id: request.projectId, proxy_key_id: request.proxyKeyId,
-          supply_mode: request.supplyMode, request_fingerprint: request.requestFingerprint,
-          request_fingerprint_version: request.requestFingerprintVersion, execution_state: request.resultState,
-          reconciliation_state: request.reconciliationState, financial_status: request.financialStatus, state_version: 1,
-        } : undefined;
+        const row =
+          request && request.tenantId === values[0]
+            ? {
+                id: request.id,
+                project_id: request.projectId,
+                proxy_key_id: request.proxyKeyId,
+                supply_mode: request.supplyMode,
+                request_fingerprint: request.requestFingerprint,
+                request_fingerprint_version: request.requestFingerprintVersion,
+                execution_state: request.resultState,
+                reconciliation_state: request.reconciliationState,
+                financial_status: request.financialStatus,
+                state_version: 1,
+              }
+            : undefined;
         return { rows: row ? [row as Row] : [], rowCount: row ? 1 : 0 };
       }
       if (sql.includes('FROM saas_attempts WHERE') && sql.includes('FOR UPDATE')) {
-        const entries = [...attempts.values()].filter((attempt) => attempt.tenantId === values[0] && attempt.requestId === values[1]);
-        return { rows: entries.map((attempt) => ({ id: attempt.id, ordinal: 1, dispatch_state: attemptState,
-          result_state: 'pending', response_started: false, response_started_at: null, result_http_status: null,
-          unknown_reason: null, state_version: 1, prepared_evidence_id: null,
-          dispatch_authority_state: 'bound', binding_state: 'bound' } as Row)), rowCount: entries.length };
+        const entries = [...attempts.values()].filter(
+          (attempt) => attempt.tenantId === values[0] && attempt.requestId === values[1],
+        );
+        return {
+          rows: entries.map(
+            (attempt) =>
+              ({
+                id: attempt.id,
+                ordinal: 1,
+                dispatch_state: attemptState,
+                result_state: 'pending',
+                response_started: false,
+                response_started_at: null,
+                result_http_status: null,
+                unknown_reason: null,
+                state_version: 1,
+                prepared_evidence_id: null,
+                dispatch_authority_state: 'bound',
+                binding_state: 'bound',
+              }) as Row,
+          ),
+          rowCount: entries.length,
+        };
       }
       if (sql.includes('FROM saas_gateway_capacity_reservations')) {
         const request = requests.get(String(values[1]));
         const binding = [...gatewayIdempotency.entries()].find(([, row]) => row.request_id === values[1]);
-        const row = request && binding ? {
-          project_id: request.projectId, proxy_key_id: request.proxyKeyId, attempt_id: 'attempt-a',
-          supply_mode: request.supplyMode, idempotency_scope_key: binding[0].split('|')[3],
-          request_fingerprint: request.requestFingerprint, request_fingerprint_version: request.requestFingerprintVersion,
-          quota_reservation_id: 'quota-a', rate_reservation_id: 'rate-a', state: 'reserved',
-        } : undefined;
+        const row =
+          request && binding
+            ? {
+                project_id: request.projectId,
+                proxy_key_id: request.proxyKeyId,
+                attempt_id: 'attempt-a',
+                supply_mode: request.supplyMode,
+                idempotency_scope_key: binding[0].split('|')[3],
+                request_fingerprint: request.requestFingerprint,
+                request_fingerprint_version: request.requestFingerprintVersion,
+                quota_reservation_id: 'quota-a',
+                rate_reservation_id: 'rate-a',
+                state: 'reserved',
+              }
+            : undefined;
         return { rows: row ? [row as Row] : [], rowCount: row ? 1 : 0 };
       }
       if (sql.startsWith('UPDATE saas_gateway_capacity_reservations')) {
@@ -677,12 +718,12 @@ test('Postgres preparation consumes the production claim proof without opening o
   );
   assert.deepEqual(
     fixture.executorEvents.map(({ stage }) => stage),
-    ['idempotency_claim', 'capacity', 'metering', 'billing'],
+    ['idempotency_claim', 'metering', 'billing', 'capacity'],
   );
   assert.ok(fixture.executorEvents.every(({ executor }) => executor === fixture.executor));
 });
 
-test('production composition wraps the real Postgres admission with one durable claim before capacity and billing', async () => {
+test('production composition wraps the real Postgres admission with one durable claim and a last-acquired capacity fence', async () => {
   const fixture = setup();
   const endpointPolicy = { allowedHosts: ['provider.example'], allowedPorts: [443] } as const;
   const options = {
@@ -777,14 +818,18 @@ test('production composition wraps the real Postgres admission with one durable 
   assert.ok(first.value.holdReservation);
   assert.deepEqual(
     fixture.executorEvents.map(({ stage }) => stage),
-    ['idempotency_claim', 'capacity', 'metering', 'billing'],
+    ['idempotency_claim', 'metering', 'billing', 'capacity'],
   );
   assert.ok(fixture.executorEvents.every(({ executor }) => executor === fixture.executor));
 
-  const capture: { value: Awaited<ReturnType<typeof productionAdmission.authorizeAndReserve>> | null } = { value: null };
+  const capture: { value: Awaited<ReturnType<typeof productionAdmission.authorizeAndReserve>> | null } = {
+    value: null,
+  };
   await assert.rejects(
     fixture.database.transaction(async (executor) => {
-      const retry = await productionAdmission.authorizeAndReserve(command(REQUEST_B_ID, 'attempt-b') as never, { executor });
+      const retry = await productionAdmission.authorizeAndReserve(command(REQUEST_B_ID, 'attempt-b') as never, {
+        executor,
+      });
       capture.value = retry;
       if (retry.decision !== 'reject') throw new Error('matching retry unexpectedly entered admission');
       throw new Error('rollback rejected retry transaction');
@@ -839,9 +884,9 @@ test('same key and fingerprint across two HTTP request IDs returns the canonical
     fixture.executorEvents.map(({ stage, executor }) => [stage, executor]),
     [
       ['idempotency_claim', fixture.executor],
-      ['capacity', fixture.executor],
       ['metering', fixture.executor],
       ['billing', fixture.executor],
+      ['capacity', fixture.executor],
     ],
   );
   const firstMappingWrite = fixture.queryEvents.find(({ sql }) =>
@@ -926,7 +971,9 @@ test('insufficient wallet balance rolls back the HMAC claim, request, attempt, c
   const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
   await assert.rejects(
     fixture.database.transaction(async (executor) => {
-      const decision = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor });
+      const decision = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, {
+        executor,
+      });
       capture.value = decision;
       if (decision.decision !== 'allow') throw new Error('preparation transaction rollback');
       return decision;
@@ -1064,10 +1111,9 @@ test('keyBudget reserve runs inside admission with the admitted facts; replays n
     },
   });
   assert.equal((await authorize(replayFixture)).decision, 'allow');
-  const replay = await replayFixture.ports.admission.authorizeAndReserve(
-    replayFixture.admissionInput() as never,
-    { executor: replayFixture.executor },
-  );
+  const replay = await replayFixture.ports.admission.authorizeAndReserve(replayFixture.admissionInput() as never, {
+    executor: replayFixture.executor,
+  });
   assert.equal(replay.decision, 'reject');
   if (replay.decision === 'reject') assert.equal(replay.code, 'idempotency_replay');
   assert.equal(replayReserved.length, 1);
