@@ -31,6 +31,7 @@ import {
   PostgresProviderAccountRuntimeHealthStore,
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
+import type { PostgresProviderAccountSchedulerOptions } from '../saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresProviderAccountScheduler } from '../saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresProviderEgressProxyResolver } from '../saas/gateway/postgres-provider-egress-proxy-resolver.js';
 import {
@@ -75,6 +76,10 @@ import {
   type ProviderPayloadCompilerInput,
   type ProviderUsageUpperBoundEstimator,
 } from '../saas/gateway/provider-payload-compiler.js';
+import {
+  createRedisStickyProviderAccountAffinity,
+  type RedisStickyAffinityOptions,
+} from '../saas/gateway/redis-sticky-provider-account-affinity.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   GatewayRequestIdempotencyStore,
@@ -639,6 +644,17 @@ export interface ManagedSaasGatewayProductionOptions {
     readonly config?: unknown;
   };
   /**
+   * F3: how a Responses-routed OpenCode Go model is served to a non-responses
+   * client. `'bridge'` (default) compiles the request through the real
+   * generic Responses bridge (gateway/responses-bridge: chat.completions /
+   * Anthropic Messages → Responses). `'restrict'` restores the R5b-4
+   * fail-closed gate — responses-routed models then require a `responses`
+   * client protocol and every other client protocol is blocked with the
+   * capability-style error — for operators who prefer the restrictive
+   * posture. Non-OpenCode-Go providers are never affected by this option.
+   */
+  readonly opencodeGoCrossResponsesRouting?: 'bridge' | 'restrict';
+  /**
    * R5b-2 mount point: when set, prepared evidence whose signed endpoint
    * scope is the OpenCode Go catalog endpoint (`opencode-go-zen`, any of the
    * three native provider protocols) is dispatched through this transport
@@ -675,6 +691,22 @@ export interface ManagedSaasGatewayProductionOptions {
    * behavior; operators enable individual strategies per deployment.
    */
   readonly schedulerStrategies?: ProviderAccountSchedulerStrategiesOptions;
+  /**
+   * F2 (task #35): optional Redis concurrency-slot pre-check in front of the
+   * PostgreSQL lease snapshot (R6b hot state). Default absent = OFF, keeping
+   * the concurrency port byte-identical. Only combined/control-plane
+   * topologies that hold a Redis connection should provide it — the
+   * dedicated gateway workload cannot, by deployment contract.
+   */
+  readonly schedulerRedisConcurrencySlots?: PostgresProviderAccountSchedulerOptions['redisConcurrencySlots'];
+  /**
+   * F2 (task #35): when set, the scheduler affinity port is decorated with
+   * the R6b Redis sticky-session fast path (createRedisStickyProviderAccount
+   * Affinity). The PostgreSQL affinity table stays authoritative on every
+   * miss and on bind; Redis only short-circuits hits whose account is still
+   * eligible. Absent keeps the undecorated port exactly.
+   */
+  readonly schedulerAffinityStickyCache?: RedisStickyAffinityOptions;
   readonly maxBodyBytes: number;
   readonly entryPoint: string;
   /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
@@ -934,7 +966,9 @@ export function createOpenCodeGoProtocolRoutingAuthority(
 /**
  * Exported for direct testing (the production composition is the only other
  * caller): the production payload-compile wrapper that applies OpenCode Go
- * protocol routing and its Responses-bridge restriction.
+ * protocol routing and (unless restricted via
+ * `opencodeGoCrossResponsesRouting: 'restrict'`) bridges cross-protocol
+ * Responses routes through the real generic Responses conversion.
  */
 export function createProviderPayloadCompiler(
   options: ManagedSaasGatewayProductionOptions,
@@ -1006,13 +1040,13 @@ export function createProviderPayloadCompiler(
       // operation); an unsupported client→provider bridge pair then fails
       // closed inside the compiler as a capability_unavailable block.
       const routedRoute = applyOpenCodeGoProtocolRouting(route, input.authority.candidate, openCodeGoProtocolRules);
-      // R5b-4 (closes R5b-2 gap 3): the generic cross→Responses bridges are
-      // passthrough stubs, so a Responses-routed OpenCode Go model requested
-      // through any other client protocol fails closed with the
-      // capability-style error instead of forwarding a wrong-shaped payload.
-      // Real Responses conversion is future work (only the codex compile
-      // layer owns it today).
+      // F3: the generic cross→Responses bridges are real conversions now
+      // (gateway/responses-bridge), so a Responses-routed OpenCode Go model
+      // requested through any client protocol compiles through the bridge by
+      // default. Operators who prefer the R5b-4 fail-closed posture restore it
+      // with `opencodeGoCrossResponsesRouting: 'restrict'`.
       if (
+        options.opencodeGoCrossResponsesRouting === 'restrict' &&
         input.authority.candidate.providerId === OPENCODE_GO_PROVIDER_ID &&
         isOpenCodeGoCrossResponsesRoute(routedRoute.clientProtocol, routedRoute.providerProtocol)
       ) {
@@ -1132,12 +1166,22 @@ export function createManagedSaasGatewayProductionComposition(
   const idempotencyStore = new GatewayRequestIdempotencyStore({ hmacKey: options.idempotencyHmacKey });
 
   const runtimeHealthStore = new PostgresProviderAccountRuntimeHealthStore({ database });
+  // F2 (task #35): additive scheduler composition options. The sticky cache
+  // decorates the affinity port (PG stays authoritative); the Redis slot
+  // pre-check is forwarded to the PostgreSQL scheduler (default off, and the
+  // PG lease remains the final admission either way).
+  const schedulerAffinityPort = options.schedulerAffinityStickyCache
+    ? createRedisStickyProviderAccountAffinity(options.schedulerAffinity, options.schedulerAffinityStickyCache)
+    : options.schedulerAffinity;
   const scheduler = new PostgresProviderAccountScheduler({
     database,
     health: runtimeHealthStore,
-    affinity: options.schedulerAffinity,
+    affinity: schedulerAffinityPort,
     leaseConcurrencyLimit: options.maxConcurrency,
     strategies: options.schedulerStrategies,
+    ...(options.schedulerRedisConcurrencySlots
+      ? { redisConcurrencySlots: options.schedulerRedisConcurrencySlots }
+      : {}),
   });
 
   const routes = new SaasRouteConfigService(database);

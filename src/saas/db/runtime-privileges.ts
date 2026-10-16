@@ -74,6 +74,49 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ...columnGrants('saas_schema_migrations', 'SELECT', ['version', 'name', 'checksum']),
   ...columnGrants('saas_platform_state', 'SELECT', ['singleton', 'initialized', 'initialized_at']),
   ...columnGrants('saas_platform_state', 'UPDATE', ['initialized']),
+  // F1 (110) platform settings: the control plane owns the settings store
+  // exclusively (admin read/write surface, registration admission and topup
+  // tier resolution all run on the control plane). No DELETE — settings rows
+  // are never removed; a reset is an audited UPDATE. The gateway and the
+  // credential-validation-worker have no grant: secret settings values must
+  // never be readable outside the control plane (fail-closed posture).
+  ...columnGrants('saas_platform_settings', 'SELECT', [
+    'key',
+    'value',
+    'version',
+    'updated_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_platform_settings', 'INSERT', [
+    'key',
+    'value',
+    'version',
+    'updated_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_platform_settings', 'UPDATE', ['value', 'version', 'updated_by_user_id', 'updated_at']),
+  // F1 (110) settings audit details: append-only facts written in the same
+  // transaction as the settings mutation; immutability triggers make UPDATE
+  // and DELETE structurally impossible, so the control plane gets no such
+  // grant.
+  ...columnGrants('saas_platform_settings_audit_details', 'SELECT', [
+    'audit_event_id',
+    'settings_key',
+    'before_version',
+    'after_version',
+    'change_summary',
+    'created_at',
+  ]),
+  ...columnGrants('saas_platform_settings_audit_details', 'INSERT', [
+    'audit_event_id',
+    'settings_key',
+    'before_version',
+    'after_version',
+    'change_summary',
+    'created_at',
+  ]),
   ...columnGrants('saas_users', 'SELECT', [
     'id',
     'email',
@@ -3529,6 +3572,11 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_usage_events',
   'saas_usage_settlements',
   'saas_billing_groups',
+  // F2 (105): the account scheduler narrows the platform candidate domain to
+  // the request's billing-group account pool. Re-apply the roles template
+  // after this addition — until then the gateway privilege probe fails
+  // closed by design (the 105/107 re-application precedent).
+  'saas_billing_group_account_pools',
   // R3 (107): the dispatch profile resolves the account's egress proxy.
   'saas_egress_proxies',
 ] as const;

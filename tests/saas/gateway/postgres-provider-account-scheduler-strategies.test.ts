@@ -243,6 +243,8 @@ function eligibilityRow(accountId: string, scheduling: Row = {}): Row {
 interface FakeDatabaseState {
   readonly eligibilityRows: ReadonlyMap<string, Row[]>;
   readonly supplierCostRows?: ReadonlyMap<string, Row[]>;
+  /** F2: resolved billing-group rows; defaults to the seeded neutral group. */
+  readonly groupRows?: Row[];
   readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
 }
 
@@ -252,7 +254,9 @@ class FakeDatabase implements SaasDatabase {
   async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
     this.state.statements.push({ sql, values });
     let rows: Row[] = [];
-    if (sql.includes('postgres-provider-account-scheduler:route')) {
+    if (sql.includes('postgres-provider-account-scheduler:billing-group')) {
+      rows = this.state.groupRows ?? [{ id: 'default', claude_code_only: false, fallback_group_id: null }];
+    } else if (sql.includes('postgres-provider-account-scheduler:route')) {
       rows = [routeRow()];
     } else if (sql.includes('postgres-provider-account-scheduler:platform-eligibility')) {
       const accountId = String(values[3]);

@@ -572,6 +572,12 @@ $runtime_column_acl_normalization$;
 -- manages the group and account-pool relations. Re-apply this template after
 -- running migration 105 on a database that predates it — until then the
 -- gateway runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (F2, scheduler consumption of 105): the gateway account
+-- scheduler additionally reads saas_billing_group_account_pools (the group
+-- pool narrowing and per-group priority) through the dynamic all-current-
+-- columns read grant below. Re-apply this template after the F2 change on a
+-- database that predates it — until then the gateway runtime privilege probe
+-- fails closed by design.
 -- DEPLOYMENT NOTE (migration 106, R4 registration admission): the identity
 -- control plane owns saas_email_verification_codes exclusively (issue,
 -- verify-and-consume, attempt counting, expiry pruning); the gateway has no
@@ -594,6 +600,26 @@ $runtime_column_acl_normalization$;
 -- through deploy/managed-saas-validation-worker-role-grants.sql. Re-apply
 -- both templates after running migration 109 on a database that predates
 -- it — until then the runtime privilege probes fail closed by design.
+-- DEPLOYMENT NOTE (migration 111, F4 Gemini): the gemini usage/quota
+-- scheduling columns on both provider account tables are worker-written
+-- only (the tier-shaped daily/minute snapshots, the 429 cooldown deadline
+-- and the loadCodeAssist tier id): they are granted in
+-- deploy/managed-saas-validation-worker-role-grants.sql (the usage worker's
+-- role) and are readable by the gateway through the dynamic
+-- all-current-columns grants below; the control plane owns no gemini
+-- column. Migration 111 also rewrites saas_probe_monitors'
+-- provider_category CHECK to admit the 'gemini' probe category (same
+-- control-plane surface, no grant change). Re-apply both templates after
+-- running migration 111 on a database that predates it.
+-- DEPLOYMENT NOTE (migration 110, F1 platform settings): the control plane
+-- owns saas_platform_settings exclusively (admin settings surface plus the
+-- registration-admission and topup-tier read paths, all control-plane
+-- workloads); the gateway and the credential-validation worker have no
+-- grant — secret settings values (KMS sealed envelopes) must never be
+-- readable outside the control plane. Rows are never DELETEd; every
+-- mutation is an audited version-CAS UPDATE. Re-apply this template after
+-- running migration 110 on a database that predates it — until then the
+-- control-plane runtime privilege probe fails closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -608,6 +634,21 @@ BEGIN
       ('saas_schema_migrations', 'SELECT', 'version name checksum'),
       ('saas_platform_state', 'SELECT', 'singleton initialized initialized_at'),
       ('saas_platform_state', 'UPDATE', 'initialized'),
+      -- F1 (110) platform settings: the control plane owns the settings store
+      -- exclusively (admin read/write surface, registration admission and
+      -- topup tier resolution). No DELETE — settings rows are never removed;
+      -- a reset is an audited UPDATE. The gateway and the credential
+      -- validation worker have no grant: secret settings values must never be
+      -- readable outside the control plane (fail-closed posture).
+      ('saas_platform_settings', 'SELECT', 'key value version updated_by_user_id created_at updated_at'),
+      ('saas_platform_settings', 'INSERT', 'key value version updated_by_user_id created_at updated_at'),
+      ('saas_platform_settings', 'UPDATE', 'value version updated_by_user_id updated_at'),
+      -- F1 (110) settings audit details: append-only facts written in the
+      -- same transaction as the settings mutation; immutability triggers make
+      -- UPDATE and DELETE structurally impossible, so the control plane gets
+      -- no such grant.
+      ('saas_platform_settings_audit_details', 'SELECT', 'audit_event_id settings_key before_version after_version change_summary created_at'),
+      ('saas_platform_settings_audit_details', 'INSERT', 'audit_event_id settings_key before_version after_version change_summary created_at'),
       ('saas_users', 'SELECT', 'id email email_canonical display_name password_hash disabled_at anonymized_at email_verified_at created_at'),
       ('saas_users', 'INSERT', 'id email password_hash display_name email_verified_at disabled_at created_at updated_at'),
       ('saas_users', 'UPDATE', 'password_hash disabled_at updated_at'),
@@ -989,6 +1030,9 @@ BEGIN
       ('saas_provider_account_leases'), ('saas_gateway_capacity_reservations'),
       ('saas_usage_events'), ('saas_usage_settlements'),
       ('saas_billing_groups'),
+      -- F2 (105): the account scheduler narrows the platform candidate domain
+      -- to the request's billing-group account pool.
+      ('saas_billing_group_account_pools'),
       -- R3 (107): the dispatch profile resolves the account's egress proxy.
       ('saas_egress_proxies')
     ) AS read_relation(table_name)

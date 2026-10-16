@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { SaasDatabase } from '../db/index.js';
+import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.js';
+import { CLAUDE_PRODUCT_ID, CLAUDE_PROVIDER_ID } from './claude/catalog-identity.js';
+import { validateClaudeCodeClient } from './claude/claude-code-validator.js';
 import type { GatewayProtocol } from './contracts.js';
 import { effectiveWeight, parseHealthScoreColumn } from './health-score.js';
 import {
@@ -23,7 +26,7 @@ import type {
   RequestPreparationDecision,
   RequestPreparationEntitlement,
 } from './request-preparation-service.js';
-import { blockRequestPreparation } from './request-preparation-service.js';
+import { blockRequestPreparation, rejectRequestPreparation } from './request-preparation-service.js';
 
 type Row = Record<string, unknown>;
 
@@ -90,6 +93,8 @@ interface EligibilityRow extends Row {
   account_opencode_go_weekly_reset_at?: unknown;
   account_opencode_go_monthly_reset_at?: unknown;
   account_opencode_go_usage_updated_at?: unknown;
+  /* F2 (migration 105): billing-group account-pool priority signal. */
+  group_pool_priority?: unknown;
   credential_owner_kind: unknown;
   credential_supply_mode: unknown;
   credential_id: unknown;
@@ -185,6 +190,27 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
   readonly health?: ProviderAccountSchedulerHealthPort;
   /** Optional so an uncomposed runtime fails closed when a request carries affinity. */
   readonly affinity?: ProviderAccountSchedulerAffinityPort;
+  /**
+   * F2 (task #35) Redis concurrency-slot pre-check (R6b hot state): OPTIONAL
+   * and default OFF — absent or `enabled: false` keeps the concurrency port
+   * byte-identical (the pure PostgreSQL lease-count read). When enabled with
+   * a slot client, the per-candidate admission path pre-checks the account's
+   * Redis slot before the PostgreSQL lease snapshot: 'saturated' skips the
+   * candidate (shaping only), 'unavailable' fails OPEN to the PostgreSQL
+   * path (the fenced PG lease remains the final admission), and 'acquired'
+   * proceeds. Slots acquired for candidates that are checked but not
+   * selected are released after the selection; the selected account's slot
+   * rides the lazy-eviction window (dispatch-completion release is the
+   * dispatch path's integration, outside this scheduler).
+   */
+  readonly redisConcurrencySlots?: {
+    readonly enabled?: boolean;
+    readonly slots: RedisConcurrencySlots;
+    /** Slot capacity per account; defaults to the lease concurrency limit. */
+    readonly maxSlots?: number;
+    /** Lazy-eviction window in milliseconds; defaults to 60 seconds. */
+    readonly windowMs?: number;
+  };
 }
 
 interface PersistedRoute extends ProviderAccountSchedulerRevalidatedRoute {
@@ -330,6 +356,13 @@ SELECT product.status AS product_status,
    AND account.provider_id = $4 AND account.product_id = $5
    AND account.status = 'active' AND account.validation_state = 'verified'
    AND account.authz_version = $10
+   /* R6a (migration 109): the probe worker's temporary-unschedulable signal
+    * excludes the account while it is in the future; NULL (never probed or
+    * recovered) and past deadlines keep the account eligible — exactly the
+    * pre-R6a behavior. $14 is the same revalidation clock as every other
+    * window predicate in this query. */
+   AND (account.probe_temp_unschedulable_until IS NULL
+        OR account.probe_temp_unschedulable_until <= $14::timestamptz)
    AND mapping.supply_mode = 'byok' AND mapping.provider_id = $4 AND mapping.product_id = $5
    AND mapping.account_authz_version = account.authz_version
    AND mapping.authz_version = $13 AND mapping.status = 'active'
@@ -383,6 +416,7 @@ SELECT product.status AS product_status,
        account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
        account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
        account.opencode_go_usage_updated_at AS account_opencode_go_usage_updated_at,
+       group_pool.priority AS group_pool_priority,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -489,6 +523,17 @@ SELECT product.status AS product_status,
   /* R3 (migration 107): see the BYOK query above. */
   LEFT JOIN saas_egress_proxies egress_proxy
     ON egress_proxy.id = account.egress_proxy_id
+  /* F2 (migration 105): billing-group account pools narrow the platform
+   * candidate domain. $23 is the server-resolved group id (key binding, then
+   * the tenant default). A group with NO pool rows is UNRESTRICTED — the
+   * seeded 'default' group ships without rows and the NOT EXISTS guard keeps
+   * every account eligible, byte-identical to pre-F2 — while any explicit
+   * pool row set requires membership. The per-group priority is surfaced as
+   * a scheduling-only signal; pool writes bump saas_api_keys.authz_version
+   * (the groups service), and this live read is what an in-flight selection
+   * actually enforces. */
+  LEFT JOIN saas_billing_group_account_pools group_pool
+    ON group_pool.group_id = $23 AND group_pool.account_id = account.id
  WHERE product.provider_id = $5 AND product.product_id = $6 AND product.status = 'active'
    AND profile.supply_mode = 'platform' AND profile.status = 'active'
    AND profile.authz_version = $13 AND profile.model_scopes @> ARRAY[$21]::text[]
@@ -496,6 +541,13 @@ SELECT product.status AS product_status,
    AND account.provider_id = $5 AND account.product_id = $6
    AND account.status = 'active' AND account.validation_state = 'verified'
    AND account.authz_version = $12
+   /* R6a (migration 109): see the BYOK query above; $20 is the shared
+    * revalidation clock. */
+   AND (account.probe_temp_unschedulable_until IS NULL
+        OR account.probe_temp_unschedulable_until <= $20::timestamptz)
+   AND (NOT EXISTS (SELECT 1 FROM saas_billing_group_account_pools guard_pool
+                    WHERE guard_pool.group_id = $23)
+        OR group_pool.account_id IS NOT NULL)
    AND pool.owner_kind = 'platform' AND pool.supply_mode = 'platform'
    AND pool.provider_id = $5 AND pool.product_id = $6
    AND pool.credential_type = account.credential_type
@@ -580,6 +632,52 @@ SELECT input_rate_numerator_minor_units, input_rate_denominator_units,
   FROM saas_supplier_cost_versions
  WHERE id = $1
  LIMIT 1`;
+
+/*
+ * F2 (task #35): resolve the request's billing group — the key's binding
+ * (migration 105), then the tenant default, then the seeded 'default' —
+ * together with the claude_code_only enforcement flags. Read once per
+ * platform selection by the wrapper and forwarded as the eligibility
+ * narrowing group. A missing or ambiguous row is authority drift and blocks
+ * the whole selection (fail closed): an unresolvable group must never fall
+ * back to "unrestricted", which would bypass pool narrowing.
+ */
+const BILLING_GROUP_SQL = `/* postgres-provider-account-scheduler:billing-group */
+SELECT g.id, g.claude_code_only, g.fallback_group_id
+  FROM saas_api_keys k
+  JOIN saas_tenants t ON t.id = k.tenant_id
+  JOIN saas_billing_groups g ON g.id = COALESCE(k.billing_group_id, t.default_billing_group_id, 'default')
+ WHERE k.tenant_id = $1 AND k.project_id = $2 AND k.id = $3
+ LIMIT 2`;
+
+/* F2: the fallback group's own flags, read only on the enforcement failure path. */
+const BILLING_GROUP_BY_ID_SQL = `/* postgres-provider-account-scheduler:billing-group-by-id */
+SELECT id, claude_code_only, fallback_group_id
+  FROM saas_billing_groups
+ WHERE id = $1
+ LIMIT 2`;
+
+/** F2: the resolved billing-group facts the wrapper enforces. */
+interface ResolvedBillingGroup {
+  readonly id: string;
+  readonly claudeCodeOnly: boolean;
+  readonly fallbackGroupId: string | null;
+}
+
+function parseBillingGroupRow(row: unknown): ResolvedBillingGroup | null {
+  if (!isRecord(row)) return null;
+  const id = row.id;
+  const claudeCodeOnly = row.claude_code_only;
+  const fallbackGroupId = row.fallback_group_id;
+  if (!nonEmpty(id)) return null;
+  if (typeof claudeCodeOnly !== 'boolean') return null;
+  if (fallbackGroupId !== null && fallbackGroupId !== undefined && !nonEmpty(fallbackGroupId)) return null;
+  return {
+    id,
+    claudeCodeOnly,
+    fallbackGroupId: fallbackGroupId === null || fallbackGroupId === undefined ? null : (fallbackGroupId as string),
+  };
+}
 
 function isRecord(value: unknown): value is Row {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -1050,6 +1148,7 @@ class PostgresEligibilityAuthority {
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
+    readonly billingGroupId?: string;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerEligibilityDecision> {
     try {
@@ -1073,6 +1172,11 @@ class PostgresEligibilityAuthority {
         !input.entitlement.allowedProviderIds.includes(input.candidate.providerId)
       ) {
         return { decision: 'deny', reason: 'provider is outside the persisted BYOK entitlement' };
+      }
+      // F2: platform revalidation without a resolved billing group can never
+      // enforce pool narrowing — fail closed rather than guessing unrestricted.
+      if (input.caller.supplyMode === 'platform' && !nonEmpty(input.billingGroupId)) {
+        return { decision: 'block', reason: 'billing group authority is unavailable' };
       }
 
       return await this.database.transaction(async (tx) => {
@@ -1136,6 +1240,19 @@ class PostgresEligibilityAuthority {
         const weight = schedulingWeight(row.account_weight);
         if (priority === null || weight === null) {
           return { decision: 'block', reason: 'persisted account scheduling scalars are malformed' };
+        }
+        // F2 (migration 105): the billing-group pool priority is a scheduling
+        // signal only — it never grants or removes eligibility here (the SQL
+        // membership guard does that) and never enters the billing path. NULL
+        // (no pool rows / BYOK) is "no signal"; a present-but-malformed value
+        // is authority drift and blocks the whole selection, mirroring the
+        // scheduling-scalar fail-closed rule.
+        const groupPoolPriority =
+          row.group_pool_priority === null || row.group_pool_priority === undefined
+            ? null
+            : schedulingScalar(row.group_pool_priority, 0, 1000);
+        if (row.group_pool_priority != null && groupPoolPriority === null) {
+          return { decision: 'block', reason: 'persisted billing group pool priority is malformed' };
         }
         const quotaSignal = schedulingQuotaSignal(row.account_quota_state);
         if (quotaSignal === 'malformed') {
@@ -1257,6 +1374,7 @@ class PostgresEligibilityAuthority {
             soonestResetAt: quotaReset === null ? null : quotaReset.resetAt,
             soonestResetObservedAt: quotaReset === null ? null : quotaReset.observedAt,
             supplierCostRate,
+            groupPoolPriority,
           },
         };
       });
@@ -1301,6 +1419,7 @@ function platformValues(
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly publicModel: string;
+    readonly billingGroupId?: string;
     readonly now: Date;
   },
   route: PersistedRoute,
@@ -1337,6 +1456,8 @@ function platformValues(
     input.now,
     input.publicModel,
     candidate.protocol,
+    // F2: $23 — the server-resolved billing group narrowing the pool domain.
+    input.billingGroupId,
   ];
 }
 
@@ -1451,12 +1572,29 @@ const SCHEDULER_SELECTION_AUDIT_ACTION = 'provider_account_scheduler.selection';
  * Health/affinity are never inferred from account labels or validation state.
  * The lease snapshot is observational; dispatch must still acquire the fenced
  * lease through PostgresProviderAccountLeaseService before transport I/O.
+ *
+ * F2 (task #35) composition: the wrapper resolves the request's billing group
+ * once per platform selection (key binding → tenant default → 'default') and
+ * enforces the group's claude_code_only flag against the R5 validator using
+ * the trusted-boundary client evidence on the input — a failed validation
+ * reroutes to the group's fallback (one hop; a fallback that is itself
+ * claude_code_only rejects rather than looping) or rejects with account_denied.
+ * It also optionally pre-checks the R6b Redis concurrency slots in front of
+ * the PostgreSQL lease snapshot (default off; fail-open; PG stays final).
  */
 export class PostgresProviderAccountScheduler implements ProviderAccountSchedulerPort {
   private readonly scheduler: ProviderAccountScheduler;
   private readonly healthAuthorityConfigured: boolean;
   private readonly database: SaasDatabase;
   private readonly now: () => Date;
+  /** The lease limit captured at construction for the slot-wrapped port. */
+  private readonly leaseConcurrencyLimit: number | undefined;
+  /** F2/R6b: configured only when the Redis slot pre-check is enabled. */
+  private readonly redisSlots: RedisConcurrencySlots | undefined;
+  private readonly redisSlotMaxSlots: number | undefined;
+  private readonly redisSlotWindowMs: number | undefined;
+  /** requestId → { scope, accounts } for slots acquired during one selection. */
+  private readonly redisSlotAcquisitions = new Map<string, { ownerScopeKey: string; accounts: Set<string> }>();
 
   constructor(options: PostgresProviderAccountSchedulerOptions) {
     if (
@@ -1468,7 +1606,30 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
     }
     this.database = options.database;
     this.now = options.now ?? (() => new Date());
+    this.leaseConcurrencyLimit = options.leaseConcurrencyLimit;
     this.healthAuthorityConfigured = options.health !== undefined;
+    const redisSlotOptions = options.redisConcurrencySlots;
+    if (redisSlotOptions?.enabled === true) {
+      if (!redisSlotOptions.slots || typeof redisSlotOptions.slots.tryAcquire !== 'function') {
+        throw new TypeError('a Redis concurrency slot client is required when the slot pre-check is enabled');
+      }
+      const maxSlots =
+        redisSlotOptions.maxSlots !== undefined
+          ? isLeaseConcurrencyLimit(redisSlotOptions.maxSlots)
+            ? redisSlotOptions.maxSlots
+            : null
+          : (options.leaseConcurrencyLimit ?? null);
+      if (maxSlots === null) {
+        throw new TypeError('the Redis slot capacity must be a safe integer in [1, 10000]');
+      }
+      const windowMs = redisSlotOptions.windowMs ?? 60_000;
+      if (typeof windowMs !== 'number' || !Number.isSafeInteger(windowMs) || windowMs < 1_000 || windowMs > 3_600_000) {
+        throw new TypeError('the Redis slot window must be a safe integer in [1000, 3600000]');
+      }
+      this.redisSlots = redisSlotOptions.slots;
+      this.redisSlotMaxSlots = maxSlots;
+      this.redisSlotWindowMs = windowMs;
+    }
     const eligibility = new PostgresEligibilityAuthority(options.database, {
       // Only the cost-priority strategy needs an extra authority read; the
       // default (strategy-free) path never issues the supplier-cost query.
@@ -1479,7 +1640,10 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
         eligibility,
         health: options.health ?? MISSING_HEALTH,
         concurrency: {
-          get: (input) => postgresConcurrency(options.database, options.leaseConcurrencyLimit, input),
+          get: (input) =>
+            this.redisSlots === undefined
+              ? postgresConcurrency(options.database, options.leaseConcurrencyLimit, input)
+              : this.concurrencyWithRedisSlotPreCheck(input),
         },
         affinity: options.affinity ?? MISSING_AFFINITY,
       },
@@ -1487,26 +1651,214 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
     );
   }
 
-  select(
+  async select(
     input: ProviderAccountSchedulerInput,
   ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>> {
     if (!this.healthAuthorityConfigured) {
-      return Promise.resolve(
-        blockRequestPreparation(
-          'capability_unavailable',
-          'runtime health authority is missing: the SaaS schema has no account health/cooldown observation contract; validation_state is not runtime health',
-        ),
+      return blockRequestPreparation(
+        'capability_unavailable',
+        'runtime health authority is missing: the SaaS schema has no account health/cooldown observation contract; validation_state is not runtime health',
       );
     }
-    return this.scheduler.select(input).then((decision) => {
+    // F2: the empty-candidate shape is delegated to the core scheduler's
+    // existing rejection untouched (no group resolution, no side reads).
+    const hasCandidates = isRecord(input) && Array.isArray(input.candidates) && input.candidates.length > 0;
+    let schedulingInput = input;
+    if (
+      hasCandidates &&
+      isRecord(input?.caller) &&
+      (input.caller as { supplyMode?: unknown }).supplyMode === 'platform'
+    ) {
+      const resolution = await this.resolveBillingGroupForSelection(input);
+      if (resolution.decision !== 'allow') return resolution.decision;
+      schedulingInput = { ...input, billingGroupId: resolution.billingGroupId };
+    }
+    const decision = await this.scheduler.select(schedulingInput).then((result) => {
       // R7: record the chosen strategy dimensions on the attempt audit. The
       // trace exists only when a strategy is enabled, so the default path
       // performs no extra write.
-      if (decision.decision === 'allow' && decision.scheduling) {
-        void this.recordSelectionAudit(input, decision.scheduling);
+      if (result.decision === 'allow' && result.scheduling) {
+        void this.recordSelectionAudit(schedulingInput, result.scheduling);
       }
-      return decision;
+      return result;
     });
+    // F2/R6b: slots acquired for candidates that were checked but not chosen
+    // are released; the selected account keeps its slot (the PG lease remains
+    // the authority and the lazy-eviction window bounds a lost release).
+    await this.settleRedisSlots(
+      isRecord(schedulingInput) ? String((schedulingInput as { requestId?: unknown }).requestId ?? '') : '',
+      decision.decision === 'allow' ? decision.value.accountId : null,
+    );
+    return decision;
+  }
+
+  /**
+   * F2: resolves the effective billing group for one platform selection and
+   * applies the claude_code_only enforcement (R5 validator) with the
+   * one-hop fallback routing. Group resolution failure blocks the whole
+   * selection — an unresolvable group must never silently widen the domain.
+   */
+  private async resolveBillingGroupForSelection(
+    input: ProviderAccountSchedulerInput,
+  ): Promise<
+    | { readonly decision: 'allow'; readonly billingGroupId: string }
+    | { readonly decision: RequestPreparationDecision<RequestPreparationCandidateAuthority> }
+  > {
+    try {
+      const caller = input.caller as { tenantId?: unknown; projectId?: unknown; proxyKeyId?: unknown };
+      const group = await this.queryBillingGroup(BILLING_GROUP_SQL, [
+        caller.tenantId,
+        caller.projectId,
+        caller.proxyKeyId,
+      ]);
+      if (group === 'block') {
+        return {
+          decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
+        };
+      }
+      let effectiveGroupId = group.id;
+      if (group.claudeCodeOnly && this.hasClaudeSubscriptionCandidate(input)) {
+        if (!this.claudeCodeClientPasses(input)) {
+          if (group.fallbackGroupId === null) {
+            return {
+              decision: rejectRequestPreparation(
+                'account_denied',
+                'the request’s billing group admits only Claude Code clients on this provider',
+              ),
+            };
+          }
+          const fallback = await this.queryBillingGroup(BILLING_GROUP_BY_ID_SQL, [group.fallbackGroupId]);
+          if (fallback === 'block') {
+            return {
+              decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
+            };
+          }
+          // One hop only: a fallback that is itself claude_code_only would
+          // reroute third-party traffic into another restricted pool — reject.
+          if (fallback.claudeCodeOnly) {
+            return {
+              decision: rejectRequestPreparation(
+                'account_denied',
+                'the request’s billing group admits only Claude Code clients on this provider',
+              ),
+            };
+          }
+          effectiveGroupId = group.fallbackGroupId;
+        }
+      }
+      return { decision: 'allow', billingGroupId: effectiveGroupId };
+    } catch {
+      return {
+        decision: blockRequestPreparation('capability_unavailable', 'billing group authority is unavailable'),
+      };
+    }
+  }
+
+  private async queryBillingGroup(sql: string, values: readonly unknown[]): Promise<ResolvedBillingGroup | 'block'> {
+    const result = await this.database.query<Row>(sql, values);
+    if (result.rows.length !== 1) return 'block';
+    const group = parseBillingGroupRow(result.rows[0]);
+    return group === null ? 'block' : group;
+  }
+
+  /**
+   * The claude subscription catalog identity (gateway/claude/catalog-identity.ts):
+   * anthropic-claude / claude-subscription. Enforcement applies only when the
+   * candidate domain actually is that supply.
+   */
+  private hasClaudeSubscriptionCandidate(input: ProviderAccountSchedulerInput): boolean {
+    const candidates = (input as { candidates?: unknown }).candidates;
+    if (!Array.isArray(candidates)) return false;
+    return candidates.some(
+      (candidate) =>
+        isRecord(candidate) &&
+        (candidate as { providerId?: unknown }).providerId === CLAUDE_PROVIDER_ID &&
+        (candidate as { productId?: unknown }).productId === CLAUDE_PRODUCT_ID,
+    );
+  }
+
+  /**
+   * F2/R5: the pure validator over the trusted-boundary client evidence
+   * (user agent, path, headers, parsed body — the RequestPreparationInput
+   * audit/clientRequest surfaces). Absent or malformed evidence fails closed:
+   * a claude_code_only group must never admit unverifiable traffic.
+   */
+  private claudeCodeClientPasses(input: ProviderAccountSchedulerInput): boolean {
+    const evidence = (input as { claudeCodeClient?: unknown }).claudeCodeClient;
+    if (!isRecord(evidence)) return false;
+    const userAgent = evidence.userAgent;
+    const path = evidence.path;
+    const headers = evidence.headers;
+    if (
+      (userAgent !== undefined && userAgent !== null && typeof userAgent !== 'string') ||
+      (path !== undefined && path !== null && typeof path !== 'string') ||
+      !isRecord(headers)
+    ) {
+      return false;
+    }
+    return validateClaudeCodeClient({
+      userAgent: userAgent === undefined ? null : (userAgent as string | null),
+      path: path === undefined ? null : (path as string | null),
+      headers: headers as Record<string, string>,
+      body: evidence.body,
+    }).valid;
+  }
+
+  /**
+   * F2/R6b seam: the Redis slot pre-check in front of the PostgreSQL lease
+   * snapshot inside the per-candidate concurrency port. 'saturated' denies
+   * only this candidate (shaping); 'unavailable' fails OPEN to the PostgreSQL
+   * authority; 'acquired' records the acquisition so non-selected candidates
+   * are released after the selection. The fenced PG lease stays final.
+   */
+  private async concurrencyWithRedisSlotPreCheck(input: {
+    readonly caller: RequestPreparationCaller;
+    readonly candidate: RequestPreparationCandidateAuthority;
+    readonly requestId: string;
+  }): Promise<ProviderAccountSchedulerConcurrencyDecision> {
+    const slots = this.redisSlots as RedisConcurrencySlots;
+    const ownerScopeKey = input.candidate.supplyMode === 'byok' ? input.caller.tenantId : 'platform';
+    let slot: Awaited<ReturnType<RedisConcurrencySlots['tryAcquire']>>;
+    try {
+      slot = await slots.tryAcquire({
+        ownerScopeKey,
+        accountId: input.candidate.accountId,
+        requestId: input.requestId,
+        maxSlots: this.redisSlotMaxSlots as number,
+        windowMs: this.redisSlotWindowMs as number,
+      });
+    } catch {
+      // A throwing client is a broken pre-check, never a broken admission:
+      // fail open to the authoritative PostgreSQL lease snapshot.
+      slot = { state: 'unavailable' };
+    }
+    if (slot.state === 'saturated') {
+      return { decision: 'deny', reason: 'redis concurrency slot pre-check is saturated' };
+    }
+    if (slot.state === 'acquired') {
+      const tracked = this.redisSlotAcquisitions.get(input.requestId);
+      if (tracked) {
+        tracked.accounts.add(input.candidate.accountId);
+      } else {
+        this.redisSlotAcquisitions.set(input.requestId, {
+          ownerScopeKey,
+          accounts: new Set([input.candidate.accountId]),
+        });
+      }
+    }
+    return postgresConcurrency(this.database, this.leaseConcurrencyLimit, input);
+  }
+
+  /** Releases every non-winning (or, on failure, every) slot acquired for a request. */
+  private async settleRedisSlots(requestId: string, winnerAccountId: string | null): Promise<void> {
+    if (this.redisSlots === undefined || requestId === '') return;
+    const tracked = this.redisSlotAcquisitions.get(requestId);
+    if (!tracked) return;
+    this.redisSlotAcquisitions.delete(requestId);
+    for (const accountId of tracked.accounts) {
+      if (accountId === winnerAccountId) continue;
+      await this.redisSlots.release({ ownerScopeKey: tracked.ownerScopeKey, accountId, requestId });
+    }
   }
 
   /** Best-effort observability write; see SCHEDULER_SELECTION_AUDIT_SQL. */

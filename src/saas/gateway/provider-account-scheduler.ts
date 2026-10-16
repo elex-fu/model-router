@@ -37,6 +37,16 @@ import {
  * `latencyMs` field, which the runtime health authority is expected to
  * populate once the R6 probe/latency signals land — until then the latency
  * coefficient stays neutral by construction.
+ *
+ * F2 (task #35, plan §R1/R5 follow-ups): the input carries a server-resolved
+ * `billingGroupId` (forwarded to the eligibility port; the PostgreSQL
+ * authority narrows the platform candidate domain to the group's account
+ * pool) and optional `claudeCodeClient` evidence consumed by the PostgreSQL
+ * wrapper's claude_code_only enforcement. The eligibility `scheduling`
+ * signals gain `groupPoolPriority`: when any candidate carries one, a group
+ * tier runs BEFORE the priority/health tiers; with no signal (the default
+ * unrestricted group, BYOK, or a pool-less group) the selection is
+ * byte-identical to pre-F2 — the R7 golden fixture is the red line.
  */
 
 export interface ProviderAccountSchedulerRights {
@@ -93,6 +103,15 @@ export interface ProviderAccountSchedulerEligibilityAllowed {
       readonly numeratorMinorUnits: bigint | number | string;
       readonly denominatorUnits: bigint | number | string;
     } | null;
+    /**
+     * F2 (task #35) billing-group pool priority: the candidate's priority in
+     * the resolved billing group's account pool (saas_billing_group_account_
+     * pools, 0–1000, higher preferred). Null means "not in a narrowed pool"
+     * — the unrestricted default — and the group tier is skipped entirely,
+     * so the pre-F2 selection order is byte-identical. Only platform
+     * candidates of a group with explicit pool rows ever carry a value.
+     */
+    readonly groupPoolPriority?: number | null;
   };
 }
 
@@ -138,6 +157,10 @@ export interface ProviderAccountSchedulerEligibilityPort {
    * Re-checks the candidate's account, credential, capability, and Provider
    * rights immediately before selection. A deny removes only this candidate;
    * an unavailable authority blocks the whole selection.
+   *
+   * F2 (task #35): the server-resolved billing group id narrows the platform
+   * candidate domain to that group's account pool; absent means the caller is
+   * BYOK (group pools never apply) or the composition did not resolve one.
    */
   revalidate(input: {
     readonly caller: RequestPreparationCaller;
@@ -146,6 +169,7 @@ export interface ProviderAccountSchedulerEligibilityPort {
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
     readonly route?: RequestPreparationRouteAuthority;
+    readonly billingGroupId?: string;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerEligibilityDecision>;
 }
@@ -219,10 +243,15 @@ export interface ProviderAccountSchedulerConcurrencyPort {
   /**
    * Reads a bounded, fail-closed capacity snapshot. The caller must still
    * acquire the fenced database lease after preparation and before I/O.
+   *
+   * F2 (task #35): the request identity is part of the observation input so
+   * an optional Redis concurrency-slot pre-check (R6) can key its ZSET member
+   * by it; ports that do not use it ignore the field.
    */
   get(input: {
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
+    readonly requestId: string;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerConcurrencyDecision>;
 }
@@ -307,6 +336,34 @@ export interface ProviderAccountSchedulerInput {
   /** Server-resolved route identity; required when an affinity key is present. */
   readonly route?: RequestPreparationRouteAuthority;
   readonly scheduling?: RequestPreparationSchedulingContext;
+  /**
+   * F2 (task #35): the server-resolved billing group that narrows the
+   * platform candidate domain (key binding, then tenant default). Set only
+   * by a trusted server adapter — the PostgreSQL scheduler wrapper — never
+   * by client input. Absent means BYOK or an unresolved group.
+   */
+  readonly billingGroupId?: string;
+  /**
+   * F2 (task #35) claude_code_only enforcement evidence: the request's
+   * client-identity signals (user agent, path, headers, parsed body),
+   * forwarded from the trusted HTTP boundary only (the clientAddress
+   * precedent). Absent means no evidence: a claude_code_only group then
+   * fails closed to its fallback/reject path. The scheduler never derives
+   * it from anything client-controlled beyond these forwarded signals.
+   */
+  readonly claudeCodeClient?: ProviderAccountSchedulerClientEvidence;
+}
+
+/**
+ * Structurally identical to the R5 Claude Code validator's input
+ * (claude/claude-code-validator.ts); declared here so the core input type
+ * carries no Claude-specific import.
+ */
+export interface ProviderAccountSchedulerClientEvidence {
+  readonly userAgent: string | null;
+  readonly path: string | null;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: unknown;
 }
 
 export interface ProviderAccountSchedulerPort {
@@ -425,6 +482,11 @@ interface EligibleCandidate {
   readonly lastUsedAt: Date | null;
   /** R7 latency signal in milliseconds; null keeps the weight modulation neutral. */
   readonly latencyMs: number | null;
+  /**
+   * F2 billing-group pool priority; null means the candidate is not in a
+   * narrowed group pool and the group tier is skipped (pre-F2 behavior).
+   */
+  readonly groupPriority: number | null;
 }
 
 const DEFAULT_MAX_HEALTH_AGE_MS = 30_000;
@@ -443,6 +505,22 @@ const LATENCY_REFERENCE_MS = 30_000;
 const LATENCY_MULTIPLIER_FLOOR_MILLI = 50;
 /** Upper bound on a plausible health-authority latency observation. */
 const LATENCY_MS_MAX = 3_600_000;
+/** Migration-105 CHECK bound on saas_billing_group_account_pools.priority. */
+const BILLING_GROUP_POOL_PRIORITY_MAX = 1000;
+
+/** F2: parses the eligibility group-pool priority signal; null = unrestricted. */
+function groupPoolPrioritySignal(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > BILLING_GROUP_POOL_PRIORITY_MAX
+  ) {
+    return null;
+  }
+  return value;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -727,6 +805,19 @@ function validSchedulingSignals(value: unknown): boolean {
     const numerator = exactNonNegativeInteger(rate.numeratorMinorUnits);
     const denominator = exactNonNegativeInteger(rate.denominatorUnits);
     if (numerator === null || denominator === null || denominator === 0n) return false;
+  }
+  // F2: the billing-group pool priority must be a safe integer in the
+  // migration-105 CHECK range when present; null/absent means unrestricted.
+  const groupPoolPriority = value.groupPoolPriority;
+  if (groupPoolPriority !== undefined && groupPoolPriority !== null) {
+    if (
+      typeof groupPoolPriority !== 'number' ||
+      !Number.isSafeInteger(groupPoolPriority) ||
+      groupPoolPriority < 0 ||
+      groupPoolPriority > BILLING_GROUP_POOL_PRIORITY_MAX
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -1036,6 +1127,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         !nonEmpty(input.requestId) ||
         (input.attemptId !== undefined && !nonEmpty(input.attemptId)) ||
         !nonEmpty(input.publicModel) ||
+        (input.billingGroupId !== undefined && !nonEmpty(input.billingGroupId)) ||
         !nonEmpty(input.caller.tenantId) ||
         !nonEmpty(input.caller.projectId) ||
         !nonEmpty(input.caller.proxyKeyId) ||
@@ -1079,6 +1171,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
             publicModel: input.publicModel,
             protocol: input.protocol,
             route: input.route,
+            billingGroupId: input.billingGroupId,
             now,
           });
           if (
@@ -1105,6 +1198,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
           const concurrency = await this.dependencies.concurrency.get({
             caller: input.caller,
             candidate: eligibility.candidate,
+            requestId: input.requestId,
             now,
           });
           if (
@@ -1152,6 +1246,9 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
                   },
             lastUsedAt: healthResult.observedAt,
             latencyMs: healthResult.latencyMs,
+            // F2: the billing-group pool tier; null keeps the ranking exactly
+            // the pre-F2 priority/health chain (golden-fixture red line).
+            groupPriority: groupPoolPrioritySignal(eligibility.scheduling?.groupPoolPriority),
           });
         }
 
@@ -1181,8 +1278,26 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
           affinityAccountId = affinity.accountId;
         }
 
-        const highestPriority = Math.max(...eligible.map((candidate) => candidate.priority));
-        const bestPriority = eligible.filter((candidate) => candidate.priority === highestPriority);
+        /*
+         * F2 (task #35) billing-group pool tier: candidates carrying a group
+         * pool priority (a group with explicit pool rows narrows the domain,
+         * so every eligible candidate carries one) are tiered by it BEFORE
+         * the existing priority/health tiers. When no candidate carries a
+         * signal — the unrestricted default, BYOK, or a pool-less group —
+         * `tiered` is exactly `eligible` and the ranking chain is
+         * byte-identical to pre-F2. A defensive mix (impossible under the
+         * narrowing SQL, which excludes non-members) keeps only the highest
+         * group tier rather than guessing.
+         */
+        const groupPriorities = eligible
+          .map((candidate) => candidate.groupPriority)
+          .filter((value): value is number => value !== null);
+        const tiered =
+          groupPriorities.length === 0
+            ? eligible
+            : eligible.filter((candidate) => candidate.groupPriority === Math.max(...groupPriorities));
+        const highestTierPriority = Math.max(...tiered.map((candidate) => candidate.priority));
+        const bestPriority = tiered.filter((candidate) => candidate.priority === highestTierPriority);
         const bestHealthRank = Math.min(...bestPriority.map((candidate) => candidate.healthRank));
         const ranked = bestPriority.filter((candidate) => candidate.healthRank === bestHealthRank);
         const preferred =
