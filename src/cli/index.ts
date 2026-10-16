@@ -105,9 +105,17 @@ program
 
 program
   .command('saas:platform-mfa-enroll')
-  .description('Issue a one-time platform MFA enrollment handoff from a secure operator TTY using the explicit management database and TOTP KMS provider')
-  .option('--allow-local-plaintext', 'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS')
-  .addHelpText('after', '\nRequires MODEL_ROUTER_SAAS_DATABASE_URL and the trusted MODEL_ROUTER_SAAS_KMS_PROVIDER module. Only platform-totp is loaded. The provider receives fixed non-secret region/deployment/workload labels and must use workload identity for authentication; no DB, Redis, upstream or API credentials are forwarded, and no embedded AES keys are supported. Remote PostgreSQL requires verified TLS; session/role/search_path/query overrides are rejected.\n')
+  .description(
+    'Issue a one-time platform MFA enrollment handoff from a secure operator TTY using the explicit management database and TOTP KMS provider',
+  )
+  .option(
+    '--allow-local-plaintext',
+    'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS',
+  )
+  .addHelpText(
+    'after',
+    '\nRequires MODEL_ROUTER_SAAS_DATABASE_URL and the trusted MODEL_ROUTER_SAAS_KMS_PROVIDER module. Only platform-totp is loaded. The provider receives fixed non-secret region/deployment/workload labels and must use workload identity for authentication; no DB, Redis, upstream or API credentials are forwarded, and no embedded AES keys are supported. Remote PostgreSQL requires verified TLS; session/role/search_path/query overrides are rejected.\n',
+  )
   .action((options) => management(() => saasPlatformMfaEnroll({}, options)));
 
 program
@@ -117,20 +125,32 @@ program
 
 program
   .command('saas:migration-audit')
-  .description('Read-only ledger/catalog audit using MODEL_ROUTER_SAAS_AUDIT_DATABASE_URL; missing baseline is unverified')
+  .description(
+    'Read-only ledger/catalog audit using MODEL_ROUTER_SAAS_AUDIT_DATABASE_URL; missing baseline is unverified',
+  )
   .option('--deployment-id <id>', 'Explicit non-sensitive target deployment label')
   .option('--environment-id <id>', 'Explicit non-sensitive target environment label')
   .option('--database <name>', 'Expected PostgreSQL database name')
   .option('--schema <name>', 'Explicit SaaS schema name')
   .option('--release-id <id>', 'Expected release label for this executable and reviewed baseline')
   .option('--catalog-baseline <path>', 'Reviewed JSON catalog baseline; never generated or promoted automatically')
-  .option('--legacy-checksum <mapping>', 'Reviewed legacy 022/023 ledger checksum mapping <22|23>=<sha256>:<evidenceId>; repeatable; annotates known history only, never grants compatibility', (value: string, previous: string[]) => [...previous, value], [])
-  .option('--allow-local-plaintext', 'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS')
-  .action((options) => management(async () => {
-    const { legacyChecksum, ...rest } = options;
-    const result = await saasMigrationAudit({ ...rest, legacyChecksums: legacyChecksum });
-    process.exitCode = result.exitCode;
-  }));
+  .option(
+    '--legacy-checksum <mapping>',
+    'Reviewed legacy 022/023 ledger checksum mapping <22|23>=<sha256>:<evidenceId>; repeatable; annotates known history only, never grants compatibility',
+    (value: string, previous: string[]) => [...previous, value],
+    [],
+  )
+  .option(
+    '--allow-local-plaintext',
+    'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS',
+  )
+  .action((options) =>
+    management(async () => {
+      const { legacyChecksum, ...rest } = options;
+      const result = await saasMigrationAudit({ ...rest, legacyChecksums: legacyChecksum });
+      process.exitCode = result.exitCode;
+    }),
+  );
 
 program
   .command('config:apply <path>')
@@ -197,8 +217,8 @@ program
       const { parseByteSize } = await import('./size.js');
       try {
         maxBodyBytes = parseByteSize(options.maxBodySize);
-      } catch (err: any) {
-        console.error(err.message);
+      } catch (err: unknown) {
+        console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
     }
@@ -263,8 +283,8 @@ program
     try {
       process.kill(pid, 'SIGTERM');
       console.log(`Sent SIGTERM to pid ${pid}`);
-    } catch (err: any) {
-      console.error(`Failed to signal pid ${pid}: ${err.message}`);
+    } catch (err: unknown) {
+      console.error(`Failed to signal pid ${pid}: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
@@ -307,8 +327,8 @@ program
     let patch: Partial<import('../config/types.js').ProxyKey>;
     try {
       patch = parseCreateOptions(options);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     store.addProxyKey({
@@ -348,8 +368,8 @@ program
     let patch: Partial<import('../config/types.js').ProxyKey>;
     try {
       patch = applyUpdateOptions(options, existing);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     store.updateProxyKey(name, patch);
@@ -659,7 +679,7 @@ program
         body: JSON.stringify(body),
       });
       const ms = Date.now() - start;
-      let snippet: any = null;
+      let snippet: unknown = null;
       try {
         snippet = await res.json();
       } catch {
@@ -672,9 +692,11 @@ program
       } else {
         console.log('OK');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       const ms = Date.now() - start;
-      console.error(`${upstreamName} ${u.baseUrl}: network error after ${ms}ms — ${err.message}`);
+      console.error(
+        `${upstreamName} ${u.baseUrl}: network error after ${ms}ms — ${err instanceof Error ? err.message : String(err)}`,
+      );
       process.exit(1);
     }
   });
@@ -690,7 +712,11 @@ program
   .action(async (model, message, options) => {
     const rawV2 = v2Config(options);
     const store = rawV2 ? undefined : getStore(options);
-    const cfg = rawV2 ?? store!.load();
+    const cfg = rawV2 ?? store?.load();
+    if (cfg === undefined) {
+      console.error('Unable to load configuration');
+      process.exit(1);
+    }
     const bind = cfg.server.bindAddress ?? '127.0.0.1';
     const port = cfg.server.port ?? 15005;
     const baseUrl = `http://${bind}:${port}`;
@@ -714,14 +740,14 @@ program
         return;
       }
     } else if (!proxyKey) {
-      const keys = store!.listProxyKeys().filter((k) => k.enabled);
+      const keys = store?.listProxyKeys().filter((k) => k.enabled) ?? [];
       if (keys.length === 0) {
         console.error('No enabled proxy keys found. Create one with key:create or pass --key');
         process.exit(1);
       }
       proxyKey = keys[0].key;
     } else {
-      const found = store!.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
+      const found = store?.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
       if (!found) {
         console.error(`Proxy key "${options.key}" not found`);
         process.exit(1);
@@ -809,7 +835,11 @@ program
         }
         console.log(`\n✓ Streaming complete (${Date.now() - start}ms)`);
       } else {
-        const data = (await res.json()) as any;
+        const data = (await res.json()) as {
+          content?: Array<{ text?: string }>;
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: unknown;
+        };
         const ms = Date.now() - start;
         if (protocol === 'anthropic') {
           const text = data.content?.map((b: { text?: string }) => b.text).join('') ?? '';
@@ -821,8 +851,8 @@ program
           console.log(`\n✓ ${ms}ms | usage: ${JSON.stringify(data.usage ?? {})}`);
         }
       }
-    } catch (err: any) {
-      console.error(`Request failed: ${err.message}`);
+    } catch (err: unknown) {
+      console.error(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
@@ -896,8 +926,8 @@ program
     let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     const store = await logStoreFromConfig(options.config);
@@ -928,8 +958,8 @@ program
     let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     const store = await logStoreFromConfig(options.config);
@@ -968,8 +998,8 @@ program
     let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     const store = await logStoreFromConfig(options.config);
