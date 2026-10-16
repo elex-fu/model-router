@@ -732,11 +732,14 @@ test('setKeyBillingGroup bumps authz_version atomically and validates the group 
 test('replaceGroupAccountPool rewrites membership and invalidates affected keys', async () => {
   const { database, executor } = fakeDatabase();
   const service = new SaasBillingGroupsService(database as never);
-  const entries = await service.replaceGroupAccountPool('vip', [
+  const outcome = await service.replaceGroupAccountPool('vip', [
     { accountId: 'account-1', priority: 10 },
     { accountId: 'account-2', priority: 90 },
   ]);
-  assert.equal(entries.length, 2);
+  assert.equal(outcome.entries.length, 2);
+  // The fake executor reports one touched row per statement; production reads
+  // the real RETURNING row count. The field's presence is the contract.
+  assert.ok(Number.isSafeInteger(outcome.invalidatedKeys) && outcome.invalidatedKeys >= 0);
   assert.ok(
     executor.statements.some((statement) => statement.includes('DELETE FROM saas_billing_group_account_pools')),
   );

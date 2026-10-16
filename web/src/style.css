@@ -18,3 +18,4 @@
 @media(prefers-color-scheme:dark){.ops-qps-figure span,.ops-qps-meta{color:#a8b9a9}.quiet-note{color:#a8b9a9}}
 .inline-controls{display:flex;gap:9px;align-items:center}.inline-controls input{flex:1;min-width:0}.inline-controls button{white-space:nowrap}.turnstile-slot{margin:4px 0 12px;min-height:65px;display:flex;align-items:flex-start}
 .auth-form-note{margin-top:14px}
+.rational-input{display:flex;align-items:center;gap:6px}.rational-input input{min-width:0}

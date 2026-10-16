@@ -2412,6 +2412,530 @@ export function isPlatformApiUnavailable(error: unknown): boolean {
   );
 }
 
+// ---- F5 console surfaces (task #38): billing groups, egress proxies,
+// opencode-go rules, platform settings, probe monitors ----
+
+/** Exact rational on the wire: decimal-string numerator/denominator (never floats). */
+export interface PlatformRationalValue {
+  readonly num: string;
+  readonly den: string;
+}
+
+export type PlatformBillingGroupModelPricing = Readonly<
+  Record<string, Partial<Record<PlatformPriceMetric, PlatformRationalValue | null>>>
+>;
+
+export interface PlatformBillingGroupPeak {
+  readonly start: string;
+  readonly end: string;
+  readonly multiplier: PlatformRationalValue;
+}
+
+export interface PlatformBillingGroup {
+  readonly id: string;
+  readonly displayName: string;
+  readonly status: string;
+  readonly rateMultiplier: PlatformRationalValue;
+  readonly topupMultiplier: PlatformRationalValue;
+  readonly peakEnabled: boolean;
+  readonly peak: PlatformBillingGroupPeak | null;
+  readonly modelPricing: PlatformBillingGroupModelPricing;
+  readonly rpmLimit: number | null;
+  readonly dailyLimitMinorUnits: string | null;
+  readonly weeklyLimitMinorUnits: string | null;
+  readonly monthlyLimitMinorUnits: string | null;
+  readonly profitMinMargin: PlatformRationalValue | null;
+  readonly profitSafetyBuffer: PlatformRationalValue | null;
+  readonly claudeCodeOnly: boolean;
+  readonly fallbackGroupId: string | null;
+  readonly supportedModelScopes: readonly string[] | null;
+}
+
+export interface PlatformBillingGroupUpsertInput {
+  readonly id: string;
+  readonly displayName: string;
+  readonly status: 'active' | 'disabled';
+  readonly rateMultiplier: PlatformRationalValue;
+  readonly topupMultiplier: PlatformRationalValue;
+  readonly peakEnabled: boolean;
+  readonly peakStart: string | null;
+  readonly peakEnd: string | null;
+  readonly peakMultiplier: PlatformRationalValue | null;
+  readonly modelPricing: PlatformBillingGroupModelPricing | null;
+  readonly rpmLimit: number | null;
+  readonly dailyLimitMinorUnits: string | null;
+  readonly weeklyLimitMinorUnits: string | null;
+  readonly monthlyLimitMinorUnits: string | null;
+  readonly profitMinMargin: PlatformRationalValue | null;
+  readonly profitSafetyBuffer: PlatformRationalValue | null;
+  readonly claudeCodeOnly: boolean;
+  readonly fallbackGroupId: string | null;
+  readonly supportedModelScopes: readonly string[] | null;
+}
+
+export interface PlatformBillingGroupPoolEntry {
+  readonly accountId: string;
+  readonly priority: number;
+}
+
+export interface PlatformKeyBillingGroupInput {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly keyId: string;
+  readonly billingGroupId: string | null;
+}
+
+export type PlatformEgressProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h';
+
+export interface PlatformEgressProxyCredentials {
+  readonly username?: string;
+  readonly password?: string;
+}
+
+export interface PlatformEgressProxyUpsertInput {
+  readonly name: string;
+  readonly protocol: PlatformEgressProxyProtocol;
+  readonly host: string;
+  readonly port: number;
+  /** Present = (re)seal server-side; null = clear; absent = keep on update. */
+  readonly credentials?: PlatformEgressProxyCredentials | null;
+  readonly status: 'active' | 'inactive';
+  readonly expiresAt: string | null;
+  readonly fallbackMode: 'none' | 'proxy' | 'direct';
+  readonly backupProxyId: string | null;
+}
+
+export interface PlatformEgressProxy {
+  readonly id: string;
+  readonly name: string;
+  readonly protocol: string;
+  readonly host: string;
+  readonly port: number;
+  readonly hasCredentials: boolean;
+  readonly status: string;
+  readonly expiresAt: string | null;
+  readonly fallbackMode: string;
+  readonly backupProxyId: string | null;
+  readonly lastProbeAt: string | null;
+  readonly lastProbeLatencyMs: number | null;
+  readonly lastProbeIp: string | null;
+  readonly lastProbeQuality: string | null;
+}
+
+export interface PlatformOpencodeGoAccountRef {
+  readonly ownerKind: 'tenant' | 'platform';
+  readonly tenantId?: string;
+  readonly accountId: string;
+}
+
+export type PlatformOpencodeGoProtocol = 'responses' | 'openai' | 'anthropic';
+
+export interface PlatformOpencodeGoProtocolRule {
+  readonly pattern: string;
+  readonly protocol: PlatformOpencodeGoProtocol;
+}
+
+export interface PlatformOpencodeGoRulesUpdateInput extends PlatformOpencodeGoAccountRef {
+  readonly expectedAuthzVersion: number;
+  readonly rules: readonly PlatformOpencodeGoProtocolRule[] | null;
+}
+
+export interface PlatformSettingView {
+  readonly key: string;
+  readonly secret: boolean;
+  readonly value?: unknown;
+  readonly version: number;
+  readonly updatedAt: string;
+  readonly updatedByUserId?: string;
+}
+
+export interface PlatformProbeMonitorTriggerResult {
+  readonly monitorId: string;
+  readonly accountId: string;
+  readonly ownerKind: 'tenant' | 'platform';
+  readonly category: string;
+  readonly queued: true;
+  readonly lastResult: string | null;
+  readonly lastRunAt: string | null;
+  readonly consecutiveFailures: number;
+}
+
+export interface PlatformProbeMonitorView {
+  readonly monitorId: string;
+  readonly ownerKind: 'tenant' | 'platform';
+  readonly ownerTenantId: string | null;
+  readonly accountId: string;
+  readonly category: string;
+  readonly probeIntervalSeconds: number;
+  readonly failureThreshold: number;
+  readonly consecutiveFailures: number;
+  readonly lastResult: string | null;
+  readonly lastRunAt: string | null;
+  readonly nextDueAt: string | null;
+  readonly enabled: boolean;
+  readonly updatedAt: string;
+}
+
+function billingGroupText(value: string, field: string, max = 255): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > max ||
+    value.trim() !== value
+  ) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', `请输入有效的${field}`);
+  }
+  return value;
+}
+
+function billingGroupIdInput(groupId: string): string {
+  return billingGroupText(groupId, '计费组 ID', 128);
+}
+
+function billingGroupPriority(priority: number): number {
+  if (typeof priority !== 'number' || !Number.isSafeInteger(priority) || priority < 0 || priority > 1000) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', '账号优先级必须是 0–1000 的整数');
+  }
+  return priority;
+}
+
+function billingGroupRationalBody(value: PlatformRationalValue): Record<string, string> {
+  return {
+    num: rationalPart(value.num, '分子'),
+    den: rationalPart(value.den, '分母'),
+  };
+}
+
+function rationalPart(value: string, label: string): string {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]{0,30})$/u.test(value)) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', `${label}必须是十进制整数字符串`);
+  }
+  return value;
+}
+
+function billingGroupUpsertBody(input: PlatformBillingGroupUpsertInput): Record<string, unknown> {
+  const modelPricing: Record<string, Record<string, unknown>> = {};
+  for (const [model, rates] of Object.entries(input.modelPricing ?? {})) {
+    const wire: Record<string, unknown> = {};
+    for (const [metric, rate] of Object.entries(rates ?? {})) {
+      wire[metric] = rate === null || rate === undefined ? null : billingGroupRationalBody(rate);
+    }
+    modelPricing[billingGroupText(model, '模型 ID', 255)] = wire;
+  }
+  return {
+    id: billingGroupIdInput(input.id),
+    displayName: billingGroupText(input.displayName, '显示名'),
+    status: input.status,
+    rateMultiplier: billingGroupRationalBody(input.rateMultiplier),
+    topupMultiplier: billingGroupRationalBody(input.topupMultiplier),
+    peakEnabled: input.peakEnabled,
+    peakStart: input.peakStart,
+    peakEnd: input.peakEnd,
+    peakMultiplier: input.peakMultiplier === null ? null : billingGroupRationalBody(input.peakMultiplier),
+    modelPricing: Object.keys(modelPricing).length === 0 ? null : modelPricing,
+    rpmLimit: input.rpmLimit,
+    dailyLimitMinorUnits: input.dailyLimitMinorUnits,
+    weeklyLimitMinorUnits: input.weeklyLimitMinorUnits,
+    monthlyLimitMinorUnits: input.monthlyLimitMinorUnits,
+    profitMinMargin: input.profitMinMargin === null ? null : billingGroupRationalBody(input.profitMinMargin),
+    profitSafetyBuffer: input.profitSafetyBuffer === null ? null : billingGroupRationalBody(input.profitSafetyBuffer),
+    claudeCodeOnly: input.claudeCodeOnly,
+    fallbackGroupId: input.fallbackGroupId,
+    supportedModelScopes: input.supportedModelScopes === null ? null : [...input.supportedModelScopes],
+  };
+}
+
+function parseRational(value: unknown, field: string): PlatformRationalValue {
+  if (!isRecord(value) || typeof value.num !== 'string' || typeof value.den !== 'string') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', `计费组响应缺少有效的${field}`);
+  }
+  return { num: value.num, den: value.den };
+}
+
+function nestedBillingGroup(value: unknown): unknown {
+  if (isRecord(value) && isRecord(value.group)) return value.group;
+  return value;
+}
+
+function parsePlatformBillingGroup(value: unknown): PlatformBillingGroup {
+  if (!isRecord(value)) throw new PlatformApiError(200, 'INVALID_RESPONSE', '计费组响应无效');
+  const peak =
+    value.peak === null || value.peak === undefined
+      ? null
+      : isRecord(value.peak)
+        ? {
+            start: requiredString(value.peak.start, 'peak.start'),
+            end: requiredString(value.peak.end, 'peak.end'),
+            multiplier: parseRational(value.peak.multiplier, 'peak.multiplier'),
+          }
+        : null;
+  const modelPricingRaw = value.modelPricing;
+  const modelPricing: Record<string, Partial<Record<PlatformPriceMetric, PlatformRationalValue | null>>> = {};
+  if (modelPricingRaw !== null && modelPricingRaw !== undefined && isRecord(modelPricingRaw)) {
+    for (const [model, rates] of Object.entries(modelPricingRaw)) {
+      if (!isRecord(rates)) continue;
+      const parsed: Partial<Record<PlatformPriceMetric, PlatformRationalValue | null>> = {};
+      for (const [metric, rate] of Object.entries(rates)) {
+        parsed[metric as PlatformPriceMetric] = rate === null || rate === undefined ? null : parseRational(rate, 'modelPricing');
+      }
+      modelPricing[model] = parsed;
+    }
+  }
+  return {
+    id: requiredString(value.id, 'id'),
+    displayName: requiredString(value.displayName, 'displayName'),
+    status: requiredString(value.status, 'status'),
+    rateMultiplier: parseRational(value.rateMultiplier, 'rateMultiplier'),
+    topupMultiplier: parseRational(value.topupMultiplier, 'topupMultiplier'),
+    peakEnabled: value.peakEnabled === true,
+    peak,
+    modelPricing,
+    rpmLimit: typeof value.rpmLimit === 'number' ? value.rpmLimit : null,
+    dailyLimitMinorUnits: typeof value.dailyLimitMinorUnits === 'string' ? value.dailyLimitMinorUnits : null,
+    weeklyLimitMinorUnits: typeof value.weeklyLimitMinorUnits === 'string' ? value.weeklyLimitMinorUnits : null,
+    monthlyLimitMinorUnits: typeof value.monthlyLimitMinorUnits === 'string' ? value.monthlyLimitMinorUnits : null,
+    profitMinMargin: value.profitMinMargin === null || value.profitMinMargin === undefined ? null : parseRational(value.profitMinMargin, 'profitMinMargin'),
+    profitSafetyBuffer: value.profitSafetyBuffer === null || value.profitSafetyBuffer === undefined ? null : parseRational(value.profitSafetyBuffer, 'profitSafetyBuffer'),
+    claudeCodeOnly: value.claudeCodeOnly === true,
+    fallbackGroupId: optionalString(value.fallbackGroupId, 'fallbackGroupId') ?? null,
+    supportedModelScopes: Array.isArray(value.supportedModelScopes)
+      ? value.supportedModelScopes.filter((scope): scope is string => typeof scope === 'string')
+      : null,
+  };
+}
+
+function parsePlatformBillingGroupList(value: unknown): PlatformBillingGroup[] {
+  if (!isRecord(value) || !Array.isArray(value.groups)) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '计费组列表响应无效');
+  }
+  return value.groups.map(parsePlatformBillingGroup);
+}
+
+function parsePlatformBillingGroupPoolEntry(value: unknown): PlatformBillingGroupPoolEntry {
+  if (!isRecord(value) || typeof value.accountId !== 'string' || typeof value.priority !== 'number') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '账号池响应无效');
+  }
+  return { accountId: value.accountId, priority: value.priority };
+}
+
+function parsePlatformBillingGroupDetail(value: unknown): {
+  group: PlatformBillingGroup;
+  accountPool: PlatformBillingGroupPoolEntry[];
+} {
+  if (!isRecord(value) || !isRecord(value.group) || !Array.isArray(value.accountPool)) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '计费组详情响应无效');
+  }
+  return {
+    group: parsePlatformBillingGroup(value.group),
+    accountPool: value.accountPool.map(parsePlatformBillingGroupPoolEntry),
+  };
+}
+
+function parsePlatformBillingGroupPoolOutcome(value: unknown): {
+  accounts: PlatformBillingGroupPoolEntry[];
+  invalidatedKeys: number;
+} {
+  if (!isRecord(value) || !Array.isArray(value.accounts) || typeof value.invalidatedKeys !== 'number') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '账号池写入响应无效');
+  }
+  return {
+    accounts: value.accounts.map(parsePlatformBillingGroupPoolEntry),
+    invalidatedKeys: value.invalidatedKeys,
+  };
+}
+
+function parsePlatformKeyBillingGroupOutcome(value: unknown): {
+  keyId: string;
+  billingGroupId: string | null;
+  authzVersion: string;
+} {
+  if (!isRecord(value) || typeof value.keyId !== 'string' || typeof value.authzVersion !== 'string') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', 'Key 分组响应无效');
+  }
+  return {
+    keyId: value.keyId,
+    billingGroupId: typeof value.billingGroupId === 'string' ? value.billingGroupId : null,
+    authzVersion: value.authzVersion,
+  };
+}
+
+function egressProxyText(value: string, field: string): string {
+  return billingGroupText(value, field, 128);
+}
+
+function isEgressProxyProtocol(value: string): value is PlatformEgressProxyProtocol {
+  return value === 'http' || value === 'https' || value === 'socks5' || value === 'socks5h';
+}
+
+function egressProxyUpsertBody(input: PlatformEgressProxyUpsertInput, proxyId?: string): Record<string, unknown> {
+  const credentials =
+    input.credentials === undefined
+      ? undefined
+      : input.credentials === null
+        ? null
+        : {
+            ...(input.credentials.username === undefined ? {} : { username: input.credentials.username }),
+            ...(input.credentials.password === undefined ? {} : { password: input.credentials.password }),
+          };
+  const port = input.port;
+  if (typeof port !== 'number' || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', '端口必须是 1–65535 的整数');
+  }
+  return {
+    ...(proxyId === undefined ? {} : { proxyId: egressProxyText(proxyId, 'proxyId') }),
+    name: billingGroupText(input.name, '代理名称', 128),
+    protocol: isEgressProxyProtocol(input.protocol) ? input.protocol : invalidEgressProxyProtocol(),
+    host: billingGroupText(input.host, '主机名', 255),
+    port,
+    ...(credentials === undefined ? {} : { credentials }),
+    status: input.status,
+    expiresAt: input.expiresAt,
+    fallbackMode: input.fallbackMode,
+    backupProxyId: input.backupProxyId,
+  };
+}
+
+function invalidEgressProxyProtocol(): never {
+  throw new PlatformApiError(400, 'INVALID_INPUT', '代理协议必须是 http、https、socks5 或 socks5h');
+}
+
+function nestedEgressProxy(value: unknown): unknown {
+  if (isRecord(value) && isRecord(value.proxy)) return value.proxy;
+  return value;
+}
+
+function parsePlatformEgressProxy(value: unknown): PlatformEgressProxy {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.name !== 'string') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '代理响应无效');
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    protocol: typeof value.protocol === 'string' ? value.protocol : '',
+    host: typeof value.host === 'string' ? value.host : '',
+    port: typeof value.port === 'number' ? value.port : 0,
+    hasCredentials: value.hasCredentials === true,
+    status: typeof value.status === 'string' ? value.status : '',
+    expiresAt: optionalString(value.expiresAt, 'expiresAt') ?? null,
+    fallbackMode: typeof value.fallbackMode === 'string' ? value.fallbackMode : 'none',
+    backupProxyId: optionalString(value.backupProxyId, 'backupProxyId') ?? null,
+    lastProbeAt: optionalString(value.lastProbeAt, 'lastProbeAt') ?? null,
+    lastProbeLatencyMs: typeof value.lastProbeLatencyMs === 'number' ? value.lastProbeLatencyMs : null,
+    lastProbeIp: optionalString(value.lastProbeIp, 'lastProbeIp') ?? null,
+    lastProbeQuality: optionalString(value.lastProbeQuality, 'lastProbeQuality') ?? null,
+  };
+}
+
+function parsePlatformEgressProxyList(value: unknown): PlatformEgressProxy[] {
+  if (!isRecord(value) || !Array.isArray(value.proxies)) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '代理列表响应无效');
+  }
+  return value.proxies.map(parsePlatformEgressProxy);
+}
+
+function opencodeGoAccountBody(input: PlatformOpencodeGoAccountRef): Record<string, unknown> {
+  return {
+    ownerKind: input.ownerKind,
+    tenantId: input.ownerKind === 'tenant' ? billingGroupText(input.tenantId ?? '', 'tenantId', 64) : null,
+    accountId: billingGroupText(input.accountId, 'accountId', 128),
+  };
+}
+
+function opencodeGoVersion(value: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new PlatformApiError(400, 'INVALID_INPUT', 'expectedAuthzVersion 必须是非负整数');
+  }
+  return value;
+}
+
+function opencodeGoProtocol(value: string): PlatformOpencodeGoProtocol {
+  if (value !== 'responses' && value !== 'openai' && value !== 'anthropic') {
+    throw new PlatformApiError(400, 'INVALID_INPUT', '协议必须是 responses、openai 或 anthropic');
+  }
+  return value;
+}
+
+function parsePlatformOpencodeGoRule(value: unknown): PlatformOpencodeGoProtocolRule {
+  if (!isRecord(value) || typeof value.pattern !== 'string' || typeof value.protocol !== 'string') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '规则表响应无效');
+  }
+  return { pattern: value.pattern, protocol: opencodeGoProtocol(value.protocol) };
+}
+
+function parsePlatformOpencodeGoRulesState(value: unknown): {
+  authzVersion: number;
+  rules: PlatformOpencodeGoProtocolRule[] | null;
+} {
+  if (!isRecord(value) || typeof value.authzVersion !== 'number') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '规则表状态响应无效');
+  }
+  if (value.rules === null || value.rules === undefined) return { authzVersion: value.authzVersion, rules: null };
+  if (!Array.isArray(value.rules)) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '规则表状态响应无效');
+  }
+  return { authzVersion: value.authzVersion, rules: value.rules.map(parsePlatformOpencodeGoRule) };
+}
+
+function parsePlatformSettingRecord(value: unknown): PlatformSettingView {
+  if (!isRecord(value) || typeof value.key !== 'string' || typeof value.version !== 'number') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '平台设置响应无效');
+  }
+  return {
+    key: value.key,
+    secret: value.secret === true,
+    value: value.value,
+    version: value.version,
+    updatedAt: requiredString(value.updatedAt, 'updatedAt'),
+    ...(typeof value.updatedByUserId === 'string' ? { updatedByUserId: value.updatedByUserId } : {}),
+  };
+}
+
+function parsePlatformSettingList(value: unknown): PlatformSettingView[] {
+  if (!isRecord(value) || !Array.isArray(value.settings)) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '平台设置列表响应无效');
+  }
+  return value.settings.map(parsePlatformSettingRecord);
+}
+
+function parsePlatformProbeMonitorTrigger(value: unknown): PlatformProbeMonitorTriggerResult {
+  if (!isRecord(value) || typeof value.monitorId !== 'string' || typeof value.accountId !== 'string') {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '探测触发响应无效');
+  }
+  return {
+    monitorId: value.monitorId,
+    accountId: value.accountId,
+    ownerKind: value.ownerKind === 'tenant' ? 'tenant' : 'platform',
+    category: typeof value.category === 'string' ? value.category : '',
+    queued: true,
+    lastResult: optionalString(value.lastResult, 'lastResult') ?? null,
+    lastRunAt: optionalString(value.lastRunAt, 'lastRunAt') ?? null,
+    consecutiveFailures: typeof value.consecutiveFailures === 'number' ? value.consecutiveFailures : 0,
+  };
+}
+
+function parsePlatformProbeMonitorList(value: unknown): PlatformProbeMonitorView[] {
+  if (!isRecord(value) || !Array.isArray(value.monitors)) {
+    throw new PlatformApiError(200, 'INVALID_RESPONSE', '探测监控列表响应无效');
+  }
+  return value.monitors
+    .filter((monitor): monitor is Record<string, unknown> => isRecord(monitor))
+    .map(monitor => ({
+      monitorId: requiredString(monitor.monitorId, 'monitorId'),
+      ownerKind: monitor.ownerKind === 'tenant' ? 'tenant' : 'platform',
+      ownerTenantId: optionalString(monitor.ownerTenantId, 'ownerTenantId') ?? null,
+      accountId: requiredString(monitor.accountId, 'accountId'),
+      category: typeof monitor.category === 'string' ? monitor.category : '',
+      probeIntervalSeconds: typeof monitor.probeIntervalSeconds === 'number' ? monitor.probeIntervalSeconds : 0,
+      failureThreshold: typeof monitor.failureThreshold === 'number' ? monitor.failureThreshold : 0,
+      consecutiveFailures: typeof monitor.consecutiveFailures === 'number' ? monitor.consecutiveFailures : 0,
+      lastResult: optionalString(monitor.lastResult, 'lastResult') ?? null,
+      lastRunAt: optionalString(monitor.lastRunAt, 'lastRunAt') ?? null,
+      nextDueAt: optionalString(monitor.nextDueAt, 'nextDueAt') ?? null,
+      enabled: monitor.enabled === true,
+      updatedAt: requiredString(monitor.updatedAt, 'updatedAt'),
+    }));
+}
+
 export const platformClient = {
   async login(input: PlatformLoginInput): Promise<PlatformLoginResult> {
     clearPlatformCsrfToken();
@@ -2995,6 +3519,237 @@ export const platformClient = {
     return request<unknown>(`/ops/channel-status?days=${encodeURIComponent(String(days))}`, options).then(
       parseOpsChannelStatus,
     );
+  },
+
+  // ---- F5 console surfaces (task #38) ----
+
+  listBillingGroups(options: ReadRequestOptions = {}): Promise<PlatformBillingGroup[]> {
+    return request<unknown>('/billing-groups/list', { ...options, method: 'POST', body: {} })
+      .then(parsePlatformBillingGroupList);
+  },
+
+  getBillingGroup(
+    groupId: string,
+    options: ReadRequestOptions = {},
+  ): Promise<{ group: PlatformBillingGroup; accountPool: PlatformBillingGroupPoolEntry[] }> {
+    return request<unknown>('/billing-groups/get', {
+      ...options,
+      method: 'POST',
+      body: { groupId: billingGroupIdInput(groupId) },
+    }).then(parsePlatformBillingGroupDetail);
+  },
+
+  createBillingGroup(
+    input: PlatformBillingGroupUpsertInput,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformBillingGroup> {
+    return request<unknown>('/billing-groups/create', {
+      ...options,
+      method: 'POST',
+      body: billingGroupUpsertBody(input),
+    }).then(value => parsePlatformBillingGroup(nestedBillingGroup(value)));
+  },
+
+  updateBillingGroup(
+    input: PlatformBillingGroupUpsertInput,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformBillingGroup> {
+    return request<unknown>('/billing-groups/update', {
+      ...options,
+      method: 'POST',
+      body: billingGroupUpsertBody(input),
+    }).then(value => parsePlatformBillingGroup(nestedBillingGroup(value)));
+  },
+
+  replaceBillingGroupAccountPool(
+    groupId: string,
+    accounts: PlatformBillingGroupPoolEntry[],
+    options: ReadRequestOptions = {},
+  ): Promise<{ accounts: PlatformBillingGroupPoolEntry[]; invalidatedKeys: number }> {
+    return request<unknown>('/billing-groups/replace-account-pool', {
+      ...options,
+      method: 'POST',
+      body: {
+        groupId: billingGroupIdInput(groupId),
+        accounts: accounts.map(entry => ({
+          accountId: billingGroupText(entry.accountId, 'accountId'),
+          priority: billingGroupPriority(entry.priority),
+        })),
+      },
+    }).then(parsePlatformBillingGroupPoolOutcome);
+  },
+
+  setKeyBillingGroup(
+    input: PlatformKeyBillingGroupInput,
+    options: ReadRequestOptions = {},
+  ): Promise<{ keyId: string; billingGroupId: string | null; authzVersion: string }> {
+    const body: Record<string, unknown> = {
+      tenantId: billingGroupText(input.tenantId, 'tenantId'),
+      projectId: billingGroupText(input.projectId, 'projectId'),
+      keyId: billingGroupText(input.keyId, 'keyId'),
+      billingGroupId: input.billingGroupId === null ? null : billingGroupIdInput(input.billingGroupId),
+    };
+    return request<unknown>('/billing-groups/set-key-group', { ...options, method: 'POST', body }).then(
+      parsePlatformKeyBillingGroupOutcome,
+    );
+  },
+
+  listEgressProxies(options: ReadRequestOptions = {}): Promise<PlatformEgressProxy[]> {
+    return request<unknown>('/egress-proxies/list', { ...options, method: 'POST', body: {} })
+      .then(parsePlatformEgressProxyList);
+  },
+
+  getEgressProxy(
+    proxyId: string,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformEgressProxy> {
+    return request<unknown>('/egress-proxies/get', {
+      ...options,
+      method: 'POST',
+      body: { proxyId: egressProxyText(proxyId, 'proxyId') },
+    }).then(value => parsePlatformEgressProxy(nestedEgressProxy(value)));
+  },
+
+  createEgressProxy(
+    input: PlatformEgressProxyUpsertInput,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformEgressProxy> {
+    return request<unknown>('/egress-proxies/create', {
+      ...options,
+      method: 'POST',
+      body: egressProxyUpsertBody(input),
+    }).then(value => parsePlatformEgressProxy(nestedEgressProxy(value)));
+  },
+
+  updateEgressProxy(
+    proxyId: string,
+    input: PlatformEgressProxyUpsertInput,
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformEgressProxy> {
+    return request<unknown>('/egress-proxies/update', {
+      ...options,
+      method: 'POST',
+      body: egressProxyUpsertBody(input, proxyId),
+    }).then(value => parsePlatformEgressProxy(nestedEgressProxy(value)));
+  },
+
+  deleteEgressProxy(proxyId: string, options: ReadRequestOptions = {}): Promise<{ deleted: true }> {
+    return request<unknown>('/egress-proxies/delete', {
+      ...options,
+      method: 'POST',
+      body: { proxyId: egressProxyText(proxyId, 'proxyId') },
+    }).then(value => {
+      if (!isRecord(value) || value.deleted !== true) {
+        throw new PlatformApiError(200, 'INVALID_RESPONSE', '代理删除响应无效');
+      }
+      return { deleted: true as const };
+    });
+  },
+
+  readOpencodeGoRules(
+    input: PlatformOpencodeGoAccountRef,
+    options: ReadRequestOptions = {},
+  ): Promise<{ authzVersion: number; rules: PlatformOpencodeGoProtocolRule[] | null }> {
+    return request<unknown>('/opencode-go-rules/read', {
+      ...options,
+      method: 'POST',
+      body: opencodeGoAccountBody(input),
+    }).then(parsePlatformOpencodeGoRulesState);
+  },
+
+  updateOpencodeGoRules(
+    input: PlatformOpencodeGoRulesUpdateInput,
+    options: ReadRequestOptions = {},
+  ): Promise<{ authzVersion: number; rules: PlatformOpencodeGoProtocolRule[] | null }> {
+    return request<unknown>('/opencode-go-rules/update', {
+      ...options,
+      method: 'POST',
+      body: {
+        ...opencodeGoAccountBody(input),
+        expectedAuthzVersion: opencodeGoVersion(input.expectedAuthzVersion),
+        rules: input.rules === null ? null : input.rules.map(rule => ({
+          pattern: billingGroupText(rule.pattern, 'pattern'),
+          protocol: opencodeGoProtocol(rule.protocol),
+        })),
+      },
+    }).then(parsePlatformOpencodeGoRulesState);
+  },
+
+  listOpencodeGoModels(options: ReadRequestOptions = {}): Promise<string[]> {
+    return request<unknown>('/opencode-go-models/list', { ...options, method: 'POST', body: {} }).then(value => {
+      if (!isRecord(value) || !Array.isArray(value.models) || value.models.some(model => typeof model !== 'string')) {
+        throw new PlatformApiError(200, 'INVALID_RESPONSE', '模型目录响应无效');
+      }
+      return value.models as string[];
+    });
+  },
+
+  listPlatformSettings(options: ReadRequestOptions = {}): Promise<PlatformSettingView[]> {
+    return request<unknown>('/platform-settings', options).then(parsePlatformSettingList);
+  },
+
+  setPlatformSetting(
+    input: { key: string; value: string; expectedVersion: number },
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformSettingView> {
+    return request<unknown>('/platform-settings', {
+      ...options,
+      method: 'PUT',
+      body: {
+        key: billingGroupText(input.key, 'key'),
+        value: input.value,
+        expectedVersion: input.expectedVersion,
+      },
+    }).then(parsePlatformSettingRecord);
+  },
+
+  setPlatformSettingSecret(
+    input: { key: string; secret: string; expectedVersion: number },
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformSettingView> {
+    return request<unknown>('/platform-settings', {
+      ...options,
+      method: 'PUT',
+      body: {
+        key: billingGroupText(input.key, 'key'),
+        secret: input.secret,
+        expectedVersion: input.expectedVersion,
+      },
+    }).then(parsePlatformSettingRecord);
+  },
+
+  triggerProbeMonitor(
+    input: { ownerKind: 'tenant' | 'platform'; accountId: string; tenantId?: string },
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformProbeMonitorTriggerResult> {
+    return request<unknown>('/probe-monitors/trigger', {
+      ...options,
+      method: 'POST',
+      body: {
+        ownerKind: input.ownerKind,
+        tenantId:
+          input.ownerKind === 'tenant'
+            ? billingGroupText(input.tenantId ?? '', 'tenantId')
+            : null,
+        accountId: billingGroupText(input.accountId, 'accountId'),
+      },
+    }).then(parsePlatformProbeMonitorTrigger);
+  },
+
+  listProbeMonitors(
+    query: { ownerKind?: 'tenant' | 'platform'; tenantId?: string; accountId?: string; limit?: number } = {},
+    options: ReadRequestOptions = {},
+  ): Promise<PlatformProbeMonitorView[]> {
+    return request<unknown>('/probe-monitors/list', {
+      ...options,
+      method: 'POST',
+      body: {
+        ownerKind: query.ownerKind ?? null,
+        tenantId: query.tenantId ?? null,
+        accountId: query.accountId ?? null,
+        limit: query.limit ?? null,
+      },
+    }).then(parsePlatformProbeMonitorList);
   },
 };
 

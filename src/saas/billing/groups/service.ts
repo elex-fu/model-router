@@ -224,15 +224,44 @@ export class SaasBillingGroupsService {
   }
 
   /**
+   * Admin read of one group's account-pool membership (the R1 console
+   * surface): bounded, priority-descending. The mutation lives in
+   * replaceGroupAccountPool.
+   */
+  async listGroupAccountPool(
+    groupId: string,
+    options: { readonly executor?: SqlExecutor } = {},
+  ): Promise<readonly { readonly accountId: string; readonly priority: number }[]> {
+    if (typeof groupId !== 'string' || groupId.trim().length === 0) fail('INVALID_INPUT');
+    const executor = options.executor ?? this.database;
+    const result = await executor.query<Row>(
+      `/* saas-billing-groups:pool-list */
+       SELECT account_id, priority FROM saas_billing_group_account_pools
+        WHERE group_id = $1
+        ORDER BY priority DESC, account_id ASC
+        LIMIT 10_000`,
+      [groupId],
+    );
+    return result.rows.map((row) => ({
+      accountId: String(row.account_id),
+      priority: Number(row.priority),
+    }));
+  }
+
+  /**
    * Replaces one group's account pool membership. Pool membership changes the
    * scheduling candidates for every key bound to the group (explicitly or via
    * a tenant default), so those keys' authz_version is bumped in the same
-   * transaction (047/082 invalidation pattern).
+   * transaction (047/082 invalidation pattern). The returned
+   * invalidatedKeys count surfaces that fence bump to the admin caller.
    */
   async replaceGroupAccountPool(
     groupId: string,
     entries: readonly { readonly accountId: string; readonly priority: number }[],
-  ): Promise<readonly { readonly accountId: string; readonly priority: number }[]> {
+  ): Promise<{
+    readonly entries: readonly { readonly accountId: string; readonly priority: number }[];
+    readonly invalidatedKeys: number;
+  }> {
     if (typeof groupId !== 'string' || groupId.trim().length === 0) fail('INVALID_INPUT');
     if (!Array.isArray(entries) || entries.length > 10_000) fail('INVALID_INPUT');
     const seen = new Set<string>();
@@ -267,15 +296,16 @@ export class SaasBillingGroupsService {
           [groupId, entry.accountId, entry.priority],
         );
       }
-      await tx.query(
+      const invalidated = await tx.query(
         `UPDATE saas_api_keys
             SET authz_version = authz_version + 1
           WHERE billing_group_id = $1
              OR (billing_group_id IS NULL
-                 AND tenant_id IN (SELECT id FROM saas_tenants WHERE default_billing_group_id = $1))`,
+                 AND tenant_id IN (SELECT id FROM saas_tenants WHERE default_billing_group_id = $1))
+          RETURNING id`,
         [groupId],
       );
-      return entries;
+      return { entries, invalidatedKeys: invalidated.rowCount ?? 0 };
     });
   }
 
