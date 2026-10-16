@@ -410,10 +410,13 @@ interface PreparedCapture {
  * The production payload compiler (createProviderPayloadCompiler) wired with
  * an echoing runtime route resolver — the same pass-through a deployment
  * implements when its route resolver echoes the (decorated) authority. This
- * is the layer the R5b-4 Responses-bridge restriction lives in.
+ * is the layer the F3 cross-Responses bridging decision lives in (bridged by
+ * default; `opencodeGoCrossResponsesRouting: 'restrict'` restores the R5b-4
+ * fail-closed gate).
  */
 function productionRoutingPayloadCompiler(
   rules?: readonly OpenCodeGoProtocolRule[],
+  crossResponsesRouting: 'bridge' | 'restrict' = 'bridge',
 ): RequestPreparationPayloadCompiler {
   return createProviderPayloadCompiler({
     providerPreparationRoute: async ({ authority }) => ({
@@ -443,6 +446,7 @@ function productionRoutingPayloadCompiler(
       compilerVersion: 'test-compiler-v1',
     },
     ...(rules === undefined ? {} : { opencodeGoProtocolRouting: { rules } }),
+    ...(crossResponsesRouting === 'restrict' ? { opencodeGoCrossResponsesRouting: 'restrict' as const } : {}),
   } as unknown as ManagedSaasGatewayProductionOptions);
 }
 
@@ -563,7 +567,7 @@ test('a configured rule table overrides the built-in default table', async () =>
 });
 
 /* ------------------------------------------------------------------ */
-/* R5b-4 gap 3: Responses-bridge restriction (fail closed)             */
+/* F3: cross-protocol Responses bridging (real conversion)             */
 /* ------------------------------------------------------------------ */
 
 test('isOpenCodeGoCrossResponsesRoute gates exactly the cross-protocol Responses pairs', () => {
@@ -577,22 +581,45 @@ test('isOpenCodeGoCrossResponsesRoute gates exactly the cross-protocol Responses
   assert.equal(isOpenCodeGoCrossResponsesRoute('anthropic', 'anthropic'), false);
 });
 
-test('a responses-routed model from an openai client is blocked at the compile layer', async () => {
-  // The compiler's SUPPORTED_BRIDGE_PAIRS gate alone would let the
-  // openai->responses passthrough stub through with a wrong-shaped payload;
-  // the production compile wrapper must fail closed with the
-  // capability-style error instead.
+test('F3: a responses-routed model from an openai client prepares through the real bridge', async () => {
+  // The generic openai→responses bridge is a real conversion now, so the
+  // grok-routed model prepares end-to-end from a chat client instead of being
+  // blocked by the R5b-4 gate.
   const capture = await prepareWithRouting(opencodeGoAuthority('grok-4.7'), undefined, {
     payload: productionRoutingPayloadCompiler(),
   });
-  assert.equal(capture.outcome, 'blocked', JSON.stringify(capture));
-  assert.equal(capture.stage, 'payload');
-  assert.equal(capture.code, 'capability_unsupported');
+  assert.equal(capture.outcome, 'prepared', JSON.stringify(capture));
+  assert.equal(capture.providerProtocol, 'responses');
+  assert.equal(capture.providerOperation, 'responses');
+  assert.equal(capture.endpoint, OPENCODE_GO_ENDPOINT);
 });
 
-test('an anthropic client requesting a responses-routed model is blocked at the compile layer', async () => {
-  // Same gate from the anthropic side: the anthropic->responses passthrough
-  // stub must not forward an unconverted Anthropic body to the Responses API.
+test('F3: the compiled payload for an openai client is Responses-shaped, not chat-shaped', async () => {
+  const compiler = productionRoutingPayloadCompiler();
+  const decision = await compiler.compile({
+    caller: caller(),
+    entitlement: entitlement(),
+    authority: opencodeGoAuthority('grok-4.7'),
+    clientRequest: {
+      model: PUBLIC_MODEL,
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'hello' },
+      ],
+      max_tokens: 64,
+    },
+  });
+  assert.equal(decision.decision, 'allow', JSON.stringify(decision));
+  if (decision.decision !== 'allow') return;
+  const payload = JSON.parse(new TextDecoder().decode(decision.value.payloadBytes)) as Record<string, unknown>;
+  assert.equal(payload.model, 'grok-4.7');
+  assert.equal(payload.instructions, 'sys');
+  assert.equal(payload.max_output_tokens, 64);
+  assert.equal('messages' in payload, false);
+  assert.deepEqual(payload.input, [{ role: 'user', content: 'hello' }]);
+});
+
+test('F3: an anthropic client requesting a responses-routed model compiles through the real bridge', async () => {
   const anthropicAuthority: RequestPreparationAuthority = {
     ...opencodeGoAuthority('gpt-5.6-luna'),
     route: {
@@ -611,12 +638,50 @@ test('an anthropic client requesting a responses-routed model is blocked at the 
     caller: caller(),
     entitlement: entitlement(),
     authority: anthropicAuthority,
+    clientRequest: {
+      model: PUBLIC_MODEL,
+      system: 'Be concise',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 32,
+    },
+  });
+  assert.equal(decision.decision, 'allow', JSON.stringify(decision));
+  if (decision.decision !== 'allow') return;
+  const payload = JSON.parse(new TextDecoder().decode(decision.value.payloadBytes)) as Record<string, unknown>;
+  assert.equal(payload.model, 'gpt-5.6-luna');
+  assert.equal(payload.instructions, 'Be concise');
+  assert.equal(payload.max_output_tokens, 32);
+  assert.equal('messages' in payload, false);
+  assert.deepEqual(payload.input, [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]);
+});
+
+test('F3: opencodeGoCrossResponsesRouting restrict restores the R5b-4 fail-closed gate', async () => {
+  const capture = await prepareWithRouting(opencodeGoAuthority('grok-4.7'), undefined, {
+    payload: productionRoutingPayloadCompiler(undefined, 'restrict'),
+  });
+  assert.equal(capture.outcome, 'blocked', JSON.stringify(capture));
+  assert.equal(capture.stage, 'payload');
+  assert.equal(capture.code, 'capability_unsupported');
+
+  // The restrict option is scoped to the OpenCode Go provider: a
+  // non-OpenCode-Go responses provider still bridges an openai client.
+  const foreignResponsesAuthority: RequestPreparationAuthority = {
+    ...opencodeGoAuthority('grok-4.7'),
+    candidate: { ...opencodeGoAuthority('grok-4.7').candidate, providerId: 'provider-a', productId: 'product-a' },
+    route: {
+      ...opencodeGoAuthority('grok-4.7').route,
+      providerProtocol: 'responses',
+      providerOperation: 'responses',
+    },
+  };
+  const foreignCompiler = productionRoutingPayloadCompiler(undefined, 'restrict');
+  const foreign = await foreignCompiler.compile({
+    caller: caller(),
+    entitlement: entitlement(),
+    authority: foreignResponsesAuthority,
     clientRequest: { model: PUBLIC_MODEL, messages: [{ role: 'user', content: 'hello' }] },
   });
-  assert.equal(decision.decision, 'block');
-  if (decision.decision === 'block') {
-    assert.equal(decision.code, 'capability_unsupported');
-  }
+  assert.equal(foreign.decision, 'allow', JSON.stringify(foreign));
 });
 
 test('a responses client requesting a responses-routed model still prepares', async () => {
@@ -630,10 +695,10 @@ test('a responses client requesting a responses-routed model still prepares', as
   assert.equal(capture.endpoint, OPENCODE_GO_ENDPOINT);
 });
 
-test('the compile-layer restriction leaves non-responses cross-protocol routing intact', async () => {
+test('non-responses cross-protocol routing stays intact alongside the bridged Responses pair', async () => {
   // glm-5.3 (chat-completions native) and minimax-m3 (anthropic native) both
   // keep preparing through the production compile wrapper from an openai
-  // client: only the Responses cross pair is restricted.
+  // client: the F3 change only affects the Responses cross pair.
   for (const scenario of [
     { resolvedModel: 'glm-5.3', protocol: 'openai', operation: 'chat.completions' },
     { resolvedModel: 'minimax-m3', protocol: 'anthropic', operation: 'messages' },

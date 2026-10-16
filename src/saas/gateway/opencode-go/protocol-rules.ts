@@ -145,15 +145,18 @@ export function openCodeGoProviderOperationForProtocol(
 
 /**
  * R5b-4 (closes R5b-2 gap 3): the generic openai→responses and
- * anthropic→responses bridges are passthrough stubs — only the codex compile
- * layer (gateway/codex/payload.ts) owns real Responses conversion — so an
- * OpenCode Go model the rule table routes to the Responses native must be
+ * anthropic→responses bridges were passthrough stubs — only the codex compile
+ * layer (gateway/codex/payload.ts) owned real Responses conversion — so an
+ * OpenCode Go model the rule table routes to the Responses native had to be
  * requested through a `responses` client, or the gateway would forward a
- * wrong-shaped payload. This predicate is the fail-closed gate: true means
+ * wrong-shaped payload. This predicate was the fail-closed gate: true means
  * the request must be blocked with the capability-style error instead of
- * dispatched. (responses→openai / responses→anthropic already fail closed in
- * the compiler's SUPPORTED_BRIDGE_PAIRS gate.) Real cross-protocol Responses
- * conversion is future work.
+ * dispatched. F3 made both bridges real conversions
+ * (gateway/responses-bridge), so the production compile wrapper now bridges
+ * these routes by default and only applies this gate when an operator opts
+ * back in with `opencodeGoCrossResponsesRouting: 'restrict'`.
+ * (responses→openai / responses→anthropic still fail closed in the
+ * compiler's SUPPORTED_BRIDGE_PAIRS gate.)
  */
 export function isOpenCodeGoCrossResponsesRoute(clientProtocol: string, routedProtocol: string): boolean {
   return routedProtocol === 'responses' && clientProtocol !== 'responses';

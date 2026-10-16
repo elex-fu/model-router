@@ -286,9 +286,11 @@ const SUPPORTED_BRIDGE_PAIRS = new Set<string>([
   'openai->anthropic',
   'anthropic->gemini',
   'anthropic->responses',
-  // P1c: chat.completions clients against a Responses provider (Codex). The
-  // generic bridge for this pair is a passthrough; the codex compile layer
-  // (gateway/codex/payload.ts) owns the actual request conversion.
+  // F3: chat.completions and Anthropic Messages clients against a Responses
+  // provider. Both compile through the real generic Responses conversion
+  // (gateway/responses-bridge + src/protocol/responses.ts); the codex compile
+  // layer (gateway/codex/payload.ts) still owns its own stricter transform
+  // for codex traffic.
   'openai->responses',
 ]);
 

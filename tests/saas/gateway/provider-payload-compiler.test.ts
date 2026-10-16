@@ -231,6 +231,97 @@ test('uses the explicitly supported Anthropic to Responses request bridge', asyn
   assert.equal(result.providerProtocol, 'responses');
 });
 
+test('F3: compiles an OpenAI chat.completions client through the real Responses bridge', async () => {
+  const result = allowed(
+    await createProviderPayloadCompiler(options({ providerProtocol: 'responses', operation: 'responses' })).compile(
+      input(
+        {
+          model: 'public-alias',
+          messages: [
+            { role: 'system', content: 'sys' },
+            { role: 'user', content: 'hi' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'call_1', function: { name: 'lookup', arguments: '{"q":"x"}' } }],
+            },
+            { role: 'tool', tool_call_id: 'call_1', content: 'result' },
+          ],
+          max_tokens: 128,
+        },
+        { authority: authority({ clientProtocol: 'openai' }) },
+      ),
+    ),
+  );
+  const payload = JSON.parse(new TextDecoder().decode(result.payloadBytes)) as Record<string, unknown>;
+
+  assert.equal(result.providerProtocol, 'responses');
+  assert.equal(result.providerOperation, 'responses');
+  assert.equal(payload.model, 'provider-model');
+  assert.equal(payload.instructions, 'sys');
+  assert.equal(payload.max_output_tokens, 128);
+  assert.equal('messages' in payload, false);
+  const inputItems = payload.input as Array<Record<string, unknown>>;
+  assert.deepEqual(inputItems[0], { role: 'user', content: 'hi' });
+  assert.deepEqual(inputItems[1], {
+    type: 'function_call',
+    call_id: 'call_1',
+    name: 'lookup',
+    arguments: '{"q":"x"}',
+  });
+  assert.deepEqual(inputItems[2], { type: 'function_call_output', call_id: 'call_1', output: 'result' });
+});
+
+test('F3: compiles an Anthropic Messages client through the real Responses bridge with tool mapping', async () => {
+  const result = allowed(
+    await createProviderPayloadCompiler(options({ providerProtocol: 'responses', operation: 'responses' })).compile(
+      input(
+        {
+          model: 'public-alias',
+          system: 'Be concise',
+          messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'lookup', input: { q: 'x' } }] },
+            { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'found' }] },
+          ],
+          max_tokens: 64,
+        },
+        { authority: authority({ clientProtocol: 'anthropic' }) },
+      ),
+    ),
+  );
+  const payload = JSON.parse(new TextDecoder().decode(result.payloadBytes)) as Record<string, unknown>;
+
+  assert.equal(result.providerProtocol, 'responses');
+  assert.equal(payload.model, 'provider-model');
+  assert.equal(payload.instructions, 'Be concise');
+  assert.equal(payload.max_output_tokens, 64);
+  const inputItems = payload.input as Array<Record<string, unknown>>;
+  assert.deepEqual(inputItems[0], { role: 'user', content: [{ type: 'input_text', text: 'hello' }] });
+  assert.deepEqual(inputItems[1], {
+    type: 'function_call',
+    call_id: 'toolu_1',
+    name: 'lookup',
+    arguments: '{"q":"x"}',
+  });
+  assert.deepEqual(inputItems[2], { type: 'function_call_output', call_id: 'toolu_1', output: 'found' });
+});
+
+test('F3: reverse Responses conversions stay fail-closed in the compiler', async () => {
+  // A responses client cannot be served by an openai or anthropic provider:
+  // the reverse conversion is not implemented, so the pair gate blocks.
+  for (const providerProtocol of ['openai', 'anthropic'] as const) {
+    const operation = providerProtocol === 'openai' ? 'chat.completions' : 'messages';
+    const blocked = await createProviderPayloadCompiler(options({ providerProtocol, operation })).compile(
+      input({ model: 'public-alias', input: 'hello' }, { authority: authority({ clientProtocol: 'responses' }) }),
+    );
+    assert.equal(blocked.decision, 'block', providerProtocol);
+    if (blocked.decision === 'block') {
+      assert.equal(blocked.code, 'capability_unavailable', providerProtocol);
+    }
+  }
+});
+
 test('rejects unsupported operations and unsupported gemini to anthropic conversion', async () => {
   const unsupportedOperation = await createProviderPayloadCompiler(
     options({ providerProtocol: 'responses', operation: 'responses.compact' }),
