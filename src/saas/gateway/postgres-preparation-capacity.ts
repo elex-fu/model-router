@@ -16,6 +16,21 @@ type Row = Record<string, unknown>;
 const SAFE_CAPACITY_FAILURE = 'Request capacity authority could not be established.';
 const PG_BIGINT_MAX = 9_223_372_036_854_775_807n;
 const JS_SAFE_INTEGER_MAX = BigInt(Number.MAX_SAFE_INTEGER);
+/**
+ * R9 P10: staleness horizon for the in-flight concurrency truth. The provider
+ * HTTP transport hard-caps every dispatched request at 300_000 ms
+ * (provider-http-transport.ts MAX_TIMEOUT_MS) and that timeout spans the entire
+ * response body, so no legal in-flight request — however slow its stream — can
+ * outlive it. The horizon is twice that ceiling: a merely slow stream still has
+ * a full timeout window of margin, while a pending/unknown row whose last state
+ * transition is older than the horizon can no longer be legally executing
+ * upstream and must stop blocking admission (a crashed gateway or a settle
+ * failure must not poison the ledger forever). The exclusion drops no billing
+ * truth: financial_status, reconciliation_state and the billing reservation
+ * stay authoritative, and the unknown-outcome recovery worker's stale-admission
+ * sweep (same horizon, STALE_ADMISSION_HORIZON_MS) reconciles the rows.
+ */
+export const CONCURRENCY_INFLIGHT_HORIZON_SECONDS = 600;
 
 interface CapacityAuthority extends Row {
   tenant_status: unknown;
@@ -364,12 +379,17 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
       const countRows = await queryRows<Row>(
         executor,
         `WITH existing AS (
-           /* Execution rows, not reservation leases, own the concurrency truth. */
+           /* Execution rows, not reservation leases, own the concurrency truth.
+              Rows past the in-flight horizon can no longer be legally executing
+              upstream (the provider transport timeout ceiling has long passed),
+              so they stop blocking admission while the recovery worker
+              reconciles them; see CONCURRENCY_INFLIGHT_HORIZON_SECONDS. */
            SELECT q.tenant_id, q.project_id, q.proxy_key_id, q.id
              FROM saas_requests q
             WHERE q.tenant_id = $1
               AND q.id <> $4
               AND q.execution_state IN ('pending', 'unknown')
+              AND q.updated_at > clock_timestamp() - INTERVAL '${CONCURRENCY_INFLIGHT_HORIZON_SECONDS} seconds'
               AND (
                 q.execution_state = 'unknown'
                 OR EXISTS (

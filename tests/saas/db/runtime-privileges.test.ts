@@ -139,7 +139,11 @@ test('operations summary has only its exact additional control-plane SELECT gran
     SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
       ([table, column]) => table === 'saas_requests' && column === 'financial_status',
     ),
-    [['saas_requests', 'financial_status', 'SELECT']],
+    [
+      ['saas_requests', 'financial_status', 'SELECT'],
+      // R9 P7: the recovery worker's guard-enforced financial reconciliation.
+      ['saas_requests', 'financial_status', 'UPDATE'],
+    ],
   );
 });
 
@@ -822,6 +826,81 @@ test('control-plane unknown-outcome grants match the scanner and append-only obs
   );
 });
 
+test('recovery worker owns exactly the metering CAS and sweep grants, never wide request reads', () => {
+  // R9 P7/P9/P10: the control-plane recovery worker drives the metering guard
+  // triggers with narrow CAS statements. Its attempt contract is the snapshot
+  // columns plus the terminal transition columns — nothing more.
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_attempts'),
+    [
+      ...[
+        'id',
+        'tenant_id',
+        'request_id',
+        'ordinal',
+        'result_state',
+        'response_started',
+        'response_started_at',
+        'result_http_status',
+        'created_at',
+        'updated_at',
+        'provider_id',
+        'upstream_id',
+        'route_config_id',
+        'resolved_model',
+        'dispatch_state',
+        'unknown_reason',
+        'state_version',
+        'account_owner_kind',
+        'account_id',
+        'product_id',
+      ].map((column) => ['saas_attempts', column, 'SELECT'] as [string, string, string]),
+      ...['dispatch_state', 'result_state', 'unknown_reason', 'updated_at', 'state_version'].map(
+        (column) => ['saas_attempts', column, 'UPDATE'] as [string, string, string],
+      ),
+    ],
+  );
+  for (const column of [
+    'account_owner_kind',
+    'account_id',
+    'product_id',
+    'state_version',
+    'credential_id',
+    'pool_id',
+    'payload_sha256',
+  ]) {
+    assert.equal(
+      SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+        ([table, field, privilege]) => table === 'saas_attempts' && field === column && privilege === 'SELECT',
+      ) === ['account_owner_kind', 'account_id', 'product_id', 'state_version'].includes(column),
+      true,
+      `attempt snapshot column contract drifted for ${column}`,
+    );
+  }
+  // Usage snapshots read only the digest scope the worker's observations need.
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
+      ([table, column]) => table === 'saas_usage_events' && ['attempt_id', 'event_digest'].includes(column),
+    ),
+    [
+      ['saas_usage_events', 'attempt_id', 'SELECT'],
+      ['saas_usage_events', 'event_digest', 'SELECT'],
+    ],
+  );
+  // The stale-admission sweep fails never-dispatched reservations under their
+  // own transactions with the fail-closed disposition only.
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_gateway_capacity_reservations'),
+    [
+      ['saas_gateway_capacity_reservations', 'tenant_id', 'SELECT'],
+      ['saas_gateway_capacity_reservations', 'request_id', 'SELECT'],
+      ['saas_gateway_capacity_reservations', 'state', 'SELECT'],
+      ['saas_gateway_capacity_reservations', 'state', 'UPDATE'],
+      ['saas_gateway_capacity_reservations', 'updated_at', 'UPDATE'],
+    ],
+  );
+});
+
 test('gateway probe is selected only by the optional workload role and defaults to control-plane policy', async () => {
   const seen: string[] = [];
   const database = {
@@ -1388,22 +1467,30 @@ test('probe pins the effective path and inspects role, ownership, and effective 
   assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /out_of_schema_function_privilege/);
 });
 
-test('customer request axes add exactly one CP purpose SELECT, with no request writes or internal identifiers', () => {
+test('customer request axes keep CP reads purpose-scoped; only the recovery worker owns state-machine UPDATEs', () => {
   const expected = [
-    'id',
-    'tenant_id',
-    'project_id',
-    'public_model',
-    'protocol',
-    'supply_mode',
-    'execution_state',
-    'financial_status',
-    'reconciliation_state',
-    'created_at',
-    'updated_at',
-  ]
-    .map((column) => ['saas_requests', column, 'SELECT'].join('\t'))
-    .sort();
+    ...[
+      'id',
+      'tenant_id',
+      'project_id',
+      'public_model',
+      'protocol',
+      'supply_mode',
+      'execution_state',
+      'financial_status',
+      'reconciliation_state',
+      'created_at',
+      'updated_at',
+      // R9 P7: the unknown-outcome recovery worker's CAS reconciliation reads.
+      'state_version',
+    ].map((column) => ['saas_requests', column, 'SELECT'].join('\t')),
+    // R9 P7/P9/P10: guard-enforced terminal reconciliation writes (execution
+    // escalation, operator resolution, stale-admission sweep); the only
+    // request columns the control plane may mutate.
+    ...['execution_state', 'reconciliation_state', 'financial_status', 'updated_at', 'state_version'].map((column) =>
+      ['saas_requests', column, 'UPDATE'].join('\t'),
+    ),
+  ].sort();
   assert.deepEqual(
     SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_requests')
       .map((grant) => grant.join('\t'))
@@ -1416,6 +1503,7 @@ test('customer request axes add exactly one CP purpose SELECT, with no request w
   );
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
   assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes("('saas_requests', 'reconciliation_state', 'SELECT')"));
+  assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes("('saas_requests', 'state_version', 'UPDATE')"));
   for (const column of ['proxy_key_id', 'principal_id', 'entitlement_id', 'supply_profile_id', 'request_fingerprint']) {
     assert.equal(
       SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([table, field]) => table === 'saas_requests' && field === column),

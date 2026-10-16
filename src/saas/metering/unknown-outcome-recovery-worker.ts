@@ -13,6 +13,25 @@ const MAX_BACKOFF_MS = 5 * 60 * 1000;
 const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const OPERATOR_AUDIT_ENTRY_POINT = 'saas_gateway_operator_reconciliation';
 const BILLING_RESERVATION_NAMESPACE = 'saas.billing.reservation';
+/**
+ * R9 P10: horizon after which a non-terminal saas_requests row can no longer be
+ * legally executing upstream. The provider HTTP transport hard-caps every
+ * dispatched request at MAX_TIMEOUT_MS = 300_000 ms
+ * (src/saas/gateway/provider-http-transport.ts) and that timer spans the entire
+ * response body, so no legal in-flight request — however slow its stream — can
+ * outlive it. The horizon is twice that ceiling, leaving a full timeout window
+ * of margin for settle latency and cross-process clock dispersion, so a merely
+ * slow stream is never evicted. The admission concurrency counter
+ * (src/saas/gateway/postgres-preparation-capacity.ts) excludes rows past the
+ * same horizon, and this worker's stale-admission sweep reconciles them, so the
+ * exclusion is paired with a reconciliation path instead of dropping billing
+ * truth (financial_status, reconciliation_state and the billing reservation
+ * remain authoritative and untouched by the counter).
+ */
+export const STALE_ADMISSION_HORIZON_MS = 600_000;
+const STALE_ADMISSION_SWEEP_ENTRY_POINT = 'control-plane-stale-admission-sweep';
+const STALE_ADMISSION_CANCELLATION_ACTION = 'saas.request.stale_admission_cancelled';
+const OPERATOR_NOT_EXECUTED_ATTEMPT_REASON = 'operator_resolution_not_executed';
 
 export type UnknownOutcomeSupplyMode = 'byok' | 'platform';
 
@@ -643,7 +662,14 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
 
   constructor(
     private readonly database: SaasDatabase,
-    private readonly metering: SaasMeteringService,
+    /**
+     * Retained for constructor-signature compatibility with the composed
+     * workflow. The repository drives the metering state machine through
+     * narrow guard-enforced CAS statements so the control-plane role keeps
+     * least-privilege column grants (R9 P7); the shared metering service's
+     * wide RETURNING projections would require gateway-level read access.
+     */
+    _metering: SaasMeteringService,
     private readonly billing: PlatformWalletLedgerService = new PlatformWalletLedgerService(),
     options: { readonly idFactory?: () => string; readonly keyBudget?: UnknownOutcomeRecoveryKeyBudget } = {},
   ) {
@@ -656,7 +682,40 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
     positiveInteger(leaseMs, 'leaseMs', MAX_LEASE_MS);
     positiveInteger(maxAttempts, 'maxAttempts', MAX_SCAN_ATTEMPTS);
 
+    await this.sweepStaleAdmissions(limit);
+
     return this.database.transaction(async (tx) => {
+      // Stale pending admissions whose dispatch may have started are escalated
+      // to unknown so the durable case machinery below reconciles them. The
+      // row-level recheck of execution_state keeps the transition guard-legal
+      // even when a concurrent settle wins the race for one of the rows.
+      await tx.query(
+        `UPDATE saas_requests AS r
+            SET execution_state = 'unknown',
+                reconciliation_state = 'pending',
+                updated_at = clock_timestamp(),
+                state_version = state_version + 1
+          WHERE r.execution_state = 'pending'
+            AND r.reconciliation_state = 'none'
+            AND r.id IN (
+              SELECT q.id
+                FROM saas_requests AS q
+               WHERE q.execution_state = 'pending'
+                 AND q.reconciliation_state = 'none'
+                 AND q.updated_at < clock_timestamp() - ($2::bigint * interval '1 millisecond')
+                 AND EXISTS (
+                   SELECT 1
+                     FROM saas_attempts AS a
+                    WHERE a.tenant_id = q.tenant_id
+                      AND a.request_id = q.id
+                      AND a.dispatch_state <> 'not_sent'
+                 )
+               ORDER BY q.updated_at ASC
+               LIMIT $1
+            )`,
+        [limit, STALE_ADMISSION_HORIZON_MS],
+      );
+
       const missing = await tx.query<RecoveryRequestRow>(
         `SELECT r.id, r.tenant_id, r.project_id, r.supply_mode,
                 r.execution_state, r.reconciliation_state, r.financial_status, r.state_version
@@ -755,6 +814,154 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
         });
       }
       return claims;
+    });
+  }
+
+  /**
+   * R9 P10/P9: reconciles pending admissions that are provably past the
+   * maximum legal in-flight duration and whose attempts were never dispatched.
+   * Migration 059's pre-dispatch cancellation is the guard-legal terminal
+   * transition; each request is cancelled in its own transaction so one
+   * poisoned row can never block the claim pipeline. Possibly-dispatched
+   * stale pendings are handled by the unknown escalation inside claimDue.
+   */
+  private async sweepStaleAdmissions(limit: number): Promise<void> {
+    const candidates = await this.database.query<{ readonly tenant_id: unknown; readonly id: unknown }>(
+      `SELECT r.tenant_id, r.id
+         FROM saas_requests AS r
+        WHERE r.execution_state = 'pending'
+          AND r.reconciliation_state = 'none'
+          AND r.updated_at < clock_timestamp() - ($2::bigint * interval '1 millisecond')
+          AND NOT EXISTS (
+            SELECT 1
+              FROM saas_attempts AS a
+             WHERE a.tenant_id = r.tenant_id
+               AND a.request_id = r.id
+               AND a.dispatch_state <> 'not_sent'
+          )
+        ORDER BY r.updated_at ASC
+        LIMIT $1`,
+      [limit, STALE_ADMISSION_HORIZON_MS],
+    );
+    for (const candidate of candidates.rows) {
+      try {
+        await this.cancelStaleAdmission(
+          databaseText(candidate.tenant_id, 'request.tenant_id'),
+          databaseText(candidate.id, 'request.id'),
+        );
+      } catch {
+        // The row is retried on the next cycle; the sweep must never block claims.
+      }
+    }
+  }
+
+  private async cancelStaleAdmission(tenantId: string, requestId: string): Promise<void> {
+    await this.database.transaction(async (tx) => {
+      const requestResult = await tx.query<RecoveryRequestRow & { readonly updated_at: unknown }>(
+        `SELECT id, tenant_id, project_id, supply_mode, execution_state,
+                reconciliation_state, financial_status, state_version, updated_at
+           FROM saas_requests
+          WHERE tenant_id = $1 AND id = $2
+            AND execution_state = 'pending'
+            AND reconciliation_state = 'none'
+            AND updated_at < clock_timestamp() - ($3::bigint * interval '1 millisecond')
+          FOR UPDATE`,
+        [tenantId, requestId, STALE_ADMISSION_HORIZON_MS],
+      );
+      const request = requestResult.rows[0];
+      if (!request) return;
+      const mode = supplyMode(request.supply_mode);
+      const financial = databaseText(request.financial_status, 'request.financial_status');
+      if (mode === 'byok' && financial !== 'not_applicable') return;
+      if (mode === 'platform' && financial !== 'pending' && financial !== 'released') return;
+
+      const attempts = await tx.query<RecoveryAttemptRow>(
+        `SELECT id, dispatch_state, result_state, response_started, state_version, unknown_reason,
+                upstream_id, account_owner_kind, account_id, provider_id, product_id, resolved_model
+           FROM saas_attempts
+          WHERE tenant_id = $1 AND request_id = $2
+          ORDER BY ordinal ASC, id ASC
+          FOR UPDATE`,
+        [tenantId, requestId],
+      );
+      for (const attempt of attempts.rows) {
+        if (
+          databaseText(attempt.dispatch_state, 'attempt.dispatch_state') !== 'not_sent' ||
+          databaseText(attempt.result_state, 'attempt.result_state') !== 'pending'
+        ) {
+          return;
+        }
+        const cancelled = await tx.query(
+          `UPDATE saas_attempts
+              SET result_state = 'failed', updated_at = clock_timestamp(), state_version = state_version + 1
+            WHERE tenant_id = $1 AND request_id = $2 AND id = $3
+              AND dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false
+              AND response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL
+              AND state_version = $4
+            RETURNING id`,
+          [
+            tenantId,
+            requestId,
+            databaseText(attempt.id, 'attempt.id'),
+            databaseInteger(attempt.state_version, 'attempt.state_version', 1),
+          ],
+        );
+        if (cancelled.rowCount !== 1) throw new Error('Stale admission attempt cancellation lost its race');
+      }
+
+      if (mode === 'platform' && financial === 'pending') {
+        const release = await this.billing.release(tx, {
+          supplyMode: 'platform',
+          tenantId,
+          requestId,
+          releaseId: `stale-admission-sweep:${requestId}`,
+          releaseEvidenceRef: `stale-admission-sweep:${requestId}`,
+          businessKey: `saas-request-admission:${tenantId}:${requestId}`,
+          idempotencyNamespace: BILLING_RESERVATION_NAMESPACE,
+        });
+        if (release.state !== 'released') throw new Error('Stale admission hold did not release');
+      }
+      if (this.keyBudget) {
+        await this.keyBudget.release(tx, { tenantId, requestId });
+      }
+
+      const failed = await tx.query(
+        `UPDATE saas_requests
+            SET execution_state = 'failed',
+                financial_status = $4,
+                updated_at = clock_timestamp(),
+                state_version = state_version + 1
+          WHERE tenant_id = $1 AND id = $2
+            AND execution_state = 'pending'
+            AND reconciliation_state = 'none'
+            AND state_version = $3
+          RETURNING id`,
+        [
+          tenantId,
+          requestId,
+          databaseInteger(request.state_version, 'request.state_version', 1),
+          mode === 'byok' ? 'not_applicable' : 'released',
+        ],
+      );
+      if (failed.rowCount !== 1) throw new Error('Stale admission cancellation lost its race');
+
+      // The sweep cannot reproduce the gateway release port's full preflight,
+      // so the capacity reservation keeps the fail-closed reconciliation
+      // disposition; its rate window has long expired and the concurrency
+      // truth left with the terminal execution row.
+      await tx.query(
+        `UPDATE saas_gateway_capacity_reservations
+            SET state = 'retained_for_reconciliation', updated_at = clock_timestamp()
+          WHERE tenant_id = $1 AND request_id = $2 AND state = 'reserved'`,
+        [tenantId, requestId],
+      );
+      await tx.query(
+        `INSERT INTO saas_audit_events
+           (id, tenant_id, actor_user_id, action, target_type, target_id,
+            occurred_at, entry_point, request_id)
+         VALUES ($1, $2, NULL, $3, 'request', $4, clock_timestamp(), $5, $4)`,
+        [this.idFactory(), tenantId, STALE_ADMISSION_CANCELLATION_ACTION, requestId, STALE_ADMISSION_SWEEP_ENTRY_POINT],
+      );
     });
   }
 
@@ -902,16 +1109,20 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
           if (pending.state !== 'reconciliation_pending') {
             financialError = 'PLATFORM_RESERVATION_STATE_CONFLICT';
           } else if (requestFinancial === 'pending') {
-            const updated = await this.metering.transitionFinancialStatus({
-              executor: tx,
-              tenantId: claim.tenantId,
-              requestId: claim.requestId,
-              expectedFinancialStatus: 'pending',
-              financialStatus: 'reconciliation_pending',
-              expectedStateVersion: requestVersion,
-            });
-            finalFinancial = updated.financialStatus;
-            finalRequestVersion = updated.stateVersion;
+            const updated = await tx.query<{ readonly financial_status: unknown; readonly state_version: unknown }>(
+              `UPDATE saas_requests
+                  SET financial_status = 'reconciliation_pending',
+                      updated_at = clock_timestamp(),
+                      state_version = state_version + 1
+                WHERE tenant_id = $1 AND id = $2
+                  AND financial_status = 'pending'
+                  AND state_version = $3
+                RETURNING financial_status, state_version`,
+              [claim.tenantId, claim.requestId, requestVersion],
+            );
+            if (updated.rowCount !== 1) throw new Error('Unknown-outcome financial transition lost its race');
+            finalFinancial = databaseText(updated.rows[0]?.financial_status, 'request.financial_status');
+            finalRequestVersion = databaseInteger(updated.rows[0]?.state_version, 'request.state_version', 1);
             await requestObservation(finalFinancial, finalRequestVersion);
           }
         }
@@ -1197,37 +1408,93 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
       const requestVersion = databaseInteger(request.state_version, 'request.state_version', 1);
       for (const row of attemptsResult.rows) {
         const attemptId = databaseText(row.id, 'attempt.id');
-        if (!possibleAttempt(row)) continue;
         const dispatchState = databaseText(row.dispatch_state, 'attempt.dispatch_state');
         const resultState = databaseText(row.result_state, 'attempt.result_state');
-        if (resultState === 'pending' || resultState === 'unknown') {
-          await this.metering.transitionAttempt({
-            executor: tx,
-            tenantId: input.tenantId,
+        const attemptVersion = databaseInteger(row.state_version, 'attempt.state_version', 1);
+        if (resultState === 'succeeded' || resultState === 'failed') continue;
+
+        if (dispatchState === 'not_sent') {
+          // R9 P9: a never-dispatched attempt takes migration 059's pre-dispatch
+          // cancellation — its only guard-legal terminal result — so aborted
+          // admissions stop accumulating non-terminal attempt rows forever.
+          const cancelled = await tx.query(
+            `UPDATE saas_attempts
+                SET result_state = 'failed', updated_at = clock_timestamp(), state_version = state_version + 1
+              WHERE tenant_id = $1 AND request_id = $2 AND id = $3
+                AND dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false
+                AND response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL
+                AND state_version = $4
+              RETURNING id`,
+            [input.tenantId, requestId, attemptId, attemptVersion],
+          );
+          if (cancelled.rowCount !== 1) throw new Error('Unknown-outcome attempt cancellation lost its race');
+          continue;
+        }
+
+        if (dispatchState === 'dispatching') {
+          // The operator attested non-execution for a possibly-sent attempt the
+          // gateway never classified; it reaches the terminal result through the
+          // guarded dispatching -> unknown -> failed path in one statement.
+          const dispatched = await tx.query(
+            `UPDATE saas_attempts
+                SET dispatch_state = 'unknown',
+                    result_state = 'failed',
+                    unknown_reason = $4,
+                    updated_at = clock_timestamp(),
+                    state_version = state_version + 1
+              WHERE tenant_id = $1 AND request_id = $2 AND id = $3
+                AND dispatch_state = 'dispatching' AND result_state = $5 AND state_version = $6
+              RETURNING id`,
+            [input.tenantId, requestId, attemptId, OPERATOR_NOT_EXECUTED_ATTEMPT_REASON, resultState, attemptVersion],
+          );
+          if (dispatched.rowCount !== 1) throw new Error('Unknown-outcome attempt resolution lost its race');
+          continue;
+        }
+
+        // sent or unknown dispatch: the terminal result keeps the dispatch
+        // evidence; a sent dispatch that carried an unknown result drops its
+        // now-contradicted reason (the CHECK requires it to be NULL again).
+        const failedAttempt = await tx.query(
+          `UPDATE saas_attempts
+              SET result_state = 'failed',
+                  unknown_reason = CASE WHEN dispatch_state = 'sent' THEN NULL ELSE unknown_reason END,
+                  updated_at = clock_timestamp(),
+                  state_version = state_version + 1
+            WHERE tenant_id = $1 AND request_id = $2 AND id = $3
+              AND dispatch_state = $4 AND result_state = $5 AND response_started = $6 AND state_version = $7
+            RETURNING id`,
+          [
+            input.tenantId,
             requestId,
             attemptId,
-            expectedDispatchState: dispatchState as 'dispatching' | 'sent' | 'unknown',
-            expectedResultState: resultState as 'pending' | 'unknown',
-            expectedResponseStarted: row.response_started === true,
-            expectedStateVersion: databaseInteger(row.state_version, 'attempt.state_version', 1),
-            dispatchState: dispatchState as 'dispatching' | 'sent' | 'unknown',
-            resultState: 'failed',
-            unknownReason:
-              dispatchState === 'unknown' ? databaseText(row.unknown_reason, 'attempt.unknown_reason', 1024) : null,
-          });
-        }
+            dispatchState,
+            resultState,
+            row.response_started === true,
+            attemptVersion,
+          ],
+        );
+        if (failedAttempt.rowCount !== 1) throw new Error('Unknown-outcome attempt resolution lost its race');
       }
 
-      const failedRequest = await this.metering.transitionRequest({
-        executor: tx,
-        tenantId: input.tenantId,
-        requestId,
-        expectedResultState: 'unknown',
-        expectedReconciliationState: 'pending',
-        expectedStateVersion: requestVersion,
-        resultState: 'failed',
-        reconciliationState: 'resolved',
-      });
+      const failedRequestResult = await tx.query<{ readonly state_version: unknown }>(
+        `UPDATE saas_requests
+            SET execution_state = 'failed',
+                reconciliation_state = 'resolved',
+                updated_at = clock_timestamp(),
+                state_version = state_version + 1
+          WHERE tenant_id = $1 AND id = $2
+            AND execution_state = 'unknown'
+            AND reconciliation_state = 'pending'
+            AND state_version = $3
+          RETURNING state_version`,
+        [input.tenantId, requestId, requestVersion],
+      );
+      if (failedRequestResult.rowCount !== 1) throw new Error('Unknown-outcome request resolution lost its race');
+      const failedRequestStateVersion = databaseInteger(
+        failedRequestResult.rows[0]?.state_version,
+        'request.state_version',
+        1,
+      );
 
       const releaseEvidenceRef = `unknown-outcome-resolution:v1:${input.evidenceDigest}`;
       if (mode === 'platform') {
@@ -1242,14 +1509,18 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
           idempotencyNamespace: BILLING_RESERVATION_NAMESPACE,
         });
         if (release.state !== 'released') throw new Error('Platform hold did not release with operator evidence');
-        await this.metering.transitionFinancialStatus({
-          executor: tx,
-          tenantId: input.tenantId,
-          requestId,
-          expectedFinancialStatus: 'reconciliation_pending',
-          financialStatus: 'released',
-          expectedStateVersion: failedRequest.stateVersion,
-        });
+        const financialRelease = await tx.query(
+          `UPDATE saas_requests
+              SET financial_status = 'released',
+                  updated_at = clock_timestamp(),
+                  state_version = state_version + 1
+            WHERE tenant_id = $1 AND id = $2
+              AND financial_status = 'reconciliation_pending'
+              AND state_version = $3
+            RETURNING id`,
+          [input.tenantId, requestId, failedRequestStateVersion],
+        );
+        if (financialRelease.rowCount !== 1) throw new Error('Unknown-outcome financial release lost its race');
       }
 
       // KEY-BUD (contract C-4): operator-resolved failure drops the admission

@@ -855,12 +855,19 @@ BEGIN
       ('saas_ledger_entries', 'INSERT', 'id transaction_id tenant_id currency direction amount_minor_units account_type account_ref wallet_id created_at'),
       ('saas_provider_account_leases', 'SELECT', 'status lease_expires_at'),
       ('saas_provider_account_runtime_health', 'SELECT', 'owner_scope_key owner_kind state cooldown_until observed_at'),
-      ('saas_requests', 'SELECT', 'id tenant_id project_id public_model protocol supply_mode execution_state financial_status reconciliation_state created_at updated_at'),
+      ('saas_requests', 'SELECT', 'id tenant_id project_id public_model protocol supply_mode execution_state financial_status reconciliation_state created_at updated_at state_version'),
+      ('saas_requests', 'UPDATE', 'execution_state reconciliation_state financial_status updated_at state_version'),
       ('saas_attempts', 'SELECT', 'id tenant_id request_id ordinal result_state response_started response_started_at result_http_status created_at updated_at'),
       -- Observability channel-status aggregation (P3): the per-attempt error
       -- taxonomy and attribution columns the 1m rollup reads under this role.
       ('saas_attempts', 'SELECT', 'provider_id upstream_id route_config_id resolved_model dispatch_state unknown_reason'),
-      ('saas_usage_events', 'SELECT', 'id tenant_id request_id supply_mode input_total input_uncached cache_read cache_write cache_write_5m cache_write_1h output_total reasoning_output status source measurement_kind billable_basis created_at'),
+      -- R9 P7/P9/P10: unknown-outcome recovery worker attempt snapshots,
+      -- operator resolution coverage and guard-enforced CAS transitions.
+      ('saas_attempts', 'SELECT', 'state_version account_owner_kind account_id product_id'),
+      ('saas_attempts', 'UPDATE', 'dispatch_state result_state unknown_reason updated_at state_version'),
+      ('saas_gateway_capacity_reservations', 'SELECT', 'tenant_id request_id state'),
+      ('saas_gateway_capacity_reservations', 'UPDATE', 'state updated_at'),
+      ('saas_usage_events', 'SELECT', 'id tenant_id request_id attempt_id supply_mode event_digest input_total input_uncached cache_read cache_write cache_write_5m cache_write_1h output_total reasoning_output status source measurement_kind billable_basis created_at'),
       ('saas_usage_settlements', 'SELECT', 'id tenant_id usage_event_id'),
       ('saas_usage_correction_events', 'SELECT', 'id tenant_id corrected_usage_event_id corrected_settlement_id reason_code correction_usage amount_delta_minor_units currency operator_identity evidence_ref correction_digest created_at'),
       ('saas_usage_correction_events', 'INSERT', 'id tenant_id corrected_usage_event_id corrected_settlement_id reason_code correction_usage amount_delta_minor_units currency operator_identity evidence_ref correction_digest created_at'),

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
 import type { SaasMeteringService } from '../../../src/saas/metering/service.js';
 import type { UnknownOutcomeProviderEvidenceObservation } from '../../../src/saas/metering/unknown-outcome-reconciliation-service.js';
@@ -21,6 +22,7 @@ import type {
 } from '../../../src/saas/metering/unknown-outcome-recovery-worker.js';
 import {
   PostgresUnknownOutcomeRecoveryRepository,
+  STALE_ADMISSION_HORIZON_MS,
   UnknownOutcomeOperatorResolutionService,
   UnknownOutcomeReconciliationWorker,
   validateOperatorCoverage,
@@ -626,6 +628,418 @@ test('transactional authorization recheck rejects a revocation after the preflig
   assert.equal(repository.audit.length, 0);
 });
 
+test('postgres claimDue escalates stale possibly-dispatched pendings to unknown before scanning', async () => {
+  const calls: Array<{ readonly sql: string; readonly values: readonly unknown[] }> = [];
+  const unknownRequest = {
+    id: 'request-unknown',
+    tenant_id: 'tenant-a',
+    project_id: 'project-a',
+    supply_mode: 'byok',
+    execution_state: 'unknown',
+    reconciliation_state: 'pending',
+    financial_status: 'not_applicable',
+    state_version: 1,
+  };
+  const handler = (sql: string, values: readonly unknown[]): { rows: Row[]; rowCount: number } => {
+    if (sql.startsWith('UPDATE saas_requests AS r')) return { rows: [], rowCount: 2 };
+    if (sql.includes('FROM saas_requests AS r')) return { rows: [unknownRequest] as Row[], rowCount: 1 };
+    if (sql.startsWith('INSERT INTO saas_unknown_outcome_reconciliation_cases')) return { rows: [], rowCount: 1 };
+    if (
+      sql.startsWith('UPDATE saas_unknown_outcome_reconciliation_cases') &&
+      sql.includes('scan_attempt_count >= $1')
+    ) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (sql.includes('FROM saas_unknown_outcome_reconciliation_cases') && sql.includes('case_state = ')) {
+      return {
+        rows: [
+          {
+            id: 'case-a',
+            tenant_id: 'tenant-a',
+            project_id: 'project-a',
+            request_id: 'request-unknown',
+            supply_mode: 'byok',
+            case_state: 'open',
+            scan_attempt_count: 1,
+            lease_token: null,
+            last_error_code: null,
+            created_at: '2026-10-16T00:00:00.000Z',
+            resolution_idempotency_key: null,
+            resolution_digest: null,
+          },
+        ] as Row[],
+        rowCount: 1,
+      };
+    }
+    if (sql.startsWith('UPDATE saas_unknown_outcome_reconciliation_cases')) {
+      return { rows: [{ scan_attempt_count: 1 }] as Row[], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+  const database = {
+    async query<Row>(sql: string, values: readonly unknown[] = []) {
+      calls.push({ sql, values });
+      return handler(sql, values);
+    },
+    async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+      const executor: SqlExecutor = {
+        async query<Row>(sql: string, values: readonly unknown[] = []) {
+          calls.push({ sql, values });
+          return handler(sql, values);
+        },
+      };
+      return work(executor);
+    },
+  } as unknown as SaasDatabase;
+  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService);
+
+  const claims = await repository.claimDue(5, 30_000, 8);
+
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0]?.requestId, 'request-unknown');
+  const escalation = calls.find((call) => call.sql.startsWith('UPDATE saas_requests AS r'));
+  assert.ok(escalation, 'claimDue must run the stale pending escalation inside its claim transaction');
+  assert.match(escalation.sql, /SET execution_state = 'unknown'/);
+  assert.match(escalation.sql, /reconciliation_state = 'pending'/);
+  assert.match(escalation.sql, /a\.dispatch_state <> 'not_sent'/);
+  // The horizon is the same one the admission concurrency counter uses.
+  assert.equal(STALE_ADMISSION_HORIZON_MS, 600_000);
+  assert.equal(escalation.values[1], STALE_ADMISSION_HORIZON_MS);
+  assert.match(escalation.sql, /interval '1 millisecond'/);
+});
+
+test('postgres claimDue sweep cancels a stale never-dispatched platform admission end to end', async () => {
+  const calls: Array<{ readonly sql: string; readonly values: readonly unknown[] }> = [];
+  const billingReleases: Array<Record<string, unknown>> = [];
+  const keyBudgetReleases: Array<Record<string, unknown>> = [];
+  let caseInsertCount = 0;
+  const handler = (sql: string, values: readonly unknown[]): { rows: Row[]; rowCount: number } => {
+    // Sweep candidate selection (pool executor).
+    if (sql.includes('NOT EXISTS') && sql.includes("r.execution_state = 'pending'")) {
+      return { rows: [{ tenant_id: 'tenant-a', id: 'request-stale' }] as Row[], rowCount: 1 };
+    }
+    // claimDue main transaction.
+    if (sql.startsWith('UPDATE saas_requests AS r')) return { rows: [], rowCount: 0 };
+    if (sql.includes('FROM saas_requests AS r')) return { rows: [] as Row[], rowCount: 0 };
+    if (sql.startsWith('INSERT INTO saas_unknown_outcome_reconciliation_cases')) {
+      caseInsertCount += 1;
+      return { rows: [], rowCount: 0 };
+    }
+    // cancelStaleAdmission transaction.
+    if (sql.includes('FROM saas_requests') && sql.includes('FOR UPDATE')) {
+      return {
+        rows: [
+          {
+            id: 'request-stale',
+            tenant_id: 'tenant-a',
+            project_id: 'project-a',
+            supply_mode: 'platform',
+            execution_state: 'pending',
+            reconciliation_state: 'none',
+            financial_status: 'pending',
+            state_version: 4,
+            updated_at: new Date('2026-10-16T00:00:00.000Z'),
+          },
+        ] as Row[],
+        rowCount: 1,
+      };
+    }
+    if (sql.includes('FROM saas_attempts')) {
+      return {
+        rows: [
+          {
+            id: 'attempt-stale',
+            dispatch_state: 'not_sent',
+            result_state: 'pending',
+            response_started: false,
+            state_version: 2,
+            unknown_reason: null,
+            upstream_id: 'upstream-a',
+            account_owner_kind: null,
+            account_id: null,
+            provider_id: null,
+            product_id: null,
+            resolved_model: 'model-a',
+          },
+        ] as Row[],
+        rowCount: 1,
+      };
+    }
+    if (sql.startsWith('UPDATE saas_attempts')) return { rows: [{ id: 'attempt-stale' }] as Row[], rowCount: 1 };
+    if (sql.startsWith('UPDATE saas_requests')) return { rows: [{ id: 'request-stale' }] as Row[], rowCount: 1 };
+    if (sql.startsWith('UPDATE saas_gateway_capacity_reservations')) {
+      return { rows: [] as Row[], rowCount: 1 };
+    }
+    if (sql.startsWith('INSERT INTO saas_audit_events')) return { rows: [] as Row[], rowCount: 1 };
+    return { rows: [] as Row[], rowCount: 0 };
+  };
+  const database = {
+    async query<Row>(sql: string, values: readonly unknown[] = []) {
+      calls.push({ sql, values });
+      return handler(sql, values);
+    },
+    async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+      const executor: SqlExecutor = {
+        async query<Row>(sql: string, values: readonly unknown[] = []) {
+          calls.push({ sql, values });
+          return handler(sql, values);
+        },
+      };
+      return work(executor);
+    },
+  } as unknown as SaasDatabase;
+  const billing = {
+    async markReconciliationPending() {
+      throw new Error('unexpected billing call');
+    },
+    async release(_executor: unknown, input: Record<string, unknown>) {
+      billingReleases.push(input);
+      return { state: 'released' };
+    },
+  } as unknown as PlatformWalletLedgerService;
+  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService, billing, {
+    idFactory: () => 'generated-id',
+    keyBudget: {
+      async release(_executor: unknown, input: Record<string, unknown>) {
+        keyBudgetReleases.push(input);
+        return true;
+      },
+    },
+  });
+
+  const claims = await repository.claimDue(5, 30_000, 8);
+
+  assert.deepEqual(claims, []);
+  assert.equal(caseInsertCount, 0, 'a cancelled admission never becomes an unknown-outcome case');
+  const attemptCancellation = calls.find((call) => call.sql.startsWith('UPDATE saas_attempts'));
+  assert.ok(attemptCancellation);
+  // Migration 059's pre-dispatch cancellation: the only guard-legal terminal
+  // result for a never-dispatched attempt.
+  assert.match(attemptCancellation.sql, /SET result_state = 'failed'/);
+  assert.match(attemptCancellation.sql, /AND dispatch_state = 'not_sent' AND result_state = 'pending'/);
+  assert.match(attemptCancellation.sql, /unknown_reason IS NULL/);
+  const requestCancellation = calls.find((call) => call.sql.startsWith('UPDATE saas_requests\n'));
+  assert.ok(requestCancellation);
+  assert.match(requestCancellation.sql, /SET execution_state = 'failed'/);
+  assert.equal(requestCancellation.values[3], 'released');
+  const capacityRetention = calls.find((call) => call.sql.startsWith('UPDATE saas_gateway_capacity_reservations'));
+  assert.ok(capacityRetention);
+  assert.match(capacityRetention.sql, /state = 'retained_for_reconciliation'/);
+  const audit = calls.find((call) => call.sql.startsWith('INSERT INTO saas_audit_events'));
+  assert.ok(audit);
+  assert.equal(audit.values[2], 'saas.request.stale_admission_cancelled');
+  assert.equal(audit.values[4], 'control-plane-stale-admission-sweep');
+  assert.deepEqual(
+    billingReleases.map((release) => release.releaseId),
+    ['stale-admission-sweep:request-stale'],
+  );
+  assert.deepEqual(keyBudgetReleases, [{ tenantId: 'tenant-a', requestId: 'request-stale' }]);
+});
+
+test('postgres claimDue sweep survives a poisoned stale admission and keeps claiming', async () => {
+  const cancelled: string[] = [];
+  const handler = (sql: string, values: readonly unknown[]): { rows: Row[]; rowCount: number } => {
+    if (sql.includes('NOT EXISTS') && sql.includes("r.execution_state = 'pending'")) {
+      return {
+        rows: [
+          { tenant_id: 'tenant-a', id: 'request-poison' },
+          { tenant_id: 'tenant-a', id: 'request-stale' },
+        ] as Row[],
+        rowCount: 2,
+      };
+    }
+    if (sql.startsWith('UPDATE saas_requests AS r')) return { rows: [], rowCount: 0 };
+    if (sql.includes('FROM saas_requests AS r')) return { rows: [] as Row[], rowCount: 0 };
+    if (sql.startsWith('INSERT INTO saas_unknown_outcome_reconciliation_cases')) return { rows: [], rowCount: 0 };
+    if (sql.includes('FROM saas_requests') && sql.includes('FOR UPDATE')) {
+      const requestId = String(values[1]);
+      if (requestId === 'request-poison') throw new Error('poisoned row');
+      return {
+        rows: [
+          {
+            id: requestId,
+            tenant_id: 'tenant-a',
+            project_id: 'project-a',
+            supply_mode: 'byok',
+            execution_state: 'pending',
+            reconciliation_state: 'none',
+            financial_status: 'not_applicable',
+            state_version: 1,
+            updated_at: new Date('2026-10-16T00:00:00.000Z'),
+          },
+        ] as Row[],
+        rowCount: 1,
+      };
+    }
+    if (sql.includes('FROM saas_attempts')) return { rows: [] as Row[], rowCount: 0 };
+    if (sql.startsWith('UPDATE saas_requests\n')) {
+      cancelled.push(String(values[1]));
+      return { rows: [{ id: String(values[1]) }] as Row[], rowCount: 1 };
+    }
+    if (sql.startsWith('UPDATE saas_attempts')) return { rows: [], rowCount: 1 };
+    if (sql.startsWith('UPDATE saas_gateway_capacity_reservations')) return { rows: [], rowCount: 1 };
+    if (sql.startsWith('INSERT INTO saas_audit_events')) return { rows: [], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  };
+  const database = {
+    async query<Row>(sql: string, values: readonly unknown[] = []) {
+      return handler(sql, values);
+    },
+    async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+      return work({
+        async query<Row>(sql: string, values: readonly unknown[] = []) {
+          return handler(sql, values);
+        },
+      });
+    },
+  } as unknown as SaasDatabase;
+  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService);
+
+  const claims = await repository.claimDue(5, 30_000, 8);
+
+  assert.deepEqual(claims, []);
+  assert.deepEqual(cancelled, ['request-stale'], 'the healthy stale row is cancelled despite the poisoned one');
+});
+
+test('postgres resolution terminally cancels never-dispatched attempts alongside possible dispatches', async () => {
+  const calls: Array<{ readonly sql: string; readonly values: readonly unknown[] }> = [];
+  const caseRow = {
+    id: 'case-a',
+    tenant_id: 'tenant-a',
+    project_id: 'project-a',
+    request_id: 'request-a',
+    supply_mode: 'byok',
+    case_state: 'operator_required',
+    scan_attempt_count: 1,
+    lease_token: null,
+    last_error_code: null,
+    created_at: '2026-10-16T00:00:00.000Z',
+    resolution_idempotency_key: null,
+    resolution_digest: null,
+  };
+  const executor: SqlExecutor = {
+    async query<Row>(sql: string, values: readonly unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes('FROM saas_unknown_outcome_reconciliation_cases')) {
+        return { rows: [caseRow] as Row[], rowCount: 1 };
+      }
+      if (sql.includes('FROM saas_requests')) {
+        return {
+          rows: [
+            {
+              id: 'request-a',
+              tenant_id: 'tenant-a',
+              project_id: 'project-a',
+              supply_mode: 'byok',
+              execution_state: 'unknown',
+              reconciliation_state: 'pending',
+              financial_status: 'not_applicable',
+              state_version: 1,
+            },
+          ] as Row[],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes('FROM saas_attempts')) {
+        return {
+          rows: [
+            {
+              id: 'attempt-sent',
+              dispatch_state: 'sent',
+              result_state: 'pending',
+              response_started: false,
+              state_version: 1,
+              unknown_reason: null,
+              upstream_id: 'upstream-a',
+              account_owner_kind: null,
+              account_id: null,
+              provider_id: null,
+              product_id: null,
+              resolved_model: 'model-a',
+            },
+            {
+              id: 'attempt-never-sent',
+              dispatch_state: 'not_sent',
+              result_state: 'pending',
+              response_started: false,
+              state_version: 1,
+              unknown_reason: null,
+              upstream_id: 'upstream-a',
+              account_owner_kind: null,
+              account_id: null,
+              provider_id: null,
+              product_id: null,
+              resolved_model: 'model-a',
+            },
+            {
+              id: 'attempt-crashed-dispatch',
+              dispatch_state: 'dispatching',
+              result_state: 'pending',
+              response_started: false,
+              state_version: 1,
+              unknown_reason: null,
+              upstream_id: 'upstream-a',
+              account_owner_kind: null,
+              account_id: null,
+              provider_id: null,
+              product_id: null,
+              resolved_model: 'model-a',
+            },
+          ] as Row[],
+          rowCount: 3,
+        };
+      }
+      if (sql.startsWith('UPDATE saas_attempts')) return { rows: [{ id: 'attempt' }] as Row[], rowCount: 1 };
+      if (sql.startsWith('UPDATE saas_requests')) return { rows: [{ state_version: 2 }] as Row[], rowCount: 1 };
+      if (sql.startsWith('UPDATE saas_unknown_outcome_reconciliation_cases')) {
+        return { rows: [{ id: 'case-a' }] as Row[], rowCount: 1 };
+      }
+      return { rows: [] as Row[], rowCount: 1 };
+    },
+  };
+  const database = {
+    async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+      return work(executor);
+    },
+  } as unknown as SaasDatabase;
+  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService);
+  const input: PreparedUnknownOutcomeResolution = {
+    tenantId: 'tenant-a',
+    caseId: 'case-a',
+    actorUserId: 'operator-a',
+    actorSessionId: 'session-a',
+    supportTicketRef: 'SUP-1843',
+    idempotencyKey: 'resolution-b',
+    reason: 'The provider-side request ledger confirms no execution.',
+    coverage: [
+      { attemptId: 'attempt-crashed-dispatch', outcome: 'not_executed', evidenceReference: 'ledger:c' },
+      { attemptId: 'attempt-sent', outcome: 'not_executed', evidenceReference: 'ledger:a' },
+    ],
+    resolutionDigest: '0'.repeat(64),
+    evidenceDigest: '1'.repeat(64),
+  };
+
+  const result = await repository.resolveNonExecution(input, async () => true);
+
+  assert.deepEqual(result, { status: 'resolved', caseId: 'case-a', requestId: 'request-a' });
+  const attemptUpdates = calls.filter((call) => call.sql.startsWith('UPDATE saas_attempts'));
+  assert.equal(attemptUpdates.length, 3);
+  const sentFailure = attemptUpdates.find((call) => call.values[2] === 'attempt-sent');
+  assert.ok(sentFailure);
+  assert.match(sentFailure.sql, /SET result_state = 'failed'/);
+  assert.match(sentFailure.sql, /unknown_reason = CASE WHEN dispatch_state = 'sent' THEN NULL ELSE unknown_reason END/);
+  // R9 P9: the never-dispatched attempt takes migration 059's cancellation.
+  const neverSent = attemptUpdates.find((call) => call.values[2] === 'attempt-never-sent');
+  assert.ok(neverSent);
+  assert.match(neverSent.sql, /AND dispatch_state = 'not_sent' AND result_state = 'pending'/);
+  // A crashed mid-dispatch attempt reaches the terminal result through the
+  // guarded dispatching -> unknown -> failed path.
+  const crashedDispatch = attemptUpdates.find((call) => call.values[2] === 'attempt-crashed-dispatch');
+  assert.ok(crashedDispatch);
+  assert.match(crashedDispatch.sql, /SET dispatch_state = 'unknown'/);
+  assert.equal(crashedDispatch.values[3], 'operator_resolution_not_executed');
+});
+
 test('postgres resolution rechecks authorization on its transaction executor before request locks', async () => {
   const queries: string[] = [];
   let transactionExecutor: SqlExecutor | undefined;
@@ -727,6 +1141,14 @@ test('postgres resolution persists the support ticket on the case and every oper
       }
       if (sql.startsWith('UPDATE saas_unknown_outcome_reconciliation_cases')) {
         return { rows: [{ id: 'case-a' }] as Row[], rowCount: 1 };
+      }
+      // R9 P7: the repository drives the metering state machine through narrow
+      // guard-enforced CAS statements instead of the shared metering service.
+      if (sql.startsWith('UPDATE saas_requests')) {
+        return { rows: [{ state_version: 2 }] as Row[], rowCount: 1 };
+      }
+      if (sql.startsWith('UPDATE saas_attempts')) {
+        return { rows: [{ id: 'attempt-a' }] as Row[], rowCount: 1 };
       }
       return { rows: [] as Row[], rowCount: 1 };
     },

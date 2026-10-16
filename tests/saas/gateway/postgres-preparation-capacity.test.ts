@@ -5,7 +5,10 @@ import { Pool as PgPool, type PoolClient } from 'pg';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
 import { GATEWAY_REQUEST_CAPACITY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/038_gateway_request_capacity.js';
 import type { SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
-import { PostgresPreparationCapacityAdapter } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
+import {
+  CONCURRENCY_INFLIGHT_HORIZON_SECONDS,
+  PostgresPreparationCapacityAdapter,
+} from '../../../src/saas/gateway/postgres-preparation-capacity.js';
 import type { RequestPreparationDecision } from '../../../src/saas/gateway/request-preparation-service.js';
 
 const capacity = new PostgresPreparationCapacityAdapter();
@@ -192,6 +195,16 @@ test('reserve uses the passed executor, persists exact scope and is idempotent b
   assert.ok(countSql?.includes('FROM saas_requests q'));
   assert.ok(countSql?.includes('FROM saas_attempts a'));
   assert.ok(countSql?.includes("reserved_at > clock_timestamp() - INTERVAL '60 seconds'"));
+  // R9 P10: the in-flight concurrency truth is age-bounded so a crashed
+  // gateway or a settle failure can never poison admission forever.
+  assert.ok(
+    countSql?.includes(`q.updated_at > clock_timestamp() - INTERVAL '${CONCURRENCY_INFLIGHT_HORIZON_SECONDS} seconds'`),
+  );
+  // The horizon is twice the provider transport's hard timeout ceiling
+  // (provider-http-transport.ts MAX_TIMEOUT_MS = 300_000): a merely slow
+  // stream always stays inside the window, while a row past the horizon can
+  // no longer be legally executing upstream.
+  assert.equal(CONCURRENCY_INFLIGHT_HORIZON_SECONDS, 600);
   assert.equal(
     executor.statements.some(({ sql }) => /saas_wallet|billing_reservation|ledger/i.test(sql)),
     false,
@@ -363,7 +376,8 @@ async function seedMinimalCapacitySchema(client: PoolClient): Promise<void> {
     CREATE TABLE saas_requests (
       tenant_id uuid NOT NULL, id uuid NOT NULL PRIMARY KEY, project_id uuid NOT NULL,
       proxy_key_id uuid NOT NULL, execution_state text NOT NULL, financial_status text NOT NULL,
-      reconciliation_state text NOT NULL, UNIQUE (tenant_id, id),
+      reconciliation_state text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (tenant_id, id),
       FOREIGN KEY (tenant_id, project_id) REFERENCES saas_projects (tenant_id, id),
       FOREIGN KEY (tenant_id, project_id, proxy_key_id)
         REFERENCES saas_api_keys (tenant_id, project_id, id)
@@ -387,10 +401,12 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
   const tenantId = randomUUID();
   const projectId = randomUUID();
   const keyId = randomUUID();
-  const requests = [randomUUID(), randomUUID()] as const;
-  const attempts = [randomUUID(), randomUUID()] as const;
+  const requests = [randomUUID(), randomUUID(), randomUUID()] as const;
+  const attempts = [randomUUID(), randomUUID(), randomUUID(), randomUUID()] as const;
   const legacyActiveRequest = randomUUID();
   const legacyActiveAttempt = randomUUID();
+  const staleRequests = [randomUUID(), randomUUID()] as const;
+  const staleAttempts = [randomUUID(), randomUUID()] as const;
   let created = false;
   try {
     await pool.query(`CREATE SCHEMA "${schema}"`);
@@ -454,6 +470,22 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
          VALUES ($1, $2, $3, 'not_sent', 'pending', false)`,
         [tenantId, legacyActiveAttempt, legacyActiveRequest],
       );
+      // R9 P10: rows stranded past the in-flight horizon (here 700 s old
+      // against the 600 s horizon) must stop owning concurrency truth.
+      for (const [index, staleRequest] of staleRequests.entries()) {
+        await setup.query(
+          `INSERT INTO saas_requests
+             (tenant_id, id, project_id, proxy_key_id, execution_state, financial_status, reconciliation_state, updated_at)
+           VALUES ($1, $2, $3, $4, 'pending', 'not_applicable', 'none', clock_timestamp() - interval '700 seconds')`,
+          [tenantId, staleRequest, projectId, keyId],
+        );
+        await setup.query(
+          `INSERT INTO saas_attempts
+             (tenant_id, id, request_id, dispatch_state, result_state, response_started)
+           VALUES ($1, $2, $3, 'not_sent', 'pending', false)`,
+          [tenantId, staleAttempts[index], staleRequest],
+        );
+      }
     } finally {
       setup.release();
     }
@@ -522,6 +554,35 @@ test('optional PostgreSQL capacity reservation is isolated and concurrent-safe',
       await clientTwo.query('BEGIN');
       const terminalReleased = await capacity.reserve(new PgExecutor(clientTwo), secondInput);
       assert.equal(terminalReleased.decision, 'allow');
+      await clientTwo.query('ROLLBACK');
+
+      // R9 P10: the two stale pending rows must not count against the key
+      // concurrency limit of 2 — only the fresh legacy row remains — while a
+      // fresh unknown row still occupies (verified above). Without the
+      // horizon predicate this reserve would be rejected as rate_limited.
+      await clientOne.query('BEGIN');
+      await clientOne.query(
+        `UPDATE saas_requests SET execution_state = 'succeeded', reconciliation_state = 'resolved'
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, requests[1]],
+      );
+      await clientOne.query(
+        `UPDATE saas_attempts SET dispatch_state = 'sent', result_state = 'succeeded'
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, attempts[1]],
+      );
+      await clientOne.query('COMMIT');
+      await clientTwo.query('BEGIN');
+      const thirdInput = {
+        ...baseInput,
+        tenantId,
+        projectId,
+        proxyKeyId: keyId,
+        requestId: requests[2],
+        attemptId: attempts[2],
+      };
+      const staleRowsDoNotBlock = await capacity.reserve(new PgExecutor(clientTwo), thirdInput);
+      assert.equal(staleRowsDoNotBlock.decision, 'allow');
       await clientTwo.query('ROLLBACK');
     } finally {
       clientOne.release();

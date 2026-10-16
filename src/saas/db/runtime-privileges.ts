@@ -2476,6 +2476,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'cooldown_until',
     'observed_at',
   ]),
+  // R9 P7/P9/P10: the unknown-outcome recovery worker (control plane) reads the
+  // state-machine projection and drives the metering guard triggers through
+  // narrow CAS statements — never the shared metering service's wide RETURNING
+  // projections — so these stay the only request/attempt writes this role owns.
   ...columnGrants('saas_requests', 'SELECT', [
     'id',
     'tenant_id',
@@ -2488,6 +2492,14 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'reconciliation_state',
     'created_at',
     'updated_at',
+    'state_version',
+  ]),
+  ...columnGrants('saas_requests', 'UPDATE', [
+    'execution_state',
+    'reconciliation_state',
+    'financial_status',
+    'updated_at',
+    'state_version',
   ]),
   ...columnGrants('saas_attempts', 'SELECT', [
     'id',
@@ -2508,12 +2520,32 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'resolved_model',
     'dispatch_state',
     'unknown_reason',
+    // Recovery worker attempt snapshots and operator resolution coverage.
+    'state_version',
+    'account_owner_kind',
+    'account_id',
+    'product_id',
   ]),
+  ...columnGrants('saas_attempts', 'UPDATE', [
+    'dispatch_state',
+    'result_state',
+    'unknown_reason',
+    'updated_at',
+    'state_version',
+  ]),
+  // The stale-admission sweep fails never-dispatched reservations under their
+  // own transactions; the fail-closed retained_for_reconciliation disposition
+  // needs only the state transition columns. The migration 038 attempt trigger
+  // also reads these three columns when a dispatch state is rewritten.
+  ...columnGrants('saas_gateway_capacity_reservations', 'SELECT', ['tenant_id', 'request_id', 'state']),
+  ...columnGrants('saas_gateway_capacity_reservations', 'UPDATE', ['state', 'updated_at']),
   ...columnGrants('saas_usage_events', 'SELECT', [
     'id',
     'tenant_id',
     'request_id',
+    'attempt_id',
     'supply_mode',
+    'event_digest',
     'input_total',
     'input_uncached',
     'cache_read',

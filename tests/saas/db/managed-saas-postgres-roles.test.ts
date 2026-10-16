@@ -468,22 +468,29 @@ test('gateway role receives no broad/default grants and health uses explicit col
   );
 });
 
-test('customer request read template is exactly CP eleven-column SELECT and rejects privilege mutations', () => {
+test('customer request read template is the CP projection plus the recovery worker state-machine UPDATE columns', () => {
   const expected = [
-    'id',
-    'tenant_id',
-    'project_id',
-    'public_model',
-    'protocol',
-    'supply_mode',
-    'execution_state',
-    'financial_status',
-    'reconciliation_state',
-    'created_at',
-    'updated_at',
-  ]
-    .map((column) => column + '\tSELECT')
-    .sort();
+    ...[
+      'id',
+      'tenant_id',
+      'project_id',
+      'public_model',
+      'protocol',
+      'supply_mode',
+      'execution_state',
+      'financial_status',
+      'reconciliation_state',
+      'created_at',
+      'updated_at',
+      // R9 P7: the unknown-outcome recovery worker's CAS reconciliation reads.
+      'state_version',
+    ].map((column) => column + '\tSELECT'),
+    // R9 P7/P9/P10: guard-enforced terminal reconciliation writes; the only
+    // request columns the control plane may mutate.
+    ...['execution_state', 'reconciliation_state', 'financial_status', 'updated_at', 'state_version'].map(
+      (column) => column + '\tUPDATE',
+    ),
+  ].sort();
   const validate = (source: string): void => {
     const block = source.match(/DO \$control_plane_runtime_grants\$([\s\S]*?)\$control_plane_runtime_grants\$/)?.[1];
     assert.ok(block);
