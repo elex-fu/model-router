@@ -33,14 +33,24 @@ interface WorkerPrivilegeProbeRow {
   readonly extra_column_privilege: boolean;
   readonly any_sequence_privilege: boolean;
   readonly any_function_privilege: boolean;
+  readonly catalog_scope_validator_executable: boolean;
   readonly out_of_schema_object_privilege: boolean;
 }
 
 /**
  * The worker receives column-level SELECT on its immutable job/credential
  * snapshot and live provider authority rows, plus column-level UPDATE on job
- * leases and credential health state. It has no table-level grants, DML on
- * catalog tables, sequence access, or application function execution.
+ * leases and credential health state. It has no table-level grants, sequence
+ * access, or application function execution — with exactly one exception:
+ * EXECUTE on the IMMUTABLE CHECK-constraint validator
+ * saas_catalog_valid_scope(text[]), required because PostgreSQL evaluates
+ * CHECK-constraint functions as the inserting role and the worker inserts
+ * into saas_provider_rights / saas_public_model_versions. G2 (F6
+ * openRouterModelPricingSync) additionally grants INSERT on the append-only
+ * catalog, public-model and supplier-cost registration tables — exactly the
+ * columns the OpenRouter pricing sync store's service-method statements
+ * touch — plus the SELECT columns those methods read (including RETURNING
+ * projections). No catalog table receives UPDATE or DELETE.
  */
 export const SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL = `
 WITH RECURSIVE runtime_role AS (
@@ -93,6 +103,15 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_provider_products', 'provider_id', 'SELECT'),
     ('saas_provider_products', 'product_id', 'SELECT'),
     ('saas_provider_products', 'status', 'SELECT'),
+    -- G2 (F6 mount): the OpenRouter pricing sync's product registration
+    -- reads/writes the full row (existence/fence reads + RETURNING).
+    ('saas_provider_products', 'display_name', 'SELECT'),
+    ('saas_provider_products', 'created_at', 'SELECT'),
+    ('saas_provider_products', 'provider_id', 'INSERT'),
+    ('saas_provider_products', 'product_id', 'INSERT'),
+    ('saas_provider_products', 'display_name', 'INSERT'),
+    ('saas_provider_products', 'status', 'INSERT'),
+    ('saas_provider_products', 'created_at', 'INSERT'),
     ('saas_provider_rights', 'rights_id', 'SELECT'),
     ('saas_provider_rights', 'version', 'SELECT'),
     ('saas_provider_rights', 'provider_id', 'SELECT'),
@@ -106,6 +125,29 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_provider_rights', 'effective_at', 'SELECT'),
     ('saas_provider_rights', 'expires_at', 'SELECT'),
     ('saas_provider_rights', 'status', 'SELECT'),
+    -- G2 (F6 mount): the rights-version registration's RETURNING projection
+    -- and append-only version write cover the remaining row columns.
+    ('saas_provider_rights', 'approval_ref', 'SELECT'),
+    ('saas_provider_rights', 'evidence_ref', 'SELECT'),
+    ('saas_provider_rights', 'evidence_sha256', 'SELECT'),
+    ('saas_provider_rights', 'created_at', 'SELECT'),
+    ('saas_provider_rights', 'rights_id', 'INSERT'),
+    ('saas_provider_rights', 'version', 'INSERT'),
+    ('saas_provider_rights', 'provider_id', 'INSERT'),
+    ('saas_provider_rights', 'product_id', 'INSERT'),
+    ('saas_provider_rights', 'credential_type', 'INSERT'),
+    ('saas_provider_rights', 'supply_mode', 'INSERT'),
+    ('saas_provider_rights', 'region', 'INSERT'),
+    ('saas_provider_rights', 'purpose', 'INSERT'),
+    ('saas_provider_rights', 'model_scope', 'INSERT'),
+    ('saas_provider_rights', 'endpoint_scope', 'INSERT'),
+    ('saas_provider_rights', 'effective_at', 'INSERT'),
+    ('saas_provider_rights', 'expires_at', 'INSERT'),
+    ('saas_provider_rights', 'approval_ref', 'INSERT'),
+    ('saas_provider_rights', 'status', 'INSERT'),
+    ('saas_provider_rights', 'evidence_ref', 'INSERT'),
+    ('saas_provider_rights', 'evidence_sha256', 'INSERT'),
+    ('saas_provider_rights', 'created_at', 'INSERT'),
     ('saas_provider_capabilities', 'provider_id', 'SELECT'),
     ('saas_provider_capabilities', 'product_id', 'SELECT'),
     ('saas_provider_capabilities', 'model', 'SELECT'),
@@ -115,6 +157,25 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_provider_capabilities', 'support_level', 'SELECT'),
     ('saas_provider_capabilities', 'validation_state', 'SELECT'),
     ('saas_provider_capabilities', 'evidence_sha256', 'SELECT'),
+    -- G2 (F6 mount): the capability-version registration's RETURNING
+    -- projection and append-only version write cover the remaining columns.
+    ('saas_provider_capabilities', 'evidence_version', 'SELECT'),
+    ('saas_provider_capabilities', 'discovery_source', 'SELECT'),
+    ('saas_provider_capabilities', 'evidence_ref', 'SELECT'),
+    ('saas_provider_capabilities', 'created_at', 'SELECT'),
+    ('saas_provider_capabilities', 'provider_id', 'INSERT'),
+    ('saas_provider_capabilities', 'product_id', 'INSERT'),
+    ('saas_provider_capabilities', 'model', 'INSERT'),
+    ('saas_provider_capabilities', 'endpoint', 'INSERT'),
+    ('saas_provider_capabilities', 'protocol', 'INSERT'),
+    ('saas_provider_capabilities', 'version', 'INSERT'),
+    ('saas_provider_capabilities', 'support_level', 'INSERT'),
+    ('saas_provider_capabilities', 'validation_state', 'INSERT'),
+    ('saas_provider_capabilities', 'evidence_version', 'INSERT'),
+    ('saas_provider_capabilities', 'discovery_source', 'INSERT'),
+    ('saas_provider_capabilities', 'evidence_ref', 'INSERT'),
+    ('saas_provider_capabilities', 'evidence_sha256', 'INSERT'),
+    ('saas_provider_capabilities', 'created_at', 'INSERT'),
     ('saas_tenant_provider_account_capabilities', 'tenant_id', 'SELECT'),
     ('saas_tenant_provider_account_capabilities', 'account_id', 'SELECT'),
     ('saas_tenant_provider_account_capabilities', 'provider_id', 'SELECT'),
@@ -477,7 +538,110 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_audit_events', 'target_type', 'INSERT'),
     ('saas_audit_events', 'target_id', 'INSERT'),
     ('saas_audit_events', 'occurred_at', 'INSERT'),
-    ('saas_audit_events', 'entry_point', 'INSERT')
+    ('saas_audit_events', 'entry_point', 'INSERT'),
+    -- G2 (F6 openRouterModelPricingSync): the OpenRouter model-pricing sync
+    -- worker shares this workload. Its service-backed store appends catalog
+    -- structure and supplier cost versions through the existing
+    -- SaasCatalogService/SaasPricingService registration methods, so the
+    -- grants below are exactly those statements' INSERT column lists plus
+    -- the SELECT columns their reads and RETURNING projections touch.
+    -- saas_provider_rights_events is INSERT-only history; no catalog table
+    -- receives UPDATE or DELETE (append-only, versioned rows).
+    ('saas_provider_rights_events', 'id', 'INSERT'),
+    ('saas_provider_rights_events', 'rights_id', 'INSERT'),
+    ('saas_provider_rights_events', 'rights_version', 'INSERT'),
+    ('saas_provider_rights_events', 'from_status', 'INSERT'),
+    ('saas_provider_rights_events', 'to_status', 'INSERT'),
+    ('saas_provider_rights_events', 'event_type', 'INSERT'),
+    ('saas_provider_rights_events', 'occurred_at', 'INSERT'),
+    ('saas_public_models', 'id', 'SELECT'),
+    ('saas_public_models', 'alias', 'SELECT'),
+    ('saas_public_models', 'display_name', 'SELECT'),
+    ('saas_public_models', 'status', 'SELECT'),
+    ('saas_public_models', 'id', 'INSERT'),
+    ('saas_public_models', 'alias', 'INSERT'),
+    ('saas_public_models', 'display_name', 'INSERT'),
+    ('saas_public_models', 'status', 'INSERT'),
+    ('saas_public_models', 'created_at', 'INSERT'),
+    ('saas_public_model_versions', 'public_model_id', 'SELECT'),
+    ('saas_public_model_versions', 'version', 'SELECT'),
+    ('saas_public_model_versions', 'provider_id', 'SELECT'),
+    ('saas_public_model_versions', 'product_id', 'SELECT'),
+    ('saas_public_model_versions', 'model', 'SELECT'),
+    ('saas_public_model_versions', 'endpoint_scope', 'SELECT'),
+    ('saas_public_model_versions', 'status', 'SELECT'),
+    ('saas_public_model_versions', 'public_model_id', 'INSERT'),
+    ('saas_public_model_versions', 'version', 'INSERT'),
+    ('saas_public_model_versions', 'provider_id', 'INSERT'),
+    ('saas_public_model_versions', 'product_id', 'INSERT'),
+    ('saas_public_model_versions', 'model', 'INSERT'),
+    ('saas_public_model_versions', 'endpoint_scope', 'INSERT'),
+    ('saas_public_model_versions', 'status', 'INSERT'),
+    ('saas_public_model_versions', 'created_at', 'INSERT'),
+    ('saas_supplier_cost_versions', 'id', 'SELECT'),
+    ('saas_supplier_cost_versions', 'version', 'SELECT'),
+    ('saas_supplier_cost_versions', 'public_model_id', 'SELECT'),
+    ('saas_supplier_cost_versions', 'public_model_version', 'SELECT'),
+    ('saas_supplier_cost_versions', 'provider_id', 'SELECT'),
+    ('saas_supplier_cost_versions', 'product_id', 'SELECT'),
+    ('saas_supplier_cost_versions', 'resolved_model', 'SELECT'),
+    ('saas_supplier_cost_versions', 'protocol', 'SELECT'),
+    ('saas_supplier_cost_versions', 'endpoint', 'SELECT'),
+    ('saas_supplier_cost_versions', 'currency', 'SELECT'),
+    ('saas_supplier_cost_versions', 'commercial_policy_version', 'SELECT'),
+    ('saas_supplier_cost_versions', 'calculator_version', 'SELECT'),
+    ('saas_supplier_cost_versions', 'rounding_version', 'SELECT'),
+    ('saas_supplier_cost_versions', 'rounding_mode', 'SELECT'),
+    ('saas_supplier_cost_versions', 'rounding_boundary', 'SELECT'),
+    ('saas_supplier_cost_versions', 'input_rate_numerator_minor_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'input_rate_denominator_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_read_rate_numerator_minor_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_read_rate_denominator_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_write_rate_numerator_minor_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_write_rate_denominator_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_write_5m_rate_numerator_minor_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_write_5m_rate_denominator_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_write_1h_rate_numerator_minor_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'cache_write_1h_rate_denominator_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'output_rate_numerator_minor_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'output_rate_denominator_units', 'SELECT'),
+    ('saas_supplier_cost_versions', 'effective_at', 'SELECT'),
+    ('saas_supplier_cost_versions', 'expires_at', 'SELECT'),
+    ('saas_supplier_cost_versions', 'idempotency_key', 'SELECT'),
+    ('saas_supplier_cost_versions', 'definition_digest', 'SELECT'),
+    ('saas_supplier_cost_versions', 'created_at', 'SELECT'),
+    ('saas_supplier_cost_versions', 'id', 'INSERT'),
+    ('saas_supplier_cost_versions', 'version', 'INSERT'),
+    ('saas_supplier_cost_versions', 'public_model_id', 'INSERT'),
+    ('saas_supplier_cost_versions', 'public_model_version', 'INSERT'),
+    ('saas_supplier_cost_versions', 'provider_id', 'INSERT'),
+    ('saas_supplier_cost_versions', 'product_id', 'INSERT'),
+    ('saas_supplier_cost_versions', 'resolved_model', 'INSERT'),
+    ('saas_supplier_cost_versions', 'protocol', 'INSERT'),
+    ('saas_supplier_cost_versions', 'endpoint', 'INSERT'),
+    ('saas_supplier_cost_versions', 'currency', 'INSERT'),
+    ('saas_supplier_cost_versions', 'commercial_policy_version', 'INSERT'),
+    ('saas_supplier_cost_versions', 'calculator_version', 'INSERT'),
+    ('saas_supplier_cost_versions', 'rounding_version', 'INSERT'),
+    ('saas_supplier_cost_versions', 'rounding_mode', 'INSERT'),
+    ('saas_supplier_cost_versions', 'rounding_boundary', 'INSERT'),
+    ('saas_supplier_cost_versions', 'input_rate_numerator_minor_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'input_rate_denominator_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_read_rate_numerator_minor_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_read_rate_denominator_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_write_rate_numerator_minor_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_write_rate_denominator_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_write_5m_rate_numerator_minor_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_write_5m_rate_denominator_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_write_1h_rate_numerator_minor_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'cache_write_1h_rate_denominator_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'output_rate_numerator_minor_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'output_rate_denominator_units', 'INSERT'),
+    ('saas_supplier_cost_versions', 'effective_at', 'INSERT'),
+    ('saas_supplier_cost_versions', 'expires_at', 'INSERT'),
+    ('saas_supplier_cost_versions', 'idempotency_key', 'INSERT'),
+    ('saas_supplier_cost_versions', 'definition_digest', 'INSERT'),
+    ('saas_supplier_cost_versions', 'created_at', 'INSERT')
 )
 SELECT
   EXISTS (SELECT 1 FROM runtime_role) AS role_exists,
@@ -597,7 +761,25 @@ SELECT
       AND namespace.nspname NOT LIKE 'pg_toast%'
       AND namespace.nspname NOT LIKE 'pg_temp_%'
       AND pg_catalog.has_function_privilege(current_user, routine.oid, 'EXECUTE')
+      -- G2 (F6 openRouterModelPricingSync): the single EXECUTE exception.
+      -- The saas_provider_rights / saas_public_model_versions CHECK
+      -- constraints (migration 008) call this IMMUTABLE validator, and
+      -- CHECK-constraint functions run as the inserting role, so the worker
+      -- must be able to execute exactly this routine.
+      AND NOT (
+        namespace.nspname = 'model_router_saas'
+        AND routine.proname = 'saas_catalog_valid_scope'
+        AND pg_catalog.pg_get_function_identity_arguments(routine.oid) = 'scope_values text[]'
+      )
   ) AS any_function_privilege,
+  EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'model_router_saas'
+      AND routine.proname = 'saas_catalog_valid_scope'
+      AND pg_catalog.pg_get_function_identity_arguments(routine.oid) = 'scope_values text[]'
+      AND pg_catalog.has_function_privilege(current_user, routine.oid, 'EXECUTE')
+  ) AS catalog_scope_validator_executable,
   EXISTS (
     SELECT 1
     FROM pg_catalog.pg_class AS relation
@@ -669,6 +851,7 @@ function isProbeRow(value: unknown): value is WorkerPrivilegeProbeRow {
     'extra_column_privilege',
     'any_sequence_privilege',
     'any_function_privilege',
+    'catalog_scope_validator_executable',
     'out_of_schema_object_privilege',
   ].every((key) => typeof row[key] === 'boolean');
 }
@@ -706,6 +889,7 @@ export async function verifyCredentialValidationWorkerRuntimePrivileges(
       row.extra_column_privilege ||
       row.any_sequence_privilege ||
       row.any_function_privilege ||
+      !row.catalog_scope_validator_executable ||
       row.out_of_schema_object_privilege
     ) {
       throw new SaasCredentialValidationWorkerPrivilegeError();

@@ -6,10 +6,15 @@
 -- role password through the deployment secret manager.
 -- 058 only repairs two original row-trigger wrappers; this worker grant set
 -- is unchanged. It never grants credential current_version/expires_at UPDATE,
--- job identity INSERT/UPDATE, migration-ledger access or routine EXECUTE.
--- R6a (109) widened INSERT to exactly two append-only observation tables:
+-- job identity INSERT/UPDATE, migration-ledger access or routine EXECUTE —
+-- with exactly one documented exception: EXECUTE on the IMMUTABLE CHECK
+-- constraint validator saas_catalog_valid_scope(text[]) (see the G2 note
+-- below).
+-- R6a (109) widened INSERT to the append-only observation tables
 -- saas_probe_runs (probe history) and saas_audit_events (best-effort alert
--- records); every other INSERT grant on this role remains forbidden.
+-- records). G2 (F6 openRouterModelPricingSync) further widened INSERT to the
+-- append-only catalog/public-model/supplier-cost registration tables; every
+-- other INSERT grant on this role remains forbidden.
 -- DEPLOYMENT NOTE (migration 093, Track D4): the quota sync worker shares
 -- this role and writes the account quota snapshot columns below. Re-apply
 -- this template after 093 is migrated; until then the worker runtime
@@ -22,6 +27,24 @@
 -- below. The opencode_go_protocol_rules column is deliberately absent: the
 -- control-plane role owns the adaptive-routing rule table. Re-apply this
 -- template after 108 is migrated.
+-- DEPLOYMENT NOTE (G2, F6 openRouterModelPricingSync): the OpenRouter
+-- model-catalog/pricing sync loop also shares this role (the opt-in
+-- managed-saas.ts `openRouterModelPricingSync` mount). Its service-backed
+-- store appends catalog structure and supplier cost versions through the
+-- existing SaasCatalogService / SaasPricingService registration methods, so
+-- this role gains INSERT on the append-only catalog, public-model and
+-- supplier-cost tables below — plus the SELECT columns those methods read,
+-- including their RETURNING projections (RETURNING requires SELECT). The
+-- saas_provider_rights / saas_public_model_versions CHECK constraints call
+-- the IMMUTABLE validator saas_catalog_valid_scope(text[]) (migration 008);
+-- PostgreSQL evaluates CHECK-constraint functions as the inserting role, so
+-- this role also gains EXECUTE on that one routine (audited: it is the only
+-- schema function any CHECK constraint on the granted tables calls — every
+-- other CHECK uses built-ins, and trigger functions need no EXECUTE to
+-- fire). No migration is involved (the 008/017 table shapes are unchanged);
+-- re-apply this template on a database that predates this change — until
+-- then the worker runtime privilege probe fails closed by design and
+-- deployments must leave the openRouterModelPricingSync option unset.
 
 BEGIN;
 
@@ -142,6 +165,17 @@ BEGIN
 END;
 $revoke_worker_acl$;
 
+-- G2 (F6 openRouterModelPricingSync): the saas_provider_rights and
+-- saas_public_model_versions CHECK constraints (migration 008) call the
+-- IMMUTABLE validator saas_catalog_valid_scope(text[]), and PostgreSQL
+-- evaluates CHECK-constraint functions as the inserting role. This is the
+-- only schema routine any CHECK constraint on a worker-granted table calls
+-- (audited across all migrations; every other CHECK uses built-ins), so it
+-- is the role's single EXECUTE exception. Granted after the blanket revoke
+-- above so re-applying this template restores it.
+GRANT EXECUTE ON FUNCTION model_router_saas.saas_catalog_valid_scope(text[])
+  TO model_router_saas_validation_worker;
+
 GRANT SELECT (
   id, tenant_id, account_id, credential_id, credential_version, provider_id,
   product_id, credential_type, allowed_models, target_model, target_endpoint,
@@ -158,14 +192,50 @@ GRANT UPDATE (
 GRANT SELECT (provider_id, product_id, status)
   ON TABLE model_router_saas.saas_provider_products
   TO model_router_saas_validation_worker;
+-- G2 (F6 mount): the OpenRouter pricing sync's product registration writes
+-- the full row; the same methods' existence/fence reads also select
+-- display_name and created_at, and the INSERT's RETURNING projection needs
+-- SELECT on every inserted column.
+GRANT SELECT (
+  display_name, created_at
+) ON TABLE model_router_saas.saas_provider_products
+  TO model_router_saas_validation_worker;
+GRANT INSERT (
+  provider_id, product_id, display_name, status, created_at
+) ON TABLE model_router_saas.saas_provider_products
+  TO model_router_saas_validation_worker;
 GRANT SELECT (
   rights_id, version, provider_id, product_id, credential_type, supply_mode,
   region, purpose, model_scope, endpoint_scope, effective_at, expires_at, status
 ) ON TABLE model_router_saas.saas_provider_rights
   TO model_router_saas_validation_worker;
+-- G2 (F6 mount): rights-version registration RETURNING projection and the
+-- append-only version write cover the remaining columns of the row.
+GRANT SELECT (
+  approval_ref, evidence_ref, evidence_sha256, created_at
+) ON TABLE model_router_saas.saas_provider_rights
+  TO model_router_saas_validation_worker;
+GRANT INSERT (
+  rights_id, version, provider_id, product_id, credential_type, supply_mode,
+  region, purpose, model_scope, endpoint_scope, effective_at, expires_at,
+  approval_ref, status, evidence_ref, evidence_sha256, created_at
+) ON TABLE model_router_saas.saas_provider_rights
+  TO model_router_saas_validation_worker;
 GRANT SELECT (
   provider_id, product_id, model, endpoint, protocol, version, support_level,
   validation_state, evidence_sha256
+) ON TABLE model_router_saas.saas_provider_capabilities
+  TO model_router_saas_validation_worker;
+-- G2 (F6 mount): capability-version registration RETURNING projection and
+-- the append-only version write cover the remaining columns of the row.
+GRANT SELECT (
+  evidence_version, discovery_source, evidence_ref, created_at
+) ON TABLE model_router_saas.saas_provider_capabilities
+  TO model_router_saas_validation_worker;
+GRANT INSERT (
+  provider_id, product_id, model, endpoint, protocol, version, support_level,
+  validation_state, evidence_version, discovery_source, evidence_ref,
+  evidence_sha256, created_at
 ) ON TABLE model_router_saas.saas_provider_capabilities
   TO model_router_saas_validation_worker;
 GRANT SELECT (
@@ -367,6 +437,75 @@ GRANT SELECT (
 GRANT INSERT (
   id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, entry_point
 ) ON TABLE model_router_saas.saas_audit_events
+  TO model_router_saas_validation_worker;
+
+-- G2 (F6 openRouterModelPricingSync): the OpenRouter model-pricing sync
+-- worker shares this workload (the 108 usage-worker precedent). Its
+-- service-backed store appends catalog structure and supplier cost versions
+-- through the existing SaasCatalogService / SaasPricingService registration
+-- methods, so every grant below is exactly the INSERT column list those
+-- methods' statements touch (plus the SELECT columns their reads and
+-- RETURNING projections need — the catalog SELECT extensions above and the
+-- public-model/supplier-cost reads here). saas_provider_rights_events is
+-- INSERT-only history; the supplier-cost identity-guard trigger reads the
+-- public-model-version identity columns as the inserting role, which the
+-- SELECT grant on saas_public_model_versions already covers. The tables are
+-- append-only and versioned: the worker never UPDATEs or DELETEs anything,
+-- and no saas_audit_events columns are added because the store registers
+-- rights without an audit context. Re-apply this template to enable the
+-- opt-in openRouterModelPricingSync mount; until then the worker runtime
+-- privilege probe fails closed by design.
+
+GRANT INSERT (
+  id, rights_id, rights_version, from_status, to_status, event_type, occurred_at
+) ON TABLE model_router_saas.saas_provider_rights_events
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  id, alias, display_name, status
+) ON TABLE model_router_saas.saas_public_models
+  TO model_router_saas_validation_worker;
+GRANT INSERT (
+  id, alias, display_name, status, created_at
+) ON TABLE model_router_saas.saas_public_models
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  public_model_id, version, provider_id, product_id, model, endpoint_scope, status
+) ON TABLE model_router_saas.saas_public_model_versions
+  TO model_router_saas_validation_worker;
+GRANT INSERT (
+  public_model_id, version, provider_id, product_id, model, endpoint_scope, status, created_at
+) ON TABLE model_router_saas.saas_public_model_versions
+  TO model_router_saas_validation_worker;
+
+GRANT SELECT (
+  id, version, public_model_id, public_model_version, provider_id, product_id,
+  resolved_model, protocol, endpoint, currency,
+  commercial_policy_version, calculator_version, rounding_version, rounding_mode,
+  rounding_boundary,
+  input_rate_numerator_minor_units, input_rate_denominator_units,
+  cache_read_rate_numerator_minor_units, cache_read_rate_denominator_units,
+  cache_write_rate_numerator_minor_units, cache_write_rate_denominator_units,
+  cache_write_5m_rate_numerator_minor_units, cache_write_5m_rate_denominator_units,
+  cache_write_1h_rate_numerator_minor_units, cache_write_1h_rate_denominator_units,
+  output_rate_numerator_minor_units, output_rate_denominator_units,
+  effective_at, expires_at, idempotency_key, definition_digest, created_at
+) ON TABLE model_router_saas.saas_supplier_cost_versions
+  TO model_router_saas_validation_worker;
+GRANT INSERT (
+  id, version, public_model_id, public_model_version, provider_id, product_id,
+  resolved_model, protocol, endpoint, currency,
+  commercial_policy_version, calculator_version, rounding_version, rounding_mode,
+  rounding_boundary,
+  input_rate_numerator_minor_units, input_rate_denominator_units,
+  cache_read_rate_numerator_minor_units, cache_read_rate_denominator_units,
+  cache_write_rate_numerator_minor_units, cache_write_rate_denominator_units,
+  cache_write_5m_rate_numerator_minor_units, cache_write_5m_rate_denominator_units,
+  cache_write_1h_rate_numerator_minor_units, cache_write_1h_rate_denominator_units,
+  output_rate_numerator_minor_units, output_rate_denominator_units,
+  effective_at, expires_at, idempotency_key, definition_digest, created_at
+) ON TABLE model_router_saas.saas_supplier_cost_versions
   TO model_router_saas_validation_worker;
 
 COMMIT;
