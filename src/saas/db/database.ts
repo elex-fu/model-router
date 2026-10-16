@@ -9,6 +9,88 @@ import type {
   SqlResult,
 } from './types.js';
 
+/** Environment override for the per-process pool maximum (positive integer). */
+export const SAAS_DATABASE_POOL_MAX_ENV = 'MODEL_ROUTER_SAAS_DB_POOL_MAX';
+/**
+ * Environment override for the queue-inclusive client acquisition timeout in
+ * milliseconds (0 disables the timeout).
+ */
+export const SAAS_DATABASE_POOL_ACQUISITION_TIMEOUT_MILLIS_ENV = 'MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS';
+
+/**
+ * Default per-process pool maximum.
+ *
+ * Budget math against PostgreSQL 16 defaults (max_connections = 100,
+ * superuser_reserved_connections = 3, so ~97 connections are usable by
+ * application roles): the reference compose deployment runs five long-lived
+ * pools — gateway ×3, control-plane, credential-validation-worker — so
+ * 5 × 16 = 80 connections, ~83% of the usable budget, leaving ~17 slots for
+ * the migrator role, operator sessions, and burst. When scaling the gateway
+ * replica count or raising PostgreSQL max_connections, operators tune this
+ * per process via MODEL_ROUTER_SAAS_DB_POOL_MAX (target aggregate ≤
+ * max_connections − superuser_reserved_connections).
+ *
+ * A larger pool removes pool-queue acquisition timeouts (R9 finding P3); it
+ * does not de-serialize admission itself — per-tenant admission remains
+ * serialized by the capacity scope fences and the per-wallet billing fence
+ * (R9 finding P4), so requests queued on those fences continue to hold their
+ * pooled connection while they wait.
+ */
+export const DEFAULT_SAAS_DATABASE_POOL_MAX = 16;
+export const DEFAULT_SAAS_DATABASE_POOL_ACQUISITION_TIMEOUT_MILLIS = 5_000;
+export const DEFAULT_SAAS_DATABASE_POOL_IDLE_TIMEOUT_MILLIS = 30_000;
+
+const MAX_POOL_UPPER_BOUND = 10_000;
+const ACQUISITION_TIMEOUT_UPPER_BOUND_MILLIS = 3_600_000;
+
+export interface SaasDatabasePoolSettings {
+  readonly max: number;
+  readonly idleTimeoutMillis: number;
+  readonly connectionTimeoutMillis: number;
+}
+
+function envInteger(
+  env: Record<string, string | undefined>,
+  name: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new TypeError(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  const parsed = Number(value);
+  if (parsed < minimum || parsed > maximum) {
+    throw new TypeError(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+/**
+ * Resolves the effective pool settings with explicit, fail-closed precedence:
+ * an explicit option wins over the environment override, which wins over the
+ * built-in default. Malformed or out-of-range environment values throw
+ * instead of being silently coerced.
+ */
+export function resolveSaasDatabasePoolSettings(
+  options: Pick<SaasDatabaseOptions, 'max' | 'idleTimeoutMillis' | 'connectionTimeoutMillis'>,
+  env: Record<string, string | undefined>,
+): SaasDatabasePoolSettings {
+  return {
+    max:
+      options.max ??
+      envInteger(env, SAAS_DATABASE_POOL_MAX_ENV, 1, MAX_POOL_UPPER_BOUND) ??
+      DEFAULT_SAAS_DATABASE_POOL_MAX,
+    idleTimeoutMillis: options.idleTimeoutMillis ?? DEFAULT_SAAS_DATABASE_POOL_IDLE_TIMEOUT_MILLIS,
+    connectionTimeoutMillis:
+      options.connectionTimeoutMillis ??
+      envInteger(env, SAAS_DATABASE_POOL_ACQUISITION_TIMEOUT_MILLIS_ENV, 0, ACQUISITION_TIMEOUT_UPPER_BOUND_MILLIS) ??
+      DEFAULT_SAAS_DATABASE_POOL_ACQUISITION_TIMEOUT_MILLIS,
+  };
+}
+
 function validateOptions(options: SaasDatabaseOptions): void {
   if (
     !options ||
@@ -59,6 +141,9 @@ function validateOptions(options: SaasDatabaseOptions): void {
   ) {
     throw new TypeError('pool must implement the SaaS database pool contract');
   }
+  if (options.env !== undefined && (typeof options.env !== 'object' || options.env === null)) {
+    throw new TypeError('env must be an environment record');
+  }
 }
 
 function asSqlResult<Row>(result: QueryResult): SqlResult<Row> {
@@ -104,13 +189,13 @@ class NodePostgresPool implements SaasDatabasePool {
 
 export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
   validateOptions(options);
+  // Pool settings (and their environment overrides) are only resolved when
+  // this call owns the pool; an injected pool keeps its caller's sizing.
   const pool =
     options.pool ??
     new NodePostgresPool({
       connectionString: options.connectionString,
-      max: options.max ?? 10,
-      idleTimeoutMillis: options.idleTimeoutMillis ?? 30_000,
-      connectionTimeoutMillis: options.connectionTimeoutMillis ?? 5_000,
+      ...resolveSaasDatabasePoolSettings(options, options.env ?? process.env),
     });
   let closePromise: Promise<void> | undefined;
 

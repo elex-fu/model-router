@@ -346,16 +346,18 @@ export class PlatformWalletLedgerService {
       const wallet = await this.lockWallet(executor, normalized.tenantId, normalized.currency);
       // The wallet row is the transaction fence for every spending-freeze
       // writer. Read the immutable freeze without requesting UPDATE privilege.
+      // The row is read once here and threaded through walletSummary so the
+      // wallet-locked critical section issues no redundant queries.
       const freeze = await this.readFreeze(executor, normalized.tenantId);
       if (freeze) throw new SaasBillingError('SPENDING_FROZEN');
 
       const raced = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
       if (raced) {
         this.assertReservationReplay(raced, normalized);
-        return this.result(executor, raced, wallet);
+        return this.result(executor, raced, wallet, freeze);
       }
 
-      const before = await this.walletSummary(executor, wallet);
+      const before = await this.walletSummary(executor, wallet, undefined, freeze);
       if (before.availableMinorUnits < normalized.amountMinorUnits) {
         throw new SaasBillingError('INSUFFICIENT_FUNDS');
       }
@@ -374,12 +376,12 @@ export class PlatformWalletLedgerService {
         expiresAt: normalized.expiresAt,
         createdAt,
       });
-      if (inserted) return this.result(executor, inserted, wallet);
+      if (inserted) return this.result(executor, inserted, wallet, freeze);
 
       const winner = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
       if (!winner) throw new SaasBillingError('BILLING_STORAGE_ERROR');
       this.assertReservationReplay(winner, normalized);
-      return this.result(executor, winner, wallet);
+      return this.result(executor, winner, wallet, freeze);
     });
   }
 
@@ -1016,6 +1018,7 @@ export class PlatformWalletLedgerService {
     executor: BillingTransactionExecutor,
     wallet: WalletRow,
     excludeRefundOrderId?: string,
+    freezeRow?: FreezeRow | null,
   ): Promise<WalletRecord> {
     const base = mapWalletRow(wallet);
     const holds = await executor.query<{ active_hold_minor_units: StoredMinorUnits }>(
@@ -1042,8 +1045,10 @@ export class PlatformWalletLedgerService {
     }
     // Spending-freeze mutations are serialized by the wallet lock in reserve
     // and settlement paths. The row is immutable, so observation needs no
-    // row lock (and must not require UPDATE privilege).
-    const freeze = await this.readFreeze(executor, wallet.tenant_id);
+    // row lock (and must not require UPDATE privilege). A caller that already
+    // read the freeze inside this wallet-locked transaction passes it here to
+    // avoid a redundant read in the critical section.
+    const freeze = freezeRow === undefined ? await this.readFreeze(executor, wallet.tenant_id) : freezeRow;
     return {
       ...base,
       activeHoldsMinorUnits,
@@ -1058,9 +1063,10 @@ export class PlatformWalletLedgerService {
     executor: BillingTransactionExecutor,
     row: ReservationRow,
     wallet: WalletRow,
+    freezeRow?: FreezeRow | null,
   ): Promise<BillingReservationResult> {
     const record = mapReservationRow(row);
-    const walletSummary = await this.walletSummary(executor, wallet);
+    const walletSummary = await this.walletSummary(executor, wallet, undefined, freezeRow);
     return {
       ...record,
       outcome: record.state,

@@ -684,8 +684,11 @@ export function createRequestAdmissionEventKey(tenantId: string, requestId: stri
 }
 
 /**
- * Composes request admission, an optional platform hold, and bookkeeping in
- * one database transaction.  The outbox is metadata-only and is not a
+ * Composes request admission, bookkeeping, and an optional platform hold in
+ * one database transaction. The platform wallet hold is reserved LAST so the
+ * per-wallet billing fence covers only the balance check, the reservation
+ * insert, and the commit (R9 finding P4: shrink, never weaken, the
+ * double-spend critical section). The outbox is metadata-only and is not a
  * dispatch queue: the live caller remains responsible for post-commit I/O.
  */
 export class SaasRequestAdmissionService {
@@ -758,6 +761,19 @@ export class SaasRequestAdmissionService {
         normalized.supplyMode,
       );
 
+      // R9 finding P4 (critical-section shrink): bookkeeping writes run BEFORE
+      // the platform hold so the per-wallet FOR UPDATE fence — acquired inside
+      // billing.reserve and held until COMMIT — covers only the wallet balance
+      // check, the reservation insert, and the commit itself. The rate counter,
+      // outbox, and audit writes never read billing state, and the wallet row
+      // remains the LAST lock this transaction acquires, so lock ordering is
+      // unchanged. If the reserve fails (insufficient funds, spending freeze),
+      // these writes roll back with the transaction exactly as before.
+      await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
+
+      const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);
+      await this.appendAdmissionAuditEvent(tx, admission, outboxEvent.createdAt);
+
       let reservation: BillingReservationResult | null = null;
       if (normalized.supplyMode === 'platform') {
         if (!platformPriceHold) {
@@ -779,10 +795,6 @@ export class SaasRequestAdmissionService {
         });
       }
 
-      await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
-
-      const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);
-      await this.appendAdmissionAuditEvent(tx, admission, outboxEvent.createdAt);
       return { ...admission, reservation, outboxEvent };
     };
     return options.executor ? work(options.executor) : this.database.transaction(work);

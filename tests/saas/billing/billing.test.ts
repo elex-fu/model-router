@@ -135,6 +135,26 @@ test('spending freezes use the wallet fence before reservation locks without UPD
   assert.ok(reservationLock > walletLock);
 });
 
+test('reserve reads the spending freeze exactly once inside the wallet critical section', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service, '100');
+
+  const statements: string[] = [];
+  await database.transaction((tx) => service.reserve(observeQueries(tx, statements), reserveInput()));
+
+  const walletLock = statements.findIndex((sql) => sql.includes('from saas_wallets') && sql.includes('for update'));
+  const freezeReads = statements
+    .map((sql, index) => ({ sql, index }))
+    .filter(({ sql }) => sql.includes('from saas_billing_spending_freezes'));
+  assert.ok(walletLock >= 0);
+  // Exactly one freeze read, after the wallet fence and before the insert.
+  assert.equal(freezeReads.length, 1);
+  assert.ok(freezeReads[0] && freezeReads[0].index > walletLock);
+  const insertAt = statements.findIndex((sql) => sql.startsWith('insert into saas_billing_reservations'));
+  assert.ok(insertAt > (freezeReads[0]?.index ?? -1));
+});
+
 test('refund-freeze and immutable ledger reads do not request row-update locks', async () => {
   const database = new FakeBillingDatabase();
   const service = createService();

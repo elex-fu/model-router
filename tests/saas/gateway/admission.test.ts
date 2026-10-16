@@ -625,10 +625,10 @@ test('platform admission prelocks first and uses one executor for all admission 
     'prelock',
     'metering',
     'guard',
-    'billing',
     'rate-counter',
     'outbox',
     'audit',
+    'billing',
   ]);
   assert.equal(
     billing.calls[0]?.input.businessKey,
@@ -674,7 +674,7 @@ test('joins a caller-owned outer executor without opening a nested transaction',
   assert.equal(metering.executors[0], outer);
   assert.equal(guard.inputs[0]?.executor, outer);
   assert.equal(billing.calls[0]?.executor, outer);
-  assert.deepEqual(outer.state.events, ['prelock', 'metering', 'guard', 'billing', 'rate-counter', 'outbox', 'audit']);
+  assert.deepEqual(outer.state.events, ['prelock', 'metering', 'guard', 'rate-counter', 'outbox', 'audit', 'billing']);
 });
 
 test('caller monetary fields cannot override the guard hold facts', async () => {
@@ -1001,6 +1001,18 @@ test('a reservation failure propagates and rolls back request, idempotency, and 
   await assert.rejects(service.admit(platformCommand()), (error: unknown) => error === reservationError);
 
   assert.equal(metering.executors[0], billing.calls[0]?.executor);
+  // The wallet hold is reserved last: the rolled-back transaction's executor
+  // shows all bookkeeping ran before the failing reserve.
+  const rolledBackExecutor = billing.calls[0]?.executor as FakeAdmissionExecutor | undefined;
+  assert.ok(rolledBackExecutor);
+  assert.deepEqual(rolledBackExecutor.state.events, [
+    'prelock',
+    'metering',
+    'guard',
+    'rate-counter',
+    'outbox',
+    'audit',
+  ]);
   assert.equal(database.commits, 0);
   assert.equal(database.rollbacks, 1);
   assert.deepEqual(database.state, emptyState());
@@ -1014,25 +1026,25 @@ test('a reservation failure propagates and rolls back request, idempotency, and 
   assert.equal(database.state.audits.length, 1);
 });
 
-test('audit failure rolls back the request, hold, and outbox atomically', async () => {
+test('audit failure rolls back the request, rate counter, and outbox before any hold is reserved', async () => {
   const { database, billing, service } = createService();
   database.state.failAudit = true;
 
   await assert.rejects(service.admit(platformCommand()), /injected audit failure/);
 
-  assert.equal(billing.calls.length, 1);
+  assert.equal(billing.calls.length, 0);
   assert.equal(database.commits, 0);
   assert.equal(database.rollbacks, 1);
   assert.deepEqual(database.state, { ...emptyState(), failAudit: true });
 });
 
-test('outbox failure rolls back the request, hold, and audit fact atomically', async () => {
+test('outbox failure rolls back the request, rate counter, and audit fact before any hold is reserved', async () => {
   const { database, billing, service } = createService();
   database.state.failOutbox = true;
 
   await assert.rejects(service.admit(platformCommand()), /injected outbox failure/);
 
-  assert.equal(billing.calls.length, 1);
+  assert.equal(billing.calls.length, 0);
   assert.equal(database.commits, 0);
   assert.equal(database.rollbacks, 1);
   assert.deepEqual(database.state, { ...emptyState(), failOutbox: true });
@@ -1202,9 +1214,12 @@ test('a rolled-back admission leaves no rate counter residue', async () => {
   assert.equal(database.rollbacks, 1);
   assert.equal(database.state.rateCounters.length, 0);
   // The upsert did run inside the doomed transaction, before the outbox write.
+  // With the wallet hold reserved last, no billing fence was ever acquired.
   const executor = database.executors[0];
   const events = executor?.state.events ?? [];
-  assert.ok(events.indexOf('rate-counter') > events.indexOf('billing'));
+  assert.ok(!events.includes('billing'));
+  assert.ok(events.includes('rate-counter'));
+  assert.ok(!events.includes('audit'));
   const statements = executor?.statements.map(({ sql }) => sql) ?? [];
   const counterAt = statements.findIndex((sql) => sql.includes('saas_provider_account_rate_counters'));
   const outboxAt = statements.findIndex((sql) => sql.includes('saas_request_admission_outbox'));

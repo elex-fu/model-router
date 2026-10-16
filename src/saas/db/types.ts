@@ -28,9 +28,27 @@ export interface SaasDatabase extends SqlExecutor {
 
 export interface SaasDatabaseOptions {
   connectionString: string;
+  /**
+   * Maximum pooled server connections for this process. Wins over the
+   * MODEL_ROUTER_SAAS_DB_POOL_MAX environment override and the built-in
+   * default (see database.ts for the default's PostgreSQL budget math).
+   */
   max?: number;
   idleTimeoutMillis?: number;
+  /**
+   * Queue-inclusive client acquisition timeout: the time a caller may wait
+   * for an idle client plus, when a new server connection is opened, the time
+   * to establish it. Exceeding it fails acquisition (observed by clients as a
+   * connection timeout, e.g. 503 REQUEST_BLOCKED under pool exhaustion).
+   * 0 disables the timeout. Wins over the
+   * MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS environment override.
+   */
   connectionTimeoutMillis?: number;
+  /**
+   * Environment source for the pool-size overrides above. Defaults to
+   * process.env. Only consulted when no pool is injected.
+   */
+  env?: Record<string, string | undefined>;
   /** Pool injection is intended for deterministic tests and custom runtimes. */
   pool?: SaasDatabasePool;
 }
