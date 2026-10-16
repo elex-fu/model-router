@@ -117,4 +117,16 @@
 
 迁移编号终局:100(claude)/104(embeddings)/105(billing groups)/106(registration)/107(egress)/108(opencode-go)/109(probe)——104/105 相对方案表的错位已在树内注释记录。
 
-**留档的后续项**(非阻塞,均已在代码/文档标注):控制台 UI(组管理页/代理 CRUD/测活按钮/目录同步挂载面)、平台 settings store(充值档位折扣/注册配置受管面)、Responses 桥真转换、R6 调度器消费探针列与并发槽预检的接线、040 半开探针路径、组池调度消费与 claude_code_only 执法、结算侧 profit control、OpenRouter 兜底(R8a)、Gemini 池(R8b)、R9 Docker 基准。
+## 后续项开发(F1–F7,2026-10-16 完成)
+
+| 任务 | 提交 | 迁移 | 要点 |
+|---|---|---|---|
+| F1 平台 settings store | 475aaa6 | 110 | 键空间注册表 + 严格解析 + CAS + 审计([redacted] 秘密 diff)+ KMS 密封;注册/充值档位 store-first 消费(env 回退);控制面独占授权;管理 API GET/PUT |
+| F2 调度器消费+组池+执法 | 1b7e35e | — | probe 列排除、Redis 槽预检(可选,输者槽释放,PG 租约最终)、组池候选域(无池=不限,金样回归过)、claude_code_only(validator 证据驱动,fallback 一跳) |
+| F3 Responses 桥真转换 | 44f32dd | — | openai/anthropic→responses 真转换(codex 语义提取 + 下行委托);R5b-4 限制门默认走桥(opencodeGoCrossResponsesRouting: bridge/restrict);反向仍 fail-closed |
+| F4 R8b Gemini 池 | eb67fc8 | 111 | 第三订阅品类(code_assist OAuth/tier 配额太平洋午夜重置/AI Studio 变体);GOCSPX 秘密 env-only(推送保护);94 新测试,codex/claude 零修改 |
+| F5 控制台 UI+管理端点 | 424ac7d | — | 组/代理/规则/设置四管理面 + 测活面板;12 端点全 codex-oauth 合同;凭据服务端密封永不回显;有理数输入客户端服务端双 BigInt;32 边界测试;web 构建过 |
+| F6 R8a OpenRouter 兜底 | abe1eea | — | OpenAI 零桥接 + HTTP-Referer/X-Title;官方价 → supplier_cost_versions(有理数精确转换,内容寻址幂等键免迁移,价变恰追加一版);R7 成本优先天然排订阅池前 |
+| F7 R9 基准套件 | 927b80d | — | bench/chaos 双驱动 + 可编程 HTTPS mock(bench_seq 损坏检测 + maxInFlight 超发 oracle);mock 本地实测 11/11,损坏检测 91764 流实证;执行需 Docker 主机(BENCH.md runbook) |
+
+**终态**:全树 tsc 干净;4730 单测 + 246 集成 0 失败;迁移 001–111。留档待办:claudeCodeClient HTTP 边界字段转发、OpenRouter worker 启用所需 worker 角色列 INSERT 授权、registerPublicModelAlias 23505 重映射修复、F1 密封秘密的解密消费(控制面无解密 KMS)、R9 执行(需 Docker 主机)。
