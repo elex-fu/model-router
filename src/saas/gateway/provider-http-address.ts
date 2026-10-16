@@ -214,6 +214,121 @@ export function isLoopbackProviderAddress(address: string): boolean {
   return address === '127.0.0.1' || address === '::1';
 }
 
+/** Composition guard: the operator egress allowlist is a narrow escape hatch, not a routing table. */
+export const PROVIDER_HTTP_EGRESS_ALLOWLIST_MAX_ENTRIES = 32;
+
+/** Safe error for every egress-allowlist validation failure; never carries operator input verbatim. */
+export class ProviderHttpEgressAllowlistError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderHttpEgressAllowlistError';
+  }
+}
+
+/**
+ * A validated operator egress allowlist (R9 §4 P1). Each entry is an explicit
+ * CIDR network; a resolved provider address is dispatchable when it is global
+ * (the default posture) or falls inside one of the entries. An empty
+ * allowlist keeps the exact pre-R9 fail-closed behavior. Loopback, link-local,
+ * and every other denied range requires the same explicit entry — there are
+ * no implicit carve-outs.
+ */
+export interface ProviderHttpEgressAllowlist {
+  /** The validated canonical CIDR entries, lowercased, in configuration order; safe to log. */
+  readonly entries: readonly string[];
+  /** True when the literal IP address falls inside one of the allowlist entries. */
+  allows(address: string): boolean;
+}
+
+function parseProviderHttpEgressAllowlistEntry(entry: string): Ipv4Range | Ipv6Range {
+  const slash = entry.indexOf('/');
+  if (slash <= 0 || slash === entry.length - 1 || entry.indexOf('/', slash + 1) !== -1) {
+    throw new ProviderHttpEgressAllowlistError('an egress allowlist entry must be an explicit CIDR network');
+  }
+  const networkText = entry.slice(0, slash);
+  const prefixText = entry.slice(slash + 1);
+  if (!/^\d{1,3}$/.test(prefixText)) {
+    throw new ProviderHttpEgressAllowlistError('an egress allowlist prefix must be a decimal number');
+  }
+  const prefix = Number(prefixText);
+  // A /0 entry would re-open every destination at once; the allowlist is
+  // deliberately not that knob — operators enumerate the ranges they need.
+  if (prefix < 1) throw new ProviderHttpEgressAllowlistError('an egress allowlist entry cannot cover all addresses');
+  const family = isIP(networkText);
+  if (family === 4) {
+    const network = ipv4Number(networkText);
+    if (network === null || prefix > 32)
+      throw new ProviderHttpEgressAllowlistError('the IPv4 egress allowlist entry is invalid');
+    const mask = (0xffff_ffff << (32 - prefix)) >>> 0;
+    if ((network & mask) >>> 0 !== network) {
+      throw new ProviderHttpEgressAllowlistError('an egress allowlist entry must be a canonical network address');
+    }
+    return { network, prefix };
+  }
+  if (family === 6) {
+    const network = ipv6Number(networkText);
+    if (network === null || prefix > 128)
+      throw new ProviderHttpEgressAllowlistError('the IPv6 egress allowlist entry is invalid');
+    const shift = 128n - BigInt(prefix);
+    if ((network >> shift) << shift !== network) {
+      throw new ProviderHttpEgressAllowlistError('an egress allowlist entry must be a canonical network address');
+    }
+    return { network, prefix };
+  }
+  throw new ProviderHttpEgressAllowlistError('an egress allowlist entry must be an IPv4 or IPv6 network');
+}
+
+/**
+ * Strict factory for the operator egress allowlist: every entry must be an
+ * explicit, canonical (host bits zero), non-/0 IPv4 or IPv6 CIDR network.
+ * Any malformed, duplicated, or out-of-bounds entry throws — the allowlist
+ * never silently drops or repairs operator input.
+ */
+export function createProviderHttpEgressAllowlist(entries: readonly string[]): ProviderHttpEgressAllowlist {
+  if (!Array.isArray(entries)) {
+    throw new ProviderHttpEgressAllowlistError('egress allowlist entries must be an array of CIDR strings');
+  }
+  if (entries.length > PROVIDER_HTTP_EGRESS_ALLOWLIST_MAX_ENTRIES) {
+    throw new ProviderHttpEgressAllowlistError(
+      `the egress allowlist accepts at most ${PROVIDER_HTTP_EGRESS_ALLOWLIST_MAX_ENTRIES} entries`,
+    );
+  }
+  const ipv4: Ipv4Range[] = [];
+  const ipv6: Ipv6Range[] = [];
+  const seen = new Set<string>();
+  const canonical: string[] = [];
+  for (const raw of entries) {
+    if (typeof raw !== 'string') {
+      throw new ProviderHttpEgressAllowlistError('an egress allowlist entry must be a CIDR string');
+    }
+    const entry = raw.trim().toLowerCase();
+    if (entry === '' || entry.length > 64) {
+      throw new ProviderHttpEgressAllowlistError('an egress allowlist entry must be a bounded non-empty CIDR');
+    }
+    if (seen.has(entry)) throw new ProviderHttpEgressAllowlistError('an egress allowlist entry is duplicated');
+    const range = parseProviderHttpEgressAllowlistEntry(entry);
+    if (isIP(entry.slice(0, entry.indexOf('/'))) === 4) ipv4.push(range as Ipv4Range);
+    else ipv6.push(range as Ipv6Range);
+    seen.add(entry);
+    canonical.push(entry);
+  }
+  return Object.freeze({
+    entries: Object.freeze(canonical),
+    allows: (address: string): boolean => {
+      const family = isIP(address);
+      if (family === 4) {
+        const numeric = ipv4Number(address);
+        return numeric !== null && ipv4.some((range) => ipv4InRange(numeric, range));
+      }
+      if (family === 6) {
+        const numeric = ipv6Number(address);
+        return numeric !== null && ipv6.some((range) => ipv6InRange(numeric, range));
+      }
+      return false;
+    },
+  });
+}
+
 export const resolveProviderHttpAddresses: ProviderHttpAddressResolver = async (hostname, signal) => {
   if (signal.aborted) throw new Error('provider address resolution was aborted');
   const addresses = await lookup(hostname, { all: true, verbatim: true });
@@ -221,10 +336,17 @@ export const resolveProviderHttpAddresses: ProviderHttpAddressResolver = async (
   return addresses.map(({ address, family }) => ({ address, family: family as 4 | 6 }));
 };
 
+/**
+ * Fail-closed address pinning: the host must resolve exclusively to
+ * dispatchable addresses. Dispatchable means globally routable (default) or
+ * covered by an operator egress-allowlist entry; the test capability keeps
+ * its own loopback-only exception. A mixed answer set is rejected as a whole.
+ */
 export function selectPinnedProviderAddress(
   hostname: string,
   resolved: readonly ProviderHttpResolvedAddress[],
   testCapability?: ProviderHttpTestAddressCapability,
+  egressAllowlist?: ProviderHttpEgressAllowlist,
 ): ProviderHttpResolvedAddress {
   const literalFamily = isIP(hostname);
   const candidates = literalFamily ? [{ address: hostname, family: literalFamily as 4 | 6 }] : resolved;
@@ -235,7 +357,8 @@ export function selectPinnedProviderAddress(
   const validated = candidates.map((entry) => {
     const addressAllowed = allowLoopback
       ? entry?.address === hostname && isLoopbackProviderAddress(entry.address)
-      : typeof entry?.address === 'string' && isGlobalProviderAddress(entry.address);
+      : typeof entry?.address === 'string' &&
+        (isGlobalProviderAddress(entry.address) || egressAllowlist?.allows(entry.address) === true);
     if (
       !entry ||
       typeof entry.address !== 'string' ||
@@ -398,6 +521,8 @@ export async function resolveEgressProxyTarget(
   options: {
     readonly resolveAddresses: ProviderHttpAddressResolver;
     readonly testCapability?: ProviderHttpTestAddressCapability;
+    /** R9 §4 P1: operator-configured CIDR entries that also permit otherwise-denied proxy addresses. */
+    readonly egressAllowlist?: ProviderHttpEgressAllowlist;
     readonly signal?: AbortSignal;
   },
 ): Promise<ProviderHttpEgressProxyTarget> {
@@ -412,7 +537,7 @@ export async function resolveEgressProxyTarget(
   }
   let pinned: ProviderHttpResolvedAddress;
   try {
-    pinned = selectPinnedProviderAddress(validated.hostname, resolved, options.testCapability);
+    pinned = selectPinnedProviderAddress(validated.hostname, resolved, options.testCapability, options.egressAllowlist);
   } catch {
     throw new ProviderHttpEgressProxyError();
   }
@@ -500,6 +625,7 @@ export async function createProviderEgressProxyConnection(
   options: {
     readonly resolveAddresses?: ProviderHttpAddressResolver;
     readonly testCapability?: ProviderHttpTestAddressCapability;
+    readonly egressAllowlist?: ProviderHttpEgressAllowlist;
     readonly signal?: AbortSignal;
     readonly requestTls?: buildConnector.BuildOptions;
   } = {},
@@ -507,6 +633,7 @@ export async function createProviderEgressProxyConnection(
   const target = await resolveEgressProxyTarget(proxy, {
     resolveAddresses: options.resolveAddresses ?? resolveProviderHttpAddresses,
     ...(options.testCapability === undefined ? {} : { testCapability: options.testCapability }),
+    ...(options.egressAllowlist === undefined ? {} : { egressAllowlist: options.egressAllowlist }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   return createEgressProxyDispatcher(

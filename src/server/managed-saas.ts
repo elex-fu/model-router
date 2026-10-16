@@ -40,6 +40,7 @@ import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provid
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
 import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
+import { parseProviderEgressAllowlistSettings } from '../saas/gateway/provider-http-egress-allowlist.js';
 import { ConsoleEmailSender, type EmailSender, SmtpEmailSender } from '../saas/identity/email-sender.js';
 import { EmailVerificationService } from '../saas/identity/email-verification-service.js';
 import { createSaasIdentityHandler, type SaasIdentityHttpOptions } from '../saas/identity/http.js';
@@ -1768,6 +1769,17 @@ export async function startManagedSaasServer(
         usageEstimatorVersion: providerPayload.estimator.version,
         now: gatewayClock,
       });
+      // R9 §4 P1: operator egress allowlist for container-network providers.
+      // Strict env parsing — malformed CIDR entries fail the gateway startup
+      // closed. The effective entries (CIDRs, never credentials) are logged.
+      const providerHttpEgressAllowlist = parseProviderEgressAllowlistSettings(environment);
+      console.log(
+        `model-router provider egress allowlist: ${
+          providerHttpEgressAllowlist.entries.length === 0
+            ? 'none (strict global-only provider egress)'
+            : providerHttpEgressAllowlist.entries.join(', ')
+        }`,
+      );
       gateway = createManagedSaasGatewayProductionComposition(database, {
         ...runtimeGatewayOptions,
         schedulerAffinity,
@@ -1795,6 +1807,7 @@ export async function startManagedSaasServer(
         // roles template is re-applied after migration 107 the runtime
         // privilege probe fails closed by design.
         egressProxyResolution: { enabled: true },
+        ...(providerHttpEgressAllowlist.entries.length === 0 ? {} : { providerHttpEgressAllowlist }),
       });
       try {
         await gatewayRuntimeModule.checkReady();

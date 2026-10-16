@@ -63,6 +63,7 @@ import type {
 } from '../saas/gateway/provider-account-scheduler.js';
 import {
   isProviderHttpTestAddressCapability,
+  type ProviderHttpEgressAllowlist,
   type ProviderHttpTestAddressCapability,
 } from '../saas/gateway/provider-http-address.js';
 import {
@@ -605,6 +606,14 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly providerTargetRoute: ManagedSaasProviderTargetRouteResolver;
   /** Test-runner-only capability for pinned local HTTPS integration upstreams. */
   readonly providerHttpTestAddressCapability?: ProviderHttpTestAddressCapability;
+  /**
+   * R9 §4 P1: operator-configured provider egress allowlist. Validated CIDR
+   * entries that additionally permit dispatch to otherwise-denied provider
+   * and egress-proxy addresses (container-network deployments: Docker 172.x,
+   * k8s services, private VPCs). Unset keeps the exact global-only
+   * fail-closed posture for every existing deployment.
+   */
+  readonly providerHttpEgressAllowlist?: ProviderHttpEgressAllowlist;
   /**
    * P1c: the codex transport (CodexPreparedEvidenceTransport). When set,
    * prepared evidence routed to the codex catalog endpoint is dispatched
@@ -1284,6 +1293,10 @@ export function createManagedSaasGatewayProductionComposition(
     ...(options.providerHttpTestAddressCapability === undefined
       ? {}
       : { testAddressCapability: options.providerHttpTestAddressCapability }),
+    // R9 §4 P1: operator egress allowlist for container-network providers.
+    ...(options.providerHttpEgressAllowlist === undefined
+      ? {}
+      : { egressAllowlist: options.providerHttpEgressAllowlist }),
     // R5b-4 (closes R5b-2 gap 2): anthropic-routed OpenCode Go requests carry
     // anthropic-version. The resolver keys on the signed endpoint scope plus
     // the signed provider protocol, so every other provider keeps its exact

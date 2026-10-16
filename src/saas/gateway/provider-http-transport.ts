@@ -11,6 +11,7 @@ import {
   createPinnedProviderHttpTestConnectorFactory,
   isProviderHttpTestAddressCapability,
   type ProviderHttpAddressResolver,
+  type ProviderHttpEgressAllowlist,
   type ProviderHttpEgressProxyTarget,
   type ProviderHttpPinnedConnector,
   type ProviderHttpPinnedConnectorFactory,
@@ -178,6 +179,13 @@ export interface ProviderHttpTransportOptions {
   readonly endpointPolicy: ProviderHttpEndpointPolicy;
   /** Test-runner-only capability for a pinned loopback HTTPS test upstream. */
   readonly testAddressCapability?: ProviderHttpTestAddressCapability;
+  /**
+   * R9 §4 P1: operator-configured egress allowlist. Validated CIDR entries
+   * that additionally permit dispatch to otherwise-denied addresses
+   * (container-network providers). Unset (the default for every existing
+   * composition) keeps the exact global-only fail-closed posture.
+   */
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   /** Defaults to the operating-system resolver; injectable for deterministic tests. */
   readonly resolveAddresses?: ProviderHttpAddressResolver;
   /** Defaults to a per-request Undici Agent pinned to the validated address. */
@@ -231,6 +239,7 @@ interface NormalizedOptions {
   readonly resolveCredential: ProviderHttpCredentialResolver;
   readonly endpointPolicy: NormalizedEndpointPolicy;
   readonly testAddressCapability?: ProviderHttpTestAddressCapability;
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   readonly resolveAddresses: ProviderHttpAddressResolver;
   readonly createConnector: ProviderHttpPinnedConnectorFactory;
   readonly timeoutMs: number;
@@ -429,6 +438,12 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
   ) {
     fail('INVALID_INPUT', 'the local provider address capability is unavailable');
   }
+  if (
+    options.egressAllowlist !== undefined &&
+    (typeof options.egressAllowlist.allows !== 'function' || !Array.isArray(options.egressAllowlist.entries))
+  ) {
+    fail('INVALID_INPUT', 'the provider egress allowlist is invalid');
+  }
   if (options.resolveFixedRequestHeaders !== undefined && typeof options.resolveFixedRequestHeaders !== 'function') {
     fail('INVALID_INPUT', 'a fixed request header resolver must be callable');
   }
@@ -455,6 +470,7 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     resolveCredential: options.resolveCredential,
     endpointPolicy: normalizeEndpointPolicy(options.endpointPolicy),
     ...(options.testAddressCapability === undefined ? {} : { testAddressCapability: options.testAddressCapability }),
+    ...(options.egressAllowlist === undefined ? {} : { egressAllowlist: options.egressAllowlist }),
     resolveAddresses: options.resolveAddresses ?? resolveProviderHttpAddresses,
     createConnector:
       options.createConnector ??
@@ -858,6 +874,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
           target.connectionHostname,
           resolvedAddresses,
           this.options.testAddressCapability,
+          this.options.egressAllowlist,
         );
       } catch {
         fail('ENDPOINT_POLICY_VIOLATION', 'dispatch profile host did not resolve exclusively to public addresses');
@@ -875,6 +892,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
             ...(this.options.testAddressCapability === undefined
               ? {}
               : { testCapability: this.options.testAddressCapability }),
+            ...(this.options.egressAllowlist === undefined ? {} : { egressAllowlist: this.options.egressAllowlist }),
             signal: context.signal,
           });
         } catch (error) {
