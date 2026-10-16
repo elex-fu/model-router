@@ -292,6 +292,11 @@ const SUPPORTED_BRIDGE_PAIRS = new Set<string>([
   // layer (gateway/codex/payload.ts) still owns its own stricter transform
   // for codex traffic.
   'openai->responses',
+  // apicompat PhaseA (roadmap 1.4): Responses clients against a
+  // chat.completions provider. Compiles through the real reverse conversion
+  // (gateway/responses-bridge/reverse-*.ts + the rewritten
+  // ResponsesToOpenAIBridge in src/protocol/bridge.ts).
+  'responses->openai',
 ]);
 
 const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([

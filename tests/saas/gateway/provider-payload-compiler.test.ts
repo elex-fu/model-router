@@ -307,18 +307,56 @@ test('F3: compiles an Anthropic Messages client through the real Responses bridg
   assert.deepEqual(inputItems[2], { type: 'function_call_output', call_id: 'toolu_1', output: 'found' });
 });
 
+test('apicompat PhaseA: a Responses client compiles through the real responses→openai bridge', async () => {
+  const result = allowed(
+    await createProviderPayloadCompiler(options({ providerProtocol: 'openai', operation: 'chat.completions' })).compile(
+      input(
+        {
+          model: 'public-alias',
+          instructions: 'Be brief',
+          input: [
+            { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+            { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"q":"x"}' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'result' },
+          ],
+          max_output_tokens: 96,
+          reasoning: { effort: 'low' },
+        },
+        { authority: authority({ clientProtocol: 'responses' }) },
+      ),
+    ),
+  );
+  const payload = JSON.parse(new TextDecoder().decode(result.payloadBytes)) as Record<string, unknown>;
+
+  assert.equal(result.providerProtocol, 'openai');
+  assert.equal(result.providerOperation, 'chat.completions');
+  assert.equal(payload.model, 'provider-model');
+  assert.equal(payload.max_completion_tokens, 96);
+  assert.equal(payload.reasoning_effort, 'low');
+  const messages = payload.messages as Array<Record<string, unknown>>;
+  assert.equal(messages[0].role, 'system');
+  assert.equal(messages[0].content, 'Be brief');
+  assert.equal(messages[1].role, 'user');
+  const assistant = messages[2] as Record<string, any>;
+  assert.equal(assistant.role, 'assistant');
+  assert.equal(assistant.tool_calls[0].function.name, 'lookup');
+  assert.equal(messages[3].role, 'tool');
+  assert.equal(messages[3].tool_call_id, 'call_1');
+});
+
 test('F3: reverse Responses conversions stay fail-closed in the compiler', async () => {
-  // A responses client cannot be served by an openai or anthropic provider:
-  // the reverse conversion is not implemented, so the pair gate blocks.
-  for (const providerProtocol of ['openai', 'anthropic'] as const) {
-    const operation = providerProtocol === 'openai' ? 'chat.completions' : 'messages';
-    const blocked = await createProviderPayloadCompiler(options({ providerProtocol, operation })).compile(
-      input({ model: 'public-alias', input: 'hello' }, { authority: authority({ clientProtocol: 'responses' }) }),
-    );
-    assert.equal(blocked.decision, 'block', providerProtocol);
-    if (blocked.decision === 'block') {
-      assert.equal(blocked.code, 'capability_unavailable', providerProtocol);
-    }
+  // A responses client cannot be served by an anthropic provider: the
+  // reverse conversion is not implemented, so the pair gate blocks. (The
+  // responses→openai pair is implemented since apicompat PhaseA and is
+  // covered by its own test above.)
+  const blocked = await createProviderPayloadCompiler(
+    options({ providerProtocol: 'anthropic', operation: 'messages' }),
+  ).compile(
+    input({ model: 'public-alias', input: 'hello' }, { authority: authority({ clientProtocol: 'responses' }) }),
+  );
+  assert.equal(blocked.decision, 'block');
+  if (blocked.decision === 'block') {
+    assert.equal(blocked.code, 'capability_unavailable');
   }
 });
 
