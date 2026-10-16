@@ -245,6 +245,18 @@ class FakePricingDatabase implements SaasDatabase {
         idempotencyKey,
         snapshotDigest,
         createdAt,
+        billingGroupId,
+        rateMultiplierNum,
+        rateMultiplierDen,
+        peakApplied,
+        overrideDigest,
+        overrideJson,
+        groupRpmLimit,
+        groupDailyLimitMinorUnits,
+        groupWeeklyLimitMinorUnits,
+        groupMonthlyLimitMinorUnits,
+        groupSupportedModelScopes,
+        groupFallbackGroupId,
       ] = values;
       const row = {
         id,
@@ -277,6 +289,18 @@ class FakePricingDatabase implements SaasDatabase {
         idempotency_key: idempotencyKey,
         snapshot_digest: snapshotDigest,
         created_at: createdAt,
+        billing_group_id: billingGroupId,
+        rate_multiplier_num: rateMultiplierNum,
+        rate_multiplier_den: rateMultiplierDen,
+        peak_applied: peakApplied,
+        model_pricing_override_digest: overrideDigest,
+        model_pricing_override: overrideJson,
+        group_rpm_limit: groupRpmLimit,
+        group_daily_limit_minor_units: groupDailyLimitMinorUnits,
+        group_weekly_limit_minor_units: groupWeeklyLimitMinorUnits,
+        group_monthly_limit_minor_units: groupMonthlyLimitMinorUnits,
+        group_supported_model_scopes: groupSupportedModelScopes,
+        group_fallback_group_id: groupFallbackGroupId,
       };
       this.customerSnapshots.push(row);
       return result([row] as RowType[]);
@@ -387,6 +411,75 @@ test('appends immutable customer prices idempotently and snapshots a positive ho
     (error: unknown) => error instanceof SaasPricingError && error.code === 'ZERO_PRICE_NOT_RESERVABLE',
   );
   assert.equal(database.customerSnapshots.length, 1);
+});
+
+test('freezes the R1 enforcement terms onto the billing-group snapshot (roadmap 1.3)', async () => {
+  const database = new FakePricingDatabase();
+  let id = 0;
+  const service = new SaasPricingService(database, {
+    now: () => new Date('2026-09-28T00:00:00.000Z'),
+    idFactory: () => `pricing-${++id}`,
+  });
+  const price = await service.appendCustomerPriceVersion(priceInput());
+  const snapshot = await service.createCustomerPriceSnapshot({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    customerPriceVersion: price.id,
+    holdInput,
+    admissionExpiresAt: '2026-09-28T00:05:00.000Z',
+    idempotencyKey: 'request-1',
+    billingGroup: {
+      billingGroupId: 'vip',
+      rateMultiplier: { numerator: 3n, denominator: 2n },
+      peakApplied: false,
+      modelPricingOverride: null,
+      rpmLimit: 60,
+      dailyLimitMinorUnits: 500n,
+      weeklyLimitMinorUnits: 0n,
+      monthlyLimitMinorUnits: null,
+      supportedModelScopes: ['claude-sonnet-4-5', 'claude-opus-4-1'],
+      fallbackGroupId: 'default',
+    },
+  });
+  assert.equal(snapshot.snapshot.billingGroupId, 'vip');
+  assert.equal(snapshot.snapshot.groupRpmLimit, 60);
+  assert.equal(snapshot.snapshot.groupDailyLimitMinorUnits, 500n);
+  assert.equal(snapshot.snapshot.groupWeeklyLimitMinorUnits, 0n);
+  assert.equal(snapshot.snapshot.groupMonthlyLimitMinorUnits, null);
+  assert.deepEqual(snapshot.snapshot.groupSupportedModelScopes, ['claude-sonnet-4-5', 'claude-opus-4-1']);
+  assert.equal(snapshot.snapshot.groupFallbackGroupId, 'default');
+  // The outer multiplier still applies to the frozen hold.
+  assert.equal(snapshot.snapshot.holdAmountMinorUnits, 3n);
+
+  const invalid = async (billingGroup: Record<string, unknown>): Promise<unknown> =>
+    service
+      .createCustomerPriceSnapshot({
+        tenantId: 'tenant-1',
+        requestId: 'request-2',
+        customerPriceVersion: price.id,
+        holdInput,
+        admissionExpiresAt: '2026-09-28T00:05:00.000Z',
+        idempotencyKey: 'request-2',
+        billingGroup: {
+          billingGroupId: 'vip',
+          rateMultiplier: { numerator: 1n, denominator: 1n },
+          peakApplied: false,
+          ...billingGroup,
+        },
+      })
+      .catch((error: unknown) => error);
+  for (const [label, shape] of [
+    ['negative rpm', { rpmLimit: -1 }],
+    ['fractional rpm', { rpmLimit: 1.5 }],
+    ['negative daily limit', { dailyLimitMinorUnits: -1n }],
+    ['oversized daily limit', { dailyLimitMinorUnits: 2n ** 63n }],
+    ['duplicate scopes', { supportedModelScopes: ['a', 'a'] }],
+    ['empty scope entry', { supportedModelScopes: [''] }],
+    ['blank fallback group', { fallbackGroupId: '  ' }],
+  ] as const) {
+    const error = await invalid(shape);
+    assert.ok(error instanceof SaasPricingError && error.code === 'INVALID_INPUT', `${label} must fail closed`);
+  }
 });
 
 test('fails closed when the current attempt contract cannot bind supplier account identity', async () => {

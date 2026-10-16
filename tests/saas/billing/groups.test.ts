@@ -313,6 +313,14 @@ test('snapshotBillingGroupTerms resolves neutral terms for pre-group snapshots a
   assert.deepEqual(neutral.rateMultiplier, { numerator: 1n, denominator: 1n });
   assert.equal(neutral.peakApplied, false);
   assert.equal(neutral.modelPricingOverride, null);
+  // Pre-112 snapshots carry no enforcement terms: every limit resolves to
+  // null (no limit was in force), never to a finite zero.
+  assert.equal(neutral.rpmLimit, null);
+  assert.equal(neutral.dailyLimitMinorUnits, null);
+  assert.equal(neutral.weeklyLimitMinorUnits, null);
+  assert.equal(neutral.monthlyLimitMinorUnits, null);
+  assert.equal(neutral.supportedModelScopes, null);
+  assert.equal(neutral.fallbackGroupId, null);
 
   const rates = normalizeRates({
     input: { numeratorMinorUnits: 3n, denominatorUnits: 1000000n },
@@ -326,11 +334,24 @@ test('snapshotBillingGroupTerms resolves neutral terms for pre-group snapshots a
     peakApplied: true,
     modelPricingOverrideDigest: override.digest,
     modelPricingOverride: serializeAppliedModelPricingOverride(override),
+    groupRpmLimit: 60,
+    groupDailyLimitMinorUnits: 500n,
+    groupWeeklyLimitMinorUnits: 0n,
+    groupMonthlyLimitMinorUnits: null,
+    groupSupportedModelScopes: ['claude-sonnet-4-5', 'claude-opus-4-1'],
+    groupFallbackGroupId: 'default',
   });
   assert.equal(frozen.billingGroupId, 'vip');
   assert.deepEqual(frozen.rateMultiplier, { numerator: 3n, denominator: 2n });
   assert.equal(frozen.peakApplied, true);
   assert.equal(frozen.modelPricingOverride?.digest, override.digest);
+  // R1 enforcement terms (roadmap 1.3): frozen verbatim, zero kept finite.
+  assert.equal(frozen.rpmLimit, 60);
+  assert.equal(frozen.dailyLimitMinorUnits, 500n);
+  assert.equal(frozen.weeklyLimitMinorUnits, 0n);
+  assert.equal(frozen.monthlyLimitMinorUnits, null);
+  assert.deepEqual(frozen.supportedModelScopes, ['claude-sonnet-4-5', 'claude-opus-4-1']);
+  assert.equal(frozen.fallbackGroupId, 'default');
   // A digest that does not match the stored rate set fails closed.
   assert.throws(
     () =>

@@ -251,6 +251,19 @@ export interface SnapshotBillingGroupInput {
     readonly rates: RateSetInput;
     readonly digest: string;
   } | null;
+  /**
+   * R1 enforcement terms (roadmap 1.3), frozen beside the pricing terms.
+   * Absent/null means no limit was in force. Zero is finite (KEY-BUD
+   * semantics: NULL unlimited, zero blocks everything).
+   */
+  readonly rpmLimit?: number | null;
+  readonly dailyLimitMinorUnits?: bigint | null;
+  readonly weeklyLimitMinorUnits?: bigint | null;
+  readonly monthlyLimitMinorUnits?: bigint | null;
+  /** Supported model scopes; null/absent means unrestricted. */
+  readonly supportedModelScopes?: readonly string[] | null;
+  /** The group's fallback group id at admission; null/absent means none. */
+  readonly fallbackGroupId?: string | null;
 }
 
 export interface CreateSupplierCostSnapshotInput {
@@ -309,6 +322,17 @@ export interface CustomerPriceSnapshotRecord {
   readonly modelPricingOverrideDigest?: string | null;
   /** Canonical stored override value (parsed by the billing-groups codec). */
   readonly modelPricingOverride?: unknown;
+  /**
+   * R1 enforcement terms frozen at admission (migration 112). Absent on
+   * snapshots created before the column family existed; null means no
+   * limit was in force. Zero limits are finite (block everything).
+   */
+  readonly groupRpmLimit?: number | null;
+  readonly groupDailyLimitMinorUnits?: bigint | null;
+  readonly groupWeeklyLimitMinorUnits?: bigint | null;
+  readonly groupMonthlyLimitMinorUnits?: bigint | null;
+  readonly groupSupportedModelScopes?: readonly string[] | null;
+  readonly groupFallbackGroupId?: string | null;
 }
 
 export interface SupplierCostSnapshotRecord {

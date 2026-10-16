@@ -82,7 +82,9 @@ const CUSTOMER_SNAPSHOT_COLUMNS = `
   hold_input_output_total, hold_input_reasoning_output, hold_amount_minor_units, wallet_hold_required,
   admission_expires_at, idempotency_key, snapshot_digest, created_at,
   billing_group_id, rate_multiplier_num, rate_multiplier_den, peak_applied,
-  model_pricing_override_digest, model_pricing_override`;
+  model_pricing_override_digest, model_pricing_override,
+  group_rpm_limit, group_daily_limit_minor_units, group_weekly_limit_minor_units,
+  group_monthly_limit_minor_units, group_supported_model_scopes, group_fallback_group_id`;
 
 const SUPPLIER_SNAPSHOT_COLUMNS = `
   id, tenant_id, request_id, attempt_id, supplier_cost_version, platform_account_id,
@@ -528,6 +530,14 @@ function mapCustomerSnapshot(row: CustomerSnapshotRow): CustomerPriceSnapshotRec
   const rateMultiplierNum = storedMultiplierPart(row, 'rate_multiplier_num');
   const rateMultiplierDen = storedMultiplierPart(row, 'rate_multiplier_den');
   const peakApplied = row.peak_applied === undefined ? false : storedBoolean(row, 'peak_applied');
+  // R1 enforcement terms (migration 112). Absent on pre-112 snapshots;
+  // absent and null both resolve to "no limit was in force".
+  const groupRpmLimit = storedOptionalRpmLimit(row, 'group_rpm_limit');
+  const groupDailyLimitMinorUnits = storedOptionalMinorUnits(row, 'group_daily_limit_minor_units');
+  const groupWeeklyLimitMinorUnits = storedOptionalMinorUnits(row, 'group_weekly_limit_minor_units');
+  const groupMonthlyLimitMinorUnits = storedOptionalMinorUnits(row, 'group_monthly_limit_minor_units');
+  const groupSupportedModelScopes = storedOptionalModelScopes(row, 'group_supported_model_scopes');
+  const groupFallbackGroupId = storedOptionalText(row, 'group_fallback_group_id', 128);
   return {
     id: storedText(row, 'id', 255),
     tenantId: storedText(row, 'tenant_id', 255),
@@ -557,7 +567,46 @@ function mapCustomerSnapshot(row: CustomerSnapshotRow): CustomerPriceSnapshotRec
     peakApplied,
     modelPricingOverrideDigest: overrideDigest,
     modelPricingOverride: row.model_pricing_override === undefined ? null : row.model_pricing_override,
+    groupRpmLimit,
+    groupDailyLimitMinorUnits,
+    groupWeeklyLimitMinorUnits,
+    groupMonthlyLimitMinorUnits,
+    groupSupportedModelScopes,
+    groupFallbackGroupId,
   };
+}
+
+function storedOptionalRpmLimit(row: Row, key: string): number | null {
+  const value = row[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) fail('PRICING_STORAGE_ERROR');
+  return value;
+}
+
+function storedOptionalMinorUnits(row: Row, key: string): bigint | null {
+  const value = row[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'bigint') return value >= 0n ? value : fail('PRICING_STORAGE_ERROR');
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value.trim())) {
+    const parsed = BigInt(value.trim());
+    return parsed >= 0n ? parsed : fail('PRICING_STORAGE_ERROR');
+  }
+  return fail('PRICING_STORAGE_ERROR');
+}
+
+function storedOptionalModelScopes(row: Row, key: string): readonly string[] | null {
+  const value = row[key];
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 64) fail('PRICING_STORAGE_ERROR');
+  const scopes = value.map((entry) => {
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 512 || entry !== entry.trim()) {
+      fail('PRICING_STORAGE_ERROR');
+    }
+    return entry;
+  });
+  if (new Set(scopes).size !== scopes.length) fail('PRICING_STORAGE_ERROR');
+  return scopes;
 }
 
 function storedOptionalText(row: Row, key: string, maxLength: number): string | null {
@@ -744,6 +793,13 @@ interface NormalizedBillingGroupSnapshot {
     readonly digest: string;
     readonly storedJson: string;
   } | null;
+  /** R1 enforcement terms (roadmap 1.3, migration 112); null means absent. */
+  readonly rpmLimit: number | null;
+  readonly dailyLimitMinorUnits: bigint | null;
+  readonly weeklyLimitMinorUnits: bigint | null;
+  readonly monthlyLimitMinorUnits: bigint | null;
+  readonly supportedModelScopes: readonly string[] | null;
+  readonly fallbackGroupId: string | null;
 }
 
 function snapshotMultiplierPart(value: unknown): bigint {
@@ -755,6 +811,51 @@ function snapshotMultiplierPart(value: unknown): bigint {
   } else fail('INVALID_INPUT');
   if (parsed <= 0n || parsed > MAX_MINOR_UNITS) fail('INVALID_INPUT');
   return parsed;
+}
+
+/**
+ * R1 enforcement terms (roadmap 1.3): a minor-unit spend ceiling. Zero is
+ * finite (blocks everything — the KEY-BUD semantics); NULL/absent is
+ * unlimited.
+ */
+function snapshotMinorUnitsLimit(value: unknown): bigint | null {
+  if (value === undefined || value === null) return null;
+  let parsed: bigint;
+  if (typeof value === 'bigint') parsed = value;
+  else if (typeof value === 'number' && Number.isSafeInteger(value)) parsed = BigInt(value);
+  else if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value.trim()) && value.trim().length <= 30) {
+    parsed = BigInt(value.trim());
+  } else fail('INVALID_INPUT');
+  if (parsed < 0n || parsed > MAX_MINOR_UNITS) fail('INVALID_INPUT');
+  return parsed;
+}
+
+function snapshotRpmLimit(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) fail('INVALID_INPUT');
+  return value;
+}
+
+/** Scope entries are non-empty trimmed text without NUL; at most 64 entries. */
+function snapshotModelScopes(value: unknown): readonly string[] | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length > 64) fail('INVALID_INPUT');
+  const scopes = value.map((entry) => {
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 512 || entry !== entry.trim()) {
+      fail('INVALID_INPUT');
+    }
+    return entry;
+  });
+  if (new Set(scopes).size !== scopes.length) fail('INVALID_INPUT');
+  return scopes;
+}
+
+function snapshotFallbackGroupId(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 128 || value !== value.trim()) {
+    fail('INVALID_INPUT');
+  }
+  return value;
 }
 
 /**
@@ -796,6 +897,12 @@ function normalizeSnapshotBillingGroup(
     rateMultiplier,
     peakApplied: value.peakApplied === true,
     override,
+    rpmLimit: snapshotRpmLimit(value.rpmLimit),
+    dailyLimitMinorUnits: snapshotMinorUnitsLimit(value.dailyLimitMinorUnits),
+    weeklyLimitMinorUnits: snapshotMinorUnitsLimit(value.weeklyLimitMinorUnits),
+    monthlyLimitMinorUnits: snapshotMinorUnitsLimit(value.monthlyLimitMinorUnits),
+    supportedModelScopes: snapshotModelScopes(value.supportedModelScopes),
+    fallbackGroupId: snapshotFallbackGroupId(value.fallbackGroupId),
   };
 }
 
@@ -808,6 +915,18 @@ function snapshotDigestMaterial(billingGroup: NormalizedBillingGroupSnapshot | n
       rateMultiplierDenominator: billingGroup.rateMultiplier.denominator.toString(10),
       peakApplied: billingGroup.peakApplied,
       modelPricingOverrideDigest: billingGroup.override?.digest ?? null,
+      // R1 enforcement terms (roadmap 1.3): the scopes are sorted so the
+      // digest is order-insensitive (a reorder of the same set must not
+      // reprice or conflict an identical re-admission).
+      rpmLimit: billingGroup.rpmLimit,
+      dailyLimitMinorUnits: billingGroup.dailyLimitMinorUnits?.toString(10) ?? null,
+      weeklyLimitMinorUnits: billingGroup.weeklyLimitMinorUnits?.toString(10) ?? null,
+      monthlyLimitMinorUnits: billingGroup.monthlyLimitMinorUnits?.toString(10) ?? null,
+      supportedModelScopes:
+        billingGroup.supportedModelScopes === null
+          ? null
+          : [...billingGroup.supportedModelScopes].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+      fallbackGroupId: billingGroup.fallbackGroupId,
     },
   };
 }
@@ -1552,6 +1671,14 @@ export class SaasPricingService {
         billingGroup?.peakApplied ?? false,
         billingGroup?.override?.digest ?? null,
         billingGroup?.override?.storedJson ?? null,
+        billingGroup?.rpmLimit ?? null,
+        billingGroup?.dailyLimitMinorUnits ?? null,
+        billingGroup?.weeklyLimitMinorUnits ?? null,
+        billingGroup?.monthlyLimitMinorUnits ?? null,
+        billingGroup?.supportedModelScopes === null || billingGroup?.supportedModelScopes === undefined
+          ? null
+          : [...billingGroup.supportedModelScopes],
+        billingGroup?.fallbackGroupId ?? null,
       ];
       const rows = await this.query<CustomerSnapshotRow>(
         tx,

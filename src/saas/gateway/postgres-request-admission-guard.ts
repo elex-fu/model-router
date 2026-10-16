@@ -1548,6 +1548,15 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
                   rates: modelPricingOverride.rates,
                   digest: modelPricingOverride.digest,
                 },
+          // R1 enforcement terms (roadmap 1.3): frozen beside the pricing
+          // terms so every later enforcement phase reads the snapshot, never
+          // the mutable group table (the R1 red line).
+          rpmLimit: billingGroup.rpmLimit,
+          dailyLimitMinorUnits: billingGroup.dailyLimitMinorUnits,
+          weeklyLimitMinorUnits: billingGroup.weeklyLimitMinorUnits,
+          monthlyLimitMinorUnits: billingGroup.monthlyLimitMinorUnits,
+          supportedModelScopes: billingGroup.supportedModelScopes,
+          fallbackGroupId: billingGroup.fallbackGroupId,
         },
       },
       { executor },

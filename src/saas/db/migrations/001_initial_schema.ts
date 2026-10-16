@@ -89,6 +89,7 @@ import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_pr
 import { PROBE_MONITORS_SAAS_MIGRATION } from './109_probe_monitors.js';
 import { PLATFORM_SETTINGS_SAAS_MIGRATION } from './110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provider_account_gemini_scheduling.js';
+import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from './112_billing_group_snapshot_limits.js';
 
 export interface SaasMigration {
   version: number;
@@ -590,4 +591,11 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // the migration-109 monitors table. Scheduling signal only, never billing;
   // 110 is taken by the parallel F1 platform-settings workstream above.
   PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
+  // 112: R1 billing-group limit enforcement phase 1 — the snapshot
+  // cross-cut: the group RPM/spend ceilings, supported model scopes and
+  // fallback group id frozen onto the customer price snapshot row so the
+  // later enforcement phases (113/114) can honor the R1 red line (enforce
+  // from the frozen snapshot, never the mutable group table). All columns
+  // nullable; existing rows backfill to NULL (no limit).
+  BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
 ];

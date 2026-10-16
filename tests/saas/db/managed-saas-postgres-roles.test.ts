@@ -246,7 +246,7 @@ test('gateway pricing template grants only exact snapshot INSERTs while worker a
     'utf8',
   );
   for (const [table, columnCount] of [
-    ['saas_request_customer_price_snapshots', 36],
+    ['saas_request_customer_price_snapshots', 42],
     ['saas_attempt_supplier_cost_snapshots', 22],
   ] as const) {
     const expected = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([relation]) => relation === table);

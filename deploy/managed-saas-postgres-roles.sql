@@ -620,6 +620,14 @@ $runtime_column_acl_normalization$;
 -- mutation is an audited version-CAS UPDATE. Re-apply this template after
 -- running migration 110 on a database that predates it — until then the
 -- control-plane runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 112, R1 billing-group limit enforcement
+-- phase 1): the customer price snapshot gains the frozen group enforcement
+-- columns (group RPM/spend ceilings, supported model scopes, fallback
+-- group id). The gateway inserts them through the fixed column manifest
+-- below and reads them back through the dynamic all-current-columns read
+-- grant. Re-apply this template after running migration 112 on a database
+-- that predates it — until then the gateway runtime privilege probe fails
+-- closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -1121,6 +1129,14 @@ BEGIN
       ('saas_request_customer_price_snapshots', 'peak_applied', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'model_pricing_override_digest', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'model_pricing_override', 'INSERT'),
+      -- R1 enforcement terms (112, roadmap 1.3): the frozen group RPM/spend
+      -- ceilings, scopes and fallback group id ride the same snapshot row.
+      ('saas_request_customer_price_snapshots', 'group_rpm_limit', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_daily_limit_minor_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_weekly_limit_minor_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_monthly_limit_minor_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_supported_model_scopes', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_fallback_group_id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'tenant_id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'request_id', 'INSERT'),

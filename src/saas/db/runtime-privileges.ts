@@ -3705,6 +3705,14 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'peak_applied',
       'model_pricing_override_digest',
       'model_pricing_override',
+      // R1 enforcement terms (112, roadmap 1.3): the frozen group RPM/spend
+      // ceilings, scopes and fallback group id ride the same snapshot row.
+      'group_rpm_limit',
+      'group_daily_limit_minor_units',
+      'group_weekly_limit_minor_units',
+      'group_monthly_limit_minor_units',
+      'group_supported_model_scopes',
+      'group_fallback_group_id',
     ] as const
   ).map((column) => ['saas_request_customer_price_snapshots', column, 'INSERT'] as const),
   ...(
