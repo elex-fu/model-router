@@ -371,11 +371,9 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     // Match KeyService and migration 050's UTF-8 hex business-layer key.
     // Keep the wait and read in separate statements: a READ COMMITTED snapshot
     // taken before a blocked fence could otherwise retain pre-revocation facts.
-    await this.query<Row>(
-      executor,
-      'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))',
-      [saasAdvisoryKey.apiKey(request.tenantId, request.projectId, authorization.keyId)],
-    );
+    await this.query<Row>(executor, 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))', [
+      saasAdvisoryKey.apiKey(request.tenantId, request.projectId, authorization.keyId),
+    ]);
     const result = await this.query<Row>(
       executor,
       `SELECT id, tenant_id, project_id, principal_user_id, execution_principal_type,
@@ -442,11 +440,9 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
   }
 
   private async fenceUser(executor: SqlExecutor, userId: string): Promise<void> {
-    await this.query<Row>(
-      executor,
-      `SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text, 0))`,
-      [userId],
-    );
+    await this.query<Row>(executor, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text, 0))`, [
+      userId,
+    ]);
   }
 
   private assertCurrentKey(key: LockedKey, request: CreateRequestInput, now: number): void {

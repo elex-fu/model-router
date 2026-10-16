@@ -12,7 +12,11 @@ const CURSOR_PREFIX = 'c1.';
 
 const REQUEST_STATUSES = new Set<ConsoleRequestStatus>(['pending', 'succeeded', 'failed', 'unknown']);
 const FINANCIAL_STATUSES = new Set<ConsoleFinancialStatus>([
-  'not_applicable', 'pending', 'settled', 'released', 'reconciliation_pending',
+  'not_applicable',
+  'pending',
+  'settled',
+  'released',
+  'reconciliation_pending',
 ]);
 const RECONCILIATION_STATES = new Set<ConsoleReconciliationState>(['none', 'pending', 'resolved']);
 const SUPPLY_MODES = new Set<ConsoleSupplyMode>(['byok', 'platform']);
@@ -628,7 +632,8 @@ function mapRequest(row: Row): ConsoleRequest {
   if (
     (supplyMode === 'byok') !== (financialStatus === 'not_applicable') ||
     (status === 'unknown' && reconciliationState !== 'pending')
-  ) storage();
+  )
+    storage();
   // Read persisted axes independently; success/resolved never implies settled.
   return {
     id: storageText(row.id),

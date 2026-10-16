@@ -1,13 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { encodeBase32, totpCode } from '../../../src/saas/platform/auth/totp.js';
-import { CustomerPasskeyError } from '../../../src/saas/identity/customer-passkey-types.js';
 import { CustomerPasskeyService } from '../../../src/saas/identity/customer-passkey-service.js';
-import {
-  CustomerPasskeyUnitDatabase,
-  CustomerPasskeyUnitKeys,
-  PASSKEY_TEST_PASSWORD,
-} from './customer-passkey-unit-database.js';
+import { CustomerPasskeyError } from '../../../src/saas/identity/customer-passkey-types.js';
+import { encodeBase32, totpCode } from '../../../src/saas/platform/auth/totp.js';
 import {
   assertionPayload,
   registrationPayload,
@@ -15,6 +10,11 @@ import {
   SIM_RP_ID,
   simulatePasskey,
 } from './customer-passkey-simulator.js';
+import {
+  CustomerPasskeyUnitDatabase,
+  CustomerPasskeyUnitKeys,
+  PASSKEY_TEST_PASSWORD,
+} from './customer-passkey-unit-database.js';
 
 async function setup() {
   const db = await CustomerPasskeyUnitDatabase.create();
@@ -44,7 +44,10 @@ test('registration ceremony completes end-to-end, revokes sessions and audits bo
   assert.match(start.challenge, /^[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(start.rp, { id: SIM_RP_ID, name: 'Model Router Console (unit)' });
   assert.equal(start.attestation, 'none');
-  assert.deepEqual(start.pubKeyCredParams.map((p) => p.alg), [-7, -257]);
+  assert.deepEqual(
+    start.pubKeyCredParams.map((p) => p.alg),
+    [-7, -257],
+  );
   assert.equal(start.user.name, 'synthetic-customer@example.test');
   assert.equal(start.user.id, Buffer.from(db.userId, 'utf8').toString('base64url'));
   assert.equal(db.state.ceremonies.length, 1);
@@ -58,7 +61,11 @@ test('registration ceremony completes end-to-end, revokes sessions and audits bo
   assert.equal(changed.credentialId, key.credentialId);
   assert.equal(changed.signInRequired, true);
   assert.ok(changed.sessionsRevoked >= 1);
-  assert.equal(db.state.sessions.every((s) => s.revoked), true, 'factor change revokes every session');
+  assert.equal(
+    db.state.sessions.every((s) => s.revoked),
+    true,
+    'factor change revokes every session',
+  );
   const stored = db.passkeys();
   assert.equal(stored.length, 1);
   assert.equal(stored[0]!.credential_id, key.credentialId);
@@ -72,7 +79,10 @@ test('registration ceremony completes end-to-end, revokes sessions and audits bo
   ]);
 
   const listed = await service.list(await db.session());
-  assert.deepEqual(listed.passkeys.map((p) => p.credentialId), [key.credentialId]);
+  assert.deepEqual(
+    listed.passkeys.map((p) => p.credentialId),
+    [key.credentialId],
+  );
 });
 
 test('a consumed challenge can never be reused and a second start is denied while one is open', async () => {
@@ -84,12 +94,16 @@ test('a consumed challenge can never be reused and a second start is denied whil
     expectCode('CEREMONY_INVALID'),
   );
   await service.finishRegistration(proof, {
-    password: PASSKEY_TEST_PASSWORD, challenge: start.challenge, credential: registrationPayload(key, start.challenge),
+    password: PASSKEY_TEST_PASSWORD,
+    challenge: start.challenge,
+    credential: registrationPayload(key, start.challenge),
   });
   const fresh = await db.session();
   await assert.rejects(
     service.finishRegistration(fresh, {
-      password: PASSKEY_TEST_PASSWORD, challenge: start.challenge, credential: registrationPayload(key, start.challenge),
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: start.challenge,
+      credential: registrationPayload(key, start.challenge),
     }),
     expectCode('CEREMONY_INVALID'),
   );
@@ -103,7 +117,9 @@ test('wrong password denies with REAUTH_REQUIRED and five attempts lock the cere
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     await assert.rejects(
       service.finishRegistration(db.next(proof), {
-        password: `wrong-${attempt}`, challenge: start.challenge, credential: registrationPayload(key, start.challenge),
+        password: `wrong-${attempt}`,
+        challenge: start.challenge,
+        credential: registrationPayload(key, start.challenge),
       }),
       attempt <= 5 ? expectCode('REAUTH_REQUIRED') : expectCode('CEREMONY_INVALID'),
     );
@@ -111,7 +127,9 @@ test('wrong password denies with REAUTH_REQUIRED and five attempts lock the cere
   }
   await assert.rejects(
     service.finishRegistration(db.next(proof), {
-      password: PASSKEY_TEST_PASSWORD, challenge: start.challenge, credential: registrationPayload(key, start.challenge),
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: start.challenge,
+      credential: registrationPayload(key, start.challenge),
     }),
     expectCode('CEREMONY_INVALID'),
   );
@@ -131,9 +149,14 @@ test('tampered or cross-ceremony registration payloads reject fail-closed', asyn
     { ...registrationPayload(key, start.challenge), id: simulatePasskey().credentialId },
   ]) {
     await assert.rejects(
-      service.finishRegistration({ ...proof, requestId: crypto.randomUUID() }, {
-        password: PASSKEY_TEST_PASSWORD, challenge: start.challenge, credential,
-      }),
+      service.finishRegistration(
+        { ...proof, requestId: crypto.randomUUID() },
+        {
+          password: PASSKEY_TEST_PASSWORD,
+          challenge: start.challenge,
+          credential,
+        },
+      ),
       expectCode('PASSKEY_REJECTED'),
     );
   }
@@ -149,11 +172,13 @@ test('an active TOTP factor gates registration with a single-use code', async ()
     'missing TOTP code never starts a ceremony while a TOTP factor is active',
   );
   const start = await service.startRegistration(db.next(proof), {
-    password: PASSKEY_TEST_PASSWORD, currentTotpCode: totpCode(secret, db.state.now),
+    password: PASSKEY_TEST_PASSWORD,
+    currentTotpCode: totpCode(secret, db.state.now),
   });
   await assert.rejects(
     service.finishRegistration(db.next(proof), {
-      password: PASSKEY_TEST_PASSWORD, challenge: start.challenge,
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: start.challenge,
       credential: registrationPayload(simulatePasskey(), start.challenge),
     }),
     expectCode('PASSKEY_REJECTED'),
@@ -161,7 +186,9 @@ test('an active TOTP factor gates registration with a single-use code', async ()
   );
   const key = simulatePasskey();
   const changed = await service.finishRegistration(proof, {
-    password: PASSKEY_TEST_PASSWORD, currentTotpCode: totpCode(secret, db.state.now + 30000), challenge: start.challenge,
+    password: PASSKEY_TEST_PASSWORD,
+    currentTotpCode: totpCode(secret, db.state.now + 30000),
+    challenge: start.challenge,
     credential: registrationPayload(key, start.challenge),
   });
   assert.equal(changed.credentialId, key.credentialId);
@@ -169,10 +196,15 @@ test('an active TOTP factor gates registration with a single-use code', async ()
   // window so a FRESH code exists, then replay the older in-window step.
   db.state.now += 60000;
   const second = await db.session();
-  const start2 = await service.startRegistration(second, { password: PASSKEY_TEST_PASSWORD, currentTotpCode: totpCode(secret, db.state.now) });
+  const start2 = await service.startRegistration(second, {
+    password: PASSKEY_TEST_PASSWORD,
+    currentTotpCode: totpCode(secret, db.state.now),
+  });
   await assert.rejects(
     service.finishRegistration(db.next(second), {
-      password: PASSKEY_TEST_PASSWORD, currentTotpCode: totpCode(secret, db.state.now - 30000), challenge: start2.challenge,
+      password: PASSKEY_TEST_PASSWORD,
+      currentTotpCode: totpCode(secret, db.state.now - 30000),
+      challenge: start2.challenge,
       credential: registrationPayload(simulatePasskey(), start2.challenge),
     }),
     expectCode('PASSKEY_REJECTED'),
@@ -185,32 +217,47 @@ test('assertion ceremony verifies the signature and advances the counter exactly
   const key = simulatePasskey();
   const regStart = await service.startRegistration(proof, { password: PASSKEY_TEST_PASSWORD });
   await service.finishRegistration(proof, {
-    password: PASSKEY_TEST_PASSWORD, challenge: regStart.challenge, credential: registrationPayload(key, regStart.challenge),
+    password: PASSKEY_TEST_PASSWORD,
+    challenge: regStart.challenge,
+    credential: registrationPayload(key, regStart.challenge),
   });
   const session = await db.session();
-  const start = await service.startAssertion(session, { password: PASSKEY_TEST_PASSWORD, credentialId: key.credentialId });
+  const start = await service.startAssertion(session, {
+    password: PASSKEY_TEST_PASSWORD,
+    credentialId: key.credentialId,
+  });
   assert.deepEqual(start.allowCredentials, [{ type: 'public-key', id: key.credentialId }]);
   assert.equal(start.rpId, SIM_RP_ID);
   const verified = await service.finishAssertion(session, {
-    password: PASSKEY_TEST_PASSWORD, challenge: start.challenge,
+    password: PASSKEY_TEST_PASSWORD,
+    challenge: start.challenge,
     credential: assertionPayload(key, start.challenge, 5),
   });
   assert.deepEqual(verified, { verified: true, credentialId: key.credentialId });
   assert.equal(db.passkeys()[0]!.sign_count, '5');
-  assert.equal(db.state.sessions.some((s) => !s.revoked), true, 'assertion never revokes the session');
+  assert.equal(
+    db.state.sessions.some((s) => !s.revoked),
+    true,
+    'assertion never revokes the session',
+  );
   // Same challenge cannot be asserted twice.
   await assert.rejects(
     service.finishAssertion(db.next(session), {
-      password: PASSKEY_TEST_PASSWORD, challenge: start.challenge,
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: start.challenge,
       credential: assertionPayload(key, start.challenge, 6),
     }),
     expectCode('CEREMONY_INVALID'),
   );
   // Next ceremony: stale or regressed counters are clone signals.
-  const second = await service.startAssertion(session, { password: PASSKEY_TEST_PASSWORD, credentialId: key.credentialId });
+  const second = await service.startAssertion(session, {
+    password: PASSKEY_TEST_PASSWORD,
+    credentialId: key.credentialId,
+  });
   await assert.rejects(
     service.finishAssertion(db.next(session), {
-      password: PASSKEY_TEST_PASSWORD, challenge: second.challenge,
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: second.challenge,
       credential: assertionPayload(key, second.challenge, 5),
     }),
     expectCode('PASSKEY_REJECTED'),
@@ -224,25 +271,34 @@ test('assertion rejects tampered signatures, wrong user handles and unknown pass
   const key = simulatePasskey();
   const regStart = await service.startRegistration(proof, { password: PASSKEY_TEST_PASSWORD });
   await service.finishRegistration(proof, {
-    password: PASSKEY_TEST_PASSWORD, challenge: regStart.challenge, credential: registrationPayload(key, regStart.challenge),
+    password: PASSKEY_TEST_PASSWORD,
+    challenge: regStart.challenge,
+    credential: registrationPayload(key, regStart.challenge),
   });
   const session = await db.session();
   await assert.rejects(
     service.startAssertion(session, { password: PASSKEY_TEST_PASSWORD, credentialId: simulatePasskey().credentialId }),
     expectCode('PASSKEY_NOT_FOUND'),
   );
-  const start = await service.startAssertion(session, { password: PASSKEY_TEST_PASSWORD, credentialId: key.credentialId });
+  const start = await service.startAssertion(session, {
+    password: PASSKEY_TEST_PASSWORD,
+    credentialId: key.credentialId,
+  });
   await assert.rejects(
     service.finishAssertion(db.next(session), {
-      password: PASSKEY_TEST_PASSWORD, challenge: start.challenge,
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: start.challenge,
       credential: assertionPayload(key, start.challenge, 1, { tamperSignature: true }),
     }),
     expectCode('PASSKEY_REJECTED'),
   );
   await assert.rejects(
     service.finishAssertion(db.next(session), {
-      password: PASSKEY_TEST_PASSWORD, challenge: start.challenge,
-      credential: assertionPayload(key, start.challenge, 1, { userHandle: Buffer.from('someone-else').toString('base64url') }),
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: start.challenge,
+      credential: assertionPayload(key, start.challenge, 1, {
+        userHandle: Buffer.from('someone-else').toString('base64url'),
+      }),
     }),
     expectCode('PASSKEY_REJECTED'),
   );
@@ -254,8 +310,11 @@ test('assertion rejects tampered signatures, wrong user handles and unknown pass
     'a second assertion ceremony cannot open while one is pending',
   );
   const verified = await service.finishAssertion(session, {
-    password: PASSKEY_TEST_PASSWORD, challenge: start.challenge,
-    credential: assertionPayload(key, start.challenge, 1, { userHandle: Buffer.from(db.userId, 'utf8').toString('base64url') }),
+    password: PASSKEY_TEST_PASSWORD,
+    challenge: start.challenge,
+    credential: assertionPayload(key, start.challenge, 1, {
+      userHandle: Buffer.from(db.userId, 'utf8').toString('base64url'),
+    }),
   });
   assert.equal(verified.verified, true);
 });
@@ -265,7 +324,9 @@ test('remove revokes the passkey, closes ceremonies, revokes sessions and forget
   const key = simulatePasskey();
   const regStart = await service.startRegistration(proof, { password: PASSKEY_TEST_PASSWORD });
   await service.finishRegistration(proof, {
-    password: PASSKEY_TEST_PASSWORD, challenge: regStart.challenge, credential: registrationPayload(key, regStart.challenge),
+    password: PASSKEY_TEST_PASSWORD,
+    challenge: regStart.challenge,
+    credential: registrationPayload(key, regStart.challenge),
   });
   const session = await db.session();
   const changed = await service.remove(session, { password: PASSKEY_TEST_PASSWORD, credentialId: key.credentialId });
@@ -306,14 +367,19 @@ test('authority changes mid-flight flip the outcome to AUTHORITY_CHANGED', async
   const { db, keys, service, proof } = await setup();
   const secret = encodeBase32(Buffer.from('unit-totp-secret-20b!'));
   await db.seedTotp(secret, keys);
-  const start = await service.startRegistration(proof, { password: PASSKEY_TEST_PASSWORD, currentTotpCode: totpCode(secret, db.state.now) });
+  const start = await service.startRegistration(proof, {
+    password: PASSKEY_TEST_PASSWORD,
+    currentTotpCode: totpCode(secret, db.state.now),
+  });
   keys.beforeLookup = () => {
     db.state.credentials.find((x) => x.kind === 'totp')!.revoked = true;
     keys.beforeLookup = undefined;
   };
   await assert.rejects(
     service.finishRegistration(proof, {
-      password: PASSKEY_TEST_PASSWORD, currentTotpCode: totpCode(secret, db.state.now), challenge: start.challenge,
+      password: PASSKEY_TEST_PASSWORD,
+      currentTotpCode: totpCode(secret, db.state.now),
+      challenge: start.challenge,
       credential: registrationPayload(simulatePasskey(), start.challenge),
     }),
     expectCode('AUTHORITY_CHANGED'),
@@ -323,16 +389,28 @@ test('authority changes mid-flight flip the outcome to AUTHORITY_CHANGED', async
 test('input validation rejects malformed proofs, bodies and identifiers', async () => {
   const { service, proof } = await setup();
   await assert.rejects(service.list({ ...proof, sessionToken: 'short' }), expectCode('INVALID_INPUT'));
+  await assert.rejects(service.startRegistration(proof, { password: '' }), expectCode('INVALID_INPUT'));
   await assert.rejects(
-    service.startRegistration(proof, { password: '' }), expectCode('INVALID_INPUT'));
+    service.startRegistration(proof, { password: PASSKEY_TEST_PASSWORD, credentialId: 'x' }),
+    expectCode('INVALID_INPUT'),
+  );
   await assert.rejects(
-    service.startRegistration(proof, { password: PASSKEY_TEST_PASSWORD, credentialId: 'x' }), expectCode('INVALID_INPUT'));
+    service.finishAssertion(proof, {
+      password: PASSKEY_TEST_PASSWORD,
+      challenge: 'not-a-challenge',
+      credential: {
+        id: 'AAAAAAAAAAAAAAAAAAAAAA',
+        clientDataJSON: '{}',
+        authenticatorData: 'AA',
+        signature: 'AA',
+      },
+    }),
+    expectCode('INVALID_INPUT'),
+  );
   await assert.rejects(
-    service.finishAssertion(proof, { password: PASSKEY_TEST_PASSWORD, challenge: 'not-a-challenge', credential: {
-      id: 'AAAAAAAAAAAAAAAAAAAAAA', clientDataJSON: '{}', authenticatorData: 'AA', signature: 'AA' } }),
-    expectCode('INVALID_INPUT'));
-  await assert.rejects(
-    service.remove(proof, { password: PASSKEY_TEST_PASSWORD, credentialId: '!!!' }), expectCode('INVALID_INPUT'));
+    service.remove(proof, { password: PASSKEY_TEST_PASSWORD, credentialId: '!!!' }),
+    expectCode('INVALID_INPUT'),
+  );
 });
 
 test('database failures surface as UNAVAILABLE without leaking detail', async () => {

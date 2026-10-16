@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { preprocessRequest } from '../../src/server/preprocess.js';
 import { providerProfile } from '../../src/providers/profiles.js';
+import { preprocessRequest } from '../../src/server/preprocess.js';
 
 test('filters _-prefixed private params recursively', () => {
   const body = {
@@ -144,7 +144,15 @@ test('explicit Anthropic policies control thinking and cache preparation indepen
   const body = {
     max_tokens: 100,
     system: 'sys',
-    messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'private' }, { type: 'text', text: 'ok' }] }],
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'private' },
+          { type: 'text', text: 'ok' },
+        ],
+      },
+    ],
   };
   const forced = preprocessRequest(body, 'anthropic', 'custom-model', profile, {
     thinking: 'force',
@@ -159,7 +167,10 @@ test('explicit Anthropic policies control thinking and cache preparation indepen
     autoCacheControl: false,
   });
   assert.equal(stripped.thinking, undefined);
-  assert.equal(stripped.messages[0].content.some((block: any) => block.type === 'thinking'), false);
+  assert.equal(
+    stripped.messages[0].content.some((block: any) => block.type === 'thinking'),
+    false,
+  );
   assert.equal(stripped.system, 'sys');
   assert.equal(stripped.messages[0].content[0].cache_control, undefined);
 });

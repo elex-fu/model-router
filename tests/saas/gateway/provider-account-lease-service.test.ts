@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import { PROVIDER_ACCOUNT_LEASES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/025_provider_account_leases.js';
 import { PostgresProviderAccountLeaseService, ProviderAccountLeaseError } from '../../../src/saas/gateway/index.js';
 import type { PreparedEvidenceLeaseRequest } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
@@ -261,8 +261,10 @@ test('acquire fences then reads account and locks held slots before the database
   assert.ok(lease);
   assert.equal(lease.fencingToken, '1');
   assert.deepEqual(database.events.slice(0, 4), ['account-fence', 'account-read', 'held-slots-lock', 'clock']);
-  assert.doesNotMatch(database.calls.find(({ sql }) => sql.includes('FROM saas_platform_provider_accounts'))!.sql,
-    /FOR (?:UPDATE|SHARE|KEY SHARE|NO KEY UPDATE)/);
+  assert.doesNotMatch(
+    database.calls.find(({ sql }) => sql.includes('FROM saas_platform_provider_accounts'))!.sql,
+    /FOR (?:UPDATE|SHARE|KEY SHARE|NO KEY UPDATE)/,
+  );
   assert.match(database.calls.find(({ sql }) => sql.startsWith('SELECT id, slot, fencing_token'))!.sql, /FOR UPDATE$/);
   assert.equal(database.leases[0]?.slot, 0);
   assert.equal(database.leases[0]?.status, 'held');
@@ -363,9 +365,10 @@ test('account fences use the existing exact owner and tenant identities without 
     const scoped = { ...input, tenantId, evidence: { ...input.evidence, tenantId } };
     assert.ok(await service(database).acquire(scoped));
     assert.equal(database.calls[0]?.sql, 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))');
-    const expected = mode === 'byok'
-      ? saasAdvisoryKey.tenantProviderAccount(tenantId, accountId)
-      : saasAdvisoryKey.platformProviderAccount(accountId);
+    const expected =
+      mode === 'byok'
+        ? saasAdvisoryKey.tenantProviderAccount(tenantId, accountId)
+        : saasAdvisoryKey.platformProviderAccount(accountId);
     assert.deepEqual(database.calls[0]?.values, [expected]);
     fences.push(expected);
     const read = database.calls[1]!;
@@ -383,8 +386,10 @@ test('failed account fence stops before the account read, lease writes, sequence
   for (const mode of ['byok', 'platform'] as const) {
     const database = new FakeLeaseDatabase();
     database.failOn = /pg_advisory_xact_lock/;
-    await assert.rejects(service(database).acquire(request(mode)),
-      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'STORAGE_ERROR');
+    await assert.rejects(
+      service(database).acquire(request(mode)),
+      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'STORAGE_ERROR',
+    );
     assert.equal(database.calls.length, 1);
     assert.deepEqual(database.events, []);
     assert.equal(database.leases.length, 0);
@@ -395,8 +400,10 @@ test('an unavailable account fails after its fence and before touching lease sta
   for (const mode of ['byok', 'platform'] as const) {
     const database = new FakeLeaseDatabase();
     database.accountAvailable = false;
-    await assert.rejects(service(database).acquire(request(mode)),
-      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'ACCOUNT_UNAVAILABLE');
+    await assert.rejects(
+      service(database).acquire(request(mode)),
+      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'ACCOUNT_UNAVAILABLE',
+    );
     assert.deepEqual(database.events, ['account-fence', 'account-read']);
     assert.equal(database.calls.length, 2);
     assert.equal(database.leases.length, 0);

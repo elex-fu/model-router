@@ -231,10 +231,7 @@ export async function loadGatewayProviderCredentialUnsealingKms(
   let rawSpecifier: string | undefined;
   try {
     sourceEnvironment = options.env ?? process.env;
-    rawSpecifier = readModuleSpecifier(
-      sourceEnvironment,
-      SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
-    );
+    rawSpecifier = readModuleSpecifier(sourceEnvironment, SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE);
   } catch (error) {
     if (error instanceof ProviderLoaderError) throw error;
     throw loaderError('PROVIDER_CREDENTIAL_KMS_CONFIGURATION_INVALID');

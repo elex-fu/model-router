@@ -171,37 +171,46 @@ async function flushLookupJobs(): Promise<void> {
   for (let i = 0; i < 12; i += 1) await Promise.resolve();
 }
 for (const late of ['resolve', 'reject'] as const) {
-  test(`bounded encryption clears local plaintext and never copies a late provider ${late}`, async t => {
+  test(`bounded encryption clears local plaintext and never copies a late provider ${late}`, async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
-    const material = keyMaterial('late-key', 0x51), unchanged = Buffer.from(material.key);
+    const material = keyMaterial('late-key', 0x51),
+      unchanged = Buffer.from(material.key);
     const fills = t.mock.method<Buffer, 'fill'>(Buffer.prototype, 'fill');
     const copies = t.mock.method(Buffer, 'from');
     let finish!: (value: CredentialKeyMaterial) => void;
     let refuse!: (error: Error) => void;
-    const pending = new Promise<CredentialKeyMaterial>((resolve, reject) => { finish = resolve; refuse = reject; });
+    const pending = new Promise<CredentialKeyMaterial>((resolve, reject) => {
+      finish = resolve;
+      refuse = reject;
+    });
     const provider: CredentialKeyProvider = { getCurrentKey: () => pending, getKey: () => undefined };
     const operation = encryptCredential('owned plaintext fixture only', context, provider, { timeoutMs: 5_000 });
     const denied = assert.rejects(operation, (error: unknown) => {
-      assertCryptoError(error, 'KEY_LOOKUP_TIMEOUT'); return true;
+      assertCryptoError(error, 'KEY_LOOKUP_TIMEOUT');
+      return true;
     });
     await flushLookupJobs();
     t.mock.timers.tick(5_000);
     await denied;
-    const cleared = fills.mock.calls.filter(call => call.arguments[0] === 0);
+    const cleared = fills.mock.calls.filter((call) => call.arguments[0] === 0);
     assert.ok(cleared.length > 0, 'owned plaintext cleanup must have executed before return');
     for (const call of cleared) {
       assert.ok(Buffer.isBuffer(call.this));
-      assert.equal(call.this.every(byte => byte === 0), true);
+      assert.equal(
+        call.this.every((byte) => byte === 0),
+        true,
+      );
     }
-    const keyCopies = () => copies.mock.calls.filter(call => call.arguments[0] === material.key).length;
+    const keyCopies = () => copies.mock.calls.filter((call) => call.arguments[0] === material.key).length;
     assert.equal(keyCopies(), 0);
-    if (late === 'resolve') finish(material); else refuse(new Error('test-only late provider refusal'));
+    if (late === 'resolve') finish(material);
+    else refuse(new Error('test-only late provider refusal'));
     await flushLookupJobs();
     assert.equal(keyCopies(), 0, 'timeout sink must not copy key material or resume encryption');
     assert.deepEqual(material.key, unchanged);
   });
 }
-test('bounded historical lookup timeout is terminal and never invokes current-key fallback', async t => {
+test('bounded historical lookup timeout is terminal and never invokes current-key fallback', async (t) => {
   const material = keyMaterial('history-key', 0x52);
   const envelope = await encryptCredential('fixture plaintext', context, createKeyProvider(material).provider);
   t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -209,57 +218,94 @@ test('bounded historical lookup timeout is terminal and never invokes current-ke
   let currentCalls = 0;
   const provider: CredentialKeyProvider = {
     getKey: () => new Promise<undefined>(() => undefined),
-    getCurrentKey: () => { currentCalls += 1; return material; },
+    getCurrentKey: () => {
+      currentCalls += 1;
+      return material;
+    },
   };
-  const denied = assert.rejects(decryptCredential(envelope, context, provider, { timeoutMs: 5_000 }),
-    (error: unknown) => { assertCryptoError(error, 'KEY_LOOKUP_TIMEOUT'); return true; });
+  const denied = assert.rejects(
+    decryptCredential(envelope, context, provider, { timeoutMs: 5_000 }),
+    (error: unknown) => {
+      assertCryptoError(error, 'KEY_LOOKUP_TIMEOUT');
+      return true;
+    },
+  );
   await flushLookupJobs();
   t.mock.timers.tick(5_000);
   await denied;
   assert.equal(currentCalls, 0);
-  const cleared = fills.mock.calls.filter(call => call.arguments[0] === 0);
+  const cleared = fills.mock.calls.filter((call) => call.arguments[0] === 0);
   assert.ok(cleared.length >= 3, 'parsed nonce/ciphertext/tag must be cleared on refusal');
   for (const call of cleared) {
     assert.ok(Buffer.isBuffer(call.this));
-    assert.equal(call.this.every(byte => byte === 0), true);
+    assert.equal(
+      call.this.every((byte) => byte === 0),
+      true,
+    );
   }
 });
-test('historical-to-current fallback shares one non-resetting bounded lookup deadline', async t => {
+test('historical-to-current fallback shares one non-resetting bounded lookup deadline', async (t) => {
   const material = keyMaterial('fallback-key', 0x53);
   const envelope = await encryptCredential('fixture plaintext', context, createKeyProvider(material).provider);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let finishHistory!: (value: undefined) => void;
   let finishCurrent!: (value: CredentialKeyMaterial) => void;
-  const history = new Promise<undefined>(resolve => { finishHistory = resolve; });
-  const current = new Promise<CredentialKeyMaterial>(resolve => { finishCurrent = resolve; });
-  let currentCalls = 0, finished = false;
+  const history = new Promise<undefined>((resolve) => {
+    finishHistory = resolve;
+  });
+  const current = new Promise<CredentialKeyMaterial>((resolve) => {
+    finishCurrent = resolve;
+  });
+  let currentCalls = 0,
+    finished = false;
   const provider: CredentialKeyProvider = {
     getKey: () => history,
-    getCurrentKey: () => { currentCalls += 1; return current; },
+    getCurrentKey: () => {
+      currentCalls += 1;
+      return current;
+    },
   };
   const operation = decryptCredential(envelope, context, provider, { timeoutMs: 5_000 });
   const denied = assert.rejects(operation, (error: unknown) => {
-    assertCryptoError(error, 'KEY_LOOKUP_TIMEOUT'); finished = true; return true;
+    assertCryptoError(error, 'KEY_LOOKUP_TIMEOUT');
+    finished = true;
+    return true;
   });
-  await flushLookupJobs(); t.mock.timers.tick(3_000);
-  finishHistory(undefined); await flushLookupJobs();
+  await flushLookupJobs();
+  t.mock.timers.tick(3_000);
+  finishHistory(undefined);
+  await flushLookupJobs();
   assert.equal(currentCalls, 1, 'the original current-only-provider fallback is retained');
-  t.mock.timers.tick(1_999); await flushLookupJobs(); assert.equal(finished, false);
-  t.mock.timers.tick(1); await denied;
-  finishCurrent(material); await flushLookupJobs();
+  t.mock.timers.tick(1_999);
+  await flushLookupJobs();
+  assert.equal(finished, false);
+  t.mock.timers.tick(1);
+  await denied;
+  finishCurrent(material);
+  await flushLookupJobs();
   assert.equal(currentCalls, 1);
 });
-test('bounded successful crypto clears its copied key and plaintext but not the provider-owned key', async t => {
-  const material = keyMaterial('bounded-key', 0x54), unchanged = Buffer.from(material.key);
+test('bounded successful crypto clears its copied key and plaintext but not the provider-owned key', async (t) => {
+  const material = keyMaterial('bounded-key', 0x54),
+    unchanged = Buffer.from(material.key);
   const fills = t.mock.method<Buffer, 'fill'>(Buffer.prototype, 'fill');
   const provider = createKeyProvider(material).provider;
   const envelope = await encryptCredential('owned plaintext fixture only', context, provider, { timeoutMs: 5_000 });
-  assert.equal(await decryptCredential(envelope, context, provider, { timeoutMs: 5_000 }), 'owned plaintext fixture only');
-  const cleared = fills.mock.calls.filter(call => call.arguments[0] === 0);
-  assert.ok(cleared.some(call => Buffer.isBuffer(call.this) && call.this.length === 32), 'the application-owned key copy must be zeroed');
+  assert.equal(
+    await decryptCredential(envelope, context, provider, { timeoutMs: 5_000 }),
+    'owned plaintext fixture only',
+  );
+  const cleared = fills.mock.calls.filter((call) => call.arguments[0] === 0);
+  assert.ok(
+    cleared.some((call) => Buffer.isBuffer(call.this) && call.this.length === 32),
+    'the application-owned key copy must be zeroed',
+  );
   for (const call of cleared) {
     assert.ok(Buffer.isBuffer(call.this));
-    assert.equal(call.this.every(byte => byte === 0), true);
+    assert.equal(
+      call.this.every((byte) => byte === 0),
+      true,
+    );
   }
   assert.deepEqual(material.key, unchanged);
 });

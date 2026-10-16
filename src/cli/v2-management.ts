@@ -187,44 +187,46 @@ async function migrationPreview(raw: Json, file: string) {
   }
   const checked = await new ConfigServiceV2(file).previewLegacy(raw);
   const config = checked.config;
-  const upstreams = config?.upstreams.map((upstream) => {
-    const legacy = (Array.isArray(raw.upstreams) ? raw.upstreams : []).find(
-      (item) => object(item) && item.name === upstream.name,
-    );
-    const legacyBase = object(legacy) && typeof legacy.baseUrl === 'string' ? legacy.baseUrl : undefined;
-    const credentials = upstream.credentials.map((credential) => {
-    const secret =
-      credential.secret.type === 'env'
-        ? `env:${credential.secret.name}`
-        : credential.secret.type === 'inline'
-          ? 'inline value in config file'
-          : 'encrypted secret';
-      return { id: credential.id, label: credential.label, enabled: credential.enabled, secretSource: secret };
-    });
-    return {
-      id: upstream.id,
-      name: upstream.name,
-      provider: upstream.provider,
-      protocol: upstream.protocol,
-      enabled: upstream.enabled,
-      urlMigration: {
-        sourceBase: safeMigrationUrl(legacyBase),
-        legacyEndpoint: upstream.endpoints.generate,
-        v2Prefix: safeMigrationUrl(upstream.baseUrl),
-        relativeEndpoint: upstream.endpoints.generate,
-        finalUrl: safeMigrationUrl(`${upstream.baseUrl.replace(/\/$/, '')}/${upstream.endpoints.generate}`),
-      },
-      credentials,
-      models: upstream.models.map((model) => model.id),
-    };
-  }) ?? [];
-  const routes = config?.routes.map((route) => ({
-    id: route.id,
-    match: route.match,
-    clientProtocols: route.clientProtocols,
-    publishedModels: route.publishedModels,
-    targets: route.targets,
-  })) ?? [];
+  const upstreams =
+    config?.upstreams.map((upstream) => {
+      const legacy = (Array.isArray(raw.upstreams) ? raw.upstreams : []).find(
+        (item) => object(item) && item.name === upstream.name,
+      );
+      const legacyBase = object(legacy) && typeof legacy.baseUrl === 'string' ? legacy.baseUrl : undefined;
+      const credentials = upstream.credentials.map((credential) => {
+        const secret =
+          credential.secret.type === 'env'
+            ? `env:${credential.secret.name}`
+            : credential.secret.type === 'inline'
+              ? 'inline value in config file'
+              : 'encrypted secret';
+        return { id: credential.id, label: credential.label, enabled: credential.enabled, secretSource: secret };
+      });
+      return {
+        id: upstream.id,
+        name: upstream.name,
+        provider: upstream.provider,
+        protocol: upstream.protocol,
+        enabled: upstream.enabled,
+        urlMigration: {
+          sourceBase: safeMigrationUrl(legacyBase),
+          legacyEndpoint: upstream.endpoints.generate,
+          v2Prefix: safeMigrationUrl(upstream.baseUrl),
+          relativeEndpoint: upstream.endpoints.generate,
+          finalUrl: safeMigrationUrl(`${upstream.baseUrl.replace(/\/$/, '')}/${upstream.endpoints.generate}`),
+        },
+        credentials,
+        models: upstream.models.map((model) => model.id),
+      };
+    }) ?? [];
+  const routes =
+    config?.routes.map((route) => ({
+      id: route.id,
+      match: route.match,
+      clientProtocols: route.clientProtocols,
+      publishedModels: route.publishedModels,
+      targets: route.targets,
+    })) ?? [];
   const blockers = checked.errors.map(({ path, code }) => `${path} [${code}]`);
   return {
     previewKind: 'v2_candidate',
@@ -235,14 +237,15 @@ async function migrationPreview(raw: Json, file: string) {
       upstreams,
       credentials: config?.upstreams.reduce((count, upstream) => count + upstream.credentials.length, 0) ?? 0,
       routes,
-      proxyKeys: config?.proxyKeys.map((key) => ({
-        id: key.id,
-        name: key.name,
-        enabled: key.enabled,
-        prefix: key.keyPrefix,
-        allowedUpstreamIds: key.allowedUpstreamIds ?? [],
-        allowedModels: key.allowedModels ?? [],
-      })) ?? [],
+      proxyKeys:
+        config?.proxyKeys.map((key) => ({
+          id: key.id,
+          name: key.name,
+          enabled: key.enabled,
+          prefix: key.keyPrefix,
+          allowedUpstreamIds: key.allowedUpstreamIds ?? [],
+          allowedModels: key.allowedModels ?? [],
+        })) ?? [],
       publicProxyUrl: config?.server.publicProxyBaseUrl,
       legacyLogHandling: 'Existing request_logs are not imported; retain separately as legacy_log_rows.',
     },

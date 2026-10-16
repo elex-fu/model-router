@@ -377,7 +377,8 @@ test('platform error notice distinguishes invalid login credentials from expired
   const poison = 'must-not-render-raw-error <img src=x onerror=alert(1)> csrf-secret';
   const invalidCredentials = '邮箱、密码或 MFA 验证码不正确。';
   const expiredSession = '平台管理员会话已失效，安全令牌已清理，请重新登录。';
-  const forbidden = '当前管理员角色未获准读取此内容。访问由服务端授权决定，请联系平台管理员确认；页面显示的角色信息不会授予权限。';
+  const forbidden =
+    '当前管理员角色未获准读取此内容。访问由服务端授权决定，请联系平台管理员确认；页面显示的角色信息不会授予权限。';
   const cases: Array<{ error: unknown; message: string }> = [
     { error: new FeaturePlatformApiError(401, 'INVALID_CREDENTIALS', poison), message: invalidCredentials },
     { error: new FeaturePlatformApiError(401, 'UNAUTHENTICATED', poison), message: expiredSession },
@@ -385,7 +386,10 @@ test('platform error notice distinguishes invalid login credentials from expired
     { error: { status: 401, code: 'INVALID_CREDENTIALS', message: poison }, message: expiredSession },
     { error: new FeaturePlatformApiError(403, 'INVALID_CREDENTIALS', poison), message: forbidden },
     { error: new FeaturePlatformApiError(403, 'FORBIDDEN', poison), message: forbidden },
-    { error: new FeaturePlatformApiError(503, 'MFA_UNAVAILABLE', poison), message: '平台 MFA 当前不可用，请联系运维人员。' },
+    {
+      error: new FeaturePlatformApiError(503, 'MFA_UNAVAILABLE', poison),
+      message: '平台 MFA 当前不可用，请联系运维人员。',
+    },
   ];
   for (const { error, message } of cases) {
     const html = renderToStaticMarkup(
@@ -890,7 +894,8 @@ function auditClientRecord(overrides: Record<string, unknown> = {}): Record<stri
 
 function auditClientResponse(items: readonly unknown[]): Response {
   return new Response(JSON.stringify({ data: { items, hasMore: false, nextCursor: null } }), {
-    status: 200, headers: { 'content-type': 'application/json' },
+    status: 200,
+    headers: { 'content-type': 'application/json' },
   });
 }
 
@@ -898,27 +903,50 @@ test('audit client projects strict optional operator declarations without changi
   const calls: string[] = [];
   const items = [
     auditClientRecord({ userAgent: 'raw-metadata-secret', sourceIp: '192.0.2.4', token: 'top-level-secret' }),
-    ...['target-unavailable', 'verified-totp-present', 'enrollment-pending'].map(outcome => auditClientRecord({
+    ...['target-unavailable', 'verified-totp-present', 'enrollment-pending'].map((outcome) =>
+      auditClientRecord({
+        action: 'platform_mfa.enrollment_token.denied',
+        operatorAttestation: { operatorId: 'o'.repeat(96), reasonCode: 'approved-enrollment', outcome },
+      }),
+    ),
+    auditClientRecord({
       action: 'platform_mfa.enrollment_token.denied',
-      operatorAttestation: { operatorId: 'o'.repeat(96), reasonCode: 'approved-enrollment', outcome },
-    })),
-    auditClientRecord({
-      action: 'platform_mfa.enrollment_token.denied', entityType: 'platform_mfa_enrollment_email_digest', entityId: null,
-      operatorAttestation: { operatorId: 'ops:handoff-01', reasonCode: 'approved-enrollment', outcome: 'target-unavailable' },
+      entityType: 'platform_mfa_enrollment_email_digest',
+      entityId: null,
+      operatorAttestation: {
+        operatorId: 'ops:handoff-01',
+        reasonCode: 'approved-enrollment',
+        outcome: 'target-unavailable',
+      },
     }),
-    auditClientRecord({ actorId: AUDIT_ACTOR_UUID, action: 'api_key.created', entityType: 'saas_api_key', operatorAttestation: undefined }),
     auditClientRecord({
-      action: 'platform_mfa.enrollment_token.denied', entityType: 'platform_mfa_enrollment_email_digest',
-      entityId: 'd'.repeat(64), operatorAttestation: undefined,
+      actorId: AUDIT_ACTOR_UUID,
+      action: 'api_key.created',
+      entityType: 'saas_api_key',
+      operatorAttestation: undefined,
+    }),
+    auditClientRecord({
+      action: 'platform_mfa.enrollment_token.denied',
+      entityType: 'platform_mfa_enrollment_email_digest',
+      entityId: 'd'.repeat(64),
+      operatorAttestation: undefined,
     }),
   ];
-  globalThis.fetch = async input => { calls.push(String(input)); return auditClientResponse(items); };
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    return auditClientResponse(items);
+  };
   const page = await platformClient.listAuditEvents({
-    actorId: AUDIT_ACTOR_UUID, action: 'platform_mfa.enrollment_token.issued',
-    entityType: 'platform_mfa_enrollment_user', limit: 10, cursor: 'pah1.unchanged',
+    actorId: AUDIT_ACTOR_UUID,
+    action: 'platform_mfa.enrollment_token.issued',
+    entityType: 'platform_mfa_enrollment_user',
+    limit: 10,
+    cursor: 'pah1.unchanged',
   });
   assert.deepEqual(page.items[0]?.operatorAttestation, {
-    operatorId: 'ops:handoff-01', reasonCode: 'initial-enrollment', outcome: 'issued',
+    operatorId: 'ops:handoff-01',
+    reasonCode: 'initial-enrollment',
+    outcome: 'issued',
   });
   assert.equal(page.items[0]?.actorId, null);
   assert.equal(page.items[5]?.actorId, AUDIT_ACTOR_UUID);
@@ -929,25 +957,38 @@ test('audit client projects strict optional operator declarations without changi
   assert.deepEqual([...url.searchParams.keys()], ['actorId', 'action', 'entityType', 'limit', 'cursor']);
   assert.equal(url.searchParams.get('actorId'), AUDIT_ACTOR_UUID);
   assert.equal(url.searchParams.get('cursor'), 'pah1.unchanged');
-  assert.doesNotMatch(JSON.stringify(page), /raw-metadata-secret|top-level-secret|192\.0\.2\.4|userAgent|sourceIp|entryPoint|requestId/);
+  assert.doesNotMatch(
+    JSON.stringify(page),
+    /raw-metadata-secret|top-level-secret|192\.0\.2\.4|userAgent|sourceIp|entryPoint|requestId/,
+  );
   assert.equal(JSON.stringify(page).includes('d'.repeat(64)), false);
 });
 
 test('audit client rejects malformed or forged optional declarations with safe errors, including proto and XSS payloads', async () => {
   const valid = { operatorId: 'ops:handoff-01', reasonCode: 'initial-enrollment', outcome: 'issued' };
   const invalidAttestations: unknown[] = [
-    null, [], 'raw-JSON-secret', 1, {},
-    { ...valid, operatorId: '' }, { ...valid, operatorId: 'o'.repeat(97) },
-    { ...valid, operatorId: '运维' }, { ...valid, operatorId: 'ops\nforged' },
+    null,
+    [],
+    'raw-JSON-secret',
+    1,
+    {},
+    { ...valid, operatorId: '' },
+    { ...valid, operatorId: 'o'.repeat(97) },
+    { ...valid, operatorId: '运维' },
+    { ...valid, operatorId: 'ops\nforged' },
     { ...valid, operatorId: '<img src=x onerror=alert(1)>' },
-    { ...valid, reasonCode: 'other-reason' }, { ...valid, outcome: 'unknown' },
+    { ...valid, reasonCode: 'other-reason' },
+    { ...valid, outcome: 'unknown' },
     { ...valid, outcome: 'enrollment-pending' },
     { ...valid, token: 'must-not-leak-secret' },
-    { ...valid, audience: 'platform' }, { ...valid, userAgent: 'must-not-leak-secret' },
-    JSON.parse('{"operatorId":"ops:handoff-01","reasonCode":"initial-enrollment","outcome":"issued","__proto__":{"token":"must-not-leak-secret"}}'),
+    { ...valid, audience: 'platform' },
+    { ...valid, userAgent: 'must-not-leak-secret' },
+    JSON.parse(
+      '{"operatorId":"ops:handoff-01","reasonCode":"initial-enrollment","outcome":"issued","__proto__":{"token":"must-not-leak-secret"}}',
+    ),
   ];
   const invalidEvents = [
-    ...invalidAttestations.map(operatorAttestation => auditClientRecord({ operatorAttestation })),
+    ...invalidAttestations.map((operatorAttestation) => auditClientRecord({ operatorAttestation })),
     auditClientRecord({ actorId: AUDIT_ACTOR_UUID }),
     auditClientRecord({ tenantId: CAPACITY_TENANT_ID }),
     auditClientRecord({ tenantId: undefined }),
@@ -957,12 +998,15 @@ test('audit client rejects malformed or forged optional declarations with safe e
     auditClientRecord({ entityType: 'saas_user' }),
     auditClientRecord({ entityId: 'not-a-user-uuid' }),
     auditClientRecord({
-      action: 'platform_mfa.enrollment_token.denied', entityType: 'platform_mfa_enrollment_email_digest',
+      action: 'platform_mfa.enrollment_token.denied',
+      entityType: 'platform_mfa_enrollment_email_digest',
       entityId: 'd'.repeat(64),
       operatorAttestation: { ...valid, outcome: 'target-unavailable' },
     }),
     auditClientRecord({
-      action: 'platform_mfa.enrollment_token.denied', entityType: 'platform_mfa_enrollment_email_digest', entityId: null,
+      action: 'platform_mfa.enrollment_token.denied',
+      entityType: 'platform_mfa_enrollment_email_digest',
+      entityId: null,
       operatorAttestation: { ...valid, outcome: 'verified-totp-present' },
     }),
   ];
@@ -980,8 +1024,11 @@ test('audit client rejects malformed or forged optional declarations with safe e
 
 test('audit client retains legacy safe event shape when the optional projection is absent', async () => {
   const legacy = {
-    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', actorId: AUDIT_ACTOR_UUID,
-    action: 'api_key.created', entityType: 'saas_api_key', entityId: 'key-reference',
+    id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    actorId: AUDIT_ACTOR_UUID,
+    action: 'api_key.created',
+    entityType: 'saas_api_key',
+    entityId: 'key-reference',
     occurredAt: '2026-09-30T16:00:00.000Z',
   };
   globalThis.fetch = async () => auditClientResponse([legacy]);

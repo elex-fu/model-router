@@ -246,7 +246,8 @@ function mapLedgerEntry(row: WalletLedgerRow, expectedCurrency: string): Custome
     currency: expectedCurrency,
     direction,
     amountMinorUnits: amount.toString(),
-    type: sourceType === 'wallet_funding' ? 'top_up' : sourceType === 'wallet_refund' ? 'wallet_refund' : 'usage_charge',
+    type:
+      sourceType === 'wallet_funding' ? 'top_up' : sourceType === 'wallet_refund' ? 'wallet_refund' : 'usage_charge',
     createdAt: storedTimestamp(row.created_at),
   };
 }

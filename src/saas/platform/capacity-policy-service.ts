@@ -459,16 +459,25 @@ async function authorizeActor(
     }
     const users = [actor.userId];
     if (principal?.kind === 'member') users.push(principal.userId);
-    await lockAdvisoryFenceLayer(tx, users.map((userId) => ({ key: saasAdvisoryKey.user(userId), mode: 'exclusive' })));
+    await lockAdvisoryFenceLayer(
+      tx,
+      users.map((userId) => ({ key: saasAdvisoryKey.user(userId), mode: 'exclusive' })),
+    );
     if (scope.apiKeyId !== undefined && principalFailure === undefined) {
-      await lockAdvisoryFenceLayer(tx, [{
-        key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId), mode: 'exclusive',
-      }]);
+      await lockAdvisoryFenceLayer(tx, [
+        {
+          key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId),
+          mode: 'exclusive',
+        },
+      ]);
     }
   } else {
     const subjectRequests: AdvisoryFenceRequest[] = [{ key: saasAdvisoryKey.user(actor.userId), mode: 'shared' }];
     if (scope.apiKeyId !== undefined) {
-      subjectRequests.push({ key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId), mode });
+      subjectRequests.push({
+        key: saasAdvisoryKey.apiKey(scope.tenantId, scope.projectId ?? '', scope.apiKeyId),
+        mode,
+      });
     }
     await lockAdvisoryFenceLayer(tx, subjectRequests);
   }
@@ -1000,8 +1009,10 @@ export class PlatformCapacityPolicyService {
       const currentRow = oneRow(resultRows(selected, 'API key capacity policy'), 'NOT_FOUND', 'API key');
       const principal = keyPrincipal(currentRow, { tenantId, projectId, apiKeyId });
       if (
-        principalHint === undefined || principal.kind !== principalHint.kind ||
-        principal.id !== principalHint.id || principal.userId !== principalHint.userId
+        principalHint === undefined ||
+        principal.kind !== principalHint.kind ||
+        principal.id !== principalHint.id ||
+        principal.userId !== principalHint.userId
       ) {
         // A changed binding cannot be repaired by taking an earlier user lock
         // here, after K/row locks. Roll back rather than admit a stale hint.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
 import { SaasPricingService } from '../../../src/saas/pricing/service.js';
 import type {
@@ -505,7 +505,9 @@ function assertSnapshotLockOrder(executor: RecordingPricingExecutor, kind: 'cust
   for (const slot of [2, 3, 4]) assert.ok(mutex.sql.includes(`$${slot}::uuid::text`));
   for (const { sql } of statements) {
     if (
-      /FROM saas_(?:customer_price_versions|supplier_cost_versions|request_customer_price_snapshots|attempt_supplier_cost_snapshots|platform_provider_accounts)\b/.test(sql)
+      /FROM saas_(?:customer_price_versions|supplier_cost_versions|request_customer_price_snapshots|attempt_supplier_cost_snapshots|platform_provider_accounts)\b/.test(
+        sql,
+      )
     ) {
       assert.doesNotMatch(sql, /FOR\s+(?:SHARE|UPDATE|KEY SHARE|NO KEY UPDATE)/i);
     }
@@ -542,13 +544,19 @@ test('both immutable snapshot paths lock before fresh reads and replay exactly o
   assert.notEqual(customerKey, supplierKey);
   assert.deepEqual(await service.createCustomerPriceSnapshot(customerInput), customer);
   assert.deepEqual(await service.createSupplierCostSnapshot(supplierInput), supplier);
-  for (const [index, expectedKey] of [[2, customerKey], [3, supplierKey]] as const) {
+  for (const [index, expectedKey] of [
+    [2, customerKey],
+    [3, supplierKey],
+  ] as const) {
     const replayExecutor = database.executors[index];
     assert.ok(replayExecutor);
     const mutex = replayExecutor.statements.find(({ sql }) => isSnapshotMutex(sql));
     assert.ok(mutex);
     assert.equal(JSON.stringify(mutex.values), expectedKey);
-    assert.equal(replayExecutor.statements.some(({ sql }) => sql.startsWith('INSERT INTO')), false);
+    assert.equal(
+      replayExecutor.statements.some(({ sql }) => sql.startsWith('INSERT INTO')),
+      false,
+    );
   }
   assert.equal(database.state.customerSnapshots.length, 1);
   assert.equal(database.state.supplierSnapshots.length, 1);
@@ -571,10 +579,12 @@ test('both immutable snapshot paths lock before fresh reads and replay exactly o
   assert.equal(database.state.customerSnapshots.length, 1);
   assert.equal(database.state.supplierSnapshots.length, 1);
   assert.equal(database.rollbacks, 3);
-  for (const [index, expectedKey] of [[4, customerKey], [5, supplierKey], [6, supplierKey]] as const) {
-    const mutex = database.executors[index]?.statements.find(
-      ({ sql }) => isSnapshotMutex(sql),
-    );
+  for (const [index, expectedKey] of [
+    [4, customerKey],
+    [5, supplierKey],
+    [6, supplierKey],
+  ] as const) {
+    const mutex = database.executors[index]?.statements.find(({ sql }) => isSnapshotMutex(sql));
     assert.ok(mutex);
     assert.equal(JSON.stringify(mutex.values), expectedKey);
   }
@@ -592,7 +602,10 @@ test('BYOK and mismatched supplier authority still cannot create snapshots', asy
       hasPricingCode('PLATFORM_REQUEST_REQUIRED'),
     );
     assert.equal(database.state.customerSnapshots.length + database.state.supplierSnapshots.length, 0);
-    assert.equal(database.executors[0]?.statements.some(({ sql }) => sql.startsWith('INSERT INTO')), false);
+    assert.equal(
+      database.executors[0]?.statements.some(({ sql }) => sql.startsWith('INSERT INTO')),
+      false,
+    );
   }
   for (const field of [
     'platform_account_id',
@@ -637,7 +650,11 @@ test('BYOK and mismatched supplier authority still cannot create snapshots', asy
 });
 
 test('snapshot or account fence failure prevents subsequent snapshot reads and inserts', async () => {
-  for (const [kind, failure] of [['customer', 'snapshot'], ['supplier', 'snapshot'], ['supplier', 'account']] as const) {
+  for (const [kind, failure] of [
+    ['customer', 'snapshot'],
+    ['supplier', 'snapshot'],
+    ['supplier', 'account'],
+  ] as const) {
     const database = readyDatabase();
     database.advisoryFailure = failure;
     const service = pricingService(database);
@@ -650,10 +667,15 @@ test('snapshot or account fence failure prevents subsequent snapshot reads and i
     const executor = database.executors[0];
     assert.ok(executor);
     assert.equal(
-      executor.statements.some(({ sql }) => /FROM saas_(?:request_customer_price_snapshots|attempt_supplier_cost_snapshots)/.test(sql)),
+      executor.statements.some(({ sql }) =>
+        /FROM saas_(?:request_customer_price_snapshots|attempt_supplier_cost_snapshots)/.test(sql),
+      ),
       false,
     );
-    assert.equal(executor.statements.some(({ sql }) => sql.startsWith('INSERT INTO')), false);
+    assert.equal(
+      executor.statements.some(({ sql }) => sql.startsWith('INSERT INTO')),
+      false,
+    );
     if (failure === 'account') assert.equal(executor.statements.length, 1);
     assert.equal(database.state.customerSnapshots.length + database.state.supplierSnapshots.length, 0);
   }
@@ -716,7 +738,10 @@ test('supplier account identity is read fresh after its native shared fence wait
     recording.statements.filter(({ sql }) => sql.includes('FROM saas_platform_provider_accounts')).length,
     1,
   );
-  assert.equal(recording.statements.some(({ sql }) => sql.startsWith('INSERT INTO')), false);
+  assert.equal(
+    recording.statements.some(({ sql }) => sql.startsWith('INSERT INTO')),
+    false,
+  );
 });
 
 // This unit executor models only transaction-held advisory waits; real PG verifies the actual locks/ACLs.
@@ -768,43 +793,52 @@ class ConcurrentPricingDatabase extends RecordingPricingDatabase {
   }
 }
 
-test('concurrent identical snapshot creators serialize missing rows into one insert per family', { timeout: 5_000 }, async () => {
+test('concurrent identical snapshot creators serialize missing rows into one insert per family', {
+  timeout: 5_000,
+}, async () => {
   for (const kind of ['customer', 'supplier'] as const) {
     const database = new ConcurrentPricingDatabase();
     database.state.request = requestRow();
     database.state.attempt = attemptRow();
     const service = pricingService(database);
-    const create = kind === 'customer'
-      ? async () => (await service.createCustomerPriceSnapshot(customerInput)).snapshot
-      : () => service.createSupplierCostSnapshot(supplierInput);
+    const create =
+      kind === 'customer'
+        ? async () => (await service.createCustomerPriceSnapshot(customerInput)).snapshot
+        : () => service.createSupplierCostSnapshot(supplierInput);
     const [first, replay] = await Promise.all([create(), create()]);
     assert.equal(first.id, replay.id);
     assert.equal(first.snapshotDigest, replay.snapshotDigest);
     assert.equal(database.state.customerSnapshots.length + database.state.supplierSnapshots.length, 1);
     assert.equal(
-      database.executors.flatMap(({ statements }) => statements).filter(({ sql }) => sql.startsWith('INSERT INTO')).length,
+      database.executors.flatMap(({ statements }) => statements).filter(({ sql }) => sql.startsWith('INSERT INTO'))
+        .length,
       1,
     );
     assert.equal(database.commits, 2);
   }
 });
 
-test('concurrent conflicting snapshot creators observe the committed digest and do not insert again', { timeout: 5_000 }, async () => {
+test('concurrent conflicting snapshot creators observe the committed digest and do not insert again', {
+  timeout: 5_000,
+}, async () => {
   for (const kind of ['customer', 'supplier'] as const) {
     const database = new ConcurrentPricingDatabase();
     database.state.request = requestRow();
     database.state.attempt = attemptRow();
     const service = pricingService(database);
-    const first = kind === 'customer'
-      ? service.createCustomerPriceSnapshot(customerInput)
-      : service.createSupplierCostSnapshot(supplierInput);
-    const conflict = kind === 'customer'
-      ? service.createCustomerPriceSnapshot({ ...customerInput, idempotencyKey: 'conflicting-key' })
-      : service.createSupplierCostSnapshot({ ...supplierInput, idempotencyKey: 'conflicting-key' });
+    const first =
+      kind === 'customer'
+        ? service.createCustomerPriceSnapshot(customerInput)
+        : service.createSupplierCostSnapshot(supplierInput);
+    const conflict =
+      kind === 'customer'
+        ? service.createCustomerPriceSnapshot({ ...customerInput, idempotencyKey: 'conflicting-key' })
+        : service.createSupplierCostSnapshot({ ...supplierInput, idempotencyKey: 'conflicting-key' });
     await Promise.all([first, assert.rejects(conflict, hasPricingCode('SNAPSHOT_CONFLICT'))]);
     assert.equal(database.state.customerSnapshots.length + database.state.supplierSnapshots.length, 1);
     assert.equal(
-      database.executors.flatMap(({ statements }) => statements).filter(({ sql }) => sql.startsWith('INSERT INTO')).length,
+      database.executors.flatMap(({ statements }) => statements).filter(({ sql }) => sql.startsWith('INSERT INTO'))
+        .length,
       1,
     );
     assert.equal(database.commits, 1);

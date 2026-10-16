@@ -1,8 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import {
+  buildPkceAuthorizeUrl,
   type PkceAuthorizeUrlInput,
   type PkceError,
-  buildPkceAuthorizeUrl,
   createPkcePair as sharedCreatePkcePair,
   decodeIdTokenPayload as sharedDecodeIdTokenPayload,
 } from '../../gateway/oauth-subscription/pkce.js';
@@ -37,7 +37,8 @@ export const CODEX_OAUTH_USER_AGENT = 'codex_cli_rs/0.146.0 (Mac OS X 15.0; arm6
 /** The id_token payload is validated against the local clock with this skew. */
 export const CODEX_ID_TOKEN_CLOCK_SKEW_MS = 120_000;
 
-const CODEX_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth';export type CodexOauthErrorCode =
+const CODEX_AUTH_CLAIMS_KEY = 'https://api.openai.com/auth';
+export type CodexOauthErrorCode =
   | 'ID_TOKEN_MALFORMED'
   | 'ID_TOKEN_EXPIRED'
   | 'ID_TOKEN_CLAIMS_MISSING'

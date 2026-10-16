@@ -581,6 +581,7 @@ test('standard production CLI: native metadata/decrypt-only KMS and restricted r
               await verifyCredentialValidationWorkerRuntimePrivileges(observer);
               t.diagnostic('safe proof: exact original ACL restored; scope and current registry unchanged; restricted readiness verified');
             }
+          // biome-ignore lint/correctness/noUnsafeFinally: deliberate test design — a failed cleanup must fail the proof even if it replaces the try-block outcome.
           } catch (cause) { throw safeFailure(cause, 'exact-column-acl-restoration'); }
           finally { rmSync(fixture.directory, { recursive: true, force: true }); }
         }

@@ -426,6 +426,7 @@ test('required current-schema four-role CP invalidation fences actual validation
         // failed. It has a session statement timeout and an attached rejection
         // handler; no child leaves a background business operation running.
         if (completion) await completion;
+        // biome-ignore lint/correctness/noUnsafeFinally: deliberate test design — a failed cleanup must fail the proof even if it replaces the try-block outcome.
         if (!outcome.ok) throw outcome.error;
       }
       assert.ok(completion, 'actual worker completion must have been started');

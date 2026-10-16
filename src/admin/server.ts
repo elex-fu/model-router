@@ -172,19 +172,84 @@ export interface AdminServer {
 const PREFIX = '/admin/api/v1';
 /** Dispatch patterns implemented below. Kept beside the dispatcher so OpenAPI parity tests catch route drift. */
 export const adminDispatchOperations = [
-  'GET /openapi.json','GET /bootstrap','POST /bootstrap','POST /session','GET /session','DELETE /session',
-  'GET /config','PUT /config','GET /config/export','POST /config/validate','POST /config/import-preview','POST /config/import','GET /config/history','POST /config/rollback',
-  'GET /provider-presets','GET /capabilities','GET /system','GET /overview',
-  'GET /upstreams','GET /upstreams/{id}','POST /upstreams','PATCH /upstreams/{id}','DELETE /upstreams/{id}',
-  'POST /upstreams/{id}/credentials','PATCH /upstreams/{id}/credentials/{credentialId}','DELETE /upstreams/{id}/credentials/{credentialId}',
-  'POST /upstreams/{id}/discover-models','POST /upstreams/{id}/test','POST /upstreams/{id}/test-jobs/{jobId}/cancel','GET /upstreams/{id}/runtime','GET /upstreams/{id}/health-events','POST /upstreams/{id}/circuit-reset',
-  'GET /routes','GET /routes/{id}','POST /routes','PATCH /routes/{id}','DELETE /routes/{id}','PUT /routes/order','POST /routes/preview','GET /models',
-  'GET /keys','GET /keys/{id}','POST /keys','PATCH /keys/{id}','DELETE /keys/{id}','POST /keys/{id}/rotate','GET /keys/{id}/quota','POST /keys/{id}/quota-adjustments',
-  'GET /usage/summary','GET /usage/timeseries','GET /usage/breakdown','GET /requests','GET /requests/{id}','GET /requests/{id}/attempts',
-  'POST /exports','GET /exports/{id}/download','POST /playground/runs','GET /playground/runs/{id}','GET /playground/status','POST /playground/runs/{id}/cancel',
-  'GET /connect/templates','GET /pricing','POST /pricing','PATCH /pricing/{id}','GET /accounts','POST /accounts/client-credentials','POST /accounts/device-flows',
-  'GET /accounts/device-flows/{id}','DELETE /accounts/device-flows/{id}','PATCH /accounts/{id}','DELETE /accounts/{id}','POST /accounts/{id}/refresh',
-  'GET /balances','POST /balances/refresh','GET /audit-events','POST /maintenance/jobs','GET /jobs/{id}','GET /events',
+  'GET /openapi.json',
+  'GET /bootstrap',
+  'POST /bootstrap',
+  'POST /session',
+  'GET /session',
+  'DELETE /session',
+  'GET /config',
+  'PUT /config',
+  'GET /config/export',
+  'POST /config/validate',
+  'POST /config/import-preview',
+  'POST /config/import',
+  'GET /config/history',
+  'POST /config/rollback',
+  'GET /provider-presets',
+  'GET /capabilities',
+  'GET /system',
+  'GET /overview',
+  'GET /upstreams',
+  'GET /upstreams/{id}',
+  'POST /upstreams',
+  'PATCH /upstreams/{id}',
+  'DELETE /upstreams/{id}',
+  'POST /upstreams/{id}/credentials',
+  'PATCH /upstreams/{id}/credentials/{credentialId}',
+  'DELETE /upstreams/{id}/credentials/{credentialId}',
+  'POST /upstreams/{id}/discover-models',
+  'POST /upstreams/{id}/test',
+  'POST /upstreams/{id}/test-jobs/{jobId}/cancel',
+  'GET /upstreams/{id}/runtime',
+  'GET /upstreams/{id}/health-events',
+  'POST /upstreams/{id}/circuit-reset',
+  'GET /routes',
+  'GET /routes/{id}',
+  'POST /routes',
+  'PATCH /routes/{id}',
+  'DELETE /routes/{id}',
+  'PUT /routes/order',
+  'POST /routes/preview',
+  'GET /models',
+  'GET /keys',
+  'GET /keys/{id}',
+  'POST /keys',
+  'PATCH /keys/{id}',
+  'DELETE /keys/{id}',
+  'POST /keys/{id}/rotate',
+  'GET /keys/{id}/quota',
+  'POST /keys/{id}/quota-adjustments',
+  'GET /usage/summary',
+  'GET /usage/timeseries',
+  'GET /usage/breakdown',
+  'GET /requests',
+  'GET /requests/{id}',
+  'GET /requests/{id}/attempts',
+  'POST /exports',
+  'GET /exports/{id}/download',
+  'POST /playground/runs',
+  'GET /playground/runs/{id}',
+  'GET /playground/status',
+  'POST /playground/runs/{id}/cancel',
+  'GET /connect/templates',
+  'GET /pricing',
+  'POST /pricing',
+  'PATCH /pricing/{id}',
+  'GET /accounts',
+  'POST /accounts/client-credentials',
+  'POST /accounts/device-flows',
+  'GET /accounts/device-flows/{id}',
+  'DELETE /accounts/device-flows/{id}',
+  'PATCH /accounts/{id}',
+  'DELETE /accounts/{id}',
+  'POST /accounts/{id}/refresh',
+  'GET /balances',
+  'POST /balances/refresh',
+  'GET /audit-events',
+  'POST /maintenance/jobs',
+  'GET /jobs/{id}',
+  'GET /events',
 ] as const;
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -542,12 +607,15 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     resetCircuit: async (input) => runtime.reset(String(input.upstreamId)),
     discoverModels: async (input) => upstreamActions.discoverModels(String(input.upstreamId)),
     testUpstream: async (input) =>
-      jobs.start('upstream-test', 'admin', (signal) =>
-        upstreamActions.test(
-          String(input.upstreamId),
-          typeof input.model === 'string' ? input.model : undefined,
-          signal,
-        ),
+      jobs.start(
+        'upstream-test',
+        'admin',
+        (signal) =>
+          upstreamActions.test(
+            String(input.upstreamId),
+            typeof input.model === 'string' ? input.model : undefined,
+            signal,
+          ),
         String(input.upstreamId),
       ),
     jobDetail: async (input) => jobs.get(String(input.jobId)),
@@ -635,8 +703,7 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
       if (url.pathname === '/') return serveStatic(req, res, '/admin/', options.webDistPath);
       if (options.saasIdentityHandler && isConsoleApiPath(url.pathname)) {
         const handled = await handleSaasIdentity(options.saasIdentityHandler, req, res);
-        if (!handled && !res.headersSent)
-          fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
+        if (!handled && !res.headersSent) fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
         return;
       }
       if (options.saasIdentityHandler && isConsolePath(url.pathname))
@@ -1066,7 +1133,12 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
             .all()
             .map((row) => {
               const item = row as { version_id: string; profile_id: string; body: string; sequence: number };
-              return { ...JSON.parse(item.body), id: item.profile_id, versionId: item.version_id, versionSequence: item.sequence };
+              return {
+                ...JSON.parse(item.body),
+                id: item.profile_id,
+                versionId: item.version_id,
+                versionSequence: item.sequence,
+              };
             }),
         );
       if ((is('pricing') && method === 'POST') || (is('pricing', '*') && method === 'PATCH')) {
@@ -1086,17 +1158,26 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
         const createdAt = new Date().toISOString();
         const save = store.db.transaction(() => {
           store.db
-            .prepare('INSERT INTO pricing_versions (version_id,profile_id,body,effective_from,created_at) VALUES(?,?,?,?,?)')
+            .prepare(
+              'INSERT INTO pricing_versions (version_id,profile_id,body,effective_from,created_at) VALUES(?,?,?,?,?)',
+            )
             .run(versionId, id, JSON.stringify(version), effectiveFrom, createdAt);
           store.db.prepare('INSERT INTO pricing_version_sequence (version_id) VALUES(?)').run(versionId);
           store.db
-            .prepare('INSERT INTO pricing (id,body,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at')
+            .prepare(
+              'INSERT INTO pricing (id,body,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at',
+            )
             .run(id, JSON.stringify(version), createdAt);
         });
         save();
         store.audit(actor, 'pricing.update', { id, versionId, effectiveFrom });
-        const sequence = store.db.prepare('SELECT sequence FROM pricing_version_sequence WHERE version_id=?').get(versionId) as { sequence: number };
-        return result({ id, versionId, versionSequence: sequence.sequence, effectiveFrom }, method === 'POST' ? 201 : 200);
+        const sequence = store.db
+          .prepare('SELECT sequence FROM pricing_version_sequence WHERE version_id=?')
+          .get(versionId) as { sequence: number };
+        return result(
+          { id, versionId, versionSequence: sequence.sequence, effectiveFrom },
+          method === 'POST' ? 201 : 200,
+        );
       }
       if (is('accounts') && method === 'GET') return result(await call(adapters.accounts));
       if (is('accounts', 'client-credentials') && method === 'POST')
@@ -1191,8 +1272,7 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     }
   };
   const server = createServer((req, res) => {
-    if (closing)
-      return fail(res, 503, `admin_${randomUUID()}`, 'ADMIN_CLOSING', 'Management service is shutting down');
+    if (closing) return fail(res, 503, `admin_${randomUUID()}`, 'ADMIN_CLOSING', 'Management service is shutting down');
     // Socket closure does not settle an async handler. In particular, telemetry
     // handlers await read-worker exit and then still access the shared stores.
     const request = handleRequest(req, res).then(() => {});

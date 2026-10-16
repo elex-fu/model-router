@@ -252,9 +252,13 @@ function sameModelResolution(
   right: ModelResolutionProvenance | undefined,
 ): boolean {
   if (left === undefined || right === undefined) return left === undefined && right === undefined;
-  return left.requestedModel === right.requestedModel && left.mappedModel === right.mappedModel &&
-    left.resolvedModel === right.resolvedModel && left.mappingSource === right.mappingSource &&
-    left.mappingVersion === right.mappingVersion;
+  return (
+    left.requestedModel === right.requestedModel &&
+    left.mappedModel === right.mappedModel &&
+    left.resolvedModel === right.resolvedModel &&
+    left.mappingSource === right.mappingSource &&
+    left.mappingVersion === right.mappingVersion
+  );
 }
 
 function assertPostClaimAttempt(
@@ -263,42 +267,91 @@ function assertPostClaimAttempt(
   preflight: PreparedRequestEvidenceRecord,
 ): void {
   const stableEvidenceFields = [
-    'evidenceId', 'tenantId', 'projectId', 'requestId', 'attemptId', 'attemptOrdinal',
-    'supplyMode', 'accountOwnerKind', 'publicModel', 'protocol', 'endpoint', 'upstreamId',
-    'accountId', 'credentialId', 'credentialVersion', 'routeTargetMode', 'payloadSha256',
-    'statementSha256', 'expiresAt', 'requestedModel', 'mappedModel', 'resolvedModel',
-    'clientProtocol', 'providerProtocol', 'clientOperation', 'providerOperation',
-    'requestFingerprint', 'requestFingerprintVersion', 'payloadCompilerVersion', 'usageEstimatorVersion',
+    'evidenceId',
+    'tenantId',
+    'projectId',
+    'requestId',
+    'attemptId',
+    'attemptOrdinal',
+    'supplyMode',
+    'accountOwnerKind',
+    'publicModel',
+    'protocol',
+    'endpoint',
+    'upstreamId',
+    'accountId',
+    'credentialId',
+    'credentialVersion',
+    'routeTargetMode',
+    'payloadSha256',
+    'statementSha256',
+    'expiresAt',
+    'requestedModel',
+    'mappedModel',
+    'resolvedModel',
+    'clientProtocol',
+    'providerProtocol',
+    'clientOperation',
+    'providerOperation',
+    'requestFingerprint',
+    'requestFingerprintVersion',
+    'payloadCompilerVersion',
+    'usageEstimatorVersion',
   ] as const;
-  const provenanceFields = ['clientProtocol', 'providerProtocol', 'clientOperation', 'providerOperation',
-    'requestFingerprint', 'requestFingerprintVersion', 'payloadCompilerVersion', 'usageEstimatorVersion'] as const;
+  const provenanceFields = [
+    'clientProtocol',
+    'providerProtocol',
+    'clientOperation',
+    'providerOperation',
+    'requestFingerprint',
+    'requestFingerprintVersion',
+    'payloadCompilerVersion',
+    'usageEstimatorVersion',
+  ] as const;
   const resolution = claimed.modelResolution;
   const hasProvenance = resolution !== undefined || provenanceFields.some((field) => claimed[field] !== undefined);
   // Persisted legacy evidence omits the entire 029 tuple, not selected fields,
   // and can authorize only an identity mapping with equally absent attempt provenance.
-  const modelBindingMatches = resolution === undefined
-    ? !hasProvenance && claimed.requestedModel === undefined && claimed.mappedModel === undefined &&
-      claimed.resolvedModel === claimed.publicModel && attempt.resolvedModel === claimed.publicModel &&
-      provenanceFields.every((field) => attempt[field] === undefined) && attempt.payloadSha256 === undefined
-    : resolution.requestedModel === claimed.publicModel && resolution.requestedModel === claimed.requestedModel &&
-      resolution.mappedModel === claimed.mappedModel && resolution.resolvedModel === claimed.resolvedModel &&
-      resolution.resolvedModel === attempt.resolvedModel;
+  const modelBindingMatches =
+    resolution === undefined
+      ? !hasProvenance &&
+        claimed.requestedModel === undefined &&
+        claimed.mappedModel === undefined &&
+        claimed.resolvedModel === claimed.publicModel &&
+        attempt.resolvedModel === claimed.publicModel &&
+        provenanceFields.every((field) => attempt[field] === undefined) &&
+        attempt.payloadSha256 === undefined
+      : resolution.requestedModel === claimed.publicModel &&
+        resolution.requestedModel === claimed.requestedModel &&
+        resolution.mappedModel === claimed.mappedModel &&
+        resolution.resolvedModel === claimed.resolvedModel &&
+        resolution.resolvedModel === attempt.resolvedModel;
   const ownerKind = claimed.supplyMode === 'byok' ? 'tenant' : 'platform';
   if (
     stableEvidenceFields.some((field) => claimed[field] !== preflight[field]) ||
     !sameModelResolution(claimed.modelResolution, preflight.modelResolution) ||
-    !sameModelResolution(attempt.modelResolution, claimed.modelResolution) || !modelBindingMatches ||
-    claimed.status !== 'claimed' || claimed.claimedAttemptId !== claimed.attemptId ||
-    typeof claimed.claimedAt !== 'string' || claimed.claimedAt.trim() === '' ||
+    !sameModelResolution(attempt.modelResolution, claimed.modelResolution) ||
+    !modelBindingMatches ||
+    claimed.status !== 'claimed' ||
+    claimed.claimedAttemptId !== claimed.attemptId ||
+    typeof claimed.claimedAt !== 'string' ||
+    claimed.claimedAt.trim() === '' ||
     (claimed.accountOwnerKind !== undefined && claimed.accountOwnerKind !== ownerKind) ||
     claimed.routeTargetMode !== (claimed.supplyMode === 'byok' ? 'tenant_account' : 'platform_pool') ||
-    attempt.tenantId !== claimed.tenantId || attempt.requestId !== claimed.requestId ||
-    attempt.id !== claimed.attemptId || attempt.ordinal !== claimed.attemptOrdinal ||
-    attempt.bindingState !== 'bound' || attempt.dispatchAuthorityState !== 'bound' ||
-    attempt.accountOwnerKind !== ownerKind || attempt.upstreamId !== claimed.upstreamId ||
-    attempt.accountId !== claimed.accountId || attempt.credentialId !== claimed.credentialId ||
-    attempt.credentialVersion !== claimed.credentialVersion || attempt.protocol !== claimed.protocol ||
-    attempt.endpoint !== claimed.endpoint || attempt.routeTargetMode !== claimed.routeTargetMode ||
+    attempt.tenantId !== claimed.tenantId ||
+    attempt.requestId !== claimed.requestId ||
+    attempt.id !== claimed.attemptId ||
+    attempt.ordinal !== claimed.attemptOrdinal ||
+    attempt.bindingState !== 'bound' ||
+    attempt.dispatchAuthorityState !== 'bound' ||
+    attempt.accountOwnerKind !== ownerKind ||
+    attempt.upstreamId !== claimed.upstreamId ||
+    attempt.accountId !== claimed.accountId ||
+    attempt.credentialId !== claimed.credentialId ||
+    attempt.credentialVersion !== claimed.credentialVersion ||
+    attempt.protocol !== claimed.protocol ||
+    attempt.endpoint !== claimed.endpoint ||
+    attempt.routeTargetMode !== claimed.routeTargetMode ||
     attempt.preparedEvidenceId !== claimed.evidenceId ||
     (claimed.resolvedModel !== undefined && attempt.resolvedModel !== claimed.resolvedModel) ||
     (claimed.clientProtocol !== undefined && attempt.clientProtocol !== claimed.clientProtocol) ||
@@ -306,14 +359,20 @@ function assertPostClaimAttempt(
     (claimed.clientOperation !== undefined && attempt.clientOperation !== claimed.clientOperation) ||
     (claimed.providerOperation !== undefined && attempt.providerOperation !== claimed.providerOperation) ||
     (claimed.requestFingerprint !== undefined && attempt.requestFingerprint !== claimed.requestFingerprint) ||
-    (claimed.requestFingerprintVersion !== undefined && attempt.requestFingerprintVersion !== claimed.requestFingerprintVersion) ||
-    (claimed.payloadCompilerVersion !== undefined && attempt.payloadCompilerVersion !== claimed.payloadCompilerVersion) ||
+    (claimed.requestFingerprintVersion !== undefined &&
+      attempt.requestFingerprintVersion !== claimed.requestFingerprintVersion) ||
+    (claimed.payloadCompilerVersion !== undefined &&
+      attempt.payloadCompilerVersion !== claimed.payloadCompilerVersion) ||
     (claimed.usageEstimatorVersion !== undefined && attempt.usageEstimatorVersion !== claimed.usageEstimatorVersion) ||
     ((hasProvenance || attempt.payloadSha256 !== undefined) && attempt.payloadSha256 !== claimed.payloadSha256) ||
-    attempt.dispatchState !== 'not_sent' || attempt.resultState !== 'pending' ||
-    attempt.responseStarted !== false || attempt.responseStartedAt !== null ||
-    attempt.resultHttpStatus !== null || attempt.unknownReason !== null ||
-    !Number.isSafeInteger(attempt.stateVersion) || attempt.stateVersion < 1
+    attempt.dispatchState !== 'not_sent' ||
+    attempt.resultState !== 'pending' ||
+    attempt.responseStarted !== false ||
+    attempt.responseStartedAt !== null ||
+    attempt.resultHttpStatus !== null ||
+    attempt.unknownReason !== null ||
+    !Number.isSafeInteger(attempt.stateVersion) ||
+    attempt.stateVersion < 1
   ) {
     fail('EVIDENCE_BINDING_MISMATCH', 'claimed prepared evidence is not bound to the current fresh attempt');
   }
@@ -692,7 +751,9 @@ export class SaasPreparedEvidenceDispatchService {
 
     let dispatching: AttemptRecord;
     try {
-      dispatching = await this.metering.transitionAttempt(transitionInput(postClaimAttempt, 'dispatching', 'pending', false));
+      dispatching = await this.metering.transitionAttempt(
+        transitionInput(postClaimAttempt, 'dispatching', 'pending', false),
+      );
     } catch (error) {
       await releaseBeforeDispatch(lease);
       fail('DISPATCH_STATE_CONFLICT', 'attempt could not be fenced for dispatch', error);
@@ -970,9 +1031,7 @@ export class SaasPreparedEvidenceDispatchService {
       // 429) and clean successes produce a signal; retryable transport
       // failures are left to the durable health write above.
       if (healthCandidate && this.dispatchFailureFeedback) {
-        const feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = retryableTransportFailure(
-          transportError,
-        )
+        const feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = retryableTransportFailure(transportError)
           ? null
           : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus);
         if (feedbackOutcome !== null) {

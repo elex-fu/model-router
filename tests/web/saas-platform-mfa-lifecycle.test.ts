@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import { PlatformApiError, type PlatformMfaEnrollmentStart } from '../../web/src/api/saas-platform-client.ts';
 import {
   createMfaEnrollmentLifecycle,
-  mfaEnrollmentNotice,
   type MfaEnrollmentClient,
   type MfaEnrollmentClock,
   type MfaEnrollmentState,
+  mfaEnrollmentNotice,
 } from '../../web/src/features/saas-platform-mfa-lifecycle.ts';
 
 const TOKEN = 'synthetic-cli-enrollment-token';
@@ -17,11 +17,20 @@ const URI = `otpauth://totp/model-router:operator%40example.test?secret=${SECRET
 function deferred<T>() {
   let resolve: ((value: T) => void) | undefined;
   let reject: ((error: unknown) => void) | undefined;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
   return {
     promise,
-    resolve(value: T) { assert.ok(resolve); resolve(value); },
-    reject(error: unknown) { assert.ok(reject); reject(error); },
+    resolve(value: T) {
+      assert.ok(resolve);
+      resolve(value);
+    },
+    reject(error: unknown) {
+      assert.ok(reject);
+      reject(error);
+    },
   };
 }
 
@@ -29,21 +38,30 @@ class Clock implements MfaEnrollmentClock {
   private time = Date.parse('2030-01-01T00:00:00.000Z');
   private sequence = 0;
   private jobs = new Map<number, { at: number; callback: () => void }>();
-  now() { return this.time; }
+  now() {
+    return this.time;
+  }
   schedule(callback: () => void, delayMs: number) {
     const id = ++this.sequence;
     this.jobs.set(id, { at: this.time + delayMs, callback });
-    return () => { this.jobs.delete(id); };
+    return () => {
+      this.jobs.delete(id);
+    };
   }
   advance(ms: number, runTimers = true) {
     this.time += ms;
     if (runTimers) {
       for (const [id, job] of this.jobs) {
-        if (job.at <= this.time) { this.jobs.delete(id); job.callback(); }
+        if (job.at <= this.time) {
+          this.jobs.delete(id);
+          job.callback();
+        }
       }
     }
   }
-  get pendingTimers() { return this.jobs.size; }
+  get pendingTimers() {
+    return this.jobs.size;
+  }
 }
 
 function enrollment(clock: Clock, ttl = 1_000): PlatformMfaEnrollmentStart {
@@ -72,22 +90,25 @@ test('start and confirm are synchronously single-flight with exact client argume
   const confirming = deferred<{ confirmed: boolean }>();
   let starts = 0;
   let confirms = 0;
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    startMfaEnrollment: async (issuer, token, options) => {
-      ++starts;
-      assert.equal(issuer, 'model-router');
-      assert.equal(token, TOKEN);
-      assert.equal(options.signal.aborted, false);
-      return starting.promise;
-    },
-    confirmMfaEnrollment: async (token, code, options) => {
-      ++confirms;
-      assert.equal(token, CONFIRMATION);
-      assert.equal(code, '123456');
-      assert.equal(options.signal.aborted, false);
-      return confirming.promise;
-    },
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      startMfaEnrollment: async (issuer, token, options) => {
+        ++starts;
+        assert.equal(issuer, 'model-router');
+        assert.equal(token, TOKEN);
+        assert.equal(options.signal.aborted, false);
+        return starting.promise;
+      },
+      confirmMfaEnrollment: async (token, code, options) => {
+        ++confirms;
+        assert.equal(token, CONFIRMATION);
+        assert.equal(code, '123456');
+        assert.equal(options.signal.aborted, false);
+        return confirming.promise;
+      },
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     const firstStart = lifecycle.start('model-router', TOKEN);
@@ -114,15 +135,23 @@ test('start and confirm are synchronously single-flight with exact client argume
     assert.equal(clock.pendingTimers, 0);
     assert.equal(await lifecycle.start('model-router', TOKEN), false);
     assert.equal(await lifecycle.confirm('123456'), false);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });
 
 test('expiry clears secrets and refuses confirm even if a background timer has not run', async () => {
   const clock = new Clock();
   let confirms = 0;
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    confirmMfaEnrollment: async () => { ++confirms; return { confirmed: true }; },
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      confirmMfaEnrollment: async () => {
+        ++confirms;
+        return { confirmed: true };
+      },
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     await lifecycle.start('model-router', TOKEN);
@@ -133,16 +162,24 @@ test('expiry clears secrets and refuses confirm even if a background timer has n
     assert.equal(confirms, 0);
     assert.equal(clock.pendingTimers, 0);
     assert.match(mfaEnrollmentNotice(lifecycle.getState()) ?? '', /安全 CLI/);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });
 
 test('timer expiry during confirmation aborts local waiting and fences even a late successful response', async () => {
   const clock = new Clock();
   const response = deferred<{ confirmed: boolean }>();
   let signal: AbortSignal | undefined;
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    confirmMfaEnrollment: async (_token, _code, options) => { signal = options.signal; return response.promise; },
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      confirmMfaEnrollment: async (_token, _code, options) => {
+        signal = options.signal;
+        return response.promise;
+      },
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     await lifecycle.start('model-router', TOKEN);
@@ -156,7 +193,9 @@ test('timer expiry during confirmation aborts local waiting and fences even a la
     await operation;
     assert.equal(lifecycle.getState().kind, 'expired');
     assert.equal(clock.pendingTimers, 0);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });
 
 test('cancel fences a late start and retains the flight guard until its real promise settles', async () => {
@@ -164,11 +203,16 @@ test('cancel fences a late start and retains the flight guard until its real pro
   const response = deferred<PlatformMfaEnrollmentStart>();
   let starts = 0;
   let signal: AbortSignal | undefined;
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    startMfaEnrollment: async (_issuer, _token, options) => {
-      ++starts; signal = options.signal; return response.promise;
-    },
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      startMfaEnrollment: async (_issuer, _token, options) => {
+        ++starts;
+        signal = options.signal;
+        return response.promise;
+      },
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     const operation = lifecycle.start('model-router', TOKEN);
@@ -183,23 +227,28 @@ test('cancel fences a late start and retains the flight guard until its real pro
     assert.equal(starts, 1);
     assert.equal(clock.pendingTimers, 0);
     assert.equal(await lifecycle.start('model-router', TOKEN), false);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });
 
 test('unmount/remount isolates late confirmation and stale cleanup cannot detach the newer listener', async () => {
   const clock = new Clock();
   const response = deferred<{ confirmed: boolean }>();
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    confirmMfaEnrollment: async () => response.promise,
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      confirmMfaEnrollment: async () => response.promise,
+    }),
+    clock,
+  );
   const firstStates: MfaEnrollmentState[] = [];
-  const firstUnmount = lifecycle.mount(state => firstStates.push(state));
+  const firstUnmount = lifecycle.mount((state) => firstStates.push(state));
   await lifecycle.start('model-router', TOKEN);
   const operation = lifecycle.confirm('123456');
   firstUnmount();
   const firstCount = firstStates.length;
   const secondStates: MfaEnrollmentState[] = [];
-  const secondUnmount = lifecycle.mount(state => secondStates.push(state));
+  const secondUnmount = lifecycle.mount((state) => secondStates.push(state));
   try {
     firstUnmount();
     response.resolve({ confirmed: true });
@@ -211,7 +260,9 @@ test('unmount/remount isolates late confirmation and stale cleanup cannot detach
     lifecycle.cancel();
     assert.equal(secondStates.length, 2);
     assert.equal(secondStates.at(-1)?.kind, 'unknown');
-  } finally { secondUnmount(); }
+  } finally {
+    secondUnmount();
+  }
 });
 
 test('leaving or cancelling an unsubmitted configuration clears it without claiming server revocation', async () => {
@@ -233,9 +284,14 @@ test('leaving or cancelling an unsubmitted configuration clears it without claim
 test('known API rejection uses only exact code/status and clears failed confirmation secrets', async () => {
   const clock = new Clock();
   const raw = `${TOKEN} ${CONFIRMATION} ${URI} 123456`;
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    confirmMfaEnrollment: async () => { throw new PlatformApiError(401, 'MFA_CONFIRMATION_INVALID', raw, raw); },
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      confirmMfaEnrollment: async () => {
+        throw new PlatformApiError(401, 'MFA_CONFIRMATION_INVALID', raw, raw);
+      },
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     await lifecycle.start('model-router', TOKEN);
@@ -246,16 +302,24 @@ test('known API rejection uses only exact code/status and clears failed confirma
     assert.equal(notice.includes(raw), false);
     assert.match(notice, /先返回登录验证/);
     assert.equal(clock.pendingTimers, 0);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });
 
 test('a denied start never retains raw error data or presents an automatic reissue/retry action', async () => {
   const clock = new Clock();
   const raw = `${TOKEN} ${CONFIRMATION} ${URI}`;
   let calls = 0;
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    startMfaEnrollment: async () => { ++calls; throw new PlatformApiError(401, 'MFA_ENROLLMENT_TOKEN_INVALID', raw, raw); },
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      startMfaEnrollment: async () => {
+        ++calls;
+        throw new PlatformApiError(401, 'MFA_ENROLLMENT_TOKEN_INVALID', raw, raw);
+      },
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     await lifecycle.start('model-router', TOKEN);
@@ -265,24 +329,31 @@ test('a denied start never retains raw error data or presents an automatic reiss
     assert.equal(calls, 1);
     assert.equal((mfaEnrollmentNotice(lifecycle.getState()) ?? '').includes(raw), false);
     assert.match(mfaEnrollmentNotice(lifecycle.getState()) ?? '', /安全 CLI 核查状态/);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });
 
 test('late rejection after unmount does not publish an error to another mount', async () => {
   const clock = new Clock();
   const response = deferred<PlatformMfaEnrollmentStart>();
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, { startMfaEnrollment: async () => response.promise }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, { startMfaEnrollment: async () => response.promise }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   const operation = lifecycle.start('model-router', TOKEN);
   unmount();
   const states: MfaEnrollmentState[] = [];
-  const unmountAgain = lifecycle.mount(state => states.push(state));
+  const unmountAgain = lifecycle.mount((state) => states.push(state));
   try {
     response.reject(new PlatformApiError(401, 'MFA_ENROLLMENT_TOKEN_INVALID', URI));
     await operation;
     assert.deepEqual(states, [{ kind: 'unknown' }]);
     assertCleared(lifecycle.getState());
-  } finally { unmountAgain(); }
+  } finally {
+    unmountAgain();
+  }
 });
 
 test('network, abort, invalid response, arbitrary code and wrong code/status remain unknown with no automatic retry', async () => {
@@ -293,14 +364,24 @@ test('network, abort, invalid response, arbitrary code and wrong code/status rem
     new PlatformApiError(500, raw, raw),
     new PlatformApiError(500, 'MFA_ENROLLMENT_TOKEN_INVALID', raw),
     new DOMException(raw, 'AbortError'),
-    Object.defineProperty({}, 'message', { get() { assert.fail('Do not read raw error messages'); } }),
+    Object.defineProperty({}, 'message', {
+      get() {
+        assert.fail('Do not read raw error messages');
+      },
+    }),
   ];
   for (const error of errors) {
     const clock = new Clock();
     let calls = 0;
-    const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-      startMfaEnrollment: async () => { ++calls; throw error; },
-    }), clock);
+    const lifecycle = createMfaEnrollmentLifecycle(
+      client(clock, {
+        startMfaEnrollment: async () => {
+          ++calls;
+          throw error;
+        },
+      }),
+      clock,
+    );
     const unmount = lifecycle.mount(() => {});
     try {
       await lifecycle.start('model-router', TOKEN);
@@ -310,7 +391,9 @@ test('network, abort, invalid response, arbitrary code and wrong code/status rem
       assert.equal(calls, 1);
       assert.equal((mfaEnrollmentNotice(lifecycle.getState()) ?? '').includes(raw), false);
       assert.match(mfaEnrollmentNotice(lifecycle.getState()) ?? '', /不能证明服务端未生效/);
-    } finally { unmount(); }
+    } finally {
+      unmount();
+    }
   }
 });
 
@@ -322,32 +405,46 @@ test('invalid or already expired start responses never publish a secret-bearing 
     if (variant === 'invalid-uri') result.otpauthUri = '<script>synthetic-response-secret</script>';
     const states: MfaEnrollmentState[] = [];
     const lifecycle = createMfaEnrollmentLifecycle(client(clock, { startMfaEnrollment: async () => result }), clock);
-    const unmount = lifecycle.mount(state => states.push(state));
+    const unmount = lifecycle.mount((state) => states.push(state));
     try {
       await lifecycle.start('model-router', TOKEN);
       assert.equal(lifecycle.getState().kind, variant === 'expired' ? 'expired' : 'unknown');
-      assert.ok(states.every(state => state.kind !== 'awaiting-confirmation'));
+      assert.ok(states.every((state) => state.kind !== 'awaiting-confirmation'));
       assertCleared(lifecycle.getState());
       assert.equal(clock.pendingTimers, 0);
-    } finally { unmount(); }
+    } finally {
+      unmount();
+    }
   }
 });
 
 test('local validation and a non-confirmed response cannot create success or dispatch another operation', async () => {
   const clock = new Clock();
   let calls = 0;
-  const invalid = createMfaEnrollmentLifecycle(client(clock, {
-    startMfaEnrollment: async () => { ++calls; return enrollment(clock); },
-  }), clock);
+  const invalid = createMfaEnrollmentLifecycle(
+    client(clock, {
+      startMfaEnrollment: async () => {
+        ++calls;
+        return enrollment(clock);
+      },
+    }),
+    clock,
+  );
   const unmountInvalid = invalid.mount(() => {});
   await invalid.start('', TOKEN);
   assert.deepEqual(invalid.getState(), { kind: 'rejected', reason: 'input_invalid' });
   assert.equal(calls, 0);
   unmountInvalid();
 
-  const invalidCode = createMfaEnrollmentLifecycle(client(clock, {
-    confirmMfaEnrollment: async () => { ++calls; return { confirmed: true }; },
-  }), clock);
+  const invalidCode = createMfaEnrollmentLifecycle(
+    client(clock, {
+      confirmMfaEnrollment: async () => {
+        ++calls;
+        return { confirmed: true };
+      },
+    }),
+    clock,
+  );
   const unmountInvalidCode = invalidCode.mount(() => {});
   try {
     await invalidCode.start('model-router', TOKEN);
@@ -356,11 +453,16 @@ test('local validation and a non-confirmed response cannot create success or dis
     assertCleared(invalidCode.getState());
     assert.equal(calls, 0);
     assert.equal(clock.pendingTimers, 0);
-  } finally { unmountInvalidCode(); }
+  } finally {
+    unmountInvalidCode();
+  }
 
-  const lifecycle = createMfaEnrollmentLifecycle(client(clock, {
-    confirmMfaEnrollment: async () => ({ confirmed: false }),
-  }), clock);
+  const lifecycle = createMfaEnrollmentLifecycle(
+    client(clock, {
+      confirmMfaEnrollment: async () => ({ confirmed: false }),
+    }),
+    clock,
+  );
   const unmount = lifecycle.mount(() => {});
   try {
     await lifecycle.start('model-router', TOKEN);
@@ -368,5 +470,7 @@ test('local validation and a non-confirmed response cannot create success or dis
     assert.equal(lifecycle.getState().kind, 'unknown');
     assertCleared(lifecycle.getState());
     assert.equal(await lifecycle.confirm('123456'), false);
-  } finally { unmount(); }
+  } finally {
+    unmount();
+  }
 });

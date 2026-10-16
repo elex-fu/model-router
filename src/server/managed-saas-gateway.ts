@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
 import { CLAUDE_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
@@ -109,7 +110,6 @@ import {
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
-import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';

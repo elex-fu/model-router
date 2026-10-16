@@ -260,8 +260,7 @@ test('rolling 5h/7d charge caps deny on the trailing window and stay optional', 
     tokenCaps: { daily: null, lifetime: null },
     customerChargeCaps: { currency: 'USD', daily: null, lifetime: null },
   };
-  assert.deepEqual(
-    evaluateProxyKeyBudgetAdmission(legacyPolicy, usage('999999999999', '999999999999')),
-    { allowed: true },
-  );
+  assert.deepEqual(evaluateProxyKeyBudgetAdmission(legacyPolicy, usage('999999999999', '999999999999')), {
+    allowed: true,
+  });
 });

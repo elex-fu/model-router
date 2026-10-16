@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  canonicalizeIpCidr,
-  canonicalizeIpPolicy,
-  isIpAllowed,
-} from '../../../src/saas/keys/ip-policy.js';
+import { canonicalizeIpCidr, canonicalizeIpPolicy, isIpAllowed } from '../../../src/saas/keys/ip-policy.js';
 
 test('canonicalizes IPv4 hosts and masks CIDR host bits', () => {
   assert.equal(canonicalizeIpCidr('192.0.2.9'), '192.0.2.9/32');
@@ -43,24 +39,18 @@ test('normalizes IPv4-mapped IPv6 hosts and CIDRs to IPv4', () => {
 
 test('validates explicit policy modes and non-empty allowlists', () => {
   assert.deepEqual(canonicalizeIpPolicy({ mode: 'disabled', rules: [] }), { mode: 'disabled', rules: [] });
-  assert.deepEqual(
-    canonicalizeIpPolicy({ mode: 'disabled', rules: ['192.0.2.1'] }),
-    { mode: 'disabled', rules: ['192.0.2.1/32'] },
-  );
+  assert.deepEqual(canonicalizeIpPolicy({ mode: 'disabled', rules: ['192.0.2.1'] }), {
+    mode: 'disabled',
+    rules: ['192.0.2.1/32'],
+  });
   assert.throws(() => canonicalizeIpPolicy({ mode: 'allowlist', rules: [] }), /at least one rule/);
   assert.throws(() => canonicalizeIpPolicy({ mode: 'enforce', rules: ['192.0.2.1'] }), /mode/);
   assert.throws(() => canonicalizeIpPolicy({ mode: 'disabled' }), /array/);
 });
 
 test('caps input rules at 256, including duplicates', () => {
-  assert.equal(
-    canonicalizeIpPolicy({ mode: 'allowlist', rules: Array(256).fill('192.0.2.1') }).rules.length,
-    1,
-  );
-  assert.throws(
-    () => canonicalizeIpPolicy({ mode: 'allowlist', rules: Array(257).fill('192.0.2.1') }),
-    /at most 256/,
-  );
+  assert.equal(canonicalizeIpPolicy({ mode: 'allowlist', rules: Array(256).fill('192.0.2.1') }).rules.length, 1);
+  assert.throws(() => canonicalizeIpPolicy({ mode: 'allowlist', rules: Array(257).fill('192.0.2.1') }), /at most 256/);
 });
 
 test('rejects non-literals, ambiguous syntax, zones, ports, and invalid prefixes', () => {

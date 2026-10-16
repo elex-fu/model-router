@@ -302,8 +302,12 @@ test('wallet page limits tenant selection to owner/admin and renders empty and l
 test('wallet client preserves mixed refund pagination, same-origin reads, and exact positive debit amounts', async () => {
   const amount = '9223372036854775807';
   const refund = {
-    id: 'refund-entry', transactionId: 'refund-transaction', currency: 'USD',
-    direction: 'debit', amountMinorUnits: amount, type: 'wallet_refund',
+    id: 'refund-entry',
+    transactionId: 'refund-transaction',
+    currency: 'USD',
+    direction: 'debit',
+    amountMinorUnits: amount,
+    type: 'wallet_refund',
     createdAt: '2026-09-28T12:30:00.000Z',
   };
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -315,39 +319,58 @@ test('wallet client preserves mixed refund pagination, same-origin reads, and ex
       ledger: url.includes('cursor=refund-page-2')
         ? { items: [walletData.ledger.items[0]], nextCursor: null, hasMore: false }
         : {
-          items: [
-            { ...walletData.ledger.items[0], id: 'funding-entry', type: 'top_up', direction: 'credit' },
-            refund,
-          ],
-          nextCursor: 'refund-page-2', hasMore: true,
-        },
+            items: [
+              { ...walletData.ledger.items[0], id: 'funding-entry', type: 'top_up', direction: 'credit' },
+              refund,
+            ],
+            nextCursor: 'refund-page-2',
+            hasMore: true,
+          },
     });
   };
   const first = await saasWalletClient.getWallet(tenant, { currency: 'USD', limit: 2 });
-  assert.deepEqual(first.ledger.items.map(({ type, direction }) => ({ type, direction })), [
-    { type: 'top_up', direction: 'credit' }, { type: 'wallet_refund', direction: 'debit' },
-  ]);
+  assert.deepEqual(
+    first.ledger.items.map(({ type, direction }) => ({ type, direction })),
+    [
+      { type: 'top_up', direction: 'credit' },
+      { type: 'wallet_refund', direction: 'debit' },
+    ],
+  );
   assert.equal(first.ledger.items[1]?.amountMinorUnits, amount);
   assert.equal(formatMinorUnits(first.ledger.items[1]?.amountMinorUnits), '9,223,372,036,854,775,807');
   assert.equal(first.ledger.nextCursor, 'refund-page-2');
   const second = await saasWalletClient.getWallet(tenant, {
-    currency: 'USD', limit: 2, cursor: first.ledger.nextCursor ?? undefined,
+    currency: 'USD',
+    limit: 2,
+    cursor: first.ledger.nextCursor ?? undefined,
   });
   assert.equal(second.ledger.items[0]?.type, 'usage_charge');
   assert.equal(second.ledger.hasMore, false);
   assert.equal(second.ledger.nextCursor, null);
   assert.deepEqual(second.wallet, first.wallet);
-  assert.equal(requests[1]?.url, '/console/api/v1/tenants/tenant%2Fone/wallet?currency=USD&limit=2&cursor=refund-page-2');
-  assert.ok(requests.every(({ init }) =>
-    init?.method === 'GET' && init.credentials === 'same-origin' && init.cache === 'no-store' &&
-    init.body === undefined,
-  ));
+  assert.equal(
+    requests[1]?.url,
+    '/console/api/v1/tenants/tenant%2Fone/wallet?currency=USD&limit=2&cursor=refund-page-2',
+  );
+  assert.ok(
+    requests.every(
+      ({ init }) =>
+        init?.method === 'GET' &&
+        init.credentials === 'same-origin' &&
+        init.cache === 'no-store' &&
+        init.body === undefined,
+    ),
+  );
 });
 
 test('wallet client rejects refund credit, invalid direction, unknown type, foreign currency, and invalid amounts', async () => {
   const refund = {
-    id: 'refund-entry', transactionId: 'refund-transaction', currency: 'USD',
-    direction: 'debit', amountMinorUnits: '25', type: 'wallet_refund',
+    id: 'refund-entry',
+    transactionId: 'refund-transaction',
+    currency: 'USD',
+    direction: 'debit',
+    amountMinorUnits: '25',
+    type: 'wallet_refund',
     createdAt: '2026-09-28T12:30:00.000Z',
   };
   for (const patch of [
@@ -362,9 +385,11 @@ test('wallet client rejects refund credit, invalid direction, unknown type, fore
     { amountMinorUnits: null },
     { amountMinorUnits: 9007199254740992 },
   ]) {
-    globalThis.fetch = async () => jsonResponse({
-      ...walletData, ledger: { items: [{ ...refund, ...patch }], nextCursor: null, hasMore: false },
-    });
+    globalThis.fetch = async () =>
+      jsonResponse({
+        ...walletData,
+        ledger: { items: [{ ...refund, ...patch }], nextCursor: null, hasMore: false },
+      });
     await assert.rejects(
       saasWalletClient.getWallet(tenant, { currency: 'USD' }),
       (error: unknown) => error instanceof SaasWalletApiError && error.code === 'INVALID_RESPONSE',
@@ -383,21 +408,34 @@ test('wallet page displays a wallet refund as a separate exact debit without sup
   queryClient.setQueryData(['saas-wallet', 'wallet', authorizedTenant.id, 'USD', ''], {
     ...walletData,
     ledger: {
-      items: [{
-        id: 'refund-entry', transactionId: 'refund-transaction', currency: 'USD',
-        direction: 'debit', amountMinorUnits: '9223372036854775807', type: 'wallet_refund',
-        createdAt: '2026-09-28T12:30:00.000Z',
-      }],
-      nextCursor: null, hasMore: false,
+      items: [
+        {
+          id: 'refund-entry',
+          transactionId: 'refund-transaction',
+          currency: 'USD',
+          direction: 'debit',
+          amountMinorUnits: '9223372036854775807',
+          type: 'wallet_refund',
+          createdAt: '2026-09-28T12:30:00.000Z',
+        },
+      ],
+      nextCursor: null,
+      hasMore: false,
     },
   });
   queryClient.setQueryData(['saas-wallet', 'topup-policy', authorizedTenant.id], {
-    available: false, currency: null, minAmountMinorUnits: null, maxAmountMinorUnits: null,
+    available: false,
+    currency: null,
+    minAmountMinorUnits: null,
+    maxAmountMinorUnits: null,
   });
   try {
     const html = renderToStaticMarkup(
-      React.createElement(QueryClientProvider, { client: queryClient },
-        React.createElement(MemoryRouter, null, React.createElement(SaasWalletPage, { onLogout: async () => {} }))),
+      React.createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        React.createElement(MemoryRouter, null, React.createElement(SaasWalletPage, { onLogout: async () => {} })),
+      ),
     );
     assert.match(html, /钱包充值退款/);
     assert.match(html, /−9,223,372,036,854,775,807/);

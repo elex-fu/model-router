@@ -43,9 +43,12 @@ test('API key client uses tenant/project routes and CSRF header for writes', asy
   globalThis.fetch = async (input, init) => {
     calls.push({ url: String(input), init: init ?? {} });
     const key = keyPrincipalFixture('member', 'tenant/one', 'project one');
-    const data = calls.length === 1 ? [] : calls.length === 4
-      ? { ...key, status: 'revoked', revokedAt: '2026-10-04T00:00:00.000Z' }
-      : { ...key, secret: 'mr_live_ABCDEFGHIJKLMNOPQRSTUVWX' };
+    const data =
+      calls.length === 1
+        ? []
+        : calls.length === 4
+          ? { ...key, status: 'revoked', revokedAt: '2026-10-04T00:00:00.000Z' }
+          : { ...key, secret: 'mr_live_ABCDEFGHIJKLMNOPQRSTUVWX' };
     return new Response(JSON.stringify({ data }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
@@ -154,7 +157,11 @@ test('requires an explicit supply mode before creating an API key', () => {
   assert.match(html, /<option value="" selected="">请选择供给模式<\/option>/);
 });
 
-function renderKeyManagementPage(role: SafeTenant['role'], projectRole: SafeTenant['role'] = role, keys: ApiKeyMetadata[] = []) {
+function renderKeyManagementPage(
+  role: SafeTenant['role'],
+  projectRole: SafeTenant['role'] = role,
+  keys: ApiKeyMetadata[] = [],
+) {
   const queryClient = new reactQuery.QueryClient();
   queryClient.setQueryData(
     ['saas-console', 'tenants'],
@@ -200,8 +207,6 @@ function renderKeyManagementPage(role: SafeTenant['role'], projectRole: SafeTena
   queryClient.clear();
   return html;
 }
-
-
 
 test('does not render misleading API key list states for viewer or billing roles', () => {
   for (const role of ['viewer', 'billing'] as const) {
@@ -296,13 +301,25 @@ function renderConsolePath(path: string) {
 }
 
 function keyPrincipalFixture(
-  kind: ApiKeyPrincipalKind = 'member', tenantId = 'tenant-one', projectId = 'project-one',
+  kind: ApiKeyPrincipalKind = 'member',
+  tenantId = 'tenant-one',
+  projectId = 'project-one',
 ): ApiKeyMetadata {
   const base = {
-    id: 'key-one', tenantId, projectId, supplyProfileId: 'profile-one',
-    supplyMode: 'platform' as const, name: 'Owned unit key', prefix: 'mr_live_ABCDEFGHIJKL',
-    modelScopes: ['model-scope-a'], status: 'active' as const,
-    createdAt: '2026-10-04T00:00:00.000Z', expiresAt: null, revokedAt: null, lastUsedAt: null, authzVersion: 1,
+    id: 'key-one',
+    tenantId,
+    projectId,
+    supplyProfileId: 'profile-one',
+    supplyMode: 'platform' as const,
+    name: 'Owned unit key',
+    prefix: 'mr_live_ABCDEFGHIJKL',
+    modelScopes: ['model-scope-a'],
+    status: 'active' as const,
+    createdAt: '2026-10-04T00:00:00.000Z',
+    expiresAt: null,
+    revokedAt: null,
+    lastUsedAt: null,
+    authzVersion: 1,
   };
   return kind === 'project_service'
     ? { ...base, executionPrincipalType: 'project_service', executionPrincipalId: projectId, principalUserId: null }
@@ -315,7 +332,8 @@ function keyResponse(data: unknown): Response {
 
 test('API key client accepts legal project-service null binding and strips secrets from list metadata', async () => {
   const key = keyPrincipalFixture('project_service');
-  globalThis.fetch = async () => keyResponse([{ ...key, secret: 'unit-secret-must-not-cache', keyHash: 'unit-hash-must-not-cache' }]);
+  globalThis.fetch = async () =>
+    keyResponse([{ ...key, secret: 'unit-secret-must-not-cache', keyHash: 'unit-hash-must-not-cache' }]);
   const listed = await saasClientModule.saasClient.getApiKeys('tenant-one', 'project-one');
   assert.deepEqual(listed, [key]);
   assert.equal(listed[0].executionPrincipalType, 'project_service');
@@ -328,7 +346,8 @@ test('API key client accepts legal project-service null binding and strips secre
 
 test('API key client preserves member principal independently of creator or current operator', async () => {
   const key = keyPrincipalFixture('member');
-  globalThis.fetch = async () => keyResponse([{ ...key, createdByUserId: 'different-operator', rotatedByUserId: 'another-operator' }]);
+  globalThis.fetch = async () =>
+    keyResponse([{ ...key, createdByUserId: 'different-operator', rotatedByUserId: 'another-operator' }]);
   const listed = await saasClientModule.saasClient.getApiKeys('tenant-one', 'project-one');
   assert.deepEqual(listed, [key]);
   assert.equal(listed[0].principalUserId, 'member-one');
@@ -350,7 +369,7 @@ test('API key client rejects missing unknown and mixed execution-principal bindi
     missing,
   ]) {
     globalThis.fetch = async () => keyResponse([{ ...invalid, secret: poison }]);
-    await assert.rejects(saasClientModule.saasClient.getApiKeys('tenant-one', 'project-one'), error => {
+    await assert.rejects(saasClientModule.saasClient.getApiKeys('tenant-one', 'project-one'), (error) => {
       assert.ok(error instanceof saasClientModule.SaasApiError);
       assert.equal(error.code, 'INVALID_RESPONSE');
       assert.equal(error.details, undefined);
@@ -367,7 +386,7 @@ test('API key client rejects foreign tenant or project response metadata instead
     keyPrincipalFixture('project_service', 'tenant-one', 'foreign-project'),
   ]) {
     globalThis.fetch = async () => keyResponse([key]);
-    await assert.rejects(saasClientModule.saasClient.getApiKeys('tenant-one', 'project-one'), error => {
+    await assert.rejects(saasClientModule.saasClient.getApiKeys('tenant-one', 'project-one'), (error) => {
       assert.ok(error instanceof saasClientModule.SaasApiError);
       assert.equal(error.code, 'INVALID_RESPONSE');
       return true;
@@ -380,11 +399,17 @@ test('API key create preserves omitted member default and sends only the explici
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { cookie: 'mr_saas_csrf=csrf-token' } });
   globalThis.fetch = async (_input, init) => {
     calls.push(init ?? {});
-    return keyResponse({ ...keyPrincipalFixture(calls.length === 1 ? 'member' : 'project_service'), secret: 'unit-one-time-secret' });
+    return keyResponse({
+      ...keyPrincipalFixture(calls.length === 1 ? 'member' : 'project_service'),
+      secret: 'unit-one-time-secret',
+    });
   };
   const input = { name: 'unit key', modelScopes: ['model-scope-a'], supplyMode: 'platform' as const };
   const member = await saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', input);
-  const service = await saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', { ...input, principalKind: 'project_service' });
+  const service = await saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', {
+    ...input,
+    principalKind: 'project_service',
+  });
   assert.equal(member.executionPrincipalType, 'member');
   assert.equal(service.executionPrincipalType, 'project_service');
   assert.equal(service.principalUserId, null);
@@ -394,29 +419,44 @@ test('API key create preserves omitted member default and sends only the explici
     assert.equal(new Headers(call.headers).get('x-csrf-token'), 'csrf-token');
     assert.equal(call.credentials, 'same-origin');
     const body = JSON.parse(String(call.body));
-    for (const field of ['principalUserId','executionPrincipalId','tenantId','projectId','budget','ipPolicy']) assert.equal(field in body, false);
+    for (const field of ['principalUserId', 'executionPrincipalId', 'tenantId', 'projectId', 'budget', 'ipPolicy'])
+      assert.equal(field in body, false);
   }
 });
 
 test('API key create rejects an invalid principal selector locally and a contradictory successful response', async () => {
   let calls = 0;
-  const input = { name: 'unit key', modelScopes: ['model-scope-a'], supplyMode: 'platform' as const, principalKind: 'member' as const };
+  const input = {
+    name: 'unit key',
+    modelScopes: ['model-scope-a'],
+    supplyMode: 'platform' as const,
+    principalKind: 'member' as const,
+  };
   Reflect.set(input, 'principalKind', 'user');
-  globalThis.fetch = async () => { calls += 1; return keyResponse({ ...keyPrincipalFixture('project_service'), secret: 'unit-secret' }); };
-  await assert.rejects(saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', input), error => {
+  globalThis.fetch = async () => {
+    calls += 1;
+    return keyResponse({ ...keyPrincipalFixture('project_service'), secret: 'unit-secret' });
+  };
+  await assert.rejects(saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', input), (error) => {
     assert.ok(error instanceof saasClientModule.SaasApiError);
     assert.equal(error.code, 'KEY_INVALID_INPUT');
     return true;
   });
   assert.equal(calls, 0);
-  await assert.rejects(saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', {
-    name: 'unit key', modelScopes: ['model-scope-a'], supplyMode: 'platform', principalKind: 'member',
-  }), error => {
-    assert.ok(error instanceof saasClientModule.SaasApiError);
-    assert.equal(error.code, 'INVALID_RESPONSE');
-    assert.equal(error.data, undefined);
-    return true;
-  });
+  await assert.rejects(
+    saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', {
+      name: 'unit key',
+      modelScopes: ['model-scope-a'],
+      supplyMode: 'platform',
+      principalKind: 'member',
+    }),
+    (error) => {
+      assert.ok(error instanceof saasClientModule.SaasApiError);
+      assert.equal(error.code, 'INVALID_RESPONSE');
+      assert.equal(error.data, undefined);
+      return true;
+    },
+  );
   assert.equal(calls, 1);
 });
 
@@ -440,22 +480,30 @@ test('API key rotation exposes one-time secret but sends no replacement principa
 });
 
 test('project-service selector defaults to member and requires owner or admin in both current scopes', () => {
-  for (const tenantRole of ['owner','admin','developer','billing','viewer'] as const) {
-    for (const projectRole of ['owner','admin','developer','billing','viewer'] as const) {
-      assert.equal(saasConsole.canIssueProjectServiceKey(tenantRole, projectRole),
-        ['owner','admin'].includes(tenantRole) && ['owner','admin'].includes(projectRole));
+  for (const tenantRole of ['owner', 'admin', 'developer', 'billing', 'viewer'] as const) {
+    for (const projectRole of ['owner', 'admin', 'developer', 'billing', 'viewer'] as const) {
+      assert.equal(
+        saasConsole.canIssueProjectServiceKey(tenantRole, projectRole),
+        ['owner', 'admin'].includes(tenantRole) && ['owner', 'admin'].includes(projectRole),
+      );
     }
   }
   assert.equal(saasConsole.canIssueProjectServiceKey(undefined, 'owner'), false);
   assert.equal(saasConsole.isApiKeyPrincipalKind('member'), true);
   assert.equal(saasConsole.isApiKeyPrincipalKind('project_service'), true);
   assert.equal(saasConsole.isApiKeyPrincipalKind('user'), false);
-  for (const [tenantRole, projectRole] of [['owner','owner'], ['admin','owner'], ['developer','owner'], ['owner','developer']] as const) {
+  for (const [tenantRole, projectRole] of [
+    ['owner', 'owner'],
+    ['admin', 'owner'],
+    ['developer', 'owner'],
+    ['owner', 'developer'],
+  ] as const) {
     const html = renderKeyManagementPage(tenantRole, projectRole);
     assert.match(html, /aria-label="选择执行主体"/);
     assert.match(html, /<option value="member" selected="">成员用户 — 当前登录成员<\/option>/);
     assert.match(html, /轮换继承原执行主体/);
-    if (saasConsole.canIssueProjectServiceKey(tenantRole, projectRole)) assert.match(html, /<option value="project_service">/);
+    if (saasConsole.canIssueProjectServiceKey(tenantRole, projectRole))
+      assert.match(html, /<option value="project_service">/);
     else assert.match(html, /<option value="project_service" disabled="">/);
   }
 });
@@ -474,11 +522,17 @@ test('API key list renders actual member and project-service principals without 
 });
 
 function originalPrincipalSelectorDom(value: ApiKeyPrincipalKind, canIssueServiceKey: boolean) {
-  return React.createElement('label', { className: 'field' },
+  return React.createElement(
+    'label',
+    { className: 'field' },
     React.createElement('span', null, '执行主体'),
-    React.createElement('select', {
-      'aria-label': '选择执行主体', value, onChange: () => {},
-    },
+    React.createElement(
+      'select',
+      {
+        'aria-label': '选择执行主体',
+        value,
+        onChange: () => {},
+      },
       React.createElement('option', { value: 'member' }, '成员用户 — 当前登录成员'),
       React.createElement('option', { value: 'project_service', disabled: !canIssueServiceKey }, '项目服务 — 当前项目'),
     ),
@@ -489,20 +543,40 @@ function originalPrincipalSelectorDom(value: ApiKeyPrincipalKind, canIssueServic
 // Literal DOM reference from the original metadata block, not an auth/API oracle.
 function originalKeyMetadataDom(key: ApiKeyMetadata) {
   const h = React.createElement;
-  const date = (value: string | null) => value ? new Date(value).toLocaleString('zh-CN') : '—';
+  const date = (value: string | null) => (value ? new Date(value).toLocaleString('zh-CN') : '—');
   const badge = (text: string, tone = 'neutral') => h('span', { className: `badge ${tone}` }, text);
-  const row = (label: string, content: React.ReactNode) =>
-    h('div', null, h('span', null, label), content);
-  return h(React.Fragment, null,
-    h('div', { className: 'saas-tenant-heading' },
+  const row = (label: string, content: React.ReactNode) => h('div', null, h('span', null, label), content);
+  return h(
+    React.Fragment,
+    null,
+    h(
+      'div',
+      { className: 'saas-tenant-heading' },
       h('div', null, h('h3', null, key.name), h('small', null, h('code', null, key.prefix))),
       badge(key.status === 'active' ? '有效' : '已撤销', key.status === 'active' ? 'good' : 'bad'),
     ),
-    h('div', { className: 'summary-list' },
+    h(
+      'div',
+      { className: 'summary-list' },
       row('供给模式', badge(key.supplyMode === 'byok' ? 'BYOK' : '平台供给')),
-      row('执行主体', h('strong', null,
-        (key.executionPrincipalType === 'project_service' ? '项目服务' : '成员用户') + ' · ' + key.executionPrincipalId)),
-      row('模型范围', h('span', null, key.modelScopes.map(scope => h('code', { key: scope }, scope, ' ')))),
+      row(
+        '执行主体',
+        h(
+          'strong',
+          null,
+          (key.executionPrincipalType === 'project_service' ? '项目服务' : '成员用户') +
+            ' · ' +
+            key.executionPrincipalId,
+        ),
+      ),
+      row(
+        '模型范围',
+        h(
+          'span',
+          null,
+          key.modelScopes.map((scope) => h('code', { key: scope }, scope, ' ')),
+        ),
+      ),
       row('创建时间', h('strong', null, date(key.createdAt))),
       row('过期时间', h('strong', null, date(key.expiresAt))),
       row('最近使用', h('strong', null, key.lastUsedAt ? date(key.lastUsedAt) : '尚未使用')),
@@ -516,9 +590,13 @@ test('API key principal selector leaf preserves original labelled DOM and contro
   assert.equal(leaf.isApiKeyPrincipalKind, saasConsole.isApiKeyPrincipalKind);
   for (const value of ['member', 'project_service'] as const) {
     for (const canIssueServiceKey of [true, false]) {
-      const actual = renderToStaticMarkup(React.createElement(leaf.ApiKeyPrincipalSelector, {
-        value, canIssueServiceKey, onChange: () => {},
-      }));
+      const actual = renderToStaticMarkup(
+        React.createElement(leaf.ApiKeyPrincipalSelector, {
+          value,
+          canIssueServiceKey,
+          onChange: () => {},
+        }),
+      );
       assert.equal(actual, renderToStaticMarkup(originalPrincipalSelectorDom(value, canIssueServiceKey)));
     }
   }
@@ -530,7 +608,9 @@ test('API key metadata leaf preserves original member and service DOM with optio
   for (const kind of ['member', 'project_service'] as const) {
     const active = keyPrincipalFixture(kind);
     const revoked: ApiKeyMetadata = {
-      ...keyPrincipalFixture(kind), status: 'revoked', supplyMode: 'byok',
+      ...keyPrincipalFixture(kind),
+      status: 'revoked',
+      supplyMode: 'byok',
       modelScopes: ['model-scope-a', 'model-scope-b'],
       expiresAt: '2026-10-05T00:00:00.000Z',
       lastUsedAt: '2026-10-04T01:00:00.000Z',

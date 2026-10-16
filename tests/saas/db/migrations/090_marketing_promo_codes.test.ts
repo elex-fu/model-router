@@ -36,17 +36,29 @@ test('090 keeps promo codes public-by-design with the kind exclusivity CHECKs', 
 
 test('090 freezes the original order amount as insert-only for replay comparison', () => {
   assert.match(commands, /ALTER TABLE saas_payment_orders\s+ADD COLUMN original_amount_minor_units text/);
-  assert.match(commands, /CHECK \(original_amount_minor_units IS NULL OR original_amount_minor_units ~ '\^\[0-9\]\{1,20\}\$'\)/);
+  assert.match(
+    commands,
+    /CHECK \(original_amount_minor_units IS NULL OR original_amount_minor_units ~ '\^\[0-9\]\{1,20\}\$'\)/,
+  );
   assert.match(commands, /CREATE FUNCTION saas_marketing_promo_orders_guard\(\) RETURNS trigger/);
   assert.match(commands, /NEW\.original_amount_minor_units IS DISTINCT FROM OLD\.original_amount_minor_units/);
-  assert.match(commands, /CREATE TRIGGER saas_payment_orders_original_amount_guard\s+BEFORE UPDATE ON saas_payment_orders/);
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_payment_orders_original_amount_guard\s+BEFORE UPDATE ON saas_payment_orders/,
+  );
 });
 
 test('090 makes usages append-only with the one-order-one-promo and per-tenant-once backstops', () => {
   assert.match(commands, /CREATE TABLE saas_marketing_promo_usages \(/);
   assert.match(commands, /CONSTRAINT saas_marketing_promo_usages_order_unique UNIQUE \(order_id\)/);
-  assert.match(commands, /CREATE UNIQUE INDEX saas_marketing_promo_usages_tenant_once\s+ON saas_marketing_promo_usages \(code_id, tenant_id\)\s+WHERE per_tenant_once/);
-  assert.match(commands, /CREATE TRIGGER saas_marketing_promo_usages_no_update\s+BEFORE UPDATE ON saas_marketing_promo_usages/);
+  assert.match(
+    commands,
+    /CREATE UNIQUE INDEX saas_marketing_promo_usages_tenant_once\s+ON saas_marketing_promo_usages \(code_id, tenant_id\)\s+WHERE per_tenant_once/,
+  );
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_marketing_promo_usages_no_update\s+BEFORE UPDATE ON saas_marketing_promo_usages/,
+  );
   assert.doesNotMatch(commands, /\(SELECT per_tenant_once/, 'index predicates must not contain subqueries');
 });
 

@@ -1,6 +1,6 @@
+import { MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE } from '../deployment.js';
 import { compileApprovedCredentialValidationTargets } from '../supply/credential-validation-targets.js';
 import type { ApprovedCredentialValidationTarget } from '../supply/types.js';
-import { MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE } from '../deployment.js';
 import {
   type ProviderAwaitable,
   type ProviderEnvironment,
@@ -58,13 +58,30 @@ export class CredentialValidationTargetsModuleError extends Error {
 }
 
 const MAX_MODULE_SPECIFIER_BYTES = 4096;
+
+// Control characters (C0 range plus DEL) rejected in module specifiers and
+// working-directory options. Built via String.fromCharCode so the source
+// itself carries no literal control bytes.
+const CONTROL_CHARACTERS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}]`,
+);
 // The compiler owns descriptor semantics. These are metadata-copy resource bounds.
 const MAX_TARGETS = 1024;
 const MAX_METADATA_FIELD_BYTES = 4096;
 const MAX_METADATA_TOTAL_BYTES = 4 * 1024 * 1024;
 const TARGET_KEYS = Object.freeze([
-  'providerId', 'productId', 'credentialType', 'model', 'endpoint', 'capabilityVersion',
-  'protocol', 'authProfile', 'baseUrl', 'approvalReference', 'expiresAt', 'evidenceSha256',
+  'providerId',
+  'productId',
+  'credentialType',
+  'model',
+  'endpoint',
+  'capabilityVersion',
+  'protocol',
+  'authProfile',
+  'baseUrl',
+  'approvalReference',
+  'expiresAt',
+  'evidenceSha256',
 ] as const satisfies readonly (keyof ApprovedCredentialValidationTarget)[]);
 const CANONICAL_TARGET_KEYS = Object.freeze([...TARGET_KEYS, 'schemaVersion', 'wirePath', 'wireProtocol'] as const);
 const OPTION_KEYS = ['env', 'importer', 'importModule', 'cwd', 'now'] as const;
@@ -93,11 +110,13 @@ function ownData(value: object, key: string): PropertyDescriptor | undefined {
   return descriptor;
 }
 
-function normalizeOptions(options: CredentialValidationTargetsModuleLoaderOptions): CredentialValidationTargetsModuleLoaderOptions {
+function normalizeOptions(
+  options: CredentialValidationTargetsModuleLoaderOptions,
+): CredentialValidationTargetsModuleLoaderOptions {
   try {
     if (!isPlainRecord(options)) throw new Error('Invalid options');
     const keys = Reflect.ownKeys(options);
-    if (keys.some((key) => typeof key !== 'string' || !OPTION_KEYS.includes(key as typeof OPTION_KEYS[number]))) {
+    if (keys.some((key) => typeof key !== 'string' || !OPTION_KEYS.includes(key as (typeof OPTION_KEYS)[number]))) {
       throw new Error('Invalid option keys');
     }
     const env = ownData(options, 'env')?.value as unknown;
@@ -105,12 +124,18 @@ function normalizeOptions(options: CredentialValidationTargetsModuleLoaderOption
     const importModule = ownData(options, 'importModule')?.value as unknown;
     const cwd = ownData(options, 'cwd')?.value as unknown;
     const now = ownData(options, 'now')?.value as unknown;
-    if ((env !== undefined && !isRecord(env)) ||
+    if (
+      (env !== undefined && !isRecord(env)) ||
       (importer !== undefined && typeof importer !== 'function') ||
       (importModule !== undefined && typeof importModule !== 'function') ||
       (now !== undefined && typeof now !== 'function') ||
-      (cwd !== undefined && (typeof cwd !== 'string' || cwd.length === 0 || cwd.trim() !== cwd ||
-        /[\x00-\x1f\x7f]/.test(cwd) || Buffer.byteLength(cwd, 'utf8') > MAX_MODULE_SPECIFIER_BYTES))) {
+      (cwd !== undefined &&
+        (typeof cwd !== 'string' ||
+          cwd.length === 0 ||
+          cwd.trim() !== cwd ||
+          CONTROL_CHARACTERS.test(cwd) ||
+          Buffer.byteLength(cwd, 'utf8') > MAX_MODULE_SPECIFIER_BYTES))
+    ) {
       throw new Error('Invalid options');
     }
     // Snapshot all loading controls before the importer/factory can yield.
@@ -137,8 +162,13 @@ function readModuleSpecifier(environment: ProviderEnvironment): string | undefin
     throw moduleError('INVALID_CONFIGURATION');
   }
   if (value === undefined) return undefined;
-  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value ||
-    /[\x00-\x1f\x7f]/.test(value) || Buffer.byteLength(value, 'utf8') > MAX_MODULE_SPECIFIER_BYTES) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    CONTROL_CHARACTERS.test(value) ||
+    Buffer.byteLength(value, 'utf8') > MAX_MODULE_SPECIFIER_BYTES
+  ) {
     throw moduleError('INVALID_MODULE_SPECIFIER');
   }
   return value;
@@ -149,7 +179,8 @@ function resolveModuleSpecifier(raw: string, cwd: string | undefined): string {
     const resolved = resolveProviderModuleSpecifier(raw, cwd ?? process.cwd());
     if (resolved.startsWith('file:')) {
       const url = new URL(resolved);
-      if (url.hostname || url.username || url.password || url.search || url.hash) throw new Error('Invalid file module');
+      if (url.hostname || url.username || url.password || url.search || url.hash)
+        throw new Error('Invalid file module');
     }
     return resolved;
   } catch {
@@ -172,8 +203,14 @@ function copyMetadata(raw: unknown): LoadedCredentialValidationTargets {
   try {
     if (!Array.isArray(raw)) throw new Error('Invalid targets');
     const length = ownData(raw, 'length')?.value as unknown;
-    if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0 || length > MAX_TARGETS ||
-      Reflect.ownKeys(raw).length !== length + 1) throw new Error('Invalid target array');
+    if (
+      typeof length !== 'number' ||
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_TARGETS ||
+      Reflect.ownKeys(raw).length !== length + 1
+    )
+      throw new Error('Invalid target array');
     const snapshot: Readonly<ApprovedCredentialValidationTarget>[] = [];
     let totalBytes = 0;
     for (let index = 0; index < length; index += 1) {
@@ -185,8 +222,10 @@ function copyMetadata(raw: unknown): LoadedCredentialValidationTargets {
       const targetKeys: readonly (keyof ApprovedCredentialValidationTarget)[] =
         schema === undefined ? TARGET_KEYS : CANONICAL_TARGET_KEYS;
       const keys = Reflect.ownKeys(input);
-      if (keys.length !== targetKeys.length ||
-        keys.some((key) => typeof key !== 'string' || !targetKeys.some((known) => known === key))) {
+      if (
+        keys.length !== targetKeys.length ||
+        keys.some((key) => typeof key !== 'string' || !targetKeys.some((known) => known === key))
+      ) {
         throw new Error('Invalid target fields');
       }
       const copied = Object.create(null) as UnknownRecord;
@@ -256,7 +295,9 @@ export async function loadCredentialValidationTargetsModule(
   const factory = readFactory(imported);
   let raw: unknown;
   try {
-    raw = await Reflect.apply(factory, imported, [Object.freeze({ purpose: CREDENTIAL_VALIDATION_TARGETS_FACTORY_PURPOSE })]);
+    raw = await Reflect.apply(factory, imported, [
+      Object.freeze({ purpose: CREDENTIAL_VALIDATION_TARGETS_FACTORY_PURPOSE }),
+    ]);
   } catch {
     throw moduleError('FACTORY_FAILED');
   }

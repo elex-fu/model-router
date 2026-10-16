@@ -60,18 +60,32 @@ test('083 mirrors the 035 job authority shape without any tenant dimension', () 
 
 test('083 platform triggers preserve the 035 immutability and invalidation contract', () => {
   // Identity immutability: every authority snapshot field except tenant_id.
-  const identity = /CREATE FUNCTION saas_platform_credential_validation_job_identity_immutable\(\) RETURNS trigger\nLANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/;
+  const identity =
+    /CREATE FUNCTION saas_platform_credential_validation_job_identity_immutable\(\) RETURNS trigger\nLANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/;
   const identityMatch = identity.exec(commands);
   assert.ok(identityMatch, 'platform identity function exists');
   for (const field of [
-    'id', 'account_id', 'credential_id', 'credential_version', 'provider_id', 'product_id',
-    'credential_type', 'allowed_models', 'target_model', 'target_endpoint', 'capability_version',
-    'idempotency_key', 'created_at',
+    'id',
+    'account_id',
+    'credential_id',
+    'credential_version',
+    'provider_id',
+    'product_id',
+    'credential_type',
+    'allowed_models',
+    'target_model',
+    'target_endpoint',
+    'capability_version',
+    'idempotency_key',
+    'created_at',
   ]) {
     assert.match(identityMatch![1]!, new RegExp(`NEW\\.${field} IS DISTINCT FROM OLD\\.${field}`));
   }
   assert.doesNotMatch(identityMatch![1]!, /tenant/);
-  assert.match(commands, /BEFORE UPDATE ON saas_platform_provider_credential_validation_jobs\s+FOR EACH ROW EXECUTE FUNCTION saas_platform_credential_validation_job_identity_immutable\(\)/);
+  assert.match(
+    commands,
+    /BEFORE UPDATE ON saas_platform_provider_credential_validation_jobs\s+FOR EACH ROW EXECUTE FUNCTION saas_platform_credential_validation_job_identity_immutable\(\)/,
+  );
 
   // Credential/account invalidation wrappers are born with the exact 058
   // execution metadata: SECURITY DEFINER + pinned search_path.
@@ -80,24 +94,45 @@ test('083 platform triggers preserve the 035 immutability and invalidation contr
     'saas_platform_invalidate_account_credential_validation_jobs',
   ]) {
     assert.match(commands, new RegExp(`ALTER FUNCTION ${name}\\(\\) SECURITY DEFINER;`));
-    assert.match(commands, new RegExp(`ALTER FUNCTION ${name}\\(\\)\\s+SET search_path TO pg_catalog, model_router_saas, pg_temp;`));
+    assert.match(
+      commands,
+      new RegExp(`ALTER FUNCTION ${name}\\(\\)\\s+SET search_path TO pg_catalog, model_router_saas, pg_temp;`),
+    );
   }
-  const credentialWrapper = /CREATE FUNCTION saas_platform_invalidate_credential_validation_jobs\(\) RETURNS trigger\nLANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/.exec(commands);
+  const credentialWrapper =
+    /CREATE FUNCTION saas_platform_invalidate_credential_validation_jobs\(\) RETURNS trigger\nLANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/.exec(
+      commands,
+    );
   assert.ok(credentialWrapper);
   assert.match(credentialWrapper![1]!, /UPDATE saas_platform_provider_credential_validation_jobs/);
   assert.match(credentialWrapper![1]!, /WHERE credential_id = NEW\.id/);
   assert.match(credentialWrapper![1]!, /AND status IN \('queued', 'leased'\)/);
   assert.match(credentialWrapper![1]!, /NEW\.current_version IS DISTINCT FROM OLD\.current_version/);
-  assert.match(credentialWrapper![1]!, /NEW\.status IN \('disabled', 'revoked'\) AND NEW\.status IS DISTINCT FROM OLD\.status/);
-  assert.match(commands, /AFTER UPDATE OF current_version, status ON saas_platform_provider_credentials\s+FOR EACH ROW EXECUTE FUNCTION saas_platform_invalidate_credential_validation_jobs\(\)/);
+  assert.match(
+    credentialWrapper![1]!,
+    /NEW\.status IN \('disabled', 'revoked'\) AND NEW\.status IS DISTINCT FROM OLD\.status/,
+  );
+  assert.match(
+    commands,
+    /AFTER UPDATE OF current_version, status ON saas_platform_provider_credentials\s+FOR EACH ROW EXECUTE FUNCTION saas_platform_invalidate_credential_validation_jobs\(\)/,
+  );
 
-  const accountWrapper = /CREATE FUNCTION saas_platform_invalidate_account_credential_validation_jobs\(\) RETURNS trigger\nLANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/.exec(commands);
+  const accountWrapper =
+    /CREATE FUNCTION saas_platform_invalidate_account_credential_validation_jobs\(\) RETURNS trigger\nLANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/.exec(
+      commands,
+    );
   assert.ok(accountWrapper);
   assert.match(accountWrapper![1]!, /WHERE account_id = NEW\.id/);
-  assert.match(commands, /AFTER UPDATE OF status ON saas_platform_provider_accounts\s+FOR EACH ROW EXECUTE FUNCTION saas_platform_invalidate_account_credential_validation_jobs\(\)/);
+  assert.match(
+    commands,
+    /AFTER UPDATE OF status ON saas_platform_provider_accounts\s+FOR EACH ROW EXECUTE FUNCTION saas_platform_invalidate_account_credential_validation_jobs\(\)/,
+  );
 
   // No-delete reuses the shared 035 reject function; nothing is deleted ever.
-  assert.match(commands, /BEFORE DELETE ON saas_platform_provider_credential_validation_jobs\s+FOR EACH ROW EXECUTE FUNCTION saas_provider_credential_validation_job_reject_delete\(\)/);
+  assert.match(
+    commands,
+    /BEFORE DELETE ON saas_platform_provider_credential_validation_jobs\s+FOR EACH ROW EXECUTE FUNCTION saas_provider_credential_validation_job_reject_delete\(\)/,
+  );
   assert.equal([...commands.matchAll(/CREATE TRIGGER/g)].length, 4);
 });
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createAdminServer } from '../../src/admin/server.js';
-import { defaultConfigV2, type ConfigV2 } from '../../src/config/v2-schema.js';
+import { type ConfigV2, defaultConfigV2 } from '../../src/config/v2-schema.js';
 import { ControlStore } from '../../src/control/store.js';
 import { SQLiteTelemetryStore } from '../../src/storage/telemetry-store.js';
 
@@ -297,7 +297,7 @@ test('admin responses, logs, exports, audit and HTML do not disclose a configure
     assert.equal(job.state, 'completed', job.error ?? 'Formula CSV export did not complete');
     const formulaCsvResponse = await raw(`/exports/${formulaJob.exportId}/download`, 'GET', undefined, auth);
     assert.equal(formulaCsvResponse.status, 200);
-    assert.match(await formulaCsvResponse.text(), /'  =HYPERLINK\(""bad""\)/);
+    assert.match(await formulaCsvResponse.text(), /' {2}=HYPERLINK\(""bad""\)/);
     assert.deepEqual(leaks, [], `Sentinel leaked through: ${leaks.join(', ')}`);
   } finally {
     app.server.closeAllConnections();

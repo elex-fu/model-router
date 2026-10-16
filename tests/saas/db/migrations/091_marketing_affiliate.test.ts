@@ -21,9 +21,18 @@ test('091 registers after 090 with the documented gaps', () => {
 test('091 makes attribution lifetime-immutable and refuses self-invites at the database level', () => {
   assert.match(commands, /CREATE TABLE saas_marketing_affiliate_attributions \(/);
   assert.match(commands, /invitee_tenant_id uuid PRIMARY KEY REFERENCES saas_tenants \(id\) ON DELETE RESTRICT/);
-  assert.match(commands, /CONSTRAINT saas_marketing_affiliate_attributions_no_self\s+CHECK \(inviter_tenant_id <> invitee_tenant_id\)/);
-  assert.match(commands, /CREATE TRIGGER saas_marketing_affiliate_attributions_no_update\s+BEFORE UPDATE ON saas_marketing_affiliate_attributions/);
-  assert.match(commands, /CREATE TRIGGER saas_marketing_affiliate_attributions_no_delete\s+BEFORE DELETE ON saas_marketing_affiliate_attributions/);
+  assert.match(
+    commands,
+    /CONSTRAINT saas_marketing_affiliate_attributions_no_self\s+CHECK \(inviter_tenant_id <> invitee_tenant_id\)/,
+  );
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_marketing_affiliate_attributions_no_update\s+BEFORE UPDATE ON saas_marketing_affiliate_attributions/,
+  );
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_marketing_affiliate_attributions_no_delete\s+BEFORE DELETE ON saas_marketing_affiliate_attributions/,
+  );
 });
 
 test('091 keeps the platform policy a singleton versioned head with exact +1 bumps', () => {
@@ -31,16 +40,28 @@ test('091 keeps the platform policy a singleton versioned head with exact +1 bum
   assert.match(commands, /id text PRIMARY KEY\s+CHECK \(id = 'platform'\)/);
   assert.match(commands, /CHECK \(reward_bp >= 0 AND reward_bp <= 5000\)/);
   assert.match(commands, /NEW\.version IS DISTINCT FROM OLD\.version \+ 1/);
-  assert.match(commands, /CREATE TRIGGER saas_marketing_affiliate_policies_guard\s+BEFORE UPDATE ON saas_marketing_affiliate_policies/);
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_marketing_affiliate_policies_guard\s+BEFORE UPDATE ON saas_marketing_affiliate_policies/,
+  );
 });
 
 test('091 makes rewards append-only with the idempotent source key and basis-point snapshots', () => {
   assert.match(commands, /CREATE TABLE saas_marketing_affiliate_rewards \(/);
   assert.match(commands, /CONSTRAINT saas_marketing_affiliate_rewards_source_unique UNIQUE \(source_funding_ref\)/);
-  assert.match(commands, /reward_bp_snapshot integer NOT NULL\s+CHECK \(reward_bp_snapshot >= 0 AND reward_bp_snapshot <= 5000\)/);
+  assert.match(
+    commands,
+    /reward_bp_snapshot integer NOT NULL\s+CHECK \(reward_bp_snapshot >= 0 AND reward_bp_snapshot <= 5000\)/,
+  );
   assert.match(commands, /CHECK \(source_amount_minor_units ~ '\^\[0-9\]\{1,20\}\$'\)/);
-  assert.match(commands, /CREATE TRIGGER saas_marketing_affiliate_rewards_no_update\s+BEFORE UPDATE ON saas_marketing_affiliate_rewards/);
-  assert.match(commands, /CREATE TRIGGER saas_marketing_affiliate_rewards_no_delete\s+BEFORE DELETE ON saas_marketing_affiliate_rewards/);
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_marketing_affiliate_rewards_no_update\s+BEFORE UPDATE ON saas_marketing_affiliate_rewards/,
+  );
+  assert.match(
+    commands,
+    /CREATE TRIGGER saas_marketing_affiliate_rewards_no_delete\s+BEFORE DELETE ON saas_marketing_affiliate_rewards/,
+  );
 });
 
 test('091 grants no privileges and pins every guard search_path', () => {

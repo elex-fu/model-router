@@ -63,19 +63,29 @@ function sqlResult<Row>(rows: Row[]): SqlResult<Row> {
 }
 
 function isClaimLookup(statement: string): boolean {
-  return statement.startsWith('SELECT ') &&
-    statement.includes(' FROM saas_gateway_request_idempotency_keys JOIN saas_requests AS request_row ');
+  return (
+    statement.startsWith('SELECT ') &&
+    statement.includes(' FROM saas_gateway_request_idempotency_keys JOIN saas_requests AS request_row ')
+  );
 }
 
 function assertClaimLookupContract(statement: string, values: readonly unknown[]): void {
-  assert.match(statement,
-    /^SELECT saas_gateway_request_idempotency_keys\.request_fingerprint AS request_fingerprint, saas_gateway_request_idempotency_keys\.request_fingerprint_version AS request_fingerprint_version, saas_gateway_request_idempotency_keys\.request_id AS request_id, saas_gateway_request_idempotency_keys\.state AS state, /);
-  assert.match(statement,
-    /request_row\.execution_state AS execution_state, request_row\.project_id AS canonical_project_id, request_row\.proxy_key_id AS canonical_proxy_key_id, request_row\.request_fingerprint AS canonical_request_fingerprint, request_row\.request_fingerprint_version AS canonical_request_fingerprint_version FROM /);
-  assert.match(statement,
-    /JOIN saas_requests AS request_row ON request_row\.tenant_id = saas_gateway_request_idempotency_keys\.tenant_id AND request_row\.id = saas_gateway_request_idempotency_keys\.request_id WHERE /);
-  assert.match(statement,
-    /WHERE saas_gateway_request_idempotency_keys\.tenant_id = \$1 AND saas_gateway_request_idempotency_keys\.project_id = \$2 AND saas_gateway_request_idempotency_keys\.proxy_key_id = \$3 AND saas_gateway_request_idempotency_keys\.key_digest = \$4 FOR UPDATE OF saas_gateway_request_idempotency_keys, request_row$/);
+  assert.match(
+    statement,
+    /^SELECT saas_gateway_request_idempotency_keys\.request_fingerprint AS request_fingerprint, saas_gateway_request_idempotency_keys\.request_fingerprint_version AS request_fingerprint_version, saas_gateway_request_idempotency_keys\.request_id AS request_id, saas_gateway_request_idempotency_keys\.state AS state, /,
+  );
+  assert.match(
+    statement,
+    /request_row\.execution_state AS execution_state, request_row\.project_id AS canonical_project_id, request_row\.proxy_key_id AS canonical_proxy_key_id, request_row\.request_fingerprint AS canonical_request_fingerprint, request_row\.request_fingerprint_version AS canonical_request_fingerprint_version FROM /,
+  );
+  assert.match(
+    statement,
+    /JOIN saas_requests AS request_row ON request_row\.tenant_id = saas_gateway_request_idempotency_keys\.tenant_id AND request_row\.id = saas_gateway_request_idempotency_keys\.request_id WHERE /,
+  );
+  assert.match(
+    statement,
+    /WHERE saas_gateway_request_idempotency_keys\.tenant_id = \$1 AND saas_gateway_request_idempotency_keys\.project_id = \$2 AND saas_gateway_request_idempotency_keys\.proxy_key_id = \$3 AND saas_gateway_request_idempotency_keys\.key_digest = \$4 FOR UPDATE OF saas_gateway_request_idempotency_keys, request_row$/,
+  );
   assert.equal(values.length, 4);
 }
 
@@ -91,8 +101,10 @@ class FakeSqlExecutor implements SqlExecutor {
     this.database.calls.push({ sql: statement, values: [...values], executor: this });
 
     if (statement.startsWith('INSERT INTO saas_gateway_request_idempotency_keys')) {
-      assert.match(statement,
-        /ON CONFLICT \(tenant_id, project_id, proxy_key_id, key_digest\) DO NOTHING RETURNING request_id$/);
+      assert.match(
+        statement,
+        /ON CONFLICT \(tenant_id, project_id, proxy_key_id, key_digest\) DO NOTHING RETURNING request_id$/,
+      );
       if (this.raceGate) await this.raceGate.wait();
       const [tenantId, projectId, proxyKeyId, keyDigest, fingerprint, version, requestId] = values;
       const key = mapKey(tenantId, projectId, proxyKeyId, keyDigest);
@@ -267,16 +279,27 @@ test('a reused key with a different fingerprint or fingerprint version is a safe
   if (first.kind !== 'claimed') throw new Error('Expected the first claim to win');
   const mappingBefore = structuredClone([...database.rows.entries()]);
 
-  assert.deepEqual(await idempotency.claim(database.executor(), claimInput({
-    requestId: REQUEST_B_ID, requestFingerprint: FINGERPRINT_B,
-  })), {
-    kind: 'fingerprint_conflict',
-  });
+  assert.deepEqual(
+    await idempotency.claim(
+      database.executor(),
+      claimInput({
+        requestId: REQUEST_B_ID,
+        requestFingerprint: FINGERPRINT_B,
+      }),
+    ),
+    {
+      kind: 'fingerprint_conflict',
+    },
+  );
   assert.deepEqual([...database.rows.entries()], mappingBefore);
   assert.deepEqual(
-    await idempotency.claim(database.executor(), claimInput({
-      requestId: REQUEST_C_ID, requestFingerprintVersion: 'gateway-request-v2',
-    })),
+    await idempotency.claim(
+      database.executor(),
+      claimInput({
+        requestId: REQUEST_C_ID,
+        requestFingerprintVersion: 'gateway-request-v2',
+      }),
+    ),
     { kind: 'fingerprint_conflict' },
   );
   assert.equal(database.rows.size, 1);

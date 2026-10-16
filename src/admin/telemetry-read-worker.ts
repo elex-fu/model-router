@@ -1,6 +1,6 @@
+import { performance } from 'node:perf_hooks';
 import { parentPort, workerData } from 'node:worker_threads';
 import Database from 'better-sqlite3';
-import { performance } from 'node:perf_hooks';
 import { FIRST_EVENT_HISTOGRAM_BOUNDS, SQLiteTelemetryStore } from '../storage/telemetry-store.js';
 
 export interface DetailFilters {
@@ -24,7 +24,11 @@ const perfStages: Record<string, number> = {};
 function timed<T>(name: string, fn: () => T): T {
   if (!perfEnabled) return fn();
   const start = performance.now();
-  try { return fn(); } finally { perfStages[name] = (perfStages[name] ?? 0) + performance.now() - start; }
+  try {
+    return fn();
+  } finally {
+    perfStages[name] = (perfStages[name] ?? 0) + performance.now() - start;
+  }
 }
 type Metrics = Record<string, number | null>;
 const requestFields = [
@@ -82,7 +86,9 @@ function liveWhere(dimensions: NonNullable<DetailFilters['dimensions']>) {
 }
 function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRows: boolean) {
   if (hasLegacyRows) return null;
-  const state = timed('liveStateSqlMs', () => db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_aggregate_state'").get());
+  const state = timed('liveStateSqlMs', () =>
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='live_aggregate_state'").get(),
+  );
   if (!state) return null;
   const covered = (
     db.prepare('SELECT covered_sequence AS n FROM live_aggregate_state WHERE id=1').get() as { n: number }
@@ -98,8 +104,11 @@ function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRo
   if (!dimensions) return null;
   const requestFilter = liveWhere(dimensions);
   const attemptFilter = liveWhere(dimensions);
-  const requestBucket = timed('liveRequestAggregateSqlMs', () => db
-    .prepare(`SELECT SUM(logical_requests) AS logicalRequests,SUM(completed) AS completed,
+  const requestBucket = timed(
+    'liveRequestAggregateSqlMs',
+    () =>
+      db
+        .prepare(`SELECT SUM(logical_requests) AS logicalRequests,SUM(completed) AS completed,
     SUM(failed) AS failed,SUM(cancelled) AS cancelled,SUM(rejected) AS rejected,
     SUM(in_progress) AS inProgress,
     SUM(admitted_ended) AS admittedEnded,SUM(admitted_completed) AS admittedCompleted,
@@ -107,15 +116,20 @@ function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRo
     SUM(unknown_admission_ended) AS unknownAdmissionEnded,
     MAX(data_through_ms) AS dataThrough
     FROM live_request_minute WHERE bucket_ms>=? AND bucket_ms<?${requestFilter.suffix}`)
-    .get(fullStart, fullEnd, ...requestFilter.args) as Metrics);
-  const attemptBucket = timed('liveAttemptAggregateSqlMs', () => db
-    .prepare(`SELECT SUM(upstream_attempts) AS upstreamAttempts,
+        .get(fullStart, fullEnd, ...requestFilter.args) as Metrics,
+  );
+  const attemptBucket = timed(
+    'liveAttemptAggregateSqlMs',
+    () =>
+      db
+        .prepare(`SELECT SUM(upstream_attempts) AS upstreamAttempts,
     SUM(input_tokens) AS inputTokens,SUM(output_tokens) AS outputTokens,
     SUM(cache_read_tokens) AS cacheReadTokens,SUM(cache_read_count) AS cacheReadCount,
     SUM(cache_write_tokens) AS cacheWriteTokens,SUM(cache_write_count) AS cacheWriteCount,
     SUM(missing_usage_attempts) AS missingUsageAttempts,SUM(unpriced_attempts) AS unpricedAttempts
     FROM live_attempt_minute WHERE bucket_ms>=? AND bucket_ms<?${attemptFilter.suffix}`)
-    .get(fullStart, fullEnd, ...attemptFilter.args) as Metrics);
+        .get(fullStart, fullEnd, ...attemptFilter.args) as Metrics,
+  );
   const intervals: Array<[number, number]> = [];
   if (from < fullStart) intervals.push([from, fullStart]);
   if (fullEnd < to) intervals.push([fullEnd, to]);
@@ -135,20 +149,25 @@ function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRo
     for (const row of rows) costs.set(row.currency, (costs.get(row.currency) ?? 0) + row.micros);
   };
   if (task.kind === 'usageSummary') {
-    timed('liveCostAggregateSqlMs', () => addCosts(
-      db
-        .prepare(`SELECT currency,SUM(cost_micros) AS micros FROM live_attempt_minute
+    timed('liveCostAggregateSqlMs', () =>
+      addCosts(
+        db
+          .prepare(`SELECT currency,SUM(cost_micros) AS micros FROM live_attempt_minute
     WHERE bucket_ms>=? AND bucket_ms<?${attemptFilter.suffix} AND currency<>''
     GROUP BY currency`)
-        .all(fullStart, fullEnd, ...attemptFilter.args) as Array<{ currency: string; micros: number }>,
-    ));
+          .all(fullStart, fullEnd, ...attemptFilter.args) as Array<{ currency: string; micros: number }>,
+      ),
+    );
   }
   for (const [start, end] of intervals) {
     const ra = [start, end, ...filters.requestArgs.slice(2)];
     const aa = [start, end, ...filters.attemptArgs.slice(2)];
     requestRows.push(
-      timed('detailRequestSqlMs', () => db
-        .prepare(`SELECT COUNT(*) AS logicalRequests,
+      timed(
+        'detailRequestSqlMs',
+        () =>
+          db
+            .prepare(`SELECT COUNT(*) AS logicalRequests,
       SUM(r.state='completed') AS completed,SUM(r.state='failed') AS failed,
       SUM(r.state='cancelled') AS cancelled,SUM(r.state='rejected') AS rejected,
       SUM(r.state NOT IN ('completed','failed','cancelled','interrupted','rejected')) AS inProgress,
@@ -157,11 +176,15 @@ function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRo
       SUM(r.source='production' AND r.admission_known=1 AND r.admitted=0 AND r.state='rejected' AND r.ended_at_ms IS NOT NULL) AS preAdmissionRejected,
       SUM(r.source='production' AND r.admission_known=0 AND r.ended_at_ms IS NOT NULL) AS unknownAdmissionEnded,
       MAX(r.ended_at_ms) AS dataThrough FROM requests r WHERE ${filters.requestWhere}`)
-        .get(...ra) as Metrics),
+            .get(...ra) as Metrics,
+      ),
     );
     attemptRows.push(
-      timed('detailAttemptSqlMs', () => db
-        .prepare(`SELECT COUNT(*) AS upstreamAttempts,
+      timed(
+        'detailAttemptSqlMs',
+        () =>
+          db
+            .prepare(`SELECT COUNT(*) AS upstreamAttempts,
       COALESCE(SUM(json_extract(a.usage_json,'$.inputTotal')),0) AS inputTokens,
       COALESCE(SUM(json_extract(a.usage_json,'$.outputTotal')),0) AS outputTokens,
       COALESCE(SUM(json_extract(a.usage_json,'$.cacheRead')),0) AS cacheReadTokens,
@@ -172,16 +195,19 @@ function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRo
         OR json_extract(a.usage_json,'$.outputTotal') IS NULL) AS missingUsageAttempts,
       SUM(a.cost_micros IS NULL) AS unpricedAttempts
       FROM attempts a JOIN requests r ON r.id=a.request_id WHERE ${filters.attemptWhere}`)
-        .get(...aa) as Metrics),
+            .get(...aa) as Metrics,
+      ),
     );
     if (task.kind === 'usageSummary') {
-      timed('detailCostSqlMs', () => addCosts(
-        db
-          .prepare(`SELECT a.currency,SUM(a.cost_micros) AS micros FROM attempts a
+      timed('detailCostSqlMs', () =>
+        addCosts(
+          db
+            .prepare(`SELECT a.currency,SUM(a.cost_micros) AS micros FROM attempts a
       JOIN requests r ON r.id=a.request_id WHERE ${filters.attemptWhere}
       AND a.currency IS NOT NULL AND a.cost_micros IS NOT NULL GROUP BY a.currency`)
-          .all(...aa) as Array<{ currency: string; micros: number }>,
-      ));
+            .all(...aa) as Array<{ currency: string; micros: number }>,
+        ),
+      );
     }
   }
   const requests = merge(requestRows, requestFields);
@@ -192,14 +218,18 @@ function liveRead(task: DetailTask, watermark: { sequence: number }, hasLegacyRo
   if (task.kind === 'usageSummary') {
     // Exact distinct retry request IDs; partial index limits this to missing-usage attempts.
     const { attemptWhere, attemptArgs } = task.filters;
-    attempts.missingUsageRequests = timed('missingUsageDistinctSqlMs', () => (
-      db
-        .prepare(`SELECT COUNT(DISTINCT a.request_id) AS n FROM attempts a
+    attempts.missingUsageRequests = timed(
+      'missingUsageDistinctSqlMs',
+      () =>
+        (
+          db
+            .prepare(`SELECT COUNT(DISTINCT a.request_id) AS n FROM attempts a
       JOIN requests r ON r.id=a.request_id WHERE ${attemptWhere} AND
       (a.usage_json IS NULL OR json_extract(a.usage_json,'$.inputTotal') IS NULL
        OR json_extract(a.usage_json,'$.outputTotal') IS NULL)`)
-        .get(...attemptArgs) as { n: number }
-    ).n);
+            .get(...attemptArgs) as { n: number }
+        ).n,
+    );
   }
   return {
     requests,
@@ -272,39 +302,65 @@ function executeDetail(task: DetailTask) {
   db = timed('sqliteOpenMs', () => new Database(task.dbPath, { readonly: true, fileMustExist: true }));
   try {
     timed('sqlitePragmaMs', () => db.pragma('busy_timeout = 5000'));
-    return timed('detailQueriesSqlMs', () => db.transaction(() => {
-      // First read pins one WAL snapshot for every number and its native write watermark.
-      const watermark = timed('watermarkSqlMs', () => db
-        .prepare('SELECT sequence,updated_at_ms AS updatedAtMs FROM telemetry_write_watermark WHERE id=1')
-        .get() as { sequence: number; updatedAtMs: number });
-      const snapshotStartedAtMs = Date.now();
-      const hasLegacy = timed('legacySchemaSqlMs', () => Boolean(
-        db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_request_metadata'").get(),
-      ));
-      const legacyMetadataCount = hasLegacy
-        ? timed('legacyMetadataSqlMs', () => (db.prepare('SELECT EXISTS(SELECT 1 FROM legacy_request_metadata) AS n').get() as { n: number }).n)
-        : 0;
-      const legacy = hasLegacy ? 'EXISTS (SELECT 1 FROM legacy_request_metadata m WHERE m.request_id=r.id)' : '0';
-      const live = timed('liveAggregateSqlMs', () => liveRead(task, watermark, legacyMetadataCount > 0));
-      if (task.kind === 'overview') {
-        const sourceWhere = task.selected === 'all' ? '' : ' AND r.source=?';
-        const args = task.selected === 'all' ? [task.fromMs, task.toMs] : [task.fromMs, task.toMs, task.selected];
-        if (live) {
-          const recentErrors = timed('recentErrorsSqlMs', () => db
-            .prepare(`SELECT r.id AS requestId,r.state,r.final_http_status AS status
+    return timed('detailQueriesSqlMs', () =>
+      db.transaction(() => {
+        // First read pins one WAL snapshot for every number and its native write watermark.
+        const watermark = timed(
+          'watermarkSqlMs',
+          () =>
+            db
+              .prepare('SELECT sequence,updated_at_ms AS updatedAtMs FROM telemetry_write_watermark WHERE id=1')
+              .get() as { sequence: number; updatedAtMs: number },
+        );
+        const snapshotStartedAtMs = Date.now();
+        const hasLegacy = timed('legacySchemaSqlMs', () =>
+          Boolean(
+            db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_request_metadata'").get(),
+          ),
+        );
+        const legacyMetadataCount = hasLegacy
+          ? timed(
+              'legacyMetadataSqlMs',
+              () => (db.prepare('SELECT EXISTS(SELECT 1 FROM legacy_request_metadata) AS n').get() as { n: number }).n,
+            )
+          : 0;
+        const legacy = hasLegacy ? 'EXISTS (SELECT 1 FROM legacy_request_metadata m WHERE m.request_id=r.id)' : '0';
+        const live = timed('liveAggregateSqlMs', () => liveRead(task, watermark, legacyMetadataCount > 0));
+        if (task.kind === 'overview') {
+          const sourceWhere = task.selected === 'all' ? '' : ' AND r.source=?';
+          const args = task.selected === 'all' ? [task.fromMs, task.toMs] : [task.fromMs, task.toMs, task.selected];
+          if (live) {
+            const recentErrors = timed(
+              'recentErrorsSqlMs',
+              () =>
+                db
+                  .prepare(`SELECT r.id AS requestId,r.state,r.final_http_status AS status
           FROM requests r WHERE r.state IN ('failed','rejected') AND r.started_at_ms>=? AND r.started_at_ms<?${sourceWhere}
           ORDER BY r.started_at_ms DESC LIMIT 5`)
-            .all(...args) as Array<{ requestId: string; state: string; status: number | null }>);
-          return {
-            kind: 'overview', watermark, snapshotStartedAtMs, snapshotCompletedAtMs: Date.now(),
-            legacyMetadataCount, legacyWritesTracked: !hasLegacy, requests: live.requests, attempts: live.attempts,
-            ...(() => { const p95 = timed('firstEventP95SqlMs', () => liveFirstEventP95(task.fromMs, task.toMs, task.selected));
-              return { firstTokenP95Ms: p95.value, firstTokenP95Status: p95.status }; })(),
-            recentErrors, coverageMode: live.coverageMode,
-          };
-        }
-        const requests = timed('overviewRequestSqlMs', () => db
-          .prepare(`SELECT SUM(NOT (${legacy})) AS logicalRequests,
+                  .all(...args) as Array<{ requestId: string; state: string; status: number | null }>,
+            );
+            return {
+              kind: 'overview',
+              watermark,
+              snapshotStartedAtMs,
+              snapshotCompletedAtMs: Date.now(),
+              legacyMetadataCount,
+              legacyWritesTracked: !hasLegacy,
+              requests: live.requests,
+              attempts: live.attempts,
+              ...(() => {
+                const p95 = timed('firstEventP95SqlMs', () => liveFirstEventP95(task.fromMs, task.toMs, task.selected));
+                return { firstTokenP95Ms: p95.value, firstTokenP95Status: p95.status };
+              })(),
+              recentErrors,
+              coverageMode: live.coverageMode,
+            };
+          }
+          const requests = timed(
+            'overviewRequestSqlMs',
+            () =>
+              db
+                .prepare(`SELECT SUM(NOT (${legacy})) AS logicalRequests,
         SUM(${legacy}) AS legacyLogRows,
         SUM(NOT (${legacy}) AND r.state='completed') AS completed,
         SUM(NOT (${legacy}) AND r.state='failed') AS failed,
@@ -317,40 +373,85 @@ function executeDetail(task: DetailTask) {
         SUM(NOT (${legacy}) AND r.source='production' AND r.admission_known=0 AND r.ended_at_ms IS NOT NULL) AS unknownAdmissionEnded,
         MAX(CASE WHEN NOT (${legacy}) THEN r.ended_at_ms END) AS dataThrough
         FROM requests r WHERE r.started_at_ms>=? AND r.started_at_ms<?${sourceWhere}`)
-          .get(...args) as Record<string, number | null>);
-        const attempts = timed('overviewAttemptSqlMs', () => db
-          .prepare(`SELECT COUNT(*) AS upstreamAttempts,
+                .get(...args) as Record<string, number | null>,
+          );
+          const attempts = timed(
+            'overviewAttemptSqlMs',
+            () =>
+              db
+                .prepare(`SELECT COUNT(*) AS upstreamAttempts,
         COALESCE(SUM(json_extract(a.usage_json,'$.inputTotal')),0) AS inputTokens,
         COALESCE(SUM(json_extract(a.usage_json,'$.outputTotal')),0) AS outputTokens,
         SUM(CASE WHEN a.usage_json IS NULL OR json_extract(a.usage_json,'$.inputTotal') IS NULL
           OR json_extract(a.usage_json,'$.outputTotal') IS NULL THEN 1 ELSE 0 END) AS missingUsageAttempts
         FROM attempts a JOIN requests r ON r.id=a.request_id WHERE a.started_at_ms>=?
         AND a.started_at_ms<?${sourceWhere} AND NOT (${legacy})`)
-          .get(...args) as Record<string, number | null>);
-        const firstEventCount = timed('overviewFirstEventCountSqlMs', () => db
-          .prepare(`SELECT COUNT(*) AS n FROM requests r WHERE r.started_at_ms>=? AND r.started_at_ms<?
+                .get(...args) as Record<string, number | null>,
+          );
+          const firstEventCount = timed(
+            'overviewFirstEventCountSqlMs',
+            () =>
+              db
+                .prepare(`SELECT COUNT(*) AS n FROM requests r WHERE r.started_at_ms>=? AND r.started_at_ms<?
         AND COALESCE(r.first_text_ms,r.first_event_ms) IS NOT NULL${sourceWhere} AND NOT (${legacy})`)
-          .get(...args) as { n: number });
-        const firstTokenP95Ms = firstEventCount.n
-          ? timed('overviewFirstEventP95SqlMs', () => (db.prepare(`SELECT COALESCE(r.first_text_ms,r.first_event_ms) AS ms FROM requests r
+                .get(...args) as { n: number },
+          );
+          const firstTokenP95Ms = firstEventCount.n
+            ? timed(
+                'overviewFirstEventP95SqlMs',
+                () =>
+                  (
+                    db
+                      .prepare(`SELECT COALESCE(r.first_text_ms,r.first_event_ms) AS ms FROM requests r
           WHERE r.started_at_ms>=? AND r.started_at_ms<?
           AND COALESCE(r.first_text_ms,r.first_event_ms) IS NOT NULL${sourceWhere} AND NOT (${legacy})
-          ORDER BY ms LIMIT 1 OFFSET ?`).get(...args, Math.ceil(firstEventCount.n * 0.95) - 1) as { ms: number }).ms)
-          : null;
-        const recentErrors = timed('recentErrorsSqlMs', () => db
-          .prepare(`SELECT r.id AS requestId,r.state,r.final_http_status AS status
+          ORDER BY ms LIMIT 1 OFFSET ?`)
+                      .get(...args, Math.ceil(firstEventCount.n * 0.95) - 1) as { ms: number }
+                  ).ms,
+              )
+            : null;
+          const recentErrors = timed(
+            'recentErrorsSqlMs',
+            () =>
+              db
+                .prepare(`SELECT r.id AS requestId,r.state,r.final_http_status AS status
         FROM requests r WHERE r.state IN ('failed','rejected') AND r.started_at_ms>=? AND r.started_at_ms<?${sourceWhere}
         AND NOT (${legacy}) ORDER BY r.started_at_ms DESC LIMIT 5`)
-          .all(...args) as Array<{ requestId: string; state: string; status: number | null }>);
-        return { kind: 'overview', watermark, snapshotStartedAtMs, snapshotCompletedAtMs: Date.now(),
-          legacyMetadataCount, legacyWritesTracked: !hasLegacy, requests, attempts, firstTokenP95Ms,
-          firstTokenP95Status: 'exact', recentErrors };
-      }
-      const { requestWhere, attemptWhere, requestArgs, attemptArgs } = task.filters;
-      if (live) return { kind: 'usageSummary', watermark, snapshotStartedAtMs, snapshotCompletedAtMs: Date.now(),
-        legacyMetadataCount, legacyWritesTracked: !hasLegacy, requests: live.requests, attempts: live.attempts,
-        costs: live.costs, coverageMode: live.coverageMode };
-      const requests = timed('summaryRequestSqlMs', () => db.prepare(`SELECT SUM(NOT (${legacy})) AS logicalRequests,
+                .all(...args) as Array<{ requestId: string; state: string; status: number | null }>,
+          );
+          return {
+            kind: 'overview',
+            watermark,
+            snapshotStartedAtMs,
+            snapshotCompletedAtMs: Date.now(),
+            legacyMetadataCount,
+            legacyWritesTracked: !hasLegacy,
+            requests,
+            attempts,
+            firstTokenP95Ms,
+            firstTokenP95Status: 'exact',
+            recentErrors,
+          };
+        }
+        const { requestWhere, attemptWhere, requestArgs, attemptArgs } = task.filters;
+        if (live)
+          return {
+            kind: 'usageSummary',
+            watermark,
+            snapshotStartedAtMs,
+            snapshotCompletedAtMs: Date.now(),
+            legacyMetadataCount,
+            legacyWritesTracked: !hasLegacy,
+            requests: live.requests,
+            attempts: live.attempts,
+            costs: live.costs,
+            coverageMode: live.coverageMode,
+          };
+        const requests = timed(
+          'summaryRequestSqlMs',
+          () =>
+            db
+              .prepare(`SELECT SUM(NOT (${legacy})) AS logicalRequests,
       SUM(${legacy}) AS legacyLogRows,
       SUM(NOT (${legacy}) AND r.state='completed') AS completed,
       SUM(NOT (${legacy}) AND r.state='failed') AS failed,
@@ -358,8 +459,14 @@ function executeDetail(task: DetailTask) {
       SUM(NOT (${legacy}) AND r.state='rejected') AS rejected,
       SUM(NOT (${legacy}) AND r.state NOT IN ('completed','failed','cancelled','interrupted','rejected')) AS inProgress,
       MAX(CASE WHEN NOT (${legacy}) THEN r.ended_at_ms END) AS dataThrough
-      FROM requests r WHERE ${requestWhere}`).get(...requestArgs) as Record<string, number | null>);
-      const attempts = timed('summaryAttemptSqlMs', () => db.prepare(`SELECT COUNT(*) AS upstreamAttempts,
+      FROM requests r WHERE ${requestWhere}`)
+              .get(...requestArgs) as Record<string, number | null>,
+        );
+        const attempts = timed(
+          'summaryAttemptSqlMs',
+          () =>
+            db
+              .prepare(`SELECT COUNT(*) AS upstreamAttempts,
       COALESCE(SUM(json_extract(a.usage_json,'$.inputTotal')),0) AS inputTokens,
       COALESCE(SUM(json_extract(a.usage_json,'$.outputTotal')),0) AS outputTokens,
       SUM(CASE WHEN a.usage_json IS NULL OR json_extract(a.usage_json,'$.inputTotal') IS NULL
@@ -370,13 +477,30 @@ function executeDetail(task: DetailTask) {
       COUNT(DISTINCT CASE WHEN a.usage_json IS NULL OR json_extract(a.usage_json,'$.inputTotal') IS NULL
         OR json_extract(a.usage_json,'$.outputTotal') IS NULL THEN a.request_id END) AS missingUsageRequests
       FROM attempts a JOIN requests r ON r.id=a.request_id WHERE ${attemptWhere} AND NOT (${legacy})`)
-        .get(...attemptArgs) as Record<string, number | null>);
-      const costs = timed('summaryCostSqlMs', () => db.prepare(`SELECT a.currency, SUM(a.cost_micros) AS micros FROM attempts a
+              .get(...attemptArgs) as Record<string, number | null>,
+        );
+        const costs = timed(
+          'summaryCostSqlMs',
+          () =>
+            db
+              .prepare(`SELECT a.currency, SUM(a.cost_micros) AS micros FROM attempts a
       JOIN requests r ON r.id=a.request_id WHERE ${attemptWhere} AND a.currency IS NOT NULL
-      AND a.cost_micros IS NOT NULL AND NOT (${legacy}) GROUP BY a.currency`).all(...attemptArgs) as Array<{ currency: string; micros: number }>);
-      return { kind: 'usageSummary', watermark, snapshotStartedAtMs, snapshotCompletedAtMs: Date.now(),
-        legacyMetadataCount, legacyWritesTracked: !hasLegacy, requests, attempts, costs };
-    })());
+      AND a.cost_micros IS NOT NULL AND NOT (${legacy}) GROUP BY a.currency`)
+              .all(...attemptArgs) as Array<{ currency: string; micros: number }>,
+        );
+        return {
+          kind: 'usageSummary',
+          watermark,
+          snapshotStartedAtMs,
+          snapshotCompletedAtMs: Date.now(),
+          legacyMetadataCount,
+          legacyWritesTracked: !hasLegacy,
+          requests,
+          attempts,
+          costs,
+        };
+      })(),
+    );
   } finally {
     timed('sqliteCloseMs', () => db.close());
   }
@@ -399,8 +523,15 @@ void (async () => {
       value = executeDetail(task);
     }
     if (perfEnabled && task.kind !== 'rebuildOffline') {
-      port.postMessage({ kind: 'perf', value: { workerTotalMs: performance.now() - workerStart, endpoint: task.kind, stages: perfStages,
-        sequence: (value as { watermark?: { sequence: number } }).watermark?.sequence ?? null } });
+      port.postMessage({
+        kind: 'perf',
+        value: {
+          workerTotalMs: performance.now() - workerStart,
+          endpoint: task.kind,
+          stages: perfStages,
+          sequence: (value as { watermark?: { sequence: number } }).watermark?.sequence ?? null,
+        },
+      });
     }
     port.postMessage({ kind: 'result', value });
   } catch (error) {

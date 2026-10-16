@@ -1695,8 +1695,14 @@ export class SaasPreparedRequestEvidenceService {
             "AND dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false " +
             'AND response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL ' +
             'RETURNING id',
-          [normalized.tenantId, normalized.attemptId, normalized.evidenceId,
-            normalized.requestId, normalized.attemptOrdinal, attemptVersion],
+          [
+            normalized.tenantId,
+            normalized.attemptId,
+            normalized.evidenceId,
+            normalized.requestId,
+            normalized.attemptOrdinal,
+            attemptVersion,
+          ],
         );
         rowCount(attemptUpdate, 1, 'prepared evidence attempt claim');
         const evidenceUpdate = await tx.query<EvidenceRow>(

@@ -142,9 +142,7 @@ test('with duplicate key text: health success resets only the matching credentia
     await (monitor as any).checkUpstream(store.listUpstreams()[0]);
     // `cred-a` retains two failures and can be cooled by one subsequent failure.
     keyPool.markFailure('u1', { credentialId: 'cred-a', key: 'shared-key' });
-    assert.deepEqual(keyPool.getAvailableEntries('u1'), [
-      { credentialId: 'cred-b', key: 'shared-key' },
-    ]);
+    assert.deepEqual(keyPool.getAvailableEntries('u1'), [{ credentialId: 'cred-b', key: 'shared-key' }]);
     assert.equal(calls, 2);
   } finally {
     global.fetch = originalFetch;
@@ -185,9 +183,7 @@ test('when all credentials are cooling, recovery probes retain credential IDs', 
     await (monitor as any).checkUpstream(store.listUpstreams()[0]);
     assert.equal(calls, 2);
     // Recovery success belongs to cred-b, so cred-a remains cooled.
-    assert.deepEqual(keyPool.getAvailableEntries('u1'), [
-      { credentialId: 'cred-b', key: 'shared-key' },
-    ]);
+    assert.deepEqual(keyPool.getAvailableEntries('u1'), [{ credentialId: 'cred-b', key: 'shared-key' }]);
   } finally {
     global.fetch = originalFetch;
     monitor.stop();

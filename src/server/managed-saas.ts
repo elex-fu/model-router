@@ -4,6 +4,7 @@ import http, { type IncomingMessage, type RequestListener, type Server, type Ser
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { PlatformWalletLedgerService } from '../saas/billing/service.js';
 import { SaasCatalogService } from '../saas/catalog/index.js';
 import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/console/http.js';
@@ -32,6 +33,7 @@ import {
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
 import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
+import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgres-billing-group-spend.js';
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
 import { createPostgresPreparationCapacityPort } from '../saas/gateway/postgres-preparation-capacity.js';
@@ -53,8 +55,6 @@ import {
 } from '../saas/identity/registration-settings.js';
 import { type CaptchaProof, createCaptchaProof } from '../saas/identity/turnstile-service.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
-import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
-import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgres-billing-group-spend.js';
 import { createSaasKeyHandler, type SaasKeyHttpHandler } from '../saas/keys/http.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';

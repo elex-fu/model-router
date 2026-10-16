@@ -633,6 +633,7 @@ test('tenant member directory: real customer HTTP sessions and restricted PG15/1
     if (!workFailed && (httpCleanupFailed || closed.some(result => result.status === 'rejected'))) {
       diagnostic.caseName = 'cleanup'; diagnostic.phase = httpCleanupFailed ? 'http-cleanup' : 'pool-cleanup'; diagnostic.lastHttpStatus = null;
       failureDiagnostic(t, undefined, diagnostic);
+      // biome-ignore lint/correctness/noUnsafeFinally: deliberate test design — a failed cleanup must fail the proof even if it replaces the try-block outcome.
       throw safeFailure(undefined, diagnostic);
     }
     // Retain synthetic rows and execution evidence; never stop an external PG.

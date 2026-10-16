@@ -1,6 +1,6 @@
 import { join } from 'node:path';
-import { Worker } from 'node:worker_threads';
 import { performance } from 'node:perf_hooks';
+import { Worker } from 'node:worker_threads';
 import type { SecretSource } from '../config/v2-schema.js';
 import { ControlError, type ControlService } from '../control/service.js';
 import type { SQLiteQuotaLedger } from '../quota/ledger.js';
@@ -44,7 +44,9 @@ function readDetail<T extends SnapshotMetadata>(task: ReadTask): Promise<T> {
     let failure: Error | undefined;
     worker.on('message', (value) => {
       if (value?.kind === 'perf' && process.env.MODEL_ROUTER_PERF === '1') {
-        process.stderr.write(`${JSON.stringify({ kind: 'telemetry-read-perf', ...value.value, workerLifecycleMs: performance.now() - started })}\n`);
+        process.stderr.write(
+          `${JSON.stringify({ kind: 'telemetry-read-perf', ...value.value, workerLifecycleMs: performance.now() - started })}\n`,
+        );
         return;
       }
       message = value;
@@ -498,7 +500,10 @@ export function telemetryAdapters(
         usage,
         freshness: observed,
       };
-      if (process.env.MODEL_ROUTER_PERF === '1') process.stderr.write(`${JSON.stringify({ kind: 'telemetry-response-perf', endpoint: 'overview', responseAssemblyMs: performance.now() - assemblyStarted, sequence: read.watermark.sequence })}\n`);
+      if (process.env.MODEL_ROUTER_PERF === '1')
+        process.stderr.write(
+          `${JSON.stringify({ kind: 'telemetry-response-perf', endpoint: 'overview', responseAssemblyMs: performance.now() - assemblyStarted, sequence: read.watermark.sequence })}\n`,
+        );
       return response;
     },
     usageSummary: async (input) => {
@@ -573,7 +578,10 @@ export function telemetryAdapters(
         to: new Date(toMs).toISOString(),
         source: selected,
       };
-      if (process.env.MODEL_ROUTER_PERF === '1') process.stderr.write(`${JSON.stringify({ kind: 'telemetry-response-perf', endpoint: 'usage-summary', responseAssemblyMs: performance.now() - assemblyStarted, sequence: read.watermark.sequence })}\n`);
+      if (process.env.MODEL_ROUTER_PERF === '1')
+        process.stderr.write(
+          `${JSON.stringify({ kind: 'telemetry-response-perf', endpoint: 'usage-summary', responseAssemblyMs: performance.now() - assemblyStarted, sequence: read.watermark.sequence })}\n`,
+        );
       return response;
     },
     usageTimeseries: async (input) => {

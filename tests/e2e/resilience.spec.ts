@@ -103,23 +103,43 @@ test('usage deep link applies key filters to summary and ranking and preserves t
       ['usage-key-alpha', 'key-alpha'],
       ['usage-key-beta', 'key-beta'],
     ] as const) {
-      await app.admin.control.createKey(
-        { id: keyId, name: keyId },
-        (await app.admin.control.raw()).revision,
-        'admin',
-      );
+      await app.admin.control.createKey({ id: keyId, name: keyId }, (await app.admin.control.raw()).revision, 'admin');
       await app.telemetry!.upsertRequest({
-        id, proxyKeyId: keyId, source: 'production', clientProtocol: 'openai', requestModel: 'fixture-model',
-        routeId: null, configRevision: 1, state: 'completed', finalHttpStatus: 200,
-        startedAtMs: now - 1000, endedAtMs: now, durationMs: 1000,
-        firstByteMs: null, firstEventMs: null, firstTextMs: null, finalUpstreamId: 'fixture-upstream',
+        id,
+        proxyKeyId: keyId,
+        source: 'production',
+        clientProtocol: 'openai',
+        requestModel: 'fixture-model',
+        routeId: null,
+        configRevision: 1,
+        state: 'completed',
+        finalHttpStatus: 200,
+        startedAtMs: now - 1000,
+        endedAtMs: now,
+        durationMs: 1000,
+        firstByteMs: null,
+        firstEventMs: null,
+        firstTextMs: null,
+        finalUpstreamId: 'fixture-upstream',
       });
       await app.telemetry!.upsertAttempt({
-        id: `${id}-attempt`, requestId: id, ordinal: 1, upstreamId: 'fixture-upstream', credentialId: null,
-        resolvedModel: 'fixture-model', reportedModel: null, protocol: 'openai', outcome: 'completed', status: 200,
-        retryReason: null, startedAtMs: now - 1000, endedAtMs: now,
+        id: `${id}-attempt`,
+        requestId: id,
+        ordinal: 1,
+        upstreamId: 'fixture-upstream',
+        credentialId: null,
+        resolvedModel: 'fixture-model',
+        reportedModel: null,
+        protocol: 'openai',
+        outcome: 'completed',
+        status: 200,
+        retryReason: null,
+        startedAtMs: now - 1000,
+        endedAtMs: now,
         usage,
-        pricingVersion: null, costMicros: null, currency: null,
+        pricingVersion: null,
+        costMicros: null,
+        currency: null,
       });
     }
     await setupAndLogin(page, app.site);

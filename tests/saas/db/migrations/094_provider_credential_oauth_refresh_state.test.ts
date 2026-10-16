@@ -22,10 +22,10 @@ test('094 adds nullable OAuth scheduling state to both credential owner families
   for (const table of ['saas_tenant_provider_credentials', 'saas_platform_provider_credentials']) {
     const alter = new RegExp(`ALTER TABLE ${table}\\s+ADD COLUMN oauth_refresh_state text,`);
     assert.match(commands, alter);
-    assert.match(commands, new RegExp(`ADD COLUMN oauth_next_refresh_at timestamptz,`));
-    assert.match(commands, new RegExp(`ADD COLUMN oauth_last_refresh_at timestamptz,`));
-    assert.match(commands, new RegExp(`ADD COLUMN oauth_force_refresh_requested boolean NOT NULL DEFAULT false,`));
-    assert.match(commands, new RegExp(`ADD COLUMN oauth_refresh_error_code text`));
+    assert.match(commands, /ADD COLUMN oauth_next_refresh_at timestamptz,/);
+    assert.match(commands, /ADD COLUMN oauth_last_refresh_at timestamptz,/);
+    assert.match(commands, /ADD COLUMN oauth_force_refresh_requested boolean NOT NULL DEFAULT false,/);
+    assert.match(commands, /ADD COLUMN oauth_refresh_error_code text/);
     assert.match(
       commands,
       new RegExp(
@@ -39,7 +39,7 @@ test('094 adds nullable OAuth scheduling state to both credential owner families
       ),
     );
     // Nullable on purpose: NULL = not an OAuth credential = pre-R4 behavior.
-    assert.doesNotMatch(commands, new RegExp(`ADD COLUMN oauth_refresh_state text NOT NULL`));
+    assert.doesNotMatch(commands, /ADD COLUMN oauth_refresh_state text NOT NULL/);
   }
 });
 

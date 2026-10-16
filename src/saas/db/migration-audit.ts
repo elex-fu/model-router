@@ -17,7 +17,14 @@ export interface SaasMigrationAuditTarget {
 
 export const SAAS_AUDIT_CATALOG_PROFILE = 'saas-ddl-v1' as const;
 export const SAAS_AUDIT_CATALOG_KINDS = [
-  'relation', 'column', 'constraint', 'index', 'trigger', 'routine', 'view', 'sequence',
+  'relation',
+  'column',
+  'constraint',
+  'index',
+  'trigger',
+  'routine',
+  'view',
+  'sequence',
 ] as const;
 export type SaasAuditCatalogKind = (typeof SAAS_AUDIT_CATALOG_KINDS)[number];
 const unsupportedCatalogFeatures = ['relation', 'aggregate', 'type', 'policy', 'rule', 'inheritance'] as const;
@@ -79,22 +86,48 @@ export interface SaasAuditCatalogComparison {
 }
 
 export type SaasMigrationAuditCode =
-  | 'INVALID_INPUT' | 'INVALID_REGISTRY' | 'INVALID_BASELINE' | 'BASELINE_MISSING'
-  | 'BASELINE_PARTIAL' | 'BASELINE_BINDING_MISMATCH' | 'CONNECT_FAILED'
-  | 'SNAPSHOT_FAILED' | 'TARGET_MISMATCH' | 'TARGET_UNAVAILABLE' | 'UNSUPPORTED_POSTGRES'
-  | 'LEDGER_MISSING' | 'LEDGER_NOT_TABLE' | 'LEDGER_INVALID' | 'LEDGER_READ_FAILED'
-  | 'MIGRATION_MISSING' | 'MIGRATION_OUT_OF_ORDER' | 'MIGRATION_UNKNOWN'
-  | 'NAME_MISMATCH' | 'CHECKSUM_MISMATCH' | 'CHECKSUM_MISMATCH_022_023'
-  | 'KNOWN_LEGACY_CHECKSUM' | 'CATALOG_READ_FAILED' | 'CATALOG_INVALID'
-  | 'CATALOG_UNSUPPORTED_OBJECTS' | 'CATALOG_MISSING' | 'CATALOG_DRIFT'
-  | 'CATALOG_UNKNOWN' | 'ROLLBACK_FAILED' | 'RELEASE_FAILED';
+  | 'INVALID_INPUT'
+  | 'INVALID_REGISTRY'
+  | 'INVALID_BASELINE'
+  | 'BASELINE_MISSING'
+  | 'BASELINE_PARTIAL'
+  | 'BASELINE_BINDING_MISMATCH'
+  | 'CONNECT_FAILED'
+  | 'SNAPSHOT_FAILED'
+  | 'TARGET_MISMATCH'
+  | 'TARGET_UNAVAILABLE'
+  | 'UNSUPPORTED_POSTGRES'
+  | 'LEDGER_MISSING'
+  | 'LEDGER_NOT_TABLE'
+  | 'LEDGER_INVALID'
+  | 'LEDGER_READ_FAILED'
+  | 'MIGRATION_MISSING'
+  | 'MIGRATION_OUT_OF_ORDER'
+  | 'MIGRATION_UNKNOWN'
+  | 'NAME_MISMATCH'
+  | 'CHECKSUM_MISMATCH'
+  | 'CHECKSUM_MISMATCH_022_023'
+  | 'KNOWN_LEGACY_CHECKSUM'
+  | 'CATALOG_READ_FAILED'
+  | 'CATALOG_INVALID'
+  | 'CATALOG_UNSUPPORTED_OBJECTS'
+  | 'CATALOG_MISSING'
+  | 'CATALOG_DRIFT'
+  | 'CATALOG_UNKNOWN'
+  | 'ROLLBACK_FAILED'
+  | 'RELEASE_FAILED';
 
 export interface SaasMigrationAuditReport {
   format: 'saas-migration-audit-v1';
   /** A match is limited to this release's ledger and the declared catalog profile. */
   compatibility: 'unverified' | 'mismatch' | 'matches-trusted-baseline';
   target: SaasMigrationAuditTarget | null;
-  actualTarget: { database: string | null; databaseChecksum: string; schemaPresent: boolean; postgresMajor: number } | null;
+  actualTarget: {
+    database: string | null;
+    databaseChecksum: string;
+    schemaPresent: boolean;
+    postgresMajor: number;
+  } | null;
   releaseId: string | null;
   expectedMigrationsChecksum: string | null;
   migrations: SaasAuditMigrationComparison[];
@@ -121,24 +154,38 @@ const digest = (value: string): string => createHash('sha256').update(value).dig
 const quoteIdentifier = (value: string): string => `"${value.replaceAll('"', '""')}"`;
 
 function positiveInteger(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value
-    : typeof value === 'string' && /^[1-9][0-9]*$/.test(value) ? Number(value) : Number.NaN;
+  const parsed =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^[1-9][0-9]*$/.test(value)
+        ? Number(value)
+        : Number.NaN;
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-export function isSaasMigrationAuditTarget(target: SaasMigrationAuditTarget | undefined): target is SaasMigrationAuditTarget {
-  return !!target && typeof target.deploymentId === 'string' && LABEL.test(target.deploymentId)
-    && typeof target.environmentId === 'string' && LABEL.test(target.environmentId)
-    && typeof target.database === 'string' && IDENTIFIER.test(target.database)
-    && typeof target.schema === 'string' && IDENTIFIER.test(target.schema)
-    && !['pg_catalog', 'information_schema', 'pg_temp', 'pg_toast'].includes(target.schema)
-    && !target.schema.startsWith('pg_');
+export function isSaasMigrationAuditTarget(
+  target: SaasMigrationAuditTarget | undefined,
+): target is SaasMigrationAuditTarget {
+  return (
+    !!target &&
+    typeof target.deploymentId === 'string' &&
+    LABEL.test(target.deploymentId) &&
+    typeof target.environmentId === 'string' &&
+    LABEL.test(target.environmentId) &&
+    typeof target.database === 'string' &&
+    IDENTIFIER.test(target.database) &&
+    typeof target.schema === 'string' &&
+    IDENTIFIER.test(target.schema) &&
+    !['pg_catalog', 'information_schema', 'pg_temp', 'pg_toast'].includes(target.schema) &&
+    !target.schema.startsWith('pg_')
+  );
 }
 
 /** Uses exactly the migration runner's SHA256(name + NUL + sql) algorithm. */
-export function getSaasMigrationAuditExpectations(
-  migrations: readonly SaasMigration[] = SAAS_MIGRATIONS,
-): { migrations: SaasAuditMigrationEvidence[]; checksum: string } {
+export function getSaasMigrationAuditExpectations(migrations: readonly SaasMigration[] = SAAS_MIGRATIONS): {
+  migrations: SaasAuditMigrationEvidence[];
+  checksum: string;
+} {
   if (!Array.isArray(migrations) || migrations.length === 0 || migrations.length > 10_000) {
     throw new Error('Invalid SaaS audit migration registry');
   }
@@ -146,22 +193,31 @@ export function getSaasMigrationAuditExpectations(
   const names = new Set<string>();
   // Validate before sorting: malformed inputs must not leak through comparator errors.
   for (const migration of migrations) {
-    if (!migration || !Number.isSafeInteger(migration.version) || migration.version < 1
-      || typeof migration.name !== 'string' || !migration.name.trim()
-      || typeof migration.sql !== 'string' || !migration.sql.trim()
-      || versions.has(migration.version) || names.has(migration.name)) {
+    if (
+      !migration ||
+      !Number.isSafeInteger(migration.version) ||
+      migration.version < 1 ||
+      typeof migration.name !== 'string' ||
+      !migration.name.trim() ||
+      typeof migration.sql !== 'string' ||
+      !migration.sql.trim() ||
+      versions.has(migration.version) ||
+      names.has(migration.name)
+    ) {
       throw new Error('Invalid SaaS audit migration registry');
     }
     versions.add(migration.version);
     names.add(migration.name);
   }
-  const expected = [...migrations].sort((a, b) => a.version - b.version).map((migration) => ({
-    version: migration.version,
-    // Registry names are emitted only if they are safe metadata labels.
-    name: LABEL.test(migration.name) ? migration.name : null,
-    nameChecksum: digest(migration.name),
-    checksum: createHash('sha256').update(migration.name).update('\0').update(migration.sql).digest('hex'),
-  }));
+  const expected = [...migrations]
+    .sort((a, b) => a.version - b.version)
+    .map((migration) => ({
+      version: migration.version,
+      // Registry names are emitted only if they are safe metadata labels.
+      name: LABEL.test(migration.name) ? migration.name : null,
+      nameChecksum: digest(migration.name),
+      checksum: createHash('sha256').update(migration.name).update('\0').update(migration.sql).digest('hex'),
+    }));
   return { migrations: expected, checksum: digest(JSON.stringify(expected)) };
 }
 
@@ -175,18 +231,30 @@ function orderedCatalog(objects: readonly SaasAuditCatalogObject[]): SaasAuditCa
 
 /** Stable digest of already-hashed inventory; useful when reviewing baseline candidates offline. */
 export function getSaasAuditCatalogChecksum(objects: readonly SaasAuditCatalogObject[]): string {
-  return digest(JSON.stringify(orderedCatalog(objects).map(({ kind, identityChecksum, definitionChecksum }) => ({
-    kind, identityChecksum, definitionChecksum,
-  }))));
+  return digest(
+    JSON.stringify(
+      orderedCatalog(objects).map(({ kind, identityChecksum, definitionChecksum }) => ({
+        kind,
+        identityChecksum,
+        definitionChecksum,
+      })),
+    ),
+  );
 }
 
 function validCatalog(objects: readonly SaasAuditCatalogObject[]): boolean {
   if (!Array.isArray(objects) || objects.length === 0 || objects.length > 100_000) return false;
   const seen = new Set<string>();
   for (const object of objects) {
-    if (!object || !catalogKinds.has(object.kind) || typeof object.identityChecksum !== 'string'
-      || !HASH.test(object.identityChecksum) || typeof object.definitionChecksum !== 'string'
-      || !HASH.test(object.definitionChecksum)) return false;
+    if (
+      !object ||
+      !catalogKinds.has(object.kind) ||
+      typeof object.identityChecksum !== 'string' ||
+      !HASH.test(object.identityChecksum) ||
+      typeof object.definitionChecksum !== 'string' ||
+      !HASH.test(object.definitionChecksum)
+    )
+      return false;
     const key = `${object.kind}:${object.identityChecksum}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -198,14 +266,21 @@ function validCatalog(objects: readonly SaasAuditCatalogObject[]): boolean {
 export function isSaasAuditCatalogBaseline(value: unknown): value is SaasAuditCatalogBaseline {
   if (!value || typeof value !== 'object') return false;
   const baseline = value as SaasAuditCatalogBaseline;
-  return baseline.profile === SAAS_AUDIT_CATALOG_PROFILE
-    && ['complete-profile', 'partial'].includes(baseline.coverage)
-    && typeof baseline.evidenceId === 'string' && LABEL.test(baseline.evidenceId)
-    && typeof baseline.releaseId === 'string' && LABEL.test(baseline.releaseId)
-    && typeof baseline.schema === 'string' && IDENTIFIER.test(baseline.schema)
-    && Number.isSafeInteger(baseline.postgresMajor) && baseline.postgresMajor >= 15
-    && typeof baseline.migrationsChecksum === 'string' && HASH.test(baseline.migrationsChecksum)
-    && validCatalog(baseline.objects);
+  return (
+    baseline.profile === SAAS_AUDIT_CATALOG_PROFILE &&
+    ['complete-profile', 'partial'].includes(baseline.coverage) &&
+    typeof baseline.evidenceId === 'string' &&
+    LABEL.test(baseline.evidenceId) &&
+    typeof baseline.releaseId === 'string' &&
+    LABEL.test(baseline.releaseId) &&
+    typeof baseline.schema === 'string' &&
+    IDENTIFIER.test(baseline.schema) &&
+    Number.isSafeInteger(baseline.postgresMajor) &&
+    baseline.postgresMajor >= 15 &&
+    typeof baseline.migrationsChecksum === 'string' &&
+    HASH.test(baseline.migrationsChecksum) &&
+    validCatalog(baseline.objects)
+  );
 }
 
 /**
@@ -309,31 +384,67 @@ export async function auditSaasMigrationCompatibility(
   options: SaasMigrationAuditOptions,
 ): Promise<SaasMigrationAuditReport> {
   const report: SaasMigrationAuditReport = {
-    format: 'saas-migration-audit-v1', compatibility: 'unverified', target: null,
-    actualTarget: null, releaseId: null, expectedMigrationsChecksum: null, migrations: [],
+    format: 'saas-migration-audit-v1',
+    compatibility: 'unverified',
+    target: null,
+    actualTarget: null,
+    releaseId: null,
+    expectedMigrationsChecksum: null,
+    migrations: [],
     catalog: {
       profile: SAAS_AUDIT_CATALOG_PROFILE,
-      coverage: ['relations/RLS flags', 'columns/types/defaults', 'constraints/validation',
-        'indexes/validity', 'triggers/enabled/internal-FK state', 'routine definitions', 'views', 'sequence definitions/ownership'],
-      exclusions: ['roles/ACL/IAM', 'business data and sequence current values',
-        'other-schema definitions/dependencies', 'deployment identity attestation', 'physical storage/owner settings',
-        'upgrade path and restore provenance'],
+      coverage: [
+        'relations/RLS flags',
+        'columns/types/defaults',
+        'constraints/validation',
+        'indexes/validity',
+        'triggers/enabled/internal-FK state',
+        'routine definitions',
+        'views',
+        'sequence definitions/ownership',
+      ],
+      exclusions: [
+        'roles/ACL/IAM',
+        'business data and sequence current values',
+        'other-schema definitions/dependencies',
+        'deployment identity attestation',
+        'physical storage/owner settings',
+        'upgrade path and restore provenance',
+      ],
       unsupportedFeatures: [],
-      baselineEvidenceId: null, baselineCoverage: null, expectedChecksum: null,
-      actualChecksum: null, actual: [], comparisons: [],
-    }, issues: [],
+      baselineEvidenceId: null,
+      baselineCoverage: null,
+      expectedChecksum: null,
+      actualChecksum: null,
+      actual: [],
+      comparisons: [],
+    },
+    issues: [],
   };
   const issue = (code: SaasMigrationAuditCode, version?: number, identityChecksum?: string): void => {
-    report.issues.push({ code, ...(version === undefined ? {} : { version }),
-      ...(identityChecksum === undefined ? {} : { identityChecksum }) });
+    report.issues.push({
+      code,
+      ...(version === undefined ? {} : { version }),
+      ...(identityChecksum === undefined ? {} : { identityChecksum }),
+    });
   };
-  if (!options || !isSaasMigrationAuditTarget(options.target) || typeof options.releaseId !== 'string'
-    || !LABEL.test(options.releaseId) || !pool || typeof pool.connect !== 'function') {
+  if (
+    !options ||
+    !isSaasMigrationAuditTarget(options.target) ||
+    typeof options.releaseId !== 'string' ||
+    !LABEL.test(options.releaseId) ||
+    !pool ||
+    typeof pool.connect !== 'function'
+  ) {
     issue('INVALID_INPUT');
     return report;
   }
-  report.target = { deploymentId: options.target.deploymentId, environmentId: options.target.environmentId,
-    database: options.target.database, schema: options.target.schema };
+  report.target = {
+    deploymentId: options.target.deploymentId,
+    environmentId: options.target.environmentId,
+    database: options.target.database,
+    schema: options.target.schema,
+  };
   report.releaseId = options.releaseId;
   let expected: SaasAuditMigrationEvidence[];
   try {
@@ -345,12 +456,24 @@ export async function auditSaasMigrationCompatibility(
     return report;
   }
   report.migrations = expected.map((migration) => ({
-    version: migration.version, state: 'unknown', expected: migration, actual: null,
+    version: migration.version,
+    state: 'unknown',
+    expected: migration,
+    actual: null,
   }));
   const legacy = options.legacyChecksums ?? [];
-  if (!Array.isArray(legacy) || legacy.some((entry) => !entry || ![22, 23].includes(entry.version)
-    || typeof entry.checksum !== 'string' || !HASH.test(entry.checksum)
-    || typeof entry.evidenceId !== 'string' || !LABEL.test(entry.evidenceId))) {
+  if (
+    !Array.isArray(legacy) ||
+    legacy.some(
+      (entry) =>
+        !entry ||
+        ![22, 23].includes(entry.version) ||
+        typeof entry.checksum !== 'string' ||
+        !HASH.test(entry.checksum) ||
+        typeof entry.evidenceId !== 'string' ||
+        !LABEL.test(entry.evidenceId),
+    )
+  ) {
     issue('INVALID_INPUT');
     return report;
   }
@@ -362,24 +485,35 @@ export async function auditSaasMigrationCompatibility(
   } else {
     // Copy only the public contract; do not retain extra fields from untrusted JSON inputs.
     baseline = {
-      profile: suppliedBaseline.profile, coverage: suppliedBaseline.coverage,
-      evidenceId: suppliedBaseline.evidenceId, releaseId: suppliedBaseline.releaseId,
-      schema: suppliedBaseline.schema, postgresMajor: suppliedBaseline.postgresMajor,
+      profile: suppliedBaseline.profile,
+      coverage: suppliedBaseline.coverage,
+      evidenceId: suppliedBaseline.evidenceId,
+      releaseId: suppliedBaseline.releaseId,
+      schema: suppliedBaseline.schema,
+      postgresMajor: suppliedBaseline.postgresMajor,
       migrationsChecksum: suppliedBaseline.migrationsChecksum,
       objects: suppliedBaseline.objects.map(({ kind, identityChecksum, definitionChecksum }) => ({
-        kind, identityChecksum, definitionChecksum,
+        kind,
+        identityChecksum,
+        definitionChecksum,
       })),
     };
     report.catalog.baselineEvidenceId = baseline.evidenceId;
     report.catalog.baselineCoverage = baseline.coverage;
     report.catalog.expectedChecksum = getSaasAuditCatalogChecksum(baseline.objects);
     if (baseline.coverage !== 'complete-profile') issue('BASELINE_PARTIAL');
-    if (baseline.releaseId !== report.releaseId || baseline.schema !== report.target.schema
-      || baseline.migrationsChecksum !== report.expectedMigrationsChecksum) issue('BASELINE_BINDING_MISMATCH');
+    if (
+      baseline.releaseId !== report.releaseId ||
+      baseline.schema !== report.target.schema ||
+      baseline.migrationsChecksum !== report.expectedMigrationsChecksum
+    )
+      issue('BASELINE_BINDING_MISMATCH');
   }
 
   let client: SaasDatabaseClient;
-  try { client = await pool.connect(); } catch {
+  try {
+    client = await pool.connect();
+  } catch {
     issue('CONNECT_FAILED');
     return report;
   }
@@ -393,21 +527,29 @@ export async function auditSaasMigrationCompatibility(
     const targetResult = await client.query<Record<string, unknown>>(TARGET_SQL, [report.target.schema]);
     const row = targetResult.rows[0];
     const serverVersion = positiveInteger(row?.server_version_num);
-    if (targetResult.rows.length !== 1 || !row || typeof row.database !== 'string'
-      || serverVersion === null || typeof row.schema_present !== 'boolean'
-      || row.read_only !== 'on' || row.isolation !== 'repeatable read') {
+    if (
+      targetResult.rows.length !== 1 ||
+      !row ||
+      typeof row.database !== 'string' ||
+      serverVersion === null ||
+      typeof row.schema_present !== 'boolean' ||
+      row.read_only !== 'on' ||
+      row.isolation !== 'repeatable read'
+    ) {
       issue('TARGET_UNAVAILABLE');
     } else {
       report.actualTarget = {
         database: row.database === report.target.database ? row.database : null,
-        databaseChecksum: digest(row.database), schemaPresent: row.schema_present,
+        databaseChecksum: digest(row.database),
+        schemaPresent: row.schema_present,
         postgresMajor: Math.floor(serverVersion / 10_000),
       };
       if (row.database !== report.target.database) issue('TARGET_MISMATCH');
       else if (!row.schema_present) issue('TARGET_UNAVAILABLE');
       else if (report.actualTarget.postgresMajor < 15) issue('UNSUPPORTED_POSTGRES');
       else {
-        if (baseline && baseline.postgresMajor !== report.actualTarget.postgresMajor) issue('BASELINE_BINDING_MISMATCH');
+        if (baseline && baseline.postgresMajor !== report.actualTarget.postgresMajor)
+          issue('BASELINE_BINDING_MISMATCH');
         phase = 'LEDGER_READ_FAILED';
         const ledger = await client.query<{ relkind: unknown }>(LEDGER_SQL, [report.target.schema]);
         if (ledger.rows.length === 0) {
@@ -427,25 +569,35 @@ export async function auditSaasMigrationCompatibility(
               issue('LEDGER_INVALID');
               continue;
             }
-            if (typeof applied.name !== 'string' || typeof applied.checksum !== 'string'
-              || !HASH.test(applied.checksum) || seenVersions.has(version) || seenNames.has(applied.name)) {
+            if (
+              typeof applied.name !== 'string' ||
+              typeof applied.checksum !== 'string' ||
+              !HASH.test(applied.checksum) ||
+              seenVersions.has(version) ||
+              seenNames.has(applied.name)
+            ) {
               issue('LEDGER_INVALID', version);
               const comparison = byVersion.get(version);
               const actual: SaasAuditMigrationEvidence = {
-                version, name: null, nameChecksum: digest(typeof applied.name === 'string' ? applied.name : ''),
+                version,
+                name: null,
+                nameChecksum: digest(typeof applied.name === 'string' ? applied.name : ''),
                 checksum: typeof applied.checksum === 'string' && HASH.test(applied.checksum) ? applied.checksum : null,
               };
-              if (comparison) { comparison.state = 'unknown'; comparison.actual ??= actual; }
-              else report.migrations.push({ version, state: 'unknown', expected: null, actual });
+              if (comparison) {
+                comparison.state = 'unknown';
+                comparison.actual ??= actual;
+              } else report.migrations.push({ version, state: 'unknown', expected: null, actual });
               continue;
             }
             seenVersions.add(version);
             seenNames.add(applied.name);
             const comparison = byVersion.get(version);
             const actual: SaasAuditMigrationEvidence = {
-              version, name: comparison?.expected?.nameChecksum === digest(applied.name)
-                ? comparison.expected.name : null,
-              nameChecksum: digest(applied.name), checksum: applied.checksum,
+              version,
+              name: comparison?.expected?.nameChecksum === digest(applied.name) ? comparison.expected.name : null,
+              nameChecksum: digest(applied.name),
+              checksum: applied.checksum,
             };
             if (!comparison) {
               report.migrations.push({ version, state: 'unknown', expected: null, actual });
@@ -480,27 +632,41 @@ export async function auditSaasMigrationCompatibility(
 
         // Inventory remains useful without a ledger or baseline, but cannot grant compatibility.
         phase = 'CATALOG_READ_FAILED';
-        const catalog = await client.query<Record<string, unknown>>(SAAS_MIGRATION_AUDIT_CATALOG_SQL, [report.target.schema]);
+        const catalog = await client.query<Record<string, unknown>>(SAAS_MIGRATION_AUDIT_CATALOG_SQL, [
+          report.target.schema,
+        ]);
         const actual: SaasAuditCatalogObject[] = [];
         let invalid = false;
         for (const object of catalog.rows) {
           if (object?.kind === 'unsupported') {
-            const feature: UnsupportedCatalogFeature = unsupportedCatalogFeatures.some((kind) => kind === object.identity)
-              ? object.identity as UnsupportedCatalogFeature : 'unknown';
+            const feature: UnsupportedCatalogFeature = unsupportedCatalogFeatures.some(
+              (kind) => kind === object.identity,
+            )
+              ? (object.identity as UnsupportedCatalogFeature)
+              : 'unknown';
             if (!report.catalog.unsupportedFeatures.includes(feature)) {
               report.catalog.unsupportedFeatures.push(feature);
               issue('CATALOG_UNSUPPORTED_OBJECTS');
             }
             continue;
           }
-          if (!object || typeof object.kind !== 'string' || !catalogKinds.has(object.kind)
-            || typeof object.identity !== 'string' || !object.identity
-            || typeof object.definition !== 'string' || !object.definition) {
+          if (
+            !object ||
+            typeof object.kind !== 'string' ||
+            !catalogKinds.has(object.kind) ||
+            typeof object.identity !== 'string' ||
+            !object.identity ||
+            typeof object.definition !== 'string' ||
+            !object.definition
+          ) {
             invalid = true;
             continue;
           }
-          actual.push({ kind: object.kind as SaasAuditCatalogKind,
-            identityChecksum: digest(object.identity), definitionChecksum: digest(object.definition) });
+          actual.push({
+            kind: object.kind as SaasAuditCatalogKind,
+            identityChecksum: digest(object.identity),
+            definitionChecksum: digest(object.definition),
+          });
         }
         if (invalid || !validCatalog(actual)) issue('CATALOG_INVALID');
         else {
@@ -511,16 +677,34 @@ export async function auditSaasMigrationCompatibility(
             for (const expectedObject of orderedCatalog(baseline.objects)) {
               const key = `${expectedObject.kind}:${expectedObject.identityChecksum}`;
               const actualObject = actualByKey.get(key) ?? null;
-              const state = !actualObject ? 'missing'
-                : actualObject.definitionChecksum !== expectedObject.definitionChecksum ? 'drift' : 'match';
-              report.catalog.comparisons.push({ kind: expectedObject.kind, identityChecksum: expectedObject.identityChecksum,
-                state, expected: expectedObject, actual: actualObject });
-              if (state !== 'match') issue(state === 'missing' ? 'CATALOG_MISSING' : 'CATALOG_DRIFT', undefined, expectedObject.identityChecksum);
+              const state = !actualObject
+                ? 'missing'
+                : actualObject.definitionChecksum !== expectedObject.definitionChecksum
+                  ? 'drift'
+                  : 'match';
+              report.catalog.comparisons.push({
+                kind: expectedObject.kind,
+                identityChecksum: expectedObject.identityChecksum,
+                state,
+                expected: expectedObject,
+                actual: actualObject,
+              });
+              if (state !== 'match')
+                issue(
+                  state === 'missing' ? 'CATALOG_MISSING' : 'CATALOG_DRIFT',
+                  undefined,
+                  expectedObject.identityChecksum,
+                );
               actualByKey.delete(key);
             }
             for (const actualObject of orderedCatalog([...actualByKey.values()])) {
-              report.catalog.comparisons.push({ kind: actualObject.kind, identityChecksum: actualObject.identityChecksum,
-                state: 'unknown', expected: null, actual: actualObject });
+              report.catalog.comparisons.push({
+                kind: actualObject.kind,
+                identityChecksum: actualObject.identityChecksum,
+                state: 'unknown',
+                expected: null,
+                actual: actualObject,
+              });
               issue('CATALOG_UNKNOWN', undefined, actualObject.identityChecksum);
             }
           }
@@ -533,14 +717,33 @@ export async function auditSaasMigrationCompatibility(
     if (!began) discard = true;
   } finally {
     if (began) {
-      try { await client.query('ROLLBACK'); } catch { discard = true; issue('ROLLBACK_FAILED'); }
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        discard = true;
+        issue('ROLLBACK_FAILED');
+      }
     }
-    try { client.release(discard); } catch { issue('RELEASE_FAILED'); }
+    try {
+      client.release(discard);
+    } catch {
+      issue('RELEASE_FAILED');
+    }
   }
   const unverified = new Set<SaasMigrationAuditCode>([
-    'BASELINE_MISSING', 'BASELINE_PARTIAL', 'INVALID_BASELINE', 'BASELINE_BINDING_MISMATCH',
-    'CONNECT_FAILED', 'SNAPSHOT_FAILED', 'TARGET_UNAVAILABLE', 'LEDGER_READ_FAILED',
-    'CATALOG_READ_FAILED', 'CATALOG_INVALID', 'CATALOG_UNSUPPORTED_OBJECTS', 'ROLLBACK_FAILED', 'RELEASE_FAILED',
+    'BASELINE_MISSING',
+    'BASELINE_PARTIAL',
+    'INVALID_BASELINE',
+    'BASELINE_BINDING_MISMATCH',
+    'CONNECT_FAILED',
+    'SNAPSHOT_FAILED',
+    'TARGET_UNAVAILABLE',
+    'LEDGER_READ_FAILED',
+    'CATALOG_READ_FAILED',
+    'CATALOG_INVALID',
+    'CATALOG_UNSUPPORTED_OBJECTS',
+    'ROLLBACK_FAILED',
+    'RELEASE_FAILED',
   ]);
   if (report.issues.length === 0) report.compatibility = 'matches-trusted-baseline';
   else if (report.issues.some(({ code }) => !unverified.has(code))) report.compatibility = 'mismatch';
@@ -556,20 +759,37 @@ export class SaasMigrationAuditError extends Error {
 
 /** This gate is necessary evidence, not permission to migrate or proof of a safe upgrade path. */
 export function assertSaasMigrationAuditMatches(report: SaasMigrationAuditReport): void {
-  if (report.compatibility !== 'matches-trusted-baseline' || report.issues.length !== 0
-    || !report.target || !report.actualTarget || report.actualTarget.database !== report.target.database
-    || !report.actualTarget.schemaPresent || report.actualTarget.postgresMajor < 15
-    || report.catalog.baselineCoverage !== 'complete-profile' || !report.catalog.baselineEvidenceId
-    || report.catalog.unsupportedFeatures.length !== 0
-    || !report.catalog.actualChecksum || report.catalog.actualChecksum !== report.catalog.expectedChecksum
-    || !validCatalog(report.catalog.actual)
-    || getSaasAuditCatalogChecksum(report.catalog.actual) !== report.catalog.actualChecksum
-    || report.catalog.comparisons.length !== report.catalog.actual.length
-    || report.catalog.comparisons.some(({ state, expected, actual }) => state !== 'match'
-      || !expected || !actual || expected.definitionChecksum !== actual.definitionChecksum)
-    || report.migrations.length === 0 || report.migrations.some(({ state, expected, actual }) => state !== 'match'
-      || !expected || !actual || expected.version !== actual.version
-      || expected.nameChecksum !== actual.nameChecksum || expected.checksum !== actual.checksum)) {
+  if (
+    report.compatibility !== 'matches-trusted-baseline' ||
+    report.issues.length !== 0 ||
+    !report.target ||
+    !report.actualTarget ||
+    report.actualTarget.database !== report.target.database ||
+    !report.actualTarget.schemaPresent ||
+    report.actualTarget.postgresMajor < 15 ||
+    report.catalog.baselineCoverage !== 'complete-profile' ||
+    !report.catalog.baselineEvidenceId ||
+    report.catalog.unsupportedFeatures.length !== 0 ||
+    !report.catalog.actualChecksum ||
+    report.catalog.actualChecksum !== report.catalog.expectedChecksum ||
+    !validCatalog(report.catalog.actual) ||
+    getSaasAuditCatalogChecksum(report.catalog.actual) !== report.catalog.actualChecksum ||
+    report.catalog.comparisons.length !== report.catalog.actual.length ||
+    report.catalog.comparisons.some(
+      ({ state, expected, actual }) =>
+        state !== 'match' || !expected || !actual || expected.definitionChecksum !== actual.definitionChecksum,
+    ) ||
+    report.migrations.length === 0 ||
+    report.migrations.some(
+      ({ state, expected, actual }) =>
+        state !== 'match' ||
+        !expected ||
+        !actual ||
+        expected.version !== actual.version ||
+        expected.nameChecksum !== actual.nameChecksum ||
+        expected.checksum !== actual.checksum,
+    )
+  ) {
     throw new SaasMigrationAuditError();
   }
 }

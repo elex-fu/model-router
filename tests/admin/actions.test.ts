@@ -22,7 +22,10 @@ test('configured upstream discovery and bounded test run use real HTTP and durab
       if (holdTests) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 30_000);
-          res.once('close', () => { clearTimeout(timer); resolve(); });
+          res.once('close', () => {
+            clearTimeout(timer);
+            resolve();
+          });
         });
         if (res.destroyed) return;
       }
@@ -130,16 +133,23 @@ test('configured upstream discovery and bounded test run use real HTTP and durab
       await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal((await getJob(cancelJobId)).state, 'running');
     const noCsrf = await fetch(`${base}/upstreams/ollama/test-jobs/${cancelJobId}/cancel`, {
-      method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' }, body: '{}',
+      method: 'POST',
+      headers: { cookie, origin, 'content-type': 'application/json' },
+      body: '{}',
     });
     assert.equal(noCsrf.status, 403);
     const unauthenticated = await fetch(`${base}/upstreams/ollama/test-jobs/${cancelJobId}/cancel`, {
-      method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}',
+      method: 'POST',
+      headers: { origin, 'content-type': 'application/json' },
+      body: '{}',
     });
     assert.equal(unauthenticated.status, 401);
     const otherUpstream = await post(`/upstreams/other/test-jobs/${cancelJobId}/cancel`, {});
     assert.equal(otherUpstream.status, 409);
-    const wrongJobType = await post(`/upstreams/ollama/test-jobs/${(await post('/maintenance/jobs', { type: 'integrity-check' })).body.data.jobId}/cancel`, {});
+    const wrongJobType = await post(
+      `/upstreams/ollama/test-jobs/${(await post('/maintenance/jobs', { type: 'integrity-check' })).body.data.jobId}/cancel`,
+      {},
+    );
     assert.equal(wrongJobType.status, 409);
     const cancelled = await post(`/upstreams/ollama/test-jobs/${cancelJobId}/cancel`, {});
     assert.equal(cancelled.status, 200);

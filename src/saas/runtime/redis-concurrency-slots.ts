@@ -327,9 +327,7 @@ export function createRedisRuntimeCache(
         if (safeRedisString(key, MAX_KEY_BYTES) === null) return { state: 'miss', value: null };
         const ttl = validatePositiveInteger(ttlMs, 1, 86_400_000);
         if (ttl === null) return { state: 'miss', value: null };
-        return replyToCacheEntry(
-          await client.command(['EVAL', REDIS_CACHE_GET_SLIDING_SCRIPT, '1', key, String(ttl)]),
-        );
+        return replyToCacheEntry(await client.command(['EVAL', REDIS_CACHE_GET_SLIDING_SCRIPT, '1', key, String(ttl)]));
       } catch {
         // Same fail-open posture as get/set: an unavailable Redis only costs
         // the sticky fast path, never the request.

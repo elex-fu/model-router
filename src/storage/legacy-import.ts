@@ -80,7 +80,7 @@ const optionalColumns = [
 function lookup(map: LegacyImportOptions['proxyKeyIdsByName'], name: string | null): string | null {
   if (!name || !map) return null;
   if (map instanceof Map) return map.get(name) ?? null;
-  return Object.prototype.hasOwnProperty.call(map, name) ? ((map as Record<string, string>)[name] ?? null) : null;
+  return Object.hasOwn(map, name) ? ((map as Record<string, string>)[name] ?? null) : null;
 }
 
 function protocol(value: string | null): UsageProtocol | 'unknown' {

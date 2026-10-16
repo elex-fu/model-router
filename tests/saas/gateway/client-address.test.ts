@@ -5,10 +5,11 @@ import { resolveClientAddress } from '../../../src/saas/gateway/client-address.j
 const TRUSTED_PROXIES = ['10.0.0.0/8'];
 
 test('does not accept a spoofed leftmost XFF value past the nearest untrusted hop', () => {
-  assert.deepEqual(
-    resolveClientAddress('10.0.0.3', '203.0.113.200, 198.51.100.9, 10.2.3.4', TRUSTED_PROXIES),
-    { status: 'resolved', address: '198.51.100.9', source: 'x-forwarded-for' },
-  );
+  assert.deepEqual(resolveClientAddress('10.0.0.3', '203.0.113.200, 198.51.100.9, 10.2.3.4', TRUSTED_PROXIES), {
+    status: 'resolved',
+    address: '198.51.100.9',
+    source: 'x-forwarded-for',
+  });
 });
 
 test('uses the validated socket peer when no proxy CIDRs are configured', () => {
@@ -28,10 +29,11 @@ test('ignores XFF when the immediate socket peer is not trusted', () => {
 });
 
 test('walks a trusted multi-proxy chain from right to left', () => {
-  assert.deepEqual(
-    resolveClientAddress('10.0.0.3', '203.0.113.7, 10.0.0.1, 10.0.0.2', TRUSTED_PROXIES),
-    { status: 'resolved', address: '203.0.113.7', source: 'x-forwarded-for' },
-  );
+  assert.deepEqual(resolveClientAddress('10.0.0.3', '203.0.113.7, 10.0.0.1, 10.0.0.2', TRUSTED_PROXIES), {
+    status: 'resolved',
+    address: '203.0.113.7',
+    source: 'x-forwarded-for',
+  });
 });
 
 test('accepts a single XFF field value in array form and trims only OWS', () => {
@@ -55,10 +57,10 @@ test('returns unresolved for missing, empty, malformed, and duplicate XFF values
     status: 'unresolved',
     reason: 'malformed-forwarded-address',
   });
-  assert.deepEqual(
-    resolveClientAddress('10.0.0.3', ['203.0.113.7', '203.0.113.7'], TRUSTED_PROXIES),
-    { status: 'unresolved', reason: 'ambiguous-forwarded-header' },
-  );
+  assert.deepEqual(resolveClientAddress('10.0.0.3', ['203.0.113.7', '203.0.113.7'], TRUSTED_PROXIES), {
+    status: 'unresolved',
+    reason: 'ambiguous-forwarded-header',
+  });
 });
 
 test('returns unresolved for oversized and overlong forwarded chains', () => {
@@ -87,10 +89,11 @@ test('returns unresolved for invalid trusted proxy CIDRs', () => {
 });
 
 test('normalizes IPv4-mapped IPv6 peers, forwarded addresses, and proxy matches', () => {
-  assert.deepEqual(
-    resolveClientAddress('::ffff:10.0.0.3', '::ffff:203.0.113.7', TRUSTED_PROXIES),
-    { status: 'resolved', address: '203.0.113.7', source: 'x-forwarded-for' },
-  );
+  assert.deepEqual(resolveClientAddress('::ffff:10.0.0.3', '::ffff:203.0.113.7', TRUSTED_PROXIES), {
+    status: 'resolved',
+    address: '203.0.113.7',
+    source: 'x-forwarded-for',
+  });
   assert.deepEqual(resolveClientAddress('::ffff:192.0.2.7', undefined, []), {
     status: 'resolved',
     address: '192.0.2.7',

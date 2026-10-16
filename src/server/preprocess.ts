@@ -48,7 +48,9 @@ function stripThinking(body: any): void {
   if (!Array.isArray(body.messages)) return;
   for (const message of body.messages) {
     if (Array.isArray(message?.content)) {
-      message.content = message.content.filter((block: any) => block?.type !== 'thinking' && block?.type !== 'redacted_thinking');
+      message.content = message.content.filter(
+        (block: any) => block?.type !== 'thinking' && block?.type !== 'redacted_thinking',
+      );
     }
   }
 }

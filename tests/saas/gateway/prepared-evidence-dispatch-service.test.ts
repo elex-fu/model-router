@@ -54,8 +54,13 @@ function evidence(): PreparedRequestEvidenceRecord {
     requestedModel: 'model-1',
     mappedModel: 'resolved-model-1',
     resolvedModel: 'resolved-model-1',
-    modelResolution: { requestedModel: 'model-1', mappedModel: 'resolved-model-1',
-      resolvedModel: 'resolved-model-1', mappingSource: 'alias', mappingVersion: 1 },
+    modelResolution: {
+      requestedModel: 'model-1',
+      mappedModel: 'resolved-model-1',
+      resolvedModel: 'resolved-model-1',
+      mappingSource: 'alias',
+      mappingVersion: 1,
+    },
     clientProtocol: 'openai',
     providerProtocol: 'openai',
     clientOperation: 'chat.completions',
@@ -107,8 +112,13 @@ function attempt(overrides: Partial<AttemptRecord> = {}): AttemptRecord {
     productId: 'product-1',
     resolvedModel: 'resolved-model-1',
     protocol: 'openai',
-    modelResolution: { requestedModel: 'model-1', mappedModel: 'resolved-model-1',
-      resolvedModel: 'resolved-model-1', mappingSource: 'alias', mappingVersion: 1 },
+    modelResolution: {
+      requestedModel: 'model-1',
+      mappedModel: 'resolved-model-1',
+      resolvedModel: 'resolved-model-1',
+      mappingSource: 'alias',
+      mappingVersion: 1,
+    },
     clientProtocol: 'openai',
     providerProtocol: 'openai',
     clientOperation: 'chat.completions',
@@ -168,11 +178,18 @@ class FakeMetering {
   }
 
   claimEvidence(record: PreparedRequestEvidenceRecord): void {
-    if (this.current.tenantId !== record.tenantId || this.current.requestId !== record.requestId ||
-      this.current.id !== record.attemptId || this.current.ordinal !== record.attemptOrdinal ||
-      this.current.preparedEvidenceId !== null || this.current.dispatchState !== 'not_sent' ||
-      this.current.resultState !== 'pending' || this.current.responseStarted ||
-      this.current.bindingState !== 'bound' || this.current.dispatchAuthorityState !== 'bound') {
+    if (
+      this.current.tenantId !== record.tenantId ||
+      this.current.requestId !== record.requestId ||
+      this.current.id !== record.attemptId ||
+      this.current.ordinal !== record.attemptOrdinal ||
+      this.current.preparedEvidenceId !== null ||
+      this.current.dispatchState !== 'not_sent' ||
+      this.current.resultState !== 'pending' ||
+      this.current.responseStarted ||
+      this.current.bindingState !== 'bound' ||
+      this.current.dispatchAuthorityState !== 'bound'
+    ) {
       throw new Error('attempt claim CAS conflict');
     }
     const before = this.current.stateVersion;
@@ -184,12 +201,19 @@ class FakeMetering {
     this.calls.push(`transition:${input.dispatchState}`);
     this.transitionInputs.push(input);
     this.beforeTransition?.(input);
-    if (input.tenantId !== this.current.tenantId || input.requestId !== this.current.requestId ||
-      input.attemptId !== this.current.id || input.expectedStateVersion !== this.current.stateVersion ||
-      input.expectedDispatchState !== this.current.dispatchState || input.expectedResultState !== this.current.resultState ||
+    if (
+      input.tenantId !== this.current.tenantId ||
+      input.requestId !== this.current.requestId ||
+      input.attemptId !== this.current.id ||
+      input.expectedStateVersion !== this.current.stateVersion ||
+      input.expectedDispatchState !== this.current.dispatchState ||
+      input.expectedResultState !== this.current.resultState ||
       input.expectedResponseStarted !== this.current.responseStarted ||
-      (input.dispatchState === 'dispatching' && (this.current.preparedEvidenceId === null ||
-        this.current.bindingState !== 'bound' || this.current.dispatchAuthorityState !== 'bound'))) {
+      (input.dispatchState === 'dispatching' &&
+        (this.current.preparedEvidenceId === null ||
+          this.current.bindingState !== 'bound' ||
+          this.current.dispatchAuthorityState !== 'bound'))
+    ) {
       throw new Error('attempt transition CAS conflict');
     }
     if (input.dispatchState === 'dispatching' && this.failDispatchFence) {
@@ -206,8 +230,11 @@ class FakeMetering {
       dispatchState: input.dispatchState ?? this.current.dispatchState,
       resultState: input.resultState ?? this.current.resultState,
       responseStarted: this.current.responseStarted || input.responseStarted === true,
-      responseStartedAt: this.current.responseStarted ? this.current.responseStartedAt
-        : input.responseStarted ? '2026-09-28T00:00:00.000Z' : null,
+      responseStartedAt: this.current.responseStarted
+        ? this.current.responseStartedAt
+        : input.responseStarted
+          ? '2026-09-28T00:00:00.000Z'
+          : null,
       stateVersion: this.current.stateVersion + 1,
       unknownReason: input.unknownReason ?? null,
       resultHttpStatus: input.resultHttpStatus ?? null,
@@ -228,8 +255,11 @@ class FakeMetering {
       dispatchState: 'sent',
       resultState: 'failed',
       responseStarted: this.current.responseStarted || input.responseStarted,
-      responseStartedAt: this.current.responseStarted ? this.current.responseStartedAt
-        : input.responseStarted ? '2026-09-28T00:00:00.000Z' : null,
+      responseStartedAt: this.current.responseStarted
+        ? this.current.responseStartedAt
+        : input.responseStarted
+          ? '2026-09-28T00:00:00.000Z'
+          : null,
       resultHttpStatus: input.resultHttpStatus,
       unknownReason: null,
       stateVersion: this.current.stateVersion + 1,
@@ -272,7 +302,12 @@ class FakeEvidence {
     }
     assert.ok(this.metering, 'claim fake must bind the actual metering state');
     this.metering.claimEvidence(this.record);
-    this.record = { ...this.record, status: 'claimed', claimedAt: '2026-09-28T00:00:00.000Z', claimedAttemptId: 'attempt-1' };
+    this.record = {
+      ...this.record,
+      status: 'claimed',
+      claimedAt: '2026-09-28T00:00:00.000Z',
+      claimedAttemptId: 'attempt-1',
+    };
     this.afterClaim?.();
     return { ...this.record, ...this.claimResultPatch };
   }
@@ -432,8 +467,15 @@ test('a confirmed successful execution with billing reconciliation remains a sen
   const proof = new FakeEvidence();
   const metering = new FakeMetering();
   proof.metering = metering;
-  const successAttempt = attempt({ preparedEvidenceId: 'evidence-1', dispatchState: 'sent', resultState: 'succeeded',
-    responseStarted: true, responseStartedAt: '2026-09-28T00:00:00.000Z', resultHttpStatus: 200, stateVersion: 4 });
+  const successAttempt = attempt({
+    preparedEvidenceId: 'evidence-1',
+    dispatchState: 'sent',
+    resultState: 'succeeded',
+    responseStarted: true,
+    responseStartedAt: '2026-09-28T00:00:00.000Z',
+    resultHttpStatus: 200,
+    stateVersion: 4,
+  });
   const settlement: NormalSuccessSettlementPort = {
     async complete() {
       return { kind: 'reconciliation_pending', attempt: successAttempt };
@@ -548,7 +590,12 @@ test('dispatch records retryable provider failures and ignores caller errors', a
   assert.equal(serverFailure.kind, 'sent');
   assert.equal(serverFailure.attempt.resultState, 'failed');
   assert.equal(serverFailure.attempt.resultHttpStatus, 503);
-  assert.deepEqual(serverMetering.calls, ['get-attempt', 'get-attempt', 'transition:dispatching', 'known-http-failure:503']);
+  assert.deepEqual(serverMetering.calls, [
+    'get-attempt',
+    'get-attempt',
+    'transition:dispatching',
+    'known-http-failure:503',
+  ]);
   assert.equal((writes[1] as { evidence: { failureKind: string } }).evidence.failureKind, 'provider_5xx');
 
   const callerError: PreparedEvidenceTransport = {
@@ -567,7 +614,12 @@ test('dispatch records retryable provider failures and ignores caller errors', a
   assert.equal(callerErrorResult.kind, 'sent');
   assert.equal(callerErrorResult.attempt.resultState, 'failed');
   assert.equal(callerErrorResult.attempt.resultHttpStatus, 401);
-  assert.deepEqual(callerErrorMetering.calls, ['get-attempt', 'get-attempt', 'transition:dispatching', 'known-http-failure:401']);
+  assert.deepEqual(callerErrorMetering.calls, [
+    'get-attempt',
+    'get-attempt',
+    'transition:dispatching',
+    'known-http-failure:401',
+  ]);
   assert.equal(writes.length, 2);
 });
 
@@ -659,28 +711,56 @@ test('dispatch rereads the bound claim and fences with its authoritative version
 
 test('equal detached model-resolution tuples authorize dispatch by typed value, including a null passthrough revision', async () => {
   const resolutions: readonly ModelResolutionProvenance[] = [
-    { requestedModel: 'model-1', mappedModel: 'resolved-model-1', resolvedModel: 'resolved-model-1',
-      mappingSource: 'alias', mappingVersion: 1 },
-    { requestedModel: 'model-1', mappedModel: 'model-1', resolvedModel: 'model-1',
-      mappingSource: 'none', mappingVersion: null },
+    {
+      requestedModel: 'model-1',
+      mappedModel: 'resolved-model-1',
+      resolvedModel: 'resolved-model-1',
+      mappingSource: 'alias',
+      mappingVersion: 1,
+    },
+    {
+      requestedModel: 'model-1',
+      mappedModel: 'model-1',
+      resolvedModel: 'model-1',
+      mappingSource: 'none',
+      mappingVersion: null,
+    },
   ];
   for (const resolution of resolutions) {
     const metering = new FakeMetering();
     const proof = new FakeEvidence();
     const lease = new FakeLeaseProvider();
-    proof.record = { ...proof.record, requestedModel: resolution.requestedModel, mappedModel: resolution.mappedModel,
-      resolvedModel: resolution.resolvedModel, modelResolution: { ...resolution } };
-    metering.current = { ...metering.current, resolvedModel: resolution.resolvedModel, modelResolution: { ...resolution } };
+    proof.record = {
+      ...proof.record,
+      requestedModel: resolution.requestedModel,
+      mappedModel: resolution.mappedModel,
+      resolvedModel: resolution.resolvedModel,
+      modelResolution: { ...resolution },
+    };
+    metering.current = {
+      ...metering.current,
+      resolvedModel: resolution.resolvedModel,
+      modelResolution: { ...resolution },
+    };
     // A new object with different insertion order must compare equal. Neither
     // object identity nor JSON key order is the persisted mapping contract.
-    proof.claimResultPatch = { modelResolution: { mappingVersion: resolution.mappingVersion,
-      mappingSource: resolution.mappingSource, resolvedModel: resolution.resolvedModel,
-      mappedModel: resolution.mappedModel, requestedModel: resolution.requestedModel } };
+    proof.claimResultPatch = {
+      modelResolution: {
+        mappingVersion: resolution.mappingVersion,
+        mappingSource: resolution.mappingSource,
+        resolvedModel: resolution.resolvedModel,
+        mappedModel: resolution.mappedModel,
+        requestedModel: resolution.requestedModel,
+      },
+    };
     assert.notEqual(proof.claimResultPatch.modelResolution, proof.record.modelResolution);
     assert.notEqual(metering.current.modelResolution, proof.record.modelResolution);
     let sends = 0;
     const result = await service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: true, resultHttpStatus: 200 }; },
+      async send() {
+        sends++;
+        return { responseStarted: true, resultHttpStatus: 200 };
+      },
     }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
     assert.equal(result.kind, 'sent');
     assert.equal(sends, 1);
@@ -693,11 +773,15 @@ test('every typed resolution field and optional presence must match across prefl
   const resolution = evidence().modelResolution;
   assert.ok(resolution);
   const patches: readonly Partial<ModelResolutionProvenance>[] = [
-    { requestedModel: 'other-model' }, { mappedModel: 'other-model' }, { resolvedModel: 'other-model' },
-    { mappingSource: 'wildcard' }, { mappingVersion: 2 },
+    { requestedModel: 'other-model' },
+    { mappedModel: 'other-model' },
+    { resolvedModel: 'other-model' },
+    { mappingSource: 'wildcard' },
+    { mappingVersion: 2 },
   ];
   const mismatches: readonly (ModelResolutionProvenance | undefined)[] = [
-    ...patches.map((patch) => ({ ...resolution, ...patch })), undefined,
+    ...patches.map((patch) => ({ ...resolution, ...patch })),
+    undefined,
   ];
   for (const target of ['attempt', 'claimed'] as const) {
     for (const mismatch of mismatches) {
@@ -705,13 +789,20 @@ test('every typed resolution field and optional presence must match across prefl
       const proof = new FakeEvidence();
       const lease = new FakeLeaseProvider();
       if (target === 'attempt') {
-        metering.readOverride = (read, snapshot) => read === 2 ? { ...snapshot, modelResolution: mismatch } : snapshot;
+        metering.readOverride = (read, snapshot) =>
+          read === 2 ? { ...snapshot, modelResolution: mismatch } : snapshot;
       } else proof.claimResultPatch = { modelResolution: mismatch };
       let sends = 0;
-      await assert.rejects(service(proof, metering, lease, {
-        async send() { sends++; return { responseStarted: false }; },
-      }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
-      (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH');
+      await assert.rejects(
+        service(proof, metering, lease, {
+          async send() {
+            sends++;
+            return { responseStarted: false };
+          },
+        }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+        (error: unknown) =>
+          error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH',
+      );
       assert.equal(sends, 0);
       assert.equal(metering.transitionInputs.length, 0);
       assert.equal(proof.calls.length, 1);
@@ -721,42 +812,80 @@ test('every typed resolution field and optional presence must match across prefl
 });
 
 test('legacy resolution omission accepts only consistent identity rows without partial or newly present provenance', async () => {
-  const identity: ModelResolutionProvenance = { requestedModel: 'model-1', mappedModel: 'model-1',
-    resolvedModel: 'model-1', mappingSource: 'none', mappingVersion: null };
-  for (const scenario of ['consistent', 'attempt_presence', 'claimed_presence', 'partial_claimed',
-    'partial_attempt', 'non_identity'] as const) {
+  const identity: ModelResolutionProvenance = {
+    requestedModel: 'model-1',
+    mappedModel: 'model-1',
+    resolvedModel: 'model-1',
+    mappingSource: 'none',
+    mappingVersion: null,
+  };
+  for (const scenario of [
+    'consistent',
+    'attempt_presence',
+    'claimed_presence',
+    'partial_claimed',
+    'partial_attempt',
+    'non_identity',
+  ] as const) {
     const metering = new FakeMetering();
     const proof = new FakeEvidence();
     const lease = new FakeLeaseProvider();
-    proof.record = { ...proof.record, requestedModel: undefined, mappedModel: undefined, resolvedModel: 'model-1',
-      modelResolution: undefined, clientProtocol: undefined, providerProtocol: undefined, clientOperation: undefined,
-      providerOperation: undefined, requestFingerprint: undefined, requestFingerprintVersion: undefined,
-      payloadCompilerVersion: undefined, usageEstimatorVersion: undefined };
-    metering.current = { ...metering.current, resolvedModel: 'model-1', modelResolution: undefined,
-      clientProtocol: undefined, providerProtocol: undefined, clientOperation: undefined, providerOperation: undefined,
-      requestFingerprint: undefined, requestFingerprintVersion: undefined, payloadCompilerVersion: undefined,
-      usageEstimatorVersion: undefined, payloadSha256: undefined };
+    proof.record = {
+      ...proof.record,
+      requestedModel: undefined,
+      mappedModel: undefined,
+      resolvedModel: 'model-1',
+      modelResolution: undefined,
+      clientProtocol: undefined,
+      providerProtocol: undefined,
+      clientOperation: undefined,
+      providerOperation: undefined,
+      requestFingerprint: undefined,
+      requestFingerprintVersion: undefined,
+      payloadCompilerVersion: undefined,
+      usageEstimatorVersion: undefined,
+    };
+    metering.current = {
+      ...metering.current,
+      resolvedModel: 'model-1',
+      modelResolution: undefined,
+      clientProtocol: undefined,
+      providerProtocol: undefined,
+      clientOperation: undefined,
+      providerOperation: undefined,
+      requestFingerprint: undefined,
+      requestFingerprintVersion: undefined,
+      payloadCompilerVersion: undefined,
+      usageEstimatorVersion: undefined,
+      payloadSha256: undefined,
+    };
     if (scenario === 'attempt_presence') {
-      metering.readOverride = (read, snapshot) => read === 2 ? { ...snapshot, modelResolution: identity } : snapshot;
+      metering.readOverride = (read, snapshot) => (read === 2 ? { ...snapshot, modelResolution: identity } : snapshot);
     } else if (scenario === 'claimed_presence') proof.claimResultPatch = { modelResolution: identity };
     else if (scenario === 'partial_claimed') proof.claimResultPatch = { requestFingerprint: 'c'.repeat(64) };
     else if (scenario === 'partial_attempt') {
-      metering.readOverride = (read, snapshot) => read === 2 ? { ...snapshot, providerProtocol: 'openai' } : snapshot;
+      metering.readOverride = (read, snapshot) => (read === 2 ? { ...snapshot, providerProtocol: 'openai' } : snapshot);
     } else if (scenario === 'non_identity') {
       proof.record = { ...proof.record, resolvedModel: 'resolved-model-1' };
       metering.current = { ...metering.current, resolvedModel: 'resolved-model-1' };
     }
     let sends = 0;
     const dispatched = service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: true, resultHttpStatus: 200 }; },
+      async send() {
+        sends++;
+        return { responseStarted: true, resultHttpStatus: 200 };
+      },
     }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
     if (scenario === 'consistent') {
       assert.equal((await dispatched).kind, 'sent');
       assert.equal(sends, 1);
       assert.equal(metering.transitionInputs[0]?.expectedStateVersion, 2);
     } else {
-      await assert.rejects(dispatched,
-        (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH');
+      await assert.rejects(
+        dispatched,
+        (error: unknown) =>
+          error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH',
+      );
       assert.equal(sends, 0);
       assert.equal(metering.transitionInputs.length, 0);
     }
@@ -771,7 +900,9 @@ test('post-claim cancellation and absent/read-failed rows prevent fencing or sen
     const lease = new FakeLeaseProvider();
     let sends = 0;
     if (failure === 'cancelled') {
-      proof.afterClaim = () => { metering.current = { ...metering.current, resultState: 'failed', stateVersion: 3 }; };
+      proof.afterClaim = () => {
+        metering.current = { ...metering.current, resultState: 'failed', stateVersion: 3 };
+      };
     } else {
       metering.readOverride = (read, snapshot) => {
         if (read === 2) {
@@ -781,13 +912,19 @@ test('post-claim cancellation and absent/read-failed rows prevent fencing or sen
         return snapshot;
       };
     }
-    await assert.rejects(service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: false }; },
-    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
-    (error: unknown) => failure === 'read_error'
-      ? error instanceof Error && error.message === 'synthetic post-claim read failure'
-      : error instanceof SaasPreparedEvidenceDispatchError && error.code ===
-        (failure === 'missing' ? 'ATTEMPT_NOT_FOUND' : 'EVIDENCE_BINDING_MISMATCH'));
+    await assert.rejects(
+      service(proof, metering, lease, {
+        async send() {
+          sends++;
+          return { responseStarted: false };
+        },
+      }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+      (error: unknown) =>
+        failure === 'read_error'
+          ? error instanceof Error && error.message === 'synthetic post-claim read failure'
+          : error instanceof SaasPreparedEvidenceDispatchError &&
+            error.code === (failure === 'missing' ? 'ATTEMPT_NOT_FOUND' : 'EVIDENCE_BINDING_MISMATCH'),
+    );
     assert.equal(sends, 0, failure);
     assert.equal(metering.transitionInputs.length, 0, failure);
     assert.equal(proof.calls.length, 1, failure);
@@ -798,36 +935,71 @@ test('post-claim cancellation and absent/read-failed rows prevent fencing or sen
 
 test('post-claim full identity, authority, evidence and response-fact mismatches fail closed without sends', async () => {
   const patches: Partial<AttemptRecord>[] = [
-    { tenantId: 'other-tenant' }, { requestId: 'other-request' }, { id: 'other-attempt' }, { ordinal: 2 },
-    { bindingState: 'legacy' }, { dispatchAuthorityState: 'unbound' }, { accountOwnerKind: 'platform' },
-    { upstreamId: 'other-upstream' }, { accountId: 'other-account' }, { credentialId: 'other-credential' },
-    { credentialVersion: '2' }, { protocol: 'anthropic' }, { endpoint: '/wrong-endpoint' },
-    { routeTargetMode: 'platform_pool' }, { preparedEvidenceId: null }, { preparedEvidenceId: 'other-evidence' },
-    { resolvedModel: 'wrong-model' }, { requestFingerprint: 'e'.repeat(64) }, { payloadSha256: 'f'.repeat(64) },
-    { modelResolution: { requestedModel: 'model-1', mappedModel: 'resolved-model-1',
-      resolvedModel: 'resolved-model-1', mappingSource: 'alias', mappingVersion: 2 } },
-    { dispatchState: 'dispatching' }, { resultState: 'failed' }, { responseStarted: true },
-    { responseStartedAt: '2026-09-28T00:00:00.000Z' }, { resultHttpStatus: 200 }, { unknownReason: 'observed' },
-    { stateVersion: 0 }, { stateVersion: Number.NaN },
+    { tenantId: 'other-tenant' },
+    { requestId: 'other-request' },
+    { id: 'other-attempt' },
+    { ordinal: 2 },
+    { bindingState: 'legacy' },
+    { dispatchAuthorityState: 'unbound' },
+    { accountOwnerKind: 'platform' },
+    { upstreamId: 'other-upstream' },
+    { accountId: 'other-account' },
+    { credentialId: 'other-credential' },
+    { credentialVersion: '2' },
+    { protocol: 'anthropic' },
+    { endpoint: '/wrong-endpoint' },
+    { routeTargetMode: 'platform_pool' },
+    { preparedEvidenceId: null },
+    { preparedEvidenceId: 'other-evidence' },
+    { resolvedModel: 'wrong-model' },
+    { requestFingerprint: 'e'.repeat(64) },
+    { payloadSha256: 'f'.repeat(64) },
+    {
+      modelResolution: {
+        requestedModel: 'model-1',
+        mappedModel: 'resolved-model-1',
+        resolvedModel: 'resolved-model-1',
+        mappingSource: 'alias',
+        mappingVersion: 2,
+      },
+    },
+    { dispatchState: 'dispatching' },
+    { resultState: 'failed' },
+    { responseStarted: true },
+    { responseStartedAt: '2026-09-28T00:00:00.000Z' },
+    { resultHttpStatus: 200 },
+    { unknownReason: 'observed' },
+    { stateVersion: 0 },
+    { stateVersion: Number.NaN },
   ];
   for (const patch of patches) {
     const metering = new FakeMetering();
     const proof = new FakeEvidence();
     const lease = new FakeLeaseProvider();
-    metering.readOverride = (read, snapshot) => read === 2 ? { ...snapshot, ...patch } : snapshot;
+    metering.readOverride = (read, snapshot) => (read === 2 ? { ...snapshot, ...patch } : snapshot);
     let sends = 0;
-    await assert.rejects(service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: false }; },
-    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
-    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH');
+    await assert.rejects(
+      service(proof, metering, lease, {
+        async send() {
+          sends++;
+          return { responseStarted: false };
+        },
+      }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+      (error: unknown) =>
+        error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH',
+    );
     assert.equal(sends, 0, JSON.stringify(patch));
     assert.equal(metering.transitionInputs.length, 0);
     assert.equal(proof.calls.length, 1);
     assert.equal(lease.releaseCount, 1);
   }
   const claimedPatches: Partial<PreparedRequestEvidenceRecord>[] = [
-    { evidenceId: 'other-evidence' }, { projectId: 'other-project' }, { requestId: 'other-request' },
-    { status: 'registered' }, { claimedAttemptId: 'other-attempt' }, { claimedAt: null },
+    { evidenceId: 'other-evidence' },
+    { projectId: 'other-project' },
+    { requestId: 'other-request' },
+    { status: 'registered' },
+    { claimedAttemptId: 'other-attempt' },
+    { claimedAt: null },
     { statementSha256: 'c'.repeat(64) },
   ];
   for (const patch of claimedPatches) {
@@ -836,10 +1008,16 @@ test('post-claim full identity, authority, evidence and response-fact mismatches
     proof.claimResultPatch = patch;
     const lease = new FakeLeaseProvider();
     let sends = 0;
-    await assert.rejects(service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: false }; },
-    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
-    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH');
+    await assert.rejects(
+      service(proof, metering, lease, {
+        async send() {
+          sends++;
+          return { responseStarted: false };
+        },
+      }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+      (error: unknown) =>
+        error instanceof SaasPreparedEvidenceDispatchError && error.code === 'EVIDENCE_BINDING_MISMATCH',
+    );
     assert.equal(sends, 0);
     assert.equal(metering.transitionInputs.length, 0);
     assert.equal(lease.releaseCount, 1);
@@ -847,8 +1025,12 @@ test('post-claim full identity, authority, evidence and response-fact mismatches
 });
 
 test('version-only, cancellation and binding races after the authoritative reread lose strict CAS with zero sends', async () => {
-  const patches: Partial<AttemptRecord>[] = [{}, { resultState: 'failed' },
-    { dispatchState: 'dispatching' }, { preparedEvidenceId: 'other-evidence' }];
+  const patches: Partial<AttemptRecord>[] = [
+    {},
+    { resultState: 'failed' },
+    { dispatchState: 'dispatching' },
+    { preparedEvidenceId: 'other-evidence' },
+  ];
   for (const patch of patches) {
     const metering = new FakeMetering();
     const proof = new FakeEvidence();
@@ -859,10 +1041,16 @@ test('version-only, cancellation and binding races after the authoritative rerea
       }
     };
     let sends = 0;
-    await assert.rejects(service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: false }; },
-    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
-    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'DISPATCH_STATE_CONFLICT');
+    await assert.rejects(
+      service(proof, metering, lease, {
+        async send() {
+          sends++;
+          return { responseStarted: false };
+        },
+      }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+      (error: unknown) =>
+        error instanceof SaasPreparedEvidenceDispatchError && error.code === 'DISPATCH_STATE_CONFLICT',
+    );
     assert.equal(sends, 0);
     assert.equal(metering.transitionInputs.length, 1, 'one fence attempt; no broad retry');
     assert.equal(metering.transitionInputs[0]?.expectedStateVersion, 2);
@@ -876,12 +1064,17 @@ test('a stale post-claim version cannot fence dispatch even when identity and ex
   const metering = new FakeMetering();
   const proof = new FakeEvidence();
   const lease = new FakeLeaseProvider();
-  metering.readOverride = (read, snapshot) => read === 2 ? { ...snapshot, stateVersion: 1 } : snapshot;
+  metering.readOverride = (read, snapshot) => (read === 2 ? { ...snapshot, stateVersion: 1 } : snapshot);
   let sends = 0;
-  await assert.rejects(service(proof, metering, lease, {
-    async send() { sends++; return { responseStarted: false }; },
-  }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
-  (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'DISPATCH_STATE_CONFLICT');
+  await assert.rejects(
+    service(proof, metering, lease, {
+      async send() {
+        sends++;
+        return { responseStarted: false };
+      },
+    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'DISPATCH_STATE_CONFLICT',
+  );
   assert.equal(sends, 0);
   assert.equal(metering.transitionInputs.length, 1);
   assert.equal(metering.transitionInputs[0]?.expectedStateVersion, 1);
@@ -896,12 +1089,21 @@ test('client cancellation after claim or during the reread prevents fencing and 
     const lease = new FakeLeaseProvider();
     const client = new FakeClientStream();
     if (stage === 'claim') proof.afterClaim = () => client.controller.abort();
-    else metering.readOverride = (read, snapshot) => { if (read === 2) client.controller.abort(); return snapshot; };
+    else
+      metering.readOverride = (read, snapshot) => {
+        if (read === 2) client.controller.abort();
+        return snapshot;
+      };
     let sends = 0;
-    await assert.rejects(service(proof, metering, lease, {
-      async send() { sends++; return { responseStarted: false }; },
-    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit, client }),
-    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'CLIENT_STREAM_ABORTED');
+    await assert.rejects(
+      service(proof, metering, lease, {
+        async send() {
+          sends++;
+          return { responseStarted: false };
+        },
+      }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit, client }),
+      (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'CLIENT_STREAM_ABORTED',
+    );
     assert.equal(sends, 0);
     assert.equal(metering.transitionInputs.length, 0);
     assert.equal(metering.current.stateVersion, 2);
@@ -914,10 +1116,15 @@ test('client cancellation while dispatch CAS completes makes no send and retains
   const proof = new FakeEvidence();
   const lease = new FakeLeaseProvider();
   const client = new FakeClientStream();
-  metering.beforeTransition = (input) => { if (input.dispatchState === 'dispatching') client.controller.abort(); };
+  metering.beforeTransition = (input) => {
+    if (input.dispatchState === 'dispatching') client.controller.abort();
+  };
   let sends = 0;
   const result = await service(proof, metering, lease, {
-    async send() { sends++; return { responseStarted: false }; },
+    async send() {
+      sends++;
+      return { responseStarted: false };
+    },
   }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit, client });
   assert.equal(result.kind, 'unknown');
   assert.equal(sends, 0);
@@ -1134,7 +1341,13 @@ test('sent-state persistence failure is recovered as unknown without replay', as
   assert.equal(metering.current.dispatchState, 'unknown');
   assert.equal(metering.current.resultState, 'unknown');
   assert.match(metering.current.unknownReason ?? '', /sent state could not be persisted/);
-  assert.deepEqual(metering.calls, ['get-attempt', 'get-attempt', 'transition:dispatching', 'transition:sent', 'transition:unknown']);
+  assert.deepEqual(metering.calls, [
+    'get-attempt',
+    'get-attempt',
+    'transition:dispatching',
+    'transition:sent',
+    'transition:unknown',
+  ]);
 });
 
 test('release failure does not overwrite a known sent result', async () => {

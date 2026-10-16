@@ -371,10 +371,10 @@ test('native Responses continuation stays bound to its credential and fails clos
     const other = await send('sk-other', 'resp_test_1');
     assert.equal(other.status, 409);
     assert.equal(upstream.calls.length, 2);
-    assert.deepEqual(upstream.calls.map((call) => call.headers.authorization), [
-      'Bearer secret-a',
-      'Bearer secret-a',
-    ]);
+    assert.deepEqual(
+      upstream.calls.map((call) => call.headers.authorization),
+      ['Bearer secret-a', 'Bearer secret-a'],
+    );
   } finally {
     await proxy.close();
     await upstream.close();
@@ -1702,34 +1702,57 @@ test('integration: duplicate credential keys retain exact identity through coold
     callNo++;
     return callNo === 1
       ? { status: 429, headers: { 'retry-after': '60' }, body: { error: { message: 'slow down' } } }
-      : { status: 200, body: {
-          id: 'msg_shared', type: 'message', role: 'assistant', model: 'claude',
-          content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
-          usage: { input_tokens: 1, output_tokens: 1 },
-        } };
+      : {
+          status: 200,
+          body: {
+            id: 'msg_shared',
+            type: 'message',
+            role: 'assistant',
+            model: 'claude',
+            content: [{ type: 'text', text: 'ok' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+        };
   };
   const mock = await startMockUpstream(responder);
-  const proxy = await startProxy(baseConfig([{
-    name: 'u1', provider: 'anthropic', protocol: 'anthropic', baseUrl: mock.baseUrl,
-    apiKeys: ['shared-key', 'shared-key'], credentialIds: ['cred-a', 'cred-b'],
-    models: ['claude'], enabled: true,
-  }]), {
-    keyPool,
-    telemetryStore: {
-      upsertRequest: async (_request: RequestRecord) => {},
-      upsertAttempt: async (attempt) => { attempts.push({ ...attempt }); },
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'u1',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: mock.baseUrl,
+        apiKeys: ['shared-key', 'shared-key'],
+        credentialIds: ['cred-a', 'cred-b'],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    {
+      keyPool,
+      telemetryStore: {
+        upsertRequest: async (_request: RequestRecord) => {},
+        upsertAttempt: async (attempt) => {
+          attempts.push({ ...attempt });
+        },
+      },
     },
-  });
+  );
   try {
     for (const expected of [429, 200]) {
       const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
-        method: 'POST', headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
         body: JSON.stringify({ model: 'claude', messages: [{ role: 'user', content: 'hi' }] }),
       });
       assert.equal(response.status, expected);
       await response.text();
     }
-    assert.deepEqual(mock.calls.map((call) => call.headers.authorization), ['Bearer shared-key', 'Bearer shared-key']);
+    assert.deepEqual(
+      mock.calls.map((call) => call.headers.authorization),
+      ['Bearer shared-key', 'Bearer shared-key'],
+    );
     assert.equal(attempts[1]?.credentialId, 'cred-a');
     assert.equal(attempts[3]?.credentialId, 'cred-b');
     assert.deepEqual(keyPool.getAvailableEntries('u1'), [entries[1]]);
@@ -1745,22 +1768,38 @@ test('integration: legacy upstream key is never persisted in attempt telemetry',
   const upstream = await startMockUpstream(() => ({
     status: 200,
     body: {
-      id: 'msg_legacy', type: 'message', role: 'assistant', model: 'claude',
-      content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+      id: 'msg_legacy',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude',
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
       usage: { input_tokens: 1, output_tokens: 1 },
     },
   }));
   const keyPool = new KeyPool();
-  const proxy = await startProxy(baseConfig([{
-    name: 'legacy-upstream', provider: 'anthropic', protocol: 'anthropic', baseUrl: upstream.baseUrl,
-    apiKeys: [upstreamSecret], models: ['claude'], enabled: true,
-  }]), {
-    keyPool,
-    telemetryStore: {
-      upsertRequest: async (_request: RequestRecord) => {},
-      upsertAttempt: async (attempt) => { attempts.push({ ...attempt }); },
+  const proxy = await startProxy(
+    baseConfig([
+      {
+        name: 'legacy-upstream',
+        provider: 'anthropic',
+        protocol: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKeys: [upstreamSecret],
+        models: ['claude'],
+        enabled: true,
+      },
+    ]),
+    {
+      keyPool,
+      telemetryStore: {
+        upsertRequest: async (_request: RequestRecord) => {},
+        upsertAttempt: async (attempt) => {
+          attempts.push({ ...attempt });
+        },
+      },
     },
-  });
+  );
   try {
     const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
       method: 'POST',

@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { getEventListeners } from 'node:events';
-import { createServer, request as httpRequest, type ClientRequest, type Server } from 'node:http';
+import { type ClientRequest, createServer, request as httpRequest, type Server } from 'node:http';
 import type { Socket } from 'node:net';
-import { test, type TestContext } from 'node:test';
+import { type TestContext, test } from 'node:test';
 import type { SaasDatabaseClient, SaasDatabasePool, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { observeProviderJsonUsage } from '../../../src/saas/gateway/provider-json-usage-observer.js';
 import { observeProviderSseUsage } from '../../../src/saas/gateway/provider-sse-usage-observer.js';
 import {
-  createDelegatedSqlFault, createFinancialNetworkFaultFixture,
-  FinancialFaultFixtureError, INVALID_JSON_USAGE_VARIANTS,
-  type DelegatedSqlFaultPlan, type FinancialNetworkScenario,
+  createDelegatedSqlFault,
+  createFinancialNetworkFaultFixture,
+  type DelegatedSqlFaultPlan,
+  FinancialFaultFixtureError,
+  type FinancialNetworkScenario,
+  INVALID_JSON_USAGE_VARIANTS,
 } from './commercial-gateway-financial-fault-fixture.js';
 
 // These are helper/socket and delegation unit tests, NOT managed gateway,
@@ -21,8 +24,14 @@ function bounded<T>(promise: Promise<T>, timeoutMs = 2_000): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Helper test wait exceeded its bound')), timeoutMs);
     promise.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error); },
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
     );
   });
 }
@@ -58,11 +67,16 @@ async function localHarness(t: TestContext, options: Parameters<typeof createFin
       }
       if (fixture.handle(request, response, body)) return;
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({
-        id: 'original-happy-fixture', object: 'chat.completion',
-        choices: [{ index: 0, message: { role: 'assistant', content: 'original-happy-fixture' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
-      }));
+      response.end(
+        JSON.stringify({
+          id: 'original-happy-fixture',
+          object: 'chat.completion',
+          choices: [
+            { index: 0, message: { role: 'assistant', content: 'original-happy-fixture' }, finish_reason: 'stop' },
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }),
+      );
     })().catch(() => response.destroy());
   });
   server.on('connection', (socket) => {
@@ -71,29 +85,41 @@ async function localHarness(t: TestContext, options: Parameters<typeof createFin
   });
   t.after(async () => {
     let fixtureError: unknown;
-    try { await fixture.dispose(); } catch (error) { fixtureError = error; }
-    finally {
+    try {
+      await fixture.dispose();
+    } catch (error) {
+      fixtureError = error;
+    } finally {
       for (const socket of sockets) socket.destroy();
       await closeServer(server);
     }
     if (fixtureError) throw fixtureError;
   });
-  await bounded(new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve(); });
-  }));
+  await bounded(
+    new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.removeListener('error', reject);
+        resolve();
+      });
+    }),
+  );
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   const url = `http://127.0.0.1:${address.port}${endpoint}`;
-  const post = (body: unknown, signal: AbortSignal = AbortSignal.timeout(2_000)) => fetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal,
-  });
+  const post = (body: unknown, signal: AbortSignal = AbortSignal.timeout(2_000)) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
   return { fixture, post, url };
 }
 
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) return;
-  await bounded(new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  await bounded(new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
 }
 
 async function readBody(body: ReadableStream<Uint8Array>): Promise<Buffer> {
@@ -105,10 +131,15 @@ async function readBody(body: ReadableStream<Uint8Array>): Promise<Buffer> {
       if (next.done) return Buffer.concat(chunks);
       chunks.push(Buffer.from(next.value));
     }
-  } finally { reader.releaseLock(); }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
-function pendingClient(url: string, body: unknown): {
+function pendingClient(
+  url: string,
+  body: unknown,
+): {
   readonly request: ClientRequest;
   readonly closed: Promise<void>;
   readonly observed: { responses: number; errors: number };
@@ -116,17 +147,23 @@ function pendingClient(url: string, body: unknown): {
   const observed = { responses: 0, errors: 0 };
   const request = httpRequest(url, { method: 'POST', headers: { 'content-type': 'application/json' } });
   const closed = new Promise<void>((resolve) => request.once('close', resolve));
-  request.on('error', () => { observed.errors += 1; });
+  request.on('error', () => {
+    observed.errors += 1;
+  });
   request.on('response', (response) => {
     observed.responses += 1;
-    response.on('error', () => { observed.errors += 1; });
+    response.on('error', () => {
+      observed.errors += 1;
+    });
     response.resume();
   });
   request.end(JSON.stringify(body));
   return { request, closed, observed };
 }
 
-test('network helper leaves unmatched happy traffic untouched and exposes no payload/header observations', { timeout: 10_000 }, async (t) => {
+test('network helper leaves unmatched happy traffic untouched and exposes no payload/header observations', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, post } = await localHarness(t);
   const scenario = fixture.register({ kind: 'json_missing_usage' }, 'scoped-nonce');
   for (const body of [
@@ -137,15 +174,20 @@ test('network helper leaves unmatched happy traffic untouched and exposes no pay
   ]) {
     const response = await post(body);
     assert.equal(response.status, 200);
-    assert.equal((await response.json() as { id: string }).id, 'original-happy-fixture');
+    assert.equal(((await response.json()) as { id: string }).id, 'original-happy-fixture');
   }
   assert.equal(scenario.snapshot().receipts, 0);
   assert.equal(scenario.snapshot().activeResponses, 0);
-  assert.equal(Object.keys(scenario.snapshot()).some((key) => /payload|authorization|headers_value|secret/.test(key)), false);
+  assert.equal(
+    Object.keys(scenario.snapshot()).some((key) => /payload|authorization|headers_value|secret/.test(key)),
+    false,
+  );
   assert.equal(Object.isFrozen(scenario.snapshot()), true);
 });
 
-test('missing usage script reaches real response EOF and the production observer keeps usage unknown', { timeout: 10_000 }, async (t) => {
+test('missing usage script reaches real response EOF and the production observer keeps usage unknown', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, post } = await localHarness(t);
   const scenario = fixture.register({ kind: 'json_missing_usage' });
   const controller = new AbortController();
@@ -158,7 +200,11 @@ test('missing usage script reaches real response EOF and the production observer
   assert.ok(response.body);
   const observed = observeProviderJsonUsage(response.body, protocol);
   const bytes = await readBody(observed.body);
-  const parsed = JSON.parse(bytes.toString('utf8')) as { object: string; usage?: unknown; choices: { finish_reason: string }[] };
+  const parsed = JSON.parse(bytes.toString('utf8')) as {
+    object: string;
+    usage?: unknown;
+    choices: { finish_reason: string }[];
+  };
   assert.equal(parsed.object, 'chat.completion');
   assert.equal(parsed.choices[0]?.finish_reason, 'stop');
   assert.equal(Object.hasOwn(parsed, 'usage'), false);
@@ -176,7 +222,9 @@ test('missing usage script reaches real response EOF and the production observer
   assert.equal(stats.bytesWritten, bytes.length);
 });
 
-test('every invalid usage script is complete real JSON but never a reported production observation', { timeout: 20_000 }, async (t) => {
+test('every invalid usage script is complete real JSON but never a reported production observation', {
+  timeout: 20_000,
+}, async (t) => {
   const { fixture, post } = await localHarness(t);
   for (const variant of INVALID_JSON_USAGE_VARIANTS) {
     await t.test(variant, async () => {
@@ -188,7 +236,9 @@ test('every invalid usage script is complete real JSON but never a reported prod
       const bytes = await readBody(observed.body);
       assert.equal((JSON.parse(bytes.toString('utf8')) as { object: string }).object, 'chat.completion');
       assert.deepEqual(await bounded(observed.observation), {
-        state: 'unknown', usage: null, reason: variant === 'duplicate_usage' ? 'malformed_body' : 'invalid_usage',
+        state: 'unknown',
+        usage: null,
+        reason: variant === 'duplicate_usage' ? 'malformed_body' : 'invalid_usage',
       });
       await scenario.waitFor('eof');
       await scenario.waitFor('close');
@@ -202,7 +252,9 @@ test('every invalid usage script is complete real JSON but never a reported prod
   }
 });
 
-test('partial SSE publishes one real chunk then peer cancellation, never usage or EOF', { timeout: 10_000 }, async (t) => {
+test('partial SSE publishes one real chunk then peer cancellation, never usage or EOF', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, post } = await localHarness(t);
   const scenario = fixture.register({ kind: 'sse_partial_cancel' });
   const response = await post(payload(scenario, true));
@@ -219,7 +271,9 @@ test('partial SSE publishes one real chunk then peer cancellation, never usage o
     assert.equal(observed.getObservation(), null);
     await scenario.waitFor('first_chunk');
     await bounded(reader.cancel());
-  } finally { reader.releaseLock(); }
+  } finally {
+    reader.releaseLock();
+  }
   assert.deepEqual(await bounded(observed.observation), { state: 'unknown', usage: null, reason: 'cancelled' });
   await scenario.waitFor('close');
   const stats = scenario.snapshot();
@@ -232,7 +286,9 @@ test('partial SSE publishes one real chunk then peer cancellation, never usage o
   assert.equal(stats.watchdogCloses + stats.cleanupCloses + stats.writeErrors, 0);
 });
 
-test('pre-header cancellation has an actual receipt and peer close without headers/body/EOF', { timeout: 10_000 }, async (t) => {
+test('pre-header cancellation has an actual receipt and peer close without headers/body/EOF', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, url } = await localHarness(t);
   for (const stream of [false, true]) {
     const scenario = fixture.register({ kind: 'before_headers_cancel' });
@@ -253,7 +309,9 @@ test('pre-header cancellation has an actual receipt and peer close without heade
   }
 });
 
-test('watchdog close is bounded and cannot masquerade as client cancellation or EOF', { timeout: 10_000 }, async (t) => {
+test('watchdog close is bounded and cannot masquerade as client cancellation or EOF', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, url } = await localHarness(t, { responseTimeoutMs: 100 });
   const scenario = fixture.register({ kind: 'before_headers_cancel' });
   const client = pendingClient(url, payload(scenario, true));
@@ -267,7 +325,9 @@ test('watchdog close is bounded and cannot masquerade as client cancellation or 
   assert.equal(stats.activeResponses, 0);
 });
 
-test('cleanup rejects unfinished barriers, closes actual sockets, and is idempotent', { timeout: 10_000 }, async (t) => {
+test('cleanup rejects unfinished barriers, closes actual sockets, and is idempotent', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, url } = await localHarness(t);
   const scenario = fixture.register({ kind: 'before_headers_cancel' });
   const client = pendingClient(url, payload(scenario, false));
@@ -292,14 +352,19 @@ test('cleanup rejects unfinished barriers, closes actual sockets, and is idempot
   assert.throws(() => fixture.register({ kind: 'json_missing_usage' }), fixtureCode('FIXTURE_DISPOSED'));
 });
 
-test('barrier timeout/abort/configuration paths all remove their timers and listeners', { timeout: 10_000 }, async (t) => {
+test('barrier timeout/abort/configuration paths all remove their timers and listeners', {
+  timeout: 10_000,
+}, async (t) => {
   const fixture = createFinancialNetworkFaultFixture();
   t.after(() => fixture.dispose());
   const scenario = fixture.register({ kind: 'json_missing_usage' }, 'bounded-wait');
   await assert.rejects(scenario.waitFor('receipt', { timeoutMs: 10 }), fixtureCode('WAIT_TIMEOUT'));
   assert.equal(scenario.snapshot().pendingWaits, 0);
   const controller = new AbortController();
-  const aborted = assert.rejects(scenario.waitFor('receipt', { signal: controller.signal }), fixtureCode('WAIT_ABORTED'));
+  const aborted = assert.rejects(
+    scenario.waitFor('receipt', { signal: controller.signal }),
+    fixtureCode('WAIT_ABORTED'),
+  );
   assert.equal(getEventListeners(controller.signal, 'abort').length, 1);
   controller.abort();
   await aborted;
@@ -309,10 +374,19 @@ test('barrier timeout/abort/configuration paths all remove their timers and list
   assert.throws(() => scenario.waitFor('receipt', { timeoutMs: 0 }), fixtureCode('INVALID_CONFIGURATION'));
   assert.throws(() => scenario.waitFor('receipt', { count: 0 }), fixtureCode('INVALID_CONFIGURATION'));
   assert.throws(() => fixture.register({ kind: 'json_missing_usage' }, 'bounded-wait'), fixtureCode('DUPLICATE_NONCE'));
-  assert.throws(() => fixture.register({ kind: 'json_missing_usage' }, 'contains spaces'), fixtureCode('INVALID_CONFIGURATION'));
-  assert.throws(() => createFinancialNetworkFaultFixture({ responseTimeoutMs: 60_001 }), fixtureCode('INVALID_CONFIGURATION'));
+  assert.throws(
+    () => fixture.register({ kind: 'json_missing_usage' }, 'contains spaces'),
+    fixtureCode('INVALID_CONFIGURATION'),
+  );
+  assert.throws(
+    () => createFinancialNetworkFaultFixture({ responseTimeoutMs: 60_001 }),
+    fixtureCode('INVALID_CONFIGURATION'),
+  );
   const disposalController = new AbortController();
-  const disposedWait = assert.rejects(scenario.waitFor('eof', { signal: disposalController.signal }), fixtureCode('FIXTURE_DISPOSED'));
+  const disposedWait = assert.rejects(
+    scenario.waitFor('eof', { signal: disposalController.signal }),
+    fixtureCode('FIXTURE_DISPOSED'),
+  );
   assert.equal(getEventListeners(disposalController.signal, 'abort').length, 1);
   await scenario.dispose();
   await disposedWait;
@@ -320,7 +394,9 @@ test('barrier timeout/abort/configuration paths all remove their timers and list
   await assert.rejects(scenario.waitFor('receipt'), fixtureCode('FIXTURE_DISPOSED'));
 });
 
-test('repeated network receipts remain countable and ambiguous/script-mode routing fails closed', { timeout: 10_000 }, async (t) => {
+test('repeated network receipts remain countable and ambiguous/script-mode routing fails closed', {
+  timeout: 10_000,
+}, async (t) => {
   const { fixture, post } = await localHarness(t);
   const first = fixture.register({ kind: 'json_missing_usage' }, 'first');
   const second = fixture.register({ kind: 'json_missing_usage' }, 'second');
@@ -331,7 +407,11 @@ test('repeated network receipts remain countable and ambiguous/script-mode routi
   await first.waitFor('close', { count: 2 });
   assert.equal(first.snapshot().eofs, 2);
   const ambiguous = await post({
-    stream: false, messages: [{ role: 'user', content: first.prompt }, { role: 'user', content: second.prompt }],
+    stream: false,
+    messages: [
+      { role: 'user', content: first.prompt },
+      { role: 'user', content: second.prompt },
+    ],
   });
   assert.equal(ambiguous.status, 400);
   await ambiguous.text();
@@ -351,12 +431,18 @@ const controlResult = Object.freeze({ rows: [], rowCount: 0 });
 const writeSql = 'INSERT INTO helper_unit_table (scope) VALUES ($1)';
 const scope = Object.freeze(['test-owned-scope']);
 
-function recordingExecutor(behavior?: (sql: string, values: readonly unknown[] | undefined) => Promise<SqlResult<unknown>>) {
+function recordingExecutor(
+  behavior?: (sql: string, values: readonly unknown[] | undefined) => Promise<SqlResult<unknown>>,
+) {
   const calls: { sql: string; values: readonly unknown[] | undefined }[] = [];
   const executor: SqlExecutor = {
     async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
       calls.push({ sql, values });
-      const result = behavior ? await behavior(sql, values) : /^(BEGIN|COMMIT|ROLLBACK)/.test(sql) ? controlResult : nativeResult;
+      const result = behavior
+        ? await behavior(sql, values)
+        : /^(BEGIN|COMMIT|ROLLBACK)/.test(sql)
+          ? controlResult
+          : nativeResult;
       return result as SqlResult<Row>;
     },
   };
@@ -365,12 +451,16 @@ function recordingExecutor(behavior?: (sql: string, values: readonly unknown[] |
 
 function faultPlan(point: DelegatedSqlFaultPlan['point'], sentinel: Error): DelegatedSqlFaultPlan {
   return {
-    point, sentinel, expectedRowCount: 1,
+    point,
+    sentinel,
+    expectedRowCount: 1,
     matchesWrite: (sql, values) => sql === writeSql && values?.[0] === scope[0],
   };
 }
 
-test('SQL helper preserves SQL/values/native result identity and injects the original sentinel once after a real delegated write', { timeout: 5_000 }, async () => {
+test('SQL helper preserves SQL/values/native result identity and injects the original sentinel once after a real delegated write', {
+  timeout: 5_000,
+}, async () => {
   const native = recordingExecutor();
   const sentinel = new Error('after-write-sentinel');
   const fault = createDelegatedSqlFault(faultPlan('after_successful_write', sentinel));
@@ -379,7 +469,10 @@ test('SQL helper preserves SQL/values/native result identity and injects the ori
   assert.strictEqual(await wrapped.query(writeSql, foreignScope), nativeResult);
   await assert.rejects(wrapped.query(writeSql, scope), (error) => error === sentinel);
   assert.deepEqual(fault.snapshot(), {
-    successfulMatchedWrites: 1, successfulMatchedCommits: 0, injections: 1, injectedAt: 'after_successful_write',
+    successfulMatchedWrites: 1,
+    successfulMatchedCommits: 0,
+    injections: 1,
+    injectedAt: 'after_successful_write',
   });
   assert.strictEqual(native.calls[1]?.values, scope);
   assert.equal(native.calls[1]?.sql, writeSql);
@@ -390,7 +483,9 @@ test('SQL helper preserves SQL/values/native result identity and injects the ori
   fault.assertInjected();
 });
 
-test('zero/unexpected/null rowCount and SELECT do not arm SQL faults; delegate errors remain untouched', { timeout: 5_000 }, async () => {
+test('zero/unexpected/null rowCount and SELECT do not arm SQL faults; delegate errors remain untouched', {
+  timeout: 5_000,
+}, async () => {
   for (const rowCount of [0, 2, null]) {
     const result = { rows: [], rowCount };
     const native = recordingExecutor(async () => result);
@@ -402,17 +497,29 @@ test('zero/unexpected/null rowCount and SELECT do not arm SQL faults; delegate e
     assert.throws(() => fault.assertInjected(), fixtureCode('FAULT_NOT_INJECTED'));
   }
   const native = recordingExecutor();
-  const readFault = createDelegatedSqlFault({ ...faultPlan('after_successful_write', new Error('unused')), matchesWrite: () => true });
+  const readFault = createDelegatedSqlFault({
+    ...faultPlan('after_successful_write', new Error('unused')),
+    matchesWrite: () => true,
+  });
   assert.strictEqual(await readFault.wrapExecutor(native.executor).query('SELECT 1'), nativeResult);
   assert.equal(readFault.snapshot().successfulMatchedWrites, 0);
   const delegateFailure = new Error('delegate-error-without-invented-SQLSTATE');
-  const failed = recordingExecutor(async () => { throw delegateFailure; });
-  const fault = createDelegatedSqlFault(faultPlan('after_successful_write', new Error('must-not-replace-delegate-error')));
-  await assert.rejects(fault.wrapExecutor(failed.executor).query(writeSql, scope), (error) => error === delegateFailure);
+  const failed = recordingExecutor(async () => {
+    throw delegateFailure;
+  });
+  const fault = createDelegatedSqlFault(
+    faultPlan('after_successful_write', new Error('must-not-replace-delegate-error')),
+  );
+  await assert.rejects(
+    fault.wrapExecutor(failed.executor).query(writeSql, scope),
+    (error) => error === delegateFailure,
+  );
   assert.equal(fault.snapshot().successfulMatchedWrites + fault.snapshot().injections, 0);
 });
 
-test('before-COMMIT fault requires two successful writes in the same transaction and never sends that COMMIT', { timeout: 5_000 }, async () => {
+test('before-COMMIT fault requires two successful writes in the same transaction and never sends that COMMIT', {
+  timeout: 5_000,
+}, async () => {
   const native = recordingExecutor();
   const sentinel = new Error('before-commit-sentinel');
   const fault = createDelegatedSqlFault({ ...faultPlan('before_commit', sentinel), successfulWritesRequired: 2 });
@@ -431,10 +538,14 @@ test('before-COMMIT fault requires two successful writes in the same transaction
   assert.equal(fault.snapshot().injections, 1);
 });
 
-test('after-COMMIT fault awaits successful native COMMIT; a native COMMIT failure is not replaced', { timeout: 5_000 }, async () => {
+test('after-COMMIT fault awaits successful native COMMIT; a native COMMIT failure is not replaced', {
+  timeout: 5_000,
+}, async () => {
   let finishCommit!: (result: SqlResult<unknown>) => void;
-  const commit = new Promise<SqlResult<unknown>>((resolve) => { finishCommit = resolve; });
-  const native = recordingExecutor(async (sql) => sql === 'COMMIT' ? commit : nativeResult);
+  const commit = new Promise<SqlResult<unknown>>((resolve) => {
+    finishCommit = resolve;
+  });
+  const native = recordingExecutor(async (sql) => (sql === 'COMMIT' ? commit : nativeResult));
   const sentinel = new Error('lost-commit-ack-sentinel');
   const fault = createDelegatedSqlFault(faultPlan('after_commit', sentinel));
   const wrapped = fault.wrapExecutor(native.executor);
@@ -461,16 +572,23 @@ test('after-COMMIT fault awaits successful native COMMIT; a native COMMIT failur
   assert.equal(untouched.snapshot().successfulMatchedCommits + untouched.snapshot().injections, 0);
 });
 
-test('pool wrapper leaves pooled queries alone, shares only one injection, and discards a lost-ACK client', { timeout: 5_000 }, async () => {
+test('pool wrapper leaves pooled queries alone, shares only one injection, and discards a lost-ACK client', {
+  timeout: 5_000,
+}, async () => {
   const native = recordingExecutor();
   const releases: (Error | boolean | undefined)[] = [];
   let endings = 0;
   const pool: SaasDatabasePool = {
     query: native.executor.query,
     connect: async (): Promise<SaasDatabaseClient> => ({
-      query: native.executor.query, release: (error) => { releases.push(error); },
+      query: native.executor.query,
+      release: (error) => {
+        releases.push(error);
+      },
     }),
-    end: async () => { endings += 1; },
+    end: async () => {
+      endings += 1;
+    },
   };
   const sentinel = new Error('one-lost-ack');
   const fault = createDelegatedSqlFault(faultPlan('after_commit', sentinel));
@@ -495,10 +613,13 @@ test('pool wrapper leaves pooled queries alone, shares only one injection, and d
   assert.equal(endings, 1);
 });
 
-test('SQL fault thresholds cannot combine writes from two clients or a rolled-back transaction', { timeout: 5_000 }, async () => {
+test('SQL fault thresholds cannot combine writes from two clients or a rolled-back transaction', {
+  timeout: 5_000,
+}, async () => {
   const native = recordingExecutor();
   const fault = createDelegatedSqlFault({
-    ...faultPlan('before_commit', new Error('not-reached')), successfulWritesRequired: 2,
+    ...faultPlan('before_commit', new Error('not-reached')),
+    successfulWritesRequired: 2,
   });
   const first = fault.wrapExecutor(native.executor);
   const second = fault.wrapExecutor(native.executor);
@@ -513,13 +634,19 @@ test('SQL fault thresholds cannot combine writes from two clients or a rolled-ba
   await second.query('COMMIT');
   assert.equal(fault.snapshot().successfulMatchedWrites, 3);
   assert.equal(fault.snapshot().injections, 0);
-  assert.throws(() => createDelegatedSqlFault({ ...faultPlan('before_commit', new Error('invalid')), expectedRowCount: 0 }),
-    fixtureCode('INVALID_CONFIGURATION'));
-  assert.throws(() => createDelegatedSqlFault({ ...faultPlan('before_commit', new Error('invalid')), successfulWritesRequired: 0 }),
-    fixtureCode('INVALID_CONFIGURATION'));
+  assert.throws(
+    () => createDelegatedSqlFault({ ...faultPlan('before_commit', new Error('invalid')), expectedRowCount: 0 }),
+    fixtureCode('INVALID_CONFIGURATION'),
+  );
+  assert.throws(
+    () => createDelegatedSqlFault({ ...faultPlan('before_commit', new Error('invalid')), successfulWritesRequired: 0 }),
+    fixtureCode('INVALID_CONFIGURATION'),
+  );
 });
 
-test('a delegate error disarms the transaction instead of inventing a successful COMMIT acknowledgement loss', { timeout: 5_000 }, async () => {
+test('a delegate error disarms the transaction instead of inventing a successful COMMIT acknowledgement loss', {
+  timeout: 5_000,
+}, async () => {
   const delegateFailure = new Error('original-statement-error');
   const native = recordingExecutor(async (sql) => {
     if (sql === 'SELECT failing_statement') throw delegateFailure;
@@ -535,11 +662,14 @@ test('a delegate error disarms the transaction instead of inventing a successful
   assert.equal(fault.snapshot().successfulMatchedCommits + fault.snapshot().injections, 0);
 });
 
-test('autocommit writes and a failed BEGIN cannot masquerade as one committed matched-write transaction', { timeout: 5_000 }, async () => {
+test('autocommit writes and a failed BEGIN cannot masquerade as one committed matched-write transaction', {
+  timeout: 5_000,
+}, async () => {
   for (const point of ['before_commit', 'after_commit', 'after_successful_write'] as const) {
     const native = recordingExecutor();
     const fault = createDelegatedSqlFault({
-      ...faultPlan(point, new Error('must-not-inject')), successfulWritesRequired: 2,
+      ...faultPlan(point, new Error('must-not-inject')),
+      successfulWritesRequired: 2,
     });
     const wrapped = fault.wrapExecutor(native.executor);
     await wrapped.query(writeSql, scope);

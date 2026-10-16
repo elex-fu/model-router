@@ -417,6 +417,7 @@ test('tenant member directory: actual PG15/18 restricted control-plane SELECT an
   } finally {
     const closed = await Promise.allSettled(databases.map(database => database.close()));
     if (!workFailed && closed.some(result => result.status === 'rejected')) {
+      // biome-ignore lint/correctness/noUnsafeFinally: deliberate test design — a failed cleanup must fail the proof even if it replaces the try-block outcome.
       enter(diagnostic, 'pool-cleanup'); throw safeFailure(undefined, diagnostic);
     }
     // Retain all synthetic rows and any successful/failed evidence in the

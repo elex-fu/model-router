@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  observeProviderJsonUsage, PROVIDER_JSON_USAGE_MAX_BODY_BYTES,
+  observeProviderJsonUsage,
+  PROVIDER_JSON_USAGE_MAX_BODY_BYTES,
   type ProviderJsonUsageEvidence,
 } from '../../../src/saas/gateway/provider-json-usage-observer.js';
 import { observeProviderSseUsage } from '../../../src/saas/gateway/provider-sse-usage-observer.js';
@@ -11,35 +12,51 @@ const openai = { providerProtocol: 'openai', providerOperation: 'chat.completion
 const anthropic = { providerProtocol: 'anthropic', providerOperation: 'messages' } as const;
 const responses = { providerProtocol: 'responses', providerOperation: 'responses' } as const;
 const openAiUsage = {
-  prompt_tokens: 10, completion_tokens: 4, total_tokens: 14,
-  prompt_tokens_details: { cached_tokens: 2 }, completion_tokens_details: { reasoning_tokens: 1 },
+  prompt_tokens: 10,
+  completion_tokens: 4,
+  total_tokens: 14,
+  prompt_tokens_details: { cached_tokens: 2 },
+  completion_tokens_details: { reasoning_tokens: 1 },
 };
 const anthropicUsage = {
-  input_tokens: 5, output_tokens: 4, cache_read_input_tokens: 2, cache_creation_input_tokens: 3,
+  input_tokens: 5,
+  output_tokens: 4,
+  cache_read_input_tokens: 2,
+  cache_creation_input_tokens: 3,
   cache_creation: { ephemeral_5m_input_tokens: 1, ephemeral_1h_input_tokens: 2 },
 };
 const responseUsage = {
-  input_tokens: 10, output_tokens: 4, total_tokens: 14,
-  input_tokens_details: { cached_tokens: 2 }, output_tokens_details: { reasoning_tokens: 1 },
+  input_tokens: 10,
+  output_tokens: 4,
+  total_tokens: 14,
+  input_tokens_details: { cached_tokens: 2 },
+  output_tokens_details: { reasoning_tokens: 1 },
 };
 
 function envelope(usage: unknown = openAiUsage) {
   return {
-    id: 'local-completion', object: 'chat.completion',
-    choices: [{ index: 0, message: { role: 'assistant', content: '你好' }, finish_reason: 'stop' }], usage,
+    id: 'local-completion',
+    object: 'chat.completion',
+    choices: [{ index: 0, message: { role: 'assistant', content: '你好' }, finish_reason: 'stop' }],
+    usage,
   };
 }
 
 function source(chunks: readonly Uint8Array[], cancel?: () => void): ReadableStream<Uint8Array> {
   let index = 0;
-  return new ReadableStream<Uint8Array>({
-    pull(controller) {
-      const chunk = chunks[index++];
-      if (chunk) controller.enqueue(chunk);
-      else controller.close();
+  return new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        const chunk = chunks[index++];
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel() {
+        cancel?.();
+      },
     },
-    cancel() { cancel?.(); },
-  }, { highWaterMark: 0 });
+    { highWaterMark: 0 },
+  );
 }
 
 async function drain(body: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
@@ -51,7 +68,9 @@ async function drain(body: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
       if (next.done) return chunks;
       chunks.push(next.value);
     }
-  } finally { reader.releaseLock(); }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 async function observe(value: unknown, evidence: ProviderJsonUsageEvidence = openai) {
@@ -78,9 +97,19 @@ test('OpenAI JSON passes through every chunk and publishes normalized usage only
   reader.releaseLock();
   const result = await observed.observation;
   assert.deepEqual(result, {
-    state: 'reported', usage: {
-      inputTotal: 10, inputUncached: 8, cacheRead: 2, cacheWrite: null, cacheWrite5m: null, cacheWrite1h: null,
-      outputTotal: 4, reasoningOutput: 1, status: 'reported', source: 'upstream', semanticsVersion: 'v1',
+    state: 'reported',
+    usage: {
+      inputTotal: 10,
+      inputUncached: 8,
+      cacheRead: 2,
+      cacheWrite: null,
+      cacheWrite5m: null,
+      cacheWrite1h: null,
+      outputTotal: 4,
+      reasoningOutput: 1,
+      status: 'reported',
+      source: 'upstream',
+      semanticsVersion: 'v1',
     },
   });
   assert.strictEqual(observed.getObservation(), result);
@@ -88,26 +117,62 @@ test('OpenAI JSON passes through every chunk and publishes normalized usage only
 });
 
 test('Anthropic message JSON retains exclusive-input/cache semantics and cache-duration buckets', async () => {
-  const result = await observe({
-    id: 'local-message', type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage: anthropicUsage,
-  }, anthropic);
+  const result = await observe(
+    {
+      id: 'local-message',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      stop_reason: 'end_turn',
+      usage: anthropicUsage,
+    },
+    anthropic,
+  );
   assert.deepEqual(result, {
-    state: 'reported', usage: {
-      inputTotal: 10, inputUncached: 5, cacheRead: 2, cacheWrite: 3, cacheWrite5m: 1, cacheWrite1h: 2,
-      outputTotal: 4, reasoningOutput: null, status: 'reported', source: 'upstream', semanticsVersion: 'v1',
+    state: 'reported',
+    usage: {
+      inputTotal: 10,
+      inputUncached: 5,
+      cacheRead: 2,
+      cacheWrite: 3,
+      cacheWrite5m: 1,
+      cacheWrite1h: 2,
+      outputTotal: 4,
+      reasoningOutput: null,
+      status: 'reported',
+      source: 'upstream',
+      semanticsVersion: 'v1',
     },
   });
 });
 
 test('completed Responses JSON uses the actual responses operation and input/output detail names', async () => {
-  const result = await observe({
-    id: 'local-response', object: 'response', status: 'completed', output: [], error: null, incomplete_details: null,
-    usage: responseUsage,
-  }, responses);
+  const result = await observe(
+    {
+      id: 'local-response',
+      object: 'response',
+      status: 'completed',
+      output: [],
+      error: null,
+      incomplete_details: null,
+      usage: responseUsage,
+    },
+    responses,
+  );
   assert.deepEqual(result, {
-    state: 'reported', usage: {
-      inputTotal: 10, inputUncached: 8, cacheRead: 2, cacheWrite: null, cacheWrite5m: null, cacheWrite1h: null,
-      outputTotal: 4, reasoningOutput: 1, status: 'reported', source: 'upstream', semanticsVersion: 'v1',
+    state: 'reported',
+    usage: {
+      inputTotal: 10,
+      inputUncached: 8,
+      cacheRead: 2,
+      cacheWrite: null,
+      cacheWrite5m: null,
+      cacheWrite1h: null,
+      outputTotal: 4,
+      reasoningOutput: 1,
+      status: 'reported',
+      source: 'upstream',
+      semanticsVersion: 'v1',
     },
   });
 });
@@ -115,10 +180,13 @@ test('completed Responses JSON uses the actual responses operation and input/out
 test('JSON and existing SSE observation agree on OpenAI and Anthropic normalized semantics', async () => {
   for (const [evidence, json, wire] of [
     [openai, envelope(), `data: ${JSON.stringify({ choices: [], usage: openAiUsage })}\n\ndata: [DONE]\n\n`],
-    [anthropic, { type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage: anthropicUsage },
+    [
+      anthropic,
+      { type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage: anthropicUsage },
       `event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { usage: anthropicUsage } })}\n\n` +
-      `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', usage: { output_tokens: 4 } })}\n\n` +
-      'event: message_stop\ndata: {"type":"message_stop"}\n\n'],
+        `event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', usage: { output_tokens: 4 } })}\n\n` +
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ],
   ] as const) {
     const sse = observeProviderSseUsage(source([encoder.encode(wire)]), evidence);
     await drain(sse.body);
@@ -128,7 +196,9 @@ test('JSON and existing SSE observation agree on OpenAI and Anthropic normalized
 
 test('missing, partial, negative, fractional, unsafe, inconsistent or unknown counters remain unreported', async (t) => {
   const cases = [
-    ['missing', undefined], ['null', null], ['partial', { prompt_tokens: 10 }],
+    ['missing', undefined],
+    ['null', null],
+    ['partial', { prompt_tokens: 10 }],
     ['negative', { ...openAiUsage, completion_tokens: -1 }],
     ['fractional', { ...openAiUsage, prompt_tokens: 1.5 }],
     ['string', { ...openAiUsage, prompt_tokens: '10' }],
@@ -148,7 +218,11 @@ test('missing, partial, negative, fractional, unsafe, inconsistent or unknown co
       const value = envelope(usage);
       if (name === 'missing') delete (value as { usage?: unknown }).usage;
       const result = await observe(value);
-      assert.deepEqual(result, { state: 'unknown', usage: null, reason: ['missing', 'null'].includes(name) ? 'no_usage' : 'invalid_usage' });
+      assert.deepEqual(result, {
+        state: 'unknown',
+        usage: null,
+        reason: ['missing', 'null'].includes(name) ? 'no_usage' : 'invalid_usage',
+      });
     });
   }
   for (const usage of [
@@ -156,17 +230,25 @@ test('missing, partial, negative, fractional, unsafe, inconsistent or unknown co
     { ...anthropicUsage, cache_creation: { ephemeral_5m_input_tokens: 1, ephemeral_1h_input_tokens: 1 } },
     { input_tokens: 5, output_tokens: 4 },
   ]) {
-    assert.deepEqual(await observe({ type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage }, anthropic),
-      { state: 'unknown', usage: null, reason: 'invalid_usage' });
+    assert.deepEqual(
+      await observe({ type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage }, anthropic),
+      { state: 'unknown', usage: null, reason: 'invalid_usage' },
+    );
   }
-  assert.deepEqual(await observe({ object: 'response', status: 'completed', output: [], usage: { ...responseUsage, total_tokens: 1 } }, responses),
-    { state: 'unknown', usage: null, reason: 'invalid_usage' });
+  assert.deepEqual(
+    await observe(
+      { object: 'response', status: 'completed', output: [], usage: { ...responseUsage, total_tokens: 1 } },
+      responses,
+    ),
+    { state: 'unknown', usage: null, reason: 'invalid_usage' },
+  );
 });
 
 test('malformed, truncated, damaged UTF-8, duplicate-key and excessive-depth JSON never reports usage', async () => {
   const valid = JSON.stringify(envelope());
   const chunks = [
-    encoder.encode(valid.slice(0, -1)), encoder.encode(`${valid} trailing garbage`),
+    encoder.encode(valid.slice(0, -1)),
+    encoder.encode(`${valid} trailing garbage`),
     encoder.encode(valid.replace('"usage":', '"usage":{},"usage":')),
     encoder.encode(valid.replace('"usage":', '"usage":{},"us\\u0061ge":')),
     encoder.encode('['.repeat(65) + valid + ']'.repeat(65)),
@@ -180,13 +262,20 @@ test('malformed, truncated, damaged UTF-8, duplicate-key and excessive-depth JSO
   for (const value of [[], { ...envelope(), error: { message: 'provider failed' } }, { ...envelope(), choices: [] }]) {
     assert.deepEqual(await observe(value), { state: 'unknown', usage: null, reason: 'malformed_body' });
   }
-  assert.deepEqual(await observe({ object: 'response', status: 'incomplete', output: [], usage: responseUsage }, responses),
-    { state: 'unknown', usage: null, reason: 'malformed_body' });
+  assert.deepEqual(
+    await observe({ object: 'response', status: 'incomplete', output: [], usage: responseUsage }, responses),
+    { state: 'unknown', usage: null, reason: 'malformed_body' },
+  );
 });
 
 test('the exact byte cap reports valid usage, while oversized bodies pass through completely and remain unknown', async () => {
   const template = JSON.stringify({ ...envelope(), padding: '' });
-  const bytes = encoder.encode(JSON.stringify({ ...envelope(), padding: 'x'.repeat(PROVIDER_JSON_USAGE_MAX_BODY_BYTES - encoder.encode(template).byteLength) }));
+  const bytes = encoder.encode(
+    JSON.stringify({
+      ...envelope(),
+      padding: 'x'.repeat(PROVIDER_JSON_USAGE_MAX_BODY_BYTES - encoder.encode(template).byteLength),
+    }),
+  );
   assert.equal(bytes.byteLength, PROVIDER_JSON_USAGE_MAX_BODY_BYTES);
   const atCap = observeProviderJsonUsage(source([bytes]), openai);
   assert.deepEqual(await drain(atCap.body), [bytes]);
@@ -198,16 +287,28 @@ test('the exact byte cap reports valid usage, while oversized bodies pass throug
 });
 
 test('server-owned protocol/operation selects the observer; unsupported pairs pass through without usage', async () => {
-  for (const evidence of [{}, { providerProtocol: 'openai', providerOperation: 'responses' },
+  for (const evidence of [
+    {},
+    { providerProtocol: 'openai', providerOperation: 'responses' },
     { providerProtocol: 'responses', providerOperation: 'responses.compact' },
-    { providerProtocol: 'gemini', providerOperation: 'generateContent' }]) {
-    assert.deepEqual(await observe(envelope(), evidence), { state: 'unknown', usage: null, reason: 'unsupported_protocol_operation' });
+    { providerProtocol: 'gemini', providerOperation: 'generateContent' },
+  ]) {
+    assert.deepEqual(await observe(envelope(), evidence), {
+      state: 'unknown',
+      usage: null,
+      reason: 'unsupported_protocol_operation',
+    });
   }
 });
 
 test('cancellation after a valid JSON chunk but before EOF cannot report usage', async () => {
   let cancelled = false;
-  const observed = observeProviderJsonUsage(source([encoder.encode(JSON.stringify(envelope()))], () => { cancelled = true; }), openai);
+  const observed = observeProviderJsonUsage(
+    source([encoder.encode(JSON.stringify(envelope()))], () => {
+      cancelled = true;
+    }),
+    openai,
+  );
   const reader = observed.body.getReader();
   assert.equal((await reader.read()).done, false);
   assert.equal(observed.getObservation(), null);
@@ -220,16 +321,26 @@ test('cancellation after a valid JSON chunk but before EOF cannot report usage',
 test('a cancellation racing a pending EOF read settles unknown and propagates to the source', async () => {
   let pulls = 0;
   let pending!: () => void;
-  const reading = new Promise<void>((resolve) => { pending = resolve; });
+  const reading = new Promise<void>((resolve) => {
+    pending = resolve;
+  });
   let cancelled = false;
-  const upstream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (pulls++ === 0) { controller.enqueue(encoder.encode(JSON.stringify(envelope()))); return; }
-      pending();
-      return new Promise<void>(() => {});
+  const upstream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (pulls++ === 0) {
+          controller.enqueue(encoder.encode(JSON.stringify(envelope())));
+          return;
+        }
+        pending();
+        return new Promise<void>(() => {});
+      },
+      cancel() {
+        cancelled = true;
+      },
     },
-    cancel() { cancelled = true; },
-  }, { highWaterMark: 0 });
+    { highWaterMark: 0 },
+  );
   const observed = observeProviderJsonUsage(upstream, openai);
   const reader = observed.body.getReader();
   await reader.read();
@@ -245,12 +356,20 @@ test('a cancellation racing a pending EOF read settles unknown and propagates to
 test('upstream failure after a complete JSON prefix preserves the stream failure and never reports usage', async () => {
   const failure = new Error('local upstream failed');
   let sent = false;
-  const observed = observeProviderJsonUsage(new ReadableStream<Uint8Array>({
-    pull(controller) {
-      if (!sent) { sent = true; controller.enqueue(encoder.encode(JSON.stringify(envelope()))); }
-      else controller.error(failure);
-    },
-  }, { highWaterMark: 0 }), openai);
+  const observed = observeProviderJsonUsage(
+    new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(encoder.encode(JSON.stringify(envelope())));
+          } else controller.error(failure);
+        },
+      },
+      { highWaterMark: 0 },
+    ),
+    openai,
+  );
   await assert.rejects(drain(observed.body), (error: unknown) => error === failure);
   assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'stream_error' });
 });

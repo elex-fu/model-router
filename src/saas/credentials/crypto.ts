@@ -84,24 +84,33 @@ class KeyLookupDeadline {
       this.rejectWait = reject;
       // Only the provider lookup continues after timeout, never crypto/SQL.
       // Do not copy or mutate any late provider-owned key material.
-      void Promise.resolve().then(() => {
-        this.check();
-        return lookup();
-      }).then(value => {
-        if (this.expired) return;
-        try {
+      void Promise.resolve()
+        .then(() => {
           this.check();
-          this.rejectWait = undefined;
-          resolve(value);
-        } catch (error) { reject(error); }
-      }, error => {
-        if (this.expired) return;
-        try {
-          this.check();
-          this.rejectWait = undefined;
-          reject(error);
-        } catch (timeout) { reject(timeout); }
-      });
+          return lookup();
+        })
+        .then(
+          (value) => {
+            if (this.expired) return;
+            try {
+              this.check();
+              this.rejectWait = undefined;
+              resolve(value);
+            } catch (error) {
+              reject(error);
+            }
+          },
+          (error) => {
+            if (this.expired) return;
+            try {
+              this.check();
+              this.rejectWait = undefined;
+              reject(error);
+            } catch (timeout) {
+              reject(timeout);
+            }
+          },
+        );
     });
   }
   close(): void {
@@ -227,7 +236,10 @@ function copyCurrentKey(material: unknown): { keyId: string; key: Buffer } {
   }
 }
 
-async function resolveCurrentKey(provider: unknown, deadline?: KeyLookupDeadline): Promise<{ keyId: string; key: Buffer }> {
+async function resolveCurrentKey(
+  provider: unknown,
+  deadline?: KeyLookupDeadline,
+): Promise<{ keyId: string; key: Buffer }> {
   validateKeyProvider(provider);
   let material: unknown;
   try {
@@ -397,7 +409,12 @@ function decryptBuffer(parsed: ParsedEnvelope, context: CredentialContext, key: 
   }
 }
 
-async function decryptToBuffer(envelope: unknown, context: unknown, provider: unknown, deadline?: KeyLookupDeadline): Promise<Buffer> {
+async function decryptToBuffer(
+  envelope: unknown,
+  context: unknown,
+  provider: unknown,
+  deadline?: KeyLookupDeadline,
+): Promise<Buffer> {
   const normalizedContext = validateContext(context);
   const parsed = parseEnvelope(envelope);
   try {
@@ -465,8 +482,12 @@ export async function decryptCredential(
     try {
       deadline?.check();
       return plaintext.toString('utf8');
-    } finally { plaintext.fill(0); }
-  } finally { deadline?.close(); }
+    } finally {
+      plaintext.fill(0);
+    }
+  } finally {
+    deadline?.close();
+  }
 }
 
 /** Re-encrypt an existing envelope under the provider's current key. */

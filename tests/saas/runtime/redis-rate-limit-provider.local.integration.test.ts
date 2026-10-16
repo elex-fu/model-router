@@ -441,6 +441,7 @@ test('RUN-01 required owned local Redis executes the original Lua and restricted
         } catch { cleanupFailure ??= new LocalFailure('PRIVATE_SUMMARY_WRITE_FAILED'); }
         t.diagnostic(JSON.stringify({ artifactDirectory: owner.directory, cleanupSucceeded, artifactsRetained: true }));
       }
+      // biome-ignore lint/correctness/noUnsafeFinally: deliberate test design — a failed cleanup must fail the proof even if it replaces the try-block outcome.
       if (cleanupFailure !== undefined) throw cleanupFailure;
     }
   }

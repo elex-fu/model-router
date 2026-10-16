@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GATEWAY_METERING_SAAS_MIGRATION } from '../../../../src/saas/db/migrations/010_gateway_metering.js';
 import {
-  PRE_DISPATCH_TERMINAL_CANCELLATION_SAAS_MIGRATION,
-  PRE_DISPATCH_TERMINAL_CHECK_SQL,
   PRE_DISPATCH_ATTEMPT_GUARD_EXPECTED_SOURCE,
   PRE_DISPATCH_ATTEMPT_GUARD_SOURCE,
+  PRE_DISPATCH_TERMINAL_CANCELLATION_SAAS_MIGRATION,
+  PRE_DISPATCH_TERMINAL_CHECK_SQL,
 } from '../../../../src/saas/db/migrations/059_pre_dispatch_terminal_cancellation.js';
 
 test('059 has a stable forward migration export; central DB owner owns registry integration', () => {
   const migration = PRE_DISPATCH_TERMINAL_CANCELLATION_SAAS_MIGRATION;
-  assert.equal(migration.version, 59); assert.equal(migration.name, 'pre_dispatch_terminal_cancellation');
+  assert.equal(migration.version, 59);
+  assert.equal(migration.name, 'pre_dispatch_terminal_cancellation');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   assert.match(migration.sql, /DO \$pre_dispatch_cancellation\$/);
   assert.match(migration.sql, /LOCK TABLE model_router_saas\.saas_attempts IN ACCESS EXCLUSIVE MODE/);
@@ -33,18 +34,35 @@ test('059 requires the exact existing guard, trigger binding, owner and validate
 });
 
 test('059 permits only false-response not_sent failed and preserves the dispatched branch', () => {
-  assert.match(PRE_DISPATCH_TERMINAL_CHECK_SQL, /dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false/);
-  assert.match(PRE_DISPATCH_TERMINAL_CHECK_SQL, /dispatch_state = 'not_sent' AND result_state = 'failed' AND response_started = false/);
-  assert.match(PRE_DISPATCH_TERMINAL_CHECK_SQL, /response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL/);
+  assert.match(
+    PRE_DISPATCH_TERMINAL_CHECK_SQL,
+    /dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false/,
+  );
+  assert.match(
+    PRE_DISPATCH_TERMINAL_CHECK_SQL,
+    /dispatch_state = 'not_sent' AND result_state = 'failed' AND response_started = false/,
+  );
+  assert.match(
+    PRE_DISPATCH_TERMINAL_CHECK_SQL,
+    /response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL/,
+  );
   assert.match(PRE_DISPATCH_TERMINAL_CHECK_SQL, /OR dispatch_state <> 'not_sent'$/);
   assert.match(PRE_DISPATCH_ATTEMPT_GUARD_SOURCE, /OLD\.dispatch_state = 'not_sent' AND OLD\.result_state = 'failed'/);
   assert.match(PRE_DISPATCH_ATTEMPT_GUARD_SOURCE, /A cancelled pre-dispatch attempt is terminal/);
-  assert.match(PRE_DISPATCH_ATTEMPT_GUARD_SOURCE, /OLD\.dispatch_state = 'not_sent' AND OLD\.result_state IN \('pending', 'failed'\)/);
+  assert.match(
+    PRE_DISPATCH_ATTEMPT_GUARD_SOURCE,
+    /OLD\.dispatch_state = 'not_sent' AND OLD\.result_state IN \('pending', 'failed'\)/,
+  );
   for (const preserved of [
-    'SaaS attempt observations are immutable', 'Invalid SaaS attempt dispatch transition', 'Invalid SaaS attempt result transition',
-    'SaaS attempt response_started is monotonic', 'SaaS attempt response_started_at is immutable',
-    'SaaS attempt result status is immutable once observed', 'Unknown SaaS attempt states require a reason',
+    'SaaS attempt observations are immutable',
+    'Invalid SaaS attempt dispatch transition',
+    'Invalid SaaS attempt result transition',
+    'SaaS attempt response_started is monotonic',
+    'SaaS attempt response_started_at is immutable',
+    'SaaS attempt result status is immutable once observed',
+    'Unknown SaaS attempt states require a reason',
     'SaaS attempt state updates require a monotonic version and timestamp',
-  ]) assert.ok(PRE_DISPATCH_ATTEMPT_GUARD_SOURCE.includes(preserved));
+  ])
+    assert.ok(PRE_DISPATCH_ATTEMPT_GUARD_SOURCE.includes(preserved));
   assert.match(PRE_DISPATCH_ATTEMPT_GUARD_SOURCE, /NEW\.state_version <> OLD\.state_version \+ 1/);
 });

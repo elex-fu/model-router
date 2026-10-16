@@ -537,8 +537,12 @@ test('prelock waits for the key fence before reading revocation, epochs, or expi
     const executor = makeExecutor();
     let releaseFence!: () => void;
     let reachedFence!: () => void;
-    const blocked = new Promise<void>((resolve) => { releaseFence = resolve; });
-    const reached = new Promise<void>((resolve) => { reachedFence = resolve; });
+    const blocked = new Promise<void>((resolve) => {
+      releaseFence = resolve;
+    });
+    const reached = new Promise<void>((resolve) => {
+      reachedFence = resolve;
+    });
     const waitingExecutor: SqlExecutor = {
       async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
         if (authorityStep(sql, values) === 'key-fence') {
@@ -551,7 +555,10 @@ test('prelock waits for the key fence before reading revocation, epochs, or expi
     const operation = new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(waitingExecutor));
     const rejection = assertDenied(operation, /not active|mismatch|expired/);
     await reached;
-    assert.equal(executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)), false);
+    assert.equal(
+      executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)),
+      false,
+    );
     executor.rows.key = [{ ...executor.rows.key[0], ...mutation }];
     releaseFence();
     await rejection;
@@ -575,7 +582,10 @@ test('prelock fails closed when the API-key advisory fence cannot be acquired', 
     new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(failingExecutor)),
     (error: unknown) => error instanceof SaasAdmissionAuthorizationError && error.code === 'storage_failure',
   );
-  assert.equal(executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)), false);
+  assert.equal(
+    executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)),
+    false,
+  );
 });
 
 test('prelock checks expiry with the database clock after a fence wait even when the key is unchanged', async () => {
@@ -583,8 +593,12 @@ test('prelock checks expiry with the database clock after a fence wait even when
   const expiresAt = validRows().key[0]?.expires_at;
   let releaseFence!: () => void;
   let reachedFence!: () => void;
-  const blocked = new Promise<void>((resolve) => { releaseFence = resolve; });
-  const reached = new Promise<void>((resolve) => { reachedFence = resolve; });
+  const blocked = new Promise<void>((resolve) => {
+    releaseFence = resolve;
+  });
+  const reached = new Promise<void>((resolve) => {
+    reachedFence = resolve;
+  });
   const waitingExecutor: SqlExecutor = {
     async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
       if (authorityStep(sql, values) === 'key-fence') {
@@ -598,7 +612,10 @@ test('prelock checks expiry with the database clock after a fence wait even when
   const operation = new PostgresSaasRequestAdmissionAuthorizationPrelock().prelock(input(waitingExecutor));
   const rejection = assertDenied(operation, /API key is expired/);
   await reached;
-  assert.equal(executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)), false);
+  assert.equal(
+    executor.statements.some(({ sql }) => /FROM saas_api_keys|clock_timestamp\(\)/i.test(sql)),
+    false,
+  );
   // The persisted expiry does not change; wall-clock time reaches it while waiting.
   executor.rows.clock = [{ now: expiresAt }];
   releaseFence();

@@ -197,12 +197,31 @@ test('playground, redacted export, runtime bridge, maintenance and pricing APIs'
     assert.equal((await json('/pricing/price-1', 'PATCH', { outputPerMillion: '1.1234567' })).response.status, 422);
     const priceVersions = (await json('/pricing')).body.data as Array<Record<string, unknown>>;
     assert.equal(priceVersions.length, 3);
-    assert.equal(priceVersions.some((version) => version.cacheWrite5mPerMillion === '3.125'), true);
-    assert.equal(priceVersions.some((version) => version.provider === 'custom' && version.upstreamId === 'up'), true);
-    assert.equal(priceVersions.every((version) => typeof version.effectiveFrom === 'string' && typeof version.versionId === 'string'), true);
+    assert.equal(
+      priceVersions.some((version) => version.cacheWrite5mPerMillion === '3.125'),
+      true,
+    );
+    assert.equal(
+      priceVersions.some((version) => version.provider === 'custom' && version.upstreamId === 'up'),
+      true,
+    );
+    assert.equal(
+      priceVersions.every(
+        (version) => typeof version.effectiveFrom === 'string' && typeof version.versionId === 'string',
+      ),
+      true,
+    );
     assert.equal(new Set(priceVersions.map((version) => version.versionId)).size, 3);
-    assert.equal(priceVersions.every((version) => typeof version.versionSequence === 'number'), true);
-    assert.equal(priceVersions.some((version) => version.cacheReadPerMillion === undefined && version.cacheWriteIncludedInInput === false), true);
+    assert.equal(
+      priceVersions.every((version) => typeof version.versionSequence === 'number'),
+      true,
+    );
+    assert.equal(
+      priceVersions.some(
+        (version) => version.cacheReadPerMillion === undefined && version.cacheWriteIncludedInInput === false,
+      ),
+      true,
+    );
 
     const exportJob = await json('/exports', 'POST', {
       type: 'usage',

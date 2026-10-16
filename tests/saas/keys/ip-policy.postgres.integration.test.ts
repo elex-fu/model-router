@@ -59,14 +59,8 @@ async function seedFixture(migrator: SaasDatabase): Promise<KeyIpSeed> {
         (await tx.query<{ role: string }>('SELECT current_user AS role')).rows[0]?.role,
         'model_router_saas_migrator',
       );
-      await tx.query('INSERT INTO saas_users (id, email) VALUES ($1, $2)', [
-        userId,
-        `key080-${label}@example.test`,
-      ]);
-      await tx.query('INSERT INTO saas_tenants (id, name, slug) VALUES ($1, $2, $2)', [
-        tenantId,
-        `key080-${label}`,
-      ]);
+      await tx.query('INSERT INTO saas_users (id, email) VALUES ($1, $2)', [userId, `key080-${label}@example.test`]);
+      await tx.query('INSERT INTO saas_tenants (id, name, slug) VALUES ($1, $2, $2)', [tenantId, `key080-${label}`]);
       await tx.query("INSERT INTO saas_memberships (tenant_id, user_id, role) VALUES ($1, $2, 'owner')", [
         tenantId,
         userId,
@@ -96,7 +90,17 @@ async function seedFixture(migrator: SaasDatabase): Promise<KeyIpSeed> {
        created_by_user_id, entitlement_id, supply_profile_id, supply_mode, name, prefix, key_hash, model_scopes,
        authz_version, model_scope_version, entitlement_authz_version, supply_profile_authz_version)
       VALUES ($1, $2, $3, $4, 'member', $4, $4, $5, $6, $7, 'KEY080', 'mr_live_key080_probe', $8, $9, 1, 1, 1, 1)`,
-        [keyId, tenantId, projectId, userId, entitlementId, profileId, 'byok', sha256Hex(`key080-key:${keyId}`), [alias]],
+        [
+          keyId,
+          tenantId,
+          projectId,
+          userId,
+          entitlementId,
+          profileId,
+          'byok',
+          sha256Hex(`key080-key:${keyId}`),
+          [alias],
+        ],
       );
       await tx.query(
         `INSERT INTO saas_api_key_ip_policies
@@ -303,12 +307,7 @@ async function guardOutcome(
   }
 }
 
-async function replacePolicy(
-  service: KeyService,
-  seed: KeyIpSeed,
-  expectedVersion: string,
-  policy: KeyIpPolicyValue,
-) {
+async function replacePolicy(service: KeyService, seed: KeyIpSeed, expectedVersion: string, policy: KeyIpPolicyValue) {
   return service.replaceKeyIpPolicy(
     {
       userId: seed.userId,
@@ -370,117 +369,127 @@ test('KEY080: real persistent key IP policy CAS and guard admission under restri
   });
   await ipPolicyAcl(controlPlane.database, gateway.database);
 
-  await t.test('control-plane CAS: get, advance, stale conflict and concurrent single-winner', {
-    timeout: 60_000,
-  }, async () => {
-    const seed = await seedFixture(migrator.database);
-    const service = new KeyService(controlPlane.database);
-    const context = {
-      userId: seed.userId,
-      tenantId: seed.tenantId,
-      projectId: seed.projectId,
-      tenantRole: 'owner' as const,
-      projectRole: 'owner' as const,
-    };
+  await t.test(
+    'control-plane CAS: get, advance, stale conflict and concurrent single-winner',
+    {
+      timeout: 60_000,
+    },
+    async () => {
+      const seed = await seedFixture(migrator.database);
+      const service = new KeyService(controlPlane.database);
+      const context = {
+        userId: seed.userId,
+        tenantId: seed.tenantId,
+        projectId: seed.projectId,
+        tenantRole: 'owner' as const,
+        projectRole: 'owner' as const,
+      };
 
-    const initial = await phase('snapshot', () => service.getKeyIpPolicy(context, seed.keyId));
-    assert.equal(initial.version, '1');
-    assert.equal(initial.authzVersion, 1);
-    assert.deepEqual(initial.policy, { mode: 'disabled', rules: [] });
+      const initial = await phase('snapshot', () => service.getKeyIpPolicy(context, seed.keyId));
+      assert.equal(initial.version, '1');
+      assert.equal(initial.authzVersion, 1);
+      assert.deepEqual(initial.policy, { mode: 'disabled', rules: [] });
 
-    const allowlist: KeyIpPolicyValue = { mode: 'allowlist', rules: ['203.0.113.10/32', '2001:db8::/32'] };
-    const advanced = await phase('first_complete', () => replacePolicy(service, seed, '1', allowlist));
-    assert.equal(advanced.version, '2');
-    assert.equal(advanced.authzVersion, 2, 'replacement atomically bumps the key authorization version');
-    assert.deepEqual(advanced.policy, allowlist);
-    const audits = await phase('snapshot', () =>
-      migrator.database.query<{ count: string }>(
-        "SELECT count(*)::text AS count FROM saas_audit_events WHERE tenant_id = $1 AND action = 'api_key.ip_policy_replaced'",
-        [seed.tenantId],
-      ),
-    );
-    assert.equal(audits.rows[0]?.count, '1', 'every committed replacement appends its audit row');
+      const allowlist: KeyIpPolicyValue = { mode: 'allowlist', rules: ['203.0.113.10/32', '2001:db8::/32'] };
+      const advanced = await phase('first_complete', () => replacePolicy(service, seed, '1', allowlist));
+      assert.equal(advanced.version, '2');
+      assert.equal(advanced.authzVersion, 2, 'replacement atomically bumps the key authorization version');
+      assert.deepEqual(advanced.policy, allowlist);
+      const audits = await phase('snapshot', () =>
+        migrator.database.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM saas_audit_events WHERE tenant_id = $1 AND action = 'api_key.ip_policy_replaced'",
+          [seed.tenantId],
+        ),
+      );
+      assert.equal(audits.rows[0]?.count, '1', 'every committed replacement appends its audit row');
 
-    // A stale expectation cannot move the head and leaves every fact untouched.
-    await assertVersionConflict(() => replacePolicy(service, seed, '1', { mode: 'denyall', rules: [] }));
-    const afterStale = await phase('snapshot', () => service.getKeyIpPolicy(context, seed.keyId));
-    assert.equal(afterStale.version, '2');
-    assert.deepEqual(afterStale.policy, allowlist);
-    const staleAudits = await phase('snapshot', () =>
-      migrator.database.query<{ count: string }>(
-        "SELECT count(*)::text AS count FROM saas_audit_events WHERE tenant_id = $1 AND action = 'api_key.ip_policy_replaced'",
-        [seed.tenantId],
-      ),
-    );
-    assert.equal(staleAudits.rows[0]?.count, '1', 'a rejected replacement appends no audit row');
+      // A stale expectation cannot move the head and leaves every fact untouched.
+      await assertVersionConflict(() => replacePolicy(service, seed, '1', { mode: 'denyall', rules: [] }));
+      const afterStale = await phase('snapshot', () => service.getKeyIpPolicy(context, seed.keyId));
+      assert.equal(afterStale.version, '2');
+      assert.deepEqual(afterStale.policy, allowlist);
+      const staleAudits = await phase('snapshot', () =>
+        migrator.database.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM saas_audit_events WHERE tenant_id = $1 AND action = 'api_key.ip_policy_replaced'",
+          [seed.tenantId],
+        ),
+      );
+      assert.equal(staleAudits.rows[0]?.count, '1', 'a rejected replacement appends no audit row');
 
-    // Two real connections race the identical replacement. The exclusive
-    // fences serialize them: exactly one commits version 3 and the loser
-    // re-reads the advanced head and conflicts.
-    const peer = new KeyService(controlPlanePeer.database);
-    const racePolicy: KeyIpPolicyValue = { mode: 'allowlist', rules: ['198.51.100.0/24'] };
-    const outcomes = await Promise.allSettled([
-      replacePolicy(service, seed, '2', racePolicy),
-      replacePolicy(peer, seed, '2', racePolicy),
-    ]);
-    const won = outcomes.filter((outcome) => outcome.status === 'fulfilled');
-    const lost = outcomes.filter((outcome) => outcome.status === 'rejected');
-    assert.equal(won.length, 1, 'exactly one racer commits the replacement');
-    assert.equal(lost.length, 1);
-    const winner = (won[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof replacePolicy>>>).value;
-    assert.equal(winner.version, '3');
-    assert.equal(winner.authzVersion, 3);
-    const reason = (lost[0] as PromiseRejectedResult).reason;
-    assert.ok(
-      reason instanceof SaasKeyError && reason.status === 409 && reason.code === 'KEY_IP_POLICY_VERSION_CONFLICT',
-      'the losing racer observes the exact version conflict',
-    );
-    const final = await phase('snapshot', () => service.getKeyIpPolicy(context, seed.keyId));
-    assert.equal(final.version, '3');
-    assert.deepEqual(final.policy, racePolicy);
-  });
+      // Two real connections race the identical replacement. The exclusive
+      // fences serialize them: exactly one commits version 3 and the loser
+      // re-reads the advanced head and conflicts.
+      const peer = new KeyService(controlPlanePeer.database);
+      const racePolicy: KeyIpPolicyValue = { mode: 'allowlist', rules: ['198.51.100.0/24'] };
+      const outcomes = await Promise.allSettled([
+        replacePolicy(service, seed, '2', racePolicy),
+        replacePolicy(peer, seed, '2', racePolicy),
+      ]);
+      const won = outcomes.filter((outcome) => outcome.status === 'fulfilled');
+      const lost = outcomes.filter((outcome) => outcome.status === 'rejected');
+      assert.equal(won.length, 1, 'exactly one racer commits the replacement');
+      assert.equal(lost.length, 1);
+      const winner = (won[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof replacePolicy>>>).value;
+      assert.equal(winner.version, '3');
+      assert.equal(winner.authzVersion, 3);
+      const reason = (lost[0] as PromiseRejectedResult).reason;
+      assert.ok(
+        reason instanceof SaasKeyError && reason.status === 409 && reason.code === 'KEY_IP_POLICY_VERSION_CONFLICT',
+        'the losing racer observes the exact version conflict',
+      );
+      const final = await phase('snapshot', () => service.getKeyIpPolicy(context, seed.keyId));
+      assert.equal(final.version, '3');
+      assert.deepEqual(final.policy, racePolicy);
+    },
+  );
 
-  await t.test('gateway guard: persisted head decides caller admission and fails closed', {
-    timeout: 60_000,
-  }, async () => {
-    const seed = await seedFixture(migrator.database);
-    const service = new KeyService(controlPlane.database);
-    const guard = new PostgresRequestAdmissionGuard(gateway.database);
-    const PASS = 'AUTHORITY_MISMATCH' as const; // Past the IP cell; stops at the absent request lock.
-    const DENY = 'CALLER_DENIED' as const;
+  await t.test(
+    'gateway guard: persisted head decides caller admission and fails closed',
+    {
+      timeout: 60_000,
+    },
+    async () => {
+      const seed = await seedFixture(migrator.database);
+      const service = new KeyService(controlPlane.database);
+      const guard = new PostgresRequestAdmissionGuard(gateway.database);
+      const PASS = 'AUTHORITY_MISMATCH' as const; // Past the IP cell; stops at the absent request lock.
+      const DENY = 'CALLER_DENIED' as const;
 
-    // Disabled head: no caller evidence is required at all.
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '1', null), PASS);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '1', resolved('198.51.100.9')), PASS);
+      // Disabled head: no caller evidence is required at all.
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '1', null), PASS);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '1', resolved('198.51.100.9')), PASS);
 
-    // Allowlist head: IPv4/IPv6/CIDR membership decides; anything else fails closed.
-    const allowlist: KeyIpPolicyValue = { mode: 'allowlist', rules: ['203.0.113.10', '2001:db8::/32'] };
-    const v2 = await phase('first_complete', () => replacePolicy(service, seed, '1', allowlist));
-    assert.equal(v2.authzVersion, 2);
-    assert.deepEqual(v2.policy, { mode: 'allowlist', rules: ['203.0.113.10/32', '2001:db8::/32'] });
+      // Allowlist head: IPv4/IPv6/CIDR membership decides; anything else fails closed.
+      const allowlist: KeyIpPolicyValue = { mode: 'allowlist', rules: ['203.0.113.10', '2001:db8::/32'] };
+      const v2 = await phase('first_complete', () => replacePolicy(service, seed, '1', allowlist));
+      assert.equal(v2.authzVersion, 2);
+      assert.deepEqual(v2.policy, { mode: 'allowlist', rules: ['203.0.113.10/32', '2001:db8::/32'] });
 
-    // The atomic authz_version bump invalidates in-flight authority BEFORE the
-    // IP cell: a stale snapshot with an out-of-policy address reports the
-    // authority mismatch, never CALLER_DENIED.
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '1', resolved('198.51.100.9')), PASS);
+      // The atomic authz_version bump invalidates in-flight authority BEFORE the
+      // IP cell: a stale snapshot with an out-of-policy address reports the
+      // authority mismatch, never CALLER_DENIED.
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '1', resolved('198.51.100.9')), PASS);
 
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('203.0.113.10')), PASS);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('2001:db8::1')), PASS);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('198.51.100.9')), DENY);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('2001:db9::1')), DENY);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', UNRESOLVED), DENY);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', null), DENY);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '2', undefined), DENY);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('203.0.113.10')), PASS);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('2001:db8::1')), PASS);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('198.51.100.9')), DENY);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', resolved('2001:db9::1')), DENY);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', UNRESOLVED), DENY);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', null), DENY);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '2', undefined), DENY);
 
-    // Denyall rejects every caller, resolved or not.
-    const v3 = await phase('first_complete', () => replacePolicy(service, seed, '2', { mode: 'denyall', rules: [] }));
-    assert.equal(v3.authzVersion, 3);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '3', resolved('203.0.113.10')), DENY);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '3', UNRESOLVED), DENY);
+      // Denyall rejects every caller, resolved or not.
+      const v3 = await phase('first_complete', () => replacePolicy(service, seed, '2', { mode: 'denyall', rules: [] }));
+      assert.equal(v3.authzVersion, 3);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '3', resolved('203.0.113.10')), DENY);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '3', UNRESOLVED), DENY);
 
-    // Returning to disabled reopens the key without caller evidence.
-    const v4 = await phase('first_complete', () => replacePolicy(service, seed, '3', { mode: 'disabled', rules: [] }));
-    assert.equal(v4.authzVersion, 4);
-    assert.equal(await guardOutcome(gateway.database, guard, seed, '4', null), PASS);
-  });
+      // Returning to disabled reopens the key without caller evidence.
+      const v4 = await phase('first_complete', () =>
+        replacePolicy(service, seed, '3', { mode: 'disabled', rules: [] }),
+      );
+      assert.equal(v4.authzVersion, 4);
+      assert.equal(await guardOutcome(gateway.database, guard, seed, '4', null), PASS);
+    },
+  );
 });

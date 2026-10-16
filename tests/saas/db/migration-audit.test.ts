@@ -9,9 +9,9 @@ import {
   SAAS_AUDIT_CATALOG_KINDS,
   SAAS_AUDIT_CATALOG_PROFILE,
   SAAS_MIGRATION_AUDIT_CATALOG_SQL,
-  SaasMigrationAuditError,
   type SaasAuditCatalogBaseline,
   type SaasAuditCatalogObject,
+  SaasMigrationAuditError,
   type SaasMigrationAuditOptions,
   type SaasMigrationAuditReport,
 } from '../../../src/saas/db/migration-audit.js';
@@ -28,20 +28,41 @@ const migrations: readonly SaasMigration[] = [
 ];
 const expected = getSaasMigrationAuditExpectations(migrations);
 const catalogRows = SAAS_AUDIT_CATALOG_KINDS.map((kind) => ({
-  kind, identity: JSON.stringify([`fixture_${kind}`]), definition: `${kind} definition`,
+  kind,
+  identity: JSON.stringify([`fixture_${kind}`]),
+  definition: `${kind} definition`,
 }));
 const catalogObjects: SaasAuditCatalogObject[] = catalogRows.map(({ kind, identity, definition }) => ({
-  kind, identityChecksum: hash(identity), definitionChecksum: hash(definition),
+  kind,
+  identityChecksum: hash(identity),
+  definitionChecksum: hash(definition),
 }));
 function baseline(overrides: Partial<SaasAuditCatalogBaseline> = {}): SaasAuditCatalogBaseline {
-  return { profile: SAAS_AUDIT_CATALOG_PROFILE, coverage: 'complete-profile',
-    evidenceId: 'reviewed-fixture', releaseId: 'release-fixture', schema: 'model_router_saas',
-    postgresMajor: 15, migrationsChecksum: expected.checksum, objects: catalogObjects, ...overrides };
+  return {
+    profile: SAAS_AUDIT_CATALOG_PROFILE,
+    coverage: 'complete-profile',
+    evidenceId: 'reviewed-fixture',
+    releaseId: 'release-fixture',
+    schema: 'model_router_saas',
+    postgresMajor: 15,
+    migrationsChecksum: expected.checksum,
+    objects: catalogObjects,
+    ...overrides,
+  };
 }
 function options(overrides: Partial<SaasMigrationAuditOptions> = {}): SaasMigrationAuditOptions {
-  return { target: { deploymentId: 'deployment-fixture', environmentId: 'environment-fixture',
-    database: 'audit_fixture', schema: 'model_router_saas' }, releaseId: 'release-fixture',
-    migrations, catalogBaseline: baseline(), ...overrides };
+  return {
+    target: {
+      deploymentId: 'deployment-fixture',
+      environmentId: 'environment-fixture',
+      database: 'audit_fixture',
+      schema: 'model_router_saas',
+    },
+    releaseId: 'release-fixture',
+    migrations,
+    catalogBaseline: baseline(),
+    ...overrides,
+  };
 }
 interface FixtureOptions {
   database?: string;
@@ -61,8 +82,12 @@ class AuditPool implements SaasDatabasePool {
   connects = 0;
   ends = 0;
   constructor(readonly fixture: FixtureOptions = {}) {}
-  query<Row>(): Promise<SqlResult<Row>> { throw new Error('Audit must use one checked-out client'); }
-  async end(): Promise<void> { this.ends += 1; }
+  query<Row>(): Promise<SqlResult<Row>> {
+    throw new Error('Audit must use one checked-out client');
+  }
+  async end(): Promise<void> {
+    this.ends += 1;
+  }
   async connect(): Promise<SaasDatabaseClient> {
     this.connects += 1;
     if (this.fixture.fail === 'connect') throw new Error(sensitiveText);
@@ -80,14 +105,17 @@ class AuditPool implements SaasDatabasePool {
             database: this.fixture.database ?? 'audit_fixture',
             schema_present: this.fixture.schemaPresent ?? true,
             server_version_num: this.fixture.serverVersion ?? '150012',
-            read_only: this.fixture.readOnly ?? 'on', isolation: this.fixture.isolation ?? 'repeatable read',
+            read_only: this.fixture.readOnly ?? 'on',
+            isolation: this.fixture.isolation ?? 'repeatable read',
           }));
         } else if (sql.includes("c.relname = 'saas_schema_migrations'")) {
           phase = 'ledger';
           rows = this.fixture.ledgerKind === null ? [] : [{ relkind: this.fixture.ledgerKind ?? 'r' }];
         } else if (sql.startsWith('SELECT version, name, checksum')) {
           phase = 'history';
-          rows = this.fixture.history ?? expected.migrations.map(({ version, name, checksum }) => ({ version, name, checksum }));
+          rows =
+            this.fixture.history ??
+            expected.migrations.map(({ version, name, checksum }) => ({ version, name, checksum }));
         } else if (sql === SAAS_MIGRATION_AUDIT_CATALOG_SQL) {
           phase = 'catalog';
           rows = this.fixture.catalog ?? catalogRows;
@@ -103,7 +131,8 @@ class AuditPool implements SaasDatabasePool {
   }
 }
 const codes = (report: SaasMigrationAuditReport): string[] => report.issues.map(({ code }) => code);
-const history = (): Record<string, unknown>[] => expected.migrations.map(({ version, name, checksum }) => ({ version, name, checksum }));
+const history = (): Record<string, unknown>[] =>
+  expected.migrations.map(({ version, name, checksum }) => ({ version, name, checksum }));
 function blocked(report: SaasMigrationAuditReport): void {
   assert.notEqual(report.compatibility, 'matches-trusted-baseline');
   assert.throws(() => assertSaasMigrationAuditMatches(report), SaasMigrationAuditError);
@@ -117,7 +146,11 @@ test('matches an explicitly bound trusted baseline using one read-only snapshot 
   assertSaasMigrationAuditMatches(report);
   assert.deepEqual(report.issues, []);
   assert.equal(report.migrations.length, 3);
-  assert.ok(report.migrations.every(({ state, expected: wanted, actual }) => state === 'match' && wanted?.checksum === actual?.checksum));
+  assert.ok(
+    report.migrations.every(
+      ({ state, expected: wanted, actual }) => state === 'match' && wanted?.checksum === actual?.checksum,
+    ),
+  );
   assert.equal(report.catalog.actualChecksum, report.catalog.expectedChecksum);
   assert.equal(report.catalog.comparisons.length, catalogRows.length);
   assert.ok(report.catalog.coverage.some((coverage) => coverage.includes('internal-FK')));
@@ -128,11 +161,21 @@ test('matches an explicitly bound trusted baseline using one read-only snapshot 
   assert.equal(pool.statements[0]?.sql, 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
   assert.equal(pool.statements[1]?.sql, 'SET LOCAL search_path TO pg_catalog');
   assert.equal(pool.statements.at(-1)?.sql, 'ROLLBACK');
-  assert.equal(pool.statements.filter(({ sql }) => sql.startsWith('SELECT version'))[0]?.sql,
-    'SELECT version, name, checksum FROM "model_router_saas"."saas_schema_migrations" ORDER BY version ASC');
-  assert.ok(pool.statements.every(({ sql }) => /^(BEGIN TRANSACTION .* READ ONLY|SET LOCAL search_path TO pg_catalog|ROLLBACK|SELECT|\s*WITH)/.test(sql)));
-  assert.ok(!pool.statements.some(({ sql }) => /^(?:CREATE|ALTER|INSERT|DELETE|UPDATE|GRANT|TRUNCATE|COMMIT)\b/i.test(sql)));
-  assert.ok(!pool.statements.some(({ sql }) => /advisory_lock|saas_provider_supply_credentials|password_hash/.test(sql)));
+  assert.equal(
+    pool.statements.filter(({ sql }) => sql.startsWith('SELECT version'))[0]?.sql,
+    'SELECT version, name, checksum FROM "model_router_saas"."saas_schema_migrations" ORDER BY version ASC',
+  );
+  assert.ok(
+    pool.statements.every(({ sql }) =>
+      /^(BEGIN TRANSACTION .* READ ONLY|SET LOCAL search_path TO pg_catalog|ROLLBACK|SELECT|\s*WITH)/.test(sql),
+    ),
+  );
+  assert.ok(
+    !pool.statements.some(({ sql }) => /^(?:CREATE|ALTER|INSERT|DELETE|UPDATE|GRANT|TRUNCATE|COMMIT)\b/i.test(sql)),
+  );
+  assert.ok(
+    !pool.statements.some(({ sql }) => /advisory_lock|saas_provider_supply_credentials|password_hash/.test(sql)),
+  );
 });
 
 test('the default expectation set exactly matches runner checksums for every registered migration', () => {
@@ -159,7 +202,7 @@ test('the assertion checks evidence consistency as well as the top-level status 
   const report = await auditSaasMigrationCompatibility(new AuditPool(), options());
   for (const changed of [
     { actualTarget: null },
-    { migrations: report.migrations.map((row, index) => index === 0 ? { ...row, actual: null } : row) },
+    { migrations: report.migrations.map((row, index) => (index === 0 ? { ...row, actual: null } : row)) },
     { catalog: { ...report.catalog, comparisons: [] } },
     { catalog: { ...report.catalog, actual: report.catalog.actual.slice(1) } },
   ]) {
@@ -173,9 +216,12 @@ for (const version of [22, 23] as const) {
     const row = rows.find((entry) => entry.version === version);
     assert.ok(row);
     row.checksum = hash(`historical-${version}`);
-    const report = await auditSaasMigrationCompatibility(new AuditPool({ history: rows }), options({
-      legacyChecksums: [{ version, checksum: String(row.checksum), evidenceId: 'reviewed-history-fixture' }],
-    }));
+    const report = await auditSaasMigrationCompatibility(
+      new AuditPool({ history: rows }),
+      options({
+        legacyChecksums: [{ version, checksum: String(row.checksum), evidenceId: 'reviewed-history-fixture' }],
+      }),
+    );
     assert.equal(report.compatibility, 'mismatch');
     assert.ok(codes(report).includes('CHECKSUM_MISMATCH_022_023'));
     assert.ok(codes(report).includes('KNOWN_LEGACY_CHECKSUM'));
@@ -225,8 +271,8 @@ test('a missing tail is a missing release requirement, not proof that an upgrade
 
 for (const [label, rows] of [
   ['duplicate version', [...history(), history()[0]]],
-  ['duplicate name', history().map((row, index) => index === 1 ? { ...row, name: 'initial' } : row)],
-  ['invalid checksum', history().map((row, index) => index === 1 ? { ...row, checksum: sensitiveText } : row)],
+  ['duplicate name', history().map((row, index) => (index === 1 ? { ...row, name: 'initial' } : row))],
+  ['invalid checksum', history().map((row, index) => (index === 1 ? { ...row, checksum: sensitiveText } : row))],
   ['malformed version', [{ version: '1e0', name: sensitiveText, checksum: sensitiveText }]],
   ['null row', [null]],
 ] as const) {
@@ -254,7 +300,7 @@ for (const ledgerKind of [null, 'v'] as const) {
 }
 
 test('catalog separately reports missing, drifted and unknown objects and never emits raw definitions', async () => {
-  const rows = catalogRows.slice(1).map((row, index) => index === 0 ? { ...row, definition: sensitiveText } : row);
+  const rows = catalogRows.slice(1).map((row, index) => (index === 0 ? { ...row, definition: sensitiveText } : row));
   rows.push({ kind: 'routine', identity: sensitiveText, definition: sensitiveText });
   const report = await auditSaasMigrationCompatibility(new AuditPool({ catalog: rows }), options());
   assert.ok(codes(report).includes('CATALOG_MISSING'));
@@ -266,7 +312,11 @@ test('catalog separately reports missing, drifted and unknown objects and never 
   blocked(report);
 });
 
-for (const rows of [[], [...catalogRows, catalogRows[0]], [...catalogRows, { kind: 'routine', identity: null, definition: sensitiveText }]]) {
+for (const rows of [
+  [],
+  [...catalogRows, catalogRows[0]],
+  [...catalogRows, { kind: 'routine', identity: null, definition: sensitiveText }],
+]) {
   test('empty/duplicate/malformed catalog rows never become a match', async () => {
     const report = await auditSaasMigrationCompatibility(new AuditPool({ catalog: rows }), options());
     assert.ok(codes(report).includes('CATALOG_INVALID'));
@@ -276,8 +326,10 @@ for (const rows of [[], [...catalogRows, catalogRows[0]], [...catalogRows, { kin
 }
 
 test('unsupported catalog features are explicit unknown coverage, even with matching supported objects', async () => {
-  const report = await auditSaasMigrationCompatibility(new AuditPool({ catalog: [...catalogRows,
-    { kind: 'unsupported', identity: 'policy', definition: 'policy' }] }), options());
+  const report = await auditSaasMigrationCompatibility(
+    new AuditPool({ catalog: [...catalogRows, { kind: 'unsupported', identity: 'policy', definition: 'policy' }] }),
+    options(),
+  );
   assert.ok(codes(report).includes('CATALOG_UNSUPPORTED_OBJECTS'));
   assert.deepEqual(report.catalog.unsupportedFeatures, ['policy']);
   assert.equal(report.compatibility, 'unverified');
@@ -285,19 +337,32 @@ test('unsupported catalog features are explicit unknown coverage, even with matc
 });
 
 for (const changed of [
-  { coverage: 'partial' as const }, { releaseId: 'other-release' }, { schema: 'other_schema' },
-  { postgresMajor: 18 }, { migrationsChecksum: hash('other-migrations') },
+  { coverage: 'partial' as const },
+  { releaseId: 'other-release' },
+  { schema: 'other_schema' },
+  { postgresMajor: 18 },
+  { migrationsChecksum: hash('other-migrations') },
 ]) {
   test('partial or differently bound baseline never establishes compatibility', async () => {
-    const report = await auditSaasMigrationCompatibility(new AuditPool(), options({ catalogBaseline: baseline(changed) }));
+    const report = await auditSaasMigrationCompatibility(
+      new AuditPool(),
+      options({ catalogBaseline: baseline(changed) }),
+    );
     assert.ok(codes(report).some((code) => ['BASELINE_PARTIAL', 'BASELINE_BINDING_MISMATCH'].includes(code)));
     blocked(report);
   });
 }
 
-for (const objects of [[], [catalogObjects[0], catalogObjects[0]], [{ ...catalogObjects[0], definitionChecksum: sensitiveText }]]) {
+for (const objects of [
+  [],
+  [catalogObjects[0], catalogObjects[0]],
+  [{ ...catalogObjects[0], definitionChecksum: sensitiveText }],
+]) {
   test('baseline validation rejects empty/duplicate/invalid manifests and retains inventory only', async () => {
-    const report = await auditSaasMigrationCompatibility(new AuditPool(), options({ catalogBaseline: baseline({ objects }) }));
+    const report = await auditSaasMigrationCompatibility(
+      new AuditPool(),
+      options({ catalogBaseline: baseline({ objects }) }),
+    );
     assert.ok(codes(report).includes('INVALID_BASELINE'));
     assert.equal(report.catalog.baselineEvidenceId, null);
     assert.equal(report.catalog.actual.length, catalogRows.length);
@@ -306,27 +371,46 @@ for (const objects of [[], [catalogObjects[0], catalogObjects[0]], [{ ...catalog
 }
 
 test('PG18 requires its own baseline and inventory ordering does not affect checksums', async () => {
-  const report = await auditSaasMigrationCompatibility(new AuditPool({ serverVersion: '180001', catalog: [...catalogRows].reverse() }),
-    options({ catalogBaseline: baseline({ postgresMajor: 18, objects: [...catalogObjects].reverse() }) }));
+  const report = await auditSaasMigrationCompatibility(
+    new AuditPool({ serverVersion: '180001', catalog: [...catalogRows].reverse() }),
+    options({ catalogBaseline: baseline({ postgresMajor: 18, objects: [...catalogObjects].reverse() }) }),
+  );
   assertSaasMigrationAuditMatches(report);
   assert.equal(report.actualTarget?.postgresMajor, 18);
   assert.equal(getSaasAuditCatalogChecksum(catalogObjects), getSaasAuditCatalogChecksum([...catalogObjects].reverse()));
 });
 
 for (const fixture of [
-  { database: sensitiveText }, { schemaPresent: false }, { serverVersion: '140010' },
-  { readOnly: 'off' }, { isolation: 'read committed' }, { targetRows: 0 }, { targetRows: 2 },
+  { database: sensitiveText },
+  { schemaPresent: false },
+  { serverVersion: '140010' },
+  { readOnly: 'off' },
+  { isolation: 'read committed' },
+  { targetRows: 0 },
+  { targetRows: 2 },
 ]) {
   test('target mismatch/unavailable/unsafe snapshot stops before reading the ledger', async () => {
     const pool = new AuditPool(fixture);
     const report = await auditSaasMigrationCompatibility(pool, options());
     assert.ok(!pool.statements.some(({ sql }) => sql.startsWith('SELECT version')));
-    assert.ok(codes(report).some((code) => ['TARGET_MISMATCH', 'TARGET_UNAVAILABLE', 'UNSUPPORTED_POSTGRES'].includes(code)));
+    assert.ok(
+      codes(report).some((code) => ['TARGET_MISMATCH', 'TARGET_UNAVAILABLE', 'UNSUPPORTED_POSTGRES'].includes(code)),
+    );
     blocked(report);
   });
 }
 
-for (const fail of ['connect', 'begin', 'path', 'target', 'ledger', 'history', 'catalog', 'rollback', 'release'] as const) {
+for (const fail of [
+  'connect',
+  'begin',
+  'path',
+  'target',
+  'ledger',
+  'history',
+  'catalog',
+  'rollback',
+  'release',
+] as const) {
   test(`failure during ${fail} is sanitized, blocks matching, and cleans up safely`, async () => {
     const pool = new AuditPool({ fail });
     const report = await auditSaasMigrationCompatibility(pool, options());
@@ -347,7 +431,9 @@ test('invalid/injected target and invalid registry are rejected before acquiring
     { target: { ...options().target, schema: sensitiveText } },
     { target: { ...options().target, schema: 'pg_catalog' } },
     { target: { ...options().target, database: 'a";DROP TABLE b;--' } },
-    { releaseId: sensitiveText }, { migrations: [] }, { migrations: [migrations[0], migrations[0]] },
+    { releaseId: sensitiveText },
+    { migrations: [] },
+    { migrations: [migrations[0], migrations[0]] },
   ]) {
     const pool = new AuditPool();
     blocked(await auditSaasMigrationCompatibility(pool, options(invalid)));

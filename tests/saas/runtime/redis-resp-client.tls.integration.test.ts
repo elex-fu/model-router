@@ -220,6 +220,7 @@ test('RUN-01 owned verified TLS and hostname checks with synthetic RESP only', {
   } finally {
     // Exact path returned by this test's mkdtemp, not a user directory or trust store.
     try { await bounded(rm(directory, { recursive: true, force: true }), 2_000, 'CERT_CLEANUP_DEADLINE'); }
+    // biome-ignore lint/correctness/noUnsafeFinally: deliberate test design — a failed cleanup must fail the proof even if it replaces the try-block outcome.
     catch { throw new ProofFailure('OWNED_CERT_CLEANUP_FAILED'); }
   }
 });

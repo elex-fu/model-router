@@ -19,7 +19,10 @@ export interface CustomerPasskeyRegistrationStart {
   readonly pubKeyCredParams: ReadonlyArray<{ readonly type: 'public-key'; readonly alg: -7 | -257 }>;
   readonly timeout: number;
   readonly attestation: 'none';
-  readonly authenticatorSelection: { readonly residentKey: 'preferred'; readonly userVerification: 'required' | 'discouraged' };
+  readonly authenticatorSelection: {
+    readonly residentKey: 'preferred';
+    readonly userVerification: 'required' | 'discouraged';
+  };
   readonly expiresAt: string;
 }
 export interface CustomerPasskeyAssertionStart {
@@ -75,10 +78,22 @@ export interface CustomerPasskeyChanged {
 }
 export interface CustomerPasskeyOperations {
   list(proof: CustomerPasskeySessionProof): Promise<CustomerPasskeyList>;
-  startRegistration(proof: CustomerPasskeySessionProof, input: CustomerPasskeyStartInput): Promise<CustomerPasskeyRegistrationStart>;
-  finishRegistration(proof: CustomerPasskeySessionProof, input: CustomerPasskeyRegistrationFinishInput): Promise<CustomerPasskeyChanged>;
-  startAssertion(proof: CustomerPasskeySessionProof, input: CustomerPasskeyStartInput): Promise<CustomerPasskeyAssertionStart>;
-  finishAssertion(proof: CustomerPasskeySessionProof, input: CustomerPasskeyAssertionFinishInput): Promise<CustomerPasskeyAssertionVerified>;
+  startRegistration(
+    proof: CustomerPasskeySessionProof,
+    input: CustomerPasskeyStartInput,
+  ): Promise<CustomerPasskeyRegistrationStart>;
+  finishRegistration(
+    proof: CustomerPasskeySessionProof,
+    input: CustomerPasskeyRegistrationFinishInput,
+  ): Promise<CustomerPasskeyChanged>;
+  startAssertion(
+    proof: CustomerPasskeySessionProof,
+    input: CustomerPasskeyStartInput,
+  ): Promise<CustomerPasskeyAssertionStart>;
+  finishAssertion(
+    proof: CustomerPasskeySessionProof,
+    input: CustomerPasskeyAssertionFinishInput,
+  ): Promise<CustomerPasskeyAssertionVerified>;
   remove(proof: CustomerPasskeySessionProof, input: CustomerPasskeyRemoveInput): Promise<CustomerPasskeyChanged>;
 }
 export interface CustomerPasskeyOptions {
@@ -93,20 +108,35 @@ export interface CustomerPasskeyOptions {
   readonly requireUserVerification?: boolean;
 }
 export type CustomerPasskeyCode =
-  | 'INVALID_INPUT' | 'UNAUTHENTICATED' | 'REAUTH_REQUIRED' | 'PASSKEY_REJECTED'
-  | 'PASSKEY_NOT_FOUND' | 'CEREMONY_INVALID' | 'MFA_STATE_CONFLICT'
-  | 'RATE_LIMITED' | 'AUTHORITY_CHANGED' | 'UNAVAILABLE';
+  | 'INVALID_INPUT'
+  | 'UNAUTHENTICATED'
+  | 'REAUTH_REQUIRED'
+  | 'PASSKEY_REJECTED'
+  | 'PASSKEY_NOT_FOUND'
+  | 'CEREMONY_INVALID'
+  | 'MFA_STATE_CONFLICT'
+  | 'RATE_LIMITED'
+  | 'AUTHORITY_CHANGED'
+  | 'UNAVAILABLE';
 export class CustomerPasskeyError extends Error {
   readonly status: number;
   constructor(readonly code: CustomerPasskeyCode) {
     super('The customer passkey operation could not be completed.');
     this.name = 'CustomerPasskeyError';
-    this.status = code === 'INVALID_INPUT' ? 400
-      : code === 'UNAUTHENTICATED' ? 401
-      : code === 'PASSKEY_NOT_FOUND' ? 404
-      : code === 'REAUTH_REQUIRED' || code === 'PASSKEY_REJECTED' ? 403
-      : code === 'RATE_LIMITED' ? 429
-      : code === 'UNAVAILABLE' ? 503 : 409;
+    this.status =
+      code === 'INVALID_INPUT'
+        ? 400
+        : code === 'UNAUTHENTICATED'
+          ? 401
+          : code === 'PASSKEY_NOT_FOUND'
+            ? 404
+            : code === 'REAUTH_REQUIRED' || code === 'PASSKEY_REJECTED'
+              ? 403
+              : code === 'RATE_LIMITED'
+                ? 429
+                : code === 'UNAVAILABLE'
+                  ? 503
+                  : 409;
   }
 }
 export function customerPasskeyFail(code: CustomerPasskeyCode): never {

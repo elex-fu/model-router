@@ -31,9 +31,7 @@ test('084 registers after 083 with the documented 061/062 and retired 064-079 ga
 
 test('084 adds the nullable account-level revalidation cadence to both account owner families', () => {
   for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
-    const alter = new RegExp(
-      `ALTER TABLE ${table}\\s+ADD COLUMN revalidation_interval_seconds integer,`,
-    );
+    const alter = new RegExp(`ALTER TABLE ${table}\\s+ADD COLUMN revalidation_interval_seconds integer,`);
     assert.match(commands, alter);
     // NULL disables periodic revalidation (the default for every existing
     // row, i.e. byte-identical pre-D3 behavior); configured values are bounded
@@ -46,10 +44,7 @@ test('084 adds the nullable account-level revalidation cadence to both account o
     );
     // Nullable on purpose: NOT NULL or a default would flip existing accounts
     // into an unrequested revalidation cadence.
-    assert.doesNotMatch(
-      commands,
-      new RegExp(`ADD COLUMN revalidation_interval_seconds integer NOT NULL`),
-    );
+    assert.doesNotMatch(commands, /ADD COLUMN revalidation_interval_seconds integer NOT NULL/);
   }
 });
 

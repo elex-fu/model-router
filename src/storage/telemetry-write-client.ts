@@ -23,7 +23,12 @@ export interface TelemetryWriterStatus {
 }
 
 type WriteEvent = { operation: 'request'; record: RequestRecord } | { operation: 'attempt'; record: AttemptRecord };
-type Pending = { resolve: (value?: unknown) => void; reject: (error: Error) => void; queuedAt?: number; postedAt?: number };
+type Pending = {
+  resolve: (value?: unknown) => void;
+  reject: (error: Error) => void;
+  queuedAt?: number;
+  postedAt?: number;
+};
 type Reply = {
   kind: 'ready' | 'committed' | 'rpc-result' | 'status' | 'fatal' | 'closed';
   id?: number;
@@ -39,10 +44,15 @@ type Reply = {
 const perfEnabled = process.env.MODEL_ROUTER_PERF === '1';
 function reportWriteBatch(samples: Array<{ queueMs: number; workerAckMs: number; totalMs: number }>): void {
   if (!perfEnabled || !samples.length) return;
-  process.stderr.write(`${JSON.stringify({ kind: 'telemetry-write-perf', batchSize: samples.length,
-    queueMs: samples.map((item) => Math.round(item.queueMs * 100) / 100),
-    workerAckMs: samples.map((item) => Math.round(item.workerAckMs * 100) / 100),
-    enqueueToCommitMs: samples.map((item) => Math.round(item.totalMs * 100) / 100) })}\n`);
+  process.stderr.write(
+    `${JSON.stringify({
+      kind: 'telemetry-write-perf',
+      batchSize: samples.length,
+      queueMs: samples.map((item) => Math.round(item.queueMs * 100) / 100),
+      workerAckMs: samples.map((item) => Math.round(item.workerAckMs * 100) / 100),
+      enqueueToCommitMs: samples.map((item) => Math.round(item.totalMs * 100) / 100),
+    })}\n`,
+  );
 }
 
 /** Worker RPC with bounded buffering. All writes resolve only after a durable batch commit. */
@@ -141,8 +151,11 @@ export class TelemetryWriteClient {
       for (const id of reply.ids ?? []) {
         const pending = this.pending.get(id);
         if (pending?.queuedAt !== undefined && pending.postedAt !== undefined)
-          samples.push({ queueMs: pending.postedAt - pending.queuedAt,
-            workerAckMs: now - pending.postedAt, totalMs: now - pending.queuedAt });
+          samples.push({
+            queueMs: pending.postedAt - pending.queuedAt,
+            workerAckMs: now - pending.postedAt,
+            totalMs: now - pending.queuedAt,
+          });
         this.settlePending(id);
       }
       reportWriteBatch(samples);
@@ -210,7 +223,11 @@ export class TelemetryWriteClient {
       return Promise.reject(error);
     }
     const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { resolve: () => resolve(), reject, ...(perfEnabled ? { queuedAt: performance.now() } : {}) });
+      this.pending.set(id, {
+        resolve: () => resolve(),
+        reject,
+        ...(perfEnabled ? { queuedAt: performance.now() } : {}),
+      });
     });
     this.writeBuffer.push({ id, event });
     if (this.writeBuffer.length >= 100) this.flush();

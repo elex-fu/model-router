@@ -12,23 +12,49 @@ function fixture() {
   const configPath = join(dir, 'config.json');
   const store = new ControlStore(dir);
   const configService = new ConfigServiceV2(configPath, {
-    storeSecret: async (value) => { const id = `test_${Math.random()}`; store.secrets.put(id, value); return id; },
+    storeSecret: async (value) => {
+      const id = `test_${Math.random()}`;
+      store.secrets.put(id, value);
+      return id;
+    },
     hasSecret: (id) => store.secrets.has(id),
-    backupLegacy: async (raw, label) => { store.secrets.put(`backup_${label}`, raw); },
+    backupLegacy: async (raw, label) => {
+      store.secrets.put(`backup_${label}`, raw);
+    },
   });
   return { dir, configPath, store, configService };
 }
 
 function configService(path: string, store: ControlStore) {
   return new ConfigServiceV2(path, {
-    storeSecret: async (value) => { const id = `test_${Math.random()}`; store.secrets.put(id, value); return id; },
+    storeSecret: async (value) => {
+      const id = `test_${Math.random()}`;
+      store.secrets.put(id, value);
+      return id;
+    },
     hasSecret: (id) => store.secrets.has(id),
-    backupLegacy: async (raw, label) => { store.secrets.put(`backup_${label}`, raw); },
+    backupLegacy: async (raw, label) => {
+      store.secrets.put(`backup_${label}`, raw);
+    },
   });
 }
 
 function legacyConfig() {
-  return { server: {}, proxyKeys: [], upstreams: [{ name: 'legacy', provider: 'custom', protocol: 'openai', baseUrl: 'https://example.com/v1', apiKeys: ['plaintext-must-stay-private'], models: [], enabled: false }] };
+  return {
+    server: {},
+    proxyKeys: [],
+    upstreams: [
+      {
+        name: 'legacy',
+        provider: 'custom',
+        protocol: 'openai',
+        baseUrl: 'https://example.com/v1',
+        apiKeys: ['plaintext-must-stay-private'],
+        models: [],
+        enabled: false,
+      },
+    ],
+  };
 }
 
 test('legacy migration records only V2 history and an idempotent commit audit', async () => {
@@ -38,10 +64,23 @@ test('legacy migration records only V2 history and an idempotent commit audit', 
     const control = new ControlService(f.configPath, f.store, f.configService);
     const migrated = await control.raw();
     assert.equal(migrated.revision, 1);
-    const row = f.store.db.prepare('SELECT actor_id,state FROM config_journal').get() as { actor_id: string; state: string };
+    const row = f.store.db.prepare('SELECT actor_id,state FROM config_journal').get() as {
+      actor_id: string;
+      state: string;
+    };
     assert.deepEqual(row, { actor_id: 'migration', state: 'committed' });
-    assert.equal((f.store.db.prepare('SELECT COUNT(*) AS count FROM config_history').get() as { count: number }).count, 1);
-    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='config.commit'").get() as { count: number }).count, 1);
+    assert.equal(
+      (f.store.db.prepare('SELECT COUNT(*) AS count FROM config_history').get() as { count: number }).count,
+      1,
+    );
+    assert.equal(
+      (
+        f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='config.commit'").get() as {
+          count: number;
+        }
+      ).count,
+      1,
+    );
     const persisted = JSON.stringify({
       history: f.store.db.prepare('SELECT config_json FROM config_history').all(),
       journal: f.store.db.prepare('SELECT * FROM config_journal').all(),
@@ -49,7 +88,10 @@ test('legacy migration records only V2 history and an idempotent commit audit', 
     });
     assert.doesNotMatch(persisted, /plaintext-must-stay-private|apiKeys/i);
     assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).schemaVersion, 2);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('pre-rename migration failure is aborted and safely retried', async () => {
@@ -57,42 +99,88 @@ test('pre-rename migration failure is aborted and safely retried', async () => {
   try {
     const legacy = legacyConfig();
     writeFileSync(f.configPath, JSON.stringify(legacy));
-    const first = new ControlService(f.configPath, f.store, f.configService, undefined, { beforeConfigRename: () => { throw new Error('before rename'); } });
+    const first = new ControlService(f.configPath, f.store, f.configService, undefined, {
+      beforeConfigRename: () => {
+        throw new Error('before rename');
+      },
+    });
     await assert.rejects(first.raw(), /before rename/);
     assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).schemaVersion, undefined);
     const retry = new ControlService(f.configPath, f.store, configService(f.configPath, f.store));
     assert.equal((await retry.raw()).schemaVersion, 2);
-    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM config_journal WHERE state='aborted'").get() as { count: number }).count, 1);
-    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM config_journal WHERE state='committed'").get() as { count: number }).count, 1);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+    assert.equal(
+      (
+        f.store.db.prepare("SELECT COUNT(*) AS count FROM config_journal WHERE state='aborted'").get() as {
+          count: number;
+        }
+      ).count,
+      1,
+    );
+    assert.equal(
+      (
+        f.store.db.prepare("SELECT COUNT(*) AS count FROM config_journal WHERE state='committed'").get() as {
+          count: number;
+        }
+      ).count,
+      1,
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('post-rename migration crash is finalized by startup recovery', async () => {
   const f = fixture();
   try {
     writeFileSync(f.configPath, JSON.stringify(legacyConfig()));
-    const first = new ControlService(f.configPath, f.store, f.configService, undefined, { afterConfigRename: () => { throw new Error('simulated crash'); } });
+    const first = new ControlService(f.configPath, f.store, f.configService, undefined, {
+      afterConfigRename: () => {
+        throw new Error('simulated crash');
+      },
+    });
     await assert.rejects(first.raw(), /simulated crash/);
     const disk = JSON.parse(readFileSync(f.configPath, 'utf8'));
     const recovery = new ControlService(f.configPath, f.store, configService(f.configPath, f.store));
     recovery.reconcileStartup(disk);
     recovery.reconcileStartup(disk);
-    assert.equal((f.store.db.prepare("SELECT state FROM config_journal WHERE actor_id='migration'").get() as { state: string }).state, 'committed');
-    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='config.commit'").get() as { count: number }).count, 1);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+    assert.equal(
+      (f.store.db.prepare("SELECT state FROM config_journal WHERE actor_id='migration'").get() as { state: string })
+        .state,
+      'committed',
+    );
+    assert.equal(
+      (
+        f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='config.commit'").get() as {
+          count: number;
+        }
+      ).count,
+      1,
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('legacy checksum conflict refuses migration retry', async () => {
   const f = fixture();
   try {
     writeFileSync(f.configPath, JSON.stringify(legacyConfig()));
-    const first = new ControlService(f.configPath, f.store, f.configService, undefined, { beforeConfigRename: () => { throw new Error('before rename'); } });
+    const first = new ControlService(f.configPath, f.store, f.configService, undefined, {
+      beforeConfigRename: () => {
+        throw new Error('before rename');
+      },
+    });
     await assert.rejects(first.raw(), /before rename/);
     writeFileSync(f.configPath, JSON.stringify({ ...legacyConfig(), changed: true }));
     const retry = new ControlService(f.configPath, f.store, configService(f.configPath, f.store));
     await assert.rejects(retry.raw(), /migration checksum conflict/);
     assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).changed, true);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('pre-rename failure leaves JSON unchanged and startup aborts prepared row', async () => {
@@ -213,9 +301,17 @@ test('startup recovery removes an orphaned generated secret after a pre-commit c
     const disk = JSON.parse(readFileSync(f.configPath, 'utf8'));
     new ControlService(f.configPath, f.store, configService(f.configPath, f.store)).reconcileStartup(disk);
     assert.equal(f.store.secrets.has(orphanId), false);
-    const events = f.store.db.prepare("SELECT detail FROM audit_events WHERE action='credential.orphan_gc'").all() as Array<{ detail: string }>;
-    assert.deepEqual(events.map(({ detail }) => JSON.parse(detail)), [{ count: 1 }]);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+    const events = f.store.db
+      .prepare("SELECT detail FROM audit_events WHERE action='credential.orphan_gc'")
+      .all() as Array<{ detail: string }>;
+    assert.deepEqual(
+      events.map(({ detail }) => JSON.parse(detail)),
+      [{ count: 1 }],
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('offline recovery retains secrets referenced by current and historical configs', async () => {
@@ -225,10 +321,21 @@ test('offline recovery retains secrets referenced by current and historical conf
     const control = new ControlService(f.configPath, f.store, f.configService);
     const migrated = await control.raw();
     const upstreamId = migrated.upstreams[0]!.id;
-    const created = await control.credential(upstreamId, 'create', undefined, {
-      id: 'retained-credential', label: 'retained', value: 'retained-secret-value',
-    }, migrated.revision, 'admin');
-    const currentId = created.config.upstreams[0]!.credentials.find((item) => item.id === 'retained-credential')!.secret;
+    const created = await control.credential(
+      upstreamId,
+      'create',
+      undefined,
+      {
+        id: 'retained-credential',
+        label: 'retained',
+        value: 'retained-secret-value',
+      },
+      migrated.revision,
+      'admin',
+    );
+    const currentId = created.config.upstreams[0]!.credentials.find(
+      (item) => item.id === 'retained-credential',
+    )!.secret;
     assert.equal(currentId.type, 'secret');
     const historicalId = migrated.upstreams[0]!.credentials[0]!.secret;
     assert.equal(historicalId.type, 'secret');
@@ -237,8 +344,18 @@ test('offline recovery retains secrets referenced by current and historical conf
     new ControlService(f.configPath, f.store, configService(f.configPath, f.store)).reconcileStartup(disk);
     assert.equal(f.store.secrets.has(currentId.id), true);
     assert.equal(f.store.secrets.has(historicalId.id), true);
-    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='credential.orphan_gc'").get() as { count: number }).count, 0);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+    assert.equal(
+      (
+        f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='credential.orphan_gc'").get() as {
+          count: number;
+        }
+      ).count,
+      0,
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('orphan collection preserves backup, OAuth, and unknown secret namespaces', async () => {
@@ -253,9 +370,14 @@ test('orphan collection preserves backup, OAuth, and unknown secret namespaces',
     assert.equal(f.store.secrets.has(orphanId), false);
     for (const id of ['backup_test', 'legacy_backup_test', 'oauth_test', 'custom_test'])
       assert.equal(f.store.secrets.has(id), true, `${id} should be retained`);
-    const event = f.store.db.prepare("SELECT detail FROM audit_events WHERE action='credential.orphan_gc'").get() as { detail: string };
+    const event = f.store.db.prepare("SELECT detail FROM audit_events WHERE action='credential.orphan_gc'").get() as {
+      detail: string;
+    };
     assert.deepEqual(JSON.parse(event.detail), { count: 1 });
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('malformed history fails closed without deleting generated secrets', async () => {
@@ -265,11 +387,23 @@ test('malformed history fails closed without deleting generated secrets', async 
     const current = await control.raw();
     const orphanId = 'sec_123e4567-e89b-42d3-a456-426614174000';
     f.store.secrets.put(orphanId, 'keep-on-corrupt-history');
-    f.store.db.prepare('INSERT INTO config_history VALUES(?,?,?,?)').run(99, 'test', '{broken', new Date().toISOString());
+    f.store.db
+      .prepare('INSERT INTO config_history VALUES(?,?,?,?)')
+      .run(99, 'test', '{broken', new Date().toISOString());
     assert.throws(() => control.reconcileStartup(current), /malformed config history/);
     assert.equal(f.store.secrets.has(orphanId), true);
-    assert.equal((f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='credential.orphan_gc'").get() as { count: number }).count, 0);
-  } finally { f.store.close(); rmSync(f.dir, { recursive: true, force: true }); }
+    assert.equal(
+      (
+        f.store.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action='credential.orphan_gc'").get() as {
+          count: number;
+        }
+      ).count,
+      0,
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.dir, { recursive: true, force: true });
+  }
 });
 
 test('checksum conflict refuses startup recovery without changing JSON', async () => {

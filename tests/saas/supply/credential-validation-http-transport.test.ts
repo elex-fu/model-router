@@ -15,10 +15,19 @@ import {
   resolveApprovedCredentialValidationTarget,
 } from '../../../src/saas/supply/credential-validation-targets.js';
 import type { ApprovedCredentialValidationTarget } from '../../../src/saas/supply/types.js';
-import { approvedTarget, customJob, probeEnvelope, validationHttpsFixture, waitForValidationFixtureSignal } from './credential-validation-test-fixture.js';
+import {
+  approvedTarget,
+  customJob,
+  probeEnvelope,
+  validationHttpsFixture,
+  waitForValidationFixtureSignal,
+} from './credential-validation-test-fixture.js';
 
 function binding(target: ApprovedCredentialValidationTarget) {
-  const resolved = resolveApprovedCredentialValidationTarget(compileApprovedCredentialValidationTargets([target]), customJob(target));
+  const resolved = resolveApprovedCredentialValidationTarget(
+    compileApprovedCredentialValidationTargets([target]),
+    customJob(target),
+  );
   assert.ok(resolved);
   return resolved;
 }
@@ -28,7 +37,9 @@ test('custom Chat and Messages use real pinned HTTPS, exact auth/profile, truthf
   const local = await validationHttpsFixture(t, (request, response) => {
     let body = '';
     request.setEncoding('utf8');
-    request.on('data', (chunk: string) => { body += chunk; });
+    request.on('data', (chunk: string) => {
+      body += chunk;
+    });
     request.on('end', () => {
       requests.push({ url: request.url, method: request.method, headers: request.headers, body: JSON.parse(body) });
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -38,12 +49,25 @@ test('custom Chat and Messages use real pinned HTTPS, exact auth/profile, truthf
   const transport = new CredentialValidationHttpTransport(local.testOptions);
   t.after(() => transport.close());
   for (const kind of ['chat', 'messages'] as const) {
-    const target = approvedTarget({ baseUrl: local.baseUrl, ...(kind === 'messages' ? {
-      productId: 'custom-anthropic', endpoint: 'messages', protocol: 'anthropic-compatible',
-      authProfile: 'anthropic-api-key-2023-06-01',
-    } as const : {}) });
+    const target = approvedTarget({
+      baseUrl: local.baseUrl,
+      ...(kind === 'messages'
+        ? ({
+            productId: 'custom-anthropic',
+            endpoint: 'messages',
+            protocol: 'anthropic-compatible',
+            authProfile: 'anthropic-api-key-2023-06-01',
+          } as const)
+        : {}),
+    });
     let rechecks = 0;
-    const result = await transport.probe(await transport.prepare(binding(target)), Buffer.from('fixture-api-key?body-not-query'), async () => { rechecks += 1; });
+    const result = await transport.probe(
+      await transport.prepare(binding(target)),
+      Buffer.from('fixture-api-key?body-not-query'),
+      async () => {
+        rechecks += 1;
+      },
+    );
     assert.equal(result.state, 'verified');
     assert.equal(rechecks, 1);
     const request = requests.at(-1);
@@ -56,8 +80,12 @@ test('custom Chat and Messages use real pinned HTTPS, exact auth/profile, truthf
     assert.equal(request.headers['x-api-key'], kind === 'messages' ? 'fixture-api-key?body-not-query' : undefined);
     assert.equal(request.headers.authorization, kind === 'chat' ? 'Bearer fixture-api-key?body-not-query' : undefined);
     assert.equal(request.headers['anthropic-version'], kind === 'messages' ? '2023-06-01' : undefined);
-    assert.deepEqual(request.body, { model: 'organisation/model-v1', max_tokens: 8, stream: false,
-      messages: [{ role: 'user', content: 'Reply with OK.' }] });
+    assert.deepEqual(request.body, {
+      model: 'organisation/model-v1',
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+    });
     assert.equal(JSON.stringify(result).includes('fixture-api-key'), false);
     assert.equal(JSON.stringify(result).includes('organisation/model-v1'), false);
     assert.equal(JSON.stringify(result).includes('OK'), false);
@@ -75,8 +103,11 @@ test('custom response validation rejects HTTP/error/malformed/unsafe/overlarge/t
   const local = await validationHttpsFixture(t, (request, response) => {
     request.resume();
     requestCount += 1;
-    response.writeHead(status, { 'content-type': contentType, ...(declared ? { 'content-length': declared } : {}),
-      location: 'http://169.254.169.254/latest/meta-data/?secret=fixture-api-key' });
+    response.writeHead(status, {
+      'content-type': contentType,
+      ...(declared ? { 'content-length': declared } : {}),
+      location: 'http://169.254.169.254/latest/meta-data/?secret=fixture-api-key',
+    });
     if (truncate) {
       response.write(wire.slice(0, 20));
       setImmediate(() => response.destroy());
@@ -92,13 +123,34 @@ test('custom response validation rejects HTTP/error/malformed/unsafe/overlarge/t
     { body: JSON.stringify({ ...chat, usage: undefined }), code: 'provider_response_invalid' },
     { body: Buffer.from([0xff]), code: 'provider_response_invalid' },
     { body: '', status: 204, code: 'provider_response_invalid' },
-    { body: JSON.stringify({ error: { message: 'fixture-api-key provider-secret-body' } }), code: 'provider_response_invalid' },
+    {
+      body: JSON.stringify({ error: { message: 'fixture-api-key provider-secret-body' } }),
+      code: 'provider_response_invalid',
+    },
     { body: JSON.stringify(chat).slice(0, -1), code: 'provider_response_invalid' },
     { body: `${JSON.stringify(chat)} trailing`, code: 'provider_response_invalid' },
-    { body: JSON.stringify({ ...chat, usage: { prompt_tokens: -1, completion_tokens: 1, total_tokens: 0 } }), code: 'provider_response_invalid' },
-    { body: JSON.stringify({ ...chat, usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 7 } }), code: 'provider_response_invalid' },
-    { body: JSON.stringify({ ...chat, choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: ['stop'] }] }), code: 'provider_response_invalid' },
-    { body: JSON.stringify({ ...chat, usage: { prompt_tokens: Number.MAX_SAFE_INTEGER, completion_tokens: 1, total_tokens: 0 } }), code: 'provider_response_invalid' },
+    {
+      body: JSON.stringify({ ...chat, usage: { prompt_tokens: -1, completion_tokens: 1, total_tokens: 0 } }),
+      code: 'provider_response_invalid',
+    },
+    {
+      body: JSON.stringify({ ...chat, usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 7 } }),
+      code: 'provider_response_invalid',
+    },
+    {
+      body: JSON.stringify({
+        ...chat,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: ['stop'] }],
+      }),
+      code: 'provider_response_invalid',
+    },
+    {
+      body: JSON.stringify({
+        ...chat,
+        usage: { prompt_tokens: Number.MAX_SAFE_INTEGER, completion_tokens: 1, total_tokens: 0 },
+      }),
+      code: 'provider_response_invalid',
+    },
     { body: JSON.stringify(chat), mime: 'text/html', code: 'provider_response_invalid' },
     { body: 'x'.repeat(4_097), code: 'provider_response_too_large' },
     { body: JSON.stringify(chat), length: '4097', code: 'provider_response_too_large' },
@@ -109,9 +161,16 @@ test('custom response validation rejects HTTP/error/malformed/unsafe/overlarge/t
     { body: JSON.stringify(chat), truncate: true, code: 'provider_network_error' },
   ];
   for (const item of cases) {
-    wire = item.body; status = item.status ?? 200; contentType = item.mime ?? 'application/json';
-    declared = item.length; truncate = item.truncate ?? false;
-    const result = await transport.probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => {});
+    wire = item.body;
+    status = item.status ?? 200;
+    contentType = item.mime ?? 'application/json';
+    declared = item.length;
+    truncate = item.truncate ?? false;
+    const result = await transport.probe(
+      await transport.prepare(target),
+      Buffer.from('fixture-api-key'),
+      async () => {},
+    );
     assert.equal(result.state, 'failed');
     if (result.state !== 'failed') throw new Error('expected bounded validation failure');
     assert.equal(result.errorCode, item.code);
@@ -120,13 +179,28 @@ test('custom response validation rejects HTTP/error/malformed/unsafe/overlarge/t
     assert.equal(JSON.stringify(result).includes('169.254.169.254'), false);
   }
   assert.equal(requestCount, cases.length, 'redirects must not redispatch');
-  const anthropic = binding(approvedTarget({ baseUrl: local.baseUrl, productId: 'custom-anthropic', endpoint: 'messages',
-    protocol: 'anthropic-compatible', authProfile: 'anthropic-api-key-2023-06-01' }));
-  for (const malformed of [JSON.stringify(probeEnvelope('messages')).slice(0, -1),
+  const anthropic = binding(
+    approvedTarget({
+      baseUrl: local.baseUrl,
+      productId: 'custom-anthropic',
+      endpoint: 'messages',
+      protocol: 'anthropic-compatible',
+      authProfile: 'anthropic-api-key-2023-06-01',
+    }),
+  );
+  for (const malformed of [
+    JSON.stringify(probeEnvelope('messages')).slice(0, -1),
     JSON.stringify({ ...probeEnvelope('messages'), usage: undefined }),
-    JSON.stringify({ ...probeEnvelope('messages'), usage: { input_tokens: 5, output_tokens: -1 } })]) {
-    wire = malformed; status = 200; truncate = false; declared = undefined;
-    assert.equal((await transport.probe(await transport.prepare(anthropic), Buffer.from('fixture-api-key'), async () => {})).state, 'failed');
+    JSON.stringify({ ...probeEnvelope('messages'), usage: { input_tokens: 5, output_tokens: -1 } }),
+  ]) {
+    wire = malformed;
+    status = 200;
+    truncate = false;
+    declared = undefined;
+    assert.equal(
+      (await transport.probe(await transport.prepare(anthropic), Buffer.from('fixture-api-key'), async () => {})).state,
+      'failed',
+    );
   }
 });
 
@@ -134,33 +208,51 @@ test('custom verification waits for real body EOF; deadline and close cannot tur
   let activeResponse: ServerResponse | undefined;
   let announce!: () => void;
   const local = await validationHttpsFixture(t, (request, response) => {
-    request.resume(); activeResponse = response;
+    request.resume();
+    activeResponse = response;
     response.writeHead(200, { 'content-type': 'application/json' });
     response.write(JSON.stringify(probeEnvelope('chat')));
     announce();
   });
   const target = binding(approvedTarget({ baseUrl: local.baseUrl }));
   const transport = new CredentialValidationHttpTransport({ ...local.testOptions, timeoutMs: 500 });
-  t.after(async () => { activeResponse?.destroy(); await transport.close(); });
-  let waiting = new Promise<void>((resolve) => { announce = resolve; });
+  t.after(async () => {
+    activeResponse?.destroy();
+    await transport.close();
+  });
+  let waiting = new Promise<void>((resolve) => {
+    announce = resolve;
+  });
   let completed = false;
-  const pending = transport.probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => {})
-    .then((result) => { completed = true; return result; });
-  await waitForValidationFixtureSignal(waiting, pending); await delay(20);
+  const pending = transport
+    .probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => {})
+    .then((result) => {
+      completed = true;
+      return result;
+    });
+  await waitForValidationFixtureSignal(waiting, pending);
+  await delay(20);
   assert.equal(completed, false);
   activeResponse?.end();
   assert.equal((await pending).state, 'verified');
-  waiting = new Promise<void>((resolve) => { announce = resolve; });
+  waiting = new Promise<void>((resolve) => {
+    announce = resolve;
+  });
   const timeout = transport.probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => {});
   await waitForValidationFixtureSignal(waiting, timeout);
   const timedOut = await timeout;
   assert.equal(timedOut.state, 'failed');
   if (timedOut.state !== 'failed') throw new Error('expected deadline failure');
   assert.equal(timedOut.errorCode, 'provider_timeout');
-  waiting = new Promise<void>((resolve) => { announce = resolve; });
+  waiting = new Promise<void>((resolve) => {
+    announce = resolve;
+  });
   const cancelled = transport.probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => {});
-  const rejected = assert.rejects(cancelled, (error: unknown) => error instanceof CredentialValidationTransportError &&
-    error.code === 'validation_transport_closed');
+  const rejected = assert.rejects(
+    cancelled,
+    (error: unknown) =>
+      error instanceof CredentialValidationTransportError && error.code === 'validation_transport_closed',
+  );
   await waitForValidationFixtureSignal(waiting, rejected);
   assert.equal(transport.close(), transport.close(), 'close is idempotent');
   await rejected;
@@ -170,47 +262,96 @@ test('custom verification waits for real body EOF; deadline and close cannot tur
 test('public DNS policy rejects every private/reserved/mixed answer and pins without a second lookup', async (t) => {
   const original = process.env.NODE_ENV;
   process.env.NODE_ENV = 'test';
-  t.after(() => { if (original === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = original; });
-  const capability = createProviderHttpTestAddressCapability('-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----');
+  t.after(() => {
+    if (original === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = original;
+  });
+  const capability = createProviderHttpTestAddressCapability(
+    '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----',
+  );
   const target = binding(approvedTarget());
-  for (const address of ['10.0.0.1', '127.0.0.1', '169.254.169.254', '168.63.129.16', '100.64.0.1',
-    '::1', 'fc00::1', 'fe80::1', '::ffff:127.0.0.1', '2001:db8::1']) {
-    const transport = new CredentialValidationHttpTransport({ addressCapability: capability,
-      resolveAddresses: async () => [{ address: '8.8.8.8', family: 4 }, { address, family: address.includes(':') ? 6 : 4 }] });
-    await assert.rejects(transport.prepare(target), (error: unknown) => error instanceof CredentialValidationTransportError &&
-      error.code === 'provider_address_rejected');
+  for (const address of [
+    '10.0.0.1',
+    '127.0.0.1',
+    '169.254.169.254',
+    '168.63.129.16',
+    '100.64.0.1',
+    '::1',
+    'fc00::1',
+    'fe80::1',
+    '::ffff:127.0.0.1',
+    '2001:db8::1',
+  ]) {
+    const transport = new CredentialValidationHttpTransport({
+      addressCapability: capability,
+      resolveAddresses: async () => [
+        { address: '8.8.8.8', family: 4 },
+        { address, family: address.includes(':') ? 6 : 4 },
+      ],
+    });
+    await assert.rejects(
+      transport.prepare(target),
+      (error: unknown) =>
+        error instanceof CredentialValidationTransportError && error.code === 'provider_address_rejected',
+    );
     await transport.close();
   }
   let lookups = 0;
-  const transport = new CredentialValidationHttpTransport({ addressCapability: capability,
-    resolveAddresses: async () => { lookups += 1; return [{ address: '8.8.8.8', family: 4 }]; } });
+  const transport = new CredentialValidationHttpTransport({
+    addressCapability: capability,
+    resolveAddresses: async () => {
+      lookups += 1;
+      return [{ address: '8.8.8.8', family: 4 }];
+    },
+  });
   const plan = await transport.prepare(target);
   assert.equal(lookups, 1);
   const lookup = createPinnedProviderLookup('validation.example', { address: '8.8.8.8', family: 4 });
   lookup('validation.example', {}, (error, address, family) => {
-    assert.equal(error, null); assert.equal(address, '8.8.8.8'); assert.equal(family, 4);
+    assert.equal(error, null);
+    assert.equal(address, '8.8.8.8');
+    assert.equal(family, 4);
   });
   lookup('other.example', {}, (error) => assert.ok(error));
   await transport.release(plan);
   await transport.close();
   const production = new CredentialValidationHttpTransport();
-  await assert.rejects(production.prepare(binding(approvedTarget({ baseUrl: 'https://127.0.0.1/v1/' }))), CredentialValidationTransportError);
+  await assert.rejects(
+    production.prepare(binding(approvedTarget({ baseUrl: 'https://127.0.0.1/v1/' }))),
+    CredentialValidationTransportError,
+  );
   await production.close();
 });
 
 test('DNS deadline/close reject late resolution, and test DNS/CA overrides cannot be installed in production', async (t) => {
   const original = process.env.NODE_ENV;
   process.env.NODE_ENV = 'test';
-  t.after(() => { if (original === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = original; });
-  const capability = createProviderHttpTestAddressCapability('-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----');
+  t.after(() => {
+    if (original === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = original;
+  });
+  const capability = createProviderHttpTestAddressCapability(
+    '-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----',
+  );
   const target = binding(approvedTarget());
-  const timed = new CredentialValidationHttpTransport({ addressCapability: capability, timeoutMs: 20,
-    resolveAddresses: async () => new Promise(() => {}) });
-  await assert.rejects(timed.prepare(target), (error: unknown) => error instanceof CredentialValidationTransportError && error.code === 'provider_timeout');
+  const timed = new CredentialValidationHttpTransport({
+    addressCapability: capability,
+    timeoutMs: 20,
+    resolveAddresses: async () => new Promise(() => {}),
+  });
+  await assert.rejects(
+    timed.prepare(target),
+    (error: unknown) => error instanceof CredentialValidationTransportError && error.code === 'provider_timeout',
+  );
   await timed.close();
   let finish!: (answers: Array<{ address: string; family: 4 }>) => void;
-  const resolver = new Promise<Array<{ address: string; family: 4 }>>((resolve) => { finish = resolve; });
-  const closing = new CredentialValidationHttpTransport({ addressCapability: capability, resolveAddresses: async () => resolver });
+  const resolver = new Promise<Array<{ address: string; family: 4 }>>((resolve) => {
+    finish = resolve;
+  });
+  const closing = new CredentialValidationHttpTransport({
+    addressCapability: capability,
+    resolveAddresses: async () => resolver,
+  });
   const pending = closing.prepare(target);
   const rejected = assert.rejects(pending, CredentialValidationTransportError);
   await closing.close();
@@ -223,34 +364,67 @@ test('DNS deadline/close reject late resolution, and test DNS/CA overrides canno
 test('authority rejection blocks dispatch and wrong TLS trust cannot verify credentials', async (t) => {
   let requests = 0;
   const local = await validationHttpsFixture(t, (request, response) => {
-    request.resume(); requests += 1;
-    response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(probeEnvelope('chat')));
+    request.resume();
+    requests += 1;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(probeEnvelope('chat')));
   });
   const target = binding(approvedTarget({ baseUrl: local.baseUrl }));
   const transport = new CredentialValidationHttpTransport(local.testOptions);
   t.after(() => transport.close());
   const denied = new Error('authority-rejected');
-  await assert.rejects(transport.probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => { throw denied; }),
-    (error: unknown) => error === denied);
+  await assert.rejects(
+    transport.probe(await transport.prepare(target), Buffer.from('fixture-api-key'), async () => {
+      throw denied;
+    }),
+    (error: unknown) => error === denied,
+  );
   assert.equal(requests, 0);
   const other = await validationHttpsFixture(t, (_request, response) => response.end());
   const wrongTrust = new CredentialValidationHttpTransport(other.testOptions);
   t.after(() => wrongTrust.close());
-  const result = await wrongTrust.probe(await wrongTrust.prepare(target), Buffer.from('fixture-api-key'), async () => {});
+  const result = await wrongTrust.probe(
+    await wrongTrust.prepare(target),
+    Buffer.from('fixture-api-key'),
+    async () => {},
+  );
   assert.equal(result.state, 'failed');
   assert.equal(requests, 0, 'untrusted TLS must fail before HTTP/auth headers reach the server');
 });
 
 import { credentialValidationTargetEvidenceSha256 as canonicalTransportEvidence } from '../../../src/saas/supply/credential-validation-targets.js';
 
-function canonicalTransportTarget(baseUrl: string, kind: 'chat' | 'messages' = 'chat', expiresAt: string | null = null): ApprovedCredentialValidationTarget {
+function canonicalTransportTarget(
+  baseUrl: string,
+  kind: 'chat' | 'messages' = 'chat',
+  expiresAt: string | null = null,
+): ApprovedCredentialValidationTarget {
   const descriptor: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'> = {
-    schemaVersion: 2, providerId: 'custom', credentialType: 'api-key', model: 'organisation/model-v1',
-    capabilityVersion: 1, baseUrl, approvalReference: 'canonical-transport-fixture-v2', expiresAt,
-    ...(kind === 'chat' ? { productId: 'custom-openai', endpoint: '/v1/chat/completions', protocol: 'openai',
-      wirePath: 'chat/completions', wireProtocol: 'openai', authProfile: 'openai-bearer-v1' } as const :
-      { productId: 'custom-anthropic', endpoint: '/v1/messages', protocol: 'anthropic',
-        wirePath: 'messages', wireProtocol: 'anthropic', authProfile: 'anthropic-api-key-2023-06-01' } as const),
+    schemaVersion: 2,
+    providerId: 'custom',
+    credentialType: 'api-key',
+    model: 'organisation/model-v1',
+    capabilityVersion: 1,
+    baseUrl,
+    approvalReference: 'canonical-transport-fixture-v2',
+    expiresAt,
+    ...(kind === 'chat'
+      ? ({
+          productId: 'custom-openai',
+          endpoint: '/v1/chat/completions',
+          protocol: 'openai',
+          wirePath: 'chat/completions',
+          wireProtocol: 'openai',
+          authProfile: 'openai-bearer-v1',
+        } as const)
+      : ({
+          productId: 'custom-anthropic',
+          endpoint: '/v1/messages',
+          protocol: 'anthropic',
+          wirePath: 'messages',
+          wireProtocol: 'anthropic',
+          authProfile: 'anthropic-api-key-2023-06-01',
+        } as const)),
   };
   return { ...descriptor, evidenceSha256: canonicalTransportEvidence(descriptor) };
 }
@@ -260,7 +434,9 @@ test('canonical v2 capability uses genuine pinned Chat/Messages wire without cha
   const local = await validationHttpsFixture(t, (request, response) => {
     let wire = '';
     request.setEncoding('utf8');
-    request.on('data', (chunk: string) => { wire += chunk; });
+    request.on('data', (chunk: string) => {
+      wire += chunk;
+    });
     request.on('end', () => {
       requests.push({ method: request.method, url: request.url, headers: request.headers, body: JSON.parse(wire) });
       response.writeHead(200, { 'content-type': 'application/json' });
@@ -274,8 +450,13 @@ test('canonical v2 capability uses genuine pinned Chat/Messages wire without cha
     const job = customJob(target);
     const before = JSON.stringify(job);
     let rechecks = 0;
-    const result = await transport.probe(await transport.prepare(binding(target)), Buffer.from('fixture-canonical-token'),
-      async () => { rechecks += 1; });
+    const result = await transport.probe(
+      await transport.prepare(binding(target)),
+      Buffer.from('fixture-canonical-token'),
+      async () => {
+        rechecks += 1;
+      },
+    );
     assert.equal(result.state, 'verified');
     const request = requests.at(-1);
     assert.ok(request);
@@ -286,8 +467,12 @@ test('canonical v2 capability uses genuine pinned Chat/Messages wire without cha
     assert.equal(request.headers['anthropic-version'], kind === 'messages' ? '2023-06-01' : undefined);
     assert.equal(request.headers.cookie, undefined);
     assert.equal(request.headers['user-agent'], 'model-router');
-    assert.deepEqual(request.body, { model: target.model, max_tokens: 8, stream: false,
-      messages: [{ role: 'user', content: 'Reply with OK.' }] });
+    assert.deepEqual(request.body, {
+      model: target.model,
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: 'user', content: 'Reply with OK.' }],
+    });
     assert.equal(rechecks, 1);
     assert.equal(JSON.stringify(job), before);
     assert.equal(JSON.stringify(result).includes('fixture-canonical-token'), false);
@@ -297,18 +482,29 @@ test('canonical v2 capability uses genuine pinned Chat/Messages wire without cha
 
 test('v2 unbranded copies, expired approved metadata and actual pre-dispatch authority refusal never send credentials', async (t) => {
   let requests = 0;
-  const local = await validationHttpsFixture(t, (request, response) => { request.resume(); requests += 1; response.end(); });
+  const local = await validationHttpsFixture(t, (request, response) => {
+    request.resume();
+    requests += 1;
+    response.end();
+  });
   const transport = new CredentialValidationHttpTransport(local.testOptions);
   t.after(() => transport.close());
   const approved = binding(canonicalTransportTarget(local.baseUrl));
   await assert.rejects(transport.prepare({ ...approved }), CredentialValidationTransportError);
   const old = canonicalTransportTarget(local.baseUrl, 'chat', '2000-01-01T00:00:00.000Z');
-  const oldBinding = resolveApprovedCredentialValidationTarget(compileApprovedCredentialValidationTargets([old]), customJob(old),
-    Date.parse('1999-12-31T23:59:59.999Z'));
+  const oldBinding = resolveApprovedCredentialValidationTarget(
+    compileApprovedCredentialValidationTargets([old]),
+    customJob(old),
+    Date.parse('1999-12-31T23:59:59.999Z'),
+  );
   assert.ok(oldBinding);
   await assert.rejects(transport.prepare(oldBinding), CredentialValidationTransportError);
   const refusal = new Error('canonical-fixture-authority-refused');
-  await assert.rejects(transport.probe(await transport.prepare(approved), Buffer.from('fixture-canonical-token'),
-    async () => { throw refusal; }), (error: unknown) => error === refusal);
+  await assert.rejects(
+    transport.probe(await transport.prepare(approved), Buffer.from('fixture-canonical-token'), async () => {
+      throw refusal;
+    }),
+    (error: unknown) => error === refusal,
+  );
   assert.equal(requests, 0);
 });

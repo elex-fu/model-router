@@ -4,17 +4,17 @@ import { customerPasskeyFail } from './customer-passkey-types.js';
 
 const sources = [
   {
-    "name": "saas_customer_passkey_ceremony_guard",
-    "body": "\nBEGIN\n IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Customer passkey ceremony history is permanent' USING ERRCODE='55000'; END IF;\n IF TG_OP='UPDATE' AND (\n   (to_jsonb(NEW)-ARRAY['credential_id','attempt_count','consumed_at','closed_at']) IS DISTINCT FROM\n   (to_jsonb(OLD)-ARRAY['credential_id','attempt_count','consumed_at','closed_at'])\n   OR OLD.closed_at IS NOT NULL\n   OR NEW.attempt_count NOT IN (OLD.attempt_count,OLD.attempt_count+1)\n   OR (NEW.consumed_at IS NOT NULL AND NEW.closed_at IS NULL)\n   OR (NEW.credential_id IS DISTINCT FROM OLD.credential_id AND NOT (\n     OLD.ceremony='registration' AND OLD.credential_id IS NULL AND NEW.consumed_at IS NOT NULL)))\n THEN RAISE EXCEPTION 'Customer passkey ceremony transition rejected' USING ERRCODE='23514'; END IF;\n IF TG_OP='INSERT' AND (NEW.attempt_count<>0 OR NEW.consumed_at IS NOT NULL OR NEW.closed_at IS NOT NULL)\n THEN RAISE EXCEPTION 'Customer passkey ceremony must begin pending' USING ERRCODE='23514'; END IF;\n IF TG_OP='INSERT' AND (\n   (NEW.ceremony='registration' AND NEW.credential_id IS NOT NULL)\n   OR (NEW.ceremony='assertion' AND (NEW.credential_id IS NULL OR NOT EXISTS(\n     SELECT 1 FROM model_router_saas.saas_mfa_credentials c\n       WHERE c.user_id=NEW.user_id AND c.kind='passkey' AND c.credential_id=NEW.credential_id\n         AND c.verified_at IS NOT NULL AND c.revoked_at IS NULL)))\n   OR EXISTS(SELECT 1 FROM model_router_saas.saas_platform_role_assignments p WHERE p.user_id=NEW.user_id)\n   OR NOT EXISTS(SELECT 1 FROM model_router_saas.saas_sessions s JOIN model_router_saas.saas_users u ON u.id=s.user_id\n     WHERE s.id=NEW.session_id AND s.user_id=NEW.user_id AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()\n       AND u.disabled_at IS NULL AND u.anonymized_at IS NULL))\n THEN RAISE EXCEPTION 'Customer passkey ceremony authority binding rejected' USING ERRCODE='23514'; END IF;\n RETURN NEW;\nEND;\n"
+    name: 'saas_customer_passkey_ceremony_guard',
+    body: "\nBEGIN\n IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Customer passkey ceremony history is permanent' USING ERRCODE='55000'; END IF;\n IF TG_OP='UPDATE' AND (\n   (to_jsonb(NEW)-ARRAY['credential_id','attempt_count','consumed_at','closed_at']) IS DISTINCT FROM\n   (to_jsonb(OLD)-ARRAY['credential_id','attempt_count','consumed_at','closed_at'])\n   OR OLD.closed_at IS NOT NULL\n   OR NEW.attempt_count NOT IN (OLD.attempt_count,OLD.attempt_count+1)\n   OR (NEW.consumed_at IS NOT NULL AND NEW.closed_at IS NULL)\n   OR (NEW.credential_id IS DISTINCT FROM OLD.credential_id AND NOT (\n     OLD.ceremony='registration' AND OLD.credential_id IS NULL AND NEW.consumed_at IS NOT NULL)))\n THEN RAISE EXCEPTION 'Customer passkey ceremony transition rejected' USING ERRCODE='23514'; END IF;\n IF TG_OP='INSERT' AND (NEW.attempt_count<>0 OR NEW.consumed_at IS NOT NULL OR NEW.closed_at IS NOT NULL)\n THEN RAISE EXCEPTION 'Customer passkey ceremony must begin pending' USING ERRCODE='23514'; END IF;\n IF TG_OP='INSERT' AND (\n   (NEW.ceremony='registration' AND NEW.credential_id IS NOT NULL)\n   OR (NEW.ceremony='assertion' AND (NEW.credential_id IS NULL OR NOT EXISTS(\n     SELECT 1 FROM model_router_saas.saas_mfa_credentials c\n       WHERE c.user_id=NEW.user_id AND c.kind='passkey' AND c.credential_id=NEW.credential_id\n         AND c.verified_at IS NOT NULL AND c.revoked_at IS NULL)))\n   OR EXISTS(SELECT 1 FROM model_router_saas.saas_platform_role_assignments p WHERE p.user_id=NEW.user_id)\n   OR NOT EXISTS(SELECT 1 FROM model_router_saas.saas_sessions s JOIN model_router_saas.saas_users u ON u.id=s.user_id\n     WHERE s.id=NEW.session_id AND s.user_id=NEW.user_id AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()\n       AND u.disabled_at IS NULL AND u.anonymized_at IS NULL))\n THEN RAISE EXCEPTION 'Customer passkey ceremony authority binding rejected' USING ERRCODE='23514'; END IF;\n RETURN NEW;\nEND;\n",
   },
   {
-    "name": "saas_customer_passkey_writer",
-    "body": "\nBEGIN\n PERFORM set_config('lock_timeout','2s',true);\n PERFORM set_config('statement_timeout','10s',true);\n PERFORM pg_advisory_xact_lock(1396788563,85);\n RETURN NULL;\nEND;\n"
+    name: 'saas_customer_passkey_writer',
+    body: "\nBEGIN\n PERFORM set_config('lock_timeout','2s',true);\n PERFORM set_config('statement_timeout','10s',true);\n PERFORM pg_advisory_xact_lock(1396788563,85);\n RETURN NULL;\nEND;\n",
   },
   {
-    "name": "saas_customer_passkey_user_fence",
-    "body": "\nBEGIN\n IF TG_OP='DELETE' THEN\n   PERFORM pg_advisory_xact_lock(hashtextextended(OLD.user_id::text,0)); RETURN OLD;\n END IF;\n PERFORM pg_advisory_xact_lock(hashtextextended(NEW.user_id::text,0)); RETURN NEW;\nEND;\n"
-  }
+    name: 'saas_customer_passkey_user_fence',
+    body: "\nBEGIN\n IF TG_OP='DELETE' THEN\n   PERFORM pg_advisory_xact_lock(hashtextextended(OLD.user_id::text,0)); RETURN OLD;\n END IF;\n PERFORM pg_advisory_xact_lock(hashtextextended(NEW.user_id::text,0)); RETURN NEW;\nEND;\n",
+  },
 ] as const;
 /** Structural readiness only. Normal migrator/deployment approves full ledger
  * and ACL manifests independently. No app ledger read, KMS or no-op verification.
@@ -62,7 +62,8 @@ export async function checkCustomerPasskeySchema(tx: SqlExecutor): Promise<void>
           WHERE n.nspname='model_router_saas' AND has_function_privilege(current_user,p.oid,'EXECUTE'))
       ) AS ready`);
     if (shape.rows.length !== 1 || shape.rows[0]?.ready !== true) return customerPasskeyFail('UNAVAILABLE');
-    const routines = await tx.query<{ name: string; body: string; safe: boolean }>(`
+    const routines = await tx.query<{ name: string; body: string; safe: boolean }>(
+      `
       SELECT p.proname AS name,p.prosrc AS body,
         (p.proowner='model_router_saas_migrator'::regrole AND NOT p.prosecdef
           AND p.proconfig=ARRAY['search_path=pg_catalog, model_router_saas, pg_temp']
@@ -70,14 +71,22 @@ export async function checkCustomerPasskeySchema(tx: SqlExecutor): Promise<void>
           AND p.pronargs=0 AND p.prokind='f' AND NOT p.proretset) AS safe
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
       JOIN pg_catalog.pg_language l ON l.oid=p.prolang
-      WHERE n.nspname='model_router_saas' AND p.proname=ANY($1::text[])`, [sources.map((x) => x.name)]);
+      WHERE n.nspname='model_router_saas' AND p.proname=ANY($1::text[])`,
+      [sources.map((x) => x.name)],
+    );
     if (routines.rows.length !== sources.length) return customerPasskeyFail('UNAVAILABLE');
     for (const expected of sources) {
       const matches = routines.rows.filter((r) => r.name === expected.name);
       const found = matches[0];
-      if (matches.length !== 1 || !found || found.safe !== true || typeof found.body !== 'string'
-        || createHash('sha256').update(found.body).digest('hex')
-          !== createHash('sha256').update(expected.body).digest('hex')) return customerPasskeyFail('UNAVAILABLE');
+      if (
+        matches.length !== 1 ||
+        !found ||
+        found.safe !== true ||
+        typeof found.body !== 'string' ||
+        createHash('sha256').update(found.body).digest('hex') !==
+          createHash('sha256').update(expected.body).digest('hex')
+      )
+        return customerPasskeyFail('UNAVAILABLE');
     }
     const bindings = await tx.query<{ ready: boolean }>(`
       WITH wanted(relation_name,trigger_name,function_name,deferred,type_bits) AS (VALUES
@@ -94,5 +103,7 @@ export async function checkCustomerPasskeySchema(tx: SqlExecutor): Promise<void>
           AND t.tgtype=w.type_bits AND t.tgnargs=0
       )) AS ready`);
     if (bindings.rows.length !== 1 || bindings.rows[0]?.ready !== true) return customerPasskeyFail('UNAVAILABLE');
-  } catch { return customerPasskeyFail('UNAVAILABLE'); }
+  } catch {
+    return customerPasskeyFail('UNAVAILABLE');
+  }
 }

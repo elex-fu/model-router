@@ -39,7 +39,8 @@ export class GatewayPreDispatchCompensationService implements GatewayPreDispatch
       prepared.evidence.requestId !== prepared.requestId ||
       prepared.evidence.attemptId !== prepared.attemptId ||
       prepared.evidence.supplyMode !== prepared.caller.supplyMode
-    ) return retained;
+    )
+      return retained;
     const command: RequestPreparationCompensationInput = {
       tenantId: prepared.caller.tenantId,
       requestId: prepared.requestId,
@@ -57,20 +58,22 @@ export class GatewayPreDispatchCompensationService implements GatewayPreDispatch
         if (decision.decision !== 'allow') throw new Error('Pre-dispatch compensation was not confirmed');
         const result = decision.value;
         if (
-          result.requestId !== prepared.requestId || result.attemptId !== prepared.attemptId ||
-          (result.disposition === 'released' && (
-            result.quotaReservation !== 'released' || result.rateReservation !== 'released' ||
-            result.holdReservation !== (prepared.caller.supplyMode === 'byok' ? 'not_applicable' : 'released') ||
-            result.manualReconciliationRequired !== false
-          )) ||
-          (result.disposition === 'retained_for_reconciliation' && (
-            result.manualReconciliationRequired !== true ||
-            result.quotaReservation !== 'retained_for_reconciliation' ||
-            result.rateReservation !== 'retained_for_reconciliation' ||
-            result.holdReservation !== (prepared.caller.supplyMode === 'byok' ? 'not_applicable' : 'retained_for_reconciliation')
-          )) ||
+          result.requestId !== prepared.requestId ||
+          result.attemptId !== prepared.attemptId ||
+          (result.disposition === 'released' &&
+            (result.quotaReservation !== 'released' ||
+              result.rateReservation !== 'released' ||
+              result.holdReservation !== (prepared.caller.supplyMode === 'byok' ? 'not_applicable' : 'released') ||
+              result.manualReconciliationRequired !== false)) ||
+          (result.disposition === 'retained_for_reconciliation' &&
+            (result.manualReconciliationRequired !== true ||
+              result.quotaReservation !== 'retained_for_reconciliation' ||
+              result.rateReservation !== 'retained_for_reconciliation' ||
+              result.holdReservation !==
+                (prepared.caller.supplyMode === 'byok' ? 'not_applicable' : 'retained_for_reconciliation'))) ||
           (result.disposition !== 'released' && result.disposition !== 'retained_for_reconciliation')
-        ) throw new Error('Invalid pre-dispatch compensation outcome');
+        )
+          throw new Error('Invalid pre-dispatch compensation outcome');
         return result;
       });
     } catch {

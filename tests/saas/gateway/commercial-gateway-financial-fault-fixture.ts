@@ -9,24 +9,32 @@ const NONCE_PATTERN = /^[A-Za-z0-9_-]{1,96}$/;
 const MAX_TIMEOUT_MS = 60_000;
 
 export class FinancialFaultFixtureError extends Error {
-  constructor(readonly code:
-    | 'INVALID_CONFIGURATION'
-    | 'DUPLICATE_NONCE'
-    | 'FIXTURE_DISPOSED'
-    | 'WAIT_ABORTED'
-    | 'WAIT_TIMEOUT'
-    | 'CLEANUP_TIMEOUT'
-    | 'FAULT_NOT_INJECTED') {
+  constructor(
+    readonly code:
+      | 'INVALID_CONFIGURATION'
+      | 'DUPLICATE_NONCE'
+      | 'FIXTURE_DISPOSED'
+      | 'WAIT_ABORTED'
+      | 'WAIT_TIMEOUT'
+      | 'CLEANUP_TIMEOUT'
+      | 'FAULT_NOT_INJECTED',
+  ) {
     super(`Financial fault fixture: ${code}`);
     this.name = 'FinancialFaultFixtureError';
   }
 }
 
 export const INVALID_JSON_USAGE_VARIANTS = [
-  'negative', 'fractional', 'unsafe_integer', 'inconsistent_total',
-  'cache_overflow', 'reasoning_overflow', 'unknown_dimension', 'duplicate_usage',
+  'negative',
+  'fractional',
+  'unsafe_integer',
+  'inconsistent_total',
+  'cache_overflow',
+  'reasoning_overflow',
+  'unknown_dimension',
+  'duplicate_usage',
 ] as const;
-export type InvalidJsonUsageVariant = typeof INVALID_JSON_USAGE_VARIANTS[number];
+export type InvalidJsonUsageVariant = (typeof INVALID_JSON_USAGE_VARIANTS)[number];
 
 export type FinancialNetworkScript =
   | { readonly kind: 'json_missing_usage' }
@@ -99,11 +107,15 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown> : null;
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function validateScript(script: FinancialNetworkScript): FinancialNetworkScript {
-  if (!script || !['json_missing_usage', 'json_invalid_usage', 'sse_partial_cancel', 'before_headers_cancel'].includes(script.kind)) {
+  if (
+    !script ||
+    !['json_missing_usage', 'json_invalid_usage', 'sse_partial_cancel', 'before_headers_cancel'].includes(script.kind)
+  ) {
     throw new FinancialFaultFixtureError('INVALID_CONFIGURATION');
   }
   if (script.kind === 'json_invalid_usage' && !INVALID_JSON_USAGE_VARIANTS.includes(script.variant)) {
@@ -114,7 +126,10 @@ function validateScript(script: FinancialNetworkScript): FinancialNetworkScript 
 
 function jsonBody(nonce: string, model: string, script: FinancialNetworkScript): string {
   const envelope = {
-    id: `chatcmpl-financial-fault-${nonce}`, object: 'chat.completion', created: 1, model,
+    id: `chatcmpl-financial-fault-${nonce}`,
+    object: 'chat.completion',
+    created: 1,
+    model,
     choices: [{ index: 0, message: { role: 'assistant', content: 'financial-fault-fixture' }, finish_reason: 'stop' }],
   };
   if (script.kind === 'json_missing_usage') return JSON.stringify(envelope);
@@ -122,18 +137,33 @@ function jsonBody(nonce: string, model: string, script: FinancialNetworkScript):
   const valid = { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 };
   let usage: Record<string, unknown>;
   switch (script.variant) {
-    case 'negative': usage = { ...valid, completion_tokens: -1 }; break;
-    case 'fractional': usage = { ...valid, completion_tokens: 1.5 }; break;
-    case 'unsafe_integer': usage = { ...valid, prompt_tokens: Number.MAX_SAFE_INTEGER + 1 }; break;
-    case 'inconsistent_total': usage = { ...valid, total_tokens: 6 }; break;
-    case 'cache_overflow': usage = { ...valid, prompt_tokens_details: { cached_tokens: 4 } }; break;
-    case 'reasoning_overflow': usage = { ...valid, completion_tokens_details: { reasoning_tokens: 3 } }; break;
-    case 'unknown_dimension': usage = { ...valid, audio_tokens: 1 }; break;
+    case 'negative':
+      usage = { ...valid, completion_tokens: -1 };
+      break;
+    case 'fractional':
+      usage = { ...valid, completion_tokens: 1.5 };
+      break;
+    case 'unsafe_integer':
+      usage = { ...valid, prompt_tokens: Number.MAX_SAFE_INTEGER + 1 };
+      break;
+    case 'inconsistent_total':
+      usage = { ...valid, total_tokens: 6 };
+      break;
+    case 'cache_overflow':
+      usage = { ...valid, prompt_tokens_details: { cached_tokens: 4 } };
+      break;
+    case 'reasoning_overflow':
+      usage = { ...valid, completion_tokens_details: { reasoning_tokens: 3 } };
+      break;
+    case 'unknown_dimension':
+      usage = { ...valid, audio_tokens: 1 };
+      break;
     case 'duplicate_usage':
       // Syntactically complete JSON; the production ambiguity checker must
       // reject duplicate names, rather than trust JSON.parse's last value.
       return `${JSON.stringify(envelope).slice(0, -1)},"usage":${JSON.stringify(valid)},"usage":${JSON.stringify(valid)}}`;
-    default: throw new FinancialFaultFixtureError('INVALID_CONFIGURATION');
+    default:
+      throw new FinancialFaultFixtureError('INVALID_CONFIGURATION');
   }
   return JSON.stringify({ ...envelope, usage });
 }
@@ -154,7 +184,11 @@ interface ResponseBinding {
 class NetworkScenario implements FinancialNetworkScenario {
   readonly prompt: string;
   private readonly counts: Record<FinancialNetworkEvent, number> = {
-    receipt: 0, headers: 0, first_chunk: 0, eof: 0, close: 0,
+    receipt: 0,
+    headers: 0,
+    first_chunk: 0,
+    eof: 0,
+    close: 0,
   };
   private readonly bindings = new Set<ResponseBinding>();
   private readonly waiters = new Set<Waiter>();
@@ -180,12 +214,21 @@ class NetworkScenario implements FinancialNetworkScenario {
 
   snapshot(): FinancialNetworkSnapshot {
     return Object.freeze({
-      receipts: this.counts.receipt, headers: this.counts.headers, firstChunks: this.counts.first_chunk,
-      eofs: this.counts.eof, closes: this.counts.close, peerCancellations: this.peerCancellations,
-      requestAborts: this.requestAborts, protocolMismatches: this.protocolMismatches,
-      watchdogCloses: this.watchdogCloses, cleanupCloses: this.cleanupCloses, writeErrors: this.writeErrors,
-      bytesWritten: this.bytesWritten, activeResponses: this.bindings.size,
-      pendingWaits: this.waiters.size, disposed: this.disposed,
+      receipts: this.counts.receipt,
+      headers: this.counts.headers,
+      firstChunks: this.counts.first_chunk,
+      eofs: this.counts.eof,
+      closes: this.counts.close,
+      peerCancellations: this.peerCancellations,
+      requestAborts: this.requestAborts,
+      protocolMismatches: this.protocolMismatches,
+      watchdogCloses: this.watchdogCloses,
+      cleanupCloses: this.cleanupCloses,
+      writeErrors: this.writeErrors,
+      bytesWritten: this.bytesWritten,
+      activeResponses: this.bindings.size,
+      pendingWaits: this.waiters.size,
+      disposed: this.disposed,
     });
   }
 
@@ -203,9 +246,16 @@ class NetworkScenario implements FinancialNetworkScenario {
         this.waiters.delete(waiter);
       };
       const waiter: Waiter = {
-        event, count,
-        resolve: () => { cleanup(); resolve(); },
-        reject: (error) => { cleanup(); reject(error); },
+        event,
+        count,
+        resolve: () => {
+          cleanup();
+          resolve();
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
       };
       const onAbort = () => waiter.reject(new FinancialFaultFixtureError('WAIT_ABORTED'));
       const timer = setTimeout(() => waiter.reject(new FinancialFaultFixtureError('WAIT_TIMEOUT')), timeoutMs);
@@ -229,10 +279,20 @@ class NetworkScenario implements FinancialNetworkScenario {
     }
     let destroyReason: 'watchdog' | 'cleanup' | 'write_error' | undefined;
     let resolveClosed!: () => void;
-    const closed = new Promise<void>((resolve) => { resolveClosed = resolve; });
-    const onRequestAbort = () => { this.requestAborts += 1; };
-    const onFinish = () => { clearTimeout(watchdog); this.record('eof'); };
-    const onError = () => { this.writeErrors += 1; binding.destroy('write_error'); };
+    const closed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const onRequestAbort = () => {
+      this.requestAborts += 1;
+    };
+    const onFinish = () => {
+      clearTimeout(watchdog);
+      this.record('eof');
+    };
+    const onError = () => {
+      this.writeErrors += 1;
+      binding.destroy('write_error');
+    };
     const onClose = () => {
       clearTimeout(watchdog);
       request.removeListener('aborted', onRequestAbort);
@@ -245,7 +305,8 @@ class NetworkScenario implements FinancialNetworkScenario {
       resolveClosed();
     };
     const binding: ResponseBinding = {
-      response, closed,
+      response,
+      closed,
       destroy: (reason) => {
         if (response.destroyed || destroyReason !== undefined) return;
         destroyReason = reason;
@@ -277,9 +338,11 @@ class NetworkScenario implements FinancialNetworkScenario {
     };
 
     const streaming = payload.stream;
-    if (typeof streaming !== 'boolean' ||
+    if (
+      typeof streaming !== 'boolean' ||
       (this.script.kind === 'sse_partial_cancel' && !streaming) ||
-      (this.script.kind.startsWith('json_') && streaming)) {
+      (this.script.kind.startsWith('json_') && streaming)
+    ) {
       this.protocolMismatches += 1;
       write('{"error":"financial_fault_fixture_protocol_mismatch"}', 'application/json', true, 400);
     } else if (this.script.kind === 'before_headers_cancel') {
@@ -287,13 +350,21 @@ class NetworkScenario implements FinancialNetworkScenario {
       // cleanup/watchdog ends this actual network response.
     } else if (this.script.kind === 'sse_partial_cancel') {
       const firstEvent = `data: ${JSON.stringify({
-        id: `chatcmpl-financial-fault-${this.nonce}`, object: 'chat.completion.chunk',
+        id: `chatcmpl-financial-fault-${this.nonce}`,
+        object: 'chat.completion.chunk',
         choices: [{ index: 0, delta: { content: 'financial-fault-first-chunk' }, finish_reason: null }],
       })}\n\n`;
       write(firstEvent, 'text/event-stream; charset=utf-8', false);
     } else {
-      write(jsonBody(this.nonce, typeof payload.model === 'string' ? payload.model : 'financial-fixture-model', this.script),
-        'application/json; charset=utf-8', true);
+      write(
+        jsonBody(
+          this.nonce,
+          typeof payload.model === 'string' ? payload.model : 'financial-fixture-model',
+          this.script,
+        ),
+        'application/json; charset=utf-8',
+        true,
+      );
     }
   }
 
@@ -308,8 +379,14 @@ class NetworkScenario implements FinancialNetworkScenario {
     this.disposal = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new FinancialFaultFixtureError('CLEANUP_TIMEOUT')), this.waitTimeoutMs);
       Promise.all(active.map((binding) => binding.closed)).then(
-        () => { clearTimeout(timer); resolve(); },
-        () => { clearTimeout(timer); reject(new FinancialFaultFixtureError('CLEANUP_TIMEOUT')); },
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        () => {
+          clearTimeout(timer);
+          reject(new FinancialFaultFixtureError('CLEANUP_TIMEOUT'));
+        },
       );
       for (const binding of active) binding.destroy('cleanup');
     });
@@ -317,10 +394,9 @@ class NetworkScenario implements FinancialNetworkScenario {
   }
 }
 
-export function createFinancialNetworkFaultFixture(options: {
-  readonly responseTimeoutMs?: number;
-  readonly waitTimeoutMs?: number;
-} = {}): FinancialNetworkFixture {
+export function createFinancialNetworkFaultFixture(
+  options: { readonly responseTimeoutMs?: number; readonly waitTimeoutMs?: number } = {},
+): FinancialNetworkFixture {
   const responseTimeoutMs = timeout(options.responseTimeoutMs, 5_000);
   const waitTimeoutMs = timeout(options.waitTimeoutMs, 2_000);
   const active = new Map<string, NetworkScenario>();
@@ -330,7 +406,8 @@ export function createFinancialNetworkFaultFixture(options: {
   return {
     register(script, nonce = randomUUID()) {
       if (disposed) throw new FinancialFaultFixtureError('FIXTURE_DISPOSED');
-      if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce)) throw new FinancialFaultFixtureError('INVALID_CONFIGURATION');
+      if (typeof nonce !== 'string' || !NONCE_PATTERN.test(nonce))
+        throw new FinancialFaultFixtureError('INVALID_CONFIGURATION');
       if (active.has(nonce)) throw new FinancialFaultFixtureError('DUPLICATE_NONCE');
       const scenario = new NetworkScenario(nonce, validateScript(script), responseTimeoutMs, waitTimeoutMs, () => {
         active.delete(nonce);
@@ -346,7 +423,12 @@ export function createFinancialNetworkFaultFixture(options: {
       const matched = new Set<NetworkScenario>();
       for (const messageValue of payload.messages) {
         const message = object(messageValue);
-        if (message?.role !== 'user' || typeof message.content !== 'string' || !message.content.startsWith(NONCE_PREFIX)) continue;
+        if (
+          message?.role !== 'user' ||
+          typeof message.content !== 'string' ||
+          !message.content.startsWith(NONCE_PREFIX)
+        )
+          continue;
         const scenario = active.get(message.content.slice(NONCE_PREFIX.length));
         if (scenario) matched.add(scenario);
       }
@@ -363,7 +445,8 @@ export function createFinancialNetworkFaultFixture(options: {
       if (disposal) return disposal;
       disposed = true;
       disposal = Promise.allSettled([...owned].map((scenario) => scenario.dispose())).then((results) => {
-        if (results.some((result) => result.status === 'rejected')) throw new FinancialFaultFixtureError('CLEANUP_TIMEOUT');
+        if (results.some((result) => result.status === 'rejected'))
+          throw new FinancialFaultFixtureError('CLEANUP_TIMEOUT');
       });
       return disposal;
     },
@@ -409,9 +492,13 @@ export interface DelegatedSqlFault {
  * Sentinel injection is not a process crash or a financial/PG proof.
  */
 export function createDelegatedSqlFault(plan: DelegatedSqlFaultPlan): DelegatedSqlFault {
-  if (!plan || !['after_successful_write', 'before_commit', 'after_commit'].includes(plan.point) ||
-    !(plan.sentinel instanceof Error) || typeof plan.matchesWrite !== 'function' ||
-    typeof plan.expectedRowCount !== 'number') {
+  if (
+    !plan ||
+    !['after_successful_write', 'before_commit', 'after_commit'].includes(plan.point) ||
+    !(plan.sentinel instanceof Error) ||
+    typeof plan.matchesWrite !== 'function' ||
+    typeof plan.expectedRowCount !== 'number'
+  ) {
     throw new FinancialFaultFixtureError('INVALID_CONFIGURATION');
   }
   const expectedRowCount = positiveInteger(plan.expectedRowCount, 1);
@@ -439,7 +526,10 @@ export function createDelegatedSqlFault(plan: DelegatedSqlFaultPlan): DelegatedS
           const commit = /^\s*COMMIT\s*;?\s*$/i.test(sql);
           const rollback = /^\s*ROLLBACK\s*;?\s*$/i.test(sql);
           const begin = /^\s*BEGIN\b/i.test(sql);
-          if (begin) { transactionWrites = 0; transactionOpen = false; }
+          if (begin) {
+            transactionWrites = 0;
+            transactionOpen = false;
+          }
           const armed = transactionOpen && transactionWrites >= required;
           if (commit && armed && injectedAt === null && point === 'before_commit') inject();
 
@@ -465,12 +555,19 @@ export function createDelegatedSqlFault(plan: DelegatedSqlFaultPlan): DelegatedS
           } else if (rollback) {
             transactionWrites = 0;
             transactionOpen = false;
-          } else if (/^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(sql) &&
-            matchesWrite(sql, values) && result.rowCount === expectedRowCount) {
+          } else if (
+            /^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b/i.test(sql) &&
+            matchesWrite(sql, values) &&
+            result.rowCount === expectedRowCount
+          ) {
             if (transactionOpen) transactionWrites += 1;
             successfulMatchedWrites += 1;
-            if ((required === 1 || (transactionOpen && transactionWrites >= required)) &&
-              injectedAt === null && point === 'after_successful_write') inject();
+            if (
+              (required === 1 || (transactionOpen && transactionWrites >= required)) &&
+              injectedAt === null &&
+              point === 'after_successful_write'
+            )
+              inject();
           }
           return result;
         },
@@ -492,10 +589,13 @@ export function createDelegatedSqlFault(plan: DelegatedSqlFaultPlan): DelegatedS
       },
       end: () => pool.end(),
     }),
-    snapshot: () => Object.freeze({
-      successfulMatchedWrites, successfulMatchedCommits,
-      injections: injectedAt === null ? 0 : 1, injectedAt,
-    }),
+    snapshot: () =>
+      Object.freeze({
+        successfulMatchedWrites,
+        successfulMatchedCommits,
+        injections: injectedAt === null ? 0 : 1,
+        injectedAt,
+      }),
     assertInjected: () => {
       if (injectedAt === null) throw new FinancialFaultFixtureError('FAULT_NOT_INJECTED');
     },

@@ -16,6 +16,14 @@ export const REDIS_RESP_BOUNDS = Object.freeze({
   depth: 4,
   evalArgs: 8,
 });
+// Endpoint / secret rejection patterns. Built via String.fromCharCode so the
+// source itself carries no literal control bytes (the C0 range plus DEL).
+const ENDPOINT_FORBIDDEN_CHARACTERS = new RegExp(
+  `[\\s${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}?#\\\\]`,
+);
+const SECRET_CONTROL_CHARACTERS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}]`,
+);
 export type RedisRespErrorCode =
   | 'REDIS_INVALID_URL'
   | 'REDIS_INVALID_COMMAND'
@@ -109,7 +117,7 @@ function endpoint(value: string): Endpoint {
       typeof value !== 'string' ||
       value.length === 0 ||
       value.length > 4_096 ||
-      /[\s\u0000-\u001f\u007f?#\\]/.test(value) ||
+      ENDPOINT_FORBIDDEN_CHARACTERS.test(value) ||
       value.split('@').length > 2
     )
       throw new Error();
@@ -131,7 +139,7 @@ function endpoint(value: string): Endpoint {
     const username = decodeURIComponent(url.username);
     const password = decodeURIComponent(url.password);
     for (const secret of [username, password]) {
-      if (/[\u0000-\u001f\u007f]/.test(secret)) throw new Error();
+      if (SECRET_CONTROL_CHARACTERS.test(secret)) throw new Error();
       const bytes = Buffer.from(secret);
       const valid = bytes.toString('utf8') === secret;
       bytes.fill(0);
@@ -195,7 +203,8 @@ export class RedisRespClient {
       await client.close().catch(() => undefined);
       throw error instanceof RedisRespError ? error : new RedisRespError('REDIS_CONNECTION_FAILED');
     } finally {
-      address.username?.fill(0); address.password?.fill(0);
+      address.username?.fill(0);
+      address.password?.fill(0);
       address.username = undefined;
       address.password = undefined;
     }
@@ -341,7 +350,8 @@ export class RedisRespClient {
       const pending = this.active;
       this.active = undefined;
       clearTimeout(pending.timer);
-      this.buffer.fill(0); this.buffer = Buffer.alloc(0);
+      this.buffer.fill(0);
+      this.buffer = Buffer.alloc(0);
       pending.resolve(reply.value);
       // Let the purpose caller validate its reply before dispatching queued work.
       queueMicrotask(() => this.pump());

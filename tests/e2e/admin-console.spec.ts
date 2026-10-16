@@ -52,7 +52,10 @@ test('first-run setup, login, navigation, config save and revision conflict', as
     await page.getByRole('button', { name: '创建管理员' }).click();
     await expect(page.getByRole('heading', { name: '登录' })).toBeVisible();
 
-    await page.getByRole('navigation', { name: '账号入口' }).getByRole('link', { name: '首次注册', exact: true }).click();
+    await page
+      .getByRole('navigation', { name: '账号入口' })
+      .getByRole('link', { name: '首次注册', exact: true })
+      .click();
     await expect(page.getByRole('heading', { name: '实例已完成注册' })).toBeVisible();
     await expect(page.getByLabel('管理员密码')).toHaveCount(0);
     await page.getByRole('link', { name: '前往登录' }).click();
