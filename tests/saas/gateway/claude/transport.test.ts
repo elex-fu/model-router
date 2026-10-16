@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { CLAUDE_MESSAGES_HOST } from '../../../../src/saas/gateway/claude/catalog-identity.js';
 import {
@@ -10,11 +11,14 @@ import {
 import {
   ClaudeHttpTransport,
   ClaudeHttpTransportError,
+  ClaudePreparedEvidenceTransport,
   type ClaudeRateLimitSink,
   type ClaudeTransportRequest,
   type ClaudeUpstreamCredential,
   claudeMetadataUserId,
 } from '../../../../src/saas/gateway/claude/transport.js';
+import type { PreparedEvidenceTransportRequest } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
+import type { PreparedRequestEvidenceRecord } from '../../../../src/saas/gateway/prepared-request-evidence-service.js';
 
 const CREDENTIAL: ClaudeUpstreamCredential = {
   accessToken: 'accs-claude-token',
@@ -261,4 +265,135 @@ test('the metadata user id derives stably from (proxy key, account)', () => {
     claudeMetadataUserId('key-1', 'acct-1'),
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* Prepared-evidence dispatch adapter (ClaudePreparedEvidenceTransport) */
+/* ------------------------------------------------------------------ */
+
+function evidenceRecord(payloadBytes: Uint8Array): PreparedRequestEvidenceRecord {
+  return {
+    evidenceId: 'ev-1',
+    tenantId: 'tenant-1',
+    projectId: 'project-1',
+    requestId: 'req-1',
+    endpoint: 'claude-messages',
+    accountId: 'account-1',
+    credentialId: 'credential-1',
+    credentialVersion: 'v1',
+    payloadSha256: createHash('sha256').update(payloadBytes).digest('hex'),
+    status: 'claimed',
+    claimedAttemptId: 'attempt-1',
+  } as unknown as PreparedRequestEvidenceRecord;
+}
+
+function evidenceTransportRequest(payloadBytes: Uint8Array): PreparedEvidenceTransportRequest {
+  return {
+    tenantId: 'tenant-1',
+    projectId: 'project-1',
+    requestId: 'req-1',
+    attemptId: 'attempt-1',
+    fencingToken: 'fence-1',
+    signal: new AbortController().signal,
+    payloadBytes,
+    evidence: evidenceRecord(payloadBytes),
+  };
+}
+
+const MESSAGE_START_CHUNK =
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":1}}}\n\n';
+const MESSAGE_DELTA_CHUNK =
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}\n\n';
+
+test('prepared-evidence adapter rejects payload bytes that do not match the signed digest', async () => {
+  const transport = new ClaudePreparedEvidenceTransport({
+    fetch: async () => sseResponse([MESSAGE_START_CHUNK, MESSAGE_DELTA_CHUNK]),
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ proxyKeyId: 'proxy-key-1' }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify({ model: 'claude-sonnet-4-5-20250929', messages: [] }));
+  const request = evidenceTransportRequest(payloadBytes);
+  (request.evidence as { payloadSha256: string }).payloadSha256 = createHash('sha256').update('tampered').digest('hex');
+  await assert.rejects(
+    () => transport.send(request),
+    (error: unknown) => error instanceof ClaudeHttpTransportError && error.code === 'INVALID_INPUT',
+  );
+});
+
+test('prepared-evidence adapter rejects evidence that is not bound to the request attempt', async () => {
+  const transport = new ClaudePreparedEvidenceTransport({
+    fetch: async () => sseResponse([MESSAGE_START_CHUNK, MESSAGE_DELTA_CHUNK]),
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ proxyKeyId: 'proxy-key-1' }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify({ model: 'claude-sonnet-4-5-20250929', messages: [] }));
+  const request = evidenceTransportRequest(payloadBytes);
+  (request.evidence as { status: string }).status = 'registered';
+  await assert.rejects(
+    () => transport.send(request),
+    (error: unknown) => error instanceof ClaudeHttpTransportError && error.code === 'INVALID_INPUT',
+  );
+});
+
+test('prepared-evidence adapter requires a request context resolver', () => {
+  assert.throws(
+    () =>
+      new ClaudePreparedEvidenceTransport({
+        fetch: async () => sseResponse([]),
+        resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+        resolveRequestContext: undefined as unknown as () => { readonly proxyKeyId: string | null },
+      }),
+    (error: unknown) => error instanceof ClaudeHttpTransportError && error.code === 'INVALID_INPUT',
+  );
+});
+
+test('prepared-evidence adapter dispatches a bound request and exposes lazy usage', async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const transport = new ClaudePreparedEvidenceTransport({
+    fetch: async (url, init) => {
+      calls.push({ url, body: JSON.parse(String(init.body)) });
+      return sseResponse([MESSAGE_START_CHUNK, MESSAGE_DELTA_CHUNK]);
+    },
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ proxyKeyId: 'proxy-key-1', cliVersionOverride: null }),
+  });
+  const payload = { model: 'claude-sonnet-4-5-20250929', messages: [{ role: 'user', content: 'hi' }] };
+  const response = await transport.send(evidenceTransportRequest(new TextEncoder().encode(JSON.stringify(payload))));
+  assert.equal(response.resultHttpStatus, 200);
+  assert.equal(response.responseStarted, false);
+  assert.ok(response.body instanceof ReadableStream);
+  // The signed payload bytes are relayed to the pinned endpoint unchanged.
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].body, payload);
+  // Usage is lazy: it resolves once the stream's terminal event is observed.
+  const body = response.body;
+  assert.ok(body instanceof ReadableStream);
+  const reader = body.getReader();
+  while (!(await reader.read()).done) {
+    // drain
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  const usage = response.providerUsage;
+  assert.ok(usage !== null);
+  assert.equal(usage.inputTotal, 150);
+  assert.equal(usage.inputUncached, 100);
+  assert.equal(usage.cacheRead, 50);
+  assert.equal(usage.outputTotal, 42);
+});
+
+test('prepared-evidence adapter surfaces non-2xx results without a body stream', async () => {
+  const transport = new ClaudePreparedEvidenceTransport({
+    fetch: async () =>
+      new Response(JSON.stringify({ type: 'error', error: { type: 'overloaded_error' } }), {
+        status: 529,
+        headers: { 'content-type': 'application/json' },
+      }),
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ proxyKeyId: 'proxy-key-1' }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify({ model: 'claude-sonnet-4-5-20250929', messages: [] }));
+  const response = await transport.send(evidenceTransportRequest(payloadBytes));
+  assert.equal(response.resultHttpStatus, 529);
+  assert.equal(response.responseStarted, false);
+  assert.equal(response.body, null);
 });

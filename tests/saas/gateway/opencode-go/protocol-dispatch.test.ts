@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor } from '../../../../src/saas/db/index.js';
+import { CLAUDE_ENDPOINT } from '../../../../src/saas/gateway/claude/catalog-identity.js';
 import { CODEX_ENDPOINT } from '../../../../src/saas/gateway/codex/catalog-identity.js';
 import type { ModelResolutionProvenance } from '../../../../src/saas/gateway/contracts.js';
+import { GEMINI_ENDPOINT } from '../../../../src/saas/gateway/gemini/catalog-identity.js';
 import {
   OPENCODE_GO_ENDPOINT,
   OPENCODE_GO_PROVIDER_ID,
@@ -994,6 +996,83 @@ test('the production dispatch transport splits on the signed endpoint scope and 
     sends.codex = 0;
     sends.opencodeGo = 0;
     await assert.rejects(() => dispatchTransport.send(transportRequest({})));
+    assert.equal(sends.codex, 0);
+    assert.equal(sends.opencodeGo, 0);
+  } finally {
+    await composition.close();
+  }
+});
+
+test('the production dispatch transport mounts the claude and gemini dispatch seams on their endpoint scopes', async () => {
+  const sends: Record<string, number> = { claude: 0, gemini: 0, codex: 0, opencodeGo: 0 };
+  const claudeTransport = {
+    async send() {
+      sends.claude += 1;
+      return { responseStarted: true, resultHttpStatus: 200 };
+    },
+  };
+  const geminiTransport = {
+    async send() {
+      sends.gemini += 1;
+      return { responseStarted: true, resultHttpStatus: 200 };
+    },
+  };
+  const composition = createManagedSaasGatewayProductionComposition(FAKE_DATABASE, {
+    ...productionOptions(),
+    codexEvidenceTransport: {
+      async send() {
+        sends.codex += 1;
+        return { responseStarted: true, resultHttpStatus: 200 };
+      },
+    },
+    claudeEvidenceTransport: claudeTransport,
+    geminiEvidenceTransport: geminiTransport,
+  });
+  try {
+    const dispatchTransport = (
+      composition.dispatch as unknown as {
+        transport: PreparedEvidenceTransport;
+      }
+    ).transport;
+
+    // Claude: the `claude-messages` scope with its native `anthropic` protocol.
+    await dispatchTransport.send(
+      transportRequest({
+        endpoint: CLAUDE_ENDPOINT,
+        providerProtocol: 'anthropic',
+        providerOperation: 'messages',
+      }),
+    );
+    assert.equal(sends.claude, 1);
+    assert.equal(sends.gemini, 0);
+
+    // Gemini: the `gemini-generate-content` scope with its native `gemini`
+    // protocol.
+    await dispatchTransport.send(
+      transportRequest({
+        endpoint: GEMINI_ENDPOINT,
+        providerProtocol: 'gemini',
+        providerOperation: 'generateContent',
+      }),
+    );
+    assert.equal(sends.claude, 1);
+    assert.equal(sends.gemini, 1);
+
+    // The claude split is narrowed by provider protocol, mirroring the codex
+    // semantics: the same endpoint scope with a different provider protocol
+    // stays on the generic transport (which fails closed here because
+    // providerTargetRoute returns null).
+    await assert.rejects(() =>
+      dispatchTransport.send(
+        transportRequest({
+          endpoint: CLAUDE_ENDPOINT,
+          providerProtocol: 'openai',
+          providerOperation: 'chat.completions',
+        }),
+      ),
+    );
+    assert.equal(sends.claude, 1);
+    assert.equal(sends.gemini, 1);
     assert.equal(sends.codex, 0);
     assert.equal(sends.opencodeGo, 0);
   } finally {

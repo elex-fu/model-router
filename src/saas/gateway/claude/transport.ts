@@ -1,3 +1,6 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { normalizeUsage } from '../../../telemetry/usage.js';
+import type { NormalSuccessObservedUsage } from '../dispatch-usage-settlement.js';
 import {
   classifyUpstreamError,
   shouldFailover,
@@ -11,6 +14,12 @@ import {
   flattenHeaders,
   QuotaSnapshotWriteThrottle,
 } from '../oauth-subscription/transport-skeleton.js';
+import type {
+  PreparedEvidenceTransport,
+  PreparedEvidenceTransportRequest,
+  PreparedEvidenceTransportResponse,
+} from '../prepared-evidence-dispatch-service.js';
+import type { PreparedRequestEvidenceRecord } from '../prepared-request-evidence-service.js';
 import { CLAUDE_MESSAGES_ENDPOINT } from './catalog-identity.js';
 import {
   CLAUDE_ANTHROPIC_VERSION,
@@ -470,4 +479,125 @@ export function claudeMetadataUserSeed(proxyKeyId: string, accountUuid: string):
 /** The deriveStableUUIDv4-based metadata user id (identity namespace kernel). */
 export function claudeMetadataUserId(proxyKeyId: string, accountUuid: string): string {
   return deriveStableUUIDv4(claudeMetadataUserSeed(proxyKeyId, accountUuid));
+}
+
+const PREPARED_PAYLOAD_SHA256 = /^[0-9a-f]{64}$/;
+
+/** Normalized Messages usage → the gateway's observed-usage contract. */
+export function claudeUsageToObservedUsage(usage: ClaudeMessagesUsage): NormalSuccessObservedUsage | null {
+  const normalized = normalizeUsage('anthropic', {
+    input_tokens: usage.inputTokens ?? undefined,
+    cache_read_input_tokens: usage.cacheReadTokens ?? undefined,
+    cache_creation_input_tokens: usage.cacheCreationTokens ?? undefined,
+    output_tokens: usage.outputTokens ?? undefined,
+  });
+  if (normalized.status !== 'reported' || normalized.inputTotal === null || normalized.outputTotal === null) {
+    return null;
+  }
+  return Object.freeze({ ...normalized, source: 'upstream' });
+}
+
+/**
+ * Per-request identity context for the prepared-evidence adapter; the gateway
+ * resolves it from the authenticated caller (proxy key id) and the account's
+ * scheduling columns (CLI version override).
+ */
+export interface ClaudeRequestIdentityContext {
+  /** Proxy key id: the metadata user id namespace seed; null disables isolation. */
+  readonly proxyKeyId: string | null;
+  /** Operator CLI version override (scheduling column); null uses the pin. */
+  readonly cliVersionOverride?: string | null;
+}
+
+/**
+ * Adapter that plugs `ClaudeHttpTransport` into the gateway's prepared-evidence
+ * dispatch chain (the direct analog of `CodexPreparedEvidenceTransport`). The
+ * evidence record carries the account/credential binding and the signed
+ * payload digest; the per-request identity context comes from the injected
+ * resolver. Dispatch routes evidence whose signed endpoint scope is the Claude
+ * catalog endpoint (`claude-messages`) here.
+ */
+export interface ClaudePreparedEvidenceTransportOptions extends ClaudeHttpTransportOptions {
+  readonly resolveRequestContext: (
+    evidence: PreparedRequestEvidenceRecord,
+  ) => Promise<ClaudeRequestIdentityContext> | ClaudeRequestIdentityContext;
+}
+
+export class ClaudePreparedEvidenceTransport implements PreparedEvidenceTransport {
+  private readonly transport: ClaudeHttpTransport;
+  private readonly resolveRequestContext: ClaudePreparedEvidenceTransportOptions['resolveRequestContext'];
+
+  constructor(options: ClaudePreparedEvidenceTransportOptions) {
+    if (typeof options.resolveRequestContext !== 'function') {
+      fail('INVALID_INPUT', 'a claude request context resolver is required');
+    }
+    this.transport = new ClaudeHttpTransport(options);
+    this.resolveRequestContext = options.resolveRequestContext;
+  }
+
+  async send(input: PreparedEvidenceTransportRequest): Promise<PreparedEvidenceTransportResponse> {
+    const body = assertPayloadBinding(input);
+    const evidence = input.evidence;
+    const context = await this.resolveRequestContext(evidence);
+    const result = await this.transport.send({
+      accountId: evidence.accountId,
+      credentialId: evidence.credentialId,
+      credentialVersion: evidence.credentialVersion,
+      body,
+      proxyKeyId: context.proxyKeyId,
+      cliVersionOverride: context.cliVersionOverride,
+      signal: input.signal,
+    });
+    if (!result.ok) {
+      return {
+        responseStarted: false,
+        resultHttpStatus: result.status,
+        headers: {},
+        body: null,
+      };
+    }
+    // The Messages usage arrives with the stream's terminal event; expose it
+    // through the same lazy accessor contract as the codex adapter.
+    let observedUsage: ClaudeMessagesUsage | null = null;
+    void result.usage
+      .then((usage) => {
+        observedUsage = usage;
+        return usage;
+      })
+      .catch(() => null);
+    return {
+      responseStarted: false,
+      resultHttpStatus: result.status,
+      headers: result.headers,
+      body: result.body,
+      get providerUsage(): NormalSuccessObservedUsage | null {
+        return observedUsage === null ? null : claudeUsageToObservedUsage(observedUsage);
+      },
+    };
+  }
+}
+
+function assertPayloadBinding(input: PreparedEvidenceTransportRequest): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || !input.evidence) fail('INVALID_INPUT', 'transport request is required');
+  const evidence = input.evidence;
+  if (evidence.status !== 'claimed' || evidence.claimedAttemptId !== input.attemptId) {
+    fail('INVALID_INPUT', 'prepared evidence is not bound to this transport request');
+  }
+  if (typeof evidence.payloadSha256 !== 'string' || !PREPARED_PAYLOAD_SHA256.test(evidence.payloadSha256)) {
+    fail('INVALID_INPUT', 'prepared evidence payload digest is invalid');
+  }
+  if (!(input.payloadBytes instanceof Uint8Array)) fail('INVALID_INPUT', 'payload bytes are invalid');
+  const actual = createHash('sha256').update(input.payloadBytes).digest();
+  const expected = Buffer.from(evidence.payloadSha256, 'hex');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    fail('INVALID_INPUT', 'payload bytes do not match prepared evidence');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(input.payloadBytes));
+  } catch {
+    fail('INVALID_INPUT', 'payload bytes are not the claude JSON body');
+  }
+  if (!isRecord(parsed)) fail('INVALID_INPUT', 'payload bytes are not the claude JSON body');
+  return parsed;
 }

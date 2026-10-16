@@ -1,3 +1,6 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { normalizeUsage } from '../../../telemetry/usage.js';
+import type { NormalSuccessObservedUsage } from '../dispatch-usage-settlement.js';
 import {
   classifyUpstreamError,
   shouldFailover,
@@ -10,6 +13,12 @@ import {
   flattenHeaders,
   QuotaSnapshotWriteThrottle,
 } from '../oauth-subscription/transport-skeleton.js';
+import type {
+  PreparedEvidenceTransport,
+  PreparedEvidenceTransportRequest,
+  PreparedEvidenceTransportResponse,
+} from '../prepared-evidence-dispatch-service.js';
+import type { PreparedRequestEvidenceRecord } from '../prepared-request-evidence-service.js';
 import { GEMINI_CLI_BASE_URL } from './catalog-identity.js';
 import { GEMINI_CLI_USER_AGENT } from './constants.js';
 import type { GeminiQuotaTierId } from './identity.js';
@@ -437,4 +446,132 @@ export class GeminiHttpTransport {
       // Health observation is best-effort; the dispatch result stands.
     }
   }
+}
+
+const PREPARED_PAYLOAD_SHA256 = /^[0-9a-f]{64}$/;
+
+/**
+ * Normalized Gemini usage → the gateway's observed-usage contract. The
+ * transport's usage vocabulary already applies the sub2api cache split
+ * (promptTokenCount includes cachedContentTokenCount), so the prompt total is
+ * reconstructed before the shared gemini normalizer runs.
+ */
+export function geminiUsageToObservedUsage(usage: GeminiResponseUsage): NormalSuccessObservedUsage | null {
+  const normalized = normalizeUsage('gemini', {
+    promptTokenCount: usage.inputTokens === null ? undefined : usage.inputTokens + (usage.cacheReadTokens ?? 0),
+    candidatesTokenCount: usage.outputTokens ?? undefined,
+    cachedContentTokenCount: usage.cacheReadTokens ?? undefined,
+  });
+  if (normalized.status !== 'reported' || normalized.inputTotal === null || normalized.outputTotal === null) {
+    return null;
+  }
+  return Object.freeze({ ...normalized, source: 'upstream' });
+}
+
+/**
+ * Per-request dispatch context for the prepared-evidence adapter; the gateway
+ * resolves it from the prepared evidence's route facts (resolved model, client
+ * stream ask) and the account's tier scheduling column.
+ */
+export interface GeminiRequestDispatchContext {
+  /** The model id (already normalized by transform.ts). */
+  readonly model: string;
+  /** Whether the client asked for a stream (selects the streamGenerateContent action). */
+  readonly stream: boolean;
+  /** Canonical tier id for the 429 cooldown; null uses the unknown-tier default. */
+  readonly tierId?: GeminiQuotaTierId | null;
+}
+
+/**
+ * Adapter that plugs `GeminiHttpTransport` into the gateway's prepared-evidence
+ * dispatch chain (the direct analog of `CodexPreparedEvidenceTransport`). The
+ * evidence record carries the account/credential binding and the signed
+ * payload digest; the per-request dispatch context comes from the injected
+ * resolver. Dispatch routes evidence whose signed endpoint scope is the Gemini
+ * catalog endpoint (`gemini-generate-content`) here.
+ */
+export interface GeminiPreparedEvidenceTransportOptions extends GeminiHttpTransportOptions {
+  readonly resolveRequestContext: (
+    evidence: PreparedRequestEvidenceRecord,
+  ) => Promise<GeminiRequestDispatchContext> | GeminiRequestDispatchContext;
+}
+
+export class GeminiPreparedEvidenceTransport implements PreparedEvidenceTransport {
+  private readonly transport: GeminiHttpTransport;
+  private readonly resolveRequestContext: GeminiPreparedEvidenceTransportOptions['resolveRequestContext'];
+
+  constructor(options: GeminiPreparedEvidenceTransportOptions) {
+    if (typeof options.resolveRequestContext !== 'function') {
+      fail('INVALID_INPUT', 'a gemini request context resolver is required');
+    }
+    this.transport = new GeminiHttpTransport(options);
+    this.resolveRequestContext = options.resolveRequestContext;
+  }
+
+  async send(input: PreparedEvidenceTransportRequest): Promise<PreparedEvidenceTransportResponse> {
+    const body = assertPayloadBinding(input);
+    const evidence = input.evidence;
+    const context = await this.resolveRequestContext(evidence);
+    const result = await this.transport.send({
+      accountId: evidence.accountId,
+      credentialId: evidence.credentialId,
+      credentialVersion: evidence.credentialVersion,
+      model: context.model,
+      body,
+      stream: context.stream,
+      tierId: context.tierId,
+      signal: input.signal,
+    });
+    if (!result.ok) {
+      return {
+        responseStarted: false,
+        resultHttpStatus: result.status,
+        headers: {},
+        body: null,
+      };
+    }
+    // The Gemini usage arrives with the terminal usageMetadata chunk; expose
+    // it through the same lazy accessor contract as the codex adapter.
+    let observedUsage: GeminiResponseUsage | null = null;
+    void result.usage
+      .then((usage) => {
+        observedUsage = usage;
+        return usage;
+      })
+      .catch(() => null);
+    return {
+      responseStarted: false,
+      resultHttpStatus: result.status,
+      headers: result.headers,
+      body: result.body,
+      get providerUsage(): NormalSuccessObservedUsage | null {
+        return observedUsage === null ? null : geminiUsageToObservedUsage(observedUsage);
+      },
+    };
+  }
+}
+
+function assertPayloadBinding(input: PreparedEvidenceTransportRequest): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || !input.evidence) fail('INVALID_INPUT', 'transport request is required');
+  const evidence = input.evidence;
+  if (evidence.status !== 'claimed' || evidence.claimedAttemptId !== input.attemptId) {
+    fail('INVALID_INPUT', 'prepared evidence is not bound to this transport request');
+  }
+  if (typeof evidence.payloadSha256 !== 'string' || !PREPARED_PAYLOAD_SHA256.test(evidence.payloadSha256)) {
+    fail('INVALID_INPUT', 'prepared evidence payload digest is invalid');
+  }
+  if (!(input.payloadBytes instanceof Uint8Array)) fail('INVALID_INPUT', 'payload bytes are invalid');
+  const actual = createHash('sha256').update(input.payloadBytes).digest();
+  const expected = Buffer.from(evidence.payloadSha256, 'hex');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    fail('INVALID_INPUT', 'payload bytes do not match prepared evidence');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(input.payloadBytes));
+  } catch {
+    fail('INVALID_INPUT', 'payload bytes are not the gemini JSON body');
+  }
+  if (!isRecord(parsed)) fail('INVALID_INPUT', 'payload bytes are not the gemini JSON body');
+  return parsed;
 }

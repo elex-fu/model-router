@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
+import { CLAUDE_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
 import { CODEX_ENDPOINT } from '../saas/gateway/codex/catalog-identity.js';
 import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from '../saas/gateway/contracts.js';
@@ -9,6 +10,7 @@ import {
   DispatchUsageSettlementCoordinator,
   type NormalSuccessSettlementPort,
 } from '../saas/gateway/dispatch-usage-settlement.js';
+import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
@@ -625,6 +627,26 @@ export interface ManagedSaasGatewayProductionOptions {
    * through it instead of the generic provider HTTP transport.
    */
   readonly codexEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Dispatch seam for the Claude Code subscription transport
+   * (ClaudePreparedEvidenceTransport). When set, prepared evidence whose
+   * signed endpoint scope is the Claude catalog endpoint (`claude-messages`,
+   * provider protocol `anthropic`) is dispatched through it instead of the
+   * generic provider HTTP transport — the direct analog of
+   * `codexEvidenceTransport`. Unset keeps claude traffic on the generic
+   * transport path unchanged.
+   */
+  readonly claudeEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Dispatch seam for the Gemini CLI subscription transport
+   * (GeminiPreparedEvidenceTransport). When set, prepared evidence whose
+   * signed endpoint scope is the Gemini catalog endpoint
+   * (`gemini-generate-content`, provider protocol `gemini`) is dispatched
+   * through it instead of the generic provider HTTP transport — the direct
+   * analog of `codexEvidenceTransport`. Unset keeps gemini traffic on the
+   * generic transport path unchanged.
+   */
+  readonly geminiEvidenceTransport?: PreparedEvidenceTransport;
   /**
    * R5b-2: multi-protocol adaptive routing for the OpenCode Go subscription
    * pool. For prepared requests whose authority candidate is the `opencode-go`
@@ -1329,8 +1351,17 @@ export function createManagedSaasGatewayProductionComposition(
   // every other provider keeps the generic transport path unchanged.
   // R5b-2: an OpenCode Go transport, when mounted, takes over the signed
   // `opencode-go-zen` endpoint scope for all three native provider protocols.
+  // Batch-3 dispatch seams: claude (`claude-messages` + `anthropic`) and
+  // gemini (`gemini-generate-content` + `gemini`) transports, when mounted,
+  // take over their single native provider protocol the same way.
   if (options.codexEvidenceTransport !== undefined) {
     requireDependency(options.codexEvidenceTransport, 'send');
+  }
+  if (options.claudeEvidenceTransport !== undefined) {
+    requireDependency(options.claudeEvidenceTransport, 'send');
+  }
+  if (options.geminiEvidenceTransport !== undefined) {
+    requireDependency(options.geminiEvidenceTransport, 'send');
   }
   if (options.opencodeGoEvidenceTransport !== undefined) {
     requireDependency(options.opencodeGoEvidenceTransport, 'send');
@@ -1341,6 +1372,20 @@ export function createManagedSaasGatewayProductionComposition(
       endpoint: CODEX_ENDPOINT,
       providerProtocol: 'responses',
       transport: options.codexEvidenceTransport,
+    });
+  }
+  if (options.claudeEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: CLAUDE_ENDPOINT,
+      providerProtocol: 'anthropic',
+      transport: options.claudeEvidenceTransport,
+    });
+  }
+  if (options.geminiEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: GEMINI_ENDPOINT,
+      providerProtocol: 'gemini',
+      transport: options.geminiEvidenceTransport,
     });
   }
   if (options.opencodeGoEvidenceTransport !== undefined) {
