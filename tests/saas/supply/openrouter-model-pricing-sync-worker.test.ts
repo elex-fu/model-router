@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { SaasCatalogError } from '../../../src/saas/catalog/errors.js';
 import { OPENROUTER_ENDPOINT, OPENROUTER_MODELS_URL } from '../../../src/saas/gateway/openrouter/catalog-identity.js';
 import type { AppendSupplierCostVersionInput } from '../../../src/saas/pricing/types.js';
+import { createOpenRouterModelPricingSyncStore } from '../../../src/saas/supply/openrouter-model-pricing-sync-store.js';
 import {
   clampOpenRouterPricingSyncIntervalMs,
   fetchOpenRouterModelPricing,
@@ -22,6 +24,7 @@ import {
   parseUsdPerTokenMinorUnits,
   startOpenRouterModelPricingSyncWorker,
 } from '../../../src/saas/supply/openrouter-model-pricing-sync-worker.js';
+import { FakeCatalogDatabase } from '../catalog/fake-database.js';
 
 /*
  * All fixtures are synthetic: the OpenRouter catalog is public so no key
@@ -686,12 +689,16 @@ test('close aborts an in-flight round', async () => {
   assert.deepEqual(await worker.runOnce(), { state: 'aborted' });
 });
 
-test('a failing alias write defers that model without failing the round', async () => {
+test('a duplicate alias write is tolerated per model without failing the round', async () => {
   const store = new MemorySyncStore();
   const base = store.registerPublicAlias.bind(store);
+  // The catalog service now surfaces a duplicate alias registration as the
+  // semantic PUBLIC_MODEL_ALIAS_EXISTS conflict (constraint-keyed on
+  // saas_public_models_alias_key); the worker's per-model tolerance must
+  // accept that duplicate signal and defer the model (fail-closed).
   const flaky: OpenRouterModelPricingSyncStore = Object.assign(Object.create(Object.getPrototypeOf(store)), store, {
     registerPublicAlias: (model: string) =>
-      model === 'openai/gpt-4o' ? Promise.reject(new Error('duplicate alias surfaces as storage error')) : base(model),
+      model === 'openai/gpt-4o' ? Promise.reject(new SaasCatalogError('PUBLIC_MODEL_ALIAS_EXISTS')) : base(model),
   });
   const worker = new OpenRouterModelPricingSyncWorker(flaky, {
     fetch: () => Promise.resolve(jsonResponse(catalogBody(TWO_MODELS))),
@@ -708,4 +715,36 @@ test('a failing alias write defers that model without failing the round', async 
     store.appended.map((input) => input.resolvedModel),
     ['anthropic/claude-sonnet-4'],
   );
+});
+
+test('a genuinely failed alias write still defers that model without failing the round', async () => {
+  const store = new MemorySyncStore();
+  const base = store.registerPublicAlias.bind(store);
+  const flaky: OpenRouterModelPricingSyncStore = Object.assign(Object.create(Object.getPrototypeOf(store)), store, {
+    registerPublicAlias: (model: string) =>
+      model === 'openai/gpt-4o' ? Promise.reject(new Error('alias write failed')) : base(model),
+  });
+  const worker = new OpenRouterModelPricingSyncWorker(flaky, {
+    fetch: () => Promise.resolve(jsonResponse(catalogBody(TWO_MODELS))),
+  });
+  const round = await worker.runOnce();
+  assert.equal(round.state, 'synced');
+  if (round.state !== 'synced') return;
+  assert.equal(round.aliasDeferredCount, 1);
+  assert.equal(round.appendedCount, 1);
+  assert.equal(round.untargetedCount, 1);
+});
+
+test('the default store absorbs a duplicate alias as PUBLIC_MODEL_ALIAS_EXISTS', async () => {
+  const database = new FakeCatalogDatabase();
+  const store = createOpenRouterModelPricingSyncStore(database);
+  await store.ensureProduct();
+  const first = await store.registerPublicAlias('openai/gpt-4o');
+  assert.ok(first);
+  // Replaying the same model hits the alias unique key; the service surfaces
+  // PUBLIC_MODEL_ALIAS_EXISTS and the store's tolerance absorbs it.
+  assert.equal(await store.registerPublicAlias('openai/gpt-4o'), null);
+  // The duplicate product registration is likewise absorbed as
+  // PROVIDER_PRODUCT_EXISTS rather than failing the round.
+  await store.ensureProduct();
 });

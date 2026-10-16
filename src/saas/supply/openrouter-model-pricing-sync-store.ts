@@ -121,12 +121,11 @@ export function createOpenRouterModelPricingSyncStore(
         const record = await catalog.registerPublicModelAlias(input);
         return { publicModelId: record.publicModelId, publicModelVersion: record.version };
       } catch (error) {
-        // The service currently surfaces a duplicate alias as
-        // CATALOG_STORAGE_ERROR (its query wrapper remaps the unique
-        // violation before the PUBLIC_MODEL_ALIAS_EXISTS mapping), so this
-        // tolerance catches only the spelled code; the worker additionally
-        // tolerates the alias write per model, which keeps pre-existing
-        // aliases from failing the round.
+        // A pre-existing alias (operator-seeded, or a prior partial round)
+        // conflicts on the alias unique key and the catalog service surfaces
+        // that duplicate as PUBLIC_MODEL_ALIAS_EXISTS (the conflict mapping is
+        // constraint-keyed and survives the shared query wrapper), so this
+        // tolerance catches the spelled code.
         if (tolerated(error, 'PUBLIC_MODEL_ALIAS_EXISTS')) return null;
         throw error;
       }

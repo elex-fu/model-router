@@ -216,6 +216,62 @@ test('persists public model aliases and appends alias target versions', async ()
   assert.doesNotMatch(appendStatements[aliasHistoryIndex] ?? '', /\bfor update\b/i);
 });
 
+test('duplicate registrations surface the semantic conflict code of their unique constraint', async () => {
+  const { service } = await setup();
+
+  // Duplicate product: the provider-product primary key conflict must surface
+  // as PROVIDER_PRODUCT_EXISTS, not the generic storage error the shared query
+  // wrapper would otherwise produce first.
+  await assert.rejects(
+    service.registerProviderProduct({
+      providerId: 'provider-a',
+      productId: 'product-a',
+      displayName: 'Provider A Product',
+    }),
+    (error: unknown) => error instanceof SaasCatalogError && error.code === 'PROVIDER_PRODUCT_EXISTS',
+  );
+
+  // Duplicate alias: the alias unique key (saas_public_models_alias_key)
+  // conflict must surface as PUBLIC_MODEL_ALIAS_EXISTS.
+  await service.registerPublicModelAlias({
+    publicModelId: 'public-model-id-a',
+    alias: 'public-model-a',
+    displayName: 'Public Model A',
+    providerId: 'provider-a',
+    productId: 'product-a',
+    model: 'model-a',
+    endpointScope: ['chat-completions'],
+  });
+  await assert.rejects(
+    service.registerPublicModelAlias({
+      alias: 'public-model-a',
+      displayName: 'Public Model A',
+      providerId: 'provider-a',
+      productId: 'product-a',
+      model: 'model-a',
+      endpointScope: ['chat-completions'],
+    }),
+    (error: unknown) => error instanceof SaasCatalogError && error.code === 'PUBLIC_MODEL_ALIAS_EXISTS',
+  );
+
+  // Constraint keying: a unique violation of a DIFFERENT unique index on the
+  // same insert (the public-model primary key, via a reused publicModelId with
+  // a fresh alias) must keep the generic storage code, never be mislabeled as
+  // an alias conflict.
+  await assert.rejects(
+    service.registerPublicModelAlias({
+      publicModelId: 'public-model-id-a',
+      alias: 'public-model-b',
+      displayName: 'Public Model B',
+      providerId: 'provider-a',
+      productId: 'product-a',
+      model: 'model-a',
+      endpointScope: ['chat-completions'],
+    }),
+    (error: unknown) => error instanceof SaasCatalogError && error.code === 'CATALOG_STORAGE_ERROR',
+  );
+});
+
 test('requires exact credential, mode, region, purpose, model, and endpoint scopes', async () => {
   const { service } = await setup();
   await service.registerProviderCapability(capability());

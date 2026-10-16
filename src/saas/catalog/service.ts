@@ -270,9 +270,55 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
 }
 
+/**
+ * True when `error` is (or wraps, via the storage-wrapper `cause` chain) a
+ * PostgreSQL unique violation of exactly `constraint`. Constraint-keyed so a
+ * violation of a different unique index on the same statement — e.g. the
+ * public-model primary key instead of the alias unique key — is not mislabeled
+ * as the semantic conflict.
+ */
+function isUniqueViolationOnConstraint(error: unknown, constraint: string): boolean {
+  if (error instanceof SaasCatalogError) return isUniqueViolationOnConstraint(error.cause, constraint);
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === '23505' &&
+    'constraint' in error &&
+    error.constraint === constraint
+  );
+}
+
 function storageError(error: unknown, conflictCode: SaasCatalogErrorCode): SaasCatalogError {
   if (error instanceof SaasCatalogError) return error;
-  return new SaasCatalogError(isUniqueViolation(error) ? conflictCode : 'CATALOG_STORAGE_ERROR');
+  const mapped = new SaasCatalogError(isUniqueViolation(error) ? conflictCode : 'CATALOG_STORAGE_ERROR');
+  // Preserve the raw driver error: the shared query/transaction wrappers wrap
+  // driver errors before method-level conflict mappings run, so the violated
+  // unique constraint is only visible through this cause chain.
+  mapped.cause = error;
+  return mapped;
+}
+
+// Unique-constraint names from migration 008 that the conflict mappings below
+// key on (saas_provider_products, saas_public_models, saas_provider_capabilities
+// and saas_provider_rights each have exactly the listed semantic unique index
+// plus their primary key; a primary-key hit stays a generic storage error).
+const PROVIDER_PRODUCT_UNIQUE_CONSTRAINT = 'saas_provider_products_pkey';
+const PUBLIC_MODEL_ALIAS_UNIQUE_CONSTRAINT = 'saas_public_models_alias_key';
+const PROVIDER_CAPABILITY_UNIQUE_CONSTRAINT = 'saas_provider_capabilities_pkey';
+const PROVIDER_RIGHTS_UNIQUE_CONSTRAINT = 'saas_provider_rights_pkey';
+
+/**
+ * Maps a caught error to `conflictCode` only when the underlying unique
+ * violation hit `constraint`; every other error keeps its existing spelling
+ * (already-mapped catalog errors pass through, raw errors go through the
+ * generic storage wrapper).
+ */
+function conflictError(error: unknown, constraint: string, conflictCode: SaasCatalogErrorCode): SaasCatalogError {
+  if (error instanceof SaasCatalogError) {
+    return isUniqueViolationOnConstraint(error.cause, constraint) ? new SaasCatalogError(conflictCode) : error;
+  }
+  return storageError(error, conflictCode);
 }
 
 function mapProviderProduct(row: ProviderProductRow): ProviderProductRecord {
@@ -757,8 +803,7 @@ export class SaasCatalogService {
       if (!row) fail('CATALOG_STORAGE_ERROR');
       return mapProviderProduct(row);
     }).catch((error) => {
-      if (error instanceof SaasCatalogError) throw error;
-      throw storageError(error, 'PROVIDER_PRODUCT_EXISTS');
+      throw conflictError(error, PROVIDER_PRODUCT_UNIQUE_CONSTRAINT, 'PROVIDER_PRODUCT_EXISTS');
     });
   }
 
@@ -803,8 +848,7 @@ export class SaasCatalogService {
         createdAt,
       };
     }).catch((error) => {
-      if (error instanceof SaasCatalogError) throw error;
-      throw storageError(error, 'PUBLIC_MODEL_ALIAS_EXISTS');
+      throw conflictError(error, PUBLIC_MODEL_ALIAS_UNIQUE_CONSTRAINT, 'PUBLIC_MODEL_ALIAS_EXISTS');
     });
   }
 
@@ -921,8 +965,7 @@ export class SaasCatalogService {
       if (!row) fail('CATALOG_STORAGE_ERROR');
       return mapCapability(row);
     }).catch((error) => {
-      if (error instanceof SaasCatalogError) throw error;
-      throw storageError(error, 'CAPABILITY_VERSION_CONFLICT');
+      throw conflictError(error, PROVIDER_CAPABILITY_UNIQUE_CONSTRAINT, 'CAPABILITY_VERSION_CONFLICT');
     });
   }
 
@@ -1025,8 +1068,7 @@ export class SaasCatalogService {
       }
       return mapRights(row);
     }).catch((error) => {
-      if (error instanceof SaasCatalogError) throw error;
-      throw storageError(error, 'RIGHTS_VERSION_CONFLICT');
+      throw conflictError(error, PROVIDER_RIGHTS_UNIQUE_CONSTRAINT, 'RIGHTS_VERSION_CONFLICT');
     });
   }
 

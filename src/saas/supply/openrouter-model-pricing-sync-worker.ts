@@ -701,16 +701,13 @@ export class OpenRouterModelPricingSyncWorker {
       let deferredThisRound = 0;
       for (const model of uncovered) {
         // A pre-existing alias (operator-seeded, or a prior partial round)
-        // makes the insert conflict — and the catalog service currently
-        // surfaces that duplicate as CATALOG_STORAGE_ERROR (the
-        // PUBLIC_MODEL_ALIAS_EXISTS mapping sits above a query wrapper that
-        // already remapped the unique violation), so the store's own
-        // duplicate tolerance cannot catch every spelling. Tolerate the
-        // alias write per model instead of failing the round: the model
-        // whose alias pre-existed still becomes a pricing target once
-        // capability + rights cover it (the re-list below proves it), and a
-        // genuinely failed alias leaves the model untargeted — unpriced and
-        // retried next round, never guessed (fail-closed).
+        // makes the insert conflict; the catalog service surfaces that
+        // duplicate as PUBLIC_MODEL_ALIAS_EXISTS and the store's tolerance
+        // absorbs it. This per-model catch stays as the fail-closed backstop
+        // for a genuinely failed alias write (anything the store does not
+        // classify): the model whose alias failed stays untargeted — unpriced
+        // and retried next round, never guessed. The re-list below proves
+        // coverage either way.
         try {
           await this.store.registerPublicAlias(model);
         } catch {

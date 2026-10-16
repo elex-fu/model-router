@@ -248,17 +248,14 @@ test('registerOpenRouterPublicModelAliases persists one alias row per model', as
       .map((model) => ({ model, version: 1, status: 'active' }))
       .sort((left, right) => left.model.localeCompare(right.model)),
   );
-  // Alias identity is unique: replaying the same registration conflicts.
-  // The service's query wrapper remaps the unique violation before the
-  // PUBLIC_MODEL_ALIAS_EXISTS mapping can see it, so the observed conflict
-  // code is the storage spelling (the sync worker tolerates the alias write
-  // per model for exactly this reason).
+  // Alias identity is unique: replaying the same registration conflicts on
+  // the alias unique key (saas_public_models_alias_key) and surfaces the
+  // semantic PUBLIC_MODEL_ALIAS_EXISTS code — the constraint-keyed conflict
+  // mapping survives the shared query wrapper (which preserves the driver
+  // error as the wrapped error's cause).
   await assert.rejects(registerOpenRouterPublicModelAliases(service), (error: unknown) => {
     assert.ok(error instanceof SaasCatalogError);
-    assert.ok(
-      error.code === 'PUBLIC_MODEL_ALIAS_EXISTS' || error.code === 'CATALOG_STORAGE_ERROR',
-      `unexpected conflict code ${error.code}`,
-    );
+    assert.equal(error.code, 'PUBLIC_MODEL_ALIAS_EXISTS');
     return true;
   });
 });

@@ -18,8 +18,13 @@ function result<Row>(rows: Row[] = []): SqlResult<Row> {
   return { rows: copy(rows), rowCount: rows.length };
 }
 
-function uniqueError(): Error & { code: string } {
-  return Object.assign(new Error('duplicate key'), { code: '23505' });
+function uniqueError(constraint: string): Error & { code: string; constraint: string } {
+  // Mirrors the PostgreSQL unique-violation shape: code 23505 plus the name of
+  // the violated unique constraint (migration 008 spellings).
+  return Object.assign(new Error('duplicate key value violates unique constraint'), {
+    code: '23505',
+    constraint,
+  });
 }
 
 function productKey(providerId: unknown, productId: unknown): string {
@@ -129,7 +134,7 @@ export class FakeCatalogDatabase implements SaasDatabase {
 
     if (statement.startsWith('insert into saas_provider_products')) {
       if (this.state.products.some((row) => productKey(row.provider_id, row.product_id) === productKey(a, b))) {
-        throw uniqueError();
+        throw uniqueError('saas_provider_products_pkey');
       }
       const row = {
         provider_id: a,
@@ -143,7 +148,10 @@ export class FakeCatalogDatabase implements SaasDatabase {
     }
 
     if (statement.startsWith('insert into saas_public_models')) {
-      if (this.state.publicModels.some((row) => row.id === a || row.alias === b)) throw uniqueError();
+      if (this.state.publicModels.some((row) => row.id === a)) throw uniqueError('saas_public_models_pkey');
+      if (this.state.publicModels.some((row) => row.alias === b)) {
+        throw uniqueError('saas_public_models_alias_key');
+      }
       this.state.publicModels.push({ id: a, alias: b, display_name: c, status: d, created_at: e });
       return result<Row>();
     }
@@ -151,7 +159,7 @@ export class FakeCatalogDatabase implements SaasDatabase {
     if (statement.startsWith('insert into saas_public_model_versions')) {
       const version = statement.includes('values ($1, 1,') ? 1 : Number(b);
       if (this.state.publicModelVersions.some((row) => row.public_model_id === a && row.version === version)) {
-        throw uniqueError();
+        throw uniqueError('saas_public_model_versions_pkey');
       }
       const row = statement.includes('values ($1, 1,')
         ? {
@@ -203,7 +211,7 @@ export class FakeCatalogDatabase implements SaasDatabase {
           (row) => [row.provider_id, row.product_id, row.model, row.endpoint, row.version].join('\u0000') === key,
         )
       ) {
-        throw uniqueError();
+        throw uniqueError('saas_provider_capabilities_pkey');
       }
       const row = {
         provider_id: a,
@@ -320,7 +328,7 @@ export class FakeCatalogDatabase implements SaasDatabase {
       if (
         this.state.rights.some((existing) => existing.rights_id === row.rights_id && existing.version === row.version)
       ) {
-        throw uniqueError();
+        throw uniqueError('saas_provider_rights_pkey');
       }
       this.state.rights.push(row);
       return result<Row>([row as Row]);
