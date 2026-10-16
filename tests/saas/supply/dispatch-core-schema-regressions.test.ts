@@ -13,6 +13,11 @@ const repositorySource = readFileSync(
 const coreMatch = repositorySource.match(/const DISPATCH_CORE_SQL = `([\s\S]*?)`;/);
 assert.ok(coreMatch, 'the production dispatch core SQL must be present');
 const coreSql = coreMatch[1]!.replace(/\s+/g, ' ').trim();
+const pinMatch = repositorySource.match(/const DISPATCH_CORE_JOIN_ORDER_PINNED_SQL = "([^"]+)"/);
+const resetMatch = repositorySource.match(/const DISPATCH_CORE_JOIN_ORDER_RESET_SQL = '([^']+)'/);
+assert.ok(pinMatch && resetMatch, 'the dispatch core planner pin and reset statements must be present');
+const pinSql = (pinMatch?.[1] ?? '').replace(/\s+/g, ' ').trim();
+const resetSql = (resetMatch?.[1] ?? '').replace(/\s+/g, ' ').trim();
 
 // This is a source/SQL-contract regression, not a substitute for executing the
 // restricted-role query on PG15/18. Derive columns from registered migration SQL,
@@ -111,7 +116,10 @@ for (const mode of ['byok', 'platform'] as const) {
           }] as Row[], rowCount: 1 };
         }
         if (normalized.includes('pg_advisory_xact_lock_shared')) return { rows: [], rowCount: 1 };
-        assert.equal(normalized, coreSql, 'only the core read may follow the shared fences');
+        assert.ok(
+          normalized === coreSql || normalized === pinSql || normalized === resetSql,
+          'only the planner pin, the core read and its reset may follow the shared fences',
+        );
         return { rows: [], rowCount: 0 };
       },
       async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> { return work(database); },
@@ -121,5 +129,27 @@ for (const mode of ['byok', 'platform'] as const) {
     assert.equal(await new PostgresProviderSupplyRepository(database).readDispatchProof('synthetic-evidence'), null);
     assert.equal(statements.filter((sql) => sql === coreSql).length, 1);
     assert.ok(statements.some((sql) => sql.includes('pg_advisory_xact_lock_shared')));
+    const pinIndex = statements.indexOf(pinSql);
+    const coreIndex = statements.indexOf(coreSql);
+    const resetIndex = statements.indexOf(resetSql);
+    assert.ok(
+      pinIndex >= 0 && coreIndex > pinIndex && resetIndex > coreIndex,
+      'the join-order pin must wrap the dispatch core read (pin before, reset after)',
+    );
   });
 }
+
+test('dispatch core pins its join order with a transaction-scoped planner override only', () => {
+  // R9 bench §4 P2: default planner settings spend seconds planning the
+  // eight-relation dispatch core; join_collapse_limit=1 plans the written
+  // left-deep order in milliseconds. The override must be SET LOCAL
+  // (transaction-scoped, privilege-free, invisible to pooled re-borrowers).
+  assert.equal(pinSql, "SET LOCAL join_collapse_limit = '1'");
+  assert.equal(resetSql, 'SET LOCAL join_collapse_limit = DEFAULT');
+  const pinUses = (repositorySource.match(/\bDISPATCH_CORE_JOIN_ORDER_PINNED_SQL\b/g) ?? []).length;
+  const resetUses = (repositorySource.match(/\bDISPATCH_CORE_JOIN_ORDER_RESET_SQL\b/g) ?? []).length;
+  assert.ok(pinUses >= 2 && resetUses >= 2, 'pin and reset constants must be declared and used');
+  for (const bare of repositorySource.matchAll(/["'`][ \t]*SET[ \t]+(?!LOCAL\b)[a-z_]+[ \t]*=/g)) {
+    assert.fail(`no session-wide settings may be issued by the repository: ${bare[0].trim()}`);
+  }
+});

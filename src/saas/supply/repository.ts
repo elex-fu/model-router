@@ -893,6 +893,27 @@ function wrapperRevisionMatchesRequest(
   );
 }
 
+/*
+ * Planner pinning for the dispatch core read (R9 bench §4 P2).
+ *
+ * DISPATCH_CORE_SQL is a fully left-deep chain of explicit JOINs, but the
+ * default join_collapse_limit (8) still lets the planner reorder all eight
+ * relations, and the search across that join-order space costs seconds per
+ * plan (measured 2,470-2,950 ms planning vs sub-millisecond execution; the
+ * statement is unnamed so the plan is never cached and every admission pays
+ * full planning). join_collapse_limit=1 plans the written join order instead:
+ * measured 3.1-5.8 ms. from_collapse_limit is not needed here because the
+ * statement flattens no FROM subqueries.
+ *
+ * SET LOCAL scopes the override to the enclosing transaction: it reverts at
+ * COMMIT/ROLLBACK, requires no privileges (USERSET GUC, verified against the
+ * restricted gateway role) and cannot leak to the pooled connection's next
+ * borrower. The reset restores any session/role-level default (SET LOCAL
+ * ... = DEFAULT reverts to the value that would apply without the override).
+ */
+const DISPATCH_CORE_JOIN_ORDER_PINNED_SQL = "SET LOCAL join_collapse_limit = '1'";
+const DISPATCH_CORE_JOIN_ORDER_RESET_SQL = 'SET LOCAL join_collapse_limit = DEFAULT';
+
 const DISPATCH_IDENTITY_SQL = `
   SELECT tenant_id, project_id, principal_kind, principal_id, proxy_key_id,
          supply_mode, account_owner_kind, account_id, credential_id,
@@ -1855,7 +1876,14 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       if (!identity) return null;
       await lockAdvisoryLayers(tx, dispatchReadLockLayers(identity), 'shared');
 
+      // Pin the core read's join order for this statement only (see the
+      // constants above): plan in milliseconds instead of seconds, then
+      // restore the session default so the authority read keeps planning
+      // exactly as it does today. If the core read throws, the transaction
+      // rolls back and SET LOCAL reverts on its own.
+      await tx.query(DISPATCH_CORE_JOIN_ORDER_PINNED_SQL);
       const coreResult = await tx.query<DispatchRow>(DISPATCH_CORE_SQL, [evidenceId]);
+      await tx.query(DISPATCH_CORE_JOIN_ORDER_RESET_SQL);
       if (coreResult.rows.length !== 1) return null;
       const core = coreResult.rows[0];
       if (!core) return null;
