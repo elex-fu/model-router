@@ -8,6 +8,7 @@ import {
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
 } from '../../../src/saas/gateway/http-handler.js';
+import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceDispatchInput,
   PreparedEvidenceDispatchResult,
@@ -17,7 +18,6 @@ import type {
   RequestPreparationResult,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
-import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 
 class FakeRequest extends EventEmitter {
   readonly socket = { remoteAddress: '127.0.0.1' };
@@ -574,8 +574,16 @@ test('maps client interruption to the stream AbortSignal without retrying dispat
 test('cancellation during awaited preparation compensates once before any upstream dispatch', async () => {
   const calls: Parameters<GatewayPreDispatchCompensationPort['compensate']>[0][] = [];
   const setup = harness({
-    afterPreparation: (request, response) => { request.aborted = true; response.destroy(); },
-    preDispatchCompensation: { async compensate(input) { calls.push(input); return {} as never; } },
+    afterPreparation: (request, response) => {
+      request.aborted = true;
+      response.destroy();
+    },
+    preDispatchCompensation: {
+      async compensate(input) {
+        calls.push(input);
+        return {} as never;
+      },
+    },
   });
   await setup.handler(asRequest(setup.request), asResponse(setup.response));
   assert.equal(setup.dispatchInputs.length, 0);
@@ -595,7 +603,12 @@ test('dispatch failure requests authoritative cleanup and records response deliv
         if (started) await input.client?.start(200, {});
         throw new Error('synthetic private provider error');
       },
-      preDispatchCompensation: { async compensate(input) { calls.push(input); return {} as never; } },
+      preDispatchCompensation: {
+        async compensate(input) {
+          calls.push(input);
+          return {} as never;
+        },
+      },
     });
     await setup.handler(asRequest(setup.request), asResponse(setup.response));
     assert.equal(setup.dispatchInputs.length, 1);
@@ -609,8 +622,15 @@ test('dispatch failure requests authoritative cleanup and records response deliv
 test('HTTP cleanup failure cannot retry dispatch or expose storage details', async () => {
   let cleanups = 0;
   const setup = harness({
-    dispatch: async () => { throw new Error('provider failure'); },
-    preDispatchCompensation: { async compensate() { cleanups++; throw new Error('private storage error'); } },
+    dispatch: async () => {
+      throw new Error('provider failure');
+    },
+    preDispatchCompensation: {
+      async compensate() {
+        cleanups++;
+        throw new Error('private storage error');
+      },
+    },
   });
   await setup.handler(asRequest(setup.request), asResponse(setup.response));
   assert.equal(cleanups, 1);
@@ -698,5 +718,88 @@ test('model discovery response contains no bearer, tenant, provider, account, or
   const body = String(setup.response.endBody);
   for (const secret of ['test-secret', 'tenant-1', 'provider-1', 'account-1', 'credential-1']) {
     assert.equal(body.includes(secret), false);
+  }
+});
+
+/* G1 (task #41): trusted-boundary Claude Code client evidence collection. */
+
+const BILLING_ATTRIBUTION_BLOCK =
+  'x-anthropic-billing-header;cc_entrypoint=claudeCode;cc_entrypoint_version=1.0.34;timestamp=1760000000000';
+
+test('collects bounded Claude Code client evidence into the preparation input', async () => {
+  const setup = harness({ dispatch: (input, response) => completeClient(input, response) });
+  setup.request.url = '/v1/messages';
+  setup.request.headers.authorization = 'Bearer test-secret';
+  Object.assign(setup.request.headers, {
+    'user-agent': 'claude-cli/1.0.34 (external, cli)',
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'oauth-2025-04-20',
+    'x-app': 'cli',
+    'x-stainless-lang': 'js',
+    'x-stainless-runtime': 'node',
+    'x-anthropic-billing-header': BILLING_ATTRIBUTION_BLOCK,
+    'x-irrelevant-header': 'never-collected',
+  });
+
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs.length, 1);
+  const evidence = setup.preparationInputs[0]?.claudeCodeClient;
+  assert.ok(evidence, 'the boundary must attach client evidence');
+  assert.equal(evidence.userAgent, 'claude-cli/1.0.34 (external, cli)');
+  assert.equal(evidence.path, '/v1/messages');
+  assert.deepEqual(evidence.headers, {
+    'user-agent': 'claude-cli/1.0.34 (external, cli)',
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'oauth-2025-04-20',
+    'x-app': 'cli',
+    'x-stainless-lang': 'js',
+    'x-stainless-runtime': 'node',
+    'x-anthropic-billing-header': BILLING_ATTRIBUTION_BLOCK,
+  });
+  // The evidence body is the exact parsed client object the compiler receives.
+  assert.strictEqual(evidence.body, setup.preparationInputs[0]?.clientRequest);
+});
+
+test('drops oversized, ambiguous, and absent evidence values without failing the request', async () => {
+  const setup = harness({ dispatch: (input, response) => completeClient(input, response) });
+  setup.request.url = '/v1/messages';
+  Object.assign(setup.request.headers, {
+    'anthropic-beta': 'x'.repeat(2049),
+    'anthropic-version': ['2023-06-01', '2024-01-01'],
+    'x-stainless-empty': '',
+  });
+
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 200);
+  const evidence = setup.preparationInputs[0]?.claudeCodeClient;
+  assert.ok(evidence);
+  assert.equal(evidence.userAgent, null);
+  assert.equal(evidence.path, '/v1/messages');
+  assert.deepEqual(evidence.headers, {});
+  assert.strictEqual(evidence.body, setup.preparationInputs[0]?.clientRequest);
+});
+
+test('client evidence never leaks into error responses', async () => {
+  const setup = harness({
+    preparationResult: {
+      outcome: 'rejected',
+      stage: 'authority',
+      code: 'account_denied',
+      reason: 'the request’s billing group admits only Claude Code clients',
+      evidence: null,
+    },
+  });
+  setup.request.url = '/v1/messages';
+  Object.assign(setup.request.headers, {
+    'user-agent': 'claude-cli/1.0.34 (external, cli)',
+    'x-anthropic-billing-header': BILLING_ATTRIBUTION_BLOCK,
+  });
+
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 403);
+  assert.equal(setup.dispatchInputs.length, 0);
+  const body = String(setup.response.endBody);
+  for (const value of [BILLING_ATTRIBUTION_BLOCK, 'claude-cli/1.0.34', 'billing group', 'Claude Code']) {
+    assert.equal(body.includes(value), false);
   }
 });

@@ -20,6 +20,7 @@ import {
   type PreparedRequestUsageEnvelope,
 } from './prepared-request-evidence-service.js';
 import type {
+  ProviderAccountSchedulerClientEvidence,
   ProviderAccountSchedulerPort,
   ProviderAccountSchedulerSelectionTrace,
 } from './provider-account-scheduler.js';
@@ -180,6 +181,15 @@ export interface RequestPreparationInput {
   readonly scheduling?: RequestPreparationSchedulingContext;
   /** Server-resolved client address evidence; only a trusted HTTP boundary may set this. */
   readonly clientAddress?: ClientAddressResolution;
+  /**
+   * G1 (task #41): trusted-boundary Claude Code client evidence (user agent,
+   * request path, Claude-relevant headers, parsed client body) forwarded
+   * verbatim into the account scheduler input for the claude_code_only
+   * enforcement (F2). Only a trusted HTTP boundary may set it, mirroring
+   * clientAddress; absent means no evidence and the enforcement fails closed.
+   * It is request-scoped scheduler input only — never logged or persisted.
+   */
+  readonly claudeCodeClient?: ProviderAccountSchedulerClientEvidence;
 }
 
 export interface RequestPreparationCallerPort {
@@ -1965,6 +1975,9 @@ export class SaasRequestPreparationService {
           protocol: input.protocol,
           route: authority.route,
           scheduling: input.scheduling,
+          // G1 (task #41): trusted-boundary client evidence, forwarded
+          // verbatim; absent stays absent (fail-closed downstream).
+          ...(input.claudeCodeClient !== undefined ? { claudeCodeClient: input.claudeCodeClient } : {}),
         }),
       );
       if (schedulerDecision.decision !== 'allow') return decisionFailure('authority', schedulerDecision, ids);

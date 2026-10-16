@@ -14,6 +14,7 @@ import type {
   PreparedEvidenceDispatchResult,
 } from './prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceAudit } from './prepared-request-evidence-service.js';
+import type { ProviderAccountSchedulerClientEvidence } from './provider-account-scheduler.js';
 import type {
   CanonicalRequestStatusReference,
   RequestPreparationFailureResult,
@@ -29,6 +30,25 @@ const MAX_AUTHORIZATION_LENGTH = 4096;
 const MAX_AUDIT_VALUE_LENGTH = 1024;
 const MAX_PATH_LENGTH = 4096;
 const ENTRY_POINT = 'hosted-gateway-http';
+
+/*
+ * G1 (task #41): Claude Code client-identity evidence collected at the
+ * trusted HTTP boundary for the account scheduler's claude_code_only
+ * enforcement (F2/R5). Bounded by construction: only the Claude-relevant
+ * header names plus the x-stainless-* SDK fingerprint family, lowercased
+ * keys, and per-value caps far above any genuine client shape. The evidence
+ * is request-scoped scheduler input only — never logged, never audited,
+ * and never forwarded to providers.
+ */
+const MAX_CLIENT_EVIDENCE_VALUE_LENGTH = 2048;
+const CLAUDE_CLIENT_EVIDENCE_HEADER_NAMES = new Set([
+  'user-agent',
+  'anthropic-version',
+  'anthropic-beta',
+  'x-app',
+  'x-anthropic-billing-header',
+]);
+const CLAUDE_CLIENT_EVIDENCE_HEADER_PREFIX = 'x-stainless-';
 
 const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   ['/v1/chat/completions', 'openai'],
@@ -415,6 +435,52 @@ function requestAudit(req: IncomingMessage, entryPoint: string): Omit<PreparedRe
     entryPoint,
     sourceIp: safeAuditValue(req.socket?.remoteAddress) ?? null,
     userAgent: safeAuditValue(oneHeader(req, 'user-agent')),
+  };
+}
+
+/**
+ * G1: a header value is kept only when a single, non-empty, in-bounds string.
+ * Oversized or ambiguous (multi-value) headers carry no detection shape a
+ * genuine client produces; dropping them keeps the evidence bounded.
+ */
+function boundedClientEvidenceValue(value: string | undefined): string | undefined {
+  if (value === undefined || value.length === 0 || value.length > MAX_CLIENT_EVIDENCE_VALUE_LENGTH) return undefined;
+  return value;
+}
+
+/** G1: only the Claude-relevant headers, lowercased, values capped. */
+function claudeCodeClientHeaders(req: IncomingMessage): Record<string, string> {
+  const collected: Record<string, string> = {};
+  for (const name of Object.keys(req.headers ?? {})) {
+    const normalized = name.toLowerCase();
+    if (
+      !CLAUDE_CLIENT_EVIDENCE_HEADER_NAMES.has(normalized) &&
+      !normalized.startsWith(CLAUDE_CLIENT_EVIDENCE_HEADER_PREFIX)
+    ) {
+      continue;
+    }
+    const value = boundedClientEvidenceValue(oneHeader(req, normalized));
+    if (value !== undefined) collected[normalized] = value;
+  }
+  return collected;
+}
+
+/**
+ * G1 (task #41): the trusted-boundary Claude Code client evidence forwarded
+ * through request preparation into the scheduler input (F2 consumption).
+ * The body is the exact parsed client object the payload compiler already
+ * receives; the evidence itself never reaches logs, audits, or providers.
+ */
+function claudeCodeClientEvidence(
+  req: IncomingMessage,
+  path: string | undefined,
+  body: Record<string, unknown>,
+): ProviderAccountSchedulerClientEvidence {
+  return {
+    userAgent: boundedClientEvidenceValue(oneHeader(req, 'user-agent')) ?? null,
+    path: path ?? null,
+    headers: claudeCodeClientHeaders(req),
+    body,
   };
 }
 
@@ -809,6 +875,10 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
           req.headers['x-forwarded-for'],
           options.trustedProxyCidrs ?? [],
         ),
+        // G1 (task #41): server-collected, bounded Claude Code client
+        // evidence for the scheduler's claude_code_only enforcement (F2);
+        // the clientAddress precedent — only this boundary may set it.
+        claudeCodeClient: claudeCodeClientEvidence(req, path, body),
       });
     } catch {
       sendHttpError(res, new GatewayHttpError(503, 'PREPARATION_UNAVAILABLE'), requestId);
@@ -869,9 +939,10 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     const dispatchStartedAtMs = Date.now();
     // Route label is best-effort: the handler-level prepared contract does not
     // guarantee evidenceInput, so observability must never break dispatch.
-    const dispatchRoute = isRecord(prepared.evidenceInput) && typeof prepared.evidenceInput.routeConfigId === 'string'
-      ? prepared.evidenceInput.routeConfigId
-      : 'unknown';
+    const dispatchRoute =
+      isRecord(prepared.evidenceInput) && typeof prepared.evidenceInput.routeConfigId === 'string'
+        ? prepared.evidenceInput.routeConfigId
+        : 'unknown';
     try {
       dispatched = await dispatch.dispatch({
         evidenceId: prepared.evidence.evidenceId,

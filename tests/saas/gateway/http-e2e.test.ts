@@ -5,6 +5,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:
 import { test } from 'node:test';
 import { Headers as UndiciHeaders } from 'undici';
 
+import type { SaasDatabase } from '../../../src/saas/db/index.js';
 import type {
   AuthorizedByokUpstreamCandidate,
   ModelResolutionProvenance,
@@ -15,6 +16,7 @@ import {
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
 } from '../../../src/saas/gateway/http-handler.js';
+import { PostgresProviderAccountScheduler } from '../../../src/saas/gateway/postgres-provider-account-scheduler.js';
 import {
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
@@ -25,6 +27,11 @@ import type {
   PreparedRequestEvidenceInput,
   PreparedRequestEvidenceRecord,
 } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
+import type {
+  ProviderAccountSchedulerHealthPort,
+  ProviderAccountSchedulerInput,
+  ProviderAccountSchedulerPort,
+} from '../../../src/saas/gateway/provider-account-scheduler.js';
 import {
   type ProviderHttpCredentialResolver,
   type ProviderHttpDispatchProfileResolver,
@@ -596,7 +603,10 @@ function dispatchAttempt(evidence: PreparedRequestEvidenceRecord): AttemptRecord
 class FakeEvidenceStore {
   readonly audits: PreparedRequestEvidenceAudit[] = [];
 
-  constructor(private readonly state: PreparationState, private readonly metering: FakeMetering) {}
+  constructor(
+    private readonly state: PreparationState,
+    private readonly metering: FakeMetering,
+  ) {}
 
   async preflightForDispatch(
     evidenceId: string,
@@ -633,7 +643,9 @@ class FakeEvidenceStore {
 
 class FakeMetering implements PreparedEvidenceMeteringPort {
   readonly transitions: AttemptTransitionInput[] = [];
-  readonly knownNonSuccessResponses: Parameters<PreparedEvidenceMeteringPort['recordKnownNonSuccessHttpResponse']>[0][] = [];
+  readonly knownNonSuccessResponses: Parameters<
+    PreparedEvidenceMeteringPort['recordKnownNonSuccessHttpResponse']
+  >[0][] = [];
   getAttemptCount = 0;
   current: AttemptRecord | null = null;
 
@@ -690,7 +702,8 @@ class FakeMetering implements PreparedEvidenceMeteringPort {
       dispatchState: input.dispatchState ?? this.current.dispatchState,
       resultState: input.resultState ?? this.current.resultState,
       responseStarted: this.current.responseStarted || input.responseStarted === true,
-      responseStartedAt: input.responseStarted === true ? (this.current.responseStartedAt ?? NOW) : this.current.responseStartedAt,
+      responseStartedAt:
+        input.responseStarted === true ? (this.current.responseStartedAt ?? NOW) : this.current.responseStartedAt,
       resultHttpStatus: input.resultHttpStatus ?? this.current.resultHttpStatus,
       unknownReason: input.unknownReason ?? this.current.unknownReason,
       stateVersion: this.current.stateVersion + 1,
@@ -706,7 +719,9 @@ class FakeMetering implements PreparedEvidenceMeteringPort {
     assert.equal(input.tenantId, this.current.tenantId);
     assert.equal(input.requestId, this.current.requestId);
     assert.equal(input.attemptId, this.current.id);
-    assert.ok(Number.isSafeInteger(input.resultHttpStatus) && input.resultHttpStatus >= 300 && input.resultHttpStatus <= 599);
+    assert.ok(
+      Number.isSafeInteger(input.resultHttpStatus) && input.resultHttpStatus >= 300 && input.resultHttpStatus <= 599,
+    );
     assert.equal(typeof input.responseStarted, 'boolean');
     assert.ok(this.current.dispatchState === 'dispatching' || this.current.dispatchState === 'sent');
     assert.equal(this.current.resultState, 'pending');
@@ -904,4 +919,281 @@ test('blocks a no-upstream authority result before dispatch or provider transpor
   assert.deepEqual(preparationState.calls, ['caller', 'entitlement', 'authority']);
   assert.deepEqual(preparationState.registered, []);
   assert.equal(JSON.parse(response.bodyText()).error.code, 'REQUEST_BLOCKED');
+});
+
+/* ------------------------------------------------------------------ */
+/* G1 (task #41): Claude Code client evidence, boundary → scheduler.   */
+/* ------------------------------------------------------------------ */
+
+function preparationOptions(): ConstructorParameters<typeof SaasRequestPreparationService>[1] {
+  return {
+    evidenceVerifierKeyId: 'verifier-key-1',
+    now: () => new Date(NOW),
+    idFactory: {
+      requestId: () => 'request-1',
+      attemptId: () => 'attempt-1',
+      evidenceId: () => 'evidence-1',
+    },
+  };
+}
+
+function completingDispatch(): PreparedEvidenceDispatchPort {
+  return {
+    async dispatch(input) {
+      await input.client?.start(200, { 'content-type': 'application/json' });
+      await input.client?.end();
+      return { kind: 'sent' } as PreparedEvidenceDispatchResult;
+    },
+  };
+}
+
+test('composes Claude Code client evidence from the HTTP boundary into the scheduler input', async () => {
+  const selects: ProviderAccountSchedulerInput[] = [];
+  const scheduler: ProviderAccountSchedulerPort = {
+    async select(inputValue) {
+      selects.push(inputValue);
+      return allowRequestPreparation(candidate());
+    },
+  };
+  const preparationState: PreparationState = { calls: [], registered: [], payloads: [] };
+  const preparationServiceInstance = new SaasRequestPreparationService(
+    {
+      ...preparationDependencies(preparationState, allowRequestPreparation(authority())),
+      scheduler,
+    },
+    preparationOptions(),
+  );
+  const handler = createSaasGatewayHandler({
+    authenticator: authenticator([]),
+    preparation: preparationServiceInstance,
+    dispatch: completingDispatch(),
+  });
+  const request = new FakeIncomingMessage();
+  Object.assign(request.headers, {
+    'user-agent': 'claude-cli/1.0.34 (external, cli)',
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'oauth-2025-04-20',
+    'x-app': 'cli',
+    'x-stainless-lang': 'js',
+  });
+  const response = new FakeServerResponse();
+
+  assert.equal(await handler(asRequest(request), asResponse(response), { requestId: 'request-1' }), true);
+  assert.equal(response.writeHeadCalls[0]?.status, 200);
+  assert.equal(selects.length, 1);
+  assert.deepEqual(selects[0]?.claudeCodeClient, {
+    userAgent: 'claude-cli/1.0.34 (external, cli)',
+    path: '/v1/chat/completions',
+    headers: {
+      'user-agent': 'claude-cli/1.0.34 (external, cli)',
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'oauth-2025-04-20',
+      'x-app': 'cli',
+      'x-stainless-lang': 'js',
+    },
+    body: CLIENT_REQUEST,
+  });
+  // The full composed flow still prepares, dispatches, and registers evidence.
+  assert.deepEqual(preparationState.calls, [
+    'caller',
+    'entitlement',
+    'authority',
+    'payload',
+    'admission',
+    'attempt',
+    'signer',
+    'registrar',
+  ]);
+});
+
+const SCHEDULER_HEALTH: ProviderAccountSchedulerHealthPort = {
+  async get() {
+    return { decision: 'allow', value: { status: 'healthy', observedAt: new Date(NOW) } };
+  },
+};
+
+function platformAuthenticatedApiKey(): AuthenticatedApiKey {
+  const key = authenticatedApiKey();
+  return {
+    metadata: { ...key.metadata, supplyMode: 'platform' },
+    authorization: { ...key.authorization, supplyMode: 'platform' },
+  };
+}
+
+function platformCaller(): RequestPreparationCaller {
+  return { ...caller(), supplyMode: 'platform' };
+}
+
+function platformEntitlement(): RequestPreparationEntitlement {
+  return { ...entitlement(), supplyMode: 'platform', allowedProviderIds: [] };
+}
+
+function claudeAuthority(): RequestPreparationAuthority {
+  return {
+    route: {
+      tenantId: 'tenant-1',
+      projectId: 'project-1',
+      publicModel: 'public-model',
+      publicModelId: 'public-model-1',
+      publicModelVersion: 1,
+      routeConfigId: 'route-config-cc',
+      routeConfigVersion: 1,
+      protocol: 'anthropic',
+      providerProtocol: 'anthropic',
+      targetMode: 'platform_pool',
+      upstreamId: 'pool-cc',
+      endpoint: 'server-owned-provider-route-cc',
+    },
+    candidate: {
+      tenantId: 'tenant-1',
+      projectId: 'project-1',
+      proxyKeyId: 'proxy-key-1',
+      supplyProfileId: 'profile-1',
+      supplyMode: 'platform',
+      accountOwnerKind: 'platform',
+      upstreamId: 'pool-cc',
+      accountId: 'account-cc',
+      credentialId: 'credential-cc',
+      credentialVersion: 1,
+      credentialAuthzVersion: 1,
+      accountAuthzVersion: 1,
+      dispatchProfileId: 'dispatch-profile-cc',
+      supplyProfileAuthzVersion: 1,
+      resolvedModel: 'provider-model',
+      protocol: 'anthropic',
+      endpoint: 'server-owned-provider-route-cc',
+      supplierCostVersion: 'cost-cc',
+      poolId: 'pool-cc',
+      poolAuthzVersion: 1,
+      poolMemberAccountAuthzVersion: 1,
+      poolMemberAuthzVersion: 1,
+      poolGrantAuthzVersion: 1,
+      poolGrantProfileAuthzVersion: 1,
+      poolGrantPoolAuthzVersion: 1,
+      providerId: 'anthropic-claude',
+      productId: 'claude-subscription',
+    },
+    poolMemberAuthzVersion: 1,
+    credentialRef: 'credential-cc',
+    configVersion: 1,
+    commercial: {
+      customerMeteringPolicyId: 'customer-policy-1',
+      customerMeteringPolicyVersion: 1,
+      providerMeteringPolicyId: 'provider-policy-1',
+      providerMeteringPolicyVersion: 1,
+      contractAttestationId: 'attestation-1',
+      customerPriceVersion: 'customer-price-cc',
+      supplierCostVersion: 'cost-cc',
+    },
+  };
+}
+
+/** Answers only the F2 billing-group read; every other authority fails closed. */
+function claudeOnlyGroupDatabase(statements: Array<{ sql: string; values: readonly unknown[] }>): SaasDatabase {
+  return {
+    async query(sql: string, values: readonly unknown[]) {
+      statements.push({ sql, values });
+      if (sql.includes('postgres-provider-account-scheduler:billing-group')) {
+        return { rows: [{ id: 'group-cc', claude_code_only: true, fallback_group_id: null }] };
+      }
+      return { rows: [] };
+    },
+    async transaction() {
+      throw new Error('this fixture only serves the billing-group enforcement gate');
+    },
+  } as unknown as SaasDatabase;
+}
+
+function claudeOnlyGateway(
+  userAgent: string,
+  extraHeaders: IncomingHttpHeaders,
+): {
+  readonly handler: ReturnType<typeof createSaasGatewayHandler>;
+  readonly request: FakeIncomingMessage;
+  readonly response: FakeServerResponse;
+  readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
+  readonly preparationState: PreparationState;
+} {
+  const statements: Array<{ sql: string; values: readonly unknown[] }> = [];
+  const scheduler = new PostgresProviderAccountScheduler({
+    database: claudeOnlyGroupDatabase(statements),
+    health: SCHEDULER_HEALTH,
+  });
+  const preparationState: PreparationState = { calls: [], registered: [], payloads: [] };
+  const preparation = new SaasRequestPreparationService(
+    {
+      ...preparationDependencies(preparationState, allowRequestPreparation(claudeAuthority())),
+      caller: {
+        async validate() {
+          preparationState.calls.push('caller');
+          return allowRequestPreparation(platformCaller());
+        },
+      },
+      entitlement: {
+        async resolve() {
+          preparationState.calls.push('entitlement');
+          return allowRequestPreparation(platformEntitlement());
+        },
+      },
+      scheduler,
+    },
+    preparationOptions(),
+  );
+  const dispatch: PreparedEvidenceDispatchPort = {
+    async dispatch() {
+      throw new Error('dispatch must not run when the group gate rejects');
+    },
+  };
+  const platformAuthenticator: ProxyKeyAuthenticator = {
+    async authenticate() {
+      return platformAuthenticatedApiKey();
+    },
+  };
+  const handler = createSaasGatewayHandler({
+    authenticator: platformAuthenticator,
+    preparation: preparation as RequestPreparationPort,
+    dispatch,
+  });
+  const request = new FakeIncomingMessage({
+    model: 'public-model',
+    max_tokens: 1024,
+    system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }],
+    metadata: { user_id: 'user_e2b8a1c4d5f6a7b8c9d0e1f2a3b4c5d6' },
+    messages: [{ role: 'user', content: 'hello from client' }],
+  });
+  request.url = '/v1/messages';
+  Object.assign(request.headers, { 'user-agent': userAgent, ...extraHeaders });
+  return { handler, request, response: new FakeServerResponse(), statements, preparationState };
+}
+
+test('a claude_code_only group rejects third-party clients through the full HTTP boundary', async () => {
+  const setup = claudeOnlyGateway('curl/8.4.0', { 'anthropic-version': '2023-06-01' });
+
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 403);
+  assert.equal(JSON.parse(setup.response.bodyText()).error.code, 'REQUEST_REJECTED');
+  // The rejection happened at the billing-group gate: exactly one authority
+  // read (the group resolution) and no candidate eligibility reads at all.
+  assert.equal(setup.statements.length, 1);
+  assert.match(setup.statements[0]?.sql ?? '', /postgres-provider-account-scheduler:billing-group/);
+  assert.deepEqual(setup.preparationState.calls, ['caller', 'entitlement', 'authority']);
+  // The client evidence itself never surfaces in the response.
+  assert.equal(setup.response.bodyText().includes('curl/8.4.0'), false);
+});
+
+test('a claude_code_only group admits genuine Claude Code clients past the group gate', async () => {
+  const setup = claudeOnlyGateway('claude-cli/1.0.34 (external, cli)', {
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'oauth-2025-04-20',
+    'x-app': 'cli',
+  });
+
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  // The genuine client passes the group gate; this fixture's database has no
+  // eligibility authority, so the selection blocks (503) instead of rejecting
+  // at the gate (403) — proving the evidence carried all the way through.
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 503);
+  assert.equal(JSON.parse(setup.response.bodyText()).error.code, 'REQUEST_BLOCKED');
+  assert.equal(setup.statements.length, 1);
+  assert.match(setup.statements[0]?.sql ?? '', /postgres-provider-account-scheduler:billing-group/);
 });

@@ -13,6 +13,8 @@ import type {
 import {
   ProviderAccountScheduler,
   type ProviderAccountSchedulerAffinityPort,
+  type ProviderAccountSchedulerInput,
+  type ProviderAccountSchedulerPort,
 } from '../../../src/saas/gateway/provider-account-scheduler.js';
 import {
   allowRequestPreparation,
@@ -827,6 +829,47 @@ test('binds the selected account only after request preparation accepts the cand
   assert.equal(result.outcome, 'prepared');
   assert.deepEqual(bindings, [{ accountId: 'account-b', routeConfigId: 'route-a' }]);
   assert.equal(state.calls.indexOf('affinity-bind') < state.calls.indexOf('admission'), true);
+});
+
+/* G1 (task #41): trusted-boundary Claude Code client evidence forwarding. */
+
+test('forwards trusted-boundary Claude Code client evidence verbatim into the scheduler input', async () => {
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [], executors: [] };
+  const selects: ProviderAccountSchedulerInput[] = [];
+  const scheduler: ProviderAccountSchedulerPort = {
+    async select(inputValue) {
+      selects.push(inputValue);
+      return allowRequestPreparation(candidate());
+    },
+  };
+  const evidence = {
+    userAgent: 'claude-cli/1.0.34',
+    path: '/v1/messages',
+    headers: { 'x-app': 'cli', 'anthropic-beta': 'oauth-2025-04-20' },
+    body: { model: 'model-a', system: [{ type: 'text', text: 'You are Claude Code.' }] },
+  };
+  const result = await service(state, { scheduler }).prepare(input({ claudeCodeClient: evidence }));
+
+  assert.equal(result.outcome, 'prepared');
+  assert.equal(selects.length, 1);
+  assert.strictEqual(selects[0]?.claudeCodeClient, evidence);
+  // The scheduler sees nothing else new: the evidence is not persisted.
+  assert.equal(state.registered.length, 1);
+
+  // Back-compat: no evidence on the input means no evidence on the scheduler
+  // input — existing callers and tests are untouched.
+  const backCompatSelects: ProviderAccountSchedulerInput[] = [];
+  const backCompatState: FakeState = { calls: [], compensated: [], signed: [], registered: [], executors: [] };
+  const backCompat = await service(backCompatState, {
+    scheduler: {
+      async select(inputValue) {
+        backCompatSelects.push(inputValue);
+        return allowRequestPreparation(candidate());
+      },
+    },
+  }).prepare(input());
+  assert.equal(backCompat.outcome, 'prepared');
+  assert.equal('claudeCodeClient' in (backCompatSelects[0] as object), false);
 });
 
 test('rejects invalid and disabled Proxy Key snapshots before admission', async () => {
