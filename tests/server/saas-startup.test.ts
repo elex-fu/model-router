@@ -319,6 +319,7 @@ function fakeDatabase(
               any_sequence_privilege: false,
               any_function_privilege: false,
               out_of_schema_object_privilege: false,
+              catalog_scope_validator_executable: true,
             } as Row,
           ],
           rowCount: 1,
