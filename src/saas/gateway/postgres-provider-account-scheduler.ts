@@ -5,13 +5,22 @@ import { CLAUDE_PRODUCT_ID, CLAUDE_PROVIDER_ID } from './claude/catalog-identity
 import { validateClaudeCodeClient } from './claude/claude-code-validator.js';
 import type { GatewayProtocol } from './contracts.js';
 import { effectiveWeight, parseHealthScoreColumn } from './health-score.js';
+import type {
+  ProviderAccountHalfOpenProbeAdmissionPort,
+  ProviderAccountHealthProbeLeaseProvider,
+  ProviderAccountHealthSchedulingPort,
+  ProviderAccountRuntimeHealthWriter,
+} from './postgres-provider-account-runtime-health-store.js';
 import {
+  MAX_HEALTH_OBSERVED_AT_SKEW_MS,
   ProviderAccountScheduler,
   type ProviderAccountSchedulerAffinityBindDecision,
   type ProviderAccountSchedulerAffinityBindingInput,
   type ProviderAccountSchedulerAffinityPort,
   type ProviderAccountSchedulerConcurrencyDecision,
   type ProviderAccountSchedulerEligibilityDecision,
+  type ProviderAccountSchedulerFailureFeedbackPort,
+  type ProviderAccountSchedulerHealthDecision,
   type ProviderAccountSchedulerHealthPort,
   type ProviderAccountSchedulerInput,
   type ProviderAccountSchedulerOptions,
@@ -19,6 +28,7 @@ import {
   type ProviderAccountSchedulerRevalidatedRoute,
   type ProviderAccountSchedulerRights,
   type ProviderAccountSchedulerSelectionTrace,
+  resolveMaxHealthAgeMs,
 } from './provider-account-scheduler.js';
 import type {
   RequestPreparationCaller,
@@ -211,6 +221,32 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
     /** Lazy-eviction window in milliseconds; defaults to 60 seconds. */
     readonly windowMs?: number;
   };
+  /**
+   * H5a (R9 bench finding P5a): wire the R7/D6 half-open probe into the
+   * scheduling path so runtime health self-heals. When provided, the wrapper
+   * replaces the plain health port with a self-healing adapter: a candidate
+   * whose scheduling view is merely STALE (a well-formed row older than the
+   * freshness bound) gets a single-winner half-open probe admission; the
+   * winner acquires a short-lived account lease and records a lease-authorized
+   * probe outcome (the exact probe pattern of the reference E2E), refreshing
+   * the row, and is then schedulable. This is NOT a billing event and never
+   * bypasses billing admission: the request still passes every eligibility,
+   * concurrency, billing, and fenced-lease check. Losers (probe already in
+   * flight) are denied for this candidate only. Absent keeps the plain port
+   * (fail-closed on stale rows), byte-identical to before.
+   */
+  readonly healthProbe?: {
+    readonly store: ProviderAccountHealthSchedulingPort &
+      ProviderAccountHalfOpenProbeAdmissionPort &
+      ProviderAccountRuntimeHealthWriter;
+    readonly leaseProvider: ProviderAccountHealthProbeLeaseProvider;
+  };
+  /**
+   * H5c (R9 bench finding P8): optional in-process failure feedback. Forwarded
+   * to the core scheduler, which excludes a cooled account from selection
+   * like a health deny. Absent keeps the selection byte-identical.
+   */
+  readonly failureFeedback?: ProviderAccountSchedulerFailureFeedbackPort;
 }
 
 interface PersistedRoute extends ProviderAccountSchedulerRevalidatedRoute {
@@ -1549,6 +1585,150 @@ const MISSING_AFFINITY: ProviderAccountSchedulerAffinityPort = {
 };
 
 /*
+ * H5a (R9 bench finding P5a): the self-healing health port. Without an
+ * in-product refresher, any quiet phase longer than maxHealthAgeMs left
+ * every account's runtime-health row stale, and the plain port's fail-closed
+ * block then walled ALL traffic ('provider account health authority is
+ * unavailable') until an external primer ran (the R9 bench shipped a
+ * health-warmer shell script for exactly this).
+ *
+ * This adapter keeps the fail-closed posture for everything except the one
+ * condition that is genuinely self-healable: a well-formed row whose
+ * observation is merely OLD. For that case only, it admits a half-open probe
+ * through the existing single-winner CAS, and the winner performs the
+ * reference-E2E probe pattern — acquire an account lease, record a
+ * lease-authorized probe outcome, release — which refreshes the row's
+ * observed_at. The probe outcome is justified by the eligibility
+ * revalidation that ran immediately before this port is consulted in the
+ * same selection (account active, credential verified, rights active,
+ * capability verified); it claims nothing about the provider endpoint. If
+ * the account is actually faulted, the dispatch failure feedback (H5c)
+ * cools it again within a couple of dispatches, and a genuinely failing
+ * probe outcome re-enters the durable cooldown path.
+ */
+class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
+  constructor(
+    private readonly store: ProviderAccountHealthSchedulingPort &
+      ProviderAccountHalfOpenProbeAdmissionPort &
+      ProviderAccountRuntimeHealthWriter,
+    private readonly leaseProvider: ProviderAccountHealthProbeLeaseProvider,
+    private readonly maxHealthAgeMs: number,
+  ) {}
+
+  async get(input: {
+    readonly caller: RequestPreparationCaller;
+    readonly candidate: RequestPreparationCandidateAuthority;
+    readonly now: Date;
+  }): Promise<ProviderAccountSchedulerHealthDecision> {
+    const view = await this.store.getSchedulingView({
+      caller: input.caller,
+      candidate: input.candidate,
+      now: input.now,
+    });
+    if (view.decision === 'allow') {
+      const observedAt = view.value.observedAt;
+      const skewMs = observedAt.getTime() - input.now.getTime();
+      const ageMs = input.now.getTime() - observedAt.getTime();
+      // Fresh per this scheduler's own bound: pass the exact decision the
+      // plain port would have produced (the core scheduler re-validates).
+      if (skewMs <= MAX_HEALTH_OBSERVED_AT_SKEW_MS && ageMs <= this.maxHealthAgeMs) {
+        return {
+          decision: 'allow',
+          value: {
+            status: view.value.status,
+            observedAt,
+            cooldownUntil: view.value.status === 'cooldown' ? view.value.cooldownUntil : null,
+          },
+        };
+      }
+      // Stale per this scheduler's (possibly tighter) bound: fall through to
+      // the half-open probe path below.
+    } else if (view.code !== 'stale') {
+      // Everything but staleness keeps the fail-closed block: unknown rows,
+      // malformed data (including genuinely future timestamps), an
+      // unavailable authority, or invalid input.
+      return { decision: 'block', reason: view.reason };
+    }
+    return this.probeStaleCandidate(input.candidate, input.now);
+  }
+
+  /**
+   * Single-winner half-open probe for one stale candidate. The winner
+   * records a lease-authorized probe outcome and becomes schedulable; every
+   * loser (probe in flight, storage blip, no free lease slot) is denied for
+   * this candidate only — never a whole-selection block.
+   */
+  private async probeStaleCandidate(
+    candidate: RequestPreparationCandidateAuthority,
+    now: Date,
+  ): Promise<ProviderAccountSchedulerHealthDecision> {
+    let admitted: 'admitted' | 'closed';
+    try {
+      admitted = await this.store.tryAdmitHalfOpenProbe({ candidate, staleAfterMs: this.maxHealthAgeMs });
+    } catch {
+      admitted = 'closed';
+    }
+    if (admitted !== 'admitted') {
+      return {
+        decision: 'deny',
+        reason: 'provider account runtime health is stale and a half-open probe is already in flight',
+      };
+    }
+    const attemptId = randomUUID();
+    try {
+      const lease = await this.leaseProvider.acquire({
+        tenantId: candidate.tenantId,
+        accountId: candidate.accountId,
+        upstreamId: candidate.upstreamId,
+        attemptId,
+        evidence: {
+          tenantId: candidate.tenantId,
+          accountId: candidate.accountId,
+          upstreamId: candidate.upstreamId,
+          attemptId,
+          supplyMode: candidate.supplyMode,
+        },
+      });
+      if (lease === null) {
+        return {
+          decision: 'deny',
+          reason: 'provider account runtime health is stale and the probe lease is unavailable',
+        };
+      }
+      try {
+        const applied = await this.store.recordRuntimeOutcome({
+          candidate,
+          attemptId,
+          fencingToken: lease.fencingToken,
+          evidence: { source: 'probe', result: 'success' },
+        });
+        if (applied !== 'applied') {
+          return {
+            decision: 'deny',
+            reason: 'provider account runtime health is stale and the probe outcome was fenced out',
+          };
+        }
+      } finally {
+        try {
+          await lease.release();
+        } catch {
+          // The lease TTL bounds a failed release; the probe outcome write
+          // has already been recorded.
+        }
+      }
+      // The probe outcome was just persisted with observed_at = the
+      // PostgreSQL clock, i.e. fresh as of this decision.
+      return { decision: 'allow', value: { status: 'healthy', observedAt: now, cooldownUntil: null } };
+    } catch {
+      return {
+        decision: 'deny',
+        reason: 'provider account runtime health is stale and the half-open probe failed',
+      };
+    }
+  }
+}
+
+/*
  * R7 observability (plan §R7 item 5): one append-only saas_audit_events row
  * per strategy-enabled selection, targeting the attempt this selection
  * prepared (request-scoped when the caller did not allocate an attempt id).
@@ -1638,7 +1818,13 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
     this.scheduler = new ProviderAccountScheduler(
       {
         eligibility,
-        health: options.health ?? MISSING_HEALTH,
+        health: options.healthProbe
+          ? new HalfOpenProbeHealthPort(
+              options.healthProbe.store,
+              options.healthProbe.leaseProvider,
+              resolveMaxHealthAgeMs(options.maxHealthAgeMs),
+            )
+          : (options.health ?? MISSING_HEALTH),
         concurrency: {
           get: (input) =>
             this.redisSlots === undefined
@@ -1646,6 +1832,9 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
               : this.concurrencyWithRedisSlotPreCheck(input),
         },
         affinity: options.affinity ?? MISSING_AFFINITY,
+        // H5c (P8): in-process post-failure cooldown; absent keeps the
+        // candidate loop byte-identical.
+        failureFeedback: options.failureFeedback,
       },
       options,
     );

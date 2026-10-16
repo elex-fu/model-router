@@ -8,10 +8,13 @@ import type {
   NormalSuccessSettlementSnapshot,
 } from './dispatch-usage-settlement.js';
 import type {
+  ProviderAccountDispatchFailureFeedbackPort,
+  ProviderAccountDispatchFeedbackOutcome,
   ProviderAccountRuntimeHealthCandidate,
   ProviderAccountRuntimeHealthEvidence,
   ProviderAccountRuntimeHealthWriter,
 } from './postgres-provider-account-runtime-health-store.js';
+import { providerDispatchFeedbackOutcome } from './postgres-provider-account-runtime-health-store.js';
 import type {
   PreparedRequestEvidenceAudit,
   PreparedRequestEvidenceClaimOptions,
@@ -582,6 +585,11 @@ export class SaasPreparedEvidenceDispatchService {
     private readonly transport: PreparedEvidenceTransport,
     private readonly normalSuccessSettlement?: NormalSuccessSettlementPort,
     private readonly runtimeHealthWriter?: ProviderAccountRuntimeHealthWriter,
+    // H5c (R9 bench finding P8): in-process failure feedback. The durable
+    // runtime-health classification deliberately excludes non-retryable 4xx,
+    // so 401/403/429 dispatch outcomes would otherwise never de-prioritize
+    // the account. Optional so existing compositions stay unchanged.
+    private readonly dispatchFailureFeedback?: ProviderAccountDispatchFailureFeedbackPort,
   ) {}
 
   async dispatch(input: PreparedEvidenceDispatchInput): Promise<PreparedEvidenceDispatchResult> {
@@ -953,7 +961,25 @@ export class SaasPreparedEvidenceDispatchService {
             evidence: healthEvidence,
           });
         } catch {
-          // The health store blocks future selections after a failed observation write.
+          // A failed observation write latches the health authority only for
+          // a bounded window (H5b); the dispatch outcome stands regardless.
+        }
+      }
+      // H5c (P8): record the dispatch outcome for the in-process failure
+      // feedback. Only account-attributable non-retryable statuses (401/403/
+      // 429) and clean successes produce a signal; retryable transport
+      // failures are left to the durable health write above.
+      if (healthCandidate && this.dispatchFailureFeedback) {
+        const feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = retryableTransportFailure(
+          transportError,
+        )
+          ? null
+          : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus);
+        if (feedbackOutcome !== null) {
+          this.dispatchFailureFeedback.recordDispatchOutcome({
+            candidate: healthCandidate,
+            outcome: feedbackOutcome,
+          });
         }
       }
       try {

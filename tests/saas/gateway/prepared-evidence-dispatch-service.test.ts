@@ -14,7 +14,10 @@ import {
   SaasPreparedEvidenceDispatchError,
   SaasPreparedEvidenceDispatchService,
 } from '../../../src/saas/gateway/index.js';
-import type { ProviderAccountRuntimeHealthWriter } from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
+import type {
+  ProviderAccountDispatchFailureFeedbackPort,
+  ProviderAccountRuntimeHealthWriter,
+} from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import type {
   PreparedEvidenceClientStream,
   PreparedEvidenceTransportResponse,
@@ -1801,4 +1804,48 @@ test('an invalid acquired lease contract is released when possible before dispat
   assert.deepEqual(proof.calls, []);
   assert.deepEqual(metering.calls, ['get-attempt']);
   assert.equal(transported, false);
+});
+
+test('dispatch feeds account-attributable outcomes to the in-process failure feedback (H5c)', async () => {
+  const feedback: string[] = [];
+  const dispatchFailureFeedback: ProviderAccountDispatchFailureFeedbackPort = {
+    recordDispatchOutcome(input) {
+      feedback.push(input.outcome);
+    },
+    isExcluded() {
+      return false;
+    },
+  };
+  const dispatchWithStatus = async (status: number | null, transportError?: Error) => {
+    const transport: PreparedEvidenceTransport = {
+      async send() {
+        if (transportError) throw transportError;
+        return { responseStarted: true, resultHttpStatus: status ?? undefined };
+      },
+    };
+    const proof = new FakeEvidence();
+    const metering = new FakeMetering();
+    proof.metering = metering;
+    return new SaasPreparedEvidenceDispatchService(
+      proof,
+      metering,
+      new FakeLeaseProvider(),
+      transport,
+      undefined,
+      undefined,
+      dispatchFailureFeedback,
+    ).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
+  };
+
+  await dispatchWithStatus(401);
+  await dispatchWithStatus(429);
+  // 5xx and other 4xx produce no feedback signal: 5xx already writes a
+  // durable health cooldown, and non-auth 4xx are request-attributable.
+  await dispatchWithStatus(503);
+  await dispatchWithStatus(400);
+  await dispatchWithStatus(200);
+  // A retryable transport failure is left to the durable health write.
+  await dispatchWithStatus(null, new ProviderHttpTransportError('NETWORK_ERROR', 'provider network failure'));
+
+  assert.deepEqual(feedback, ['auth_or_permission_failure', 'rate_limited', 'success']);
 });

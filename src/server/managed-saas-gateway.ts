@@ -30,6 +30,8 @@ import { openCodeGoFixedRequestHeaders } from '../saas/gateway/opencode-go/trans
 import { createOpenRouterFixedRequestHeaders } from '../saas/gateway/openrouter/transport-headers.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
+  ProviderAccountDispatchFailureFeedback,
+  type ProviderAccountDispatchFailureFeedbackPort,
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
 import type { PostgresProviderAccountSchedulerOptions } from '../saas/gateway/postgres-provider-account-scheduler.js';
@@ -53,10 +55,7 @@ import {
   SaasPreparedRequestEvidenceService,
   type TrustedPreparedRequestVerifierKey,
 } from '../saas/gateway/prepared-request-evidence-service.js';
-import {
-  PostgresProviderAccountLeaseService,
-  type ProviderAccountLeaseServiceOptions,
-} from '../saas/gateway/provider-account-lease-service.js';
+import { PostgresProviderAccountLeaseService } from '../saas/gateway/provider-account-lease-service.js';
 import type {
   ProviderAccountSchedulerAffinityPort,
   ProviderAccountSchedulerStrategiesOptions,
@@ -175,6 +174,11 @@ export interface ManagedSaasGatewayDispatchDependencies {
   readonly normalSuccessSettlement?: NormalSuccessSettlementPort;
   /** Installed by the production composition; tests may supply a recording fake. */
   readonly runtimeHealthWriter?: ProviderAccountRuntimeHealthWriter;
+  /**
+   * H5c (R9 bench finding P8): in-process dispatch failure feedback installed
+   * by the production composition. Optional; absent keeps dispatch unchanged.
+   */
+  readonly dispatchFailureFeedback?: ProviderAccountDispatchFailureFeedbackPort;
 }
 
 /**
@@ -525,6 +529,7 @@ export function createManagedSaasGatewayComposition(
     dependencies.dispatch.transport,
     dependencies.dispatch.normalSuccessSettlement,
     dependencies.dispatch.runtimeHealthWriter,
+    dependencies.dispatch.dispatchFailureFeedback,
   );
   const httpHandler = createSaasGatewayHandler({
     authenticator: dependencies.authenticator,
@@ -1191,6 +1196,17 @@ export function createManagedSaasGatewayProductionComposition(
   const idempotencyStore = new GatewayRequestIdempotencyStore({ hmacKey: options.idempotencyHmacKey });
 
   const runtimeHealthStore = new PostgresProviderAccountRuntimeHealthStore({ database });
+  // H5c (P8): the in-process dispatch failure feedback shared by scheduling
+  // (exclusion hint) and dispatch (outcome recording). Purely in-memory; the
+  // PostgreSQL runtime health rows remain the durable authority.
+  const dispatchFailureFeedback = new ProviderAccountDispatchFailureFeedback();
+  // The lease service is created before the scheduler so the same fenced
+  // lease authority can back the scheduler's half-open health probes (H5a).
+  const leaseProvider = new PostgresProviderAccountLeaseService({
+    database,
+    maxConcurrency: options.maxConcurrency,
+    leaseTtlMs: options.leaseTtlMs,
+  });
   // F2 (task #35): additive scheduler composition options. The sticky cache
   // decorates the affinity port (PG stays authoritative); the Redis slot
   // pre-check is forwarded to the PostgreSQL scheduler (default off, and the
@@ -1201,6 +1217,11 @@ export function createManagedSaasGatewayProductionComposition(
   const scheduler = new PostgresProviderAccountScheduler({
     database,
     health: runtimeHealthStore,
+    // H5a (P5a): self-heal stale runtime health through the half-open probe
+    // so a quiet phase no longer walls all scheduling.
+    healthProbe: { store: runtimeHealthStore, leaseProvider },
+    // H5c (P8): fast fail-away from accounts returning 401/403/429.
+    failureFeedback: dispatchFailureFeedback,
     affinity: schedulerAffinityPort,
     leaseConcurrencyLimit: options.maxConcurrency,
     strategies: options.schedulerStrategies,
@@ -1251,12 +1272,8 @@ export function createManagedSaasGatewayProductionComposition(
       ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
     }),
   );
-  const leaseOptions: ProviderAccountLeaseServiceOptions = {
-    database,
-    maxConcurrency: options.maxConcurrency,
-    leaseTtlMs: options.leaseTtlMs,
-  };
-  const leaseProvider = new PostgresProviderAccountLeaseService(leaseOptions);
+  // (The lease service was created before the scheduler so its fenced
+  // authority backs the half-open health probes; see H5a above.)
   const unsealer = new GatewayProviderCredentialUnsealer(
     options.providerCredentialUnsealingKms,
     options.credentialContext,
@@ -1362,6 +1379,7 @@ export function createManagedSaasGatewayProductionComposition(
       transport: dispatchTransport,
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
+      dispatchFailureFeedback,
     },
     lifecycle: {
       close: async () => {

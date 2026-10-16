@@ -318,6 +318,30 @@ export interface ProviderAccountSchedulerDependencies {
   readonly concurrency?: ProviderAccountSchedulerConcurrencyPort;
   /** Required whenever the request carries an affinity reference. */
   readonly affinity?: ProviderAccountSchedulerAffinityPort;
+  /**
+   * H5c (R9 bench finding P8): optional in-process, short-term failure
+   * feedback. The durable runtime-health classification deliberately
+   * excludes non-retryable provider 4xx outcomes (401/403/429 — caller
+   * validation is not runtime evidence), so a faulted account otherwise keeps
+   * receiving dispatches for as long as its health row stays fresh. This port
+   * lets the composition temporarily exclude an account from selection after
+   * recent dispatch failures. It is a scheduling hint only — exactly like the
+   * priority/weight signals: it can never grant access, it never touches the
+   * persisted health rows, and the billing/lease authorities stay exactly as
+   * authoritative as before. Absent (the default) keeps the selection path
+   * byte-identical (golden-fixture red line).
+   */
+  readonly failureFeedback?: ProviderAccountSchedulerFailureFeedbackPort;
+}
+
+/**
+ * H5c: the in-process failure-feedback seam consumed by the candidate loop.
+ * Implementations must be synchronous, non-throwing, and process-local (the
+ * PostgreSQL health rows remain the durable authority).
+ */
+export interface ProviderAccountSchedulerFailureFeedbackPort {
+  /** True while recent dispatch failures put the account in a short-term cooldown. */
+  isExcluded(input: { readonly candidate: RequestPreparationCandidateAuthority; readonly now: Date }): boolean;
 }
 
 export interface ProviderAccountSchedulerInput {
@@ -491,6 +515,28 @@ interface EligibleCandidate {
 
 const DEFAULT_MAX_HEALTH_AGE_MS = 30_000;
 const MAX_HEALTH_AGE_MS = 86_400_000;
+
+/**
+ * H1 (R9 bench finding P5b): the persisted runtime-health `observed_at` is
+ * written by the PostgreSQL clock (`clock_timestamp()`), while this gate
+ * compares against the gateway process clock (`input.now`). Cross-process
+ * clock dispersion (measured at 15–30 ms between the gateway and Postgres
+ * containers during the R9 bench; NTP-synced fleets typically stay within a
+ * few tens of milliseconds) therefore yields rows a few milliseconds "in the
+ * future", which used to be treated as malformed and blocked ~5–15% of
+ * admissions under load. An `observedAt` up to this many milliseconds AHEAD
+ * of `now` is now clamped to age 0; anything further ahead is still a
+ * genuinely future timestamp (clock misconfiguration, not dispersion) and
+ * fails closed exactly as before.
+ */
+export const MAX_HEALTH_OBSERVED_AT_SKEW_MS = 250;
+
+/** Resolves the health freshness bound shared by the scheduler and its ports. */
+export function resolveMaxHealthAgeMs(value: number | undefined): number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0
+    ? Math.min(value, MAX_HEALTH_AGE_MS)
+    : DEFAULT_MAX_HEALTH_AGE_MS;
+}
 const MAX_IDENTIFIER_LENGTH = 512;
 const POSITIVE_INTEGER_MAX = 1_000_000_000;
 
@@ -752,9 +798,12 @@ function healthValue(
     return 'block';
   }
   const observedAt = date(value.observedAt);
-  if (!observedAt || observedAt.getTime() > now.getTime() || now.getTime() - observedAt.getTime() > maxHealthAgeMs) {
-    return 'block';
-  }
+  if (!observedAt) return 'block';
+  // H1 (P5b): small negative age — the PostgreSQL writer clock running ahead
+  // of the gateway clock — is clamped to age 0; only a genuinely future
+  // timestamp beyond MAX_HEALTH_OBSERVED_AT_SKEW_MS stays malformed.
+  if (observedAt.getTime() - now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS) return 'block';
+  if (now.getTime() - observedAt.getTime() > maxHealthAgeMs) return 'block';
   // R7: the optional latency signal must be a plausible non-negative duration;
   // anything else is authority drift and fails closed like the other facts.
   const latencyMs = value.latencyMs;
@@ -1097,10 +1146,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     options: ProviderAccountSchedulerOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
-    this.maxHealthAgeMs =
-      options.maxHealthAgeMs !== undefined && Number.isSafeInteger(options.maxHealthAgeMs) && options.maxHealthAgeMs > 0
-        ? Math.min(options.maxHealthAgeMs, MAX_HEALTH_AGE_MS)
-        : DEFAULT_MAX_HEALTH_AGE_MS;
+    this.maxHealthAgeMs = resolveMaxHealthAgeMs(options.maxHealthAgeMs);
     this.strategies = resolveStrategies(options.strategies);
     const chain: OrderingStrategy[] = [];
     if (this.strategies.costPriorityEnabled) {
@@ -1163,6 +1209,9 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
           seenAccounts.add(candidateValue.accountId);
           if (attempted.has(candidateValue.accountId)) continue;
           if (!candidateMatchesScope(input.caller, candidateValue)) continue;
+          // H5c (P8): an in-process post-failure cooldown removes only this
+          // candidate, exactly like a health deny — never the whole selection.
+          if (this.dependencies.failureFeedback?.isExcluded({ candidate: candidateValue, now })) continue;
 
           const eligibility = await this.dependencies.eligibility.revalidate({
             caller: input.caller,

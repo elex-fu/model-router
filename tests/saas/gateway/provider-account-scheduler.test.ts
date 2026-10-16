@@ -400,3 +400,111 @@ test('missing distributed ports and stale health state fail closed', async () =>
   }).select(baseInput(candidates, { sessionId: 'opaque-session-1' }));
   assert.equal(missingAffinity.decision, 'block');
 });
+
+/* ------------------------------------------------------------------ */
+/* H1 (R9 bench finding P5b): clock-skew tolerance in healthValue      */
+/* ------------------------------------------------------------------ */
+
+test('health observedAt slightly ahead of now (DB clock dispersion) is clamped, not blocked (H1)', async () => {
+  const candidates = [candidate('account-a')];
+  const withinTolerance = await scheduler({
+    eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+    health: healthPort(new Map(), {
+      async get() {
+        return { decision: 'allow', value: { status: 'healthy', observedAt: new Date(NOW.getTime() + 200) } };
+      },
+    }),
+    concurrency: concurrencyPort(new Map()),
+  }).select(baseInput(candidates));
+  assert.equal(withinTolerance.decision, 'allow');
+
+  const beyondTolerance = await scheduler({
+    eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+    health: healthPort(new Map(), {
+      async get() {
+        return { decision: 'allow', value: { status: 'healthy', observedAt: new Date(NOW.getTime() + 251) } };
+      },
+    }),
+    concurrency: concurrencyPort(new Map()),
+  }).select(baseInput(candidates));
+  assert.equal(beyondTolerance.decision, 'block');
+});
+
+/* ------------------------------------------------------------------ */
+/* H5c (R9 bench finding P8): in-process failure-feedback exclusion    */
+/* ------------------------------------------------------------------ */
+
+test('failure feedback excludes only the cooled candidate from selection (H5c)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const dependencies: ProviderAccountSchedulerDependencies = {
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    failureFeedback: {
+      isExcluded(input) {
+        return input.candidate.accountId === 'account-a' && input.now.getTime() < NOW.getTime() + 5_000;
+      },
+    },
+  };
+  const result = await scheduler(dependencies).select(baseInput(candidates));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+
+  // Once the cooldown expires the account is schedulable again.
+  const recoveredDependencies: ProviderAccountSchedulerDependencies = {
+    ...dependencies,
+    concurrency: concurrencyPort(new Map([['account-b', { inFlight: 2, limit: 2 }]])),
+  };
+  const recoveredScheduler = new ProviderAccountScheduler(recoveredDependencies, {
+    now: () => new Date(NOW.getTime() + 6_000),
+    maxHealthAgeMs: 60_000,
+  });
+  const recovered = await recoveredScheduler.select(baseInput(candidates));
+  assert.equal(recovered.decision, 'allow');
+  if (recovered.decision === 'allow') assert.equal(recovered.value.accountId, 'account-a');
+});
+
+test('failure feedback cooling every candidate rejects the request without blocking the authority (H5c)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    failureFeedback: {
+      isExcluded() {
+        return true;
+      },
+    },
+  }).select(baseInput(candidates));
+  assert.deepEqual(result, {
+    decision: 'reject',
+    code: 'account_denied',
+    message: 'no eligible provider account is available',
+  });
+});
+
+test('absent failure feedback keeps the default selection path (golden-fixture red line, H5c)', async () => {
+  // Same shape as the exclusion test but without the port: account-a wins
+  // the deterministic draw among equal weights for this request identity.
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+  }).select(baseInput([candidate('account-a'), candidate('account-b')]));
+  assert.equal(result.decision, 'allow');
+});

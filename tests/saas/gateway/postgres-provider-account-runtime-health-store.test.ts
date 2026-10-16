@@ -4,8 +4,10 @@ import { GATEWAY_PROVIDER_ACCOUNT_RUNTIME_HEALTH_SAAS_MIGRATION } from '../../..
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
+  ProviderAccountDispatchFailureFeedback,
   type ProviderAccountRuntimeHealthEvidence,
   ProviderAccountRuntimeHealthStoreError,
+  providerDispatchFeedbackOutcome,
 } from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import type {
   RequestPreparationCaller,
@@ -109,7 +111,8 @@ class FakeExecutor implements SqlExecutor {
       if (this.database.failHealthWrites) throw new Error('runtime health admission write failed');
       assert.match(statement, /nextval\('saas_provider_account_lease_fencing_seq'\)/i);
       assert.match(statement, /current_health\.state = 'cooldown'/i);
-      const [ownerScopeKey, ownerKind, ownerTenantId, accountId] = values;
+      assert.match(statement, /current_health\.state IN \('healthy', 'degraded'\)/i);
+      const [ownerScopeKey, ownerKind, ownerTenantId, accountId, staleAfterMs] = values;
       // The sequence is drawn on every attempt, winners and losers alike.
       const fencingToken = BigInt(this.database.fencingSeq++);
       const key = `${String(ownerScopeKey)}${String.fromCharCode(0)}${String(accountId)}`;
@@ -119,8 +122,17 @@ class FakeExecutor implements SqlExecutor {
       }
       if (current.sourceFence >= fencingToken) return result([] as Row[]);
       const now = this.database.now;
-      if (current.state !== 'cooldown' || !current.cooldownUntil) return result([] as Row[]);
-      if (current.cooldownUntil.getTime() > now.getTime()) return result([] as Row[]);
+      // H5a: probe eligibility is expired cooldown OR a merely-stale
+      // fresh-state row ($5 = the caller's freshness bound).
+      const staleAfter = Number(staleAfterMs ?? 30_000);
+      const expiredCooldown =
+        current.state === 'cooldown' &&
+        current.cooldownUntil !== null &&
+        current.cooldownUntil.getTime() <= now.getTime();
+      const staleFreshState =
+        (current.state === 'healthy' || current.state === 'degraded') &&
+        current.observedAt.getTime() + staleAfter <= now.getTime();
+      if (!expiredCooldown && !staleFreshState) return result([] as Row[]);
       // A probe is live iff its admission is newer than the last outcome
       // (observedAt) and younger than the 30s crash-recovery lease.
       if (
@@ -809,4 +821,302 @@ test('failed half-open admission writes close the same runtime to future selecti
   const decision = await health.getSchedulingView({ caller: caller(), candidate: account, now: database.now });
   assert.equal(decision.decision, 'block');
   assert.equal(database.calls.length, callsBeforeRead);
+});
+
+/* ------------------------------------------------------------------ */
+/* H1 (R9 bench finding P5b): clock-skew tolerance                     */
+/* ------------------------------------------------------------------ */
+
+function seedHealth(
+  database: FakeHealthDatabase,
+  account: RequestPreparationCandidateAuthority,
+  overrides: Partial<StoredHealth> = {},
+): StoredHealth {
+  const row: StoredHealth = {
+    ownerScopeKey: scopeKey(account),
+    ownerKind: account.supplyMode === 'byok' ? 'tenant' : 'platform',
+    ownerTenantId: account.supplyMode === 'byok' ? account.tenantId : null,
+    accountId: account.accountId,
+    state: 'healthy',
+    failureCount: 0,
+    observedAt: new Date(NOW.getTime() - 1000),
+    cooldownUntil: null,
+    lastOutcome: 'gateway_success',
+    sourceFence: 1n,
+    revision: 1n,
+    healthScore: '1.000',
+    halfOpenProbeAt: null,
+    ...overrides,
+  };
+  database.health.set(`${scopeKey(account)}${String.fromCharCode(0)}${account.accountId}`, row);
+  return row;
+}
+
+test('observed_at up to the skew tolerance ahead of now is clamped to age zero (H1)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  seedHealth(database, account, { observedAt: new Date(NOW.getTime() + 200) });
+  const health = store(database);
+  const decision = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(decision.decision, 'allow');
+  if (decision.decision === 'allow') assert.equal(decision.value.status, 'healthy');
+  const view = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(view.decision, 'allow');
+});
+
+test('observed_at beyond the skew tolerance stays malformed and blocks fail-closed (H1)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  seedHealth(database, account, { observedAt: new Date(NOW.getTime() + 251) });
+  const health = store(database);
+  const decision = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(decision.decision, 'block');
+  if (decision.decision === 'block') assert.match(decision.reason, /stale or malformed/);
+  const view = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(view.decision, 'block');
+  if (view.decision === 'block') assert.equal(view.code, 'malformed');
+});
+
+test('scheduling view block reasons carry a discriminating code (H5a)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  const unknown = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(unknown.decision, 'block');
+  if (unknown.decision === 'block') assert.equal(unknown.code, 'unknown');
+
+  seedHealth(database, account, { observedAt: new Date(NOW.getTime() - 30_001) });
+  const stale = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(stale.decision, 'block');
+  if (stale.decision === 'block') assert.equal(stale.code, 'stale');
+
+  const invalid = await health.getSchedulingView({
+    caller: caller(TENANT_B),
+    candidate: account,
+    now: NOW,
+  });
+  assert.equal(invalid.decision, 'block');
+  if (invalid.decision === 'block') assert.equal(invalid.code, 'input');
+
+  const malformedScore = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  seedHealth(database, account, { healthScore: '9.999', observedAt: new Date(NOW.getTime() - 1000) });
+  const corrupt = await health.getSchedulingView({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(corrupt.decision, 'block');
+  if (corrupt.decision === 'block') assert.equal(corrupt.code, 'malformed');
+  assert.equal(malformedScore.decision, 'block');
+});
+
+/* ------------------------------------------------------------------ */
+/* H5b (R9 bench finding P6): bounded write-failure latch              */
+/* ------------------------------------------------------------------ */
+
+test('a failed health write latches only for a bounded window, then a read recovers it (H5b)', async (t) => {
+  t.mock.timers.enable({ now: NOW.getTime() });
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  seedLease(database, account, '110');
+  await record(health, account, '110', { source: 'gateway', result: 'success' });
+  database.failHealthWrites = true;
+  seedLease(database, account, '111');
+  await assert.rejects(
+    record(health, account, '111', { source: 'gateway', result: 'success' }),
+    (error: unknown) => error instanceof ProviderAccountRuntimeHealthStoreError && error.code === 'STORAGE_ERROR',
+  );
+
+  // Inside the (first-failure) 1 s window the authority stays fail-closed.
+  const callsBeforeRead = database.calls.length;
+  const latched = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(latched.decision, 'block');
+  assert.equal(database.calls.length, callsBeforeRead);
+
+  // Once the window expires the read runs again and its success clears the latch.
+  t.mock.timers.tick(1_000);
+  const recovered = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(recovered.decision, 'allow');
+  assert.equal((await health.get({ caller: caller(), candidate: account, now: NOW })).decision, 'allow');
+});
+
+test('a successful health write clears the latch immediately without waiting out the window (H5b)', async (t) => {
+  t.mock.timers.enable({ now: NOW.getTime() });
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  database.failHealthWrites = true;
+  await assert.rejects(
+    record(health, account, '120', { source: 'gateway', result: 'success' }),
+    (error: unknown) => error instanceof ProviderAccountRuntimeHealthStoreError && error.code === 'STORAGE_ERROR',
+  );
+  assert.equal((await health.get({ caller: caller(), candidate: account, now: NOW })).decision, 'block');
+
+  database.failHealthWrites = false;
+  seedLease(database, account, '121');
+  assert.equal(await record(health, account, '121', { source: 'gateway', result: 'success' }), 'applied');
+  // No tick: the successful statement already proved the pool recovered.
+  const decision = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(decision.decision, 'allow');
+});
+
+test('repeated write failures escalate the latch window instead of wedging forever (H5b)', async (t) => {
+  t.mock.timers.enable({ now: NOW.getTime() });
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  seedHealth(database, account);
+  database.failHealthWrites = true;
+
+  await assert.rejects(record(health, account, '130', { source: 'gateway', result: 'success' }));
+  t.mock.timers.tick(500);
+  await assert.rejects(record(health, account, '131', { source: 'gateway', result: 'success' }));
+  // Second failure: a 2 s window from t=500 (latched until t=2500).
+  assert.equal((await health.get({ caller: caller(), candidate: account, now: NOW })).decision, 'block');
+  t.mock.timers.tick(1_000);
+  assert.equal((await health.get({ caller: caller(), candidate: account, now: NOW })).decision, 'block');
+  t.mock.timers.tick(1_000);
+  const recovered = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(recovered.decision, 'allow');
+});
+
+/* ------------------------------------------------------------------ */
+/* H5a (R9 bench finding P5a): stale-row half-open probe admission     */
+/* ------------------------------------------------------------------ */
+
+test('a stale healthy row admits exactly one half-open probe and keeps the binary columns unchanged (H5a)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  seedHealth(database, account, { observedAt: new Date(NOW.getTime() - 31_000) });
+  database.now = NOW;
+
+  // Not stale under a looser caller-provided bound: stays closed.
+  assert.equal(await health.tryAdmitHalfOpenProbe({ candidate: account, staleAfterMs: 60_000 }), 'closed');
+
+  assert.equal(await admit(health, account), 'admitted');
+  const row = healthRow(database, account);
+  assert.ok(row);
+  assert.equal(row.halfOpenProbeAt?.getTime(), NOW.getTime());
+  assert.equal(row.state, 'healthy');
+  assert.equal(row.failureCount, 0);
+  assert.equal(row.cooldownUntil, null);
+  assert.equal(row.healthScore, '1.000');
+  assert.equal(row.revision, 2n);
+
+  // The live admission is single-winner until the crash-recovery lease.
+  assert.equal(await admit(health, account), 'closed');
+  database.now = new Date(NOW.getTime() + 30_000);
+  assert.equal(await admit(health, account), 'admitted');
+
+  // A fresh healthy row never admits.
+  database.now = NOW;
+  seedHealth(database, account, { observedAt: new Date(NOW.getTime() - 1_000) });
+  assert.equal(await admit(health, account), 'closed');
+});
+
+/* ------------------------------------------------------------------ */
+/* H5c (R9 bench finding P8): in-process dispatch failure feedback     */
+/* ------------------------------------------------------------------ */
+
+test('dispatch feedback maps only account-attributable statuses (H5c)', () => {
+  assert.equal(providerDispatchFeedbackOutcome(200), 'success');
+  assert.equal(providerDispatchFeedbackOutcome(299), 'success');
+  assert.equal(providerDispatchFeedbackOutcome(401), 'auth_or_permission_failure');
+  assert.equal(providerDispatchFeedbackOutcome(403), 'auth_or_permission_failure');
+  assert.equal(providerDispatchFeedbackOutcome(429), 'rate_limited');
+  // 5xx and other 4xx belong to the durable health classification or are
+  // request-attributable: no in-process feedback signal.
+  assert.equal(providerDispatchFeedbackOutcome(500), null);
+  assert.equal(providerDispatchFeedbackOutcome(400), null);
+  assert.equal(providerDispatchFeedbackOutcome(404), null);
+  assert.equal(providerDispatchFeedbackOutcome(null), null);
+  assert.equal(providerDispatchFeedbackOutcome(undefined), null);
+});
+
+test('a single 429 does not cool the account; consecutive 429s cool briefly and escalate (H5c)', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const isExcluded = (nowMs: number) => feedback.isExcluded({ candidate: account, now: new Date(nowMs) });
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'rate_limited' });
+  assert.equal(isExcluded(clockMs), false, 'a single routine 429 must not cool');
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'rate_limited' });
+  assert.equal(isExcluded(clockMs), true);
+  assert.equal(isExcluded(clockMs + 999), true);
+  assert.equal(isExcluded(clockMs + 1_000), false, 'the base 429 cooldown is one second');
+
+  clockMs += 1_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'rate_limited' });
+  assert.equal(isExcluded(clockMs), true);
+  assert.equal(isExcluded(clockMs + 2_000), false, 'the second consecutive cooldown doubles');
+});
+
+test('a 401/403 cools immediately, doubles, and caps at 60 seconds (H5c)', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const isExcluded = (nowMs: number) => feedback.isExcluded({ candidate: account, now: new Date(nowMs) });
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  assert.equal(isExcluded(clockMs), true, 'a revoked credential cools on the first failure');
+  assert.equal(isExcluded(clockMs + 9_999), true);
+  assert.equal(isExcluded(clockMs + 10_000), false);
+
+  clockMs += 10_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  assert.equal(isExcluded(clockMs + 19_999), true);
+  assert.equal(isExcluded(clockMs + 20_000), false);
+
+  // Escalation caps at 60 s: five consecutive auth failures cool for the cap.
+  clockMs += 20_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  clockMs += 40_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  clockMs += 60_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  assert.equal(isExcluded(clockMs + 59_999), true);
+  assert.equal(isExcluded(clockMs + 60_000), false);
+});
+
+test('a success resets the failure feedback and scopes stay isolated (H5c)', () => {
+  const clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs) }), true);
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'success' });
+  assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs) }), false);
+
+  // The next failure starts a fresh count (10 s base, not 20 s).
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs + 10_000) }), false);
+
+  // Tenant-scoped (BYOK) and platform-scoped accounts never share a cooldown.
+  const platformAccount = candidate(TENANT_A, account.accountId, 'platform');
+  feedback.recordDispatchOutcome({ candidate: platformAccount, outcome: 'auth_or_permission_failure' });
+  // The BYOK account keeps its own (still-active) cooldown; the platform
+  // account has a fresh, independent one.
+  assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs) }), true);
+  assert.equal(feedback.isExcluded({ candidate: platformAccount, now: new Date(clockMs) }), true);
+  assert.equal(
+    feedback.isExcluded({ candidate: candidate(TENANT_A, 'unrelated-account'), now: new Date(clockMs) }),
+    false,
+  );
+
+  // Malformed input never throws and never excludes.
+  assert.equal(feedback.isExcluded({ candidate: {} as never, now: new Date(clockMs) }), false);
+  feedback.recordDispatchOutcome({ candidate: null as never, outcome: 'success' });
+});
+
+test('failures older than the stale window start a fresh consecutive count (H5c)', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  clockMs += 300_001; // past the 5-minute stale window
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  // A fresh count means the 10 s base, not the doubled 20 s.
+  assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs + 10_000) }), false);
+  assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs + 9_999) }), true);
 });

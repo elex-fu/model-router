@@ -1,8 +1,10 @@
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { parseHealthScoreColumn } from './health-score.js';
-import type {
-  ProviderAccountSchedulerHealthDecision,
-  ProviderAccountSchedulerHealthPort,
+import {
+  MAX_HEALTH_OBSERVED_AT_SKEW_MS,
+  type ProviderAccountSchedulerFailureFeedbackPort,
+  type ProviderAccountSchedulerHealthDecision,
+  type ProviderAccountSchedulerHealthPort,
 } from './provider-account-scheduler.js';
 import type { RequestPreparationCaller, RequestPreparationCandidateAuthority } from './request-preparation-service.js';
 
@@ -93,7 +95,14 @@ export interface ProviderAccountHealthSchedulingSnapshot {
 
 export type ProviderAccountHealthSchedulingView =
   | { readonly decision: 'allow'; readonly value: ProviderAccountHealthSchedulingSnapshot }
-  | { readonly decision: 'block'; readonly reason: string };
+  | { readonly decision: 'block'; readonly reason: string; readonly code: ProviderAccountHealthSchedulingBlockCode };
+
+/**
+ * H5a: why a scheduling view blocked. The half-open probe wiring only acts
+ * on 'stale' — a well-formed row whose observation is merely older than the
+ * freshness bound. Every other code keeps the fail-closed block.
+ */
+export type ProviderAccountHealthSchedulingBlockCode = 'input' | 'unknown' | 'stale' | 'malformed' | 'unavailable';
 
 /**
  * The minimal scheduling-candidate shape the health scope resolution actually
@@ -125,11 +134,50 @@ export interface ProviderAccountHealthSchedulingPort {
  * record the probe outcome through the normal lease-authorized write.
  * 'closed' conflates every losing case (still cooling, probe in flight,
  * healthy row, missing row) — the caller must not probe.
+ *
+ * H5a (R9 bench finding P5a): the admission gate additionally admits a
+ * STALE fresh-state row — `state` in ('healthy','degraded') whose
+ * `observed_at` is older than `staleAfterMs` (default: the store's
+ * maxHealthAgeMs). Staleness is the same circuit the cooldown columns
+ * encode for failures: with no in-product refresher, any quiet phase
+ * longer than the freshness bound permanently walled the account behind
+ * 'stale or malformed'. The single-winner CAS, the 30 s crash-recovery
+ * lease, and the fence ordering all apply unchanged to this branch.
  */
 export interface ProviderAccountHalfOpenProbeAdmissionPort {
   tryAdmitHalfOpenProbe(input: {
     readonly candidate: ProviderAccountRuntimeHealthCandidate;
+    /** H5a: staleness bound for the fresh-state probe branch; defaults to the store's maxHealthAgeMs. */
+    readonly staleAfterMs?: number;
   }): Promise<'admitted' | 'closed'>;
+}
+
+/**
+ * H5a: the minimal lease surface a health probe needs — acquire a
+ * short-lived, account-scoped lease whose fencing token authorizes the
+ * probe outcome write, then release it. Structurally satisfied by
+ * PostgresProviderAccountLeaseService; declared here so the health module
+ * owns no dispatch-service imports.
+ */
+export interface ProviderAccountHealthProbeLease {
+  readonly fencingToken: string;
+  release(): Promise<void>;
+}
+
+export interface ProviderAccountHealthProbeLeaseProvider {
+  acquire(input: {
+    readonly tenantId: string;
+    readonly accountId: string;
+    readonly upstreamId: string;
+    readonly attemptId: string;
+    readonly evidence: {
+      readonly tenantId: string;
+      readonly accountId: string;
+      readonly upstreamId: string;
+      readonly attemptId: string;
+      readonly supplyMode: 'byok' | 'platform';
+    };
+  }): Promise<ProviderAccountHealthProbeLease | null>;
 }
 
 interface NormalizedEvidence {
@@ -142,6 +190,16 @@ const LEASE_TABLE = 'saas_provider_account_leases';
 const DEFAULT_MAX_HEALTH_AGE_MS = 30_000;
 const MAX_HEALTH_AGE_MS = 86_400_000;
 const MAX_FENCING_TOKEN = 9_223_372_036_854_775_807n;
+/**
+ * H5b (R9 bench finding P6): a failed health write closes the runtime to
+ * future selections for a bounded, exponentially backed-off window instead
+ * of the process lifetime. A transient PostgreSQL blip must not permanently
+ * wedge scheduling (the R9 bench needed a gateway force-recreate to
+ * recover); a sustained outage still fails closed on every call because each
+ * write failure re-latches and every read fails per-call.
+ */
+const WRITE_FAILURE_LATCH_BASE_MS = 1_000;
+const WRITE_FAILURE_LATCH_MAX_MS = 60_000;
 
 const READ_HEALTH_SQL = `
   SELECT state, observed_at, cooldown_until
@@ -233,6 +291,13 @@ const WRITE_HEALTH_SQL = `
  * OR the in-flight admission is older than the 30s crash-recovery lease).
  * Inter-probe backoff rides on the persisted cooldown, which already
  * doubles per consecutive failure.
+ *
+ * H5a (R9 bench finding P5a): the second OR branch admits a fresh-STATE
+ * row whose last outcome is merely STALE ($5 = the caller's freshness
+ * bound, defaulting to the store's maxHealthAgeMs). Without an in-product
+ * refresher, any quiet phase longer than the freshness bound permanently
+ * walled the account; the same single-winner CAS, crash-recovery lease,
+ * and fence ordering govern this branch.
  */
 const ADMIT_HALF_OPEN_PROBE_SQL = `
   WITH observation AS (
@@ -248,9 +313,14 @@ const ADMIT_HALF_OPEN_PROBE_SQL = `
      AND current_health.owner_kind = $2
      AND current_health.owner_tenant_id IS NOT DISTINCT FROM $3
      AND current_health.account_id = $4
-     AND current_health.state = 'cooldown'
-     AND current_health.cooldown_until IS NOT NULL
-     AND current_health.cooldown_until <= observation.observed_at
+     AND (
+          (current_health.state = 'cooldown'
+       AND current_health.cooldown_until IS NOT NULL
+       AND current_health.cooldown_until <= observation.observed_at)
+       OR (current_health.state IN ('healthy', 'degraded')
+       AND current_health.observed_at + $5::bigint * interval '1 millisecond'
+            <= observation.observed_at)
+     )
      AND (current_health.half_open_probe_at IS NULL
        OR current_health.half_open_probe_at <= current_health.observed_at
        OR current_health.half_open_probe_at + 30000::bigint * interval '1 millisecond'
@@ -363,7 +433,9 @@ export class PostgresProviderAccountRuntimeHealthStore
 {
   private readonly database: SaasDatabase;
   private readonly maxHealthAgeMs: number;
-  private writeFailed = false;
+  /** H5b: epoch-ms deadline of the bounded write-failure latch; 0 = not latched. */
+  private writeFailedUntil = 0;
+  private writeFailureCount = 0;
 
   constructor(options: ProviderAccountRuntimeHealthStoreOptions) {
     if (
@@ -381,12 +453,32 @@ export class PostgresProviderAccountRuntimeHealthStore
     this.database = options.database;
   }
 
+  /** H5b: a failed write latches fail-closed for a bounded, doubling window. */
+  private storageFailed(): void {
+    this.writeFailureCount += 1;
+    const backoffMs = Math.min(
+      WRITE_FAILURE_LATCH_MAX_MS,
+      WRITE_FAILURE_LATCH_BASE_MS * 2 ** Math.min(this.writeFailureCount - 1, 16),
+    );
+    this.writeFailedUntil = Date.now() + backoffMs;
+  }
+
+  /**
+   * H5b: any successful statement against the same pool proves the storage
+   * recovered, so the latch (and its escalation counter) resets immediately
+   * rather than waiting out the full backoff window.
+   */
+  private storageRecovered(): void {
+    this.writeFailedUntil = 0;
+    this.writeFailureCount = 0;
+  }
+
   async get(input: {
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerHealthDecision> {
-    if (this.writeFailed) {
+    if (Date.now() < this.writeFailedUntil) {
       return { decision: 'block', reason: 'provider account runtime health authority is unavailable' };
     }
     const scope = accountScope(input?.candidate, input?.caller);
@@ -400,6 +492,7 @@ export class PostgresProviderAccountRuntimeHealthStore
         scope.ownerKind,
         scope.ownerTenantId,
       ]);
+      this.storageRecovered();
       if (result.rows.length !== 1) {
         return { decision: 'block', reason: 'provider account runtime health is unknown' };
       }
@@ -409,7 +502,11 @@ export class PostgresProviderAccountRuntimeHealthStore
       if (
         !validState(row.state) ||
         !observedAt ||
-        observedAt.getTime() > input.now.getTime() ||
+        // H1 (P5b): observed_at is written by the PostgreSQL clock while the
+        // gate compares against the gateway clock; small negative age from
+        // cross-process clock dispersion is clamped, a genuinely future
+        // timestamp beyond the tolerance stays malformed (fail-closed).
+        observedAt.getTime() - input.now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS ||
         input.now.getTime() - observedAt.getTime() > this.maxHealthAgeMs ||
         (row.cooldown_until !== null && !cooldownUntil)
       ) {
@@ -443,12 +540,16 @@ export class PostgresProviderAccountRuntimeHealthStore
     readonly candidate: ProviderAccountHealthSchedulingCandidate;
     readonly now: Date;
   }): Promise<ProviderAccountHealthSchedulingView> {
-    if (this.writeFailed) {
-      return { decision: 'block', reason: 'provider account runtime health authority is unavailable' };
+    if (Date.now() < this.writeFailedUntil) {
+      return {
+        decision: 'block',
+        reason: 'provider account runtime health authority is unavailable',
+        code: 'unavailable',
+      };
     }
     const scope = accountScope(input?.candidate, input?.caller);
     if (!scope || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
-      return { decision: 'block', reason: 'provider account runtime health input is invalid' };
+      return { decision: 'block', reason: 'provider account runtime health input is invalid', code: 'input' };
     }
     try {
       const result = await this.database.query<SchedulingHealthRow>(READ_SCHEDULING_SQL, [
@@ -457,8 +558,9 @@ export class PostgresProviderAccountRuntimeHealthStore
         scope.ownerKind,
         scope.ownerTenantId,
       ]);
+      this.storageRecovered();
       if (result.rows.length !== 1) {
-        return { decision: 'block', reason: 'provider account runtime health is unknown' };
+        return { decision: 'block', reason: 'provider account runtime health is unknown', code: 'unknown' };
       }
       const row = result.rows[0];
       const observedAt = asDate(row.observed_at);
@@ -469,18 +571,37 @@ export class PostgresProviderAccountRuntimeHealthStore
       try {
         healthScore = parseHealthScoreColumn(row.health_score);
       } catch {
-        return { decision: 'block', reason: 'provider account runtime health score is malformed' };
+        return {
+          decision: 'block',
+          reason: 'provider account runtime health score is malformed',
+          code: 'malformed',
+        };
       }
       if (
         !validState(row.state) ||
         !observedAt ||
-        observedAt.getTime() > input.now.getTime() ||
-        input.now.getTime() - observedAt.getTime() > this.maxHealthAgeMs ||
         (row.cooldown_until !== null && !cooldownUntil) ||
         (row.half_open_probe_at !== null && !halfOpenProbeAt) ||
         consecutiveFailures === null
       ) {
-        return { decision: 'block', reason: 'provider account runtime health is stale or malformed' };
+        return {
+          decision: 'block',
+          reason: 'provider account runtime health is stale or malformed',
+          code: 'malformed',
+        };
+      }
+      // H1 (P5b): a genuinely future timestamp beyond the dispersion
+      // tolerance is malformed data, not staleness — it must never reach the
+      // half-open probe path. Only a merely-old observation is 'stale'.
+      if (observedAt.getTime() - input.now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS) {
+        return {
+          decision: 'block',
+          reason: 'provider account runtime health is stale or malformed',
+          code: 'malformed',
+        };
+      }
+      if (input.now.getTime() - observedAt.getTime() > this.maxHealthAgeMs) {
+        return { decision: 'block', reason: 'provider account runtime health is stale or malformed', code: 'stale' };
       }
       const status =
         row.state === 'cooldown' && cooldownUntil && cooldownUntil.getTime() <= input.now.getTime()
@@ -502,7 +623,11 @@ export class PostgresProviderAccountRuntimeHealthStore
         },
       };
     } catch {
-      return { decision: 'block', reason: 'provider account runtime health authority is unavailable' };
+      return {
+        decision: 'block',
+        reason: 'provider account runtime health authority is unavailable',
+        code: 'unavailable',
+      };
     }
   }
 
@@ -531,11 +656,14 @@ export class PostgresProviderAccountRuntimeHealthStore
           evidence.outcome,
         ]),
       );
+      // Any completed statement (including a fenced-out no-op) proves the
+      // storage path works; H5b: the bounded latch resets immediately.
+      this.storageRecovered();
       if (result.rows.length === 0) return 'stale';
       if (result.rows.length !== 1 || !validRevision(result.rows[0].revision)) throw storageError();
       return 'applied';
     } catch {
-      this.writeFailed = true;
+      this.storageFailed();
       throw storageError();
     }
   }
@@ -544,13 +672,19 @@ export class PostgresProviderAccountRuntimeHealthStore
    * R7/D6 half-open probe admission: at most one concurrent probe per
    * account. Losing cases (still cooling, live probe, healthy or missing
    * row) all return 'closed'. A storage failure closes this runtime to
-   * future selections, mirroring recordRuntimeOutcome.
+   * future selections for a bounded window (H5b), mirroring
+   * recordRuntimeOutcome.
    */
   async tryAdmitHalfOpenProbe(input: {
     readonly candidate: ProviderAccountRuntimeHealthCandidate;
+    readonly staleAfterMs?: number;
   }): Promise<'admitted' | 'closed'> {
     const scope = accountScope(input?.candidate);
     if (!scope) invalidInput();
+    const staleAfterMs =
+      input.staleAfterMs !== undefined && Number.isSafeInteger(input.staleAfterMs) && input.staleAfterMs > 0
+        ? Math.min(input.staleAfterMs, MAX_HEALTH_AGE_MS)
+        : this.maxHealthAgeMs;
     try {
       const result = await this.database.transaction((tx: SqlExecutor) =>
         tx.query<RevisionRow>(ADMIT_HALF_OPEN_PROBE_SQL, [
@@ -558,14 +692,169 @@ export class PostgresProviderAccountRuntimeHealthStore
           scope.ownerKind,
           scope.ownerTenantId,
           scope.accountId,
+          staleAfterMs,
         ]),
       );
+      // A completed admission statement (including a losing CAS) proves the
+      // storage path works; H5b: the bounded latch resets immediately.
+      this.storageRecovered();
       if (result.rows.length === 0) return 'closed';
       if (result.rows.length !== 1 || !validRevision(result.rows[0].revision)) throw storageError();
       return 'admitted';
     } catch {
-      this.writeFailed = true;
+      this.storageFailed();
       throw storageError();
+    }
+  }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * H5c (R9 bench finding P8): in-process short-term dispatch failure feedback.
+ *
+ * The durable runtime-health classification deliberately excludes
+ * non-retryable provider 4xx outcomes (401/403/429 — "caller validation and
+ * non-retryable 4xx outcomes" are not runtime evidence), so during a fault
+ * window the scheduler kept dispatching to accounts returning 401/429/403
+ * (25–88 dispatches per 20 s window in the R9 chaos run) because nothing
+ * de-prioritized the account within the window. This registry is the
+ * process-local complement: consecutive account-attributable failures put
+ * the account in a short, exponentially backed-off scheduling cooldown.
+ *
+ * Scope discipline (fail-closed posture preserved):
+ * - Only statuses the durable classification EXCLUDES and that are
+ *   account-attributable count as feedback failures: 401/403 (credential or
+ *   permission revoked — a hard signal) and 429 (rate limited — a soft
+ *   signal). 5xx/network/protocol failures already produce a durable
+ *   PostgreSQL cooldown via recordRuntimeOutcome in the same dispatch
+ *   completion path; other 4xx are request-attributable and must not cool
+ *   an account.
+ * - The registry is a scheduling HINT only, like priority/weight: it never
+ *   writes the health table, never feeds billing, and never grants access.
+ *   The durable 401/403/429 classification matrix stays authoritative.
+ * - In-memory only: a process restart forgets everything, and the bounded
+ *   cooldowns (≤60 s) expire on their own.
+ * ---------------------------------------------------------------------------
+ */
+
+/** The dispatch outcomes the failure-feedback registry understands. */
+export type ProviderAccountDispatchFeedbackOutcome = 'success' | 'auth_or_permission_failure' | 'rate_limited';
+
+/**
+ * Maps a provider HTTP status to a feedback outcome. Null means "no feedback
+ * signal": 5xx and unclassified statuses (plus transport errors, decided by
+ * the caller) are left to the durable health classification.
+ */
+export function providerDispatchFeedbackOutcome(
+  status: number | null | undefined,
+): ProviderAccountDispatchFeedbackOutcome | null {
+  if (status === 401 || status === 403) return 'auth_or_permission_failure';
+  if (status === 429) return 'rate_limited';
+  if (typeof status === 'number' && Number.isInteger(status) && status >= 200 && status <= 299) {
+    return 'success';
+  }
+  return null;
+}
+
+/** The dispatch-side seam: record outcomes; the scheduler side reads isExcluded. */
+export interface ProviderAccountDispatchFailureFeedbackPort extends ProviderAccountSchedulerFailureFeedbackPort {
+  recordDispatchOutcome(input: {
+    readonly candidate: ProviderAccountRuntimeHealthCandidate;
+    readonly outcome: ProviderAccountDispatchFeedbackOutcome;
+  }): void;
+}
+
+/** A feedback failure with no cooldown yet cools from the second consecutive occurrence. */
+const FEEDBACK_RATE_FAILURE_THRESHOLD = 2;
+/** 401/403 base cooldown: a revoked credential is a hard signal — cool immediately. */
+const FEEDBACK_AUTH_BASE_COOLDOWN_MS = 10_000;
+const FEEDBACK_AUTH_MAX_COOLDOWN_MS = 60_000;
+/** 429 base cooldown: routine rate limiting deserves only a short backoff. */
+const FEEDBACK_RATE_BASE_COOLDOWN_MS = 1_000;
+const FEEDBACK_RATE_MAX_COOLDOWN_MS = 30_000;
+/** Consecutive failures from longer ago than this are forgotten (fresh start). */
+const FEEDBACK_STALE_AFTER_MS = 300_000;
+/** Hard bound on tracked accounts; the registry is a bounded process-local hint. */
+const FEEDBACK_MAX_TRACKED_ACCOUNTS = 10_000;
+
+interface FeedbackEntry {
+  consecutiveFailures: number;
+  lastOutcomeAt: number;
+  cooledUntil: number;
+}
+
+/**
+ * H5c: the in-process failure-feedback registry. Never throws, never touches
+ * PostgreSQL, and resets entirely on a successful dispatch outcome.
+ */
+export class ProviderAccountDispatchFailureFeedback implements ProviderAccountDispatchFailureFeedbackPort {
+  private readonly entries = new Map<string, FeedbackEntry>();
+  private readonly now: () => Date;
+
+  constructor(options: { readonly now?: () => Date } = {}) {
+    this.now = options.now ?? (() => new Date());
+  }
+
+  recordDispatchOutcome(input: {
+    readonly candidate: ProviderAccountRuntimeHealthCandidate;
+    readonly outcome: ProviderAccountDispatchFeedbackOutcome;
+  }): void {
+    const scope = accountScope(input?.candidate);
+    if (
+      !scope ||
+      (input.outcome !== 'success' &&
+        input.outcome !== 'auth_or_permission_failure' &&
+        input.outcome !== 'rate_limited')
+    ) {
+      return;
+    }
+    const now = this.now().getTime();
+    const key = `${scope.ownerScopeKey} ${scope.accountId}`;
+    if (input.outcome === 'success') {
+      this.entries.delete(key);
+      return;
+    }
+    const current = this.entries.get(key);
+    const stale = current !== undefined && now - current.lastOutcomeAt > FEEDBACK_STALE_AFTER_MS;
+    const consecutive = current === undefined || stale ? 1 : current.consecutiveFailures + 1;
+    let cooledUntil = 0;
+    if (input.outcome === 'auth_or_permission_failure') {
+      cooledUntil =
+        now +
+        Math.min(FEEDBACK_AUTH_MAX_COOLDOWN_MS, FEEDBACK_AUTH_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - 1, 16));
+    } else if (consecutive >= FEEDBACK_RATE_FAILURE_THRESHOLD) {
+      cooledUntil =
+        now +
+        Math.min(
+          FEEDBACK_RATE_MAX_COOLDOWN_MS,
+          FEEDBACK_RATE_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - FEEDBACK_RATE_FAILURE_THRESHOLD, 16),
+        );
+    }
+    this.entries.set(key, { consecutiveFailures: consecutive, lastOutcomeAt: now, cooledUntil });
+    this.prune(now);
+  }
+
+  isExcluded(input: { readonly candidate: ProviderAccountRuntimeHealthCandidate; readonly now: Date }): boolean {
+    const scope = accountScope(input?.candidate);
+    if (!scope || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) return false;
+    const entry = this.entries.get(`${scope.ownerScopeKey} ${scope.accountId}`);
+    if (!entry) return false;
+    // The cooldown is the only exclusion signal; once it expires the account
+    // is schedulable again and the next recorded failure starts a fresh count.
+    return input.now.getTime() < entry.cooledUntil;
+  }
+
+  /** Drops expired-and-forgotten entries and bounds the map size. */
+  private prune(now: number): void {
+    for (const [key, entry] of this.entries) {
+      if (now >= entry.cooledUntil && now - entry.lastOutcomeAt > FEEDBACK_STALE_AFTER_MS) {
+        this.entries.delete(key);
+      }
+    }
+    if (this.entries.size <= FEEDBACK_MAX_TRACKED_ACCOUNTS) return;
+    const byAge = [...this.entries.entries()].sort((left, right) => left[1].lastOutcomeAt - right[1].lastOutcomeAt);
+    for (const [key] of byAge.slice(0, this.entries.size - FEEDBACK_MAX_TRACKED_ACCOUNTS)) {
+      this.entries.delete(key);
     }
   }
 }

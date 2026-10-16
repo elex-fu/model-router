@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import { effectiveWeight } from '../../../src/saas/gateway/health-score.js';
+import type {
+  ProviderAccountHalfOpenProbeAdmissionPort,
+  ProviderAccountHealthSchedulingPort,
+  ProviderAccountHealthSchedulingView,
+  ProviderAccountRuntimeHealthWriter,
+} from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import {
   PostgresProviderAccountScheduler,
   type PostgresProviderAccountSchedulerOptions,
@@ -1090,4 +1096,200 @@ test('malformed persisted health scores block instead of silently defaulting', a
       if (result.decision === 'block') assert.match(result.message, /health score is malformed/);
     });
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* H5a (R9 bench finding P5a): half-open probe wiring                  */
+/* ------------------------------------------------------------------ */
+
+type ProbeStore = ProviderAccountHealthSchedulingPort &
+  ProviderAccountHalfOpenProbeAdmissionPort &
+  ProviderAccountRuntimeHealthWriter;
+
+interface ProbeStoreCalls {
+  readonly admissions: Array<{ readonly accountId: string; readonly staleAfterMs?: number }>;
+  readonly outcomes: ReadonlyArray<{
+    readonly accountId: string;
+    readonly fencingToken: string;
+    readonly evidence: unknown;
+  }>;
+  readonly views: readonly string[];
+}
+
+function probeStore(
+  viewFor: (accountId: string) => ProviderAccountHealthSchedulingView,
+  admission: 'admitted' | 'closed',
+  applied: 'applied' | 'stale' = 'applied',
+): { store: ProbeStore; calls: ProbeStoreCalls } {
+  const calls: {
+    admissions: Array<{ accountId: string; staleAfterMs?: number }>;
+    outcomes: Array<{ accountId: string; fencingToken: string; evidence: unknown }>;
+    views: string[];
+  } = { admissions: [], outcomes: [], views: [] };
+  return {
+    calls,
+    store: {
+      async getSchedulingView(input) {
+        calls.views.push(input.candidate.accountId);
+        return viewFor(input.candidate.accountId);
+      },
+      async tryAdmitHalfOpenProbe(input) {
+        calls.admissions.push({ accountId: input.candidate.accountId, staleAfterMs: input.staleAfterMs });
+        return admission;
+      },
+      async recordRuntimeOutcome(input) {
+        calls.outcomes.push({
+          accountId: input.candidate.accountId,
+          fencingToken: input.fencingToken,
+          evidence: input.evidence,
+        });
+        return applied;
+      },
+    },
+  };
+}
+
+function allowView(): ProviderAccountHealthSchedulingView {
+  return {
+    decision: 'allow',
+    value: {
+      status: 'healthy',
+      observedAt: NOW,
+      cooldownUntil: null,
+      healthScore: null,
+      halfOpenProbeAt: null,
+      consecutiveFailures: 0,
+    },
+  };
+}
+
+function staleView(): ProviderAccountHealthSchedulingView {
+  return {
+    decision: 'block',
+    reason: 'provider account runtime health is stale or malformed',
+    code: 'stale',
+  };
+}
+
+test('a fresh scheduling view passes through the probe port without admitting a probe (H5a)', async () => {
+  const { store, calls } = probeStore(() => allowView(), 'admitted');
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    { healthProbe: { store, leaseProvider: { acquire: async () => null } } },
+  );
+  const result = await scheduler.select(input([candidate('byok')]));
+  assert.equal(result.decision, 'allow');
+  assert.deepEqual(calls.admissions, []);
+  assert.deepEqual(calls.outcomes, []);
+});
+
+test('a stale scheduling view is self-healed by a half-open probe (H5a)', async () => {
+  const { store, calls } = probeStore(() => staleView(), 'admitted');
+  let releases = 0;
+  const leaseProvider = {
+    async acquire() {
+      return {
+        fencingToken: '9001',
+        release: async () => {
+          releases += 1;
+        },
+      };
+    },
+  };
+  const { scheduler, input } = setup('byok', {}, { healthProbe: { store, leaseProvider } });
+  const result = await scheduler.select(input([candidate('byok')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+  // The admission carries the scheduler's freshness bound (setup: 60 s).
+  assert.deepEqual(calls.admissions, [{ accountId: 'account-a', staleAfterMs: 60_000 }]);
+  // The probe outcome is lease-authorized probe-success evidence.
+  assert.equal(calls.outcomes.length, 1);
+  assert.equal(calls.outcomes[0]?.fencingToken, '9001');
+  assert.deepEqual(calls.outcomes[0]?.evidence, { source: 'probe', result: 'success' });
+  assert.equal(releases, 1);
+});
+
+test('a losing half-open probe admission denies only the stale candidate (H5a)', async () => {
+  const { store, calls } = probeStore((accountId) => (accountId === 'account-a' ? staleView() : allowView()), 'closed');
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    { healthProbe: { store, leaseProvider: { acquire: async () => null } } },
+  );
+  const result = await scheduler.select(input([candidate('byok'), candidate('byok', 'account-b')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  assert.deepEqual(calls.admissions, [{ accountId: 'account-a', staleAfterMs: 60_000 }]);
+  assert.deepEqual(calls.outcomes, []);
+
+  // With the stale account as the only candidate the request is rejected,
+  // never blocked: the concurrent winner's probe will refresh the row.
+  const single = await scheduler.select(input([candidate('byok')]));
+  assert.equal(single.decision, 'reject');
+  if (single.decision === 'reject') assert.equal(single.code, 'account_denied');
+});
+
+test('a probe that cannot acquire or record its outcome denies the candidate (H5a)', async () => {
+  const noLease = probeStore(() => staleView(), 'admitted');
+  const noLeaseSetup = setup(
+    'byok',
+    {},
+    { healthProbe: { store: noLease.store, leaseProvider: { acquire: async () => null } } },
+  );
+  const rejected = await noLeaseSetup.scheduler.select(noLeaseSetup.input([candidate('byok')]));
+  assert.equal(rejected.decision, 'reject');
+  assert.deepEqual(noLease.calls.outcomes, []);
+
+  const fenced = probeStore(() => staleView(), 'admitted', 'stale');
+  const fencedSetup = setup(
+    'byok',
+    {},
+    {
+      healthProbe: {
+        store: fenced.store,
+        leaseProvider: { acquire: async () => ({ fencingToken: '9002', release: async () => {} }) },
+      },
+    },
+  );
+  const fencedResult = await fencedSetup.scheduler.select(fencedSetup.input([candidate('byok')]));
+  assert.equal(fencedResult.decision, 'reject');
+  assert.equal(fenced.calls.outcomes.length, 1);
+});
+
+test('non-stale scheduling view blocks keep the fail-closed whole-selection block (H5a)', async () => {
+  const { store, calls } = probeStore(
+    () => ({
+      decision: 'block' as const,
+      reason: 'provider account runtime health authority is unavailable',
+      code: 'unavailable' as const,
+    }),
+    'admitted',
+  );
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    { healthProbe: { store, leaseProvider: { acquire: async () => null } } },
+  );
+  const result = await scheduler.select(input([candidate('byok')]));
+  assert.equal(result.decision, 'block');
+  if (result.decision === 'block') assert.match(result.message, /authority is unavailable/);
+  assert.deepEqual(calls.admissions, []);
+});
+
+test('failureFeedback is forwarded to the core scheduler and cools only the faulted account (H5c)', async () => {
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    {
+      failureFeedback: {
+        isExcluded(probe: { candidate: RequestPreparationCandidateAuthority }) {
+          return probe.candidate.accountId === 'account-a';
+        },
+      },
+    },
+  );
+  const result = await scheduler.select(input([candidate('byok'), candidate('byok', 'account-b')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
 });
