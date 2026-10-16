@@ -140,3 +140,16 @@
 | G5 R9 基准执行 | 9fa565e | — | colima 全 8 容器栈(gateway×3)+ operator 运行时模块;**实测 FAIL:6/6 bench + 6/6 chaos 阈值未达**——p99 337.5ms、TTFB 761ms、0× 扩展、故障窗 25–88 次派发;但已服务流 235,776 chunk 零损坏、全混沌场景零连接泄漏、kill-postgres 免重启恢复;**14 项产品发现(P1–P14)+ 修复顺序**存 `deploy/compose/bench/reports/R9-RESULTS.md`;全部凭据 bench 本地随机、gitignored |
 
 **G 系列终态**:全树 tsc 干净;4750 单测 0 失败;秘密扫描干净。R9 基准揭示了负载下的结构性问题(P5b 时钟偏移负年龄、P10 卡死执行行毒化并发账本、P2 ~3s 证据重取规划、P3/P4 池上限+准入串行、P5a 半开探针未接线、P6 writeFailed 永久闩锁、P8 无故障快速撤离、P1 SSRF 无运营者白名单)——按 R9-RESULTS.md §6 顺序修复后需重跑基准。
+
+## H 系列:R9 修复 + 基准重跑(2026-10-16)
+
+| 修复 | 提交 | R9 发现 | 证据 |
+|---|---|---|---|
+| H6 出口白名单 | da5fbe2 | P1 | `MODEL_ROUTER_SAAS_PROVIDER_EGRESS_ALLOWLIST` 严格 CIDR 语法,默认=原 fail-closed 姿态逐字节一致;回环/链路本地需显式条目;重跑中实证放行真实被拒的 172.18/16,TEST-NET-1 hack 弃用 |
+| H4 池+锁 | 228c168 | P3/P4 | 池默认 10→16(compose 拓扑 5 池=97 可用连接 83%),env 可调 fail-closed;计簿移到 billing.reserve 前,钱包 FOR UPDATE 成为最后获取的锁;围栏内冻结只读一次;不安全方案(乐观读/拆事务)文档化否决 |
+| H3 规划炸弹 | 0e386f6 | P2 | SET LOCAL join_collapse_limit=1 包住 dispatch-core 读;一次性 PG18.6 实测规划 2,474ms→3-6ms,端到端 2.4s→4-7ms(~480×);语法钉序/拆 LATERAL/prepared statement 全部实测否决 |
+| H1+H5 健康自愈 | dc55447 | P5a/b、P6、P8 | 250ms 偏移钳制(三处门);半开探针接线(stale 视图→CAS 单赢家→租约→probe/success→释放,失败只拒该候选);writeFailed→有界指数退避任一成功即复位;401/403 首败即冷却、429 二次起;金样 fixture 未改全绿 |
+| H2 卡死行回收 | 2ed1faf | P7/P9/P10 | 600s 视界(2×300s 硬超时上界)停计并发账本+恢复 worker 扫滞行(可能派发→升级进既有机器,未派发→059 取消生命周期);P9 前提证伪(059 已合法,修执行者);控制面授权补全(worker 改窄 CAS 语句);真实集群+guard 触发器全验证;零迁移 |
+| H7 基准重跑 | 42b6398 | 全量对比 | **FAIL(实质改善)**:p99 337→185ms、TTFB 761→181ms、corrupt 9605→95(631k chunk 零损坏)、c=200 0 ok→439 ok、precision 正向验证、2-of-4 故障成功 0.603→0.957 PASS、P1/P2/P5/P6/P10 行为性解决;新发现 P15(控制面缺 supply_profile_id/endpoint 授权→取消静默失败)、P16(跨进程准入围栏护航 3 实例减半吞吐)、P17(全故障账号场景 H5c 冷却准入拒绝回归)、P18(冷启动零健康行仍需一次性预热);P4 10rps 上限未动。报告 `deploy/compose/bench/reports/R9-RESULTS-RERUN.md` |
+
+**H 系列终态**:全树 tsc 干净;4791 单测 0 失败;秘密扫描干净。剩余结构性天花板 = P4 单租户准入串行 + P15 授权缺口 + P16 多实例护航 + P18 冷启动预热;均为可定位的后续工作。
