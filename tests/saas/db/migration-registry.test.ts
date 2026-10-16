@@ -70,6 +70,9 @@ import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../..
 import { PROBE_MONITORS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/109_probe_monitors.js';
 import { PLATFORM_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/111_provider_account_gemini_scheduling.js';
+import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/112_billing_group_snapshot_limits.js';
+import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/113_billing_group_rate_counters.js';
+import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/114_billing_group_spend_windows.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -137,6 +140,12 @@ test('SaaS migration registry keeps a stable append order with only documented g
       109,
       110,
       111,
+      // R1 billing-group limit enforcement (roadmap 1.3): 112 snapshot
+      // freeze, 113 group RPM counters, 114 group spend windows + key
+      // rolling 5h/7d caps.
+      112,
+      113,
+      114,
     ],
   );
 });
@@ -193,9 +202,12 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     PROBE_MONITORS_SAAS_MIGRATION,
     PLATFORM_SETTINGS_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
+    BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
+    BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
+    BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 92);
+  assert.equal(SAAS_MIGRATIONS.length, 95);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -249,6 +261,9 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'probe_monitors',
       'platform_settings',
       'provider_account_gemini_scheduling',
+      'billing_group_snapshot_limits',
+      'billing_group_rate_counters',
+      'billing_group_spend_windows',
     ],
   );
   assert.deepEqual(
@@ -287,10 +302,13 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       109,
       110,
       111,
+      112,
+      113,
+      114,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 92);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 92);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 95);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 95);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -380,7 +398,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 92);
+  assert.equal(SAAS_MIGRATIONS.length, 95);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -420,6 +438,9 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     PROBE_MONITORS_SAAS_MIGRATION,
     PLATFORM_SETTINGS_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
+    BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
+    BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
+    BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -512,6 +533,14 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[91], PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[91]?.version, 111);
   assert.equal(SAAS_MIGRATIONS[91]?.name, 'provider_account_gemini_scheduling');
+  // R1 billing-group limit enforcement (roadmap 1.3): 112 snapshot freeze,
+  // 113 group RPM counters, 114 group spend windows + key rolling 5h/7d caps.
+  assert.equal(SAAS_MIGRATIONS[92]?.version, 112);
+  assert.equal(SAAS_MIGRATIONS[92]?.name, 'billing_group_snapshot_limits');
+  assert.equal(SAAS_MIGRATIONS[93]?.version, 113);
+  assert.equal(SAAS_MIGRATIONS[93]?.name, 'billing_group_rate_counters');
+  assert.equal(SAAS_MIGRATIONS[94]?.version, 114);
+  assert.equal(SAAS_MIGRATIONS[94]?.name, 'billing_group_spend_windows');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

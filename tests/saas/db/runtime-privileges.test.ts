@@ -1055,6 +1055,12 @@ test('gateway pricing snapshots have exactly the service INSERT columns and keep
         'peak_applied',
         'model_pricing_override_digest',
         'model_pricing_override',
+        'group_rpm_limit',
+        'group_daily_limit_minor_units',
+        'group_weekly_limit_minor_units',
+        'group_monthly_limit_minor_units',
+        'group_supported_model_scopes',
+        'group_fallback_group_id',
       ],
     ],
     [

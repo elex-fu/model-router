@@ -13,7 +13,7 @@ test('113 registers as the applied head after the 112 snapshot freeze', () => {
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
   assert.equal(registered.at(-1), 114);
-  assert.equal(SAAS_MIGRATIONS[SAAS_MIGRATIONS.length - 1], migration);
+  assert.equal(registered.includes(migration.version), true);
 });
 
 test('113 creates the per-group per-second RPM counter store mirroring 098', () => {
