@@ -28,6 +28,7 @@ import {
   CLAUDE_STAINLESS_HEADERS,
 } from './constants.js';
 import { buildClaudeUserAgent, resolveClaudeCliVersion } from './identity.js';
+import { normalizeClaudeDatelineBody } from './dateline.js';
 import { type ClaudeRateLimitClassification, classifyClaude429 } from './quota-headers.js';
 import { type ClaudeMessagesUsage, parseMessagesUsage } from './response-bridge.js';
 
@@ -355,7 +356,14 @@ export class ClaudeHttpTransport {
     }
 
     const headers = this.buildHeaders(request, credential);
-    const bodyBytes = Buffer.from(JSON.stringify(request.body), 'utf8');
+    // Client dateline normalization runs at the claude egress chokepoint —
+    // after any mimicry transform, before serialization — so both genuine
+    // Claude Code traffic and rewritten third-party bodies are cleaned. It is
+    // a pure copy-on-write no-op on canonical bodies (sub2api
+    // gateway_forward.go placement; that implementation defaults it on).
+    if (!isRecord(request.body)) fail('INVALID_INPUT', 'the claude outbound body must be a JSON object');
+    const outboundBody = normalizeClaudeDatelineBody(request.body);
+    const bodyBytes = Buffer.from(JSON.stringify(outboundBody), 'utf8');
     let response: Response;
     try {
       response = await this.options.fetch(this.options.baseUrl.toString(), {

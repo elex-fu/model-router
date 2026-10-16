@@ -127,6 +127,35 @@ test('the outbound request pins the host and carries the full mimicry header set
   assert.equal(request.headers['content-type'], 'application/json');
 });
 
+test('the outbound body dateline watermark is normalized at the egress chokepoint', async () => {
+  const h = harness();
+  const body = {
+    model: 'claude-sonnet-4-5',
+    system: [{ type: 'text', text: 'You are helpful. Today’s date is 2026/07/01.' }],
+    messages: [
+      {
+        role: 'user',
+        content:
+          '<system-reminder>\nTodayʼs date is 2026/07/01.\n</system-reminder>\nToday’s date is 2026/07/01. (user prose, must survive)',
+      },
+    ],
+  };
+  const result = await h.request(body, sseResponse([]));
+  assert.equal(result.ok, true);
+  const seenBody = h.seen[0]?.body as Record<string, unknown>;
+  const system = seenBody.system as Array<{ text: string }>;
+  assert.equal(system[0]?.text, "You are helpful. Today's date is 2026-07-01.");
+  const content = (seenBody.messages as Array<{ content: string }>)[0]?.content ?? '';
+  assert.ok(content.includes("<system-reminder>\nToday's date is 2026-07-01.\n</system-reminder>"));
+  // User prose outside the system-reminder block keeps its watermark characters.
+  assert.ok(content.includes('Today’s date is 2026/07/01. (user prose, must survive)'));
+  // The caller's body object is never mutated.
+  assert.equal(
+    (body.system as Array<{ text: string }>)[0]?.text.includes('2026/07/01'),
+    true,
+  );
+});
+
 test('a 429 classification is written through the throttled sink', async () => {
   const h = harness();
   const resetAtMs = Date.now() + 3 * 60 * 60 * 1000;
