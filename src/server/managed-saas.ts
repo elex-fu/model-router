@@ -31,6 +31,7 @@ import {
 } from '../saas/deployment.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
+import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
 import { createPostgresPreparationCapacityPort } from '../saas/gateway/postgres-preparation-capacity.js';
@@ -148,6 +149,11 @@ import {
   type PlatformAdminAuthHttpHandler,
 } from '../saas/platform/auth/http.js';
 import { PlatformAdminAuthService } from '../saas/platform/auth/service.js';
+import {
+  type BillingGroupsHttpHandler,
+  createBillingGroupsHttpHandler,
+  createPostgresBillingGroupsAuditWriter,
+} from '../saas/platform/billing-groups-http.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
@@ -162,6 +168,12 @@ import {
 } from '../saas/platform/credential-rewrap-http.js';
 import { createPlatformCredentialRewrapOperations } from '../saas/platform/credential-rewrap-operations.js';
 import {
+  createEgressProxiesHttpHandler,
+  createPostgresEgressProxyAdminStore,
+  createPostgresEgressProxyAuditWriter,
+  type EgressProxiesHttpHandler,
+} from '../saas/platform/egress-proxies-http.js';
+import {
   PlatformOperatorManagementService,
   PlatformTenantLifecycleService,
   PlatformUserGovernanceService,
@@ -171,6 +183,14 @@ import {
   type PlatformAdminCapacityPolicyTargetSelectors,
   type PlatformAdminReadHttpHandler,
 } from '../saas/platform/http/index.js';
+import {
+  createOpencodeGoModelCatalogHttpHandler,
+  createOpencodeGoRulesHttpHandler,
+  createPostgresOpencodeGoRulesAuditWriter,
+  createPostgresOpencodeGoRulesStore,
+  type OpencodeGoModelCatalogHttpHandler,
+  type OpencodeGoRulesHttpHandler,
+} from '../saas/platform/opencode-go-rules-http.js';
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
 import {
   createPlatformSettingsHttpHandler,
@@ -236,6 +256,13 @@ import {
   type OpencodeGoUsageWorkerOptions,
   startOpencodeGoUsageWorker,
 } from '../saas/supply/opencode-go-usage-worker.js';
+import { createOpenRouterModelPricingSyncStore } from '../saas/supply/openrouter-model-pricing-sync-store.js';
+import {
+  type OpenRouterModelPricingSyncStore,
+  type OpenRouterModelPricingSyncWorkerHandle,
+  type OpenRouterModelPricingSyncWorkerOptions,
+  startOpenRouterModelPricingSyncWorker,
+} from '../saas/supply/openrouter-model-pricing-sync-worker.js';
 import {
   PostgresProbeMonitorStore,
   type ProbeMonitorWorkerHandle,
@@ -303,6 +330,8 @@ export interface ManagedSaasRuntime {
   readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
   /** R5b OpenCode Go usage-snapshot loop; same workload as quota sync. */
   readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
+  /** F6 OpenRouter model-catalog/pricing sync loop; opt-in on the worker workload. */
+  readonly openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | null;
   /** R3 egress-proxy probe + expiry-sweep loop; same workload as quota sync. */
   readonly egressProxyProbeWorker: EgressProxyProbeWorkerHandle | null;
   /** R6a scheduled probe monitor loop; same workload as quota sync. */
@@ -447,6 +476,22 @@ export interface ManagedSaasStartOptions {
   ) => OpencodeGoUsageStore;
   /** Optional usage loop tuning or test fetch; deployment identity always reaches the store. */
   opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
+  /**
+   * F6 (task #39): OpenRouter catalog/pricing sync loop on the
+   * credential-validation-worker workload. Presence of this option ENABLES
+   * the loop — the R4 OAuth-refresh opt-in precedent — because the sync
+   * writes provider catalog, public-model and supplier-cost rows, which the
+   * restricted validation-worker role cannot do by default (it is SELECT-only
+   * on the catalog). Deployments enable it only after granting those INSERT
+   * privileges to the role, or by wiring a custom store bound to a role that
+   * already has them. Absent keeps the workload exactly as before.
+   */
+  openRouterModelPricingSync?: {
+    /** Custom store seam (tests or a privileged-role binding); default is the service-backed store on this database. */
+    readonly store?: OpenRouterModelPricingSyncStore;
+    /** Optional sync loop tuning or test fetch. */
+    readonly worker?: Partial<OpenRouterModelPricingSyncWorkerOptions>;
+  };
   /** R3: optional egress-proxy probe/sweep loop tuning. */
   egressProxyProbeWorkerOptions?: EgressProxyProbeWorkerOptions;
   /** R6a: deterministic seam for the probe monitor loop on the worker workload. */
@@ -767,6 +812,10 @@ function createPlatformHandler(
   codexOauthHandler: CodexOauthHttpHandler | undefined,
   accountProbeHandler: AccountProbeHttpHandler | undefined,
   platformSettingsHandler: PlatformSettingsHttpHandler,
+  billingGroupsHandler: BillingGroupsHttpHandler | undefined,
+  egressProxiesHandler: EgressProxiesHttpHandler | undefined,
+  opencodeGoRulesHandler: OpencodeGoRulesHttpHandler | undefined,
+  opencodeGoModelsHandler: OpencodeGoModelCatalogHttpHandler | undefined,
   unknownOutcomeHandler: UnknownOutcomePlatformHttpHandler | undefined,
   usageCorrectionHandler: UsageCorrectionPlatformHttpHandler | undefined,
   marketingOpsRedeemCodesHandler: MarketingRedeemHttpHandler,
@@ -794,6 +843,10 @@ function createPlatformHandler(
         if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
         if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
         if (await platformSettingsHandler(req, res)) return;
+        if (billingGroupsHandler && (await billingGroupsHandler(req, res))) return;
+        if (egressProxiesHandler && (await egressProxiesHandler(req, res))) return;
+        if (opencodeGoRulesHandler && (await opencodeGoRulesHandler(req, res))) return;
+        if (opencodeGoModelsHandler && (await opencodeGoModelsHandler(req, res))) return;
         if (unknownOutcomeHandler && (await unknownOutcomeHandler(req, res))) return;
         if (usageCorrectionHandler && (await usageCorrectionHandler(req, res))) return;
         if (await marketingOpsRedeemCodesHandler(req, res)) return;
@@ -1248,6 +1301,7 @@ async function startCredentialValidationWorkerRuntime(
   let worker: CredentialValidationWorkerHandle | undefined;
   let quotaWorker: QuotaSyncWorkerHandle | undefined;
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
+  let openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let egressProxyProbeWorker: EgressProxyProbeWorkerHandle | undefined;
   let probeMonitorWorker: ProbeMonitorWorkerHandle | undefined;
@@ -1260,6 +1314,9 @@ async function startCredentialValidationWorkerRuntime(
       if (worker) await Promise.allSettled([worker.close()]);
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
+      if (openRouterModelPricingSyncWorker) {
+        await Promise.allSettled([openRouterModelPricingSyncWorker.close()]);
+      }
       if (oauthRefreshWorker) await Promise.allSettled([oauthRefreshWorker.close()]);
       if (egressProxyProbeWorker) await Promise.allSettled([egressProxyProbeWorker.close()]);
       if (probeMonitorWorker) await Promise.allSettled([probeMonitorWorker.close()]);
@@ -1340,6 +1397,22 @@ async function startCredentialValidationWorkerRuntime(
       }),
       options.opencodeGoUsageWorkerOptions,
     );
+    // F6 (task #39): the OpenRouter model-catalog/pricing sync loop. It is
+    // strictly opt-in (the R4 OAuth-refresh precedent): the sync appends
+    // provider catalog, public-model alias and supplier-cost version rows,
+    // and the restricted validation-worker role is SELECT-only on the
+    // catalog, so a deployment enables the loop only after granting those
+    // INSERT privileges (or wiring a custom store on a privileged role).
+    // The loop itself never touches credentials or the KMS — OpenRouter's
+    // models catalog is public — and every write is idempotent
+    // (content-addressed supplier-cost keys; duplicate-tolerant structure
+    // seeding), so crashes and replays are free.
+    if (options.openRouterModelPricingSync) {
+      openRouterModelPricingSyncWorker = startOpenRouterModelPricingSyncWorker(
+        options.openRouterModelPricingSync.store ?? createOpenRouterModelPricingSyncStore(database),
+        options.openRouterModelPricingSync.worker,
+      );
+    }
     // Track R3: the egress-proxy probe/sweep loop shares this workload's
     // database role and decrypt-only KMS, exactly like the quota sync loop.
     // Probes measure the exit IP the provider sees; the expiry sweep is the
@@ -1386,6 +1459,7 @@ async function startCredentialValidationWorkerRuntime(
       credentialValidationWorker: worker,
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
+      openRouterModelPricingSyncWorker: openRouterModelPricingSyncWorker ?? null,
       egressProxyProbeWorker,
       probeMonitorWorker: probeMonitorWorker ?? null,
       probeRunRetentionWorker: null,
@@ -2157,6 +2231,53 @@ export async function startManagedSaasServer(
         service: platformSettingsService,
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
+      // F5 console surfaces (task #38): the R1 billing-groups admin CRUD,
+      // the R3 egress-proxy admin CRUD (credentials sealed server-side
+      // through the provider-credential KMS, never echoed), the R5b
+      // opencode-go adaptive-routing rule-table CAS editor, and the
+      // read-only opencode-go model-catalog view. All follow the
+      // codex-oauth admin contract; audit writes are best-effort on the
+      // control-plane role.
+      const billingGroupsAdminHandler = createBillingGroupsHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: new SaasBillingGroupsService(database),
+        audit: createPostgresBillingGroupsAuditWriter(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      const egressProxiesAdminHandler =
+        providers.providerCredentialSealingKms && deployment.providerCredentialKmsKeyId
+          ? createEgressProxiesHttpHandler({
+              access: platformAccessService,
+              authService: platformAuthService,
+              store: createPostgresEgressProxyAdminStore(database, {
+                deployment: deployment.deploymentId,
+                environment: deployment.environmentId,
+                kms: providers.providerCredentialSealingKms,
+                kmsKeyId: deployment.providerCredentialKmsKeyId,
+              }),
+              audit: createPostgresEgressProxyAuditWriter(database),
+              publicOrigin: deploymentListener(deployment, 'platform').origin,
+            })
+          : undefined;
+      const opencodeGoRulesAdminHandler = createOpencodeGoRulesHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        store: createPostgresOpencodeGoRulesStore(database),
+        audit: createPostgresOpencodeGoRulesAuditWriter(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      // Read-only model-catalog view. The control plane holds no
+      // credential-unsealing KMS, so the live upstream sync cache cannot be
+      // read through here; the built-in fallback catalog (the cache module's
+      // never-fail floor) is served, and deployments able to supply a
+      // resolver seam can inject a live cache.
+      const opencodeGoModelsAdminHandler = createOpencodeGoModelCatalogHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        resolveModels: () => mergeOpenCodeGoModelCatalog(null),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
       let platformRefundHandler: PlatformRefundHttpHandler | undefined;
       if (options.payments?.refundAdapter) {
         const refundService = new PaymentRefundService(database, options.payments.refundAdapter, {
@@ -2453,6 +2574,10 @@ export async function startManagedSaasServer(
         codexOauthHandler,
         accountProbeHandler,
         platformSettingsAdminHandler,
+        billingGroupsAdminHandler,
+        egressProxiesAdminHandler,
+        opencodeGoRulesAdminHandler,
+        opencodeGoModelsAdminHandler,
         unknownOutcomePlatformHandler,
         usageCorrectionPlatformHandler,
         marketingOpsRedeemCodesHandler,
@@ -2490,6 +2615,7 @@ export async function startManagedSaasServer(
       credentialValidationWorker: null,
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
+      openRouterModelPricingSyncWorker: null,
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,
       probeRunRetentionWorker: probeRunRetentionWorker ?? null,

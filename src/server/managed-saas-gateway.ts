@@ -27,6 +27,7 @@ import {
   resolveOpenCodeGoProtocolRulesFromConfig,
 } from '../saas/gateway/opencode-go/protocol-rules.js';
 import { openCodeGoFixedRequestHeaders } from '../saas/gateway/opencode-go/transport-headers.js';
+import { createOpenRouterFixedRequestHeaders } from '../saas/gateway/openrouter/transport-headers.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
   type ProviderAccountRuntimeHealthWriter,
@@ -664,6 +665,21 @@ export interface ManagedSaasGatewayProductionOptions {
    * provider-target bindings.
    */
   readonly opencodeGoEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
+   * `X-Title`). When set, the values are mounted on the generic transport's
+   * fixed-request-header resolver for every request whose signed endpoint
+   * scope is `openrouter-api`, on top of the R5b-4 OpenCode Go
+   * anthropic-version rule. Unset keeps the default attribution
+   * (`X-Title: model-router`, no referer); every other provider keeps its
+   * exact previous header set either way.
+   */
+  readonly openRouterAttribution?: {
+    /** The deployment's public site URL (`HTTP-Referer`); omitted when unset. */
+    readonly referer?: string;
+    /** App name (`X-Title`); defaults to 'model-router'. */
+    readonly title?: string;
+  };
   readonly providerCredentialUnsealingKms: ProviderCredentialUnsealingKms;
   readonly credentialContext: GatewayProviderCredentialUnsealerOptions;
   /**
@@ -1254,6 +1270,9 @@ export function createManagedSaasGatewayProductionComposition(
         credentialContext: options.credentialContext,
       })
     : undefined;
+  // F6: OpenRouter supplier-attribute headers, built once (input validation
+  // happens at composition time, not per request).
+  const openRouterFixedRequestHeaders = createOpenRouterFixedRequestHeaders(options.openRouterAttribution);
   const transport = new ProviderHttpTransport({
     fetch: options.fetch,
     resolveDispatchProfile: createProviderDispatchProfileResolver(
@@ -1268,8 +1287,11 @@ export function createManagedSaasGatewayProductionComposition(
     // R5b-4 (closes R5b-2 gap 2): anthropic-routed OpenCode Go requests carry
     // anthropic-version. The resolver keys on the signed endpoint scope plus
     // the signed provider protocol, so every other provider keeps its exact
-    // previous header set.
-    resolveFixedRequestHeaders: openCodeGoFixedRequestHeaders,
+    // previous header set. F6 composes the OpenRouter supplier-attribute
+    // headers (HTTP-Referer / X-Title, endpoint-keyed across all protocols)
+    // in front of it — the two endpoint scopes are disjoint, so at most one
+    // resolver ever matches.
+    resolveFixedRequestHeaders: (input) => openRouterFixedRequestHeaders(input) ?? openCodeGoFixedRequestHeaders(input),
     timeoutMs: options.timeoutMs,
   });
   // P1c codex dispatch split: the codex transport takes over exactly the
