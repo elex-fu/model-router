@@ -16,7 +16,15 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 test('unknown-outcome scanner validates a bounded interval', () => {
   const worker = {
-    runOnce: async () => ({ claimed: 0, operatorRequired: [], superseded: [], leaseLost: [], deferred: [], failed: 0 }),
+    runOnce: async () => ({
+      claimed: 0,
+      operatorRequired: [],
+      superseded: [],
+      leaseLost: [],
+      deferred: [],
+      failed: 0,
+      staleAdmissionCancelFailures: 0,
+    }),
   };
   assert.throws(() => startUnknownOutcomeScanner(worker, { intervalMs: 49 }), /between 50 and 60000 ms/);
   assert.throws(() => startUnknownOutcomeScanner(worker, { intervalMs: 60_001 }), /between 50 and 60000 ms/);
@@ -46,6 +54,7 @@ test('unknown-outcome scanner is single-flight and stop waits for the active cyc
           leaseLost: [],
           deferred: [],
           failed: 0,
+          staleAdmissionCancelFailures: 0,
         };
       },
     },

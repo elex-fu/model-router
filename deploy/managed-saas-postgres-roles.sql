@@ -855,7 +855,7 @@ BEGIN
       ('saas_ledger_entries', 'INSERT', 'id transaction_id tenant_id currency direction amount_minor_units account_type account_ref wallet_id created_at'),
       ('saas_provider_account_leases', 'SELECT', 'status lease_expires_at'),
       ('saas_provider_account_runtime_health', 'SELECT', 'owner_scope_key owner_kind state cooldown_until observed_at'),
-      ('saas_requests', 'SELECT', 'id tenant_id project_id public_model protocol supply_mode execution_state financial_status reconciliation_state created_at updated_at state_version'),
+      ('saas_requests', 'SELECT', 'id tenant_id project_id public_model protocol supply_mode endpoint supply_profile_id execution_state financial_status reconciliation_state created_at updated_at state_version'),
       ('saas_requests', 'UPDATE', 'execution_state reconciliation_state financial_status updated_at state_version'),
       ('saas_attempts', 'SELECT', 'id tenant_id request_id ordinal result_state response_started response_started_at result_http_status created_at updated_at'),
       -- Observability channel-status aggregation (P3): the per-attempt error
@@ -867,6 +867,17 @@ BEGIN
       ('saas_attempts', 'UPDATE', 'dispatch_state result_state unknown_reason updated_at state_version'),
       ('saas_gateway_capacity_reservations', 'SELECT', 'tenant_id request_id state'),
       ('saas_gateway_capacity_reservations', 'UPDATE', 'state updated_at'),
+      -- R9 P15: the live migration 024/028 prepared-evidence guard FOR SHAREs
+      -- the claimed-evidence identity window on every saas_attempts UPDATE
+      -- whose row carries prepared_evidence_id, including the recovery
+      -- worker's CAS writes. FOR SHARE prices as UPDATE privilege on at least
+      -- one column, so created_at carries a lock-only UPDATE grant (the
+      -- migration 024 immutability trigger freezes it; no reachable write
+      -- path). Payload/statement evidence columns stay gateway-only; the live
+      -- migration 027 claim-pool guard never fences under this role's UPDATE
+      -- shapes and adds no grants.
+      ('saas_prepared_request_evidence', 'SELECT', 'tenant_id id request_id attempt_id attempt_ordinal claimed_attempt_id status expires_at dispatch_deadline'),
+      ('saas_prepared_request_evidence', 'UPDATE', 'created_at'),
       ('saas_usage_events', 'SELECT', 'id tenant_id request_id attempt_id supply_mode event_digest input_total input_uncached cache_read cache_write cache_write_5m cache_write_1h output_total reasoning_output status source measurement_kind billable_basis created_at'),
       ('saas_usage_settlements', 'SELECT', 'id tenant_id usage_event_id'),
       ('saas_usage_correction_events', 'SELECT', 'id tenant_id corrected_usage_event_id corrected_settlement_id reason_code correction_usage amount_delta_minor_units currency operator_identity evidence_ref correction_digest created_at'),

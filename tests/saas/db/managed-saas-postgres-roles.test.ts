@@ -477,6 +477,10 @@ test('customer request read template is the CP projection plus the recovery work
       'public_model',
       'protocol',
       'supply_mode',
+      // R9 P15: guard-trigger reads (018 endpoint; 019 supply_profile_id and
+      // endpoint) required while the control plane UPDATEs saas_attempts.
+      'endpoint',
+      'supply_profile_id',
       'execution_state',
       'financial_status',
       'reconciliation_state',

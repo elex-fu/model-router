@@ -899,6 +899,67 @@ test('recovery worker owns exactly the metering CAS and sweep grants, never wide
       ['saas_gateway_capacity_reservations', 'updated_at', 'UPDATE'],
     ],
   );
+  // R9 P15: the live migration 024/028 prepared-evidence guard FOR SHAREs the
+  // claimed-evidence identity window on every saas_attempts UPDATE whose row
+  // carries prepared_evidence_id while the control plane runs its CAS writes.
+  // The read set is exactly the guard's WHERE key plus its projection; the
+  // lock-only UPDATE (created_at) exists solely because PostgreSQL prices a
+  // FOR SHARE row lock as UPDATE privilege on at least one column, and the
+  // migration 024 immutability trigger freezes created_at, leaving no
+  // reachable write path.
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
+      ([table, , privilege]) => table === 'saas_prepared_request_evidence' && privilege === 'SELECT',
+    ),
+    [
+      ['saas_prepared_request_evidence', 'tenant_id', 'SELECT'],
+      ['saas_prepared_request_evidence', 'id', 'SELECT'],
+      ['saas_prepared_request_evidence', 'request_id', 'SELECT'],
+      ['saas_prepared_request_evidence', 'attempt_id', 'SELECT'],
+      ['saas_prepared_request_evidence', 'attempt_ordinal', 'SELECT'],
+      ['saas_prepared_request_evidence', 'claimed_attempt_id', 'SELECT'],
+      ['saas_prepared_request_evidence', 'status', 'SELECT'],
+      ['saas_prepared_request_evidence', 'expires_at', 'SELECT'],
+      ['saas_prepared_request_evidence', 'dispatch_deadline', 'SELECT'],
+    ],
+    'prepared-request evidence reads are exactly the 024 guard-trigger FOR SHARE set',
+  );
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
+      ([table, , privilege]) => table === 'saas_prepared_request_evidence' && privilege === 'UPDATE',
+    ),
+    [['saas_prepared_request_evidence', 'created_at', 'UPDATE']],
+    'the only UPDATE grant is the FOR SHARE row-lock pricing on the immutability-frozen created_at column',
+  );
+  for (const [table, column, privilege] of SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS) {
+    if (table !== 'saas_prepared_request_evidence') continue;
+    assert.equal(
+      privilege === 'SELECT' || (privilege === 'UPDATE' && column === 'created_at'),
+      true,
+      `unexpected prepared-request evidence grant ${column} ${privilege}`,
+    );
+    assert.equal(
+      [
+        'payload_sha256',
+        'statement',
+        'statement_sha256',
+        'usage_feasible_input_buckets',
+        'provider_id',
+        'product_id',
+        'pool_id',
+        'pool_authz_version',
+      ].includes(column),
+      false,
+      `prepared-request evidence column ${column} is not a guard-trigger read`,
+    );
+  }
+  assert.equal(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+      ([table, , privilege]) => table === 'saas_prepared_request_evidence' && privilege === 'INSERT',
+    ),
+    false,
+    'control plane never creates prepared-request evidence',
+  );
 });
 
 test('gateway probe is selected only by the optional workload role and defaults to control-plane policy', async () => {
@@ -1476,6 +1537,13 @@ test('customer request axes keep CP reads purpose-scoped; only the recovery work
       'public_model',
       'protocol',
       'supply_mode',
+      // R9 P15: migration 018's provider-binding guard reads `endpoint` and
+      // migration 019's dispatch-authority guard reads `supply_profile_id` and
+      // `endpoint` from saas_requests with the invoker's privileges whenever
+      // this role UPDATEs saas_attempts, so the stale-admission cancel sweep
+      // needs SELECT on both even though the worker never projects them.
+      'endpoint',
+      'supply_profile_id',
       'execution_state',
       'financial_status',
       'reconciliation_state',
@@ -1504,7 +1572,7 @@ test('customer request axes keep CP reads purpose-scoped; only the recovery work
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
   assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes("('saas_requests', 'reconciliation_state', 'SELECT')"));
   assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes("('saas_requests', 'state_version', 'UPDATE')"));
-  for (const column of ['proxy_key_id', 'principal_id', 'entitlement_id', 'supply_profile_id', 'request_fingerprint']) {
+  for (const column of ['proxy_key_id', 'principal_id', 'entitlement_id', 'request_fingerprint']) {
     assert.equal(
       SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([table, field]) => table === 'saas_requests' && field === column),
       false,

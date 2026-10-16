@@ -16,6 +16,7 @@ import type {
   UnknownOutcomeOperatorCoverage,
   UnknownOutcomeOperatorResolutionResult,
   UnknownOutcomeRecoveryClaim,
+  UnknownOutcomeRecoveryClaimDueResult,
   UnknownOutcomeRecoveryRepository,
   UnknownOutcomeRecoveryRunResult,
   UnknownOutcomeSupplyMode,
@@ -90,7 +91,7 @@ class MemoryRecoveryRepository implements UnknownOutcomeRecoveryRepository {
     }));
   }
 
-  async claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<readonly UnknownOutcomeRecoveryClaim[]> {
+  async claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<UnknownOutcomeRecoveryClaimDueResult> {
     for (const request of this.requests) {
       if (
         request.resultState === 'unknown' &&
@@ -139,7 +140,7 @@ class MemoryRecoveryRepository implements UnknownOutcomeRecoveryRepository {
         scanAttempt: currentCase.scanAttempts,
       });
     }
-    return claims;
+    return { claims, staleAdmissionCancelFailures: 0 };
   }
 
   async captureAndEscalate(claim: UnknownOutcomeRecoveryClaim): Promise<UnknownOutcomeCaseCaptureResult> {
@@ -382,7 +383,7 @@ async function scan(repository: MemoryRecoveryRepository): Promise<UnknownOutcom
 
 test('a crashed claim is durably reclaimed after lease expiry by a new worker instance', async () => {
   const repository = new MemoryRecoveryRepository([makeRequest()]);
-  const [crashedClaim] = await repository.claimDue(1, 10, 4);
+  const [crashedClaim] = (await repository.claimDue(1, 10, 4)).claims;
   assert.ok(crashedClaim);
   assert.equal(repository.cases.get('request-a')?.state, 'open');
   assert.equal(repository.cases.get('request-a')?.scanAttempts, 1);
@@ -693,7 +694,7 @@ test('postgres claimDue escalates stale possibly-dispatched pendings to unknown 
   } as unknown as SaasDatabase;
   const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService);
 
-  const claims = await repository.claimDue(5, 30_000, 8);
+  const { claims } = await repository.claimDue(5, 30_000, 8);
 
   assert.equal(claims.length, 1);
   assert.equal(claims[0]?.requestId, 'request-unknown');
@@ -807,7 +808,7 @@ test('postgres claimDue sweep cancels a stale never-dispatched platform admissio
     },
   });
 
-  const claims = await repository.claimDue(5, 30_000, 8);
+  const { claims } = await repository.claimDue(5, 30_000, 8);
 
   assert.deepEqual(claims, []);
   assert.equal(caseInsertCount, 0, 'a cancelled admission never becomes an unknown-outcome case');
@@ -895,10 +896,88 @@ test('postgres claimDue sweep survives a poisoned stale admission and keeps clai
   } as unknown as SaasDatabase;
   const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService);
 
-  const claims = await repository.claimDue(5, 30_000, 8);
+  const { claims } = await repository.claimDue(5, 30_000, 8);
 
   assert.deepEqual(claims, []);
   assert.deepEqual(cancelled, ['request-stale'], 'the healthy stale row is cancelled despite the poisoned one');
+});
+
+test('postgres sweep cancellation failures surface as a cycle counter and one bounded warning', async () => {
+  // R9 P15: every candidate fails (the permission-denied shape under a guard
+  // trigger); the sweep stays poison-safe but the failure must be observable.
+  const handler = (sql: string): { rows: Row[]; rowCount: number } => {
+    if (sql.includes('NOT EXISTS') && sql.includes("r.execution_state = 'pending'")) {
+      return {
+        rows: [
+          { tenant_id: 'tenant-a', id: 'request-stale-1' },
+          { tenant_id: 'tenant-a', id: 'request-stale-2' },
+        ] as Row[],
+        rowCount: 2,
+      };
+    }
+    if (sql.includes('FROM saas_requests') && sql.includes('FOR UPDATE') && sql.includes('AND id = $2')) {
+      // cancelStaleAdmission's per-request lock: the permission-denied shape.
+      throw new Error('permission denied for table saas_requests');
+    }
+    if (sql.startsWith('UPDATE saas_requests AS r')) return { rows: [], rowCount: 0 };
+    if (sql.includes('FROM saas_requests AS r')) return { rows: [] as Row[], rowCount: 0 };
+    return { rows: [] as Row[], rowCount: 0 };
+  };
+  const database = {
+    async query(sql: string) {
+      return handler(sql);
+    },
+    async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+      return work({
+        async query(sql: string) {
+          return handler(sql);
+        },
+      });
+    },
+  } as unknown as SaasDatabase;
+  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService);
+
+  const due = await repository.claimDue(5, 30_000, 8);
+  assert.deepEqual(due.claims, []);
+  assert.equal(due.staleAdmissionCancelFailures, 2, 'both failing candidates are counted');
+
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (message: unknown) => {
+    warnings.push(String(message));
+  };
+  let result: UnknownOutcomeRecoveryRunResult;
+  try {
+    result = await new UnknownOutcomeReconciliationWorker(repository, { leaseMs: 30_000, maxAttempts: 8 }).runOnce();
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(result.staleAdmissionCancelFailures, 2, 'the counter rides the cycle run result');
+  assert.equal(warnings.length, 1, 'exactly one warning per cycle');
+  assert.match(warnings[0] ?? '', /2 stale-admission cancellation\(s\) failed this cycle/);
+  assert.match(warnings[0] ?? '', /systematic failure/);
+  // Scanner observer discipline: no tenant, request or raw error details.
+  for (const warning of warnings) {
+    assert.equal(warning.includes('tenant-a'), false);
+    assert.equal(warning.includes('request-stale'), false);
+    assert.equal(warning.includes('permission denied'), false);
+  }
+});
+
+test('worker runOnce stays silent when the sweep cancels cleanly', async () => {
+  const repository = new MemoryRecoveryRepository([]);
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (message: unknown) => {
+    warnings.push(String(message));
+  };
+  try {
+    const result = await scan(repository);
+    assert.equal(result.staleAdmissionCancelFailures, 0);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(warnings, []);
 });
 
 test('postgres resolution terminally cancels never-dispatched attempts alongside possible dispatches', async () => {

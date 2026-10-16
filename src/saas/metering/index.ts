@@ -94,6 +94,7 @@ export type {
   UnknownOutcomeOperatorCoverage,
   UnknownOutcomeOperatorResolutionResult,
   UnknownOutcomeRecoveryClaim,
+  UnknownOutcomeRecoveryClaimDueResult,
   UnknownOutcomeRecoveryRepository,
   UnknownOutcomeRecoveryRunResult,
   UnknownOutcomeRecoveryWorkflowOptions,

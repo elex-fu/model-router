@@ -2480,6 +2480,13 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   // state-machine projection and drives the metering guard triggers through
   // narrow CAS statements — never the shared metering service's wide RETURNING
   // projections — so these stay the only request/attempt writes this role owns.
+  //
+  // R9 P15: migration 018's saas_attempts_guard_provider_binding trigger reads
+  // `endpoint` and migration 019's saas_attempts_guard_dispatch_authority
+  // trigger reads `supply_profile_id` + `endpoint` from saas_requests while the
+  // invoker UPDATEs saas_attempts (trigger functions run with the invoker's
+  // privileges), so the stale-admission cancel sweep needs SELECT on both
+  // columns even though the worker itself never projects them.
   ...columnGrants('saas_requests', 'SELECT', [
     'id',
     'tenant_id',
@@ -2487,6 +2494,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'public_model',
     'protocol',
     'supply_mode',
+    'endpoint',
+    'supply_profile_id',
     'execution_state',
     'financial_status',
     'reconciliation_state',
@@ -2539,6 +2548,32 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   // also reads these three columns when a dispatch state is rewritten.
   ...columnGrants('saas_gateway_capacity_reservations', 'SELECT', ['tenant_id', 'request_id', 'state']),
   ...columnGrants('saas_gateway_capacity_reservations', 'UPDATE', ['state', 'updated_at']),
+  // R9 P15: the live migration 024/028 saas_attempts_guard_prepared_evidence
+  // trigger SELECT ... FOR SHAREs the claimed-evidence identity window (WHERE
+  // tenant_id/id plus the status, request/attempt identity, expiry and
+  // dispatch-deadline projection) on EVERY saas_attempts UPDATE whose row
+  // carries prepared_evidence_id — including the recovery worker's cancel and
+  // operator-resolution CAS writes, which run with this role's privileges.
+  // PostgreSQL prices a FOR SHARE row lock as UPDATE privilege on at least one
+  // column, so created_at carries a lock-only UPDATE grant: the migration 024
+  // immutability trigger freezes created_at, leaving no reachable write path
+  // (only same-value no-op updates). The payload/statement evidence columns
+  // stay gateway-only, and the migration 027 claim-pool guard never fences
+  // under this role's UPDATE shapes (it only fences on INSERT, evidence
+  // attachment, or the gateway's not_sent -> dispatching transition), so it
+  // adds no grants here.
+  ...columnGrants('saas_prepared_request_evidence', 'SELECT', [
+    'tenant_id',
+    'id',
+    'request_id',
+    'attempt_id',
+    'attempt_ordinal',
+    'claimed_attempt_id',
+    'status',
+    'expires_at',
+    'dispatch_deadline',
+  ]),
+  ...columnGrants('saas_prepared_request_evidence', 'UPDATE', ['created_at']),
   ...columnGrants('saas_usage_events', 'SELECT', [
     'id',
     'tenant_id',

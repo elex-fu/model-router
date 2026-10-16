@@ -147,7 +147,7 @@ type UnknownOutcomeOperatorCoverageError = Extract<
 >;
 
 export interface UnknownOutcomeRecoveryRepository {
-  claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<readonly UnknownOutcomeRecoveryClaim[]>;
+  claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<UnknownOutcomeRecoveryClaimDueResult>;
   captureAndEscalate(claim: UnknownOutcomeRecoveryClaim): Promise<UnknownOutcomeCaseCaptureResult>;
   retryClaim(
     claim: UnknownOutcomeRecoveryClaim,
@@ -199,6 +199,21 @@ export interface UnknownOutcomeRecoveryRunResult {
   readonly leaseLost: readonly string[];
   readonly deferred: readonly string[];
   readonly failed: number;
+  /**
+   * R9 P15: stale-admission cancellations that failed during this cycle's
+   * sweep. The sweep is poison-safe (each candidate runs in its own
+   * transaction and is retried next cycle), so a single failing row is
+   * expected; a count that never returns to zero means a systematic failure
+   * (for example a missing control-plane column grant under a guard trigger)
+   * and must stay observable instead of failing silently forever.
+   */
+  readonly staleAdmissionCancelFailures: number;
+}
+
+/** Cycle-level claim result: the claimed cases plus the sweep failure counter. */
+export interface UnknownOutcomeRecoveryClaimDueResult {
+  readonly claims: readonly UnknownOutcomeRecoveryClaim[];
+  readonly staleAdmissionCancelFailures: number;
 }
 
 export function validateOperatorCoverage(
@@ -358,7 +373,8 @@ export class UnknownOutcomeReconciliationWorker {
   }
 
   async runOnce(): Promise<UnknownOutcomeRecoveryRunResult> {
-    const claims = await this.repository.claimDue(this.batchSize, this.leaseMs, this.maxAttempts);
+    const due = await this.repository.claimDue(this.batchSize, this.leaseMs, this.maxAttempts);
+    const claims = due.claims;
     const operatorRequired: string[] = [];
     const superseded: string[] = [];
     const leaseLost: string[] = [];
@@ -394,7 +410,25 @@ export class UnknownOutcomeReconciliationWorker {
       }
     }
 
-    return { claimed: claims.length, operatorRequired, superseded, leaseLost, deferred, failed };
+    // R9 P15: bounded per-cycle visibility for the poison-safe sweep. The
+    // count carries no tenant, case or error details (the existing scanner
+    // observer discipline), so a permanently failing sweep surfaces as a
+    // repeating one-line warning instead of an infinite silent retry loop.
+    if (due.staleAdmissionCancelFailures > 0) {
+      console.warn(
+        `model-router unknown-outcome recovery: ${due.staleAdmissionCancelFailures} stale-admission cancellation(s) failed this cycle and will retry; a non-varying count indicates a systematic failure (for example missing control-plane grants under a metering guard trigger)`,
+      );
+    }
+
+    return {
+      claimed: claims.length,
+      operatorRequired,
+      superseded,
+      leaseLost,
+      deferred,
+      failed,
+      staleAdmissionCancelFailures: due.staleAdmissionCancelFailures,
+    };
   }
 }
 
@@ -677,12 +711,12 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
     this.keyBudget = options.keyBudget;
   }
 
-  async claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<readonly UnknownOutcomeRecoveryClaim[]> {
+  async claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<UnknownOutcomeRecoveryClaimDueResult> {
     positiveInteger(limit, 'limit', MAX_BATCH_SIZE);
     positiveInteger(leaseMs, 'leaseMs', MAX_LEASE_MS);
     positiveInteger(maxAttempts, 'maxAttempts', MAX_SCAN_ATTEMPTS);
 
-    await this.sweepStaleAdmissions(limit);
+    const staleAdmissionCancelFailures = await this.sweepStaleAdmissions(limit);
 
     return this.database.transaction(async (tx) => {
       // Stale pending admissions whose dispatch may have started are escalated
@@ -813,7 +847,7 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
           scanAttempt: attemptNumber,
         });
       }
-      return claims;
+      return { claims, staleAdmissionCancelFailures };
     });
   }
 
@@ -824,8 +858,14 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
    * transition; each request is cancelled in its own transaction so one
    * poisoned row can never block the claim pipeline. Possibly-dispatched
    * stale pendings are handled by the unknown escalation inside claimDue.
+   *
+   * R9 P15: returns the number of candidates whose cancellation failed this
+   * cycle. The per-request catch keeps the sweep poison-safe, but a systematic
+   * failure (for example a control-plane grant gap under migration 018/019's
+   * guard triggers) must stay observable, so the count is surfaced through the
+   * claim result and the cycle's run result instead of being swallowed.
    */
-  private async sweepStaleAdmissions(limit: number): Promise<void> {
+  private async sweepStaleAdmissions(limit: number): Promise<number> {
     const candidates = await this.database.query<{ readonly tenant_id: unknown; readonly id: unknown }>(
       `SELECT r.tenant_id, r.id
          FROM saas_requests AS r
@@ -843,6 +883,7 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
         LIMIT $1`,
       [limit, STALE_ADMISSION_HORIZON_MS],
     );
+    let staleAdmissionCancelFailures = 0;
     for (const candidate of candidates.rows) {
       try {
         await this.cancelStaleAdmission(
@@ -851,8 +892,10 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
         );
       } catch {
         // The row is retried on the next cycle; the sweep must never block claims.
+        staleAdmissionCancelFailures += 1;
       }
     }
+    return staleAdmissionCancelFailures;
   }
 
   private async cancelStaleAdmission(tenantId: string, requestId: string): Promise<void> {

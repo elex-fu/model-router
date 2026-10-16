@@ -508,7 +508,15 @@ function startupUnknownOutcomeWorkflow(events: string[]): ReturnType<typeof crea
     worker: {
       runOnce: async () => {
         events.push('unknown-outcome-run');
-        return { claimed: 0, operatorRequired: [], superseded: [], leaseLost: [], deferred: [], failed: 0 };
+        return {
+          claimed: 0,
+          operatorRequired: [],
+          superseded: [],
+          leaseLost: [],
+          deferred: [],
+          failed: 0,
+          staleAdmissionCancelFailures: 0,
+        };
       },
     },
     operatorResolution: {
