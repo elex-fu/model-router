@@ -520,6 +520,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ...columnGrants('saas_billing_group_account_pools', 'SELECT', ['group_id', 'account_id', 'priority', 'created_at']),
   ...columnGrants('saas_billing_group_account_pools', 'INSERT', ['group_id', 'account_id', 'priority']),
   ...columnGrants('saas_billing_group_account_pools', 'UPDATE', ['priority']),
+  // R1 (113): no control-plane grant on saas_billing_group_rate_counters —
+  // the gateway alone upserts the group RPM admission counters (the gateway
+  // column manifest below carries the DML).
   // R3 (107) egress proxies: the control plane manages the proxy registry
   // and runs the probe/sweep worker (last_probe_* writes); the gateway and
   // the OAuth refresh worker read through the dynamic read-table grants.
@@ -3646,6 +3649,9 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_billing_group_account_pools',
   // R3 (107): the dispatch profile resolves the account's egress proxy.
   'saas_egress_proxies',
+  // R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
+  // RPM admission counters (capacity-side rate evidence, never billing).
+  'saas_billing_group_rate_counters',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -3803,6 +3809,16 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_provider_account_rate_counters', 'tokens', 'INSERT'],
   ['saas_provider_account_rate_counters', 'requests', 'UPDATE'],
   ['saas_provider_account_rate_counters', 'tokens', 'UPDATE'],
+  // R1 (113, roadmap 1.3): the capacity adapter upserts the billing-group
+  // RPM admission counter inside the admission transaction (rate evidence
+  // only; the counters never touch billing state).
+  ['saas_billing_group_rate_counters', 'group_id', 'SELECT'],
+  ['saas_billing_group_rate_counters', 'window_start', 'SELECT'],
+  ['saas_billing_group_rate_counters', 'requests', 'SELECT'],
+  ['saas_billing_group_rate_counters', 'group_id', 'INSERT'],
+  ['saas_billing_group_rate_counters', 'window_start', 'INSERT'],
+  ['saas_billing_group_rate_counters', 'requests', 'INSERT'],
+  ['saas_billing_group_rate_counters', 'requests', 'UPDATE'],
   // Affinity resolution reads only its scoped key and target state; inserts create the full
   // immutable identity, while UPDATE is limited to binding/lifecycle fields.
   ...(

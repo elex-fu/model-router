@@ -70,6 +70,56 @@ interface ReservationRow extends Row {
   state: unknown;
 }
 
+/**
+ * R1 (roadmap 1.3, phase 2): the billing-group RPM terms frozen on this
+ * request's customer price snapshot (migration 112). Enforcement reads these
+ * frozen values only — never the mutable saas_billing_groups table (the R1
+ * red line: a later group edit must never reprice or re-limit an admission).
+ */
+interface FrozenBillingGroupRateTerms {
+  readonly billingGroupId: string;
+  /** Null means no RPM ceiling was frozen (unlimited; skip the counter entirely). */
+  readonly rpmLimit: bigint | null;
+}
+
+/*
+ * Per-request snapshot read: the platform admission guard creates the
+ * customer price snapshot earlier on this same transaction, so exactly one
+ * row must exist. A missing, duplicated or malformed row is authority drift
+ * and blocks (fail closed).
+ */
+const SNAPSHOT_GROUP_TERMS_SQL = `/* postgres-preparation-capacity:billing-group-terms */
+SELECT billing_group_id, group_rpm_limit
+  FROM saas_request_customer_price_snapshots
+ WHERE tenant_id = $1 AND request_id = $2
+ LIMIT 2`;
+
+/*
+ * R1 group RPM counter upsert (the migration-098 account-counter pattern at
+ * group scope). The returned count includes THIS admission; the surrounding
+ * admission transaction holds the counter row until COMMIT, and a rejection
+ * rolls the increment back with the transaction. window_start is truncated
+ * to the second from the database clock so every writer in a UTC second
+ * shares one row.
+ */
+const GROUP_RATE_UPSERT_SQL = `/* postgres-preparation-capacity:billing-group-rate */
+INSERT INTO saas_billing_group_rate_counters (group_id, window_start, requests)
+VALUES ($1, date_trunc('second', clock_timestamp()), 1)
+ON CONFLICT (group_id, window_start)
+DO UPDATE SET requests = saas_billing_group_rate_counters.requests + 1
+RETURNING requests`;
+
+function frozenGroupRateTerms(row: Row | null): FrozenBillingGroupRateTerms | null | 'malformed' {
+  if (row === null) return null;
+  const billingGroupId = row.billing_group_id;
+  const rpmLimit = row.group_rpm_limit;
+  if (!text(billingGroupId)) return 'malformed';
+  if (rpmLimit === null || rpmLimit === undefined) return { billingGroupId, rpmLimit: null };
+  const limit = exactInteger(rpmLimit);
+  if (limit === null || limit > JS_SAFE_INTEGER_MAX) return 'malformed';
+  return { billingGroupId, rpmLimit: limit };
+}
+
 type SafeReservationRow = ReservationRow & {
   tenant_id: string;
   project_id: string;
@@ -286,7 +336,14 @@ function sameIdentity(row: ReservationRow, input: Parameters<PostgresPreparation
   );
 }
 
-/** PostgreSQL request capacity implementation. It never touches wallet tables. */
+/**
+ * PostgreSQL request capacity implementation. It never touches wallet
+ * tables. R1 (roadmap 1.3, phase 2) documented exception: it reads the
+ * billing-group RPM terms from this request's own customer price snapshot
+ * row (evidence frozen by the admission guard, not a wallet table and not
+ * the mutable group table) and writes the saas_billing_group_rate_counters
+ * admission counter — capacity-side rate evidence, never billing state.
+ */
 export class PostgresPreparationCapacityAdapter implements PostgresPreparationCapacityPort {
   async reserve(
     executor: SqlExecutor,
@@ -418,6 +475,30 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
         return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
       }
 
+      /* R1 (roadmap 1.3, phase 2): the frozen billing-group RPM terms for
+         platform admissions. The admission guard created this request's
+         customer price snapshot earlier on the same transaction, so the row
+         must exist; the group terms are read from the frozen snapshot —
+         never the mutable group table (the R1 red line). BYOK admissions
+         carry no price snapshot and no group. This is a per-request read
+         (unique tenant_id + request_id), so it stays outside the fence. */
+      let groupRateTerms: FrozenBillingGroupRateTerms | null = null;
+      if (input.supplyMode === 'platform') {
+        const snapshotRows = await queryRows<Row>(executor, SNAPSHOT_GROUP_TERMS_SQL, [
+          input.tenantId,
+          input.requestId,
+        ]);
+        const snapshotRow = oneRow(snapshotRows);
+        if (snapshotRow === null) {
+          return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
+        }
+        const terms = frozenGroupRateTerms(snapshotRow);
+        if (terms === 'malformed' || terms === null) {
+          return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
+        }
+        groupRateTerms = terms;
+      }
+
       /* R9 P4/P16: the exclusive tenant-scope fence starts HERE. Everything
          above is per-request or protected by the caller's shared authz
          fences; everything below reads or writes shared capacity state and
@@ -519,6 +600,24 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
         keyConcurrency + 1n > limits.key.concurrency
       ) {
         return rejectRequestPreparation('rate_limited', 'The request exceeds an authoritative concurrency limit.');
+      }
+
+      /* R1 (roadmap 1.3, phase 2): group RPM enforcement, inside the fence.
+         Only a group with a frozen ceiling touches the counter table — an
+         unlimited group performs no extra write (the seeded 'default' group
+         ships with rpm_limit NULL). The upsert counts THIS admission; a
+         rejection rolls the increment back with the admission transaction,
+         and the replay path above returned before the fence, so replays
+         never double-count. A zero ceiling is finite: it rejects the very
+         first request. */
+      if (groupRateTerms !== null && groupRateTerms.rpmLimit !== null) {
+        const counterRows = await queryRows<Row>(executor, GROUP_RATE_UPSERT_SQL, [groupRateTerms.billingGroupId]);
+        const counterRow = oneRow(counterRows);
+        const requests = counterRow === null ? null : exactInteger(counterRow.requests);
+        if (requests === null) return blockRequestPreparation('storage_failure', SAFE_CAPACITY_FAILURE);
+        if (requests > groupRateTerms.rpmLimit) {
+          return rejectRequestPreparation('rate_limited', 'The request exceeds the billing group request rate limit.');
+        }
       }
 
       const quotaReservationId = randomUUID();

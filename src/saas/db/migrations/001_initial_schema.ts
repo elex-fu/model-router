@@ -90,6 +90,7 @@ import { PROBE_MONITORS_SAAS_MIGRATION } from './109_probe_monitors.js';
 import { PLATFORM_SETTINGS_SAAS_MIGRATION } from './110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provider_account_gemini_scheduling.js';
 import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from './112_billing_group_snapshot_limits.js';
+import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from './113_billing_group_rate_counters.js';
 
 export interface SaasMigration {
   version: number;
@@ -598,4 +599,10 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // from the frozen snapshot, never the mutable group table). All columns
   // nullable; existing rows backfill to NULL (no limit).
   BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
+  // 113: R1 billing-group limit enforcement phase 2 — the group RPM counter
+  // store (the 098 per-account pattern at group scope). The capacity adapter
+  // reads the frozen group_rpm_limit from the 112 snapshot columns and
+  // atomically upserts this counter inside the admission fence; a rejection
+  // rolls back with the transaction.
+  BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
 ];

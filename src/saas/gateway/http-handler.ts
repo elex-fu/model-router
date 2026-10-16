@@ -497,7 +497,15 @@ function preparationError(result: RequestPreparationResult): GatewayHttpError {
   if (result.outcome !== 'prepared' && result.code === 'capability_unsupported') {
     return new GatewayHttpError(404, 'CAPABILITY_UNSUPPORTED');
   }
-  if (result.outcome === 'rejected') return new GatewayHttpError(403, 'REQUEST_REJECTED');
+  if (result.outcome === 'rejected') {
+    // R1 (roadmap 1.3): authoritative rate ceilings (tenant/project/key RPM,
+    // TPM and concurrency, and the billing-group RPM ceiling) are rate-limit
+    // rejections — 429, not the generic 403 refusal.
+    if (result.code === 'rate_limited' || result.code === 'quota_exceeded') {
+      return new GatewayHttpError(429, 'RATE_LIMITED');
+    }
+    return new GatewayHttpError(403, 'REQUEST_REJECTED');
+  }
   return new GatewayHttpError(503, 'REQUEST_BLOCKED');
 }
 

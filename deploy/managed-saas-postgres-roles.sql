@@ -620,6 +620,14 @@ $runtime_column_acl_normalization$;
 -- mutation is an audited version-CAS UPDATE. Re-apply this template after
 -- running migration 110 on a database that predates it — until then the
 -- control-plane runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 113, R1 billing-group limit enforcement
+-- phase 2): the gateway owns the new saas_billing_group_rate_counters table
+-- (per-group per-second admission counters, the 098 account-counter pattern
+-- at group scope). It is granted through the dynamic all-current-columns
+-- read list plus the fixed column manifest below; the control plane and the
+-- validation worker have no grant. Re-apply this template after running
+-- migration 113 on a database that predates it — until then the gateway
+-- runtime privilege probe fails closed by design.
 -- DEPLOYMENT NOTE (migration 112, R1 billing-group limit enforcement
 -- phase 1): the customer price snapshot gains the frozen group enforcement
 -- columns (group RPM/spend ceilings, supported model scopes, fallback
@@ -1060,7 +1068,10 @@ BEGIN
       -- to the request's billing-group account pool.
       ('saas_billing_group_account_pools'),
       -- R3 (107): the dispatch profile resolves the account's egress proxy.
-      ('saas_egress_proxies')
+      ('saas_egress_proxies'),
+      -- R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
+      -- RPM admission counters (capacity-side rate evidence, never billing).
+      ('saas_billing_group_rate_counters')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1207,6 +1218,15 @@ BEGIN
       ('saas_provider_account_rate_counters', 'tokens', 'INSERT'),
       ('saas_provider_account_rate_counters', 'requests', 'UPDATE'),
       ('saas_provider_account_rate_counters', 'tokens', 'UPDATE'),
+      -- R1 (113, roadmap 1.3): the capacity adapter upserts the billing-group
+      -- RPM admission counter inside the admission transaction.
+      ('saas_billing_group_rate_counters', 'group_id', 'SELECT'),
+      ('saas_billing_group_rate_counters', 'window_start', 'SELECT'),
+      ('saas_billing_group_rate_counters', 'requests', 'SELECT'),
+      ('saas_billing_group_rate_counters', 'group_id', 'INSERT'),
+      ('saas_billing_group_rate_counters', 'window_start', 'INSERT'),
+      ('saas_billing_group_rate_counters', 'requests', 'INSERT'),
+      ('saas_billing_group_rate_counters', 'requests', 'UPDATE'),
       ('saas_gateway_provider_account_affinity', 'tenant_id', 'INSERT'),
       ('saas_gateway_provider_account_affinity', 'project_id', 'INSERT'),
       ('saas_gateway_provider_account_affinity', 'supply_profile_id', 'INSERT'),

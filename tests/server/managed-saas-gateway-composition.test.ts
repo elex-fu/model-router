@@ -1336,7 +1336,9 @@ test('managed HTTP boundary shares trusted IDs across 401 and concurrent admissi
       })),
     );
     for (const { response, body } of concurrentResults) {
-      assert.equal(response.status, 403);
+      // R1 (roadmap 1.3): the fixture's quota_exceeded refusal is a rate-
+      // family rejection and surfaces as 429.
+      assert.equal(response.status, 429);
       assert.equal(response.headers.get('x-request-id'), body.error.requestId);
     }
     const expectedConcurrentIds = ['server-id-a', 'server-id-b'];
