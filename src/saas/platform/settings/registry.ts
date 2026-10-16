@@ -37,7 +37,20 @@ export interface PlatformSettingDefinition {
    * form stored under the {"value": ...} envelope.
    */
   readonly parse: (value: unknown) => unknown;
+  /**
+   * Sealed keys only: the closed allowlist of designated runtime consumer
+   * labels permitted to unseal the value (G4 consumption path). Absent or
+   * empty means no consumer may unseal the key.
+   */
+  readonly consumers?: readonly string[];
 }
+
+/**
+ * G4 sealed-secret consumption: the designated consumer label for the R4
+ * registration admission runtime (Turnstile siteverify secret, SMTP AUTH
+ * password). It is recorded as the audit entry_point on every unseal.
+ */
+export const PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION = 'registration-admission' as const;
 
 /** Registration reward amounts are already covered by the per-key grammar above. */
 
@@ -95,19 +108,21 @@ const DEFINITIONS: readonly PlatformSettingDefinition[] = [
     key: REGISTRATION_SETTINGS_KEYS.turnstileSecret,
     kind: 'sealed',
     description:
-      'Cloudflare Turnstile siteverify secret (sealed envelope; control-plane consumption is env-only until an unsealing KMS is wired).',
+      'Cloudflare Turnstile siteverify secret (sealed envelope; consumed store-first by the registration-admission runtime when an unsealing KMS is wired, env-only otherwise).',
     parse: () => {
       throw new Error('sealed settings keys have no plain-value grammar');
     },
+    consumers: [PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION],
   },
   {
     key: REGISTRATION_SETTINGS_KEYS.smtpPassword,
     kind: 'sealed',
     description:
-      'SMTP AUTH password (sealed envelope; control-plane consumption is env-only until an unsealing KMS is wired).',
+      'SMTP AUTH password (sealed envelope; consumed store-first by the registration-admission runtime when an unsealing KMS is wired, env-only otherwise).',
     parse: () => {
       throw new Error('sealed settings keys have no plain-value grammar');
     },
+    consumers: [PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION],
   },
   {
     key: TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY,
@@ -128,6 +143,11 @@ export const PLATFORM_SETTING_DEFINITIONS: readonly PlatformSettingDefinition[] 
 /** The reserved registration settings keys that consume the store store-first. */
 export const PLATFORM_REGISTRATION_SETTINGS_KEYS: readonly string[] = Object.freeze(
   Object.values(REGISTRATION_SETTINGS_KEYS).filter((key) => !REGISTRATION_SECRET_SETTINGS_KEYS.has(key)),
+);
+
+/** The sealed registration settings keys consumed through the G4 unseal path. */
+export const PLATFORM_REGISTRATION_SECRET_SETTINGS_KEYS: readonly string[] = Object.freeze(
+  Object.values(REGISTRATION_SETTINGS_KEYS).filter((key) => REGISTRATION_SECRET_SETTINGS_KEYS.has(key)),
 );
 
 export function getPlatformSettingDefinition(key: string): PlatformSettingDefinition | undefined {

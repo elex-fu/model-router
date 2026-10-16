@@ -1,141 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY } from '../../../../src/saas/billing/groups/multiplier.js';
-import type {
-  GenerateProviderCredentialDataKeyRequest,
-  ProviderCredentialKms,
-} from '../../../../src/saas/credentials/provider-crypto.js';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../../src/saas/db/types.js';
+import type { SaasDatabase } from '../../../../src/saas/db/types.js';
 import { REGISTRATION_SETTINGS_KEYS } from '../../../../src/saas/identity/registration-settings.js';
+import { PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION } from '../../../../src/saas/platform/settings/registry.js';
 import {
   type PlatformSettingRecord,
   PlatformSettingsError,
   PlatformSettingsService,
 } from '../../../../src/saas/platform/settings/service.js';
+import { DeterministicSettingsKms, FakeSettingsDatabase, type FakeSettingsRow } from './fakes.js';
 
 /**
  * F1 platform settings store: the service contract (strict per-key parsing,
  * version CAS, audited mutations with redacted secret diffs, sealed-secret
  * round trip, and the registration/topup consumption reads). The fake
  * database is the scripted-results style of tests/saas/billing/groups.test.ts
- * with a small stateful settings table.
+ * with a small stateful settings table (shared via ./fakes.ts).
  */
-
-interface FakeRow {
-  key: string;
-  value: unknown;
-  version: number;
-  updated_by_user_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-class FakeSettingsDatabase {
-  readonly statements: string[] = [];
-  readonly auditEvents: Array<readonly unknown[]> = [];
-  readonly auditDetails: Array<readonly unknown[]> = [];
-  readonly rows = new Map<string, FakeRow>();
-  readonly now = '2026-10-16T00:00:00Z';
-
-  async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
-    this.statements.push(`${sql.trim().replace(/\s+/g, ' ')} :: ${values.join('|')}`);
-    return this.execute<Row>(sql, values);
-  }
-
-  async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
-    return work({
-      query: async <Row>(sql: string, values: readonly unknown[] = []) => {
-        this.statements.push(`${sql.trim().replace(/\s+/g, ' ')} :: ${values.join('|')}`);
-        return this.execute<Row>(sql, values);
-      },
-    });
-  }
-
-  private async execute<Row>(sql: string, values: readonly unknown[]): Promise<SqlResult<Row>> {
-    const flat = sql.trim().replace(/\s+/g, ' ');
-    if (flat.includes('pg_advisory_xact_lock')) return { rows: [], rowCount: 0 };
-    if (flat.includes('SELECT key, value, version FROM saas_platform_settings WHERE key = $1 FOR UPDATE')) {
-      const row = this.rows.get(String(values[0]));
-      return { rows: row === undefined ? [] : [row as Row], rowCount: row === undefined ? 0 : 1 };
-    }
-    if (flat.includes('INSERT INTO saas_platform_settings_audit_details')) {
-      this.auditDetails.push(values);
-      return { rows: [{ audit_event_id: values[0] } as Row], rowCount: 1 };
-    }
-    if (flat.includes('INSERT INTO saas_platform_settings (')) {
-      const key = String(values[0]);
-      if (this.rows.has(key)) return { rows: [], rowCount: 0 };
-      const row: FakeRow = {
-        key,
-        value: JSON.parse(String(values[1])),
-        version: 1,
-        updated_by_user_id: (values[2] as string | null) ?? null,
-        created_at: this.now,
-        updated_at: this.now,
-      };
-      this.rows.set(key, row);
-      return { rows: [row as Row], rowCount: 1 };
-    }
-    if (flat.includes('UPDATE saas_platform_settings')) {
-      const key = String(values[0]);
-      const row = this.rows.get(key);
-      if (row === undefined || row.version !== Number(values[3])) return { rows: [], rowCount: 0 };
-      row.value = JSON.parse(String(values[1]));
-      row.version += 1;
-      row.updated_by_user_id = (values[2] as string | null) ?? null;
-      row.updated_at = this.now;
-      return { rows: [row as Row], rowCount: 1 };
-    }
-    if (flat.includes('INSERT INTO saas_audit_events')) {
-      this.auditEvents.push(values);
-      return { rows: [{ id: values[0] } as Row], rowCount: 1 };
-    }
-    if (flat.includes('INSERT INTO saas_platform_settings_audit_details')) {
-      this.auditDetails.push(values);
-      return { rows: [{ audit_event_id: values[0] } as Row], rowCount: 1 };
-    }
-    if (flat.includes('WHERE key = ANY($1::text[])')) {
-      const wanted = values[0] as readonly string[];
-      const rows = wanted
-        .map((key) => this.rows.get(key))
-        .filter((row): row is FakeRow => row !== undefined)
-        .map((row) => ({ key: row.key, value: row.value }));
-      return { rows: rows as Row[], rowCount: rows.length };
-    }
-    if (flat.includes('SELECT value FROM saas_platform_settings WHERE key = $1')) {
-      const row = this.rows.get(String(values[0]));
-      return { rows: (row === undefined ? [] : [{ value: row.value }]) as Row[], rowCount: row === undefined ? 0 : 1 };
-    }
-    if (flat.includes('FROM saas_platform_settings')) {
-      const rows = [...this.rows.values()].sort((left, right) => left.key.localeCompare(right.key));
-      return { rows: rows as Row[], rowCount: rows.length };
-    }
-    throw new Error(`unhandled fake SQL: ${sql}`);
-  }
-}
-
-class DeterministicKms implements ProviderCredentialKms {
-  private readonly keys = new Map<string, Buffer>();
-  private sequence = 0;
-
-  async generateDataKey(_request: GenerateProviderCredentialDataKeyRequest) {
-    const plaintextKey = Buffer.alloc(32, this.sequence + 1);
-    const ciphertextBlob = Buffer.from(`wrapped-settings-${this.sequence}`, 'utf-8');
-    this.sequence += 1;
-    this.keys.set(ciphertextBlob.toString('base64url'), Buffer.from(plaintextKey));
-    return { plaintextKey, ciphertextBlob };
-  }
-
-  async decryptDataKey(request: { readonly ciphertextBlob: Uint8Array }): Promise<Uint8Array> {
-    const key = this.keys.get(Buffer.from(request.ciphertextBlob).toString('base64url'));
-    if (!key) throw new Error('unknown wrapped key');
-    return Buffer.from(key);
-  }
-}
 
 const ACTOR = Object.freeze({ actorUserId: '11111111-1111-4111-8111-111111111111', requestId: 'req-1' });
 
-function createService(overrides: { readonly rows?: readonly FakeRow[] } = {}) {
+function createService(overrides: { readonly rows?: readonly FakeSettingsRow[] } = {}) {
   const fake = new FakeSettingsDatabase();
   for (const row of overrides.rows ?? []) fake.rows.set(row.key, row);
   const service = new PlatformSettingsService(fake as unknown as SaasDatabase, {
@@ -148,7 +34,7 @@ function createSealingService() {
   const fake = new FakeSettingsDatabase();
   // One KMS instance plays both roles (the local master-key seam): the
   // wrapped data keys it generates are the ones it can decrypt.
-  const kms = new DeterministicKms();
+  const kms = new DeterministicSettingsKms();
   const service = new PlatformSettingsService(fake as unknown as SaasDatabase, {
     idFactory: () => '22222222-2222-4222-8222-222222222222',
     sealingKms: kms,
@@ -315,8 +201,41 @@ test('sealed secrets round-trip through the KMS seam and never persist plaintext
   assert.deepEqual(JSON.parse(String(details[4])), ['[redacted] → [redacted]']);
   assert.ok(!JSON.stringify(fake.auditDetails).includes('turnstile-secret-value'));
 
-  const unsealed = await service.withSettingSecret(REGISTRATION_SETTINGS_KEYS.turnstileSecret, (secret) => secret);
+  const unsealed = await service.withSettingSecret(
+    REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+    PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
+    (secret) => secret,
+  );
   assert.equal(unsealed, 'turnstile-secret-value');
+  // G4: the unseal appended an audited, fully redacted consumption event.
+  const unsealEvent = fake.auditEvents[1] ?? [];
+  assert.equal(unsealEvent[0], '22222222-2222-4222-8222-222222222222');
+  assert.equal(unsealEvent[1], REGISTRATION_SETTINGS_KEYS.turnstileSecret);
+  assert.equal(unsealEvent[2], PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION);
+  assert.ok(
+    fake.statements.some(
+      (statement) =>
+        statement.includes("'platform.settings.secret_unsealed'") &&
+        statement.includes("'platform_settings'") &&
+        statement.includes('NULL, NULL'),
+    ),
+    'the audit event carries the unseal action with a NULL tenant/actor (system consumption)',
+  );
+  const unsealDetails = fake.auditDetails[1] ?? [];
+  assert.equal(unsealDetails[1], REGISTRATION_SETTINGS_KEYS.turnstileSecret);
+  assert.equal(unsealDetails[2], 1, 'after_version records the version read (before_version is NULL inline)');
+  assert.ok(
+    fake.statements.some(
+      (statement) =>
+        statement.includes('INSERT INTO saas_platform_settings_audit_details') && statement.includes('NULL'),
+    ),
+    'the unseal audit detail carries a NULL before_version',
+  );
+  assert.deepEqual(JSON.parse(String(unsealDetails[3])), [
+    `[redacted] unsealed by ${PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION}`,
+  ]);
+  assert.ok(!JSON.stringify(fake.auditEvents).includes('turnstile-secret-value'));
+  assert.ok(!JSON.stringify(fake.auditDetails).includes('turnstile-secret-value'));
 });
 
 test('sealed secrets fail closed without the KMS seams', async () => {
@@ -331,9 +250,88 @@ test('sealed secrets fail closed without the KMS seams', async () => {
     (error: unknown) => error instanceof PlatformSettingsError && error.code === 'SEALING_UNAVAILABLE',
   );
   await assert.rejects(
-    service.withSettingSecret(REGISTRATION_SETTINGS_KEYS.turnstileSecret, (secret) => secret),
+    service.withSettingSecret(
+      REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+      PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
+      (secret) => secret,
+    ),
     (error: unknown) => error instanceof PlatformSettingsError && error.code === 'UNSEALING_UNAVAILABLE',
   );
+});
+
+test('withSettingSecret rejects non-allowlisted and malformed consumers before any KMS or storage access', async () => {
+  const { fake, service } = createSealingService();
+  await service.setSecret({
+    key: REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+    secret: 'turnstile-secret-value',
+    expectedVersion: 0,
+    actor: ACTOR,
+  });
+  const statementsBefore = fake.statements.length;
+  for (const consumer of ['gateway-dispatch', 'Registration-Admission', '', 'not a consumer', 42, undefined]) {
+    await assert.rejects(
+      service.withSettingSecret(REGISTRATION_SETTINGS_KEYS.turnstileSecret, consumer as string, (secret) => secret),
+      (error: unknown) => error instanceof PlatformSettingsError && error.code === 'CONSUMER_NOT_ALLOWED',
+    );
+  }
+  assert.equal(fake.statements.length, statementsBefore, 'no SQL ran for a rejected consumer');
+});
+
+test('withSettingSecret fails closed with UNSEAL_FAILED on a wrong unsealing key and records no audit', async () => {
+  const { fake, service } = createSealingService();
+  await service.setSecret({
+    key: REGISTRATION_SETTINGS_KEYS.smtpPassword,
+    secret: 'smtp-password-value',
+    expectedVersion: 0,
+    actor: ACTOR,
+  });
+  // A second KMS instance cannot decrypt the first instance's wrapped data
+  // keys (the wrong-key posture: decryptDataKey rejects, and even a
+  // same-shape foreign key would fail the GCM tag).
+  const foreignKms = new DeterministicSettingsKms();
+  const foreign = new PlatformSettingsService(fake as unknown as SaasDatabase, {
+    idFactory: () => '33333333-3333-4333-8333-333333333333',
+    unsealingKms: foreignKms,
+    sealContext: { deployment: 'deployment-a', environment: 'production' },
+  });
+  await assert.rejects(
+    foreign.withSettingSecret(
+      REGISTRATION_SETTINGS_KEYS.smtpPassword,
+      PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
+      (secret) => secret,
+    ),
+    (error: unknown) =>
+      error instanceof PlatformSettingsError &&
+      error.code === 'UNSEAL_FAILED' &&
+      !error.message.includes('smtp-password-value'),
+  );
+  assert.equal(fake.auditEvents.length, 1, 'only the setSecret audit event exists');
+  assert.equal(fake.auditDetails.length, 1);
+  assert.ok(!JSON.stringify(fake.statements).includes('smtp-password-value'));
+});
+
+test('withSettingSecret fails closed when the audit insert fails, before the callback receives plaintext', async () => {
+  const { fake, service } = createSealingService();
+  await service.setSecret({
+    key: REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+    secret: 'turnstile-secret-value',
+    expectedVersion: 0,
+    actor: ACTOR,
+  });
+  fake.failAuditInserts = true;
+  let callbackSawSecret = false;
+  await assert.rejects(
+    service.withSettingSecret(
+      REGISTRATION_SETTINGS_KEYS.turnstileSecret,
+      PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
+      (secret) => {
+        callbackSawSecret = secret.length > 0;
+        return secret;
+      },
+    ),
+    (error: unknown) => error instanceof PlatformSettingsError && error.code === 'UNSEAL_FAILED',
+  );
+  assert.equal(callbackSawSecret, false, 'the plaintext handoff is denied when the audit cannot persist');
 });
 
 test('list exposes plain values and marks sealed rows without values', async () => {

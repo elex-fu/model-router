@@ -194,6 +194,7 @@ import {
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
 import {
   createPlatformSettingsHttpHandler,
+  PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
   type PlatformSettingsHttpHandler,
   PlatformSettingsService,
 } from '../saas/platform/settings/index.js';
@@ -1872,35 +1873,57 @@ export async function startManagedSaasServer(
       // F1 platform settings store consumption (task #34). Non-secret
       // admission switches resolve store-first (a store hit wins) with env
       // fallback — an empty store keeps the exact pre-F1 env/default posture.
-      // Secrets (SMTP password, Turnstile secret) stay env-only: the control
-      // plane holds no credential-unsealing KMS, so sealed envelopes in the
-      // store are not consumable here (documented deviation); they are never
-      // persisted as plaintext anywhere. Unconfigured SMTP degrades to the
-      // console sender (the alerts.ts behavior) so nothing dials out by
-      // surprise; default mode is fail-closed (closed).
-      const platformSettingsService = new PlatformSettingsService(database, {
-        ...(providers?.providerCredentialSealingKms && deployment.providerCredentialKmsKeyId
+      // G4 sealed-secret consumption: the only runtime role allowed to hold
+      // an unsealing key provider is the gateway-class credential KMS, which
+      // reaches the control-plane code path only in the combined workload
+      // through the injected gateway composition (split control-plane
+      // workloads get no unsealing KMS and keep the F1 env-only posture —
+      // the service fails closed with UNSEALING_UNAVAILABLE on sealed reads).
+      // When an unsealing KMS IS wired, store-carried secrets (Turnstile
+      // secret, SMTP password) win over the environment through the audited
+      // withSettingSecret path, and an unseal failure fails closed (no
+      // silent env fallback against a present store envelope). Unconfigured
+      // SMTP degrades to the console sender (the alerts.ts behavior) so
+      // nothing dials out by surprise; default mode is fail-closed (closed).
+      const platformSettingsUnsealingKms = options.gateway?.providerCredentialUnsealingKms;
+      const platformSettingsSealing =
+        providers?.providerCredentialSealingKms && deployment.providerCredentialKmsKeyId
           ? {
               sealingKms: providers.providerCredentialSealingKms,
               kmsKeyId: deployment.providerCredentialKmsKeyId,
+            }
+          : {};
+      const platformSettingsService = new PlatformSettingsService(database, {
+        ...platformSettingsSealing,
+        ...(platformSettingsSealing.kmsKeyId !== undefined || platformSettingsUnsealingKms !== undefined
+          ? {
               sealContext: {
                 deployment: deployment.deploymentId,
                 environment: deployment.environmentId,
               },
             }
           : {}),
+        ...(platformSettingsUnsealingKms === undefined ? {} : { unsealingKms: platformSettingsUnsealingKms }),
       });
       // The env snapshot stays the constructor-validated fallback; the live
       // resolver merges the store overlay over the environment on every
       // admission decision. A resolution failure (unreadable store or a
       // misconfigured overlay) fails closed to the parser's empty-source
       // defaults rather than admitting traffic against an unverifiable
-      // configuration.
+      // configuration. G4: sealed secrets join the overlay store-first only
+      // when an unsealing KMS is wired; otherwise the env-only posture holds.
       const registrationSettings = parseRegistrationAdmissionSettings(process.env);
       const resolveRegistrationSettingsFailClosed = async (): Promise<RegistrationAdmissionSettings> => {
         try {
           return resolveRegistrationAdmissionSettings(
-            await platformSettingsService.readRegistrationSettingsOverlay(),
+            {
+              ...(await platformSettingsService.readRegistrationSettingsOverlay()),
+              ...(platformSettingsUnsealingKms === undefined
+                ? {}
+                : await platformSettingsService.readRegistrationSecretsOverlay(
+                    PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
+                  )),
+            },
             process.env,
           );
         } catch (error) {

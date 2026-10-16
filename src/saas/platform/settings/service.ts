@@ -5,10 +5,11 @@ import type {
   ProviderCredentialSealingKms,
   ProviderCredentialUnsealingKms,
 } from '../../credentials/provider-crypto.js';
-import type { SaasDatabase } from '../../db/types.js';
+import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
 import { diffSettings } from '../../observability/settings-diff.js';
 import {
   getPlatformSettingDefinition,
+  PLATFORM_REGISTRATION_SECRET_SETTINGS_KEYS,
   PLATFORM_REGISTRATION_SETTINGS_KEYS,
   type PlatformSettingDefinition,
   parseStoredTopupAmountTierDiscounts,
@@ -41,10 +42,14 @@ import {
  * - Sealed secrets: secret-suffixed keys are stored only as KMS sealed
  *   envelopes (sealProviderCredential output — the egress-proxy precedent);
  *   the plaintext exists only inside the unseal callback. Sealing needs the
- *   control plane's sealing KMS; unsealing needs an unsealing KMS, which the
- *   control-plane workload does not hold, so production registration secrets
- *   remain env-only (documented deviation) while the store can already carry
- *   the sealed envelopes for a future consumer.
+ *   control plane's sealing KMS; unsealing needs an unsealing KMS (the
+ *   gateway-class credential KMS — the only role allowed to hold one). G4
+ *   consumption: withSettingSecret resolves a sealed key to its plaintext at
+ *   the point of use for a designated, registry-allowlisted consumer label,
+ *   fails closed with UNSEALING_UNAVAILABLE when the role holds no unsealing
+ *   key provider, and appends an audited 'platform.settings.secret_unsealed'
+ *   event (plus the narrow audit-details sibling) before the plaintext is
+ *   handed over — never recording the plaintext itself.
  */
 
 export type PlatformSettingsErrorCode =
@@ -54,7 +59,9 @@ export type PlatformSettingsErrorCode =
   | 'VERSION_CONFLICT'
   | 'NOT_FOUND'
   | 'SEALING_UNAVAILABLE'
-  | 'UNSEALING_UNAVAILABLE';
+  | 'UNSEALING_UNAVAILABLE'
+  | 'CONSUMER_NOT_ALLOWED'
+  | 'UNSEAL_FAILED';
 
 export class PlatformSettingsError extends Error {
   readonly code: PlatformSettingsErrorCode;
@@ -110,6 +117,7 @@ interface SettingsRow {
 const SETTINGS_LOCK_KEY = 'saas-platform-settings:mutations';
 const MAX_SECRET_BYTES = 4096;
 const MAX_AUDIT_SUMMARY_LINES = 64;
+const CONSUMER_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 function fail(code: PlatformSettingsErrorCode, message: string): never {
   throw new PlatformSettingsError(code, message);
@@ -300,28 +308,113 @@ export class PlatformSettingsService {
   }
 
   /**
-   * Unseals a secret settings value inside the callback (the plaintext exists
-   * only there). Fails closed when no unsealing KMS is wired.
+   * G4 sealed-secret consumption: unseals a secret settings value inside the
+   * callback (the plaintext exists only there) for a designated consumer.
+   *
+   * Contract:
+   * - Access control: `consumer` must be a bounded label allowlisted on the
+   *   key's registry definition (CONSUMER_NOT_ALLOWED otherwise). The admin
+   *   HTTP surface never calls this path — it keeps returning redacted
+   *   metadata only.
+   * - Fail-closed: without an unsealing KMS and seal context the read fails
+   *   with UNSEALING_UNAVAILABLE; a corrupt envelope, a wrong key or a KMS
+   *   failure surfaces as UNSEAL_FAILED. Ciphertext is never returned.
+   * - Audit: a successful unseal appends 'platform.settings.secret_unsealed'
+   *   to saas_audit_events (entry_point = consumer label, no actor, no
+   *   request metadata) plus the audit-details sibling carrying the key, the
+   *   version read and a fully redacted summary — inside the same
+   *   transaction, before the plaintext reaches the consumer callback, so an
+   *   audit failure denies the handoff. The plaintext is never recorded.
    */
-  async withSettingSecret<T>(key: string, callback: (secret: string) => T | PromiseLike<T>): Promise<T> {
+  async withSettingSecret<T>(
+    key: string,
+    consumer: string,
+    callback: (secret: string) => T | PromiseLike<T>,
+  ): Promise<T> {
     const definition = requireDefinition(key);
     if (definition.kind !== 'sealed') fail('INVALID_VALUE', 'The settings key does not hold a sealed secret');
+    const consumerLabel = this.requireConsumer(consumer, definition);
     if (!this.options.unsealingKms || !this.options.sealContext) {
       fail('UNSEALING_UNAVAILABLE', 'Unsealing a secret settings value requires an unsealing KMS');
     }
-    const record = await this.database.query<SettingsRow>(
-      `/* saas-platform-settings:get-sealed */
-       SELECT value FROM saas_platform_settings WHERE key = $1`,
-      [definition.key],
+    if (typeof callback !== 'function') fail('INVALID_VALUE', 'The unseal callback is required');
+    const kms = this.options.unsealingKms;
+    return this.database.transaction(async (tx) => {
+      const record = await tx.query<SettingsRow>(
+        `/* saas-platform-settings:get-sealed */
+         SELECT value, version FROM saas_platform_settings WHERE key = $1`,
+        [definition.key],
+      );
+      const row = record.rows[0];
+      if (row === undefined) fail('NOT_FOUND', 'The settings key has no stored value');
+      const version = rowVersion(row.version);
+      try {
+        return await withUnsealedPlatformSettingSecret(
+          row.value,
+          this.sealContextFor(definition.key),
+          kms,
+          async (secret) => {
+            await this.auditUnseal(tx, definition.key, version, consumerLabel);
+            return await callback(secret);
+          },
+        );
+      } catch (error) {
+        if (error instanceof PlatformSettingsError) throw error;
+        fail('UNSEAL_FAILED', 'The settings secret could not be unsealed');
+      }
+    });
+  }
+
+  /**
+   * The G4 registration secrets overlay: settings-key → plaintext for every
+   * sealed registration key present in the store. Absent keys are omitted (env
+   * fallback — the exact pre-F1 posture); present keys fail closed through
+   * withSettingSecret (UNSEALING_UNAVAILABLE when the role holds no unsealing
+   * key provider, UNSEAL_FAILED on a wrong key or corrupt envelope), so a
+   * store-carried secret can never silently degrade to the environment.
+   */
+  async readRegistrationSecretsOverlay(consumer: string): Promise<Readonly<Record<string, string>>> {
+    const overlay: Record<string, string> = {};
+    for (const key of PLATFORM_REGISTRATION_SECRET_SETTINGS_KEYS) {
+      try {
+        const secret = await this.withSettingSecret(key, consumer, (value) => value);
+        if (secret !== '') overlay[key] = secret;
+      } catch (error) {
+        if (error instanceof PlatformSettingsError && error.code === 'NOT_FOUND') continue;
+        throw error;
+      }
+    }
+    return overlay;
+  }
+
+  private requireConsumer(consumer: unknown, definition: PlatformSettingDefinition): string {
+    if (typeof consumer !== 'string' || !CONSUMER_LABEL_PATTERN.test(consumer)) {
+      fail('CONSUMER_NOT_ALLOWED', 'The settings secret consumer is not recognized');
+    }
+    if (!(definition.consumers ?? []).includes(consumer)) {
+      fail('CONSUMER_NOT_ALLOWED', 'The consumer is not permitted to unseal this settings secret');
+    }
+    return consumer;
+  }
+
+  private async auditUnseal(tx: SqlExecutor, key: string, version: number, consumer: string): Promise<void> {
+    const auditEventId = this.idFactory();
+    const auditEvent = await tx.query(
+      `INSERT INTO saas_audit_events
+        (id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, source_ip, user_agent, entry_point, request_id)
+       VALUES ($1, NULL, NULL, 'platform.settings.secret_unsealed', 'platform_settings', $2, clock_timestamp(), NULL, NULL, $3, NULL)
+       RETURNING id`,
+      [auditEventId, key, consumer],
     );
-    const envelope = record.rows[0]?.value;
-    if (envelope === undefined) fail('NOT_FOUND', 'The settings key has no stored value');
-    return withUnsealedPlatformSettingSecret(
-      envelope,
-      this.sealContextFor(definition.key),
-      this.options.unsealingKms,
-      callback,
+    if (auditEvent.rowCount !== 1) fail('UNSEAL_FAILED', 'The settings unseal audit event could not be persisted');
+    const details = await tx.query(
+      `INSERT INTO saas_platform_settings_audit_details
+         (audit_event_id, settings_key, before_version, after_version, change_summary)
+       VALUES ($1, $2, NULL, $3, $4::jsonb)
+       RETURNING audit_event_id`,
+      [auditEventId, key, version, JSON.stringify([`[redacted] unsealed by ${consumer}`])],
     );
+    if (details.rowCount !== 1) fail('UNSEAL_FAILED', 'The settings unseal audit detail could not be persisted');
   }
 
   private sealContextFor(key: string): PlatformSettingSealContextInput {

@@ -5,8 +5,10 @@ export {
 } from './http.js';
 export {
   getPlatformSettingDefinition,
+  PLATFORM_REGISTRATION_SECRET_SETTINGS_KEYS,
   PLATFORM_REGISTRATION_SETTINGS_KEYS,
   PLATFORM_SETTING_DEFINITIONS,
+  PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
   type PlatformSettingDefinition,
   type PlatformSettingKind,
   parseStoredTopupAmountTierDiscounts,

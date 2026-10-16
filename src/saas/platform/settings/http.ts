@@ -219,7 +219,10 @@ function settingsErrorStatus(error: PlatformSettingsError): { status: number; co
       return { status: 404, code: 'SETTINGS_KEY_NOT_FOUND' };
     case 'SEALING_UNAVAILABLE':
     case 'UNSEALING_UNAVAILABLE':
+    case 'UNSEAL_FAILED':
       return { status: 503, code: 'SETTINGS_KMS_UNAVAILABLE' };
+    case 'CONSUMER_NOT_ALLOWED':
+      return { status: 403, code: 'FORBIDDEN' };
     default:
       return { status: 503, code: 'PLATFORM_SETTINGS_UNAVAILABLE' };
   }
