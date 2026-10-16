@@ -905,7 +905,17 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'updated_at',
   ]),
-  ...columnGrants('saas_api_key_budget_counters', 'UPDATE', ['token_settled', 'charge_settled', 'updated_at']),
+  ...columnGrants('saas_api_key_budget_counters', 'UPDATE', [
+    'token_settled',
+    'charge_settled',
+    'updated_at',
+    // R9 P15b: the unknown-outcome recovery worker's keyBudget release
+    // (releaseKeyBudgetReservation -> adjustCounters) decrements the
+    // outstanding-reserved columns on both windows when cancelling a stale
+    // admission; without these the sweep fails on every candidate.
+    'token_outstanding_reserved',
+    'charge_outstanding_reserved',
+  ]),
   ...columnGrants('saas_api_key_budget_reservations', 'SELECT', [
     'tenant_id',
     'project_id',
@@ -919,6 +929,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'updated_at',
   ]),
+  // R9 P15b: releaseKeyBudgetReservation flips the reservation to 'released'
+  // (state, updated_at) after decrementing the counters; the recovery worker
+  // and pre-dispatch compensation both drive this under the control-plane role.
+  ...columnGrants('saas_api_key_budget_reservations', 'UPDATE', ['state', 'updated_at']),
   ...columnGrants('saas_route_config_heads', 'SELECT', [
     'tenant_id',
     'project_id',
