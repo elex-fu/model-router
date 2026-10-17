@@ -27,6 +27,7 @@ import {
 } from '../saas/gateway/dispatch-usage-settlement.js';
 import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
 import { GROK_ENDPOINT } from '../saas/gateway/grok/catalog-identity.js';
+import type { GrokCredentialResolver } from '../saas/gateway/grok/transport.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
@@ -143,11 +144,24 @@ import {
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
+import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
+import { SaasVideoBillingStateMachine } from '../saas/gateway/videos/video-billing-state-machine.js';
+import type { SaasGatewayVideoCreatePort } from '../saas/gateway/videos/video-create-port.js';
+import { PersistentSaasGatewayVideoCreatePort } from '../saas/gateway/videos/video-create-port.js';
+import { ReconciliationVideoSettlementPort } from '../saas/gateway/videos/video-settlement-port.js';
+import { PostgresVideoTaskStore } from '../saas/gateway/videos/video-task-store.js';
+import {
+  createSaasGatewayQueryPortRouter,
+  SaasGatewayVideosQueryPort,
+} from '../saas/gateway/videos/videos-query-port.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
-import { DurableNormalSuccessSettlementPort } from '../saas/metering/conditional-settlement-port.js';
+import {
+  DurableConditionalSettlementPort,
+  DurableNormalSuccessSettlementPort,
+} from '../saas/metering/conditional-settlement-port.js';
 import { SaasMeteringService } from '../saas/metering/service.js';
 import { ByokServicePlanService } from '../saas/plans/service.js';
 import { SaasPricingService } from '../saas/pricing/service.js';
@@ -276,6 +290,16 @@ export interface ManagedSaasGatewayCompositionDependencies {
     /** Built by the production composition; the plain composition accepts them pre-built. */
     readonly queryEndpoints: SaasGatewayQueryPort;
     readonly asyncMedia: SaasGatewayAsyncMediaPort;
+  };
+  /**
+   * Roadmap batch 4 §4.3 (task #17): the async video media binding —
+   * built by the production composition; the plain composition accepts
+   * the ports pre-built. Absent keeps the video create endpoints closed
+   * (503) and the video query routes unrouted (503).
+   */
+  readonly videoMedia?: {
+    readonly queryEndpoints: SaasGatewayQueryPort;
+    readonly videoCreate: SaasGatewayVideoCreatePort;
   };
   /**
    * Roadmap batch 2 §2.1: enable the sticky-session scheduling seam at the
@@ -567,6 +591,10 @@ function validateCompositionDependencies(dependencies: ManagedSaasGatewayComposi
   requirePositiveInteger(dependencies.maxBodyBytes);
   requireText(dependencies.entryPoint);
   requireDependency(dependencies.lifecycle, 'close');
+  if (dependencies.videoMedia !== undefined) {
+    requireDependency(dependencies.videoMedia.queryEndpoints, 'serve');
+    requireDependency(dependencies.videoMedia.videoCreate, 'registerCreate');
+  }
 }
 
 /**
@@ -632,7 +660,6 @@ export function createManagedSaasGatewayComposition(
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
     ...(dependencies.imageMedia
       ? {
-          queryEndpoints: dependencies.imageMedia.queryEndpoints,
           asyncMedia: dependencies.imageMedia.asyncMedia,
           asyncExecutionTimeoutMs: dependencies.imageMedia.executionTimeoutMs,
           ...(dependencies.imageMedia.keepaliveIntervalMs
@@ -640,6 +667,27 @@ export function createManagedSaasGatewayComposition(
             : {}),
         }
       : {}),
+    /*
+     * §4.0 ③ (task #14) + §4.3 (task #17): the query-endpoint family composes
+     * through an explicit route router — the images port serves
+     * images.task_status, the videos port serves the two video routes; a
+     * route without a port fails closed with 503. A videoMedia binding
+     * without imageMedia (and vice versa) keeps the other family closed.
+     */
+    ...(dependencies.imageMedia || dependencies.videoMedia
+      ? {
+          queryEndpoints: createSaasGatewayQueryPortRouter({
+            ...(dependencies.imageMedia ? { 'images.task_status': dependencies.imageMedia.queryEndpoints } : {}),
+            ...(dependencies.videoMedia
+              ? {
+                  'videos.task_status': dependencies.videoMedia.queryEndpoints,
+                  'videos.task_content': dependencies.videoMedia.queryEndpoints,
+                }
+              : {}),
+          }),
+        }
+      : {}),
+    ...(dependencies.videoMedia ? { videoCreate: dependencies.videoMedia.videoCreate } : {}),
   });
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
@@ -865,6 +913,29 @@ export interface ManagedSaasGatewayProductionOptions {
    * credential convention).
    */
   readonly imageMedia?: SaasGatewayImageMediaOptions;
+  /**
+   * Roadmap batch 4 §4.3 (task #17): the async video media binding — the
+   * bound-account status/content forwarder plus task lifecycle tuning.
+   * Absent keeps the POST /v1/videos* create endpoints and the video
+   * query routes closed (503). The credential resolver is the batch-3
+   * Grok transport's contract (SSRF hard gate enforced by the forwarder).
+   */
+  readonly videoMedia?: {
+    /** Undici-compatible fetch the status/content lookups dial. */
+    readonly fetch: (url: string, init: RequestInit) => Promise<Response>;
+    /** The batch-3 Grok credential resolver (oauth / api-key accounts). */
+    readonly resolveCredential: GrokCredentialResolver;
+    /** Credential-kind-scoped base override (tests / custom api-key upstreams). */
+    readonly baseUrl?: string;
+    /** Operator allowlist of custom base hosts for api-key credentials. */
+    readonly operatorHostAllowlist?: readonly string[];
+    /** Task TTL; default 24 h (the sub2api pending-billing TTL). */
+    readonly taskTtlMs?: number;
+    /** Upstream lookup timeout; default 120 s. */
+    readonly timeoutMs?: number;
+    /** In-memory ceiling for one proxied content response; default 64 MiB. */
+    readonly maxContentBytes?: number;
+  };
   /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
    * `X-Title`). When set, the values are mounted on the generic transport's
@@ -1811,6 +1882,47 @@ export function createManagedSaasGatewayProductionComposition(
         };
       })()
     : undefined;
+  /*
+   * §4.3 (task #17): the async video media binding — the PG-backed task
+   * store (migration 124), the bound-account status/content forwarder, the
+   * one-shot billing state machine (its deferred settlement runs through
+   * the unknown-outcome reconciliation channel against the create's frozen
+   * admission facts), and the two boundary ports (create-time snapshot
+   * registration + the status/content query port). Absent keeps the
+   * endpoints closed.
+   */
+  const videoMedia = options.videoMedia
+    ? (() => {
+        const store = new PostgresVideoTaskStore(database);
+        const forwarder = new GrokVideoUpstreamForwarder({
+          fetch: options.videoMedia.fetch,
+          resolveCredential: options.videoMedia.resolveCredential,
+          ...(options.videoMedia.baseUrl === undefined ? {} : { baseUrl: options.videoMedia.baseUrl }),
+          ...(options.videoMedia.operatorHostAllowlist === undefined
+            ? {}
+            : { operatorHostAllowlist: options.videoMedia.operatorHostAllowlist }),
+          ...(options.videoMedia.timeoutMs === undefined ? {} : { timeoutMs: options.videoMedia.timeoutMs }),
+          ...(options.videoMedia.maxContentBytes === undefined
+            ? {}
+            : { maxContentBytes: options.videoMedia.maxContentBytes }),
+        });
+        const billing = new SaasVideoBillingStateMachine({
+          store,
+          settlement: new ReconciliationVideoSettlementPort({
+            metering,
+            settlement: new DurableConditionalSettlementPort(database),
+            pricing: new SaasPricingService(database),
+          }),
+        });
+        return {
+          queryEndpoints: new SaasGatewayVideosQueryPort({ store, forwarder, billing }),
+          videoCreate: new PersistentSaasGatewayVideoCreatePort({
+            store,
+            ...(options.videoMedia.taskTtlMs === undefined ? {} : { ttlMs: options.videoMedia.taskTtlMs }),
+          }),
+        };
+      })()
+    : undefined;
   const payload = createProviderPayloadCompiler(options);
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
@@ -1854,6 +1966,7 @@ export function createManagedSaasGatewayProductionComposition(
     entryPoint: options.entryPoint,
     trustedProxyCidrs: options.trustedProxyCidrs,
     ...(imageMedia ? { imageMedia } : {}),
+    ...(videoMedia ? { videoMedia } : {}),
     // Batch 2 §2.1: the production composition always wires the scheduler
     // with the affinity port (required above), so the sticky-session
     // scheduling seam is unconditionally live here.

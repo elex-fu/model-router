@@ -101,6 +101,7 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
+import { VIDEO_TASKS_SAAS_MIGRATION } from './124_video_tasks.js';
 
 export interface SaasMigration {
   version: number;
@@ -698,4 +699,9 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // role owns the lifecycle (column-scoped INSERT/UPDATE + dynamic read),
   // control plane has no access.
   IMAGE_TASKS_SAAS_MIGRATION,
+  // 124: batch-4 §4.3 async video tasks (task #17) — the create-time
+  // billing snapshot + bound-account binding + one-shot billing claim
+  // (pending → billed atomically, released on settlement failure, skipped
+  // fail-closed when the snapshot is missing).
+  VIDEO_TASKS_SAAS_MIGRATION,
 ];

@@ -81,20 +81,33 @@ export function createEmbeddingsUsageUpperBoundEstimator(): EmbeddingsUsageUpper
 
 /**
  * Composition helper: selects the embeddings estimator for embeddings
- * traffic and the default estimator for everything else, so a runtime
- * module can keep one `providerPayload.estimator` dependency.
+ * traffic, the video estimator for the §4.3 video create family, and the
+ * default estimator for everything else, so a runtime module can keep one
+ * `providerPayload.estimator` dependency.
  */
 export function selectUsageUpperBoundEstimatorByOperation(options: {
   readonly default: ProviderUsageUpperBoundEstimator;
   readonly embeddings?: ProviderUsageUpperBoundEstimator;
+  /** §4.3 (task #17): the videos.* create operations' per-unit hold estimator. */
+  readonly videos?: ProviderUsageUpperBoundEstimator;
 }): ProviderUsageUpperBoundEstimator {
   const embeddings = options.embeddings ?? createEmbeddingsUsageUpperBoundEstimator();
+  const videos = options.videos ?? null;
   return {
-    version: `${options.default.version}+${embeddings.version}`,
+    version: `${options.default.version}+${embeddings.version}${videos === null ? '' : `+${videos.version}`}`,
     estimate(input) {
-      return input.normalizedRequest.providerOperation === 'embeddings'
-        ? embeddings.estimate(input)
-        : options.default.estimate(input);
+      if (input.normalizedRequest.providerOperation === 'embeddings') {
+        return embeddings.estimate(input);
+      }
+      if (
+        videos !== null &&
+        (input.normalizedRequest.providerOperation === 'videos.generations' ||
+          input.normalizedRequest.providerOperation === 'videos.edits' ||
+          input.normalizedRequest.providerOperation === 'videos.extensions')
+      ) {
+        return videos.estimate(input);
+      }
+      return options.default.estimate(input);
     },
   };
 }

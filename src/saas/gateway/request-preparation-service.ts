@@ -685,11 +685,18 @@ function normalizeOperationForProtocol(value: unknown, protocol: GatewayProtocol
  * §4.2 (task #16): the OpenAI family also hosts the images.generations
  * operation with the same constraint — image requests are passthrough-only
  * onto OpenAI-family providers.
+ * §4.3 (task #17): the OpenAI family also hosts the async video create
+ * operations with the same constraint.
  */
 function operationAllowedForProtocol(protocol: GatewayProtocol, operation: string): boolean {
   return (
     operation === canonicalOperationForProtocol(protocol) ||
-    (protocol === 'openai' && (operation === 'embeddings' || operation === 'images.generations'))
+    (protocol === 'openai' &&
+      (operation === 'embeddings' ||
+        operation === 'images.generations' ||
+        operation === 'videos.generations' ||
+        operation === 'videos.edits' ||
+        operation === 'videos.extensions'))
   );
 }
 
