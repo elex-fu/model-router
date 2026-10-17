@@ -301,14 +301,17 @@ M1=内伤清零+bench达标 → M2=账号运营同级 → M3=平台广度+多模
 | #3 apicompat PhaseA | 236bae2 | responses↔CC 双向真转换（reverse-request/response/chat 三模块 2979 行）+ bridge stub 重写 + pair 注册，77 测试 |
 | #2 R1 限额执法 | aa0ffc4→d0921f0 | 四 Phase：快照横切（迁移 112）→ 组 RPM fence（113）→ d/w/m 储备制 + key 5h/7d 真滚动窗口（114）→ scopes + fallback 环检测；20 个 PG 门禁 + 金样零漂移 |
 
-**Wave 2（批次二）— 进行中**
+**Wave 2（批次二）— 全部完成（2026-10-17）**
 
 | 任务 | 状态 | 摘要 |
 |---|---|---|
 | #7 dateline | ✅ b077b5b | system prompt 日期句规范化（反文本指纹） |
 | #5 粘性调度 | ✅ f9f5c16 | sessionHash 协议感知四级合并 + stickyScheduling 显式能力（默认关零变化）+ 三态门（新增 stale 降级语义）+ golden byte-identical |
-| #4 P4/P16 | Step2 ✅ 601cfd1（语句削减）；Step3 进行中 | freeze writer 审计 + advisory lock |
-| #6 5h 窗口/状态机 | 进行中 | 迁移 115 + dormant 列激活 + 矩阵扩展 |
-| #7 TLS sidecar 主体 | 进行中 | 迁移 116（jsonpath bug 修复中）+ Go sidecar + connector |
+| #4 P4/P16 | ✅ 601cfd1+f5c9b3d | Step2 语句削减 93→73（预算门钉死）；Step3 钱包 XACT advisory fence（freeze 审计通过、互斥域闭合、跨 fence 元组锁消除）；Step4 跳过（Step3 已消除根因） |
+| #6 5h 窗口/状态机 | ✅ 91a62c8+dae3d5b | 三品类观测管线（claude 成功路径头解析/codex 首写入方/gemini attempt 聚合 worker）+ 阈值停调（复用 dormant auto_pause 列、选号惰性评估、迁移 115）+ 矩阵扩展（402 CN/403 再分类/模型级限流/401 升级/429 fallback，三层保留） |
+| #7 TLS sidecar | ✅ c2325e2 | Go sidecar（utls 三 dialer + IPC 隧道 + JA3 抓包自测）+ 迁移 116 档案表 + TS connector 全链 + PG 权威 30s TTL 缓存 fail-open + compose 服务；fingerprint_mode 裁决=与 profile_id 正交并存 |
+| payments 修复 | ✅ 035b504 | drill fakes 适配钱包 advisory fence |
+
+Wave 2 终检：5051/5051 测试全绿、tsc 零错、golden 全部 byte-identical。遗留项见各任务报告（bench 复测待合流后统一、FIN057×PG18 环境问题、模型级停调调度侧消费、#5 预留带判定、探针路径档案接入）。
 
 **待办**：批次三四平台（Bedrock/Vertex/Grok/智谱MiniMax，seam #8 已就绪）、批次四（4.0 前置 + 计费横切 + 多模态）、批次五（生态六线）。
