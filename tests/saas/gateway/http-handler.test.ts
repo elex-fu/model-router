@@ -507,19 +507,31 @@ test('rejects unsupported paths, methods, content types, and body sizes before p
 
 test('resolves endpoint-family body limits with documented defaults and fails closed on invalid injection (4.0 ①)', () => {
   const defaults = resolveSaasGatewayBodyLimits(1024, undefined);
-  assert.deepEqual(defaults, { default: 1024, images: 10 * 1024 * 1024, audio: 26 * 1024 * 1024 });
+  // §4.3 (task #17): the videos family shares the images media ceiling.
+  assert.deepEqual(defaults, {
+    default: 1024,
+    images: 10 * 1024 * 1024,
+    audio: 26 * 1024 * 1024,
+    videos: 10 * 1024 * 1024,
+  });
 
-  const injected = resolveSaasGatewayBodyLimits(1024, { images: 2048, audio: 4096 });
-  assert.deepEqual(injected, { default: 1024, images: 2048, audio: 4096 });
+  const injected = resolveSaasGatewayBodyLimits(1024, { images: 2048, audio: 4096, videos: 8192 });
+  assert.deepEqual(injected, { default: 1024, images: 2048, audio: 4096, videos: 8192 });
 
   // Partial injection keeps family defaults for the omitted family only.
   const partial = resolveSaasGatewayBodyLimits(1024, { images: 2048 });
-  assert.deepEqual(partial, { default: 1024, images: 2048, audio: 26 * 1024 * 1024 });
+  assert.deepEqual(partial, {
+    default: 1024,
+    images: 2048,
+    audio: 26 * 1024 * 1024,
+    videos: 10 * 1024 * 1024,
+  });
 
   assert.equal(resolveSaasGatewayBodyLimits(null, undefined), null);
   assert.equal(resolveSaasGatewayBodyLimits(1024, { images: 0 }), null);
   assert.equal(resolveSaasGatewayBodyLimits(1024, { audio: -1 }), null);
   assert.equal(resolveSaasGatewayBodyLimits(1024, { audio: 1.5 }), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { videos: 0 }), null);
 });
 
 test('enforces endpoint-family body ceilings before route resolution (4.0 ①)', async () => {

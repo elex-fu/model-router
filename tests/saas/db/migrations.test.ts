@@ -607,6 +607,8 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     // Batch-5 §5.1 plugin system (task #24) — installation registry,
     // capability bindings and the host-service KV store.
     128,
+    // Batch-4 §4.3 async video tasks (task #17).
+    124,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -617,6 +619,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     versions,
   );
   assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 108);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 105);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -686,6 +689,10 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     ],
   );
   assert.equal(pool.applied.length, 108);
+      'video_tasks',
+    ],
+  );
+  assert.equal(pool.applied.length, 105);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -853,6 +860,7 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       126,
       127,
       128,
+      124,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );

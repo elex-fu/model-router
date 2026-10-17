@@ -106,6 +106,7 @@ import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_setting
 import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
 
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
+import { VIDEO_TASKS_SAAS_MIGRATION } from './124_video_tasks.js';
 
 export interface SaasMigration {
   version: number;
@@ -703,6 +704,11 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // role owns the lifecycle (column-scoped INSERT/UPDATE + dynamic read),
   // control plane has no access.
   IMAGE_TASKS_SAAS_MIGRATION,
+  // 124: batch-4 §4.3 async video tasks (task #17) — the create-time
+  // billing snapshot + bound-account binding + one-shot billing claim
+  // (pending → billed atomically, released on settlement failure, skipped
+  // fail-closed when the snapshot is missing).
+  VIDEO_TASKS_SAAS_MIGRATION,
   // 125: batch-5 §5.4 content risk control (task #19) — single-row gateway-
   // readable JSONB config, the moderation decision log (hit/non-hit rows,
   // auto-ban violation counting, admin filter dimensions), and the pre-hash

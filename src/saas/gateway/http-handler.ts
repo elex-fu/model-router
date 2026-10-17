@@ -27,6 +27,9 @@ import type {
 } from './request-preparation-service.js';
 import type { SaasModelPlazaPort } from './model-plaza/endpoint.js';
 import { stickySchedulingContext } from './sticky-session-reference.js';
+import { TeeRecordingClientStream } from './videos/tee-recording-client-stream.js';
+import { extractVideoRequestIdFromBody } from './videos/video-billing.js';
+import type { SaasGatewayVideoCreatePort } from './videos/video-create-port.js';
 
 const GATEWAY_PREFIX = '/v1';
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -56,6 +59,8 @@ const DEFAULT_IMAGE_FAMILY_BODY_BYTES = 10 * 1024 * 1024;
 const DEFAULT_AUDIO_FAMILY_BODY_BYTES = 26 * 1024 * 1024;
 const IMAGE_FAMILY_PATH_PREFIX = '/v1/images/';
 const AUDIO_FAMILY_PATH_PREFIX = '/v1/audio/';
+/** §4.3 (task #17): the video create family shares the images media ceiling. */
+const VIDEO_FAMILY_PATH_PREFIX = '/v1/videos/';
 
 /*
  * Roadmap batch 4 §4.0 ② (task #14): JSON-only media policy.
@@ -206,6 +211,14 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   // submission endpoint is the same operation with a 202+task contract.
   ['/v1/images/generations', 'openai'],
   ['/v1/images/generations/async', 'openai'],
+  // §4.3 (task #17): the async video create family rides the OpenAI
+  // inbound protocol family the same way — a synchronous forward whose
+  // upstream answers with a request id (the gateway-side task state is
+  // the migration-124 snapshot, not a gateway-executed task).
+  ['/v1/videos', 'openai'],
+  ['/v1/videos/generations', 'openai'],
+  ['/v1/videos/edits', 'openai'],
+  ['/v1/videos/extensions', 'openai'],
 ]);
 
 /**
@@ -225,6 +238,12 @@ const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
   // path-derived; stateless — the sub2api /v1/images precedent).
   ['/v1/images/generations', 'images.generations'],
   ['/v1/images/generations/async', 'images.generations'],
+  // §4.3 (task #17): video create operations (server-owned, path-derived;
+  // the bare /v1/videos path is the generations alias).
+  ['/v1/videos', 'videos.generations'],
+  ['/v1/videos/generations', 'videos.generations'],
+  ['/v1/videos/edits', 'videos.edits'],
+  ['/v1/videos/extensions', 'videos.extensions'],
 ]);
 
 /**
@@ -235,6 +254,19 @@ const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
 const ASYNC_IMAGE_SUBMIT_PATH = '/v1/images/generations/async';
 /** The poll route prefix a submitted task's Location header points at. */
 const ASYNC_IMAGE_POLL_PATH_PREFIX = '/v1/images/tasks/';
+
+/**
+ * §4.3 (task #17): the async video create endpoints (the bare /v1/videos
+ * path is the generations alias). These forward synchronously; the
+ * migration-124 snapshot registration runs against the recorded create
+ * response after dispatch completes.
+ */
+const VIDEO_CREATE_PATHS = new Set<string>([
+  '/v1/videos',
+  '/v1/videos/generations',
+  '/v1/videos/edits',
+  '/v1/videos/extensions',
+]);
 
 /**
  * Per-endpoint-family POST body ceilings (roadmap 4.0 ①). Values are
@@ -248,6 +280,8 @@ export interface SaasGatewayEndpointFamilyBodyLimits {
   readonly images?: number;
   /** Ceiling for POST bodies on /v1/audio/* endpoints. Default 26 MiB. */
   readonly audio?: number;
+  /** Ceiling for POST bodies on /v1/videos/* endpoints. Default 10 MiB. */
+  readonly videos?: number;
 }
 
 /** Resolved, immutable per-family body ceilings. `default` is the text family. */
@@ -255,12 +289,14 @@ export interface SaasGatewayBodyLimits {
   readonly default: number;
   readonly images: number;
   readonly audio: number;
+  readonly videos: number;
 }
 
 /** Path-family body limit for one request path. Unmatched prefixes are text. */
 export function bodyLimitForPath(path: string, limits: SaasGatewayBodyLimits): number {
   if (path.startsWith(IMAGE_FAMILY_PATH_PREFIX)) return limits.images;
   if (path.startsWith(AUDIO_FAMILY_PATH_PREFIX)) return limits.audio;
+  if (path.startsWith(VIDEO_FAMILY_PATH_PREFIX)) return limits.videos;
   return limits.default;
 }
 
@@ -276,9 +312,10 @@ export function resolveSaasGatewayBodyLimits(
   if (maxBodyBytes === null) return null;
   const images = families?.images ?? DEFAULT_IMAGE_FAMILY_BODY_BYTES;
   const audio = families?.audio ?? DEFAULT_AUDIO_FAMILY_BODY_BYTES;
+  const videos = families?.videos ?? DEFAULT_IMAGE_FAMILY_BODY_BYTES;
   const valid = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
-  if (!valid(images) || !valid(audio)) return null;
-  return { default: maxBodyBytes, images, audio };
+  if (!valid(images) || !valid(audio) || !valid(videos)) return null;
+  return { default: maxBodyBytes, images, audio, videos };
 }
 
 /** The only authentication capability accepted by the hosted HTTP boundary. */
@@ -309,6 +346,13 @@ export interface SaasGatewayQueryRequestContext {
   readonly routeId: SaasGatewayQueryRouteId;
   readonly pathParameters: Readonly<Record<string, string>>;
   readonly authenticatedCaller: AuthenticatedApiKey;
+  /**
+   * §4.3 (task #17): the bounded client `Range` header for the video
+   * content proxy (the only header the task-content route needs; absent
+   * for every other query route). Collected at the trusted boundary,
+   * capped, and never derived from request bodies.
+   */
+  readonly clientRangeHeader?: string | null;
 }
 
 /** Result contract for one query endpoint hit. */
@@ -330,6 +374,37 @@ export interface SaasGatewayQueryResult {
 /** Reserved query-endpoint port for #16/#17: async task status/content reads. */
 export interface SaasGatewayQueryPort {
   serve(context: SaasGatewayQueryRequestContext): Promise<SaasGatewayQueryResult>;
+}
+
+/**
+ * Content risk control (roadmap batch 5 §5.4, task #19): the moderation seam
+ * runs exactly once per request, after proxy-key authentication and body/model
+ * extraction and strictly before request preparation — it never enters the
+ * preparation transaction. A hit returns the configured block status with the
+ * `content_policy_violation` code; every failure inside the port must allow
+ * the request (fail-open is the port's own contract, and this boundary also
+ * defends against a port that throws).
+ */
+export interface ContentModerationCheckRequest {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly userId: string | null;
+  readonly apiKeyId: string;
+  readonly apiKeyName: string;
+  readonly protocol: 'anthropic' | 'openai' | 'responses';
+  readonly model: string;
+  readonly body: Record<string, unknown>;
+}
+
+export interface ContentModerationCheckResponse {
+  readonly allowed: boolean;
+  /** HTTP status for the rejection (400..599; 403 by default). */
+  readonly statusCode: number;
+  readonly message: string;
+}
+
+export interface ContentModerationPort {
+  check(input: ContentModerationCheckRequest): Promise<ContentModerationCheckResponse>;
 }
 
 /**
@@ -360,6 +435,12 @@ export interface SaasGatewayHttpOptions {
    */
   readonly queryEndpoints?: SaasGatewayQueryPort;
   /**
+   * Content risk control (roadmap batch 5 §5.4, task #19): post-auth,
+   * pre-preparation moderation. Absent means the deployment runs without
+   * risk control — the request path is byte-identical.
+   */
+  readonly contentModeration?: ContentModerationPort;
+  /**
    * Model plaza port (roadmap batch 5 §5.5, task #22): the read-only
    * GET /v1/model-plaza showcase with three-tier authentication (proxy key /
    * console session / anonymous). Absent means the deployment has no plaza
@@ -371,6 +452,13 @@ export interface SaasGatewayHttpOptions {
    * Absent keeps POST /v1/images/generations/async closed with 503.
    */
   readonly asyncMedia?: SaasGatewayAsyncMediaPort;
+  /**
+   * §4.3 (task #17): the video create-time persistence port (the
+   * migration-124 snapshot + bound-account binding). Absent keeps the
+   * POST /v1/videos* create endpoints closed with 503; the GET status and
+   * content query routes serve through `queryEndpoints` regardless.
+   */
+  readonly videoCreate?: SaasGatewayVideoCreatePort;
   /**
    * §4.2 (task #16): non-streaming JSON keepalive for the synchronous
    * images endpoint — whitespace heartbeats while waiting for a slow
@@ -481,6 +569,22 @@ function requestPath(req: IncomingMessage): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * §4.3 (task #17): the bounded client `Range` header for the video content
+ * proxy — single header value, capped, printable ASCII only. Anything else
+ * is dropped (the content fetch then runs without a range).
+ */
+function boundedRangeHeader(req: IncomingMessage): string | null {
+  const raw = oneHeader(req, 'range');
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (trimmed === '' || trimmed.length > 512) return null;
+  if ([...trimmed].some((character) => character.charCodeAt(0) < 0x21 || character.charCodeAt(0) > 0x7e)) {
+    return null;
+  }
+  return trimmed;
 }
 
 function writeJsonError(
@@ -1171,6 +1275,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
   const dispatch = options.dispatch ?? options.dispatchService;
   const modelDiscovery = options.modelDiscovery;
   const queryEndpoints = options.queryEndpoints;
+  const contentModeration = options.contentModeration;
   const modelPlaza = options.modelPlaza;
   const trustedProxyCidrs = options.trustedProxyCidrs;
   const bodyLimits = resolveSaasGatewayBodyLimits(validMaxBodyBytes(options.maxBodyBytes), options.endpointBodyLimits);
@@ -1293,9 +1398,16 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     // §4.0 ③ (task #14): GET query endpoints — the /v1/models-style
     // lightweight bypass (authenticate, parse parameters, delegate); they
     // never enter preparation/admission because they read task state
-    // instead of creating billable work.
-    const queryRoute = matchQueryRoute(path);
-    if (queryRoute !== null) {
+    // instead of creating billable work. Method scoping: a non-GET request
+    // whose path matches a query-route pattern keeps the #14 contract 405
+    // — EXCEPT when the path is also a registered POST route (§4.3's
+    // POST /v1/videos/generations|edits|extensions are three-segment paths
+    // that collide with the videos.task_status :taskId pattern and must
+    // fall through to the create-route table).
+    const queryRouteMatch = matchQueryRoute(path);
+    const isGetMethod = (req.method ?? '').toUpperCase() === 'GET';
+    if (queryRouteMatch !== null && (isGetMethod || !ROUTES.has(path))) {
+      const queryRoute = queryRouteMatch;
       drainRequest(req);
       if ((req.method ?? '').toUpperCase() !== 'GET') {
         sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
@@ -1324,6 +1436,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
           routeId: queryRoute.routeId,
           pathParameters: queryRoute.pathParameters,
           authenticatedCaller: authenticatedQueryCaller,
+          // §4.3 (task #17): the content proxy's Range passthrough — the
+          // one bounded header a task-content read needs.
+          ...(queryRoute.routeId === 'videos.task_content' ? { clientRangeHeader: boundedRangeHeader(req) } : {}),
         });
         if (!validQueryResult(queryResult)) throw new Error('invalid query endpoint result');
       } catch {
@@ -1350,6 +1465,19 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         requestId,
         MULTIPART_UNSUPPORTED_MESSAGE,
       );
+      return true;
+    }
+
+    /*
+     * §4.3 (task #17): the video create family requires the create-time
+     * persistence port (the migration-124 snapshot). A deployment without
+     * video media keeps the create endpoints closed with 503 — the GET
+     * status/content query routes remain independently gated by
+     * `queryEndpoints`.
+     */
+    if (VIDEO_CREATE_PATHS.has(path) && !options.videoCreate) {
+      drainRequest(req);
+      sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
       return true;
     }
 
@@ -1425,6 +1553,44 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         requestId,
       );
       return true;
+    }
+
+    /*
+     * Roadmap batch 5 §5.4 (task #19): the content risk-control seam. Runs
+     * exactly once per request, after authentication and body/model
+     * extraction, strictly before preparation — the moderation decision
+     * never enters the preparation transaction. The port owns the
+     * fail-open contract; this boundary additionally defends against a
+     * throwing port so moderation can never take a request down. Absent
+     * port (deployments without risk control) keeps the path unchanged.
+     */
+    if (contentModeration) {
+      let moderation: ContentModerationCheckResponse;
+      try {
+        moderation = await contentModeration.check({
+          requestId,
+          tenantId: authenticatedCaller.metadata.tenantId,
+          userId: authenticatedCaller.metadata.principalUserId,
+          apiKeyId: authenticatedCaller.metadata.id,
+          apiKeyName: authenticatedCaller.metadata.name,
+          protocol,
+          model,
+          body,
+        });
+      } catch {
+        moderation = { allowed: true, statusCode: 0, message: '' };
+      }
+      if (!moderation.allowed) {
+        drainRequest(req);
+        writeJsonError(
+          res,
+          moderation.statusCode >= 400 && moderation.statusCode <= 599 ? moderation.statusCode : 403,
+          'CONTENT_POLICY_VIOLATION',
+          requestId,
+          moderation.message !== '' ? moderation.message : 'The request was blocked by content policy',
+        );
+        return true;
+      }
     }
 
     const auditContext = requestAudit(req, entryPoint);
@@ -1647,10 +1813,20 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
      * constraint is structurally satisfied.
      */
     const keepaliveIntervalMs = validKeepaliveInterval(options.imageKeepaliveIntervalMs);
-    const client =
+    const videoCreatePort = VIDEO_CREATE_PATHS.has(path) ? options.videoCreate : undefined;
+    const innerClient =
       path === '/v1/images/generations' && keepaliveIntervalMs > 0
         ? new JsonKeepaliveClientStream(req, res, requestId, { intervalMs: keepaliveIntervalMs })
         : new NodePreparedEvidenceClientStream(req, res, requestId);
+    /*
+     * §4.3 (task #17): a delivered video create response is teed into a
+     * bounded recording so the upstream request id can be extracted after
+     * dispatch; the client sees the upstream JSON verbatim either way.
+     */
+    const client =
+      videoCreatePort !== undefined
+        ? new TeeRecordingClientStream(innerClient, { maxRecordedBytes: bodyLimits.videos })
+        : innerClient;
     const compensate = async (cause: 'client_cancelled' | 'dispatch_failed') => {
       try {
         await options.preDispatchCompensation?.compensate({
@@ -1728,6 +1904,56 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     }
     if (dispatched.kind === 'unknown' && !res.headersSent && !res.destroyed) {
       sendHttpError(res, new GatewayHttpError(502, 'DISPATCH_OUTCOME_UNKNOWN'), requestId);
+    }
+    /*
+     * §4.3 (task #17): register the create-time snapshot for a delivered
+     * 2xx video create. The response is already with the client, so
+     * persistence is strictly background best-effort — a failure leaves
+     * the task unregistered and the later billing path fails closed (the
+     * 404 poll surface and the skip-with-alert state machine).
+     */
+    if (videoCreatePort !== undefined && dispatched.kind === 'sent' && client instanceof TeeRecordingClientStream) {
+      const recording = client;
+      const dispatchedStatus = dispatched.transport?.resultHttpStatus;
+      const evidence = preparedRequest.evidence;
+      const snapshot = preparedRequest.normalSuccessSnapshot;
+      void (async () => {
+        if (!recording.isComplete) return;
+        if (typeof dispatchedStatus !== 'number' || dispatchedStatus < 200 || dispatchedStatus >= 300) return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(recording.recordedBody()));
+        } catch {
+          return;
+        }
+        const taskId = extractVideoRequestIdFromBody(parsed);
+        if (taskId === '') return;
+        const facts =
+          snapshot.supplyMode === 'platform' &&
+          typeof snapshot.customerPriceVersion === 'string' &&
+          snapshot.customerPriceVersion !== '' &&
+          typeof snapshot.priceSnapshotRef === 'string' &&
+          snapshot.priceSnapshotRef !== '' &&
+          typeof snapshot.currency === 'string'
+            ? {
+                customerPriceVersion: snapshot.customerPriceVersion,
+                priceSnapshotRef: snapshot.priceSnapshotRef,
+                currency: snapshot.currency,
+              }
+            : null;
+        await videoCreatePort.registerCreate({
+          authenticatedCaller,
+          taskId,
+          account: {
+            accountId: evidence.accountId,
+            credentialId: evidence.credentialId,
+            credentialVersion: evidence.credentialVersion,
+          },
+          settlement: { requestId: preparedRequest.requestId, attemptId: preparedRequest.attemptId },
+          requestBody: body,
+          settlementFacts: facts,
+        });
+      })().catch(() => undefined);
     }
     return true;
   };

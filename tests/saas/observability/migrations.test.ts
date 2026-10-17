@@ -86,8 +86,12 @@ test('migrations 102 and 103 are registered in order ahead of the later forwards
   assert.deepEqual(versions.slice(index + 2, index + 22), [
     104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123,
   ]);
-  // The batch-5 tail: 126 public brand settings, then this task's 127
-  // alert silences/report state.
-  assert.deepEqual(versions.slice(-2), [126, 127]);
-  assert.equal(SAAS_MIGRATIONS.at(-1), OBS_ALERT_SILENCES_SAAS_MIGRATION);
+  // 127 (this task) registers directly after 126 (public brand settings).
+  // The absolute tail stays unpinned: later parallel workstreams keep
+  // appending (128 plugins, 125 risk in flight), so only the relative
+  // neighbourhood is a stable contract.
+  const index127 = versions.indexOf(127);
+  assert.ok(index127 > 0, '127 is registered');
+  assert.equal(versions[index127 - 1], 126);
+  assert.equal(SAAS_MIGRATIONS[index127], OBS_ALERT_SILENCES_SAAS_MIGRATION);
 });

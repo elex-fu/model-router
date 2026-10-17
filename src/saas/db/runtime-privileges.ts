@@ -4002,6 +4002,10 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // snapshot for a capability comes from the enabled binding row (plugin key
   // + rollout); no sensitive column exists on the table.
   'saas_plugin_bindings',
+  // (124) batch-4 §4.3 async video tasks: the gateway owns the snapshot +
+  // binding + claim lifecycle (create/read/claim/release/skip plus the
+  // expiry purge delete below).
+  'saas_video_tasks',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -4823,14 +4827,53 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_plugin_installations', 'binary_sha256', 'SELECT'],
   ['saas_plugin_installations', 'signature_status', 'SELECT'],
   ['saas_plugin_installations', 'updated_at', 'SELECT'],
+  // 123 (batch-4 §4.2) async image tasks: gateway owns the lifecycle UPDATE
+  // face (status/http_status/result/error/completed_at/expires_at only).
+  ...(
+    ['status', 'http_status', 'result', 'error', 'completed_at', 'expires_at'] as const
+  ).map((column) => ['saas_image_tasks', column, 'UPDATE'] as const),
+  // (124) batch-4 §4.3 async video tasks: the gateway owns the create-time
+  // snapshot + bound-account binding + the one-shot billing claim. The
+  // claim/release/skip transitions touch only the billing-state columns;
+  // row identity columns (tenant/proxy key/binding/created) are
+  // insert-only, and the settlement facts ride the INSERT (frozen at
+  // create, never rewritten).
+  ...(
+    [
+      'request_id',
+      'tenant_id',
+      'proxy_key_id',
+      'provider_account_id',
+      'credential_id',
+      'credential_version',
+      'gateway_request_id',
+      'gateway_attempt_id',
+      'model',
+      'resolution',
+      'duration_seconds',
+      'video_count',
+      'billing_state',
+      'settlement_facts',
+      'created_at',
+      'expires_at',
+    ] as const
+  ).map((column) => ['saas_video_tasks', column, 'INSERT'] as const),
+  ...(['billing_state', 'billed_at'] as const).map(
+    (column) => ['saas_video_tasks', column, 'UPDATE'] as const,
+  ),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
 
 const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
-// (123) batch-4 §4.2 async image tasks: the gateway owns the task rows'
-// expiry purge (PostgresImageTaskStore.purgeExpired).
-const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes', 'saas_image_tasks'] as const;
+// (123) batch-4 §4.2 async image tasks + (124) batch-4 §4.3 async video
+// tasks: the gateway owns the task rows' expiry purge
+// (Postgres*TaskStore.purgeExpired).
+const GATEWAY_DELETE_TABLES = [
+  'saas_billing_spending_freezes',
+  'saas_image_tasks',
+  'saas_video_tasks',
+] as const;
 const GATEWAY_SEQUENCE = 'saas_provider_account_lease_fencing_seq' as const;
 
 function sqlText(value: string): string {

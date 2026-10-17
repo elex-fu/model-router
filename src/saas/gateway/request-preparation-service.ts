@@ -685,6 +685,8 @@ function normalizeOperationForProtocol(value: unknown, protocol: GatewayProtocol
  * §4.2 (task #16): the OpenAI family also hosts the images.generations
  * operation with the same constraint — image requests are passthrough-only
  * onto OpenAI-family providers.
+ * §4.3 (task #17): the OpenAI family also hosts the async video create
+ * operations with the same constraint.
  */
 function operationAllowedForProtocol(protocol: GatewayProtocol, operation: string): boolean {
   return (
@@ -694,7 +696,13 @@ function operationAllowedForProtocol(protocol: GatewayProtocol, operation: strin
     // standalone search operations (the emulation rides /responses; the
     // payload compiler constructs the outbound body server-side) and the
     // TTS audio passthrough (the xAI Voice /tts surface).
-    (protocol === 'responses' && (operation === 'web_search' || operation === 'x_search' || operation === 'audio.tts'))
+    (protocol === 'responses' && (operation === 'web_search' || operation === 'x_search' || operation === 'audio.tts')) ||
+    (protocol === 'openai' &&
+      (operation === 'embeddings' ||
+        operation === 'images.generations' ||
+        operation === 'videos.generations' ||
+        operation === 'videos.edits' ||
+        operation === 'videos.extensions'))
   );
 }
 

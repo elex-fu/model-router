@@ -1228,6 +1228,9 @@ BEGIN
       -- routing snapshot for a capability comes from the enabled binding
       -- row; no sensitive column exists on the table.
       ('saas_plugin_bindings')
+      -- (124) batch-4 §4.3 async video tasks: the gateway owns the
+      -- snapshot + binding + claim lifecycle (plus the expiry purge).
+      ('saas_video_tasks')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1837,6 +1840,19 @@ decorator): routing
       ('saas_plugin_installations', 'signature_status', 'SELECT'),
       ('saas_plugin_installations', 'updated_at', 'SELECT')
     ) AS manifest(table_name, column_name, privilege_type)
+      -- (124) batch-4 §4.3 async video tasks: the gateway owns the
+      -- create-time snapshot + binding insert, the one-shot billing-claim
+      -- transitions, and the expiry purge. Settlement facts are frozen at
+      -- create (INSERT only).
+      ('saas_video_tasks', 'request_id', 'INSERT'), ('saas_video_tasks', 'tenant_id', 'INSERT'),
+      ('saas_video_tasks', 'proxy_key_id', 'INSERT'), ('saas_video_tasks', 'provider_account_id', 'INSERT'),
+      ('saas_video_tasks', 'credential_id', 'INSERT'), ('saas_video_tasks', 'credential_version', 'INSERT'),
+      ('saas_video_tasks', 'gateway_request_id', 'INSERT'), ('saas_video_tasks', 'gateway_attempt_id', 'INSERT'),
+      ('saas_video_tasks', 'model', 'INSERT'), ('saas_video_tasks', 'resolution', 'INSERT'),
+      ('saas_video_tasks', 'duration_seconds', 'INSERT'), ('saas_video_tasks', 'video_count', 'INSERT'),
+      ('saas_video_tasks', 'billing_state', 'INSERT'), ('saas_video_tasks', 'settlement_facts', 'INSERT'),
+      ('saas_video_tasks', 'created_at', 'INSERT'), ('saas_video_tasks', 'expires_at', 'INSERT'),
+      ('saas_video_tasks', 'billing_state', 'UPDATE'), ('saas_video_tasks', 'billed_at', 'UPDATE')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP
@@ -1879,10 +1895,13 @@ decorator): routing
   IF pg_catalog.to_regclass('model_router_saas.saas_billing_spending_freezes') IS NOT NULL THEN
     EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_billing_spending_freezes TO model_router_saas_gateway';
   END IF;
-  -- (123) batch-4 §4.2 async image tasks: the gateway owns the task rows'
-  -- expiry purge (PostgresImageTaskStore.purgeExpired).
+  -- (123) batch-4 §4.2 async image tasks + (124) batch-4 §4.3 async
+  -- video tasks: the gateway owns the task rows' expiry purge.
   IF pg_catalog.to_regclass('model_router_saas.saas_image_tasks') IS NOT NULL THEN
     EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_image_tasks TO model_router_saas_gateway';
+  END IF;
+  IF pg_catalog.to_regclass('model_router_saas.saas_video_tasks') IS NOT NULL THEN
+    EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_video_tasks TO model_router_saas_gateway';
   END IF;
   IF pg_catalog.to_regclass('model_router_saas.saas_provider_account_lease_fencing_seq') IS NOT NULL THEN
     EXECUTE 'GRANT USAGE ON SEQUENCE model_router_saas.saas_provider_account_lease_fencing_seq TO model_router_saas_gateway';

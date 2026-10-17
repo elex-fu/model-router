@@ -43,7 +43,10 @@ export type ProviderPayloadOperation =
   | 'images.generations'
   | 'web_search'
   | 'x_search'
-  | 'audio.tts';
+  | 'audio.tts'
+  | 'videos.generations'
+  | 'videos.edits'
+  | 'videos.extensions';
 
 /**
  * R2: the OpenAI protocol family additionally hosts the embeddings
@@ -51,8 +54,19 @@ export type ProviderPayloadOperation =
  * onto another provider protocol.
  * §4.2 (task #16): the OpenAI family also hosts the images.generations
  * operation — passthrough-only, never bridged.
+ * §4.3 (task #17): the same family hosts the async video create operations
+ * (generations / edits / extensions) — passthrough-only onto
+ * OpenAI-protocol-family providers (the xAI Imagine video surface), never
+ * bridged.
  */
-const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['chat.completions', 'embeddings', 'images.generations']);
+const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
+  'chat.completions',
+  'embeddings',
+  'images.generations',
+  'videos.generations',
+  'videos.edits',
+  'videos.extensions',
+]);
 
 /**
  * §4.3 (task #17): the Responses protocol family additionally hosts the
@@ -401,6 +415,9 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'web_search') return 'web_search';
   if (value === 'x_search') return 'x_search';
   if (value === 'audio.tts') return 'audio.tts';
+  if (value === 'videos.generations') return 'videos.generations';
+  if (value === 'videos.edits') return 'videos.edits';
+  if (value === 'videos.extensions') return 'videos.extensions';
   compilerFailure('UNSUPPORTED_OPERATION');
 }
 
@@ -549,7 +566,14 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   }
   // §4.2 (task #16): the same gate applies to the image generation
   // operation — passthrough-only onto OpenAI-protocol-family providers.
-  if (normalizedClientOperation === 'images.generations' && resolvedProviderProtocol !== 'openai') {
+  // §4.3 (task #17): and to the async video create family.
+  if (
+    (normalizedClientOperation === 'images.generations' ||
+      normalizedClientOperation === 'videos.generations' ||
+      normalizedClientOperation === 'videos.edits' ||
+      normalizedClientOperation === 'videos.extensions') &&
+    resolvedProviderProtocol !== 'openai'
+  ) {
     compilerFailure('CAPABILITY_UNSUPPORTED');
   }
   // §4.3: the standalone search operations are servable only by
@@ -746,6 +770,18 @@ function validateClientBody(body: unknown, route: NormalizedRoute, publicModel: 
   // validation is the billing constructor's (a parse miss fails closed).
   if (route.clientOperation === 'audio.tts') {
     if (ttsBillingRunes(body) === null) compilerFailure('INVALID_INPUT');
+    return body;
+  }
+  // §4.3 (task #17): a video create request carries a non-empty `prompt`;
+  // `resolution`/`duration`/`n` stay opaque JSON (the video estimator
+  // bounds the per-unit hold and fails closed on a malformed count).
+  if (
+    route.clientOperation === 'videos.generations' ||
+    route.clientOperation === 'videos.edits' ||
+    route.clientOperation === 'videos.extensions'
+  ) {
+    if (!Object.hasOwn(body, 'prompt')) compilerFailure('INVALID_INPUT');
+    text(body.prompt, 'INVALID_INPUT', 64 * 1024);
     return body;
   }
   if (route.clientProtocol === 'responses') {
@@ -1004,6 +1040,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
     // missing capability (404 at the HTTP boundary), unlike chat-model
     // incompatibility which stays a closed 503.
     // §4.2: the images.generations operation shares the rule.
+    // §4.3: the videos.* create family shares it too.
     let embeddingsOperation = false;
     try {
       if (this.configurationError !== null || this.options === null) {
@@ -1017,7 +1054,11 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       if (!isRecord(candidate)) compilerFailure('INVALID_INPUT');
       const route = normalizeRoute(input, this.options);
       embeddingsOperation =
-        route.providerOperation === 'embeddings' || route.providerOperation === 'images.generations';
+        route.providerOperation === 'embeddings' ||
+        route.providerOperation === 'images.generations' ||
+        route.providerOperation === 'videos.generations' ||
+        route.providerOperation === 'videos.edits' ||
+        route.providerOperation === 'videos.extensions';
       if (
         !isProtocol(authority.route.protocol) ||
         authority.route.protocol !== route.clientProtocol ||
