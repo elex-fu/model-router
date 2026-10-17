@@ -724,6 +724,12 @@ SELECT account.id AS account_id,
        account.opencode_go_weekly_used_percent, account.opencode_go_weekly_reset_at,
        account.opencode_go_monthly_used_percent, account.opencode_go_monthly_reset_at,
        account.opencode_go_usage_updated_at,
+       account.zhipu_5h_used_percent, account.zhipu_5h_reset_at,
+       account.zhipu_weekly_used_percent, account.zhipu_weekly_reset_at,
+       account.zhipu_usage_updated_at,
+       account.minimax_5h_used_percent, account.minimax_5h_reset_at,
+       account.minimax_weekly_used_percent, account.minimax_weekly_reset_at,
+       account.minimax_usage_updated_at,
        account.auto_pause_5h_threshold, account.auto_pause_7d_threshold,
        account.scheduling_threshold_pause_until, account.scheduling_threshold_pause_reason
   FROM ${accountsTable} account

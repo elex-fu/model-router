@@ -56,6 +56,12 @@ test('migration 036 is registered immediately before subsequent append-only migr
       114,
       115,
       116,
+      // Batch-3 category scheduling tails (117 bedrock / 118 vertex /
+      // 119 grok / 120 zhipu+minimax).
+      117,
+      118,
+      119,
+      120,
     ],
   );
 });

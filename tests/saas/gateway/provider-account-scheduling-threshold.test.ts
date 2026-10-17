@@ -52,6 +52,16 @@ function baseRow(overrides: Partial<SchedulingThresholdAccountRow> = {}): Schedu
     opencode_go_monthly_used_percent: null,
     opencode_go_monthly_reset_at: null,
     opencode_go_usage_updated_at: null,
+    zhipu_5h_used_percent: null,
+    zhipu_5h_reset_at: null,
+    zhipu_weekly_used_percent: null,
+    zhipu_weekly_reset_at: null,
+    zhipu_usage_updated_at: null,
+    minimax_5h_used_percent: null,
+    minimax_5h_reset_at: null,
+    minimax_weekly_used_percent: null,
+    minimax_weekly_reset_at: null,
+    minimax_usage_updated_at: null,
     auto_pause_5h_threshold: null,
     auto_pause_7d_threshold: null,
     ...overrides,
@@ -204,6 +214,50 @@ test('candidate rows map each column family with its unit and staleness rules', 
   assert.equal(opencode.length, 2);
   assert.equal(opencode[0]?.window, 'rolling_5h');
   assert.equal(opencode[1]?.window, 'weekly');
+
+  // Batch-3 CN providers (migration 120): the coding-plan quota worker's
+  // percent families split across the same two threshold families.
+  const zhipu = schedulingThresholdCandidatesFromRow(
+    baseRow({
+      zhipu_5h_used_percent: 91,
+      zhipu_5h_reset_at: iso(IN_3H),
+      zhipu_weekly_used_percent: 25,
+      zhipu_weekly_reset_at: iso(IN_2D),
+      zhipu_usage_updated_at: iso(NOW_MS - 60_000),
+      auto_pause_5h_threshold: 90,
+      auto_pause_7d_threshold: 80,
+    }),
+    NOW_MS,
+  );
+  assert.equal(zhipu.length, 2);
+  assert.equal(zhipu[0]?.platform, 'zhipu');
+  assert.equal(zhipu[0]?.window, '5h');
+  assert.equal(zhipu[1]?.window, 'weekly');
+
+  const minimax = schedulingThresholdCandidatesFromRow(
+    baseRow({
+      minimax_5h_used_percent: 50,
+      minimax_5h_reset_at: iso(IN_3H),
+      minimax_weekly_used_percent: 82,
+      minimax_weekly_reset_at: iso(IN_2D),
+      minimax_usage_updated_at: iso(NOW_MS - 60_000),
+      auto_pause_5h_threshold: 90,
+      auto_pause_7d_threshold: 80,
+    }),
+    NOW_MS,
+  );
+  assert.equal(minimax.length, 2);
+  assert.equal(minimax[0]?.platform, 'minimax');
+  assert.equal(minimax[0]?.window, '5h');
+  assert.equal(minimax[1]?.window, 'weekly');
+  // payg accounts never get snapshots: a NULL family contributes nothing.
+  assert.equal(
+    schedulingThresholdCandidatesFromRow(
+      baseRow({ auto_pause_5h_threshold: 90, auto_pause_7d_threshold: 80 }),
+      NOW_MS,
+    ).length,
+    0,
+  );
 });
 
 test('stale snapshots contribute no candidates; absent thresholds contribute none either (dormant default)', () => {

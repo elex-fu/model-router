@@ -586,6 +586,12 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     114,
     115,
     116,
+    // Batch-3 category scheduling tails (117 bedrock / 118 vertex /
+    // 119 grok / 120 zhipu+minimax).
+    117,
+    118,
+    119,
+    120,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -595,7 +601,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     pool.applied.map(({ version }) => version),
     versions,
   );
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 97);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 101);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -651,9 +657,13 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
       'billing_group_spend_windows',
       'provider_account_scheduling_threshold_pause',
       'tls_fingerprint_profiles',
+      'provider_account_bedrock_scheduling',
+      'provider_account_vertex_scheduling',
+      'provider_account_grok_scheduling',
+      'cn_provider_account_scheduling',
     ],
   );
-  assert.equal(pool.applied.length, 97);
+  assert.equal(pool.applied.length, 101);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -810,6 +820,10 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       114,
       115,
       116,
+      117,
+      118,
+      119,
+      120,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );

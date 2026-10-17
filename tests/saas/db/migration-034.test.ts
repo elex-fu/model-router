@@ -61,6 +61,12 @@ test('migration 034 registers after the immutable 033 history', () => {
       114,
       115,
       116,
+      // Batch-3 category scheduling tails (117 bedrock / 118 vertex /
+      // 119 grok / 120 zhipu+minimax).
+      117,
+      118,
+      119,
+      120,
     ],
   );
 });

@@ -554,6 +554,15 @@ $runtime_column_acl_normalization$;
 -- DEPLOYMENT NOTE (migration 108, R5b): the control plane owns the
 -- opencode_go_protocol_rules column on both provider account tables (the
 -- adaptive-routing rule table; admin mutation bumps authz_version).
+-- DEPLOYMENT NOTE (migration 120, batch-3 cn-providers): the control plane
+-- likewise owns the zhipu/minimax account_mode + api_protocol columns on
+-- both provider account tables (the dual-mode configuration; admin mutation
+-- bumps authz_version through the platform/cn-providers config store). The
+-- CN-provider quota snapshot/worker columns are worker-written only: they
+-- are granted in deploy/managed-saas-validation-worker-role-grants.sql (the
+-- quota worker shares the credential-validation-worker role) and are
+-- readable by the gateway through the dynamic all-current-columns grants
+-- below. Re-apply both templates after 120.
 -- DEPLOYMENT NOTE (migration 100, R5): the control plane likewise owns the
 -- claude_cli_version_override column on both provider account tables (the
 -- operator's CLI pin override; admin mutation bumps authz_version). The
@@ -623,6 +632,18 @@ $runtime_column_acl_normalization$;
 -- provider_category CHECK to admit the 'gemini' probe category (same
 -- control-plane surface, no grant change). Re-apply both templates after
 -- running migration 111 on a database that predates it.
+-- DEPLOYMENT NOTE (migration 117, batch-3 Bedrock): the bedrock scheduling
+-- columns on both provider account tables (bedrock_rate_limited_until —
+-- the ThrottlingException cooldown deadline — and
+-- bedrock_usage_updated_at — the observation stamp) are worker-written
+-- only (the quota-snapshot store's bedrock rate-limit sink): they are
+-- granted in deploy/managed-saas-validation-worker-role-grants.sql and are
+-- readable by the gateway through the dynamic all-current-columns grants
+-- below; the control plane owns no bedrock column. Migration 117 also
+-- rewrites saas_probe_monitors' provider_category CHECK to admit the
+-- 'bedrock' probe category (same control-plane surface, no grant change).
+-- Re-apply both templates after running migration 117 on a database that
+-- predates it.
 -- DEPLOYMENT NOTE (migration 110, F1 platform settings): the control plane
 -- owns saas_platform_settings exclusively (admin settings surface plus the
 -- registration-admission and topup-tier read paths, all control-plane
@@ -814,12 +835,12 @@ BEGIN
       ('saas_project_entitlements', 'INSERT', 'id tenant_id project_id supply_profile_id supply_mode status model_scopes authz_version created_at updated_at last_audited_at disabled_at effective_at expires_at superseded_at source_type source_ref service_plan_snapshot_id'),
       ('saas_project_entitlements', 'UPDATE', 'status disabled_at superseded_at authz_version updated_at last_audited_at'),
       ('saas_supply_profiles', 'SELECT', 'tenant_id id supply_mode status model_scopes authz_version'),
-      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
       ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id tls_fingerprint_profile_id created_at updated_at'),
-      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
-      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
+      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
       ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id tls_fingerprint_profile_id created_at updated_at'),
-      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
       ('saas_tenant_provider_account_capabilities', 'SELECT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_tenant_provider_account_capabilities', 'INSERT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_platform_provider_account_capabilities', 'SELECT', 'account_id provider_id product_id model endpoint capability_version'),

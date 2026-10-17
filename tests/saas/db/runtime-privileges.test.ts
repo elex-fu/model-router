@@ -1678,3 +1678,54 @@ test('108 grants the control plane only the opencode_go protocol rules column, n
     );
   }
 });
+
+test('120 grants the control plane only the CN-provider dual-mode config columns, never the quota snapshot columns', () => {
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const privilege of ['SELECT', 'UPDATE'] as const) {
+      for (const column of [
+        'zhipu_account_mode',
+        'zhipu_api_protocol',
+        'minimax_account_mode',
+        'minimax_api_protocol',
+      ]) {
+        assert.ok(
+          SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+            ([relation, field, granted]) => relation === table && field === column && granted === privilege,
+          ),
+          `missing ${privilege} ${table}.${column}`,
+        );
+      }
+    }
+    // The quota worker owns the scheduling snapshot columns; the control
+    // plane never reads or writes them (gateway reads stay dynamic).
+    for (const column of [
+      'zhipu_5h_used_percent',
+      'zhipu_5h_reset_at',
+      'zhipu_weekly_used_percent',
+      'zhipu_weekly_reset_at',
+      'zhipu_usage_updated_at',
+      'zhipu_usage_next_due_at',
+      'zhipu_usage_failure_count',
+      'zhipu_rate_limited_until',
+      'minimax_5h_used_percent',
+      'minimax_5h_reset_at',
+      'minimax_weekly_used_percent',
+      'minimax_weekly_reset_at',
+      'minimax_usage_updated_at',
+      'minimax_usage_next_due_at',
+      'minimax_usage_failure_count',
+      'minimax_rate_limited_until',
+    ]) {
+      assert.equal(
+        SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
+        false,
+        `unexpected control-plane grant ${table}.${column}`,
+      );
+      assert.equal(
+        SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
+        false,
+        `unexpected gateway write grant ${table}.${column}`,
+      );
+    }
+  }
+});

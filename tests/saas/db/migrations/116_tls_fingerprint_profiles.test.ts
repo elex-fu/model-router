@@ -13,8 +13,13 @@ test('116 registers after the 115 threshold-pause tail with the next free slot',
   assert.equal(migration.name, 'tls_fingerprint_profiles');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(registered.at(-1), 116);
-  assert.equal(SAAS_MIGRATIONS[SAAS_MIGRATIONS.length - 1], migration);
+  // Batch-3 (117 bedrock / 118 vertex / 119 grok / 120 cn) tails registered
+  // after 116.
+  assert.equal(registered.at(-1), 120);
+  const index = registered.indexOf(116);
+  assert.ok(index > 0, '116 is registered');
+  assert.equal(SAAS_MIGRATIONS[index], migration);
+  assert.deepEqual(registered.slice(index + 1), [117, 118, 119, 120]);
 });
 
 test('116 creates the bounded ClientHello profile registry', () => {

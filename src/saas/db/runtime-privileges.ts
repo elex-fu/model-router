@@ -1240,6 +1240,13 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // the usage scheduling columns are worker-written and stay off this
     // manifest (the gateway reads them through the dynamic read-table grants).
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): the control plane owns the dual-mode
+    // account configuration columns; the quota snapshot/worker columns are
+    // worker-written and stay off this manifest (dynamic read-table grants).
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): the operator's per-account CLI pin override rides the same
     // control-plane scheduling surface; the usage snapshot columns are
     // worker-written and stay off this manifest.
@@ -1301,6 +1308,12 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
     // bump, mirroring the 047/082 repository pattern.
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): admin dual-mode config mutation rides the
+    // same CAS authz_version bump.
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): admin CLI-pin mutation rides the same CAS pattern.
     'claude_cli_version_override',
     'rpm_limit',
@@ -1342,6 +1355,12 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_checked_at',
     // 108 (R5b): the control plane owns the adaptive-routing rule table.
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): the control plane owns the dual-mode
+    // account configuration columns.
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): the operator's per-account CLI pin override.
     'claude_cli_version_override',
     'quarantine_entered_at',
@@ -1400,6 +1419,12 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
     // bump, mirroring the 047/082 repository pattern.
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): admin dual-mode config mutation rides the
+    // same CAS authz_version bump.
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): admin CLI-pin mutation rides the same CAS pattern.
     'claude_cli_version_override',
     'rpm_limit',

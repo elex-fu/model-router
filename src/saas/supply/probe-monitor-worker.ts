@@ -141,7 +141,10 @@ function mapMonitorRow(row: MonitorRow): ProbeMonitorRecord | null {
       category !== 'codex' &&
       category !== 'opencode-go' &&
       category !== 'api-key' &&
-      category !== 'gemini')
+      category !== 'gemini' &&
+      category !== 'grok' &&
+      category !== 'bedrock' &&
+      category !== 'vertex')
   ) {
     return null;
   }

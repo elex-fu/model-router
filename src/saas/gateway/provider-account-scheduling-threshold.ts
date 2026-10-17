@@ -10,11 +10,12 @@
  * Thresholds reuse the dormant migration-099 `auto_pause_*_threshold`
  * columns — the per-account operator override, one per window family:
  * `auto_pause_5h_threshold` gates short windows (codex 5h, claude 5h,
- * opencode-go rolling 5h), `auto_pause_7d_threshold` gates long windows
- * (codex 7d, claude 7d/7d_sonnet/7d_oi, opencode-go weekly/monthly, gemini
- * daily). No threshold configured (NULL) produces no candidate at all —
- * the pre-activation behavior, byte-identical (the golden-fixture red
- * line).
+ * opencode-go rolling 5h, zhipu/minimax coding-plan 5h),
+ * `auto_pause_7d_threshold` gates long windows (codex 7d, claude
+ * 7d/7d_sonnet/7d_oi, opencode-go weekly/monthly, gemini daily,
+ * zhipu/minimax coding-plan weekly). No threshold configured (NULL) produces
+ * no candidate at all — the pre-activation behavior, byte-identical (the
+ * golden-fixture red line).
  *
  * The persisted reason JSON is the sub2api temp-unsched shape
  * (`source: "account_scheduling_threshold"`); idempotency compares reasons
@@ -24,7 +25,13 @@
 /** A snapshot older than this no longer pauses (the codex 2h precedent). */
 export const SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
-export type SchedulingThresholdPlatform = 'codex' | 'claude' | 'gemini' | 'opencode-go';
+export type SchedulingThresholdPlatform =
+  | 'codex'
+  | 'claude'
+  | 'gemini'
+  | 'opencode-go'
+  | 'zhipu'
+  | 'minimax';
 
 /** One window candidate as persisted in the quota-snapshot column family. */
 export interface SchedulingThresholdWindowCandidate {
@@ -224,6 +231,16 @@ export interface SchedulingThresholdAccountRow {
   readonly opencode_go_monthly_used_percent: number | null;
   readonly opencode_go_monthly_reset_at: Date | string | null;
   readonly opencode_go_usage_updated_at: Date | string | null;
+  readonly zhipu_5h_used_percent: number | null;
+  readonly zhipu_5h_reset_at: Date | string | null;
+  readonly zhipu_weekly_used_percent: number | null;
+  readonly zhipu_weekly_reset_at: Date | string | null;
+  readonly zhipu_usage_updated_at: Date | string | null;
+  readonly minimax_5h_used_percent: number | null;
+  readonly minimax_5h_reset_at: Date | string | null;
+  readonly minimax_weekly_used_percent: number | null;
+  readonly minimax_weekly_reset_at: Date | string | null;
+  readonly minimax_usage_updated_at: Date | string | null;
   readonly auto_pause_5h_threshold: number | null;
   readonly auto_pause_7d_threshold: number | null;
 }
@@ -363,6 +380,35 @@ export function schedulingThresholdCandidatesFromRow(
         'monthly',
         finiteNumber(row.opencode_go_monthly_used_percent),
         timestampMs(row.opencode_go_monthly_reset_at),
+        threshold7d,
+      );
+    }
+    // Batch-3 CN providers (migration 120): the coding-plan quota worker
+    // writes the 5h/rolling + weekly windows as used percents. payg accounts
+    // never get snapshots, so they contribute nothing by construction.
+    if (familyFresh(row.zhipu_usage_updated_at, nowMs)) {
+      push('zhipu', '5h', finiteNumber(row.zhipu_5h_used_percent), timestampMs(row.zhipu_5h_reset_at), threshold5h);
+      push(
+        'zhipu',
+        'weekly',
+        finiteNumber(row.zhipu_weekly_used_percent),
+        timestampMs(row.zhipu_weekly_reset_at),
+        threshold7d,
+      );
+    }
+    if (familyFresh(row.minimax_usage_updated_at, nowMs)) {
+      push(
+        'minimax',
+        '5h',
+        finiteNumber(row.minimax_5h_used_percent),
+        timestampMs(row.minimax_5h_reset_at),
+        threshold5h,
+      );
+      push(
+        'minimax',
+        'weekly',
+        finiteNumber(row.minimax_weekly_used_percent),
+        timestampMs(row.minimax_weekly_reset_at),
         threshold7d,
       );
     }
