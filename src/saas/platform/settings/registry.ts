@@ -8,6 +8,7 @@ import {
   REGISTRATION_SECRET_SETTINGS_KEYS,
   REGISTRATION_SETTINGS_KEYS,
 } from '../../identity/registration-settings.js';
+import { MODEL_PLAZA_SETTINGS_KEYS, parseModelPlazaSettingValue } from '../../gateway/model-plaza/settings.js';
 import {
   parseBrandApiBaseUrlSetting,
   parseBrandContactUrlSetting,
@@ -142,6 +143,36 @@ const DEFINITIONS: readonly PlatformSettingDefinition[] = [
     description:
       'Wallet-topup amount-tier discounts: an ascending list of { thresholdMinorUnits, discountNumerator, discountDenominator } entries; at or above a threshold the credit is multiplied by numerator/denominator (no greater than one).',
     parse: parseTopupAmountTierDiscountsSetting,
+  },
+  // Batch-5 §5.5 model plaza (task #22): the `saas.plaza.*` runtime
+  // switches, parsed by the plaza settings grammar (store-first, env
+  // fallback, fail-closed defaults).
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.enabled,
+    kind: 'plain',
+    description:
+      'Model plaza master switch (default false = the GET /v1/model-plaza showcase answers 404 PLAZA_DISABLED).',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.enabled, value),
+  },
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.requireAuth,
+    kind: 'plain',
+    description:
+      'When true, the model plaza requires authentication (proxy key or console session) instead of serving the anonymous view.',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.requireAuth, value),
+  },
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.description,
+    kind: 'plain',
+    description: 'Model plaza description echoed at the top of the plaza response (0-512 characters).',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.description, value),
+  },
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.exclusiveGroups,
+    kind: 'plain',
+    description:
+      'Billing group ids treated as exclusive: visible only to callers whose access tier authorizes the group; anonymous callers never see them (max 64 ids).',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.exclusiveGroups, value),
   },
   // Batch-5 §5.2 OEM white-label (task #20): the `saas.brand.*` public brand
   // keys. All plain, all strictly parsed by the shared brand grammar in

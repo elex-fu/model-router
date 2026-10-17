@@ -34,6 +34,7 @@ import {
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
 import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
+import { MODEL_PLAZA_SETTINGS_KEYS } from '../saas/gateway/model-plaza/settings.js';
 import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgres-billing-group-spend.js';
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
@@ -1981,6 +1982,10 @@ export async function startManagedSaasServer(
       );
       // Gateway-scoped Redis decorates the PG affinity port with the R6b
       // sticky fast path (sliding 1h TTL; PG remains authoritative).
+      const plazaDatabase = database;
+      const plazaSettingsService = new PlatformSettingsService(plazaDatabase);
+      const plazaIdentityService = new SaasIdentityService(plazaDatabase);
+
       const gatewayStickyCache =
         gatewayRedis === undefined
           ? undefined
@@ -1989,7 +1994,36 @@ export async function startManagedSaasServer(
               keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX,
             };
       gateway = createManagedSaasGatewayProductionComposition(database, {
-        ...runtimeGatewayOptions,
+        ...runtimeGatewayOptions,        // Model plaza (batch 5 §5.5, task #22): store-first settings overlay
+        // and console-session validation. On the dedicated gateway workload
+        // the role holds no grant on saas_platform_settings / saas_sessions,
+        // so both degrade (env-only settings, anonymous session view) — the
+        // documented posture until the #20 public-settings snapshot face
+        // lands. Combined/control-plane deployments read the live store and
+        // validate sessions natively.
+        modelPlazaSettingsOverlay: async () => {
+          try {
+            return await plazaSettingsService.readPlainValues([
+              MODEL_PLAZA_SETTINGS_KEYS.enabled,
+              MODEL_PLAZA_SETTINGS_KEYS.requireAuth,
+              MODEL_PLAZA_SETTINGS_KEYS.description,
+              MODEL_PLAZA_SETTINGS_KEYS.exclusiveGroups,
+            ]);
+          } catch {
+            return {};
+          }
+        },
+        modelPlazaSessionAuth: {
+          getSession: async (token: string) => {
+            try {
+              const session = await plazaIdentityService.getSession(token);
+              return session?.userId ? { userId: session.userId } : null;
+            } catch {
+              return null;
+            }
+          },
+        },
+
         schedulerAffinity,
         ...(gatewayStickyCache ? { schedulerAffinityStickyCache: gatewayStickyCache } : {}),
         // F3: settlement terminal commits enqueue customer webhook events.

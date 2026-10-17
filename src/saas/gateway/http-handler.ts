@@ -28,6 +28,7 @@ import type {
   RequestPreparationPreparedResult,
   RequestPreparationResult,
 } from './request-preparation-service.js';
+import type { SaasModelPlazaPort } from './model-plaza/endpoint.js';
 import { stickySchedulingContext } from './sticky-session-reference.js';
 
 const GATEWAY_PREFIX = '/v1';
@@ -338,6 +339,13 @@ export interface SaasGatewayHttpOptions {
    */
   readonly queryEndpoints?: SaasGatewayQueryPort;
   /**
+   * Model plaza port (roadmap batch 5 §5.5, task #22): the read-only
+   * GET /v1/model-plaza showcase with three-tier authentication (proxy key /
+   * console session / anonymous). Absent means the deployment has no plaza
+   * authority and hits fail closed with 503.
+   */
+  readonly modelPlaza?: SaasModelPlazaPort;
+  /**
    * §4.2 (task #16): the async image task port (task store + S3 offload).
    * Absent keeps POST /v1/images/generations/async closed with 503.
    */
@@ -647,6 +655,28 @@ function bearerKey(req: IncomingMessage): string | undefined {
   if (!match || match[1].length === 0 || match[1].length > MAX_AUTHORIZATION_LENGTH) return undefined;
   return match[1];
 }
+
+/*
+ * Model plaza (task #22): the console session cookie value, for the plaza's
+ * session tier. The gateway boundary only parses the bounded cookie pair it
+ * knows by name; validation belongs to the plaza port's session authority.
+ */
+const PLAZA_SESSION_COOKIE_NAME = 'mr_saas_session';
+
+function plazaSessionToken(req: IncomingMessage): string | null {
+  const header = oneHeader(req, 'cookie');
+  if (header === undefined || header.length > MAX_AUTHORIZATION_LENGTH) return null;
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator <= 0) continue;
+    if (part.slice(0, separator).trim() !== PLAZA_SESSION_COOKIE_NAME) continue;
+    const value = part.slice(separator + 1).trim();
+    if (value.length === 0 || value.length > MAX_AUTHORIZATION_LENGTH) return null;
+    return value;
+  }
+  return null;
+}
+
 
 async function authenticateCaller(
   req: IncomingMessage,
@@ -1120,6 +1150,8 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
   const dispatch = options.dispatch ?? options.dispatchService;
   const modelDiscovery = options.modelDiscovery;
   const queryEndpoints = options.queryEndpoints;
+  const modelPlaza = options.modelPlaza;
+  const trustedProxyCidrs = options.trustedProxyCidrs;
   const bodyLimits = resolveSaasGatewayBodyLimits(validMaxBodyBytes(options.maxBodyBytes), options.endpointBodyLimits);
   const entryPoint = validEntryPoint(options.entryPoint);
 
@@ -1175,6 +1207,47 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         return true;
       }
       sendModelList(res, requestId, models);
+      return true;
+    }
+
+    /*
+     * Model plaza (roadmap batch 5 §5.5, task #22): a read-only showcase
+     * mount with its own three-tier authentication (proxy key / console
+     * session / anonymous) — the one /v1 surface where anonymous access is
+     * by design, gated by the plaza settings port. Like /v1/models and the
+     * query endpoints, it never enters preparation/admission: it reads state
+     * instead of creating billable work. All tier decisions, settings
+     * gating, and rate limiting live inside the port (model-plaza/endpoint).
+     */
+    if (path === '/v1/model-plaza') {
+      drainRequest(req);
+      if ((req.method ?? '').toUpperCase() !== 'GET') {
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      if (!modelPlaza) {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      let plazaResult: SaasGatewayQueryResult;
+      try {
+        const clientAddress = resolveClientAddress(
+          req.socket?.remoteAddress ?? '',
+          req.headers['x-forwarded-for'],
+          trustedProxyCidrs ?? [],
+        );
+        plazaResult = await modelPlaza.serve({
+          requestId,
+          bearerToken: bearerKey(req) ?? null,
+          sessionToken: plazaSessionToken(req),
+          clientAddress: clientAddress.status === 'resolved' ? clientAddress.address : null,
+          authenticateProxyKey: (rawKey) => authenticator.authenticate(rawKey),
+        });
+      } catch {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      sendQueryResult(res, requestId, plazaResult);
       return true;
     }
 

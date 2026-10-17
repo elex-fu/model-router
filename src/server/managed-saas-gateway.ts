@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
+import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
@@ -38,6 +39,11 @@ import {
   type SaasGatewayQueryPort,
 } from '../saas/gateway/http-handler.js';
 import { SaasGatewayAsyncImageMediaPort } from '../saas/gateway/images/async-image-media-port.js';
+import { createSaasModelPlazaEndpoint, type SaasModelPlazaPort } from '../saas/gateway/model-plaza/endpoint.js';
+import { ModelsDevOfficialPricingRegistry } from '../saas/gateway/model-plaza/official-pricing.js';
+import { SaasModelPlazaService } from '../saas/gateway/model-plaza/service.js';
+import { PostgresModelPlazaFacts } from '../saas/gateway/model-plaza/store.js';
+import { createModelPlazaSettingsProvider } from '../saas/gateway/model-plaza/settings.js';
 import { ImageResultOffloader } from '../saas/gateway/images/image-result-offloader.js';
 import {
   IMAGE_TASK_EXECUTION_TIMEOUT_MS,
@@ -284,6 +290,11 @@ export interface ManagedSaasGatewayCompositionDependencies {
    * this; default false keeps preparation input byte-identical.
    */
   readonly stickyScheduling?: boolean;
+  /**
+   * Model plaza port (roadmap batch 5 §5.5, task #22): the read-only
+   * GET /v1/model-plaza showcase. Absent keeps the endpoint closed (503).
+   */
+  readonly modelPlaza?: SaasModelPlazaPort;
 }
 
 export interface ManagedSaasGatewayComposition {
@@ -630,6 +641,7 @@ export function createManagedSaasGatewayComposition(
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
+    ...(dependencies.modelPlaza ? { modelPlaza: dependencies.modelPlaza } : {}),
     ...(dependencies.imageMedia
       ? {
           queryEndpoints: dependencies.imageMedia.queryEndpoints,
@@ -864,7 +876,21 @@ export interface ManagedSaasGatewayProductionOptions {
    * supply is the deployment runtime module's concern (the egress-proxy
    * credential convention).
    */
-  readonly imageMedia?: SaasGatewayImageMediaOptions;
+  readonly imageMedia?: SaasGatewayImageMediaOptions;  /**
+   * Model plaza (roadmap batch 5 §5.5, task #22): the settings overlay
+   * source (store-first; the deployment resolves what its database role can
+   * read). Absent resolves the plaza switches from the environment only.
+   */
+  readonly modelPlazaSettingsOverlay?: () => Promise<Readonly<Record<string, unknown>>>;
+  /**
+   * Model plaza console-session validation for the session tier. Absent
+   * degrades presented session credentials to the anonymous view (the
+   * split-gateway deployment holds no saas_sessions grant).
+   */
+  readonly modelPlazaSessionAuth?: {
+    readonly getSession: (token: string) => Promise<{ readonly userId: string } | null>;
+  };
+
   /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
    * `X-Title`). When set, the values are mounted on the generic transport's
@@ -1816,6 +1842,29 @@ export function createManagedSaasGatewayProductionComposition(
     resolver: new PostgresSupplyProfileResolver(database),
   });
 
+  // Model plaza (batch 5 §5.5, task #22): the read-only showcase rides the
+  // same database and the same pricing service as admission (the facts port
+  // resolves every display price through resolveCustomerPriceVersion inside
+  // one snapshot transaction). Settings resolve store-first when the
+  // deployment supplies an overlay reader, env-only otherwise; the session
+  // tier is wired by the deployment when a console-session authority is in
+  // scope (the split-gateway role holds no saas_sessions grant).
+  const modelPlaza = createSaasModelPlazaEndpoint({
+    service: new SaasModelPlazaService({
+      facts: new PostgresModelPlazaFacts({
+        database,
+        pricing: new SaasPricingService(database),
+        groups: new SaasBillingGroupsService(database),
+      }),
+      officialPricing: new ModelsDevOfficialPricingRegistry(),
+    }),
+    settings: createModelPlazaSettingsProvider({
+      ...(options.modelPlazaSettingsOverlay ? { overlay: options.modelPlazaSettingsOverlay } : {}),
+    }),
+    ...(options.modelPlazaSessionAuth ? { sessionAuth: options.modelPlazaSessionAuth } : {}),
+  });
+
+
   return createManagedSaasGatewayComposition({
     authenticator: keyService,
     preparation: {
@@ -1858,6 +1907,7 @@ export function createManagedSaasGatewayProductionComposition(
     // with the affinity port (required above), so the sticky-session
     // scheduling seam is unconditionally live here.
     stickyScheduling: true,
+    modelPlaza,
   });
 }
 
