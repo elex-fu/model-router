@@ -701,6 +701,7 @@ export class CodexPreparedEvidenceTransport implements PreparedEvidenceTransport
       return {
         responseStarted: false,
         resultHttpStatus: result.status,
+        upstreamErrorKind: result.classification.kind,
         headers: {},
         body: null,
       };

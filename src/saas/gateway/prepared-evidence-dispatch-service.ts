@@ -44,6 +44,13 @@ export interface PreparedEvidenceTransportRequest {
 export interface PreparedEvidenceTransportResponse {
   readonly responseStarted: boolean;
   readonly resultHttpStatus?: number | null;
+  /**
+   * Batch 2.3: the transport's upstream error classification (the shared
+   * health-classifier kind), when the category transport recorded one for a
+   * non-2xx result. Optional and read-side only: adapters that do not set
+   * it keep the status-only feedback mapping.
+   */
+  readonly upstreamErrorKind?: string | null;
   /** Response headers already reduced to the transport's safe allowlist. */
   readonly headers?: Readonly<Record<string, string>>;
   /** Trustworthy, normalized provider usage supplied by a bounded transport observer. */
@@ -649,6 +656,18 @@ export class SaasPreparedEvidenceDispatchService {
     // so 401/403/429 dispatch outcomes would otherwise never de-prioritize
     // the account. Optional so existing compositions stay unchanged.
     private readonly dispatchFailureFeedback?: ProviderAccountDispatchFailureFeedbackPort,
+    /**
+     * Batch 2.3: the model-level rate limit registry (the sub2api
+     * SetModelRateLimit port). A model-not-found 404 or plan-gated 400 cools
+     * the (account, model) pair while the account stays schedulable for
+     * other models. Optional so existing compositions stay unchanged.
+     */
+    private readonly modelRateLimit?: {
+      recordModelRateLimit(input: {
+        readonly candidate: ProviderAccountRuntimeHealthCandidate;
+        readonly model: string;
+      }): void;
+    },
   ) {}
 
   async dispatch(input: PreparedEvidenceDispatchInput): Promise<PreparedEvidenceDispatchResult> {
@@ -1031,9 +1050,29 @@ export class SaasPreparedEvidenceDispatchService {
       // 429) and clean successes produce a signal; retryable transport
       // failures are left to the durable health write above.
       if (healthCandidate && this.dispatchFailureFeedback) {
-        const feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = retryableTransportFailure(transportError)
+        let feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = retryableTransportFailure(transportError)
           ? null
-          : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus);
+          : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus, transportResult?.upstreamErrorKind);
+        // Batch 2.3 — stream-timeout threshold counting: a transport TIMEOUT
+        // that produced no HTTP status is the stream-timeout signal (the
+        // sub2api stream_timeout port); the registry counts it per account
+        // over the window and cools at the threshold.
+        if (
+          feedbackOutcome === null &&
+          transportError instanceof ProviderHttpTransportError &&
+          transportError.code === 'TIMEOUT'
+        ) {
+          feedbackOutcome = 'stream_timeout';
+        }
+        // Batch 2.3 — model-level rate limit: a model-unavailable
+        // classification cools the (account, model) pair for 30 minutes;
+        // the account keeps serving every other model.
+        if (transportResult?.upstreamErrorKind === 'model-unavailable' && this.modelRateLimit) {
+          const model = evidence.resolvedModel;
+          if (typeof model === 'string' && model.trim().length > 0) {
+            this.modelRateLimit.recordModelRateLimit({ candidate: healthCandidate, model });
+          }
+        }
         if (feedbackOutcome !== null) {
           this.dispatchFailureFeedback.recordDispatchOutcome({
             candidate: healthCandidate,

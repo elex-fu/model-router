@@ -5,6 +5,7 @@ import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/
 import {
   PostgresProviderAccountRuntimeHealthStore,
   ProviderAccountDispatchFailureFeedback,
+  ProviderAccountModelRateLimit,
   type ProviderAccountRuntimeHealthEvidence,
   ProviderAccountRuntimeHealthStoreError,
   providerDispatchFeedbackOutcome,
@@ -1137,6 +1138,12 @@ test('dispatch feedback maps only account-attributable statuses (H5c)', () => {
   assert.equal(providerDispatchFeedbackOutcome(404), null);
   assert.equal(providerDispatchFeedbackOutcome(null), null);
   assert.equal(providerDispatchFeedbackOutcome(undefined), null);
+  // Batch 2.3: the kind-aware mapping and the 402 status fallback.
+  assert.equal(providerDispatchFeedbackOutcome(500, 'insufficient-balance'), 'insufficient_balance');
+  assert.equal(providerDispatchFeedbackOutcome(403, 'concurrency-limited'), 'concurrency_limited');
+  assert.equal(providerDispatchFeedbackOutcome(404, 'model-unavailable'), 'rate_limited');
+  assert.equal(providerDispatchFeedbackOutcome(402), 'insufficient_balance');
+  assert.equal(providerDispatchFeedbackOutcome(402, 'forbidden'), 'insufficient_balance');
 });
 
 test('a single 429 does not cool the account; consecutive 429s cool briefly and escalate (H5c)', () => {
@@ -1170,20 +1177,37 @@ test('a 401/403 cools immediately, doubles, and caps at 60 seconds (H5c)', () =>
   assert.equal(isExcluded(clockMs + 9_999), true);
   assert.equal(isExcluded(clockMs + 10_000), false);
 
+  // Batch 2.3 — OAuth 401 second-strike escalation: the second consecutive
+  // auth failure jumps straight to the 60 s max cooldown (the sub2api
+  // 401-escalated-to-error port; permanence stays with the durable store).
   clockMs += 10_000;
-  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
-  assert.equal(isExcluded(clockMs + 19_999), true);
-  assert.equal(isExcluded(clockMs + 20_000), false);
-
-  // Escalation caps at 60 s: five consecutive auth failures cool for the cap.
-  clockMs += 20_000;
-  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
-  clockMs += 40_000;
-  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
-  clockMs += 60_000;
   feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
   assert.equal(isExcluded(clockMs + 59_999), true);
   assert.equal(isExcluded(clockMs + 60_000), false);
+
+  // A success resets the chain: the next auth failure is a fresh first
+  // strike (10 s base — the consecutive counter drives the doubling, so
+  // without the reset the fourth strike would already cap at 60 s).
+  clockMs += 60_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'success' });
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  assert.equal(isExcluded(clockMs + 19_999), false);
+  assert.equal(isExcluded(clockMs + 9_999), true, 'a fresh first auth strike cools for the 10 s base');
+  // Batch 2.3: the rate_limited outcome between auth failures does NOT
+  // itself escalate (the escalation is 401-after-401 only) — the next auth
+  // after the rate outcome uses the doubling ladder from its own streak.
+  clockMs += 10_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'success' });
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  clockMs += 10_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'rate_limited' });
+  clockMs += 2_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'auth_or_permission_failure' });
+  // Auth streak length 2 with a rate in between: the previous outcome was
+  // rate_limited, so no escalation — but the consecutive counter (3) puts
+  // the doubling ladder at 10 s × 2² = 40 s.
+  assert.equal(isExcluded(clockMs + 39_999), true);
+  assert.equal(isExcluded(clockMs + 40_000), false);
 });
 
 test('a success resets the failure feedback and scopes stay isolated (H5c)', () => {
@@ -1227,4 +1251,95 @@ test('failures older than the stale window start a fresh consecutive count (H5c)
   // A fresh count means the 10 s base, not the doubled 20 s.
   assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs + 10_000) }), false);
   assert.equal(feedback.isExcluded({ candidate: account, now: new Date(clockMs + 9_999) }), true);
+});
+
+test('batch 2.3: a 402 insufficient-balance cools for 2× the balance-check period and recovers on success', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const isExcluded = (nowMs: number) => feedback.isExcluded({ candidate: account, now: new Date(nowMs) });
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'insufficient_balance' });
+  assert.equal(isExcluded(clockMs), true);
+  assert.equal(isExcluded(clockMs + 20 * 60_000 - 1), true);
+  assert.equal(isExcluded(clockMs + 20 * 60_000), false, 'the balance cooldown is 2× the 10-minute check period');
+
+  // A successful dispatch clears the cooldown entirely (balance recovered).
+  clockMs += 60_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'success' });
+  assert.equal(isExcluded(clockMs), false);
+});
+
+test('batch 2.3: a Kimi 403 concurrency limit cools for one minute without escalation', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const isExcluded = (nowMs: number) => feedback.isExcluded({ candidate: account, now: new Date(nowMs) });
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'concurrency_limited' });
+  assert.equal(isExcluded(clockMs + 59_999), true);
+  assert.equal(isExcluded(clockMs + 60_000), false);
+  // The second strike cools for the same minute — no escalation ladder.
+  clockMs += 60_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'concurrency_limited' });
+  assert.equal(isExcluded(clockMs + 60_000), false);
+});
+
+test('batch 2.3: stream timeouts cool only at the threshold inside the window', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const isExcluded = (nowMs: number) => feedback.isExcluded({ candidate: account, now: new Date(nowMs) });
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_timeout' });
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_timeout' });
+  assert.equal(isExcluded(clockMs), false, 'two timeouts below the threshold of three do not cool');
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_timeout' });
+  assert.equal(isExcluded(clockMs), true, 'the third timeout inside the window cools');
+  assert.equal(isExcluded(clockMs + 10 * 60_000 - 1), true);
+  assert.equal(isExcluded(clockMs + 10 * 60_000), false);
+
+  // Timeouts older than the window leave the count: after the cooldown, a
+  // fresh single timeout does not immediately re-cool.
+  clockMs += 11 * 60_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_timeout' });
+  assert.equal(isExcluded(clockMs), false);
+});
+
+test('batch 2.3: the model rate limit cools the (account, model) pair for 30 minutes only', () => {
+  const clockMs = NOW.getTime();
+  const modelLimits = new ProviderAccountModelRateLimit({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const otherAccount = candidate('tenant-a', 'account-b');
+
+  modelLimits.recordModelRateLimit({ candidate: account, model: 'provider-model' });
+  assert.equal(
+    modelLimits.isModelExcluded({ candidate: account, model: 'provider-model', now: new Date(clockMs) }),
+    true,
+  );
+  assert.equal(
+    modelLimits.isModelExcluded({
+      candidate: account,
+      model: 'provider-model',
+      now: new Date(clockMs + 30 * 60_000 - 1),
+    }),
+    true,
+  );
+  assert.equal(
+    modelLimits.isModelExcluded({ candidate: account, model: 'provider-model', now: new Date(clockMs + 30 * 60_000) }),
+    false,
+  );
+  // The account stays schedulable for every other model.
+  assert.equal(
+    modelLimits.isModelExcluded({ candidate: account, model: 'another-model', now: new Date(clockMs) }),
+    false,
+  );
+  assert.equal(
+    modelLimits.isModelExcluded({ candidate: otherAccount, model: 'provider-model', now: new Date(clockMs) }),
+    false,
+  );
+  // Whitespace and malformed models record nothing.
+  modelLimits.recordModelRateLimit({ candidate: account, model: '  ' });
+  assert.equal(modelLimits.isModelExcluded({ candidate: account, model: '  ', now: new Date(clockMs) }), false);
 });

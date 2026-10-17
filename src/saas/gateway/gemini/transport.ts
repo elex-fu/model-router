@@ -526,6 +526,7 @@ export class GeminiPreparedEvidenceTransport implements PreparedEvidenceTranspor
       return {
         responseStarted: false,
         resultHttpStatus: result.status,
+        upstreamErrorKind: result.classification.kind,
         headers: {},
         body: null,
       };

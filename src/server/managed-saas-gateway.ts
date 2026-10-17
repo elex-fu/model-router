@@ -35,21 +35,18 @@ import {
   PostgresProviderAccountRuntimeHealthStore,
   ProviderAccountDispatchFailureFeedback,
   type ProviderAccountDispatchFailureFeedbackPort,
+  ProviderAccountModelRateLimit,
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
 import type { PostgresProviderAccountSchedulerOptions } from '../saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresProviderAccountScheduler } from '../saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresProviderEgressProxyResolver } from '../saas/gateway/postgres-provider-egress-proxy-resolver.js';
-import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
-import {
-  createTlsFingerprintSidecarConnectorFactory,
-  type ProviderTlsFingerprintEgress,
-} from '../saas/gateway/provider-http-tls-fingerprint-connector.js';
 import {
   PostgresRequestPreparationAuthorityAdapter,
   type PostgresRequestPreparationAuthorityAdapterDependencies,
 } from '../saas/gateway/postgres-request-preparation-authority-adapter.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
+import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
 import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   type PreparedEvidenceLeaseProvider,
@@ -73,6 +70,10 @@ import {
   type ProviderHttpEgressAllowlist,
   type ProviderHttpTestAddressCapability,
 } from '../saas/gateway/provider-http-address.js';
+import {
+  createTlsFingerprintSidecarConnectorFactory,
+  type ProviderTlsFingerprintEgress,
+} from '../saas/gateway/provider-http-tls-fingerprint-connector.js';
 import {
   type ProviderHttpDispatchProfileResolveInput,
   type ProviderHttpEndpointPolicy,
@@ -187,6 +188,17 @@ export interface ManagedSaasGatewayDispatchDependencies {
    * by the production composition. Optional; absent keeps dispatch unchanged.
    */
   readonly dispatchFailureFeedback?: ProviderAccountDispatchFailureFeedbackPort;
+  /**
+   * Batch 2.3: the model-level rate limit registry. A model-not-found 404
+   * or plan-gated 400 cools the (account, model) pair for 30 minutes while
+   * the account stays schedulable for other models.
+   */
+  readonly modelRateLimit?: {
+    recordModelRateLimit(input: {
+      readonly candidate: import('../saas/gateway/postgres-provider-account-runtime-health-store.js').ProviderAccountRuntimeHealthCandidate;
+      readonly model: string;
+    }): void;
+  };
 }
 
 /**
@@ -545,6 +557,7 @@ export function createManagedSaasGatewayComposition(
     dependencies.dispatch.normalSuccessSettlement,
     dependencies.dispatch.runtimeHealthWriter,
     dependencies.dispatch.dispatchFailureFeedback,
+    dependencies.dispatch.modelRateLimit,
   );
   const httpHandler = createSaasGatewayHandler({
     authenticator: dependencies.authenticator,
@@ -1499,6 +1512,7 @@ export function createManagedSaasGatewayProductionComposition(
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
       dispatchFailureFeedback,
+      modelRateLimit: new ProviderAccountModelRateLimit(),
     },
     lifecycle: {
       close: async () => {
