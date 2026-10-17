@@ -10,9 +10,31 @@ import type { RequestPreparationCaller, RequestPreparationCandidateAuthority } f
 
 type HealthState = 'healthy' | 'degraded' | 'cooldown' | 'unhealthy';
 type HealthSource = 'gateway' | 'probe';
-type RetryableFailureKind = 'network' | 'provider_5xx' | 'protocol';
 
-/** Runtime evidence excludes caller validation and non-retryable 4xx outcomes. */
+/**
+ * K2 (R9 run-3 all-4-faulted finding): the durable failure vocabulary gains
+ * three account-attributable kinds. `network`, `provider_5xx` and `protocol`
+ * keep their exact pre-K2 cooldown curve (1 s doubling to 300 s); the new
+ * kinds carry their own short, bounded curves (see WRITE_HEALTH_SQL) so a
+ * 20 s chaos window cools an account without walling it past the window.
+ */
+export type RetryableFailureKind =
+  | 'network'
+  | 'provider_5xx'
+  | 'protocol'
+  | 'account_access'
+  | 'rate_limited'
+  | 'stream_abort';
+
+/**
+ * Runtime evidence. Caller-validation 4xx (400/404/422…) is still excluded —
+ * those are request-attributable and must never cool an account. The
+ * account-attributable statuses (401/403/429) and mid-stream upstream aborts
+ * ARE runtime evidence (K2): during an all-accounts-faulted window the
+ * scheduler's P17 fail-open fallback deliberately ignores the in-process
+ * hint, so only durable evidence can stop dispatching to the faulted
+ * accounts.
+ */
 export type ProviderAccountRuntimeHealthEvidence =
   | { readonly source: HealthSource; readonly result: 'success' }
   | {
@@ -233,6 +255,24 @@ const READ_SCHEDULING_SQL = `
  * (alpha = 0.2, optimistic NULL seed = 1.000, three-decimal numeric grid).
  * The INSERT seed applies one EMA step from 1.000 so the first failure
  * lands at 0.800, matching recordOutcomeEma in ./health-score.js.
+ *
+ * K2 (all-4-faulted fail-away): the account-attributable failure kinds get
+ * their own SHORT cooldown curves, keyed on the persisted last_outcome so
+ * the pre-K2 kinds (network/provider_5xx/protocol) keep the exact original
+ * 1 s → 300 s doubling. The new curves are tuned for a ~20 s fault window:
+ *   - gateway_account_access_failure (401/403): 5 s → 10 s → 15 s cap.
+ *     A hard credential/permission signal cools immediately, but a revoked
+ *     key must not wall the account past the window (post-window recovery
+ *     is cooldown expiry → 'degraded' → schedulable; the first success
+ *     write then resets the row to healthy).
+ *   - gateway_rate_limited_failure (429): the FIRST consecutive 429 is
+ *     count-only (cooldown_until = observed_at, i.e. immediately expired →
+ *     'degraded' rank, still schedulable) mirroring the in-process H5c
+ *     threshold-2 semantics; from the second, 4 s → 8 s → 15 s cap (the
+ *     first write already counted failure_count = 1). Routine provider
+ *     rate limiting must not durably deny a healthy, merely busy account.
+ *   - gateway_stream_abort_failure (mid-stream abort after ≥1 delivered
+ *     chunk): 5 s → 10 s → 15 s cap.
  */
 const WRITE_HEALTH_SQL = `
   WITH observation AS (
@@ -254,8 +294,11 @@ const WRITE_HEALTH_SQL = `
   SELECT $8::text, $2, $3, $4, $9::text,
          CASE WHEN $9::text = 'cooldown' THEN 1 ELSE 0 END,
          observation.observed_at,
-         CASE WHEN $9::text = 'cooldown'
-           THEN observation.observed_at + interval '1 second' ELSE NULL END,
+         CASE WHEN $9::text <> 'cooldown' THEN NULL
+           WHEN $10::text = 'gateway_rate_limited_failure' THEN observation.observed_at
+           WHEN $10::text = 'gateway_account_access_failure' THEN observation.observed_at + interval '5 seconds'
+           WHEN $10::text = 'gateway_stream_abort_failure' THEN observation.observed_at + interval '5 seconds'
+           ELSE observation.observed_at + interval '1 second' END,
          $10::text, $7::bigint, 1,
          ROUND((1.000 + 0.2 * (CASE WHEN $9::text = 'cooldown' THEN 0.000 ELSE 1.000 END
                  - 1.000))::numeric, 3)
@@ -266,10 +309,20 @@ const WRITE_HEALTH_SQL = `
         failure_count = CASE WHEN EXCLUDED.state = 'healthy' THEN 0
           ELSE LEAST(current_health.failure_count + 1, 8) END,
         observed_at = EXCLUDED.observed_at,
-        cooldown_until = CASE WHEN EXCLUDED.state = 'healthy' THEN NULL
+        cooldown_until = CASE
+          WHEN EXCLUDED.state = 'healthy' THEN NULL
+          WHEN EXCLUDED.last_outcome = 'gateway_rate_limited_failure'
+            AND current_health.failure_count + 1 < 2 THEN EXCLUDED.observed_at
           ELSE EXCLUDED.observed_at +
-            LEAST(300000::bigint, 1000::bigint * (1::bigint << LEAST(current_health.failure_count, 8)))
-              * interval '1 millisecond' END,
+            CASE EXCLUDED.last_outcome
+              WHEN 'gateway_account_access_failure' THEN
+                LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(current_health.failure_count, 2)))
+              WHEN 'gateway_rate_limited_failure' THEN
+                LEAST(15000::bigint, 2000::bigint * (1::bigint << LEAST(current_health.failure_count, 3)))
+              WHEN 'gateway_stream_abort_failure' THEN
+                LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(current_health.failure_count, 2)))
+              ELSE LEAST(300000::bigint, 1000::bigint * (1::bigint << LEAST(current_health.failure_count, 8)))
+            END * interval '1 millisecond' END,
         last_outcome = EXCLUDED.last_outcome,
         source_fencing_token = EXCLUDED.source_fencing_token,
         revision = current_health.revision + 1,
@@ -431,6 +484,15 @@ function accountScope(candidate: unknown, caller?: RequestPreparationCaller): He
   return null;
 }
 
+const RETRYABLE_FAILURE_KINDS: ReadonlySet<RetryableFailureKind> = new Set([
+  'network',
+  'provider_5xx',
+  'protocol',
+  'account_access',
+  'rate_limited',
+  'stream_abort',
+]);
+
 function normalizedEvidence(value: unknown): NormalizedEvidence | null {
   if (!record(value) || (value.source !== 'gateway' && value.source !== 'probe')) return null;
   const prefix = value.source;
@@ -439,7 +501,7 @@ function normalizedEvidence(value: unknown): NormalizedEvidence | null {
   }
   if (
     value.result !== 'retryable_failure' ||
-    (value.failureKind !== 'network' && value.failureKind !== 'provider_5xx' && value.failureKind !== 'protocol') ||
+    !RETRYABLE_FAILURE_KINDS.has(value.failureKind as RetryableFailureKind) ||
     Object.keys(value).some((key) => !['source', 'result', 'failureKind'].includes(key))
   ) {
     return null;
@@ -796,16 +858,21 @@ export class PostgresProviderAccountRuntimeHealthStore
  * the account in a short, exponentially backed-off scheduling cooldown.
  *
  * Scope discipline (fail-closed posture preserved):
- * - Only statuses the durable classification EXCLUDES and that are
- *   account-attributable count as feedback failures: 401/403 (credential or
- *   permission revoked — a hard signal) and 429 (rate limited — a soft
- *   signal). 5xx/network/protocol failures already produce a durable
- *   PostgreSQL cooldown via recordRuntimeOutcome in the same dispatch
- *   completion path; other 4xx are request-attributable and must not cool
- *   an account.
+ * - The account-attributable outcomes count as feedback failures: 401/403
+ *   (credential or permission revoked — a hard signal), 429 (rate limited —
+ *   a soft signal), and a mid-stream upstream abort after ≥1 delivered chunk
+ *   (K2 — the provider committed a 200 then killed the stream; a real but
+ *   soft account signal). Since K2 these outcomes ALSO produce durable
+ *   runtime-health evidence (see RetryableFailureKind), with the in-process
+ *   registry remaining the faster first line: it excludes the account in
+ *   the scheduler's first pass without a round trip. Other 4xx are
+ *   request-attributable and must not cool an account; 5xx/network/protocol
+ *   failures produce their own (longer) durable cooldowns via the same
+ *   dispatch completion path.
  * - The registry is a scheduling HINT only, like priority/weight: it never
  *   writes the health table, never feeds billing, and never grants access.
- *   The durable 401/403/429 classification matrix stays authoritative.
+ *   The durable classification stays authoritative; the P17 fallback pass
+ *   deliberately ignores this hint when it would empty the candidate set.
  * - In-memory only: a process restart forgets everything, and the bounded
  *   cooldowns (≤60 s) expire on their own.
  * ---------------------------------------------------------------------------
@@ -817,7 +884,8 @@ export class PostgresProviderAccountRuntimeHealthStore
  * (recoverable), 403 concurrency-limited (recoverable, the Kimi ceiling) and
  * the model-level 404/plan-gated-400 dimension (account-level cooldown only
  * when the registry is asked per model — the model scoping stays with the
- * caller, which knows the requested model).
+ * caller, which knows the requested model). K2 adds the mid-stream abort:
+ * the provider committed a 200, delivered ≥1 chunk, then killed the stream.
  */
 export type ProviderAccountDispatchFeedbackOutcome =
   | 'success'
@@ -825,7 +893,8 @@ export type ProviderAccountDispatchFeedbackOutcome =
   | 'rate_limited'
   | 'insufficient_balance'
   | 'concurrency_limited'
-  | 'stream_timeout';
+  | 'stream_timeout'
+  | 'stream_abort';
 
 /**
  * The kind-aware feedback mapping (batch 2.3): the shared classifier's kind
@@ -902,6 +971,15 @@ export const FEEDBACK_AUTH_ESCALATION_MAX_COOLDOWN_MS = 60_000;
  */
 export const FEEDBACK_429_FALLBACK_MIN_COOLDOWN_MS = 1_000;
 export const FEEDBACK_429_FALLBACK_MAX_COOLDOWN_MS = 30_000;
+/**
+ * K2 mid-stream abort cooldown: a provider that commits a 200, delivers at
+ * least one chunk, and then destroys the stream is a real account signal —
+ * but a soft one (transient connection resets look identical), so it cools
+ * immediately yet briefly, and never from a client-side cancellation (the
+ * dispatch side only records the outcome when the upstream body failed).
+ */
+const FEEDBACK_STREAM_ABORT_BASE_COOLDOWN_MS = 5_000;
+const FEEDBACK_STREAM_ABORT_MAX_COOLDOWN_MS = 30_000;
 /** Consecutive failures from longer ago than this are forgotten (fresh start). */
 const FEEDBACK_STALE_AFTER_MS = 300_000;
 /** Hard bound on tracked accounts; the registry is a bounded process-local hint. */
@@ -942,7 +1020,8 @@ export class ProviderAccountDispatchFailureFeedback implements ProviderAccountDi
         outcome !== 'rate_limited' &&
         outcome !== 'insufficient_balance' &&
         outcome !== 'concurrency_limited' &&
-        outcome !== 'stream_timeout')
+        outcome !== 'stream_timeout' &&
+        outcome !== 'stream_abort')
     ) {
       return;
     }
@@ -991,6 +1070,15 @@ export class ProviderAccountDispatchFailureFeedback implements ProviderAccountDi
       // Kimi 403 concurrency ceiling (batch 2.3): minute-scale, no
       // escalation — the ceiling clears as in-flight requests drain.
       cooledUntil = now + FEEDBACK_CONCURRENCY_LIMIT_COOLDOWN_MS;
+    } else if (outcome === 'stream_abort') {
+      // K2 mid-stream abort: immediate but brief and bounded (5 s → 30 s
+      // doubling); see FEEDBACK_STREAM_ABORT_* above.
+      cooledUntil =
+        now +
+        Math.min(
+          FEEDBACK_STREAM_ABORT_MAX_COOLDOWN_MS,
+          FEEDBACK_STREAM_ABORT_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - 1, 16),
+        );
     } else {
       // Stream timeout (batch 2.3): threshold counting inside the window
       // (the sub2api stream_timeout port) — cool only at the threshold.

@@ -87,6 +87,7 @@ import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migra
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
 import { PLUGIN_SYSTEM_SAAS_MIGRATION } from '../../../src/saas/db/migrations/128_plugin_system.js';
 import { VIDEO_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/124_video_tasks.js';
+import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/129_provider_account_durable_fault_classification.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -203,6 +204,9 @@ test('SaaS migration registry keeps a stable append order with only documented g
       // Batch-5 §5.1 (task #24): 128 plugin system — installation registry,
       // capability bindings and the host-service KV store.
       128,
+      // K2 (main-side, renumbered 112 → 129 in this merge): the durable
+      // fault classification appends at the tail.
+      129,
     ],
   );
 });
@@ -266,7 +270,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 109);
+  assert.equal(SAAS_MIGRATIONS.length, 110);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -337,6 +341,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'public_brand_settings',
       'obs_alert_silences_and_report_state',
       'plugin_system',
+      'provider_account_durable_fault_classification',
     ],
   );
   assert.deepEqual(
@@ -418,10 +423,13 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       // Batch-5 §5.1 (task #24): 128 plugin system — installation registry,
       // capability bindings and the host-service KV store.
       128,
+      // K2 (main-side, renumbered 112 → 129 in this merge): the durable
+      // fault classification appends at the tail.
+      129,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 109);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 109);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 110);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 110);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -511,7 +519,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 109);
+  assert.equal(SAAS_MIGRATIONS.length, 110);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -568,6 +576,7 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
     OBS_ALERT_SILENCES_SAAS_MIGRATION,
     PLUGIN_SYSTEM_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -725,6 +734,13 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[108], PLUGIN_SYSTEM_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[108]?.version, 128);
   assert.equal(SAAS_MIGRATIONS[108]?.name, 'plugin_system');
+
+  // 129: K2 account-attributable runtime-health outcomes (040 CHECK
+  // extension) — the all-4-faulted durable fail-away classification;
+  // authored as 112 on main and renumbered to 129 in this merge.
+  assert.equal(SAAS_MIGRATIONS[109], PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[109]?.version, 129);
+  assert.equal(SAAS_MIGRATIONS[109]?.name, 'provider_account_durable_fault_classification');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

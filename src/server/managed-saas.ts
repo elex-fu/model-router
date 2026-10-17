@@ -43,7 +43,10 @@ import { createPostgresPreparationPorts } from '../saas/gateway/postgres-prepara
 import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provider-account-affinity.js';
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
-import { isProviderHttpTestAddressCapability } from '../saas/gateway/provider-http-address.js';
+import {
+  isProviderHttpTestAddressCapability,
+  type ProviderHttpEgressAllowlist,
+} from '../saas/gateway/provider-http-address.js';
 import { parseProviderEgressAllowlistSettings } from '../saas/gateway/provider-http-egress-allowlist.js';
 import { ConsoleEmailSender, type EmailSender, SmtpEmailSender } from '../saas/identity/email-sender.js';
 import { EmailVerificationService } from '../saas/identity/email-verification-service.js';
@@ -1417,6 +1420,7 @@ async function startCredentialValidationWorkerRuntime(
   deployment: ManagedSaasDeploymentConfig,
   options: ManagedSaasStartOptions,
   environment: DeploymentEnvironment,
+  providerEgressAllowlistOption: { readonly egressAllowlist?: ProviderHttpEgressAllowlist },
 ): Promise<ManagedSaasRuntime> {
   if (options.gateway || options.payments || options.paymentHandler) {
     throw new TypeError('Credential-validation worker cannot receive gateway or payment capabilities');
@@ -1556,6 +1560,9 @@ async function startCredentialValidationWorkerRuntime(
       transportTestOptions: options.credentialValidationWorkerTestTransport,
       deployment: deployment.deploymentId,
       environment: deployment.environmentId,
+      // R9 §4 P1: the validation transport consults the same operator
+      // egress allowlist as gateway dispatch (empty = strict posture).
+      ...providerEgressAllowlistOption,
     });
     // Track D4: the quota sync loop shares this workload's database role and
     // decrypt-only KMS. Its snapshot writes never feed the billing path.
@@ -1621,6 +1628,8 @@ async function startCredentialValidationWorkerRuntime(
         ...(options.egressProxyProbeWorkerOptions ?? {}),
         deployment: deployment.deploymentId,
         environment: deployment.environmentId,
+        // R9 §4 P1: proxy probes honor the same operator egress allowlist.
+        ...providerEgressAllowlistOption,
       }),
       options.egressProxyProbeWorkerOptions,
     );
@@ -1636,6 +1645,8 @@ async function startCredentialValidationWorkerRuntime(
         ...(options.probeMonitorWorkerOptions ?? {}),
         deployment: deployment.deploymentId,
         environment: deployment.environmentId,
+        // R9 §4 P1: account probes honor the same operator egress allowlist.
+        ...providerEgressAllowlistOption,
       }),
       options.probeMonitorWorkerOptions ?? {},
     );
@@ -1647,6 +1658,8 @@ async function startCredentialValidationWorkerRuntime(
         ...(options.oauthTokenRefreshWorkerOptions ?? {}),
         deployment: deployment.deploymentId,
         environment: deployment.environmentId,
+        // R9 §4 P1: OAuth refresh egress honors the same operator allowlist.
+        ...providerEgressAllowlistOption,
       } as Parameters<typeof startOauthTokenRefreshWorker>[3]);
     }
     const runtime: ManagedSaasRuntime = {
@@ -1756,6 +1769,24 @@ export async function startManagedSaasServer(
   }
 
   const environment = options.environment ?? process.env;
+  // R9 §4 P1: operator egress allowlist for container-network providers.
+  // Strict env parsing — malformed CIDR entries fail EVERY workload startup
+  // closed (gateway dispatch, credential validation, account probing and
+  // OAuth refresh all share this one parsed value). The effective entries
+  // (CIDRs, never credentials) are logged.
+  const providerHttpEgressAllowlist = parseProviderEgressAllowlistSettings(environment);
+  console.log(
+    `model-router provider egress allowlist: ${
+      providerHttpEgressAllowlist.entries.length === 0
+        ? 'none (strict global-only provider egress)'
+        : providerHttpEgressAllowlist.entries.join(', ')
+    }`,
+  );
+  // R9 §4 P1 composition: an empty allowlist is the pre-R9 strict posture —
+  // omit the option entirely so every consumer keeps byte-identical default
+  // behavior.
+  const providerEgressAllowlistOption =
+    providerHttpEgressAllowlist.entries.length === 0 ? {} : { egressAllowlist: providerHttpEgressAllowlist };
   if (
     deployment.workloadRole !== 'credential-validation-worker' &&
     (targetsModuleData(deployment, 'credentialValidationTargetsModule') !== undefined ||
@@ -1765,7 +1796,7 @@ export async function startManagedSaasServer(
     throw new TypeError('Credential-validation targets module is available only to the credential-validation worker');
   }
   if (deployment.workloadRole === 'credential-validation-worker') {
-    return startCredentialValidationWorkerRuntime(deployment, options, environment);
+    return startCredentialValidationWorkerRuntime(deployment, options, environment, providerEgressAllowlistOption);
   }
   if (deployment.workloadRole === 'plugin-host') {
     // Batch-5 §5.1: the isolated plugin-host workload (same codebase, own
@@ -2037,17 +2068,9 @@ export async function startManagedSaasServer(
         usageEstimatorVersion: providerPayload.estimator.version,
         now: gatewayClock,
       });
-      // R9 §4 P1: operator egress allowlist for container-network providers.
-      // Strict env parsing — malformed CIDR entries fail the gateway startup
-      // closed. The effective entries (CIDRs, never credentials) are logged.
-      const providerHttpEgressAllowlist = parseProviderEgressAllowlistSettings(environment);
-      console.log(
-        `model-router provider egress allowlist: ${
-          providerHttpEgressAllowlist.entries.length === 0
-            ? 'none (strict global-only provider egress)'
-            : providerHttpEgressAllowlist.entries.join(', ')
-        }`,
-      );
+      // R9 §4 P1: the operator egress allowlist is parsed once at server
+      // startup (see startManagedSaasServer) and shared by gateway dispatch,
+      // credential validation, account probing and OAuth refresh.
       // Gateway-scoped Redis decorates the PG affinity port with the R6b
       // sticky fast path (sliding 1h TTL; PG remains authoritative).
       const plazaDatabase = database;
@@ -2989,6 +3012,9 @@ export async function startManagedSaasServer(
           ...(refresh.pollIntervalMs === undefined ? {} : { pollIntervalMs: refresh.pollIntervalMs }),
           deployment: deployment.deploymentId,
           environment: deployment.environmentId,
+          // R9 §4 P1: control-plane OAuth refresh egress honors the same
+          // operator allowlist (empty = strict global-only posture).
+          ...providerEgressAllowlistOption,
         } as Parameters<typeof startOauthTokenRefreshWorker>[3]);
       }
       const startScanner = options.startUnknownOutcomeScanner ?? startUnknownOutcomeScanner;

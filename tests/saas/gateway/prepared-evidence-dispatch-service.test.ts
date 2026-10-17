@@ -620,6 +620,62 @@ test('dispatch records retryable provider failures and ignores caller errors', a
     'transition:dispatching',
     'known-http-failure:401',
   ]);
+  // K2: 401 is account-attributable (the gateway injected this account's
+  // credential), so it now produces durable account_access evidence.
+  assert.deepEqual((writes[2] as { evidence: unknown }).evidence, {
+    source: 'gateway',
+    result: 'retryable_failure',
+    failureKind: 'account_access',
+  });
+});
+
+test('dispatch classifies account-attributable 403/429 and skips request-attributable 4xx (K2)', async () => {
+  const writes: unknown[] = [];
+  const health: ProviderAccountRuntimeHealthWriter = {
+    async recordRuntimeOutcome(input) {
+      writes.push(input);
+      return 'applied';
+    },
+  };
+  for (const [status, failureKind] of [
+    [403, 'account_access'],
+    [429, 'rate_limited'],
+  ] as const) {
+    const transport: PreparedEvidenceTransport = {
+      async send() {
+        return { responseStarted: false, resultHttpStatus: status };
+      },
+    };
+    const result = await service(
+      new FakeEvidence(),
+      new FakeMetering(),
+      new FakeLeaseProvider(),
+      transport,
+      health,
+    ).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
+    assert.equal(result.kind, 'sent');
+    assert.equal(result.attempt.resultHttpStatus, status);
+    assert.deepEqual((writes.at(-1) as { evidence: unknown }).evidence, {
+      source: 'gateway',
+      result: 'retryable_failure',
+      failureKind,
+    });
+  }
+  // A request-attributable 4xx (400) stays excluded from runtime evidence.
+  const requestError: PreparedEvidenceTransport = {
+    async send() {
+      return { responseStarted: false, resultHttpStatus: 400 };
+    },
+  };
+  const requestErrorResult = await service(
+    new FakeEvidence(),
+    new FakeMetering(),
+    new FakeLeaseProvider(),
+    requestError,
+    health,
+  ).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
+  assert.equal(requestErrorResult.kind, 'sent');
+  assert.equal(requestErrorResult.attempt.resultHttpStatus, 400);
   assert.equal(writes.length, 2);
 });
 
@@ -1406,6 +1462,172 @@ test('streams response chunks with backpressure and commits headers after readin
   assert.equal(client.abortCount, 0);
   assert.equal(metering.current.responseStarted, true);
   assert.ok(lease.renewCount >= 2);
+});
+
+/** A body that delivers `chunks` then errors like a destroyed upstream socket. */
+function abortingResponseBody(chunks: readonly Uint8Array[], error: Error): ReadableStream<Uint8Array> {
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[index];
+      if (chunk) {
+        index += 1;
+        controller.enqueue(chunk);
+        return;
+      }
+      controller.error(error);
+    },
+    cancel() {
+      // The dispatch side cancels on abort; nothing further to observe.
+    },
+  });
+}
+
+test('mid-stream upstream abort after a delivered chunk records stream_abort evidence, not success (K2)', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const client = new FakeClientStream();
+  const writes: unknown[] = [];
+  const feedback: ProviderAccountDispatchFailureFeedbackPort = {
+    isExcluded: () => false,
+    recordDispatchOutcome(input) {
+      writes.push({ feedback: input });
+    },
+  };
+  const health: ProviderAccountRuntimeHealthWriter = {
+    async recordRuntimeOutcome(input) {
+      writes.push({ health: input });
+      return 'applied';
+    },
+  };
+  const transport: PreparedEvidenceTransport = {
+    async send() {
+      return {
+        responseStarted: false,
+        resultHttpStatus: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: abortingResponseBody([new Uint8Array([1]), new Uint8Array([2])], new Error('socket hang up')),
+      };
+    },
+  };
+  proof.metering = metering;
+  const dispatch = new SaasPreparedEvidenceDispatchService(
+    proof,
+    metering,
+    lease,
+    transport,
+    undefined,
+    health,
+    feedback,
+  );
+
+  const result = await dispatch.dispatch({
+    evidenceId: 'evidence-1',
+    payloadBytes: payload,
+    audit,
+    client,
+  });
+
+  // The upstream killed the stream mid-delivery: the outcome is unknown and
+  // the account receives durable stream_abort evidence plus in-process
+  // feedback — pre-K2 this wrote a durable SUCCESS that erased the signal.
+  assert.equal(result.kind, 'unknown');
+  assert.ok(client.starts.length === 1);
+  const healthWrite = writes.find((entry) => 'health' in entry) as {
+    health: { evidence: { failureKind: string; result: string; source: string } };
+  };
+  assert.deepEqual(healthWrite.health.evidence, {
+    source: 'gateway',
+    result: 'retryable_failure',
+    failureKind: 'stream_abort',
+  });
+  const feedbackWrite = writes.find((entry) => 'feedback' in entry) as {
+    feedback: { outcome: string; candidate: { accountId: string } };
+  };
+  assert.equal(feedbackWrite.feedback.outcome, 'stream_abort');
+  assert.equal(feedbackWrite.feedback.candidate.accountId, 'account-1');
+});
+
+test('client cancellation mid-stream is not an account signal and keeps the success evidence (K2)', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const client = new FakeClientStream();
+  // Cancel synchronously once the client sink commits headers mid-stream.
+  client.onStart = () => client.controller.abort();
+  const writes: unknown[] = [];
+  const health: ProviderAccountRuntimeHealthWriter = {
+    async recordRuntimeOutcome(input) {
+      writes.push(input);
+      return 'applied';
+    },
+  };
+  const transport: PreparedEvidenceTransport = {
+    async send() {
+      return {
+        responseStarted: false,
+        resultHttpStatus: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        // The upstream body itself never errors; only the client goes away.
+        body: responseBody([new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([3])]),
+      };
+    },
+  };
+
+  const result = await service(proof, metering, lease, transport, health).dispatch({
+    evidenceId: 'evidence-1',
+    payloadBytes: payload,
+    audit,
+    client,
+  });
+
+  assert.equal(result.kind, 'unknown');
+  // A client disconnect must never cool the account: the provider was serving
+  // fine, so the durable evidence stays a success observation.
+  assert.deepEqual((writes.at(-1) as { evidence: unknown }).evidence, {
+    source: 'gateway',
+    result: 'success',
+  });
+});
+
+test('an upstream abort before any delivered chunk keeps the pre-K2 success classification (K2 boundary)', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const client = new FakeClientStream();
+  const writes: unknown[] = [];
+  const health: ProviderAccountRuntimeHealthWriter = {
+    async recordRuntimeOutcome(input) {
+      writes.push(input);
+      return 'applied';
+    },
+  };
+  const transport: PreparedEvidenceTransport = {
+    async send() {
+      return {
+        responseStarted: false,
+        resultHttpStatus: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: abortingResponseBody([], new Error('socket hang up')),
+      };
+    },
+  };
+
+  await service(proof, metering, lease, transport, health).dispatch({
+    evidenceId: 'evidence-1',
+    payloadBytes: payload,
+    audit,
+    client,
+  });
+
+  // No chunk was delivered, so the abort is indistinguishable from a plain
+  // network failure and keeps its pre-K2 classification (a success write,
+  // conservative in the account's favor).
+  assert.deepEqual((writes.at(-1) as { evidence: unknown }).evidence, {
+    source: 'gateway',
+    result: 'success',
+  });
 });
 
 test('empty provider body commits headers at EOF and records the observable response', async () => {

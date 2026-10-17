@@ -17,7 +17,9 @@ test('098 registers after 097 ahead of later forwards with the documented gaps',
   }
   // 104 (R2 embeddings), 105 (R1 billing groups), 106 (R4 registration
   // admission) and 108 (R5b OpenCode Go scheduling) follow at the tail.
-  assert.equal(registered.at(-1), 128);
+  // K2: 129 (provider_account_durable_fault_classification, renumbered
+  // from main's 112 in this merge) is the new head.
+  assert.equal(registered.at(-1), 129);
   assert.equal(SAAS_MIGRATIONS[78], migration);
 });
 

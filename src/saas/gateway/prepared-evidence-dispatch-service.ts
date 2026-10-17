@@ -192,11 +192,53 @@ function retryableTransportFailure(error: unknown): ProviderAccountRuntimeHealth
   return null;
 }
 
+/**
+ * K2: a 2xx response whose upstream body died mid-delivery AFTER the client
+ * response had started is an account-attributable stream abort. It is only
+ * counted when the upstream body failed (the reader rejected) and the client
+ * did not cancel — a client-side disconnect or a lost account lease must
+ * never cool the account, and neither may an abort that happened before any
+ * chunk was delivered (that is indistinguishable from a plain network
+ * failure and keeps its pre-K2 classification).
+ */
+function midstreamUpstreamAbort(
+  response: PreparedEvidenceTransportResponse | undefined,
+  transportError: unknown,
+  delivery: ResponseDeliveryState,
+  clientAborted: boolean,
+): boolean {
+  const status = response?.resultHttpStatus;
+  return (
+    delivery.upstreamBodyFailed &&
+    !clientAborted &&
+    typeof status === 'number' &&
+    status >= 200 &&
+    status <= 299 &&
+    delivery.responseStarted &&
+    !(transportError instanceof SaasPreparedEvidenceDispatchError)
+  );
+}
+
 function runtimeHealthEvidence(
   response: PreparedEvidenceTransportResponse | undefined,
   transportError: unknown,
+  midstreamAbort = false,
 ): ProviderAccountRuntimeHealthEvidence | null {
+  if (midstreamAbort) {
+    return { source: 'gateway', result: 'retryable_failure', failureKind: 'stream_abort' };
+  }
   const status = response?.resultHttpStatus;
+  // K2: 401/403/429 are account-attributable — the gateway injected this
+  // account's credential, so the provider rejecting it is a scheduling fact
+  // about the account (durable cooldown; the in-process registry remains the
+  // faster first line). Every other 4xx is request-attributable and stays
+  // excluded from runtime evidence.
+  if (status === 401 || status === 403) {
+    return { source: 'gateway', result: 'retryable_failure', failureKind: 'account_access' };
+  }
+  if (status === 429) {
+    return { source: 'gateway', result: 'retryable_failure', failureKind: 'rate_limited' };
+  }
   if (typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 499) return null;
   if (typeof status === 'number' && Number.isInteger(status) && status >= 500 && status <= 599) {
     return { source: 'gateway', result: 'retryable_failure', failureKind: 'provider_5xx' };
@@ -412,6 +454,13 @@ interface CombinedAbortSignal {
 
 interface ResponseDeliveryState {
   responseStarted: boolean;
+  /**
+   * K2: set only when the UPSTREAM body reader rejected mid-delivery — the
+   * provider killed a stream it had already committed. Client-side write
+   * failures, client cancellation and lease-loss aborts cancel the reader
+   * (reads then resolve done), so they never set this flag.
+   */
+  upstreamBodyFailed: boolean;
 }
 
 function canReleaseLease(value: unknown): value is { release(): Promise<void> } {
@@ -611,7 +660,15 @@ async function deliverTransportResponse(
     while (true) {
       if (leaseSignal.aborted) fail('CLIENT_STREAM_FAILED', 'provider lease was lost during body delivery');
       if (client.signal.aborted) fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled');
-      const next = await reader.read();
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try {
+        next = await reader.read();
+      } catch (error) {
+        // K2: the upstream body itself died; distinguish from client/lease
+        // aborts (which cancel the reader, resolving pending reads done).
+        state.upstreamBodyFailed = true;
+        throw error;
+      }
       if (leaseSignal.aborted) fail('CLIENT_STREAM_FAILED', 'provider lease was lost during body delivery');
       if (client.signal.aborted) fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled');
       if (next.done) {
@@ -798,12 +855,14 @@ export class SaasPreparedEvidenceDispatchService {
     let transportSignal: CombinedAbortSignal | undefined;
     let transportResult: PreparedEvidenceTransportResponse | undefined;
     let transportError: unknown;
+    // K2: hoisted so the finally-block evidence classification can see the
+    // delivery facts (mid-stream upstream abort detection).
+    const delivery: ResponseDeliveryState = { responseStarted: false, upstreamBodyFailed: false };
     try {
       heartbeat = startLeaseHeartbeat(lease);
       transportSignal = combineAbortSignals(
         input.client ? [heartbeat.signal, input.client.signal] : [heartbeat.signal],
       );
-      const delivery: ResponseDeliveryState = { responseStarted: false };
       let reconciliationPersisted = false;
       try {
         if (transportSignal.signal.aborted) {
@@ -1050,7 +1109,18 @@ export class SaasPreparedEvidenceDispatchService {
         }
       }
       transportSignal?.dispose();
-      const healthEvidence = runtimeHealthEvidence(transportResult, transportError);
+      // K2: classify the durable evidence. A mid-stream upstream abort after
+      // the response started overrides the 2xx status — pre-K2 it wrote a
+      // durable SUCCESS, actively erasing the failure signal (the R9
+      // midstream chaos window measured 42 dispatches partly because every
+      // abort refreshed the account's health row as healthy).
+      const midstreamAbort = midstreamUpstreamAbort(
+        transportResult,
+        transportError,
+        delivery,
+        input.client?.signal.aborted === true,
+      );
+      const healthEvidence = runtimeHealthEvidence(transportResult, transportError, midstreamAbort);
       const healthCandidate = runtimeHealthCandidate(evidence);
       if (healthEvidence && healthCandidate && this.runtimeHealthWriter) {
         try {
@@ -1066,19 +1136,23 @@ export class SaasPreparedEvidenceDispatchService {
         }
       }
       // H5c (P8): record the dispatch outcome for the in-process failure
-      // feedback. Only account-attributable non-retryable statuses (401/403/
-      // 429) and clean successes produce a signal; retryable transport
-      // failures are left to the durable health write above.
+      // feedback. Only account-attributable outcomes produce a signal: 401/
+      // 403/429 and a mid-stream upstream abort (K2), plus clean successes;
+      // retryable transport failures are left to the durable health write
+      // above, and other 4xx are request-attributable.
       if (healthCandidate && this.dispatchFailureFeedback) {
-        let feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = retryableTransportFailure(transportError)
-          ? null
-          : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus, transportResult?.upstreamErrorKind);
+        let feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = midstreamAbort
+          ? 'stream_abort'
+          : retryableTransportFailure(transportError)
+            ? null
+            : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus, transportResult?.upstreamErrorKind);
         // Batch 2.3 — stream-timeout threshold counting: a transport TIMEOUT
         // that produced no HTTP status is the stream-timeout signal (the
         // sub2api stream_timeout port); the registry counts it per account
         // over the window and cools at the threshold.
         if (
           feedbackOutcome === null &&
+          !midstreamAbort &&
           transportError instanceof ProviderHttpTransportError &&
           transportError.code === 'TIMEOUT'
         ) {

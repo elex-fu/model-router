@@ -216,7 +216,22 @@ class FakeExecutor implements SqlExecutor {
       const failed = state === 'cooldown';
       const previousFailureCount = current?.failureCount ?? 0;
       const failureCount = failed ? Math.min(previousFailureCount + 1, 8) : 0;
-      const backoffMs = Math.min(300_000, 1000 * 2 ** Math.min(previousFailureCount, 8));
+      // K2 mirror of the authoritative per-outcome cooldown curves. The
+      // account-attributable kinds carry short bounded curves (and a
+      // count-only first write for 429); the pre-K2 kinds keep the exact
+      // original 1 s → 300 s doubling. A fresh row (no current) uses the
+      // same first-failure values the SQL INSERT branch applies.
+      const outcomeText = String(outcome);
+      let backoffMs: number;
+      if (outcomeText === 'gateway_rate_limited_failure' && failureCount < 2) {
+        backoffMs = 0; // count-only: cooldown_until = observed_at
+      } else if (outcomeText === 'gateway_account_access_failure' || outcomeText === 'gateway_stream_abort_failure') {
+        backoffMs = Math.min(15_000, 5_000 * 2 ** Math.min(previousFailureCount, 2));
+      } else if (outcomeText === 'gateway_rate_limited_failure') {
+        backoffMs = Math.min(15_000, 2_000 * 2 ** Math.min(previousFailureCount, 3));
+      } else {
+        backoffMs = Math.min(300_000, 1000 * 2 ** Math.min(previousFailureCount, 8));
+      }
       const observedAt = new Date(this.database.now);
       // EMA mirror of the authoritative SQL: NULL seeds at 1.000, alpha 0.2,
       // one step per applied outcome on the three-decimal grid.
@@ -494,6 +509,157 @@ test('retryable failures create bounded exponential cooldown and expire to degra
   row = database.health.get(`${scopeKey(account)}\u0000${account.accountId}`);
   assert.equal(row?.failureCount, 8);
   assert.ok((row?.cooldownUntil?.getTime() ?? 0) - database.now.getTime() <= 300_000);
+});
+
+test('account access failures cool immediately with a short capped curve (K2)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  const key = `${scopeKey(account)}\u0000${account.accountId}`;
+
+  // First 401/403 on a never-observed account: the INSERT branch applies the
+  // kind's base cooldown (5 s), not the generic 1 s.
+  seedLease(database, account, '20');
+  assert.equal(
+    await record(health, account, '20', {
+      source: 'gateway',
+      result: 'retryable_failure',
+      failureKind: 'account_access',
+    }),
+    'applied',
+  );
+  let row = database.health.get(key);
+  assert.equal(row?.state, 'cooldown');
+  assert.equal(row?.lastOutcome, 'gateway_account_access_failure');
+  assert.equal(row?.cooldownUntil?.getTime(), NOW.getTime() + 5_000);
+  const cooling = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(cooling.decision, 'allow');
+  if (cooling.decision === 'allow') assert.equal(cooling.value.status, 'cooldown');
+
+  // Second and third consecutive failures double to the 15 s cap.
+  for (const [fence, expectedMs, atMs] of [
+    ['21', 10_000, 5_000],
+    ['22', 15_000, 15_000],
+    ['23', 15_000, 30_000],
+  ] as const) {
+    database.now = new Date(NOW.getTime() + atMs);
+    seedLease(database, account, fence);
+    assert.equal(
+      await record(health, account, fence, {
+        source: 'gateway',
+        result: 'retryable_failure',
+        failureKind: 'account_access',
+      }),
+      'applied',
+    );
+    row = database.health.get(key);
+    assert.equal(row?.cooldownUntil?.getTime(), database.now.getTime() + expectedMs);
+  }
+
+  // Post-window recovery is cooldown expiry: the account is schedulable
+  // again (degraded rank) without any external probe.
+  database.now = new Date(NOW.getTime() + 45_001);
+  const recovered = await health.get({ caller: caller(), candidate: account, now: database.now });
+  assert.equal(recovered.decision, 'allow');
+  if (recovered.decision === 'allow') assert.equal(recovered.value.status, 'degraded');
+});
+
+test('rate limited failures count first and cool from the second (K2)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  const key = `${scopeKey(account)}\u0000${account.accountId}`;
+
+  // First 429: count-only — cooldown_until equals observed_at, so the row
+  // reads as expired ('degraded') and the account stays schedulable.
+  seedLease(database, account, '20');
+  assert.equal(
+    await record(health, account, '20', {
+      source: 'gateway',
+      result: 'retryable_failure',
+      failureKind: 'rate_limited',
+    }),
+    'applied',
+  );
+  let row = database.health.get(key);
+  assert.equal(row?.state, 'cooldown');
+  assert.equal(row?.failureCount, 1);
+  assert.equal(row?.lastOutcome, 'gateway_rate_limited_failure');
+  assert.equal(row?.cooldownUntil?.getTime(), NOW.getTime());
+  const first = await health.get({ caller: caller(), candidate: account, now: NOW });
+  assert.equal(first.decision, 'allow');
+  if (first.decision === 'allow') assert.equal(first.value.status, 'degraded');
+
+  // From the second consecutive 429: 4 s doubling to the 15 s cap (the
+  // first write already counted failure_count = 1).
+  for (const [fence, expectedMs, atMs] of [
+    ['21', 4_000, 1_000],
+    ['22', 8_000, 3_000],
+    ['23', 15_000, 7_000],
+    ['24', 15_000, 15_000],
+  ] as const) {
+    database.now = new Date(NOW.getTime() + atMs);
+    seedLease(database, account, fence);
+    assert.equal(
+      await record(health, account, fence, {
+        source: 'gateway',
+        result: 'retryable_failure',
+        failureKind: 'rate_limited',
+      }),
+      'applied',
+    );
+    row = database.health.get(key);
+    assert.equal(row?.cooldownUntil?.getTime(), database.now.getTime() + expectedMs);
+  }
+});
+
+test('stream abort failures use the short capped curve (K2)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  const key = `${scopeKey(account)}\u0000${account.accountId}`;
+  seedLease(database, account, '20');
+  await record(health, account, '20', {
+    source: 'gateway',
+    result: 'retryable_failure',
+    failureKind: 'stream_abort',
+  });
+  assert.equal(database.health.get(key)?.lastOutcome, 'gateway_stream_abort_failure');
+  assert.equal(database.health.get(key)?.cooldownUntil?.getTime(), NOW.getTime() + 5_000);
+  database.now = new Date(NOW.getTime() + 5_000);
+  seedLease(database, account, '21');
+  await record(health, account, '21', {
+    source: 'gateway',
+    result: 'retryable_failure',
+    failureKind: 'stream_abort',
+  });
+  assert.equal(database.health.get(key)?.cooldownUntil?.getTime(), database.now.getTime() + 10_000);
+});
+
+test('pre-K2 failure kinds keep the original 1 s to 300 s doubling curve (K2 red line)', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  const key = `${scopeKey(account)}\u0000${account.accountId}`;
+  seedLease(database, account, '20');
+  await record(health, account, '20', {
+    source: 'gateway',
+    result: 'retryable_failure',
+    failureKind: 'provider_5xx',
+  });
+  assert.equal(database.health.get(key)?.cooldownUntil?.getTime(), NOW.getTime() + 1_000);
+  // A high failure_count on an original kind still reaches the long cap —
+  // the K2 short curves must not leak into the existing vocabulary.
+  const row = database.health.get(key);
+  assert.ok(row);
+  database.health.set(key, { ...row, failureCount: 8 });
+  seedLease(database, account, '21');
+  await record(health, account, '21', {
+    source: 'gateway',
+    result: 'retryable_failure',
+    failureKind: 'network',
+  });
+  assert.equal(database.health.get(key)?.cooldownUntil?.getTime(), NOW.getTime() + 256_000);
 });
 
 test('newer success heals a circuit and older failure cannot reopen it', async () => {
@@ -1239,6 +1405,29 @@ test('a success resets the failure feedback and scopes stay isolated (H5c)', () 
   // Malformed input never throws and never excludes.
   assert.equal(feedback.isExcluded({ candidate: {} as never, now: new Date(clockMs) }), false);
   feedback.recordDispatchOutcome({ candidate: null as never, outcome: 'success' });
+});
+
+test('a mid-stream abort cools immediately, doubles, and caps at 30 seconds (K2)', () => {
+  let clockMs = NOW.getTime();
+  const feedback = new ProviderAccountDispatchFailureFeedback({ now: () => new Date(clockMs) });
+  const account = candidate();
+  const isExcluded = (nowMs: number) => feedback.isExcluded({ candidate: account, now: new Date(nowMs) });
+
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_abort' });
+  assert.equal(isExcluded(clockMs), true, 'a provider that kills a committed stream cools on the first abort');
+  assert.equal(isExcluded(clockMs + 4_999), true);
+  assert.equal(isExcluded(clockMs + 5_000), false);
+
+  clockMs += 5_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_abort' });
+  assert.equal(isExcluded(clockMs + 9_999), true);
+  assert.equal(isExcluded(clockMs + 10_000), false, 'the second consecutive abort doubles');
+
+  // A success between aborts resets the count (the provider recovered).
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'success' });
+  clockMs += 10_000;
+  feedback.recordDispatchOutcome({ candidate: account, outcome: 'stream_abort' });
+  assert.equal(isExcluded(clockMs + 5_000), false, 'the fresh count restarts at the 5 s base');
 });
 
 test('failures older than the stale window start a fresh consecutive count (H5c)', () => {

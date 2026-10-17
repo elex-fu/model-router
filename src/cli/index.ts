@@ -9,10 +9,13 @@ import {
 import { generateProxyKey } from '../utils/generate-key.js';
 import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
+import { saasDeploy } from './saas-deploy.js';
+import { saasDoctor } from './saas-doctor.js';
 import { saasBootstrapAdmin } from './saas-management.js';
 import { saasMigrationAudit } from './saas-migration-audit.js';
 import { saasMigrate } from './saas-migrations.js';
 import { saasPlatformMfaEnroll } from './saas-platform-mfa-enrollment.js';
+import { saasUpgrade } from './saas-upgrade.js';
 import { tryV2, v2Config } from './v2.js';
 import {
   adminBootstrap,
@@ -122,6 +125,94 @@ program
   .command('saas:migrate')
   .description('Apply SaaS database migrations explicitly. Server startup never runs migrations.')
   .action(() => management(() => saasMigrate()));
+
+program
+  .command('saas:deploy')
+  .description(
+    'One-command managed SaaS deployment: preflight, explicit migration, role template replay, per-role runtime privilege probes',
+  )
+  .option('--env-file <path>', 'Deployment environment file (per-role database URLs and KMS module declarations)')
+  .option('--skip-migrate', 'Skip the explicit migration step (CI cache scenario; the registry is still verified)')
+  .option('--dry-run', 'Run preflight and print the step plan only; zero database mutations')
+  .option(
+    '--role <role>',
+    'Single-role mode (control-plane, gateway, credential-validation-worker): preflight + that role probe only, for per-container usage',
+  )
+  .option('--verbose', 'Print the equivalent manual command for every step')
+  .option(
+    '--allow-local-plaintext',
+    'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS',
+  )
+  .addHelpText(
+    'after',
+    '\nRequires MODEL_ROUTER_SAAS_DEPLOY_ADMIN_URL (deployment administrator) plus the per-role database URLs and readiness declarations from src/saas/deployment.ts. Fail-closed: any step failure stops the sequence. Probes run as the runtime role logins; no credential value is ever printed.\n',
+  )
+  .action((options) =>
+    management(async () => {
+      const result = await saasDeploy(options);
+      process.exitCode = result.exitCode;
+    }),
+  );
+
+program
+  .command('saas:doctor')
+  .description(
+    'Read-only leveled diagnosis of a managed SaaS deployment: migrations, per-role grants, KMS readiness, Redis, sweep/health/freeze status, systemd posture',
+  )
+  .addHelpText(
+    'after',
+    '\nCheck-level semantics: redis-contract FAILS for control-plane/combined (Redis is deployment-required there) but WARNS for gateway (the gateway has no Redis URL by design). Run per role on deployment hosts — the combined default cannot pass role-privileges against the migrator login. Each --verbose line prints probe provenance.\n',
+  )
+  .option(
+    '--role <role>',
+    'Diagnose one workload role (combined, control-plane, gateway, credential-validation-worker); default follows MODEL_ROUTER_SAAS_WORKLOAD_ROLE or combined',
+  )
+  .option(
+    '--json',
+    'Emit the stable saas-doctor-command-v1 JSON document instead of human lines (monitoring/Prometheus consumption)',
+  )
+  .option('--verbose', 'Print hints for passing checks too')
+  .addHelpText(
+    'after',
+    '\nRead-only: existing verify probes, SELECT counts, KMS checkReady loads, a Redis PING, and filesystem posture reads. Exit 0 when no check fails (warns do not fail); 1 on any failure. No credential value is ever printed.\n',
+  )
+  .action((options) =>
+    management(async () => {
+      const result = await saasDoctor(options);
+      process.exitCode = result.exitCode;
+    }),
+  );
+
+program
+  .command('saas:upgrade')
+  .description(
+    'In-place managed SaaS upgrade: pre-checks (migration audit + doctor subset), backup point, explicit migration, role template replay, runtime probes, rolling restart, post-check + optional smoke',
+  )
+  .option(
+    '--env-file <path>',
+    'Deployment environment file (same surface as saas:deploy: administrator and per-role database URLs)',
+  )
+  .option('--smoke-url <url>', 'Single smoke request after the upgrade (expects HTTP 200; skipped when unset)')
+  .option('--dry-run', 'Run the pre-checks and print the step plan only; zero mutations')
+  .option('--verbose', 'Print the equivalent manual command for every step')
+  .option(
+    '--rollback-to <version>',
+    'Print the documented backup-restore rollback path for this registry version; down-migrations do not exist and are refused',
+  )
+  .option(
+    '--allow-local-plaintext',
+    'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS',
+  )
+  .addHelpText(
+    'after',
+    '\nRestart mechanism: MODEL_ROUTER_SAAS_UPGRADE_RESTART_MECHANISM=manual (default; prints the sequence) | compose (docker compose up -d --no-deps per service with health gating) | systemd (systemctl restart per unit with is-active gating). Backup point: MODEL_ROUTER_SAAS_UPGRADE_BACKUP_DIR (pg_dump custom archive) or MODEL_ROUTER_SAAS_UPGRADE_BACKUP_COMMAND; without either, the step records only the registry anchor — backup:create covers the local V2 config/secrets/telemetry and does NOT back up PostgreSQL. Fail-closed per step; no credential value is ever printed. Rollback is the documented backup-restore path only (never a down-migration).\n',
+  )
+  .action((options) =>
+    management(async () => {
+      const result = await saasUpgrade(options);
+      process.exitCode = result.exitCode;
+    }),
+  );
 
 program
   .command('saas:migration-audit')

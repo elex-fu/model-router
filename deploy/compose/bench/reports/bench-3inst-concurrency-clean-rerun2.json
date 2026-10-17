@@ -1,0 +1,92 @@
+{
+  "tool": "bench-gateway",
+  "startedAt": "2026-10-16T16:43:21.335Z",
+  "config": {
+    "protocol": "openai",
+    "model": "bench-model",
+    "maxTokens": 64,
+    "requests": 300,
+    "streamSamples": 100,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "sseChunkDelayMs": 0,
+    "inflight": 200,
+    "concurrencySeconds": 60,
+    "accountLimit": 0,
+    "precisionAccounts": "bench-account-1,bench-account-2,bench-account-3,bench-account-4",
+    "precisionInflight": 200,
+    "scalingSeconds": 60,
+    "scalingInflight": 200,
+    "baselineReport": null,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "out": "/tmp/bench-3inst-concurrency-clean.json",
+    "noFail": false,
+    "gatewayUrls": [
+      "http://127.0.0.1:15007",
+      "http://127.0.0.1:15008",
+      "http://127.0.0.1:15009"
+    ],
+    "instanceCount": 3
+  },
+  "scenarios": {
+    "concurrency": {
+      "inflight": 200,
+      "seconds": 80,
+      "statuses": {
+        "200": 2,
+        "403": 75,
+        "502": 17,
+        "503": 929
+      },
+      "transportErrors": 16,
+      "errors": {
+        "TimeoutError": 16
+      },
+      "perUrl": [
+        {
+          "url": "http://127.0.0.1:15007",
+          "requests": 347
+        },
+        {
+          "url": "http://127.0.0.1:15008",
+          "requests": 346
+        },
+        {
+          "url": "http://127.0.0.1:15009",
+          "requests": 346
+        }
+      ],
+      "latency": {
+        "n": 2,
+        "p50": 49795.67,
+        "p90": 49795.67,
+        "p99": 49795.67,
+        "max": 49795.67
+      },
+      "throughputRps": 0.03
+    }
+  },
+  "violations": [
+    {
+      "scenario": "concurrency",
+      "metric": "transport errors",
+      "value": 16,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "concurrency",
+      "metric": "unexpected 5xx",
+      "value": 946,
+      "threshold": 0,
+      "unit": ""
+    }
+  ]
+}

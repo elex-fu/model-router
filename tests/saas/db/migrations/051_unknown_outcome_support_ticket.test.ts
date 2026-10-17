@@ -276,6 +276,8 @@ test('migration 051 is registered in append order and remains forward-only', () 
       127,
       // Batch-5 §5.1 plugin system (task #24).
       128,
+      // K2 durable fault classification (renumbered from main's 112).
+      129,
     ],
   );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);

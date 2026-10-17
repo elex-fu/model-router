@@ -1,0 +1,56 @@
+{
+  "tool": "bench-gateway",
+  "startedAt": "2026-10-16T16:07:28.747Z",
+  "config": {
+    "protocol": "openai",
+    "model": "bench-model",
+    "maxTokens": 64,
+    "requests": 300,
+    "streamSamples": 100,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "sseChunkDelayMs": 0,
+    "inflight": 200,
+    "concurrencySeconds": 60,
+    "accountLimit": 0,
+    "precisionAccounts": "bench-account-1,bench-account-2,bench-account-3,bench-account-4",
+    "precisionInflight": 200,
+    "scalingSeconds": 60,
+    "scalingInflight": 200,
+    "baselineReport": null,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "out": "deploy/compose/bench/reports/bench-1inst-scaling-rerun2.json",
+    "noFail": false,
+    "gatewayUrls": [
+      "http://127.0.0.1:15009"
+    ],
+    "instanceCount": 1
+  },
+  "scenarios": {
+    "scaling": {
+      "instanceCount": 1,
+      "inflight": 200,
+      "seconds": 78.9,
+      "throughputRps": 10.14,
+      "statuses": {
+        "200": 800,
+        "503": 754
+      },
+      "latency": {
+        "n": 800,
+        "p50": 13430.97,
+        "p90": 18539.94,
+        "p99": 19426.56,
+        "max": 20608.18
+      }
+    }
+  },
+  "violations": []
+}

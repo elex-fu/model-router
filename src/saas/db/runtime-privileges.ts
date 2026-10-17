@@ -1088,7 +1088,17 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'updated_at',
   ]),
-  ...columnGrants('saas_api_key_budget_counters', 'UPDATE', ['token_settled', 'charge_settled', 'updated_at']),
+  ...columnGrants('saas_api_key_budget_counters', 'UPDATE', [
+    'token_settled',
+    'charge_settled',
+    'updated_at',
+    // R9 P15b: the unknown-outcome recovery worker's keyBudget release
+    // (releaseKeyBudgetReservation -> adjustCounters) decrements the
+    // outstanding-reserved columns on both windows when cancelling a stale
+    // admission; without these the sweep fails on every candidate.
+    'token_outstanding_reserved',
+    'charge_outstanding_reserved',
+  ]),
   ...columnGrants('saas_api_key_budget_reservations', 'SELECT', [
     'tenant_id',
     'project_id',
@@ -1102,6 +1112,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'updated_at',
   ]),
+  // R9 P15b: releaseKeyBudgetReservation flips the reservation to 'released'
+  // (state, updated_at) after decrementing the counters; the recovery worker
+  // and pre-dispatch compensation both drive this under the control-plane role.
+  ...columnGrants('saas_api_key_budget_reservations', 'UPDATE', ['state', 'updated_at']),
   ...columnGrants('saas_route_config_heads', 'SELECT', [
     'tenant_id',
     'project_id',
@@ -1385,7 +1399,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
     // (written by the probe monitor worker; consumed by R7 scheduling).
-    'probe_temp_unschedulable_until', // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
+    // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
+    'probe_temp_unschedulable_until',
     // (tri-state: NULL=off, 0=default, -1=random, >0=profile row).
     'tls_fingerprint_profile_id',
   ]),
@@ -1496,7 +1511,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
     // (written by the probe monitor worker; consumed by R7 scheduling).
-    'probe_temp_unschedulable_until', // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
+    // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
+    'probe_temp_unschedulable_until',
     // (tri-state: NULL=off, 0=default, -1=random, >0=profile row).
     'tls_fingerprint_profile_id',
   ]),
@@ -4027,6 +4043,10 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_idempotency_records', 'key_digest', 'SELECT'],
   // Pricing creates only the fixed immutable snapshot records, never price versions.
   // Keep INSERT column-scoped so future snapshot columns require explicit review.
+  // 4.1 (122): per-unit hold witness (hold_input_per_unit_units,
+  // hold_input_size_tier, hold_amount_minor_units, wallet_hold_required).
+  // R1 enforcement terms (112, roadmap 1.3): the frozen group RPM/spend
+  // ceilings, scopes and fallback group id ride the same snapshot row.
   ...(
     [
       'id',
@@ -4053,7 +4073,6 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'hold_input_cache_write_1h',
       'hold_input_output_total',
       'hold_input_reasoning_output',
-      // 4.1 (122): per-unit hold witness.
       'hold_input_per_unit_units',
       'hold_input_size_tier',
       'hold_amount_minor_units',
@@ -4068,8 +4087,6 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'peak_applied',
       'model_pricing_override_digest',
       'model_pricing_override',
-      // R1 enforcement terms (112, roadmap 1.3): the frozen group RPM/spend
-      // ceilings, scopes and fallback group id ride the same snapshot row.
       'group_rpm_limit',
       'group_daily_limit_minor_units',
       'group_weekly_limit_minor_units',
@@ -4623,6 +4640,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
     ] as const
   ).map((column) => ['saas_ledger_entries', column, 'INSERT'] as const),
   // Usage records and settlements are append-only idempotent facts.
+  // 4.1 (122): media metering columns (billing_mode, units, size_tier,
+  // measurement_kind, billable_basis).
   ...(
     [
       'id',
@@ -4640,7 +4659,6 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'cache_write_1h',
       'output_total',
       'reasoning_output',
-      // 4.1 (122): media metering columns.
       'billing_mode',
       'units',
       'size_tier',
@@ -4861,10 +4879,11 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
 
 const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
-// (123) batch-4 §4.2 async image tasks + (124) batch-4 §4.3 async video
-// tasks: the gateway owns the task rows' expiry purge
-// (Postgres*TaskStore.purgeExpired).
-const GATEWAY_DELETE_TABLES = [
+// Exported for the saas:doctor missing-grant diagnosis (L3). (123) batch-4
+// §4.2 async image tasks + (124) batch-4 §4.3 async video tasks: the gateway
+// owns the task rows' expiry purge (Postgres*TaskStore.purgeExpired) alongside
+// the spending-freeze DELETE.
+export const GATEWAY_DELETE_TABLES = [
   'saas_billing_spending_freezes',
   'saas_image_tasks',
   'saas_video_tasks',

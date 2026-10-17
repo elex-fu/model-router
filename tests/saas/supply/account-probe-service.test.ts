@@ -9,6 +9,10 @@ import type { SaasDatabase, SqlResult } from '../../../src/saas/db/index.js';
 import { CLAUDE_CODE_MIMICRY_BETA_HEADER } from '../../../src/saas/gateway/claude/constants.js';
 import type { ProviderHttpPinnedConnector } from '../../../src/saas/gateway/provider-http-address.js';
 import {
+  createProviderHttpEgressAllowlist,
+  type ProviderHttpEgressAllowlist,
+} from '../../../src/saas/gateway/provider-http-address.js';
+import {
   type AccountProbeFetchInit,
   type AccountProbeOutcome,
   accountProbeCategoryForProvider,
@@ -145,6 +149,7 @@ async function sealSecret(
 interface Harness {
   readonly requests: CapturedRequest[];
   readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
+  readonly connectionOptions: Array<{ readonly signal?: AbortSignal; readonly egressAllowlist?: unknown }>;
   setResponse(response: Response | Error): void;
   connections: string[];
   probe(ownerKind: 'tenant' | 'platform', category: string): Promise<AccountProbeOutcome>;
@@ -156,6 +161,7 @@ async function harness(input: {
   readonly proxy?: Row | null;
   readonly secret: string;
   readonly response?: Response | Error;
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
 }): Harness {
   const state: FakeDatabaseState = {
     statements: [],
@@ -167,6 +173,7 @@ async function harness(input: {
   const database = new FakeDatabase(state);
   const requests: CapturedRequest[] = [];
   const connections: string[] = [];
+  const connectionOptions: Array<{ readonly signal?: AbortSignal; readonly egressAllowlist?: unknown }> = [];
   let response: Response | Error =
     input.response ?? new Response('{}', { headers: { 'content-type': 'application/json' } });
   if (input.account !== null) {
@@ -182,13 +189,15 @@ async function harness(input: {
   const service = createAccountProbeService(database as SaasDatabase, unsealingKms, {
     deployment: DEPLOYMENT,
     environment: ENVIRONMENT,
+    ...(input.egressAllowlist === undefined ? {} : { egressAllowlist: input.egressAllowlist }),
     fetch: async (url, init) => {
       requests.push({ url, init });
       if (response instanceof Error) throw response;
       return response;
     },
-    createConnection: async (proxy) => {
+    createConnection: async (proxy, init) => {
       connections.push(proxy.url);
+      connectionOptions.push(init);
       return FAKE_CONNECTION;
     },
     now: () => 1_000_000,
@@ -196,6 +205,7 @@ async function harness(input: {
   return {
     requests,
     connections,
+    connectionOptions,
     statements: state.statements,
     setResponse(next: Response | Error) {
       response = next;
@@ -409,6 +419,44 @@ test('a bound egress proxy carries the probe and the dispatcher reaches the fetc
   assert.equal(outcome.category, 'ok');
   assert.deepEqual(h.connections, ['http://egress.example:8080']);
   assert.equal(h.requests[0]?.init.dispatcher, FAKE_CONNECTION.dispatcher);
+});
+
+test('proxy-bound probes consult the operator egress allowlist (R9 §4 P1)', async () => {
+  const allowlist = createProviderHttpEgressAllowlist(['172.20.0.0/16']);
+  const h = await harness({
+    account: tenantAccountRow(),
+    secret: 'opencode-fixture-key',
+    proxy: { bound: true },
+    response: new Response(JSON.stringify({ choices: [{ message: { content: '17' } }] }), { status: 200 }),
+    egressAllowlist: allowlist,
+  });
+  const outcome = await h.probe('tenant', 'opencode-go');
+  assert.equal(outcome.category, 'ok');
+  assert.equal(h.connections.length, 1);
+  // The configured allowlist reaches the egress connection factory verbatim.
+  assert.equal(h.connectionOptions[0]?.egressAllowlist, allowlist);
+  assert.ok(h.connectionOptions[0]?.signal instanceof AbortSignal);
+
+  // Without the option the default factory call carries no allowlist — the
+  // exact pre-R9 strict posture.
+  const strict = await harness({
+    account: tenantAccountRow(),
+    secret: 'opencode-fixture-key',
+    proxy: { bound: true },
+    response: new Response(JSON.stringify({ choices: [{ message: { content: '17' } }] }), { status: 200 }),
+  });
+  assert.equal((await strict.probe('tenant', 'opencode-go')).category, 'ok');
+  assert.equal(strict.connectionOptions[0]?.egressAllowlist, undefined);
+
+  // A malformed allowlist fails service construction closed.
+  await assert.rejects(
+    harness({
+      account: null,
+      secret: 'x',
+      egressAllowlist: {} as unknown as ProviderHttpEgressAllowlist,
+    }),
+    (error: unknown) => error instanceof Error && error.name === 'AccountProbeServiceError',
+  );
 });
 
 test('an unavailable account or credential is an error outcome, never a throw', async () => {

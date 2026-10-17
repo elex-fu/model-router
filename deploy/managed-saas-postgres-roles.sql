@@ -327,7 +327,7 @@ BEGIN
           OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
           OR (
             pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-            AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks')
+            AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks')
           )
         )
       )
@@ -350,7 +350,7 @@ BEGIN
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
         OR (
           pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-          AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks')
+          AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks')
         )
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'TRUNCATE')
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'REFERENCES')
@@ -869,8 +869,9 @@ BEGIN
       ('saas_api_key_budget_policies', 'INSERT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d created_at updated_at'),
       ('saas_api_key_budget_policies', 'UPDATE', 'version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d updated_at'),
       ('saas_api_key_budget_counters', 'SELECT', 'tenant_id project_id lineage_id window_kind day token_settled token_outstanding_reserved charge_settled charge_outstanding_reserved charge_currency created_at updated_at'),
-      ('saas_api_key_budget_counters', 'UPDATE', 'token_settled charge_settled updated_at'),
+      ('saas_api_key_budget_counters', 'UPDATE', 'token_settled charge_settled updated_at token_outstanding_reserved charge_outstanding_reserved'),
       ('saas_api_key_budget_reservations', 'SELECT', 'tenant_id project_id lineage_id request_id day token_units charge_minor_units charge_currency state created_at updated_at'),
+      ('saas_api_key_budget_reservations', 'UPDATE', 'state updated_at'),
       ('saas_route_config_heads', 'SELECT', 'tenant_id project_id route_id current_version status'),
       ('saas_route_config_versions', 'SELECT', 'tenant_id project_id route_id version public_model_id public_model_version status supply_mode endpoint'),
       ('saas_audit_events', 'SELECT', 'id tenant_id actor_user_id action target_type target_id occurred_at source_ip user_agent entry_point request_id'),
@@ -1227,7 +1228,7 @@ BEGIN
       -- 128 (batch-5 §5.1) plugin routing read (gateway decorator): the
       -- routing snapshot for a capability comes from the enabled binding
       -- row; no sensitive column exists on the table.
-      ('saas_plugin_bindings')
+      ('saas_plugin_bindings'),
       -- (124) batch-4 §4.3 async video tasks: the gateway owns the
       -- snapshot + binding + claim lifecycle (plus the expiry purge).
       ('saas_video_tasks')
@@ -1829,8 +1830,10 @@ BEGIN
       -- 125 auto-ban guard: the platform-role existence probe (SELECT-only,
       -- user_id alone).
       ('saas_platform_role_assignments', 'user_id', 'SELECT'),
-decorator): routing
-      -- columns only — never artifact_data, the manifest blob or
+      -- 128 (batch-5 §5.1) plugin routing read (gateway decorator): the
+      -- decorator resolves the enabled binding's installation identity +
+      -- version/state/hash/signature for the fail-closed availability check.
+      -- Routing columns only — never artifact_data, the manifest blob or
       -- config_json.
       ('saas_plugin_installations', 'id', 'SELECT'),
       ('saas_plugin_installations', 'plugin_key', 'SELECT'),
@@ -1838,8 +1841,7 @@ decorator): routing
       ('saas_plugin_installations', 'state', 'SELECT'),
       ('saas_plugin_installations', 'binary_sha256', 'SELECT'),
       ('saas_plugin_installations', 'signature_status', 'SELECT'),
-      ('saas_plugin_installations', 'updated_at', 'SELECT')
-    ) AS manifest(table_name, column_name, privilege_type)
+      ('saas_plugin_installations', 'updated_at', 'SELECT'),
       -- (124) batch-4 §4.3 async video tasks: the gateway owns the
       -- create-time snapshot + binding insert, the one-shot billing-claim
       -- transitions, and the expiry purge. Settlement facts are frozen at

@@ -92,6 +92,8 @@ test('migration 052 uses initialized scalar snapshots for optional commercial pr
       127,
       // Batch-5 §5.1 plugin system (task #24).
       128,
+      // K2 durable fault classification (renumbered from main's 112).
+      129,
     ],
   );
   assert.equal(COMMERCIAL_AUTHORITY_GUARD_ROWTYPE_SAFETY_SAAS_MIGRATION.sql, expected);

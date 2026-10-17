@@ -12,7 +12,7 @@ import {
   withUnsealedProviderCredential,
 } from '../credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
-import type { ProviderHttpPinnedConnector } from '../gateway/provider-http-address.js';
+import type { ProviderHttpEgressAllowlist, ProviderHttpPinnedConnector } from '../gateway/provider-http-address.js';
 import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
 import {
   CLAUDE_OAUTH_CLIENT_ID,
@@ -945,6 +945,13 @@ export interface PostgresOauthTokenRefreshWorkerStoreOptions {
   readonly fetch?: OauthTokenRefreshFetch;
   /** Test seam; production uses createProviderEgressProxyConnection. */
   readonly createEgressConnection?: OauthTokenRefreshEgressConnectionFactory;
+  /**
+   * R9 §4 P1: operator-configured egress allowlist shared with the gateway
+   * dispatch transport. Validated CIDR entries additionally permit otherwise
+   * denied bound-proxy addresses (container-network proxies). Unset keeps the
+   * exact global-only fail-closed posture.
+   */
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   /** Worker-owned lifetime; an abort rolls the in-flight claim back. */
   readonly signal?: AbortSignal;
 }
@@ -1056,6 +1063,12 @@ export class PostgresOauthTokenRefreshWorkerStore {
     );
     const egressConnectionFactory = options.createEgressConnection ?? createProviderEgressProxyConnection;
     if (typeof egressConnectionFactory !== 'function') throw workerError('STORE_UNAVAILABLE');
+    if (
+      options.egressAllowlist !== undefined &&
+      (typeof options.egressAllowlist.allows !== 'function' || !Array.isArray(options.egressAllowlist.entries))
+    ) {
+      throw workerError('STORE_UNAVAILABLE');
+    }
     this.createEgressConnection = egressConnectionFactory;
   }
 
@@ -1404,7 +1417,10 @@ export class PostgresOauthTokenRefreshWorkerStore {
         );
         egressConnection = await this.createEgressConnection(
           { url: proxyUrl },
-          ...(this.options.signal === undefined ? [] : [{ signal: this.options.signal }]),
+          {
+            ...(this.options.signal === undefined ? {} : { signal: this.options.signal }),
+            ...(this.options.egressAllowlist === undefined ? {} : { egressAllowlist: this.options.egressAllowlist }),
+          },
         );
         const connection = egressConnection;
         fetcher = (url, init) => baseFetch(url, { ...init, dispatcher: connection.dispatcher });

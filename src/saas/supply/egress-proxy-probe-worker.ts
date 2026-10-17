@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Dispatcher } from 'undici';
 import type { ProviderCredentialUnsealingKms } from '../credentials/provider-crypto.js';
 import type { SaasDatabase } from '../db/index.js';
-import type { ProviderHttpPinnedConnector } from '../gateway/provider-http-address.js';
+import type { ProviderHttpEgressAllowlist, ProviderHttpPinnedConnector } from '../gateway/provider-http-address.js';
 import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
 import type { EgressProxyRecord } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
@@ -80,6 +80,13 @@ export interface PostgresEgressProxyProbeWorkerStoreOptions {
   readonly fetch?: EgressProxyProbeFetch;
   /** Test seam; production uses createProviderEgressProxyConnection. */
   readonly createConnection?: EgressProxyProbeConnectionFactory;
+  /**
+   * R9 §4 P1: operator-configured egress allowlist shared with the gateway
+   * dispatch transport. Validated CIDR entries additionally permit otherwise
+   * denied proxy addresses (container-network proxies). Unset keeps the exact
+   * global-only fail-closed posture.
+   */
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   readonly now?: () => Date;
   readonly signal?: AbortSignal;
 }
@@ -282,6 +289,7 @@ export class PostgresEgressProxyProbeWorkerStore {
     readonly probeUrls: { readonly primary: string; readonly secondary: string };
     readonly fetch: EgressProxyProbeFetch;
     readonly createConnection: EgressProxyProbeConnectionFactory;
+    readonly egressAllowlist?: ProviderHttpEgressAllowlist;
     readonly now: () => Date;
     readonly signal?: AbortSignal;
   };
@@ -300,6 +308,12 @@ export class PostgresEgressProxyProbeWorkerStore {
     if (typeof fetcher !== 'function') fail('INVALID_INPUT');
     const connectionFactory = options.createConnection ?? createProviderEgressProxyConnection;
     if (typeof connectionFactory !== 'function') fail('INVALID_INPUT');
+    if (
+      options.egressAllowlist !== undefined &&
+      (typeof options.egressAllowlist.allows !== 'function' || !Array.isArray(options.egressAllowlist.entries))
+    ) {
+      fail('INVALID_INPUT');
+    }
     this.database = database;
     this.kms = kms;
     this.options = {
@@ -320,6 +334,7 @@ export class PostgresEgressProxyProbeWorkerStore {
       },
       fetch: fetcher,
       createConnection: connectionFactory,
+      ...(options.egressAllowlist === undefined ? {} : { egressAllowlist: options.egressAllowlist }),
       now: options.now ?? (() => new Date()),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
@@ -387,7 +402,10 @@ export class PostgresEgressProxyProbeWorkerStore {
       );
       connection = await this.options.createConnection(
         { url: proxyUrl },
-        ...(this.options.signal === undefined ? [] : [{ signal: this.options.signal }]),
+        {
+          ...(this.options.signal === undefined ? {} : { signal: this.options.signal }),
+          ...(this.options.egressAllowlist === undefined ? {} : { egressAllowlist: this.options.egressAllowlist }),
+        },
       );
       const dispatcher = connection.dispatcher;
       const fetcher = this.options.fetch;

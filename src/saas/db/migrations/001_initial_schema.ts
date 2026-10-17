@@ -101,12 +101,12 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
+import { VIDEO_TASKS_SAAS_MIGRATION } from './124_video_tasks.js';
 import { RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION } from './125_risk_control_content_moderation.js';
 import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_settings.js';
-import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
-
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
-import { VIDEO_TASKS_SAAS_MIGRATION } from './124_video_tasks.js';
+import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
+import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './129_provider_account_durable_fault_classification.js';
 
 export interface SaasMigration {
   version: number;
@@ -737,4 +737,13 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // plugin-host role template. 123/124/127 stay reserved for the parallel
   // media/websearch/observability workstreams.
   PLUGIN_SYSTEM_SAAS_MIGRATION,
+  // 129: K2 account-attributable runtime-health outcomes — extends the 040
+  // last_outcome/outcome_shape CHECKs with gateway_account_access_failure
+  // (401/403), gateway_rate_limited_failure (429) and
+  // gateway_stream_abort_failure (mid-stream abort after ≥1 delivered chunk)
+  // so the durable classification can cool a faulted account in the
+  // scheduler's P17 fail-open fallback. Same-table constraint rewrite only;
+  // authored as 112 on main (head 111) and renumbered to 129 here because
+  // 112-128 are taken by the capability-parity workstream.
+  PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
 ];

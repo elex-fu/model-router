@@ -6,6 +6,7 @@ import type { PreparedEvidenceTransportRequest } from '../../../src/saas/gateway
 import type { PreparedRequestEvidenceRecord } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import {
   createProviderHttpEgressAllowlist,
+  createProviderHttpTestAddressCapability,
   ProviderHttpAddressPolicyError,
   ProviderHttpEgressAllowlistError,
   ProviderHttpEgressProxyError,
@@ -22,6 +23,15 @@ import {
   ProviderHttpTransport,
   ProviderHttpTransportError,
 } from '../../../src/saas/gateway/provider-http-transport.js';
+import {
+  CredentialValidationHttpTransport,
+  CredentialValidationTransportError,
+} from '../../../src/saas/supply/credential-validation-http-transport.js';
+import {
+  compileApprovedCredentialValidationTargets,
+  resolveApprovedCredentialValidationTarget,
+} from '../../../src/saas/supply/credential-validation-targets.js';
+import { approvedTarget, customJob } from '../supply/credential-validation-test-fixture.js';
 
 const payload = new Uint8Array([0, 1, 2, 255, 10, 13]);
 const payloadSha256 = createHash('sha256').update(payload).digest('hex');
@@ -280,5 +290,63 @@ test('egress proxy targets honor the same operator allowlist', async () => {
   await assert.rejects(
     resolveEgressProxyTarget(proxy, { resolveAddresses }),
     (error: unknown) => error instanceof ProviderHttpEgressProxyError,
+  );
+});
+
+test('credential validation probes consult the same operator allowlist', async (t) => {
+  // The test address capability requires the test-runner environment the
+  // shared validation fixture sets up (local HTTPS fixtures do the same).
+  const originalNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'test';
+  t.after(() => {
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
+  });
+  const target = approvedTarget({ baseUrl: 'https://provider.internal/v1/' });
+  const resolved = resolveApprovedCredentialValidationTarget(
+    compileApprovedCredentialValidationTargets([target]),
+    customJob(target),
+  );
+  assert.ok(resolved);
+  const testOptions = {
+    addressCapability: createProviderHttpTestAddressCapability(
+      '-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n',
+    ),
+    resolveAddresses: async () => [CONTAINER_NETWORK_ADDRESS],
+  };
+  const rejectedWith = async (transport: CredentialValidationHttpTransport): Promise<void> => {
+    await assert.rejects(
+      transport.prepare(resolved),
+      (error: unknown) =>
+        error instanceof CredentialValidationTransportError && error.code === 'provider_address_rejected',
+    );
+  };
+
+  // Allowlisted container-network provider: the probe plan pins the address.
+  const allowed = new CredentialValidationHttpTransport(
+    testOptions,
+    createProviderHttpEgressAllowlist(['172.20.0.0/16']),
+  );
+  const plan = await allowed.prepare(resolved);
+  await allowed.release(plan);
+  await allowed.close();
+
+  // An allowlist without the entry keeps the address denied.
+  const notCovered = new CredentialValidationHttpTransport(
+    testOptions,
+    createProviderHttpEgressAllowlist(['10.0.0.0/8']),
+  );
+  await rejectedWith(notCovered);
+  await notCovered.close();
+
+  // Default posture (no allowlist) is byte-identical strict behavior.
+  const strict = new CredentialValidationHttpTransport(testOptions);
+  await rejectedWith(strict);
+  await strict.close();
+
+  // A malformed allowlist fails transport construction closed.
+  assert.throws(
+    () => new CredentialValidationHttpTransport(testOptions, {} as never),
+    (error: unknown) => error instanceof TypeError,
   );
 });

@@ -556,7 +556,9 @@ test('authoritative unhealthy state excludes an otherwise eligible account', asy
     },
   );
   const result = await scheduler.select(input([candidate('platform')]));
-  assert.equal(result.decision, 'reject');
+  // K2: the durable health authority denied the only candidate — an
+  // availability block (503), not the account_denied 403.
+  assert.equal(result.decision, 'block');
 });
 
 test('concurrency requires the lease service limit and denies a full observed account', async (t) => {
@@ -1227,11 +1229,12 @@ test('a losing half-open probe admission denies only the stale candidate (H5a)',
   assert.deepEqual(calls.admissions, [{ accountId: 'account-a', staleAfterMs: 60_000 }]);
   assert.deepEqual(calls.outcomes, []);
 
-  // With the stale account as the only candidate the request is rejected,
-  // never blocked: the concurrent winner's probe will refresh the row.
+  // With the stale account as the only candidate the selection blocks as a
+  // 503 availability signal (K2: the durable health authority denied it);
+  // the concurrent winner's probe will refresh the row.
   const single = await scheduler.select(input([candidate('byok')]));
-  assert.equal(single.decision, 'reject');
-  if (single.decision === 'reject') assert.equal(single.code, 'account_denied');
+  assert.equal(single.decision, 'block');
+  if (single.decision === 'block') assert.equal(single.code, 'capability_unavailable');
 });
 
 test('a probe that cannot acquire or record its outcome denies the candidate (H5a)', async () => {
@@ -1242,7 +1245,9 @@ test('a probe that cannot acquire or record its outcome denies the candidate (H5
     { healthProbe: { store: noLease.store, leaseProvider: { acquire: async () => null } } },
   );
   const rejected = await noLeaseSetup.scheduler.select(noLeaseSetup.input([candidate('byok')]));
-  assert.equal(rejected.decision, 'reject');
+  // K2: the durable health authority (stale row, probe in flight) denied the
+  // candidate — an availability block, not an account_denied rejection.
+  assert.equal(rejected.decision, 'block');
   assert.deepEqual(noLease.calls.outcomes, []);
 
   const fenced = probeStore(() => staleView(), 'admitted', 'stale');
@@ -1257,7 +1262,8 @@ test('a probe that cannot acquire or record its outcome denies the candidate (H5
     },
   );
   const fencedResult = await fencedSetup.scheduler.select(fencedSetup.input([candidate('byok')]));
-  assert.equal(fencedResult.decision, 'reject');
+  // K2: same durable-authority deny shape — a 503 availability block.
+  assert.equal(fencedResult.decision, 'block');
   assert.equal(fenced.calls.outcomes.length, 1);
 });
 
@@ -1335,10 +1341,11 @@ test('a losing cold-start prime admission denies only the unobserved candidate (
   assert.deepEqual(calls.outcomes, []);
 
   // The concurrent winner's prime will create the row; until then the lone
-  // unobserved candidate rejects (candidate deny), never blocks.
+  // unobserved candidate blocks as a 503 availability signal (K2: the durable
+  // health authority denied it), never a gateway 403.
   const single = await scheduler.select(input([candidate('byok')]));
-  assert.equal(single.decision, 'reject');
-  if (single.decision === 'reject') assert.equal(single.code, 'account_denied');
+  assert.equal(single.decision, 'block');
+  if (single.decision === 'block') assert.equal(single.code, 'capability_unavailable');
 });
 
 test('failureFeedback is forwarded to the core scheduler and cools only the faulted account (H5c)', async () => {

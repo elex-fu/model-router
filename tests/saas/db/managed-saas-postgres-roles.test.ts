@@ -53,7 +53,7 @@ test('managed PostgreSQL role template creates distinct least-privilege principa
   );
   assert.match(
     roleTemplate,
-    /has_table_privilege\(v_gateway_oid, relation\.oid, 'DELETE'\)[\s\S]+relation\.relname NOT IN \('saas_billing_spending_freezes', 'saas_image_tasks'\)/,
+    /has_table_privilege\(v_gateway_oid, relation\.oid, 'DELETE'\)[\s\S]+relation\.relname NOT IN \('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks'\)/,
   );
 });
 

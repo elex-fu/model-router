@@ -263,3 +263,123 @@ jobs:
           tests/ci/managed-saas-required-gates.test.ts
       - name: Provision fresh CI service and execute the fixed required root
         run: node --import tsx tests/ci/managed-saas-isolated-required-gates.ts "${{ matrix.gate }}"
+
+  # DOps plan §6 (docs/deployment-ops-efficiency-plan-2026-10-17.md): gate the
+  # one-command deployment orchestration on every pull request, so a P15b-class
+  # authorization gap (a runtime probe column missing from the role templates)
+  # fails here instead of on a real deployment. Cold-start sequence, exactly as
+  # the plan specifies: saas:deploy --dry-run (assert the step plan) → real
+  # saas:deploy (bootstrap + explicit migration + role template replay + all
+  # three runtime privilege probes) → saas:doctor per role, zero fails allowed.
+  deploy-smoke:
+    name: Managed SaaS deploy smoke (PG 16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: node:22.16.0-bookworm
+      options: --user root
+    services:
+      # Same disposable service shape as the PG gates above; the plan pins this
+      # gate to postgres:16 (the gates above cover 15 and 18).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: model_router_saas_ci
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres -d model_router_saas_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      # The same disposable cache/coordination Redis the compose stack ships
+      # (deploy/compose/docker-compose.yml): the control-plane doctor's Redis
+      # RESP contract probe fail-closes without a reachable Redis.
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install locked dependencies
+        run: npm ci
+      # Runtime-only deployment environment (repo rule: no secrets committed).
+      # The helper generates the per-role URLs, the deployment administrator
+      # URL (the CI service superuser), and the minimum KMS declarations
+      # saas:doctor needs for a pass — including a randomly generated pilot
+      # software-KMS master key that exists only in this RUNNER_TEMP file for
+      # the lifetime of the job. Nothing in the repository ever holds a key.
+      - name: Generate the runtime CI deployment environment file
+        run: bash scripts/ci/generate-deploy-smoke-env.sh "$RUNNER_TEMP/deploy-smoke.env" postgres 5432 model_router_saas_ci redis://redis:6379
+      # The CI service is trust-auth disposable, so every URL uses
+      # sslmode=disable: the designated postgres:5432 CI endpoint that
+      # saas:deploy accepts under --allow-local-plaintext (same rule as the
+      # drill/track-F gates). Dry-run must exit 0 and print the full step plan
+      # without touching the database.
+      - name: saas:deploy dry-run asserts the step plan without touching the database
+        run: |
+          set -euo pipefail
+          node --import tsx src/cli/index.ts saas:deploy \
+            --env-file "$RUNNER_TEMP/deploy-smoke.env" \
+            --allow-local-plaintext --dry-run \
+            | tee "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq "no database mutations will be performed" "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq -- "- bootstrap: apply managed-saas-postgres-roles.sql" "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq -- "- migrate: run the registered SaaS migrations as model_router_saas_migrator" "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq -- "- roles: replay managed-saas-postgres-roles.sql and managed-saas-validation-worker-role-grants.sql" "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq -- "- verify: migration registry check as the migrator" "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq -- "- readiness: poll declared listener ports" "$RUNNER_TEMP/deploy-dry-run.log"
+          grep -Fq "dry-run: preflight passed" "$RUNNER_TEMP/deploy-dry-run.log"
+      # Real cold start against the empty service database, then the doctor
+      # pass over every role. saas:doctor reads the process environment (it has
+      # no --env-file option), so the generated file is sourced for the
+      # diagnostic invocations only. Warns are allowed — the worker role cannot
+      # read the migration ledger by design — but any fail fails the gate.
+      # The plan's 15-minute budget is asserted explicitly on top of the
+      # job-level timeout (locally the whole sequence runs in ~10s; the budget
+      # exists for CI queue/slow-runner variance).
+      - name: Real saas:deploy plus per-role saas:doctor under the 15-minute budget
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          node --import tsx src/cli/index.ts saas:deploy \
+            --env-file "$RUNNER_TEMP/deploy-smoke.env" \
+            --allow-local-plaintext \
+            | tee "$RUNNER_TEMP/deploy.log"
+          grep -Fq "registered migrations applied" "$RUNNER_TEMP/deploy.log"
+          grep -Fq "model_router_saas_control_plane: runtime privilege probe green" "$RUNNER_TEMP/deploy.log"
+          grep -Fq "model_router_saas_gateway: runtime privilege probe green" "$RUNNER_TEMP/deploy.log"
+          grep -Fq "model_router_saas_validation_worker: runtime privilege probe green" "$RUNNER_TEMP/deploy.log"
+          grep -Fq "next steps: start the workloads" "$RUNNER_TEMP/deploy.log"
+          set -a
+          . "$RUNNER_TEMP/deploy-smoke.env"
+          set +a
+          for role in control-plane gateway credential-validation-worker; do
+            node --import tsx src/cli/index.ts saas:doctor --json --role "$role" \
+              > "$RUNNER_TEMP/doctor-$role.json"
+            node -e '
+              const fs = require("node:fs");
+              const role = process.argv[1];
+              const result = JSON.parse(
+                fs.readFileSync(`${process.env.RUNNER_TEMP}/doctor-${role}.json`, "utf8"),
+              );
+              if (result.format !== "saas-doctor-command-v1") {
+                throw new Error(`doctor ${role}: unexpected format ${result.format}`);
+              }
+              if (result.role !== role) {
+                throw new Error(`doctor ${role}: unexpected role ${result.role}`);
+              }
+              if (result.exitCode !== 0 || result.summary.fail !== 0) {
+                throw new Error(
+                  `doctor ${role}: ${JSON.stringify(result.summary)} — zero fails required (warns are allowed)`,
+                );
+              }
+              console.log(`doctor ${role}: ${result.summary.pass} pass, ${result.summary.warn} warn, 0 fail`);
+            ' "$role"
+          done
+          elapsed=$((SECONDS - start))
+          echo "saas:deploy + saas:doctor wall time: ${elapsed}s (plan §6 budget: 900s)"
+          test "$elapsed" -lt 900

@@ -609,6 +609,9 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     // Batch-5 §5.1 plugin system (task #24) — installation registry,
     // capability bindings and the host-service KV store.
     128,
+    // K2 durable fault classification (main-side, renumbered 112 → 129 in
+    // this merge; account-attributable 401/403/429/stream-abort vocabulary).
+    129,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -618,7 +621,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     pool.applied.map(({ version }) => version),
     versions,
   );
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 109);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 110);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -686,9 +689,10 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
       'public_brand_settings',
       'obs_alert_silences_and_report_state',
       'plugin_system',
+      'provider_account_durable_fault_classification',
     ],
   );
-  assert.equal(pool.applied.length, 109);
+  assert.equal(pool.applied.length, 110);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -857,6 +861,7 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       126,
       127,
       128,
+      129,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );

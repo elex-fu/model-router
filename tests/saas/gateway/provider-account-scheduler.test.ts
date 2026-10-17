@@ -291,10 +291,12 @@ test('valid affinity is only a preference and cannot bypass health or attempted-
   const attemptedResult = await scheduler(dependencies).select(
     baseInput(candidates, { previousResponseId: 'opaque-response-1', attemptedAccountIds: ['account-b'] }),
   );
+  // K2: the durable health deny (account-a unhealthy) makes the emptiness an
+  // availability condition — a 503 block, not the account_denied 403.
   assert.deepEqual(attemptedResult, {
-    decision: 'reject',
-    code: 'account_denied',
-    message: 'no eligible provider account is available',
+    decision: 'block',
+    code: 'capability_unavailable',
+    message: 'no schedulable provider account is available',
   });
 });
 
@@ -495,7 +497,7 @@ test('failure feedback cooling every candidate fails open and dispatches anyway 
   }
 });
 
-test('failure feedback cooling every candidate still rejects when the durable authorities deny (P17)', async () => {
+test('failure feedback cooling every candidate still blocks closed when the durable authorities deny (P17, K2)', async () => {
   const candidates = [candidate('account-a'), candidate('account-b')];
   const result = await scheduler({
     eligibility: eligibilityPort(
@@ -518,6 +520,51 @@ test('failure feedback cooling every candidate still rejects when the durable au
         return true;
       },
     },
+  }).select(baseInput(candidates));
+  // K2: all-durably-denied is an availability condition, not a client fault:
+  // a 503 block (retryable) instead of the account_denied 403 that the
+  // run-2 P17 starvation surfaced 4,698 times. The fail-open passthrough
+  // itself is unchanged — it is the in-process HINT that can never produce
+  // this outcome, only durable health evidence can.
+  assert.deepEqual(result, {
+    decision: 'block',
+    code: 'capability_unavailable',
+    message: 'no schedulable provider account is available',
+  });
+});
+
+test('every candidate denied by durable health blocks closed even without failure feedback (K2)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(
+      new Map([
+        ['account-a', 'cooldown'],
+        ['account-b', 'cooldown'],
+      ]),
+    ),
+    concurrency: concurrencyPort(new Map()),
+  }).select(baseInput(candidates));
+  assert.deepEqual(result, {
+    decision: 'block',
+    code: 'capability_unavailable',
+    message: 'no schedulable provider account is available',
+  });
+});
+
+test('all candidates denied without any durable health deny keeps the account_denied rejection (K2)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    // Both candidates fail eligibility revalidation; the durable health
+    // authority never denied anyone, so the pre-K2 rejection stands.
+    eligibility: eligibilityPort(new Map()),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
   }).select(baseInput(candidates));
   assert.deepEqual(result, {
     decision: 'reject',

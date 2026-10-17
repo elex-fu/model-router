@@ -7,6 +7,7 @@
 | `settlement-crash-child.mjs` | FIN-01 F3 崩溃单元：子进程经 `DurableNormalSuccessSettlementPort` 逐条完成结算，每条提交后同步追加 JSONL marker；被 SIGKILL 后由下一轮进程重放全部输入，证明恰好一次 | `tests/drills/settlement-sigkill-crash.postgres.integration.test.ts`（CI gate `settlement-sigkill-crash`） |
 | `instance-child.mjs` | OPS-01 I1 实例探针：以 managed-saas 角色装配**启动门禁链**（ping→schema→control-plane unknown-outcome→运行时 ACL→软件 KMS readiness 自探针，顺序同 B2 fail-closed 装配），每过一门追加 JSONL marker；`--mode hold` 时持有真实 PG provider 账号租约（fencing token + DB 时钟 TTL）供 SIGKILL 故障转移演练；`--mode once` 跑完门禁即退出（幸存实例门禁复探） | `tests/drills/dual-instance-failover.postgres.integration.test.ts`（CI gate `dual-instance-failover`） |
 | `backup-restore.mjs` | OPS-01 I1 备份恢复工具：pg_dump→archive 校验→drop→重建→pg_restore→指纹比对（迁移台账 sha256 + 逐表行数）→`verifySaasMigrations`→可选只读迁移审计；fail-fast：损坏 dump 在 drop 源库前拒绝，异源 dump 恢复后指纹不匹配即拒绝并 drop 目标库，任何一步失败非零退出、不留半恢复库 | `tests/drills/backup-restore.postgres.integration.test.ts`（本地/scratch 门禁，CI 接法见 `docs/evidence/ops-01-drills.md`） |
+| `upgrade.mjs` | DOps §5.4 升级演练：一次性库 seed 到 N-1（真迁移链前缀）→ `saas:upgrade` 全序列（备份点 pg_dump + 111→112 迁移 + 模板重放 + 三角色探针 + 实测停机窗口）；注入损坏模板 → 第 4 步（roles）非零停止、库停在已迁移态；撤销一列授权复现"已迁移未授权"，重跑自愈；`--rollback-to` 拒绝 down-migration 并只打印备份恢复路径（台账不动） | `tests/drills/upgrade.postgres.integration.test.ts`（本地/scratch 门禁，接法同 backup-restore） |
 
 ## 契约（新增演练必须遵守）
 
@@ -23,7 +24,7 @@
 | --- | --- | --- |
 | `MODEL_ROUTER_SAAS_DRILL_GATEWAY_URL` | `settlement-crash-child.mjs` | gateway 受限角色 URL |
 | `MODEL_ROUTER_SAAS_DRILL_INSTANCE_URL` | `instance-child.mjs` | 当前实例的角色 URL（gateway 或 control_plane） |
-| `MODEL_ROUTER_SAAS_DRILL_ADMIN_URL` | `backup-restore.mjs`、备份测试 | 演练专用集群管理员 URL（仅 CI 服务或显式非默认端口 loopback；数据库名限定 `model_router_test_drill*`） |
+| `MODEL_ROUTER_SAAS_DRILL_ADMIN_URL` | `backup-restore.mjs`、`upgrade.mjs`、备份测试 | 演练专用集群管理员 URL（仅 CI 服务或显式非默认端口 loopback；数据库名限定 `model_router_test_drill*`；upgrade 演练自行生成角色密码，只需该管理员 URL） |
 | `MODEL_ROUTER_SAAS_DRILL_MIGRATOR_URL` | 备份测试（装配用） | migrator 角色 URL，用于 `saas:migrate` 显式迁移 |
 
 ## 运行方式

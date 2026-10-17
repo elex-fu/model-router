@@ -1273,6 +1273,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       });
       if (firstPass.outcome === 'blocked') return schedulerBlock(firstPass.reason);
       let eligible = firstPass.eligible;
+      let durableHealthDenies = firstPass.healthDenied;
       /*
        * P17 (R9 re-run finding): fail-open passthrough when the in-process
        * failure-feedback cooldown would empty the entire viable candidate
@@ -1293,10 +1294,30 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         });
         if (fallbackPass.outcome === 'blocked') return schedulerBlock(fallbackPass.reason);
         eligible = fallbackPass.eligible;
+        durableHealthDenies += fallbackPass.healthDenied;
       }
 
-      if (eligible.length === 0)
+      if (eligible.length === 0) {
+        /*
+         * K2 (all-4-faulted fail-away): when the durable health authority
+         * itself denied candidates — every structurally eligible account is
+         * in a cooldown — the emptiness is an availability condition, not a
+         * client fault, so the selection blocks as a clean 503 instead of
+         * the generic account_denied 403 (a 403 tells well-behaved clients
+         * their request is forbidden and suppresses retry; the run-2 P17
+         * starvation was 4,698 of exactly those). This is a DIFFERENT
+         * mechanism from P17's: P17's starvation came from the in-process
+         * HINT emptying the set while the durable rows were healthy, which
+         * the fallback pass above now prevents; here the durable evidence
+         * itself — the authority P17 explicitly defers to — says no account
+         * is schedulable, and the cooldowns are short (≤15 s for the
+         * account-attributable kinds) so recovery is seconds away.
+         */
+        if (durableHealthDenies > 0) {
+          return blockRequestPreparation('capability_unavailable', 'no schedulable provider account is available');
+        }
         return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
+      }
 
       try {
         let affinityAccountId: string | null = null;
@@ -1407,6 +1428,11 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
    * rejection — the durable PG health classification checked in this same
    * chain remains the only authoritative gate. `failureFeedbackSkipped`
    * carries the excluded candidates (in encounter order) for that fallback.
+   *
+   * K2: `healthDenied` counts candidates the DURABLE health authority
+   * denied (cooldown/unhealthy row, or a live-cooldown deny). select()
+   * surfaces an all-durably-denied emptiness as a 503 availability block
+   * instead of the generic account_denied 403.
    */
   private async collectEligibleCandidates(
     input: ProviderAccountSchedulerInput,
@@ -1419,12 +1445,14 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         readonly outcome: 'collected';
         readonly eligible: EligibleCandidate[];
         readonly failureFeedbackSkipped: RequestPreparationCandidateAuthority[];
+        readonly healthDenied: number;
       }
   > {
     const attempted = new Set(input.scheduling?.attemptedAccountIds ?? []);
     const seenAccounts = new Set<string>();
     const eligible: EligibleCandidate[] = [];
     const failureFeedbackSkipped: RequestPreparationCandidateAuthority[] = [];
+    let healthDenied = 0;
     // select() has already validated these; the local bindings keep the same
     // narrowing for the extracted loop body and fail closed defensively.
     const eligibilityPort = this.dependencies.eligibility;
@@ -1490,7 +1518,10 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       if (healthResult === 'block') {
         return { outcome: 'blocked', reason: 'provider account health authority is unavailable' };
       }
-      if (healthResult === 'deny') continue;
+      if (healthResult === 'deny') {
+        healthDenied += 1;
+        continue;
+      }
 
       const concurrency = await concurrencyPort.get({
         caller: input.caller,
@@ -1548,7 +1579,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       });
     }
 
-    return { outcome: 'collected', eligible, failureFeedbackSkipped };
+    return { outcome: 'collected', eligible, failureFeedbackSkipped, healthDenied };
   }
 
   /**

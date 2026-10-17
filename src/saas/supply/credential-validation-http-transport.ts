@@ -8,6 +8,7 @@ import {
   isProviderHttpTestAddressCapability,
   ProviderHttpAddressPolicyError,
   type ProviderHttpAddressResolver,
+  type ProviderHttpEgressAllowlist,
   type ProviderHttpPinnedConnector,
   type ProviderHttpTestAddressCapability,
   resolveProviderHttpAddresses,
@@ -102,9 +103,13 @@ export class CredentialValidationHttpTransport {
   private readonly active = new Set<ProbeState>();
   private readonly resolver: ProviderHttpAddressResolver;
   private readonly timeoutMs: number;
+  private readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   private closePromise?: Promise<void>;
 
-  constructor(private readonly testOptions?: CredentialValidationTransportTestOptions) {
+  constructor(
+    private readonly testOptions?: CredentialValidationTransportTestOptions,
+    egressAllowlist?: ProviderHttpEgressAllowlist,
+  ) {
     if (
       testOptions &&
       (!isProviderHttpTestAddressCapability(testOptions.addressCapability) ||
@@ -114,6 +119,16 @@ export class CredentialValidationHttpTransport {
     ) {
       throw new TypeError('Credential validation test transport requires a test-runner capability');
     }
+    // R9 §4 P1: the operator egress allowlist shares the gateway dispatch
+    // grammar — shape-invalid input fails construction instead of silently
+    // allowing nothing.
+    if (
+      egressAllowlist !== undefined &&
+      (typeof egressAllowlist.allows !== 'function' || !Array.isArray(egressAllowlist.entries))
+    ) {
+      throw new TypeError('Credential validation transport egress allowlist is invalid');
+    }
+    this.egressAllowlist = egressAllowlist;
     this.testOptions = testOptions ? Object.freeze({ ...testOptions }) : undefined;
     this.resolver = testOptions?.resolveAddresses ?? resolveProviderHttpAddresses;
     this.timeoutMs = testOptions?.timeoutMs ?? PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS;
@@ -180,7 +195,12 @@ export class CredentialValidationHttpTransport {
         : await untilAbort(this.resolver(hostname, controller.signal), controller.signal);
       controller.signal.throwIfAborted();
       if (!Array.isArray(answers) || answers.length > 64) throw new ProviderHttpAddressPolicyError();
-      const address = selectPinnedProviderAddress(hostname, answers, this.testOptions?.addressCapability);
+      const address = selectPinnedProviderAddress(
+        hostname,
+        answers,
+        this.testOptions?.addressCapability,
+        this.egressAllowlist,
+      );
       const connectorFactory =
         this.testOptions && isLoopbackProviderAddress(hostname)
           ? createPinnedProviderHttpTestConnectorFactory(this.testOptions.addressCapability)
