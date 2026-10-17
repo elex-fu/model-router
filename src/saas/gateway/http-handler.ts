@@ -73,6 +73,80 @@ const MULTIPART_ONLY_ENDPOINT_PATHS = new Set<string>([
 ]);
 const MULTIPART_UNSUPPORTED_MESSAGE =
   'This endpoint requires multipart/form-data, which the hosted gateway does not support yet; use the JSON media generation endpoints with base64-encoded input instead';
+const WEBSOCKET_UNSUPPORTED_MESSAGE =
+  'Realtime WebSocket sessions are not supported by the hosted gateway; use the HTTP media endpoints instead';
+
+/*
+ * Roadmap batch 4 §4.0 ③ (task #14): the query endpoint family.
+ *
+ * Asynchronous media tasks (image generations, video renders) are polled
+ * through GET status/content endpoints. These are deliberately a
+ * lightweight bypass modeled on the /v1/models precedent: authenticate,
+ * parse path parameters, delegate to a query port — no preparation, no
+ * admission, no evidence lifecycle, because they read task state rather
+ * than create billable work. The port contract below is the reserved
+ * interface shape for #16 (images) and #17 (video/audio): route ids,
+ * parsed path parameters, and the authenticated caller are all the
+ * handlers receive; response framing stays boundary-owned.
+ */
+export type SaasGatewayQueryRouteId = 'images.task_status' | 'videos.task_status' | 'videos.task_content';
+
+interface QueryRoutePattern {
+  readonly routeId: SaasGatewayQueryRouteId;
+  readonly segments: readonly string[];
+}
+
+const QUERY_ROUTES: readonly QueryRoutePattern[] = [
+  { routeId: 'images.task_status', segments: ['v1', 'images', 'tasks', ':taskId'] },
+  { routeId: 'videos.task_status', segments: ['v1', 'videos', ':taskId'] },
+  { routeId: 'videos.task_content', segments: ['v1', 'videos', ':taskId', 'content'] },
+];
+
+/**
+ * Parameter values are the raw (still percent-encoded) path segments. The
+ * printable-ASCII bound keeps them opaque, bounded identifiers; #16/#17 own
+ * any decoding policy for their task id space.
+ */
+const QUERY_PATH_PARAMETER = /^[\x21-\x7e]{1,255}$/;
+
+interface MatchedQueryRoute {
+  readonly routeId: SaasGatewayQueryRouteId;
+  readonly pathParameters: Readonly<Record<string, string>>;
+}
+
+function matchQueryRoute(path: string): MatchedQueryRoute | null {
+  const parts = path.split('/');
+  if (parts[0] !== '') return null;
+  const segments = parts.slice(1);
+  // Strict segment matching: a trailing slash or an interior empty segment
+  // matches no query route (no lenient normalization at this boundary).
+  if (segments.some((segment) => segment.length === 0)) return null;
+  for (const route of QUERY_ROUTES) {
+    if (route.segments.length !== segments.length) continue;
+    const pathParameters: Record<string, string> = {};
+    let matched = true;
+    for (let index = 0; index < segments.length; index += 1) {
+      const pattern = route.segments[index];
+      const segment = segments[index];
+      if (pattern === undefined || segment === undefined) {
+        matched = false;
+        break;
+      }
+      if (pattern.startsWith(':')) {
+        if (!QUERY_PATH_PARAMETER.test(segment)) {
+          matched = false;
+          break;
+        }
+        pathParameters[pattern.slice(1)] = segment;
+      } else if (pattern !== segment) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return { routeId: route.routeId, pathParameters };
+  }
+  return null;
+}
 const MAX_MODEL_LENGTH = 512;
 const MAX_AUTHORIZATION_LENGTH = 4096;
 const MAX_AUDIT_VALUE_LENGTH = 1024;
@@ -178,6 +252,33 @@ export interface ModelDiscoveryPort {
 }
 
 /**
+ * Per-request context handed to a query endpoint handler after
+ * authentication (roadmap 4.0 ③). Everything a #16/#17 task-status or
+ * task-content reader needs; the boundary owns framing and security
+ * headers, so the port never touches the response object.
+ */
+export interface SaasGatewayQueryRequestContext {
+  readonly routeId: SaasGatewayQueryRouteId;
+  readonly pathParameters: Readonly<Record<string, string>>;
+  readonly authenticatedCaller: AuthenticatedApiKey;
+}
+
+/** Result contract for one query endpoint hit. */
+export interface SaasGatewayQueryResult {
+  /** Complete HTTP status for the client response (integer in 200..599). */
+  readonly status: number;
+  /** Response media type; defaults to application/json; charset=utf-8. */
+  readonly contentType?: string;
+  /** Body sent verbatim: string (JSON text) or Uint8Array (binary content). */
+  readonly body?: Uint8Array | string | null;
+}
+
+/** Reserved query-endpoint port for #16/#17: async task status/content reads. */
+export interface SaasGatewayQueryPort {
+  serve(context: SaasGatewayQueryRequestContext): Promise<SaasGatewayQueryResult>;
+}
+
+/**
  * The aliases keep this adapter usable by composition code while it is still
  * being wired. A missing capability is handled as a closed 503 at request
  * time; this adapter never creates a local fallback authenticator or service.
@@ -198,6 +299,12 @@ export interface SaasGatewayHttpOptions {
    * whole boundary closed (503), mirroring `maxBodyBytes`.
    */
   readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
+  /**
+   * Query endpoint family port (roadmap 4.0 ③): GET task status/content
+   * reads for #16/#17. Absent means the deployment has no query authority
+   * and hits fail closed with 503.
+   */
+  readonly queryEndpoints?: SaasGatewayQueryPort;
   readonly entryPoint?: string;
   /**
    * CIDRs of trusted reverse proxies allowed to attest X-Forwarded-For. Empty
@@ -538,6 +645,54 @@ function sendModelList(res: ServerResponse, requestId: string, models: readonly 
   }
 }
 
+function sendQueryResult(res: ServerResponse, requestId: string, result: SaasGatewayQueryResult): void {
+  if (res.destroyed || res.writableEnded) return;
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  try {
+    res.writeHead(result.status, {
+      'content-type': result.contentType ?? 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-request-id': requestId,
+    });
+    res.end(result.body ?? '');
+  } catch {
+    try {
+      res.destroy();
+    } catch {
+      // Nothing else is safe to send after the response write failed.
+    }
+  }
+}
+
+/** Defensive contract check for a query port result; invalid shapes fail closed to 503. */
+function validQueryResult(value: SaasGatewayQueryResult): boolean {
+  if (!isRecord(value)) return false;
+  if (!Number.isInteger(value.status) || value.status < 200 || value.status > 599) return false;
+  if (value.body !== undefined && value.body !== null) {
+    if (typeof value.body !== 'string' && !(value.body instanceof Uint8Array)) return false;
+  }
+  const contentType = value.contentType;
+  if (contentType !== undefined) {
+    if (
+      typeof contentType !== 'string' ||
+      contentType.length === 0 ||
+      contentType.length > 128 ||
+      [...contentType].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 0x20 || code === 0x7f;
+      })
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function safeAuditValue(value: unknown): string | null {
   if (typeof value !== 'string' || value.length > MAX_AUDIT_VALUE_LENGTH) return null;
   if ([...value].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f)) {
@@ -844,6 +999,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
   const preparation = options.preparation ?? options.preparationService;
   const dispatch = options.dispatch ?? options.dispatchService;
   const modelDiscovery = options.modelDiscovery;
+  const queryEndpoints = options.queryEndpoints;
   const bodyLimits = resolveSaasGatewayBodyLimits(validMaxBodyBytes(options.maxBodyBytes), options.endpointBodyLimits);
   const entryPoint = validEntryPoint(options.entryPoint);
 
@@ -899,6 +1055,68 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         return true;
       }
       sendModelList(res, requestId, models);
+      return true;
+    }
+
+    /*
+     * Roadmap batch 4 §4.0 ④ + §4.3 (task #14): zero WebSocket
+     * infrastructure is a recorded boundary, not an omission. Realtime
+     * sessions need an independent upgrade handler plus a connection-scoped
+     * admission/billing path parallel to the request-scoped
+     * prepared-evidence lifecycle — that is task #17's separate sub-task.
+     * The authoritative boundary is that the hosted server registers no
+     * 'upgrade' listener (Node destroys such sockets); this check gives any
+     * upgrade-shaped request that still reaches the request handler an
+     * explicit, documented 501 instead of falling through to route
+     * dispatch.
+     */
+    if (oneHeader(req, 'upgrade')?.trim().toLowerCase() === 'websocket') {
+      drainRequest(req);
+      sendHttpError(res, new GatewayHttpError(501, 'WEBSOCKET_UNSUPPORTED'), requestId, WEBSOCKET_UNSUPPORTED_MESSAGE);
+      return true;
+    }
+
+    // §4.0 ③ (task #14): GET query endpoints — the /v1/models-style
+    // lightweight bypass (authenticate, parse parameters, delegate); they
+    // never enter preparation/admission because they read task state
+    // instead of creating billable work.
+    const queryRoute = matchQueryRoute(path);
+    if (queryRoute !== null) {
+      drainRequest(req);
+      if ((req.method ?? '').toUpperCase() !== 'GET') {
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      if (!queryEndpoints) {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+
+      let authenticatedQueryCaller: AuthenticatedApiKey;
+      try {
+        authenticatedQueryCaller = await authenticateCaller(req, authenticator);
+      } catch (error) {
+        sendHttpError(
+          res,
+          error instanceof GatewayHttpError ? error : new GatewayHttpError(503, 'AUTHENTICATION_UNAVAILABLE'),
+          requestId,
+        );
+        return true;
+      }
+
+      let queryResult: SaasGatewayQueryResult;
+      try {
+        queryResult = await queryEndpoints.serve({
+          routeId: queryRoute.routeId,
+          pathParameters: queryRoute.pathParameters,
+          authenticatedCaller: authenticatedQueryCaller,
+        });
+        if (!validQueryResult(queryResult)) throw new Error('invalid query endpoint result');
+      } catch {
+        sendHttpError(res, new GatewayHttpError(503, 'QUERY_ENDPOINT_UNAVAILABLE'), requestId);
+        return true;
+      }
+      sendQueryResult(res, requestId, queryResult);
       return true;
     }
 

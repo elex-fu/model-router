@@ -9,6 +9,8 @@ import {
   type RequestPreparationPort,
   resolveSaasGatewayBodyLimits,
   type SaasGatewayEndpointFamilyBodyLimits,
+  type SaasGatewayQueryRequestContext,
+  type SaasGatewayQueryResult,
 } from '../../../src/saas/gateway/http-handler.js';
 import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 import type {
@@ -246,6 +248,8 @@ function harness(
       request: FakeRequest,
     ) => Promise<PreparedEvidenceDispatchResult>;
     readonly modelDiscovery?: (authenticatedCaller: AuthenticatedApiKey) => Promise<readonly string[]>;
+    /** Roadmap 4.0 ③: fake query-endpoint port for GET task reads. */
+    readonly queryEndpoints?: (context: SaasGatewayQueryRequestContext) => Promise<SaasGatewayQueryResult>;
     readonly maxBodyBytes?: number;
     /** Roadmap 4.0 ①: endpoint-family body limits injected at construction. */
     readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
@@ -262,11 +266,13 @@ function harness(
   readonly dispatchInputs: PreparedEvidenceDispatchInput[];
   readonly keys: string[];
   readonly modelDiscoveryInputs: AuthenticatedApiKey[];
+  readonly queryInputs: SaasGatewayQueryRequestContext[];
 } {
   const preparationInputs: RequestPreparationInput[] = [];
   const dispatchInputs: PreparedEvidenceDispatchInput[] = [];
   const keys: string[] = [];
   const modelDiscoveryInputs: AuthenticatedApiKey[] = [];
+  const queryInputs: SaasGatewayQueryRequestContext[] = [];
   const request = new FakeRequest(options.request ?? {});
   const response = new FakeResponse();
   const key = authenticatedApiKey();
@@ -298,12 +304,22 @@ function harness(
         },
       }
     : undefined;
+  const queryServe = options.queryEndpoints;
+  const queryEndpoints = queryServe
+    ? {
+        serve: async (context: SaasGatewayQueryRequestContext) => {
+          queryInputs.push(context);
+          return queryServe(context);
+        },
+      }
+    : undefined;
   const baseHandler = createSaasGatewayHandler({
     authenticator,
     preparation,
     dispatch,
     preDispatchCompensation: options.preDispatchCompensation,
     modelDiscovery,
+    queryEndpoints,
     maxBodyBytes: options.maxBodyBytes,
     endpointBodyLimits: options.endpointBodyLimits,
     ...(options.stickyScheduling ? { stickyScheduling: true } : {}),
@@ -312,7 +328,16 @@ function harness(
     options.preparationResult?.outcome === 'prepared' ? options.preparationResult.requestId : 'request-1';
   const handler: ReturnType<typeof createSaasGatewayHandler> = (req, res, context) =>
     baseHandler(req, res, context ?? { requestId });
-  return { handler, request, response, preparationInputs, dispatchInputs, keys, modelDiscoveryInputs };
+  return {
+    handler,
+    request,
+    response,
+    preparationInputs,
+    dispatchInputs,
+    keys,
+    modelDiscoveryInputs,
+    queryInputs,
+  };
 }
 
 async function completeClient(
@@ -1012,4 +1037,148 @@ test('the sticky scheduling seam is opt-in: the default boundary never sets inpu
   });
   assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
   assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+});
+
+test('serves GET query endpoints through the authenticated query port (4.0 ③)', async () => {
+  const imageTask = harness({
+    request: { url: '/v1/images/tasks/img_0001', method: 'GET' },
+    queryEndpoints: async (context) => {
+      assert.equal(context.authenticatedCaller.metadata.id, 'key-1');
+      return { status: 200, body: JSON.stringify({ id: context.pathParameters.taskId, status: 'succeeded' }) };
+    },
+  });
+  assert.equal(await imageTask.handler(asRequest(imageTask.request), asResponse(imageTask.response)), true);
+  assert.equal(imageTask.response.writeHeadCalls[0]?.status, 200);
+  assert.equal(imageTask.response.writeHeadCalls[0]?.headers['content-type'], 'application/json; charset=utf-8');
+  const body = JSON.parse(String(imageTask.response.endBody)) as { id: string; status: string };
+  assert.equal(body.id, 'img_0001');
+  assert.equal(body.status, 'succeeded');
+  assert.equal(imageTask.queryInputs[0]?.routeId, 'images.task_status');
+  assert.deepEqual(imageTask.queryInputs[0]?.pathParameters, { taskId: 'img_0001' });
+  // Query reads are the /v1/models-style bypass: no preparation, no dispatch.
+  assert.equal(imageTask.preparationInputs.length, 0);
+  assert.equal(imageTask.dispatchInputs.length, 0);
+
+  const videoStatus = harness({
+    request: { url: '/v1/videos/vid_9', method: 'GET' },
+    queryEndpoints: async () => ({ status: 202, body: JSON.stringify({ status: 'in_progress' }) }),
+  });
+  await videoStatus.handler(asRequest(videoStatus.request), asResponse(videoStatus.response));
+  assert.equal(videoStatus.response.writeHeadCalls[0]?.status, 202);
+  assert.equal(videoStatus.queryInputs[0]?.routeId, 'videos.task_status');
+  assert.deepEqual(videoStatus.queryInputs[0]?.pathParameters, { taskId: 'vid_9' });
+
+  const videoContent = harness({
+    request: { url: '/v1/videos/vid_9/content', method: 'GET' },
+    queryEndpoints: async () => ({
+      status: 200,
+      contentType: 'video/mp4',
+      body: new TextEncoder().encode('video-bytes'),
+    }),
+  });
+  await videoContent.handler(asRequest(videoContent.request), asResponse(videoContent.response));
+  assert.equal(videoContent.response.writeHeadCalls[0]?.status, 200);
+  assert.equal(videoContent.response.writeHeadCalls[0]?.headers['content-type'], 'video/mp4');
+  assert.deepEqual(
+    new Uint8Array(videoContent.response.endBody as Uint8Array),
+    new TextEncoder().encode('video-bytes'),
+  );
+  assert.equal(videoContent.queryInputs[0]?.routeId, 'videos.task_content');
+});
+
+test('query endpoints enforce GET, authentication, and fail closed (4.0 ③)', async () => {
+  // Non-GET on a query path is method-rejected before the port runs.
+  const post = harness({
+    request: { url: '/v1/images/tasks/img_0001', method: 'POST', body: JSON.stringify({ model: 'public-model' }) },
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await post.handler(asRequest(post.request), asResponse(post.response));
+  assert.equal(post.response.writeHeadCalls[0]?.status, 405);
+  assert.equal(post.queryInputs.length, 0);
+
+  // Absent query authority fails closed.
+  const noPort = harness({ request: { url: '/v1/images/tasks/img_0001', method: 'GET' } });
+  await noPort.handler(asRequest(noPort.request), asResponse(noPort.response));
+  assert.equal(noPort.response.writeHeadCalls[0]?.status, 503);
+  assert.equal(noPort.queryInputs.length, 0);
+
+  // Authentication precedes the port.
+  const unauthenticated = harness({
+    request: { url: '/v1/images/tasks/img_0001', method: 'GET' },
+    authenticate: async () => null,
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await unauthenticated.handler(asRequest(unauthenticated.request), asResponse(unauthenticated.response));
+  assert.equal(unauthenticated.response.writeHeadCalls[0]?.status, 401);
+  assert.equal(unauthenticated.queryInputs.length, 0);
+
+  // GET on POST-only routes and unknown paths keep their existing answers.
+  const textRoute = harness({ request: { url: '/v1/chat/completions', method: 'GET' } });
+  await textRoute.handler(asRequest(textRoute.request), asResponse(textRoute.response));
+  assert.equal(textRoute.response.writeHeadCalls[0]?.status, 405);
+
+  const unknown = harness({ request: { url: '/v1/unknown', method: 'GET' } });
+  await unknown.handler(asRequest(unknown.request), asResponse(unknown.response));
+  assert.equal(unknown.response.writeHeadCalls[0]?.status, 404);
+
+  // Strict path matching: trailing slash or oversized parameter matches nothing.
+  const trailingSlash = harness({
+    request: { url: '/v1/videos/vid_9/', method: 'GET' },
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await trailingSlash.handler(asRequest(trailingSlash.request), asResponse(trailingSlash.response));
+  assert.equal(trailingSlash.response.writeHeadCalls[0]?.status, 404);
+  assert.equal(trailingSlash.queryInputs.length, 0);
+
+  const oversizedParameter = harness({
+    request: { url: `/v1/images/tasks/${'a'.repeat(256)}`, method: 'GET' },
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await oversizedParameter.handler(asRequest(oversizedParameter.request), asResponse(oversizedParameter.response));
+  assert.equal(oversizedParameter.response.writeHeadCalls[0]?.status, 404);
+  assert.equal(oversizedParameter.queryInputs.length, 0);
+
+  // Port failure and contract violations surface as 503, never partial output.
+  const failing = harness({
+    request: { url: '/v1/videos/vid_9', method: 'GET' },
+    queryEndpoints: async () => {
+      throw new Error('task store unavailable');
+    },
+  });
+  await failing.handler(asRequest(failing.request), asResponse(failing.response));
+  assert.equal(failing.response.writeHeadCalls[0]?.status, 503);
+
+  for (const invalid of [
+    { status: 200, body: 42 } as unknown as SaasGatewayQueryResult,
+    { status: 700 } as unknown as SaasGatewayQueryResult,
+    { status: 200, contentType: 'not\x00ok' } as unknown as SaasGatewayQueryResult,
+  ]) {
+    const contract = harness({
+      request: { url: '/v1/videos/vid_9', method: 'GET' },
+      queryEndpoints: async () => invalid,
+    });
+    await contract.handler(asRequest(contract.request), asResponse(contract.response));
+    assert.equal(contract.response.writeHeadCalls[0]?.status, 503);
+    assert.equal(contract.response.writeHeadCalls.length, 1);
+  }
+});
+
+test('rejects WebSocket upgrade requests with an explicit 501 boundary (4.0 ④)', async () => {
+  for (const upgrade of ['websocket', 'WebSocket']) {
+    const ws = harness({
+      request: {
+        url: '/v1/realtime',
+        method: 'GET',
+        headers: { upgrade, connection: 'Upgrade' },
+      },
+    });
+    await ws.handler(asRequest(ws.request), asResponse(ws.response));
+    assert.equal(ws.response.writeHeadCalls[0]?.status, 501);
+    const body = JSON.parse(String(ws.response.endBody)) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, 'WEBSOCKET_UNSUPPORTED');
+    assert.ok(body.error.message.includes('WebSocket'));
+    assert.equal(ws.request.resumed, true);
+    assert.equal(ws.preparationInputs.length, 0);
+    assert.equal(ws.dispatchInputs.length, 0);
+  }
 });
