@@ -4,9 +4,9 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
 import {
-  SaasPreparedRequestEvidenceError,
   type PreparedRequestEvidenceAudit,
   type PreparedRequestEvidenceRecord,
+  SaasPreparedRequestEvidenceError,
 } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import {
   CANCELLATION_PG_REQUIRED,
@@ -49,11 +49,16 @@ class BeforeClaimLocks {
     assert.ok(!this.pids.has(pid), 'both claims must occupy different pooled PG sessions');
     this.pids.add(pid);
     assert.ok(this.pids.size <= 2, 'barrier accepts exactly two claims');
-    if (this.pids.size === 2) { clearTimeout(this.timer); this.release(); }
+    if (this.pids.size === 2) {
+      clearTimeout(this.timer);
+      this.release();
+    }
     await this.ready;
   }
 
-  close(): void { clearTimeout(this.timer); }
+  close(): void {
+    clearTimeout(this.timer);
+  }
 }
 
 interface ClaimTransaction {
@@ -88,20 +93,33 @@ function observedGateway(gateway: SaasDatabase, probe: ClaimProbe): SaasDatabase
       try {
         const value = await cancellationTransaction(gateway, async (tx) => {
           if (!probe.active) return work(tx);
-          const identity = (await tx.query<{ pid: number; role: string; session: string }>(
-            'SELECT pg_backend_pid() AS pid, current_user AS role, session_user AS session',
-          )).rows[0];
-          assert.ok(identity); assert.equal(identity.role, 'model_router_saas_gateway');
-          assert.equal(identity.session, 'model_router_saas_gateway'); assert.ok(Number.isSafeInteger(identity.pid));
-          const fact: ClaimTransaction = { ...identity, hintReads: 0, attemptWrites: 0, evidenceWrites: 0,
-            auditAttempts: 0, auditWrites: 0, outcome: 'running' };
-          captured.value = fact; probe.transactions.push(fact);
+          const identity = (
+            await tx.query<{ pid: number; role: string; session: string }>(
+              'SELECT pg_backend_pid() AS pid, current_user AS role, session_user AS session',
+            )
+          ).rows[0];
+          assert.ok(identity);
+          assert.equal(identity.role, 'model_router_saas_gateway');
+          assert.equal(identity.session, 'model_router_saas_gateway');
+          assert.ok(Number.isSafeInteger(identity.pid));
+          const fact: ClaimTransaction = {
+            ...identity,
+            hintReads: 0,
+            attemptWrites: 0,
+            evidenceWrites: 0,
+            auditAttempts: 0,
+            auditWrites: 0,
+            outcome: 'running',
+          };
+          captured.value = fact;
+          probe.transactions.push(fact);
           const executor: SqlExecutor = {
             async query<Row>(sql: string, values: readonly unknown[] = []) {
               const claimAudit = sql.startsWith('INSERT INTO saas_audit_events') && values[3] === CLAIM_ACTION;
               if (claimAudit) {
                 assert.ok(probe.fixture);
-                assert.equal(values[1], probe.fixture.tenantId); assert.equal(values[5], probe.fixture.evidenceId);
+                assert.equal(values[1], probe.fixture.tenantId);
+                assert.equal(values[5], probe.fixture.evidenceId);
                 assert.equal(values[10], probe.fixture.requestId);
                 fact.auditAttempts++;
                 if (probe.failBeforeAudit) throw probe.failBeforeAudit;
@@ -109,12 +127,19 @@ function observedGateway(gateway: SaasDatabase, probe: ClaimProbe): SaasDatabase
               const result = await tx.query<Row>(sql, values);
               if (sql.includes('/* prepared-evidence:evidence-lock-hint */')) {
                 fact.hintReads++;
-                assert.equal(fact.attemptWrites, 0); assert.equal(fact.evidenceWrites, 0);
+                assert.equal(fact.attemptWrites, 0);
+                assert.equal(fact.evidenceWrites, 0);
                 assert.ok(!/FOR\s+(UPDATE|SHARE)/i.test(sql), 'barrier query must remain read-only and unlocked');
                 if (probe.barrier) await probe.barrier.arrive(identity.pid);
               }
-              if (sql.startsWith('UPDATE saas_attempts ')) { assert.equal(result.rowCount, 1); fact.attemptWrites++; }
-              if (sql.startsWith('UPDATE saas_prepared_request_evidence ')) { assert.equal(result.rowCount, 1); fact.evidenceWrites++; }
+              if (sql.startsWith('UPDATE saas_attempts ')) {
+                assert.equal(result.rowCount, 1);
+                fact.attemptWrites++;
+              }
+              if (sql.startsWith('UPDATE saas_prepared_request_evidence ')) {
+                assert.equal(result.rowCount, 1);
+                fact.evidenceWrites++;
+              }
               if (claimAudit) fact.auditWrites++;
               return result;
             },
@@ -191,36 +216,61 @@ function auditFor(fixture: Fixture): PreparedRequestEvidenceAudit {
   return { actorUserId: null, entryPoint: 'prepared-evidence-concurrent-claim-pg', requestId: fixture.requestId };
 }
 
-function assertEvidenceError(error: unknown, code: 'ALREADY_CLAIMED' | 'AUDIT_FAILED'): asserts error is SaasPreparedRequestEvidenceError {
-  assert.ok(error instanceof SaasPreparedRequestEvidenceError, 'SQL/storage/TypeError cannot stand in for the expected domain refusal');
-  assert.equal(error.code, code); assert.equal(cancellationSqlState(error), undefined);
+function assertEvidenceError(
+  error: unknown,
+  code: 'ALREADY_CLAIMED' | 'AUDIT_FAILED',
+): asserts error is SaasPreparedRequestEvidenceError {
+  assert.ok(
+    error instanceof SaasPreparedRequestEvidenceError,
+    'SQL/storage/TypeError cannot stand in for the expected domain refusal',
+  );
+  assert.equal(error.code, code);
+  assert.equal(cancellationSqlState(error), undefined);
 }
 
 function assertFresh(before: ClaimSnapshot, mode: 'byok' | 'platform'): void {
-  assert.equal(before.prepared_evidence_id, null); assert.equal(before.evidence_status, 'registered');
-  assert.equal(before.claimed_at, null); assert.equal(before.claimed_attempt_id, null);
-  assert.equal(before.prepared_bindings, '0'); assert.equal(before.claim_audits, '0');
-  assert.equal(before.registered_audits, '1'); assert.equal(before.dispatch_state, 'not_sent');
-  assert.equal(before.result_state, 'pending'); assert.equal(before.response_started, false);
+  assert.equal(before.prepared_evidence_id, null);
+  assert.equal(before.evidence_status, 'registered');
+  assert.equal(before.claimed_at, null);
+  assert.equal(before.claimed_attempt_id, null);
+  assert.equal(before.prepared_bindings, '0');
+  assert.equal(before.claim_audits, '0');
+  assert.equal(before.registered_audits, '1');
+  assert.equal(before.dispatch_state, 'not_sent');
+  assert.equal(before.result_state, 'pending');
+  assert.equal(before.response_started, false);
   assert.deepEqual(before.holds, mode === 'byok' ? [] : [{ state: 'reserved' }]);
 }
 
 async function assertOneClaim(migrator: SqlExecutor, fixture: Fixture, before: ClaimSnapshot): Promise<ClaimSnapshot> {
   const after = await snapshot(migrator, fixture);
   assert.equal(after.attempt_version, (BigInt(before.attempt_version) + 1n).toString());
-  assert.equal(after.prepared_evidence_id, fixture.evidenceId); assert.equal(after.prepared_bindings, '1');
-  assert.equal(after.evidence_status, 'claimed'); assert.equal(after.claimed_attempt_id, fixture.attemptId);
-  assert.ok(after.claimed_at); assert.equal(after.claim_audits, '1'); assert.equal(after.registered_audits, '1');
-  assert.deepEqual(after.attempt_fixed, before.attempt_fixed); assert.deepEqual(after.evidence_identity, before.evidence_identity);
-  assert.deepEqual(after.resources, before.resources, 'claim cannot mutate wallet, hold, capacity, idempotency, request or ledger');
+  assert.equal(after.prepared_evidence_id, fixture.evidenceId);
+  assert.equal(after.prepared_bindings, '1');
+  assert.equal(after.evidence_status, 'claimed');
+  assert.equal(after.claimed_attempt_id, fixture.attemptId);
+  assert.ok(after.claimed_at);
+  assert.equal(after.claim_audits, '1');
+  assert.equal(after.registered_audits, '1');
+  assert.deepEqual(after.attempt_fixed, before.attempt_fixed);
+  assert.deepEqual(after.evidence_identity, before.evidence_identity);
+  assert.deepEqual(
+    after.resources,
+    before.resources,
+    'claim cannot mutate wallet, hold, capacity, idempotency, request or ledger',
+  );
   assert.deepEqual(after.holds, before.holds);
   // No dispatcher or transport exists in this root. Both transactions only
   // claim evidence; durable facts must still show zero dispatch/response.
-  assert.equal(after.dispatch_state, 'not_sent'); assert.equal(after.result_state, 'pending'); assert.equal(after.response_started, false);
-  const monotonic = (await migrator.query<{ valid: boolean }>(
-    'SELECT updated_at >= $4::timestamptz AS valid FROM saas_attempts WHERE tenant_id = $1 AND request_id = $2 AND id = $3',
-    [fixture.tenantId, fixture.requestId, fixture.attemptId, before.attempt_updated_at],
-  )).rows[0];
+  assert.equal(after.dispatch_state, 'not_sent');
+  assert.equal(after.result_state, 'pending');
+  assert.equal(after.response_started, false);
+  const monotonic = (
+    await migrator.query<{ valid: boolean }>(
+      'SELECT updated_at >= $4::timestamptz AS valid FROM saas_attempts WHERE tenant_id = $1 AND request_id = $2 AND id = $3',
+      [fixture.tenantId, fixture.requestId, fixture.attemptId, before.attempt_updated_at],
+    )
+  ).rows[0];
   assert.equal(monotonic?.valid, true);
   return after;
 }
@@ -235,65 +285,149 @@ test('two real restricted-gateway transactions claim one signed evidence exactly
   const { databases, migrator, gateway } = await cancellationDatabases();
   try {
     for (const mode of ['byok', 'platform'] as const) {
-      await t.test(`${mode}: concurrent claims have one exact domain loser and no send or financial/capacity effect`, { timeout: 30000 }, async () => {
-        const probe: ClaimProbe = { active: false, transactions: [] };
-        const fixture = await cancellationFixture(migrator, observedGateway(gateway, probe), mode);
-        probe.fixture = fixture;
-        const before = await snapshot(migrator, fixture); assertFresh(before, mode);
-        const barrier = new BeforeClaimLocks(); probe.barrier = barrier; probe.active = true;
-        try {
-          const options = { payloadSha256: fixture.prepared.evidence.payloadSha256 };
-          const outcomes = await Promise.allSettled([0, 1].map(() =>
-            fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options)));
-          assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1, 'exactly one real transaction commits');
-          assert.equal(outcomes.filter((outcome) => outcome.status === 'rejected').length, 1, 'exactly one real transaction loses');
-          for (const outcome of outcomes) {
-            if (outcome.status === 'rejected') assertEvidenceError(outcome.reason, 'ALREADY_CLAIMED');
-            else {
-              const claimed: PreparedRequestEvidenceRecord = outcome.value;
-              assert.equal(claimed.evidenceId, fixture.evidenceId); assert.equal(claimed.tenantId, fixture.tenantId);
-              assert.equal(claimed.requestId, fixture.requestId); assert.equal(claimed.attemptId, fixture.attemptId);
-              assert.equal(claimed.status, 'claimed'); assert.equal(claimed.claimedAttemptId, fixture.attemptId);
+      await t.test(
+        `${mode}: concurrent claims have one exact domain loser and no send or financial/capacity effect`,
+        { timeout: 30000 },
+        async () => {
+          const probe: ClaimProbe = { active: false, transactions: [] };
+          const fixture = await cancellationFixture(migrator, observedGateway(gateway, probe), mode);
+          probe.fixture = fixture;
+          const before = await snapshot(migrator, fixture);
+          assertFresh(before, mode);
+          const barrier = new BeforeClaimLocks();
+          probe.barrier = barrier;
+          probe.active = true;
+          try {
+            const options = { payloadSha256: fixture.prepared.evidence.payloadSha256 };
+            const outcomes = await Promise.allSettled(
+              [0, 1].map(() =>
+                fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
+              ),
+            );
+            assert.equal(
+              outcomes.filter((outcome) => outcome.status === 'fulfilled').length,
+              1,
+              'exactly one real transaction commits',
+            );
+            assert.equal(
+              outcomes.filter((outcome) => outcome.status === 'rejected').length,
+              1,
+              'exactly one real transaction loses',
+            );
+            for (const outcome of outcomes) {
+              if (outcome.status === 'rejected') assertEvidenceError(outcome.reason, 'ALREADY_CLAIMED');
+              else {
+                const claimed: PreparedRequestEvidenceRecord = outcome.value;
+                assert.equal(claimed.evidenceId, fixture.evidenceId);
+                assert.equal(claimed.tenantId, fixture.tenantId);
+                assert.equal(claimed.requestId, fixture.requestId);
+                assert.equal(claimed.attemptId, fixture.attemptId);
+                assert.equal(claimed.status, 'claimed');
+                assert.equal(claimed.claimedAttemptId, fixture.attemptId);
+              }
             }
+            assert.equal(barrier.pids.size, 2);
+            assert.equal(probe.transactions.length, 2);
+            assert.ok(
+              probe.transactions.every(
+                (fact) =>
+                  fact.hintReads === 1 && fact.role === 'model_router_saas_gateway' && fact.session === fact.role,
+              ),
+            );
+            assert.deepEqual(
+              probe.transactions
+                .map((fact) => [fact.attemptWrites, fact.evidenceWrites, fact.auditWrites, fact.outcome])
+                .sort(),
+              [
+                [0, 0, 0, 'rolled_back'],
+                [1, 1, 1, 'committed'],
+              ],
+            );
+            const after = await assertOneClaim(migrator, fixture, before);
+            probe.barrier = undefined;
+            await assert.rejects(
+              fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
+              (error: unknown) => {
+                assertEvidenceError(error, 'ALREADY_CLAIMED');
+                return true;
+              },
+            );
+            assert.deepEqual(
+              await snapshot(migrator, fixture),
+              after,
+              'duplicate claim creates neither a second binding/bump nor audit/effect',
+            );
+            const duplicate = probe.transactions[2];
+            assert.ok(duplicate);
+            assert.equal(duplicate.attemptWrites, 0);
+            assert.equal(duplicate.evidenceWrites, 0);
+            assert.equal(duplicate.auditAttempts, 0);
+          } finally {
+            barrier.close();
+            probe.active = false;
           }
-          assert.equal(barrier.pids.size, 2); assert.equal(probe.transactions.length, 2);
-          assert.ok(probe.transactions.every((fact) => fact.hintReads === 1 && fact.role === 'model_router_saas_gateway' && fact.session === fact.role));
-          assert.deepEqual(probe.transactions.map((fact) => [fact.attemptWrites, fact.evidenceWrites, fact.auditWrites, fact.outcome]).sort(),
-            [[0, 0, 0, 'rolled_back'], [1, 1, 1, 'committed']]);
-          const after = await assertOneClaim(migrator, fixture, before);
-          probe.barrier = undefined;
-          await assert.rejects(fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
-            (error: unknown) => { assertEvidenceError(error, 'ALREADY_CLAIMED'); return true; });
-          assert.deepEqual(await snapshot(migrator, fixture), after, 'duplicate claim creates neither a second binding/bump nor audit/effect');
-          const duplicate = probe.transactions[2]; assert.ok(duplicate);
-          assert.equal(duplicate.attemptWrites, 0); assert.equal(duplicate.evidenceWrites, 0); assert.equal(duplicate.auditAttempts, 0);
-        } finally { barrier.close(); probe.active = false; }
-      });
+        },
+      );
 
-      await t.test(`${mode}: a real claim write followed by a pre-audit fault rolls back atomically and can be claimed once later`, { timeout: 30000 }, async () => {
-        const probe: ClaimProbe = { active: false, transactions: [] };
-        const fixture = await cancellationFixture(migrator, observedGateway(gateway, probe), mode);
-        probe.fixture = fixture;
-        const before = await snapshot(migrator, fixture); assertFresh(before, mode);
-        const sentinel = new Error('synthetic fault before claim audit SQL'); probe.failBeforeAudit = sentinel; probe.active = true;
-        const options = { payloadSha256: fixture.prepared.evidence.payloadSha256 };
-        await assert.rejects(fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
-          (error: unknown) => { assertEvidenceError(error, 'AUDIT_FAILED'); assert.equal(error.cause, sentinel); return true; });
-        assert.equal(probe.transactions.length, 1, 'no implicit claim retry');
-        const failed = probe.transactions[0]; assert.ok(failed);
-        assert.deepEqual([failed.attemptWrites, failed.evidenceWrites, failed.auditAttempts, failed.auditWrites, failed.outcome],
-          [1, 1, 1, 0, 'rolled_back'], 'fault follows actual PG attempt/evidence writes, before audit SQL');
-        assert.deepEqual(await snapshot(migrator, fixture), before, 'actual ROLLBACK restores original version, refs and all resources');
-        probe.failBeforeAudit = undefined;
-        const claimed = await fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options);
-        assert.equal(claimed.evidenceId, fixture.evidenceId); assert.equal(claimed.status, 'claimed');
-        const after = await assertOneClaim(migrator, fixture, before);
-        await assert.rejects(fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
-          (error: unknown) => { assertEvidenceError(error, 'ALREADY_CLAIMED'); return true; });
-        assert.deepEqual(await snapshot(migrator, fixture), after);
-        assert.equal(probe.transactions.length, 3); probe.active = false;
-      });
+      await t.test(
+        `${mode}: a real claim write followed by a pre-audit fault rolls back atomically and can be claimed once later`,
+        { timeout: 30000 },
+        async () => {
+          const probe: ClaimProbe = { active: false, transactions: [] };
+          const fixture = await cancellationFixture(migrator, observedGateway(gateway, probe), mode);
+          probe.fixture = fixture;
+          const before = await snapshot(migrator, fixture);
+          assertFresh(before, mode);
+          const sentinel = new Error('synthetic fault before claim audit SQL');
+          probe.failBeforeAudit = sentinel;
+          probe.active = true;
+          const options = { payloadSha256: fixture.prepared.evidence.payloadSha256 };
+          await assert.rejects(
+            fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
+            (error: unknown) => {
+              assertEvidenceError(error, 'AUDIT_FAILED');
+              assert.equal(error.cause, sentinel);
+              return true;
+            },
+          );
+          assert.equal(probe.transactions.length, 1, 'no implicit claim retry');
+          const failed = probe.transactions[0];
+          assert.ok(failed);
+          assert.deepEqual(
+            [failed.attemptWrites, failed.evidenceWrites, failed.auditAttempts, failed.auditWrites, failed.outcome],
+            [1, 1, 1, 0, 'rolled_back'],
+            'fault follows actual PG attempt/evidence writes, before audit SQL',
+          );
+          assert.deepEqual(
+            await snapshot(migrator, fixture),
+            before,
+            'actual ROLLBACK restores original version, refs and all resources',
+          );
+          probe.failBeforeAudit = undefined;
+          const claimed = await fixture.evidenceService.claimForDispatch(
+            fixture.evidenceId,
+            auditFor(fixture),
+            options,
+          );
+          assert.equal(claimed.evidenceId, fixture.evidenceId);
+          assert.equal(claimed.status, 'claimed');
+          const after = await assertOneClaim(migrator, fixture, before);
+          await assert.rejects(
+            fixture.evidenceService.claimForDispatch(fixture.evidenceId, auditFor(fixture), options),
+            (error: unknown) => {
+              assertEvidenceError(error, 'ALREADY_CLAIMED');
+              return true;
+            },
+          );
+          assert.deepEqual(await snapshot(migrator, fixture), after);
+          assert.equal(probe.transactions.length, 3);
+          probe.active = false;
+        },
+      );
     }
-  } catch (error) { throw safeCancellationFailure(error); }
-  finally { await Promise.all(databases.map((database) => database.close())); }
+  } catch (error) {
+    throw safeCancellationFailure(error);
+  } finally {
+    await Promise.all(databases.map((database) => database.close()));
+  }
 });

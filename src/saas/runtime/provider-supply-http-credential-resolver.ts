@@ -25,6 +25,12 @@ const DEFAULT_ALLOWED_AUTHENTICATION_HEADERS = Object.freeze([
   'x-goog-api-key',
 ]);
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+// Control characters (C0 range plus DEL) rejected in credential header names
+// and caller-supplied allowlist entries. Built via String.fromCharCode so the
+// source itself carries no literal control bytes.
+const CONTROL_CHARACTERS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}]`,
+);
 const MAX_AUTHENTICATION_VALUE_BYTES = 16 * 1024;
 const BEARER_PREFIX = Buffer.from('Bearer ', 'ascii');
 
@@ -148,20 +154,25 @@ function authenticationFromValue(
       const keys = Reflect.ownKeys(descriptors);
       if (
         !keys.every((key) => key === 'headerName' || key === 'valueFormat') ||
-        !descriptors.headerName || !Object.hasOwn(descriptors.headerName, 'value') ||
+        !descriptors.headerName ||
+        !Object.hasOwn(descriptors.headerName, 'value') ||
         (descriptors.valueFormat !== undefined && !Object.hasOwn(descriptors.valueFormat, 'value'))
-      ) fail('CREDENTIAL_INVALID');
+      )
+        fail('CREDENTIAL_INVALID');
       raw = descriptors.headerName.value;
       format = descriptors.valueFormat?.value;
     } catch {
       fail('CREDENTIAL_INVALID');
     }
   }
-  if (typeof raw !== 'string' || /[\x00-\x1f\x7f]/.test(raw)) fail('CREDENTIAL_INVALID');
+  if (typeof raw !== 'string' || CONTROL_CHARACTERS.test(raw)) fail('CREDENTIAL_INVALID');
   const headerName = raw.trim().toLowerCase();
   if (!HEADER_NAME.test(headerName) || !allowedAuthenticationHeaders.has(headerName)) fail('CREDENTIAL_INVALID');
-  const valueFormat = format === undefined ? headerName === 'authorization' ? 'bearer' : 'raw' : format;
-  if ((valueFormat !== 'raw' && valueFormat !== 'bearer') || (valueFormat === 'bearer' && headerName !== 'authorization'))
+  const valueFormat = format === undefined ? (headerName === 'authorization' ? 'bearer' : 'raw') : format;
+  if (
+    (valueFormat !== 'raw' && valueFormat !== 'bearer') ||
+    (valueFormat === 'bearer' && headerName !== 'authorization')
+  )
     fail('CREDENTIAL_INVALID');
   return { headerName, valueFormat };
 }
@@ -188,7 +199,7 @@ function normalizeAllowedAuthenticationHeaders(value: readonly string[] | undefi
   if (!Array.isArray(headers) || headers.length === 0) fail('INVALID_INPUT');
   const normalized = new Set<string>();
   for (const header of headers) {
-    if (typeof header !== 'string' || header.trim() === '' || /[\x00-\x1f\x7f]/.test(header)) fail('INVALID_INPUT');
+    if (typeof header !== 'string' || header.trim() === '' || CONTROL_CHARACTERS.test(header)) fail('INVALID_INPUT');
     const normalizedHeader = header.trim().toLowerCase();
     if (!HEADER_NAME.test(normalizedHeader)) fail('INVALID_INPUT');
     normalized.add(normalizedHeader);

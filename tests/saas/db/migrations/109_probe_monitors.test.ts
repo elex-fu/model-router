@@ -18,8 +18,9 @@ test('109 registers directly after the applied 108 head as the R6a forward', () 
   const index = registered.indexOf(109);
   assert.ok(index > 0, '109 is registered');
   assert.equal(registered[index - 1], 108, '109 lands directly after the 108 head');
-  // K2: 112 (provider_account_durable_fault_classification) is the new head.
-  assert.equal(registered.at(-1), 112, 'the F1, Gemini and K2 forwards follow 109');
+  // K2: 129 (provider_account_durable_fault_classification, renumbered from
+  // main's 112 in this merge) is the new head.
+  assert.equal(registered.at(-1), 129, 'the batch-4/5 tails and the K2 durable fault classification follow 109');
   assert.equal(registered.indexOf(109), registered.lastIndexOf(109));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

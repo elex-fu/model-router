@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { type Bridge, type Protocol, pickBridge } from '../../protocol/bridge.js';
+import { ttsBillingRunes } from './audio/tts.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from './contracts.js';
 import type { PreparedRequestUsageEnvelope } from './prepared-request-evidence-service.js';
 import {
@@ -12,6 +13,7 @@ import {
   type RequestPreparationEntitlement,
   type RequestPreparationPayloadCompiler,
 } from './request-preparation-service.js';
+import { buildSearchResponsesBody, parseSearchClientRequest } from './websearch/emulation.js';
 
 /** The version is part of the preparation contract, not provider metadata. */
 export const PROVIDER_PAYLOAD_COMPILER_VERSION = 'provider-payload-compiler/v1';
@@ -28,16 +30,55 @@ const SHA256 = /^[0-9a-f]{64}$/;
 
 const PROTOCOLS = new Set<GatewayProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
 const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
+// §4.1: canonical per-unit size tiers (the pricing registry).
+const PER_UNIT_TIER_SET = new Set(['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime']);
 
 /** Canonical provider operations understood by this compiler. */
-export type ProviderPayloadOperation = 'chat.completions' | 'messages' | 'responses' | 'generateContent' | 'embeddings';
+export type ProviderPayloadOperation =
+  | 'chat.completions'
+  | 'messages'
+  | 'responses'
+  | 'generateContent'
+  | 'embeddings'
+  | 'images.generations'
+  | 'web_search'
+  | 'x_search'
+  | 'audio.tts'
+  | 'videos.generations'
+  | 'videos.edits'
+  | 'videos.extensions';
 
 /**
  * R2: the OpenAI protocol family additionally hosts the embeddings
  * operation. It is passthrough-only (openai -> openai) and is never bridged
  * onto another provider protocol.
+ * §4.2 (task #16): the OpenAI family also hosts the images.generations
+ * operation — passthrough-only, never bridged.
+ * §4.3 (task #17): the same family hosts the async video create operations
+ * (generations / edits / extensions) — passthrough-only onto
+ * OpenAI-protocol-family providers (the xAI Imagine video surface), never
+ * bridged.
  */
-const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['chat.completions', 'embeddings']);
+const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
+  'chat.completions',
+  'embeddings',
+  'images.generations',
+  'videos.generations',
+  'videos.edits',
+  'videos.extensions',
+]);
+
+/**
+ * §4.3 (task #17): the Responses protocol family additionally hosts the
+ * standalone search and audio operations. `web_search`/`x_search` are server
+ * construction-only operations: the client body (query + filters) is not a
+ * Responses body, so the compiler builds the outbound Responses emulation
+ * body itself instead of running the generic bridge. `audio.tts` is a
+ * passthrough-only operation (the xAI Voice /v1/tts JSON body rides upstream
+ * verbatim with the resolved model). All of them are servable only by
+ * responses-protocol providers (the capability gate below).
+ */
+const RESPONSES_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['responses', 'web_search', 'x_search', 'audio.tts']);
 
 /**
  * A server-owned route description. It contains no URL, credential, or caller
@@ -292,6 +333,11 @@ const SUPPORTED_BRIDGE_PAIRS = new Set<string>([
   // layer (gateway/codex/payload.ts) still owns its own stricter transform
   // for codex traffic.
   'openai->responses',
+  // apicompat PhaseA (roadmap 1.4): Responses clients against a
+  // chat.completions provider. Compiles through the real reverse conversion
+  // (gateway/responses-bridge/reverse-*.ts + the rewritten
+  // ResponsesToOpenAIBridge in src/protocol/bridge.ts).
+  'responses->openai',
 ]);
 
 const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
@@ -365,6 +411,13 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'responses') return 'responses';
   if (value === 'generateContent') return 'generateContent';
   if (value === 'embeddings') return 'embeddings';
+  if (value === 'images.generations') return 'images.generations';
+  if (value === 'web_search') return 'web_search';
+  if (value === 'x_search') return 'x_search';
+  if (value === 'audio.tts') return 'audio.tts';
+  if (value === 'videos.generations') return 'videos.generations';
+  if (value === 'videos.edits') return 'videos.edits';
+  if (value === 'videos.extensions') return 'videos.extensions';
   compilerFailure('UNSUPPORTED_OPERATION');
 }
 
@@ -379,6 +432,9 @@ function protocolOperationMatches(protocol: GatewayProtocol, operation: Provider
   // The OpenAI family accepts the embeddings operation in addition to its
   // canonical chat operation; no other protocol can serve embeddings.
   if (protocol === 'openai') return OPENAI_FAMILY_OPERATIONS.has(operation);
+  // §4.3: the Responses family accepts the standalone search operations in
+  // addition to its canonical operation (the emulation rides /responses).
+  if (protocol === 'responses') return RESPONSES_FAMILY_OPERATIONS.has(operation);
   return canonicalOperationForProtocol(protocol) === operation;
 }
 
@@ -506,6 +562,33 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   // generic operation/bridge pair validation so the family mismatch is never
   // shadowed by an UNSUPPORTED_OPERATION fallback.
   if (normalizedClientOperation === 'embeddings' && resolvedProviderProtocol !== 'openai') {
+    compilerFailure('CAPABILITY_UNSUPPORTED');
+  }
+  // §4.2 (task #16): the same gate applies to the image generation
+  // operation — passthrough-only onto OpenAI-protocol-family providers.
+  // §4.3 (task #17): and to the async video create family.
+  if (
+    (normalizedClientOperation === 'images.generations' ||
+      normalizedClientOperation === 'videos.generations' ||
+      normalizedClientOperation === 'videos.edits' ||
+      normalizedClientOperation === 'videos.extensions') &&
+    resolvedProviderProtocol !== 'openai'
+  ) {
+    compilerFailure('CAPABILITY_UNSUPPORTED');
+  }
+  // §4.3: the standalone search operations are servable only by
+  // responses-protocol providers (the emulation constructs a Responses
+  // body); any other provider protocol is a capability miss.
+  if (
+    (normalizedClientOperation === 'web_search' || normalizedClientOperation === 'x_search') &&
+    resolvedProviderProtocol !== 'responses'
+  ) {
+    compilerFailure('CAPABILITY_UNSUPPORTED');
+  }
+  // §4.3: the TTS audio passthrough is servable only by responses-protocol
+  // providers (the xAI Voice surface rides the responses-family catalog
+  // endpoint); any other provider protocol is a capability miss.
+  if (normalizedClientOperation === 'audio.tts' && resolvedProviderProtocol !== 'responses') {
     compilerFailure('CAPABILITY_UNSUPPORTED');
   }
   if (
@@ -662,6 +745,45 @@ function validateClientBody(body: unknown, route: NormalizedRoute, publicModel: 
     assertJsonCompatible(body.input);
     return body;
   }
+  // §4.2 (task #16): an image generations request carries a non-empty
+  // `prompt`; `n`/`size`/`response_format`/`quality`/`service_tier` stay
+  // opaque JSON (the media estimator bounds `n`/`size`; invalid n fails
+  // closed at the estimator, and the payload cap bounds everything else).
+  if (route.clientOperation === 'images.generations') {
+    if (!Object.hasOwn(body, 'prompt')) compilerFailure('INVALID_INPUT');
+    text(body.prompt, 'INVALID_INPUT', 64 * 1024);
+    return body;
+  }
+  // §4.3: a standalone search request carries `query` (or the `input`
+  // alias) plus `max_results`; it is NOT a Responses body — the compiler
+  // constructs the outbound emulation request from it. Validation of the
+  // query fields happens in the constructor (a parse miss fails closed).
+  if (route.clientOperation === 'web_search' || route.clientOperation === 'x_search') {
+    if (typeof body.query !== 'string' && typeof body.input !== 'string') {
+      compilerFailure('INVALID_INPUT');
+    }
+    return body;
+  }
+  // §4.3 (task #17): a TTS request carries the speakable `input` text (the
+  // xAI Voice JSON shape); the remaining voice fields (voice, format, …)
+  // stay opaque JSON and ride the passthrough verbatim. The rune-bound
+  // validation is the billing constructor's (a parse miss fails closed).
+  if (route.clientOperation === 'audio.tts') {
+    if (ttsBillingRunes(body) === null) compilerFailure('INVALID_INPUT');
+    return body;
+  }
+  // §4.3 (task #17): a video create request carries a non-empty `prompt`;
+  // `resolution`/`duration`/`n` stay opaque JSON (the video estimator
+  // bounds the per-unit hold and fails closed on a malformed count).
+  if (
+    route.clientOperation === 'videos.generations' ||
+    route.clientOperation === 'videos.edits' ||
+    route.clientOperation === 'videos.extensions'
+  ) {
+    if (!Object.hasOwn(body, 'prompt')) compilerFailure('INVALID_INPUT');
+    text(body.prompt, 'INVALID_INPUT', 64 * 1024);
+    return body;
+  }
   if (route.clientProtocol === 'responses') {
     if (!Object.hasOwn(body, 'input')) compilerFailure('INVALID_INPUT');
     assertJsonCompatible(body.input);
@@ -801,6 +923,18 @@ function validateUsage(value: unknown): PreparedRequestUsageEnvelope {
     if (bound === undefined) compilerFailure('USAGE_BOUND_INVALID');
     return bound.toString(10);
   };
+  /*
+   * §4.1: optional per-unit (media) bounds. Absent keeps the token-only
+   * envelope; present values must be an exact non-negative unit count and,
+   * for the tier, a canonical registry tier.
+   */
+  const perUnitUnitsRaw = value.perUnitUnitsUpperBound;
+  const media = perUnitUnitsRaw !== undefined && perUnitUnitsRaw !== null;
+  const sizeTierRaw = value.sizeTier;
+  if (!media && sizeTierRaw !== undefined && sizeTierRaw !== null) {
+    // A tier without a unit bound shapes nothing; reject the shape.
+    compilerFailure('USAGE_BOUND_INVALID');
+  }
   return {
     inputTotalUpperBound: decimal(inputTotal),
     inputUncachedUpperBound: decimal(inputUncached),
@@ -811,6 +945,19 @@ function validateUsage(value: unknown): PreparedRequestUsageEnvelope {
     outputTotalUpperBound: decimal(outputTotal),
     reasoningOutputUpperBound: decimal(reasoningOutput),
     feasibleInputBuckets: [...buckets] as readonly string[],
+    ...(media
+      ? {
+          perUnitUnitsUpperBound: exactNonNegative(perUnitUnitsRaw).toString(10),
+          ...(sizeTierRaw !== undefined && sizeTierRaw !== null
+            ? {
+                sizeTier:
+                  typeof sizeTierRaw === 'string' && PER_UNIT_TIER_SET.has(sizeTierRaw)
+                    ? sizeTierRaw
+                    : compilerFailure('USAGE_BOUND_INVALID'),
+              }
+            : {}),
+        }
+      : {}),
   };
 }
 
@@ -892,6 +1039,8 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
     // R2: catalog-rights incompatibility for the embeddings operation is a
     // missing capability (404 at the HTTP boundary), unlike chat-model
     // incompatibility which stays a closed 503.
+    // §4.2: the images.generations operation shares the rule.
+    // §4.3: the videos.* create family shares it too.
     let embeddingsOperation = false;
     try {
       if (this.configurationError !== null || this.options === null) {
@@ -904,7 +1053,12 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       const candidate = authority.candidate;
       if (!isRecord(candidate)) compilerFailure('INVALID_INPUT');
       const route = normalizeRoute(input, this.options);
-      embeddingsOperation = route.providerOperation === 'embeddings';
+      embeddingsOperation =
+        route.providerOperation === 'embeddings' ||
+        route.providerOperation === 'images.generations' ||
+        route.providerOperation === 'videos.generations' ||
+        route.providerOperation === 'videos.edits' ||
+        route.providerOperation === 'videos.extensions';
       if (
         !isProtocol(authority.route.protocol) ||
         authority.route.protocol !== route.clientProtocol ||
@@ -962,23 +1116,56 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       const inputBytes = canonicalBytes(normalizedRequest.body);
       if (inputBytes.byteLength > this.options.maxPayloadBytes) compilerFailure('PAYLOAD_TOO_LARGE');
 
-      let bridge: Bridge;
+      /*
+       * §4.3: the standalone search operations bypass the generic bridge —
+       * the client body is not a Responses body at all. The server-owned
+       * constructor builds the outbound emulation request from the
+       * validated client fields and the catalog-resolved model; the
+       * bridge-pair assertion below still gates the protocol pair. The TTS
+       * audio passthrough bypasses it the same way: the client body IS the
+       * outbound body (model already resolved), so there is nothing to
+       * bridge.
+       */
+      const searchOperation = route.clientOperation === 'web_search' || route.clientOperation === 'x_search';
+      const audioTtsOperation = route.clientOperation === 'audio.tts';
+
+      let bridge: Bridge | null;
       try {
-        bridge = pickBridge(route.clientProtocol as Protocol, route.providerProtocol as Protocol);
+        bridge =
+          searchOperation || audioTtsOperation
+            ? null
+            : pickBridge(route.clientProtocol as Protocol, route.providerProtocol as Protocol);
       } catch {
         compilerFailure('UNSUPPORTED_OPERATION');
       }
       if (
-        bridge.clientProto !== route.clientProtocol ||
-        bridge.upstreamProto !== route.providerProtocol ||
-        !SUPPORTED_BRIDGE_PAIRS.has(routeKey(bridge.clientProto, bridge.upstreamProto))
+        !SUPPORTED_BRIDGE_PAIRS.has(routeKey(route.clientProtocol, route.providerProtocol)) ||
+        (bridge !== null &&
+          (bridge.clientProto !== route.clientProtocol || bridge.upstreamProto !== route.providerProtocol))
       ) {
         compilerFailure('UNSUPPORTED_OPERATION');
       }
 
       let transformed: unknown;
       try {
-        transformed = bridge.transformRequest(normalizedRequest.body);
+        if (searchOperation) {
+          const searchRequest = parseSearchClientRequest(
+            route.clientOperation as 'web_search' | 'x_search',
+            sourceBody,
+          );
+          if (searchRequest === null) compilerFailure('INVALID_INPUT');
+          transformed = buildSearchResponsesBody(
+            route.clientOperation as 'web_search' | 'x_search',
+            searchRequest,
+            resolvedModel,
+          );
+        } else if (audioTtsOperation) {
+          // §4.3 (task #17): the TTS passthrough — the validated client body
+          // (with the catalog-resolved model) rides upstream verbatim.
+          transformed = normalizedRequest.body;
+        } else {
+          transformed = (bridge as Bridge).transformRequest(normalizedRequest.body);
+        }
         // P1c provider-layer hook (codex compile step): applied to the
         // bridge-transformed body; an unset hook keeps the exact previous
         // payload bytes.

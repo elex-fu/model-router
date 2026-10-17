@@ -404,6 +404,135 @@ test('109 grants the probe monitor worker its claim/write surface only', () => {
   );
 });
 
+test('115 grants the quota snapshot writer and gemini usage worker their surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  // The quota-snapshot writer's codex columns (the transport's every-response
+  // parseCodexRateLimitHeaders sink) — UPDATE only, no due-predicate reads.
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const column of [
+      'codex_5h_used_percent',
+      'codex_5h_reset_at',
+      'codex_7d_used_percent',
+      'codex_7d_reset_at',
+      'codex_usage_updated_at',
+    ]) {
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The gemini usage worker's claim RETURNING reads the tier id.
+    assert.ok(probeSql.includes(`('${table}', 'gemini_tier_id', 'SELECT')`));
+    assert.match(
+      workerGrantSql,
+      new RegExp(`GRANT SELECT \\([^)]*\\bgemini_tier_id\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+    );
+    // The scheduling-threshold pause columns stay gateway-owned (115): this
+    // role must never write them.
+    for (const column of ['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']) {
+      assert.equal(probeSql.includes(`('${table}', '${column}',`), false);
+      assert.doesNotMatch(workerGrantSql, new RegExp(`GRANT [A-Z]+ \\([^)]*\\b${column}\\b`));
+    }
+  }
+  // The gemini usage worker's request-count aggregation: minimal read-only
+  // attempt surface (usage events carry no account or model binding).
+  for (const column of ['account_id', 'resolved_model', 'created_at', 'result_state']) {
+    assert.ok(
+      probeSql.includes(`('saas_attempts', '${column}', 'SELECT')`),
+      `probe manifest missing SELECT saas_attempts.${column}`,
+    );
+  }
+  assert.match(
+    workerGrantSql,
+    /GRANT SELECT \(account_id, resolved_model, created_at, result_state\)\s+ON TABLE model_router_saas\.saas_attempts/,
+  );
+  assert.doesNotMatch(probeSql, /\('saas_attempts', '[^']+', '(?:INSERT|UPDATE|DELETE)'\)/);
+  assert.doesNotMatch(workerGrantSql, /GRANT (?:INSERT|UPDATE|DELETE)[^;]*saas_attempts/);
+});
+
+test('117 grants the bedrock rate-limit sink its surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  // The bedrock sink's cooldown + observation writes (one UPDATE per
+  // ThrottlingException observation) — both account owner tables.
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const column of ['bedrock_rate_limited_until', 'bedrock_usage_updated_at']) {
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'SELECT')`),
+        `probe manifest missing SELECT ${table}.${column}`,
+      );
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT SELECT \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+  }
+  // The bedrock family is exactly two columns — no quota-window or tier
+  // columns (Bedrock responses expose none).
+  assert.doesNotMatch(
+    probeSql,
+    /\('saas_(?:tenant|platform)_provider_accounts', 'bedrock_(?!rate_limited_until|usage_updated_at)[a-z_]+',/,
+  );
+  assert.doesNotMatch(workerGrantSql, /bedrock_(?!rate_limited_until|usage_updated_at)[a-z_]+/);
+});
+
+test('118 grants the vertex rate-limit sink its surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  // The vertex sink's cooldown + observation writes (one UPDATE per 429
+  // observation) — both account owner tables.
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const column of ['vertex_rate_limited_until', 'vertex_usage_updated_at']) {
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'SELECT')`),
+        `probe manifest missing SELECT ${table}.${column}`,
+      );
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT SELECT \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+  }
+  // The vertex family is exactly two columns — pay-as-you-go, so no daily
+  // quota or tier columns (the sub2api adjudication documented in the
+  // migration comment).
+  assert.doesNotMatch(
+    probeSql,
+    /\('saas_(?:tenant|platform)_provider_accounts', 'vertex_(?!rate_limited_until|usage_updated_at)[a-z_]+',/,
+  );
+  assert.doesNotMatch(workerGrantSql, /vertex_(?!rate_limited_until|usage_updated_at)[a-z_]+/);
+});
+
 test('G2 grants the OpenRouter pricing sync worker its append-only catalog and supplier-cost surface only', () => {
   const workerGrantSql = readFileSync(
     new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
@@ -615,4 +744,107 @@ test('G2 grants the OpenRouter pricing sync worker its append-only catalog and s
     /routine\.proname = 'saas_catalog_valid_scope'\s+AND pg_catalog\.pg_get_function_identity_arguments\(routine\.oid\) = 'scope_values text\[\]'/,
   );
   assert.match(probeSql, /AS catalog_scope_validator_executable/);
+});
+
+test('119 grants the grok quota/billing/tier writer its surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    // The grok quota-snapshot/billing/tier writer (the transport's
+    // every-response parseGrokQuotaHeaders sink, the billing probe merge and
+    // the binding/refresh pipeline's trusted tier copy).
+    for (const column of [
+      'grok_5h_used_percent',
+      'grok_5h_reset_at',
+      'grok_requests_used_percent',
+      'grok_requests_reset_at',
+      'grok_rate_limited_until',
+      'grok_usage_updated_at',
+      'grok_subscription_tier',
+      'grok_billing',
+      'grok_billing_updated_at',
+    ]) {
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The due-predicate reads mirror the gemini minimal surface.
+    for (const column of ['grok_usage_updated_at', 'grok_rate_limited_until']) {
+      assert.ok(probeSql.includes(`('${table}', '${column}', 'SELECT')`));
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT SELECT \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+  }
+});
+
+test('120 grants the CN-provider quota worker its surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    // The CN-provider quota worker (the opencode-go worker's shape, both
+    // providers): snapshot + lease/backoff/cooldown writes.
+    for (const column of [
+      'zhipu_5h_used_percent',
+      'zhipu_5h_reset_at',
+      'zhipu_weekly_used_percent',
+      'zhipu_weekly_reset_at',
+      'zhipu_usage_updated_at',
+      'zhipu_usage_next_due_at',
+      'zhipu_usage_failure_count',
+      'zhipu_rate_limited_until',
+      'minimax_5h_used_percent',
+      'minimax_5h_reset_at',
+      'minimax_weekly_used_percent',
+      'minimax_weekly_reset_at',
+      'minimax_usage_updated_at',
+      'minimax_usage_next_due_at',
+      'minimax_usage_failure_count',
+      'minimax_rate_limited_until',
+    ]) {
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The due-predicate reads include the coding-mode filter column.
+    for (const column of [
+      'zhipu_account_mode',
+      'zhipu_usage_next_due_at',
+      'zhipu_usage_updated_at',
+      'zhipu_rate_limited_until',
+      'minimax_account_mode',
+      'minimax_usage_next_due_at',
+      'minimax_usage_updated_at',
+      'minimax_rate_limited_until',
+    ]) {
+      assert.ok(probeSql.includes(`('${table}', '${column}', 'SELECT')`));
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT SELECT \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The dual-mode CONFIG columns are deliberately absent from the worker
+    // surface: the control plane owns them (the migration-108 rule-table
+    // precedent).
+    for (const column of ['zhipu_api_protocol', 'minimax_api_protocol']) {
+      assert.ok(!probeSql.includes(`('${table}', '${column}',`));
+    }
+  }
 });

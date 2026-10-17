@@ -16,18 +16,32 @@ function replaceOnce(source: string, before: string, after: string): string {
   return source.replace(before, after);
 }
 
-const historical = betweenOnce(PREPARED_REQUEST_EVIDENCE_POOL_CLAIM_HARDENING_SAAS_MIGRATION.sql,
-  `CREATE OR REPLACE FUNCTION ${signature} RETURNS trigger\nLANGUAGE plpgsql AS $$`, '\n$$;') + '\n';
+const historical =
+  betweenOnce(
+    PREPARED_REQUEST_EVIDENCE_POOL_CLAIM_HARDENING_SAAS_MIGRATION.sql,
+    `CREATE OR REPLACE FUNCTION ${signature} RETURNS trigger\nLANGUAGE plpgsql AS $$`,
+    '\n$$;',
+  ) + '\n';
 const fences = PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql;
 const poolRead = betweenOnce(fences, '  pool_read_anchor constant text := $pool_read_anchor$', '$pool_read_anchor$;');
-const poolFence = betweenOnce(fences, '  pool_fence_preamble constant text := $pool_fence_preamble$', '$pool_fence_preamble$;');
-if (!fences.includes("rewritten_definition := replace(claim_definition, pool_read_anchor, pool_fence_preamble || replace(pool_read_anchor, 'FOR SHARE;', ';'));")) {
+const poolFence = betweenOnce(
+  fences,
+  '  pool_fence_preamble constant text := $pool_fence_preamble$',
+  '$pool_fence_preamble$;',
+);
+if (
+  !fences.includes(
+    "rewritten_definition := replace(claim_definition, pool_read_anchor, pool_fence_preamble || replace(pool_read_anchor, 'FOR SHARE;', ';'));",
+  )
+) {
   throw new Error('060 requires the unchanged 050 claim-pool rewrite');
 }
 
 /** Exact prosrc installed by 028 followed by the one 050 pool-reader rewrite. */
 export const PREPARED_EVIDENCE_CLAIM_ACCOUNT_EXPECTED_SOURCE = replaceOnce(
-  historical, poolRead, poolFence + replaceOnce(poolRead, 'FOR SHARE;', ';'),
+  historical,
+  poolRead,
+  poolFence + replaceOnce(poolRead, 'FOR SHARE;', ';'),
 );
 export const PREPARED_EVIDENCE_CLAIM_ACCOUNT_SOURCE = replaceOnce(
   PREPARED_EVIDENCE_CLAIM_ACCOUNT_EXPECTED_SOURCE,
@@ -35,8 +49,13 @@ export const PREPARED_EVIDENCE_CLAIM_ACCOUNT_SOURCE = replaceOnce(
   '      OR evidence_record.account_id IS DISTINCT FROM NEW.platform_account_id\n',
 );
 const updateColumns = [
-  'prepared_evidence_id', 'dispatch_state', 'dispatch_authority_state',
-  'provider_id', 'product_id', 'pool_id', 'pool_authz_version',
+  'prepared_evidence_id',
+  'dispatch_state',
+  'dispatch_authority_state',
+  'provider_id',
+  'product_id',
+  'pool_id',
+  'pool_authz_version',
 ] as const;
 
 /** Staged only: no registry/export integration or business-row rewrite. */

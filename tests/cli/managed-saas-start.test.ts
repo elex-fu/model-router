@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test, type TestContext } from 'node:test';
+import { type TestContext, test } from 'node:test';
 import { promisify } from 'node:util';
 import {
   DEPLOYMENT_ENV_VARS,
@@ -84,13 +84,15 @@ async function ownedTcpFixture(t: TestContext, mode: 'reject-handshake' | 'reser
   const server = createServer((socket) => {
     connections += 1;
     sockets.add(socket);
-    closedSockets.push(new Promise<void>((resolve) => {
-      socket.once('close', () => {
-        sockets.delete(socket);
-        closed += 1;
-        resolve();
-      });
-    }));
+    closedSockets.push(
+      new Promise<void>((resolve) => {
+        socket.once('close', () => {
+          sockets.delete(socket);
+          closed += 1;
+          resolve();
+        });
+      }),
+    );
     // Disconnect errors are expected; never retain or disclose error contents.
     socket.on('error', () => undefined);
     if (mode === 'reserve-listener') {
@@ -103,7 +105,9 @@ async function ownedTcpFixture(t: TestContext, mode: 'reject-handshake' | 'reser
       socket.destroy();
     });
   });
-  server.on('error', () => { serverFailed = true; });
+  server.on('error', () => {
+    serverFailed = true;
+  });
   t.after(async () => {
     const serverClosed = new Promise<void>((resolve, reject) => {
       if (!server.listening) {
@@ -118,9 +122,11 @@ async function ownedTcpFixture(t: TestContext, mode: 'reject-handshake' | 'reser
     for (const socket of sockets) socket.destroy();
     // The server callback alone is insufficient: also require each owned
     // socket's close event and an empty tracking set.
-    await withCleanupDeadline(serverClosed.then(async () => {
-      await Promise.all(closedSockets);
-    }));
+    await withCleanupDeadline(
+      serverClosed.then(async () => {
+        await Promise.all(closedSockets);
+      }),
+    );
     assert.equal(sockets.size, 0);
     assert.equal(closed, connections);
     assert.equal(serverFailed, false);

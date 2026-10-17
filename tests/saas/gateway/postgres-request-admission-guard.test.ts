@@ -58,6 +58,10 @@ function priceRow(kind: 'customer' | 'supplier'): Row {
     cache_write_1h_rate_denominator_units: 1,
     output_rate_numerator_minor_units: 1,
     output_rate_denominator_units: 1,
+    per_unit_rate_numerator_minor_units: null,
+    per_unit_rate_denominator_units: null,
+    per_unit_tier_rates: null,
+    token_multipliers: null,
     effective_at: '2026-01-01T00:00:00.000Z',
     expires_at: null,
     idempotency_key: `${kind}-idempotency`,
@@ -335,6 +339,7 @@ function makeFixture(supplyMode: 'byok' | 'platform'): Fixture {
       claude_code_only: false,
       fallback_group_id: null,
       supported_model_scopes: null,
+      composite: false,
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
       updated_at: '2026-01-01T00:00:00.000Z',
@@ -592,7 +597,14 @@ class FakeExecutor implements SqlExecutor {
     const stage = /postgres-request-admission:([a-z-]+)/.exec(sql)?.[1];
     if (lower.includes('select clock_timestamp')) return { rows: [{ locked_at: NOW }] as RowType[], rowCount: 1 };
     if (lower.includes('pg_advisory_xact_lock')) {
-      this.fixture.fenceKeys.push(String(values[0]));
+      // The fence batch passes the ordered key list as one text-array
+      // parameter; record the keys in array (acquisition) order.
+      const keys = values[0];
+      if (Array.isArray(keys)) {
+        for (const key of keys) this.fixture.fenceKeys.push(String(key));
+      } else {
+        this.fixture.fenceKeys.push(String(values[0]));
+      }
       return { rows: [], rowCount: 0 };
     }
     if (lower.startsWith('insert into saas_request_customer_price_snapshots')) {
@@ -621,18 +633,20 @@ class FakeExecutor implements SqlExecutor {
         hold_input_cache_write_1h: values[21],
         hold_input_output_total: values[22],
         hold_input_reasoning_output: values[23],
-        hold_amount_minor_units: values[24],
-        wallet_hold_required: values[25],
-        admission_expires_at: values[26],
-        idempotency_key: values[27],
-        snapshot_digest: values[28],
-        created_at: values[29],
-        billing_group_id: values[30],
-        rate_multiplier_num: values[31],
-        rate_multiplier_den: values[32],
-        peak_applied: values[33],
-        model_pricing_override_digest: values[34],
-        model_pricing_override: values[35],
+        hold_input_per_unit_units: values[24],
+        hold_input_size_tier: values[25],
+        hold_amount_minor_units: values[26],
+        wallet_hold_required: values[27],
+        admission_expires_at: values[28],
+        idempotency_key: values[29],
+        snapshot_digest: values[30],
+        created_at: values[31],
+        billing_group_id: values[32],
+        rate_multiplier_num: values[33],
+        rate_multiplier_den: values[34],
+        peak_applied: values[35],
+        model_pricing_override_digest: values[36],
+        model_pricing_override: values[37],
       };
       this.fixture.snapshot = row;
       return { rows: [row] as RowType[], rowCount: 1 };

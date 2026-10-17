@@ -76,3 +76,20 @@ test('shouldFailover is true exactly for failover-worthy classifications', () =>
   assert.equal(shouldFailover({ kind: 'request-error', status: 400 }), false);
   assert.equal(shouldFailover(undefined as unknown as { kind: 'transient'; status: 500 }), false);
 });
+
+test('batch 2.3: 402, model-level 404/400 and 403 reclassification (codex view)', () => {
+  assert.equal(classify(402, '{"detail":"insufficient_credit"}'), 'insufficient-balance');
+  assert.equal(classify(404, '{"error":{"message":"The model `gpt-x` was not found"}}'), 'model-unavailable');
+  assert.equal(
+    classify(400, "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."),
+    'model-unavailable',
+  );
+  assert.equal(
+    classify(
+      403,
+      "You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again.",
+    ),
+    'concurrency-limited',
+  );
+  assert.equal(classify(403, 'usage limit reached for this plan'), 'rate-limited');
+});

@@ -201,15 +201,34 @@ function setCookies(response: Response): string[] {
 
 function assertExpiredCustomerCookies(cookies: string[]): void {
   assert.equal(cookies.length, 3);
-  assert.ok(cookies.every(cookie => cookie.includes('SameSite=Strict') && cookie.includes('Max-Age=0') && cookie.includes('Expires=Thu, 01 Jan 1970')));
-  assert.deepEqual(cookies.map(cookie => cookie.split(';').map(part => part.trim()).filter(part => part.startsWith('Path=') || part === 'HttpOnly').join(';')).sort(),
-    ['HttpOnly;Path=/console/api/v1', 'Path=/console', 'Path=/console/api/v1'].sort());
-  assert.equal(cookies.filter(cookie => cookie.startsWith('mr_saas_session=;')).length, 1);
-  assert.equal(cookies.filter(cookie => cookie.startsWith('mr_saas_csrf=;')).length, 2);
+  assert.ok(
+    cookies.every(
+      (cookie) =>
+        cookie.includes('SameSite=Strict') &&
+        cookie.includes('Max-Age=0') &&
+        cookie.includes('Expires=Thu, 01 Jan 1970'),
+    ),
+  );
+  assert.deepEqual(
+    cookies
+      .map((cookie) =>
+        cookie
+          .split(';')
+          .map((part) => part.trim())
+          .filter((part) => part.startsWith('Path=') || part === 'HttpOnly')
+          .join(';'),
+      )
+      .sort(),
+    ['HttpOnly;Path=/console/api/v1', 'Path=/console', 'Path=/console/api/v1'].sort(),
+  );
+  assert.equal(cookies.filter((cookie) => cookie.startsWith('mr_saas_session=;')).length, 1);
+  assert.equal(cookies.filter((cookie) => cookie.startsWith('mr_saas_csrf=;')).length, 2);
 }
 
 function cookiePair(response: Response, name: string): string {
-  const matches = setCookies(response).filter(value => value.startsWith(`${name}=`) && !/Max-Age=0(?:;|$)/.test(value));
+  const matches = setCookies(response).filter(
+    (value) => value.startsWith(`${name}=`) && !/Max-Age=0(?:;|$)/.test(value),
+  );
   assert.equal(matches.length, 1, `one live ${name} cookie required`);
   const cookie = matches[0];
   assert.ok(cookie, `missing ${name} cookie`);
@@ -410,8 +429,10 @@ test('login sets an HttpOnly strict session cookie and returns a session without
     assert.equal(result.response.status, 200);
     const cookies = setCookies(result.response);
     assert.equal(cookies.length, 4);
-    const sessionCookie = cookies.find(cookie => cookie.startsWith('mr_saas_session=') && !cookie.includes('Max-Age=0')) ?? '';
-    const csrfCookie = cookies.find(cookie => cookie.startsWith('mr_saas_csrf=') && !cookie.includes('Max-Age=0')) ?? '';
+    const sessionCookie =
+      cookies.find((cookie) => cookie.startsWith('mr_saas_session=') && !cookie.includes('Max-Age=0')) ?? '';
+    const csrfCookie =
+      cookies.find((cookie) => cookie.startsWith('mr_saas_csrf=') && !cookie.includes('Max-Age=0')) ?? '';
     assert.match(sessionCookie, /HttpOnly/);
     assert.match(sessionCookie, /SameSite=Strict/);
     assert.match(sessionCookie, /Path=\/console\/api\/v1/);
@@ -422,12 +443,22 @@ test('login sets an HttpOnly strict session cookie and returns a session without
     assert.match(csrfCookie, /Max-Age=900/);
     assert.match(csrfCookie, /Secure/);
     assert.doesNotMatch(csrfCookie, /HttpOnly/);
-    const expiredCsrf = cookies.filter(cookie => cookie.startsWith('mr_saas_csrf=;') && cookie.includes('Max-Age=0'));
+    const expiredCsrf = cookies.filter((cookie) => cookie.startsWith('mr_saas_csrf=;') && cookie.includes('Max-Age=0'));
     assert.equal(expiredCsrf.length, 2);
-    assert.deepEqual(expiredCsrf.map(cookie => /(?:^|; )Path=([^;]+)/.exec(cookie)?.[1]).sort(), ['/console', '/console/api/v1']);
-    assert.ok(expiredCsrf.every(cookie => cookie.includes('SameSite=Strict') && cookie.includes('Secure') && cookie.includes('Expires=Thu, 01 Jan 1970')));
-    assert.ok(expiredCsrf.every(cookie => !cookie.includes('HttpOnly')));
-    assert.equal(cookies.filter(cookie => !cookie.includes('Max-Age=0')).length, 2);
+    assert.deepEqual(expiredCsrf.map((cookie) => /(?:^|; )Path=([^;]+)/.exec(cookie)?.[1]).sort(), [
+      '/console',
+      '/console/api/v1',
+    ]);
+    assert.ok(
+      expiredCsrf.every(
+        (cookie) =>
+          cookie.includes('SameSite=Strict') &&
+          cookie.includes('Secure') &&
+          cookie.includes('Expires=Thu, 01 Jan 1970'),
+      ),
+    );
+    assert.ok(expiredCsrf.every((cookie) => !cookie.includes('HttpOnly')));
+    assert.equal(cookies.filter((cookie) => !cookie.includes('Max-Age=0')).length, 2);
     assert.equal(JSON.stringify(result.body).includes(SESSION_TOKEN), false);
     assert.equal(JSON.stringify(result.body).includes(CSRF_TOKEN), false);
     const loginArguments = calls.login[0]?.[0] as { ttlSeconds: number } | undefined;
@@ -714,7 +745,8 @@ test('session revocation rejects missing, mismatched, or invalid CSRF/origin bou
     for (const secondToken of [CSRF_TOKEN, 'different-csrf-cookie']) {
       const duplicated = await request({
         cookie: `${loggedIn.cookie}; mr_saas_csrf=${secondToken}`,
-        origin: app.origin, 'x-csrf-token': loggedIn.csrfToken,
+        origin: app.origin,
+        'x-csrf-token': loggedIn.csrfToken,
       });
       assert.equal(duplicated.status, 403);
       assert.equal((await json(duplicated)).error.code, 'CSRF_REJECTED');

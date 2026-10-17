@@ -262,6 +262,11 @@ class FakeRefundDatabase {
       return result<Row>();
     }
 
+    // The per-wallet billing fence (batch 1.2 step 3): a transaction-scoped
+    // exclusive advisory lock. The fake is single-threaded per transaction,
+    // so the fence is a no-op here.
+    if (statement.startsWith('select pg_advisory_xact_lock')) return result<Row>();
+
     if (statement.startsWith('select refund_type from saas_refund_orders where id = $1')) {
       const row = this.state.refunds.find((item) => item.id === a);
       return result<Row>(row ? [{ refund_type: row.refund_type } as Row] : []);

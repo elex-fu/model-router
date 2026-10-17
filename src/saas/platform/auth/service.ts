@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { CredentialEnvelope, CredentialKeyProvider, UserCredentialContext } from '../../credentials/crypto.js';
 import { decryptCredential, encryptCredential } from '../../credentials/crypto.js';
-import type { SaasDatabase, SqlExecutor } from '../../db/index.js';
 import { SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL } from '../../db/advisory-lock-keys.js';
+import type { SaasDatabase, SqlExecutor } from '../../db/index.js';
 import { verifyPassword } from '../../identity/password.js';
 import { PlatformAuthError } from './errors.js';
 import { generateTotpSecret, totpUri, verifyTotpCode } from './totp.js';
@@ -95,11 +95,14 @@ export interface PlatformMfaEnrollmentIssuanceAudit {
 }
 
 function validateEnrollmentIssuanceAudit(audit: PlatformMfaEnrollmentIssuanceAudit): void {
-  if (!audit || typeof audit.operatorId !== 'string'
-    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(audit.operatorId)
-    || !['initial-enrollment', 'approved-enrollment'].includes(audit.reasonCode)
-    || typeof audit.requestId !== 'string'
-    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(audit.requestId)) {
+  if (
+    !audit ||
+    typeof audit.operatorId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(audit.operatorId) ||
+    !['initial-enrollment', 'approved-enrollment'].includes(audit.reasonCode) ||
+    typeof audit.requestId !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(audit.requestId)
+  ) {
     throw new PlatformAuthError(400, 'INVALID_INPUT');
   }
 }
@@ -408,7 +411,8 @@ export class PlatformAdminAuthService {
     occurredAt: string,
   ): Promise<void> {
     const id = randomUUID();
-    const persisted = await this.query<{ id: string }>(tx,
+    const persisted = await this.query<{ id: string }>(
+      tx,
       `INSERT INTO saas_audit_events
        (id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at,
         entry_point, request_id, user_agent)
@@ -419,9 +423,18 @@ export class PlatformAdminAuthService {
            'workload_id', 'saas:platform-mfa-enroll', 'database_role', current_user,
            'outcome', $9::text)::text)
        RETURNING id`,
-      [id, outcome === 'issued' ? 'platform_mfa.enrollment_token.issued' : 'platform_mfa.enrollment_token.denied',
+      [
+        id,
+        outcome === 'issued' ? 'platform_mfa.enrollment_token.issued' : 'platform_mfa.enrollment_token.denied',
         targetUserId ? 'platform_mfa_enrollment_user' : 'platform_mfa_enrollment_email_digest',
-        targetUserId ?? emailDigest, occurredAt, audit.requestId, audit.operatorId, audit.reasonCode, outcome]);
+        targetUserId ?? emailDigest,
+        occurredAt,
+        audit.requestId,
+        audit.operatorId,
+        audit.reasonCode,
+        outcome,
+      ],
+    );
     if (persisted.rows.length !== 1 || persisted.rows[0]?.id !== id) {
       throw new PlatformAuthError(500, 'PLATFORM_AUTH_STORAGE_ERROR');
     }
@@ -432,8 +445,10 @@ export class PlatformAdminAuthService {
     audit?: PlatformMfaEnrollmentIssuanceAudit,
   ): Promise<PlatformMfaEnrollmentToken> {
     if (audit !== undefined) validateEnrollmentIssuanceAudit(audit);
-    const issuanceAudit = audit === undefined ? undefined
-      : { operatorId: audit.operatorId, reasonCode: audit.reasonCode, requestId: audit.requestId };
+    const issuanceAudit =
+      audit === undefined
+        ? undefined
+        : { operatorId: audit.operatorId, reasonCode: audit.reasonCode, requestId: audit.requestId };
     this.requireCredentialKeyProvider();
     const normalizedEmail = normalizeEmail(email);
     const candidate = await this.query<PlatformAdminRow>(
@@ -443,11 +458,18 @@ export class PlatformAdminAuthService {
     );
     const candidateUserId = candidate.rows[0]?.id;
     if (!candidateUserId) {
-      if (issuanceAudit) await this.transaction(async (tx) => {
-        await this.prepareAuthorizationTransaction(tx);
-        await this.appendEnrollmentIssuanceAudit(tx, issuanceAudit, undefined, hashToken(normalizedEmail),
-          'target-unavailable', this.currentDate().toISOString());
-      });
+      if (issuanceAudit)
+        await this.transaction(async (tx) => {
+          await this.prepareAuthorizationTransaction(tx);
+          await this.appendEnrollmentIssuanceAudit(
+            tx,
+            issuanceAudit,
+            undefined,
+            hashToken(normalizedEmail),
+            'target-unavailable',
+            this.currentDate().toISOString(),
+          );
+        });
       throw new PlatformAuthError(403, 'MFA_ENROLLMENT_UNAVAILABLE');
     }
     const token = issueOpaqueToken();
@@ -456,10 +478,19 @@ export class PlatformAdminAuthService {
     const outcome = await this.transaction<{ denied: 403 | 409 } | { expiresAt: string }>(async (tx) => {
       await this.prepareAuthorizationTransaction(tx);
       await this.lockMfaEnrollmentIssuance(tx, candidateUserId);
-      const deny = async (status: 403 | 409, reason: 'target-unavailable' | 'verified-totp-present' | 'enrollment-pending') => {
+      const deny = async (
+        status: 403 | 409,
+        reason: 'target-unavailable' | 'verified-totp-present' | 'enrollment-pending',
+      ) => {
         if (!issuanceAudit) throw new PlatformAuthError(status, 'MFA_ENROLLMENT_UNAVAILABLE');
-        await this.appendEnrollmentIssuanceAudit(tx, issuanceAudit, candidateUserId, hashToken(normalizedEmail),
-          reason, this.currentDate().toISOString());
+        await this.appendEnrollmentIssuanceAudit(
+          tx,
+          issuanceAudit,
+          candidateUserId,
+          hashToken(normalizedEmail),
+          reason,
+          this.currentDate().toISOString(),
+        );
         // Commit the denial event, then throw outside the transaction. No token
         // was inserted; throwing here would roll the immutable denial back.
         return { denied: status } as const;
@@ -494,8 +525,15 @@ export class PlatformAdminAuthService {
          VALUES ($1, $2, $3, $4, $5, NULL)`,
         [randomUUID(), candidateUserId, tokenHash, now.toISOString(), expiry.toISOString()],
       );
-      if (issuanceAudit) await this.appendEnrollmentIssuanceAudit(tx, issuanceAudit, candidateUserId, hashToken(normalizedEmail),
-        'issued', now.toISOString());
+      if (issuanceAudit)
+        await this.appendEnrollmentIssuanceAudit(
+          tx,
+          issuanceAudit,
+          candidateUserId,
+          hashToken(normalizedEmail),
+          'issued',
+          now.toISOString(),
+        );
       return { expiresAt: expiry.toISOString() } as const;
     });
 

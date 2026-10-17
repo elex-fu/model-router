@@ -23,6 +23,16 @@ export interface PreparedRequestUsageEnvelope {
   readonly outputTotalUpperBound: PreparedEvidenceInteger;
   readonly reasoningOutputUpperBound: PreparedEvidenceInteger;
   readonly feasibleInputBuckets: readonly string[];
+  /**
+   * §4.1 (roadmap batch 4) per-unit (media) upper bounds. Absent/null keeps
+   * the token-only envelope — and therefore the signed statement —
+   * byte-identical to the pre-4.1 form (the digest-optional policy). A media
+   * envelope may carry all-zero token bounds (image generation reports no
+   * tokens at all).
+   */
+  readonly perUnitUnitsUpperBound?: PreparedEvidenceInteger | null;
+  /** Canonical size tier fixed by the request; null when the tier is open. */
+  readonly sizeTier?: string | null;
 }
 
 export interface PreparedRequestEvidenceAudit {
@@ -55,6 +65,14 @@ export interface PreparedRequestEvidenceInput {
   readonly publicModel: string;
   /** Migration 029 snapshot; identity inputs may omit this for legacy compatibility. */
   readonly modelResolution?: ModelResolutionProvenance;
+  /**
+   * §4.4 composite model routing: the resolved composite decision (migration
+   * 121). Persisted as the `composite_route` jsonb column so dispatch-time
+   * preflight/claim revalidation can honor the serving endpoint; the signed
+   * statement already covers the composite outcome through its
+   * provider/product/model/endpoint fields.
+   */
+  readonly composite?: PreparedEvidenceCompositeRoute;
   readonly protocol: PreparedEvidenceProtocol;
   /** Migration 029 persists the provider route facts; client protocol is `protocol`. */
   readonly clientProtocol?: PreparedEvidenceProtocol;
@@ -215,6 +233,40 @@ export class SaasPreparedRequestEvidenceError extends Error {
   }
 }
 
+/** §4.4 composite decision persisted on the evidence row (jsonb). */
+export interface PreparedEvidenceCompositeRoute {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
+}
+
+function normalizeCompositeRoute(value: unknown): PreparedEvidenceCompositeRoute | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail('INVALID_INPUT', 'composite route context is invalid');
+  }
+  const record = value as Record<string, unknown>;
+  const source = record.source;
+  const routeId = record.routeId;
+  const composite: PreparedEvidenceCompositeRoute = {
+    billingGroupId: text(record.billingGroupId, 'composite route billing group'),
+    source:
+      source === 'route' || source === 'account_model' || source === 'detector'
+        ? source
+        : fail('INVALID_INPUT', 'composite route source is invalid'),
+    routeId: routeId === null || routeId === undefined ? null : text(routeId, 'composite route id'),
+    targetPlatform: text(record.targetPlatform, 'composite route target platform'),
+    productId: text(record.productId, 'composite route product'),
+    upstreamModel: text(record.upstreamModel, 'composite route upstream model'),
+    endpoint: text(record.endpoint, 'composite route endpoint'),
+  };
+  return composite;
+}
+
 interface NormalizedEvidence {
   readonly evidenceId: string;
   readonly tenantId: string;
@@ -238,6 +290,7 @@ interface NormalizedEvidence {
   readonly protocol: PreparedEvidenceProtocol;
   readonly legacyProvenance: boolean;
   readonly modelResolution?: ModelResolutionProvenance;
+  readonly composite?: PreparedEvidenceCompositeRoute;
   readonly clientProtocol?: PreparedEvidenceProtocol;
   readonly providerProtocol?: PreparedEvidenceProtocol;
   readonly clientOperation?: string;
@@ -292,6 +345,8 @@ interface NormalizedEvidence {
     readonly outputTotalUpperBound: string;
     readonly reasoningOutputUpperBound: string;
     readonly feasibleInputBuckets: readonly string[];
+    readonly perUnitUnitsUpperBound?: string;
+    readonly sizeTier?: string | null;
   };
   readonly maxHoldCurrency: string | null;
   readonly maxHoldMinorUnits: string;
@@ -304,6 +359,8 @@ interface NormalizedEvidence {
 }
 
 const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
+// §4.1: canonical per-unit size tiers (pricing registry, migration 122 CHECK).
+const PER_UNIT_TIER_SET = new Set(['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime']);
 const PROTOCOLS = new Set<PreparedEvidenceProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
 const MAX_BIGINT = 9223372036854775807n;
 
@@ -454,7 +511,19 @@ function digest(value: unknown, label: string): string {
 
 function normalizeUsage(input: PreparedRequestUsageEnvelope): NormalizedEvidence['usage'] {
   if (!input || typeof input !== 'object') fail('INVALID_INPUT', 'usage is required');
-  const usage = {
+  const usage: {
+    inputTotalUpperBound: string;
+    inputUncachedUpperBound: string;
+    cacheReadUpperBound: string;
+    cacheWriteUpperBound: string;
+    cacheWrite5mUpperBound: string;
+    cacheWrite1hUpperBound: string;
+    outputTotalUpperBound: string;
+    reasoningOutputUpperBound: string;
+    feasibleInputBuckets: string[];
+    perUnitUnitsUpperBound?: string;
+    sizeTier?: string | null;
+  } = {
     inputTotalUpperBound: nonNegative(input.inputTotalUpperBound, 'usage.inputTotalUpperBound'),
     inputUncachedUpperBound: nonNegative(input.inputUncachedUpperBound, 'usage.inputUncachedUpperBound'),
     cacheReadUpperBound: nonNegative(input.cacheReadUpperBound, 'usage.cacheReadUpperBound'),
@@ -467,6 +536,26 @@ function normalizeUsage(input: PreparedRequestUsageEnvelope): NormalizedEvidence
       ? input.feasibleInputBuckets.map((bucket) => text(bucket, 'usage.feasibleInputBuckets'))
       : fail('INVALID_INPUT', 'usage.feasibleInputBuckets is required'),
   };
+  /*
+   * §4.1: the media bound and tier join the SIGNED statement only when they
+   * carry a value (the digest-optional anti-drift policy — a token-only
+   * statement must stay byte-identical so existing verifier signatures keep
+   * verifying). A tier value must be canonical.
+   */
+  const perUnitUnitsUpperBound =
+    input.perUnitUnitsUpperBound === undefined || input.perUnitUnitsUpperBound === null
+      ? undefined
+      : nonNegative(input.perUnitUnitsUpperBound, 'usage.perUnitUnitsUpperBound');
+  const sizeTier =
+    input.sizeTier === undefined || input.sizeTier === null
+      ? undefined
+      : PER_UNIT_TIER_SET.has(String(input.sizeTier))
+        ? String(input.sizeTier)
+        : fail('INVALID_INPUT', 'usage.sizeTier is not a canonical size tier');
+  if (perUnitUnitsUpperBound !== undefined) {
+    usage.perUnitUnitsUpperBound = perUnitUnitsUpperBound;
+    if (sizeTier !== undefined) usage.sizeTier = sizeTier;
+  }
   if (
     usage.feasibleInputBuckets.length === 0 ||
     new Set(usage.feasibleInputBuckets).size !== usage.feasibleInputBuckets.length
@@ -574,6 +663,7 @@ function normalizeInput(
     protocol,
     legacyProvenance,
     modelResolution: normalizeModelResolution(input.modelResolution, publicModel, resolvedModel, legacyProvenance),
+    composite: normalizeCompositeRoute(input.composite),
     clientProtocol: optionalProtocol(input.clientProtocol, 'clientProtocol'),
     providerProtocol: optionalProtocol(input.providerProtocol, 'providerProtocol'),
     clientOperation: optionalOperation(input.clientOperation, 'clientOperation'),
@@ -954,6 +1044,7 @@ const EVIDENCE_COLUMNS = [
   'request_fingerprint_version',
   'payload_compiler_version',
   'usage_estimator_version',
+  'composite_route',
   'endpoint',
   'route_config_id',
   'route_config_version',
@@ -998,6 +1089,8 @@ const EVIDENCE_COLUMNS = [
   'usage_cache_write_1h_upper_bound',
   'usage_output_total_upper_bound',
   'usage_reasoning_output_upper_bound',
+  'usage_per_unit_units_upper_bound',
+  'usage_size_tier',
   'usage_feasible_input_buckets',
   'max_hold_currency',
   'max_hold_minor_units',
@@ -1044,6 +1137,7 @@ function evidenceValues(input: NormalizedEvidence, statementSha256: string): rea
     input.requestFingerprintVersion,
     input.payloadCompilerVersion,
     input.usageEstimatorVersion,
+    input.composite === undefined ? null : JSON.stringify(input.composite),
     input.endpoint,
     input.routeConfigId,
     input.routeConfigVersion,
@@ -1088,6 +1182,8 @@ function evidenceValues(input: NormalizedEvidence, statementSha256: string): rea
     input.usage.cacheWrite1hUpperBound,
     input.usage.outputTotalUpperBound,
     input.usage.reasoningOutputUpperBound,
+    input.usage.perUnitUnitsUpperBound ?? '0',
+    input.usage.perUnitUnitsUpperBound === undefined ? null : (input.usage.sizeTier ?? null),
     [...input.usage.feasibleInputBuckets],
     input.maxHoldCurrency,
     input.maxHoldMinorUnits,
@@ -1695,8 +1791,14 @@ export class SaasPreparedRequestEvidenceService {
             "AND dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false " +
             'AND response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL ' +
             'RETURNING id',
-          [normalized.tenantId, normalized.attemptId, normalized.evidenceId,
-            normalized.requestId, normalized.attemptOrdinal, attemptVersion],
+          [
+            normalized.tenantId,
+            normalized.attemptId,
+            normalized.evidenceId,
+            normalized.requestId,
+            normalized.attemptOrdinal,
+            attemptVersion,
+          ],
         );
         rowCount(attemptUpdate, 1, 'prepared evidence attempt claim');
         const evidenceUpdate = await tx.query<EvidenceRow>(
@@ -1896,7 +1998,13 @@ export class SaasPreparedRequestEvidenceService {
       route.protocol !== input.routeProtocol ||
       route.target_mode !== input.routeTargetMode ||
       route.upstream_id !== input.routeUpstreamId ||
-      route.endpoint !== input.endpoint
+      /*
+       * §4.4 composite: the serving endpoint is the resolved target's (the
+       * persisted composite_route jsonb); the nominal route-config endpoint
+       * does not describe the composite dispatch. Everything else about the
+       * route authority is still enforced exactly.
+       */
+      (input.composite === undefined ? route.endpoint !== input.endpoint : input.composite.endpoint !== input.endpoint)
     ) {
       fail('AUTHORITY_MISMATCH', 'route authority does not match prepared evidence');
     }
@@ -2276,6 +2384,21 @@ function storedMappingVersion(value: unknown): number | null {
   return parsed;
 }
 
+/** Parses the persisted composite_route jsonb (object or JSON text); absent stays absent. */
+function storedCompositeRoute(row: EvidenceRow): PreparedEvidenceCompositeRoute | undefined {
+  const value = row.composite_route;
+  if (value === undefined || value === null) return undefined;
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      fail('STORAGE_ERROR', 'stored composite route context is invalid');
+    }
+  }
+  return normalizeCompositeRoute(parsed);
+}
+
 function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedRequestEvidenceAudit>): NormalizedEvidence {
   const buckets = normalizedRowValue(row, 'usage_feasible_input_buckets', 'usage buckets');
   if (!Array.isArray(buckets)) fail('STORAGE_ERROR', 'stored usage buckets are invalid');
@@ -2317,6 +2440,7 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
   if (modelResolutionAbsent && publicModel !== resolvedModel) {
     fail('AUTHORITY_MISMATCH', 'legacy evidence without model provenance cannot bind a non-identity mapping');
   }
+  const composite = storedCompositeRoute(row);
   const input: PreparedRequestEvidenceInput = {
     evidenceId: identifier(normalizedRowValue(row, 'id', 'evidence id'), 'evidenceId'),
     tenantId: identifier(normalizedRowValue(row, 'tenant_id', 'tenant id'), 'tenantId'),
@@ -2361,6 +2485,7 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
             mappingVersion: storedMappingVersion(modelResolutionValues[3]),
           },
         }),
+    ...(composite === undefined ? {} : { composite }),
     ...(transportProvenanceAbsent
       ? {}
       : {
@@ -2494,6 +2619,20 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
         'usage_reasoning_output_upper_bound',
         'reasoning upper bound',
       ) as PreparedEvidenceInteger,
+      // §4.1: media columns (migration 122); the neutral column values on a
+      // pre-122 row (0/NULL, or absent entirely in older readers) map back
+      // to an envelope WITHOUT the media keys so the recomputed statement
+      // matches its stored signature.
+      ...(Number(row.usage_per_unit_units_upper_bound ?? 0) > 0
+        ? {
+            perUnitUnitsUpperBound: normalizedRowValue(
+              row,
+              'usage_per_unit_units_upper_bound',
+              'per-unit upper bound',
+            ) as PreparedEvidenceInteger,
+            sizeTier: row.usage_size_tier == null ? null : String(row.usage_size_tier),
+          }
+        : {}),
       feasibleInputBuckets: buckets.map((value) => String(value)),
     },
     maxHoldCurrency: row.max_hold_currency == null ? null : String(row.max_hold_currency),

@@ -878,21 +878,40 @@ export class PostgresProviderAccountRuntimeHealthStore
  * ---------------------------------------------------------------------------
  */
 
-/** The dispatch outcomes the failure-feedback registry understands. */
+/**
+ * The dispatch outcomes the failure-feedback registry understands. The
+ * batch-2.3 kinds extend the original H5c trio: 402 insufficient balance
+ * (recoverable), 403 concurrency-limited (recoverable, the Kimi ceiling) and
+ * the model-level 404/plan-gated-400 dimension (account-level cooldown only
+ * when the registry is asked per model — the model scoping stays with the
+ * caller, which knows the requested model). K2 adds the mid-stream abort:
+ * the provider committed a 200, delivered ≥1 chunk, then killed the stream.
+ */
 export type ProviderAccountDispatchFeedbackOutcome =
   | 'success'
   | 'auth_or_permission_failure'
   | 'rate_limited'
+  | 'insufficient_balance'
+  | 'concurrency_limited'
+  | 'stream_timeout'
   | 'stream_abort';
 
 /**
- * Maps a provider HTTP status to a feedback outcome. Null means "no feedback
- * signal": 5xx and unclassified statuses (plus transport errors, decided by
- * the caller) are left to the durable health classification.
+ * The kind-aware feedback mapping (batch 2.3): the shared classifier's kind
+ * decides the outcome when the transport recorded one; the status-only
+ * fallback keeps the original H5c semantics for callers without a
+ * classification. Null means "no feedback signal": 5xx and unclassified
+ * statuses (plus transport errors, decided by the caller) are left to the
+ * durable health classification.
  */
 export function providerDispatchFeedbackOutcome(
   status: number | null | undefined,
+  kind?: string | null,
 ): ProviderAccountDispatchFeedbackOutcome | null {
+  if (kind === 'insufficient-balance') return 'insufficient_balance';
+  if (kind === 'concurrency-limited') return 'concurrency_limited';
+  if (kind === 'model-unavailable') return 'rate_limited';
+  if (status === 402) return 'insufficient_balance';
   if (status === 401 || status === 403) return 'auth_or_permission_failure';
   if (status === 429) return 'rate_limited';
   if (typeof status === 'number' && Number.isInteger(status) && status >= 200 && status <= 299) {
@@ -918,6 +937,41 @@ const FEEDBACK_AUTH_MAX_COOLDOWN_MS = 60_000;
 const FEEDBACK_RATE_BASE_COOLDOWN_MS = 1_000;
 const FEEDBACK_RATE_MAX_COOLDOWN_MS = 30_000;
 /**
+ * Batch 2.3 — 402 insufficient balance: 2× the balance-check period (the
+ * sub2api cnBalanceCooldownDuration port; the default 10-minute check
+ * interval gives 20 minutes). A balance recovery clears it on the next
+ * successful dispatch.
+ */
+export const FEEDBACK_INSUFFICIENT_BALANCE_COOLDOWN_MS = 20 * 60 * 1000;
+/**
+ * Batch 2.3 — 403 concurrency-limited: the Kimi per-account concurrent
+ * ceiling; a minute-scale cooldown matches the sub2api openAI403 default.
+ */
+export const FEEDBACK_CONCURRENCY_LIMIT_COOLDOWN_MS = 60_000;
+/**
+ * Batch 2.3 — stream-timeout threshold counting (the sub2api
+ * stream_timeout port): N timeouts inside the window cool the account; the
+ * default threshold is 3 in 10 minutes, the cooldown the sub2api
+ * temp-unsched minutes default.
+ */
+export const FEEDBACK_STREAM_TIMEOUT_THRESHOLD = 3;
+export const FEEDBACK_STREAM_TIMEOUT_WINDOW_MS = 10 * 60 * 1000;
+export const FEEDBACK_STREAM_TIMEOUT_COOLDOWN_MS = 10 * 60 * 1000;
+/**
+ * Batch 2.3 — OAuth 401 second-strike escalation: an auth failure whose
+ * previous outcome was ALSO an auth failure escalates to the auth max
+ * cooldown (the sub2api 401-escalated-to-error port; permanence stays with
+ * the durable 040 store, this is the process-local backoff).
+ */
+export const FEEDBACK_AUTH_ESCALATION_MAX_COOLDOWN_MS = 60_000;
+/**
+ * Batch 2.3 — 429 fallback cooldown clamp (the sub2api
+ * clampRateLimit429CooldownSeconds port): a 429 that parses to no window
+ * gets a second-scale fallback, clamped to [1s, max].
+ */
+export const FEEDBACK_429_FALLBACK_MIN_COOLDOWN_MS = 1_000;
+export const FEEDBACK_429_FALLBACK_MAX_COOLDOWN_MS = 30_000;
+/**
  * K2 mid-stream abort cooldown: a provider that commits a 200, delivers at
  * least one chunk, and then destroys the stream is a real account signal —
  * but a soft one (transient connection resets look identical), so it cools
@@ -935,6 +989,10 @@ interface FeedbackEntry {
   consecutiveFailures: number;
   lastOutcomeAt: number;
   cooledUntil: number;
+  /** The previous failure outcome (batch 2.3): 401-after-401 escalates. */
+  previousOutcome: ProviderAccountDispatchFeedbackOutcome | null;
+  /** Stream-timeout timestamps inside the counting window (batch 2.3). */
+  streamTimeouts: number[];
 }
 
 /**
@@ -954,18 +1012,22 @@ export class ProviderAccountDispatchFailureFeedback implements ProviderAccountDi
     readonly outcome: ProviderAccountDispatchFeedbackOutcome;
   }): void {
     const scope = accountScope(input?.candidate);
+    const outcome = input?.outcome;
     if (
       !scope ||
-      (input.outcome !== 'success' &&
-        input.outcome !== 'auth_or_permission_failure' &&
-        input.outcome !== 'rate_limited' &&
-        input.outcome !== 'stream_abort')
+      (outcome !== 'success' &&
+        outcome !== 'auth_or_permission_failure' &&
+        outcome !== 'rate_limited' &&
+        outcome !== 'insufficient_balance' &&
+        outcome !== 'concurrency_limited' &&
+        outcome !== 'stream_timeout' &&
+        outcome !== 'stream_abort')
     ) {
       return;
     }
     const now = this.now().getTime();
-    const key = `${scope.ownerScopeKey} ${scope.accountId}`;
-    if (input.outcome === 'success') {
+    const key = `${scope.ownerScopeKey} ${scope.accountId}`;
+    if (outcome === 'success') {
       this.entries.delete(key);
       return;
     }
@@ -973,33 +1035,82 @@ export class ProviderAccountDispatchFailureFeedback implements ProviderAccountDi
     const stale = current !== undefined && now - current.lastOutcomeAt > FEEDBACK_STALE_AFTER_MS;
     const consecutive = current === undefined || stale ? 1 : current.consecutiveFailures + 1;
     let cooledUntil = 0;
-    if (input.outcome === 'auth_or_permission_failure') {
+    if (outcome === 'auth_or_permission_failure') {
+      // Batch 2.3 — OAuth 401 second-strike escalation: when the previous
+      // failure was also an auth failure, jump straight to the max cooldown
+      // (the sub2api 401-escalated-to-error port; permanence stays with the
+      // durable 040 store — this is the process-local backoff).
+      const previousWasAuth =
+        current !== undefined && !stale && current.previousOutcome === 'auth_or_permission_failure';
+      cooledUntil = previousWasAuth
+        ? now + FEEDBACK_AUTH_ESCALATION_MAX_COOLDOWN_MS
+        : now +
+          Math.min(FEEDBACK_AUTH_MAX_COOLDOWN_MS, FEEDBACK_AUTH_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - 1, 16));
+    } else if (outcome === 'rate_limited') {
+      // The 429 (and model-unavailable) fallback cooldown: second-scale,
+      // clamped to [min, max] (the sub2api clampRateLimit429CooldownSeconds
+      // port). The exact window deadline stays with the durable snapshot.
+      const fallback = Math.min(
+        Math.max(FEEDBACK_RATE_BASE_COOLDOWN_MS, FEEDBACK_429_FALLBACK_MIN_COOLDOWN_MS),
+        FEEDBACK_429_FALLBACK_MAX_COOLDOWN_MS,
+      );
       cooledUntil =
-        now +
-        Math.min(FEEDBACK_AUTH_MAX_COOLDOWN_MS, FEEDBACK_AUTH_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - 1, 16));
-    } else if (input.outcome === 'stream_abort') {
+        consecutive >= FEEDBACK_RATE_FAILURE_THRESHOLD
+          ? now +
+            Math.min(
+              FEEDBACK_RATE_MAX_COOLDOWN_MS,
+              fallback * 2 ** Math.min(consecutive - FEEDBACK_RATE_FAILURE_THRESHOLD, 16),
+            )
+          : 0;
+    } else if (outcome === 'insufficient_balance') {
+      // 402 (batch 2.3): 2× the balance-check period; recoverable — the
+      // next successful dispatch clears the cooldown entirely.
+      cooledUntil = now + FEEDBACK_INSUFFICIENT_BALANCE_COOLDOWN_MS;
+    } else if (outcome === 'concurrency_limited') {
+      // Kimi 403 concurrency ceiling (batch 2.3): minute-scale, no
+      // escalation — the ceiling clears as in-flight requests drain.
+      cooledUntil = now + FEEDBACK_CONCURRENCY_LIMIT_COOLDOWN_MS;
+    } else if (outcome === 'stream_abort') {
+      // K2 mid-stream abort: immediate but brief and bounded (5 s → 30 s
+      // doubling); see FEEDBACK_STREAM_ABORT_* above.
       cooledUntil =
         now +
         Math.min(
           FEEDBACK_STREAM_ABORT_MAX_COOLDOWN_MS,
           FEEDBACK_STREAM_ABORT_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - 1, 16),
         );
-    } else if (consecutive >= FEEDBACK_RATE_FAILURE_THRESHOLD) {
-      cooledUntil =
-        now +
-        Math.min(
-          FEEDBACK_RATE_MAX_COOLDOWN_MS,
-          FEEDBACK_RATE_BASE_COOLDOWN_MS * 2 ** Math.min(consecutive - FEEDBACK_RATE_FAILURE_THRESHOLD, 16),
-        );
+    } else {
+      // Stream timeout (batch 2.3): threshold counting inside the window
+      // (the sub2api stream_timeout port) — cool only at the threshold.
+      const windowStart = now - FEEDBACK_STREAM_TIMEOUT_WINDOW_MS;
+      const timeouts = (current?.streamTimeouts ?? []).filter((at) => at > windowStart);
+      timeouts.push(now);
+      if (timeouts.length >= FEEDBACK_STREAM_TIMEOUT_THRESHOLD) {
+        cooledUntil = now + FEEDBACK_STREAM_TIMEOUT_COOLDOWN_MS;
+      }
+      this.entries.set(key, {
+        consecutiveFailures: consecutive,
+        lastOutcomeAt: now,
+        cooledUntil,
+        previousOutcome: outcome,
+        streamTimeouts: timeouts,
+      });
+      this.prune(now);
+      return;
     }
-    this.entries.set(key, { consecutiveFailures: consecutive, lastOutcomeAt: now, cooledUntil });
+    this.entries.set(key, {
+      consecutiveFailures: consecutive,
+      lastOutcomeAt: now,
+      cooledUntil,
+      previousOutcome: outcome,
+      streamTimeouts: current?.streamTimeouts ?? [],
+    });
     this.prune(now);
   }
-
   isExcluded(input: { readonly candidate: ProviderAccountRuntimeHealthCandidate; readonly now: Date }): boolean {
     const scope = accountScope(input?.candidate);
     if (!scope || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) return false;
-    const entry = this.entries.get(`${scope.ownerScopeKey} ${scope.accountId}`);
+    const entry = this.entries.get(`${scope.ownerScopeKey} ${scope.accountId}`);
     if (!entry) return false;
     // The cooldown is the only exclusion signal; once it expires the account
     // is schedulable again and the next recorded failure starts a fresh count.
@@ -1017,6 +1128,60 @@ export class ProviderAccountDispatchFailureFeedback implements ProviderAccountDi
     const byAge = [...this.entries.entries()].sort((left, right) => left[1].lastOutcomeAt - right[1].lastOutcomeAt);
     for (const [key] of byAge.slice(0, this.entries.size - FEEDBACK_MAX_TRACKED_ACCOUNTS)) {
       this.entries.delete(key);
+    }
+  }
+}
+
+/**
+ * Batch 2.3 — model-level rate limit (the sub2api SetModelRateLimit port):
+ * a model-not-found 404 or a Codex plan-gated 400 cools the
+ * (account, model) pair for 30 minutes while the account stays schedulable
+ * for every other model. Process-local like the account registry; the
+ * durable account-level windows remain authoritative.
+ */
+export const MODEL_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+/** Hard bound on tracked (account, model) pairs. */
+const MODEL_RATE_LIMIT_MAX_TRACKED = 100_000;
+
+/** The model-scoped cooldown registry: record + isModelExcluded. */
+export class ProviderAccountModelRateLimit {
+  private readonly until = new Map<string, number>();
+  private readonly now: () => Date;
+
+  constructor(options: { readonly now?: () => Date } = {}) {
+    this.now = options.now ?? (() => new Date());
+  }
+
+  recordModelRateLimit(input: {
+    readonly candidate: ProviderAccountRuntimeHealthCandidate;
+    readonly model: string;
+    readonly nowMs?: number;
+  }): void {
+    const scope = accountScope(input?.candidate);
+    if (!scope || typeof input.model !== 'string' || input.model.trim().length === 0) return;
+    const now = input.nowMs ?? this.now().getTime();
+    this.until.set(
+      `${scope.ownerScopeKey} ${scope.accountId} ${input.model.trim()}`,
+      now + MODEL_RATE_LIMIT_COOLDOWN_MS,
+    );
+    this.prune(now);
+  }
+
+  isModelExcluded(input: {
+    readonly candidate: ProviderAccountRuntimeHealthCandidate;
+    readonly model: string;
+    readonly now: Date;
+  }): boolean {
+    const scope = accountScope(input?.candidate);
+    if (!scope || typeof input.model !== 'string' || !(input.now instanceof Date)) return false;
+    const until = this.until.get(`${scope.ownerScopeKey} ${scope.accountId} ${input.model.trim()}`);
+    return until !== undefined && input.now.getTime() < until;
+  }
+
+  private prune(now: number): void {
+    if (this.until.size <= MODEL_RATE_LIMIT_MAX_TRACKED) return;
+    for (const [key, until] of this.until) {
+      if (until <= now) this.until.delete(key);
     }
   }
 }

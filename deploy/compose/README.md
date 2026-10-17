@@ -16,7 +16,9 @@
 ## 红线(与 systemd 部署完全一致)
 
 1. **PostgreSQL 是唯一权威**:容量、租约、健康、affinity、计费全部以 PG 为准;
-   Redis 只做 control-plane 认证限流/缓存(`appendonly no`,丢数据无害)。
+   Redis 只做 control-plane 认证限流/缓存 + gateway 粘性会话快路径
+   (专属 `MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL`,滑动 1h TTL,PG affinity 仍权威,
+   任何 Redis 故障 fail-open;`appendonly no`,丢数据无害)。
 2. **启动即探针,fail-closed**:每个角色绑定监听器/首次 claim 前依次通过
    PG ping → schema 校验 → 角色最小权限 ACL 核验(仅 `NODE_ENV=production`)
    → KMS readiness;任一失败进程非零退出。`restart: on-failure` 故意不用
@@ -116,7 +118,9 @@ docker compose up -d --scale gateway=1
 副本数受宿主端口范围约束:`GATEWAY_HOST_PORT_START`–`GATEWAY_HOST_PORT_END`
 (默认 15007–15009,即最多 3 副本;更多副本请扩大范围或改用 LB/反向代理)。
 `deploy.replicas` 也可经 `.env` 的 `GATEWAY_REPLICAS` 固定。多实例下 PG 仍是
-容量/租约/affinity 的唯一权威;Redis 仅承担 control-plane 认证限流等缓存职责。
+容量/租约/affinity 的唯一权威;Redis 仅承担 control-plane 认证限流 + gateway
+粘性快路径(经 `MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL`,默认指向栈内 redis;
+注释掉 compose 中该行即回到纯 PG 路径)。
 
 ## 备份
 

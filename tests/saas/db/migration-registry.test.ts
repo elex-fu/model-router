@@ -70,7 +70,24 @@ import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from '../../..
 import { PROBE_MONITORS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/109_probe_monitors.js';
 import { PLATFORM_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/111_provider_account_gemini_scheduling.js';
-import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/112_provider_account_durable_fault_classification.js';
+import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/112_billing_group_snapshot_limits.js';
+import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/113_billing_group_rate_counters.js';
+import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/114_billing_group_spend_windows.js';
+import { PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/115_provider_account_scheduling_threshold_pause.js';
+import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/116_tls_fingerprint_profiles.js';
+import { PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/117_provider_account_bedrock_scheduling.js';
+import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/118_provider_account_vertex_scheduling.js';
+import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/119_provider_account_grok_scheduling.js';
+import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/120_cn_provider_account_scheduling.js';
+import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/121_composite_model_routes.js';
+import { MULTIMODAL_BILLING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/122_multimodal_billing_dimensions.js';
+import { IMAGE_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/123_image_tasks.js';
+import { VIDEO_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/124_video_tasks.js';
+import { RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/125_risk_control_content_moderation.js';
+import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/126_public_brand_settings.js';
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
+import { PLUGIN_SYSTEM_SAAS_MIGRATION } from '../../../src/saas/db/migrations/128_plugin_system.js';
+import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/129_provider_account_durable_fault_classification.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -138,7 +155,58 @@ test('SaaS migration registry keeps a stable append order with only documented g
       109,
       110,
       111,
+      // R1 billing-group limit enforcement (roadmap 1.3): 112 snapshot
+      // freeze, 113 group RPM counters, 114 group spend windows + key
+      // rolling 5h/7d caps.
       112,
+      113,
+      114,
+      // R-dormant activation (batch 2.2): 115 scheduling-threshold pause
+      // columns on both provider account tables.
+      115,
+      // Batch-2 §2.4 (task #7): 116 TLS fingerprint profile registry + the
+      // tri-state account binding column.
+      116,
+      // Batch-3 (task #10): 117 Bedrock scheduling signals — the
+      // ThrottlingException cooldown deadline and the observation stamp
+      // (Bedrock responses expose no quota windows) plus the probe-category
+      // CHECK rewrite admitting 'bedrock'.
+      117,
+      // Batch-3 (task #11): 118 Vertex AI service-account scheduling
+      // signals — the 429 cooldown deadline (retry-after, else capped
+      // RetryInfo, else the 60s pay-as-you-go fallback) and the observation
+      // stamp plus the probe-category CHECK rewrite admitting 'vertex'.
+      118,
+      // Batch-3 (parallel Grok workstream): 119 xAI quota-header scheduling
+      // windows + the 'grok' probe category.
+      119,
+      // Batch-3 (task #13): 120 CN providers (zhipu/minimax) dual-mode
+      // account columns + Coding Plan quota-window snapshots.
+      120,
+      // Batch-4 §4.4 (task #18): 121 composite model routing — the composite
+      // route registry, the group composite marker, and the durable evidence
+      // composite decision column.
+      121,
+      // Batch-4 §4.1 (task #15): 122 multimodal billing dimensions.
+      122,
+      // Batch-4 §4.2 (task #16): 123 async image tasks.
+      123,
+      // Batch-4 §4.3 (task #17): 124 async video tasks — create-time
+      // snapshot + binding + billing claim.
+      124,
+      // Batch-5 §5.4 (task #19): 125 content risk control.
+      125,
+      // Batch-5 §5.2 (task #20): 126 public brand settings — the
+      // gateway-readable OEM white-label snapshot table.
+      126,
+      // Batch-5 §5.6 (task #23): 127 alert silences/report state.
+      127,
+      // Batch-5 §5.1 (task #24): 128 plugin system — installation registry,
+      // capability bindings and the host-service KV store.
+      128,
+      // K2 (main-side, renumbered 112 → 129 in this merge): the durable
+      // fault classification appends at the tail.
+      129,
     ],
   );
 });
@@ -195,10 +263,14 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     PROBE_MONITORS_SAAS_MIGRATION,
     PLATFORM_SETTINGS_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
-    PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
+    BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
+    BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
+    BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
+    TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 93);
+  assert.equal(SAAS_MIGRATIONS.length, 110);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -252,6 +324,23 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'probe_monitors',
       'platform_settings',
       'provider_account_gemini_scheduling',
+      'billing_group_snapshot_limits',
+      'billing_group_rate_counters',
+      'billing_group_spend_windows',
+      'provider_account_scheduling_threshold_pause',
+      'tls_fingerprint_profiles',
+      'provider_account_bedrock_scheduling',
+      'provider_account_vertex_scheduling',
+      'provider_account_grok_scheduling',
+      'cn_provider_account_scheduling',
+      'composite_model_routes',
+      'multimodal_billing_dimensions',
+      'image_tasks',
+      'video_tasks',
+      'risk_control_content_moderation',
+      'public_brand_settings',
+      'obs_alert_silences_and_report_state',
+      'plugin_system',
       'provider_account_durable_fault_classification',
     ],
   );
@@ -292,10 +381,55 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       110,
       111,
       112,
+      113,
+      114,
+      115,
+      // Batch-2 §2.4 (task #7): 116 TLS fingerprint profile registry + the
+      // tri-state account binding column.
+      116,
+      // Batch-3 (task #10): 117 Bedrock scheduling signals — the
+      // ThrottlingException cooldown deadline and the observation stamp
+      // (Bedrock responses expose no quota windows) plus the probe-category
+      // CHECK rewrite admitting 'bedrock'.
+      117,
+      // Batch-3 (task #11): 118 Vertex AI service-account scheduling
+      // signals — the 429 cooldown deadline (retry-after, else capped
+      // RetryInfo, else the 60s pay-as-you-go fallback) and the observation
+      // stamp plus the probe-category CHECK rewrite admitting 'vertex'.
+      118,
+      // Batch-3 (parallel Grok workstream): 119 xAI quota-header scheduling
+      // windows + the 'grok' probe category.
+      119,
+      // Batch-3 (task #13): 120 CN providers (zhipu/minimax) dual-mode
+      // account columns + Coding Plan quota-window snapshots.
+      120,
+      // Batch-4 §4.4 (task #18): 121 composite model routing — the composite
+      // route registry, the group composite marker, and the durable evidence
+      // composite decision column.
+      121,
+      // Batch-4 §4.1 (task #15): 122 multimodal billing dimensions.
+      122,
+      // Batch-4 §4.2 (task #16): 123 async image tasks.
+      123,
+      // Batch-4 §4.3 (task #17): 124 async video tasks.
+      124,
+      // Batch-5 §5.4 (task #19): 125 content risk control.
+      125,
+      // Batch-5 §5.2 (task #20): 126 public brand settings — the
+      // gateway-readable OEM white-label snapshot table.
+      126,
+      // Batch-5 §5.6 (task #23): 127 alert silences/report state.
+      127,
+      // Batch-5 §5.1 (task #24): 128 plugin system — installation registry,
+      // capability bindings and the host-service KV store.
+      128,
+      // K2 (main-side, renumbered 112 → 129 in this merge): the durable
+      // fault classification appends at the tail.
+      129,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 93);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 93);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 110);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 110);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -380,12 +514,12 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
   );
   assert.equal(
     createHash('sha256').update(source).digest('hex'),
-    '7c86dc81ea1ddea6b0a46c2bcea4837c9a83e705ae817106e3cbae5ccdb8b5ed',
+    '597a0f645d25e2dbd2bb9a7ad475427cc10f4bf4ab3cd73baeb6d5ab019ccb2a',
   );
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 93);
+  assert.equal(SAAS_MIGRATIONS.length, 110);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -425,6 +559,23 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     PROBE_MONITORS_SAAS_MIGRATION,
     PLATFORM_SETTINGS_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
+    BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
+    BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
+    BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
+    TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION,
+    CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
+    COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
+    MULTIMODAL_BILLING_SAAS_MIGRATION,
+    IMAGE_TASKS_SAAS_MIGRATION,
+    VIDEO_TASKS_SAAS_MIGRATION,
+    RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION,
+    PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
+    OBS_ALERT_SILENCES_SAAS_MIGRATION,
+    PLUGIN_SYSTEM_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
@@ -518,11 +669,78 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[91], PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[91]?.version, 111);
   assert.equal(SAAS_MIGRATIONS[91]?.name, 'provider_account_gemini_scheduling');
-  // 112: K2 account-attributable runtime-health outcomes (040 CHECK
-  // extension) — the all-4-faulted durable fail-away classification.
-  assert.equal(SAAS_MIGRATIONS[92], PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION);
+  // R1 billing-group limit enforcement (roadmap 1.3): 112 snapshot freeze,
+  // 113 group RPM counters, 114 group spend windows + key rolling 5h/7d caps.
   assert.equal(SAAS_MIGRATIONS[92]?.version, 112);
-  assert.equal(SAAS_MIGRATIONS[92]?.name, 'provider_account_durable_fault_classification');
+  assert.equal(SAAS_MIGRATIONS[92]?.name, 'billing_group_snapshot_limits');
+  assert.equal(SAAS_MIGRATIONS[93]?.version, 113);
+  assert.equal(SAAS_MIGRATIONS[93]?.name, 'billing_group_rate_counters');
+  assert.equal(SAAS_MIGRATIONS[94]?.version, 114);
+  assert.equal(SAAS_MIGRATIONS[94]?.name, 'billing_group_spend_windows');
+  assert.equal(SAAS_MIGRATIONS[95]?.version, 115);
+  assert.equal(SAAS_MIGRATIONS[95]?.name, 'provider_account_scheduling_threshold_pause');
+  assert.equal(SAAS_MIGRATIONS[96]?.version, 116);
+  assert.equal(SAAS_MIGRATIONS[96]?.name, 'tls_fingerprint_profiles');
+  // 117: batch-3 Bedrock scheduling (parallel workstream tail; 118/119 are
+  // the parallel Vertex/Grok batch-3 workstreams' slots).
+  assert.equal(SAAS_MIGRATIONS[97], PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[97]?.version, 117);
+  assert.equal(SAAS_MIGRATIONS[97]?.name, 'provider_account_bedrock_scheduling');
+  // 118: batch-3 Vertex AI service-account scheduling (task #11; the
+  // parallel workstream's reserved slot).
+  assert.equal(SAAS_MIGRATIONS[98], PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[98]?.version, 118);
+  assert.equal(SAAS_MIGRATIONS[98]?.name, 'provider_account_vertex_scheduling');
+  // 119: batch-3 Grok scheduling (the parallel workstream's tail; its CHECK
+  // rewrite carries 'bedrock'/'vertex' forward per the batch-3 chain note).
+  assert.equal(SAAS_MIGRATIONS[99], PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[99]?.version, 119);
+  assert.equal(SAAS_MIGRATIONS[99]?.name, 'provider_account_grok_scheduling');
+  // 120: batch-3 CN providers (zhipu/minimax) dual-mode columns + Coding
+  // Plan quota-window snapshot family (task #13).
+  assert.equal(SAAS_MIGRATIONS[100], CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[100]?.version, 120);
+  assert.equal(SAAS_MIGRATIONS[100]?.name, 'cn_provider_account_scheduling');
+  // 121: batch-4 composite model routing (task #18) — the three-level
+  // resolver's registry table + group marker + evidence decision column.
+  assert.equal(SAAS_MIGRATIONS[101], COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[101]?.version, 121);
+  assert.equal(SAAS_MIGRATIONS[101]?.name, 'composite_model_routes');
+  // 122: batch-4 §4.1 multimodal billing (task #15); 123: batch-4 §4.2
+  // async image tasks (task #16) — the saas_image_tasks lifecycle registry.
+  assert.equal(SAAS_MIGRATIONS[102]?.version, 122);
+  assert.equal(SAAS_MIGRATIONS[102]?.name, 'multimodal_billing_dimensions');
+  assert.equal(SAAS_MIGRATIONS[103], IMAGE_TASKS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[103]?.version, 123);
+  assert.equal(SAAS_MIGRATIONS[103]?.name, 'image_tasks');
+  // 124: batch-4 §4.3 async video tasks (task #17) — create-time billing
+  // snapshot + bound-account binding + one-shot billing claim.
+  assert.equal(SAAS_MIGRATIONS[104], VIDEO_TASKS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[104]?.version, 124);
+  assert.equal(SAAS_MIGRATIONS[104]?.name, 'video_tasks');
+  // 125: batch-5 §5.4 content risk control (task #19).
+  assert.equal(SAAS_MIGRATIONS[105], RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[105]?.version, 125);
+  assert.equal(SAAS_MIGRATIONS[105]?.name, 'risk_control_content_moderation');
+  // 126: batch-5 §5.2 public brand settings (task #20).
+  assert.equal(SAAS_MIGRATIONS[106], PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[106]?.version, 126);
+  assert.equal(SAAS_MIGRATIONS[106]?.name, 'public_brand_settings');
+  // 127: batch-5 §5.6 alert silences/report state (task #23).
+  assert.equal(SAAS_MIGRATIONS[107], OBS_ALERT_SILENCES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[107]?.version, 127);
+  assert.equal(SAAS_MIGRATIONS[107]?.name, 'obs_alert_silences_and_report_state');
+  // 128: batch-5 §5.1 plugin system (task #24).
+  assert.equal(SAAS_MIGRATIONS[108], PLUGIN_SYSTEM_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[108]?.version, 128);
+  assert.equal(SAAS_MIGRATIONS[108]?.name, 'plugin_system');
+
+  // 129: K2 account-attributable runtime-health outcomes (040 CHECK
+  // extension) — the all-4-faulted durable fail-away classification;
+  // authored as 112 on main and renumbered to 129 in this merge.
+  assert.equal(SAAS_MIGRATIONS[109], PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[109]?.version, 129);
+  assert.equal(SAAS_MIGRATIONS[109]?.name, 'provider_account_durable_fault_classification');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

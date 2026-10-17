@@ -186,7 +186,7 @@ function extractCommercialPriceVersionColumns(source: string): readonly string[]
   if (!match) throw new Error('COMMERCIAL_PRICE_VERSION_COLUMNS not found');
   return match[1]
     .split('\n')
-    .filter((line) => line.trim() !== '')
+    .filter((line) => line.trim() !== '' && !line.trim().startsWith('//'))
     .map((line) => {
       const column = line.match(/^\s*'([^']+)',?\s*$/);
       if (!column) throw new Error(`unexpected COMMERCIAL_PRICE_VERSION_COLUMNS line: ${tsString(line)}`);

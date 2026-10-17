@@ -136,7 +136,10 @@ export class ConfigStore {
     if (idx === -1) {
       throw new Error(`Proxy key "${name}" does not exist.`);
     }
-    const current = config.proxyKeys[idx]!;
+    const current = config.proxyKeys[idx];
+    if (current === undefined) {
+      throw new Error(`Proxy key "${name}" does not exist.`);
+    }
     const merged: ProxyKey = { ...current, ...patch, name: current.name };
     for (const field of [
       'description',
@@ -218,7 +221,10 @@ export class ConfigStore {
     if (idx === -1) {
       throw new Error(`Upstream "${name}" does not exist.`);
     }
-    const current = config.upstreams[idx]!;
+    const current = config.upstreams[idx];
+    if (current === undefined) {
+      throw new Error(`Upstream "${name}" does not exist.`);
+    }
     config.upstreams[idx] = { ...current, ...patch, name: current.name };
     this.save(config);
   }

@@ -38,10 +38,17 @@ test('cancellation is scoped, idempotent and cannot rewrite a completed job', as
   let finish!: (value: unknown) => void;
   let signal: AbortSignal | undefined;
   try {
-    const running = jobs.start('upstream-test', 'admin', (jobSignal) => {
-      signal = jobSignal;
-      return new Promise((resolve) => { finish = resolve; });
-    }, 'upstream-a');
+    const running = jobs.start(
+      'upstream-test',
+      'admin',
+      (jobSignal) => {
+        signal = jobSignal;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+      'upstream-a',
+    );
     for (let attempt = 0; attempt < 100 && !finish; attempt++) await new Promise((resolve) => setTimeout(resolve, 2));
     assert.equal(jobs.get(running.jobId).state, 'running');
     assert.throws(() => jobs.cancel(running.jobId, 'admin', 'upstream-test', 'upstream-b'), /does not match/);

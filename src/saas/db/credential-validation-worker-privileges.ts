@@ -216,6 +216,41 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_tenant_provider_accounts', 'gemini_usage_updated_at', 'SELECT'),
     ('saas_tenant_provider_accounts', 'gemini_daily_reset_at', 'SELECT'),
     ('saas_tenant_provider_accounts', 'gemini_rate_limited_until', 'SELECT'),
+    -- 115 (R-dormant batch 2.2): the gemini usage worker's claim RETURNING
+    -- reads the account's tier id, and its request-count aggregation reads
+    -- the attempt table's per-account model facts (usage events carry no
+    -- account or model binding — migration 018's generated account_id is
+    -- the join key). Minimal column surface; no attempt writes.
+    ('saas_tenant_provider_accounts', 'gemini_tier_id', 'SELECT'),
+    -- 119 (batch 3): the Grok quota/billing writer's due-predicate reads
+    -- (snapshot freshness + cooldown columns, same minimal surface as the
+    -- gemini worker).
+    ('saas_tenant_provider_accounts', 'grok_usage_updated_at', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'grok_rate_limited_until', 'SELECT'),
+    -- 117 (batch 3): the Bedrock rate-limit sink's due-predicate reads
+    -- (the gemini worker's minimal surface; there is no bedrock usage
+    -- worker — the ThrottlingException observation is the family's only
+    -- writer).
+    ('saas_tenant_provider_accounts', 'bedrock_rate_limited_until', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'bedrock_usage_updated_at', 'SELECT'),
+    -- 118 (batch 3): the Vertex rate-limit sink's due-predicate reads (the
+    -- 117 bedrock minimal surface; pay-as-you-go, no usage worker).
+    ('saas_tenant_provider_accounts', 'vertex_rate_limited_until', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'vertex_usage_updated_at', 'SELECT'),
+    -- 120 (batch 3): the CN-provider quota worker's due-predicate reads
+    -- (coding-mode filter + the shared due/freshness/cooldown surface).
+    ('saas_tenant_provider_accounts', 'zhipu_account_mode', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'zhipu_usage_next_due_at', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'zhipu_usage_updated_at', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'zhipu_rate_limited_until', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'minimax_account_mode', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'minimax_usage_next_due_at', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'minimax_usage_updated_at', 'SELECT'),
+    ('saas_tenant_provider_accounts', 'minimax_rate_limited_until', 'SELECT'),
+    ('saas_attempts', 'account_id', 'SELECT'),
+    ('saas_attempts', 'resolved_model', 'SELECT'),
+    ('saas_attempts', 'created_at', 'SELECT'),
+    ('saas_attempts', 'result_state', 'SELECT'),
     ('saas_tenant_provider_accounts', 'status', 'UPDATE'),
     ('saas_tenant_provider_accounts', 'validation_state', 'UPDATE'),
     ('saas_tenant_provider_accounts', 'quarantine_entered_at', 'UPDATE'),
@@ -241,6 +276,26 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_tenant_provider_accounts', 'opencode_go_usage_next_due_at', 'UPDATE'),
     ('saas_tenant_provider_accounts', 'opencode_go_usage_failure_count', 'UPDATE'),
     ('saas_tenant_provider_accounts', 'opencode_go_rate_limited_until', 'UPDATE'),
+    -- 120 (batch 3): the CN-provider quota worker's snapshot/lease/failure/
+    -- cooldown writes (the opencode-go worker's shape, both providers).
+    -- The dual-mode config columns are deliberately absent (the control
+    -- plane owns them).
+    ('saas_tenant_provider_accounts', 'zhipu_5h_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_5h_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_weekly_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_weekly_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_usage_updated_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_usage_next_due_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_usage_failure_count', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'zhipu_rate_limited_until', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_5h_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_5h_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_weekly_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_weekly_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_usage_updated_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_usage_next_due_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_usage_failure_count', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'minimax_rate_limited_until', 'UPDATE'),
     -- 100 (R5): the Claude usage worker's snapshot/session-window writes.
     -- claude_cli_version_override is deliberately absent (control plane owns
     -- the operator's CLI pin override).
@@ -269,6 +324,34 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_tenant_provider_accounts', 'gemini_usage_updated_at', 'UPDATE'),
     ('saas_tenant_provider_accounts', 'gemini_rate_limited_until', 'UPDATE'),
     ('saas_tenant_provider_accounts', 'gemini_tier_id', 'UPDATE'),
+    -- 115 (R-dormant batch 2.2): the quota-snapshot writer's codex writes
+    -- (the transport's every-response parseCodexRateLimitHeaders sink; the
+    -- 099 columns were the last dormant snapshot family with no writer).
+    ('saas_tenant_provider_accounts', 'codex_5h_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'codex_5h_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'codex_7d_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'codex_7d_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'codex_usage_updated_at', 'UPDATE'),
+    -- 119 (batch 3): the Grok quota-snapshot/billing/tier writer (the
+    -- transport's every-response parseGrokQuotaHeaders sink, the billing
+    -- probe merge, and the binding/refresh pipeline's trusted tier copy).
+    ('saas_tenant_provider_accounts', 'grok_5h_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_5h_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_requests_used_percent', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_requests_reset_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_rate_limited_until', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_usage_updated_at', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_subscription_tier', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_billing', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'grok_billing_updated_at', 'UPDATE'),
+    -- 117 (batch 3): the Bedrock rate-limit sink's cooldown + observation
+    -- stamp writes (one UPDATE per ThrottlingException observation).
+    ('saas_tenant_provider_accounts', 'bedrock_rate_limited_until', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'bedrock_usage_updated_at', 'UPDATE'),
+    -- 118 (batch 3): the Vertex rate-limit sink's cooldown + observation
+    -- stamp writes (the 117 bedrock precedent).
+    ('saas_tenant_provider_accounts', 'vertex_rate_limited_until', 'UPDATE'),
+    ('saas_tenant_provider_accounts', 'vertex_usage_updated_at', 'UPDATE'),
     ('saas_tenant_provider_credentials', 'id', 'SELECT'),
     ('saas_tenant_provider_credentials', 'tenant_id', 'SELECT'),
     ('saas_tenant_provider_credentials', 'account_id', 'SELECT'),
@@ -381,6 +464,29 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_platform_provider_accounts', 'gemini_usage_updated_at', 'SELECT'),
     ('saas_platform_provider_accounts', 'gemini_daily_reset_at', 'SELECT'),
     ('saas_platform_provider_accounts', 'gemini_rate_limited_until', 'SELECT'),
+    -- 115 (R-dormant batch 2.2): the gemini usage worker's claim RETURNING
+    -- reads the account's tier id (the saas_attempts read surface is shared
+    -- with the tenant block above — the attempt table is tenant-scoped).
+    ('saas_platform_provider_accounts', 'gemini_tier_id', 'SELECT'),
+    -- 119 (batch 3): the Grok quota/billing writer's due-predicate reads.
+    ('saas_platform_provider_accounts', 'grok_usage_updated_at', 'SELECT'),
+    ('saas_platform_provider_accounts', 'grok_rate_limited_until', 'SELECT'),
+    -- 117 (batch 3): the Bedrock rate-limit sink's due-predicate reads.
+    ('saas_platform_provider_accounts', 'bedrock_rate_limited_until', 'SELECT'),
+    ('saas_platform_provider_accounts', 'bedrock_usage_updated_at', 'SELECT'),
+    -- 118 (batch 3): the Vertex rate-limit sink's due-predicate reads.
+    ('saas_platform_provider_accounts', 'vertex_rate_limited_until', 'SELECT'),
+    ('saas_platform_provider_accounts', 'vertex_usage_updated_at', 'SELECT'),
+    -- 120 (batch 3): the CN-provider quota worker's due-predicate reads
+    -- (coding-mode filter + the shared due/freshness/cooldown surface).
+    ('saas_platform_provider_accounts', 'zhipu_account_mode', 'SELECT'),
+    ('saas_platform_provider_accounts', 'zhipu_usage_next_due_at', 'SELECT'),
+    ('saas_platform_provider_accounts', 'zhipu_usage_updated_at', 'SELECT'),
+    ('saas_platform_provider_accounts', 'zhipu_rate_limited_until', 'SELECT'),
+    ('saas_platform_provider_accounts', 'minimax_account_mode', 'SELECT'),
+    ('saas_platform_provider_accounts', 'minimax_usage_next_due_at', 'SELECT'),
+    ('saas_platform_provider_accounts', 'minimax_usage_updated_at', 'SELECT'),
+    ('saas_platform_provider_accounts', 'minimax_rate_limited_until', 'SELECT'),
     ('saas_platform_provider_accounts', 'status', 'UPDATE'),
     ('saas_platform_provider_accounts', 'validation_state', 'UPDATE'),
     ('saas_platform_provider_accounts', 'quarantine_entered_at', 'UPDATE'),
@@ -404,6 +510,26 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_platform_provider_accounts', 'opencode_go_usage_next_due_at', 'UPDATE'),
     ('saas_platform_provider_accounts', 'opencode_go_usage_failure_count', 'UPDATE'),
     ('saas_platform_provider_accounts', 'opencode_go_rate_limited_until', 'UPDATE'),
+    -- 120 (batch 3): the CN-provider quota worker's snapshot/lease/failure/
+    -- cooldown writes (the opencode-go worker's shape, both providers).
+    -- The dual-mode config columns are deliberately absent (the control
+    -- plane owns them).
+    ('saas_platform_provider_accounts', 'zhipu_5h_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_5h_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_weekly_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_weekly_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_usage_updated_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_usage_next_due_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_usage_failure_count', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'zhipu_rate_limited_until', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_5h_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_5h_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_weekly_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_weekly_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_usage_updated_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_usage_next_due_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_usage_failure_count', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'minimax_rate_limited_until', 'UPDATE'),
     -- 100 (R5): the Claude usage worker's snapshot/session-window writes.
     ('saas_platform_provider_accounts', 'claude_5h_utilization', 'UPDATE'),
     ('saas_platform_provider_accounts', 'claude_5h_reset_at', 'UPDATE'),
@@ -429,6 +555,31 @@ expected_column_privileges(table_name, column_name, privilege_type) AS (
     ('saas_platform_provider_accounts', 'gemini_usage_updated_at', 'UPDATE'),
     ('saas_platform_provider_accounts', 'gemini_rate_limited_until', 'UPDATE'),
     ('saas_platform_provider_accounts', 'gemini_tier_id', 'UPDATE'),
+    -- 115 (R-dormant batch 2.2): the quota-snapshot writer's codex writes
+    -- (the transport's every-response parseCodexRateLimitHeaders sink).
+    ('saas_platform_provider_accounts', 'codex_5h_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'codex_5h_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'codex_7d_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'codex_7d_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'codex_usage_updated_at', 'UPDATE'),
+    -- 119 (batch 3): the Grok quota-snapshot/billing/tier writer.
+    ('saas_platform_provider_accounts', 'grok_5h_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_5h_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_requests_used_percent', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_requests_reset_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_rate_limited_until', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_usage_updated_at', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_subscription_tier', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_billing', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'grok_billing_updated_at', 'UPDATE'),
+    -- 117 (batch 3): the Bedrock rate-limit sink's cooldown + observation
+    -- stamp writes.
+    ('saas_platform_provider_accounts', 'bedrock_rate_limited_until', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'bedrock_usage_updated_at', 'UPDATE'),
+    -- 118 (batch 3): the Vertex rate-limit sink's cooldown + observation
+    -- stamp writes (the 117 bedrock precedent).
+    ('saas_platform_provider_accounts', 'vertex_rate_limited_until', 'UPDATE'),
+    ('saas_platform_provider_accounts', 'vertex_usage_updated_at', 'UPDATE'),
     ('saas_platform_provider_credentials', 'id', 'SELECT'),
     ('saas_platform_provider_credentials', 'account_id', 'SELECT'),
     ('saas_platform_provider_credentials', 'provider_id', 'SELECT'),

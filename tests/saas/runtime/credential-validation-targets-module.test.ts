@@ -7,8 +7,8 @@ import { pathToFileURL } from 'node:url';
 import { inspect } from 'node:util';
 import {
   CREDENTIAL_VALIDATION_TARGETS_FACTORY_PURPOSE,
-  CredentialValidationTargetsModuleError,
   type CredentialValidationTargetsFactoryOptions,
+  CredentialValidationTargetsModuleError,
   type CredentialValidationTargetsModuleLoaderOptions,
   loadCredentialValidationTargetsModule,
   MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
@@ -55,15 +55,26 @@ function target(
 /** Pure consumer-lookup fixture; it is never an input to the module or factory. */
 function consumerJob(descriptor: ApprovedCredentialValidationTarget): ProviderCredentialValidationJobRecord {
   return {
-    id: 'lookup-fixture-job', tenantId: 'lookup-fixture-tenant', accountId: 'lookup-fixture-account',
-    credentialId: 'lookup-fixture-credential', credentialVersion: 1,
-    providerId: descriptor.providerId, productId: descriptor.productId, credentialType: descriptor.credentialType,
+    id: 'lookup-fixture-job',
+    tenantId: 'lookup-fixture-tenant',
+    accountId: 'lookup-fixture-account',
+    credentialId: 'lookup-fixture-credential',
+    credentialVersion: 1,
+    providerId: descriptor.providerId,
+    productId: descriptor.productId,
+    credentialType: descriptor.credentialType,
     allowedModels: [descriptor.model],
     target: { model: descriptor.model, endpoint: descriptor.endpoint, version: descriptor.capabilityVersion },
-    idempotencyKey: 'a'.repeat(64), state: 'failed', attemptCount: 1,
-    availableAt: '2026-10-01T00:00:00.000Z', leaseUntil: null, leaseGeneration: 1,
-    lastErrorCode: 'adapter_unsupported', completedAt: '2026-10-01T00:00:00.000Z',
-    createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+    idempotencyKey: 'a'.repeat(64),
+    state: 'failed',
+    attemptCount: 1,
+    availableAt: '2026-10-01T00:00:00.000Z',
+    leaseUntil: null,
+    leaseGeneration: 1,
+    lastErrorCode: 'adapter_unsupported',
+    completedAt: '2026-10-01T00:00:00.000Z',
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: '2026-10-01T00:00:00.000Z',
   };
 }
 
@@ -116,8 +127,14 @@ test('missing own setting disables custom targets without import, clock, or anot
     let clockReads = 0;
     const loaded = await loadCredentialValidationTargetsModule({
       env,
-      importer: () => { imports += 1; throw new Error(DIAGNOSTIC); },
-      now: () => { clockReads += 1; throw new Error(DIAGNOSTIC); },
+      importer: () => {
+        imports += 1;
+        throw new Error(DIAGNOSTIC);
+      },
+      now: () => {
+        clockReads += 1;
+        throw new Error(DIAGNOSTIC);
+      },
     });
     assert.equal(loaded, undefined);
     assert.equal(imports, 0);
@@ -145,14 +162,22 @@ test('reads only the dedicated setting and gives the exact frozen metadata-only 
     [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: MODULE,
   };
   for (const key of [
-    'MODEL_ROUTER_SAAS_DATABASE_URL', 'MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL',
-    'MODEL_ROUTER_SAAS_REDIS_URL', 'MODEL_ROUTER_SAAS_KMS_PROVIDER',
+    'MODEL_ROUTER_SAAS_DATABASE_URL',
+    'MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL',
+    'MODEL_ROUTER_SAAS_REDIS_URL',
+    'MODEL_ROUTER_SAAS_KMS_PROVIDER',
     'SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE',
-    'KIMI_API_KEY', 'UPSTREAM_API_KEY', 'HTTP_PROXY', 'TENANT_TARGET_URL',
+    'KIMI_API_KEY',
+    'UPSTREAM_API_KEY',
+    'HTTP_PROXY',
+    'TENANT_TARGET_URL',
   ]) {
     Object.defineProperty(env, key, {
       enumerable: true,
-      get() { secretReads += 1; throw new Error(DIAGNOSTIC); },
+      get() {
+        secretReads += 1;
+        throw new Error(DIAGNOSTIC);
+      },
     });
   }
   const loaded = await loadCredentialValidationTargetsModule({
@@ -176,7 +201,9 @@ test('reads only the dedicated setting and gives the exact frozen metadata-only 
         },
       };
       Object.defineProperty(module, 'createCredentialValidationWorkerUnsealingKms', {
-        get() { throw new Error(DIAGNOSTIC); },
+        get() {
+          throw new Error(DIAGNOSTIC);
+        },
       });
       return module;
     },
@@ -215,38 +242,86 @@ test('uses the existing trusted package/path/file resolution and compatibility i
 
 test('malformed explicit settings fail before any import and never become a missing/default target source', async () => {
   for (const raw of [
-    '', ' ', ' trusted-fixture', 'trusted-fixture ', null, 1,
-    'x'.repeat(4097), `trusted\u0000${SECRET}`, 'trusted\nmodule',
-    `https://${HOST}/private-target-config.mjs?key=${SECRET}`, 'node:fs', 'data:text/javascript,export{}',
-    'file://remote-fixture.example/targets.mjs', 'file:///operator-fixture/targets.mjs?override=1',
+    '',
+    ' ',
+    ' trusted-fixture',
+    'trusted-fixture ',
+    null,
+    1,
+    'x'.repeat(4097),
+    `trusted\u0000${SECRET}`,
+    'trusted\nmodule',
+    `https://${HOST}/private-target-config.mjs?key=${SECRET}`,
+    'node:fs',
+    'data:text/javascript,export{}',
+    'file://remote-fixture.example/targets.mjs',
+    'file:///operator-fixture/targets.mjs?override=1',
     'file:///operator-fixture/targets.mjs#override',
   ]) {
     let imports = 0;
-    await assertSafeError(() => loadCredentialValidationTargetsModule({
-      env: { [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: raw } as never,
-      importer: () => { imports += 1; return {}; },
-    }), 'INVALID_MODULE_SPECIFIER');
+    await assertSafeError(
+      () =>
+        loadCredentialValidationTargetsModule({
+          env: { [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: raw } as never,
+          importer: () => {
+            imports += 1;
+            return {};
+          },
+        }),
+      'INVALID_MODULE_SPECIFIER',
+    );
     assert.equal(imports, 0);
   }
 });
 
 test('invalid loader controls and configuration accessors are redacted before import', async () => {
   const badOptions = [
-    null, [], 1, { env: null }, { env: [] }, { importer: 1 }, { importModule: true },
-    { now: 1 }, { cwd: '' }, { cwd: 1 }, { cwd: 'x'.repeat(4097) }, { cwd: `x\u0000${SECRET}` },
-    { env: {}, job: { target: DIAGNOSTIC } }, { env: {}, fetch: () => undefined },
+    null,
+    [],
+    1,
+    { env: null },
+    { env: [] },
+    { importer: 1 },
+    { importModule: true },
+    { now: 1 },
+    { cwd: '' },
+    { cwd: 1 },
+    { cwd: 'x'.repeat(4097) },
+    { cwd: `x\u0000${SECRET}` },
+    { env: {}, job: { target: DIAGNOSTIC } },
+    { env: {}, fetch: () => undefined },
     { env: {}, [Symbol('private-fixture')]: SECRET },
-    Object.defineProperty({}, 'env', { get() { throw new Error(DIAGNOSTIC); } }),
-    new Proxy({}, { ownKeys() { throw new Error(DIAGNOSTIC); } }),
+    Object.defineProperty({}, 'env', {
+      get() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
+    new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(DIAGNOSTIC);
+        },
+      },
+    ),
   ];
   for (const options of badOptions) {
     await assertSafeError(() => loadCredentialValidationTargetsModule(options as never), 'INVALID_CONFIGURATION');
   }
   for (const env of [
     Object.defineProperty({}, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE, {
-      get() { throw new Error(DIAGNOSTIC); },
+      get() {
+        throw new Error(DIAGNOSTIC);
+      },
     }),
-    new Proxy({}, { getOwnPropertyDescriptor() { throw new Error(DIAGNOSTIC); } }),
+    new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error(DIAGNOSTIC);
+        },
+      },
+    ),
   ]) {
     await assertSafeError(() => loadCredentialValidationTargetsModule({ env }), 'INVALID_CONFIGURATION');
   }
@@ -255,32 +330,68 @@ test('invalid loader controls and configuration accessors are redacted before im
 test('import and factory errors discard raw secrets, bodies, URLs and causes without retry or fallback', async () => {
   let imports = 0;
   let factories = 0;
-  await assertSafeError(() => loadFactory(() => {
-    factories += 1;
-    return [target()];
-  }, {
-    importer: () => { imports += 1; throw Object.assign(new Error(DIAGNOSTIC), { body: SECRET, cause: SECRET }); },
-    importModule: () => { throw new Error('must not retry via a secondary importer'); },
-  }), 'MODULE_LOAD_FAILED');
+  await assertSafeError(
+    () =>
+      loadFactory(
+        () => {
+          factories += 1;
+          return [target()];
+        },
+        {
+          importer: () => {
+            imports += 1;
+            throw Object.assign(new Error(DIAGNOSTIC), { body: SECRET, cause: SECRET });
+          },
+          importModule: () => {
+            throw new Error('must not retry via a secondary importer');
+          },
+        },
+      ),
+    'MODULE_LOAD_FAILED',
+  );
   assert.equal(imports, 1);
   assert.equal(factories, 0);
 
   const revokedArray = Proxy.revocable([target()], {});
   revokedArray.revoke();
   for (const factory of [
-    () => { throw Object.assign(new Error(DIAGNOSTIC), { body: SECRET, cause: SECRET }); },
-    async () => { throw new Error(DIAGNOSTIC); },
-    () => Object.defineProperty({}, 'then', { get() { throw new Error(DIAGNOSTIC); } }),
+    () => {
+      throw Object.assign(new Error(DIAGNOSTIC), { body: SECRET, cause: SECRET });
+    },
+    async () => {
+      throw new Error(DIAGNOSTIC);
+    },
+    () =>
+      Object.defineProperty({}, 'then', {
+        get() {
+          throw new Error(DIAGNOSTIC);
+        },
+      }),
     // Await reads the result's `then` before metadata validation. A revoked
     // top-level array therefore rejects factory-result assimilation here.
     () => revokedArray.proxy,
-    () => { throw Object.assign(new CredentialValidationTargetsModuleError('TARGETS_INVALID'), { message: DIAGNOSTIC }); },
+    () => {
+      throw Object.assign(new CredentialValidationTargetsModuleError('TARGETS_INVALID'), { message: DIAGNOSTIC });
+    },
   ]) {
     let calls = 0;
     let clockReads = 0;
-    await assertSafeError(() => loadFactory(() => { calls += 1; return factory(); }, {
-      now: () => { clockReads += 1; return NOW; },
-    }), 'FACTORY_FAILED');
+    await assertSafeError(
+      () =>
+        loadFactory(
+          () => {
+            calls += 1;
+            return factory();
+          },
+          {
+            now: () => {
+              clockReads += 1;
+              return NOW;
+            },
+          },
+        ),
+      'FACTORY_FAILED',
+    );
     assert.equal(calls, 1);
     assert.equal(clockReads, 0);
   }
@@ -288,14 +399,31 @@ test('import and factory errors discard raw secrets, bodies, URLs and causes wit
 
 test('only an own named callable factory is accepted; no default, KMS, static binding, inherited, or accessor fallback', async () => {
   for (const module of [
-    null, undefined, [], 'not-a-module', 1, () => undefined, {},
+    null,
+    undefined,
+    [],
+    'not-a-module',
+    1,
+    () => undefined,
+    {},
     { default: { createCredentialValidationTargets: () => [target()] } },
     { createCredentialValidationWorkerUnsealingKms: () => [target()] },
     { providerTargetBindings: [target()] },
     { createCredentialValidationTargets: [target()] },
     Object.create({ createCredentialValidationTargets: () => [target()] }),
-    Object.defineProperty({}, 'createCredentialValidationTargets', { get() { throw new Error(DIAGNOSTIC); } }),
-    new Proxy({}, { getOwnPropertyDescriptor() { throw new Error(DIAGNOSTIC); } }),
+    Object.defineProperty({}, 'createCredentialValidationTargets', {
+      get() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
+    new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error(DIAGNOSTIC);
+        },
+      },
+    ),
   ]) {
     await assertSafeError(() => loadFactory(() => [target()], { importer: () => module }), 'MODULE_EXPORT_INVALID');
   }
@@ -303,14 +431,34 @@ test('only an own named callable factory is accepted; no default, KMS, static bi
 
 test('factory must return a bounded dense metadata array, never a registry, callback or runtime handle', async () => {
   for (const raw of [
-    undefined, null, false, 1, 'not-metadata', target(), { targets: [target()] }, () => [target()],
+    undefined,
+    null,
+    false,
+    1,
+    'not-metadata',
+    target(),
+    { targets: [target()] },
+    () => [target()],
     compileApprovedCredentialValidationTargets([target()]),
     { bindings: [target()], fetch: () => undefined, close: () => undefined },
-    [null], [false], [SECRET], [() => undefined], new Array(1), new Array(1025).fill(target()),
+    [null],
+    [false],
+    [SECRET],
+    [() => undefined],
+    new Array(1),
+    new Array(1025).fill(target()),
     Object.assign([target()], { headers: { Authorization: SECRET } }),
     Object.assign([target()], { [Symbol('private-fixture')]: SECRET }),
-    Object.defineProperty([target()], '0', { get() { throw new Error(DIAGNOSTIC); } }),
-    new Proxy([target()], { ownKeys() { throw new Error(DIAGNOSTIC); } }),
+    Object.defineProperty([target()], '0', {
+      get() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
+    new Proxy([target()], {
+      ownKeys() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
   ]) {
     await assertSafeError(() => loadTargets(raw), 'TARGETS_INVALID');
   }
@@ -321,9 +469,12 @@ test('retains the compiler target-count bound and rejects oversized aggregate me
   const loaded = await loadTargets(maximum);
   assert.equal(loaded?.length, 1024);
   assert.equal(Object.isFrozen(loaded), true);
-  const oversized = Object.fromEntries(Object.keys(target()).map((key) => [key,
-    key === 'capabilityVersion' ? 1 : key === 'expiresAt' ? null : 'x'.repeat(4096),
-  ]));
+  const oversized = Object.fromEntries(
+    Object.keys(target()).map((key) => [
+      key,
+      key === 'capabilityVersion' ? 1 : key === 'expiresAt' ? null : 'x'.repeat(4096),
+    ]),
+  );
   await assertSafeError(() => loadTargets(new Array(1024).fill(oversized)), 'TARGETS_INVALID');
 });
 
@@ -335,16 +486,30 @@ test('requires every canonical descriptor field, rejects hidden/symbol/extra met
     await assertSafeError(() => loadTargets([missing]), 'TARGETS_INVALID');
   }
   for (const extra of [
-    { headers: { Authorization: SECRET } }, { fetch: () => undefined }, { tenantId: 'tenant-fixture' },
-    { job: { target: DIAGNOSTIC } }, { database: {} }, { approved: true },
-    { capabilityCatalogEvidence: approved.evidenceSha256 }, { requestUrl: DIAGNOSTIC },
+    { headers: { Authorization: SECRET } },
+    { fetch: () => undefined },
+    { tenantId: 'tenant-fixture' },
+    { job: { target: DIAGNOSTIC } },
+    { database: {} },
+    { approved: true },
+    { capabilityCatalogEvidence: approved.evidenceSha256 },
+    { requestUrl: DIAGNOSTIC },
   ]) {
     await assertSafeError(() => loadTargets([{ ...approved, ...extra }]), 'TARGETS_INVALID');
   }
   for (const raw of [
-    { ...approved, model: { toString() { throw new Error(DIAGNOSTIC); } } },
-    { ...approved, model: () => DIAGNOSTIC }, { ...approved, capabilityVersion: 1n },
-    { ...approved, approvalReference: 'x'.repeat(4097) }, { ...approved, baseUrl: 'x'.repeat(4097) },
+    {
+      ...approved,
+      model: {
+        toString() {
+          throw new Error(DIAGNOSTIC);
+        },
+      },
+    },
+    { ...approved, model: () => DIAGNOSTIC },
+    { ...approved, capabilityVersion: 1n },
+    { ...approved, approvalReference: 'x'.repeat(4097) },
+    { ...approved, baseUrl: 'x'.repeat(4097) },
     Object.defineProperty({ ...approved }, 'headers', { value: SECRET, enumerable: false }),
     Object.defineProperty({ ...approved }, 'model', { value: approved.model, enumerable: false }),
     { ...approved, [Symbol('private-fixture')]: SECRET },
@@ -358,15 +523,34 @@ test('descriptor and array getters/proxies cannot supply changing authority or l
   let reads = 0;
   const changing = Object.defineProperty({ ...target() }, 'baseUrl', {
     enumerable: true,
-    get() { reads += 1; return reads === 1 ? target().baseUrl : DIAGNOSTIC; },
+    get() {
+      reads += 1;
+      return reads === 1 ? target().baseUrl : DIAGNOSTIC;
+    },
   });
   await assertSafeError(() => loadTargets([changing]), 'TARGETS_INVALID');
   assert.equal(reads, 0, 'descriptor accessors must be rejected without invoking them');
   for (const raw of [
-    Object.defineProperty({ ...target() }, 'evidenceSha256', { get() { throw new Error(DIAGNOSTIC); } }),
-    new Proxy(target(), { getPrototypeOf() { throw new Error(DIAGNOSTIC); } }),
-    new Proxy(target(), { ownKeys() { throw new Error(DIAGNOSTIC); } }),
-    new Proxy(target(), { getOwnPropertyDescriptor() { throw new Error(DIAGNOSTIC); } }),
+    Object.defineProperty({ ...target() }, 'evidenceSha256', {
+      get() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
+    new Proxy(target(), {
+      getPrototypeOf() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
+    new Proxy(target(), {
+      ownKeys() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
+    new Proxy(target(), {
+      getOwnPropertyDescriptor() {
+        throw new Error(DIAGNOSTIC);
+      },
+    }),
   ]) {
     await assertSafeError(() => loadTargets([raw]), 'TARGETS_INVALID');
   }
@@ -380,16 +564,30 @@ test('descriptor and array getters/proxies cannot supply changing authority or l
 test('canonical HTTPS and fixed protocol/auth profiles remain owned by the existing compiler', async () => {
   const approved = target();
   for (const changes of [
-    { providerId: 'kimi' }, { productId: 'tenant-product' }, { credentialType: 'oauth' },
-    { model: 'https://private-fixture/model' }, { model: 'model with space' }, { model: 'x'.repeat(257) },
-    { endpoint: 'tenant-route' }, { capabilityVersion: 0 }, { capabilityVersion: Number.MAX_SAFE_INTEGER + 1 },
-    { protocol: 'tenant-protocol' }, { authProfile: 'custom-header' }, { productId: 'custom-anthropic' },
-    { baseUrl: `http://${HOST}/api/` }, { baseUrl: `https://operator:${SECRET}@${HOST}/api/` },
-    { baseUrl: `https://${HOST}/api/?key=${SECRET}` }, { baseUrl: `https://${HOST}/api/#fragment` },
-    { baseUrl: `https://${HOST.toUpperCase()}/api/` }, { baseUrl: `https://${HOST}/api` },
-    { baseUrl: `https://${HOST}:0/api/` }, { baseUrl: `https://${HOST}/../api/` },
-    { baseUrl: `https://${HOST}/%2fapi/` }, { approvalReference: 'x'.repeat(257) },
-    { expiresAt: '2027-01-01' }, { expiresAt: '2027-01-01T00:00:00.000+00:00' },
+    { providerId: 'kimi' },
+    { productId: 'tenant-product' },
+    { credentialType: 'oauth' },
+    { model: 'https://private-fixture/model' },
+    { model: 'model with space' },
+    { model: 'x'.repeat(257) },
+    { endpoint: 'tenant-route' },
+    { capabilityVersion: 0 },
+    { capabilityVersion: Number.MAX_SAFE_INTEGER + 1 },
+    { protocol: 'tenant-protocol' },
+    { authProfile: 'custom-header' },
+    { productId: 'custom-anthropic' },
+    { baseUrl: `http://${HOST}/api/` },
+    { baseUrl: `https://operator:${SECRET}@${HOST}/api/` },
+    { baseUrl: `https://${HOST}/api/?key=${SECRET}` },
+    { baseUrl: `https://${HOST}/api/#fragment` },
+    { baseUrl: `https://${HOST.toUpperCase()}/api/` },
+    { baseUrl: `https://${HOST}/api` },
+    { baseUrl: `https://${HOST}:0/api/` },
+    { baseUrl: `https://${HOST}/../api/` },
+    { baseUrl: `https://${HOST}/%2fapi/` },
+    { approvalReference: 'x'.repeat(257) },
+    { expiresAt: '2027-01-01' },
+    { expiresAt: '2027-01-01T00:00:00.000+00:00' },
   ]) {
     await assertSafeError(() => loadTargets([{ ...approved, ...changes }]), 'TARGETS_INVALID');
   }
@@ -398,53 +596,92 @@ test('canonical HTTPS and fixed protocol/auth profiles remain owned by the exist
 test('checks complete reviewed evidence without manufacturing/repairing its digest or accepting approval flags', async () => {
   const approved = target();
   for (const changes of [
-    { model: 'another-org/model' }, { capabilityVersion: 2 },
-    { baseUrl: 'https://another-fixture.example.test/api/' }, { approvalReference: 'different-review' },
+    { model: 'another-org/model' },
+    { capabilityVersion: 2 },
+    { baseUrl: 'https://another-fixture.example.test/api/' },
+    { approvalReference: 'different-review' },
     { expiresAt: new Date(NOW + 60_000).toISOString() },
-    { evidenceSha256: '' }, { evidenceSha256: 'f'.repeat(64) },
+    { evidenceSha256: '' },
+    { evidenceSha256: 'f'.repeat(64) },
     { evidenceSha256: `A${approved.evidenceSha256.slice(1)}` },
   ]) {
     await assertSafeError(() => loadTargets([{ ...approved, ...changes }]), 'TARGETS_INVALID');
   }
-  await assertSafeError(() => loadTargets([{
-    ...approved, productId: 'custom-anthropic', endpoint: 'messages', protocol: 'anthropic-compatible',
-    authProfile: 'anthropic-api-key-2023-06-01',
-  }]), 'TARGETS_INVALID');
+  await assertSafeError(
+    () =>
+      loadTargets([
+        {
+          ...approved,
+          productId: 'custom-anthropic',
+          endpoint: 'messages',
+          protocol: 'anthropic-compatible',
+          authProfile: 'anthropic-api-key-2023-06-01',
+        },
+      ]),
+    'TARGETS_INVALID',
+  );
 });
 
 test('duplicate tuple/version bindings are rejected even if both distinct descriptors have valid review digests', async () => {
   const first = target();
-  const conflicting = target({ baseUrl: 'https://another-fixture.example.test/api/', approvalReference: 'another-review' });
+  const conflicting = target({
+    baseUrl: 'https://another-fixture.example.test/api/',
+    approvalReference: 'another-review',
+  });
   await assertSafeError(() => loadTargets([first, first]), 'TARGETS_INVALID');
   await assertSafeError(() => loadTargets([first, conflicting]), 'TARGETS_INVALID');
 });
 
 test('expired or exact-deadline metadata rejects the whole load; expiry is checked after the awaited factory', async () => {
   for (const expiry of [NOW - 1, NOW]) {
-    await assertSafeError(() => loadTargets([target(), target({
-      model: 'another-org/model', expiresAt: new Date(expiry).toISOString(),
-    })]), 'TARGETS_INVALID');
+    await assertSafeError(
+      () =>
+        loadTargets([
+          target(),
+          target({
+            model: 'another-org/model',
+            expiresAt: new Date(expiry).toISOString(),
+          }),
+        ]),
+      'TARGETS_INVALID',
+    );
   }
   let current = NOW;
   const expiring = target({ expiresAt: new Date(NOW + 1).toISOString() });
-  await assertSafeError(() => loadFactory(async () => {
-    await Promise.resolve();
-    current = NOW + 1;
-    return [expiring];
-  }, { now: () => current }), 'TARGETS_INVALID');
+  await assertSafeError(
+    () =>
+      loadFactory(
+        async () => {
+          await Promise.resolve();
+          current = NOW + 1;
+          return [expiring];
+        },
+        { now: () => current },
+      ),
+    'TARGETS_INVALID',
+  );
 
   const loaded = await loadTargets([expiring]);
   assert.ok(loaded);
   const registry = compileApprovedCredentialValidationTargets(loaded);
   assert.ok(resolveApprovedCredentialValidationTarget(registry, consumerJob(expiring), NOW));
-  assert.equal(resolveApprovedCredentialValidationTarget(registry, consumerJob(expiring), NOW + 1), null,
-    'startup load must not promote metadata past the compiler/resolver runtime expiry gate');
+  assert.equal(
+    resolveApprovedCredentialValidationTarget(registry, consumerJob(expiring), NOW + 1),
+    null,
+    'startup load must not promote metadata past the compiler/resolver runtime expiry gate',
+  );
 });
 
 test('a broken trusted expiry clock is sanitized and never converted into unlimited approval', async () => {
   for (const now of [
-    () => NaN, () => Infinity, () => -Infinity, () => NOW + 0.5, () => 8_640_000_000_000_001,
-    () => { throw new Error(DIAGNOSTIC); },
+    () => NaN,
+    () => Infinity,
+    () => -Infinity,
+    () => NOW + 0.5,
+    () => 8_640_000_000_000_001,
+    () => {
+      throw new Error(DIAGNOSTIC);
+    },
     (() => `${SECRET}`) as never,
   ]) {
     await assertSafeError(() => loadFactory(() => [target()], { now }), 'INVALID_CONFIGURATION');
@@ -463,8 +700,12 @@ test('captures loading controls before await and copies/freezes metadata without
     env: { [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: MODULE },
     importer: async () => {
       options.env[MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE] = 'must-not-reload';
-      options.now = () => { throw new Error(DIAGNOSTIC); };
-      options.importer = () => { throw new Error(DIAGNOSTIC); };
+      options.now = () => {
+        throw new Error(DIAGNOSTIC);
+      };
+      options.importer = () => {
+        throw new Error(DIAGNOSTIC);
+      };
       return { createCredentialValidationTargets: () => raw };
     },
     now: () => NOW,
@@ -491,13 +732,19 @@ test('captures loading controls before await and copies/freezes metadata without
 test('both compiler-supported profiles retain exact request paths; slash models never interpolate into URLs', async () => {
   const chat = target();
   const messages = target({
-    productId: 'custom-anthropic', endpoint: 'messages', protocol: 'anthropic-compatible',
-    authProfile: 'anthropic-api-key-2023-06-01', baseUrl: `https://${HOST}:8443/anthropic/v1/`,
+    productId: 'custom-anthropic',
+    endpoint: 'messages',
+    protocol: 'anthropic-compatible',
+    authProfile: 'anthropic-api-key-2023-06-01',
+    baseUrl: `https://${HOST}:8443/anthropic/v1/`,
   });
   const loaded = await loadTargets([chat, messages]);
   assert.ok(loaded);
   const registry = compileApprovedCredentialValidationTargets(loaded);
-  for (const [descriptor, path] of [[chat, '/api/v1/chat/completions'], [messages, '/anthropic/v1/messages']] as const) {
+  for (const [descriptor, path] of [
+    [chat, '/api/v1/chat/completions'],
+    [messages, '/anthropic/v1/messages'],
+  ] as const) {
     const binding = resolveApprovedCredentialValidationTarget(registry, consumerJob(descriptor), NOW);
     assert.ok(binding);
     const url = credentialValidationTargetRequestUrl(binding);
@@ -533,7 +780,11 @@ function createCredentialValidationTargets(options) {
     // The factories contain static fake metadata only: no imports, environment,
     // credentials, network access, resource acquisition or catalog approval.
     await writeFile(namedPath, `${factorySource}\nexport { createCredentialValidationTargets };\n`, writeOptions);
-    await writeFile(defaultOnlyPath, `${factorySource}\nexport default { createCredentialValidationTargets };\n`, writeOptions);
+    await writeFile(
+      defaultOnlyPath,
+      `${factorySource}\nexport default { createCredentialValidationTargets };\n`,
+      writeOptions,
+    );
 
     const namedUrl = pathToFileURL(namedPath).href;
     const namespace = await import(namedUrl);
@@ -561,24 +812,49 @@ function createCredentialValidationTargets(options) {
     assert.equal(Object.getPrototypeOf(defaultOnlyNamespace), null);
     assert.equal(Object.hasOwn(defaultOnlyNamespace, 'createCredentialValidationTargets'), false);
     assert.equal(typeof defaultOnlyNamespace.default.createCredentialValidationTargets, 'function');
-    await assertSafeError(() => loadCredentialValidationTargetsModule({
-      env: { [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: defaultOnlyUrl },
-      now: () => NOW,
-    }), 'MODULE_EXPORT_INVALID');
+    await assertSafeError(
+      () =>
+        loadCredentialValidationTargetsModule({
+          env: { [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: defaultOnlyUrl },
+          now: () => NOW,
+        }),
+      'MODULE_EXPORT_INVALID',
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-function canonicalModuleTarget(kind: 'chat' | 'messages' = 'chat', expiresAt: string | null = null): ApprovedCredentialValidationTarget {
+function canonicalModuleTarget(
+  kind: 'chat' | 'messages' = 'chat',
+  expiresAt: string | null = null,
+): ApprovedCredentialValidationTarget {
   const descriptor: Omit<ApprovedCredentialValidationTarget, 'evidenceSha256'> = {
-    schemaVersion: 2, providerId: 'custom', credentialType: 'api-key', model: 'reviewed-org/model-v1:variant',
-    capabilityVersion: 1, baseUrl: `https://${HOST}:8443/api/v1/`,
-    approvalReference: 'operator-review:canonical-v2', expiresAt,
-    ...(kind === 'chat' ? { productId: 'custom-openai', endpoint: '/v1/chat/completions', protocol: 'openai',
-      wirePath: 'chat/completions', wireProtocol: 'openai', authProfile: 'openai-bearer-v1' } as const :
-      { productId: 'custom-anthropic', endpoint: '/v1/messages', protocol: 'anthropic',
-        wirePath: 'messages', wireProtocol: 'anthropic', authProfile: 'anthropic-api-key-2023-06-01' } as const),
+    schemaVersion: 2,
+    providerId: 'custom',
+    credentialType: 'api-key',
+    model: 'reviewed-org/model-v1:variant',
+    capabilityVersion: 1,
+    baseUrl: `https://${HOST}:8443/api/v1/`,
+    approvalReference: 'operator-review:canonical-v2',
+    expiresAt,
+    ...(kind === 'chat'
+      ? ({
+          productId: 'custom-openai',
+          endpoint: '/v1/chat/completions',
+          protocol: 'openai',
+          wirePath: 'chat/completions',
+          wireProtocol: 'openai',
+          authProfile: 'openai-bearer-v1',
+        } as const)
+      : ({
+          productId: 'custom-anthropic',
+          endpoint: '/v1/messages',
+          protocol: 'anthropic',
+          wirePath: 'messages',
+          wireProtocol: 'anthropic',
+          authProfile: 'anthropic-api-key-2023-06-01',
+        } as const)),
   };
   return { ...descriptor, evidenceSha256: credentialValidationTargetEvidenceSha256(descriptor) };
 }
@@ -597,8 +873,10 @@ test('loader copies exact v2 data-only metadata alongside unchanged v1 without a
     assert.equal(binding.protocol, descriptor.protocol);
     assert.equal(binding.evidenceSha256, descriptor.evidenceSha256);
     assert.equal(Object.isFrozen(binding), true);
-    assert.equal(credentialValidationTargetRequestUrl(binding).pathname,
-      descriptor.productId === 'custom-anthropic' ? '/api/v1/messages' : '/api/v1/chat/completions');
+    assert.equal(
+      credentialValidationTargetRequestUrl(binding).pathname,
+      descriptor.productId === 'custom-anthropic' ? '/api/v1/messages' : '/api/v1/chat/completions',
+    );
   }
   assert.deepEqual({ ...loaded[0] }, inputs[0], 'legacy metadata retains exactly its original fields');
 });
@@ -611,14 +889,26 @@ test('loader refuses incomplete, mixed, accessor and unreviewed v2 metadata with
     await assertSafeError(() => loadTargets([missing]), 'TARGETS_INVALID');
   }
   for (const changes of [
-    { endpoint: '/v1/messages' }, { protocol: 'anthropic' }, { wirePath: 'messages' },
-    { wireProtocol: 'anthropic' }, { model: 'another/model' }, { evidenceSha256: 'f'.repeat(64) },
-    { requestUrl: DIAGNOSTIC }, { approved: true }, { schemaVersion: 1 },
-    { wirePath: '/v1/chat/completions' }, { wireProtocol: 'openai-compatible' },
-  ]) await assertSafeError(() => loadTargets([{ ...original, ...changes }]), 'TARGETS_INVALID');
+    { endpoint: '/v1/messages' },
+    { protocol: 'anthropic' },
+    { wirePath: 'messages' },
+    { wireProtocol: 'anthropic' },
+    { model: 'another/model' },
+    { evidenceSha256: 'f'.repeat(64) },
+    { requestUrl: DIAGNOSTIC },
+    { approved: true },
+    { schemaVersion: 1 },
+    { wirePath: '/v1/chat/completions' },
+    { wireProtocol: 'openai-compatible' },
+  ])
+    await assertSafeError(() => loadTargets([{ ...original, ...changes }]), 'TARGETS_INVALID');
   let reads = 0;
   const changing = Object.defineProperty({ ...original }, 'schemaVersion', {
-    enumerable: true, get() { reads += 1; throw new Error(DIAGNOSTIC); },
+    enumerable: true,
+    get() {
+      reads += 1;
+      throw new Error(DIAGNOSTIC);
+    },
   });
   await assertSafeError(() => loadTargets([changing]), 'TARGETS_INVALID');
   assert.equal(reads, 0);
@@ -630,8 +920,20 @@ test('loader refuses incomplete, mixed, accessor and unreviewed v2 metadata with
 test('v2 exact-deadline expiry rejects the entire awaited module load, not just its canonical subset', async () => {
   let now = NOW;
   const original = canonicalModuleTarget('chat', new Date(NOW + 1).toISOString());
-  await assertSafeError(() => loadFactory(async () => {
-    await Promise.resolve(); now = NOW + 1; return [target(), original];
-  }, { now: () => now }), 'TARGETS_INVALID');
-  await assertSafeError(() => loadTargets([target(), canonicalModuleTarget('messages', new Date(NOW).toISOString())]), 'TARGETS_INVALID');
+  await assertSafeError(
+    () =>
+      loadFactory(
+        async () => {
+          await Promise.resolve();
+          now = NOW + 1;
+          return [target(), original];
+        },
+        { now: () => now },
+      ),
+    'TARGETS_INVALID',
+  );
+  await assertSafeError(
+    () => loadTargets([target(), canonicalModuleTarget('messages', new Date(NOW).toISOString())]),
+    'TARGETS_INVALID',
+  );
 });

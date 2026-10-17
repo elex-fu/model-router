@@ -366,36 +366,44 @@ test('expired mappings may be rebound, with a new revision and fence', async () 
   assert.equal(row.fence, 3);
 });
 
-test('revoked, unhealthy, or capacity-denied affinity targets are invalidated and block fallback until TTL expiry', async () => {
+test('revoked, unhealthy, or capacity-denied affinity targets are cleared and the selection degrades', async () => {
   const { port, state } = createHarness();
   const context = { sessionId: 'stale-session' };
   assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
 
+  // The target lost eligibility: the row is CAS-invalidated and the decision
+  // is 'stale' — the caller (scheduler) degrades to load balancing instead
+  // of failing the request (batch 2 §2.1 shouldClearStickySession).
   const denied = await resolveInput(port, scope(), ['account-b'], context);
-  assert.deepEqual(denied, {
-    decision: 'block',
-    reason: 'persisted provider account affinity target is no longer eligible',
-  });
+  assert.deepEqual(denied, { decision: 'stale' });
   const [invalidated] = [...state.rows.values()];
   assert.equal(invalidated.state, 'invalidated');
   assert.equal(invalidated.revision, 2);
   assert.equal(invalidated.fence, 2);
 
-  // An invalidated mapping is still an existing binding until its original TTL expires.
+  // An invalidated row is no active binding: the next resolve allows a fresh
+  // selection (no anti-flap block until the original TTL expires).
+  assert.deepEqual(await resolveInput(port, scope(), ['account-b'], context), { decision: 'allow', accountId: null });
+
+  // The degraded selection re-binds immediately: the invalidated row is
+  // resurrected for the newly selected account via the CAS-guarded update.
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), { decision: 'allow' });
+  const [rebound] = [...state.rows.values()];
+  assert.equal(rebound.accountId, 'account-b');
+  assert.equal(rebound.state, 'active');
+  assert.equal(rebound.revision, 3);
+  assert.equal(rebound.fence, 3);
   assert.deepEqual(await resolveInput(port, scope(), ['account-b'], context), {
-    decision: 'block',
-    reason: 'provider account affinity target was invalidated',
-  });
-  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), {
-    decision: 'block',
-    reason: 'provider account affinity binding conflict',
+    decision: 'allow',
+    accountId: 'account-b',
   });
 
-  // Once the explicit binding TTL expires, normal candidate choice may proceed and bind anew.
-  state.nowMs += 60_001;
-  assert.deepEqual(await resolveInput(port, scope(), ['account-b'], context), { decision: 'allow', accountId: null });
-  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), { decision: 'allow' });
-  assert.equal([...state.rows.values()][0].accountId, 'account-b');
+  // The original target returning to the eligible set must NOT resurrect the
+  // old binding: the re-bound account stays authoritative.
+  assert.deepEqual(await resolveInput(port, scope(), ['account-a', 'account-b'], context), {
+    decision: 'allow',
+    accountId: 'account-b',
+  });
 });
 
 test('versioned HMAC compatibility resolves old rows while a new version is active', async () => {

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MAX_MINOR_UNITS } from '../../../src/saas/billing/money.js';
 import {
+  type BudgetWindowUsage,
   evaluateProxyKeyBudgetAdmission,
   ProxyKeyBudgetError,
-  type BudgetWindowUsage,
   type ProxyKeyBudgetPolicy,
   type ProxyKeyBudgetUsage,
 } from '../../../src/saas/keys/budget-policy.js';
@@ -217,4 +217,50 @@ test('validates currencies and rejects unsupported supplier-cost or wallet dimen
     () => evaluateProxyKeyBudgetAdmission(unsupportedPolicy, { supplyMode: 'platform' }),
     'UNSUPPORTED_DIMENSION',
   );
+});
+
+test('rolling 5h/7d charge caps deny on the trailing window and stay optional', () => {
+  const policy = {
+    supplyMode: 'platform' as const,
+    tokenCaps: { daily: null, lifetime: null },
+    customerChargeCaps: {
+      currency: 'USD',
+      daily: null,
+      lifetime: null,
+      fiveHour: '500' as const,
+      sevenDay: '5000' as const,
+    },
+  };
+  const usage = (fiveHour: string, sevenDay: string) => ({
+    supplyMode: 'platform' as const,
+    customerChargeUsage: {
+      currency: 'USD',
+      fiveHour: { settled: '0', outstandingReserved: fiveHour, newReservation: '0' },
+      sevenDay: { settled: '0', outstandingReserved: sevenDay, newReservation: '0' },
+    },
+  });
+  // Exactly at both rolling caps: admitted.
+  assert.deepEqual(evaluateProxyKeyBudgetAdmission(policy, usage('500', '5000')), { allowed: true });
+  // The 5h window exceeds: denied on charge_5h with the exact projection.
+  const denied5h = evaluateProxyKeyBudgetAdmission(policy, usage('501', '5000'));
+  assert.equal(denied5h.allowed, false);
+  if (!denied5h.allowed) {
+    assert.equal(denied5h.deniedDimension, 'charge_5h');
+    assert.equal(denied5h.projectedTotal, 501n);
+    assert.equal(denied5h.cap, 500n);
+    assert.equal(denied5h.currency, 'USD');
+  }
+  // The 7d window exceeds: denied on charge_7d.
+  const denied7d = evaluateProxyKeyBudgetAdmission(policy, usage('400', '5001'));
+  assert.equal(denied7d.allowed, false);
+  if (!denied7d.allowed) assert.equal(denied7d.deniedDimension, 'charge_7d');
+  // Absent rolling caps are unlimited even when trailing totals are huge.
+  const legacyPolicy = {
+    supplyMode: 'platform' as const,
+    tokenCaps: { daily: null, lifetime: null },
+    customerChargeCaps: { currency: 'USD', daily: null, lifetime: null },
+  };
+  assert.deepEqual(evaluateProxyKeyBudgetAdmission(legacyPolicy, usage('999999999999', '999999999999')), {
+    allowed: true,
+  });
 });

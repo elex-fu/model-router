@@ -48,11 +48,16 @@ function assertDisposableRoleTargets(): Record<keyof typeof roleUrls, string> {
     const ciTarget = hostname === 'postgres' && port === 5432 && database === 'model_router_saas_ci';
     const localTarget =
       ['127.0.0.1', '[::1]'].includes(hostname) &&
-      Boolean(parsed.port) && Number.isInteger(port) && port > 0 && port <= 65_535 &&
+      Boolean(parsed.port) &&
+      Number.isInteger(port) &&
+      port > 0 &&
+      port <= 65_535 &&
       ![5432, 6432].includes(port) &&
       (database === 'model_router_saas_ci' || /^model_router_test_[a-zA-Z0-9_]+$/.test(database));
-    assert.ok(ciTarget || localTarget,
-      'use postgres:5432/model_router_saas_ci or a disposable model_router_saas_ci/model_router_test_* loopback database on an explicit nondefault port');
+    assert.ok(
+      ciTarget || localTarget,
+      'use postgres:5432/model_router_saas_ci or a disposable model_router_saas_ci/model_router_test_* loopback database on an explicit nondefault port',
+    );
     const currentTarget = `${hostname}:${port}/${database}`;
     if (target === undefined) target = currentTarget;
     assert.equal(currentTarget, target, 'all E2E roles must use the same disposable database');
@@ -95,7 +100,9 @@ function databasePool(pool: Pool, repeatableReadDefault = false): SaasDatabasePo
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
@@ -151,14 +158,26 @@ async function insertKey(executor: SqlExecutor, fixture: Fixture, keyId = fixtur
      VALUES ($1, $2, $3, $4, 'member', $4, $4, $5, $6, $7, 'Prelock PG test', 'mr_live_prelock_test', $8,
              $9, $10, 1, 1, 1, clock_timestamp() - interval '1 minute', clock_timestamp() + interval '10 minutes')
      RETURNING id`,
-    [keyId, request.tenantId, request.projectId, userId, request.entitlementId, request.supplyProfileId,
-      request.supplyMode, createHash('sha256').update(`prelock-test-only:${keyId}`).digest('hex'),
-      [request.publicModel], version],
+    [
+      keyId,
+      request.tenantId,
+      request.projectId,
+      userId,
+      request.entitlementId,
+      request.supplyProfileId,
+      request.supplyMode,
+      createHash('sha256').update(`prelock-test-only:${keyId}`).digest('hex'),
+      [request.publicModel],
+      version,
+    ],
   );
   assert.equal(inserted.rowCount, 1);
 }
 
-async function seedFixture(database: ReturnType<typeof createSaasDatabase>, mode: 'byok' | 'platform'): Promise<Fixture> {
+async function seedFixture(
+  database: ReturnType<typeof createSaasDatabase>,
+  mode: 'byok' | 'platform',
+): Promise<Fixture> {
   const tenantId = randomUUID();
   const projectId = randomUUID();
   const userId = randomUUID();
@@ -167,28 +186,60 @@ async function seedFixture(database: ReturnType<typeof createSaasDatabase>, mode
   const profileId = `prelock-${randomUUID()}`;
   const publicModel = `prelock-model-${randomUUID()}`;
   const request: CreateRequestInput = {
-    tenantId, projectId, proxyKeyId: keyId, entitlementId, supplyProfileId: profileId,
-    supplyProfileVersion: 1, modelScopeVersion: 1, supplyMode: mode, principalKind: 'member',
-    principalId: userId, authzVersion: 1, entitlementVersion: 1, configVersion: 1, projectPolicyVersion: 1,
-    publicModel, protocol: 'openai', endpoint: '/v1/chat/completions',
-    requestFingerprint: 'a'.repeat(64), requestFingerprintVersion: 'canonical-v1',
-    idempotencyKey: `prelock-replay-${keyId}`, customerPriceVersion: mode === 'platform' ? 'prelock-price' : null,
+    tenantId,
+    projectId,
+    proxyKeyId: keyId,
+    entitlementId,
+    supplyProfileId: profileId,
+    supplyProfileVersion: 1,
+    modelScopeVersion: 1,
+    supplyMode: mode,
+    principalKind: 'member',
+    principalId: userId,
+    authzVersion: 1,
+    entitlementVersion: 1,
+    configVersion: 1,
+    projectPolicyVersion: 1,
+    publicModel,
+    protocol: 'openai',
+    endpoint: '/v1/chat/completions',
+    requestFingerprint: 'a'.repeat(64),
+    requestFingerprintVersion: 'canonical-v1',
+    idempotencyKey: `prelock-replay-${keyId}`,
+    customerPriceVersion: mode === 'platform' ? 'prelock-price' : null,
   };
   const fixture: Fixture = {
-    userId, request,
-    authenticatedKey: { authorization: {
-      keyId, tenantId, projectId, principalKind: 'member', principalId: userId,
-      entitlementId, supplyProfileId: profileId, supplyMode: mode, modelScopes: [publicModel],
-      authzVersion: 1, modelScopeVersion: 1, entitlementAuthzVersion: 1, supplyProfileAuthzVersion: 1,
-    } },
+    userId,
+    request,
+    authenticatedKey: {
+      authorization: {
+        keyId,
+        tenantId,
+        projectId,
+        principalKind: 'member',
+        principalId: userId,
+        entitlementId,
+        supplyProfileId: profileId,
+        supplyMode: mode,
+        modelScopes: [publicModel],
+        authzVersion: 1,
+        modelScopeVersion: 1,
+        entitlementAuthzVersion: 1,
+        supplyProfileAuthzVersion: 1,
+      },
+    },
   };
   await database.transaction(async (tx) => {
     await tx.query('INSERT INTO saas_users (id, email) VALUES ($1, $2)', [userId, `prelock-${userId}@example.test`]);
     await tx.query('INSERT INTO saas_tenants (id, name, slug) VALUES ($1, $2, $2)', [tenantId, `prelock-${tenantId}`]);
-    await tx.query("INSERT INTO saas_memberships (tenant_id, user_id, role) VALUES ($1, $2, 'owner')", [tenantId, userId]);
+    await tx.query("INSERT INTO saas_memberships (tenant_id, user_id, role) VALUES ($1, $2, 'owner')", [
+      tenantId,
+      userId,
+    ]);
     await tx.query(
       `INSERT INTO saas_projects (tenant_id, id, name, slug, inference_policy_status)
-       VALUES ($1, $2, $3, $3, 'active')`, [tenantId, projectId, `prelock-${projectId}`],
+       VALUES ($1, $2, $3, $3, 'active')`,
+      [tenantId, projectId, `prelock-${projectId}`],
     );
     await tx.query(
       "INSERT INTO saas_project_memberships (tenant_id, project_id, user_id, role) VALUES ($1, $2, $3, 'owner')",
@@ -231,16 +282,24 @@ async function assertDenied(operation: Promise<unknown>, message: RegExp): Promi
 }
 
 test('restricted PostgreSQL prelock fences concurrent authorization changes on the disposable E2E target', {
-  skip: process.env[REQUIRED_FLAG] !== '1' && !anyConfigured
-    ? `set ${REQUIRED_FLAG}=1 and all three disposable E2E role URLs to require this gate`
-    : false,
+  skip:
+    process.env[REQUIRED_FLAG] !== '1' && !anyConfigured
+      ? `set ${REQUIRED_FLAG}=1 and all three disposable E2E role URLs to require this gate`
+      : false,
   timeout: 120_000,
 }, async (t) => {
   const urls = assertDisposableRoleTargets();
-  const pools = Object.fromEntries(Object.entries(urls).map(([role, connectionString]) => [role, new Pool({
-    connectionString, max: 3, connectionTimeoutMillis: 5_000,
-    options: '-c statement_timeout=10000 -c lock_timeout=8000',
-  })])) as Record<keyof typeof roleUrls, Pool>;
+  const pools = Object.fromEntries(
+    Object.entries(urls).map(([role, connectionString]) => [
+      role,
+      new Pool({
+        connectionString,
+        max: 3,
+        connectionTimeoutMillis: 5_000,
+        options: '-c statement_timeout=10000 -c lock_timeout=8000',
+      }),
+    ]),
+  ) as Record<keyof typeof roleUrls, Pool>;
   const seed = createSaasDatabase({ connectionString: urls.migrator, pool: databasePool(pools.migrator) });
   const control = createSaasDatabase({ connectionString: urls.control_plane, pool: databasePool(pools.control_plane) });
   // Every acquired reader session deliberately defaults to REPEATABLE READ.
@@ -248,9 +307,18 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
   const gateway = createSaasDatabase({ connectionString: urls.gateway, pool: databasePool(pools.gateway, true) });
   try {
     const expectedDatabase = decodeURIComponent(new URL(urls.migrator).pathname.slice(1));
-    for (const [database, role] of [[seed, 'migrator'], [control, 'control_plane'], [gateway, 'gateway']] as const) {
+    for (const [database, role] of [
+      [seed, 'migrator'],
+      [control, 'control_plane'],
+      [gateway, 'gateway'],
+    ] as const) {
       const current = await database.query<{
-        role: string; session: string; schema: string; superuser: boolean; database: string; version: string;
+        role: string;
+        session: string;
+        schema: string;
+        superuser: boolean;
+        database: string;
+        version: string;
       }>(
         `SELECT current_user AS role, session_user AS session, current_schema() AS schema,
                 r.rolsuper AS superuser, current_database() AS database,
@@ -263,29 +331,45 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
       assert.equal(current.rows[0]?.schema, 'model_router_saas');
       assert.equal(current.rows[0]?.superuser, false);
       assert.equal(current.rows[0]?.database, expectedDatabase);
-      assert.ok([15, 18].includes(Math.floor(Number(current.rows[0]?.version) / 10_000)), 'run this gate on PG15 and PG18');
+      assert.ok(
+        [15, 18].includes(Math.floor(Number(current.rows[0]?.version) / 10_000)),
+        'run this gate on PG15 and PG18',
+      );
     }
     await seed.verifySchema();
     await verifySaasRuntimeDatabasePrivileges(control, 'control_plane');
     await verifySaasRuntimeDatabasePrivileges(gateway, 'gateway');
 
     await t.test('gateway has column SELECT, no API-key UPDATE, and executes the new prelock', async () => {
-      const acl = await gateway.query<{ column_select: boolean; table_select: boolean; any_update: boolean; superuser: boolean }>(
+      const acl = await gateway.query<{
+        column_select: boolean;
+        table_select: boolean;
+        any_update: boolean;
+        superuser: boolean;
+      }>(
         `SELECT has_column_privilege(current_user, 'saas_api_keys', 'id', 'SELECT') AS column_select,
                 has_table_privilege(current_user, 'saas_api_keys', 'SELECT') AS table_select,
                 has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS any_update,
                 (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser`,
       );
       assert.deepEqual(acl.rows[0], { column_select: true, table_select: false, any_update: false, superuser: false });
-      await assert.rejects(gateway.query('SELECT id FROM saas_api_keys LIMIT 1 FOR SHARE'),
-        (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === '42501');
+      await assert.rejects(
+        gateway.query('SELECT id FROM saas_api_keys LIMIT 1 FOR SHARE'),
+        (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === '42501',
+      );
       for (const mode of ['byok', 'platform'] as const) {
         const fixture = await seedFixture(seed, mode);
         await gateway.transaction(async (executor) => {
-          const isolation = await executor.query<{ transaction_isolation: string; default_transaction_isolation: string }>(
+          const isolation = await executor.query<{
+            transaction_isolation: string;
+            default_transaction_isolation: string;
+          }>(
             "SELECT current_setting('transaction_isolation') AS transaction_isolation, current_setting('default_transaction_isolation') AS default_transaction_isolation",
           );
-          assert.deepEqual(isolation.rows[0], { transaction_isolation: 'read committed', default_transaction_isolation: 'repeatable read' });
+          assert.deepEqual(isolation.rows[0], {
+            transaction_isolation: 'read committed',
+            default_transaction_isolation: 'repeatable read',
+          });
           await prelock.prelock({ executor, ...fixture });
         });
       }
@@ -293,61 +377,75 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
 
     for (const mode of ['byok', 'platform'] as const) {
       for (const rotation of [false, true]) {
-        await t.test(`${mode}: prelock holds shared fences until commit and blocks a real ${rotation ? 'rotation' : 'revocation'} trigger`, async () => {
-          const fixture = await seedFixture(seed, mode);
-          const held = deferred();
-          const release = deferred();
-          let readerPid = 0;
-          const reader = gateway.transaction(async (executor) => {
-            readerPid = await pid(executor);
-            await prelock.prelock({ executor, ...fixture });
-            held.resolve();
-            await release.promise;
-          });
-          void reader.catch(() => held.resolve());
-          const rawWriter = await pools.control_plane.connect();
-          const writer = clientExecutor(rawWriter);
-          let mutation: Promise<void> | undefined;
-          try {
-            await held.promise;
-            await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-            const writerPid = await pid(writer);
-            const businessKey = saasAdvisoryKey.apiKey(
-              fixture.request.tenantId, fixture.request.projectId, fixture.request.proxyKeyId,
-            );
-            const heldKey = await control.query<{ held: boolean }>(
-              `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = $1 AND locktype = 'advisory'
+        await t.test(
+          `${mode}: prelock holds shared fences until commit and blocks a real ${rotation ? 'rotation' : 'revocation'} trigger`,
+          async () => {
+            const fixture = await seedFixture(seed, mode);
+            const held = deferred();
+            const release = deferred();
+            let readerPid = 0;
+            const reader = gateway.transaction(async (executor) => {
+              readerPid = await pid(executor);
+              await prelock.prelock({ executor, ...fixture });
+              held.resolve();
+              await release.promise;
+            });
+            void reader.catch(() => held.resolve());
+            const rawWriter = await pools.control_plane.connect();
+            const writer = clientExecutor(rawWriter);
+            let mutation: Promise<void> | undefined;
+            try {
+              await held.promise;
+              await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+              const writerPid = await pid(writer);
+              const businessKey = saasAdvisoryKey.apiKey(
+                fixture.request.tenantId,
+                fixture.request.projectId,
+                fixture.request.proxyKeyId,
+              );
+              const heldKey = await control.query<{ held: boolean }>(
+                `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = $1 AND locktype = 'advisory'
                  AND granted AND mode = 'ShareLock' AND objsubid = 1
                  AND classid = ((hashtextextended($2::text, 0) >> 32) & 4294967295)::oid
                  AND objid = (hashtextextended($2::text, 0) & 4294967295)::oid) AS held`,
-              [readerPid, businessKey],
-            );
-            assert.equal(heldKey.rows[0]?.held, true, 'the completed prelock retains its exact shared API-key fence');
-            mutation = revoke(writer, fixture, rotation);
-            void mutation.catch(() => {});
-            // The trigger follows tenant -> project -> user -> key, so a full
-            // prelock first blocks its exclusive tenant fence, before key DML.
-            // The separate key-only test below proves the business layer too.
-            await waitForFence(control, writerPid, readerPid,
-              saasAdvisoryKey.tenant(fixture.request.tenantId), 'ExclusiveLock');
-            const original = await gateway.query<{ status: string; authz_version: string }>(
-              'SELECT status, authz_version FROM saas_api_keys WHERE id = $1', [fixture.request.proxyKeyId],
-            );
-            assert.deepEqual(original.rows[0], { status: 'active', authz_version: '1' });
-            release.resolve();
-            await reader;
-            await mutation;
-            await writer.query('COMMIT');
-            // The identical retry input still revalidates current authority.
-            await assertDenied(gateway.transaction((executor) => prelock.prelock({ executor, ...fixture })), /API key is not active/);
-          } finally {
-            release.resolve();
-            await reader.catch(() => {});
-            await mutation?.catch(() => {});
-            await writer.query('ROLLBACK');
-            writer.release();
-          }
-        });
+                [readerPid, businessKey],
+              );
+              assert.equal(heldKey.rows[0]?.held, true, 'the completed prelock retains its exact shared API-key fence');
+              mutation = revoke(writer, fixture, rotation);
+              void mutation.catch(() => {});
+              // The trigger follows tenant -> project -> user -> key, so a full
+              // prelock first blocks its exclusive tenant fence, before key DML.
+              // The separate key-only test below proves the business layer too.
+              await waitForFence(
+                control,
+                writerPid,
+                readerPid,
+                saasAdvisoryKey.tenant(fixture.request.tenantId),
+                'ExclusiveLock',
+              );
+              const original = await gateway.query<{ status: string; authz_version: string }>(
+                'SELECT status, authz_version FROM saas_api_keys WHERE id = $1',
+                [fixture.request.proxyKeyId],
+              );
+              assert.deepEqual(original.rows[0], { status: 'active', authz_version: '1' });
+              release.resolve();
+              await reader;
+              await mutation;
+              await writer.query('COMMIT');
+              // The identical retry input still revalidates current authority.
+              await assertDenied(
+                gateway.transaction((executor) => prelock.prelock({ executor, ...fixture })),
+                /API key is not active/,
+              );
+            } finally {
+              release.resolve();
+              await reader.catch(() => {});
+              await mutation?.catch(() => {});
+              await writer.query('ROLLBACK');
+              writer.release();
+            }
+          },
+        );
       }
     }
 
@@ -360,7 +458,11 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
       let mutation: Promise<void> | undefined;
       try {
         await reader.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-        const key = saasAdvisoryKey.apiKey(fixture.request.tenantId, fixture.request.projectId, fixture.request.proxyKeyId);
+        const key = saasAdvisoryKey.apiKey(
+          fixture.request.tenantId,
+          fixture.request.projectId,
+          fixture.request.proxyKeyId,
+        );
         await reader.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))', [key]);
         await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         const readerPid = await pid(reader);
@@ -383,62 +485,77 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
     for (const [mode, change] of (['byok', 'platform'] as const).flatMap((mode) =>
       (['revoke', 'rotate', 'expiry'] as const).map((change) => [mode, change] as const),
     )) {
-      await t.test(`${mode}: pre-existing snapshot plus actual fence wait sees fresh ${change} under a REPEATABLE READ session default`, async () => {
-        const fixture = await seedFixture(seed, mode);
-        if (change === 'expiry') {
-          await seed.query("UPDATE saas_api_keys SET expires_at = clock_timestamp() + interval '4 seconds' WHERE id = $1", [fixture.request.proxyKeyId]);
-        }
-        const snapshot = deferred();
-        const startPrelock = deferred();
-        let readerPid = 0;
-        const reader = gateway.transaction(async (executor) => {
-          readerPid = await pid(executor);
-          const prior = await executor.query<{ status: string; unexpired: boolean }>(
-            'SELECT status, expires_at > clock_timestamp() AS unexpired FROM saas_api_keys WHERE id = $1',
-            [fixture.request.proxyKeyId],
-          );
-          assert.deepEqual(prior.rows[0], { status: 'active', unexpired: true });
-          snapshot.resolve();
-          await startPrelock.promise;
-          await prelock.prelock({ executor, ...fixture });
-        });
-        const rejection = assertDenied(reader, change === 'expiry' ? /API key is expired/ : /API key is not active/);
-        void rejection.catch(() => {});
-        void reader.catch(() => snapshot.resolve());
-        const rawWriter = await pools.control_plane.connect();
-        const writer = clientExecutor(rawWriter);
-        try {
-          await snapshot.promise;
-          await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-          const writerPid = await pid(writer);
+      await t.test(
+        `${mode}: pre-existing snapshot plus actual fence wait sees fresh ${change} under a REPEATABLE READ session default`,
+        async () => {
+          const fixture = await seedFixture(seed, mode);
           if (change === 'expiry') {
-            await writer.query('UPDATE saas_api_keys SET last_used_at = clock_timestamp() WHERE id = $1', [fixture.request.proxyKeyId]);
-          } else {
-            await revoke(writer, fixture, change === 'rotate');
+            await seed.query(
+              "UPDATE saas_api_keys SET expires_at = clock_timestamp() + interval '4 seconds' WHERE id = $1",
+              [fixture.request.proxyKeyId],
+            );
           }
-          startPrelock.resolve();
-          await waitForFence(control, readerPid, writerPid, saasAdvisoryKey.tenant(fixture.request.tenantId), 'ShareLock');
-          if (change === 'expiry') {
-            const deadline = Date.now() + 5_000;
-            let expired = false;
-            do {
-              const current = await writer.query<{ expired: boolean }>(
-                'SELECT expires_at <= clock_timestamp() AS expired FROM saas_api_keys WHERE id = $1', [fixture.request.proxyKeyId],
-              );
-              expired = current.rows[0]?.expired === true;
-              if (!expired) await delay(10);
-            } while (!expired && Date.now() < deadline);
-            assert.equal(expired, true, 'expiry must pass while the reader is actually waiting');
+          const snapshot = deferred();
+          const startPrelock = deferred();
+          let readerPid = 0;
+          const reader = gateway.transaction(async (executor) => {
+            readerPid = await pid(executor);
+            const prior = await executor.query<{ status: string; unexpired: boolean }>(
+              'SELECT status, expires_at > clock_timestamp() AS unexpired FROM saas_api_keys WHERE id = $1',
+              [fixture.request.proxyKeyId],
+            );
+            assert.deepEqual(prior.rows[0], { status: 'active', unexpired: true });
+            snapshot.resolve();
+            await startPrelock.promise;
+            await prelock.prelock({ executor, ...fixture });
+          });
+          const rejection = assertDenied(reader, change === 'expiry' ? /API key is expired/ : /API key is not active/);
+          void rejection.catch(() => {});
+          void reader.catch(() => snapshot.resolve());
+          const rawWriter = await pools.control_plane.connect();
+          const writer = clientExecutor(rawWriter);
+          try {
+            await snapshot.promise;
+            await writer.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+            const writerPid = await pid(writer);
+            if (change === 'expiry') {
+              await writer.query('UPDATE saas_api_keys SET last_used_at = clock_timestamp() WHERE id = $1', [
+                fixture.request.proxyKeyId,
+              ]);
+            } else {
+              await revoke(writer, fixture, change === 'rotate');
+            }
+            startPrelock.resolve();
+            await waitForFence(
+              control,
+              readerPid,
+              writerPid,
+              saasAdvisoryKey.tenant(fixture.request.tenantId),
+              'ShareLock',
+            );
+            if (change === 'expiry') {
+              const deadline = Date.now() + 5_000;
+              let expired = false;
+              do {
+                const current = await writer.query<{ expired: boolean }>(
+                  'SELECT expires_at <= clock_timestamp() AS expired FROM saas_api_keys WHERE id = $1',
+                  [fixture.request.proxyKeyId],
+                );
+                expired = current.rows[0]?.expired === true;
+                if (!expired) await delay(10);
+              } while (!expired && Date.now() < deadline);
+              assert.equal(expired, true, 'expiry must pass while the reader is actually waiting');
+            }
+            await writer.query('COMMIT');
+            await rejection;
+          } finally {
+            startPrelock.resolve();
+            await writer.query('ROLLBACK');
+            await rejection.catch(() => {});
+            writer.release();
           }
-          await writer.query('COMMIT');
-          await rejection;
-        } finally {
-          startPrelock.resolve();
-          await writer.query('ROLLBACK');
-          await rejection.catch(() => {});
-          writer.release();
-        }
-      });
+        },
+      );
     }
   } finally {
     await Promise.all([gateway.close(), control.close(), seed.close()]);

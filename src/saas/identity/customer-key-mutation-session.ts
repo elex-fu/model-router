@@ -1,5 +1,5 @@
-import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL } from '../db/advisory-lock-keys.js';
+import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 
 /** Shape is deliberately NOT authority: only IdentityService's private WeakMap
  * can establish origin. No raw cookie, session identity or digest is exposed. */
@@ -16,16 +16,21 @@ const ownedWrites = new WeakMap<SqlExecutor, SaasDatabase>();
 /** Executes the SAME original KeyService four-statement write entry, then brands
  * only this actual DB-owned callback executor. No caller executor/lock Boolean. */
 export async function runCustomerKeyMutationWrite<T>(
-  database: SaasDatabase, work: (tx: SqlExecutor) => Promise<T>,
+  database: SaasDatabase,
+  work: (tx: SqlExecutor) => Promise<T>,
 ): Promise<T> {
-  return database.transaction(async tx => {
+  return database.transaction(async (tx) => {
     if (ownedWrites.has(tx)) throw new CustomerKeyMutationSessionError(503);
     await tx.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
     await tx.query("SET LOCAL lock_timeout = '2s'");
     await tx.query("SET LOCAL statement_timeout = '10s'");
     await tx.query(SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL);
     ownedWrites.set(tx, database);
-    try { return await work(tx); } finally { ownedWrites.delete(tx); }
+    try {
+      return await work(tx);
+    } finally {
+      ownedWrites.delete(tx);
+    }
   });
 }
 export function assertCustomerKeyMutationWrite(database: SaasDatabase, tx: SqlExecutor): void {
@@ -50,25 +55,40 @@ export const CUSTOMER_KEY_MUTATION_CURRENT_SQL = `/* customer-key-session:curren
    AND u.disabled_at IS NULL
  LIMIT 2`;
 export interface CustomerKeyMutationSessionRow {
-  readonly id: string; readonly user_id: string;
-  readonly token_hash: string; readonly csrf_token_hash: string;
+  readonly id: string;
+  readonly user_id: string;
+  readonly token_hash: string;
+  readonly csrf_token_hash: string;
 }
 export function readCustomerKeyMutationSessionRow(
-  value: unknown, tokenHash: string, csrfHash: string,
+  value: unknown,
+  tokenHash: string,
+  csrfHash: string,
 ): CustomerKeyMutationSessionRow {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Reflect.ownKeys(value).length !== 4) throw new CustomerKeyMutationSessionError(503);
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Reflect.ownKeys(value).length !== 4)
+    throw new CustomerKeyMutationSessionError(503);
   const field = (name: string): unknown => {
     const d = Object.getOwnPropertyDescriptor(value, name);
     if (!d || !('value' in d)) throw new CustomerKeyMutationSessionError(503);
     return d.value;
   };
-  const id = field('id'), userId = field('user_id');
-  const token = field('token_hash'), csrf = field('csrf_token_hash');
+  const id = field('id'),
+    userId = field('user_id');
+  const token = field('token_hash'),
+    csrf = field('csrf_token_hash');
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  if (typeof id !== 'string' || !uuid.test(id) || typeof userId !== 'string' || !uuid.test(userId)
-    || typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token) || token !== tokenHash
-    || typeof csrf !== 'string' || !/^[a-f0-9]{64}$/.test(csrf) || csrf !== csrfHash) {
+  if (
+    typeof id !== 'string' ||
+    !uuid.test(id) ||
+    typeof userId !== 'string' ||
+    !uuid.test(userId) ||
+    typeof token !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(token) ||
+    token !== tokenHash ||
+    typeof csrf !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(csrf) ||
+    csrf !== csrfHash
+  ) {
     throw new CustomerKeyMutationSessionError(503);
   }
   return { id, user_id: userId, token_hash: token, csrf_token_hash: csrf };

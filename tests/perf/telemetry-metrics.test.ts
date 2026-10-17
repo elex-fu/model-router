@@ -4,10 +4,22 @@ import { summarizeTelemetryPerf } from '../../scripts/benchmark-console.mjs';
 
 test('telemetry performance aggregation reports P50/P95 and watermarks without payload fields', () => {
   const summary = summarizeTelemetryPerf([
-    { kind: 'telemetry-read-perf', endpoint: 'usageSummary', workerLifecycleMs: 20,
-      workerTotalMs: 10, sequence: 41, stages: { summaryRequestSqlMs: 2, summaryAttemptSqlMs: 4 } },
-    { kind: 'telemetry-read-perf', endpoint: 'usageSummary', workerLifecycleMs: 40,
-      workerTotalMs: 20, sequence: 42, stages: { summaryRequestSqlMs: 6, summaryAttemptSqlMs: 8 } },
+    {
+      kind: 'telemetry-read-perf',
+      endpoint: 'usageSummary',
+      workerLifecycleMs: 20,
+      workerTotalMs: 10,
+      sequence: 41,
+      stages: { summaryRequestSqlMs: 2, summaryAttemptSqlMs: 4 },
+    },
+    {
+      kind: 'telemetry-read-perf',
+      endpoint: 'usageSummary',
+      workerLifecycleMs: 40,
+      workerTotalMs: 20,
+      sequence: 42,
+      stages: { summaryRequestSqlMs: 6, summaryAttemptSqlMs: 8 },
+    },
     { kind: 'telemetry-response-perf', endpoint: 'usage-summary', responseAssemblyMs: 1, sequence: 42 },
     { kind: 'telemetry-write-perf', batchSize: 2, queueMs: [1, 3], workerAckMs: [4, 8], enqueueToCommitMs: [5, 11] },
   ]);

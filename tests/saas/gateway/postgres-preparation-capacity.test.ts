@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { Pool as PgPool, type PoolClient } from 'pg';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
 import { GATEWAY_REQUEST_CAPACITY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/038_gateway_request_capacity.js';
+import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/113_billing_group_rate_counters.js';
 import type { SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import {
   CONCURRENCY_INFLIGHT_HORIZON_SECONDS,
@@ -74,6 +75,11 @@ class CapacityFakeExecutor implements SqlExecutor {
   reservation: Record<string, unknown> | null = null;
   attempt: Record<string, unknown> | null = null;
   insertCount = 0;
+  /** R1: the frozen billing-group snapshot row for this request; null = no row. */
+  snapshot: Record<string, unknown> | null = null;
+  /** R1: requests already counted for the group before this admission. */
+  groupRateRequests = 0;
+  groupRateUpserts = 0;
 
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     this.statements.push({ sql, values });
@@ -101,6 +107,12 @@ class CapacityFakeExecutor implements SqlExecutor {
       ) {
         rows = [{ ...this.reservation }];
       }
+    } else if (normalized.includes('from saas_request_customer_price_snapshots')) {
+      rows = this.snapshot ? [{ ...this.snapshot }] : [];
+    } else if (normalized.includes('insert into saas_billing_group_rate_counters')) {
+      this.groupRateUpserts += 1;
+      this.groupRateRequests += 1;
+      rows = [{ requests: this.groupRateRequests }];
     } else if (normalized.includes('from saas_tenants t')) {
       rows = this.authority ? [{ ...this.authority }] : [];
     } else if (normalized.startsWith('insert into saas_gateway_capacity_reservations')) {
@@ -273,6 +285,83 @@ test('reserve enforces explicit request, token, and concurrency ceilings', async
   assert.equal(concurrencyExceeded.decision, 'reject');
   if (concurrencyExceeded.decision === 'reject') assert.equal(concurrencyExceeded.code, 'rate_limited');
   assert.equal(executor.insertCount, 0);
+});
+
+const platformInput = { ...baseInput, supplyMode: 'platform' as const };
+
+function platformExecutor(): CapacityFakeExecutor {
+  const executor = new CapacityFakeExecutor();
+  executor.authority = { ...allowedAuthority, supply_mode: 'platform' };
+  return executor;
+}
+
+test('group RPM enforcement reads the frozen snapshot outside the fence and upserts the counter inside it', async () => {
+  const executor = platformExecutor();
+  executor.snapshot = { billing_group_id: 'vip', group_rpm_limit: 2 };
+
+  const decision = allowed(await capacity.reserve(executor, platformInput));
+
+  assert.equal(decision.retryBudget, 0);
+  assert.equal(executor.groupRateUpserts, 1, 'a limited group performs exactly one counter upsert');
+  const statements = executor.statements.map(({ sql }) => sql);
+  const snapshotIndex = statements.findIndex((sql) => sql.includes('FROM saas_request_customer_price_snapshots'));
+  const lockIndex = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
+  const counterIndex = statements.findIndex((sql) => sql.includes('saas_billing_group_rate_counters'));
+  const insertIndex = statements.findIndex((sql) => sql.includes('INSERT INTO saas_gateway_capacity_reservations'));
+  assert.ok(snapshotIndex >= 0, 'the frozen snapshot terms must be read');
+  assert.ok(snapshotIndex < lockIndex, 'the per-request snapshot read runs outside the fence');
+  assert.ok(counterIndex > lockIndex, 'the group counter upsert runs inside the fence');
+  assert.ok(counterIndex < insertIndex, 'the group check precedes the reservation INSERT');
+  // The counter never touches billing state (the wallet-table discipline).
+  assert.equal(
+    executor.statements.some(({ sql }) => /saas_wallet|billing_reservation|ledger|saas_billing_groups\b/i.test(sql)),
+    false,
+    'enforcement must never read the mutable group table or billing state',
+  );
+});
+
+test('group RPM enforcement rejects when the frozen ceiling is already consumed', async () => {
+  const executor = platformExecutor();
+  executor.snapshot = { billing_group_id: 'vip', group_rpm_limit: 2 };
+  executor.groupRateRequests = 2;
+
+  const decision = await capacity.reserve(executor, platformInput);
+
+  assert.equal(decision.decision, 'reject');
+  if (decision.decision === 'reject') assert.equal(decision.code, 'rate_limited');
+  assert.equal(executor.insertCount, 0, 'a rejection leaves no reservation');
+  assert.equal(executor.groupRateUpserts, 1, 'the upsert ran and rolls back with the transaction');
+});
+
+test('a frozen zero group RPM ceiling is finite and rejects the first request', async () => {
+  const executor = platformExecutor();
+  executor.snapshot = { billing_group_id: 'vip', group_rpm_limit: 0 };
+
+  const decision = await capacity.reserve(executor, platformInput);
+
+  assert.equal(decision.decision, 'reject');
+  if (decision.decision === 'reject') assert.equal(decision.code, 'rate_limited');
+});
+
+test('a group without a frozen RPM ceiling performs no counter write', async () => {
+  const executor = platformExecutor();
+  executor.snapshot = { billing_group_id: 'default', group_rpm_limit: null };
+
+  allowed(await capacity.reserve(executor, platformInput));
+
+  assert.equal(executor.groupRateUpserts, 0, 'unlimited groups never touch the counter table');
+});
+
+test('a platform admission without its price snapshot blocks fail-closed', async () => {
+  const executor = platformExecutor();
+  executor.snapshot = null;
+
+  const decision = await capacity.reserve(executor, platformInput);
+
+  assert.equal(decision.decision, 'block');
+  if (decision.decision === 'block') assert.equal(decision.code, 'capability_unavailable');
+  assert.equal(executor.insertCount, 0);
+  assert.equal(executor.groupRateUpserts, 0);
 });
 
 test('release is idempotent for confirmed pre-dispatch and retains possible dispatches', async () => {
@@ -1020,6 +1109,121 @@ test('optional PostgreSQL fence proof: different tenants do not serialize on eac
     } finally {
       for (const client of clients) client.release();
     }
+  } finally {
+    if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  }
+});
+
+/*
+ * R1 (roadmap 1.3, phase 2): the billing-group RPM fence proof. The minimal
+ * capacity world gains the frozen snapshot terms (billing_group_id +
+ * group_rpm_limit, exactly the columns the adapter reads) and the migration
+ * 113 counter table; 20 competing platform admissions on one group with a
+ * frozen ceiling of 10 must admit exactly 10 — the counter upsert is
+ * serialized by the admission fence plus the counter row lock, and every
+ * rejection rolls its increment back with the transaction.
+ */
+test('optional PostgreSQL fence proof: group RPM admits exactly the frozen ceiling, never more', {
+  skip: isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL).skipReason,
+}, async () => {
+  const target = isolatedTestDatabaseTarget(process.env.SAAS_CAPACITY_TEST_DATABASE_URL);
+  assert.ok(target.connectionString);
+  const pool = new PgPool({ connectionString: target.connectionString, max: 24 });
+  const schema = `capacity_group_${process.pid}_${randomUUID().replaceAll('-', '')}`;
+  const tenantId = randomUUID();
+  const projectId = randomUUID();
+  const keyId = randomUUID();
+  const GROUP_RPM_LIMIT = 10;
+  const COMPETING = 20;
+  const requestIds = Array.from({ length: COMPETING }, () => randomUUID());
+  const attemptIds = Array.from({ length: COMPETING }, () => randomUUID());
+  let created = false;
+  try {
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    const setup = await pool.connect();
+    try {
+      await setup.query(`SET search_path TO "${schema}"`);
+      await seedMinimalCapacitySchema(setup);
+      await setup.query(BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION.sql);
+      await setup.query(`
+        CREATE TABLE saas_request_customer_price_snapshots (
+          tenant_id uuid NOT NULL,
+          request_id uuid NOT NULL,
+          billing_group_id text,
+          group_rpm_limit integer,
+          UNIQUE (tenant_id, request_id)
+        );
+      `);
+      await seedTwoTenantCapacityWorld(setup, {
+        schema,
+        tenantIds: [tenantId],
+        projectId,
+        keyIds: [keyId],
+        keyRpm: 1000,
+      });
+      // The key must be a platform key for a platform admission.
+      await setup.query(`UPDATE saas_api_keys SET supply_mode = 'platform' WHERE id = $1`, [keyId]);
+      for (const [index, requestId] of requestIds.entries()) {
+        await seedRequestAndAttempt(setup, {
+          tenantId,
+          projectId,
+          keyId,
+          requestId,
+          attemptId: attemptIds[index] ?? randomUUID(),
+        });
+        await setup.query(
+          `INSERT INTO saas_request_customer_price_snapshots (tenant_id, request_id, billing_group_id, group_rpm_limit)
+           VALUES ($1, $2, 'vip', $3)`,
+          [tenantId, requestId, GROUP_RPM_LIMIT],
+        );
+      }
+      // The requests must be platform-side too (the capacity reservation FK
+      // includes supply_mode); seedRequestAndAttempt inserts them as byok.
+      await setup.query(`UPDATE saas_requests SET supply_mode = 'platform' WHERE tenant_id = $1`, [tenantId]);
+    } finally {
+      setup.release();
+    }
+
+    const clients = await Promise.all(Array.from({ length: COMPETING }, () => pool.connect()));
+    const decisions: RequestPreparationDecision<PostgresPreparationCapacityReservation>[] = [];
+    try {
+      const tasks = clients.map(async (client, index) => {
+        await client.query(`SET search_path TO "${schema}"`);
+        await client.query('BEGIN');
+        const decision = await capacity.reserve(new PgExecutor(client), {
+          ...baseInput,
+          supplyMode: 'platform',
+          tenantId,
+          projectId,
+          proxyKeyId: keyId,
+          requestId: requestIds[index],
+          attemptId: attemptIds[index] ?? randomUUID(),
+        });
+        if (decision.decision === 'allow') await client.query('COMMIT');
+        else await client.query('ROLLBACK');
+        return decision;
+      });
+      decisions.push(...(await Promise.all(tasks)));
+    } finally {
+      for (const client of clients) client.release();
+    }
+
+    const admitted = decisions.filter((decision) => decision.decision === 'allow');
+    const rejected = decisions.filter((decision) => decision.decision === 'reject');
+    assert.equal(admitted.length, GROUP_RPM_LIMIT, 'exactly the frozen group ceiling may be admitted');
+    assert.equal(rejected.length, COMPETING - GROUP_RPM_LIMIT);
+    for (const decision of rejected) {
+      if (decision.decision === 'reject') assert.equal(decision.code, 'rate_limited');
+    }
+    // The committed counter holds exactly the admitted requests: every
+    // rejection rolled its increment back with the admission transaction.
+    const counter = await pool.query<{ requests: number }>(
+      `SELECT requests FROM "${schema}".saas_billing_group_rate_counters WHERE group_id = 'vip'`,
+    );
+    assert.equal(counter.rows.length, 1);
+    assert.equal(counter.rows[0]?.requests, GROUP_RPM_LIMIT);
   } finally {
     if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await pool.end();

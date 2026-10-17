@@ -41,6 +41,8 @@ export interface BillingGroupRecord {
   readonly claudeCodeOnly: boolean;
   readonly fallbackGroupId: string | null;
   readonly supportedModelScopes: readonly string[] | null;
+  /** §4.4 composite model routing marker (migration 121). */
+  readonly composite: boolean;
   readonly status: string;
 }
 
@@ -63,6 +65,17 @@ export interface SnapshotBillingGroupTerms {
   readonly rateMultiplier: RationalMultiplier;
   readonly peakApplied: boolean;
   readonly modelPricingOverride: AppliedModelPricingOverride | null;
+  /**
+   * R1 enforcement terms (roadmap 1.3, migration 112). Null means no limit
+   * was in force at admission (also the pre-112 snapshot shape); zero is
+   * finite (blocks everything, the KEY-BUD semantics).
+   */
+  readonly rpmLimit: number | null;
+  readonly dailyLimitMinorUnits: bigint | null;
+  readonly weeklyLimitMinorUnits: bigint | null;
+  readonly monthlyLimitMinorUnits: bigint | null;
+  readonly supportedModelScopes: readonly string[] | null;
+  readonly fallbackGroupId: string | null;
 }
 
 /** A control-plane writable billing group shape. */
@@ -85,6 +98,8 @@ export interface BillingGroupUpsertInput {
   readonly claudeCodeOnly: boolean;
   readonly fallbackGroupId: string | null;
   readonly supportedModelScopes: readonly string[] | null;
+  /** §4.4 composite model routing marker (migration 121). */
+  readonly composite: boolean;
   readonly status: string;
 }
 

@@ -338,15 +338,25 @@ test('GET request metadata preserves known-success financial pending and BYOK no
     updatedAt: '2026-09-28T01:00:02.000Z',
   } satisfies ConsoleRequest;
   const byok = {
-    ...pending, id: 'request-byok', supplyMode: 'byok', financialStatus: 'not_applicable',
+    ...pending,
+    id: 'request-byok',
+    supplyMode: 'byok',
+    financialStatus: 'not_applicable',
   } satisfies ConsoleRequest;
   const detail = {
     ...pending,
-    attempts: [{
-      id: 'attempt-a', sequence: 1, status: 'succeeded', responseStarted: true,
-      responseStartedAt: '2026-09-28T01:00:01.000Z', httpStatus: 200,
-      createdAt: pending.createdAt, updatedAt: pending.updatedAt,
-    }],
+    attempts: [
+      {
+        id: 'attempt-a',
+        sequence: 1,
+        status: 'succeeded',
+        responseStarted: true,
+        responseStartedAt: '2026-09-28T01:00:01.000Z',
+        httpStatus: 200,
+        createdAt: pending.createdAt,
+        updatedAt: pending.updatedAt,
+      },
+    ],
     usageEvents: [],
   } satisfies ConsoleRequestDetail;
   const app = await createTestServer({
@@ -366,14 +376,19 @@ test('GET request metadata preserves known-success financial pending and BYOK no
     },
   });
   const headers = { ...sessionHeaders(), 'x-user-id': 'forged-user', 'x-tenant-id': 'forged-tenant' };
-  const listResponse = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/requests?projectId=project-a`, { headers });
+  const listResponse = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/requests?projectId=project-a`, {
+    headers,
+  });
   assert.equal(listResponse.status, 200);
   const listBody = await listResponse.json();
   assertJsonObject(listBody);
   assertJsonObject(listBody.data);
   assert.ok(Array.isArray(listBody.data.items));
   assert.deepEqual(listBody.data.items, [pending, byok]);
-  const detailResponse = await fetch(`${app.origin}/console/api/v1/tenants/tenant-a/requests/request-pending?projectId=project-a`, { headers });
+  const detailResponse = await fetch(
+    `${app.origin}/console/api/v1/tenants/tenant-a/requests/request-pending?projectId=project-a`,
+    { headers },
+  );
   assert.equal(detailResponse.status, 200); // Metadata read, not money approval.
   const detailBody = await detailResponse.json();
   assertJsonObject(detailBody);

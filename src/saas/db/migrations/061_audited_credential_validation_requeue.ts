@@ -19,27 +19,50 @@ export const REQUEUE_COUNTER_SIGNATURE = 'saas_credential_validation_job_cycle_g
 export const REQUEUE_CYCLE_COLUMNS = ['current_cycle_id', 'cycle_start_attempt_count', 'cycle_attempt_limit'] as const;
 
 const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-const checksum = (migration: SaasMigration) => createHash('sha256').update(migration.name).update('\0').update(migration.sql).digest('hex');
-const originalFunctions = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS.map(({ signature, source }, index) =>
-  `(${quote(signature)}, $original_${index}$${source}$original_${index}$, ${index < 2})`).join(',\n    ');
-const originalBindings = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS.map(([table, name, signature, type, columns]) =>
-  `(${quote(table)}, ${quote(name.slice(0, 63))}, ${quote(signature)}, ${type}, ARRAY[${columns.map(quote).join(',')}]::text[])`).join(',\n    ');
+const checksum = (migration: SaasMigration) =>
+  createHash('sha256').update(migration.name).update('\0').update(migration.sql).digest('hex');
+const originalFunctions = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS.map(
+  ({ signature, source }, index) =>
+    `(${quote(signature)}, $original_${index}$${source}$original_${index}$, ${index < 2})`,
+).join(',\n    ');
+const originalBindings = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS.map(
+  ([table, name, signature, type, columns]) =>
+    `(${quote(table)}, ${quote(name.slice(0, 63))}, ${quote(signature)}, ${type}, ARRAY[${columns.map(quote).join(',')}]::text[])`,
+).join(',\n    ');
 const immutableSource = `\nBEGIN\n  RAISE EXCEPTION 'SaaS records are immutable' USING ERRCODE = '55000';\nEND;\n`;
 // Compose compact JSON from pg_catalog primitives, not jsonb::text (which adds
 // whitespace). Its array order matches the EXISTING JS snapshot helper exactly.
 const compactArray = (expressions: readonly string[]) =>
   `('[' || ${expressions.map((value) => `pg_catalog.to_json(${value})::text`).join(" || ',' || ")} || ']')`;
 const snapshotJson = compactArray([
-  "'model-router-credential-validation-job-v1'::text", 'job_row.id::text', 'job_row.tenant_id::text',
-  'job_row.account_id', 'job_row.credential_id', 'job_row.credential_version', 'job_row.provider_id',
-  'job_row.product_id', 'job_row.credential_type', 'job_row.allowed_models', 'job_row.target_model',
-  'job_row.target_endpoint', 'job_row.capability_version', 'job_row.idempotency_key',
+  "'model-router-credential-validation-job-v1'::text",
+  'job_row.id::text',
+  'job_row.tenant_id::text',
+  'job_row.account_id',
+  'job_row.credential_id',
+  'job_row.credential_version',
+  'job_row.provider_id',
+  'job_row.product_id',
+  'job_row.credential_type',
+  'job_row.allowed_models',
+  'job_row.target_model',
+  'job_row.target_endpoint',
+  'job_row.capability_version',
+  'job_row.idempotency_key',
   `pg_catalog.to_char(job_row.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
 ]);
 const requestJson = compactArray([
-  "'model-router-credential-validation-requeue-v1'::text", 'NEW.tenant_id::text', 'NEW.actor_user_id::text',
-  'NEW.job_id::text', 'NEW.expected_credential_authz_version', 'NEW.expected_lease_generation',
-  'NEW.snapshot_sha256', 'NEW.idempotency_key', 'NEW.request_id', 'NEW.reason_code', 'NEW.reason',
+  "'model-router-credential-validation-requeue-v1'::text",
+  'NEW.tenant_id::text',
+  'NEW.actor_user_id::text',
+  'NEW.job_id::text',
+  'NEW.expected_credential_authz_version',
+  'NEW.expected_lease_generation',
+  'NEW.snapshot_sha256',
+  'NEW.idempotency_key',
+  'NEW.request_id',
+  'NEW.reason_code',
+  'NEW.reason',
   'capability_evidence_sha256',
 ]);
 

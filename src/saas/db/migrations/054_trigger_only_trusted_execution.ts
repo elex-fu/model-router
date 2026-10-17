@@ -34,20 +34,29 @@ const functions = [
 
 // Bind the elevated writer only to the complete, exact 050 trigger set,
 // including binary TG_ARGV identities; no loosely matching trigger names.
-const writerTriggers = [...writerSql.matchAll(
-  /CREATE TRIGGER (saas_\w+)\n  BEFORE INSERT OR UPDATE OR DELETE ON (saas_\w+)\n  FOR EACH ROW EXECUTE FUNCTION saas_prepared_evidence_authorization_writer_fence\(([^;]+)\);/g,
-)].map(([, name, relation, argumentsSql]) => {
+const writerTriggers = [
+  ...writerSql.matchAll(
+    /CREATE TRIGGER (saas_\w+)\n {2}BEFORE INSERT OR UPDATE OR DELETE ON (saas_\w+)\n {2}FOR EACH ROW EXECUTE FUNCTION saas_prepared_evidence_authorization_writer_fence\(([^;]+)\);/g,
+  ),
+].map(([, name, relation, argumentsSql]) => {
   const args = [...argumentsSql!.matchAll(/'([^']+)'/g)].map((match) => match[1]!);
   if (args.length === 0 || args.map((arg) => `'${arg}'`).join(', ') !== argumentsSql) {
     throw new Error('Migration 054 writer trigger arguments drifted');
   }
-  return { name: name!, relation: relation!, args, hex: args.map((arg) => `${Buffer.from(arg, 'utf8').toString('hex')}00`).join('') };
+  return {
+    name: name!,
+    relation: relation!,
+    args,
+    hex: args.map((arg) => `${Buffer.from(arg, 'utf8').toString('hex')}00`).join(''),
+  };
 });
 if (writerTriggers.length !== 28) throw new Error('Migration 054 requires all 28 historical writer triggers');
 
 const bindings = [
-  ...writerTriggers.map(({ name, relation, args, hex }) =>
-    `('${relation}', '${name}', '${targets[0]}', 31, false, ${args.length}, '${hex}')`),
+  ...writerTriggers.map(
+    ({ name, relation, args, hex }) =>
+      `('${relation}', '${name}', '${targets[0]}', 31, false, ${args.length}, '${hex}')`,
+  ),
   `('saas_ledger_transactions', 'saas_ledger_transactions_balanced', '${targets[1]}', 5, true, 0, '')`,
   `('saas_ledger_entries', 'saas_ledger_entries_balanced', '${targets[2]}', 5, true, 0, '')`,
   `('saas_ledger_transactions', 'saas_ledger_transactions_immutable', 'saas_billing_reject_ledger_mutation()', 27, false, 0, '')`,
@@ -55,10 +64,12 @@ const bindings = [
   `('saas_ledger_entries', 'saas_ledger_entries_immutable', 'saas_billing_reject_ledger_mutation()', 27, false, 0, '')`,
   `('saas_ledger_entries', 'saas_ledger_entries_no_truncate', 'saas_billing_reject_ledger_mutation()', 34, false, 0, '')`,
 ].join(',\n      ');
-const expectedFunctions = functions.map(([signature, source, returnType, volatility]) => {
-  const name = signature.slice(0, signature.indexOf('('));
-  return `('${signature}', $expected_${name}$${historicalBody(source, name)}$expected_${name}$, '${returnType}', '${volatility}')`;
-}).join(',\n      ');
+const expectedFunctions = functions
+  .map(([signature, source, returnType, volatility]) => {
+    const name = signature.slice(0, signature.indexOf('('));
+    return `('${signature}', $expected_${name}$${historicalBody(source, name)}$expected_${name}$, '${returnType}', '${volatility}')`;
+  })
+  .join(',\n      ');
 const targetList = targets.map((signature) => `'${signature}'`).join(', ');
 
 const sql = `

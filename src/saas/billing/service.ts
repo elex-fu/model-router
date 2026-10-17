@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../db/advisory-lock-keys.js';
 import type { SqlResult } from '../db/types.js';
 import { isSaasBillingError, SaasBillingError } from './errors.js';
 import {
@@ -344,10 +345,11 @@ export class PlatformWalletLedgerService {
       }
 
       const wallet = await this.lockWallet(executor, normalized.tenantId, normalized.currency);
-      // The wallet row is the transaction fence for every spending-freeze
-      // writer. Read the immutable freeze without requesting UPDATE privilege.
-      // The row is read once here and threaded through walletSummary so the
-      // wallet-locked critical section issues no redundant queries.
+      // The wallet advisory fence (see lockWallet) is the transaction fence for
+      // every spending-freeze writer. Read the immutable freeze without
+      // requesting UPDATE privilege. The row is read once here and threaded
+      // through walletSummary so the fenced critical section issues no
+      // redundant queries.
       const freeze = await this.readFreeze(executor, normalized.tenantId);
       if (freeze) throw new SaasBillingError('SPENDING_FROZEN');
 
@@ -984,17 +986,45 @@ export class PlatformWalletLedgerService {
     return { row, wallet };
   }
 
+  /**
+   * The per-wallet billing fence (R9 P4/P16, roadmap batch 1.2 step 3).
+   *
+   * Every writer of wallet-derived billing state takes ONE EXCLUSIVE
+   * transaction-scoped advisory lock keyed by the wallet's business identity
+   * (tenant + currency) — see saasAdvisoryKey.walletFence — instead of a
+   * `saas_wallets` row FOR UPDATE. Audit of the fence domain (all writers):
+   * this service's reserve/settle/release/markReconciliationPending/
+   * postVerifiedFunding/postVerifiedWalletRefund/postUsageCorrection/
+   * rebuildWalletProjection paths, and the payment refund service's
+   * refund-request path (which inserts `saas_refund_wallet_freezes` under the
+   * same derived key through the shared helper). The spending-freeze gate is
+   * preserved verbatim: freezeTenant/clearFreezeIfResolved run inside this
+   * critical section, and reserve's freeze read happens after the fence, so a
+   * freeze insert can never interleave with an admission freeze check for the
+   * same wallet. The refund fulfillment path deletes its freeze row inside the
+   * same transaction as postVerifiedWalletRefund, which re-enters this fence
+   * (pg_advisory_xact_lock is re-entrant per session).
+   *
+   * The fence is taken BEFORE the wallet row read so the read sees a fresh
+   * READ COMMITTED snapshot after the fence wait (same discipline as the
+   * admission authorization prelock). Tuple locks are gone: an admission no
+   * longer holds a wallet row lock across the capacity fence, and lock waits
+   * no longer queue on the row's tuple lock. `forUpdate=false` callers
+   * (read-only wallet queries) take no fence, exactly as before.
+   */
   private async lockWallet(
     executor: BillingTransactionExecutor,
     tenantId: string,
     currency: string,
     forUpdate = true,
   ): Promise<WalletRow> {
+    if (forUpdate) {
+      await executor.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
+    }
     const result = await executor.query<WalletRow>(
       `SELECT id, tenant_id, currency, posted_balance_minor_units, created_at, updated_at
        FROM saas_wallets
-       WHERE tenant_id = $1 AND currency = $2
-       ${forUpdate ? 'FOR UPDATE' : ''}`,
+       WHERE tenant_id = $1 AND currency = $2`,
       [tenantId, currency],
     );
     const row = result.rows[0];
@@ -1043,11 +1073,11 @@ export class PlatformWalletLedgerService {
     if (activeHoldsMinorUnits + activeRefundFreezesMinorUnits > base.postedBalanceMinorUnits) {
       throw new SaasBillingError('BILLING_STORAGE_ERROR');
     }
-    // Spending-freeze mutations are serialized by the wallet lock in reserve
-    // and settlement paths. The row is immutable, so observation needs no
-    // row lock (and must not require UPDATE privilege). A caller that already
-    // read the freeze inside this wallet-locked transaction passes it here to
-    // avoid a redundant read in the critical section.
+    // Spending-freeze mutations are serialized by the wallet advisory fence
+    // (lockWallet) in reserve and settlement paths. The row is immutable, so
+    // observation needs no row lock (and must not require UPDATE privilege).
+    // A caller that already read the freeze inside this fenced transaction
+    // passes it here to avoid a redundant read in the critical section.
     const freeze = freezeRow === undefined ? await this.readFreeze(executor, wallet.tenant_id) : freezeRow;
     return {
       ...base,
@@ -1305,7 +1335,8 @@ export class PlatformWalletLedgerService {
     }
 
     // Ledger rows are immutable. Unique idempotency/source-order constraints
-    // fence races, and the wallet lock serializes postings for this wallet;
+    // fence races, and the wallet advisory fence serializes postings for this
+    // wallet;
     // SELECT FOR UPDATE would unnecessarily require UPDATE privilege.
     const existing = await executor.query<LedgerTransactionRow>(
       `SELECT id, tenant_id, currency, idempotency_namespace, business_key, source_type,

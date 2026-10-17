@@ -1,4 +1,4 @@
-import { normalizeUsage } from '../../telemetry/usage.js';
+import { type NormalizedUsage, normalizeUsage } from '../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from './dispatch-usage-settlement.js';
 
 export const PROVIDER_JSON_USAGE_MAX_BODY_BYTES = 1024 * 1024;
@@ -21,6 +21,23 @@ export interface ProviderJsonUsageEvidence {
   readonly providerOperation?: string;
 }
 
+/**
+ * §4.1 (roadmap batch 4) media usage extraction seam — the point where the
+ * #16 image / #17 video-audio category transports plug per-unit usage
+ * extraction into the JSON observer. A media extractor receives the parsed
+ * final body and returns the media usage (billingMode/units/sizeTier set;
+ * token counters as reported) or null for an untrusted/absent report.
+ *
+ * The built-in token protocols are unchanged: a media extractor is only
+ * consulted for operations the token observer does not know, so every
+ * existing token observation path is byte-identical.
+ */
+export interface ProviderMediaUsageExtractor {
+  /** Provider operations this extractor serves (e.g. 'images.generations'). */
+  readonly operations: ReadonlySet<string>;
+  extract(body: Record<string, unknown>): NormalizedUsage | null;
+}
+
 export interface ProviderJsonObservedStream {
   readonly body: ReadableStream<Uint8Array>;
   readonly observation: Promise<ProviderJsonUsageObservation>;
@@ -39,26 +56,36 @@ type Fields = Record<string, unknown>;
 // prompt_tokens (and total_tokens == prompt_tokens) with no output counters.
 const counterShapes = {
   openai: {
-    required: ['prompt_tokens', 'completion_tokens'], optional: ['total_tokens', 'cached_tokens'],
+    required: ['prompt_tokens', 'completion_tokens'],
+    optional: ['total_tokens', 'cached_tokens'],
     details: { prompt_tokens_details: ['cached_tokens'], completion_tokens_details: ['reasoning_tokens'] },
   },
   anthropic: {
-    required: ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'], optional: [],
+    required: ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'],
+    optional: [],
     details: { cache_creation: ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'] },
   },
   responses: {
-    required: ['input_tokens', 'output_tokens'], optional: ['total_tokens', 'cached_tokens'],
+    required: ['input_tokens', 'output_tokens'],
+    optional: ['total_tokens', 'cached_tokens'],
     details: { input_tokens_details: ['cached_tokens'], output_tokens_details: ['reasoning_tokens'] },
   },
   embeddings: {
-    required: [], optional: ['prompt_tokens', 'total_tokens'], details: {},
+    required: [],
+    optional: ['prompt_tokens', 'total_tokens'],
+    details: {},
   },
-} satisfies Record<JsonProtocol, {
-  required: readonly string[]; optional: readonly string[]; details: Record<string, readonly string[]>;
-}>;
+} satisfies Record<
+  JsonProtocol,
+  {
+    required: readonly string[];
+    optional: readonly string[];
+    details: Record<string, readonly string[]>;
+  }
+>;
 
 function record(value: unknown): Fields | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Fields : null;
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Fields) : null;
 }
 
 function token(value: unknown): value is number {
@@ -97,7 +124,10 @@ function unambiguousJson(text: string): boolean {
       let closed = false;
       for (index += 1; index < text.length; index += 1) {
         if (text[index] === '\\') index += 1;
-        else if (text[index] === '"') { closed = true; break; }
+        else if (text[index] === '"') {
+          closed = true;
+          break;
+        }
       }
       if (!closed) return false;
       let next = index + 1;
@@ -116,24 +146,41 @@ function unambiguousJson(text: string): boolean {
 function validEnvelope(protocol: JsonProtocol, body: Fields): boolean {
   if (body.error !== undefined && body.error !== null) return false;
   if (protocol === 'openai') {
-    return body.object === 'chat.completion' && Array.isArray(body.choices) && body.choices.length > 0 &&
+    return (
+      body.object === 'chat.completion' &&
+      Array.isArray(body.choices) &&
+      body.choices.length > 0 &&
       body.choices.every((choice: unknown) => {
         const value = record(choice);
-        return value !== null && typeof value.finish_reason === 'string' && value.finish_reason.length > 0 &&
-          record(value.message)?.role === 'assistant';
-      });
+        return (
+          value !== null &&
+          typeof value.finish_reason === 'string' &&
+          value.finish_reason.length > 0 &&
+          record(value.message)?.role === 'assistant'
+        );
+      })
+    );
   }
   if (protocol === 'anthropic') {
-    return body.type === 'message' && body.role === 'assistant' && Array.isArray(body.content) &&
-      typeof body.stop_reason === 'string' && body.stop_reason.length > 0;
+    return (
+      body.type === 'message' &&
+      body.role === 'assistant' &&
+      Array.isArray(body.content) &&
+      typeof body.stop_reason === 'string' &&
+      body.stop_reason.length > 0
+    );
   }
   if (protocol === 'embeddings') {
     // OpenAI embeddings responses are a non-empty list envelope of embedding
     // vectors; vector contents stay opaque byte passthrough to the client.
     return body.object === 'list' && Array.isArray(body.data) && body.data.length > 0;
   }
-  return body.object === 'response' && body.status === 'completed' && Array.isArray(body.output) &&
-    (body.incomplete_details === undefined || body.incomplete_details === null);
+  return (
+    body.object === 'response' &&
+    body.status === 'completed' &&
+    Array.isArray(body.output) &&
+    (body.incomplete_details === undefined || body.incomplete_details === null)
+  );
 }
 
 /**
@@ -166,6 +213,10 @@ function embeddingsTrustedUsage(raw: Fields): NormalSuccessObservedUsage | null 
     cacheWrite1h: null,
     outputTotal: 0,
     reasoningOutput: 0,
+    // §4.1: embeddings are token-billed; the media fields stay neutral.
+    billingMode: 'token',
+    units: null,
+    sizeTier: null,
     status: 'reported',
     source: 'upstream',
     semanticsVersion: 'v1',
@@ -176,8 +227,11 @@ function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObse
   const raw = record(value);
   if (!raw) return null;
   if (protocol === 'embeddings') return embeddingsTrustedUsage(raw);
-  const shape: { required: readonly string[]; optional: readonly string[]; details: Record<string, readonly string[]> } =
-    counterShapes[protocol];
+  const shape: {
+    required: readonly string[];
+    optional: readonly string[];
+    details: Record<string, readonly string[]>;
+  } = counterShapes[protocol];
   const scalarNames = [...shape.required, ...shape.optional];
   if (shape.required.some((name) => !Object.hasOwn(raw, name) || !token(raw[name]))) return null;
   for (const [name, counter] of Object.entries(raw)) {
@@ -186,14 +240,27 @@ function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObse
     } else {
       const allowed = Object.hasOwn(shape.details, name) ? shape.details[name] : undefined;
       const details = record(counter);
-      if (!allowed || !details || Object.entries(details).some(([key, count]) => !allowed.includes(key) || !token(count))) {
+      if (
+        !allowed ||
+        !details ||
+        Object.entries(details).some(([key, count]) => !allowed.includes(key) || !token(count))
+      ) {
         return null;
       }
     }
   }
   const usage = normalizeUsage(protocol, raw);
   if (usage.status !== 'reported' || usage.inputTotal === null || usage.outputTotal === null) return null;
-  for (const name of ['inputTotal', 'inputUncached', 'cacheRead', 'cacheWrite', 'cacheWrite5m', 'cacheWrite1h', 'outputTotal', 'reasoningOutput'] as const) {
+  for (const name of [
+    'inputTotal',
+    'inputUncached',
+    'cacheRead',
+    'cacheWrite',
+    'cacheWrite5m',
+    'cacheWrite1h',
+    'outputTotal',
+    'reasoningOutput',
+  ] as const) {
     if (usage[name] !== null && !token(usage[name])) return null;
   }
   const total = usage.inputTotal + usage.outputTotal;
@@ -204,12 +271,21 @@ function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObse
   if (!Number.isSafeInteger(detailTotal) || detailTotal > (usage.cacheWrite ?? 0)) return null;
   if (usage.cacheWrite5m !== null && usage.cacheWrite1h !== null && detailTotal !== usage.cacheWrite) return null;
   const inputDetails = record(raw[protocol === 'responses' ? 'input_tokens_details' : 'prompt_tokens_details']);
-  if (inputDetails && Object.hasOwn(inputDetails, 'cached_tokens') && Object.hasOwn(raw, 'cached_tokens') &&
-    inputDetails.cached_tokens !== raw.cached_tokens) return null;
+  if (
+    inputDetails &&
+    Object.hasOwn(inputDetails, 'cached_tokens') &&
+    Object.hasOwn(raw, 'cached_tokens') &&
+    inputDetails.cached_tokens !== raw.cached_tokens
+  )
+    return null;
   return Object.freeze({ ...usage, source: 'upstream' });
 }
 
-function parseBody(bytes: Uint8Array, protocol: JsonProtocol): ProviderJsonUsageObservation {
+function parseBody(
+  bytes: Uint8Array,
+  protocol: JsonProtocol | null,
+  mediaExtractor: ProviderMediaUsageExtractor | null,
+): ProviderJsonUsageObservation {
   let body: Fields | null;
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -218,7 +294,25 @@ function parseBody(bytes: Uint8Array, protocol: JsonProtocol): ProviderJsonUsage
   } catch {
     return unknown('malformed_body');
   }
-  if (!body || !validEnvelope(protocol, body)) return unknown('malformed_body');
+  if (!body || (protocol !== null && !validEnvelope(protocol, body))) return unknown('malformed_body');
+  // §4.1 seam: an operation the token observer does not know goes to the
+  // registered media extractor (never silently zero-billed).
+  if (protocol === null) {
+    if (mediaExtractor !== null) {
+      try {
+        const mediaUsage = mediaExtractor.extract(body);
+        if (mediaUsage !== null && mediaUsage.units !== null && mediaUsage.status === 'reported') {
+          return {
+            state: 'reported',
+            usage: Object.freeze({ ...mediaUsage, source: 'upstream' }) as NormalSuccessObservedUsage,
+          };
+        }
+      } catch {
+        return unknown('invalid_usage');
+      }
+    }
+    return unknown('unsupported_protocol_operation');
+  }
   if (!Object.hasOwn(body, 'usage') || body.usage === null) return unknown('no_usage');
   try {
     const usage = trustedUsage(protocol, body.usage);
@@ -230,9 +324,18 @@ function parseBody(bytes: Uint8Array, protocol: JsonProtocol): ProviderJsonUsage
 
 /** Demand-driven, byte-transparent observation. No body or parser error is logged. */
 export function observeProviderJsonUsage(
-  body: ReadableStream<Uint8Array>, evidence: ProviderJsonUsageEvidence,
+  body: ReadableStream<Uint8Array>,
+  evidence: ProviderJsonUsageEvidence,
+  /** §4.1 seam: media usage extraction for operations the token path does not know. */
+  mediaExtractor: ProviderMediaUsageExtractor | null = null,
 ): ProviderJsonObservedStream {
   const protocol = selectedProtocol(evidence);
+  const media =
+    mediaExtractor !== null &&
+    typeof evidence.providerOperation === 'string' &&
+    mediaExtractor.operations.has(evidence.providerOperation)
+      ? mediaExtractor
+      : null;
   const reader = body.getReader();
   let buffer: Uint8Array | undefined;
   let length = 0;
@@ -240,7 +343,9 @@ export function observeProviderJsonUsage(
   let cancelled = false;
   let finalObservation: ProviderJsonUsageObservation | null = null;
   let resolveObservation!: (value: ProviderJsonUsageObservation) => void;
-  const observation = new Promise<ProviderJsonUsageObservation>((resolve) => { resolveObservation = resolve; });
+  const observation = new Promise<ProviderJsonUsageObservation>((resolve) => {
+    resolveObservation = resolve;
+  });
   const settle = (value: ProviderJsonUsageObservation) => {
     if (finalObservation) return;
     buffer = undefined;
@@ -248,44 +353,71 @@ export function observeProviderJsonUsage(
     resolveObservation(value);
   };
   const release = () => {
-    try { reader.releaseLock(); } catch { /* A cancellation may have released the reader already. */ }
+    try {
+      reader.releaseLock();
+    } catch {
+      /* A cancellation may have released the reader already. */
+    }
   };
-  const observedBody = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const next = await reader.read();
-        if (cancelled) { release(); return; }
-        if (next.done) {
-          settle(protocol === null ? unknown('unsupported_protocol_operation') : oversized ? unknown('oversized_body') :
-            parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), protocol));
-          release();
-          controller.close();
-          return;
-        }
-        if (!(next.value instanceof Uint8Array)) throw new TypeError('invalid provider response chunk');
-        if (protocol !== null && !oversized) {
-          if (next.value.byteLength > PROVIDER_JSON_USAGE_MAX_BODY_BYTES - length) {
-            oversized = true;
-            buffer = undefined;
-          } else {
-            buffer ??= new Uint8Array(PROVIDER_JSON_USAGE_MAX_BODY_BYTES);
-            buffer.set(next.value, length);
-            length += next.value.byteLength;
+  const observedBody = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const next = await reader.read();
+          if (cancelled) {
+            release();
+            return;
           }
+          if (next.done) {
+            settle(
+              protocol === null
+                ? media === null
+                  ? unknown('unsupported_protocol_operation')
+                  : oversized
+                    ? unknown('oversized_body')
+                    : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), null, media)
+                : oversized
+                  ? unknown('oversized_body')
+                  : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), protocol, null),
+            );
+            release();
+            controller.close();
+            return;
+          }
+          if (!(next.value instanceof Uint8Array)) throw new TypeError('invalid provider response chunk');
+          if ((protocol !== null || media !== null) && !oversized) {
+            if (next.value.byteLength > PROVIDER_JSON_USAGE_MAX_BODY_BYTES - length) {
+              oversized = true;
+              buffer = undefined;
+            } else {
+              buffer ??= new Uint8Array(PROVIDER_JSON_USAGE_MAX_BODY_BYTES);
+              buffer.set(next.value, length);
+              length += next.value.byteLength;
+            }
+          }
+          controller.enqueue(next.value);
+        } catch (error) {
+          settle(unknown(cancelled ? 'cancelled' : 'stream_error'));
+          try {
+            await reader.cancel(error);
+          } catch {
+            /* Preserve the original stream error. */
+          }
+          release();
+          if (!cancelled) controller.error(error);
         }
-        controller.enqueue(next.value);
-      } catch (error) {
-        settle(unknown(cancelled ? 'cancelled' : 'stream_error'));
-        try { await reader.cancel(error); } catch { /* Preserve the original stream error. */ }
-        release();
-        if (!cancelled) controller.error(error);
-      }
+      },
+      async cancel(reason) {
+        cancelled = true;
+        settle(unknown('cancelled'));
+        try {
+          await reader.cancel(reason);
+        } finally {
+          release();
+        }
+      },
     },
-    async cancel(reason) {
-      cancelled = true;
-      settle(unknown('cancelled'));
-      try { await reader.cancel(reason); } finally { release(); }
-    },
-  }, { highWaterMark: 0 });
+    { highWaterMark: 0 },
+  );
   return { body: observedBody, observation, getObservation: () => finalObservation };
 }

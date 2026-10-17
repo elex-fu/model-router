@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
 import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/102_obs_channel_metrics.js';
 import { OBS_ALERTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/103_obs_alerts.js';
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
 
 test('migration 102 creates the channel metrics tables with the pinned shape', () => {
   assert.equal(OBS_CHANNEL_METRICS_SAAS_MIGRATION.version, 102);
@@ -69,27 +70,29 @@ test('migration 103 creates alert rules and events with the pinned shape', () =>
   assert.match(sql, /CONSTRAINT saas_obs_alert_events_resolved_after_trigger/);
 });
 
-test('migrations 102 and 103 are registered in order ahead of the R1/R2/R4/R5/R5b forwards', () => {
+test('migrations 102 and 103 are registered in order ahead of the later forwards', () => {
   const versions = SAAS_MIGRATIONS.map(({ version }) => version);
-  // 112 (K2 durable fault classification) appends after 111, shifting the
-  // tail indices by one.
-  assert.equal(versions.at(-11), 102);
-  assert.equal(versions.at(-10), 103);
-  assert.equal(SAAS_MIGRATIONS.at(-11), OBS_CHANNEL_METRICS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS.at(-10), OBS_ALERTS_SAAS_MIGRATION);
-  // 104 (R2 embeddings operation), 105 (R1 billing groups), 106 (R4
-  // registration admission), 107 (R3 egress proxies), 108 (R5b OpenCode Go
-  // scheduling), 109 (R6a probe monitors), 110 (F1 platform settings) and
-  // 111 (F4 gemini scheduling) and 112 (K2 durable fault classification)
-  // are the tail; 100 (R5 claude scheduling)
-  // slots in behind 099.
-  assert.equal(versions.at(-9), 104);
-  assert.equal(versions.at(-8), 105);
-  assert.equal(versions.at(-7), 106);
-  assert.equal(versions.at(-6), 107);
-  assert.equal(versions.at(-5), 108);
-  assert.equal(versions.at(-4), 109);
-  assert.equal(versions.at(-3), 110);
-  assert.equal(versions.at(-2), 111);
-  assert.equal(versions.at(-1), 112);
+  const index = versions.indexOf(102);
+  assert.ok(index > 0, '102 is registered');
+  assert.equal(versions[index + 1], 103);
+  assert.equal(SAAS_MIGRATIONS[index], OBS_CHANNEL_METRICS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[index + 1], OBS_ALERTS_SAAS_MIGRATION);
+  // The documented forward chain behind 103: 104 embeddings, 105 billing
+  // groups, 106 registration admission, 107 egress proxies, 108 opencode-go
+  // scheduling, 109 probe monitors, 110 platform settings, 111 gemini
+  // scheduling, 112-114 billing-group limit enforcement, 115 threshold
+  // pause, 116 TLS fingerprints, 117-120 the batch-3 scheduling tails, 121
+  // composite routing, 122 multimodal billing, 123 async image tasks, and (post-merge) 124-129 incl. the K2 durable fault classification.
+  assert.deepEqual(
+    versions.slice(index + 2, index + 22),
+    [104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123],
+  );
+  // 127 (this task) registers directly after 126 (public brand settings).
+  // The absolute tail stays unpinned: later parallel workstreams keep
+  // appending (128 plugins, 125 risk in flight), so only the relative
+  // neighbourhood is a stable contract.
+  const index127 = versions.indexOf(127);
+  assert.ok(index127 > 0, '127 is registered');
+  assert.equal(versions[index127 - 1], 126);
+  assert.equal(SAAS_MIGRATIONS[index127], OBS_ALERT_SILENCES_SAAS_MIGRATION);
 });

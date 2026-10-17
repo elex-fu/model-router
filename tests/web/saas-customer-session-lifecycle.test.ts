@@ -35,7 +35,10 @@ after(() => {
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
   return { promise, resolve, reject };
 }
 
@@ -44,16 +47,23 @@ const currentRevokePath = `${listPath}/session-current/revoke`;
 const otherRevokePath = `${listPath}/session%2Fother/revoke`;
 const othersRevokePath = `${listPath}/revoke-others`;
 const currentSession: SafeCustomerSession = {
-  id: 'session-current', createdAt: '2026-10-03T08:00:00.000Z',
-  expiresAt: '2026-10-10T08:00:00.000Z', revokedAt: null,
-  status: 'active', current: true,
+  id: 'session-current',
+  createdAt: '2026-10-03T08:00:00.000Z',
+  expiresAt: '2026-10-10T08:00:00.000Z',
+  revokedAt: null,
+  status: 'active',
+  current: true,
 };
 const otherSession: SafeCustomerSession = { ...currentSession, id: 'session/other', current: false };
 const revokedOther: SafeCustomerSession = {
-  ...otherSession, status: 'revoked', revokedAt: '2026-10-03T09:00:00.000Z',
+  ...otherSession,
+  status: 'revoked',
+  revokedAt: '2026-10-03T09:00:00.000Z',
 };
 const currentResult = {
-  sessionId: currentSession.id, revokedAt: '2026-10-03T09:00:00.000Z', currentSessionRevoked: true,
+  sessionId: currentSession.id,
+  revokedAt: '2026-10-03T09:00:00.000Z',
+  currentSessionRevoked: true,
 };
 const otherResult = { ...currentResult, sessionId: otherSession.id, currentSessionRevoked: false };
 function response(data: unknown) {
@@ -63,19 +73,25 @@ function response(data: unknown) {
 function wire(handler: (path: string, method: string) => Response | Promise<Response>) {
   const calls: Array<{ path: string; method: string; init: RequestInit }> = [];
   Object.defineProperty(globalThis, 'document', {
-    configurable: true, value: { cookie: 'mr_saas_csrf=lifecycle-test-csrf' },
+    configurable: true,
+    value: { cookie: 'mr_saas_csrf=lifecycle-test-csrf' },
   });
   globalThis.fetch = async (input, init) => {
     const path = String(input);
     const method = init?.method ?? 'GET';
-    assert.ok([listPath, currentRevokePath, otherRevokePath, othersRevokePath].includes(path), `unexpected route ${path}`);
+    assert.ok(
+      [listPath, currentRevokePath, otherRevokePath, othersRevokePath].includes(path),
+      `unexpected route ${path}`,
+    );
     calls.push({ path, method, init: init ?? {} });
     return handler(path, method);
   };
   return calls;
 }
 
-function mountedLifecycle(options: { isCurrent?: () => boolean; onCurrentSessionRevoked?: () => void | Promise<void> } = {}) {
+function mountedLifecycle(
+  options: { isCurrent?: () => boolean; onCurrentSessionRevoked?: () => void | Promise<void> } = {},
+) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClients.add(cache);
   cache.setQueryData(customerSessionsKey, [currentSession, otherSession]);
@@ -100,16 +116,32 @@ test('current revoke starts the real list read, but invalidates before that read
     return read.promise;
   });
   let settled = false;
-  const work = performCustomerSessionMutation({ kind: 'session', sessionId: currentSession.id }, {
-    refresh: saasClient.getCustomerSessions,
-    onCurrentSessionRevoked: () => { invalidated.resolve(undefined); },
-  });
-  void work.then(() => { settled = true; }, () => { settled = true; });
+  const work = performCustomerSessionMutation(
+    { kind: 'session', sessionId: currentSession.id },
+    {
+      refresh: saasClient.getCustomerSessions,
+      onCurrentSessionRevoked: () => {
+        invalidated.resolve(undefined);
+      },
+    },
+  );
+  void work.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
   await invalidated.promise;
   assert.equal(settled, false);
-  assert.deepEqual(calls.map(({ path, method }) => [path, method]), [
-    [currentRevokePath, 'POST'], [listPath, 'GET'],
-  ]);
+  assert.deepEqual(
+    calls.map(({ path, method }) => [path, method]),
+    [
+      [currentRevokePath, 'POST'],
+      [listPath, 'GET'],
+    ],
+  );
   read.resolve(response({ sessions: [] }));
   assert.deepEqual(await work, currentResult);
 });
@@ -118,10 +150,20 @@ test('successful current revoke still invalidates when the list refresh rejects'
   wire(() => response(currentResult));
   const original = new Error('original-refresh-failure');
   let invalidations = 0;
-  await assert.rejects(performCustomerSessionMutation({ kind: 'session', sessionId: currentSession.id }, {
-    refresh: async () => { throw original; },
-    onCurrentSessionRevoked: () => { invalidations += 1; },
-  }), error => error === original);
+  await assert.rejects(
+    performCustomerSessionMutation(
+      { kind: 'session', sessionId: currentSession.id },
+      {
+        refresh: async () => {
+          throw original;
+        },
+        onCurrentSessionRevoked: () => {
+          invalidations += 1;
+        },
+      },
+    ),
+    (error) => error === original,
+  );
   assert.equal(invalidations, 1);
 });
 
@@ -130,10 +172,21 @@ test('refresh rejection remains the original error even if local invalidation al
   const original = new Error('original-refresh-failure');
   const cleanup = new Error('separate-invalidation-failure');
   let invalidations = 0;
-  await assert.rejects(performCustomerSessionMutation({ kind: 'session', sessionId: currentSession.id }, {
-    refresh: async () => { throw original; },
-    onCurrentSessionRevoked: async () => { invalidations += 1; throw cleanup; },
-  }), error => error === original);
+  await assert.rejects(
+    performCustomerSessionMutation(
+      { kind: 'session', sessionId: currentSession.id },
+      {
+        refresh: async () => {
+          throw original;
+        },
+        onCurrentSessionRevoked: async () => {
+          invalidations += 1;
+          throw cleanup;
+        },
+      },
+    ),
+    (error) => error === original,
+  );
   assert.equal(invalidations, 1);
 });
 
@@ -141,10 +194,19 @@ test('a sole invalidation failure is preserved without repeating the server muta
   const calls = wire(() => response(currentResult));
   const original = new Error('original-invalidation-failure');
   let invalidations = 0;
-  await assert.rejects(performCustomerSessionMutation({ kind: 'session', sessionId: currentSession.id }, {
-    refresh: async () => {},
-    onCurrentSessionRevoked: () => { invalidations += 1; throw original; },
-  }), error => error === original);
+  await assert.rejects(
+    performCustomerSessionMutation(
+      { kind: 'session', sessionId: currentSession.id },
+      {
+        refresh: async () => {},
+        onCurrentSessionRevoked: () => {
+          invalidations += 1;
+          throw original;
+        },
+      },
+    ),
+    (error) => error === original,
+  );
   assert.equal(calls.length, 1);
   assert.equal(invalidations, 1);
 });
@@ -153,14 +215,26 @@ test('endpoint rejection remains the original error and never invents a revoke a
   const original = new SaasApiError(403, 'FORBIDDEN', 'not-rendered');
   let reads = 0;
   let invalidations = 0;
-  await assert.rejects(performCustomerSessionMutation({ kind: 'session', sessionId: currentSession.id }, {
-    client: {
-      revokeCustomerSession: async () => { throw original; },
-      revokeOtherCustomerSessions: async () => ({ revokedCount: 0, currentSessionPreserved: true }),
-    },
-    refresh: async () => { reads += 1; },
-    onCurrentSessionRevoked: () => { invalidations += 1; },
-  }), error => error === original);
+  await assert.rejects(
+    performCustomerSessionMutation(
+      { kind: 'session', sessionId: currentSession.id },
+      {
+        client: {
+          revokeCustomerSession: async () => {
+            throw original;
+          },
+          revokeOtherCustomerSessions: async () => ({ revokedCount: 0, currentSessionPreserved: true }),
+        },
+        refresh: async () => {
+          reads += 1;
+        },
+        onCurrentSessionRevoked: () => {
+          invalidations += 1;
+        },
+      },
+    ),
+    (error) => error === original,
+  );
   assert.equal(reads, 0);
   assert.equal(invalidations, 0);
 });
@@ -173,7 +247,11 @@ test('real other-session and revoke-others routes refresh authoritative rows wit
     assert.equal(path, othersRevokePath);
     return response({ revokedCount: 0, currentSessionPreserved: true });
   });
-  const { lifecycle, cache } = mountedLifecycle({ onCurrentSessionRevoked: () => { invalidations += 1; } });
+  const { lifecycle, cache } = mountedLifecycle({
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
+  });
   const one = await lifecycle.perform({ kind: 'session', sessionId: otherSession.id });
   const others = await lifecycle.perform({ kind: 'others' });
   assert.ok(one.status === 'complete');
@@ -182,10 +260,16 @@ test('real other-session and revoke-others routes refresh authoritative rows wit
   assert.deepEqual(others.result, { revokedCount: 0, currentSessionPreserved: true });
   assert.equal(invalidations, 0);
   assert.deepEqual(cache.getQueryData(customerSessionsKey), [currentSession, revokedOther]);
-  assert.deepEqual(calls.map(({ path, method }) => [path, method]), [
-    [otherRevokePath, 'POST'], [listPath, 'GET'], [othersRevokePath, 'POST'], [listPath, 'GET'],
-  ]);
-  for (const call of calls.filter(call => call.method === 'POST')) {
+  assert.deepEqual(
+    calls.map(({ path, method }) => [path, method]),
+    [
+      [otherRevokePath, 'POST'],
+      [listPath, 'GET'],
+      [othersRevokePath, 'POST'],
+      [listPath, 'GET'],
+    ],
+  );
+  for (const call of calls.filter((call) => call.method === 'POST')) {
     assert.equal(call.init.credentials, 'same-origin');
     assert.equal(new Headers(call.init.headers).get('x-csrf-token'), 'lifecycle-test-csrf');
     assert.deepEqual(JSON.parse(String(call.init.body)), {});
@@ -193,23 +277,32 @@ test('real other-session and revoke-others routes refresh authoritative rows wit
 });
 
 test('the server currentSessionRevoked flag, not the selected UI session, controls invalidation', async () => {
-  const calls = wire((_path, method) => method === 'GET'
-    ? response({ sessions: [currentSession] })
-    : response({ ...currentResult, currentSessionRevoked: false }));
+  const calls = wire((_path, method) =>
+    method === 'GET'
+      ? response({ sessions: [currentSession] })
+      : response({ ...currentResult, currentSessionRevoked: false }),
+  );
   let invalidations = 0;
-  const { lifecycle } = mountedLifecycle({ onCurrentSessionRevoked: () => { invalidations += 1; } });
+  const { lifecycle } = mountedLifecycle({
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
+  });
   assert.equal((await lifecycle.perform({ kind: 'session', sessionId: currentSession.id })).status, 'complete');
   assert.equal(invalidations, 0);
-  assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+  assert.equal(calls.filter((call) => call.method === 'POST').length, 1);
 });
 
 test('same-tick duplicate or different-session triggers cannot issue a second mutation', async () => {
   const reply = deferred<Response>();
-  const calls = wire((_path, method) => method === 'POST' ? reply.promise : response({ sessions: [] }));
+  const calls = wire((_path, method) => (method === 'POST' ? reply.promise : response({ sessions: [] })));
   const { lifecycle } = mountedLifecycle();
   const first = lifecycle.perform({ kind: 'session', sessionId: otherSession.id });
   assert.equal(lifecycle.busy, true);
-  assert.deepEqual(await lifecycle.perform({ kind: 'session', sessionId: otherSession.id }), { status: 'ignored', reason: 'busy' });
+  assert.deepEqual(await lifecycle.perform({ kind: 'session', sessionId: otherSession.id }), {
+    status: 'ignored',
+    reason: 'busy',
+  });
   assert.deepEqual(await lifecycle.perform({ kind: 'others' }), { status: 'ignored', reason: 'busy' });
   assert.equal(calls.length, 1);
   reply.resolve(response(otherResult));
@@ -225,7 +318,11 @@ test('network unknown blocks resubmission until an explicit GET confirms the lis
     if (fail) throw new Error('private-network-payload');
     return response(otherResult);
   });
-  const { lifecycle, cache } = mountedLifecycle({ onCurrentSessionRevoked: () => { invalidations += 1; } });
+  const { lifecycle, cache } = mountedLifecycle({
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
+  });
   const attempt = await lifecycle.perform({ kind: 'session', sessionId: otherSession.id });
   assert.ok(attempt.status === 'error');
   assert.equal(attempt.outcome, 'unknown');
@@ -236,19 +333,29 @@ test('network unknown blocks resubmission until an explicit GET confirms the lis
   assert.deepEqual(await lifecycle.perform({ kind: 'others' }), { status: 'ignored', reason: 'refresh-required' });
   assert.equal(calls.length, 1);
   assert.equal((await lifecycle.refreshAndConfirm()).status, 'refreshed');
-  assert.deepEqual(calls.map(call => call.method), ['POST', 'GET']);
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['POST', 'GET'],
+  );
   assert.equal(lifecycle.requiresRefresh, false);
   assert.deepEqual(cache.getQueryData(customerSessionsKey), [currentSession, otherSession]);
   fail = false;
   assert.equal((await lifecycle.perform({ kind: 'session', sessionId: otherSession.id })).status, 'complete');
-  assert.deepEqual(calls.map(call => call.method), ['POST', 'GET', 'POST', 'GET']);
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['POST', 'GET', 'POST', 'GET'],
+  );
   assert.deepEqual(cache.getQueryData(customerSessionsKey), [currentSession, revokedOther]);
 });
 
 test('unreadable acknowledgement and server storage errors remain unknown, without cleanup or retry', async () => {
   let invalidations = 0;
   const calls = wire(() => new Response('{broken', { status: 200 }));
-  const { lifecycle } = mountedLifecycle({ onCurrentSessionRevoked: () => { invalidations += 1; } });
+  const { lifecycle } = mountedLifecycle({
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
+  });
   const malformed = await lifecycle.perform({ kind: 'session', sessionId: currentSession.id });
   assert.ok(malformed.status === 'error');
   assert.equal(malformed.outcome, 'unknown');
@@ -256,9 +363,13 @@ test('unreadable acknowledgement and server storage errors remain unknown, witho
   assert.equal(calls.length, 1);
 
   const other = mountedLifecycle();
-  wire(() => new Response(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message: 'private-storage-payload' } }), {
-    status: 503, headers: { 'content-type': 'application/json' },
-  }));
+  wire(
+    () =>
+      new Response(JSON.stringify({ error: { code: 'INTERNAL_ERROR', message: 'private-storage-payload' } }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      }),
+  );
   const storage = await other.lifecycle.perform({ kind: 'others' });
   assert.ok(storage.status === 'error');
   assert.equal(storage.outcome, 'unknown');
@@ -266,21 +377,34 @@ test('unreadable acknowledgement and server storage errors remain unknown, witho
 });
 
 test('failed explicit refresh keeps unknown blocked and does not repeat the mutation', async () => {
-  const calls = wire(() => { throw new Error('offline'); });
+  const calls = wire(() => {
+    throw new Error('offline');
+  });
   const { lifecycle } = mountedLifecycle();
   await lifecycle.perform({ kind: 'others' });
   assert.equal((await lifecycle.refreshAndConfirm()).status, 'error');
   assert.equal(lifecycle.requiresRefresh, true);
   assert.deepEqual(await lifecycle.perform({ kind: 'others' }), { status: 'ignored', reason: 'refresh-required' });
-  assert.deepEqual(calls.map(call => call.method), ['POST', 'GET']);
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['POST', 'GET'],
+  );
 });
 
 test('known server denial preserves auth and safe status without broadening it to a confirmed revoke', async () => {
   let invalidations = 0;
-  const calls = wire(() => new Response(JSON.stringify({ error: { code: 'FORBIDDEN', message: 'private-denial' } }), {
-    status: 403, headers: { 'content-type': 'application/json' },
-  }));
-  const { lifecycle } = mountedLifecycle({ onCurrentSessionRevoked: () => { invalidations += 1; } });
+  const calls = wire(
+    () =>
+      new Response(JSON.stringify({ error: { code: 'FORBIDDEN', message: 'private-denial' } }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      }),
+  );
+  const { lifecycle } = mountedLifecycle({
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
+  });
   const attempt = await lifecycle.perform({ kind: 'session', sessionId: currentSession.id });
   assert.ok(attempt.status === 'error');
   assert.equal(attempt.outcome, 'rejected');
@@ -293,13 +417,22 @@ test('known server denial preserves auth and safe status without broadening it t
 test('confirmed revoke plus refresh failure preserves original read error, cleans once, and requires a read', async () => {
   let original: unknown;
   let invalidations = 0;
-  const calls = wire((_path, method) => method === 'POST' ? response(currentResult) : Promise.reject(new Error('read-failure')));
+  const calls = wire((_path, method) =>
+    method === 'POST' ? response(currentResult) : Promise.reject(new Error('read-failure')),
+  );
   const lifecycle = createCustomerSessionMutationLifecycle({
     refresh: async () => {
-      try { await saasClient.getCustomerSessions(); }
-      catch (error) { original = error; throw error; }
+      try {
+        await saasClient.getCustomerSessions();
+      } catch (error) {
+        original = error;
+        throw error;
+      }
     },
-    onCurrentSessionRevoked: () => { invalidations += 1; throw new Error('secondary-cleanup-error'); },
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+      throw new Error('secondary-cleanup-error');
+    },
   });
   const attempt = await lifecycle.perform({ kind: 'session', sessionId: currentSession.id });
   assert.ok(attempt.status === 'error');
@@ -307,15 +440,25 @@ test('confirmed revoke plus refresh failure preserves original read error, clean
   assert.equal(attempt.error, original);
   assert.equal(invalidations, 1);
   assert.equal(lifecycle.requiresRefresh, true);
-  assert.deepEqual(await lifecycle.perform({ kind: 'session', sessionId: currentSession.id }), { status: 'ignored', reason: 'refresh-required' });
-  assert.deepEqual(calls.map(call => call.method), ['POST', 'GET']);
+  assert.deepEqual(await lifecycle.perform({ kind: 'session', sessionId: currentSession.id }), {
+    status: 'ignored',
+    reason: 'refresh-required',
+  });
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['POST', 'GET'],
+  );
 });
 
 test('unmounted lifecycle ignores a late current-session acknowledgement and new actions', async () => {
   const reply = deferred<Response>();
   const calls = wire(() => reply.promise);
   let invalidations = 0;
-  const { lifecycle } = mountedLifecycle({ onCurrentSessionRevoked: () => { invalidations += 1; } });
+  const { lifecycle } = mountedLifecycle({
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
+  });
   const pending = lifecycle.perform({ kind: 'session', sessionId: currentSession.id });
   lifecycle.deactivate();
   reply.resolve(response(currentResult));
@@ -333,7 +476,9 @@ test('replacement login invalidates old work before a late callback can clear it
   let invalidations = 0;
   const { lifecycle } = mountedLifecycle({
     isCurrent: () => owner === 'old-login',
-    onCurrentSessionRevoked: () => { invalidations += 1; },
+    onCurrentSessionRevoked: () => {
+      invalidations += 1;
+    },
   });
   const pending = lifecycle.perform({ kind: 'session', sessionId: currentSession.id });
   owner = 'replacement-login';
@@ -352,7 +497,10 @@ test('late list response cannot publish rows into a replacement scope or release
   wire((_path, method) => {
     if (method === 'POST') return response(otherResult);
     reads += 1;
-    if (reads === 1) { oldStarted.resolve(undefined); return oldRead.promise; }
+    if (reads === 1) {
+      oldStarted.resolve(undefined);
+      return oldRead.promise;
+    }
     newStarted.resolve(undefined);
     return newRead.promise;
   });
@@ -389,10 +537,15 @@ test('explicit confirmation reads also use a synchronous single-flight lock', as
 
 test('uncertain and confirmed-local-failure notices preserve safe DOM copy without raw error/secret/XSS payloads', () => {
   const poison = '<script>session-secret-must-not-render</script>';
-  const render = (outcome: 'unknown' | 'confirmed') => renderToStaticMarkup(React.createElement(SessionSecurityErrorNotice, {
-    error: new SaasApiError(0, 'NETWORK', poison, { token: poison }), outcome,
-    onRetry: () => {}, onLogout: async () => {},
-  }));
+  const render = (outcome: 'unknown' | 'confirmed') =>
+    renderToStaticMarkup(
+      React.createElement(SessionSecurityErrorNotice, {
+        error: new SaasApiError(0, 'NETWORK', poison, { token: poison }),
+        outcome,
+        onRetry: () => {},
+        onLogout: async () => {},
+      }),
+    );
   const uncertain = render('unknown');
   assert.match(uncertain, /撤销结果尚未确认/);
   assert.match(uncertain, /不会自动重试撤销/);
@@ -413,7 +566,10 @@ test('real page binds the lifecycle to existing APIs, scoped cache and guarded l
   assert.match(page, /const lifecycle = useMemo\(\(\) => createCustomerSessionMutationLifecycle/);
   assert.match(page, /const attempt = await lifecycle\.perform\(mutation\)/);
   assert.match(page, /const attempt = await lifecycle\.refreshAndConfirm\(\)/);
-  assert.match(page, /const rows = await saasClient\.getCustomerSessions\(\);\s*if \(isCurrent\(\)\) queryClient\.setQueryData\(scopedSessionsKey, rows\)/);
+  assert.match(
+    page,
+    /const rows = await saasClient\.getCustomerSessions\(\);\s*if \(isCurrent\(\)\) queryClient\.setQueryData\(scopedSessionsKey, rows\)/,
+  );
   assert.match(source, /if \(sessionScope\.current !== session\) return;/);
   assert.match(source, /isCurrentSessionScope=\{\(\) => sessionScope\.current === session\}/);
   assert.match(page, /return \(\) => lifecycle\.deactivate\(\)/);

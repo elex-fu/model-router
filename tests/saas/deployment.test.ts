@@ -11,6 +11,7 @@ import {
   MODEL_ROUTER_SAAS_DEPLOYMENT_ID,
   MODEL_ROUTER_SAAS_ENVIRONMENT_ID,
   MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
+  MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
   MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
   MODEL_ROUTER_SAAS_KMS_PROVIDER,
   MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
@@ -298,17 +299,25 @@ test('validation-worker deployment requires only its isolated database, KMS and 
 });
 
 test('worker metadata module is an optional immutable standard deployment declaration, not a default target source', () => {
-  assert.equal(DEPLOYMENT_ENV_VARS.saas.credentialValidationTargetsModule,
-    MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE);
+  assert.equal(
+    DEPLOYMENT_ENV_VARS.saas.credentialValidationTargetsModule,
+    MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE,
+  );
   assert.ok(SAAS_DEPLOYMENT_ENV_NAMES.includes(MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE));
   const missing = parseDeploymentConfig(validationWorkerEnvironment());
   assert.equal(missing.mode, 'managed-saas');
   if (missing.mode !== 'managed-saas') throw new Error('expected managed-saas');
   assert.equal(Object.hasOwn(missing, 'credentialValidationTargetsModule'), false);
-  for (const specifier of ['@operator/reviewed-targets', './reviewed-targets.mjs', 'file:///operator/reviewed-targets.mjs']) {
-    const environment = Object.freeze(validationWorkerEnvironment({
-      [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: specifier,
-    }));
+  for (const specifier of [
+    '@operator/reviewed-targets',
+    './reviewed-targets.mjs',
+    'file:///operator/reviewed-targets.mjs',
+  ]) {
+    const environment = Object.freeze(
+      validationWorkerEnvironment({
+        [MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE]: specifier,
+      }),
+    );
     const config = parseDeploymentConfig(environment);
     assert.equal(config.mode, 'managed-saas');
     if (config.mode !== 'managed-saas') throw new Error('expected managed-saas');
@@ -322,9 +331,14 @@ test('metadata module declarations fail closed in local mode and every non-worke
   const name = MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE;
   const specifier = 'operator-target-module-value-must-not-be-public';
   assertDeploymentError(() => parseDeploymentConfig({ [name]: specifier }), 'SAAS_SETTINGS_REQUIRE_MANAGED_MODE');
-  assertDeploymentError(() => parseDeploymentConfig({
-    [MODEL_ROUTER_DEPLOYMENT_MODE]: 'local', [name]: specifier,
-  }), 'LOCAL_MODE_HAS_SAAS_SETTINGS');
+  assertDeploymentError(
+    () =>
+      parseDeploymentConfig({
+        [MODEL_ROUTER_DEPLOYMENT_MODE]: 'local',
+        [name]: specifier,
+      }),
+    'LOCAL_MODE_HAS_SAAS_SETTINGS',
+  );
   const nonWorkers = [
     managedEnvironment(),
     managedEnvironment({ [MODEL_ROUTER_SAAS_WORKLOAD_ROLE]: 'combined' }),
@@ -332,26 +346,32 @@ test('metadata module declarations fail closed in local mode and every non-worke
     gatewayEnvironment(),
   ];
   for (const environment of nonWorkers) {
-    assert.throws(() => parseDeploymentConfig({ ...environment, [name]: specifier }), (error: unknown) => {
-      assert.ok(error instanceof DeploymentConfigError);
-      assert.equal(error.code, 'UNEXPECTED_WORKLOAD_SETTING');
-      assert.equal(error.variableName, name);
-      assert.equal(error.message.includes(specifier), false);
-      return true;
-    });
+    assert.throws(
+      () => parseDeploymentConfig({ ...environment, [name]: specifier }),
+      (error: unknown) => {
+        assert.ok(error instanceof DeploymentConfigError);
+        assert.equal(error.code, 'UNEXPECTED_WORKLOAD_SETTING');
+        assert.equal(error.variableName, name);
+        assert.equal(error.message.includes(specifier), false);
+        return true;
+      },
+    );
   }
 });
 
 test('explicit empty or mistyped worker metadata setting is rejected without echoing its value', () => {
   const name = MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE;
   for (const value of ['', ' ', ' private-target-module-secret ', null, 1]) {
-    assert.throws(() => parseDeploymentConfig(validationWorkerEnvironment({ [name]: value as never })), (error: unknown) => {
-      assert.ok(error instanceof DeploymentConfigError);
-      assert.equal(error.code, 'INVALID_PROVIDER_MODULE');
-      assert.equal(error.variableName, name);
-      assert.equal(error.message.includes('private-target-module-secret'), false);
-      return true;
-    });
+    assert.throws(
+      () => parseDeploymentConfig(validationWorkerEnvironment({ [name]: value as never })),
+      (error: unknown) => {
+        assert.ok(error instanceof DeploymentConfigError);
+        assert.equal(error.code, 'INVALID_PROVIDER_MODULE');
+        assert.equal(error.variableName, name);
+        assert.equal(error.message.includes('private-target-module-secret'), false);
+        return true;
+      },
+    );
   }
 });
 
@@ -360,14 +380,20 @@ test('metadata declaration uses own data without invoking getters or leaking con
   const diagnostic = 'private-deployment-metadata-secret https://private-deployment-target.example.test/module.mjs';
   let getterReads = 0;
   const accessor = Object.defineProperty(validationWorkerEnvironment(), name, {
-    get() { getterReads += 1; throw new Error(diagnostic); },
+    get() {
+      getterReads += 1;
+      throw new Error(diagnostic);
+    },
   });
   assertDeploymentError(() => parseDeploymentConfig(accessor), 'INVALID_PROVIDER_MODULE', new RegExp(name));
   assert.equal(getterReads, 0);
   const ownData = validationWorkerEnvironment({ [name]: '@operator/reviewed-targets' });
   const guarded = new Proxy(ownData, {
     get(value, key, receiver) {
-      if (key === name) { getterReads += 1; throw new Error(diagnostic); }
+      if (key === name) {
+        getterReads += 1;
+        throw new Error(diagnostic);
+      }
       return Reflect.get(value, key, receiver);
     },
   });
@@ -382,13 +408,16 @@ test('metadata declaration uses own data without invoking getters or leaking con
       return Reflect.getOwnPropertyDescriptor(value, key);
     },
   });
-  assert.throws(() => parseDeploymentConfig(failedDescriptor), (error: unknown) => {
-    assert.ok(error instanceof DeploymentConfigError);
-    assert.equal(error.code, 'INVALID_PROVIDER_MODULE');
-    assert.equal(error.message.includes('private-deployment'), false);
-    assert.equal(Object.hasOwn(error, 'cause'), false);
-    return true;
-  });
+  assert.throws(
+    () => parseDeploymentConfig(failedDescriptor),
+    (error: unknown) => {
+      assert.ok(error instanceof DeploymentConfigError);
+      assert.equal(error.code, 'INVALID_PROVIDER_MODULE');
+      assert.equal(error.message.includes('private-deployment'), false);
+      assert.equal(Object.hasOwn(error, 'cause'), false);
+      return true;
+    },
+  );
 });
 
 test('production gateway requires its isolated database, listener, context, runtime module, and decrypt-only KMS module', () => {
@@ -488,6 +517,79 @@ test('gateway rejects control-plane and other-role-only settings', () => {
     'UNEXPECTED_WORKLOAD_SETTING',
     new RegExp(MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE),
   );
+});
+
+test('gateway accepts an optional gateway-scoped Redis URL and keeps the control-plane pair rejected', () => {
+  assert.equal(DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl, MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL);
+  assert.ok(SAAS_DEPLOYMENT_ENV_NAMES.includes(MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL));
+
+  // Absent by default: no gatewayRedisUrl key, pure-PG affinity path.
+  const absent = parseDeploymentConfig(gatewayEnvironment({ NODE_ENV: 'production' }));
+  assert.equal(absent.mode, 'managed-saas');
+  if (absent.mode !== 'managed-saas') throw new Error('expected managed-saas');
+  assert.equal(Object.hasOwn(absent, 'gatewayRedisUrl'), false);
+
+  // Present and valid: retained on the frozen contract, redis/rediss only.
+  for (const url of ['redis://redis.example:6379', 'rediss://redis-user:redis-secret@redis.example:6380/2']) {
+    const config = parseDeploymentConfig(
+      gatewayEnvironment({ NODE_ENV: 'production', [MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL]: url }),
+    );
+    assert.equal(config.mode, 'managed-saas');
+    if (config.mode !== 'managed-saas') throw new Error('expected managed-saas');
+    assert.equal(config.gatewayRedisUrl, url);
+    assert.equal(config.redisUrl, undefined, 'the control-plane Redis URL stays rejected for the gateway');
+    assert.equal(config.redisProviderModule, undefined);
+  }
+
+  // Invalid schemes fail closed without echoing the value.
+  assertDeploymentError(
+    () =>
+      parseDeploymentConfig(
+        gatewayEnvironment({ [MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL]: 'http://redis.example/private-secret' }),
+      ),
+    'INVALID_REDIS_URL',
+    new RegExp(MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL),
+  );
+  // The control-plane spelling never becomes gateway-legal through the back door.
+  assertDeploymentError(
+    () =>
+      parseDeploymentConfig(
+        gatewayEnvironment({
+          [MODEL_ROUTER_SAAS_REDIS_URL]: 'redis://redis.example',
+          [MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL]: 'redis://redis.example',
+        }),
+      ),
+    'UNEXPECTED_WORKLOAD_SETTING',
+    new RegExp(MODEL_ROUTER_SAAS_REDIS_URL),
+  );
+});
+
+test('the gateway-scoped Redis URL is rejected in local mode and every non-gateway workload', () => {
+  const name = MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL;
+  const url = 'redis://redis-user:redis-secret@redis.example:6379';
+  assertDeploymentError(() => parseDeploymentConfig({ [name]: url }), 'SAAS_SETTINGS_REQUIRE_MANAGED_MODE');
+  assertDeploymentError(
+    () => parseDeploymentConfig({ [MODEL_ROUTER_DEPLOYMENT_MODE]: 'local', [name]: url }),
+    'LOCAL_MODE_HAS_SAAS_SETTINGS',
+  );
+  const nonGateways = [
+    { label: 'combined', environment: managedEnvironment() },
+    { label: 'control-plane', environment: managedEnvironment({ [MODEL_ROUTER_SAAS_WORKLOAD_ROLE]: 'control-plane' }) },
+    { label: 'validation-worker', environment: validationWorkerEnvironment() },
+  ];
+  for (const scenario of nonGateways) {
+    assert.throws(
+      () => parseDeploymentConfig({ ...scenario.environment, [name]: url }),
+      (error: unknown) => {
+        assert.ok(error instanceof DeploymentConfigError);
+        assert.equal(error.code, 'UNEXPECTED_WORKLOAD_SETTING');
+        assert.equal(error.variableName, name);
+        assert.equal(error.message.includes('redis-secret'), false);
+        return true;
+      },
+      scenario.label,
+    );
+  }
 });
 
 test('binds provider credential sealing to explicit deployment and environment identities', () => {

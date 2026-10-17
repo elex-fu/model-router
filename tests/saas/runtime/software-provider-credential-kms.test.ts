@@ -99,9 +99,7 @@ test('the pilot-only warning is emitted exactly once per process', async (t) => 
   const emitWarning = t.mock.method(process, 'emitWarning');
   await loadProviderCredentialSealingKms({ env: sealEnv(), importer: softwareImporter });
   await loadGatewayProviderCredentialUnsealingKms({ env: gatewayEnv(), importer: softwareImporter });
-  const pilotWarnings = emitWarning.mock.calls.filter((call) =>
-    String(call.arguments[0]).includes('pilot-only'),
-  );
+  const pilotWarnings = emitWarning.mock.calls.filter((call) => String(call.arguments[0]).includes('pilot-only'));
   assert.equal(pilotWarnings.length, 1);
   assert.match(String(pilotWarnings[0]?.arguments[0]), /must not serve a charging production environment/);
 });
@@ -145,7 +143,8 @@ test('decryption fails closed on a mismatched encryption context, key id or tamp
       ciphertextBlob: generated.ciphertextBlob,
       encryptionContext: { ...CONTEXT, owner: 'tenant-2' },
     }),
-    (error: unknown) => error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
+    (error: unknown) =>
+      error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
   );
   await assert.rejects(
     gateway.decryptDataKey({
@@ -153,18 +152,23 @@ test('decryption fails closed on a mismatched encryption context, key id or tamp
       ciphertextBlob: generated.ciphertextBlob,
       encryptionContext: CONTEXT,
     }),
-    (error: unknown) => error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
+    (error: unknown) =>
+      error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
   );
   const tampered = Buffer.from(generated.ciphertextBlob);
   tampered[tampered.byteLength - 1] = tampered[tampered.byteLength - 1]! ^ 1;
   await assert.rejects(
     gateway.decryptDataKey({ kmsKeyId: KEY_ID_V1, ciphertextBlob: tampered, encryptionContext: CONTEXT }),
-    (error: unknown) => error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
+    (error: unknown) =>
+      error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
   );
   // Safe errors carry no request or key detail.
   const failure = await gateway
     .decryptDataKey({ kmsKeyId: KEY_ID_V1, ciphertextBlob: tampered, encryptionContext: CONTEXT })
-    .then(() => undefined, (error: unknown) => error as Error);
+    .then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
   assert.ok(failure);
   for (const leaked of [MASTER_KEY_V1, KEY_ID_V1, 'tenant-1']) {
     assert.equal(failure.message.includes(leaked), false);
@@ -182,7 +186,8 @@ test('decryption under a ring without the wrapping key fails closed', async () =
   assert.ok(other);
   await assert.rejects(
     other.decryptDataKey({ kmsKeyId: KEY_ID_V1, ciphertextBlob: generated.ciphertextBlob, encryptionContext: CONTEXT }),
-    (error: unknown) => error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
+    (error: unknown) =>
+      error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
   );
   await generated.close();
   await other.close();
@@ -243,8 +248,13 @@ test('rewrap rotates a wrapped key to the current master key without exposing pl
 
   // The old context no longer authenticates the rotated blob.
   await assert.rejects(
-    gateway.decryptDataKey({ kmsKeyId: KEY_ID_V2, ciphertextBlob: reencrypted.ciphertextBlob, encryptionContext: CONTEXT }),
-    (error: unknown) => error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
+    gateway.decryptDataKey({
+      kmsKeyId: KEY_ID_V2,
+      ciphertextBlob: reencrypted.ciphertextBlob,
+      encryptionContext: CONTEXT,
+    }),
+    (error: unknown) =>
+      error instanceof ProviderCredentialUnsealingKmsError && error.code === 'DATA_KEY_DECRYPTION_FAILED',
   );
 
   // A source-context mismatch rejects the rewrap before any plaintext exists.

@@ -197,6 +197,33 @@ test('migration 050 is registered in append order and remains forward-only', () 
       110,
       111,
       112,
+      113,
+      114,
+      115,
+      116,
+      117,
+      118,
+      119,
+      120,
+      // Batch-4 §4.4 composite model routing (task #18).
+      121,
+      // Batch-4 §4.1 multimodal billing dimensions (task #15).
+      122,
+      // Batch-4 §4.2 async image tasks (task #16).
+      123,
+      // Batch-4 §4.3 async video tasks (task #17) — create-time
+      // snapshot + binding + billing claim.
+      124,
+      // Batch-5 §5.4 content risk control (task #19).
+      125,
+      // Batch-5 §5.2 public brand settings (task #20).
+      126,
+      // Batch-5 §5.6 alert silences/report state (task #23).
+      127,
+      // Batch-5 §5.1 plugin system (task #24).
+      128,
+      // K2 durable fault classification (renumbered from main's 112).
+      129,
     ],
   );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);
@@ -511,8 +538,25 @@ test('migration 050 stays within the existing gateway privilege contract', () =>
     'saas_customer_price_versions',
     'saas_supplier_cost_versions',
   ]) {
-    assert.equal(gatewayUpdateTables.has(table), false, `${table} must not receive UPDATE merely to support FOR SHARE`);
+    // Sanctioned exceptions: 115 (R-dormant batch 2.2) adds the scheduler's
+    // lazy scheduling-threshold pause columns, and 125 (batch-5 §5.4) risk
+    // control's auto-ban seam flips the user's disabled_at/updated_at. Every
+    // other table column stays gateway-read-only (the 058 precedent).
+    const sanctioned = new Set(['saas_tenant_provider_accounts', 'saas_platform_provider_accounts', 'saas_users']);
+    assert.equal(
+      sanctioned.has(table) || gatewayUpdateTables.has(table) === false,
+      true,
+      `${table} must not receive UPDATE merely to support FOR SHARE`,
+    );
   }
+  // The 125 saas_users exception stays column-exact: only the auto-ban pair.
+  assert.deepEqual(
+    SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+      ([grantTable, , privilege]) => grantTable === 'saas_users' && privilege === 'UPDATE',
+    ).map(([, column]) => column),
+    ['disabled_at', 'updated_at'],
+    'saas_users gateway UPDATE stays limited to the 125 auto-ban columns',
+  );
   assert.match(
     migration.sql,
     /CREATE TRIGGER saas_tenants_prepared_evidence_authorization_fence\s+BEFORE INSERT OR UPDATE OR DELETE ON saas_tenants/,

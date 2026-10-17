@@ -170,6 +170,8 @@ export interface ProviderAccountSchedulerEligibilityPort {
     readonly protocol: GatewayProtocol;
     readonly route?: RequestPreparationRouteAuthority;
     readonly billingGroupId?: string;
+    /** §4.4 composite: revalidate against the resolved target platform. */
+    readonly composite?: ProviderAccountSchedulerCompositeContext;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerEligibilityDecision>;
 }
@@ -262,6 +264,20 @@ export interface ProviderAccountSchedulerAffinityAllowed {
   readonly accountId: string | null;
 }
 
+/**
+ * Roadmap batch 2 §2.1 (task #5) — the shouldClearStickySession semantics:
+ * the authority held a binding for this request's affinity reference,
+ * revalidated its target against the caller's eligible snapshot, found it
+ * unschedulable (unhealthy, cooling down, or revoked), and CLEARED the
+ * binding. The selection must degrade to load balancing instead of failing
+ * closed — unlike 'allow' with an account that is no longer eligible, which
+ * stays a hard block (an authority that recommends a target it did not
+ * validate against the snapshot is an inconsistency, not a clean downgrade).
+ */
+export interface ProviderAccountSchedulerAffinityStale {
+  readonly decision: 'stale';
+}
+
 export interface ProviderAccountSchedulerAffinityBlocked {
   readonly decision: 'block';
   readonly reason: string;
@@ -269,12 +285,16 @@ export interface ProviderAccountSchedulerAffinityBlocked {
 
 export type ProviderAccountSchedulerAffinityDecision =
   | ProviderAccountSchedulerAffinityAllowed
+  | ProviderAccountSchedulerAffinityStale
   | ProviderAccountSchedulerAffinityBlocked;
 
 export interface ProviderAccountSchedulerAffinityPort {
   /**
    * Resolves only a server-validated opaque affinity reference. The returned
    * account is merely a preference and is checked again against all filters.
+   * A 'stale' decision means the authority found a binding, verified its
+   * target against eligibleAccountIds, cleared it, and the caller must
+   * degrade to load balancing (batch 2 §2.1 shouldClearStickySession).
    */
   resolve(input: {
     readonly caller: RequestPreparationCaller;
@@ -384,6 +404,12 @@ export interface ProviderAccountSchedulerInput {
    * it from anything client-controlled beyond these forwarded signals.
    */
   readonly claudeCodeClient?: ProviderAccountSchedulerClientEvidence;
+  /**
+   * §4.4 composite: the authority adapter's resolved composite decision.
+   * Present only when the request's billing group is composite; absent keeps
+   * the selection path byte-identical (the golden-fixture red line).
+   */
+  readonly composite?: ProviderAccountSchedulerCompositeContext;
 }
 
 /**
@@ -396,6 +422,27 @@ export interface ProviderAccountSchedulerClientEvidence {
   readonly path: string | null;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: unknown;
+}
+
+/**
+ * Batch 4 §4.4 composite model routing: the resolved composite decision for
+ * a request whose billing group is marked composite. Set only by a trusted
+ * server adapter (the PostgreSQL preparation authority resolved it from the
+ * migration-121 registry plus the group's account catalog) — never client
+ * input. When present, eligibility revalidation expects the candidate on the
+ * resolved target platform/product/model/endpoint instead of the route
+ * config's nominal pin (the platform-column predicates in the eligibility
+ * SQL narrow through the candidate's own provider facts, the model_scopes
+ * pattern). Structurally identical to RequestPreparationCompositeRoute.
+ */
+export interface ProviderAccountSchedulerCompositeContext {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
 }
 
 export interface ProviderAccountSchedulerPort {
@@ -1190,6 +1237,26 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       ) {
         return schedulerBlock('scheduler input is invalid');
       }
+      // §4.4 composite: the context is server-owned and complete or absent;
+      // composite groups are platform pools (the F2 precedent), so a BYOK or
+      // partial composite context is invalid input, never a fallback to the
+      // nominal route pin.
+      const composite = input.composite;
+      if (composite !== undefined) {
+        if (
+          !isRecord(composite) ||
+          !nonEmpty(composite.billingGroupId) ||
+          (composite.source !== 'route' && composite.source !== 'account_model' && composite.source !== 'detector') ||
+          (composite.routeId !== null && composite.routeId !== undefined && !nonEmpty(composite.routeId)) ||
+          !nonEmpty(composite.targetPlatform) ||
+          !nonEmpty(composite.productId) ||
+          !nonEmpty(composite.upstreamModel) ||
+          !nonEmpty(composite.endpoint) ||
+          input.caller.supplyMode !== 'platform'
+        ) {
+          return schedulerBlock('scheduler composite route context is invalid');
+        }
+      }
       if (!validAffinityContext(input.scheduling)) return schedulerBlock('scheduler affinity context is invalid');
       if (!Array.isArray(input.candidates) || input.candidates.length === 0) {
         return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
@@ -1255,6 +1322,23 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       try {
         let affinityAccountId: string | null = null;
         if (hasAffinityReference(input.scheduling)) {
+          /*
+           * Roadmap batch 2 §2.1 (task #5) — the sticky three-state gate
+           * (sub2api CheckWindowCostSchedulability semantics, MVP scope):
+           *  1. a sticky hit whose account is healthy and not cooling down
+           *     is already inside `eligible` (the check chain ran first) and
+           *     is selected directly — model routing beats stickiness beats
+           *     load balancing;
+           *  2. a binding whose target is no longer schedulable is cleared
+           *     by the authority ('stale') and the selection DEGRADES to the
+           *     normal ranking chain — the session re-binds to whatever the
+           *     load balancer picks instead of rejecting the request;
+           *  3. no binding at all → the normal ranking chain.
+           * The sub2api wait/queue state and the window-cost reserve band
+           * (limit+reserve) are deliberately NOT implemented here: they need
+           * the 5h window-cost aggregation pipeline owned by task #6, so
+           * this branch only distinguishes schedulable / cleared / absent.
+           */
           const scope = affinityScopeFromSelection(input, eligible);
           if (!scope) return schedulerBlock('provider account affinity route scope is unavailable or stale');
           const affinity = await this.dependencies.affinity?.resolve({
@@ -1266,14 +1350,20 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
             scope,
             eligibleAccountIds: eligible.map(({ accountId }) => accountId),
           });
-          if (!isRecord(affinity) || (affinity.decision !== 'allow' && affinity.decision !== 'block')) {
+          if (
+            !isRecord(affinity) ||
+            (affinity.decision !== 'allow' && affinity.decision !== 'block' && affinity.decision !== 'stale')
+          ) {
             return schedulerBlock('provider account affinity authority returned an invalid decision');
           }
           if (affinity.decision === 'block') return schedulerBlock(affinity.reason);
-          if (affinity.accountId !== null && !nonEmpty(affinity.accountId)) {
-            return schedulerBlock('provider account affinity returned an invalid account');
+          if (affinity.decision === 'allow') {
+            if (affinity.accountId !== null && !nonEmpty(affinity.accountId)) {
+              return schedulerBlock('provider account affinity returned an invalid account');
+            }
+            affinityAccountId = affinity.accountId;
           }
-          affinityAccountId = affinity.accountId;
+          // 'stale': the cleared binding degrades to load balancing below.
         }
 
         /*
@@ -1404,6 +1494,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         protocol: input.protocol,
         route: input.route,
         billingGroupId: input.billingGroupId,
+        composite: input.composite,
         now,
       });
       if (

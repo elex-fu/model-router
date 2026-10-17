@@ -308,8 +308,8 @@ program
       const { parseByteSize } = await import('./size.js');
       try {
         maxBodyBytes = parseByteSize(options.maxBodySize);
-      } catch (err: any) {
-        console.error(err.message);
+      } catch (err: unknown) {
+        console.error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
     }
@@ -374,8 +374,8 @@ program
     try {
       process.kill(pid, 'SIGTERM');
       console.log(`Sent SIGTERM to pid ${pid}`);
-    } catch (err: any) {
-      console.error(`Failed to signal pid ${pid}: ${err.message}`);
+    } catch (err: unknown) {
+      console.error(`Failed to signal pid ${pid}: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
@@ -418,8 +418,8 @@ program
     let patch: Partial<import('../config/types.js').ProxyKey>;
     try {
       patch = parseCreateOptions(options);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     store.addProxyKey({
@@ -459,8 +459,8 @@ program
     let patch: Partial<import('../config/types.js').ProxyKey>;
     try {
       patch = applyUpdateOptions(options, existing);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     store.updateProxyKey(name, patch);
@@ -770,7 +770,7 @@ program
         body: JSON.stringify(body),
       });
       const ms = Date.now() - start;
-      let snippet: any = null;
+      let snippet: unknown = null;
       try {
         snippet = await res.json();
       } catch {
@@ -783,9 +783,11 @@ program
       } else {
         console.log('OK');
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       const ms = Date.now() - start;
-      console.error(`${upstreamName} ${u.baseUrl}: network error after ${ms}ms — ${err.message}`);
+      console.error(
+        `${upstreamName} ${u.baseUrl}: network error after ${ms}ms — ${err instanceof Error ? err.message : String(err)}`,
+      );
       process.exit(1);
     }
   });
@@ -801,7 +803,11 @@ program
   .action(async (model, message, options) => {
     const rawV2 = v2Config(options);
     const store = rawV2 ? undefined : getStore(options);
-    const cfg = rawV2 ?? store!.load();
+    const cfg = rawV2 ?? store?.load();
+    if (cfg === undefined) {
+      console.error('Unable to load configuration');
+      process.exit(1);
+    }
     const bind = cfg.server.bindAddress ?? '127.0.0.1';
     const port = cfg.server.port ?? 15005;
     const baseUrl = `http://${bind}:${port}`;
@@ -825,14 +831,14 @@ program
         return;
       }
     } else if (!proxyKey) {
-      const keys = store!.listProxyKeys().filter((k) => k.enabled);
+      const keys = store?.listProxyKeys().filter((k) => k.enabled) ?? [];
       if (keys.length === 0) {
         console.error('No enabled proxy keys found. Create one with key:create or pass --key');
         process.exit(1);
       }
       proxyKey = keys[0].key;
     } else {
-      const found = store!.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
+      const found = store?.listProxyKeys().find((k) => k.key === proxyKey || k.name === proxyKey);
       if (!found) {
         console.error(`Proxy key "${options.key}" not found`);
         process.exit(1);
@@ -920,7 +926,11 @@ program
         }
         console.log(`\n✓ Streaming complete (${Date.now() - start}ms)`);
       } else {
-        const data = (await res.json()) as any;
+        const data = (await res.json()) as {
+          content?: Array<{ text?: string }>;
+          choices?: Array<{ message?: { content?: string } }>;
+          usage?: unknown;
+        };
         const ms = Date.now() - start;
         if (protocol === 'anthropic') {
           const text = data.content?.map((b: { text?: string }) => b.text).join('') ?? '';
@@ -932,8 +942,8 @@ program
           console.log(`\n✓ ${ms}ms | usage: ${JSON.stringify(data.usage ?? {})}`);
         }
       }
-    } catch (err: any) {
-      console.error(`Request failed: ${err.message}`);
+    } catch (err: unknown) {
+      console.error(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
   });
@@ -1007,8 +1017,8 @@ program
     let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     const store = await logStoreFromConfig(options.config);
@@ -1039,8 +1049,8 @@ program
     let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     const store = await logStoreFromConfig(options.config);
@@ -1079,8 +1089,8 @@ program
     let range: { fromDate: string; toDate: string };
     try {
       range = resolveSinceRange(options.since, today);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err: unknown) {
+      console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
     const store = await logStoreFromConfig(options.config);

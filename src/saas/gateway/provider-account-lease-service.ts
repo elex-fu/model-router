@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
+import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import type {
   PreparedEvidenceLease,
   PreparedEvidenceLeaseProvider,
@@ -312,9 +312,10 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     // SELECT-only for the gateway: it must not require a tuple-lock UPDATE ACL.
     // All live acquirers must share this fence; a legacy tuple-lock-only
     // acquirer does not participate and is not safe to mix during rollout.
-    const key = input.ownerKind === 'tenant'
-      ? saasAdvisoryKey.tenantProviderAccount(input.tenantId, input.accountId)
-      : saasAdvisoryKey.platformProviderAccount(input.accountId);
+    const key =
+      input.ownerKind === 'tenant'
+        ? saasAdvisoryKey.tenantProviderAccount(input.tenantId, input.accountId)
+        : saasAdvisoryKey.platformProviderAccount(input.accountId);
     await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))', [key]);
 
     // Keep this a separate statement after the wait. The production database

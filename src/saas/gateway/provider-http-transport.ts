@@ -21,8 +21,22 @@ import {
   resolveProviderHttpAddresses,
   selectPinnedProviderAddress,
 } from './provider-http-address.js';
-import { observeProviderJsonUsage } from './provider-json-usage-observer.js';
+import {
+  isProviderTlsFingerprintEgress,
+  type ProviderTlsFingerprintEgress,
+} from './provider-http-tls-fingerprint-connector.js';
+import { observeProviderJsonUsage, type ProviderMediaUsageExtractor } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
+import { observeSearchProviderResponse, searchDescriptorForDispatch } from './websearch/response-observer.js';
+
+/** §4.3: parse the verified payload bytes for the search descriptor round-trip. */
+function parsePayloadJson(payloadBytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes));
+  } catch {
+    return null;
+  }
+}
 
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -66,6 +80,13 @@ export interface ProviderHttpDispatchProfile {
    * keeps the exact pre-R3 direct-egress behavior.
    */
   readonly egressProxy?: { readonly url: string };
+  /**
+   * Batch-2 §2.4 TLS fingerprints: the account's resolved egress descriptor
+   * (selector + inline profile for custom rows, resolved from PG at dispatch
+   * time). Absent keeps the ordinary connector path; the profile payload
+   * never carries credentials.
+   */
+  readonly tlsFingerprint?: ProviderTlsFingerprintEgress;
 }
 
 export interface ProviderHttpDispatchProfileResolveInput {
@@ -200,7 +221,33 @@ export interface ProviderHttpTransportOptions {
    * for every existing composition) keeps the exact previous header set.
    */
   readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
+  /**
+   * §4.2 (task #16): per-request media usage plan for operations the token
+   * observers do not know (images.generations; the #17 video/audio
+   * operations reuse the same seam). The factory is invoked with the signed
+   * payload bytes on the 2xx JSON response branch; a null plan (or a throw)
+   * keeps the observation at the observer's documented unknown outcome, and
+   * the plan's serviceTier terms are carried on the transport response into
+   * the dispatch settlement input.
+   */
+  readonly mediaUsagePlan?: ProviderMediaUsagePlanFactory | null;
 }
+
+/**
+ * §4.2: the per-request media usage plan bound by the mediaUsagePlan
+ * factory. Defined here (not in the images module) so the seam stays
+ * available to the #17 category without a cross-module import cycle.
+ */
+export interface ProviderMediaUsagePlan {
+  readonly extractor: ProviderMediaUsageExtractor | null;
+  readonly serviceTier: { readonly requested: string | null; readonly observed: string | null } | null;
+}
+
+/** The factory binds a plan per request; returning null keeps the token path. */
+export type ProviderMediaUsagePlanFactory = (input: {
+  readonly providerOperation: string | undefined;
+  readonly payloadBytes: Uint8Array;
+}) => ProviderMediaUsagePlan | null;
 
 export type ProviderHttpTransportErrorCode =
   | 'INVALID_INPUT'
@@ -208,6 +255,7 @@ export type ProviderHttpTransportErrorCode =
   | 'PROFILE_INVALID'
   | 'ENDPOINT_POLICY_VIOLATION'
   | 'EGRESS_PROXY_INVALID'
+  | 'TLS_FINGERPRINT_INVALID'
   | 'PAYLOAD_BINDING_MISMATCH'
   | 'CREDENTIAL_UNAVAILABLE'
   | 'CREDENTIAL_INVALID'
@@ -246,6 +294,7 @@ interface NormalizedOptions {
   readonly maxPayloadBytes: number;
   readonly allowedCredentialHeaderNames: ReadonlySet<string>;
   readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
+  readonly mediaUsagePlan?: ProviderMediaUsagePlanFactory;
 }
 
 interface RequestContext {
@@ -447,6 +496,13 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
   if (options.resolveFixedRequestHeaders !== undefined && typeof options.resolveFixedRequestHeaders !== 'function') {
     fail('INVALID_INPUT', 'a fixed request header resolver must be callable');
   }
+  if (
+    options.mediaUsagePlan !== undefined &&
+    options.mediaUsagePlan !== null &&
+    typeof options.mediaUsagePlan !== 'function'
+  ) {
+    fail('INVALID_INPUT', 'a media usage plan factory must be callable');
+  }
   const timeoutMs = boundedPositiveInteger(options.timeoutMs, 'timeoutMs', MAX_TIMEOUT_MS);
   const maxPayloadBytes = boundedPositiveInteger(
     options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES,
@@ -483,6 +539,9 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     ...(options.resolveFixedRequestHeaders === undefined
       ? {}
       : { resolveFixedRequestHeaders: options.resolveFixedRequestHeaders }),
+    ...(options.mediaUsagePlan === undefined || options.mediaUsagePlan === null
+      ? {}
+      : { mediaUsagePlan: options.mediaUsagePlan }),
   };
 }
 
@@ -566,6 +625,22 @@ function egressProxyFromProfile(profile: ProviderHttpDispatchProfile | null): { 
   const url = (proxy as { readonly url: string }).url;
   if (url === '') fail('EGRESS_PROXY_INVALID', 'dispatch profile egress proxy is invalid');
   return { url };
+}
+
+/**
+ * Batch-2 §2.4: normalize the profile's TLS-fingerprint descriptor. The
+ * shape is validated strictly (isProviderTlsFingerprintEgress — unknown keys
+ * rejected) so a malformed descriptor fails closed at the dispatch-profile
+ * boundary; a missing descriptor keeps the ordinary connector.
+ */
+function tlsFingerprintFromProfile(profile: ProviderHttpDispatchProfile | null): ProviderTlsFingerprintEgress | null {
+  if (!profile || typeof profile !== 'object') fail('PROFILE_UNAVAILABLE', 'dispatch profile is unavailable');
+  const descriptor = (profile as { readonly tlsFingerprint?: unknown }).tlsFingerprint;
+  if (descriptor === undefined || descriptor === null) return null;
+  if (!isProviderTlsFingerprintEgress(descriptor)) {
+    fail('TLS_FINGERPRINT_INVALID', 'dispatch profile tls fingerprint is invalid');
+  }
+  return descriptor;
 }
 
 function validateTargetUrl(value: string, policy: NormalizedEndpointPolicy): ValidatedTarget {
@@ -902,6 +977,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         }
       }
       assertActive(context);
+      // Batch-2 §2.4: the account's resolved TLS-fingerprint descriptor rides
+      // on the dispatch profile next to the egress proxy. Unlike a bound
+      // proxy, a malformed/unreadable fingerprint never fails the dispatch —
+      // resolution happens in the profile resolver (fail-open to the default
+      // profile); this boundary only rejects structurally invalid payloads.
+      const tlsFingerprint = tlsFingerprintFromProfile(profile);
+      assertActive(context);
       // R5b-4: deployment-owned per-protocol fixed headers (e.g. the OpenCode
       // Go anthropic-version header), resolved from the signed dispatch facts
       // before any credential material exists.
@@ -942,6 +1024,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
               headerValue.value,
               fixedRequestHeaders,
               egressProxy,
+              tlsFingerprint ?? undefined,
             );
             return result;
           } finally {
@@ -978,6 +1061,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     credentialHeaderValue: string,
     fixedRequestHeaders: Readonly<Record<string, string>> = {},
     egressProxy?: ProviderHttpEgressProxyTarget,
+    tlsFingerprint?: ProviderTlsFingerprintEgress,
   ): Promise<PreparedEvidenceTransportResponse> {
     const headers = new Headers(FIXED_REQUEST_HEADERS);
     // R5b-4 per-protocol fixed headers sit between the transport-owned fixed
@@ -995,6 +1079,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         address: pinnedAddress.address,
         family: pinnedAddress.family,
         ...(egressProxy === undefined ? {} : { proxy: egressProxy }),
+        ...(tlsFingerprint === undefined ? {} : { tlsFingerprint }),
       });
       if (
         !connector ||
@@ -1041,6 +1126,42 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     }
     const responseBody = response.body ? managedResponseBody(response.body, context) : null;
     const safeResponseHeaders = responseHeaders(response);
+
+    /*
+     * §4.3 (task #17): the search emulation operations adapt the upstream
+     * Responses envelope into the client search body before any generic
+     * observer sees it. The descriptor is recovered from the signed,
+     * digest-verified payload bytes themselves (the server-owned
+     * construction round-trips exactly) and requires the client-side search
+     * operation fact; a payload that does not round-trip fails the dispatch
+     * closed rather than leaking an untransformed envelope.
+     */
+    const searchClientOperation = context.request.clientOperation ?? context.request.evidence.clientOperation;
+    if (
+      responseBody &&
+      response.status >= 200 &&
+      response.status < 300 &&
+      (searchClientOperation === 'web_search' || searchClientOperation === 'x_search')
+    ) {
+      const descriptor = searchDescriptorForDispatch(parsePayloadJson(body), searchClientOperation);
+      if (descriptor === null) {
+        await cancelResponseBody(response);
+        fail('INVALID_INPUT', 'search dispatch payload is not the search emulation body');
+      }
+      const observed = observeSearchProviderResponse(responseBody, descriptor);
+      const result: PreparedEvidenceTransportResponse = {
+        responseStarted: false,
+        resultHttpStatus: response.status,
+        headers: safeResponseHeaders,
+        body: observed.body,
+        get providerUsage() {
+          return observed.getUsage();
+        },
+      };
+      context.transferCleanup();
+      return result;
+    }
+
     if (responseBody && isEventStreamContentType(response.headers.get('content-type'))) {
       const observed = observeProviderSseUsage(responseBody, {
         providerProtocol: context.request.evidence.providerProtocol,
@@ -1062,15 +1183,36 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
 
     const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
     if (responseBody && mediaType === 'application/json' && response.status >= 200 && response.status < 300) {
-      const observed = observeProviderJsonUsage(responseBody, {
-        providerProtocol: context.request.evidence.providerProtocol,
-        providerOperation: context.request.evidence.providerOperation,
-      });
+      // §4.2: bind the media usage plan (if a factory is wired) for
+      // operations the token observers do not know; a factory failure keeps
+      // the observation at the observer's unknown outcome, never a guess.
+      let mediaPlan: ProviderMediaUsagePlan | null = null;
+      if (this.options.mediaUsagePlan) {
+        try {
+          mediaPlan = this.options.mediaUsagePlan({
+            providerOperation: context.request.evidence.providerOperation,
+            payloadBytes: context.request.payloadBytes,
+          });
+        } catch {
+          mediaPlan = null;
+        }
+      }
+      const observed = observeProviderJsonUsage(
+        responseBody,
+        {
+          providerProtocol: context.request.evidence.providerProtocol,
+          providerOperation: context.request.evidence.providerOperation,
+        },
+        mediaPlan?.extractor ?? null,
+      );
       const result = {
         responseStarted: false,
         resultHttpStatus: response.status,
         headers: safeResponseHeaders,
         body: observed.body,
+        ...(mediaPlan?.serviceTier !== null && mediaPlan?.serviceTier !== undefined
+          ? { serviceTier: mediaPlan.serviceTier }
+          : {}),
         get providerUsage() {
           const observation = observed.getObservation();
           return observation?.state === 'reported' ? observation.usage : null;

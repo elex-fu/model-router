@@ -14,6 +14,13 @@ export interface CustomerChargeBudgetCaps {
   readonly currency: string;
   readonly daily: KeyBudgetCap;
   readonly lifetime: KeyBudgetCap;
+  /**
+   * R1 (roadmap 1.3, phase 3): the sub2api RateLimitWindow5h/7d analog —
+   * rolling USD windows over the key lineage. Optional for backward
+   * compatibility with pre-114 callers; absent caps are unlimited.
+   */
+  readonly fiveHour?: KeyBudgetCap;
+  readonly sevenDay?: KeyBudgetCap;
 }
 
 export interface ByokProxyKeyBudgetPolicy {
@@ -45,6 +52,9 @@ export interface TokenBudgetUsage {
 
 export interface CustomerChargeBudgetUsage extends TokenBudgetUsage {
   readonly currency: string;
+  /** Rolling 5h/7d windows: the trailing settled + outstanding totals. */
+  readonly fiveHour?: BudgetWindowUsage;
+  readonly sevenDay?: BudgetWindowUsage;
 }
 
 export interface ByokProxyKeyBudgetUsage {
@@ -65,7 +75,9 @@ export type ProxyKeyBudgetDimension =
   | 'daily_tokens'
   | 'lifetime_tokens'
   | 'daily_customer_charge'
-  | 'lifetime_customer_charge';
+  | 'lifetime_customer_charge'
+  | 'charge_5h'
+  | 'charge_7d';
 
 export type ProxyKeyBudgetErrorCode =
   | 'INVALID_INPUT'
@@ -121,12 +133,18 @@ interface NormalizedTokenUsage {
 
 interface NormalizedChargeUsage extends NormalizedTokenUsage {
   readonly currency: string;
+  readonly fiveHour?: NormalizedTokenWindowUsage;
+  readonly sevenDay?: NormalizedTokenWindowUsage;
 }
 
 interface NormalizedPolicy {
   readonly supplyMode: SupplyMode;
   readonly tokenCaps: Readonly<Record<KeyBudgetWindow, bigint | null>>;
-  readonly customerChargeCaps?: Readonly<Record<KeyBudgetWindow, bigint | null>> & { readonly currency: string };
+  readonly customerChargeCaps?: Readonly<Record<KeyBudgetWindow, bigint | null>> & {
+    readonly currency: string;
+    readonly fiveHour?: bigint | null;
+    readonly sevenDay?: bigint | null;
+  };
 }
 
 interface NormalizedUsage {
@@ -212,12 +230,14 @@ function normalizePolicy(value: unknown): NormalizedPolicy {
   if (supplyMode === 'platform' && hasOwn(value, 'customerChargeCaps')) {
     const caps = value.customerChargeCaps;
     if (!isRecord(caps)) fail('INVALID_INPUT');
-    assertOnlyKeys(caps, ['currency', 'daily', 'lifetime']);
+    assertOnlyKeys(caps, ['currency', 'daily', 'lifetime', 'fiveHour', 'sevenDay']);
     if (!hasOwn(caps, 'daily') || !hasOwn(caps, 'lifetime')) fail('INVALID_INPUT');
     customerChargeCaps = {
       currency: parseCurrency(caps.currency),
       daily: parseCap(caps.daily),
       lifetime: parseCap(caps.lifetime),
+      ...(hasOwn(caps, 'fiveHour') ? { fiveHour: parseCap(caps.fiveHour) } : {}),
+      ...(hasOwn(caps, 'sevenDay') ? { sevenDay: parseCap(caps.sevenDay) } : {}),
     };
   }
 
@@ -264,7 +284,7 @@ function normalizeUsage(value: unknown, policy: NormalizedPolicy): NormalizedUsa
     if (policy.customerChargeCaps === undefined) fail('UNSUPPORTED_DIMENSION');
     const chargeUsage = value.customerChargeUsage;
     if (!isRecord(chargeUsage)) fail('INVALID_INPUT');
-    assertOnlyKeys(chargeUsage, ['currency', 'daily', 'lifetime']);
+    assertOnlyKeys(chargeUsage, ['currency', 'daily', 'lifetime', 'fiveHour', 'sevenDay']);
 
     const currency = parseCurrency(chargeUsage.currency);
     if (currency !== policy.customerChargeCaps.currency) fail('CURRENCY_MISMATCH');
@@ -272,6 +292,8 @@ function normalizeUsage(value: unknown, policy: NormalizedPolicy): NormalizedUsa
       currency,
       ...(hasOwn(chargeUsage, 'daily') ? { daily: normalizeWindowUsage(chargeUsage.daily) } : {}),
       ...(hasOwn(chargeUsage, 'lifetime') ? { lifetime: normalizeWindowUsage(chargeUsage.lifetime) } : {}),
+      ...(hasOwn(chargeUsage, 'fiveHour') ? { fiveHour: normalizeWindowUsage(chargeUsage.fiveHour) } : {}),
+      ...(hasOwn(chargeUsage, 'sevenDay') ? { sevenDay: normalizeWindowUsage(chargeUsage.sevenDay) } : {}),
     };
   }
 
@@ -345,6 +367,24 @@ export function evaluateProxyKeyBudgetAdmission(
       chargeCaps.currency,
     );
     if (lifetimeResult !== null) return lifetimeResult;
+
+    // R1 (roadmap 1.3, phase 3): the rolling 5h/7d USD windows. The caller
+    // supplies the trailing settled + outstanding totals INCLUDING this new
+    // reservation as its newReservation component.
+    const fiveHourResult = evaluateDimension(
+      'charge_5h',
+      chargeCaps.fiveHour ?? null,
+      chargeUsage?.fiveHour,
+      chargeCaps.currency,
+    );
+    if (fiveHourResult !== null) return fiveHourResult;
+    const sevenDayResult = evaluateDimension(
+      'charge_7d',
+      chargeCaps.sevenDay ?? null,
+      chargeUsage?.sevenDay,
+      chargeCaps.currency,
+    );
+    if (sevenDayResult !== null) return sevenDayResult;
   }
 
   return { allowed: true };

@@ -127,6 +127,7 @@ export function mapBillingGroupRow(row: unknown): BillingGroupRecord {
     claudeCodeOnly: requiredBoolean(record, 'claude_code_only'),
     fallbackGroupId: optionalText(record, 'fallback_group_id'),
     supportedModelScopes: optionalStringArray(record, 'supported_model_scopes'),
+    composite: requiredBoolean(record, 'composite'),
     status: requiredText(record, 'status'),
   };
 }

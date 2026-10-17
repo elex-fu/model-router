@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import {
   createServer,
   type IncomingMessage,
@@ -15,6 +15,7 @@ import { ConfigConflictError, ConfigValidationError, ControlError, ControlServic
 import { ControlStore } from '../control/store.js';
 import type { SQLiteQuotaLedger } from '../quota/ledger.js';
 import type { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
+import { injectBrandAppConfig, type PublicBrandSnapshot } from '../saas/platform/brand/snapshot.js';
 import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
 import type { TelemetryWriterStatus } from '../storage/telemetry-write-client.js';
 import { connectTemplate } from './connect.js';
@@ -26,11 +27,32 @@ import { type PlaygroundExecutor, PlaygroundRuns } from './playground.js';
 import { validatePricing } from './pricing.js';
 import { AdminRuntime, type AdminRuntimeBridge } from './runtime.js';
 import { telemetryAdapters } from './telemetry.js';
+import {
+  createFetchUpdateHttpClient,
+  resolveBuildType,
+  resolveRuntimeVersion,
+  resolveUpdateTargetPath,
+  SqliteUpdateCheckCache,
+  scheduleProcessRestart,
+  UPDATE_BUILD_TYPE_ENV,
+  UPDATE_GITHUB_REPO_ENV,
+  UPDATE_GITHUB_TOKEN_ENV,
+  UpdateOperationGuard,
+  UpdateService,
+  updateHttpError,
+} from './update.js';
 import { UpstreamActions } from './upstream-actions.js';
 
 type Json = Record<string, unknown>;
 type Handler = (input: Json) => Promise<unknown>;
 export type AdminMountedRequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+
+/** First value of a repeated-or-single header, if present. */
+function requestHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  if (Array.isArray(value)) return value[0];
+  return typeof value === 'string' ? value : undefined;
+}
 
 function redactInlineValues(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactInlineValues);
@@ -157,8 +179,19 @@ export interface AdminServerOptions {
   publicOrigin?: string | (() => string);
   /** Read-only process-owned listener diagnostics used by GET /system. */
   listenerStatus?: () => unknown;
+  /** Batch-5 §5.3 online update service override (tests). */
+  updateService?: UpdateService;
+  /** Idempotency guard override for the mutating update endpoints (tests). */
+  updateOperationGuard?: UpdateOperationGuard;
   /** Optional customer-facing SaaS handler mounted under /console/api/v1. */
   saasIdentityHandler?: AdminMountedRequestHandler;
+  /**
+   * Batch-5 §5.2 OEM white-label: optional public brand snapshot provider
+   * (the local brand.json override wired by the BYOK bootstrap). When set,
+   * every served HTML document carries `window.__APP_CONFIG__` and the
+   * snapshot-derived CSP; an empty snapshot keeps responses byte-identical.
+   */
+  publicBrand?: () => PublicBrandSnapshot;
   adapters?: AdminAdapters;
 }
 
@@ -172,19 +205,90 @@ export interface AdminServer {
 const PREFIX = '/admin/api/v1';
 /** Dispatch patterns implemented below. Kept beside the dispatcher so OpenAPI parity tests catch route drift. */
 export const adminDispatchOperations = [
-  'GET /openapi.json','GET /bootstrap','POST /bootstrap','POST /session','GET /session','DELETE /session',
-  'GET /config','PUT /config','GET /config/export','POST /config/validate','POST /config/import-preview','POST /config/import','GET /config/history','POST /config/rollback',
-  'GET /provider-presets','GET /capabilities','GET /system','GET /overview',
-  'GET /upstreams','GET /upstreams/{id}','POST /upstreams','PATCH /upstreams/{id}','DELETE /upstreams/{id}',
-  'POST /upstreams/{id}/credentials','PATCH /upstreams/{id}/credentials/{credentialId}','DELETE /upstreams/{id}/credentials/{credentialId}',
-  'POST /upstreams/{id}/discover-models','POST /upstreams/{id}/test','POST /upstreams/{id}/test-jobs/{jobId}/cancel','GET /upstreams/{id}/runtime','GET /upstreams/{id}/health-events','POST /upstreams/{id}/circuit-reset',
-  'GET /routes','GET /routes/{id}','POST /routes','PATCH /routes/{id}','DELETE /routes/{id}','PUT /routes/order','POST /routes/preview','GET /models',
-  'GET /keys','GET /keys/{id}','POST /keys','PATCH /keys/{id}','DELETE /keys/{id}','POST /keys/{id}/rotate','GET /keys/{id}/quota','POST /keys/{id}/quota-adjustments',
-  'GET /usage/summary','GET /usage/timeseries','GET /usage/breakdown','GET /requests','GET /requests/{id}','GET /requests/{id}/attempts',
-  'POST /exports','GET /exports/{id}/download','POST /playground/runs','GET /playground/runs/{id}','GET /playground/status','POST /playground/runs/{id}/cancel',
-  'GET /connect/templates','GET /pricing','POST /pricing','PATCH /pricing/{id}','GET /accounts','POST /accounts/client-credentials','POST /accounts/device-flows',
-  'GET /accounts/device-flows/{id}','DELETE /accounts/device-flows/{id}','PATCH /accounts/{id}','DELETE /accounts/{id}','POST /accounts/{id}/refresh',
-  'GET /balances','POST /balances/refresh','GET /audit-events','POST /maintenance/jobs','GET /jobs/{id}','GET /events',
+  'GET /openapi.json',
+  'GET /bootstrap',
+  'POST /bootstrap',
+  'POST /session',
+  'GET /session',
+  'DELETE /session',
+  'GET /config',
+  'PUT /config',
+  'GET /config/export',
+  'POST /config/validate',
+  'POST /config/import-preview',
+  'POST /config/import',
+  'GET /config/history',
+  'POST /config/rollback',
+  'GET /provider-presets',
+  'GET /capabilities',
+  'GET /system',
+  'GET /system/version',
+  'GET /system/updates/check',
+  'GET /system/updates/rollback-versions',
+  'POST /system/updates/apply',
+  'POST /system/updates/rollback',
+  'POST /system/restart',
+  'GET /overview',
+  'GET /upstreams',
+  'GET /upstreams/{id}',
+  'POST /upstreams',
+  'PATCH /upstreams/{id}',
+  'DELETE /upstreams/{id}',
+  'POST /upstreams/{id}/credentials',
+  'PATCH /upstreams/{id}/credentials/{credentialId}',
+  'DELETE /upstreams/{id}/credentials/{credentialId}',
+  'POST /upstreams/{id}/discover-models',
+  'POST /upstreams/{id}/test',
+  'POST /upstreams/{id}/test-jobs/{jobId}/cancel',
+  'GET /upstreams/{id}/runtime',
+  'GET /upstreams/{id}/health-events',
+  'POST /upstreams/{id}/circuit-reset',
+  'GET /routes',
+  'GET /routes/{id}',
+  'POST /routes',
+  'PATCH /routes/{id}',
+  'DELETE /routes/{id}',
+  'PUT /routes/order',
+  'POST /routes/preview',
+  'GET /models',
+  'GET /keys',
+  'GET /keys/{id}',
+  'POST /keys',
+  'PATCH /keys/{id}',
+  'DELETE /keys/{id}',
+  'POST /keys/{id}/rotate',
+  'GET /keys/{id}/quota',
+  'POST /keys/{id}/quota-adjustments',
+  'GET /usage/summary',
+  'GET /usage/timeseries',
+  'GET /usage/breakdown',
+  'GET /requests',
+  'GET /requests/{id}',
+  'GET /requests/{id}/attempts',
+  'POST /exports',
+  'GET /exports/{id}/download',
+  'POST /playground/runs',
+  'GET /playground/runs/{id}',
+  'GET /playground/status',
+  'POST /playground/runs/{id}/cancel',
+  'GET /connect/templates',
+  'GET /pricing',
+  'POST /pricing',
+  'PATCH /pricing/{id}',
+  'GET /accounts',
+  'POST /accounts/client-credentials',
+  'POST /accounts/device-flows',
+  'GET /accounts/device-flows/{id}',
+  'DELETE /accounts/device-flows/{id}',
+  'PATCH /accounts/{id}',
+  'DELETE /accounts/{id}',
+  'POST /accounts/{id}/refresh',
+  'GET /balances',
+  'POST /balances/refresh',
+  'GET /audit-events',
+  'POST /maintenance/jobs',
+  'GET /jobs/{id}',
+  'GET /events',
 ] as const;
 const mime: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -352,13 +456,22 @@ function tokenCookie(req: IncomingMessage): string | undefined {
   return /(?:^|;\s*)mr_admin_session=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
 }
 
-function serveMountedStatic(
+/**
+ * Batch-5 §5.2 OEM white-label: serves the BYOK admin/console static site.
+ * When a `brand` provider is wired and the target is an HTML document, the
+ * public brand snapshot is injected as `window.__APP_CONFIG__` (nonce'd
+ * script, HTML breakers escaped) and the CSP is derived from the snapshot —
+ * the same injectBrandAppConfig path the managed SaaS deployment uses. A
+ * missing/empty brand keeps the response byte-identical.
+ */
+async function serveMountedStatic(
   req: IncomingMessage,
   res: ServerResponse,
   path: string,
   mountPath: '/admin' | '/console',
   distPath?: string,
-): void {
+  brand?: () => PublicBrandSnapshot,
+): Promise<void> {
   if (!distPath || (req.method !== 'GET' && req.method !== 'HEAD')) {
     res.writeHead(404);
     res.end();
@@ -430,6 +543,23 @@ function serveMountedStatic(
     res.end();
     return;
   }
+  if (extname(target) === '.html' && brand !== undefined) {
+    const injected = injectBrandAppConfig(readFileSync(target, 'utf8'), brand());
+    const body = Buffer.from(injected.html, 'utf8');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': body.length,
+      'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': injected.contentSecurityPolicy,
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(body);
+    return;
+  }
   res.writeHead(200, {
     'content-type': mime[extname(target)] ?? 'application/octet-stream',
     'content-length': statSync(target).size,
@@ -447,8 +577,14 @@ function serveMountedStatic(
     .pipe(res);
 }
 
-function serveStatic(req: IncomingMessage, res: ServerResponse, path: string, distPath?: string): void {
-  serveMountedStatic(req, res, path, '/admin', distPath);
+async function serveStatic(
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  distPath?: string,
+  brand?: () => PublicBrandSnapshot,
+): Promise<void> {
+  await serveMountedStatic(req, res, path, '/admin', distPath, brand);
 }
 
 function rewriteSaasCookie(value: string): string {
@@ -534,6 +670,25 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     ? new AdminExports(store, options.telemetryStore, jobs, store.dataDir)
     : undefined;
   const maintenance = new AdminMaintenance(control, store, options.telemetryStore);
+  // Batch-5 §5.3 online update (BYOK admin face): the check cache persists
+  // in the control SQLite store — the only always-present durable store on
+  // this plane (see src/admin/update.ts header for the Redis/PG decision).
+  // The service is inert until an endpoint is hit; an unconfigured repo
+  // degrades check-updates to a warning instead of an error.
+  const updateService =
+    options.updateService ??
+    new UpdateService({
+      currentVersion: resolveRuntimeVersion(),
+      buildType: resolveBuildType(),
+      repo: process.env[UPDATE_GITHUB_REPO_ENV]?.trim() || undefined,
+      client: createFetchUpdateHttpClient({
+        repo: process.env[UPDATE_GITHUB_REPO_ENV]?.trim() || '',
+        token: process.env[UPDATE_GITHUB_TOKEN_ENV]?.trim() || undefined,
+      }),
+      cache: new SqliteUpdateCheckCache(store.db),
+      targetPath: resolveUpdateTargetPath(),
+    });
+  const updateGuard = options.updateOperationGuard ?? new UpdateOperationGuard();
   const runtime = new AdminRuntime(control, options.telemetryStore, options.runtime);
   const builtIn: AdminAdapters = {
     upstreamRuntime: async (input) => runtime.snapshot(String(input.upstreamId)),
@@ -542,12 +697,15 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     resetCircuit: async (input) => runtime.reset(String(input.upstreamId)),
     discoverModels: async (input) => upstreamActions.discoverModels(String(input.upstreamId)),
     testUpstream: async (input) =>
-      jobs.start('upstream-test', 'admin', (signal) =>
-        upstreamActions.test(
-          String(input.upstreamId),
-          typeof input.model === 'string' ? input.model : undefined,
-          signal,
-        ),
+      jobs.start(
+        'upstream-test',
+        'admin',
+        (signal) =>
+          upstreamActions.test(
+            String(input.upstreamId),
+            typeof input.model === 'string' ? input.model : undefined,
+            signal,
+          ),
         String(input.upstreamId),
       ),
     jobDetail: async (input) => jobs.get(String(input.jobId)),
@@ -632,20 +790,19 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     const requestId = `admin_${randomUUID()}`;
     try {
       const url = new URL(req.url ?? '/', 'http://admin.local');
-      if (url.pathname === '/') return serveStatic(req, res, '/admin/', options.webDistPath);
+      if (url.pathname === '/') return serveStatic(req, res, '/admin/', options.webDistPath, options.publicBrand);
       if (options.saasIdentityHandler && isConsoleApiPath(url.pathname)) {
         const handled = await handleSaasIdentity(options.saasIdentityHandler, req, res);
-        if (!handled && !res.headersSent)
-          fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
+        if (!handled && !res.headersSent) fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
         return;
       }
       if (options.saasIdentityHandler && isConsolePath(url.pathname))
-        return serveMountedStatic(req, res, url.pathname, '/console', options.webDistPath);
+        return serveMountedStatic(req, res, url.pathname, '/console', options.webDistPath, options.publicBrand);
       if (
         url.pathname === '/admin' ||
         (url.pathname.startsWith('/admin/') && url.pathname !== '/admin/api' && !url.pathname.startsWith('/admin/api/'))
       )
-        return serveStatic(req, res, url.pathname, options.webDistPath);
+        return serveStatic(req, res, url.pathname, options.webDistPath, options.publicBrand);
       if (!url.pathname.startsWith(`${PREFIX}/`) && url.pathname !== PREFIX)
         return fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
       const retryAfter = adminRequestLimiter.take(req.socket.remoteAddress ?? 'unknown', Date.now());
@@ -836,6 +993,52 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
           databases: databaseDiagnostics(store, options.telemetryStore),
           timezone: config.quota.timezone,
         });
+      // Batch-5 §5.3 online update (task #21): runtime version, GitHub
+      // release detection with checksum-verified download and atomic swap,
+      // the rollback whitelist, and a supervisor-reliant restart. The
+      // mutating actions carry no body — their idempotency rides the
+      // Idempotency-Key header (the quota-adjustments precedent).
+      const idempotencyKey = requestHeader(req, 'idempotency-key');
+      const updateCall = async <T>(action: () => Promise<T>): Promise<T> => {
+        try {
+          return await action();
+        } catch (error) {
+          throw updateHttpError(error);
+        }
+      };
+      if (is('system', 'version') && method === 'GET') return result(updateService.versionInfo());
+      if (is('system', 'updates', 'check') && method === 'GET')
+        return result(
+          await updateCall(() =>
+            updateService.checkUpdate(input.force === 'true' || input.force === '1' || input.force === true),
+          ),
+        );
+      if (is('system', 'updates', 'rollback-versions') && method === 'GET')
+        return result({ versions: await updateCall(() => updateService.listRollbackVersions()) });
+      if (is('system', 'updates', 'apply') && method === 'POST')
+        return result(await updateCall(() => updateGuard.run(idempotencyKey, () => updateService.performUpdate())));
+      if (is('system', 'updates', 'rollback') && method === 'POST')
+        return result(
+          await updateCall(() =>
+            updateGuard.run(idempotencyKey, () => updateService.rollbackToVersion(String(input.version ?? ''))),
+          ),
+        );
+      if (is('system', 'restart') && method === 'POST')
+        return result(
+          await updateCall(() =>
+            updateGuard.run(idempotencyKey, async () => {
+              const schedule = scheduleProcessRestart();
+              return {
+                restarting: true,
+                ...schedule,
+                semantics:
+                  'The process exits(0) 500ms after this response and relies on a supervisor to come back ' +
+                  '(systemd Restart=always). Under docker compose the container is recreated — anything not on a ' +
+                  'volume is lost, so prefer image-tag upgrades there.',
+              };
+            }),
+          ),
+        );
       if (method === 'GET' && is('overview')) {
         const value = await call(adapters.overview);
         const usage = record(record(value).usage);
@@ -1066,7 +1269,12 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
             .all()
             .map((row) => {
               const item = row as { version_id: string; profile_id: string; body: string; sequence: number };
-              return { ...JSON.parse(item.body), id: item.profile_id, versionId: item.version_id, versionSequence: item.sequence };
+              return {
+                ...JSON.parse(item.body),
+                id: item.profile_id,
+                versionId: item.version_id,
+                versionSequence: item.sequence,
+              };
             }),
         );
       if ((is('pricing') && method === 'POST') || (is('pricing', '*') && method === 'PATCH')) {
@@ -1086,17 +1294,26 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
         const createdAt = new Date().toISOString();
         const save = store.db.transaction(() => {
           store.db
-            .prepare('INSERT INTO pricing_versions (version_id,profile_id,body,effective_from,created_at) VALUES(?,?,?,?,?)')
+            .prepare(
+              'INSERT INTO pricing_versions (version_id,profile_id,body,effective_from,created_at) VALUES(?,?,?,?,?)',
+            )
             .run(versionId, id, JSON.stringify(version), effectiveFrom, createdAt);
           store.db.prepare('INSERT INTO pricing_version_sequence (version_id) VALUES(?)').run(versionId);
           store.db
-            .prepare('INSERT INTO pricing (id,body,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at')
+            .prepare(
+              'INSERT INTO pricing (id,body,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,updated_at=excluded.updated_at',
+            )
             .run(id, JSON.stringify(version), createdAt);
         });
         save();
         store.audit(actor, 'pricing.update', { id, versionId, effectiveFrom });
-        const sequence = store.db.prepare('SELECT sequence FROM pricing_version_sequence WHERE version_id=?').get(versionId) as { sequence: number };
-        return result({ id, versionId, versionSequence: sequence.sequence, effectiveFrom }, method === 'POST' ? 201 : 200);
+        const sequence = store.db
+          .prepare('SELECT sequence FROM pricing_version_sequence WHERE version_id=?')
+          .get(versionId) as { sequence: number };
+        return result(
+          { id, versionId, versionSequence: sequence.sequence, effectiveFrom },
+          method === 'POST' ? 201 : 200,
+        );
       }
       if (is('accounts') && method === 'GET') return result(await call(adapters.accounts));
       if (is('accounts', 'client-credentials') && method === 'POST')
@@ -1191,8 +1408,7 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     }
   };
   const server = createServer((req, res) => {
-    if (closing)
-      return fail(res, 503, `admin_${randomUUID()}`, 'ADMIN_CLOSING', 'Management service is shutting down');
+    if (closing) return fail(res, 503, `admin_${randomUUID()}`, 'ADMIN_CLOSING', 'Management service is shutting down');
     // Socket closure does not settle an async handler. In particular, telemetry
     // handlers await read-worker exit and then still access the shared stores.
     const request = handleRequest(req, res).then(() => {});

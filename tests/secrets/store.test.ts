@@ -43,18 +43,42 @@ test('master key creation syncs contents before publishing and syncs the directo
   const key = Buffer.alloc(32, 7);
   try {
     const result = loadOrCreateMasterKey(keyPath, {
-      mkdir: (path, options) => { events.push('mkdir'); mkdirSync(path, options); },
+      mkdir: (path, options) => {
+        events.push('mkdir');
+        mkdirSync(path, options);
+      },
       open: (path, flags, mode) => {
         const fd = openSync(path, flags, mode);
         descriptors.set(fd, path);
         events.push(path === dir ? 'open-directory' : path === keyPath ? 'open-key' : 'open-temp');
         return fd;
       },
-      write: (fd, data) => { events.push('write'); writeFileSync(fd, data); },
-      fsync: (fd) => { events.push(descriptors.get(fd) === dir ? 'fsync-directory' : descriptors.get(fd) === keyPath ? 'fsync-key' : 'fsync-temp'); fsyncSync(fd); },
-      close: (fd) => { closeSync(fd); descriptors.delete(fd); },
-      link: (source, destination) => { events.push('publish'); linkSync(source, destination); },
-      unlink: (path) => { events.push('unlink-temp'); unlinkSync(path); },
+      write: (fd, data) => {
+        events.push('write');
+        writeFileSync(fd, data);
+      },
+      fsync: (fd) => {
+        events.push(
+          descriptors.get(fd) === dir
+            ? 'fsync-directory'
+            : descriptors.get(fd) === keyPath
+              ? 'fsync-key'
+              : 'fsync-temp',
+        );
+        fsyncSync(fd);
+      },
+      close: (fd) => {
+        closeSync(fd);
+        descriptors.delete(fd);
+      },
+      link: (source, destination) => {
+        events.push('publish');
+        linkSync(source, destination);
+      },
+      unlink: (path) => {
+        events.push('unlink-temp');
+        unlinkSync(path);
+      },
       read: readFileSync,
       random: () => key,
       tempPath: () => join(dir, `.master-key-test-${serial++}`),
@@ -68,18 +92,21 @@ test('master key creation syncs contents before publishing and syncs the directo
     assert.equal(statSync(keyPath).mode & 0o777, 0o600);
 
     const replacement = Buffer.alloc(32, 9);
-    assert.deepEqual(loadOrCreateMasterKey(keyPath, {
-      mkdir: mkdirSync,
-      open: openSync,
-      write: (fd, data) => writeFileSync(fd, data),
-      fsync: fsyncSync,
-      close: closeSync,
-      link: linkSync,
-      unlink: unlinkSync,
-      read: readFileSync,
-      random: () => replacement,
-      tempPath: () => join(dir, `.master-key-race-${serial++}`),
-    }), key);
+    assert.deepEqual(
+      loadOrCreateMasterKey(keyPath, {
+        mkdir: mkdirSync,
+        open: openSync,
+        write: (fd, data) => writeFileSync(fd, data),
+        fsync: fsyncSync,
+        close: closeSync,
+        link: linkSync,
+        unlink: unlinkSync,
+        read: readFileSync,
+        random: () => replacement,
+        tempPath: () => join(dir, `.master-key-race-${serial++}`),
+      }),
+      key,
+    );
     assert.deepEqual(readFileSync(keyPath), key);
   } finally {
     rmSync(dir, { recursive: true, force: true });

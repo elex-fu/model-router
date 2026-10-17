@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { GEMINI_CLI_BASE_URL, GEMINI_CLI_HOST } from '../../../../src/saas/gateway/gemini/catalog-identity.js';
 import { GEMINI_CLI_USER_AGENT } from '../../../../src/saas/gateway/gemini/constants.js';
@@ -6,10 +7,13 @@ import {
   type GeminiAccountHealthSink,
   GeminiHttpTransport,
   GeminiHttpTransportError,
+  GeminiPreparedEvidenceTransport,
   type GeminiRateLimitSink,
   type GeminiTransportRequest,
   type GeminiUpstreamCredential,
 } from '../../../../src/saas/gateway/gemini/transport.js';
+import type { PreparedEvidenceTransportRequest } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
+import type { PreparedRequestEvidenceRecord } from '../../../../src/saas/gateway/prepared-request-evidence-service.js';
 
 const CREDENTIAL: GeminiUpstreamCredential = {
   accessToken: 'accs-gemini-token',
@@ -315,4 +319,166 @@ test('redirects are rejected and local test upstreams are allowed', async () => 
       return true;
     },
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* Prepared-evidence dispatch adapter (GeminiPreparedEvidenceTransport) */
+/* ------------------------------------------------------------------ */
+
+function evidenceRecord(payloadBytes: Uint8Array): PreparedRequestEvidenceRecord {
+  return {
+    evidenceId: 'ev-1',
+    tenantId: 'tenant-1',
+    projectId: 'project-1',
+    requestId: 'req-1',
+    endpoint: 'gemini-generate-content',
+    accountId: 'account-1',
+    credentialId: 'credential-1',
+    credentialVersion: 'v1',
+    payloadSha256: createHash('sha256').update(payloadBytes).digest('hex'),
+    status: 'claimed',
+    claimedAttemptId: 'attempt-1',
+  } as unknown as PreparedRequestEvidenceRecord;
+}
+
+function evidenceTransportRequest(payloadBytes: Uint8Array): PreparedEvidenceTransportRequest {
+  return {
+    tenantId: 'tenant-1',
+    projectId: 'project-1',
+    requestId: 'req-1',
+    attemptId: 'attempt-1',
+    fencingToken: 'fence-1',
+    signal: new AbortController().signal,
+    payloadBytes,
+    evidence: evidenceRecord(payloadBytes),
+  };
+}
+
+const TERMINAL_USAGE_CHUNK = `data: ${JSON.stringify({
+  response: {
+    candidates: [{ content: { parts: [{ text: '2' }] }, finishReason: 'STOP' }],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
+  },
+})}\n\n`;
+
+test('prepared-evidence adapter rejects payload bytes that do not match the signed digest', async () => {
+  const transport = new GeminiPreparedEvidenceTransport({
+    fetch: async () => sseResponse([TERMINAL_USAGE_CHUNK]),
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ model: 'gemini-2.5-pro', stream: true }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(wrappedBody()));
+  const request = evidenceTransportRequest(payloadBytes);
+  (request.evidence as { payloadSha256: string }).payloadSha256 = createHash('sha256').update('tampered').digest('hex');
+  await assert.rejects(
+    () => transport.send(request),
+    (error: unknown) => error instanceof GeminiHttpTransportError && error.code === 'INVALID_INPUT',
+  );
+});
+
+test('prepared-evidence adapter rejects evidence that is not bound to the request attempt', async () => {
+  const transport = new GeminiPreparedEvidenceTransport({
+    fetch: async () => sseResponse([TERMINAL_USAGE_CHUNK]),
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ model: 'gemini-2.5-pro', stream: true }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(wrappedBody()));
+  const request = evidenceTransportRequest(payloadBytes);
+  (request.evidence as { status: string }).status = 'registered';
+  await assert.rejects(
+    () => transport.send(request),
+    (error: unknown) => error instanceof GeminiHttpTransportError && error.code === 'INVALID_INPUT',
+  );
+});
+
+test('prepared-evidence adapter requires a request context resolver', () => {
+  assert.throws(
+    () =>
+      new GeminiPreparedEvidenceTransport({
+        fetch: async () => sseResponse([]),
+        resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+        resolveRequestContext: undefined as unknown as () => { readonly model: string; readonly stream: boolean },
+      }),
+    (error: unknown) => error instanceof GeminiHttpTransportError && error.code === 'INVALID_INPUT',
+  );
+});
+
+test('prepared-evidence adapter threads the dispatch context, relays the signed payload and exposes lazy usage', async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const transport = new GeminiPreparedEvidenceTransport({
+    fetch: async (url, init) => {
+      calls.push({ url, body: JSON.parse(String(init.body)) });
+      return sseResponse([TERMINAL_USAGE_CHUNK]);
+    },
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ model: 'gemini-2.5-pro', stream: true, tierId: 'gcp_standard' }),
+  });
+  const payload = wrappedBody();
+  const response = await transport.send(evidenceTransportRequest(new TextEncoder().encode(JSON.stringify(payload))));
+  assert.equal(response.resultHttpStatus, 200);
+  assert.equal(response.responseStarted, false);
+  assert.ok(response.body instanceof ReadableStream);
+  // The stream context selects the SSE action; the signed payload bytes are
+  // relayed to the pinned Code Assist endpoint unchanged.
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `${GEMINI_CLI_BASE_URL}/v1internal:streamGenerateContent?alt=sse`);
+  assert.deepEqual(calls[0].body, payload);
+  // Usage is lazy: it resolves once the terminal usageMetadata chunk is drained.
+  const body = response.body;
+  assert.ok(body instanceof ReadableStream);
+  const reader = body.getReader();
+  while (!(await reader.read()).done) {
+    // drain
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  const usage = response.providerUsage;
+  assert.ok(usage !== null);
+  assert.equal(usage.inputTotal, 10);
+  assert.equal(usage.outputTotal, 2);
+});
+
+test('prepared-evidence adapter honors the non-stream dispatch context', async () => {
+  const calls: Array<{ url: string }> = [];
+  const transport = new GeminiPreparedEvidenceTransport({
+    fetch: async (url) => {
+      calls.push({ url });
+      return jsonResponse({
+        candidates: [{ content: { parts: [{ text: '42' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
+      });
+    },
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ model: 'gemini-2.5-pro', stream: false, tierId: null }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(wrappedBody()));
+  const response = await transport.send(evidenceTransportRequest(payloadBytes));
+  assert.equal(response.resultHttpStatus, 200);
+  assert.equal(calls[0].url, `${GEMINI_CLI_BASE_URL}/v1internal:generateContent`);
+  assert.ok(response.body instanceof ReadableStream);
+  const reader = response.body.getReader();
+  while (!(await reader.read()).done) {
+    // drain
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  // The usage watcher is SSE-frame based (same contract as the codex adapter):
+  // a non-streaming JSON body carries no usage events, so the lazy accessor
+  // stays null and settlement falls back to the gateway's estimation path.
+  assert.equal(response.providerUsage, null);
+});
+
+test('prepared-evidence adapter surfaces non-2xx results without a body stream', async () => {
+  const transport = new GeminiPreparedEvidenceTransport({
+    fetch: async () =>
+      new Response(JSON.stringify({ error: { code: 429, message: 'quota exceeded' } }), {
+        status: 429,
+        headers: { 'content-type': 'application/json' },
+      }),
+    resolveCredential: async (_input, useCredential) => useCredential(CREDENTIAL),
+    resolveRequestContext: () => ({ model: 'gemini-2.5-pro', stream: true }),
+  });
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(wrappedBody()));
+  const response = await transport.send(evidenceTransportRequest(payloadBytes));
+  assert.equal(response.resultHttpStatus, 429);
+  assert.equal(response.responseStarted, false);
+  assert.equal(response.body, null);
 });

@@ -62,6 +62,14 @@ export interface PlatformRequestAdmissionHoldInput {
   readonly cacheWrite1h: bigint | number | string;
   readonly outputTotal: bigint | number | string;
   readonly reasoningOutput: bigint | number | string;
+  /**
+   * §4.1 (roadmap batch 4) per-unit (media) hold evidence: the unit-count
+   * upper bound and the canonical size tier fixed by the request. Absent on
+   * token-only admissions; a media admission always carries an explicit unit
+   * bound so an unknown unit count is never priced as zero.
+   */
+  readonly perUnitUnits?: bigint | number | string | null;
+  readonly sizeTier?: string | null;
 }
 
 /** Hold evidence plus the caller's requested admission window. */
@@ -249,6 +257,8 @@ function requireAdmissionAuthenticatedKey(value: unknown): SaasRequestAdmissionA
   };
 }
 
+const PER_UNIT_TIER_SET = new Set(['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime']);
+
 const HOLD_INPUT_KEYS = [
   'inputTotal',
   'inputUncached',
@@ -283,30 +293,50 @@ function normalizeAdmissionExpiry(value: unknown, label: string): string {
   return date.toISOString();
 }
 
+const OPTIONAL_HOLD_INPUT_KEYS = ['perUnitUnits', 'sizeTier'] as const;
+
 function requireHoldInput(value: unknown, label: string): PlatformRequestAdmissionHoldInput {
   const holdInput = requireRecord(value, label);
-  const allowed = new Set<string>(HOLD_INPUT_KEYS);
+  const allowed = new Set<string>([...HOLD_INPUT_KEYS, ...OPTIONAL_HOLD_INPUT_KEYS]);
   for (const key of HOLD_INPUT_KEYS) {
     if (!(key in holdInput)) throw new TypeError(`${label}.${key} is required`);
   }
   for (const key of Object.keys(holdInput)) {
     if (!allowed.has(key)) throw new TypeError(`${label}.${key} is not accepted`);
   }
-  const normalized = {} as Record<HoldInputKey, bigint | number | string>;
+  const normalized: {
+    [K in HoldInputKey]: bigint | number | string;
+  } & { perUnitUnits?: bigint | number | string; sizeTier?: string } = {} as never;
   for (const key of HOLD_INPUT_KEYS) normalized[key] = normalizeHoldCounter(holdInput[key], `${label}.${key}`);
+  // §4.1: optional per-unit evidence; absent stays absent (token-only).
+  if (holdInput.perUnitUnits !== undefined && holdInput.perUnitUnits !== null) {
+    normalized.perUnitUnits = normalizeHoldCounter(holdInput.perUnitUnits, `${label}.perUnitUnits`);
+  }
+  if (holdInput.sizeTier !== undefined && holdInput.sizeTier !== null) {
+    if (typeof holdInput.sizeTier !== 'string' || !PER_UNIT_TIER_SET.has(holdInput.sizeTier)) {
+      throw new TypeError(`${label}.sizeTier is not a canonical size tier`);
+    }
+    normalized.sizeTier = holdInput.sizeTier;
+  }
   return normalized;
 }
 
 function requireHoldEvidence(value: unknown, label: string): PlatformRequestAdmissionHoldEvidence {
   const evidence = requireRecord(value, label);
-  const allowed = new Set<string>([...HOLD_INPUT_KEYS, 'admissionExpiresAt']);
+  const allowed = new Set<string>([...HOLD_INPUT_KEYS, ...OPTIONAL_HOLD_INPUT_KEYS, 'admissionExpiresAt']);
   for (const key of HOLD_INPUT_KEYS) {
     if (!(key in evidence)) throw new TypeError(`${label}.${key} is required`);
   }
   for (const key of Object.keys(evidence)) {
     if (!allowed.has(key)) throw new TypeError(`${label}.${key} is not accepted`);
   }
-  const holdInput = requireHoldInput(Object.fromEntries(HOLD_INPUT_KEYS.map((key) => [key, evidence[key]])), label);
+  const holdInput = requireHoldInput(
+    Object.fromEntries([
+      ...HOLD_INPUT_KEYS.map((key) => [key, evidence[key]]),
+      ...OPTIONAL_HOLD_INPUT_KEYS.map((key) => [key, (evidence as Record<string, unknown>)[key]]),
+    ]),
+    label,
+  );
   return {
     ...holdInput,
     admissionExpiresAt: normalizeAdmissionExpiry(evidence.admissionExpiresAt, `${label}.admissionExpiresAt`),
@@ -762,13 +792,15 @@ export class SaasRequestAdmissionService {
       );
 
       // R9 finding P4 (critical-section shrink): bookkeeping writes run BEFORE
-      // the platform hold so the per-wallet FOR UPDATE fence — acquired inside
-      // billing.reserve and held until COMMIT — covers only the wallet balance
-      // check, the reservation insert, and the commit itself. The rate counter,
-      // outbox, and audit writes never read billing state, and the wallet row
-      // remains the LAST lock this transaction acquires, so lock ordering is
-      // unchanged. If the reserve fails (insufficient funds, spending freeze),
-      // these writes roll back with the transaction exactly as before.
+      // the platform hold so the per-wallet advisory fence — acquired inside
+      // billing.reserve (saasAdvisoryKey.walletFence, roadmap batch 1.2 step 3)
+      // and held until COMMIT — covers only the wallet balance check, the
+      // reservation insert, and the commit itself. The rate counter, outbox,
+      // and audit writes never read billing state, and the wallet fence
+      // remains the LAST wallet-domain lock this transaction acquires, so lock
+      // ordering is unchanged. If the reserve fails (insufficient funds,
+      // spending freeze), these writes roll back with the transaction exactly
+      // as before.
       await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
 
       const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);

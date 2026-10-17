@@ -75,6 +75,10 @@ function priceRow(
     cache_write_1h_rate_denominator_units: null,
     output_rate_numerator_minor_units: 4n,
     output_rate_denominator_units: 1n,
+    per_unit_rate_numerator_minor_units: null,
+    per_unit_rate_denominator_units: null,
+    per_unit_tier_rates: null,
+    token_multipliers: null,
     effective_at: '2026-09-01T00:00:00.000Z',
     expires_at: null,
     idempotency_key: `${kind}-price-1`,
@@ -92,8 +96,8 @@ function rowFromAppendValues(values: readonly unknown[], kind: 'customer' | 'sup
     commonStart,
     commonStart + 5,
   );
-  const rateValues = values.slice(commonStart + 5, commonStart + 17);
-  const [effectiveAt, expiresAt, idempotencyKey, definitionDigest, createdAt] = values.slice(commonStart + 17);
+  const rateValues = values.slice(commonStart + 5, commonStart + 21);
+  const [effectiveAt, expiresAt, idempotencyKey, definitionDigest, createdAt] = values.slice(commonStart + 21);
   const [publicModelId, publicModelVersion, providerId, productId] = identityValues;
   const resolvedModel = kind === 'supplier' ? identityValues[4] : undefined;
   const protocol = kind === 'supplier' ? identityValues[5] : identityValues[4];
@@ -112,6 +116,10 @@ function rowFromAppendValues(values: readonly unknown[], kind: 'customer' | 'sup
     cacheWrite1hDenominator,
     outputNumerator,
     outputDenominator,
+    perUnitNumerator,
+    perUnitDenominator,
+    perUnitTierRates,
+    tokenMultipliers,
   ] = rateValues;
   return {
     id: values[0],
@@ -141,6 +149,10 @@ function rowFromAppendValues(values: readonly unknown[], kind: 'customer' | 'sup
     cache_write_1h_rate_denominator_units: cacheWrite1hDenominator,
     output_rate_numerator_minor_units: outputNumerator,
     output_rate_denominator_units: outputDenominator,
+    per_unit_rate_numerator_minor_units: perUnitNumerator,
+    per_unit_rate_denominator_units: perUnitDenominator,
+    per_unit_tier_rates: perUnitTierRates,
+    token_multipliers: tokenMultipliers,
     effective_at: effectiveAt,
     expires_at: expiresAt,
     idempotency_key: idempotencyKey,

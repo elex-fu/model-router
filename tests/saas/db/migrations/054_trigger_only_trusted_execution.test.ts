@@ -41,17 +41,31 @@ test('054 preserves its exact forward append and exactly three trigger-only meta
   assert.equal((sql.match(/EXECUTE format\(/g) ?? []).length, 2);
   assert.match(sql, /ALTER FUNCTION model_router_saas\.%s SECURITY DEFINER/);
   assert.match(sql, /SET search_path TO pg_catalog, model_router_saas, pg_temp/);
-  assert.doesNotMatch(sql, /^\s*(?:GRANT|REVOKE|CREATE FUNCTION|CREATE OR REPLACE FUNCTION|DROP|ALTER TABLE|ALTER ROLE)\b/im);
+  assert.doesNotMatch(
+    sql,
+    /^\s*(?:GRANT|REVOKE|CREATE FUNCTION|CREATE OR REPLACE FUNCTION|DROP|ALTER TABLE|ALTER ROLE)\b/im,
+  );
   assert.doesNotMatch(sql, /(?:UPDATE|DELETE FROM|INSERT INTO) saas_schema_migrations/);
 });
 
 test('054 attests all wrapper/helper/immutability bodies byte-for-byte without replacing them', () => {
-  for (const name of ['saas_prepared_evidence_authorization_writer_fence', 'saas_prepared_evidence_writer_require_value',
-    'saas_prepared_evidence_writer_lock_layer', 'saas_prepared_evidence_writer_composite_key']) {
-    assert.equal(expectedBody(name), historicalBody(PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql, name));
+  for (const name of [
+    'saas_prepared_evidence_authorization_writer_fence',
+    'saas_prepared_evidence_writer_require_value',
+    'saas_prepared_evidence_writer_lock_layer',
+    'saas_prepared_evidence_writer_composite_key',
+  ]) {
+    assert.equal(
+      expectedBody(name),
+      historicalBody(PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql, name),
+    );
   }
-  for (const name of ['saas_billing_assert_ledger_transaction_balanced', 'saas_billing_check_ledger_transaction',
-    'saas_billing_check_ledger_entry_transaction', 'saas_billing_reject_ledger_mutation']) {
+  for (const name of [
+    'saas_billing_assert_ledger_transaction_balanced',
+    'saas_billing_check_ledger_transaction',
+    'saas_billing_check_ledger_entry_transaction',
+    'saas_billing_reject_ledger_mutation',
+  ]) {
     assert.equal(expectedBody(name), historicalBody(PLATFORM_WALLET_LEDGER_SAAS_MIGRATION.sql, name));
   }
   assert.match(expectedBody('saas_billing_assert_ledger_transaction_balanced'), /entry_count < 2/);
@@ -65,9 +79,11 @@ test('054 attests all wrapper/helper/immutability bodies byte-for-byte without r
 
 test('054 validates every actual 050 trigger including binary TG_ARGV and ledger deferral/immutability bindings', () => {
   const canonical = PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql;
-  const writerBindings = [...canonical.matchAll(
-    /CREATE TRIGGER (saas_\w+)\n  BEFORE INSERT OR UPDATE OR DELETE ON (saas_\w+)\n  FOR EACH ROW EXECUTE FUNCTION saas_prepared_evidence_authorization_writer_fence\(([^;]+)\);/g,
-  )];
+  const writerBindings = [
+    ...canonical.matchAll(
+      /CREATE TRIGGER (saas_\w+)\n {2}BEFORE INSERT OR UPDATE OR DELETE ON (saas_\w+)\n {2}FOR EACH ROW EXECUTE FUNCTION saas_prepared_evidence_authorization_writer_fence\(([^;]+)\);/g,
+    ),
+  ];
   assert.equal(writerBindings.length, 28);
   for (const [, name, relation, argumentSql] of writerBindings) {
     const args = [...argumentSql!.matchAll(/'([^']+)'/g)].map((match) => match[1]!);
@@ -89,7 +105,10 @@ test('054 validates every actual 050 trigger including binary TG_ARGV and ledger
 
 test('054 fails closed on unsafe ownership/callability and proves body/function/table/column ACLs unchanged', () => {
   assert.match(sql, /nspowner = trusted_owner/);
-  assert.match(sql, /NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication/);
+  assert.match(
+    sql,
+    /NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication/,
+  );
   assert.match(sql, /pg_has_role\(oid, trusted_owner, 'MEMBER'\)/);
   assert.match(sql, /has_schema_privilege\(oid, managed_schema, 'CREATE'\)/);
   assert.match(sql, /has_table_privilege\(oid,.*'TRIGGER'\)/);

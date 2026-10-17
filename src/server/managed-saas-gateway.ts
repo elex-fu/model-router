@@ -1,7 +1,24 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
+import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
+import { CLAUDE_ENDPOINT, CLAUDE_MESSAGES_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
+import {
+  MINIMAX_ENDPOINT,
+  ZHIPU_CODING_ENDPOINT,
+  ZHIPU_ENDPOINT,
+} from '../saas/gateway/cn-providers/catalog-identity.js';
+import {
+  type CnProvidersProtocolRoutingConfig,
+  cnProviderOperationForProtocol,
+  resolveCnNativeProtocol,
+  resolveCnProviderApiProtocol,
+} from '../saas/gateway/cn-providers/protocol-rules.js';
+import { cnProvidersProviderRequestTransform } from '../saas/gateway/cn-providers/transform.js';
+import { cnProvidersFixedRequestHeaders } from '../saas/gateway/cn-providers/transport-headers.js';
 import { CODEX_ENDPOINT } from '../saas/gateway/codex/catalog-identity.js';
 import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from '../saas/gateway/contracts.js';
@@ -9,14 +26,35 @@ import {
   DispatchUsageSettlementCoordinator,
   type NormalSuccessSettlementPort,
 } from '../saas/gateway/dispatch-usage-settlement.js';
+import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
+import { GROK_ENDPOINT } from '../saas/gateway/grok/catalog-identity.js';
+import type { GrokCredentialResolver } from '../saas/gateway/grok/transport.js';
+import type { ContentModerationPort } from '../saas/gateway/http-handler.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
   type ModelDiscoveryPort,
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
+  type SaasGatewayAsyncMediaPort,
   type SaasGatewayHttpHandler,
+  type SaasGatewayQueryPort,
 } from '../saas/gateway/http-handler.js';
+import { SaasGatewayAsyncImageMediaPort } from '../saas/gateway/images/async-image-media-port.js';
+import { ImageResultOffloader } from '../saas/gateway/images/image-result-offloader.js';
+import {
+  IMAGE_TASK_EXECUTION_TIMEOUT_MS,
+  IMAGE_TASK_TTL_MS,
+  SaasImageTaskService,
+} from '../saas/gateway/images/image-task-service.js';
+import { PostgresImageTaskStore } from '../saas/gateway/images/image-task-store.js';
+import { SaasGatewayImagesQueryPort } from '../saas/gateway/images/images-query-port.js';
+import { createImagesMediaUsagePlan } from '../saas/gateway/images/media-usage-plan.js';
+import { createSaasModelPlazaEndpoint, type SaasModelPlazaPort } from '../saas/gateway/model-plaza/endpoint.js';
+import { ModelsDevOfficialPricingRegistry } from '../saas/gateway/model-plaza/official-pricing.js';
+import { SaasModelPlazaService } from '../saas/gateway/model-plaza/service.js';
+import { createModelPlazaSettingsProvider } from '../saas/gateway/model-plaza/settings.js';
+import { PostgresModelPlazaFacts } from '../saas/gateway/model-plaza/store.js';
 import { OPENCODE_GO_ENDPOINT, OPENCODE_GO_PROVIDER_ID } from '../saas/gateway/opencode-go/catalog-identity.js';
 import {
   DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
@@ -32,6 +70,7 @@ import {
   PostgresProviderAccountRuntimeHealthStore,
   ProviderAccountDispatchFailureFeedback,
   type ProviderAccountDispatchFailureFeedbackPort,
+  ProviderAccountModelRateLimit,
   type ProviderAccountRuntimeHealthWriter,
 } from '../saas/gateway/postgres-provider-account-runtime-health-store.js';
 import type { PostgresProviderAccountSchedulerOptions } from '../saas/gateway/postgres-provider-account-scheduler.js';
@@ -42,6 +81,7 @@ import {
   type PostgresRequestPreparationAuthorityAdapterDependencies,
 } from '../saas/gateway/postgres-request-preparation-authority-adapter.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
+import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
 import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   type PreparedEvidenceLeaseProvider,
@@ -65,6 +105,10 @@ import {
   type ProviderHttpEgressAllowlist,
   type ProviderHttpTestAddressCapability,
 } from '../saas/gateway/provider-http-address.js';
+import {
+  createTlsFingerprintSidecarConnectorFactory,
+  type ProviderTlsFingerprintEgress,
+} from '../saas/gateway/provider-http-tls-fingerprint-connector.js';
 import {
   type ProviderHttpDispatchProfileResolveInput,
   type ProviderHttpEndpointPolicy,
@@ -106,14 +150,35 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
+import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
+import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
+import { SaasVideoBillingStateMachine } from '../saas/gateway/videos/video-billing-state-machine.js';
+import type { SaasGatewayVideoCreatePort } from '../saas/gateway/videos/video-create-port.js';
+import { PersistentSaasGatewayVideoCreatePort } from '../saas/gateway/videos/video-create-port.js';
+import { ReconciliationVideoSettlementPort } from '../saas/gateway/videos/video-settlement-port.js';
+import { PostgresVideoTaskStore } from '../saas/gateway/videos/video-task-store.js';
+import {
+  createSaasGatewayQueryPortRouter,
+  SaasGatewayVideosQueryPort,
+} from '../saas/gateway/videos/videos-query-port.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
-import { DurableNormalSuccessSettlementPort } from '../saas/metering/conditional-settlement-port.js';
+import {
+  DurableConditionalSettlementPort,
+  DurableNormalSuccessSettlementPort,
+} from '../saas/metering/conditional-settlement-port.js';
 import { SaasMeteringService } from '../saas/metering/service.js';
 import { ByokServicePlanService } from '../saas/plans/service.js';
+import {
+  type PluginHostClient,
+  type PluginRouteReader,
+  PluginRoutingClaudeTransport,
+} from '../saas/plugins/gateway-plugin-router.js';
 import { SaasPricingService } from '../saas/pricing/service.js';
+import { type ModerationEmailSender, SaasContentModerationService } from '../saas/risk/moderation.js';
+import { PostgresContentModerationStore } from '../saas/risk/postgres-store.js';
 import type { ProviderCredentialUnsealingKms } from '../saas/runtime/gateway-provider-credential-kms.js';
 import {
   GatewayProviderCredentialUnsealer,
@@ -130,6 +195,7 @@ import {
 } from '../saas/runtime/request-preparation-signer-adapter.js';
 import { PostgresProviderSupplyRepository } from '../saas/supply/repository.js';
 import { createCustomerWebhookEventProducer } from '../saas/webhooks/producers.js';
+import { S3ObjectClient, type S3ObjectClientConfig } from '../storage/s3-object-client.js';
 
 /** Stable safe error used when the `/v1` graph cannot be constructed. */
 export class ManagedSaasGatewayCompositionError extends Error {
@@ -179,6 +245,17 @@ export interface ManagedSaasGatewayDispatchDependencies {
    * by the production composition. Optional; absent keeps dispatch unchanged.
    */
   readonly dispatchFailureFeedback?: ProviderAccountDispatchFailureFeedbackPort;
+  /**
+   * Batch 2.3: the model-level rate limit registry. A model-not-found 404
+   * or plan-gated 400 cools the (account, model) pair for 30 minutes while
+   * the account stays schedulable for other models.
+   */
+  readonly modelRateLimit?: {
+    recordModelRateLimit(input: {
+      readonly candidate: import('../saas/gateway/postgres-provider-account-runtime-health-store.js').ProviderAccountRuntimeHealthCandidate;
+      readonly model: string;
+    }): void;
+  };
 }
 
 /**
@@ -186,6 +263,25 @@ export interface ManagedSaasGatewayDispatchDependencies {
  * already assembled HTTP handler, so the builder owns construction of the
  * preparation service, dispatch service, and HTTP boundary.
  */
+/**
+ * Roadmap batch 4 §4.2 (task #16): the async image media binding. The
+ * resolved S3 config is injected by the deployment runtime (the
+ * egress-proxy credential convention — plaintext never lives in a column;
+ * a sealed platform-settings surface is the recorded follow-up).
+ */
+export interface SaasGatewayImageMediaOptions {
+  /** Zero-dep S3-compatible storage config (endpoint/bucket/region/keys/path style/public base URL). */
+  readonly s3: S3ObjectClientConfig;
+  /** Object key prefix for offloaded images; default `images/`. */
+  readonly keyPrefix?: string;
+  /** Task TTL; default 24 h. */
+  readonly taskTtlMs?: number;
+  /** Execution timeout; default 30 min. */
+  readonly executionTimeoutMs?: number;
+  /** Sync-path JSON keepalive heartbeat cadence; default 0 (disabled). */
+  readonly keepaliveIntervalMs?: number;
+}
+
 export interface ManagedSaasGatewayCompositionDependencies {
   readonly authenticator: ProxyKeyAuthenticator;
   readonly preparation: ManagedSaasGatewayPreparationDependencies;
@@ -199,6 +295,44 @@ export interface ManagedSaasGatewayCompositionDependencies {
   readonly entryPoint: string;
   /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
   readonly trustedProxyCidrs?: readonly string[];
+  /**
+   * Roadmap batch 4 §4.2 (task #16): the async image task media binding —
+   * the object-storage config plus task lifecycle tuning. Absent keeps the
+   * async images endpoints and the task query route closed (503).
+   */
+  readonly imageMedia?: SaasGatewayImageMediaOptions & {
+    /** Built by the production composition; the plain composition accepts them pre-built. */
+    readonly queryEndpoints: SaasGatewayQueryPort;
+    readonly asyncMedia: SaasGatewayAsyncMediaPort;
+  };
+  /**
+   * Roadmap batch 4 §4.3 (task #17): the async video media binding —
+   * built by the production composition; the plain composition accepts
+   * the ports pre-built. Absent keeps the video create endpoints closed
+   * (503) and the video query routes unrouted (503).
+   */
+  readonly videoMedia?: {
+    readonly queryEndpoints: SaasGatewayQueryPort;
+    readonly videoCreate: SaasGatewayVideoCreatePort;
+  };
+  /**
+   * Roadmap batch 2 §2.1: enable the sticky-session scheduling seam at the
+   * HTTP boundary. Only compositions that wire an account scheduler with
+   * affinity binding (the managed production gateway always does) may set
+   * this; default false keeps preparation input byte-identical.
+   */
+  readonly stickyScheduling?: boolean;
+  /**
+   * Model plaza port (roadmap batch 5 §5.5, task #22): the read-only
+   * GET /v1/model-plaza showcase. Absent keeps the endpoint closed (503).
+   */
+  readonly modelPlaza?: SaasModelPlazaPort;
+  /**
+   * Content risk control (roadmap batch 5 §5.4, task #19): the post-auth,
+   * pre-preparation moderation seam. Absent keeps the gateway without risk
+   * control (the request path is byte-identical).
+   */
+  readonly contentModeration?: ContentModerationPort;
 }
 
 export interface ManagedSaasGatewayComposition {
@@ -482,6 +616,10 @@ function validateCompositionDependencies(dependencies: ManagedSaasGatewayComposi
   requirePositiveInteger(dependencies.maxBodyBytes);
   requireText(dependencies.entryPoint);
   requireDependency(dependencies.lifecycle, 'close');
+  if (dependencies.videoMedia !== undefined) {
+    requireDependency(dependencies.videoMedia.queryEndpoints, 'serve');
+    requireDependency(dependencies.videoMedia.videoCreate, 'registerCreate');
+  }
 }
 
 /**
@@ -530,6 +668,7 @@ export function createManagedSaasGatewayComposition(
     dependencies.dispatch.normalSuccessSettlement,
     dependencies.dispatch.runtimeHealthWriter,
     dependencies.dispatch.dispatchFailureFeedback,
+    dependencies.dispatch.modelRateLimit,
   );
   const httpHandler = createSaasGatewayHandler({
     authenticator: dependencies.authenticator,
@@ -543,6 +682,39 @@ export function createManagedSaasGatewayComposition(
     maxBodyBytes: dependencies.maxBodyBytes,
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
+    ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
+    ...(dependencies.modelPlaza ? { modelPlaza: dependencies.modelPlaza } : {}),
+    ...(dependencies.contentModeration ? { contentModeration: dependencies.contentModeration } : {}),
+    ...(dependencies.imageMedia
+      ? {
+          asyncMedia: dependencies.imageMedia.asyncMedia,
+          asyncExecutionTimeoutMs: dependencies.imageMedia.executionTimeoutMs,
+          ...(dependencies.imageMedia.keepaliveIntervalMs
+            ? { imageKeepaliveIntervalMs: dependencies.imageMedia.keepaliveIntervalMs }
+            : {}),
+        }
+      : {}),
+    /*
+     * §4.0 ③ (task #14) + §4.3 (task #17): the query-endpoint family composes
+     * through an explicit route router — the images port serves
+     * images.task_status, the videos port serves the two video routes; a
+     * route without a port fails closed with 503. A videoMedia binding
+     * without imageMedia (and vice versa) keeps the other family closed.
+     */
+    ...(dependencies.imageMedia || dependencies.videoMedia
+      ? {
+          queryEndpoints: createSaasGatewayQueryPortRouter({
+            ...(dependencies.imageMedia ? { 'images.task_status': dependencies.imageMedia.queryEndpoints } : {}),
+            ...(dependencies.videoMedia
+              ? {
+                  'videos.task_status': dependencies.videoMedia.queryEndpoints,
+                  'videos.task_content': dependencies.videoMedia.queryEndpoints,
+                }
+              : {}),
+          }),
+        }
+      : {}),
+    ...(dependencies.videoMedia ? { videoCreate: dependencies.videoMedia.videoCreate } : {}),
   });
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
@@ -626,6 +798,36 @@ export interface ManagedSaasGatewayProductionOptions {
    */
   readonly codexEvidenceTransport?: PreparedEvidenceTransport;
   /**
+   * Dispatch seam for the Claude Code subscription transport
+   * (ClaudePreparedEvidenceTransport). When set, prepared evidence whose
+   * signed endpoint scope is the Claude catalog endpoint (`claude-messages`,
+   * provider protocol `anthropic`) is dispatched through it instead of the
+   * generic provider HTTP transport — the direct analog of
+   * `codexEvidenceTransport`. Unset keeps claude traffic on the generic
+   * transport path unchanged.
+   */
+  readonly claudeEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-5 §5.1 plugin routing dependencies. When set (gateway deployment
+   * with MODEL_ROUTER_SAAS_PLUGIN_HOST_URL + the shared internal token), the
+   * claude route is wrapped by PluginRoutingClaudeTransport; unset keeps the
+   * native claude path byte-identical.
+   */
+  readonly pluginRouting?: {
+    readonly routeReader: PluginRouteReader;
+    readonly pluginHostClient: PluginHostClient;
+  };
+  /**
+   * Dispatch seam for the Gemini CLI subscription transport
+   * (GeminiPreparedEvidenceTransport). When set, prepared evidence whose
+   * signed endpoint scope is the Gemini catalog endpoint
+   * (`gemini-generate-content`, provider protocol `gemini`) is dispatched
+   * through it instead of the generic provider HTTP transport — the direct
+   * analog of `codexEvidenceTransport`. Unset keeps gemini traffic on the
+   * generic transport path unchanged.
+   */
+  readonly geminiEvidenceTransport?: PreparedEvidenceTransport;
+  /**
    * R5b-2: multi-protocol adaptive routing for the OpenCode Go subscription
    * pool. For prepared requests whose authority candidate is the `opencode-go`
    * provider, the provider protocol is re-derived per request from the
@@ -680,6 +882,122 @@ export interface ManagedSaasGatewayProductionOptions {
    */
   readonly opencodeGoEvidenceTransport?: PreparedEvidenceTransport;
   /**
+   * Batch-3 dispatch seam for the CN-provider category adapter
+   * (CnProvidersPreparedEvidenceTransport — a classifying decorator over the
+   * generic transport). When set, prepared evidence whose signed endpoint
+   * scope is a CN-provider catalog endpoint (`zhipu-glm`,
+   * `zhipu-glm-coding`, `minimax-m`, any provider protocol) is dispatched
+   * through it instead of the generic provider HTTP transport directly. The
+   * adapter delegates the actual send to the generic transport (URL,
+   * credential, egress proxy, TLS fingerprint, usage observation all stay
+   * its job) and adds the bounded error-body classification a payg
+   * insufficient-balance 429 needs to reach the failure-feedback layer as
+   * `insufficient-balance` instead of the status-only `rate-limited`
+   * fallback. Unset keeps CN-provider traffic on the generic transport with
+   * the status-only classification.
+   */
+  readonly cnProvidersEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-3 CN-provider adaptive protocol routing (the opencode-go
+   * `opencodeGoProtocolRouting` shape): the per-provider api_protocol the
+   * authority decorator and payload-compile layer resolve the native
+   * protocol from. Explicit map first, then the lenient config value (the
+   * migration-120 account columns read through the runtime module or the
+   * sub2api credentials-map wrapper), then the adaptive default (the native
+   * endpoint follows the inbound client protocol).
+   */
+  readonly cnProvidersProtocolRouting?: CnProvidersProtocolRoutingConfig;
+  /**
+   * Batch-3 dispatch seam for the Grok category transport
+   * (GrokPreparedEvidenceTransport). When set, prepared evidence whose signed
+   * endpoint scope is the Grok catalog endpoint (`grok-responses`, provider
+   * protocol `responses`) is dispatched through it instead of the generic
+   * provider HTTP transport — the direct analog of `codexEvidenceTransport`.
+   * Unset keeps grok traffic on the generic transport path unchanged.
+   */
+  readonly grokEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-3 dispatch seam for the Bedrock category transport
+   * (BedrockPreparedEvidenceTransport). When set, prepared evidence whose
+   * signed endpoint scope is the Bedrock catalog endpoint
+   * (`bedrock-invoke`, provider protocol `anthropic`) is dispatched through
+   * it instead of the generic provider HTTP transport — the direct analog
+   * of `codexEvidenceTransport`. Bedrock cannot ride the generic transport:
+   * SigV4 signing, the InvokeModel request-body transform and the binary
+   * EventStream decoding all live inside the category transport. Unset
+   * keeps bedrock traffic undispatchable (no catalog route exists yet).
+   */
+  readonly bedrockEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-3 dispatch seam for the Vertex AI service-account category
+   * transport (VertexPreparedEvidenceTransport). When set, prepared
+   * evidence whose signed endpoint scope is the Vertex catalog endpoint
+   * (`vertex-raw-predict`, provider protocol `anthropic` OR `gemini` — the
+   * scope covers both the Anthropic-on-Vertex rawPredict family and the
+   * Gemini-on-Vertex generateContent family) is dispatched through it
+   * instead of the generic provider HTTP transport — the direct analog of
+   * `geminiEvidenceTransport`. The transport authenticates with the
+   * service-account JWT→OAuth Bearer token, so it cannot ride the generic
+   * transport's static-header resolver. Unset keeps vertex traffic
+   * undispatchable (no catalog route exists yet).
+   */
+  readonly vertexEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Roadmap batch 4 §4.2 (task #16): the async image media binding — S3
+   * config plus task lifecycle tuning. Absent keeps the async images
+   * endpoints and the task query route closed (503). The resolved secret
+   * supply is the deployment runtime module's concern (the egress-proxy
+   * credential convention).
+   */
+  readonly imageMedia?: SaasGatewayImageMediaOptions;
+  /**
+   * Model plaza (roadmap batch 5 §5.5, task #22): the settings overlay
+   * source (store-first; the deployment resolves what its database role can
+   * read). Absent resolves the plaza switches from the environment only.
+   */
+  readonly modelPlazaSettingsOverlay?: () => Promise<Readonly<Record<string, unknown>>>;
+  /**
+   * Model plaza console-session validation for the session tier. Absent
+   * degrades presented session credentials to the anonymous view (the
+   * split-gateway deployment holds no saas_sessions grant).
+   */
+  readonly modelPlazaSessionAuth?: {
+    readonly getSession: (token: string) => Promise<{ readonly userId: string } | null>;
+  };
+  /**
+   * Content risk control (roadmap batch 5 §5.4, task #19): optional email
+   * sender (violation / account-disabled notices) and site name for the
+   * moderation service. The moderation store is always the gateway database
+   * (fail-open on any store failure); absent sender skips emails.
+   */
+  readonly riskControl?: {
+    readonly emailSender?: ModerationEmailSender;
+    readonly siteName?: string;
+  };
+  /**
+   * Roadmap batch 4 §4.3 (task #17): the async video media binding — the
+   * bound-account status/content forwarder plus task lifecycle tuning.
+   * Absent keeps the POST /v1/videos* create endpoints and the video
+   * query routes closed (503). The credential resolver is the batch-3
+   * Grok transport's contract (SSRF hard gate enforced by the forwarder).
+   */
+  readonly videoMedia?: {
+    /** Undici-compatible fetch the status/content lookups dial. */
+    readonly fetch: (url: string, init: RequestInit) => Promise<Response>;
+    /** The batch-3 Grok credential resolver (oauth / api-key accounts). */
+    readonly resolveCredential: GrokCredentialResolver;
+    /** Credential-kind-scoped base override (tests / custom api-key upstreams). */
+    readonly baseUrl?: string;
+    /** Operator allowlist of custom base hosts for api-key credentials. */
+    readonly operatorHostAllowlist?: readonly string[];
+    /** Task TTL; default 24 h (the sub2api pending-billing TTL). */
+    readonly taskTtlMs?: number;
+    /** Upstream lookup timeout; default 120 s. */
+    readonly timeoutMs?: number;
+    /** In-memory ceiling for one proxied content response; default 64 MiB. */
+    readonly maxContentBytes?: number;
+  };
+  /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
    * `X-Title`). When set, the values are mounted on the generic transport's
    * fixed-request-header resolver for every request whose signed endpoint
@@ -704,6 +1022,19 @@ export interface ManagedSaasGatewayProductionOptions {
    * that have not yet re-applied the roles template after migration 107.
    */
   readonly egressProxyResolution?: { readonly enabled?: boolean };
+  /**
+   * Batch-2 §2.4 TLS fingerprints: when enabled, the composition resolves
+   * each claimed account's bound TLS-fingerprint profile (migration 116,
+   * fail-open posture) and mounts the sidecar connector factory on the
+   * generic transport. The sidecar process itself is deployment-managed
+   * (compose/systemd); the gateway only connects to the Unix socket.
+   * Unset keeps the exact pre-116 connector behavior.
+   */
+  readonly tlsFingerprintResolution?: {
+    readonly enabled?: boolean;
+    /** The sidecar's Unix socket path. */
+    readonly sidecarSocketPath: string;
+  };
   /**
    * F3: when enabled, settlement terminal commits and terminal request
    * failures enqueue customer webhook events inside their own transactions.
@@ -994,6 +1325,95 @@ export function createOpenCodeGoProtocolRoutingAuthority(
 }
 
 /**
+ * Batch-3 CN-provider adaptive protocol routing (the opencode-go
+ * applyOpenCodeGoProtocolRouting analog): after modelMap resolution, the
+ * candidate's provider-resolved api_protocol (composition routing config,
+ * default adaptive) decides the native protocol — pinned
+ * (chat_completions/anthropic/responses) or inbound-client-following — and
+ * the matched native protocol and its canonical provider operation replace
+ * the route's provider-side protocol before payload compilation and
+ * endpoint signing. Non-CN-provider candidates keep the route untouched.
+ *
+ * The returned second element is true when the client protocol has no
+ * servable native route for this provider (a gemini client — defensive: the
+ * capability-protocol eligibility check never surfaces a CN candidate for a
+ * gemini client); callers fail closed on it instead of guessing.
+ *
+ * Exported for direct testing; production wiring is the two call sites in
+ * this module (the authority decorator below and the payload-compile route).
+ */
+export function applyCnProvidersProtocolRouting(
+  route: ManagedSaasProviderPreparationRoute,
+  candidate: { readonly providerId: string },
+  routing: CnProvidersProtocolRoutingConfig | undefined,
+): { readonly route: ManagedSaasProviderPreparationRoute; readonly blocked: boolean } {
+  if (candidate.providerId !== 'zhipu' && candidate.providerId !== 'minimax') {
+    return { route, blocked: false };
+  }
+  const native = resolveCnNativeProtocol({
+    providerId: candidate.providerId,
+    apiProtocol: resolveCnProviderApiProtocol(routing, candidate.providerId),
+    clientProtocol: route.clientProtocol,
+  });
+  if (native === null) return { route, blocked: true };
+  return {
+    route: {
+      ...route,
+      providerProtocol: native,
+      providerOperation: cnProviderOperationForProtocol(native),
+    },
+    blocked: false,
+  };
+}
+
+/**
+ * Batch-3 CN-provider adaptive protocol routing, authority layer (the
+ * opencode-go decorator analog): the resolved native protocol is written
+ * into `authority.route.providerProtocol` — the field the preparation
+ * service's route facts, `validatePayload` and the signed prepared-evidence
+ * statement all derive from — so the per-request protocol decision is
+ * signed and later dispatch (endpoint scope + providerProtocol keys,
+ * per-protocol provider-target bindings, usage observers) sees exactly one
+ * consistent value. Non-CN-provider authorities pass through unchanged; a
+ * blocked resolution keeps the route untouched (the payload-compile layer
+ * owns the fail-closed block).
+ */
+export function createCnProvidersProtocolRoutingAuthority(
+  authority: RequestPreparationAuthorityPort,
+  routing: CnProvidersProtocolRoutingConfig | undefined,
+): RequestPreparationAuthorityPort {
+  return {
+    async resolve(input) {
+      const decision = await authority.resolve(input);
+      if (decision.decision !== 'allow') return decision;
+      const value = decision.value;
+      const providerId = value.candidate.providerId;
+      if (providerId !== 'zhipu' && providerId !== 'minimax') return decision;
+      // value.route.protocol is the client protocol (the compile-layer
+      // route's clientProtocol); a blocked resolution (no servable native
+      // for this client protocol) keeps the route untouched — the
+      // payload-compile layer owns the fail-closed block.
+      const native = resolveCnNativeProtocol({
+        providerId,
+        apiProtocol: resolveCnProviderApiProtocol(routing, providerId),
+        clientProtocol: value.route.protocol,
+      });
+      if (native === null) return decision;
+      if (value.route.providerProtocol === native) return decision;
+      return allowRequestPreparation({
+        ...value,
+        route: {
+          ...value.route,
+          providerProtocol: native,
+          providerOperation: cnProviderOperationForProtocol(native),
+        },
+      });
+    },
+    underlyingAuthority: authority,
+  } as RequestPreparationAuthorityPort & { readonly underlyingAuthority: RequestPreparationAuthorityPort };
+}
+
+/**
  * Exported for direct testing (the production composition is the only other
  * caller): the production payload-compile wrapper that applies OpenCode Go
  * protocol routing and (unless restricted via
@@ -1028,6 +1448,12 @@ export function createProviderPayloadCompiler(
     maxPayloadBytes: payloadOptions.maxPayloadBytes,
     compilerVersion: payloadOptions.compilerVersion,
     allowIdentityModelResolution: false,
+    // Batch-3: the CN-provider thinking-protocol transform (MiniMax M-series
+    // thinking.type enabled→adaptive on the Anthropic native; verbatim
+    // passback for glm-/minimax-m-) — the dormant providerRequestTransform
+    // seam's first consumer. Copy-on-write and provider-scoped: every other
+    // provider's payload bytes are unchanged.
+    providerRequestTransform: cnProvidersProviderRequestTransform,
   });
 
   return {
@@ -1086,14 +1512,31 @@ export function createProviderPayloadCompiler(
           message: 'opencode-go responses-routed models require a responses client protocol',
         };
       }
+      // Batch-3: CN-provider candidates re-derive the provider protocol from
+      // the per-provider api_protocol (default adaptive: the native endpoint
+      // follows the inbound client protocol). A blocked resolution (no
+      // servable native for this client protocol) fails closed here instead
+      // of compiling a wrong-shaped payload.
+      const cnRouted = applyCnProvidersProtocolRouting(
+        routedRoute,
+        input.authority.candidate,
+        options.cnProvidersProtocolRouting,
+      );
+      if (cnRouted.blocked) {
+        return {
+          decision: 'block',
+          code: 'capability_unsupported',
+          message: 'cn-provider accounts cannot serve this client protocol',
+        };
+      }
       return compiler.compile({
         ...input,
-        clientProtocol: routedRoute.clientProtocol,
-        providerProtocol: routedRoute.providerProtocol,
-        clientOperation: routedRoute.clientOperation,
-        providerOperation: routedRoute.providerOperation,
-        operation: routedRoute.providerOperation,
-        modelResolution: routedRoute.modelResolution,
+        clientProtocol: cnRouted.route.clientProtocol,
+        providerProtocol: cnRouted.route.providerProtocol,
+        clientOperation: cnRouted.route.clientOperation,
+        providerOperation: cnRouted.route.providerOperation,
+        operation: cnRouted.route.providerOperation,
+        modelResolution: cnRouted.route.modelResolution,
       } as ProviderPayloadCompilerInput);
     },
   };
@@ -1107,6 +1550,12 @@ function createProviderDispatchProfileResolver(
     readonly accountOwnerKind: 'tenant' | 'platform' | undefined;
     readonly accountId: string;
   }) => Promise<{ readonly url: string } | null>,
+  resolveTlsFingerprint?: (input: {
+    readonly tenantId: string;
+    readonly supplyMode: 'byok' | 'platform' | undefined;
+    readonly accountOwnerKind: 'tenant' | 'platform' | undefined;
+    readonly accountId: string;
+  }) => Promise<ProviderTlsFingerprintEgress | null>,
 ): ConstructorParameters<typeof ProviderHttpTransport>[0]['resolveDispatchProfile'] {
   requireDependency(options.providerTargetResolver, 'resolve');
   requireCallable(options.providerTargetRoute);
@@ -1127,17 +1576,36 @@ function createProviderDispatchProfileResolver(
     }
     const url = target.url ?? target.targetUrl;
     if (typeof url !== 'string' || url.length === 0) return null;
-    if (resolveEgressProxy === undefined) return { url };
     // R3: the per-account egress proxy rides on the dispatch profile. The
     // resolver's failures propagate — a bound proxy that cannot be read must
     // fail the dispatch, never silently direct-egress the account.
-    const egressProxy = await resolveEgressProxy({
-      tenantId: input.tenantId,
-      supplyMode: input.supplyMode,
-      accountOwnerKind: input.accountOwnerKind,
-      accountId: input.accountId,
-    });
-    return egressProxy === null ? { url } : { url, egressProxy };
+    const egressProxy =
+      resolveEgressProxy === undefined
+        ? null
+        : await resolveEgressProxy({
+            tenantId: input.tenantId,
+            supplyMode: input.supplyMode,
+            accountOwnerKind: input.accountOwnerKind,
+            accountId: input.accountId,
+          });
+    // Batch-2 §2.4: the per-account TLS fingerprint rides alongside. The
+    // resolver itself fails open (null descriptor = ordinary connector), so
+    // unlike the proxy a resolution miss never fails the dispatch.
+    const tlsFingerprint =
+      resolveTlsFingerprint === undefined
+        ? null
+        : await resolveTlsFingerprint({
+            tenantId: input.tenantId,
+            supplyMode: input.supplyMode,
+            accountOwnerKind: input.accountOwnerKind,
+            accountId: input.accountId,
+          });
+    if (egressProxy === null && tlsFingerprint === null) return { url };
+    return {
+      url,
+      ...(egressProxy === null ? {} : { egressProxy }),
+      ...(tlsFingerprint === null ? {} : { tlsFingerprint }),
+    };
   };
 }
 
@@ -1250,7 +1718,13 @@ export function createManagedSaasGatewayProductionComposition(
     DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
   );
   const authority: RequestPreparationAuthorityPort = createOpenCodeGoProtocolRoutingAuthority(
-    new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
+    // Batch-3: CN-provider adaptive routing wraps OUTSIDE the OpenCode Go
+    // decorator (the provider sets are disjoint, so the two decorators
+    // commute; non-CN-provider decisions pass through unchanged).
+    createCnProvidersProtocolRoutingAuthority(
+      new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
+      options.cnProvidersProtocolRouting,
+    ),
     openCodeGoProtocolRules,
   );
 
@@ -1269,6 +1743,9 @@ export function createManagedSaasGatewayProductionComposition(
     new SaasPricingService(database),
     new DurableNormalSuccessSettlementPort(database, {
       keyBudget: createKeyBudgetResolution(),
+      // R1 (roadmap 1.3, phase 3): group spend windows settle with the
+      // ACTUAL group-multiplied charge at the settlement terminal commit.
+      billingGroupSpend: createBillingGroupSpendResolution(),
       ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
     }),
   );
@@ -1296,6 +1773,21 @@ export function createManagedSaasGatewayProductionComposition(
         credentialContext: options.credentialContext,
       })
     : undefined;
+  // Batch-2 §2.4: the per-account TLS-fingerprint resolver (PG authoritative
+  // + short-TTL in-process profile cache; fail-open by design). The sidecar
+  // connector factory composes over the ordinary pinned connector, so
+  // accounts without a bound profile keep the exact previous path.
+  const tlsFingerprintResolver = options.tlsFingerprintResolution?.enabled
+    ? new PostgresProviderTlsFingerprintResolver({ database })
+    : undefined;
+  const tlsFingerprintConnectorFactory =
+    options.tlsFingerprintResolution?.enabled === true &&
+    typeof options.tlsFingerprintResolution.sidecarSocketPath === 'string' &&
+    options.tlsFingerprintResolution.sidecarSocketPath !== ''
+      ? createTlsFingerprintSidecarConnectorFactory({
+          socketPath: options.tlsFingerprintResolution.sidecarSocketPath,
+        })
+      : undefined;
   // F6: OpenRouter supplier-attribute headers, built once (input validation
   // happens at composition time, not per request).
   const openRouterFixedRequestHeaders = createOpenRouterFixedRequestHeaders(options.openRouterAttribution);
@@ -1304,6 +1796,9 @@ export function createManagedSaasGatewayProductionComposition(
     resolveDispatchProfile: createProviderDispatchProfileResolver(
       options,
       egressProxyResolver === undefined ? undefined : egressProxyResolver.resolveEgressProxy.bind(egressProxyResolver),
+      tlsFingerprintResolver === undefined
+        ? undefined
+        : tlsFingerprintResolver.resolveTlsFingerprint.bind(tlsFingerprintResolver),
     ),
     resolveCredential: credentialResolver.resolveCredential,
     endpointPolicy: options.endpointPolicy,
@@ -1321,19 +1816,48 @@ export function createManagedSaasGatewayProductionComposition(
     // headers (HTTP-Referer / X-Title, endpoint-keyed across all protocols)
     // in front of it — the two endpoint scopes are disjoint, so at most one
     // resolver ever matches.
-    resolveFixedRequestHeaders: (input) => openRouterFixedRequestHeaders(input) ?? openCodeGoFixedRequestHeaders(input),
+    resolveFixedRequestHeaders: (input) =>
+      openRouterFixedRequestHeaders(input) ??
+      openCodeGoFixedRequestHeaders(input) ??
+      cnProvidersFixedRequestHeaders(input),
+    ...(tlsFingerprintConnectorFactory === undefined ? {} : { createConnector: tlsFingerprintConnectorFactory }),
     timeoutMs: options.timeoutMs,
+    // §4.2 (task #16): the images media usage plan (units + output-first
+    // tier + service-tier terms) rides the generic transport's 2xx JSON
+    // branch; other operations get no plan and stay byte-identical.
+    mediaUsagePlan: createImagesMediaUsagePlan,
   });
   // P1c codex dispatch split: the codex transport takes over exactly the
   // signed `codex-responses` endpoint scope (provider protocol `responses`);
   // every other provider keeps the generic transport path unchanged.
   // R5b-2: an OpenCode Go transport, when mounted, takes over the signed
   // `opencode-go-zen` endpoint scope for all three native provider protocols.
+  // Batch-3 dispatch seams: claude (`claude-messages` + `anthropic`) and
+  // gemini (`gemini-generate-content` + `gemini`) transports, when mounted,
+  // take over their single native provider protocol the same way.
   if (options.codexEvidenceTransport !== undefined) {
     requireDependency(options.codexEvidenceTransport, 'send');
   }
+  if (options.claudeEvidenceTransport !== undefined) {
+    requireDependency(options.claudeEvidenceTransport, 'send');
+  }
+  if (options.geminiEvidenceTransport !== undefined) {
+    requireDependency(options.geminiEvidenceTransport, 'send');
+  }
   if (options.opencodeGoEvidenceTransport !== undefined) {
     requireDependency(options.opencodeGoEvidenceTransport, 'send');
+  }
+  if (options.cnProvidersEvidenceTransport !== undefined) {
+    requireDependency(options.cnProvidersEvidenceTransport, 'send');
+  }
+  if (options.grokEvidenceTransport !== undefined) {
+    requireDependency(options.grokEvidenceTransport, 'send');
+  }
+  if (options.bedrockEvidenceTransport !== undefined) {
+    requireDependency(options.bedrockEvidenceTransport, 'send');
+  }
+  if (options.vertexEvidenceTransport !== undefined) {
+    requireDependency(options.vertexEvidenceTransport, 'send');
   }
   const endpointRoutingRoutes: EndpointRoutingRoute[] = [];
   if (options.codexEvidenceTransport !== undefined) {
@@ -1343,14 +1867,161 @@ export function createManagedSaasGatewayProductionComposition(
       transport: options.codexEvidenceTransport,
     });
   }
+  if (options.claudeEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: CLAUDE_ENDPOINT,
+      providerProtocol: 'anthropic',
+      // Batch-5 §5.1: the optional plugin routing layer wraps the claude
+      // transport at its exit. Unrouted accounts and no-binding deployments
+      // delegate to the inner transport unchanged; routed accounts whose
+      // plugin cannot serve fail closed (see gateway-plugin-router.ts).
+      transport:
+        options.pluginRouting === undefined
+          ? options.claudeEvidenceTransport
+          : new PluginRoutingClaudeTransport({
+              inner: options.claudeEvidenceTransport,
+              capability: 'claude.oauth.outbound_transport.v1',
+              routeReader: options.pluginRouting.routeReader,
+              pluginHostClient: options.pluginRouting.pluginHostClient,
+              baseUrl: CLAUDE_MESSAGES_ENDPOINT,
+            }),
+    });
+  }
+  if (options.geminiEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: GEMINI_ENDPOINT,
+      providerProtocol: 'gemini',
+      transport: options.geminiEvidenceTransport,
+    });
+  }
   if (options.opencodeGoEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({ endpoint: OPENCODE_GO_ENDPOINT, transport: options.opencodeGoEvidenceTransport });
   }
+  // Batch-3: the CN-provider adapter takes over all three endpoint scopes
+  // with no providerProtocol narrowing (the opencode-go whole-scope
+  // precedent) — the adapter itself delegates to the generic transport and
+  // only adds the error-body classification.
+  if (options.cnProvidersEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: ZHIPU_ENDPOINT, transport: options.cnProvidersEvidenceTransport });
+    endpointRoutingRoutes.push({
+      endpoint: ZHIPU_CODING_ENDPOINT,
+      transport: options.cnProvidersEvidenceTransport,
+    });
+    endpointRoutingRoutes.push({ endpoint: MINIMAX_ENDPOINT, transport: options.cnProvidersEvidenceTransport });
+  }
+  if (options.grokEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: GROK_ENDPOINT,
+      providerProtocol: 'responses',
+      transport: options.grokEvidenceTransport,
+    });
+  }
+  if (options.bedrockEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: BEDROCK_ENDPOINT,
+      providerProtocol: 'anthropic',
+      transport: options.bedrockEvidenceTransport,
+    });
+  }
+  // The Vertex route takes over the whole `vertex-raw-predict` endpoint
+  // scope with no providerProtocol narrowing — the scope covers BOTH
+  // provider protocols (anthropic for the rawPredict family, gemini for the
+  // generateContent family) and the transport selects the endpoint family
+  // from the signed provider protocol on the evidence (the opencode-go
+  // whole-scope precedent).
+  if (options.vertexEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: VERTEX_ENDPOINT, transport: options.vertexEvidenceTransport });
+  }
   const dispatchTransport =
     endpointRoutingRoutes.length === 0 ? transport : createEndpointRoutingTransport(transport, endpointRoutingRoutes);
+  // §4.2 (task #16): the async image media binding — the zero-dep S3
+  // client, the offloader, the PG-backed task service and the two boundary
+  // ports (async submit + task-status query). Absent keeps the endpoints closed.
+  const imageMedia = options.imageMedia
+    ? (() => {
+        const storage = new S3ObjectClient(options.imageMedia.s3);
+        const taskService = new SaasImageTaskService({
+          store: new PostgresImageTaskStore(database),
+          offloader: new ImageResultOffloader({
+            storage,
+            keyPrefix: options.imageMedia.keyPrefix,
+          }),
+          ttlMs: options.imageMedia.taskTtlMs ?? IMAGE_TASK_TTL_MS,
+          executionTimeoutMs: options.imageMedia.executionTimeoutMs ?? IMAGE_TASK_EXECUTION_TIMEOUT_MS,
+        });
+        return {
+          ...options.imageMedia,
+          queryEndpoints: new SaasGatewayImagesQueryPort(taskService),
+          asyncMedia: new SaasGatewayAsyncImageMediaPort(taskService),
+        };
+      })()
+    : undefined;
+  /*
+   * §4.3 (task #17): the async video media binding — the PG-backed task
+   * store (migration 124), the bound-account status/content forwarder, the
+   * one-shot billing state machine (its deferred settlement runs through
+   * the unknown-outcome reconciliation channel against the create's frozen
+   * admission facts), and the two boundary ports (create-time snapshot
+   * registration + the status/content query port). Absent keeps the
+   * endpoints closed.
+   */
+  const videoMedia = options.videoMedia
+    ? (() => {
+        const store = new PostgresVideoTaskStore(database);
+        const forwarder = new GrokVideoUpstreamForwarder({
+          fetch: options.videoMedia.fetch,
+          resolveCredential: options.videoMedia.resolveCredential,
+          ...(options.videoMedia.baseUrl === undefined ? {} : { baseUrl: options.videoMedia.baseUrl }),
+          ...(options.videoMedia.operatorHostAllowlist === undefined
+            ? {}
+            : { operatorHostAllowlist: options.videoMedia.operatorHostAllowlist }),
+          ...(options.videoMedia.timeoutMs === undefined ? {} : { timeoutMs: options.videoMedia.timeoutMs }),
+          ...(options.videoMedia.maxContentBytes === undefined
+            ? {}
+            : { maxContentBytes: options.videoMedia.maxContentBytes }),
+        });
+        const billing = new SaasVideoBillingStateMachine({
+          store,
+          settlement: new ReconciliationVideoSettlementPort({
+            metering,
+            settlement: new DurableConditionalSettlementPort(database),
+            pricing: new SaasPricingService(database),
+          }),
+        });
+        return {
+          queryEndpoints: new SaasGatewayVideosQueryPort({ store, forwarder, billing }),
+          videoCreate: new PersistentSaasGatewayVideoCreatePort({
+            store,
+            ...(options.videoMedia.taskTtlMs === undefined ? {} : { ttlMs: options.videoMedia.taskTtlMs }),
+          }),
+        };
+      })()
+    : undefined;
   const payload = createProviderPayloadCompiler(options);
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
+  });
+
+  // Model plaza (batch 5 §5.5, task #22): the read-only showcase rides the
+  // same database and the same pricing service as admission (the facts port
+  // resolves every display price through resolveCustomerPriceVersion inside
+  // one snapshot transaction). Settings resolve store-first when the
+  // deployment supplies an overlay reader, env-only otherwise; the session
+  // tier is wired by the deployment when a console-session authority is in
+  // scope (the split-gateway role holds no saas_sessions grant).
+  const modelPlaza = createSaasModelPlazaEndpoint({
+    service: new SaasModelPlazaService({
+      facts: new PostgresModelPlazaFacts({
+        database,
+        pricing: new SaasPricingService(database),
+        groups: new SaasBillingGroupsService(database),
+      }),
+      officialPricing: new ModelsDevOfficialPricingRegistry(),
+    }),
+    settings: createModelPlazaSettingsProvider({
+      ...(options.modelPlazaSettingsOverlay ? { overlay: options.modelPlazaSettingsOverlay } : {}),
+    }),
+    ...(options.modelPlazaSessionAuth ? { sessionAuth: options.modelPlazaSessionAuth } : {}),
   });
 
   return createManagedSaasGatewayComposition({
@@ -1380,6 +2051,7 @@ export function createManagedSaasGatewayProductionComposition(
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
       dispatchFailureFeedback,
+      modelRateLimit: new ProviderAccountModelRateLimit(),
     },
     lifecycle: {
       close: async () => {
@@ -1389,6 +2061,21 @@ export function createManagedSaasGatewayProductionComposition(
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
     trustedProxyCidrs: options.trustedProxyCidrs,
+    ...(imageMedia ? { imageMedia } : {}),
+    ...(videoMedia ? { videoMedia } : {}),
+    // Batch 2 §2.1: the production composition always wires the scheduler
+    // with the affinity port (required above), so the sticky-session
+    // scheduling seam is unconditionally live here.
+    stickyScheduling: true,
+    modelPlaza,
+    // Batch 5 §5.4 (task #19): content risk control — always wired with the
+    // gateway database store; the service itself fails open when the feature
+    // is disabled or the store errors, so this never gates startup.
+    contentModeration: new SaasContentModerationService({
+      store: new PostgresContentModerationStore(database),
+      ...(options.riskControl?.emailSender ? { emailSender: options.riskControl.emailSender } : {}),
+      ...(options.riskControl?.siteName ? { siteName: options.riskControl.siteName } : {}),
+    }),
   });
 }
 

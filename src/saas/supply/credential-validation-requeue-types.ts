@@ -38,8 +38,14 @@ export interface AuditedCredentialValidationRequeueReceipt {
 }
 
 export type CredentialValidationRequeueErrorCode =
-  | 'INVALID_INPUT' | 'UNAUTHENTICATED' | 'FORBIDDEN' | 'SCHEMA_NOT_READY'
-  | 'STATE_CONFLICT' | 'IDEMPOTENCY_CONFLICT' | 'TARGET_NOT_AUTHORIZED' | 'STORAGE_UNAVAILABLE';
+  | 'INVALID_INPUT'
+  | 'UNAUTHENTICATED'
+  | 'FORBIDDEN'
+  | 'SCHEMA_NOT_READY'
+  | 'STATE_CONFLICT'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'TARGET_NOT_AUTHORIZED'
+  | 'STORAGE_UNAVAILABLE';
 
 export class CredentialValidationRequeueError extends Error {
   constructor(readonly code: CredentialValidationRequeueErrorCode) {

@@ -57,12 +57,7 @@ export class SecretStore {
     this.db.prepare('DELETE FROM secrets WHERE id=?').run(id);
   }
 
-  status(
-    source:
-      | { type: 'env'; name: string }
-      | { type: 'inline'; value: string }
-      | { type: 'secret'; id: string },
-  ): {
+  status(source: { type: 'env'; name: string } | { type: 'inline'; value: string } | { type: 'secret'; id: string }): {
     type: string;
     configured: boolean;
     reference: string;

@@ -877,22 +877,28 @@ export async function proxyHandler(
       const credentialIndex = previousOwner.credentialId
         ? (ownedUpstream.credentialIds?.indexOf(previousOwner.credentialId) ?? -1)
         : -1;
-      const configuredCredential = credentialIndex >= 0
-        ? {
-            credentialId: ownedUpstream.credentialIds?.[credentialIndex] ?? '',
-            key: ownedUpstream.apiKeys[credentialIndex],
-          }
-        : undefined;
+      const configuredCredential =
+        credentialIndex >= 0
+          ? {
+              credentialId: ownedUpstream.credentialIds?.[credentialIndex] ?? '',
+              key: ownedUpstream.apiKeys[credentialIndex],
+            }
+          : undefined;
       options.keyPool?.reconcile(
         ownedUpstream.name,
         ownedUpstream.apiKeys.map((key, index) => ({ credentialId: ownedUpstream.credentialIds?.[index] ?? key, key })),
       );
-      const availableCredential = configuredCredential &&
-        (options.keyPool?.getAvailableEntries(ownedUpstream.name) ??
-          ownedUpstream.apiKeys.map((key, index) => ({ credentialId: ownedUpstream.credentialIds?.[index] ?? key, key })))
-          .some((entry) =>
-            entry.credentialId === configuredCredential.credentialId && entry.key === configuredCredential.key,
-          );
+      const availableCredential =
+        configuredCredential &&
+        (
+          options.keyPool?.getAvailableEntries(ownedUpstream.name) ??
+          ownedUpstream.apiKeys.map((key, index) => ({
+            credentialId: ownedUpstream.credentialIds?.[index] ?? key,
+            key,
+          }))
+        ).some(
+          (entry) => entry.credentialId === configuredCredential.credentialId && entry.key === configuredCredential.key,
+        );
       if ((!usesClientAuth && !availableCredential) || (usesClientAuth && previousOwner.credentialId !== null)) {
         writeProtocolError(
           res,
@@ -1177,10 +1183,12 @@ export async function proxyHandler(
           upstream.name,
           upstream.apiKeys.map((key, i) => ({ credentialId: upstream.credentialIds?.[i] ?? key, key })),
         );
-        const rawEntries = options.keyPool?.getAvailableEntries(upstream.name) ?? upstream.apiKeys.map((key, index) => ({
-          credentialId: upstream.credentialIds?.[index] ?? key,
-          key,
-        }));
+        const rawEntries =
+          options.keyPool?.getAvailableEntries(upstream.name) ??
+          upstream.apiKeys.map((key, index) => ({
+            credentialId: upstream.credentialIds?.[index] ?? key,
+            key,
+          }));
         const noAuth =
           (upstream as { authMode?: string }).authMode === 'none' &&
           (upstream.provider === 'custom-openai' || upstream.provider === 'custom');
@@ -1193,10 +1201,19 @@ export async function proxyHandler(
         const ownedCredentialIndex = previousOwner?.credentialId
           ? (upstream.credentialIds?.indexOf(previousOwner.credentialId) ?? -1)
           : -1;
-        const ownedEntry = ownedCredentialIndex >= 0
-          ? { credentialId: upstream.credentialIds?.[ownedCredentialIndex] ?? '', key: upstream.apiKeys[ownedCredentialIndex] }
-          : undefined;
-        if (previousOwner && !usesClientAuth && (!ownedEntry || !rawEntries.some((entry) => entry.credentialId === ownedEntry.credentialId && entry.key === ownedEntry.key))) {
+        const ownedEntry =
+          ownedCredentialIndex >= 0
+            ? {
+                credentialId: upstream.credentialIds?.[ownedCredentialIndex] ?? '',
+                key: upstream.apiKeys[ownedCredentialIndex],
+              }
+            : undefined;
+        if (
+          previousOwner &&
+          !usesClientAuth &&
+          (!ownedEntry ||
+            !rawEntries.some((entry) => entry.credentialId === ownedEntry.credentialId && entry.key === ownedEntry.key))
+        ) {
           options.circuitBreaker?.neutralRelease(upstream.name);
           writeProtocolError(
             res,
@@ -1271,8 +1288,8 @@ export async function proxyHandler(
           }
           const apiKey = key ?? '';
           const credentialId = credentialEntry
-            ? (upstream.credentialIds?.find((id, index) =>
-                id === credentialEntry.credentialId && upstream.apiKeys[index] === credentialEntry.key,
+            ? (upstream.credentialIds?.find(
+                (id, index) => id === credentialEntry.credentialId && upstream.apiKeys[index] === credentialEntry.key,
               ) ?? null)
             : null;
           const tryStart = Date.now();
@@ -1487,7 +1504,12 @@ export async function proxyHandler(
           }
 
           if (!usesClientAuth && result.statusCode === 429) {
-            if (credentialEntry) options.keyPool?.markCooldown(upstream.name, credentialEntry, result.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS);
+            if (credentialEntry)
+              options.keyPool?.markCooldown(
+                upstream.name,
+                credentialEntry,
+                result.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS,
+              );
           } else if (!usesClientAuth && statusNeedsKeyCooldown(result.statusCode)) {
             if (credentialEntry) options.keyPool?.markFailure(upstream.name, credentialEntry);
           }

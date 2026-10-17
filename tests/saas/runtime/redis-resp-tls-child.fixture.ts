@@ -6,7 +6,12 @@ import type { RedisRespClient as Client } from '../../../src/saas/runtime/redis-
 // Test-only isolated process. This observes real tls.connect/socket.write;
 // certificate verification and the production client remain unchanged.
 type Mode = 'verified' | 'wrong-san' | 'unknown-ca' | 'uncertain-eval';
-interface Input { mode: Mode; port: number; username: string; password: string }
+interface Input {
+  mode: Mode;
+  port: number;
+  username: string;
+  password: string;
+}
 function check(value: unknown): asserts value {
   if (!value) throw new Error('RUN01_TLS_CHILD_ASSERTION');
 }
@@ -23,7 +28,10 @@ process.once('message', (message: unknown) => {
 });
 function finish(report: object, code: number): void {
   process.exitCode = code;
-  if (!process.send || !process.connected) { clearTimeout(watchdog); return; }
+  if (!process.send || !process.connected) {
+    clearTimeout(watchdog);
+    return;
+  }
   process.send(report, () => {
     clearTimeout(watchdog);
     if (process.connected) process.disconnect();
@@ -33,22 +41,34 @@ async function run(message: unknown) {
   check(message !== null && typeof message === 'object' && !Array.isArray(message));
   const input = message as Input;
   check(['verified', 'wrong-san', 'unknown-ca', 'uncertain-eval'].includes(input.mode));
-  check(Number.isInteger(input.port) && input.port > 1024 && input.port <= 65535 &&
-    input.port !== 6379 && input.port !== 6380);
-  check(input.username === 'owned-user' && typeof input.password === 'string' &&
-    /^[0-9a-f]{64}$/.test(input.password));
+  check(
+    Number.isInteger(input.port) &&
+      input.port > 1024 &&
+      input.port <= 65535 &&
+      input.port !== 6379 &&
+      input.port !== 6380,
+  );
+  check(input.username === 'owned-user' && typeof input.password === 'string' && /^[0-9a-f]{64}$/.test(input.password));
   const tls = createRequire(__filename)('node:tls') as typeof import('node:tls');
   const originalConnect = tls.connect;
-  let dials = 0; let secureConnects = 0; let applicationWrites = 0; let beforeSecureWrites = 0;
+  let dials = 0;
+  let secureConnects = 0;
+  let applicationWrites = 0;
+  let beforeSecureWrites = 0;
   let client: Client | undefined;
   tls.connect = ((options: ConnectionOptions) => {
-    check(options.host === 'localhost' && options.port === input.port &&
-      options.servername === 'localhost' && options.rejectUnauthorized === true &&
-      options.minVersion === 'TLSv1.2');
+    check(
+      options.host === 'localhost' &&
+        options.port === input.port &&
+        options.servername === 'localhost' &&
+        options.rejectUnauthorized === true &&
+        options.minVersion === 'TLSv1.2',
+    );
     dials += 1;
     const ownedLookup: LookupFunction = (hostname, lookupOptions, callback) => {
       if (hostname !== 'localhost' || lookupOptions.family === 6 || lookupOptions.family === 'IPv6') {
-        callback(new Error('RUN01_TLS_LOOKUP_REFUSED'), '', 4); return;
+        callback(new Error('RUN01_TLS_LOOKUP_REFUSED'), '', 4);
+        return;
       }
       if (lookupOptions.all) {
         callback(null, [{ address: '127.0.0.1', family: 4 }]);
@@ -72,25 +92,37 @@ async function run(message: unknown) {
       if (verified) secureConnects += 1;
     });
     const originalWrite = socket.write;
-    socket.write = function (...args: unknown[]): boolean {
+    socket.write = ((...args: unknown[]): boolean => {
       if (!verified) beforeSecureWrites += 1;
       applicationWrites += 1;
       return Reflect.apply(originalWrite, socket, args) as boolean;
-    } as typeof socket.write;
+    }) as typeof socket.write;
     return socket;
   }) as typeof tls.connect;
   syncBuiltinESMExports();
   try {
     const { RedisRespClient, RedisRespError } = await import('../../../src/saas/runtime/redis-resp-client.js');
-    const safe = (code: string) => (error: unknown): boolean => {
-      check(error instanceof RedisRespError && error.code === code && error.message === code &&
-        error.stack === 'RedisRespError: ' + code && error.cause === undefined &&
-        !error.message.includes(input.password) && !error.stack.includes('rediss:'));
-      return true;
-    };
+    const safe =
+      (code: string) =>
+      (error: unknown): boolean => {
+        check(
+          error instanceof RedisRespError &&
+            error.code === code &&
+            error.message === code &&
+            error.stack === 'RedisRespError: ' + code &&
+            error.cause === undefined &&
+            !error.message.includes(input.password) &&
+            !error.stack.includes('rediss:'),
+        );
+        return true;
+      };
     const rejected = async (work: Promise<unknown>, code: string) => {
       let denied = false;
-      try { await work; } catch (error) { denied = safe(code)(error); }
+      try {
+        await work;
+      } catch (error) {
+        denied = safe(code)(error);
+      }
       check(denied);
     };
     const url = 'rediss://' + input.username + ':' + input.password + '@localhost:' + input.port + '/2';
@@ -101,7 +133,7 @@ async function run(message: unknown) {
       check(dials === 1 && secureConnects === 0 && applicationWrites === 0);
     } else {
       client = await RedisRespClient.connect(url);
-      check(await client.command(['PING']) === 'PONG');
+      check((await client.command(['PING'])) === 'PONG');
       const evalCommand = ['EVAL', 'return {1, 10}', '1', 'owned-tls-key', '1', '10'];
       if (input.mode === 'uncertain-eval') {
         failureCode = 'REDIS_TIMEOUT';
@@ -117,11 +149,21 @@ async function run(message: unknown) {
       check(dials === 1 && secureConnects === 1 && applicationWrites === 4);
     }
     check(beforeSecureWrites === 0);
-    return { status: 'passed', mode: input.mode, dials, secureConnects,
-      applicationWrites, beforeSecureWrites, failureCode };
+    return {
+      status: 'passed',
+      mode: input.mode,
+      dials,
+      secureConnects,
+      applicationWrites,
+      beforeSecureWrites,
+      failureCode,
+    };
   } finally {
-    tls.connect = originalConnect; syncBuiltinESMExports();
-    try { await client?.close(); } finally {
+    tls.connect = originalConnect;
+    syncBuiltinESMExports();
+    try {
+      await client?.close();
+    } finally {
       for (const socket of sockets) socket.destroy();
       input.password = '';
     }

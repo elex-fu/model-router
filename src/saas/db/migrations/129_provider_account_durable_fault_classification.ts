@@ -30,8 +30,10 @@ import type { SaasMigration } from './001_initial_schema.js';
  * the window; post-window recovery is cooldown expiry → 'degraded' →
  * schedulable, and the first success write resets the row to healthy.
  *
- * Numbered 112: the applied registry head is 111; 115/116 are claimed by
- * the parallel capability-parity workstream, 112-114 are the free gap.
+ * Numbered 129: originally authored as 112 on main against the 111 registry
+ * head; renumbered to 129 during the capability-parity merge because 112-128
+ * are taken by the parallel workstream's migrations (the applied registry
+ * head is 128, so this durable fault vocabulary extension appends at 129).
  */
 const providerAccountDurableFaultClassificationSql = `
 ALTER TABLE saas_provider_account_runtime_health
@@ -60,7 +62,7 @@ ALTER TABLE saas_provider_account_runtime_health
 `;
 
 export const PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION: SaasMigration = {
-  version: 112,
+  version: 129,
   name: 'provider_account_durable_fault_classification',
   sql: providerAccountDurableFaultClassificationSql,
 };

@@ -689,10 +689,20 @@ export interface UnknownOutcomeRecoveryKeyBudget {
   release(executor: SqlExecutor, input: { readonly tenantId: string; readonly requestId: string }): Promise<boolean>;
 }
 
+/**
+ * R1 (roadmap 1.3, phase 3): resolved-not-executed and stale-admission
+ * sweeps drop the billing group spend window reservations without recording
+ * usage; replay and pre-114 admissions are no-ops inside the store.
+ */
+export interface UnknownOutcomeRecoveryBillingGroupSpend {
+  release(executor: SqlExecutor, input: { readonly tenantId: string; readonly requestId: string }): Promise<boolean>;
+}
+
 /** PostgreSQL implementation; provider I/O is deliberately absent from this repository. */
 export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeRecoveryRepository {
   private readonly idFactory: () => string;
   private readonly keyBudget: UnknownOutcomeRecoveryKeyBudget | undefined;
+  private readonly billingGroupSpend: UnknownOutcomeRecoveryBillingGroupSpend | undefined;
 
   constructor(
     private readonly database: SaasDatabase,
@@ -705,10 +715,15 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
      */
     _metering: SaasMeteringService,
     private readonly billing: PlatformWalletLedgerService = new PlatformWalletLedgerService(),
-    options: { readonly idFactory?: () => string; readonly keyBudget?: UnknownOutcomeRecoveryKeyBudget } = {},
+    options: {
+      readonly idFactory?: () => string;
+      readonly keyBudget?: UnknownOutcomeRecoveryKeyBudget;
+      readonly billingGroupSpend?: UnknownOutcomeRecoveryBillingGroupSpend;
+    } = {},
   ) {
     this.idFactory = options.idFactory ?? randomUUID;
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
   }
 
   async claimDue(limit: number, leaseMs: number, maxAttempts: number): Promise<UnknownOutcomeRecoveryClaimDueResult> {
@@ -966,6 +981,9 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
       }
       if (this.keyBudget) {
         await this.keyBudget.release(tx, { tenantId, requestId });
+      }
+      if (this.billingGroupSpend) {
+        await this.billingGroupSpend.release(tx, { tenantId, requestId });
       }
 
       const failed = await tx.query(
@@ -1572,6 +1590,9 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
       if (this.keyBudget) {
         await this.keyBudget.release(tx, { tenantId: input.tenantId, requestId });
       }
+      if (this.billingGroupSpend) {
+        await this.billingGroupSpend.release(tx, { tenantId: input.tenantId, requestId });
+      }
 
       const auditEventId = this.idFactory();
       await tx.query(
@@ -1667,6 +1688,8 @@ export interface UnknownOutcomeRecoveryWorkflowOptions {
   readonly repository?: { readonly idFactory?: () => string };
   /** KEY-BUD (contract C-4) budget resolution; absent disables budget accounting. */
   readonly keyBudget?: UnknownOutcomeRecoveryKeyBudget;
+  /** R1 (roadmap 1.3, phase 3) group spend resolution; absent disables it. */
+  readonly billingGroupSpend?: UnknownOutcomeRecoveryBillingGroupSpend;
 }
 
 /**
@@ -1678,6 +1701,7 @@ export function createUnknownOutcomeRecoveryWorkflow(input: UnknownOutcomeRecove
   const repository = new PostgresUnknownOutcomeRecoveryRepository(input.database, input.metering, input.billing, {
     idFactory: input.repository?.idFactory,
     ...(input.keyBudget === undefined ? {} : { keyBudget: input.keyBudget }),
+    ...(input.billingGroupSpend === undefined ? {} : { billingGroupSpend: input.billingGroupSpend }),
   });
   const authorization = input.authorization ?? new PostgresUnknownOutcomeOperatorAuthorizationAdapter(input.database);
   return {

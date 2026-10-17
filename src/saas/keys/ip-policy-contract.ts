@@ -46,11 +46,7 @@ function strictObject(input: unknown, fields: readonly string[]): Record<string,
 
 /** Validate a revision without lossy coercion or assigning an initial revision. */
 export function parseKeyIpPolicyVersion(input: unknown): KeyIpPolicyVersion {
-  if (
-    typeof input !== 'string' ||
-    !/^[1-9][0-9]{0,18}$/.test(input) ||
-    BigInt(input) > 9223372036854775807n
-  ) {
+  if (typeof input !== 'string' || !/^[1-9][0-9]{0,18}$/.test(input) || BigInt(input) > 9223372036854775807n) {
     throw new TypeError('Invalid Key IP policy version');
   }
   return input;

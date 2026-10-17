@@ -17,10 +17,12 @@ test('111 registers directly after 110 as the applied head (the slot 110 documen
   const index = registered.indexOf(111);
   assert.ok(index > 0, '111 is registered');
   assert.equal(registered[index - 1], 110, '111 lands directly after 110');
-  // K2: 112 (provider_account_durable_fault_classification) is the new
-  // applied head; 111 lands directly after 110 as before.
-  assert.equal(registered.at(-1), 112, '112 is the applied head');
-  assert.equal(registered[index + 1], 112, '112 lands directly after 111');
+  // Batch-3 (117 bedrock / 119 grok) tails registered after 116; 111's
+  // direct-predecessor contract above is what pins the ordering.
+  // K2: 129 (provider_account_durable_fault_classification, renumbered from
+  // main's 112 in this merge) is the applied head; 111 still lands directly
+  // after 110 (the direct-predecessor contract above).
+  assert.equal(registered.at(-1), 129, 'the K2 durable fault classification tail is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 111).length, 1);

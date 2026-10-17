@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setImmediate } from 'node:timers/promises';
 import { test } from 'node:test';
-import { createAdminServer, type AdminAdapters } from '../../src/admin/server.js';
+import { setImmediate } from 'node:timers/promises';
+import { type AdminAdapters, createAdminServer } from '../../src/admin/server.js';
 import { telemetryAdapters } from '../../src/admin/telemetry.js';
 import { SQLiteTelemetryStore } from '../../src/storage/telemetry-store.js';
 
@@ -77,7 +77,12 @@ for (const outcome of ['success', 'failure'] as const) {
 
       const listenerClosed = once(app.server, 'close');
       closePromise = app.close();
-      void closePromise.then(() => { closeCompleted = true; }, () => {});
+      void closePromise.then(
+        () => {
+          closeCompleted = true;
+        },
+        () => {},
+      );
       await listenerClosed;
       // Flush close callbacks/microtasks, rather than relying on a timed delay.
       await setImmediate();

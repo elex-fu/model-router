@@ -2,28 +2,38 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
+import { CUSTOMER_PASSKEY_CEREMONIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/085_customer_passkey_ceremonies.js';
 import type { SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { checkCustomerPasskeySchema } from '../../../src/saas/identity/customer-passkey-schema-readiness.js';
 import { CustomerPasskeyError } from '../../../src/saas/identity/customer-passkey-types.js';
-import { CUSTOMER_PASSKEY_CEREMONIES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/085_customer_passkey_ceremonies.js';
 
 function catalog(shape = true, binding = true, damaged = false): { tx: SqlExecutor; calls: string[] } {
   const sql = CUSTOMER_PASSKEY_CEREMONIES_SAAS_MIGRATION.sql;
   const routines = Array.from(
-    sql.matchAll(/CREATE FUNCTION model_router_saas\.(saas_customer_passkey_[a-z_]+)\(\) RETURNS trigger\nLANGUAGE plpgsql SET search_path TO pg_catalog, model_router_saas, pg_temp AS \$body\$([\s\S]*?)\$body\$;/g),
+    sql.matchAll(
+      /CREATE FUNCTION model_router_saas\.(saas_customer_passkey_[a-z_]+)\(\) RETURNS trigger\nLANGUAGE plpgsql SET search_path TO pg_catalog, model_router_saas, pg_temp AS \$body\$([\s\S]*?)\$body\$;/g,
+    ),
     (m) => ({ name: m[1], body: m[2], safe: true }),
   );
   assert.equal(routines.length, 3);
   const calls: string[] = [];
-  const tx: SqlExecutor = { async query<Row>(query: string): Promise<SqlResult<Row>> {
-    let rows: unknown[];
-    if (query.includes('WITH wanted(relation_name,column_name,type_name)')) { calls.push('shape'); rows = [{ ready: shape }]; }
-    else if (query.includes('p.prosrc AS body')) { calls.push('routines'); rows = routines.map((r, i) => damaged && i === 0 ? { ...r, body: `${r.body} altered` } : r); }
-    else if (query.includes('trigger_name,function_name,deferred,type_bits')) { calls.push('bindings'); rows = [{ ready: binding }]; }
-    else throw new Error('Unexpected readiness SQL');
-    // Test-only PG catalog row boundary, not an application authority cast.
-    return { rows: rows as Row[], rowCount: rows.length };
-  } };
+  const tx: SqlExecutor = {
+    async query<Row>(query: string): Promise<SqlResult<Row>> {
+      let rows: unknown[];
+      if (query.includes('WITH wanted(relation_name,column_name,type_name)')) {
+        calls.push('shape');
+        rows = [{ ready: shape }];
+      } else if (query.includes('p.prosrc AS body')) {
+        calls.push('routines');
+        rows = routines.map((r, i) => (damaged && i === 0 ? { ...r, body: `${r.body} altered` } : r));
+      } else if (query.includes('trigger_name,function_name,deferred,type_bits')) {
+        calls.push('bindings');
+        rows = [{ ready: binding }];
+      } else throw new Error('Unexpected readiness SQL');
+      // Test-only PG catalog row boundary, not an application authority cast.
+      return { rows: rows as Row[], rowCount: rows.length };
+    },
+  };
   return { tx, calls };
 }
 const unavailable = (e: unknown) => e instanceof CustomerPasskeyError && e.code === 'UNAVAILABLE';

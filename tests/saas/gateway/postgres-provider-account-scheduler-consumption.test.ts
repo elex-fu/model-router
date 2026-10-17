@@ -297,8 +297,12 @@ interface FakeDatabaseState {
   readonly inFlight?: ReadonlyMap<string, unknown>;
   /** F2: resolved billing-group rows; defaults to the seeded neutral group. */
   readonly groupRows?: Row[];
-  /** F2: rows answered by the by-id fallback-group lookup (any id matches). */
-  readonly groupByIdRows?: Row[];
+  /**
+   * F2: rows answered by the by-id fallback-group lookup. An array answers
+   * every id (single-hop fixtures); a map answers per id (R1 phase-4 chain
+   * walks where each hop resolves a different group).
+   */
+  readonly groupByIdRows?: Row[] | ReadonlyMap<string, Row>;
   /** F2: group pools — groupId → accountId → per-group priority. */
   readonly pools?: ReadonlyMap<string, ReadonlyMap<string, number>>;
   readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
@@ -313,7 +317,11 @@ class FakeDatabase implements SaasDatabase {
     let rows: Row[] = [];
     if (sql.includes('postgres-provider-account-scheduler:billing-group-by-id')) {
       const groupId = String(values[0]);
-      rows = this.state.groupByIdRows ?? [{ id: groupId, claude_code_only: false, fallback_group_id: null }];
+      const byId = this.state.groupByIdRows;
+      rows =
+        byId instanceof Map
+          ? [byId.get(groupId) ?? { id: groupId, claude_code_only: false, fallback_group_id: null }]
+          : (byId ?? [{ id: groupId, claude_code_only: false, fallback_group_id: null }]);
     } else if (sql.includes('postgres-provider-account-scheduler:billing-group')) {
       rows = this.state.groupRows ?? [{ id: 'default', claude_code_only: false, fallback_group_id: null }];
     } else if (sql.includes('postgres-provider-account-scheduler:route')) {
@@ -740,6 +748,136 @@ test('a group without claude_code_only ignores client evidence entirely', async 
     claudeCodeClient: THIRD_PARTY_EVIDENCE,
   });
   assert.equal(result.decision, 'allow');
+});
+
+/*
+ * R1 (roadmap 1.3, phase 4): supported_model_scopes gating and the
+ * multi-hop fallback chain with cycle detection.
+ */
+const SCOPES_ROW = (id: string, scopes: string[] | null, fallbackGroupId: string | null): Row => ({
+  id,
+  claude_code_only: false,
+  fallback_group_id: fallbackGroupId,
+  ...(scopes === null ? {} : { supported_model_scopes: scopes }),
+});
+
+test('supported_model_scopes admits an in-scope model under its own group', async () => {
+  const { scheduler, state, input } = setup('platform', {
+    groupRows: [SCOPES_ROW('group-vip', ['public-model', 'public-model-2'], null)],
+  });
+  const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+  assert.equal(result.decision, 'allow');
+  const eligibility = state.statements.find(({ sql }) =>
+    sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
+  );
+  assert.equal(eligibility?.values[22], 'group-vip');
+});
+
+test('supported_model_scopes rejects an out-of-scope model when no fallback admits it', async () => {
+  const { scheduler, state, input } = setup('platform', {
+    groupRows: [SCOPES_ROW('group-vip', ['other-model'], null)],
+  });
+  const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') {
+    assert.equal(result.code, 'route_denied');
+    assert.match(result.message, /does not admit the requested model/);
+  }
+  // The rejection happens before any candidate eligibility read.
+  assert.equal(
+    state.statements.some(({ sql }) => sql.includes('postgres-provider-account-scheduler:platform-eligibility')),
+    false,
+  );
+});
+
+test('supported_model_scopes reroutes to a multi-hop fallback chain that admits the model', async (t) => {
+  await t.test('the second hop of the chain serves the selection', async () => {
+    const pools = new Map([['group-c', new Map([['account-b', 50]])]]);
+    const { scheduler, state, input } = setup('platform', {
+      groupRows: [SCOPES_ROW('group-a', ['other-model'], 'group-b')],
+      // The by-id lookups answer per id: group-b (one more restricted hop),
+      // then group-c, which admits the requested model.
+      groupByIdRows: new Map([
+        ['group-b', SCOPES_ROW('group-b', ['another-model'], 'group-c')],
+        ['group-c', SCOPES_ROW('group-c', ['public-model'], null)],
+      ]),
+      pools,
+      eligibilityRows: new Map([['account-b', [eligibilityRow('platform', 'account-b')]]]),
+    });
+    const result = await scheduler.select(
+      input([candidate('platform', 'account-a'), candidate('platform', 'account-b')]),
+    );
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+    const byIdQueries = state.statements.filter(({ sql }) =>
+      sql.includes('postgres-provider-account-scheduler:billing-group-by-id'),
+    );
+    assert.equal(byIdQueries.length, 2, 'the chain walks exactly two hops');
+    assert.deepEqual(
+      byIdQueries.map(({ values }) => values[0]),
+      ['group-b', 'group-c'],
+    );
+    const eligibility = state.statements.find(({ sql }) =>
+      sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
+    );
+    assert.equal(eligibility?.values[22], 'group-c');
+  });
+
+  await t.test('a chain that exhausts without admitting the model rejects with route_denied', async () => {
+    const { scheduler, input } = setup('platform', {
+      groupRows: [SCOPES_ROW('group-a', ['other-model'], 'group-b')],
+      groupByIdRows: new Map([['group-b', SCOPES_ROW('group-b', ['yet-another-model'], null)]]),
+    });
+    const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+    assert.equal(result.decision, 'reject');
+    if (result.decision === 'reject') assert.equal(result.code, 'route_denied');
+  });
+
+  await t.test('a cyclic fallback chain blocks as authority drift instead of looping', async () => {
+    const { scheduler, state, input } = setup('platform', {
+      groupRows: [SCOPES_ROW('group-a', ['other-model'], 'group-b')],
+      groupByIdRows: new Map([['group-b', SCOPES_ROW('group-b', ['another-model'], 'group-a')]]),
+    });
+    const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+    assert.equal(result.decision, 'block');
+    if (result.decision === 'block') assert.equal(result.code, 'capability_unavailable');
+    // The walk stopped after visiting each group once: two by-id reads.
+    const byIdQueries = state.statements.filter(({ sql }) =>
+      sql.includes('postgres-provider-account-scheduler:billing-group-by-id'),
+    );
+    assert.equal(byIdQueries.length, 2);
+  });
+
+  await t.test('a self-referencing fallback chain blocks after one hop', async () => {
+    const { scheduler, input } = setup('platform', {
+      groupRows: [SCOPES_ROW('group-a', ['other-model'], 'group-a')],
+    });
+    const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+    assert.equal(result.decision, 'block');
+    if (result.decision === 'block') assert.equal(result.code, 'capability_unavailable');
+  });
+});
+
+test('a scope-restricted group with an unresolvable requested model blocks fail-closed', async () => {
+  const { scheduler, input } = setup('platform', {
+    groupRows: [SCOPES_ROW('group-vip', ['public-model'], null)],
+  });
+  const result = await scheduler.select({
+    ...input([candidate('platform', 'account-a')]),
+    publicModel: '',
+  });
+  assert.equal(result.decision, 'block');
+  if (result.decision === 'block') assert.equal(result.code, 'capability_unavailable');
+});
+
+test('a group without supported_model_scopes stays unrestricted', async () => {
+  const { scheduler, state, input } = setup('platform');
+  const result = await scheduler.select(input([candidate('platform', 'account-a')]));
+  assert.equal(result.decision, 'allow');
+  const eligibility = state.statements.find(({ sql }) =>
+    sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
+  );
+  assert.equal(eligibility?.values[22], 'default');
 });
 
 test('claude_code_only never applies to non-claude providers', async () => {

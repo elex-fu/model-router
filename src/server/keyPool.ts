@@ -16,9 +16,7 @@ type KeyPoolInput = Array<string | KeyPoolEntry>;
 type KeyPoolIdentity = string | KeyPoolEntry;
 
 function normalizeEntries(entries: KeyPoolInput): KeyPoolEntry[] {
-  return entries.map((entry) =>
-    typeof entry === 'string' ? { credentialId: entry, key: entry } : entry,
-  );
+  return entries.map((entry) => (typeof entry === 'string' ? { credentialId: entry, key: entry } : entry));
 }
 
 export class KeyPool {
@@ -49,7 +47,8 @@ export class KeyPool {
     if (
       old.length === normalized.length &&
       old.every((state, i) => state.credentialId === normalized[i]?.credentialId && state.key === normalized[i]?.key)
-    ) return;
+    )
+      return;
     this.states.set(
       upstreamName,
       normalized.map(({ credentialId, key }) => {
@@ -133,9 +132,7 @@ export class KeyPool {
     const states = this.states.get(upstreamName);
     if (!states) return [];
     const now = Date.now();
-    return states
-      .filter((state) => state.cooledUntil <= now)
-      .map(({ credentialId, key }) => ({ credentialId, key }));
+    return states.filter((state) => state.cooledUntil <= now).map(({ credentialId, key }) => ({ credentialId, key }));
   }
 
   /** Count currently available credentials without exposing secrets or advancing round-robin state. */

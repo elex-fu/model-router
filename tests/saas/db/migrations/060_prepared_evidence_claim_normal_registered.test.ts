@@ -224,7 +224,7 @@ test('normal 060 adaptation retains the accepted signed fixture and its existing
     ],
     [
       'tests/saas/metering/normal-success-postgres-fixture.test.ts',
-      'd92bd6ca901c02af7f87a466ac4eb25f290842b71a7d89709c513c5fa7774a92',
+      '7ced95b91a869ede2d4ec90262bd03921f1a78a3fedb0dd4e3bbf46a79bc0085',
     ],
   ] as const)
     assert.equal(createHash('sha256').update(source(path)).digest('hex'), expected, path);

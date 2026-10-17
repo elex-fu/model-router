@@ -9,9 +9,7 @@ import type {
   AuthorizedPlatformUpstreamCandidate,
   ModelResolutionProvenance,
 } from '../../../src/saas/gateway/contracts.js';
-import {
-  createEmbeddingsUsageUpperBoundEstimator,
-} from '../../../src/saas/gateway/embeddings-usage-estimator.js';
+import { createEmbeddingsUsageUpperBoundEstimator } from '../../../src/saas/gateway/embeddings-usage-estimator.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort,
@@ -29,15 +27,15 @@ import type {
   PreparedRequestEvidenceRecord,
 } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import {
-  createProviderPayloadCompiler,
-  type ProviderCompiledPayload,
-} from '../../../src/saas/gateway/provider-payload-compiler.js';
-import {
   type ProviderHttpCredentialResolver,
   type ProviderHttpDispatchProfileResolver,
   type ProviderHttpFetch,
   ProviderHttpTransport,
 } from '../../../src/saas/gateway/provider-http-transport.js';
+import {
+  createProviderPayloadCompiler,
+  type ProviderCompiledPayload,
+} from '../../../src/saas/gateway/provider-payload-compiler.js';
 import {
   allowRequestPreparation,
   type RequestPreparationAdmission,
@@ -621,7 +619,10 @@ function dispatchAttempt(evidence: PreparedRequestEvidenceRecord): AttemptRecord
 class FakeEvidenceStore {
   readonly audits: PreparedRequestEvidenceAudit[] = [];
 
-  constructor(private readonly state: PreparationState, private readonly metering: FakeMetering) {}
+  constructor(
+    private readonly state: PreparationState,
+    private readonly metering: FakeMetering,
+  ) {}
 
   async preflightForDispatch(
     evidenceId: string,
@@ -688,7 +689,8 @@ class FakeMetering implements PreparedEvidenceMeteringPort {
       dispatchState: input.dispatchState ?? this.current.dispatchState,
       resultState: input.resultState ?? this.current.resultState,
       responseStarted: this.current.responseStarted || input.responseStarted === true,
-      responseStartedAt: input.responseStarted === true ? (this.current.responseStartedAt ?? NOW) : this.current.responseStartedAt,
+      responseStartedAt:
+        input.responseStarted === true ? (this.current.responseStartedAt ?? NOW) : this.current.responseStartedAt,
       resultHttpStatus: input.resultHttpStatus ?? this.current.resultHttpStatus,
       unknownReason: input.unknownReason ?? this.current.unknownReason,
       stateVersion: this.current.stateVersion + 1,
@@ -706,9 +708,7 @@ interface SettlementCapture {
   readonly completions: Parameters<SettlementPort['complete']>[0][];
 }
 
-type SettlementPort = NonNullable<
-  ConstructorParameters<typeof SaasPreparedEvidenceDispatchService>[4]
->;
+type SettlementPort = NonNullable<ConstructorParameters<typeof SaasPreparedEvidenceDispatchService>[4]>;
 
 function settlementPort(capture: SettlementCapture, metering: FakeMetering): SettlementPort {
   return {
@@ -833,7 +833,10 @@ test('R2: /v1/embeddings runs the full admission -> hold -> forward -> usage -> 
   });
   const response = new FakeServerResponse();
 
-  assert.equal(await handler(asRequest(new FakeIncomingMessage()), asResponse(response), { requestId: 'request-1' }), true);
+  assert.equal(
+    await handler(asRequest(new FakeIncomingMessage()), asResponse(response), { requestId: 'request-1' }),
+    true,
+  );
   assert.deepEqual(keyCalls, ['fake-proxy-key']);
   assert.deepEqual(preparationState.calls, [
     'caller',
@@ -876,10 +879,10 @@ test('R2: /v1/embeddings runs the full admission -> hold -> forward -> usage -> 
   assert.equal(provider.urls[0], 'https://provider.example/v1/embeddings');
   assert.equal(provider.headers[0]?.get('authorization'), 'Bearer fake-provider-credential');
   assert.equal(provider.headers[0]?.get('content-type'), 'application/json');
-  assert.deepEqual(
-    JSON.parse(new TextDecoder().decode(provider.payloads[0])),
-    { input: CLIENT_REQUEST.input, model: 'provider-model' },
-  );
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(provider.payloads[0])), {
+    input: CLIENT_REQUEST.input,
+    model: 'provider-model',
+  });
 
   // Usage -> settlement: the JSON observer normalized prompt_tokens with a
   // zero output, and settlement consumed the admission hold snapshot.
@@ -894,10 +897,7 @@ test('R2: /v1/embeddings runs the full admission -> hold -> forward -> usage -> 
   assert.equal(completion.usage.source, 'upstream');
 
   assert.equal(metering.current?.dispatchState, 'sent');
-  assert.equal(
-    metering.transitions.map((transition) => transition.dispatchState).join(','),
-    'dispatching,sent',
-  );
+  assert.equal(metering.transitions.map((transition) => transition.dispatchState).join(','), 'dispatching,sent');
   assert.equal(lease.acquireCount, 1);
   assert.equal(lease.releaseCount, 1);
 

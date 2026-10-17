@@ -21,8 +21,8 @@
  */
 
 import {
-  deriveStableUUIDv4 as sharedDeriveStableUUIDv4,
   type IdentityNamespaceError,
+  deriveStableUUIDv4 as sharedDeriveStableUUIDv4,
   isolateSessionId as sharedIsolateSessionId,
 } from '../oauth-subscription/identity-namespace.js';
 

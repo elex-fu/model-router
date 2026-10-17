@@ -57,7 +57,7 @@ function limiterOptions(options: RedisRateLimiterOptions): void {
   }
 }
 
-/** Named export for the existing trusted dynamic provider loader; no gateway use. */
+/** Trusted static export: the dynamic control-plane provider loader and the core gateway Redis wiring both use it. */
 export async function createRedisProvider(options: RedisProviderFactoryOptions): Promise<RedisProvider> {
   if (
     options === null ||

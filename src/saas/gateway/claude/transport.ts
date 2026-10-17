@@ -1,3 +1,6 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { normalizeUsage } from '../../../telemetry/usage.js';
+import type { NormalSuccessObservedUsage } from '../dispatch-usage-settlement.js';
 import {
   classifyUpstreamError,
   shouldFailover,
@@ -11,6 +14,12 @@ import {
   flattenHeaders,
   QuotaSnapshotWriteThrottle,
 } from '../oauth-subscription/transport-skeleton.js';
+import type {
+  PreparedEvidenceTransport,
+  PreparedEvidenceTransportRequest,
+  PreparedEvidenceTransportResponse,
+} from '../prepared-evidence-dispatch-service.js';
+import type { PreparedRequestEvidenceRecord } from '../prepared-request-evidence-service.js';
 import { CLAUDE_MESSAGES_ENDPOINT } from './catalog-identity.js';
 import {
   CLAUDE_ANTHROPIC_VERSION,
@@ -18,8 +27,14 @@ import {
   CLAUDE_CODE_MIMICRY_BETA_HEADER,
   CLAUDE_STAINLESS_HEADERS,
 } from './constants.js';
+import { normalizeClaudeDatelineBody } from './dateline.js';
 import { buildClaudeUserAgent, resolveClaudeCliVersion } from './identity.js';
-import { type ClaudeRateLimitClassification, classifyClaude429 } from './quota-headers.js';
+import {
+  type ClaudeQuotaSnapshot,
+  type ClaudeRateLimitClassification,
+  classifyClaude429,
+  parseClaudeQuotaSnapshot,
+} from './quota-headers.js';
 import { type ClaudeMessagesUsage, parseMessagesUsage } from './response-bridge.js';
 
 /**
@@ -42,6 +57,9 @@ import { type ClaudeMessagesUsage, parseMessagesUsage } from './response-bridge.
  *   accounts;
  * - `anthropic-ratelimit-unified-*` parsing on every 429 with an
  *   at-least-30s throttled, best-effort classification write;
+ * - the same unified headers parsed off every response (success included)
+ *   into a per-window quota snapshot with its own throttled best-effort
+ *   sink (R-dormant: the 099/100 column writer);
  * - upstream error classification (shared health classifier) split into the
  *   account health signal and the in-flight failover signal;
  * - SSE relay that keeps draining the upstream after the client disconnects
@@ -85,6 +103,19 @@ export type ClaudeRateLimitSink = (record: {
   readonly fromStatus: number;
 }) => void | Promise<void>;
 
+/**
+ * Throttled, best-effort quota-snapshot write observed off ANY response
+ * (success included — the `anthropic-ratelimit-unified-*` utilization/status
+ * headers ride on 2xx traffic too). The record carries the owner-neutral
+ * account id; owner-scope resolution is the sink's job.
+ */
+export type ClaudeQuotaSnapshotSink = (record: {
+  readonly accountId: string;
+  readonly snapshot: ClaudeQuotaSnapshot;
+  readonly observedAtMs: number;
+  readonly fromStatus: number;
+}) => void | Promise<void>;
+
 /** Account health signal (classification) separate from the failover signal. */
 export type ClaudeAccountHealthSink = (signal: {
   readonly accountId: string;
@@ -113,6 +144,8 @@ export interface ClaudeTransportStreamResult {
   /** Settles with the usage from the terminal message events. */
   readonly usage: Promise<ClaudeMessagesUsage | null>;
   readonly rateLimitWritten: boolean;
+  /** Whether a success-path quota snapshot write was dispatched (R-dormant). */
+  readonly quotaSnapshotWritten: boolean;
 }
 
 export interface ClaudeTransportErrorResult {
@@ -123,6 +156,7 @@ export interface ClaudeTransportErrorResult {
   readonly failover: boolean;
   readonly bodyText: string | null;
   readonly rateLimitWritten: boolean;
+  readonly quotaSnapshotWritten: boolean;
 }
 
 export type ClaudeTransportResult = ClaudeTransportStreamResult | ClaudeTransportErrorResult;
@@ -159,8 +193,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Incremental Messages SSE watcher: extracts the usage facts from
  * `message_start` (input side) and the terminal `message_delta`
  * (authoritative output_tokens) without buffering whole events.
+ *
+ * Exported for the batch-5 §5.1 plugin routing decorator
+ * (src/saas/plugins/gateway-plugin-router.ts): the plugin path returns a
+ * plain response stream and reuses this watcher for usage observation so
+ * billing is identical across the native and plugin routes.
  */
-class MessagesUsageWatcher {
+export class MessagesUsageWatcher {
   private buffer = '';
   private usage: ClaudeMessagesUsage | null = null;
   private complete = false;
@@ -240,6 +279,7 @@ export interface ClaudeHttpTransportOptions {
   readonly baseUrl?: string;
   readonly resolveCredential: ClaudeCredentialResolver;
   readonly writeRateLimit?: ClaudeRateLimitSink;
+  readonly writeQuotaSnapshot?: ClaudeQuotaSnapshotSink;
   readonly recordAccountHealth?: ClaudeAccountHealthSink;
   readonly timeoutMs?: number;
   readonly snapshotMinIntervalMs?: number;
@@ -251,6 +291,7 @@ interface NormalizedTransportOptions {
   readonly baseUrl: URL;
   readonly resolveCredential: ClaudeCredentialResolver;
   readonly writeRateLimit: ClaudeRateLimitSink | null;
+  readonly writeQuotaSnapshot: ClaudeQuotaSnapshotSink | null;
   readonly recordAccountHealth: ClaudeAccountHealthSink | null;
   readonly timeoutMs: number;
   readonly snapshotMinIntervalMs: number;
@@ -264,6 +305,7 @@ interface NormalizedTransportOptions {
 export class ClaudeHttpTransport {
   private readonly options: NormalizedTransportOptions;
   private readonly rateLimitThrottle: QuotaSnapshotWriteThrottle;
+  private readonly quotaSnapshotThrottle: QuotaSnapshotWriteThrottle;
 
   constructor(options: ClaudeHttpTransportOptions) {
     if (!options || typeof options.fetch !== 'function') fail('INVALID_INPUT', 'an injected fetch adapter is required');
@@ -284,12 +326,17 @@ export class ClaudeHttpTransport {
       baseUrl,
       resolveCredential: options.resolveCredential,
       writeRateLimit: options.writeRateLimit ?? null,
+      writeQuotaSnapshot: options.writeQuotaSnapshot ?? null,
       recordAccountHealth: options.recordAccountHealth ?? null,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       snapshotMinIntervalMs: options.snapshotMinIntervalMs ?? DEFAULT_SNAPSHOT_MIN_INTERVAL_MS,
       nowMs: options.nowMs ?? (() => Date.now()),
     };
     this.rateLimitThrottle = new QuotaSnapshotWriteThrottle(this.options.snapshotMinIntervalMs, this.options.nowMs);
+    // The success-path quota snapshot and the 429 classification are separate
+    // observations: a snapshot write must never suppress the classification
+    // write of a 429 that immediately follows it (and vice versa).
+    this.quotaSnapshotThrottle = new QuotaSnapshotWriteThrottle(this.options.snapshotMinIntervalMs, this.options.nowMs);
   }
 
   async send(request: ClaudeTransportRequest): Promise<ClaudeTransportResult> {
@@ -346,7 +393,14 @@ export class ClaudeHttpTransport {
     }
 
     const headers = this.buildHeaders(request, credential);
-    const bodyBytes = Buffer.from(JSON.stringify(request.body), 'utf8');
+    // Client dateline normalization runs at the claude egress chokepoint —
+    // after any mimicry transform, before serialization — so both genuine
+    // Claude Code traffic and rewritten third-party bodies are cleaned. It is
+    // a pure copy-on-write no-op on canonical bodies (sub2api
+    // gateway_forward.go placement; that implementation defaults it on).
+    if (!isRecord(request.body)) fail('INVALID_INPUT', 'the claude outbound body must be a JSON object');
+    const outboundBody = normalizeClaudeDatelineBody(request.body);
+    const bodyBytes = Buffer.from(JSON.stringify(outboundBody), 'utf8');
     let response: Response;
     try {
       response = await this.options.fetch(this.options.baseUrl.toString(), {
@@ -375,6 +429,7 @@ export class ClaudeHttpTransport {
 
     const responseHeaders = flattenHeaders(response);
     const rateLimitWritten = this.maybeWriteRateLimit(request.accountId, responseHeaders, response.status);
+    const quotaSnapshotWritten = this.maybeWriteQuotaSnapshot(request.accountId, responseHeaders, response.status);
 
     if (response.status < 200 || response.status >= 300) {
       const bodyText = await boundedErrorBody(response, controller.signal, MAX_ERROR_BODY_BYTES);
@@ -385,7 +440,15 @@ export class ClaudeHttpTransport {
       });
       const failover = shouldFailover(classification);
       await this.recordHealth(request.accountId, classification, failover);
-      return { ok: false, status: response.status, classification, failover, bodyText, rateLimitWritten };
+      return {
+        ok: false,
+        status: response.status,
+        classification,
+        failover,
+        bodyText,
+        rateLimitWritten,
+        quotaSnapshotWritten,
+      };
     }
 
     const body = response.body ?? null;
@@ -397,6 +460,7 @@ export class ClaudeHttpTransport {
         body: null,
         usage: Promise.resolve(null),
         rateLimitWritten,
+        quotaSnapshotWritten,
       };
     }
     const relay = createDrainingRelay(body, controller.signal, new MessagesUsageWatcher(), {
@@ -410,6 +474,7 @@ export class ClaudeHttpTransport {
       body: relay.stream,
       usage: relay.usage,
       rateLimitWritten,
+      quotaSnapshotWritten,
     };
   }
 
@@ -448,6 +513,29 @@ export class ClaudeHttpTransport {
     return true;
   }
 
+  /**
+   * Success-path quota observation (R-dormant activation): the unified
+   * utilization/status headers ride on every response, not only 429s. The
+   * write is throttled per account, best-effort, and never gates the
+   * response. A response carrying no window signal writes nothing.
+   */
+  private maybeWriteQuotaSnapshot(
+    accountId: string,
+    headers: Readonly<Record<string, string>>,
+    status: number,
+  ): boolean {
+    if (this.options.writeQuotaSnapshot === null) return false;
+    const snapshot = parseClaudeQuotaSnapshot(headers as Record<string, string>, this.options.nowMs());
+    if (snapshot === null) return false;
+    if (!this.quotaSnapshotThrottle.shouldWrite(accountId)) return false;
+    const observedAtMs = this.options.nowMs();
+    // Best-effort by contract: persistence failures never affect the response.
+    void Promise.resolve()
+      .then(() => this.options.writeQuotaSnapshot?.({ accountId, snapshot, observedAtMs, fromStatus: status }))
+      .catch(() => undefined);
+    return true;
+  }
+
   private async recordHealth(
     accountId: string,
     classification: UpstreamErrorClassification,
@@ -467,7 +555,153 @@ export function claudeMetadataUserSeed(proxyKeyId: string, accountUuid: string):
   return `${CLAUDE_METADATA_USER_ID_NAMESPACE}${proxyKeyId}:${accountUuid}`;
 }
 
+/**
+ * The Claude Code mimicry header set WITHOUT `authorization` — the exact
+ * `buildHeaders` shape minus the credential line. The batch-5 §5.1 plugin
+ * routing decorator sends this to the plugin transport; the plugin injects
+ * the Authorization header itself after decrypting its per-request session
+ * credential envelope (the host never serializes the token).
+ */
+export function buildClaudeOutboundHeadersSansAuth(
+  baseUrl: URL,
+  cliVersionOverride?: string | null,
+): Record<string, string> {
+  const cliVersion = resolveClaudeCliVersion(cliVersionOverride ?? undefined);
+  return {
+    host: baseUrl.host,
+    'anthropic-version': CLAUDE_ANTHROPIC_VERSION,
+    'anthropic-beta': CLAUDE_CODE_MIMICRY_BETA_HEADER,
+    'user-agent': buildClaudeUserAgent(cliVersion),
+    accept: 'text/event-stream',
+    'content-type': 'application/json',
+    ...CLAUDE_STAINLESS_HEADERS,
+    ...CLAUDE_CLIENT_IDENTITY_HEADERS,
+  };
+}
+
 /** The deriveStableUUIDv4-based metadata user id (identity namespace kernel). */
 export function claudeMetadataUserId(proxyKeyId: string, accountUuid: string): string {
   return deriveStableUUIDv4(claudeMetadataUserSeed(proxyKeyId, accountUuid));
+}
+
+const PREPARED_PAYLOAD_SHA256 = /^[0-9a-f]{64}$/;
+
+/** Normalized Messages usage → the gateway's observed-usage contract. */
+export function claudeUsageToObservedUsage(usage: ClaudeMessagesUsage): NormalSuccessObservedUsage | null {
+  const normalized = normalizeUsage('anthropic', {
+    input_tokens: usage.inputTokens ?? undefined,
+    cache_read_input_tokens: usage.cacheReadTokens ?? undefined,
+    cache_creation_input_tokens: usage.cacheCreationTokens ?? undefined,
+    output_tokens: usage.outputTokens ?? undefined,
+  });
+  if (normalized.status !== 'reported' || normalized.inputTotal === null || normalized.outputTotal === null) {
+    return null;
+  }
+  return Object.freeze({ ...normalized, source: 'upstream' });
+}
+
+/**
+ * Per-request identity context for the prepared-evidence adapter; the gateway
+ * resolves it from the authenticated caller (proxy key id) and the account's
+ * scheduling columns (CLI version override).
+ */
+export interface ClaudeRequestIdentityContext {
+  /** Proxy key id: the metadata user id namespace seed; null disables isolation. */
+  readonly proxyKeyId: string | null;
+  /** Operator CLI version override (scheduling column); null uses the pin. */
+  readonly cliVersionOverride?: string | null;
+}
+
+/**
+ * Adapter that plugs `ClaudeHttpTransport` into the gateway's prepared-evidence
+ * dispatch chain (the direct analog of `CodexPreparedEvidenceTransport`). The
+ * evidence record carries the account/credential binding and the signed
+ * payload digest; the per-request identity context comes from the injected
+ * resolver. Dispatch routes evidence whose signed endpoint scope is the Claude
+ * catalog endpoint (`claude-messages`) here.
+ */
+export interface ClaudePreparedEvidenceTransportOptions extends ClaudeHttpTransportOptions {
+  readonly resolveRequestContext: (
+    evidence: PreparedRequestEvidenceRecord,
+  ) => Promise<ClaudeRequestIdentityContext> | ClaudeRequestIdentityContext;
+}
+
+export class ClaudePreparedEvidenceTransport implements PreparedEvidenceTransport {
+  private readonly transport: ClaudeHttpTransport;
+  private readonly resolveRequestContext: ClaudePreparedEvidenceTransportOptions['resolveRequestContext'];
+
+  constructor(options: ClaudePreparedEvidenceTransportOptions) {
+    if (typeof options.resolveRequestContext !== 'function') {
+      fail('INVALID_INPUT', 'a claude request context resolver is required');
+    }
+    this.transport = new ClaudeHttpTransport(options);
+    this.resolveRequestContext = options.resolveRequestContext;
+  }
+
+  async send(input: PreparedEvidenceTransportRequest): Promise<PreparedEvidenceTransportResponse> {
+    const body = assertPayloadBinding(input);
+    const evidence = input.evidence;
+    const context = await this.resolveRequestContext(evidence);
+    const result = await this.transport.send({
+      accountId: evidence.accountId,
+      credentialId: evidence.credentialId,
+      credentialVersion: evidence.credentialVersion,
+      body,
+      proxyKeyId: context.proxyKeyId,
+      cliVersionOverride: context.cliVersionOverride,
+      signal: input.signal,
+    });
+    if (!result.ok) {
+      return {
+        responseStarted: false,
+        resultHttpStatus: result.status,
+        upstreamErrorKind: result.classification.kind,
+        headers: {},
+        body: null,
+      };
+    }
+    // The Messages usage arrives with the stream's terminal event; expose it
+    // through the same lazy accessor contract as the codex adapter.
+    let observedUsage: ClaudeMessagesUsage | null = null;
+    void result.usage
+      .then((usage) => {
+        observedUsage = usage;
+        return usage;
+      })
+      .catch(() => null);
+    return {
+      responseStarted: false,
+      resultHttpStatus: result.status,
+      headers: result.headers,
+      body: result.body,
+      get providerUsage(): NormalSuccessObservedUsage | null {
+        return observedUsage === null ? null : claudeUsageToObservedUsage(observedUsage);
+      },
+    };
+  }
+}
+
+function assertPayloadBinding(input: PreparedEvidenceTransportRequest): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || !input.evidence) fail('INVALID_INPUT', 'transport request is required');
+  const evidence = input.evidence;
+  if (evidence.status !== 'claimed' || evidence.claimedAttemptId !== input.attemptId) {
+    fail('INVALID_INPUT', 'prepared evidence is not bound to this transport request');
+  }
+  if (typeof evidence.payloadSha256 !== 'string' || !PREPARED_PAYLOAD_SHA256.test(evidence.payloadSha256)) {
+    fail('INVALID_INPUT', 'prepared evidence payload digest is invalid');
+  }
+  if (!(input.payloadBytes instanceof Uint8Array)) fail('INVALID_INPUT', 'payload bytes are invalid');
+  const actual = createHash('sha256').update(input.payloadBytes).digest();
+  const expected = Buffer.from(evidence.payloadSha256, 'hex');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    fail('INVALID_INPUT', 'payload bytes do not match prepared evidence');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(input.payloadBytes));
+  } catch {
+    fail('INVALID_INPUT', 'payload bytes are not the claude JSON body');
+  }
+  if (!isRecord(parsed)) fail('INVALID_INPUT', 'payload bytes are not the claude JSON body');
+  return parsed;
 }

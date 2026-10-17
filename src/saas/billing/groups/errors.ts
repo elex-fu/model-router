@@ -7,7 +7,10 @@ export type SaasBillingGroupsErrorCode =
   | 'INVALID_OVERRIDE'
   | 'AMOUNT_OVERFLOW'
   | 'GROUP_CONFLICT'
-  | 'TARGET_NOT_FOUND';
+  | 'TARGET_NOT_FOUND'
+  | 'GROUP_SPEND_STORAGE_ERROR'
+  | 'GROUP_SPEND_CURRENCY_MISMATCH'
+  | 'GROUP_SPEND_EXCEEDED';
 
 const SAFE_MESSAGES: Record<SaasBillingGroupsErrorCode, string> = {
   INVALID_INPUT: 'The billing group request contains invalid data.',
@@ -19,6 +22,9 @@ const SAFE_MESSAGES: Record<SaasBillingGroupsErrorCode, string> = {
   AMOUNT_OVERFLOW: 'The multiplied billing amount is outside the supported range.',
   GROUP_CONFLICT: 'The billing group change conflicts with existing data.',
   TARGET_NOT_FOUND: 'The billing group binding target was not found.',
+  GROUP_SPEND_STORAGE_ERROR: 'The billing group spend window state is unavailable.',
+  GROUP_SPEND_CURRENCY_MISMATCH: 'The billing group spend window currencies do not match.',
+  GROUP_SPEND_EXCEEDED: 'The billing group spend limit is exhausted.',
 };
 
 export class SaasBillingGroupsError extends Error {

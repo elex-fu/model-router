@@ -56,6 +56,11 @@ const COMMERCIAL_PRICE_VERSION_COLUMNS = [
   'cache_write_1h_rate_denominator_units',
   'output_rate_numerator_minor_units',
   'output_rate_denominator_units',
+  // 4.1 (122): per-unit rate pair, tier ladder, token-multiplier policy.
+  'per_unit_rate_numerator_minor_units',
+  'per_unit_rate_denominator_units',
+  'per_unit_tier_rates',
+  'token_multipliers',
   'effective_at',
   'expires_at',
   'idempotency_key',
@@ -362,6 +367,35 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ]),
   ...columnGrants('saas_obs_alert_events', 'SELECT', ['id', 'rule_id', 'triggered_at', 'resolved_at', 'payload']),
   ...columnGrants('saas_obs_alert_events', 'INSERT', ['id', 'rule_id', 'triggered_at', 'payload']),
+  // Batch-5 §5.6 (migration 127): the alert evaluator auto-resolves a
+  // rule's open events when a cycle does not violate the window; the
+  // silence service manages operator silences; the report scheduler claims
+  // runs by advancing the per-type last_run row under a SKIP LOCKED lease.
+  ...columnGrants('saas_obs_alert_events', 'UPDATE', ['resolved_at']),
+  ...columnGrants('saas_obs_alert_silences', 'SELECT', [
+    'id',
+    'rule_id',
+    'platform',
+    'group_id',
+    'region',
+    'until',
+    'reason',
+    'created_by',
+    'created_at',
+  ]),
+  ...columnGrants('saas_obs_alert_silences', 'INSERT', [
+    'id',
+    'rule_id',
+    'platform',
+    'group_id',
+    'region',
+    'until',
+    'reason',
+    'created_by',
+  ]),
+  ...columnGrants('saas_obs_report_state', 'SELECT', ['report_type', 'last_run_at', 'updated_at']),
+  ...columnGrants('saas_obs_report_state', 'INSERT', ['report_type', 'last_run_at']),
+  ...columnGrants('saas_obs_report_state', 'UPDATE', ['last_run_at', 'updated_at']),
   ...columnGrants('saas_platform_mfa_enrollment_tokens', 'SELECT', [
     'id',
     'user_id',
@@ -459,6 +493,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'claude_code_only',
     'fallback_group_id',
     'supported_model_scopes',
+    'composite',
     'status',
     'created_at',
     'updated_at',
@@ -487,6 +522,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'claude_code_only',
     'fallback_group_id',
     'supported_model_scopes',
+    'composite',
     'status',
     'created_at',
     'updated_at',
@@ -514,12 +550,100 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'claude_code_only',
     'fallback_group_id',
     'supported_model_scopes',
+    'composite',
     'status',
     'updated_at',
   ]),
   ...columnGrants('saas_billing_group_account_pools', 'SELECT', ['group_id', 'account_id', 'priority', 'created_at']),
   ...columnGrants('saas_billing_group_account_pools', 'INSERT', ['group_id', 'account_id', 'priority']),
   ...columnGrants('saas_billing_group_account_pools', 'UPDATE', ['priority']),
+  // 125 (batch-5 §5.4) risk control: the control plane owns the single-row
+  // JSONB config (admin PUT), reads the moderation decision log for the
+  // admin surface, and runs the retention cleanup; the flagged-hash
+  // blocklist rows are deleted through the table-level DELETE manifest.
+  ...columnGrants('saas_risk_control_config', 'SELECT', ['id', 'config', 'updated_at']),
+  ...columnGrants('saas_risk_control_config', 'INSERT', ['id', 'config', 'updated_at']),
+  ...columnGrants('saas_risk_control_config', 'UPDATE', ['config', 'updated_at']),
+  ...columnGrants('saas_content_moderation_logs', 'SELECT', [
+    'id',
+    'request_id',
+    'tenant_id',
+    'user_id',
+    'api_key_id',
+    'api_key_name',
+    'model',
+    'protocol',
+    'mode',
+    'action',
+    'flagged',
+    'highest_category',
+    'highest_score',
+    'matched_keyword',
+    'category_scores',
+    'threshold_snapshot',
+    'input_excerpt',
+    'input_hash',
+    'upstream_latency_ms',
+    'error',
+    'violation_count',
+    'auto_banned',
+    'email_sent',
+    'created_at',
+  ]),
+  ...columnGrants('saas_content_moderation_flagged_hashes', 'SELECT', ['input_hash', 'created_at']),
+  // (121) composite model routes: the control plane manages the composite
+  // route registry; the gateway reads it during composite-group resolution
+  // (the dynamic read-table grant below).
+  ...columnGrants('saas_composite_model_routes', 'SELECT', [
+    'id',
+    'group_id',
+    'public_model',
+    'match_type',
+    'target_platform',
+    'upstream_model',
+    'endpoint',
+    'priority',
+    'enabled',
+    'notes',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_composite_model_routes', 'INSERT', [
+    'group_id',
+    'public_model',
+    'match_type',
+    'target_platform',
+    'upstream_model',
+    'endpoint',
+    'priority',
+    'enabled',
+    'notes',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_composite_model_routes', 'UPDATE', [
+    'public_model',
+    'match_type',
+    'target_platform',
+    'upstream_model',
+    'endpoint',
+    'priority',
+    'enabled',
+    'notes',
+    'updated_at',
+  ]),
+  // 126 (batch-5 §5.2) OEM white-label: the control plane materializes the
+  // public brand snapshot (the non-secret `saas.brand.*` settings subset)
+  // into the single-row table the gateway and console-serving workloads read
+  // (SSR `__APP_CONFIG__` injection + `GET /settings/public`). No DELETE —
+  // the snapshot row is never removed, only re-materialized; no grant on the
+  // table for the credential-validation-worker.
+  ...columnGrants('saas_public_brand_settings', 'SELECT', ['singleton', 'snapshot', 'version', 'materialized_at']),
+  ...columnGrants('saas_public_brand_settings', 'INSERT', ['singleton', 'snapshot', 'version', 'materialized_at']),
+  ...columnGrants('saas_public_brand_settings', 'UPDATE', ['snapshot', 'version', 'materialized_at']),
+  // R1 (113): no control-plane grant on saas_billing_group_rate_counters —
+  // the gateway alone upserts the group RPM admission counters (the gateway
+  // column manifest below carries the DML).
   // R3 (107) egress proxies: the control plane manages the proxy registry
   // and runs the probe/sweep worker (last_probe_* writes); the gateway and
   // the OAuth refresh worker read through the dynamic read-table grants.
@@ -569,6 +693,59 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'last_probe_latency_ms',
     'last_probe_ip',
     'last_probe_quality',
+    'updated_at',
+  ]),
+  // Batch-2 §2.4 (116) TLS fingerprint profiles: the control plane owns the
+  // ClientHello profile registry; the gateway reads it through the dynamic
+  // read-table grants below (profile resolution is fail-open, never a
+  // control-plane write path).
+  ...columnGrants('saas_tls_fingerprint_profiles', 'SELECT', [
+    'id',
+    'name',
+    'description',
+    'enable_grease',
+    'cipher_suites',
+    'curves',
+    'point_formats',
+    'signature_algorithms',
+    'alpn_protocols',
+    'supported_versions',
+    'key_share_groups',
+    'psk_modes',
+    'extensions',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_tls_fingerprint_profiles', 'INSERT', [
+    'id',
+    'name',
+    'description',
+    'enable_grease',
+    'cipher_suites',
+    'curves',
+    'point_formats',
+    'signature_algorithms',
+    'alpn_protocols',
+    'supported_versions',
+    'key_share_groups',
+    'psk_modes',
+    'extensions',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_tls_fingerprint_profiles', 'UPDATE', [
+    'name',
+    'description',
+    'enable_grease',
+    'cipher_suites',
+    'curves',
+    'point_formats',
+    'signature_algorithms',
+    'alpn_protocols',
+    'supported_versions',
+    'key_share_groups',
+    'psk_modes',
+    'extensions',
     'updated_at',
   ]),
   // R6a (109) probe monitors: the control plane owns the monitor registry
@@ -867,6 +1044,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'token_lifetime',
     'charge_daily',
     'charge_lifetime',
+    'charge_5h',
+    'charge_7d',
     'created_at',
     'updated_at',
   ]),
@@ -880,6 +1059,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'token_lifetime',
     'charge_daily',
     'charge_lifetime',
+    'charge_5h',
+    'charge_7d',
     'created_at',
     'updated_at',
   ]),
@@ -889,6 +1070,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'token_lifetime',
     'charge_daily',
     'charge_lifetime',
+    'charge_5h',
+    'charge_7d',
     'updated_at',
   ]),
   ...columnGrants('saas_api_key_budget_counters', 'SELECT', [
@@ -1192,6 +1375,13 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // the usage scheduling columns are worker-written and stay off this
     // manifest (the gateway reads them through the dynamic read-table grants).
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): the control plane owns the dual-mode
+    // account configuration columns; the quota snapshot/worker columns are
+    // worker-written and stay off this manifest (dynamic read-table grants).
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): the operator's per-account CLI pin override rides the same
     // control-plane scheduling surface; the usage snapshot columns are
     // worker-written and stay off this manifest.
@@ -1209,7 +1399,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
     // (written by the probe monitor worker; consumed by R7 scheduling).
+    // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
     'probe_temp_unschedulable_until',
+    // (tri-state: NULL=off, 0=default, -1=random, >0=profile row).
+    'tls_fingerprint_profile_id',
   ]),
   ...columnGrants('saas_tenant_provider_accounts', 'INSERT', [
     'tenant_id',
@@ -1230,6 +1423,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'rpm_limit',
     'tpm_limit',
     'egress_proxy_id',
+    'tls_fingerprint_profile_id',
     'created_at',
     'updated_at',
   ]),
@@ -1249,6 +1443,12 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
     // bump, mirroring the 047/082 repository pattern.
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): admin dual-mode config mutation rides the
+    // same CAS authz_version bump.
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): admin CLI-pin mutation rides the same CAS pattern.
     'claude_cli_version_override',
     'rpm_limit',
@@ -1258,6 +1458,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe monitor worker unschedule/recovery writes.
     'probe_temp_unschedulable_until',
+    // Batch-2 §2.4 (116): admin fingerprint-binding mutation.
+    'tls_fingerprint_profile_id',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -1288,6 +1490,12 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'quota_checked_at',
     // 108 (R5b): the control plane owns the adaptive-routing rule table.
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): the control plane owns the dual-mode
+    // account configuration columns.
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): the operator's per-account CLI pin override.
     'claude_cli_version_override',
     'quarantine_entered_at',
@@ -1303,7 +1511,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
     // (written by the probe monitor worker; consumed by R7 scheduling).
+    // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
     'probe_temp_unschedulable_until',
+    // (tri-state: NULL=off, 0=default, -1=random, >0=profile row).
+    'tls_fingerprint_profile_id',
   ]),
   ...columnGrants('saas_platform_provider_accounts', 'INSERT', [
     'id',
@@ -1323,6 +1534,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'rpm_limit',
     'tpm_limit',
     'egress_proxy_id',
+    'tls_fingerprint_profile_id',
     'created_at',
     'updated_at',
   ]),
@@ -1342,6 +1554,12 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     // 108 (R5b): admin protocol-rule mutation rides the CAS authz_version
     // bump, mirroring the 047/082 repository pattern.
     'opencode_go_protocol_rules',
+    // 120 (batch-3 cn-providers): admin dual-mode config mutation rides the
+    // same CAS authz_version bump.
+    'zhipu_account_mode',
+    'zhipu_api_protocol',
+    'minimax_account_mode',
+    'minimax_api_protocol',
     // 100 (R5): admin CLI-pin mutation rides the same CAS pattern.
     'claude_cli_version_override',
     'rpm_limit',
@@ -1351,6 +1569,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe monitor worker unschedule/recovery writes.
     'probe_temp_unschedulable_until',
+    // Batch-2 §2.4 (116): admin fingerprint-binding mutation.
+    'tls_fingerprint_profile_id',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -2603,6 +2823,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'cache_write_1h',
     'output_total',
     'reasoning_output',
+    // 4.1 (122): media metering columns.
+    'billing_mode',
+    'units',
+    'size_tier',
     'status',
     'source',
     'measurement_kind',
@@ -3211,6 +3435,89 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'events_in_bucket',
     'updated_at',
   ]),
+  // 128 (batch-5 §5.1) plugin system: the control plane owns the
+  // installation registry CRUD (upload/replace, state admin, config) and
+  // every binding edit; the gateway reads routing truth through the dynamic
+  // read-table grant + the routing-column grants below, and the plugin-host
+  // workload converges from these rows through its own role template.
+  ...columnGrants('saas_plugin_installations', 'SELECT', [
+    'id',
+    'plugin_key',
+    'name',
+    'version',
+    'description',
+    'author',
+    'manifest',
+    'manifest_sha256',
+    'entrypoint_path',
+    'binary_sha256',
+    'signature_status',
+    'state',
+    'config_json',
+    'last_error',
+    'artifact_data',
+    'artifact_sha256',
+    'installed_by',
+    'installed_at',
+    'updated_at',
+    'enabled_at',
+  ]),
+  ...columnGrants('saas_plugin_installations', 'INSERT', [
+    'plugin_key',
+    'name',
+    'version',
+    'description',
+    'author',
+    'manifest',
+    'manifest_sha256',
+    'entrypoint_path',
+    'binary_sha256',
+    'signature_status',
+    'state',
+    'config_json',
+    'last_error',
+    'artifact_data',
+    'artifact_sha256',
+    'installed_by',
+  ]),
+  ...columnGrants('saas_plugin_installations', 'UPDATE', [
+    'name',
+    'version',
+    'description',
+    'author',
+    'manifest',
+    'manifest_sha256',
+    'entrypoint_path',
+    'binary_sha256',
+    'signature_status',
+    'state',
+    'config_json',
+    'last_error',
+    'artifact_data',
+    'artifact_sha256',
+    'updated_at',
+    'enabled_at',
+  ]),
+  ...columnGrants('saas_plugin_bindings', 'SELECT', [
+    'id',
+    'installation_id',
+    'capability',
+    'platform',
+    'account_type',
+    'enabled',
+    'rollout_percent',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_plugin_bindings', 'INSERT', [
+    'installation_id',
+    'capability',
+    'platform',
+    'account_type',
+    'enabled',
+    'rollout_percent',
+  ]),
+  ...columnGrants('saas_plugin_bindings', 'UPDATE', ['enabled', 'rollout_percent', 'updated_at']),
 ] as const;
 
 /** Table-level DELETE is the narrowest PostgreSQL privilege for these SQL statements. */
@@ -3226,6 +3533,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   ['saas_obs_channel_metrics_1m', 'DELETE'],
   ['saas_obs_channel_metrics_hourly', 'DELETE'],
   ['saas_obs_alert_rules', 'DELETE'],
+  // Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+  // rides the same DELETE).
+  ['saas_obs_alert_silences', 'DELETE'],
   // R1 (105): billing group account-pool membership replacement.
   ['saas_billing_group_account_pools', 'DELETE'],
   // R4 (106): verification-code expiry pruning and delivery-failure
@@ -3234,10 +3544,27 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // R3 (107): proxy registry lifecycle. In-use proxies are protected by the
   // egress_proxy_id FK (ON DELETE RESTRICT); only unbound proxies delete.
   ['saas_egress_proxies', 'DELETE'],
+  // Batch-2 §2.4 (116): TLS fingerprint profile registry lifecycle. There is
+  // no FK from the tri-state account column (0/-1 are sentinels), so deletion
+  // of a referenced profile leaves the resolver's fail-open default path —
+  // documented and application-level.
+  ['saas_tls_fingerprint_profiles', 'DELETE'],
   // R6a (109): probe monitor lifecycle (runs cascade with the monitor) and
   // the 30-day probe run retention cleanup.
   ['saas_probe_monitors', 'DELETE'],
   ['saas_probe_runs', 'DELETE'],
+  // (121) composite model routes: registry row lifecycle (group rows cascade
+  // with the group head; this grant is the per-row admin delete).
+  ['saas_composite_model_routes', 'DELETE'],
+  // 125 (batch-5 §5.4) risk control: moderation log retention (hit/non-hit
+  // windows) and the flagged-hash blocklist lifecycle (admin delete/clear).
+  ['saas_content_moderation_logs', 'DELETE'],
+  ['saas_content_moderation_flagged_hashes', 'DELETE'],
+  // 128 (batch-5 §5.1) plugin system: installation lifecycle (bindings
+  // cascade via the FK) and the binding-set replacement DELETE inside
+  // upsertInstallation/replaceBindings.
+  ['saas_plugin_installations', 'DELETE'],
+  ['saas_plugin_bindings', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */
@@ -3660,6 +3987,41 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_billing_group_account_pools',
   // R3 (107): the dispatch profile resolves the account's egress proxy.
   'saas_egress_proxies',
+  // Batch-2 §2.4 (116): the dispatch profile resolves the account's TLS
+  // fingerprint binding (saas_tls_fingerprint_profiles join).
+  'saas_tls_fingerprint_profiles',
+  // R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
+  // RPM admission counters (capacity-side rate evidence, never billing).
+  'saas_billing_group_rate_counters',
+  // R1 (114, roadmap 1.3): the gateway reserves and resolves the billing
+  // group spend windows (the KEY-BUD counters pattern at group scope).
+  'saas_billing_group_spend_counters',
+  'saas_billing_group_spend_reservations',
+  // (121) composite model routing: the gateway scheduler reads the composite
+  // route registry while resolving a composite-group request (control-plane
+  // CRUD only; the gateway never writes it).
+  'saas_composite_model_routes',
+  // (123) batch-4 §4.2 async image tasks: the gateway owns the task
+  // lifecycle (create/finish/read plus the expiry purge delete below).
+  'saas_image_tasks',
+  // 126 (batch-5 §5.2) OEM white-label: the gateway serves the public brand
+  // snapshot (`GET /settings/public` + custom page content) read-only; the
+  // materialization writes run on the control plane only.
+  'saas_public_brand_settings',
+  // 125 (batch-5 §5.4) risk control: the moderation seam reads the JSONB
+  // config snapshot (short TTL) and the flagged-hash blocklist, and counts
+  // the auto-ban violation window over its own log rows.
+  'saas_risk_control_config',
+  'saas_content_moderation_logs',
+  'saas_content_moderation_flagged_hashes',
+  // 128 (batch-5 §5.1) plugin routing read (gateway decorator): the routing
+  // snapshot for a capability comes from the enabled binding row (plugin key
+  // + rollout); no sensitive column exists on the table.
+  'saas_plugin_bindings',
+  // (124) batch-4 §4.3 async video tasks: the gateway owns the snapshot +
+  // binding + claim lifecycle (create/read/claim/release/skip plus the
+  // expiry purge delete below).
+  'saas_video_tasks',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -3681,6 +4043,10 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_idempotency_records', 'key_digest', 'SELECT'],
   // Pricing creates only the fixed immutable snapshot records, never price versions.
   // Keep INSERT column-scoped so future snapshot columns require explicit review.
+  // 4.1 (122): per-unit hold witness (hold_input_per_unit_units,
+  // hold_input_size_tier, hold_amount_minor_units, wallet_hold_required).
+  // R1 enforcement terms (112, roadmap 1.3): the frozen group RPM/spend
+  // ceilings, scopes and fallback group id ride the same snapshot row.
   ...(
     [
       'id',
@@ -3707,6 +4073,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'hold_input_cache_write_1h',
       'hold_input_output_total',
       'hold_input_reasoning_output',
+      'hold_input_per_unit_units',
+      'hold_input_size_tier',
       'hold_amount_minor_units',
       'wallet_hold_required',
       'admission_expires_at',
@@ -3719,6 +4087,12 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'peak_applied',
       'model_pricing_override_digest',
       'model_pricing_override',
+      'group_rpm_limit',
+      'group_daily_limit_minor_units',
+      'group_weekly_limit_minor_units',
+      'group_monthly_limit_minor_units',
+      'group_supported_model_scopes',
+      'group_fallback_group_id',
     ] as const
   ).map((column) => ['saas_request_customer_price_snapshots', column, 'INSERT'] as const),
   ...(
@@ -3809,6 +4183,57 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_provider_account_rate_counters', 'tokens', 'INSERT'],
   ['saas_provider_account_rate_counters', 'requests', 'UPDATE'],
   ['saas_provider_account_rate_counters', 'tokens', 'UPDATE'],
+  // R-dormant (115, batch 2.2): the scheduler's lazy scheduling-threshold
+  // pause write at candidate-collection time — the only account-table DML
+  // the gateway role owns (the 109 probe pause is worker-written).
+  // SELECT arrives through the dynamic read-table grant.
+  ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'],
+  ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'],
+  ['saas_platform_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'],
+  ['saas_platform_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'],
+  // R1 (113, roadmap 1.3): the capacity adapter upserts the billing-group
+  // RPM admission counter inside the admission transaction (rate evidence
+  // only; the counters never touch billing state).
+  ['saas_billing_group_rate_counters', 'group_id', 'SELECT'],
+  ['saas_billing_group_rate_counters', 'window_start', 'SELECT'],
+  ['saas_billing_group_rate_counters', 'requests', 'SELECT'],
+  ['saas_billing_group_rate_counters', 'group_id', 'INSERT'],
+  ['saas_billing_group_rate_counters', 'window_start', 'INSERT'],
+  ['saas_billing_group_rate_counters', 'requests', 'INSERT'],
+  ['saas_billing_group_rate_counters', 'requests', 'UPDATE'],
+  // R1 (114, roadmap 1.3): the gateway reserves the group spend windows at
+  // admission and resolves them at settlement/compensation/correction.
+  ['saas_billing_group_spend_counters', 'billing_group_id', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'window_kind', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'window_start', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'charge_settled', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'charge_currency', 'SELECT'],
+  ['saas_billing_group_spend_counters', 'billing_group_id', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'window_kind', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'window_start', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'charge_currency', 'INSERT'],
+  ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'UPDATE'],
+  ['saas_billing_group_spend_counters', 'charge_settled', 'UPDATE'],
+  ['saas_billing_group_spend_reservations', 'tenant_id', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'request_id', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'billing_group_id', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'window_kind', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'window_start', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'amount_minor_units', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'charge_currency', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'state', 'SELECT'],
+  ['saas_billing_group_spend_reservations', 'tenant_id', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'request_id', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'billing_group_id', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'window_kind', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'window_start', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'amount_minor_units', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'charge_currency', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'state', 'INSERT'],
+  ['saas_billing_group_spend_reservations', 'settled_amount_minor_units', 'UPDATE'],
+  ['saas_billing_group_spend_reservations', 'state', 'UPDATE'],
   // Affinity resolution reads only its scoped key and target state; inserts create the full
   // immutable identity, while UPDATE is limited to binding/lifecycle fields.
   ...(
@@ -4120,7 +4545,9 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'updated_at',
     ] as const
   ).map((column) => ['saas_api_key_budget_reservations', column, 'INSERT'] as const),
-  ...(['state', 'updated_at'] as const).map(
+  // R1 (114, roadmap 1.3): settle records the ACTUAL charge on the
+  // reservation row (the rolling 5h/7d windows read it back).
+  ...(['state', 'settled_charge_minor_units', 'updated_at'] as const).map(
     (column) => ['saas_api_key_budget_reservations', column, 'UPDATE'] as const,
   ),
   // The lease adapter writes only lease identity at creation and lifecycle timestamps thereafter.
@@ -4213,6 +4640,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
     ] as const
   ).map((column) => ['saas_ledger_entries', column, 'INSERT'] as const),
   // Usage records and settlements are append-only idempotent facts.
+  // 4.1 (122): media metering columns (billing_mode, units, size_tier,
+  // measurement_kind, billable_basis).
   ...(
     [
       'id',
@@ -4230,6 +4659,9 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'cache_write_1h',
       'output_total',
       'reasoning_output',
+      'billing_mode',
+      'units',
+      'size_tier',
       'status',
       'source',
       'semantics_version',
@@ -4341,14 +4773,115 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ...(['pending_deliveries', 'minute_bucket', 'events_in_bucket', 'updated_at'] as const).map(
     (column) => ['saas_customer_webhook_tenant_usage', column, 'UPDATE'] as const,
   ),
+  // (123) batch-4 §4.2 async image tasks: the gateway owns the task
+  // lifecycle — the create insert, the finish transition (status/http
+  // status/result-or-error/completed_at/expires_at) and the read; row
+  // identity columns (tenant/proxy key/created) are insert-only.
+  ...(
+    [
+      'id',
+      'tenant_id',
+      'proxy_key_id',
+      'status',
+      'http_status',
+      'result',
+      'error',
+      'created_at',
+      'completed_at',
+      'expires_at',
+    ] as const
+  ).map((column) => ['saas_image_tasks', column, 'INSERT'] as const),
+  ...(['status', 'http_status', 'result', 'error', 'completed_at', 'expires_at'] as const).map(
+    (column) => ['saas_image_tasks', column, 'UPDATE'] as const,
+  ),
+  // 125 (batch-5 §5.4) risk control: the moderation seam writes decision
+  // logs (identity columns only — id is the identity default) and records
+  // flagged input hashes; auto-ban flips the user's disabled_at through the
+  // same column the control-plane governance service uses.
+  ...(
+    [
+      'request_id',
+      'tenant_id',
+      'user_id',
+      'api_key_id',
+      'api_key_name',
+      'model',
+      'protocol',
+      'mode',
+      'action',
+      'flagged',
+      'highest_category',
+      'highest_score',
+      'matched_keyword',
+      'category_scores',
+      'threshold_snapshot',
+      'input_excerpt',
+      'input_hash',
+      'upstream_latency_ms',
+      'error',
+      'violation_count',
+      'auto_banned',
+      'email_sent',
+      'created_at',
+    ] as const
+  ).map((column) => ['saas_content_moderation_logs', column, 'INSERT'] as const),
+  ...(['input_hash', 'created_at'] as const).map(
+    (column) => ['saas_content_moderation_flagged_hashes', column, 'INSERT'] as const,
+  ),
+  ['saas_users', 'disabled_at', 'UPDATE'],
+  ['saas_users', 'updated_at', 'UPDATE'],
+  // 125 auto-ban guard: the platform-role existence probe (SELECT-only,
+  // user_id alone) so risk control never disables a governance-owned account.
+  ['saas_platform_role_assignments', 'user_id', 'SELECT'],
+  // 128 (batch-5 §5.1) plugin routing read (gateway decorator): the
+  // decorator resolves the enabled binding's installation identity +
+  // version/state/hash/signature for the fail-closed availability check.
+  // Routing columns only — never artifact_data, the manifest blob or
+  // config_json.
+  ['saas_plugin_installations', 'id', 'SELECT'],
+  ['saas_plugin_installations', 'plugin_key', 'SELECT'],
+  ['saas_plugin_installations', 'version', 'SELECT'],
+  ['saas_plugin_installations', 'state', 'SELECT'],
+  ['saas_plugin_installations', 'binary_sha256', 'SELECT'],
+  ['saas_plugin_installations', 'signature_status', 'SELECT'],
+  ['saas_plugin_installations', 'updated_at', 'SELECT'],
+  // (124) batch-4 §4.3 async video tasks: the gateway owns the create-time
+  // snapshot + bound-account binding + the one-shot billing claim. The
+  // claim/release/skip transitions touch only the billing-state columns;
+  // row identity columns (tenant/proxy key/binding/created) are
+  // insert-only, and the settlement facts ride the INSERT (frozen at
+  // create, never rewritten).
+  ...(
+    [
+      'request_id',
+      'tenant_id',
+      'proxy_key_id',
+      'provider_account_id',
+      'credential_id',
+      'credential_version',
+      'gateway_request_id',
+      'gateway_attempt_id',
+      'model',
+      'resolution',
+      'duration_seconds',
+      'video_count',
+      'billing_state',
+      'settlement_facts',
+      'created_at',
+      'expires_at',
+    ] as const
+  ).map((column) => ['saas_video_tasks', column, 'INSERT'] as const),
+  ...(['billing_state', 'billed_at'] as const).map((column) => ['saas_video_tasks', column, 'UPDATE'] as const),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
 
 const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
-// Exported for the saas:doctor missing-grant diagnosis (L3): the gateway's
-// only expected table-level DML is the spending-freeze DELETE.
-export const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes'] as const;
+// Exported for the saas:doctor missing-grant diagnosis (L3). (123) batch-4
+// §4.2 async image tasks + (124) batch-4 §4.3 async video tasks: the gateway
+// owns the task rows' expiry purge (Postgres*TaskStore.purgeExpired) alongside
+// the spending-freeze DELETE.
+export const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks'] as const;
 const GATEWAY_SEQUENCE = 'saas_provider_account_lease_fencing_seq' as const;
 
 function sqlText(value: string): string {

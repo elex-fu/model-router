@@ -444,9 +444,13 @@ test('platform candidates must target the exact persisted route pool before down
   if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
   // F2: the billing-group resolution runs once before the route read; the
   // candidate is still rejected before any eligibility or concurrency read.
-  assert.equal(state.statements.length, 2);
+  // R-dormant (115): the scheduling-threshold candidate read runs between
+  // the group resolution and the route read — it is a scheduling-signal
+  // read, never an eligibility or concurrency read.
+  assert.equal(state.statements.length, 3);
   assert.ok(state.statements[0]?.sql.includes('postgres-provider-account-scheduler:billing-group'));
-  assert.ok(state.statements[1]?.sql.includes('postgres-provider-account-scheduler:route'));
+  assert.ok(state.statements[1]?.sql.includes('postgres-provider-account-scheduler:threshold-candidates'));
+  assert.ok(state.statements[2]?.sql.includes('postgres-provider-account-scheduler:route'));
   assert.equal(
     state.statements.some(({ sql }) => sql.includes('eligibility') || sql.includes(':concurrency')),
     false,

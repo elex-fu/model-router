@@ -138,9 +138,9 @@ export class HealthMonitor {
           const bodyText = await res.text().catch(() => '');
           lastError = `returned ${res.status}: ${bodyText.slice(0, 200)}`;
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         ok = false;
-        lastError = `error: ${err.message}`;
+        lastError = `error: ${err instanceof Error ? err.message : String(err)}`;
       }
 
       if (ok) {

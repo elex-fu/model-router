@@ -51,7 +51,11 @@ export interface ConfigServiceOptions {
   }) => void;
   afterConfigRename?: () => void;
   beforeRename?: () => void;
-  beforeLegacyMigrationWrite?: (input: { baseChecksum: string; candidate: ConfigV2; candidateChecksum: string }) => void;
+  beforeLegacyMigrationWrite?: (input: {
+    baseChecksum: string;
+    candidate: ConfigV2;
+    candidateChecksum: string;
+  }) => void;
   afterLegacyMigrationRename?: (input: { candidate: ConfigV2; candidateChecksum: string }) => void;
 }
 
@@ -93,11 +97,12 @@ function isPrivateHttpHost(hostname: string): boolean {
   if (/^\[(?:fc|fd)[0-9a-f]{2}:/.test(host)) return true;
   if (isIP(host) !== 4) return false;
   const octets = host.split('.').map(Number);
+  const secondOctet = octets[1];
   return (
     octets[0] === 127 ||
     octets[0] === 10 ||
-    (octets[0] === 172 && octets[1]! >= 16 && octets[1]! <= 31) ||
-    (octets[0] === 192 && octets[1] === 168)
+    (octets[0] === 172 && secondOctet !== undefined && secondOctet >= 16 && secondOctet <= 31) ||
+    (octets[0] === 192 && secondOctet === 168)
   );
 }
 
@@ -200,7 +205,9 @@ export class ConfigServiceV2 {
     this.beforeRename = hooks.beforeRename;
   }
 
-  setLegacyMigrationHooks(hooks: Pick<ConfigServiceOptions, 'beforeLegacyMigrationWrite' | 'afterLegacyMigrationRename'>): void {
+  setLegacyMigrationHooks(
+    hooks: Pick<ConfigServiceOptions, 'beforeLegacyMigrationWrite' | 'afterLegacyMigrationRename'>,
+  ): void {
     this.beforeLegacyMigrationWrite = hooks.beforeLegacyMigrationWrite;
     this.afterLegacyMigrationRename = hooks.afterLegacyMigrationRename;
   }
@@ -481,7 +488,17 @@ export class ConfigServiceV2 {
     } catch (error) {
       if (error instanceof ConfigValidationError) return { valid: false, errors: error.issues, warnings: [] };
       if (error instanceof Error && error.message.startsWith('Cannot migrate proxy key '))
-        return { valid: false, errors: [{ path: 'proxyKeys', code: 'proxy_key_environment_unset', message: 'Proxy key requires an environment variable that is not set' }], warnings: [] };
+        return {
+          valid: false,
+          errors: [
+            {
+              path: 'proxyKeys',
+              code: 'proxy_key_environment_unset',
+              message: 'Proxy key requires an environment variable that is not set',
+            },
+          ],
+          warnings: [],
+        };
       throw error;
     }
   }
@@ -538,8 +555,10 @@ export class ConfigServiceV2 {
     const legacyUrls = new Map<number, { baseUrl: string; endpoint: string }>();
     for (const [index, upstream] of (legacy.upstreams ?? []).entries()) {
       if (!upstream?.name) continue;
+      let legacyUrl: { baseUrl: string; endpoint: string };
       try {
-        legacyUrls.set(index, migratedLegacyUrl(upstream.baseUrl, upstream.protocol ?? 'openai'));
+        legacyUrl = migratedLegacyUrl(upstream.baseUrl, upstream.protocol ?? 'openai');
+        legacyUrls.set(index, legacyUrl);
       } catch {
         throw new ConfigValidationError([
           {
@@ -551,12 +570,7 @@ export class ConfigServiceV2 {
       }
       const policy = (upstream as typeof upstream & { policy?: { allowInsecureHttp?: boolean } }).policy;
       const urlErrors: ConfigIssue[] = [];
-      inspectUpstreamUrl(
-        legacyUrls.get(index)!.baseUrl,
-        `upstreams[${index}].baseUrl`,
-        policy?.allowInsecureHttp,
-        urlErrors,
-      );
+      inspectUpstreamUrl(legacyUrl.baseUrl, `upstreams[${index}].baseUrl`, policy?.allowInsecureHttp, urlErrors);
       if (upstream.oauth?.tokenUrl)
         inspectUpstreamUrl(
           upstream.oauth.tokenUrl,
@@ -570,7 +584,9 @@ export class ConfigServiceV2 {
     const usedUpstreamIds = new Set<string>();
     const legacyIdByIndex = new Map<number, string>();
     for (const [index, upstream] of (legacy.upstreams ?? []).entries()) {
-      if (!upstream || !upstream.name) continue;
+      if (!upstream?.name) continue;
+      const legacyUrl = legacyUrls.get(index);
+      if (legacyUrl === undefined) throw new Error(`No resolved URL for legacy upstream "${upstream.name}"`);
       let upstreamId = `up_${safeId(upstream.name)}`;
       while (usedUpstreamIds.has(upstreamId)) upstreamId = `${upstreamId}_${index}`;
       usedUpstreamIds.add(upstreamId);
@@ -602,8 +618,8 @@ export class ConfigServiceV2 {
             : undefined,
         protocol: upstream.protocol ?? 'openai',
         enabled: upstream.enabled ?? true,
-        baseUrl: legacyUrls.get(index)!.baseUrl,
-        endpoints: { generate: legacyUrls.get(index)!.endpoint },
+        baseUrl: legacyUrl.baseUrl,
+        endpoints: { generate: legacyUrl.endpoint },
         auth: {
           mode: upstream.passThroughAuth ? 'pass-through' : upstream.oauth ? 'oauth' : (upstream.authMode ?? 'bearer'),
           ...(upstream.authMode === 'custom-header' && upstream.authHeaderName
@@ -672,9 +688,9 @@ export class ConfigServiceV2 {
     initial.routes = [...routes.values()].map((route) => ({
       ...route,
       targets: route.targets.sort((a, b) => {
-        const aOrder = upstreamOrder.get(a.upstreamId) ?? [0, 0];
-        const bOrder = upstreamOrder.get(b.upstreamId) ?? [0, 0];
-        return aOrder[0]! - bOrder[0]! || aOrder[1]! - bOrder[1]!;
+        const aOrder = upstreamOrder.get(a.upstreamId);
+        const bOrder = upstreamOrder.get(b.upstreamId);
+        return (aOrder?.[0] ?? 0) - (bOrder?.[0] ?? 0) || (aOrder?.[1] ?? 0) - (bOrder?.[1] ?? 0);
       }),
     }));
     for (const [index, key] of (legacy.proxyKeys ?? []).entries()) {
@@ -705,7 +721,8 @@ export class ConfigServiceV2 {
 
   private async legacySecret(value: string, label: string): Promise<SecretSource> {
     const env = ENV_REF.exec(value);
-    if (env) return { type: 'env', name: env[1]! };
+    const envName = env?.[1];
+    if (envName !== undefined) return { type: 'env', name: envName };
     if (!this.options.storeSecret) throw new Error(`Migration requires an encrypted secret store for ${label}`);
     return { type: 'secret', id: await this.options.storeSecret(value, label) };
   }

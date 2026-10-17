@@ -51,6 +51,15 @@ export abstract class BaseBridge implements Bridge {
 }
 
 import { normalizeUsage } from '../providers/usage.js';
+import {
+  type NamespacedToolName,
+  type ResponsesToChatToolMapping,
+  responsesToChatCompletionsRequest,
+} from '../saas/gateway/responses-bridge/reverse-request.js';
+import {
+  ChatCompletionsToResponsesStream,
+  chatCompletionsResponseToResponses,
+} from '../saas/gateway/responses-bridge/reverse-response.js';
 import { AnthToOpenAIBridge } from './anth-to-openai.js';
 import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
 import { OpenAIToAnthBridge } from './openai-to-anth.js';
@@ -58,6 +67,10 @@ import { PassthroughAnthropicBridge } from './passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from './passthrough-openai.js';
 import { AnthToResponsesBridge, OpenAIToResponsesBridge, ResponsesToAnthBridge } from './responses.js';
 import { parseSseStream } from './sse.js';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 /** Stub bridge: passthrough for gemini client <-> gemini upstream. */
 class PassthroughGeminiBridge implements Bridge {
@@ -145,49 +158,143 @@ class PassthroughResponsesBridge implements Bridge {
   }
 }
 
-/** Stub bridge: responses -> openai (backward compatible passthrough). */
+/**
+ * Bridge: responses -> openai (apicompat PhaseA: real conversion, replacing
+ * the former passthrough stub).
+ *
+ * - URL: `/v1/responses` → `/v1/chat/completions`.
+ * - Request: Responses body → chat.completions body
+ *   (`responsesToChatCompletionsRequest`): instructions + leading developer
+ *   items merge into one leading system message; `reasoning.effort` →
+ *   `reasoning_effort`; `max_output_tokens` → `max_completion_tokens`; input
+ *   items map one-by-one (message / function_call / custom_tool_call /
+ *   tool_search_call / *_output / agent_message / reasoning), reasoning text
+ *   is double-buffered onto the owning assistant's `reasoning_content`,
+ *   truncated tool_call+output pairs are skipped whole, and item types with
+ *   no chat equivalent are dropped.
+ * - Response: chat.completion → Responses envelope; custom/freeform tools,
+ *   tool_search and flattened namespace tools are restored on the way back
+ *   using the identity mapping recorded by transformRequest.
+ * - Stream: chat.completion.chunk SSE → Responses SSE events, finalized
+ *   idempotently when the upstream stream is cut.
+ *
+ * Instances are per-request (the proxy creates a fresh bridge for every
+ * upstream attempt): transformRequest records the tool mapping that
+ * transformResponse/transformStream need; reusing an instance across
+ * requests would leak the mapping.
+ */
 class ResponsesToOpenAIBridge implements Bridge {
   readonly clientProto: Protocol = 'responses';
   readonly upstreamProto: Protocol = 'openai';
 
+  private mapping: ResponsesToChatToolMapping | null = null;
+
   rewriteUrlPath(clientPath: string): string {
+    if (clientPath === '/v1/responses') return '/v1/chat/completions';
     return clientPath;
   }
+
   transformRequest(clientBody: any): any {
-    return clientBody;
+    const result = responsesToChatCompletionsRequest(clientBody);
+    this.mapping = result.mapping;
+    return result.body;
   }
+
   transformResponse(upstreamBody: any): any {
-    return upstreamBody;
+    const mapping = this.mapping;
+    return chatCompletionsResponseToResponses(upstreamBody, {
+      ...(mapping ?? {
+        customTools: new Set<string>(),
+        functionTools: new Set<string>(),
+        toolSearch: false,
+        namespaceTools: new Map<string, NamespacedToolName>(),
+      }),
+      model: mapping?.model,
+    });
   }
+
   transformStream(upstreamStream: ReadableStream<Uint8Array>): BridgeStreamResult {
-    const [toClient, toParser] = upstreamStream.tee();
-    const usage: Promise<BridgeUsage> = (async () => {
-      let inputTokens: number | undefined;
-      let outputTokens: number | undefined;
-      let cacheReadTokens: number | undefined;
-      for await (const ev of parseSseStream(toParser)) {
-        const data = ev.data;
-        if (!data || data === '[DONE]') continue;
-        let json: any;
+    const mapping = this.mapping;
+    const state = new ChatCompletionsToResponsesStream({
+      customTools: mapping?.customTools ?? new Set<string>(),
+      functionTools: mapping?.functionTools ?? new Set<string>(),
+      toolSearch: mapping?.toolSearch ?? false,
+      namespaceTools: mapping?.namespaceTools ?? new Map<string, NamespacedToolName>(),
+      model: mapping?.model,
+    });
+    const encoder = new TextEncoder();
+    let resolveUsage!: (usage: BridgeUsage) => void;
+    const usage = new Promise<BridgeUsage>((resolve) => {
+      resolveUsage = resolve;
+    });
+    const observedToBridgeUsage = (): BridgeUsage => {
+      const observed = state.observedUsage;
+      if (observed === null) return {};
+      const details = observed.input_tokens_details;
+      const cached = isRecord(details) && typeof details.cached_tokens === 'number' ? details.cached_tokens : undefined;
+      return {
+        inputTokens: observed.input_tokens,
+        outputTokens: observed.output_tokens,
+        ...(cached === undefined ? {} : { cacheReadTokens: cached }),
+      };
+    };
+
+    const clientStream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let closed = false;
+        const emit = (events: readonly Record<string, unknown>[]): void => {
+          if (closed) return;
+          for (const event of events) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          }
+        };
+        const finalize = (): void => {
+          // Truncated tool-call arguments must not be emitted as completed
+          // items (a strict client persists and replays them); the stream
+          // then ends without a terminal event, mirroring the Go gateway.
+          if (state.validateToolCallArguments() !== null) return;
+          emit(state.finalize());
+        };
         try {
-          json = JSON.parse(data);
+          for await (const ev of parseSseStream(upstreamStream)) {
+            const data = ev.data;
+            if (!data || data === '[DONE]') continue;
+            let chunk: any;
+            try {
+              chunk = JSON.parse(data);
+            } catch {
+              continue;
+            }
+            emit(state.push(chunk));
+          }
+          finalize();
         } catch {
-          continue;
-        }
-        const u = json?.usage;
-        if (u && typeof u === 'object') {
-          if (u.prompt_tokens !== undefined) inputTokens = u.prompt_tokens;
-          if (u.completion_tokens !== undefined) outputTokens = u.completion_tokens;
-          const details = u.prompt_tokens_details;
-          if (details && typeof details === 'object' && details.cached_tokens !== undefined) {
-            cacheReadTokens = details.cached_tokens;
+          // 断流 finalize：the upstream stream was cut mid-flight; keep the
+          // client protocol well-formed when nothing terminal was emitted.
+          try {
+            finalize();
+          } catch {
+            // never expected; nothing more we can do for the client
+          }
+        } finally {
+          resolveUsage(observedToBridgeUsage());
+          if (!closed) {
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              // already closed via cancellation
+            }
           }
         }
-      }
-      return { inputTokens, outputTokens, cacheReadTokens };
-    })();
-    return { clientStream: toClient, usage };
+      },
+      cancel() {
+        resolveUsage(observedToBridgeUsage());
+      },
+    });
+    return { clientStream, usage };
   }
+
   wrapError(statusCode: number, message: string): BridgeError {
     const errorType = statusCode === 429 ? 'rate_limit_exceeded' : 'server_error';
     return { body: { error: { message, type: errorType, code: null } }, contentType: 'application/json' };

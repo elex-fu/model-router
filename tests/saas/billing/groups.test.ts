@@ -62,6 +62,7 @@ function group(overrides: Partial<BillingGroupRecord> = {}): BillingGroupRecord 
     claudeCodeOnly: false,
     fallbackGroupId: null,
     supportedModelScopes: null,
+    composite: false,
     status: 'active',
     ...overrides,
   };
@@ -237,6 +238,7 @@ test('mapBillingGroupRow validates the peak and profit pair shapes fail-closed',
     claude_code_only: false,
     fallback_group_id: null,
     supported_model_scopes: null,
+    composite: false,
     status: 'active',
   };
   const record = mapBillingGroupRow(base);
@@ -313,6 +315,14 @@ test('snapshotBillingGroupTerms resolves neutral terms for pre-group snapshots a
   assert.deepEqual(neutral.rateMultiplier, { numerator: 1n, denominator: 1n });
   assert.equal(neutral.peakApplied, false);
   assert.equal(neutral.modelPricingOverride, null);
+  // Pre-112 snapshots carry no enforcement terms: every limit resolves to
+  // null (no limit was in force), never to a finite zero.
+  assert.equal(neutral.rpmLimit, null);
+  assert.equal(neutral.dailyLimitMinorUnits, null);
+  assert.equal(neutral.weeklyLimitMinorUnits, null);
+  assert.equal(neutral.monthlyLimitMinorUnits, null);
+  assert.equal(neutral.supportedModelScopes, null);
+  assert.equal(neutral.fallbackGroupId, null);
 
   const rates = normalizeRates({
     input: { numeratorMinorUnits: 3n, denominatorUnits: 1000000n },
@@ -326,11 +336,24 @@ test('snapshotBillingGroupTerms resolves neutral terms for pre-group snapshots a
     peakApplied: true,
     modelPricingOverrideDigest: override.digest,
     modelPricingOverride: serializeAppliedModelPricingOverride(override),
+    groupRpmLimit: 60,
+    groupDailyLimitMinorUnits: 500n,
+    groupWeeklyLimitMinorUnits: 0n,
+    groupMonthlyLimitMinorUnits: null,
+    groupSupportedModelScopes: ['claude-sonnet-4-5', 'claude-opus-4-1'],
+    groupFallbackGroupId: 'default',
   });
   assert.equal(frozen.billingGroupId, 'vip');
   assert.deepEqual(frozen.rateMultiplier, { numerator: 3n, denominator: 2n });
   assert.equal(frozen.peakApplied, true);
   assert.equal(frozen.modelPricingOverride?.digest, override.digest);
+  // R1 enforcement terms (roadmap 1.3): frozen verbatim, zero kept finite.
+  assert.equal(frozen.rpmLimit, 60);
+  assert.equal(frozen.dailyLimitMinorUnits, 500n);
+  assert.equal(frozen.weeklyLimitMinorUnits, 0n);
+  assert.equal(frozen.monthlyLimitMinorUnits, null);
+  assert.deepEqual(frozen.supportedModelScopes, ['claude-sonnet-4-5', 'claude-opus-4-1']);
+  assert.equal(frozen.fallbackGroupId, 'default');
   // A digest that does not match the stored rate set fails closed.
   assert.throws(
     () =>
@@ -610,9 +633,10 @@ class FakeExecutor implements SqlExecutor {
             claude_code_only: values[20],
             fallback_group_id: values[21],
             supported_model_scopes: values[22],
-            status: values[23],
-            created_at: values[24],
-            updated_at: values[25],
+            composite: values[23] === undefined ? false : values[23],
+            status: values[24],
+            created_at: values[25],
+            updated_at: values[26],
           },
         ] as Row[],
         rowCount: 1,
@@ -660,6 +684,7 @@ function upsertInput(overrides: Record<string, unknown> = {}) {
     claudeCodeOnly: false,
     fallbackGroupId: null,
     supportedModelScopes: null,
+    composite: false,
     status: 'active',
     ...overrides,
   };
@@ -804,6 +829,7 @@ test('resolveTopupCredit converts through the tenant default group', async () =>
             claude_code_only: false,
             fallback_group_id: null,
             supported_model_scopes: null,
+            composite: false,
             status: 'active',
             created_at: '2026-10-15T00:00:00Z',
             updated_at: '2026-10-15T00:00:00Z',
@@ -856,6 +882,7 @@ test('resolveTopupCredit accepts a call-time tiers override (F1 store-first cons
           claude_code_only: false,
           fallback_group_id: null,
           supported_model_scopes: null,
+          composite: false,
           status: 'active',
           created_at: '2026-10-15T00:00:00Z',
           updated_at: '2026-10-15T00:00:00Z',

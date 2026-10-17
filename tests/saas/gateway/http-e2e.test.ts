@@ -517,19 +517,40 @@ function preparationDependencies(
   };
 }
 
+/*
+ * Roadmap batch 2 §2.1: every content-bearing hosted request now carries a
+ * sticky scheduling reference, and request preparation requires an account
+ * scheduler whenever input.scheduling is set. The default test scheduler
+ * selects the authority's candidate and allows the affinity binding.
+ */
+function stickyScheduler(): ProviderAccountSchedulerPort {
+  return {
+    async select(input) {
+      return allowRequestPreparation(input.candidates[0] ?? candidate());
+    },
+    async bindAffinity() {
+      return { decision: 'allow' };
+    },
+  };
+}
+
 function preparationService(
   state: PreparationState,
   authorityDecision: RequestPreparationDecision<RequestPreparationAuthority> = allowRequestPreparation(authority()),
+  scheduler: ProviderAccountSchedulerPort = stickyScheduler(),
 ): SaasRequestPreparationService {
-  return new SaasRequestPreparationService(preparationDependencies(state, authorityDecision), {
-    evidenceVerifierKeyId: 'verifier-key-1',
-    now: () => new Date(NOW),
-    idFactory: {
-      requestId: () => 'request-1',
-      attemptId: () => 'attempt-1',
-      evidenceId: () => 'evidence-1',
+  return new SaasRequestPreparationService(
+    { ...preparationDependencies(state, authorityDecision), scheduler },
+    {
+      evidenceVerifierKeyId: 'verifier-key-1',
+      now: () => new Date(NOW),
+      idFactory: {
+        requestId: () => 'request-1',
+        attemptId: () => 'attempt-1',
+        evidenceId: () => 'evidence-1',
+      },
     },
-  });
+  );
 }
 
 function dispatchAttempt(evidence: PreparedRequestEvidenceRecord): AttemptRecord {
@@ -848,6 +869,10 @@ test('composes the HTTP gateway through preparation, evidence dispatch, and fake
     preparation: preparation as RequestPreparationPort,
     dispatch: dispatch as PreparedEvidenceDispatchPort,
     entryPoint: 'fake-e2e-test',
+    // Batch 2 §2.1: the full composed flow with the sticky seam enabled —
+    // every content-bearing request derives a scheduling reference and the
+    // composition's scheduler binds it after selection.
+    stickyScheduling: true,
   });
   const request = new FakeIncomingMessage();
   const response = new FakeServerResponse();
@@ -954,6 +979,9 @@ test('composes Claude Code client evidence from the HTTP boundary into the sched
       selects.push(inputValue);
       return allowRequestPreparation(candidate());
     },
+    async bindAffinity() {
+      return { decision: 'allow' };
+    },
   };
   const preparationState: PreparationState = { calls: [], registered: [], payloads: [] };
   const preparationServiceInstance = new SaasRequestPreparationService(
@@ -967,6 +995,7 @@ test('composes Claude Code client evidence from the HTTP boundary into the sched
     authenticator: authenticator([]),
     preparation: preparationServiceInstance,
     dispatch: completingDispatch(),
+    stickyScheduling: true,
   });
   const request = new FakeIncomingMessage();
   Object.assign(request.headers, {
@@ -993,6 +1022,12 @@ test('composes Claude Code client evidence from the HTTP boundary into the sched
     },
     body: CLIENT_REQUEST,
   });
+  // The sticky scheduling seam: the same trusted boundary derivation fills
+  // input.scheduling.sessionId (here the openai content fallback: the
+  // request carries no explicit session signal) and preparation forwards it
+  // into the scheduler input, binding after the selection (batch 2 §2.1).
+  assert.ok(selects[0]?.scheduling?.sessionId);
+  assert.match(selects[0]?.scheduling?.sessionId ?? '', /^[0-9a-f]{64}$/);
   // The full composed flow still prepares, dispatches, and registers evidence.
   assert.deepEqual(preparationState.calls, [
     'caller',
@@ -1194,6 +1229,10 @@ test('a claude_code_only group admits genuine Claude Code clients past the group
   // at the gate (403) — proving the evidence carried all the way through.
   assert.equal(setup.response.writeHeadCalls[0]?.status, 503);
   assert.equal(JSON.parse(setup.response.bodyText()).error.code, 'REQUEST_BLOCKED');
-  assert.equal(setup.statements.length, 1);
+  // R-dormant (115): the scheduling-threshold candidate read runs between
+  // the group resolution and the eligibility authority — a scheduling-signal
+  // side read that never gates the group decision.
+  assert.equal(setup.statements.length, 2);
   assert.match(setup.statements[0]?.sql ?? '', /postgres-provider-account-scheduler:billing-group/);
+  assert.match(setup.statements[1]?.sql ?? '', /postgres-provider-account-scheduler:threshold-candidates/);
 });

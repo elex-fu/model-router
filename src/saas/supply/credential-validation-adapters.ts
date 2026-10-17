@@ -1,5 +1,10 @@
 import { performance } from 'node:perf_hooks';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import {
+  MINIMAX_MODELS_URL,
+  ZHIPU_CODING_MODELS_URL,
+  ZHIPU_PAYG_MODELS_URL,
+} from '../gateway/cn-providers/constants.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
 import type { ProviderCredentialValidationJobRecord } from './types.js';
@@ -97,6 +102,57 @@ interface FixedProviderValidationAdapter {
  * openai-bearer-v1 like the kimi/deepseek API-key precedents.
  */
 const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze([
+  Object.freeze({
+    // Batch-3 CN providers (src/saas/gateway/cn-providers/): the OpenAI-format
+    // models endpoint on each product's Chat Completions base (sub2api
+    // buildUpstreamModelsRequest matrix — zhipu payg / zhipu coding / minimax
+    // share the api.minimaxi.com inference domain). Bearer api-key auth, the
+    // kimi/deepseek API-key precedent.
+    providerId: 'zhipu',
+    productId: 'zhipu-glm',
+    credentialType: 'api-key',
+    capabilityEndpoint: 'zhipu-glm',
+    capabilityProtocol: 'openai-compatible',
+    adapterId: 'zhipu-glm-models-v1',
+    url: ZHIPU_PAYG_MODELS_URL,
+    probe: 'models',
+  }),
+  Object.freeze({
+    providerId: 'zhipu',
+    productId: 'zhipu-glm-coding',
+    credentialType: 'api-key',
+    capabilityEndpoint: 'zhipu-glm-coding',
+    capabilityProtocol: 'openai-compatible',
+    adapterId: 'zhipu-glm-coding-models-v1',
+    url: ZHIPU_CODING_MODELS_URL,
+    probe: 'models',
+  }),
+  Object.freeze({
+    providerId: 'minimax',
+    productId: 'minimax-m',
+    credentialType: 'api-key',
+    capabilityEndpoint: 'minimax-m',
+    capabilityProtocol: 'openai-compatible',
+    adapterId: 'minimax-m-models-v1',
+    url: MINIMAX_MODELS_URL,
+    probe: 'models',
+  }),
+  Object.freeze({
+    // Batch-3 grok API-key binding (src/saas/gateway/grok/catalog-identity.ts
+    // grok-api product): the official api.x.ai models list. OAuth grok
+    // credentials are refreshed (oauth-token-refresh-worker) and probed
+    // (account-probe-service 'grok' category) instead — never validated here,
+    // because the CLI-proxy surface requires the CLI identity masquerade this
+    // generic bearer probe cannot carry.
+    providerId: 'xai-grok',
+    productId: 'grok-api',
+    credentialType: 'api-key',
+    capabilityEndpoint: 'grok-responses',
+    capabilityProtocol: 'responses',
+    adapterId: 'xai-grok-api-models-v1',
+    url: 'https://api.x.ai/v1/models',
+    probe: 'models',
+  }),
   Object.freeze({
     providerId: 'opencode-go',
     productId: 'opencode-go-zen',

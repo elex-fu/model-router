@@ -327,7 +327,7 @@ BEGIN
           OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
           OR (
             pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-            AND relation.relname <> 'saas_billing_spending_freezes'
+            AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks')
           )
         )
       )
@@ -350,7 +350,7 @@ BEGIN
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
         OR (
           pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-          AND relation.relname <> 'saas_billing_spending_freezes'
+          AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks')
         )
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'TRUNCATE')
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'REFERENCES')
@@ -554,6 +554,15 @@ $runtime_column_acl_normalization$;
 -- DEPLOYMENT NOTE (migration 108, R5b): the control plane owns the
 -- opencode_go_protocol_rules column on both provider account tables (the
 -- adaptive-routing rule table; admin mutation bumps authz_version).
+-- DEPLOYMENT NOTE (migration 120, batch-3 cn-providers): the control plane
+-- likewise owns the zhipu/minimax account_mode + api_protocol columns on
+-- both provider account tables (the dual-mode configuration; admin mutation
+-- bumps authz_version through the platform/cn-providers config store). The
+-- CN-provider quota snapshot/worker columns are worker-written only: they
+-- are granted in deploy/managed-saas-validation-worker-role-grants.sql (the
+-- quota worker shares the credential-validation-worker role) and are
+-- readable by the gateway through the dynamic all-current-columns grants
+-- below. Re-apply both templates after 120.
 -- DEPLOYMENT NOTE (migration 100, R5): the control plane likewise owns the
 -- claude_cli_version_override column on both provider account tables (the
 -- operator's CLI pin override; admin mutation bumps authz_version). The
@@ -578,6 +587,24 @@ $runtime_column_acl_normalization$;
 -- columns read grant below. Re-apply this template after the F2 change on a
 -- database that predates it — until then the gateway runtime privilege probe
 -- fails closed by design.
+-- DEPLOYMENT NOTE (migration 121, composite model routing): the control
+-- plane owns the composite route registry saas_composite_model_routes and
+-- the composite marker column on saas_billing_groups; the gateway scheduler
+-- reads the registry (and the marker through the existing group read grant)
+-- while resolving composite-group requests. Re-apply this template after
+-- running migration 121 on a database that predates it — until then the
+-- gateway runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 128, batch-5 §5.1 plugin system): the control
+-- plane owns the plugin installation registry and every binding edit; the
+-- gateway reads routing truth only (the full saas_plugin_bindings row set
+-- through the dynamic read-table grant, and the seven routing columns of
+-- saas_plugin_installations through the fixed column manifest — never
+-- artifact_data, the manifest blob or config_json). The standalone
+-- plugin-host workload uses its own template
+-- (deploy/managed-saas-plugin-host-role-grants.sql — apply it after the
+-- migrate). Re-apply this template after running migration 128 on a
+-- database that predates it — until then the runtime privilege probes fail
+-- closed by design.
 -- DEPLOYMENT NOTE (migration 106, R4 registration admission): the identity
 -- control plane owns saas_email_verification_codes exclusively (issue,
 -- verify-and-consume, attempt counting, expiry pruning); the gateway has no
@@ -591,6 +618,18 @@ $runtime_column_acl_normalization$;
 -- through the dynamic all-current-columns read grant below. Re-apply this
 -- template after running migration 107 on a database that predates it —
 -- until then the runtime privilege probes fail closed by design.
+-- DEPLOYMENT NOTE (migration 115, R-dormant activation batch 2.2): the
+-- scheduling-threshold pause columns on both provider account tables are
+-- gateway-written only (the scheduler's lazy candidate-collection
+-- evaluation; the sub2api account_scheduling_threshold port). They are
+-- granted through the fixed column manifest in the gateway block below and
+-- read through the dynamic all-current-columns grants; the control plane
+-- owns no threshold-pause column. The quota-snapshot writer (the 099/100
+-- codex/claude columns) and the gemini usage worker's saas_attempts read
+-- surface are granted in deploy/managed-saas-validation-worker-role-grants.sql.
+-- Re-apply both templates after running migration 115 on a database that
+-- predates it — until then the runtime privilege probes fail closed by
+-- design.
 -- DEPLOYMENT NOTE (migration 109, R6a active probing): the control plane
 -- owns the saas_probe_monitors registry and reads saas_probe_runs (the
 -- admin trigger/list surface); the probe monitor worker — which runs on the
@@ -611,6 +650,18 @@ $runtime_column_acl_normalization$;
 -- provider_category CHECK to admit the 'gemini' probe category (same
 -- control-plane surface, no grant change). Re-apply both templates after
 -- running migration 111 on a database that predates it.
+-- DEPLOYMENT NOTE (migration 117, batch-3 Bedrock): the bedrock scheduling
+-- columns on both provider account tables (bedrock_rate_limited_until —
+-- the ThrottlingException cooldown deadline — and
+-- bedrock_usage_updated_at — the observation stamp) are worker-written
+-- only (the quota-snapshot store's bedrock rate-limit sink): they are
+-- granted in deploy/managed-saas-validation-worker-role-grants.sql and are
+-- readable by the gateway through the dynamic all-current-columns grants
+-- below; the control plane owns no bedrock column. Migration 117 also
+-- rewrites saas_probe_monitors' provider_category CHECK to admit the
+-- 'bedrock' probe category (same control-plane surface, no grant change).
+-- Re-apply both templates after running migration 117 on a database that
+-- predates it.
 -- DEPLOYMENT NOTE (migration 110, F1 platform settings): the control plane
 -- owns saas_platform_settings exclusively (admin settings surface plus the
 -- registration-admission and topup-tier read paths, all control-plane
@@ -620,6 +671,40 @@ $runtime_column_acl_normalization$;
 -- mutation is an audited version-CAS UPDATE. Re-apply this template after
 -- running migration 110 on a database that predates it — until then the
 -- control-plane runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 114, R1 billing-group limit enforcement
+-- phase 3): the gateway owns the new saas_billing_group_spend_counters and
+-- saas_billing_group_spend_reservations relations (the KEY-BUD counters
+-- pattern at group scope), UPDATEs the settled amount on
+-- saas_api_key_budget_reservations (the rolling 5h/7d window evidence), and
+-- reads the new charge_5h/charge_7d policy columns through the dynamic
+-- all-current-columns grant; the control plane manages the new policy
+-- columns through its manifest above. Re-apply this template after running
+-- migration 114 on a database that predates it — until then the runtime
+-- privilege probes fail closed by design.
+-- DEPLOYMENT NOTE (migration 113, R1 billing-group limit enforcement
+-- phase 2): the gateway owns the new saas_billing_group_rate_counters table
+-- (per-group per-second admission counters, the 098 account-counter pattern
+-- at group scope). It is granted through the dynamic all-current-columns
+-- read list plus the fixed column manifest below; the control plane and the
+-- validation worker have no grant. Re-apply this template after running
+-- migration 113 on a database that predates it — until then the gateway
+-- runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 112, R1 billing-group limit enforcement
+-- phase 1): the customer price snapshot gains the frozen group enforcement
+-- columns (group RPM/spend ceilings, supported model scopes, fallback
+-- group id). The gateway inserts them through the fixed column manifest
+-- below and reads them back through the dynamic all-current-columns read
+-- grant. Re-apply this template after running migration 112 on a database
+-- that predates it — until then the gateway runtime privilege probe fails
+-- closed by design.
+-- DEPLOYMENT NOTE (migration 125, content risk control): the control plane
+-- owns the single-row JSONB config (saas_risk_control_config), the admin log
+-- surface and the retention cleanup (DELETE on the log and flagged-hash
+-- tables); the gateway moderation seam reads the config and blocklist, writes
+-- decision logs and flagged hashes, and flips saas_users.disabled_at for
+-- auto-ban (the same column the governance service uses). Re-apply this
+-- template after running migration 125 on a database that predates it —
+-- until then both runtime privilege probes fail closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -686,6 +771,15 @@ BEGIN
       ('saas_obs_alert_rules', 'UPDATE', 'name enabled metric operator threshold window_minutes sustained_minutes cooldown_minutes notify_email webhook_url last_triggered_at'),
       ('saas_obs_alert_events', 'SELECT', 'id rule_id triggered_at resolved_at payload'),
       ('saas_obs_alert_events', 'INSERT', 'id rule_id triggered_at payload'),
+      -- Batch-5 §5.6 (migration 127): alert auto-resolve (the evaluator
+      -- closes a rule's open events when a cycle does not violate), the
+      -- operator silence registry, and the report scheduler's last_run rows.
+      ('saas_obs_alert_events', 'UPDATE', 'resolved_at'),
+      ('saas_obs_alert_silences', 'SELECT', 'id rule_id platform group_id region until reason created_by created_at'),
+      ('saas_obs_alert_silences', 'INSERT', 'id rule_id platform group_id region until reason created_by'),
+      ('saas_obs_report_state', 'SELECT', 'report_type last_run_at updated_at'),
+      ('saas_obs_report_state', 'INSERT', 'report_type last_run_at'),
+      ('saas_obs_report_state', 'UPDATE', 'last_run_at updated_at'),
       ('saas_platform_mfa_enrollment_tokens', 'SELECT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'INSERT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'UPDATE', 'consumed_at'),
@@ -697,18 +791,44 @@ BEGIN
       ('saas_tenants', 'UPDATE', 'status requests_per_minute tokens_per_minute max_concurrent_requests capacity_policy_revision updated_at default_billing_group_id'),
       -- R1 (105) billing groups: the control plane manages group heads and
       -- account-pool bindings; the gateway reads groups at admission only.
-      ('saas_billing_groups', 'SELECT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status created_at updated_at'),
-      ('saas_billing_groups', 'INSERT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status created_at updated_at'),
-      ('saas_billing_groups', 'UPDATE', 'display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status updated_at'),
+      ('saas_billing_groups', 'SELECT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes composite status created_at updated_at'),
+      ('saas_billing_groups', 'INSERT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes composite status created_at updated_at'),
+      ('saas_billing_groups', 'UPDATE', 'display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes composite status updated_at'),
       ('saas_billing_group_account_pools', 'SELECT', 'group_id account_id priority created_at'),
       ('saas_billing_group_account_pools', 'INSERT', 'group_id account_id priority'),
       ('saas_billing_group_account_pools', 'UPDATE', 'priority'),
+      -- 125 (batch-5 §5.4) risk control: the control plane owns the
+      -- single-row JSONB config (admin PUT), reads the moderation decision
+      -- log for the admin surface, and runs the retention cleanup; the
+      -- flagged-hash blocklist deletes ride the table-level DELETE manifest.
+      ('saas_risk_control_config', 'SELECT', 'id config updated_at'),
+      ('saas_risk_control_config', 'INSERT', 'id config updated_at'),
+      ('saas_risk_control_config', 'UPDATE', 'config updated_at'),
+      ('saas_content_moderation_logs', 'SELECT', 'id request_id tenant_id user_id api_key_id api_key_name model protocol mode action flagged highest_category highest_score matched_keyword category_scores threshold_snapshot input_excerpt input_hash upstream_latency_ms error violation_count auto_banned email_sent created_at'),
+      ('saas_content_moderation_flagged_hashes', 'SELECT', 'input_hash created_at'),
+      -- (121) composite model routes: the control plane manages the composite
+      -- route registry; the gateway reads it during composite-group resolution
+      -- (the dynamic read-table grant below).
+      ('saas_composite_model_routes', 'SELECT', 'id group_id public_model match_type target_platform upstream_model endpoint priority enabled notes created_at updated_at'),
+      ('saas_composite_model_routes', 'INSERT', 'group_id public_model match_type target_platform upstream_model endpoint priority enabled notes created_at updated_at'),
+      ('saas_composite_model_routes', 'UPDATE', 'public_model match_type target_platform upstream_model endpoint priority enabled notes updated_at'),
+      -- 126 (batch-5 §5.2) OEM white-label: the control plane materializes
+      -- the public brand snapshot (the non-secret saas.brand.* settings
+      -- subset) into the single-row table the gateway and the
+      -- console-serving workloads read. No DELETE: the row is never removed.
+      ('saas_public_brand_settings', 'SELECT', 'singleton snapshot version materialized_at'),
+      ('saas_public_brand_settings', 'INSERT', 'singleton snapshot version materialized_at'),
+      ('saas_public_brand_settings', 'UPDATE', 'snapshot version materialized_at'),
       -- R3 (107) egress proxies: the control plane manages the proxy registry
       -- and runs the probe/sweep worker; the gateway and the OAuth refresh
       -- worker read through the dynamic read-table grant below.
       ('saas_egress_proxies', 'SELECT', 'id name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id last_probe_at last_probe_latency_ms last_probe_ip last_probe_quality created_at updated_at'),
       ('saas_egress_proxies', 'INSERT', 'id name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id created_at updated_at'),
       ('saas_egress_proxies', 'UPDATE', 'name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id last_probe_at last_probe_latency_ms last_probe_ip last_probe_quality updated_at'),
+      -- Batch-2 §2.4 (116) TLS fingerprint profiles: control-plane registry.
+      ('saas_tls_fingerprint_profiles', 'SELECT', 'id name description enable_grease cipher_suites curves point_formats signature_algorithms alpn_protocols supported_versions key_share_groups psk_modes extensions created_at updated_at'),
+      ('saas_tls_fingerprint_profiles', 'INSERT', 'id name description enable_grease cipher_suites curves point_formats signature_algorithms alpn_protocols supported_versions key_share_groups psk_modes extensions created_at updated_at'),
+      ('saas_tls_fingerprint_profiles', 'UPDATE', 'name description enable_grease cipher_suites curves point_formats signature_algorithms alpn_protocols supported_versions key_share_groups psk_modes extensions updated_at'),
       -- R6a (109) probe monitors: the control plane owns the monitor registry
       -- (admin trigger/list surface) and reads the run history; the probe
       -- monitor worker claims and writes through the validation-worker grants.
@@ -745,9 +865,9 @@ BEGIN
       ('saas_api_key_ip_policies', 'SELECT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
       ('saas_api_key_ip_policies', 'INSERT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
       ('saas_api_key_ip_policies', 'UPDATE', 'version mode rules updated_at'),
-      ('saas_api_key_budget_policies', 'SELECT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime created_at updated_at'),
-      ('saas_api_key_budget_policies', 'INSERT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime created_at updated_at'),
-      ('saas_api_key_budget_policies', 'UPDATE', 'version token_daily token_lifetime charge_daily charge_lifetime updated_at'),
+      ('saas_api_key_budget_policies', 'SELECT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d created_at updated_at'),
+      ('saas_api_key_budget_policies', 'INSERT', 'tenant_id project_id key_id lineage_id version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d created_at updated_at'),
+      ('saas_api_key_budget_policies', 'UPDATE', 'version token_daily token_lifetime charge_daily charge_lifetime charge_5h charge_7d updated_at'),
       ('saas_api_key_budget_counters', 'SELECT', 'tenant_id project_id lineage_id window_kind day token_settled token_outstanding_reserved charge_settled charge_outstanding_reserved charge_currency created_at updated_at'),
       ('saas_api_key_budget_counters', 'UPDATE', 'token_settled charge_settled updated_at token_outstanding_reserved charge_outstanding_reserved'),
       ('saas_api_key_budget_reservations', 'SELECT', 'tenant_id project_id lineage_id request_id day token_units charge_minor_units charge_currency state created_at updated_at'),
@@ -773,20 +893,20 @@ BEGIN
       ('saas_project_entitlements', 'INSERT', 'id tenant_id project_id supply_profile_id supply_mode status model_scopes authz_version created_at updated_at last_audited_at disabled_at effective_at expires_at superseded_at source_type source_ref service_plan_snapshot_id'),
       ('saas_project_entitlements', 'UPDATE', 'status disabled_at superseded_at authz_version updated_at last_audited_at'),
       ('saas_supply_profiles', 'SELECT', 'tenant_id id supply_mode status model_scopes authz_version'),
-      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until'),
-      ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id created_at updated_at'),
-      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
-      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until'),
-      ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id created_at updated_at'),
-      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
+      ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id tls_fingerprint_profile_id created_at updated_at'),
+      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
+      ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id tls_fingerprint_profile_id created_at updated_at'),
+      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules zhipu_account_mode zhipu_api_protocol minimax_account_mode minimax_api_protocol claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
       ('saas_tenant_provider_account_capabilities', 'SELECT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_tenant_provider_account_capabilities', 'INSERT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_platform_provider_account_capabilities', 'SELECT', 'account_id provider_id product_id model endpoint capability_version'),
       ('saas_platform_provider_account_capabilities', 'INSERT', 'account_id provider_id product_id model endpoint capability_version'),
-      ('saas_customer_price_versions', 'SELECT', 'id version public_model_id public_model_version provider_id product_id protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units effective_at expires_at idempotency_key definition_digest created_at'),
-      ('saas_customer_price_versions', 'INSERT', 'id version public_model_id public_model_version provider_id product_id protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units effective_at expires_at idempotency_key definition_digest created_at'),
-      ('saas_supplier_cost_versions', 'SELECT', 'id version public_model_id public_model_version provider_id product_id resolved_model protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units effective_at expires_at idempotency_key definition_digest created_at'),
-      ('saas_supplier_cost_versions', 'INSERT', 'id version public_model_id public_model_version provider_id product_id resolved_model protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units effective_at expires_at idempotency_key definition_digest created_at'),
+      ('saas_customer_price_versions', 'SELECT', 'id version public_model_id public_model_version provider_id product_id protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units per_unit_rate_numerator_minor_units per_unit_rate_denominator_units per_unit_tier_rates token_multipliers effective_at expires_at idempotency_key definition_digest created_at'),
+      ('saas_customer_price_versions', 'INSERT', 'id version public_model_id public_model_version provider_id product_id protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units per_unit_rate_numerator_minor_units per_unit_rate_denominator_units per_unit_tier_rates token_multipliers effective_at expires_at idempotency_key definition_digest created_at'),
+      ('saas_supplier_cost_versions', 'SELECT', 'id version public_model_id public_model_version provider_id product_id resolved_model protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units per_unit_rate_numerator_minor_units per_unit_rate_denominator_units per_unit_tier_rates token_multipliers effective_at expires_at idempotency_key definition_digest created_at'),
+      ('saas_supplier_cost_versions', 'INSERT', 'id version public_model_id public_model_version provider_id product_id resolved_model protocol endpoint currency commercial_policy_version calculator_version rounding_version rounding_mode rounding_boundary input_rate_numerator_minor_units input_rate_denominator_units cache_read_rate_numerator_minor_units cache_read_rate_denominator_units cache_write_rate_numerator_minor_units cache_write_rate_denominator_units cache_write_5m_rate_numerator_minor_units cache_write_5m_rate_denominator_units cache_write_1h_rate_numerator_minor_units cache_write_1h_rate_denominator_units output_rate_numerator_minor_units output_rate_denominator_units per_unit_rate_numerator_minor_units per_unit_rate_denominator_units per_unit_tier_rates token_multipliers effective_at expires_at idempotency_key definition_digest created_at'),
       ('saas_tenant_provider_credentials', 'SELECT', 'owner_kind tenant_id supply_mode id account_id provider_id product_id credential_type status validation_state validation_error_code last_validated_at current_version expires_at authz_version created_at updated_at disabled_at revoked_at oauth_refresh_state oauth_next_refresh_at oauth_last_refresh_at oauth_force_refresh_requested oauth_refresh_error_code'),
       ('saas_tenant_provider_credentials', 'INSERT', 'tenant_id id account_id provider_id product_id credential_type status validation_state expires_at created_at updated_at oauth_refresh_state oauth_next_refresh_at'),
       ('saas_tenant_provider_credentials', 'UPDATE', 'status validation_state validation_error_code last_validated_at current_version expires_at authz_version updated_at disabled_at revoked_at oauth_refresh_state oauth_next_refresh_at oauth_last_refresh_at oauth_force_refresh_requested oauth_refresh_error_code'),
@@ -879,7 +999,7 @@ BEGIN
       -- shapes and adds no grants.
       ('saas_prepared_request_evidence', 'SELECT', 'tenant_id id request_id attempt_id attempt_ordinal claimed_attempt_id status expires_at dispatch_deadline'),
       ('saas_prepared_request_evidence', 'UPDATE', 'created_at'),
-      ('saas_usage_events', 'SELECT', 'id tenant_id request_id attempt_id supply_mode event_digest input_total input_uncached cache_read cache_write cache_write_5m cache_write_1h output_total reasoning_output status source measurement_kind billable_basis created_at'),
+      ('saas_usage_events', 'SELECT', 'id tenant_id request_id attempt_id supply_mode event_digest input_total input_uncached cache_read cache_write cache_write_5m cache_write_1h output_total reasoning_output billing_mode units size_tier status source measurement_kind billable_basis created_at'),
       ('saas_usage_settlements', 'SELECT', 'id tenant_id usage_event_id'),
       ('saas_usage_correction_events', 'SELECT', 'id tenant_id corrected_usage_event_id corrected_settlement_id reason_code correction_usage amount_delta_minor_units currency operator_identity evidence_ref correction_digest created_at'),
       ('saas_usage_correction_events', 'INSERT', 'id tenant_id corrected_usage_event_id corrected_settlement_id reason_code correction_usage amount_delta_minor_units currency operator_identity evidence_ref correction_digest created_at'),
@@ -931,7 +1051,17 @@ BEGIN
       ('saas_customer_webhook_delivery_attempts', 'UPDATE', 'state http_status latency_ms error_code finished_at'),
       ('saas_customer_webhook_tenant_usage', 'SELECT', 'tenant_id pending_deliveries minute_bucket events_in_bucket'),
       ('saas_customer_webhook_tenant_usage', 'INSERT', 'tenant_id minute_bucket events_in_bucket pending_deliveries'),
-      ('saas_customer_webhook_tenant_usage', 'UPDATE', 'pending_deliveries minute_bucket events_in_bucket updated_at')
+      ('saas_customer_webhook_tenant_usage', 'UPDATE', 'pending_deliveries minute_bucket events_in_bucket updated_at'),
+      -- 128 (batch-5 §5.1) plugin system: the control plane owns the
+      -- installation registry CRUD (upload/replace, state admin, config)
+      -- and every binding edit; the plugin-host workload runs its own role
+      -- template and the gateway reads routing truth only.
+      ('saas_plugin_installations', 'SELECT', 'id plugin_key name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 installed_by installed_at updated_at enabled_at'),
+      ('saas_plugin_installations', 'INSERT', 'plugin_key name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 installed_by'),
+      ('saas_plugin_installations', 'UPDATE', 'name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 updated_at enabled_at'),
+      ('saas_plugin_bindings', 'SELECT', 'id installation_id capability platform account_type enabled rollout_percent created_at updated_at'),
+      ('saas_plugin_bindings', 'INSERT', 'installation_id capability platform account_type enabled rollout_percent'),
+      ('saas_plugin_bindings', 'UPDATE', 'enabled rollout_percent updated_at')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -964,15 +1094,32 @@ BEGIN
       ('saas_obs_channel_metrics_1m', 'DELETE'),
       ('saas_obs_channel_metrics_hourly', 'DELETE'),
       ('saas_obs_alert_rules', 'DELETE'),
+      -- Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+      -- rides the same DELETE).
+      ('saas_obs_alert_silences', 'DELETE'),
       ('saas_billing_group_account_pools', 'DELETE'),
       ('saas_email_verification_codes', 'DELETE'),
       -- R3 (107): proxy registry lifecycle; in-use proxies are protected by
       -- the egress_proxy_id FK (ON DELETE RESTRICT).
       ('saas_egress_proxies', 'DELETE'),
+      ('saas_tls_fingerprint_profiles', 'DELETE'),
       -- R6a (109): probe monitor lifecycle (runs cascade with the monitor)
       -- and the 30-day probe run retention cleanup.
       ('saas_probe_monitors', 'DELETE'),
-      ('saas_probe_runs', 'DELETE')
+      ('saas_probe_runs', 'DELETE'),
+      -- (121) composite model routes: registry row lifecycle (group rows
+      -- cascade with the group head; this is the per-row admin delete).
+      ('saas_composite_model_routes', 'DELETE'),
+      -- 125 (batch-5 §5.4) risk control: moderation log retention
+      -- (hit/non-hit windows) and the flagged-hash blocklist lifecycle
+      -- (admin delete/clear).
+      ('saas_content_moderation_logs', 'DELETE'),
+      ('saas_content_moderation_flagged_hashes', 'DELETE'),
+      -- 128 (batch-5 §5.1) plugin system: installation lifecycle (bindings
+      -- cascade via the FK) and the binding-set replacement DELETE inside
+      -- upsertInstallation/replaceBindings.
+      ('saas_plugin_installations', 'DELETE'),
+      ('saas_plugin_bindings', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
@@ -1053,7 +1200,38 @@ BEGIN
       -- to the request's billing-group account pool.
       ('saas_billing_group_account_pools'),
       -- R3 (107): the dispatch profile resolves the account's egress proxy.
-      ('saas_egress_proxies')
+      ('saas_egress_proxies'),
+      ('saas_tls_fingerprint_profiles'),
+      -- R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
+      -- RPM admission counters (capacity-side rate evidence, never billing).
+      ('saas_billing_group_rate_counters'),
+      -- R1 (114, roadmap 1.3): the gateway reserves and resolves the billing
+      -- group spend windows (the KEY-BUD counters pattern at group scope).
+      ('saas_billing_group_spend_counters'),
+      ('saas_billing_group_spend_reservations'),
+      -- (121) composite model routing: the gateway scheduler reads the
+      -- composite route registry while resolving a composite-group request.
+      ('saas_composite_model_routes'),
+      -- (123) batch-4 §4.2 async image tasks: the gateway owns the task
+      -- lifecycle (create/finish/read plus the expiry purge).
+      ('saas_image_tasks'),
+      -- 126 (batch-5 §5.2) OEM white-label: the gateway serves the public
+      -- brand snapshot (GET /settings/public + custom page content)
+      -- read-only; materialization writes run on the control plane only.
+      ('saas_public_brand_settings'),
+      -- 125 (batch-5 §5.4) risk control: the moderation seam reads the
+      -- JSONB config snapshot (short TTL) and the flagged-hash blocklist,
+      -- and counts the auto-ban violation window over its own log rows.
+      ('saas_risk_control_config'),
+      ('saas_content_moderation_logs'),
+      ('saas_content_moderation_flagged_hashes'),
+      -- 128 (batch-5 §5.1) plugin routing read (gateway decorator): the
+      -- routing snapshot for a capability comes from the enabled binding
+      -- row; no sensitive column exists on the table.
+      ('saas_plugin_bindings'),
+      -- (124) batch-4 §4.3 async video tasks: the gateway owns the
+      -- snapshot + binding + claim lifecycle (plus the expiry purge).
+      ('saas_video_tasks')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1110,6 +1288,8 @@ BEGIN
       ('saas_request_customer_price_snapshots', 'hold_input_cache_write_1h', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'hold_input_output_total', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'hold_input_reasoning_output', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'hold_input_per_unit_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'hold_input_size_tier', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'hold_amount_minor_units', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'wallet_hold_required', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'admission_expires_at', 'INSERT'),
@@ -1122,6 +1302,14 @@ BEGIN
       ('saas_request_customer_price_snapshots', 'peak_applied', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'model_pricing_override_digest', 'INSERT'),
       ('saas_request_customer_price_snapshots', 'model_pricing_override', 'INSERT'),
+      -- R1 enforcement terms (112, roadmap 1.3): the frozen group RPM/spend
+      -- ceilings, scopes and fallback group id ride the same snapshot row.
+      ('saas_request_customer_price_snapshots', 'group_rpm_limit', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_daily_limit_minor_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_weekly_limit_minor_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_monthly_limit_minor_units', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_supported_model_scopes', 'INSERT'),
+      ('saas_request_customer_price_snapshots', 'group_fallback_group_id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'tenant_id', 'INSERT'),
       ('saas_attempt_supplier_cost_snapshots', 'request_id', 'INSERT'),
@@ -1192,6 +1380,55 @@ BEGIN
       ('saas_provider_account_rate_counters', 'tokens', 'INSERT'),
       ('saas_provider_account_rate_counters', 'requests', 'UPDATE'),
       ('saas_provider_account_rate_counters', 'tokens', 'UPDATE'),
+      -- R-dormant (115, batch 2.2): the scheduler's lazy scheduling-threshold
+      -- pause write at candidate-collection time — the only account-table DML
+      -- the gateway role owns (the 109 probe pause is worker-written).
+      ('saas_tenant_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'),
+      ('saas_tenant_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'),
+      ('saas_platform_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'),
+      ('saas_platform_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'),
+      -- R1 (113, roadmap 1.3): the capacity adapter upserts the billing-group
+      -- RPM admission counter inside the admission transaction.
+      ('saas_billing_group_rate_counters', 'group_id', 'SELECT'),
+      ('saas_billing_group_rate_counters', 'window_start', 'SELECT'),
+      ('saas_billing_group_rate_counters', 'requests', 'SELECT'),
+      ('saas_billing_group_rate_counters', 'group_id', 'INSERT'),
+      ('saas_billing_group_rate_counters', 'window_start', 'INSERT'),
+      ('saas_billing_group_rate_counters', 'requests', 'INSERT'),
+      ('saas_billing_group_rate_counters', 'requests', 'UPDATE'),
+      -- R1 (114, roadmap 1.3): the gateway reserves the group spend windows at
+      -- admission and resolves them at settlement/compensation/correction.
+      ('saas_billing_group_spend_counters', 'billing_group_id', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'window_kind', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'window_start', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'charge_settled', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'charge_currency', 'SELECT'),
+      ('saas_billing_group_spend_counters', 'billing_group_id', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'window_kind', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'window_start', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'charge_currency', 'INSERT'),
+      ('saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'UPDATE'),
+      ('saas_billing_group_spend_counters', 'charge_settled', 'UPDATE'),
+      ('saas_billing_group_spend_reservations', 'tenant_id', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'request_id', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'billing_group_id', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'window_kind', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'window_start', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'amount_minor_units', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'charge_currency', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'state', 'SELECT'),
+      ('saas_billing_group_spend_reservations', 'tenant_id', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'request_id', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'billing_group_id', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'window_kind', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'window_start', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'amount_minor_units', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'charge_currency', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'state', 'INSERT'),
+      ('saas_billing_group_spend_reservations', 'settled_amount_minor_units', 'UPDATE'),
+      ('saas_billing_group_spend_reservations', 'state', 'UPDATE'),
       ('saas_gateway_provider_account_affinity', 'tenant_id', 'INSERT'),
       ('saas_gateway_provider_account_affinity', 'project_id', 'INSERT'),
       ('saas_gateway_provider_account_affinity', 'supply_profile_id', 'INSERT'),
@@ -1397,6 +1634,9 @@ BEGIN
       ('saas_api_key_budget_reservations', 'created_at', 'INSERT'),
       ('saas_api_key_budget_reservations', 'updated_at', 'INSERT'),
       ('saas_api_key_budget_reservations', 'state', 'UPDATE'),
+      -- R1 (114, roadmap 1.3): settle records the ACTUAL charge on the
+      -- reservation row (the rolling 5h/7d windows read it back).
+      ('saas_api_key_budget_reservations', 'settled_charge_minor_units', 'UPDATE'),
       ('saas_api_key_budget_reservations', 'updated_at', 'UPDATE'),
       ('saas_provider_account_leases', 'id', 'INSERT'), ('saas_provider_account_leases', 'tenant_id', 'INSERT'),
       ('saas_provider_account_leases', 'owner_kind', 'INSERT'),
@@ -1458,7 +1698,9 @@ BEGIN
       ('saas_usage_events', 'input_uncached', 'INSERT'), ('saas_usage_events', 'cache_read', 'INSERT'),
       ('saas_usage_events', 'cache_write', 'INSERT'), ('saas_usage_events', 'cache_write_5m', 'INSERT'),
       ('saas_usage_events', 'cache_write_1h', 'INSERT'), ('saas_usage_events', 'output_total', 'INSERT'),
-      ('saas_usage_events', 'reasoning_output', 'INSERT'), ('saas_usage_events', 'status', 'INSERT'),
+      ('saas_usage_events', 'reasoning_output', 'INSERT'),
+      ('saas_usage_events', 'billing_mode', 'INSERT'), ('saas_usage_events', 'units', 'INSERT'),
+      ('saas_usage_events', 'size_tier', 'INSERT'), ('saas_usage_events', 'status', 'INSERT'),
       ('saas_usage_events', 'source', 'INSERT'), ('saas_usage_events', 'semantics_version', 'INSERT'),
       ('saas_usage_events', 'measurement_kind', 'INSERT'), ('saas_usage_events', 'billable_basis', 'INSERT'),
       ('saas_usage_events', 'created_at', 'INSERT'), ('saas_usage_events', 'event_digest', 'UPDATE'),
@@ -1542,7 +1784,77 @@ BEGIN
       ('saas_customer_webhook_tenant_usage', 'pending_deliveries', 'UPDATE'),
       ('saas_customer_webhook_tenant_usage', 'minute_bucket', 'UPDATE'),
       ('saas_customer_webhook_tenant_usage', 'events_in_bucket', 'UPDATE'),
-      ('saas_customer_webhook_tenant_usage', 'updated_at', 'UPDATE')
+      ('saas_customer_webhook_tenant_usage', 'updated_at', 'UPDATE'),
+      -- (123) batch-4 §4.2 async image tasks: the gateway owns the task
+      -- lifecycle — create insert, finish transition, expiry purge.
+      ('saas_image_tasks', 'id', 'INSERT'), ('saas_image_tasks', 'tenant_id', 'INSERT'),
+      ('saas_image_tasks', 'proxy_key_id', 'INSERT'), ('saas_image_tasks', 'status', 'INSERT'),
+      ('saas_image_tasks', 'http_status', 'INSERT'), ('saas_image_tasks', 'result', 'INSERT'),
+      ('saas_image_tasks', 'error', 'INSERT'), ('saas_image_tasks', 'created_at', 'INSERT'),
+      ('saas_image_tasks', 'completed_at', 'INSERT'), ('saas_image_tasks', 'expires_at', 'INSERT'),
+      ('saas_image_tasks', 'status', 'UPDATE'), ('saas_image_tasks', 'http_status', 'UPDATE'),
+      ('saas_image_tasks', 'result', 'UPDATE'), ('saas_image_tasks', 'error', 'UPDATE'),
+      ('saas_image_tasks', 'completed_at', 'UPDATE'), ('saas_image_tasks', 'expires_at', 'UPDATE'),
+      -- 125 (batch-5 §5.4) risk control: the moderation seam writes
+      -- decision logs (identity columns only — id is the identity default)
+      -- and records flagged input hashes; auto-ban flips the user's
+      -- disabled_at through the same column the control-plane governance
+      -- service uses.
+      ('saas_content_moderation_logs', 'request_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'tenant_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'user_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'api_key_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'api_key_name', 'INSERT'),
+      ('saas_content_moderation_logs', 'model', 'INSERT'),
+      ('saas_content_moderation_logs', 'protocol', 'INSERT'),
+      ('saas_content_moderation_logs', 'mode', 'INSERT'),
+      ('saas_content_moderation_logs', 'action', 'INSERT'),
+      ('saas_content_moderation_logs', 'flagged', 'INSERT'),
+      ('saas_content_moderation_logs', 'highest_category', 'INSERT'),
+      ('saas_content_moderation_logs', 'highest_score', 'INSERT'),
+      ('saas_content_moderation_logs', 'matched_keyword', 'INSERT'),
+      ('saas_content_moderation_logs', 'category_scores', 'INSERT'),
+      ('saas_content_moderation_logs', 'threshold_snapshot', 'INSERT'),
+      ('saas_content_moderation_logs', 'input_excerpt', 'INSERT'),
+      ('saas_content_moderation_logs', 'input_hash', 'INSERT'),
+      ('saas_content_moderation_logs', 'upstream_latency_ms', 'INSERT'),
+      ('saas_content_moderation_logs', 'error', 'INSERT'),
+      ('saas_content_moderation_logs', 'violation_count', 'INSERT'),
+      ('saas_content_moderation_logs', 'auto_banned', 'INSERT'),
+      ('saas_content_moderation_logs', 'email_sent', 'INSERT'),
+      ('saas_content_moderation_logs', 'created_at', 'INSERT'),
+      ('saas_content_moderation_flagged_hashes', 'input_hash', 'INSERT'),
+      ('saas_content_moderation_flagged_hashes', 'created_at', 'INSERT'),
+      ('saas_users', 'disabled_at', 'UPDATE'),
+      ('saas_users', 'updated_at', 'UPDATE'),
+      -- 125 auto-ban guard: the platform-role existence probe (SELECT-only,
+      -- user_id alone).
+      ('saas_platform_role_assignments', 'user_id', 'SELECT'),
+      -- 128 (batch-5 §5.1) plugin routing read (gateway decorator): the
+      -- decorator resolves the enabled binding's installation identity +
+      -- version/state/hash/signature for the fail-closed availability check.
+      -- Routing columns only — never artifact_data, the manifest blob or
+      -- config_json.
+      ('saas_plugin_installations', 'id', 'SELECT'),
+      ('saas_plugin_installations', 'plugin_key', 'SELECT'),
+      ('saas_plugin_installations', 'version', 'SELECT'),
+      ('saas_plugin_installations', 'state', 'SELECT'),
+      ('saas_plugin_installations', 'binary_sha256', 'SELECT'),
+      ('saas_plugin_installations', 'signature_status', 'SELECT'),
+      ('saas_plugin_installations', 'updated_at', 'SELECT'),
+      -- (124) batch-4 §4.3 async video tasks: the gateway owns the
+      -- create-time snapshot + binding insert, the one-shot billing-claim
+      -- transitions, and the expiry purge. Settlement facts are frozen at
+      -- create (INSERT only).
+      ('saas_video_tasks', 'request_id', 'INSERT'), ('saas_video_tasks', 'tenant_id', 'INSERT'),
+      ('saas_video_tasks', 'proxy_key_id', 'INSERT'), ('saas_video_tasks', 'provider_account_id', 'INSERT'),
+      ('saas_video_tasks', 'credential_id', 'INSERT'), ('saas_video_tasks', 'credential_version', 'INSERT'),
+      ('saas_video_tasks', 'gateway_request_id', 'INSERT'), ('saas_video_tasks', 'gateway_attempt_id', 'INSERT'),
+      ('saas_video_tasks', 'model', 'INSERT'), ('saas_video_tasks', 'resolution', 'INSERT'),
+      ('saas_video_tasks', 'duration_seconds', 'INSERT'), ('saas_video_tasks', 'video_count', 'INSERT'),
+      ('saas_video_tasks', 'billing_state', 'INSERT'), ('saas_video_tasks', 'settlement_facts', 'INSERT'),
+      ('saas_video_tasks', 'created_at', 'INSERT'), ('saas_video_tasks', 'expires_at', 'INSERT'),
+      ('saas_video_tasks', 'billing_state', 'UPDATE'), ('saas_video_tasks', 'billed_at', 'UPDATE')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP
@@ -1584,6 +1896,14 @@ BEGIN
 
   IF pg_catalog.to_regclass('model_router_saas.saas_billing_spending_freezes') IS NOT NULL THEN
     EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_billing_spending_freezes TO model_router_saas_gateway';
+  END IF;
+  -- (123) batch-4 §4.2 async image tasks + (124) batch-4 §4.3 async
+  -- video tasks: the gateway owns the task rows' expiry purge.
+  IF pg_catalog.to_regclass('model_router_saas.saas_image_tasks') IS NOT NULL THEN
+    EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_image_tasks TO model_router_saas_gateway';
+  END IF;
+  IF pg_catalog.to_regclass('model_router_saas.saas_video_tasks') IS NOT NULL THEN
+    EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_video_tasks TO model_router_saas_gateway';
   END IF;
   IF pg_catalog.to_regclass('model_router_saas.saas_provider_account_lease_fencing_seq') IS NOT NULL THEN
     EXECUTE 'GRANT USAGE ON SEQUENCE model_router_saas.saas_provider_account_lease_fencing_seq TO model_router_saas_gateway';

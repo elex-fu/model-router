@@ -193,13 +193,30 @@ test('stop a running upstream test and show its cancelled state', async ({ page 
   const app = await startConsole(page);
   try {
     const current = await app.admin.control.raw();
-    await app.admin.control.entity('upstreams', 'create', undefined, {
-      id: 'cancel-fixture', name: 'Cancel fixture', provider: 'custom', protocol: 'openai', enabled: true,
-      baseUrl: `http://127.0.0.1:${address.port}/v1`, endpoints: { generate: 'chat/completions' },
-      auth: { mode: 'none' }, credentials: [],
-      models: [{ id: 'local-model', enabled: true, capabilities: { text: 'supported' }, capabilitiesSource: 'manual' }],
-      priority: 0, sortIndex: 0, policy: { allowInsecureHttp: true },
-    }, current.revision, 'admin');
+    await app.admin.control.entity(
+      'upstreams',
+      'create',
+      undefined,
+      {
+        id: 'cancel-fixture',
+        name: 'Cancel fixture',
+        provider: 'custom',
+        protocol: 'openai',
+        enabled: true,
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        endpoints: { generate: 'chat/completions' },
+        auth: { mode: 'none' },
+        credentials: [],
+        models: [
+          { id: 'local-model', enabled: true, capabilities: { text: 'supported' }, capabilitiesSource: 'manual' },
+        ],
+        priority: 0,
+        sortIndex: 0,
+        policy: { allowInsecureHttp: true },
+      },
+      current.revision,
+      'admin',
+    );
     await setupAndLogin(page, app.site);
     await page.goto(new URL('/admin/upstreams/cancel-fixture', app.site).toString());
     await expect(page.getByRole('heading', { name: '上游', exact: true })).toBeVisible();
@@ -217,7 +234,7 @@ test('stop a running upstream test and show its cancelled state', async ({ page 
   } finally {
     await app.close();
     mock.closeAllConnections();
-    await new Promise<void>((resolve, reject) => mock.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => mock.close((error) => (error ? reject(error) : resolve())));
   }
 });
 

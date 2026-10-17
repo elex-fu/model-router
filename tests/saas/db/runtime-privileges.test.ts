@@ -175,6 +175,10 @@ test('commercial price versions allow history reads and append inserts without U
     'cache_write_1h_rate_denominator_units',
     'output_rate_numerator_minor_units',
     'output_rate_denominator_units',
+    'per_unit_rate_numerator_minor_units',
+    'per_unit_rate_denominator_units',
+    'per_unit_tier_rates',
+    'token_multipliers',
     'effective_at',
     'expires_at',
     'idempotency_key',
@@ -515,6 +519,9 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_obs_channel_metrics_1m', 'DELETE'],
     ['saas_obs_channel_metrics_hourly', 'DELETE'],
     ['saas_obs_alert_rules', 'DELETE'],
+    // Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+    // rides the same DELETE).
+    ['saas_obs_alert_silences', 'DELETE'],
     // R1 (105): billing group account-pool membership replacement.
     ['saas_billing_group_account_pools', 'DELETE'],
     // R4 (106): verification-code expiry pruning and delivery-failure
@@ -522,10 +529,25 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_email_verification_codes', 'DELETE'],
     // R3 (107): proxy registry lifecycle; in-use proxies are FK-protected.
     ['saas_egress_proxies', 'DELETE'],
+    // Batch-2 §2.4 (116): TLS fingerprint profile registry lifecycle. There
+    // is no FK from the tri-state account column (0/-1 are sentinels), so
+    // deleting a referenced profile leaves the resolver's fail-open default.
+    ['saas_tls_fingerprint_profiles', 'DELETE'],
     // R6a (109): probe monitor lifecycle (runs cascade with the monitor) and
     // the 30-day probe run retention cleanup (control-plane retention loop).
     ['saas_probe_monitors', 'DELETE'],
     ['saas_probe_runs', 'DELETE'],
+    // (121) composite model routes: registry row lifecycle.
+    ['saas_composite_model_routes', 'DELETE'],
+    // 125 (batch-5 §5.4) risk control: moderation log retention (hit/non-hit
+    // windows) and the flagged-hash blocklist lifecycle (admin delete/clear).
+    ['saas_content_moderation_logs', 'DELETE'],
+    ['saas_content_moderation_flagged_hashes', 'DELETE'],
+    // 128 (batch-5 §5.1) plugin system: installation lifecycle (bindings
+    // cascade via the FK) and the binding-set replacement DELETE inside
+    // upsertInstallation/replaceBindings.
+    ['saas_plugin_installations', 'DELETE'],
+    ['saas_plugin_bindings', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });
@@ -556,7 +578,7 @@ test('role template mirrors the control-plane manifest and grants no broad table
   );
   assert.doesNotMatch(
     sql,
-    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b|saas_billing_group_account_pools\b|saas_email_verification_codes\b|saas_egress_proxies\b|saas_probe_monitors\b|saas_probe_runs\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
+    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b|saas_billing_group_account_pools\b|saas_email_verification_codes\b|saas_egress_proxies\b|saas_probe_monitors\b|saas_probe_runs\b|saas_plugin_installations\b|saas_plugin_bindings\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
   assert.doesNotMatch(
     sql,
@@ -657,7 +679,29 @@ test('058 changes no CP rotation columns and grants neither CP job UPDATE nor ga
     ),
     false,
   );
-  for (const table of ['saas_api_keys', 'saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+  // 115 (R-dormant batch 2.2) is the single sanctioned exception: the
+  // scheduler's lazy scheduling-threshold pause columns. Every other
+  // account-table column — credentials, rotation, quota state — stays
+  // gateway-read-only.
+  const gatewayAccountUpdates = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+    ([relation, , privilege]) =>
+      privilege === 'UPDATE' &&
+      (relation === 'saas_tenant_provider_accounts' || relation === 'saas_platform_provider_accounts'),
+  );
+  assert.deepEqual(
+    gatewayAccountUpdates
+      .map(([relation, field]) => [relation, field])
+      .sort(([aRelation, aField], [bRelation, bField]) =>
+        aRelation === bRelation ? aField.localeCompare(bField) : aRelation.localeCompare(bRelation),
+      ),
+    [
+      ['saas_platform_provider_accounts', 'scheduling_threshold_pause_reason'],
+      ['saas_platform_provider_accounts', 'scheduling_threshold_pause_until'],
+      ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_reason'],
+      ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_until'],
+    ],
+  );
+  for (const table of ['saas_api_keys']) {
     assert.equal(
       SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
         ([relation, , privilege]) => relation === table && privilege === 'UPDATE',
@@ -1043,6 +1087,8 @@ test('gateway pricing snapshots have exactly the service INSERT columns and keep
         'hold_input_cache_write_1h',
         'hold_input_output_total',
         'hold_input_reasoning_output',
+        'hold_input_per_unit_units',
+        'hold_input_size_tier',
         'hold_amount_minor_units',
         'wallet_hold_required',
         'admission_expires_at',
@@ -1055,6 +1101,12 @@ test('gateway pricing snapshots have exactly the service INSERT columns and keep
         'peak_applied',
         'model_pricing_override_digest',
         'model_pricing_override',
+        'group_rpm_limit',
+        'group_daily_limit_minor_units',
+        'group_weekly_limit_minor_units',
+        'group_monthly_limit_minor_units',
+        'group_supported_model_scopes',
+        'group_fallback_group_id',
       ],
     ],
     [
@@ -1278,7 +1330,7 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
   assert.ok(SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.every(([, , verb]) => ['SELECT', 'INSERT', 'UPDATE'].includes(verb)));
   assert.equal(
     SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
-      ([table, , verb]) =>
+      ([table, column, verb]) =>
         [
           'saas_users',
           'saas_memberships',
@@ -1288,7 +1340,13 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
           'saas_tenant_provider_credential_versions',
           'saas_platform_provider_credentials',
           'saas_platform_provider_credential_versions',
-        ].includes(table) && verb !== 'SELECT',
+        ].includes(table) &&
+        verb !== 'SELECT' &&
+        // 125 (batch-5 §5.4) risk control: the moderation seam's auto-ban
+        // flips the user's disabled_at through the same columns the
+        // control-plane governance service uses — the single sanctioned
+        // non-SELECT exception on saas_users.
+        !(table === 'saas_users' && (column === 'disabled_at' || column === 'updated_at')),
     ),
     false,
   );
@@ -1644,5 +1702,56 @@ test('108 grants the control plane only the opencode_go protocol rules column, n
       false,
       'gateway reads protocol_rules through the dynamic all-column read-table grants only',
     );
+  }
+});
+
+test('120 grants the control plane only the CN-provider dual-mode config columns, never the quota snapshot columns', () => {
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const privilege of ['SELECT', 'UPDATE'] as const) {
+      for (const column of [
+        'zhipu_account_mode',
+        'zhipu_api_protocol',
+        'minimax_account_mode',
+        'minimax_api_protocol',
+      ]) {
+        assert.ok(
+          SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(
+            ([relation, field, granted]) => relation === table && field === column && granted === privilege,
+          ),
+          `missing ${privilege} ${table}.${column}`,
+        );
+      }
+    }
+    // The quota worker owns the scheduling snapshot columns; the control
+    // plane never reads or writes them (gateway reads stay dynamic).
+    for (const column of [
+      'zhipu_5h_used_percent',
+      'zhipu_5h_reset_at',
+      'zhipu_weekly_used_percent',
+      'zhipu_weekly_reset_at',
+      'zhipu_usage_updated_at',
+      'zhipu_usage_next_due_at',
+      'zhipu_usage_failure_count',
+      'zhipu_rate_limited_until',
+      'minimax_5h_used_percent',
+      'minimax_5h_reset_at',
+      'minimax_weekly_used_percent',
+      'minimax_weekly_reset_at',
+      'minimax_usage_updated_at',
+      'minimax_usage_next_due_at',
+      'minimax_usage_failure_count',
+      'minimax_rate_limited_until',
+    ]) {
+      assert.equal(
+        SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
+        false,
+        `unexpected control-plane grant ${table}.${column}`,
+      );
+      assert.equal(
+        SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
+        false,
+        `unexpected gateway write grant ${table}.${column}`,
+      );
+    }
   }
 });

@@ -1,18 +1,18 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import type { SupplyMode } from '../gateway/contracts.js';
-import { assertCustomerKeyMutationSessionIssued, type SaasIdentityService } from '../identity/service.js';
 import type { CustomerKeyMutationSessionHandle } from '../identity/customer-key-mutation-session.js';
+import { assertCustomerKeyMutationSessionIssued, type SaasIdentityService } from '../identity/service.js';
 import type { TenantContext } from '../identity/types.js';
-import type { KeyService } from './service.js';
-import type { ApiKeyMetadata, ApiKeyPrincipalKind, CreateApiKeyInput, CreatedApiKey } from './types.js';
-import type { KeyIpPolicySnapshot, ReplaceKeyIpPolicyInput } from './ip-policy-contract.js';
 import type {
   KeyBudgetCounterSnapshot,
   KeyBudgetPolicySnapshot,
   KeyBudgetUsageSnapshot,
   ReplaceKeyBudgetPolicyInput,
 } from './budget-policy-contract.js';
+import type { KeyIpPolicySnapshot, ReplaceKeyIpPolicyInput } from './ip-policy-contract.js';
+import type { KeyService } from './service.js';
+import type { ApiKeyMetadata, ApiKeyPrincipalKind, CreateApiKeyInput, CreatedApiKey } from './types.js';
 
 const API_PREFIX = '/console/api/v1';
 const SESSION_COOKIE_NAME = 'mr_saas_session';
@@ -26,7 +26,10 @@ export type SaasKeyHttpHandler = (req: IncomingMessage, res: ServerResponse) => 
 export interface SaasKeyHttpOptions {
   readonly service: Pick<SaasIdentityService, 'getSession' | 'verifyCsrfToken' | 'authorizeProjectAccess'> &
     Partial<Pick<SaasIdentityService, 'issueKeyMutationSession'>>;
-  readonly keyService?: Pick<KeyService, 'create' | 'list' | 'rotate' | 'revoke' | 'getKeyIpPolicy' | 'getKeyBudgetPolicy'> &
+  readonly keyService?: Pick<
+    KeyService,
+    'create' | 'list' | 'rotate' | 'revoke' | 'getKeyIpPolicy' | 'getKeyBudgetPolicy'
+  > &
     Partial<
       Pick<
         KeyService,
@@ -278,11 +281,14 @@ function routePath(req: IncomingMessage, origin: string): string | undefined {
   }
 }
 
-function findRoute(
-  path: string,
-):
+function findRoute(path: string):
   | { route: 'projectKeys'; tenantId: string; projectId: string }
-  | { route: 'keyRotate' | 'keyRevoke' | 'keyIpPolicy' | 'keyBudgetPolicy'; tenantId: string; projectId: string; keyId: string }
+  | {
+      route: 'keyRotate' | 'keyRevoke' | 'keyIpPolicy' | 'keyBudgetPolicy';
+      tenantId: string;
+      projectId: string;
+      keyId: string;
+    }
   | undefined {
   const match = new RegExp(
     `^${API_PREFIX}/tenants/([^/]+)/projects/([^/]+)/keys(?:/([^/]+)/(rotate|revoke|ip-policy|budget-policy))?$`,
@@ -423,7 +429,11 @@ export function createSaasKeyHandler(options: SaasKeyHttpOptions): SaasKeyHttpHa
   const authorize = async (session: unknown, tenantId: string, projectId: string): Promise<TenantContext> =>
     options.service.authorizeProjectAccess({ userId: requireUserId(session), tenantId, projectId });
 
-  const issueMutation = async (req: IncomingMessage, token: string, context: TenantContext): Promise<CustomerKeyMutationSessionHandle> => {
+  const issueMutation = async (
+    req: IncomingMessage,
+    token: string,
+    context: TenantContext,
+  ): Promise<CustomerKeyMutationSessionHandle> => {
     if (typeof options.service.issueKeyMutationSession !== 'function') {
       throw new HttpError(503, 'SERVICE_UNAVAILABLE', 'The key mutation authentication service is unavailable');
     }

@@ -7,6 +7,10 @@ import {
   type PreparedEvidenceDispatchPort,
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
+  resolveSaasGatewayBodyLimits,
+  type SaasGatewayEndpointFamilyBodyLimits,
+  type SaasGatewayQueryRequestContext,
+  type SaasGatewayQueryResult,
 } from '../../../src/saas/gateway/http-handler.js';
 import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 import type {
@@ -244,7 +248,15 @@ function harness(
       request: FakeRequest,
     ) => Promise<PreparedEvidenceDispatchResult>;
     readonly modelDiscovery?: (authenticatedCaller: AuthenticatedApiKey) => Promise<readonly string[]>;
+    /** Roadmap 4.0 ③: fake query-endpoint port for GET task reads. */
+    readonly queryEndpoints?: (context: SaasGatewayQueryRequestContext) => Promise<SaasGatewayQueryResult>;
     readonly maxBodyBytes?: number;
+    /** Roadmap 4.0 ①: endpoint-family body limits injected at construction. */
+    readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
+    /** Batch 2 §2.1: enable the sticky scheduling seam at the boundary. */
+    readonly stickyScheduling?: boolean;
+    /** Constructor options for the inbound FakeRequest (url/body/headers). */
+    readonly request?: ConstructorParameters<typeof FakeRequest>[0];
   } = {},
 ): {
   readonly handler: ReturnType<typeof createSaasGatewayHandler>;
@@ -254,12 +266,14 @@ function harness(
   readonly dispatchInputs: PreparedEvidenceDispatchInput[];
   readonly keys: string[];
   readonly modelDiscoveryInputs: AuthenticatedApiKey[];
+  readonly queryInputs: SaasGatewayQueryRequestContext[];
 } {
   const preparationInputs: RequestPreparationInput[] = [];
   const dispatchInputs: PreparedEvidenceDispatchInput[] = [];
   const keys: string[] = [];
   const modelDiscoveryInputs: AuthenticatedApiKey[] = [];
-  const request = new FakeRequest({});
+  const queryInputs: SaasGatewayQueryRequestContext[] = [];
+  const request = new FakeRequest(options.request ?? {});
   const response = new FakeResponse();
   const key = authenticatedApiKey();
   const authenticator: ProxyKeyAuthenticator = {
@@ -290,19 +304,40 @@ function harness(
         },
       }
     : undefined;
+  const queryServe = options.queryEndpoints;
+  const queryEndpoints = queryServe
+    ? {
+        serve: async (context: SaasGatewayQueryRequestContext) => {
+          queryInputs.push(context);
+          return queryServe(context);
+        },
+      }
+    : undefined;
   const baseHandler = createSaasGatewayHandler({
     authenticator,
     preparation,
     dispatch,
     preDispatchCompensation: options.preDispatchCompensation,
     modelDiscovery,
+    queryEndpoints,
     maxBodyBytes: options.maxBodyBytes,
+    endpointBodyLimits: options.endpointBodyLimits,
+    ...(options.stickyScheduling ? { stickyScheduling: true } : {}),
   });
   const requestId =
     options.preparationResult?.outcome === 'prepared' ? options.preparationResult.requestId : 'request-1';
   const handler: ReturnType<typeof createSaasGatewayHandler> = (req, res, context) =>
     baseHandler(req, res, context ?? { requestId });
-  return { handler, request, response, preparationInputs, dispatchInputs, keys, modelDiscoveryInputs };
+  return {
+    handler,
+    request,
+    response,
+    preparationInputs,
+    dispatchInputs,
+    keys,
+    modelDiscoveryInputs,
+    queryInputs,
+  };
 }
 
 async function completeClient(
@@ -468,6 +503,129 @@ test('rejects unsupported paths, methods, content types, and body sizes before p
   streamedTooLarge.request.chunks = [new TextEncoder().encode('{"model":"too-large"}')];
   await streamedTooLarge.handler(asRequest(streamedTooLarge.request), asResponse(streamedTooLarge.response));
   assert.equal(streamedTooLarge.response.writeHeadCalls[0]?.status, 413);
+});
+
+test('resolves endpoint-family body limits with documented defaults and fails closed on invalid injection (4.0 ①)', () => {
+  const defaults = resolveSaasGatewayBodyLimits(1024, undefined);
+  // §4.3 (task #17): the videos family shares the images media ceiling.
+  assert.deepEqual(defaults, {
+    default: 1024,
+    images: 10 * 1024 * 1024,
+    audio: 26 * 1024 * 1024,
+    videos: 10 * 1024 * 1024,
+  });
+
+  const injected = resolveSaasGatewayBodyLimits(1024, { images: 2048, audio: 4096, videos: 8192 });
+  assert.deepEqual(injected, { default: 1024, images: 2048, audio: 4096, videos: 8192 });
+
+  // Partial injection keeps family defaults for the omitted family only.
+  const partial = resolveSaasGatewayBodyLimits(1024, { images: 2048 });
+  assert.deepEqual(partial, {
+    default: 1024,
+    images: 2048,
+    audio: 26 * 1024 * 1024,
+    videos: 10 * 1024 * 1024,
+  });
+
+  assert.equal(resolveSaasGatewayBodyLimits(null, undefined), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { images: 0 }), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { audio: -1 }), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { audio: 1.5 }), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { videos: 0 }), null);
+});
+
+test('enforces endpoint-family body ceilings before route resolution (4.0 ①)', async () => {
+  // Images family default ceiling: exactly 10 MiB passes the bound.
+  const imagesBoundary = harness();
+  imagesBoundary.request.url = '/v1/images/generations';
+  imagesBoundary.request.headers['content-length'] = String(10 * 1024 * 1024);
+  await imagesBoundary.handler(asRequest(imagesBoundary.request), asResponse(imagesBoundary.response));
+  // §4.2 (task #16): /v1/images/generations is now a registered route, so
+  // the boundary case proceeds through the full pipeline (the default
+  // harness's dispatch returns a sent result with no client interaction —
+  // no response body is committed, which the 413 rejects stay below).
+  assert.equal(imagesBoundary.response.writeHeadCalls.length, 0);
+  assert.equal(imagesBoundary.preparationInputs.length, 1);
+
+  const imagesOver = harness();
+  imagesOver.request.url = '/v1/images/generations';
+  imagesOver.request.headers['content-length'] = String(10 * 1024 * 1024 + 1);
+  await imagesOver.handler(asRequest(imagesOver.request), asResponse(imagesOver.response));
+  assert.equal(imagesOver.response.writeHeadCalls[0]?.status, 413);
+
+  // Audio family default ceiling: 26 MiB passes, 26 MiB + 1 byte rejects.
+  const audioBoundary = harness();
+  audioBoundary.request.url = '/v1/audio/speech';
+  audioBoundary.request.headers['content-length'] = String(26 * 1024 * 1024);
+  await audioBoundary.handler(asRequest(audioBoundary.request), asResponse(audioBoundary.response));
+  assert.equal(audioBoundary.response.writeHeadCalls[0]?.status, 404);
+
+  const audioOver = harness();
+  audioOver.request.url = '/v1/audio/speech';
+  audioOver.request.headers['content-length'] = String(26 * 1024 * 1024 + 1);
+  await audioOver.handler(asRequest(audioOver.request), asResponse(audioOver.response));
+  assert.equal(audioOver.response.writeHeadCalls[0]?.status, 413);
+
+  // The text family keeps the global ceiling and never inherits media limits.
+  const textOver = harness();
+  textOver.request.url = '/v1/chat/completions';
+  textOver.request.headers['content-length'] = String(1024 * 1024 + 1);
+  await textOver.handler(asRequest(textOver.request), asResponse(textOver.response));
+  assert.equal(textOver.response.writeHeadCalls[0]?.status, 413);
+
+  // Injected family limits override the defaults exactly.
+  const injectedBoundary = harness({ endpointBodyLimits: { images: 2048 } });
+  injectedBoundary.request.url = '/v1/images/generations';
+  injectedBoundary.request.headers['content-length'] = '2048';
+  await injectedBoundary.handler(asRequest(injectedBoundary.request), asResponse(injectedBoundary.response));
+  assert.equal(injectedBoundary.response.writeHeadCalls.length, 0);
+  assert.equal(injectedBoundary.preparationInputs.length, 1);
+
+  const injectedOver = harness({ endpointBodyLimits: { images: 2048 } });
+  injectedOver.request.url = '/v1/images/generations';
+  injectedOver.request.headers['content-length'] = '2049';
+  await injectedOver.handler(asRequest(injectedOver.request), asResponse(injectedOver.response));
+  assert.equal(injectedOver.response.writeHeadCalls[0]?.status, 413);
+
+  // An invalid injected family limit fails the whole boundary closed.
+  const invalid = harness({ endpointBodyLimits: { images: 0 } });
+  invalid.request.url = '/v1/chat/completions';
+  await invalid.handler(asRequest(invalid.request), asResponse(invalid.response));
+  assert.equal(invalid.response.writeHeadCalls[0]?.status, 503);
+
+  // Transport-level bound precedes routing: an unknown path with an oversized
+  // declared length gets 413, not 404.
+  const unknownOver = harness();
+  unknownOver.request.url = '/v1/unknown';
+  unknownOver.request.headers['content-length'] = String(2 * 1024 * 1024);
+  await unknownOver.handler(asRequest(unknownOver.request), asResponse(unknownOver.response));
+  assert.equal(unknownOver.response.writeHeadCalls[0]?.status, 413);
+});
+
+test('rejects multipart-only media endpoints with an explicit JSON-only policy (4.0 ②)', async () => {
+  for (const path of ['/v1/images/edits', '/v1/audio/transcriptions', '/v1/audio/translations']) {
+    const multipart = harness();
+    multipart.request.url = path;
+    await multipart.handler(asRequest(multipart.request), asResponse(multipart.response));
+    assert.equal(multipart.response.writeHeadCalls[0]?.status, 501);
+    const body = JSON.parse(String(multipart.response.endBody)) as {
+      error: { code: string; message: string };
+    };
+    assert.equal(body.error.code, 'MULTIPART_NOT_SUPPORTED');
+    assert.ok(body.error.message.includes('multipart'));
+    assert.ok(body.error.message.includes('JSON'));
+    assert.equal(multipart.request.resumed, true);
+    assert.equal(multipart.preparationInputs.length, 0);
+    assert.equal(multipart.dispatchInputs.length, 0);
+  }
+
+  // The policy answer precedes size enforcement: an oversized declared upload
+  // to a multipart endpoint still gets the precise 501, not a bare 413.
+  const oversized = harness();
+  oversized.request.url = '/v1/audio/transcriptions';
+  oversized.request.headers['content-length'] = String(100 * 1024 * 1024);
+  await oversized.handler(asRequest(oversized.request), asResponse(oversized.response));
+  assert.equal(oversized.response.writeHeadCalls[0]?.status, 501);
 });
 
 test('accepts only Bearer authorization and never exposes the raw secret in errors', async () => {
@@ -801,5 +959,242 @@ test('client evidence never leaks into error responses', async () => {
   const body = String(setup.response.endBody);
   for (const value of [BILLING_ATTRIBUTION_BLOCK, 'claude-cli/1.0.34', 'billing group', 'Claude Code']) {
     assert.equal(body.includes(value), false);
+  }
+});
+
+/*
+ * Roadmap batch 2 §2.1 (task #5): the http-handler scheduling seam. The
+ * trusted boundary derives the merged sessionHash reference and fills
+ * input.scheduling.sessionId; the preparation service forwards it to the
+ * account scheduler, whose affinity resolution binds/reads it (the
+ * http-handler → preparation → scheduler chain's first link).
+ */
+
+test('derives the sticky scheduling reference from an anthropic metadata.user_id body', async () => {
+  const session = '11111111-2222-3333-4444-555555555555';
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/messages',
+      body: JSON.stringify({
+        model: 'public-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        metadata: { user_id: `user_${'a'.repeat(64)}_account__session_${session}` },
+      }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  const scheduling = setup.preparationInputs[0]?.scheduling;
+  assert.deepEqual(scheduling, { sessionId: session });
+});
+
+test('derives the sticky scheduling reference from an openai session-id header over the body', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/chat/completions',
+      headers: { 'session-id': 'sess-header-1' },
+      body: JSON.stringify({ model: 'public-model', prompt_cache_key: 'pc-key', messages: [] }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.deepEqual(setup.preparationInputs[0]?.scheduling, { sessionId: 'sess-header-1' });
+});
+
+test('content-derived fallback references are deterministic sha-256 values', async () => {
+  const body = JSON.stringify({
+    model: 'public-model',
+    messages: [{ role: 'user', content: 'hello there' }],
+  });
+  const first = harness({ stickyScheduling: true, request: { url: '/v1/chat/completions', body } });
+  assert.equal(await first.handler(asRequest(first.request), asResponse(first.response)), true);
+  const second = harness({ stickyScheduling: true, request: { url: '/v1/chat/completions', body } });
+  assert.equal(await second.handler(asRequest(second.request), asResponse(second.response)), true);
+  const firstSession = first.preparationInputs[0]?.scheduling?.sessionId;
+  const secondSession = second.preparationInputs[0]?.scheduling?.sessionId;
+  assert.ok(firstSession);
+  assert.match(firstSession, /^[0-9a-f]{64}$/);
+  assert.equal(firstSession, secondSession);
+});
+
+test('stateless embeddings requests carry no sticky scheduling reference', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: { url: '/v1/embeddings', body: JSON.stringify({ model: 'public-model', input: 'embed me' }) },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+  // The server-owned operation override still rides along unchanged.
+  assert.equal(setup.preparationInputs[0]?.clientOperation, 'embeddings');
+});
+
+test('anthropic bodies without text leave scheduling undefined', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/messages',
+      body: JSON.stringify({ model: 'public-model', metadata: {} }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+});
+
+test('the sticky scheduling seam is opt-in: the default boundary never sets input.scheduling', async () => {
+  const setup = harness({
+    request: {
+      url: '/v1/messages',
+      body: JSON.stringify({
+        model: 'public-model',
+        messages: [{ role: 'user', content: 'hello' }],
+        metadata: { user_id: `user_${'a'.repeat(64)}_account__session_11111111-2222-3333-4444-555555555555` },
+      }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+});
+
+test('serves GET query endpoints through the authenticated query port (4.0 ③)', async () => {
+  const imageTask = harness({
+    request: { url: '/v1/images/tasks/img_0001', method: 'GET' },
+    queryEndpoints: async (context) => {
+      assert.equal(context.authenticatedCaller.metadata.id, 'key-1');
+      return { status: 200, body: JSON.stringify({ id: context.pathParameters.taskId, status: 'succeeded' }) };
+    },
+  });
+  assert.equal(await imageTask.handler(asRequest(imageTask.request), asResponse(imageTask.response)), true);
+  assert.equal(imageTask.response.writeHeadCalls[0]?.status, 200);
+  assert.equal(imageTask.response.writeHeadCalls[0]?.headers['content-type'], 'application/json; charset=utf-8');
+  const body = JSON.parse(String(imageTask.response.endBody)) as { id: string; status: string };
+  assert.equal(body.id, 'img_0001');
+  assert.equal(body.status, 'succeeded');
+  assert.equal(imageTask.queryInputs[0]?.routeId, 'images.task_status');
+  assert.deepEqual(imageTask.queryInputs[0]?.pathParameters, { taskId: 'img_0001' });
+  // Query reads are the /v1/models-style bypass: no preparation, no dispatch.
+  assert.equal(imageTask.preparationInputs.length, 0);
+  assert.equal(imageTask.dispatchInputs.length, 0);
+
+  const videoStatus = harness({
+    request: { url: '/v1/videos/vid_9', method: 'GET' },
+    queryEndpoints: async () => ({ status: 202, body: JSON.stringify({ status: 'in_progress' }) }),
+  });
+  await videoStatus.handler(asRequest(videoStatus.request), asResponse(videoStatus.response));
+  assert.equal(videoStatus.response.writeHeadCalls[0]?.status, 202);
+  assert.equal(videoStatus.queryInputs[0]?.routeId, 'videos.task_status');
+  assert.deepEqual(videoStatus.queryInputs[0]?.pathParameters, { taskId: 'vid_9' });
+
+  const videoContent = harness({
+    request: { url: '/v1/videos/vid_9/content', method: 'GET' },
+    queryEndpoints: async () => ({
+      status: 200,
+      contentType: 'video/mp4',
+      body: new TextEncoder().encode('video-bytes'),
+    }),
+  });
+  await videoContent.handler(asRequest(videoContent.request), asResponse(videoContent.response));
+  assert.equal(videoContent.response.writeHeadCalls[0]?.status, 200);
+  assert.equal(videoContent.response.writeHeadCalls[0]?.headers['content-type'], 'video/mp4');
+  assert.deepEqual(
+    new Uint8Array(videoContent.response.endBody as Uint8Array),
+    new TextEncoder().encode('video-bytes'),
+  );
+  assert.equal(videoContent.queryInputs[0]?.routeId, 'videos.task_content');
+});
+
+test('query endpoints enforce GET, authentication, and fail closed (4.0 ③)', async () => {
+  // Non-GET on a query path is method-rejected before the port runs.
+  const post = harness({
+    request: { url: '/v1/images/tasks/img_0001', method: 'POST', body: JSON.stringify({ model: 'public-model' }) },
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await post.handler(asRequest(post.request), asResponse(post.response));
+  assert.equal(post.response.writeHeadCalls[0]?.status, 405);
+  assert.equal(post.queryInputs.length, 0);
+
+  // Absent query authority fails closed.
+  const noPort = harness({ request: { url: '/v1/images/tasks/img_0001', method: 'GET' } });
+  await noPort.handler(asRequest(noPort.request), asResponse(noPort.response));
+  assert.equal(noPort.response.writeHeadCalls[0]?.status, 503);
+  assert.equal(noPort.queryInputs.length, 0);
+
+  // Authentication precedes the port.
+  const unauthenticated = harness({
+    request: { url: '/v1/images/tasks/img_0001', method: 'GET' },
+    authenticate: async () => null,
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await unauthenticated.handler(asRequest(unauthenticated.request), asResponse(unauthenticated.response));
+  assert.equal(unauthenticated.response.writeHeadCalls[0]?.status, 401);
+  assert.equal(unauthenticated.queryInputs.length, 0);
+
+  // GET on POST-only routes and unknown paths keep their existing answers.
+  const textRoute = harness({ request: { url: '/v1/chat/completions', method: 'GET' } });
+  await textRoute.handler(asRequest(textRoute.request), asResponse(textRoute.response));
+  assert.equal(textRoute.response.writeHeadCalls[0]?.status, 405);
+
+  const unknown = harness({ request: { url: '/v1/unknown', method: 'GET' } });
+  await unknown.handler(asRequest(unknown.request), asResponse(unknown.response));
+  assert.equal(unknown.response.writeHeadCalls[0]?.status, 404);
+
+  // Strict path matching: trailing slash or oversized parameter matches nothing.
+  const trailingSlash = harness({
+    request: { url: '/v1/videos/vid_9/', method: 'GET' },
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await trailingSlash.handler(asRequest(trailingSlash.request), asResponse(trailingSlash.response));
+  assert.equal(trailingSlash.response.writeHeadCalls[0]?.status, 404);
+  assert.equal(trailingSlash.queryInputs.length, 0);
+
+  const oversizedParameter = harness({
+    request: { url: `/v1/images/tasks/${'a'.repeat(256)}`, method: 'GET' },
+    queryEndpoints: async () => ({ status: 200, body: '{}' }),
+  });
+  await oversizedParameter.handler(asRequest(oversizedParameter.request), asResponse(oversizedParameter.response));
+  assert.equal(oversizedParameter.response.writeHeadCalls[0]?.status, 404);
+  assert.equal(oversizedParameter.queryInputs.length, 0);
+
+  // Port failure and contract violations surface as 503, never partial output.
+  const failing = harness({
+    request: { url: '/v1/videos/vid_9', method: 'GET' },
+    queryEndpoints: async () => {
+      throw new Error('task store unavailable');
+    },
+  });
+  await failing.handler(asRequest(failing.request), asResponse(failing.response));
+  assert.equal(failing.response.writeHeadCalls[0]?.status, 503);
+
+  for (const invalid of [
+    { status: 200, body: 42 } as unknown as SaasGatewayQueryResult,
+    { status: 700 } as unknown as SaasGatewayQueryResult,
+    { status: 200, contentType: 'not\x00ok' } as unknown as SaasGatewayQueryResult,
+  ]) {
+    const contract = harness({
+      request: { url: '/v1/videos/vid_9', method: 'GET' },
+      queryEndpoints: async () => invalid,
+    });
+    await contract.handler(asRequest(contract.request), asResponse(contract.response));
+    assert.equal(contract.response.writeHeadCalls[0]?.status, 503);
+    assert.equal(contract.response.writeHeadCalls.length, 1);
+  }
+});
+
+test('rejects WebSocket upgrade requests with an explicit 501 boundary (4.0 ④)', async () => {
+  for (const upgrade of ['websocket', 'WebSocket']) {
+    const ws = harness({
+      request: {
+        url: '/v1/realtime',
+        method: 'GET',
+        headers: { upgrade, connection: 'Upgrade' },
+      },
+    });
+    await ws.handler(asRequest(ws.request), asResponse(ws.response));
+    assert.equal(ws.response.writeHeadCalls[0]?.status, 501);
+    const body = JSON.parse(String(ws.response.endBody)) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, 'WEBSOCKET_UNSUPPORTED');
+    assert.ok(body.error.message.includes('WebSocket'));
+    assert.equal(ws.request.resumed, true);
+    assert.equal(ws.preparationInputs.length, 0);
+    assert.equal(ws.dispatchInputs.length, 0);
   }
 });

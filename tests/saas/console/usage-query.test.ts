@@ -287,7 +287,12 @@ test('request list and detail expose persisted execution, financial and reconcil
   const database = new RecordingDatabase();
   const base = requestRow('request-a', '2026-09-28T01:00:00.000Z');
   const cases = [
-    { supply_mode: 'platform', status: 'succeeded', financial_status: 'reconciliation_pending', reconciliation_state: 'resolved' },
+    {
+      supply_mode: 'platform',
+      status: 'succeeded',
+      financial_status: 'reconciliation_pending',
+      reconciliation_state: 'resolved',
+    },
     { supply_mode: 'platform', status: 'succeeded', financial_status: 'settled', reconciliation_state: 'resolved' },
     { supply_mode: 'platform', status: 'failed', financial_status: 'released', reconciliation_state: 'none' },
     { supply_mode: 'platform', status: 'pending', financial_status: 'pending', reconciliation_state: 'none' },
@@ -302,7 +307,12 @@ test('request list and detail expose persisted execution, financial and reconcil
     database.requestRows = [row];
     database.detailRequest = row;
     const page = await queries.listRequests({ userId: 'user-a', tenantId: 'tenant-a', projectId: 'project-a' });
-    const detail = await queries.getRequest({ userId: 'user-a', tenantId: 'tenant-a', requestId: 'request-a', projectId: 'project-a' });
+    const detail = await queries.getRequest({
+      userId: 'user-a',
+      tenantId: 'tenant-a',
+      requestId: 'request-a',
+      projectId: 'project-a',
+    });
     assert.ok(detail);
     for (const projected of [page.items[0], detail]) {
       assert.equal(projected?.status, states.status);
@@ -318,7 +328,10 @@ test('request list and detail expose persisted execution, financial and reconcil
     assert.match(call.sql, /r\.tenant_id = \$2/);
     assert.match(call.sql, /tm\.user_id = \$1/);
     assert.match(call.sql, /pm\.user_id = \$1/);
-    assert.doesNotMatch(call.sql, /SELECT\s+\*|saas_wallets|saas_billing_reservations|saas_ledger|proxy_key_id|usage_evidence_ref/i);
+    assert.doesNotMatch(
+      call.sql,
+      /SELECT\s+\*|saas_wallets|saas_billing_reservations|saas_ledger|proxy_key_id|usage_evidence_ref/i,
+    );
   }
 });
 
@@ -359,7 +372,12 @@ test('adding financial metadata does not expand cross-tenant or revoked-project 
   assert.equal(otherTenant, null);
   assert.equal(database.calls.length, 1);
   database.allowProjectMembership = false;
-  const revoked = await queries.getRequest({ userId: 'user-a', tenantId: 'tenant-a', requestId: 'request-a', projectId: 'project-a' });
+  const revoked = await queries.getRequest({
+    userId: 'user-a',
+    tenantId: 'tenant-a',
+    requestId: 'request-a',
+    projectId: 'project-a',
+  });
   assert.equal(revoked, null);
   assert.equal(database.calls.length, 2);
   for (const call of database.calls) {

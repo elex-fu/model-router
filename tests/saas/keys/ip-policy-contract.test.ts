@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { canonicalizeIpPolicy, isIpAllowed } from '../../../src/saas/keys/ip-policy.js';
-import {
-  parseKeyIpPolicyVersion,
-  parseReplaceKeyIpPolicyInput,
-} from '../../../src/saas/keys/ip-policy-contract.js';
+import { parseKeyIpPolicyVersion, parseReplaceKeyIpPolicyInput } from '../../../src/saas/keys/ip-policy-contract.js';
 
 test('explicit denyall stays distinct from disabled for both address families and mapped peers', () => {
   const denied = canonicalizeIpPolicy({ mode: 'denyall', rules: [] });
@@ -41,20 +38,26 @@ test('replace DTO canonicalizes through the existing CIDR implementation without
 });
 
 test('disabled draft rules are preserved and never replaced with implicit broad CIDRs', () => {
-  assert.deepEqual(parseReplaceKeyIpPolicyInput({
-    expectedVersion: '1',
-    policy: { mode: 'disabled', rules: ['192.0.2.7'] },
-  }), {
-    expectedVersion: '1',
-    policy: { mode: 'disabled', rules: ['192.0.2.7/32'] },
-  });
-  assert.deepEqual(parseReplaceKeyIpPolicyInput({
-    expectedVersion: '2',
-    policy: { mode: 'denyall', rules: [] },
-  }), {
-    expectedVersion: '2',
-    policy: { mode: 'denyall', rules: [] },
-  });
+  assert.deepEqual(
+    parseReplaceKeyIpPolicyInput({
+      expectedVersion: '1',
+      policy: { mode: 'disabled', rules: ['192.0.2.7'] },
+    }),
+    {
+      expectedVersion: '1',
+      policy: { mode: 'disabled', rules: ['192.0.2.7/32'] },
+    },
+  );
+  assert.deepEqual(
+    parseReplaceKeyIpPolicyInput({
+      expectedVersion: '2',
+      policy: { mode: 'denyall', rules: [] },
+    }),
+    {
+      expectedVersion: '2',
+      policy: { mode: 'denyall', rules: [] },
+    },
+  );
 });
 
 test('revision text is exact through PostgreSQL bigint max with no numeric coercion', () => {
@@ -62,8 +65,22 @@ test('revision text is exact through PostgreSQL bigint max with no numeric coerc
     assert.equal(parseKeyIpPolicyVersion(value), value);
   }
   for (const value of [
-    undefined, null, 1, 1n, Number.MAX_SAFE_INTEGER + 1, '', '0', '-1',
-    '+1', '01', ' 1', '1 ', '1.0', '1e3', '9223372036854775808', '1'.repeat(100),
+    undefined,
+    null,
+    1,
+    1n,
+    Number.MAX_SAFE_INTEGER + 1,
+    '',
+    '0',
+    '-1',
+    '+1',
+    '01',
+    ' 1',
+    '1 ',
+    '1.0',
+    '1e3',
+    '9223372036854775808',
+    '1'.repeat(100),
   ]) {
     assert.throws(() => parseKeyIpPolicyVersion(value), TypeError);
   }
@@ -71,8 +88,13 @@ test('revision text is exact through PostgreSQL bigint max with no numeric coerc
 
 test('replacement requires an explicit CAS revision and a complete policy', () => {
   for (const value of [
-    undefined, null, [], {}, { policy: { mode: 'disabled', rules: [] } },
-    { expectedVersion: '1' }, { expectedVersion: '1', policy: null },
+    undefined,
+    null,
+    [],
+    {},
+    { policy: { mode: 'disabled', rules: [] } },
+    { expectedVersion: '1' },
+    { expectedVersion: '1', policy: null },
     { expectedVersion: '1', policy: [] },
     { expectedVersion: '1', policy: { mode: 'disabled' } },
     { expectedVersion: '1', policy: { rules: [] } },
@@ -85,53 +107,97 @@ test('replacement requires an explicit CAS revision and a complete policy', () =
 test('body cannot supply scope, a new version, Key authority, secrets or forwarding configuration', () => {
   const valid = { expectedVersion: '1', policy: { mode: 'disabled', rules: [] } };
   for (const field of [
-    'tenantId', 'projectId', 'keyId', 'version', 'authzVersion', 'secret',
-    'key_hash', 'trustedProxyCidrs', 'xForwardedFor', 'forwarded',
+    'tenantId',
+    'projectId',
+    'keyId',
+    'version',
+    'authzVersion',
+    'secret',
+    'key_hash',
+    'trustedProxyCidrs',
+    'xForwardedFor',
+    'forwarded',
   ]) {
     assert.throws(() => parseReplaceKeyIpPolicyInput({ ...valid, [field]: 'untrusted' }), TypeError);
   }
   for (const field of ['version', 'trustedProxyCidrs', 'xForwardedFor', 'forwarded']) {
-    assert.throws(() => parseReplaceKeyIpPolicyInput({
-      ...valid, policy: { ...valid.policy, [field]: 'untrusted' },
-    }), TypeError);
+    assert.throws(
+      () =>
+        parseReplaceKeyIpPolicyInput({
+          ...valid,
+          policy: { ...valid.policy, [field]: 'untrusted' },
+        }),
+      TypeError,
+    );
   }
 });
 
 test('required fields cannot be supplied only through the prototype', () => {
-  assert.throws(() => parseReplaceKeyIpPolicyInput(Object.create({
-    expectedVersion: '1', policy: { mode: 'disabled', rules: [] },
-  })), TypeError);
-  assert.throws(() => parseReplaceKeyIpPolicyInput({
-    expectedVersion: '1', policy: Object.create({ mode: 'disabled', rules: [] }),
-  }), TypeError);
+  assert.throws(
+    () =>
+      parseReplaceKeyIpPolicyInput(
+        Object.create({
+          expectedVersion: '1',
+          policy: { mode: 'disabled', rules: [] },
+        }),
+      ),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      parseReplaceKeyIpPolicyInput({
+        expectedVersion: '1',
+        policy: Object.create({ mode: 'disabled', rules: [] }),
+      }),
+    TypeError,
+  );
 });
 
 test('DTO preserves the existing input-rule cap before deduplication', () => {
-  assert.equal(parseReplaceKeyIpPolicyInput({
-    expectedVersion: '1',
-    policy: { mode: 'allowlist', rules: Array(256).fill('192.0.2.7') },
-  }).policy.rules.length, 1);
-  assert.throws(() => parseReplaceKeyIpPolicyInput({
-    expectedVersion: '1',
-    policy: { mode: 'allowlist', rules: Array(257).fill('192.0.2.7') },
-  }), /at most 256/);
+  assert.equal(
+    parseReplaceKeyIpPolicyInput({
+      expectedVersion: '1',
+      policy: { mode: 'allowlist', rules: Array(256).fill('192.0.2.7') },
+    }).policy.rules.length,
+    1,
+  );
+  assert.throws(
+    () =>
+      parseReplaceKeyIpPolicyInput({
+        expectedVersion: '1',
+        policy: { mode: 'allowlist', rules: Array(257).fill('192.0.2.7') },
+      }),
+    /at most 256/,
+  );
 });
 
 test('malformed literals stay rejected instead of becoming disabled or broad allow rules', () => {
   for (const rule of [
-    'example.invalid', '192.000.2.7', '192.0.2.7:443', '[2001:db8::7]',
-    'fe80::7%eth0', '192.0.2.7/33', '2001:db8::7/129', '::ffff:192.0.2.7/95',
+    'example.invalid',
+    '192.000.2.7',
+    '192.0.2.7:443',
+    '[2001:db8::7]',
+    'fe80::7%eth0',
+    '192.0.2.7/33',
+    '2001:db8::7/129',
+    '::ffff:192.0.2.7/95',
   ]) {
-    assert.throws(() => parseReplaceKeyIpPolicyInput({
-      expectedVersion: '1', policy: { mode: 'allowlist', rules: [rule] },
-    }), TypeError);
+    assert.throws(
+      () =>
+        parseReplaceKeyIpPolicyInput({
+          expectedVersion: '1',
+          policy: { mode: 'allowlist', rules: [rule] },
+        }),
+      TypeError,
+    );
   }
 });
 
 test('canonical replacement owns a fresh rules array and leaves input ordering untouched', () => {
   const rules = ['2001:db8::7', '192.0.2.7'];
   const parsed = parseReplaceKeyIpPolicyInput({
-    expectedVersion: '1', policy: { mode: 'allowlist', rules },
+    expectedVersion: '1',
+    policy: { mode: 'allowlist', rules },
   });
   assert.deepEqual(rules, ['2001:db8::7', '192.0.2.7']);
   rules.push('0.0.0.0/0');

@@ -9,6 +9,7 @@ import {
   MODEL_ROUTER_SAAS_DEPLOYMENT_ID,
   MODEL_ROUTER_SAAS_ENVIRONMENT_ID,
   MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
+  MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
   MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
   MODEL_ROUTER_SAAS_KMS_PROVIDER,
   MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
@@ -64,7 +65,7 @@ export interface ManagedSaasGatewayRuntimeModuleOptions {
     environmentId: string;
     listener: DeploymentListenerConfig<'gateway'>;
   }>;
-  /** Snapshot excludes database URLs and control-plane provider/KMS settings. */
+  /** Snapshot excludes database URLs, Redis URLs, and control-plane provider/KMS settings. */
   readonly env: ProviderEnvironment;
   /** Register construction-time rollback hooks; successful factories transfer ownership to close(). */
   readonly lifecycle: Readonly<{
@@ -165,6 +166,10 @@ const EXCLUDED_ENVIRONMENT_NAMES = new Set<string>([
   MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
   MODEL_ROUTER_SAAS_REDIS_URL,
+  // The gateway-scoped Redis URL is also excluded: core owns the gateway
+  // RESP connection and its lifecycle, handing the runtime module already
+  // constructed capabilities — the module never dials Redis on its own.
+  MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
   MODEL_ROUTER_SAAS_REDIS_PROVIDER,
   MODEL_ROUTER_SAAS_KMS_PROVIDER,
   SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,

@@ -214,7 +214,8 @@ async function execute(control: ControlService, action: Action, args: string[], 
         expiresAt: patch.expiresAt,
       };
       await control.mutate(config.revision, actor, (next) => {
-        const item = next.proxyKeys.find((candidate) => candidate.id === key.id)!;
+        const item = next.proxyKeys.find((candidate) => candidate.id === key.id);
+        if (item === undefined) throw new Error(`Proxy key "${name}" not found`);
         for (const [field, value] of Object.entries(update)) {
           if (value !== undefined) (item as unknown as Record<string, unknown>)[field] = value;
           else if (
@@ -279,7 +280,9 @@ async function execute(control: ControlService, action: Action, args: string[], 
     const maps = parseMap(options.map);
     try {
       keys.forEach((value, index) => {
-        control.store.secrets.put(secretIds[index]!, value);
+        const secretId = secretIds[index];
+        if (secretId === undefined) throw new Error(`Missing secret id for key ${index + 1}`);
+        control.store.secrets.put(secretId, value);
       });
       await control.mutate(config.revision, actor, (next) => {
         next.upstreams.push(upstream);
@@ -329,9 +332,11 @@ async function execute(control: ControlService, action: Action, args: string[], 
     else console.table(entries);
   } else if (action === 'upstream:map:set') {
     const [pattern, target] = args.slice(1);
-    await control.mutate(config.revision, actor, (next) =>
-      setRouteTarget(next, findUpstream(next, name)!, pattern, target),
-    );
+    await control.mutate(config.revision, actor, (next) => {
+      const nextUpstream = findUpstream(next, name);
+      if (nextUpstream === undefined) throw new Error(`Upstream "${name}" not found`);
+      setRouteTarget(next, nextUpstream, pattern, target);
+    });
     console.log(`Set ${upstream.name}: ${pattern} → ${target}`);
   } else if (action === 'upstream:map:delete') {
     const pattern = args[1];

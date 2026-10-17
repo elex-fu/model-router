@@ -368,8 +368,10 @@ class FakeExecutor implements SqlExecutor {
       this.attemptClaimQueries.push({ sql, values: [...values] });
       // Model the existing attempt guard, not PostgreSQL execution. The old
       // claim SQL must fail here rather than bypassing the version contract.
-      if (!sql.includes('state_version = state_version + 1') ||
-        !sql.includes('updated_at = GREATEST(updated_at, clock_timestamp())')) {
+      if (
+        !sql.includes('state_version = state_version + 1') ||
+        !sql.includes('updated_at = GREATEST(updated_at, clock_timestamp())')
+      ) {
         throw Object.assign(new Error('attempt update omitted its monotonic version/timestamp'), { code: '55000' });
       }
       assert.match(sql, /request_id = \$4 AND ordinal = \$5 AND state_version = \$6::bigint/);
@@ -377,18 +379,32 @@ class FakeExecutor implements SqlExecutor {
       assert.match(sql, /dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false/);
       assert.match(sql, /response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL/);
       const current = this.rows.attempt as Record<string, unknown>;
-      if (this.failAttemptClaim || current.tenant_id !== values[0] || current.id !== values[1] ||
-        current.prepared_evidence_id !== null || current.request_id !== values[3] || current.ordinal !== values[4] ||
-        String(current.state_version) !== values[5] || current.binding_state !== 'bound' ||
-        current.dispatch_authority_state !== 'bound' || current.dispatch_state !== 'not_sent' ||
-        current.result_state !== 'pending' || current.response_started !== false ||
-        current.response_started_at !== null || current.result_http_status !== null || current.unknown_reason !== null) {
+      if (
+        this.failAttemptClaim ||
+        current.tenant_id !== values[0] ||
+        current.id !== values[1] ||
+        current.prepared_evidence_id !== null ||
+        current.request_id !== values[3] ||
+        current.ordinal !== values[4] ||
+        String(current.state_version) !== values[5] ||
+        current.binding_state !== 'bound' ||
+        current.dispatch_authority_state !== 'bound' ||
+        current.dispatch_state !== 'not_sent' ||
+        current.result_state !== 'pending' ||
+        current.response_started !== false ||
+        current.response_started_at !== null ||
+        current.result_http_status !== null ||
+        current.unknown_reason !== null
+      ) {
         return { rows: [], rowCount: 0 };
       }
       this.attemptEvidenceId = String(values[2]);
-      this.rows.attempt = { ...current, prepared_evidence_id: this.attemptEvidenceId,
+      this.rows.attempt = {
+        ...current,
+        prepared_evidence_id: this.attemptEvidenceId,
         state_version: (BigInt(String(current.state_version)) + 1n).toString(),
-        updated_at: new Date(Math.max(new Date(String(current.updated_at)).getTime(), CLOCK.getTime())).toISOString() };
+        updated_at: new Date(Math.max(new Date(String(current.updated_at)).getTime(), CLOCK.getTime())).toISOString(),
+      };
       return { rows: [{ id: this.input.attemptId }] as Row[], rowCount: 1 };
     }
     if (sql.includes("SET status = 'claimed'")) {
@@ -558,7 +574,7 @@ function makeDatabase(fake: FakeExecutor): SaasDatabase {
       fake.transactionCalls += 1;
       const evidence = { ...fake.evidence };
       const attemptEvidenceId = fake.attemptEvidenceId;
-      const attempt = { ...fake.rows.attempt as Record<string, unknown> };
+      const attempt = { ...(fake.rows.attempt as Record<string, unknown>) };
       const auditCount = fake.auditActorIds.length;
       try {
         return await work(fake);
@@ -605,9 +621,10 @@ async function registerWithPgTimestampRow(input: PreparedRequestEvidenceInput) {
   for (const column of ['dispatch_deadline', 'expires_at']) {
     const value = stored[column];
     assert.ok(typeof value === 'string');
-    const parsed: unknown = pgTypes.getTypeParser(pgTypes.builtins.TIMESTAMPTZ, 'text')(
-      value.replace('T', ' ').replace(/Z$/, '+00'),
-    );
+    const parsed: unknown = pgTypes.getTypeParser(
+      pgTypes.builtins.TIMESTAMPTZ,
+      'text',
+    )(value.replace('T', ' ').replace(/Z$/, '+00'));
     assert.ok(parsed instanceof Date && Number.isFinite(parsed.getTime()));
     stored[column] = parsed;
   }
@@ -629,20 +646,36 @@ test('real Ed25519 evidence preserves nonzero milliseconds through PG Date decod
   assert.ok(deadline instanceof Date && expiry instanceof Date);
   assert.equal(deadline.getUTCMilliseconds(), 123);
   assert.equal(expiry.getUTCMilliseconds(), 789);
-  const expectedDigest = createHash('sha256').update(canonicalPreparedRequestEvidencePayload(input), 'utf8').digest('hex');
+  const expectedDigest = createHash('sha256')
+    .update(canonicalPreparedRequestEvidencePayload(input), 'utf8')
+    .digest('hex');
   assert.equal(registered.statementSha256, expectedDigest);
   const formerLossyCanonical = canonicalPreparedRequestEvidencePayload({
-    ...input, dispatchDeadline: String(deadline), expiresAt: String(expiry),
+    ...input,
+    dispatchDeadline: String(deadline),
+    expiresAt: String(expiry),
   });
   assert.notEqual(createHash('sha256').update(formerLossyCanonical, 'utf8').digest('hex'), expectedDigest);
-  assert.equal(verifyEd25519(null, Buffer.from(formerLossyCanonical, 'utf8'), publicKey,
-    Buffer.from(input.signatureBase64, 'base64')), false, 'the former Date string coercion changes signed bytes, not keys');
-  const preflight = await evidenceService.preflightForDispatch(input.evidenceId ?? '', input.audit, { payloadSha256: input.payloadSha256 });
+  assert.equal(
+    verifyEd25519(
+      null,
+      Buffer.from(formerLossyCanonical, 'utf8'),
+      publicKey,
+      Buffer.from(input.signatureBase64, 'base64'),
+    ),
+    false,
+    'the former Date string coercion changes signed bytes, not keys',
+  );
+  const preflight = await evidenceService.preflightForDispatch(input.evidenceId ?? '', input.audit, {
+    payloadSha256: input.payloadSha256,
+  });
   assert.equal(preflight.statementSha256, expectedDigest);
   assert.equal(preflight.status, 'registered');
   assert.ok(preflight.expiresAt === expiry.toISOString());
   assert.equal(fake.attemptEvidenceId, null, 'preflight remains read-only');
-  const claimed = await evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit, { payloadSha256: input.payloadSha256 });
+  const claimed = await evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit, {
+    payloadSha256: input.payloadSha256,
+  });
   assert.equal(claimed.status, 'claimed');
   assert.equal(claimed.statementSha256, expectedDigest);
   assert.ok(claimed.expiresAt === expiry.toISOString());
@@ -651,10 +684,16 @@ test('real Ed25519 evidence preserves nonzero milliseconds through PG Date decod
 
 test('whole-second PG Dates and equivalent timestamp strings retain the same signed statement', async () => {
   for (const variant of ['whole_second_dates', 'fractional_iso_strings', 'fractional_offset_strings'] as const) {
-    const input = signedInput(variant === 'whole_second_dates' ? {} : {
-      dispatchDeadline: variant === 'fractional_iso_strings' ? '2026-09-28T00:10:00.123Z' : '2026-09-28T05:40:00.123+05:30',
-      expiresAt: variant === 'fractional_iso_strings' ? '2026-09-28T00:15:00.789Z' : '2026-09-28T05:45:00.789+05:30',
-    });
+    const input = signedInput(
+      variant === 'whole_second_dates'
+        ? {}
+        : {
+            dispatchDeadline:
+              variant === 'fractional_iso_strings' ? '2026-09-28T00:10:00.123Z' : '2026-09-28T05:40:00.123+05:30',
+            expiresAt:
+              variant === 'fractional_iso_strings' ? '2026-09-28T00:15:00.789Z' : '2026-09-28T05:45:00.789+05:30',
+          },
+    );
     const { fake, evidenceService, registered } = await registerWithPgTimestampRow(input);
     if (variant !== 'whole_second_dates') {
       // A string-returning driver remains compatible with the same UTC/ms
@@ -674,7 +713,8 @@ test('each signed timestamp rejects a one-millisecond tamper at preflight and cl
   for (const method of ['preflightForDispatch', 'claimForDispatch'] as const) {
     for (const column of ['dispatch_deadline', 'expires_at']) {
       const input = signedInput({
-        dispatchDeadline: '2026-09-28T00:10:00.123Z', expiresAt: '2026-09-28T00:15:00.789Z',
+        dispatchDeadline: '2026-09-28T00:10:00.123Z',
+        expiresAt: '2026-09-28T00:15:00.789Z',
       });
       const { fake, evidenceService } = await registerWithPgTimestampRow(input);
       const original = fake.evidence[column];
@@ -700,9 +740,12 @@ test('invalid stored Dates and malformed strings refuse preflight/claim without 
   for (const method of ['preflightForDispatch', 'claimForDispatch'] as const) {
     for (const column of ['dispatch_deadline', 'expires_at']) {
       for (const damaged of [new Date(Number.NaN), 'not-a-timestamp']) {
-        const { fake, evidenceService } = await registerWithPgTimestampRow(signedInput({
-          dispatchDeadline: '2026-09-28T00:10:00.123Z', expiresAt: '2026-09-28T00:15:00.789Z',
-        }));
+        const { fake, evidenceService } = await registerWithPgTimestampRow(
+          signedInput({
+            dispatchDeadline: '2026-09-28T00:10:00.123Z',
+            expiresAt: '2026-09-28T00:15:00.789Z',
+          }),
+        );
         fake.evidence[column] = damaged;
         await expectCode(evidenceService[method](String(fake.input.evidenceId), fake.input.audit), 'INVALID_INPUT');
         assert.equal(fake.evidence.status, 'registered');
@@ -714,15 +757,24 @@ test('invalid stored Dates and malformed strings refuse preflight/claim without 
 
 test('PG Date round-trip still rejects altered provenance, ordered buckets, statement digest and signature', async () => {
   const mutations: Array<(row: Record<string, unknown>) => void> = [
-    (row) => { row.model_resolution_mapping_version = 8; },
-    (row) => { row.usage_feasible_input_buckets = ['input', 'cache_read', 'cache_write']; },
-    (row) => { row.statement_sha256 = 'c'.repeat(64); },
-    (row) => { row.signature_base64 = Buffer.alloc(64).toString('base64'); },
+    (row) => {
+      row.model_resolution_mapping_version = 8;
+    },
+    (row) => {
+      row.usage_feasible_input_buckets = ['input', 'cache_read', 'cache_write'];
+    },
+    (row) => {
+      row.statement_sha256 = 'c'.repeat(64);
+    },
+    (row) => {
+      row.signature_base64 = Buffer.alloc(64).toString('base64');
+    },
   ];
   for (const method of ['preflightForDispatch', 'claimForDispatch'] as const) {
     for (const mutate of mutations) {
       const input = signedInput({
-        dispatchDeadline: '2026-09-28T00:10:00.123Z', expiresAt: '2026-09-28T00:15:00.789Z',
+        dispatchDeadline: '2026-09-28T00:10:00.123Z',
+        expiresAt: '2026-09-28T00:15:00.789Z',
         usage: { ...baseInput().usage, feasibleInputBuckets: ['cache_write', 'input', 'cache_read'] },
       });
       const { fake, evidenceService } = await registerWithPgTimestampRow(input);
@@ -943,8 +995,14 @@ test('claim satisfies the attempt guard with one bound versioned CAS and no repe
   assert.equal(current.result_state, 'pending');
   assert.equal(current.response_started, false);
   assert.equal(fake.attemptClaimQueries.length, 1);
-  assert.deepEqual(fake.attemptClaimQueries[0]?.values,
-    [input.tenantId, input.attemptId, input.evidenceId, input.requestId, input.attemptOrdinal, '1']);
+  assert.deepEqual(fake.attemptClaimQueries[0]?.values, [
+    input.tenantId,
+    input.attemptId,
+    input.evidenceId,
+    input.requestId,
+    input.attemptOrdinal,
+    '1',
+  ]);
   const auditCount = fake.auditActorIds.length;
   await expectCode(evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit), 'ALREADY_CLAIMED');
   assert.equal(fake.attemptClaimQueries.length, 1);
@@ -959,14 +1017,16 @@ test('claim CAS, evidence CAS and claim audit failures roll back binding/version
     const evidenceService = service(fake);
     const registered = await evidenceService.register(input);
     fake.evidence.statement_sha256 = registered.statementSha256;
-    const beforeAttempt = { ...fake.rows.attempt as Record<string, unknown> };
+    const beforeAttempt = { ...(fake.rows.attempt as Record<string, unknown>) };
     const beforeEvidence = { ...fake.evidence };
     const auditCount = fake.auditActorIds.length;
     fake.failAttemptClaim = failure === 'attempt_cas';
     fake.failEvidenceClaim = failure === 'evidence_cas';
     fake.failAudit = failure === 'audit';
-    await expectCode(evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit),
-      failure === 'audit' ? 'AUDIT_FAILED' : 'STORAGE_ERROR');
+    await expectCode(
+      evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit),
+      failure === 'audit' ? 'AUDIT_FAILED' : 'STORAGE_ERROR',
+    );
     assert.deepEqual(fake.rows.attempt, beforeAttempt, failure);
     assert.deepEqual(fake.evidence, beforeEvidence, failure);
     assert.equal(fake.attemptEvidenceId, null, failure);
@@ -996,7 +1056,7 @@ test('claim cannot bind a cancelled or observed not-sent attempt, or invent a mi
     const registered = await evidenceService.register(input);
     fake.evidence.statement_sha256 = registered.statementSha256;
     Object.assign(fake.rows.attempt as Record<string, unknown>, patch);
-    const before = { ...fake.rows.attempt as Record<string, unknown> };
+    const before = { ...(fake.rows.attempt as Record<string, unknown>) };
     const auditCount = fake.auditActorIds.length;
     await expectCode(evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit), 'STORAGE_ERROR');
     assert.deepEqual(fake.rows.attempt, before);

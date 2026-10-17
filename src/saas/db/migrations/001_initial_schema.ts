@@ -89,7 +89,24 @@ import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_pr
 import { PROBE_MONITORS_SAAS_MIGRATION } from './109_probe_monitors.js';
 import { PLATFORM_SETTINGS_SAAS_MIGRATION } from './110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provider_account_gemini_scheduling.js';
-import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './112_provider_account_durable_fault_classification.js';
+import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from './112_billing_group_snapshot_limits.js';
+import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from './113_billing_group_rate_counters.js';
+import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from './114_billing_group_spend_windows.js';
+import { PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION } from './115_provider_account_scheduling_threshold_pause.js';
+import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from './116_tls_fingerprint_profiles.js';
+import { PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION } from './117_provider_account_bedrock_scheduling.js';
+import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from './118_provider_account_vertex_scheduling.js';
+import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from './119_provider_account_grok_scheduling.js';
+import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider_account_scheduling.js';
+import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
+import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
+import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
+import { VIDEO_TASKS_SAAS_MIGRATION } from './124_video_tasks.js';
+import { RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION } from './125_risk_control_content_moderation.js';
+import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_settings.js';
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
+import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
+import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './129_provider_account_durable_fault_classification.js';
 
 export interface SaasMigration {
   version: number;
@@ -591,12 +608,142 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // the migration-109 monitors table. Scheduling signal only, never billing;
   // 110 is taken by the parallel F1 platform-settings workstream above.
   PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
-  // 112: K2 account-attributable runtime-health outcomes — extends the 040
+  // 112: R1 billing-group limit enforcement phase 1 — the snapshot
+  // cross-cut: the group RPM/spend ceilings, supported model scopes and
+  // fallback group id frozen onto the customer price snapshot row so the
+  // later enforcement phases (113/114) can honor the R1 red line (enforce
+  // from the frozen snapshot, never the mutable group table). All columns
+  // nullable; existing rows backfill to NULL (no limit).
+  BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
+  // 113: R1 billing-group limit enforcement phase 2 — the group RPM counter
+  // store (the 098 per-account pattern at group scope). The capacity adapter
+  // reads the frozen group_rpm_limit from the 112 snapshot columns and
+  // atomically upserts this counter inside the admission fence; a rejection
+  // rolls back with the transaction.
+  BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
+  // 114: R1 billing-group limit enforcement phase 3 — the group
+  // daily/weekly/monthly spend counters and per-request reservations (the
+  // KEY-BUD reserve-first-then-check pattern at group scope, UTC calendar
+  // buckets), plus the API key 5h/7d rolling USD caps on the budget policy
+  // head and the settled-amount column + lineage/created_at index that let
+  // the reservation ledger answer trailing-window sums exactly.
+  BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
+  // 115: R-dormant activation (batch 2.2) — the scheduling-threshold
+  // temporary-pause columns on both account owner tables. The lazy
+  // candidate-collection evaluator writes them when a 099/100/108/111
+  // quota-snapshot window is at or above the account's dormant
+  // auto_pause_*_threshold (099); the pause runs to the latest breaching
+  // window reset and recovers when the deadline passes (the 109
+  // probe_temp_unschedulable_until eligibility precedent). Scheduling
+  // signal only — never billing.
+  PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
+  // 116: batch-2 §2.4 TLS fingerprints — the ClientHello profile registry
+  // (sub2api tls_fingerprint_profiles parity) plus the tri-state account
+  // binding column (NULL=off, 0=built-in Node 24.x default, -1=randomized,
+  // >0=specific profile). Orthogonal to 099's dormant
+  // codex_fingerprint_mode/seed (application-layer Codex device identity —
+  // see the migration comment for the adjudication); 115 is the parallel
+  // batch-2 threshold-pause workstream tail above.
+  TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
+  // 117: batch-3 Bedrock scheduling signals — the minimal defensible
+  // column family (bedrock_rate_limited_until + bedrock_usage_updated_at on
+  // both account tables; Bedrock responses expose no quota windows, so the
+  // ThrottlingException cooldown is the only observable scheduling signal)
+  // plus the probe-category CHECK rewrite that admits the 'bedrock' probe
+  // category on the migration-109 monitors table. Scheduling signal only,
+  // never billing (the 099/111 precedent); 118 stays reserved for the
+  // parallel Vertex workstream.
+  PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION,
+  // 118: batch-3 Vertex AI service-account scheduling signals — the minimal
+  // defensible column family (vertex_rate_limited_until +
+  // vertex_usage_updated_at on both account tables; Vertex service accounts
+  // are pay-as-you-go with no daily quota windows, so the 429 cooldown —
+  // retry-after, else google.rpc.RetryInfo capped at 15 minutes, else the
+  // 60-second fallback — is the only observable scheduling signal) plus the
+  // probe-category CHECK rewrite that admits the 'vertex' probe category on
+  // the migration-109 monitors table. Scheduling signal only, never billing
+  // (the 099/111/117 precedent).
+  PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION,
+  // 119: batch-3 Grok scheduling signals — the xAI quota-header window
+  // family (token + request windows with the ms/s/relative reset
+  // disambiguation), the 429 cooldown deadline, the access-token-derived
+  // subscription tier and the weekly/monthly billing probe snapshot, plus
+  // the probe-category CHECK rewrite that admits the 'grok' probe category
+  // on the migration-109 monitors table. 117/118 stay reserved for the
+  // parallel batch-3 Bedrock/Vertex workstreams. Scheduling signal only,
+  // never billing (the 099/111 precedent).
+  PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION,
+  // 120: batch-3 CN providers (zhipu / minimax) — the dual-mode account
+  // configuration columns (account_mode payg/coding + api_protocol
+  // chat_completions/anthropic/responses/adaptive, the adaptive mode routing
+  // the native endpoint per inbound client protocol) plus the Coding Plan
+  // rolling-window quota snapshot family ({provider}_5h/weekly
+  // used_percent/reset_at + the worker lease/backoff/cooldown columns) the
+  // cn-providers quota worker writes and the 115 threshold evaluator
+  // consumes. Scheduling signal only — never billing (the 099/108
+  // precedent).
+  CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
+  // 121: batch-4 §4.4 composite model routing (task #18) — the admin route
+  // registry saas_composite_model_routes (public model → concrete provider
+  // platform + optional upstream model; the gateway resolves composite-group
+  // requests with the three-level resolver in
+  // src/saas/gateway/composite-route-resolver.ts) plus the composite marker
+  // column on the migration-105 billing-group head. Control-plane CRUD with
+  // gateway read-only (the 105 grants mirror); unknown models fail closed.
+  COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
+  // 122: batch-4 §4.1 multimodal billing (task #15) — per_unit rate pair +
+  // tier ladder + token-multiplier policy on both 017 version tables, the
+  // per-unit hold witness on customer price snapshots, the media metering
+  // columns on usage events, the per-unit evidence envelope columns on
+  // prepared-request evidence (with the 024 immutability function's
+  // hardcoded column list extended). All additive/defaulted: token-only
+  // rows and their digests are byte-identical (the #14 anti-drift policy).
+  MULTIMODAL_BILLING_SAAS_MIGRATION,
+  // 123: batch-4 §4.2 async image tasks (task #16) — the saas_image_tasks
+  // lifecycle registry (processing/completed/failed + 24 h TTL); gateway
+  // role owns the lifecycle (column-scoped INSERT/UPDATE + dynamic read),
+  // control plane has no access.
+  IMAGE_TASKS_SAAS_MIGRATION,
+  // 124: batch-4 §4.3 async video tasks (task #17) — the create-time
+  // billing snapshot + bound-account binding + one-shot billing claim
+  // (pending → billed atomically, released on settlement failure, skipped
+  // fail-closed when the snapshot is missing).
+  VIDEO_TASKS_SAAS_MIGRATION,
+  // 125: batch-5 §5.4 content risk control (task #19) — single-row gateway-
+  // readable JSONB config, the moderation decision log (hit/non-hit rows,
+  // auto-ban violation counting, admin filter dimensions), and the pre-hash
+  // blocklist for previously flagged inputs. Retention cleanup runs on the
+  // control plane; the gateway seam writes logs and hashes only.
+  RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION,
+  // 126: batch-5 §5.2 OEM white-label (task #20) — the gateway-readable
+  // public brand snapshot single-row table. The control plane materializes
+  // the non-secret `saas.brand.*` settings subset into it; the gateway and
+  // the console-serving workloads read it (SSR `window.__APP_CONFIG__`
+  // injection, `GET /settings/public`) through read-only grants.
+  PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
+  // 127: batch-5 §5.6 alert/report gaps (task #23) — the operator silence
+  // table the alert evaluator consults each cycle (a silenced rule neither
+  // triggers nor auto-resolves; rule/platform scope, group/region reserved)
+  // plus the per-report-type last_run state row the scheduled email reports
+  // claim under a SKIP LOCKED lease BEFORE generating content, so a broken
+  // SMTP config can never retry every minute.
+  OBS_ALERT_SILENCES_SAAS_MIGRATION,
+  // 128: batch-5 §5.1 plugin system (task #24) — the DB-authoritative
+  // installation registry (with the signed artifact bytes for replica
+  // re-verify), the capability-scope binding table (partial unique index =
+  // one enabled plugin per capability scope), and the PG-backed host-service
+  // KV store. The plugin-host workload converges from these rows (1s
+  // reconcile); grants live in runtime-privileges.ts and the new
+  // plugin-host role template. 123/124/127 stay reserved for the parallel
+  // media/websearch/observability workstreams.
+  PLUGIN_SYSTEM_SAAS_MIGRATION,
+  // 129: K2 account-attributable runtime-health outcomes — extends the 040
   // last_outcome/outcome_shape CHECKs with gateway_account_access_failure
   // (401/403), gateway_rate_limited_failure (429) and
   // gateway_stream_abort_failure (mid-stream abort after ≥1 delivered chunk)
   // so the durable classification can cool a faulted account in the
   // scheduler's P17 fail-open fallback. Same-table constraint rewrite only;
-  // 115/116 are claimed by the parallel capability-parity workstream.
+  // authored as 112 on main (head 111) and renumbered to 129 here because
+  // 112-128 are taken by the capability-parity workstream.
   PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
 ];

@@ -14,14 +14,14 @@ import type { ProviderHttpCredentialResolveInput } from '../../../src/saas/gatew
 import type { ProviderCredentialUnsealingKms } from '../../../src/saas/runtime/gateway-provider-credential-kms.js';
 import { GatewayProviderCredentialUnsealer } from '../../../src/saas/runtime/gateway-provider-credential-unsealer.js';
 import {
+  type ProviderSupplyHttpAuthenticationHeader,
   ProviderSupplyHttpCredentialResolver,
   ProviderSupplyHttpCredentialResolverError,
-  type ProviderSupplyHttpAuthenticationHeader,
 } from '../../../src/saas/runtime/provider-supply-http-credential-resolver.js';
 import type {
   ProviderCredentialDispatchAccountSnapshot,
-  ProviderCredentialDispatchBinding,
   ProviderCredentialDispatchAttempt,
+  ProviderCredentialDispatchBinding,
   ProviderCredentialDispatchCredentialSnapshot,
   ProviderCredentialDispatchEvidence,
   ProviderCredentialDispatchProfileAccountSnapshot,
@@ -158,7 +158,14 @@ function proofFor(
     providerId: ACCOUNT.providerId,
     productId: ACCOUNT.productId,
     protocol,
-    endpoint: protocol === 'responses' ? 'responses' : protocol === 'anthropic' ? 'messages' : protocol === 'gemini' ? 'generateContent' : 'chat-completions',
+    endpoint:
+      protocol === 'responses'
+        ? 'responses'
+        : protocol === 'anthropic'
+          ? 'messages'
+          : protocol === 'gemini'
+            ? 'generateContent'
+            : 'chat-completions',
     routeConfigId: 'route-a',
     routeConfigVersion: 1,
     routePublicModelId: 'public-model-a',
@@ -269,11 +276,13 @@ interface ResolverFixture {
   readonly plaintexts: Buffer[];
 }
 
-async function fixture(options: {
-  authentication?: ProviderSupplyHttpAuthenticationHeader;
-  secret?: Uint8Array;
-  protocol?: ProviderCredentialDispatchBinding['protocol'];
-} = {}): Promise<ResolverFixture> {
+async function fixture(
+  options: {
+    authentication?: ProviderSupplyHttpAuthenticationHeader;
+    secret?: Uint8Array;
+    protocol?: ProviderCredentialDispatchBinding['protocol'];
+  } = {},
+): Promise<ResolverFixture> {
   const kms = new FakeCredentialKms();
   const plaintext = options.secret === undefined ? Buffer.from(SECRET) : Buffer.from(options.secret);
   let envelope: ProviderCredentialEnvelope;
@@ -294,10 +303,11 @@ async function fixture(options: {
   });
   const plaintexts: Buffer[] = [];
   const unsealer: Pick<GatewayProviderCredentialUnsealer, 'withCredential'> = {
-    withCredential: (request, callback) => realUnsealer.withCredential(request, (secret) => {
-      plaintexts.push(secret);
-      return callback(secret);
-    }),
+    withCredential: (request, callback) =>
+      realUnsealer.withCredential(request, (secret) => {
+        plaintexts.push(secret);
+        return callback(secret);
+      }),
   };
   const resolver = new ProviderSupplyHttpCredentialResolver({
     proofReader: repository,
@@ -519,7 +529,12 @@ test('redacts repository errors and never returns credential contents in resolve
 });
 
 function assertCleared(buffers: readonly Uint8Array[]): void {
-  for (const buffer of buffers) assert.equal(buffer.every((byte) => byte === 0), true, 'ephemeral bytes must be cleared');
+  for (const buffer of buffers)
+    assert.equal(
+      buffer.every((byte) => byte === 0),
+      true,
+      'ephemeral bytes must be cleared',
+    );
 }
 
 function isInvalidCredential(error: unknown): boolean {
@@ -530,35 +545,70 @@ function isInvalidCredential(error: unknown): boolean {
   return true;
 }
 
-test('deployment-owned native authentication formats do not infer the client protocol', { timeout: 5000 }, async (t) => {
+test('deployment-owned native authentication formats do not infer the client protocol', {
+  timeout: 5000,
+}, async (t) => {
   const cases = [
-    { name: 'OpenAI Chat default bearer', protocol: 'openai', authentication: 'authorization', expected: `Bearer ${SECRET}` },
-    { name: 'OpenAI Responses default bearer', protocol: 'responses', authentication: { headerName: 'authorization' }, expected: `Bearer ${SECRET}` },
-    { name: 'explicit OpenAI bearer', protocol: 'openai', authentication: { headerName: 'authorization', valueFormat: 'bearer' }, expected: `Bearer ${SECRET}` },
+    {
+      name: 'OpenAI Chat default bearer',
+      protocol: 'openai',
+      authentication: 'authorization',
+      expected: `Bearer ${SECRET}`,
+    },
+    {
+      name: 'OpenAI Responses default bearer',
+      protocol: 'responses',
+      authentication: { headerName: 'authorization' },
+      expected: `Bearer ${SECRET}`,
+    },
+    {
+      name: 'explicit OpenAI bearer',
+      protocol: 'openai',
+      authentication: { headerName: 'authorization', valueFormat: 'bearer' },
+      expected: `Bearer ${SECRET}`,
+    },
     { name: 'Anthropic Messages raw API key', protocol: 'anthropic', authentication: 'x-api-key', expected: SECRET },
-    { name: 'OpenAI client bridged to Anthropic raw API key', protocol: 'openai', authentication: { headerName: 'x-api-key' }, expected: SECRET },
-    { name: 'Anthropic client bridged to OpenAI bearer', protocol: 'anthropic', authentication: 'authorization', expected: `Bearer ${SECRET}` },
+    {
+      name: 'OpenAI client bridged to Anthropic raw API key',
+      protocol: 'openai',
+      authentication: { headerName: 'x-api-key' },
+      expected: SECRET,
+    },
+    {
+      name: 'Anthropic client bridged to OpenAI bearer',
+      protocol: 'anthropic',
+      authentication: 'authorization',
+      expected: `Bearer ${SECRET}`,
+    },
     { name: 'other API-key header defaults raw', protocol: 'openai', authentication: 'api-key', expected: SECRET },
-    { name: 'Google API-key header defaults raw', protocol: 'gemini', authentication: 'x-goog-api-key', expected: SECRET },
+    {
+      name: 'Google API-key header defaults raw',
+      protocol: 'gemini',
+      authentication: 'x-goog-api-key',
+      expected: SECRET,
+    },
   ] as const;
-  for (const scenario of cases) await t.test(scenario.name, async () => {
-    const f = await fixture({ protocol: scenario.protocol, authentication: scenario.authentication });
-    let injected: Uint8Array | undefined;
-    const response = await f.resolver.resolveCredential(input(), async (credential) => {
-      assert.ok(credential.value instanceof Uint8Array);
-      injected = credential.value;
-      assert.equal(Buffer.from(credential.value).toString('utf8') === scenario.expected, true);
-      return RESPONSE;
+  for (const scenario of cases)
+    await t.test(scenario.name, async () => {
+      const f = await fixture({ protocol: scenario.protocol, authentication: scenario.authentication });
+      let injected: Uint8Array | undefined;
+      const response = await f.resolver.resolveCredential(input(), async (credential) => {
+        assert.ok(credential.value instanceof Uint8Array);
+        injected = credential.value;
+        assert.equal(Buffer.from(credential.value).toString('utf8') === scenario.expected, true);
+        return RESPONSE;
+      });
+      assert.deepEqual(response, RESPONSE);
+      assert.ok(injected);
+      assert.equal(f.repository.readCount, 1);
+      assert.equal(f.kms.decryptedOutputs.length, 1);
+      assertCleared([injected, ...f.plaintexts, ...f.kms.decryptedOutputs]);
     });
-    assert.deepEqual(response, RESPONSE);
-    assert.ok(injected);
-    assert.equal(f.repository.readCount, 1);
-    assert.equal(f.kms.decryptedOutputs.length, 1);
-    assertCleared([injected, ...f.plaintexts, ...f.kms.decryptedOutputs]);
-  });
 });
 
-test('explicit raw preserves stored complete header values without guessing or stripping a prefix', { timeout: 5000 }, async () => {
+test('explicit raw preserves stored complete header values without guessing or stripping a prefix', {
+  timeout: 5000,
+}, async () => {
   const stored = Buffer.from(`Bearer ${SECRET}`);
   for (const authentication of [
     { headerName: 'authorization', valueFormat: 'raw' },
@@ -568,8 +618,11 @@ test('explicit raw preserves stored complete header values without guessing or s
     await f.resolver.resolveCredential(input(), async (credential) => {
       assert.ok(credential.value instanceof Uint8Array);
       const expected = authentication.valueFormat === 'raw' ? stored : Buffer.concat([Buffer.from('Bearer '), stored]);
-      try { assert.equal(Buffer.from(credential.value).equals(expected), true); }
-      finally { if (expected !== stored) expected.fill(0); }
+      try {
+        assert.equal(Buffer.from(credential.value).equals(expected), true);
+      } finally {
+        if (expected !== stored) expected.fill(0);
+      }
       return RESPONSE;
     });
     assertCleared([...f.plaintexts, ...f.kms.decryptedOutputs]);
@@ -579,29 +632,45 @@ test('explicit raw preserves stored complete header values without guessing or s
 
 test('invalid deployment format/header policies fail before proof, KMS, or injection', { timeout: 5000 }, async (t) => {
   const invalid: readonly unknown[] = [
-    'x-forwarded-for', 'authorization\r\n',
+    'x-forwarded-for',
+    'authorization\r\n',
     { headerName: 'authorization', valueFormat: 'basic' },
     { headerName: 'authorization', valueFormat: 'Bearer' },
     { headerName: 'authorization', valueFormat: null },
     { headerName: 'x-api-key', valueFormat: 'bearer' },
     { headerName: 'authorization', valueFormat: 'raw', prefix: 'Bearer ' },
     { headerName: 'authorization', scheme: 'Bearer' },
-    { get headerName() { throw new Error(SECRET); } },
+    {
+      get headerName() {
+        throw new Error(SECRET);
+      },
+    },
   ];
-  for (let index = 0; index < invalid.length; index += 1) await t.test(`invalid policy ${index}`, async () => {
-    const f = await fixture();
-    // Deliberate untyped trusted-module return boundary, not a wider public DTO.
-    const candidate: unknown = Reflect.construct(ProviderSupplyHttpCredentialResolver, [{
-      proofReader: f.repository, unsealer: f.unsealer,
-      resolveAuthenticationHeader: () => invalid[index], now: () => NOW,
-    }]);
-    assert.ok(candidate instanceof ProviderSupplyHttpCredentialResolver);
-    let calls = 0;
-    await assert.rejects(candidate.resolveCredential(input(), async () => { calls += 1; return RESPONSE; }), isInvalidCredential);
-    assert.equal(calls, 0);
-    assert.equal(f.repository.readCount, 0);
-    assert.equal(f.kms.decryptedOutputs.length, 0);
-  });
+  for (let index = 0; index < invalid.length; index += 1)
+    await t.test(`invalid policy ${index}`, async () => {
+      const f = await fixture();
+      // Deliberate untyped trusted-module return boundary, not a wider public DTO.
+      const candidate: unknown = Reflect.construct(ProviderSupplyHttpCredentialResolver, [
+        {
+          proofReader: f.repository,
+          unsealer: f.unsealer,
+          resolveAuthenticationHeader: () => invalid[index],
+          now: () => NOW,
+        },
+      ]);
+      assert.ok(candidate instanceof ProviderSupplyHttpCredentialResolver);
+      let calls = 0;
+      await assert.rejects(
+        candidate.resolveCredential(input(), async () => {
+          calls += 1;
+          return RESPONSE;
+        }),
+        isInvalidCredential,
+      );
+      assert.equal(calls, 0);
+      assert.equal(f.repository.readCount, 0);
+      assert.equal(f.kms.decryptedOutputs.length, 0);
+    });
 });
 
 test('malformed or oversized plaintext never reaches injection and is cleared', { timeout: 5000 }, async (t) => {
@@ -613,30 +682,47 @@ test('malformed or oversized plaintext never reaches injection and is cleared', 
     { name: 'bearer prefix exceeds cap', secret: Buffer.alloc(16 * 1024 - 6, 0x61), authentication: 'authorization' },
     { name: 'raw exceeds cap', secret: Buffer.alloc(16 * 1024 + 1, 0x61), authentication: 'x-api-key' },
   ] as const;
-  for (const scenario of cases) await t.test(scenario.name, async () => {
-    const f = await fixture(scenario);
-    let calls = 0;
-    await assert.rejects(f.resolver.resolveCredential(input(), async () => { calls += 1; return RESPONSE; }), isInvalidCredential);
-    assert.equal(calls, 0);
-    assert.equal(f.plaintexts.length, 1);
-    assertCleared([...f.plaintexts, ...f.kms.decryptedOutputs]);
-    scenario.secret.fill(0);
-  });
+  for (const scenario of cases)
+    await t.test(scenario.name, async () => {
+      const f = await fixture(scenario);
+      let calls = 0;
+      await assert.rejects(
+        f.resolver.resolveCredential(input(), async () => {
+          calls += 1;
+          return RESPONSE;
+        }),
+        isInvalidCredential,
+      );
+      assert.equal(calls, 0);
+      assert.equal(f.plaintexts.length, 1);
+      assertCleared([...f.plaintexts, ...f.kms.decryptedOutputs]);
+      scenario.secret.fill(0);
+    });
   await t.test('empty unsealer output', async () => {
     const f = await fixture();
     const secret = Buffer.alloc(0);
     const resolver = new ProviderSupplyHttpCredentialResolver({
-      proofReader: f.repository, now: () => NOW, resolveAuthenticationHeader: () => 'authorization',
+      proofReader: f.repository,
+      now: () => NOW,
+      resolveAuthenticationHeader: () => 'authorization',
       unsealer: { withCredential: async (_binding, callback) => callback(secret) },
     });
     let calls = 0;
-    await assert.rejects(resolver.resolveCredential(input(), async () => { calls += 1; return RESPONSE; }), isInvalidCredential);
+    await assert.rejects(
+      resolver.resolveCredential(input(), async () => {
+        calls += 1;
+        return RESPONSE;
+      }),
+      isInvalidCredential,
+    );
     assert.equal(calls, 0);
     assertCleared([secret]);
   });
 });
 
-test('the 16KiB credential cap includes the fixed prefix and preserves the raw boundary', { timeout: 5000 }, async () => {
+test('the 16KiB credential cap includes the fixed prefix and preserves the raw boundary', {
+  timeout: 5000,
+}, async () => {
   for (const authentication of ['authorization', 'x-api-key']) {
     const secret = Buffer.alloc(16 * 1024 - (authentication === 'authorization' ? 7 : 0), 0x61);
     const f = await fixture({ authentication, secret });
@@ -653,41 +739,53 @@ test('the 16KiB credential cap includes the fixed prefix and preserves the raw b
   }
 });
 
-test('duplicate callbacks, including swallowed concurrent failures, never inject twice', { timeout: 5000 }, async (t) => {
-  for (const concurrent of [false, true]) await t.test(concurrent ? 'concurrent' : 'sequential', async () => {
-    const f = await fixture();
-    const first = Buffer.from(SECRET);
-    const second = Buffer.from(SECRET);
-    const resolver = new ProviderSupplyHttpCredentialResolver({
-      proofReader: f.repository, now: () => NOW, resolveAuthenticationHeader: () => 'authorization',
-      unsealer: {
-        async withCredential(_binding, callback) {
-          const pending = Promise.resolve(callback(first));
-          if (!concurrent) await pending;
-          await assert.rejects(Promise.resolve(callback(second)), isInvalidCredential);
-          return await pending;
+test('duplicate callbacks, including swallowed concurrent failures, never inject twice', {
+  timeout: 5000,
+}, async (t) => {
+  for (const concurrent of [false, true])
+    await t.test(concurrent ? 'concurrent' : 'sequential', async () => {
+      const f = await fixture();
+      const first = Buffer.from(SECRET);
+      const second = Buffer.from(SECRET);
+      const resolver = new ProviderSupplyHttpCredentialResolver({
+        proofReader: f.repository,
+        now: () => NOW,
+        resolveAuthenticationHeader: () => 'authorization',
+        unsealer: {
+          async withCredential(_binding, callback) {
+            const pending = Promise.resolve(callback(first));
+            if (!concurrent) await pending;
+            await assert.rejects(Promise.resolve(callback(second)), isInvalidCredential);
+            return await pending;
+          },
         },
-      },
+      });
+      let calls = 0;
+      let formatted: Uint8Array | undefined;
+      await assert.rejects(
+        resolver.resolveCredential(input(), async (credential) => {
+          calls += 1;
+          assert.ok(credential.value instanceof Uint8Array);
+          formatted = credential.value;
+          return RESPONSE;
+        }),
+        isInvalidCredential,
+      );
+      assert.equal(calls, 1);
+      assert.ok(formatted);
+      assertCleared([first, second, formatted]);
     });
-    let calls = 0;
-    let formatted: Uint8Array | undefined;
-    await assert.rejects(resolver.resolveCredential(input(), async (credential) => {
-      calls += 1;
-      assert.ok(credential.value instanceof Uint8Array);
-      formatted = credential.value;
-      return RESPONSE;
-    }), isInvalidCredential);
-    assert.equal(calls, 1);
-    assert.ok(formatted);
-    assertCleared([first, second, formatted]);
-  });
 });
 
-test('late callbacks after unsealer completion cannot dispatch and their plaintext is cleared', { timeout: 5000 }, async () => {
+test('late callbacks after unsealer completion cannot dispatch and their plaintext is cleared', {
+  timeout: 5000,
+}, async () => {
   const f = await fixture();
   let late: ((secret: Buffer) => Promise<unknown>) | undefined;
   const resolver = new ProviderSupplyHttpCredentialResolver({
-    proofReader: f.repository, now: () => NOW, resolveAuthenticationHeader: () => 'authorization',
+    proofReader: f.repository,
+    now: () => NOW,
+    resolveAuthenticationHeader: () => 'authorization',
     unsealer: {
       async withCredential(_binding, callback) {
         late = async (secret) => callback(secret);
@@ -696,7 +794,13 @@ test('late callbacks after unsealer completion cannot dispatch and their plainte
     },
   });
   let calls = 0;
-  await assert.rejects(resolver.resolveCredential(input(), async () => { calls += 1; return RESPONSE; }), assertUnavailable);
+  await assert.rejects(
+    resolver.resolveCredential(input(), async () => {
+      calls += 1;
+      return RESPONSE;
+    }),
+    assertUnavailable,
+  );
   assert.ok(late);
   const secret = Buffer.from(SECRET);
   await assert.rejects(late(secret), isInvalidCredential);
@@ -720,10 +824,11 @@ test('abort boundaries prevent new injection without pretending to cancel KMS', 
           },
         },
         unsealer: {
-          withCredential: (binding, callback) => f.unsealer.withCredential(binding, (secret) => {
-            if (boundary === 'after KMS') controller.abort();
-            return callback(secret);
-          }),
+          withCredential: (binding, callback) =>
+            f.unsealer.withCredential(binding, (secret) => {
+              if (boundary === 'after KMS') controller.abort();
+              return callback(secret);
+            }),
         },
         resolveAuthenticationHeader: () => {
           if (boundary === 'after policy') controller.abort();
@@ -732,13 +837,16 @@ test('abort boundaries prevent new injection without pretending to cancel KMS', 
         now: () => NOW,
       });
       if (boundary === 'before policy') controller.abort();
-      await assert.rejects(resolver.resolveCredential(input({ signal: controller.signal }), async (credential) => {
-        calls += 1;
-        assert.ok(credential.value instanceof Uint8Array);
-        injected = credential.value;
-        controller.abort();
-        return RESPONSE;
-      }), assertUnavailable);
+      await assert.rejects(
+        resolver.resolveCredential(input({ signal: controller.signal }), async (credential) => {
+          calls += 1;
+          assert.ok(credential.value instanceof Uint8Array);
+          injected = credential.value;
+          controller.abort();
+          return RESPONSE;
+        }),
+        assertUnavailable,
+      );
       assert.equal(calls, boundary === 'during injection' ? 1 : 0);
       assert.equal(f.kms.decryptedOutputs.length, boundary === 'after KMS' || boundary === 'during injection' ? 1 : 0);
       assertCleared([...f.plaintexts, ...f.kms.decryptedOutputs, ...(injected === undefined ? [] : [injected])]);

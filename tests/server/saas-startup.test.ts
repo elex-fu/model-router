@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
+import { createServer as createTcpServer, type Socket } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -256,6 +257,9 @@ function fakeGatewayRuntimeModule(
       assert.equal(options.deployment.deploymentId, 'model-router-startup-test');
       assert.equal(options.deployment.environmentId, 'test');
       assert.equal(options.env[MODEL_ROUTER_SAAS_REDIS_URL], undefined);
+      // The gateway-scoped Redis URL is core-owned connection material; the
+      // runtime-module env snapshot must never carry it.
+      assert.equal(options.env[DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl], undefined);
       assert.equal(options.env[SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE], undefined);
       return {
         dependencies,
@@ -1743,6 +1747,105 @@ test('standard startServer route composes gateway runtime and binds only the /v1
   await runtime.close();
   assert.ok(events.indexOf('gateway-kms-close') < events.indexOf('gateway-runtime-close'));
   assert.equal(events.at(-1), 'database-close');
+});
+
+test('gateway workload wires its scoped Redis sticky cache and closes it after the gateway', async () => {
+  // A minimal RESP peer: any received command answers +PONG, which satisfies
+  // both the RESP protocol and the provider's PING readiness probe.
+  const sockets = new Set<Socket>();
+  const pong = createTcpServer((socket) => {
+    sockets.add(socket);
+    socket.on('error', () => undefined);
+    socket.on('data', () => socket.write('+PONG\r\n'));
+    socket.on('close', () => {
+      sockets.delete(socket);
+      events.push('gateway-redis-close');
+    });
+  });
+  await new Promise<void>((resolve) => pong.listen(0, '127.0.0.1', resolve));
+  const pongAddress = pong.address();
+  assert.ok(pongAddress && typeof pongAddress !== 'string');
+  const events: string[] = [];
+  const listeners = new Map<string, RequestListener>();
+  let runtime: ManagedSaasRuntime | undefined;
+  try {
+    const environment = {
+      ...gatewayEnvironment({ customer: 45_131, platform: 45_132, gateway: 45_133 }),
+      [DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl]: `redis://127.0.0.1:${pongAddress.port}`,
+    };
+    await startServer(undefined, '/unused/local-config.json', {
+      environment,
+      managedSaas: managedOptions(events, {
+        environment,
+        loadProviders: async () => {
+          assert.fail('gateway workload must not load control-plane providers, Redis or TOTP KMS');
+        },
+        gatewayRuntimeModuleImporter: async () => fakeGatewayRuntimeModule(events),
+        gatewayProviderCredentialKmsImporter: async () => fakeGatewayKmsModule(events),
+        createListener: (name, handler) => {
+          events.push(`listener:${name}`);
+          listeners.set(name, handler);
+          return inertListener();
+        },
+        onReady: (value) => {
+          runtime = value;
+          events.push('ready');
+        },
+      }),
+    });
+    assert.ok(runtime);
+    assert.ok(runtime.gateway);
+    assert.deepEqual([...listeners.keys()], ['gateway']);
+    assert.ok(sockets.size >= 1, 'the gateway Redis provider must hold its RESP connection');
+    await runtime.close();
+    // The server side of the RESP socket observes the close a tick after the
+    // awaited client-side close, so poll briefly for it instead of racing.
+    const redisClosed = await new Promise<boolean>((resolve) => {
+      const deadline = Date.now() + 2_000;
+      const check = () => {
+        if (sockets.size === 0) resolve(true);
+        else if (Date.now() > deadline) resolve(false);
+        else setTimeout(check, 10);
+      };
+      check();
+    });
+    assert.ok(redisClosed, 'the gateway RESP connection must be closed');
+    // The gateway runtime module closes before its Redis connection is torn
+    // down (the server side observes the close asynchronously, so only the
+    // initiation order is asserted).
+    assert.ok(events.indexOf('gateway-runtime-close') < events.indexOf('gateway-redis-close'));
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => pong.close(() => resolve()));
+  }
+});
+
+test('gateway startup fails closed when its scoped Redis is configured but unreachable', async () => {
+  const deadPort = await freePort();
+  const events: string[] = [];
+  const environment = {
+    ...gatewayEnvironment({ customer: 45_134, platform: 45_135, gateway: 45_136 }),
+    [DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl]: `redis://127.0.0.1:${deadPort}`,
+  };
+  await assert.rejects(
+    startServer(undefined, '/unused/local-config.json', {
+      environment,
+      managedSaas: managedOptions(events, {
+        environment,
+        loadProviders: async () => {
+          assert.fail('gateway workload must not load control-plane providers');
+        },
+        gatewayRuntimeModuleImporter: async () => fakeGatewayRuntimeModule(events),
+        gatewayProviderCredentialKmsImporter: async () => fakeGatewayKmsModule(events),
+        createListener: (name) => {
+          events.push(`listener:${name}`);
+          return inertListener();
+        },
+      }),
+    }),
+    /Managed SaaS gateway Redis provider is unavailable/,
+  );
+  assert.equal(events.includes('listener:gateway'), false, 'no listener may bind before the scoped Redis is ready');
 });
 
 /** Worker metadata composition fixture only; never a database/catalog approval fixture. */

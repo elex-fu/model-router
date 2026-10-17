@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { SaasCompositeModelRoutesService } from '../saas/billing/composite-routes/service.js';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { PlatformWalletLedgerService } from '../saas/billing/service.js';
 import { SaasCatalogService } from '../saas/catalog/index.js';
 import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/console/http.js';
@@ -31,7 +34,9 @@ import {
 } from '../saas/deployment.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
+import { MODEL_PLAZA_SETTINGS_KEYS } from '../saas/gateway/model-plaza/settings.js';
 import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
+import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgres-billing-group-spend.js';
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
 import { createPostgresPreparationCapacityPort } from '../saas/gateway/postgres-preparation-capacity.js';
@@ -101,15 +106,21 @@ import {
 } from '../saas/metering/usage-correction-platform-http.js';
 import {
   type AlertEvaluatorWorkerHandle,
+  type AlertSilencesHttpHandler,
   type ChannelStatusWorkerHandle,
+  createAlertSilencesHttpHandler,
   createObservabilityHttpHandler,
+  createPostgresAlertSilencesAuditWriter,
   getChannelStatusPage,
   ObservabilityAlertService,
+  ObservabilityAlertSilenceService,
   type ObservabilityHttpHandler,
+  type ReportSchedulerWorkerHandle,
   refreshSaasRuntimeGauges,
   renderSaasMetrics,
   startAlertEvaluatorWorker,
   startChannelStatusWorker,
+  startReportSchedulerWorker,
 } from '../saas/observability/index.js';
 import type { PaymentProviderAdapter, PaymentProviderRefundAdapter } from '../saas/payments/adapter.js';
 import { SaasCustomerPaymentOrderQueryService } from '../saas/payments/customer-order-query.js';
@@ -158,6 +169,23 @@ import {
   createBillingGroupsHttpHandler,
   createPostgresBillingGroupsAuditWriter,
 } from '../saas/platform/billing-groups-http.js';
+import {
+  createPublicBrandSettingsHttpHandler,
+  type PublicBrandSettingsHttpHandler,
+} from '../saas/platform/brand/http.js';
+import {
+  BRAND_SETTINGS_KEY_PREFIX,
+  EMPTY_BRAND_SNAPSHOT,
+  injectBrandAppConfig,
+  type PublicBrandSnapshot,
+} from '../saas/platform/brand/snapshot.js';
+import {
+  type CachedBrandSnapshotReader,
+  createCachedBrandSnapshotReader,
+  PublicBrandSnapshotStore,
+  type PublicBrandSnapshotWorkerHandle,
+  startPublicBrandSnapshotWorker,
+} from '../saas/platform/brand/store.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
@@ -166,6 +194,11 @@ import {
   createPostgresCodexCatalogBindingResolver,
   createProviderSupplyCodexCredentialSink,
 } from '../saas/platform/codex-oauth/supply-sink.js';
+import {
+  type CompositeModelRoutesHttpHandler,
+  createCompositeModelRoutesHttpHandler,
+  createPostgresCompositeModelRoutesAuditWriter,
+} from '../saas/platform/composite-routes-http.js';
 import {
   createPlatformCredentialRewrapHttpHandler,
   type PlatformCredentialRewrapHttpHandler,
@@ -183,6 +216,15 @@ import {
   PlatformUserGovernanceService,
 } from '../saas/platform/governance/index.js';
 import {
+  GrokOAuthBindingService,
+  InMemoryGrokBindingSessionStore,
+} from '../saas/platform/grok-oauth/binding-service.js';
+import { createGrokOauthHttpHandler, type GrokOauthHttpHandler } from '../saas/platform/grok-oauth/http.js';
+import {
+  createPostgresGrokCatalogBindingResolver,
+  createProviderSupplyGrokCredentialSink,
+} from '../saas/platform/grok-oauth/supply-sink.js';
+import {
   createPlatformAdminReadHandler,
   type PlatformAdminCapacityPolicyTargetSelectors,
   type PlatformAdminReadHttpHandler,
@@ -196,13 +238,29 @@ import {
   type OpencodeGoRulesHttpHandler,
 } from '../saas/platform/opencode-go-rules-http.js';
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
+import { createPluginsHttpHandler, type PluginsHttpHandler } from '../saas/platform/plugins-http.js';
+import {
+  createPostgresRiskControlAuditWriter,
+  createRiskControlHttpHandler,
+  type RiskControlHttpHandler,
+} from '../saas/platform/risk-control-http.js';
 import {
   createPlatformSettingsHttpHandler,
   PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
   type PlatformSettingsHttpHandler,
   PlatformSettingsService,
 } from '../saas/platform/settings/index.js';
+import { PluginAdminService } from '../saas/plugins/admin-service.js';
+import { PluginHostClient, PostgresPluginRouteReader } from '../saas/plugins/gateway-plugin-router.js';
+import { type StartPluginHostRuntimeOptions, startPluginHostRuntime } from '../saas/plugins/plugin-host-runtime.js';
+import { PostgresPluginStore } from '../saas/plugins/store.js';
 import { SaasPricingService } from '../saas/pricing/index.js';
+import type { ModerationEmailSender } from '../saas/risk/moderation.js';
+import { PostgresRiskControlAdminStore } from '../saas/risk/postgres-store.js';
+import {
+  type RiskControlRetentionWorkerHandle,
+  startRiskControlRetentionWorker,
+} from '../saas/risk/retention-worker.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
   assertCustomerMfaDeploymentConfiguration,
@@ -222,15 +280,24 @@ import {
 } from '../saas/runtime/gateway-runtime-module.js';
 import {
   loadManagedSaasProviders,
+  MANAGED_SAAS_REDIS_KEY_PREFIX,
   type ManagedRateLimiter,
   type ManagedSaasProviders,
   type ProviderModuleImporter,
+  type RedisProvider,
 } from '../saas/runtime/providers.js';
+import { createRedisProvider } from '../saas/runtime/redis-rate-limit-provider.js';
 import {
   type LoadedValidationWorkerProviderCredentialKms,
   loadValidationWorkerProviderCredentialKms,
   SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/runtime/validation-worker-provider-credential-kms.js';
+import { PostgresCnProvidersQuotaStore } from '../saas/supply/cn-providers-quota-store-postgres.js';
+import {
+  type CnProvidersQuotaWorkerHandle,
+  type CnProvidersQuotaWorkerOptions,
+  startCnProvidersQuotaWorker,
+} from '../saas/supply/cn-providers-quota-worker.js';
 import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
 import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
 import {
@@ -245,6 +312,11 @@ import {
   PostgresEgressProxyProbeWorkerStore,
   startEgressProxyProbeWorker,
 } from '../saas/supply/egress-proxy-probe-worker.js';
+import {
+  type GeminiUsageWorkerHandle,
+  type GeminiUsageWorkerOptions,
+  startGeminiUsageWorker,
+} from '../saas/supply/gemini-usage-worker.js';
 import { ProviderSupplyService } from '../saas/supply/index.js';
 import {
   type OauthCredentialRotator,
@@ -275,6 +347,10 @@ import {
   startProbeMonitorWorker,
   startProbeRunRetentionWorker,
 } from '../saas/supply/probe-monitor-worker.js';
+import {
+  PostgresProviderQuotaSnapshotStore,
+  type PostgresProviderQuotaSnapshotStoreOptions,
+} from '../saas/supply/provider-account-quota-snapshot-store-postgres.js';
 import {
   type QuotaSyncWorkerHandle,
   type QuotaSyncWorkerOptions,
@@ -335,6 +411,10 @@ export interface ManagedSaasRuntime {
   readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
   /** R5b OpenCode Go usage-snapshot loop; same workload as quota sync. */
   readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
+  /** Batch-3 CN-provider coding-plan quota probe loop; same workload. */
+  readonly cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | null;
+  /** R-dormant (batch 2.2): the gemini usage-snapshot loop; same workload. */
+  readonly geminiUsageWorker: GeminiUsageWorkerHandle | null;
   /** F6 OpenRouter model-catalog/pricing sync loop; opt-in on the worker workload. */
   readonly openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | null;
   /** R3 egress-proxy probe + expiry-sweep loop; same workload as quota sync. */
@@ -343,6 +423,10 @@ export interface ManagedSaasRuntime {
   readonly probeMonitorWorker: ProbeMonitorWorkerHandle | null;
   /** R6a probe run retention loop; control-plane workload only. */
   readonly probeRunRetentionWorker: ProbeMonitorWorkerHandle | null;
+  /** Batch-5 §5.4 risk-control retention loop; control-plane workload only. */
+  readonly riskControlRetentionWorker: RiskControlRetentionWorkerHandle | null;
+  /** Batch-5 §5.2 public brand snapshot materialization loop; control-plane workload only. */
+  readonly publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | null;
   /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
   readonly oauthTokenRefreshWorker: OauthTokenRefreshWorkerHandle | null;
   /** G4.5 announcement fan-out loop; only when customer webhooks are enabled. */
@@ -462,6 +546,8 @@ export interface ManagedSaasStartOptions {
     options: CredentialValidationWorkerOptions,
   ) => CredentialValidationWorkerHandle;
   /** Optional worker loop tuning or test fetch; deployment identity is always supplied by config. */
+  /** Batch-5 §5.1: plugin-host workload seams (role `plugin-host` only). */
+  pluginHost?: StartPluginHostRuntimeOptions;
   credentialValidationWorkerOptions?: Partial<
     Omit<CredentialValidationWorkerOptions, 'deployment' | 'environment' | 'approvedTargets' | 'transportTestOptions'>
   >;
@@ -481,6 +567,14 @@ export interface ManagedSaasStartOptions {
   ) => OpencodeGoUsageStore;
   /** Optional usage loop tuning or test fetch; deployment identity always reaches the store. */
   opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
+  cnProvidersQuotaWorkerOptions?: Partial<CnProvidersQuotaWorkerOptions>;
+  /** Deterministic seam for the R-dormant quota-snapshot store (gemini loop). */
+  createQuotaSnapshotStore?: (
+    database: SaasDatabase,
+    options: PostgresProviderQuotaSnapshotStoreOptions,
+  ) => PostgresProviderQuotaSnapshotStore;
+  /** Optional gemini usage loop tuning; same workload as quota sync. */
+  geminiUsageWorkerOptions?: Partial<GeminiUsageWorkerOptions>;
   /**
    * F6 (task #39): OpenRouter catalog/pricing sync loop on the
    * credential-validation-worker workload. Presence of this option ENABLES
@@ -513,6 +607,12 @@ export interface ManagedSaasStartOptions {
   ) => ProbeMonitorWorkerHandle;
   /** R6a: optional probe run retention loop tuning. */
   probeRunRetentionWorkerOptions?: ProbeMonitorWorkerOptions;
+  /**
+   * Batch-5 §5.2 OEM white-label: optional public brand snapshot
+   * materialization loop tuning (control-plane workload only; the loop runs
+   * with the default 60s cadence otherwise).
+   */
+  publicBrandSnapshot?: { readonly intervalMs?: number };
   /**
    * R4: the privileged rotation seam for the OAuth refresh worker. Rotation
    * writes the new credential version chain through the audited supply path,
@@ -630,13 +730,30 @@ function sendJsonError(
   res.end(JSON.stringify({ error: { code, message, requestId } }));
 }
 
-function serveMountedStatic(
+/**
+ * Serves the mounted web console (customer /console, platform /admin).
+ *
+ * Batch-5 §5.2 OEM white-label: when a brand reader is wired, every HTML
+ * document is served through `injectBrandAppConfig` — the materialized public
+ * brand snapshot is embedded as `window.__APP_CONFIG__` (nonce'd script, HTML
+ * breakers escaped) and the CSP is derived from the snapshot (logo origin →
+ * img-src, iframe page origins → frame-src, configurable frame-ancestors).
+ * A reader failure serves the empty snapshot fail-open: the console must
+ * never hard-fail on a brand hiccup. Non-HTML assets keep the fixed baseline
+ * CSP and stream unchanged; an empty snapshot keeps the pre-brand response
+ * byte-identical.
+ *
+ * Exported for the brand injection tests (the createManagedOauthTokenRefresh-
+ * Rotator test-seam precedent).
+ */
+export async function serveMountedStatic(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
   mount: typeof CUSTOMER_MOUNT | typeof PLATFORM_MOUNT,
   webDistPath: string | undefined,
-): void {
+  brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
+): Promise<void> {
   if (!webDistPath || (req.method !== 'GET' && req.method !== 'HEAD')) {
     sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
     return;
@@ -708,6 +825,31 @@ function serveMountedStatic(
   }
 
   const extension = extname(target);
+  if (extension === '.html' && brandReader !== undefined) {
+    // OEM white-label HTML path: read → inject → serve with the derived CSP.
+    let snapshot: PublicBrandSnapshot;
+    try {
+      snapshot = await brandReader.read();
+    } catch {
+      snapshot = EMPTY_BRAND_SNAPSHOT;
+    }
+    const source = await readFile(target, 'utf8');
+    const injected = injectBrandAppConfig(source, snapshot);
+    const body = Buffer.from(injected.html, 'utf8');
+    res.writeHead(200, {
+      'content-type': MIME_TYPES['.html'] ?? 'text/html; charset=utf-8',
+      'content-length': body.length,
+      'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': injected.contentSecurityPolicy,
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(body);
+    return;
+  }
   res.writeHead(200, {
     'content-type': MIME_TYPES[extension] ?? 'application/octet-stream',
     'content-length': statSync(target).size,
@@ -745,6 +887,7 @@ function createCustomerHandler(
   marketingAffiliateHandler: MarketingAffiliateHttpHandler,
   paymentHandler: SaasPaymentHttpHandler | undefined,
   webDistPath: string | undefined,
+  brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
 ): RequestListener {
   return (req, res) => {
     void (async () => {
@@ -770,7 +913,7 @@ function createCustomerHandler(
         return;
       }
       if (isMountedPath(pathname, CUSTOMER_MOUNT)) {
-        serveMountedStatic(req, res, pathname, CUSTOMER_MOUNT, webDistPath);
+        await serveMountedStatic(req, res, pathname, CUSTOMER_MOUNT, webDistPath, brandReader);
         return;
       }
       sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
@@ -815,9 +958,13 @@ function createPlatformHandler(
   refundHandler: PlatformRefundHttpHandler | undefined,
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
   codexOauthHandler: CodexOauthHttpHandler | undefined,
+  grokOauthHandler: GrokOauthHttpHandler | undefined,
   accountProbeHandler: AccountProbeHttpHandler | undefined,
   platformSettingsHandler: PlatformSettingsHttpHandler,
   billingGroupsHandler: BillingGroupsHttpHandler | undefined,
+  compositeModelRoutesHandler: CompositeModelRoutesHttpHandler | undefined,
+  riskControlHandler: RiskControlHttpHandler | undefined,
+  pluginsHandler: PluginsHttpHandler | undefined,
   egressProxiesHandler: EgressProxiesHttpHandler | undefined,
   opencodeGoRulesHandler: OpencodeGoRulesHttpHandler | undefined,
   opencodeGoModelsHandler: OpencodeGoModelCatalogHttpHandler | undefined,
@@ -828,8 +975,10 @@ function createPlatformHandler(
   marketingOpsPromoCodesHandler: MarketingPromoHttpHandler,
   marketingOpsAffiliateHandler: MarketingAffiliateHttpHandler,
   observabilityHandler: ObservabilityHttpHandler,
+  alertSilencesHandler: AlertSilencesHttpHandler | undefined,
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
+  brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
 ): RequestListener {
   return (req, res) => {
     void (async () => {
@@ -839,6 +988,7 @@ function createPlatformHandler(
         return;
       }
       if (await observabilityHandler(req, res)) return;
+      if (alertSilencesHandler && (await alertSilencesHandler(req, res))) return;
       if (isApiPath(pathname, PLATFORM_API_PREFIX)) {
         if (pathname === PLATFORM_ADMIN_AUTH_PREFIX || pathname.startsWith(`${PLATFORM_ADMIN_AUTH_PREFIX}/`)) {
           if (await authHandler(req, res)) return;
@@ -846,9 +996,13 @@ function createPlatformHandler(
         if (refundHandler && (await refundHandler(req, res))) return;
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
         if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
+        if (grokOauthHandler && (await grokOauthHandler(req, res))) return;
         if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
         if (await platformSettingsHandler(req, res)) return;
         if (billingGroupsHandler && (await billingGroupsHandler(req, res))) return;
+        if (compositeModelRoutesHandler && (await compositeModelRoutesHandler(req, res))) return;
+        if (riskControlHandler && (await riskControlHandler(req, res))) return;
+        if (pluginsHandler && (await pluginsHandler(req, res))) return;
         if (egressProxiesHandler && (await egressProxiesHandler(req, res))) return;
         if (opencodeGoRulesHandler && (await opencodeGoRulesHandler(req, res))) return;
         if (opencodeGoModelsHandler && (await opencodeGoModelsHandler(req, res))) return;
@@ -863,7 +1017,7 @@ function createPlatformHandler(
         return;
       }
       if (isMountedPath(pathname, PLATFORM_MOUNT)) {
-        serveMountedStatic(req, res, pathname, PLATFORM_MOUNT, webDistPath);
+        await serveMountedStatic(req, res, pathname, PLATFORM_MOUNT, webDistPath, brandReader);
         return;
       }
       sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
@@ -871,7 +1025,19 @@ function createPlatformHandler(
   };
 }
 
-function createGatewayHandler(gatewayHandler?: SaasGatewayHttpHandler): RequestListener {
+/**
+ * The gateway listener handler. Exported for the public brand surface tests
+ * (the createManagedOauthTokenRefreshRotator test-seam precedent).
+ *
+ * Batch-5 §5.2: `publicBrandHandler` mounts the unauthenticated
+ * `GET /settings/public` (+ `/settings/public/pages/:slug`) surface on this
+ * listener — the /metrics precedent: public, non-secret data (the
+ * gateway-read-only brand snapshot table), no session.
+ */
+export function createGatewayHandler(
+  gatewayHandler?: SaasGatewayHttpHandler,
+  publicBrandHandler?: PublicBrandSettingsHttpHandler,
+): RequestListener {
   return (req, res) => {
     void (async () => {
       const pathname = requestPath(req);
@@ -879,6 +1045,10 @@ function createGatewayHandler(gatewayHandler?: SaasGatewayHttpHandler): RequestL
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
         return;
       }
+      // Batch-5 §5.2 OEM white-label: public brand snapshot + custom page
+      // content, unauthenticated by design (no secrets in the snapshot by
+      // construction; the handler owns its own 404/405 semantics).
+      if (publicBrandHandler && (await publicBrandHandler(req, res))) return;
       // Phase 3 observability: read-only Prometheus exposition on the gateway
       // listener. Unauthenticated by design (counters only, no secrets);
       // deployments should restrict scraper network access.
@@ -1301,12 +1471,18 @@ async function startCredentialValidationWorkerRuntime(
       kms: LoadedValidationWorkerProviderCredentialKms,
       storeOptions: PostgresOpencodeGoUsageStoreOptions,
     ) => new PostgresOpencodeGoUsageStore(database, kms, storeOptions));
+  const createSnapshotStore =
+    options.createQuotaSnapshotStore ??
+    ((database: SaasDatabase, storeOptions: PostgresProviderQuotaSnapshotStoreOptions) =>
+      new PostgresProviderQuotaSnapshotStore(database, storeOptions));
 
   let database: ManagedSaasDatabase | undefined;
   let kms: LoadedValidationWorkerProviderCredentialKms | undefined;
   let worker: CredentialValidationWorkerHandle | undefined;
   let quotaWorker: QuotaSyncWorkerHandle | undefined;
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
+  let cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | undefined;
+  let geminiUsageWorker: GeminiUsageWorkerHandle | undefined;
   let openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let egressProxyProbeWorker: EgressProxyProbeWorkerHandle | undefined;
@@ -1320,6 +1496,8 @@ async function startCredentialValidationWorkerRuntime(
       if (worker) await Promise.allSettled([worker.close()]);
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
+      if (geminiUsageWorker) await Promise.allSettled([geminiUsageWorker.close()]);
+      if (cnProvidersQuotaWorker) await Promise.allSettled([cnProvidersQuotaWorker.close()]);
       if (openRouterModelPricingSyncWorker) {
         await Promise.allSettled([openRouterModelPricingSyncWorker.close()]);
       }
@@ -1406,6 +1584,24 @@ async function startCredentialValidationWorkerRuntime(
       }),
       options.opencodeGoUsageWorkerOptions,
     );
+    // R-dormant (batch 2.2): the gemini usage-snapshot loop folds per-model
+    // request counts from saas_attempts into the migration-111 tier snapshot.
+    // Same workload, role and lease semantics as the opencode-go loop above;
+    // a deployment without gemini accounts simply idles every round.
+    geminiUsageWorker = startGeminiUsageWorker(createSnapshotStore(database, {}), options.geminiUsageWorkerOptions);
+    // Batch-3 (task #13): the CN-provider coding-plan quota probe loop
+    // (zhipu /api/monitor/usage/quota/limit without Bearer; minimax
+    // coding_plan/remains with Bearer). Same workload, role and lease
+    // semantics as the opencode-go loop above; the due scan only ever claims
+    // coding-mode accounts, so a deployment without zhipu/minimax accounts
+    // simply idles every round.
+    cnProvidersQuotaWorker = startCnProvidersQuotaWorker(
+      new PostgresCnProvidersQuotaStore(database, kms, {
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      }),
+      options.cnProvidersQuotaWorkerOptions,
+    );
     // F6 (task #39): the OpenRouter model-catalog/pricing sync loop. It is
     // strictly opt-in (the R4 OAuth-refresh precedent): the sync appends
     // provider catalog, public-model alias and supplier-cost version rows,
@@ -1474,10 +1670,14 @@ async function startCredentialValidationWorkerRuntime(
       credentialValidationWorker: worker,
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
+      geminiUsageWorker: geminiUsageWorker,
+      cnProvidersQuotaWorker: cnProvidersQuotaWorker,
       openRouterModelPricingSyncWorker: openRouterModelPricingSyncWorker ?? null,
       egressProxyProbeWorker,
       probeMonitorWorker: probeMonitorWorker ?? null,
       probeRunRetentionWorker: null,
+      riskControlRetentionWorker: null,
+      publicBrandSnapshotWorker: null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: null,
       unknownOutcomeScanner: null,
@@ -1598,6 +1798,44 @@ export async function startManagedSaasServer(
   if (deployment.workloadRole === 'credential-validation-worker') {
     return startCredentialValidationWorkerRuntime(deployment, options, environment, providerEgressAllowlistOption);
   }
+  if (deployment.workloadRole === 'plugin-host') {
+    // Batch-5 §5.1: the isolated plugin-host workload (same codebase, own
+    // process; the credential-validation-worker deployment precedent).
+    if (options.gateway !== undefined || options.payments !== undefined || options.paymentHandler !== undefined) {
+      throw new TypeError('Plugin-host workload cannot receive gateway or payment capabilities');
+    }
+    const handle = await startPluginHostRuntime(deployment, options.pluginHost ?? {}, environment);
+    let removeSignals: (() => void) | undefined;
+    const runtime: ManagedSaasRuntime = {
+      deployment,
+      database: handle.database,
+      providers: null,
+      gateway: null,
+      credentialValidationWorker: null,
+      quotaSyncWorker: null,
+      opencodeGoUsageWorker: null,
+      cnProvidersQuotaWorker: null,
+      geminiUsageWorker: null,
+      openRouterModelPricingSyncWorker: null,
+      egressProxyProbeWorker: null,
+      probeMonitorWorker: null,
+      probeRunRetentionWorker: null,
+      riskControlRetentionWorker: null,
+      publicBrandSnapshotWorker: null,
+      oauthTokenRefreshWorker: null,
+      announcementFanoutWorker: null,
+      unknownOutcomeScanner: null,
+      listeners: Object.freeze({}),
+      close: async () => {
+        removeSignals?.();
+        removeSignals = undefined;
+        await handle.close();
+      },
+    };
+    if (options.installSignalHandlers !== false) removeSignals = installSignals(runtime);
+    await options.onReady?.(runtime);
+    return runtime;
+  }
 
   const controlPlaneEnabled = deployment.workloadRole === 'combined' || deployment.workloadRole === 'control-plane';
   const gatewayEnabled = deployment.workloadRole === 'combined' || deployment.workloadRole === 'gateway';
@@ -1642,10 +1880,16 @@ export async function startManagedSaasServer(
   let gateway: ManagedSaasGatewayComposition | undefined;
   let gatewayKms: LoadedProviderCredentialUnsealingKms | undefined;
   let gatewayRuntimeModule: LoadedManagedSaasGatewayRuntimeModule | undefined;
+  // Gateway-scoped Redis (optional MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL):
+  // one core-owned RESP connection for the sticky-session hot path.
+  let gatewayRedis: RedisProvider | undefined;
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
+  let reportSchedulerWorker: ReportSchedulerWorkerHandle | undefined;
   let probeRunRetentionWorker: ProbeMonitorWorkerHandle | undefined;
+  let riskControlRetentionWorker: RiskControlRetentionWorkerHandle | undefined;
+  let publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let customerWebhookWorker: CustomerWebhookDeliveryWorkerHandle | undefined;
@@ -1664,7 +1908,10 @@ export async function startManagedSaasServer(
       await Promise.allSettled([
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
+        ...(reportSchedulerWorker ? [reportSchedulerWorker.close()] : []),
         ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
+        ...(riskControlRetentionWorker ? [riskControlRetentionWorker.close()] : []),
+        ...(publicBrandSnapshotWorker ? [publicBrandSnapshotWorker.close()] : []),
       ]);
       await closeAllResources(
         listeners.values(),
@@ -1683,6 +1930,8 @@ export async function startManagedSaasServer(
         database,
         closeDatabase,
       );
+      // The gateway composition closes first; its Redis connection follows.
+      if (gatewayRedis) await Promise.allSettled([gatewayRedis.close()]);
     })();
     await closePromise;
   };
@@ -1754,6 +2003,23 @@ export async function startManagedSaasServer(
       });
       if (!gatewayKms) throw new Error('Managed SaaS gateway credential KMS is unavailable');
 
+      // Optional gateway-scoped Redis (deployment contract change, roadmap
+      // batch 2 §2.0): a configured-but-unreachable Redis fails startup
+      // closed, mirroring the control-plane provider readiness posture.
+      // Once loaded it only accelerates the sticky-session fast path — PG
+      // affinity stays authoritative and every cache error fails open.
+      if (deployment.gatewayRedisUrl !== undefined) {
+        try {
+          gatewayRedis = await createRedisProvider({
+            url: deployment.gatewayRedisUrl,
+            keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX,
+          });
+          await gatewayRedis.checkReady();
+        } catch {
+          throw new Error('Managed SaaS gateway Redis provider is unavailable');
+        }
+      }
+
       const runtimeDependencies = gatewayRuntimeModule.dependencies;
       const { schedulerAuthorities, ...runtimeGatewayOptions } = runtimeDependencies;
       if (
@@ -1784,6 +2050,7 @@ export async function startManagedSaasServer(
       const capacityPort = createPostgresPreparationCapacityPort();
       const gatewayClock = () => new Date();
       const keyBudgetResolution = createKeyBudgetResolution();
+      const billingGroupSpendResolution = createBillingGroupSpendResolution();
       const preparationPorts = createPostgresPreparationPorts({
         database,
         metering,
@@ -1796,6 +2063,7 @@ export async function startManagedSaasServer(
         ),
         capacity: capacityPort,
         keyBudget: createPostgresKeyBudgetAdmission({ now: gatewayClock }),
+        billingGroupSpend: createPostgresBillingGroupSpendAdmission({ now: gatewayClock }),
         payloadCompilerVersion: providerPayload.compilerVersion,
         usageEstimatorVersion: providerPayload.estimator.version,
         now: gatewayClock,
@@ -1803,9 +2071,106 @@ export async function startManagedSaasServer(
       // R9 §4 P1: the operator egress allowlist is parsed once at server
       // startup (see startManagedSaasServer) and shared by gateway dispatch,
       // credential validation, account probing and OAuth refresh.
+      // Gateway-scoped Redis decorates the PG affinity port with the R6b
+      // sticky fast path (sliding 1h TTL; PG remains authoritative).
+      const plazaDatabase = database;
+      const plazaSettingsService = new PlatformSettingsService(plazaDatabase);
+      const plazaIdentityService = new SaasIdentityService(plazaDatabase);
+
+      const gatewayStickyCache =
+        gatewayRedis === undefined
+          ? undefined
+          : {
+              cache: await gatewayRedis.createCacheClient(),
+              keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX,
+            };
+      // Batch-5 §5.4 (task #19): risk-control violation/ban emails reuse the
+      // registration SMTP seam — settings re-resolve per message, the
+      // console sender degrades gracefully when SMTP is unconfigured.
+      const riskControlEmailSender: ModerationEmailSender = {
+        send: async (message) => {
+          const unsealingKms = options.gateway?.providerCredentialUnsealingKms;
+          const settingsService = new PlatformSettingsService(plazaDatabase ?? database, {
+            ...(unsealingKms === undefined ? {} : { unsealingKms }),
+          });
+          let settings: ReturnType<typeof parseRegistrationAdmissionSettings>;
+          try {
+            const plain = await settingsService.readRegistrationSettingsOverlay();
+            const secrets =
+              unsealingKms === undefined
+                ? {}
+                : await settingsService.readRegistrationSecretsOverlay(
+                    PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
+                  );
+            settings = resolveRegistrationAdmissionSettings({ ...plain, ...secrets }, process.env);
+          } catch {
+            settings = parseRegistrationAdmissionSettings(process.env);
+          }
+          const sender =
+            settings.smtp === undefined
+              ? new ConsoleEmailSender()
+              : new SmtpEmailSender({
+                  host: settings.smtp.host,
+                  port: settings.smtp.port,
+                  secure: settings.smtp.secure,
+                  ...(settings.smtp.username === undefined ? {} : { username: settings.smtp.username }),
+                  ...(settings.smtp.password === undefined ? {} : { password: settings.smtp.password }),
+                  from: settings.smtp.from,
+                });
+          return sender.send(message);
+        },
+      };
       gateway = createManagedSaasGatewayProductionComposition(database, {
+        riskControl: { emailSender: riskControlEmailSender },
         ...runtimeGatewayOptions,
+        // Batch-5 §5.1: the optional claude-exit plugin routing layer. Only
+        // wired when the gateway deployment declares the plugin-host URL and
+        // the shared internal token; otherwise the claude route stays on the
+        // native transport byte-for-byte. Placed AFTER the runtime-module
+        // spread so operator runtime code cannot override or forge it.
+        ...(deployment.gatewayPluginHostUrl !== undefined && deployment.pluginHostInternalToken !== undefined
+          ? {
+              pluginRouting: {
+                routeReader: new PostgresPluginRouteReader({ executor: database }),
+                pluginHostClient: new PluginHostClient({
+                  baseUrl: deployment.gatewayPluginHostUrl,
+                  internalToken: deployment.pluginHostInternalToken,
+                }),
+              },
+            }
+          : {}),
+        // Model plaza (batch 5 §5.5, task #22): store-first settings overlay
+        // and console-session validation. On the dedicated gateway workload
+        // the role holds no grant on saas_platform_settings / saas_sessions,
+        // so both degrade (env-only settings, anonymous session view) — the
+        // documented posture until the #20 public-settings snapshot face
+        // lands. Combined/control-plane deployments read the live store and
+        // validate sessions natively.
+        modelPlazaSettingsOverlay: async () => {
+          try {
+            return await plazaSettingsService.readPlainValues([
+              MODEL_PLAZA_SETTINGS_KEYS.enabled,
+              MODEL_PLAZA_SETTINGS_KEYS.requireAuth,
+              MODEL_PLAZA_SETTINGS_KEYS.description,
+              MODEL_PLAZA_SETTINGS_KEYS.exclusiveGroups,
+            ]);
+          } catch {
+            return {};
+          }
+        },
+        modelPlazaSessionAuth: {
+          getSession: async (token: string) => {
+            try {
+              const session = await plazaIdentityService.getSession(token);
+              return session?.userId ? { userId: session.userId } : null;
+            } catch {
+              return null;
+            }
+          },
+        },
+
         schedulerAffinity,
+        ...(gatewayStickyCache ? { schedulerAffinityStickyCache: gatewayStickyCache } : {}),
         // F3: settlement terminal commits enqueue customer webhook events.
         ...(options.customerWebhooks?.enabled ? { customerWebhooks: { enabled: true } } : {}),
         caller: preparationPorts.caller,
@@ -1818,6 +2183,7 @@ export async function startManagedSaasServer(
           capacity: capacityPort,
           billing: billingLedger,
           keyBudget: keyBudgetResolution,
+          billingGroupSpend: billingGroupSpendResolution,
         }),
         providerCredentialUnsealingKms: gatewayKms,
         credentialContext: {
@@ -1845,6 +2211,25 @@ export async function startManagedSaasServer(
       }
       gateway = createManagedSaasGatewayProductionComposition(database, options.gateway);
     }
+
+    // Batch-5 §5.2 OEM white-label: the public brand snapshot data plane.
+    // Every workload that serves the console HTML or the public endpoint
+    // reads through this TTL cache; the control plane additionally
+    // materializes the snapshot (the worker started below). A read failure
+    // serves the last good snapshot (or the empty default) fail-open — the
+    // brand surface is cosmetic and must never take the console down.
+    const publicBrandSnapshotStore = new PublicBrandSnapshotStore({ database });
+    const brandSnapshotReader = createCachedBrandSnapshotReader(publicBrandSnapshotStore, {
+      onError: (error) =>
+        console.error('model-router public brand snapshot read failed; serving the cached brand', error),
+    });
+    const refreshPublicBrandSnapshotAfterWrite = (key: string): void => {
+      if (!key.startsWith(BRAND_SETTINGS_KEY_PREFIX)) return;
+      void publicBrandSnapshotStore
+        .materialize()
+        .then(() => brandSnapshotReader.invalidate())
+        .catch((error) => console.error('model-router public brand snapshot eager refresh failed', error));
+    };
 
     const handlers: Partial<Record<ListenerName, RequestListener>> = {};
     if (controlPlaneEnabled) {
@@ -2268,6 +2653,23 @@ export async function startManagedSaasServer(
             publicOrigin: deploymentListener(deployment, 'platform').origin,
           })
         : undefined;
+      // Batch-3 Grok OAuth account binding surface: available exactly when
+      // the supply service is wired, mirroring the codex mount. The sink
+      // resolves the xai-grok catalog binding from the control-plane
+      // database and fails closed until the provider is registered
+      // (saas/catalog/grok-registration.ts).
+      const grokOauthHandler = providerSupplyService
+        ? createGrokOauthHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            service: new GrokOAuthBindingService({ sessionStore: new InMemoryGrokBindingSessionStore() }),
+            sink: createProviderSupplyGrokCredentialSink({
+              supply: providerSupplyService,
+              resolveCatalogBinding: createPostgresGrokCatalogBindingResolver(database),
+            }),
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+          })
+        : undefined;
       // R6a active probing admin surface: the trigger/list endpoints run on
       // the control-plane role (monitor registry CRUD). The probe itself
       // executes asynchronously in the probe monitor worker on the
@@ -2289,6 +2691,9 @@ export async function startManagedSaasServer(
         authService: platformAuthService,
         service: platformSettingsService,
         publicOrigin: deploymentListener(deployment, 'platform').origin,
+        // Batch-5 §5.2: a brand-key write re-materializes the public snapshot
+        // immediately instead of waiting for the periodic cycle.
+        afterWrite: refreshPublicBrandSnapshotAfterWrite,
       });
       // F5 console surfaces (task #38): the R1 billing-groups admin CRUD,
       // the R3 egress-proxy admin CRUD (credentials sealed server-side
@@ -2302,6 +2707,39 @@ export async function startManagedSaasServer(
         authService: platformAuthService,
         service: new SaasBillingGroupsService(database),
         audit: createPostgresBillingGroupsAuditWriter(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      // Batch-4 §4.4 composite model routing: the composite-group route
+      // registry admin surface (CRUD + the three-level resolution preview).
+      const compositeModelRoutesAdminHandler = createCompositeModelRoutesHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: new SaasCompositeModelRoutesService(database),
+        audit: createPostgresCompositeModelRoutesAuditWriter(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      // Batch-5 §5.4 (task #19): the content risk-control admin surface
+      // (config, decision logs, unban, blocklist lifecycle, retention sweep).
+      const riskControlAdminHandler = createRiskControlHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        store: new PostgresRiskControlAdminStore(database),
+        audit: createPostgresRiskControlAuditWriter(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
+      // Batch-5 §5.1 plugin admin surface (install/enable/disable/config/
+      // delete). The control plane verifies packages and writes the
+      // authoritative DB state; the plugin-host workload converges to it —
+      // the control plane NEVER spawns a plugin (types.ts decision #1).
+      const pluginsAdminHandler = createPluginsHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: new PluginAdminService({
+          store: new PostgresPluginStore({ database }),
+          trustedPublishers: deployment.pluginsTrustedPublishers ?? {},
+          allowUnsigned: deployment.pluginsAllowUnsigned === true,
+        }),
+        store: new PostgresPluginStore({ database }),
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
       const egressProxiesAdminHandler =
@@ -2485,6 +2923,7 @@ export async function startManagedSaasServer(
         database,
         metering: new SaasMeteringService(database),
         keyBudget: createKeyBudgetResolution(),
+        billingGroupSpend: createBillingGroupSpendResolution(),
         ...(workerOptions === undefined ? {} : { worker: workerOptions }),
       });
       const unknownOutcomePlatformHandler = createUnknownOutcomePlatformHttpHandler({
@@ -2500,6 +2939,7 @@ export async function startManagedSaasServer(
       const usageCorrectionService = new UsageCorrectionService(database, {
         ledger: new PlatformWalletLedgerService(),
         keyBudget: createKeyBudgetResolution(),
+        billingGroupSpend: createBillingGroupSpendResolution(),
       });
       const usageCorrectionPlatformHandler = createUsageCorrectionPlatformHttpHandler({
         access: platformAccessService,
@@ -2591,6 +3031,17 @@ export async function startManagedSaasServer(
       // control-plane listener plus the two single-leader workers behind it.
       const observabilityDatabase = database;
       const observabilityAlertService = new ObservabilityAlertService(observabilityDatabase);
+      const observabilityAlertSilenceService = new ObservabilityAlertSilenceService(observabilityDatabase);
+      // Batch-5 §5.6: the operator silence CRUD surface (the
+      // composite-routes contract shape) mounted next to the read-only
+      // observability handler.
+      const alertSilencesHandler = createAlertSilencesHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: observabilityAlertSilenceService,
+        audit: createPostgresAlertSilencesAuditWriter(observabilityDatabase),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
       const observabilityHandler = createObservabilityHttpHandler({
         access: platformAccessService,
         channelStatus: (query) => getChannelStatusPage(observabilityDatabase, query),
@@ -2605,6 +3056,16 @@ export async function startManagedSaasServer(
       alertEvaluatorWorker = startAlertEvaluatorWorker(database, {
         onError: (error) => console.error('model-router managed observability alert evaluator cycle failed', error),
       });
+      // Batch-5 §5.6: the scheduled email reports (daily/weekly summary,
+      // error digest, account health). The SMTP transport reuses the
+      // registration email sender seam (settings-resolved, console fallback
+      // when unconfigured); last_run persists in the migration-127 PG rows.
+      reportSchedulerWorker = startReportSchedulerWorker(database, {
+        emailSender: registrationEmailSender,
+        templateDir: process.env.MODEL_ROUTER_SAAS_OBS_REPORT_TEMPLATE_DIR?.trim() || undefined,
+        onError: (error, type) =>
+          console.error(`model-router managed observability report ${type ?? 'scheduler'} cycle failed`, error),
+      });
       // R6a: probe run retention (30 days) prunes on the control-plane role —
       // the validation-worker role that appends the history rows holds no
       // table-level grants by contract, so the DELETE lives here next to the
@@ -2612,6 +3073,22 @@ export async function startManagedSaasServer(
       probeRunRetentionWorker = (options.startProbeRunRetentionWorker ?? startProbeRunRetentionWorker)(database, {
         ...(options.probeRunRetentionWorkerOptions ?? {}),
         onError: () => console.error('model-router managed probe run retention cycle failed'),
+      });
+      // Batch-5 §5.4 (task #19): moderation log retention (hit/non-hit
+      // windows) plus flagged-hash expiry, on the control-plane DELETE grant.
+      riskControlRetentionWorker = startRiskControlRetentionWorker(database, {
+        onError: (error) => console.error('model-router managed risk-control retention cycle failed', error),
+      });
+
+      // Batch-5 §5.2 OEM white-label: the control plane owns the snapshot
+      // materialization loop (periodic cycles; the first is delayed by the
+      // interval so startup stays read-only). A failed cycle keeps the
+      // previously materialized snapshot serving and reschedules.
+      publicBrandSnapshotWorker = startPublicBrandSnapshotWorker(publicBrandSnapshotStore, {
+        ...(options.publicBrandSnapshot?.intervalMs === undefined
+          ? {}
+          : { intervalMs: options.publicBrandSnapshot.intervalMs }),
+        onError: (error) => console.error('model-router public brand snapshot materialization cycle failed', error),
       });
 
       handlers.customer = createCustomerHandler(
@@ -2628,15 +3105,20 @@ export async function startManagedSaasServer(
         customerMarketingAffiliateHandler,
         paymentHandler,
         webDistPath,
+        brandSnapshotReader,
       );
       handlers.platform = createPlatformHandler(
         platformAuthHandler,
         platformRefundHandler,
         platformCredentialRewrapHandler,
         codexOauthHandler,
+        grokOauthHandler,
         accountProbeHandler,
         platformSettingsAdminHandler,
         billingGroupsAdminHandler,
+        compositeModelRoutesAdminHandler,
+        riskControlAdminHandler,
+        pluginsAdminHandler,
         egressProxiesAdminHandler,
         opencodeGoRulesAdminHandler,
         opencodeGoModelsAdminHandler,
@@ -2647,12 +3129,22 @@ export async function startManagedSaasServer(
         marketingOpsPromoCodesHandler,
         marketingOpsAffiliateHandler,
         observabilityHandler,
+        alertSilencesHandler,
         platformReadHandler,
         webDistPath,
+        brandSnapshotReader,
       );
     }
 
-    if (gatewayEnabled) handlers.gateway = createGatewayHandler(gateway?.handler);
+    if (gatewayEnabled) {
+      handlers.gateway = createGatewayHandler(
+        gateway?.handler,
+        createPublicBrandSettingsHttpHandler({
+          read: brandSnapshotReader.read,
+          onError: (error) => console.error('model-router public brand snapshot read failed', error),
+        }),
+      );
+    }
 
     for (const name of listenerNames) {
       const handler = handlers[name];
@@ -2677,10 +3169,14 @@ export async function startManagedSaasServer(
       credentialValidationWorker: null,
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
+      geminiUsageWorker: null,
+      cnProvidersQuotaWorker: null,
       openRouterModelPricingSyncWorker: null,
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,
       probeRunRetentionWorker: probeRunRetentionWorker ?? null,
+      riskControlRetentionWorker: riskControlRetentionWorker ?? null,
+      publicBrandSnapshotWorker: publicBrandSnapshotWorker ?? null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: announcementFanoutWorker ?? null,
       unknownOutcomeScanner: unknownOutcomeScanner ?? null,

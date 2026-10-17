@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, type Page, type Route, test } from '@playwright/test';
 import { createServer as createViteServer } from 'vite';
 
 const TOKEN = 'synthetic-browser-cli-enrollment-token';
@@ -13,7 +13,8 @@ let origin = '';
 
 test.beforeAll(async () => {
   vite = await createViteServer({
-    configFile: resolve('web/vite.config.ts'), root: resolve('web'),
+    configFile: resolve('web/vite.config.ts'),
+    root: resolve('web'),
     server: { host: '127.0.0.1', port: 0 },
   });
   await vite.listen();
@@ -22,26 +23,43 @@ test.beforeAll(async () => {
   origin = new URL(site).origin;
 });
 
-test.afterAll(async () => { await vite?.close(); });
+test.afterAll(async () => {
+  await vite?.close();
+});
 
 function gate() {
   let release: (() => void) | undefined;
-  const promise = new Promise<void>(resolve => { release = resolve; });
-  return { promise, release() { if (!release) throw new Error('MFA fixture gate unavailable'); release(); } };
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    promise,
+    release() {
+      if (!release) throw new Error('MFA fixture gate unavailable');
+      release();
+    },
+  };
 }
 
 function enrollment(expiresAt = new Date(Date.now() + 60_000).toISOString()) {
   return { otpauthUri: URI, confirmationToken: CONFIRMATION, expiresAt };
 }
 
-async function mockApi(page: Page, handlers: {
-  start?: (route: Route) => Promise<void>;
-  confirm?: (route: Route) => Promise<void>;
-} = {}) {
+async function mockApi(
+  page: Page,
+  handlers: {
+    start?: (route: Route) => Promise<void>;
+    confirm?: (route: Route) => Promise<void>;
+  } = {},
+) {
   const calls: { starts: number; confirms: number; logins: number; urls: string[]; unexpected: string[] } = {
-    starts: 0, confirms: 0, logins: 0, urls: [], unexpected: [],
+    starts: 0,
+    confirms: 0,
+    logins: 0,
+    urls: [],
+    unexpected: [],
   };
-  await page.route('**/admin/api/v1/**', async route => {
+  await page.route('**/admin/api/v1/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     calls.urls.push(request.url());
@@ -108,17 +126,25 @@ async function assertNoSensitiveDisplay(page: Page) {
   }
 }
 
-test('double submit dispatches once per operation, clears submission secrets, and confirmation never grants login', async ({ page }) => {
+test('double submit dispatches once per operation, clears submission secrets, and confirmation never grants login', async ({
+  page,
+}) => {
   const startGate = gate();
   const confirmGate = gate();
   const calls = await mockApi(page, {
-    start: async route => { await startGate.promise; await route.fulfill({ status: 200, json: { data: enrollment() } }); },
-    confirm: async route => { await confirmGate.promise; await route.fulfill({ status: 200, json: { data: { confirmed: true } } }); },
+    start: async (route) => {
+      await startGate.promise;
+      await route.fulfill({ status: 200, json: { data: enrollment() } });
+    },
+    confirm: async (route) => {
+      await confirmGate.promise;
+      await route.fulfill({ status: 200, json: { data: { confirmed: true } } });
+    },
   });
   try {
     await openEnrollment(page);
-    const startRequest = page.waitForRequest(request => new URL(request.url()).pathname === START);
-    await page.locator('form').evaluate(form => {
+    const startRequest = page.waitForRequest((request) => new URL(request.url()).pathname === START);
+    await page.locator('form').evaluate((form) => {
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
@@ -128,8 +154,8 @@ test('double submit dispatches once per operation, clears submission secrets, an
     startGate.release();
     await expect(page.getByLabel('MFA 配置 URI', { exact: true })).toHaveText(URI);
     await page.getByLabel('认证器验证码', { exact: true }).fill('123456');
-    const confirmRequest = page.waitForRequest(request => new URL(request.url()).pathname === CONFIRM);
-    await page.locator('form').evaluate(form => {
+    const confirmRequest = page.waitForRequest((request) => new URL(request.url()).pathname === CONFIRM);
+    await page.locator('form').evaluate((form) => {
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
@@ -152,7 +178,8 @@ test('double submit dispatches once per operation, clears submission secrets, an
     await expect(page.getByRole('heading', { name: '平台管理员工作区', exact: true })).toHaveCount(0);
     expect(calls.logins).toBe(1);
   } finally {
-    startGate.release(); confirmGate.release();
+    startGate.release();
+    confirmGate.release();
     await page.unrouteAll({ behavior: 'wait' });
   }
 });
@@ -161,7 +188,8 @@ test('expiry removes URI and an unsubmitted OTP without another start or confirm
   const time = new Date('2030-01-01T00:00:00.000Z');
   await page.clock.install({ time });
   const calls = await mockApi(page, {
-    start: route => route.fulfill({ status: 200, json: { data: enrollment(new Date(time.getTime() + 10_000).toISOString()) } }),
+    start: (route) =>
+      route.fulfill({ status: 200, json: { data: enrollment(new Date(time.getTime() + 10_000).toISOString()) } }),
   });
   await openEnrollment(page);
   await page.getByRole('button', { name: '生成 MFA 配置', exact: true }).click();
@@ -177,14 +205,19 @@ test('expiry removes URI and an unsubmitted OTP without another start or confirm
   await assertNoPersistence(page, calls.urls);
 });
 
-test('cancelled start stays unknown and a late reply cannot repopulate the current or revisited page', async ({ page }) => {
+test('cancelled start stays unknown and a late reply cannot repopulate the current or revisited page', async ({
+  page,
+}) => {
   const startGate = gate();
   const calls = await mockApi(page, {
-    start: async route => { await startGate.promise; await route.fulfill({ status: 200, json: { data: enrollment() } }); },
+    start: async (route) => {
+      await startGate.promise;
+      await route.fulfill({ status: 200, json: { data: enrollment() } });
+    },
   });
   try {
     await openEnrollment(page);
-    const request = page.waitForRequest(request => new URL(request.url()).pathname === START);
+    const request = page.waitForRequest((request) => new URL(request.url()).pathname === START);
     await page.getByRole('button', { name: '生成 MFA 配置', exact: true }).click();
     await request;
     await page.getByRole('button', { name: '取消并清除配置', exact: true }).click();
@@ -201,20 +234,26 @@ test('cancelled start stays unknown and a late reply cannot repopulate the curre
     await assertNoSensitiveDisplay(page);
     expect(calls).toMatchObject({ starts: 1, confirms: 0, logins: 0, unexpected: [] });
     await assertNoPersistence(page, calls.urls);
-  } finally { startGate.release(); await page.unrouteAll({ behavior: 'wait' }); }
+  } finally {
+    startGate.release();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
 });
 
 test('leaving a pending confirmation isolates late success from a fresh enrollment page', async ({ page }) => {
   const confirmGate = gate();
   const calls = await mockApi(page, {
-    confirm: async route => { await confirmGate.promise; await route.fulfill({ status: 200, json: { data: { confirmed: true } } }); },
+    confirm: async (route) => {
+      await confirmGate.promise;
+      await route.fulfill({ status: 200, json: { data: { confirmed: true } } });
+    },
   });
   try {
     await openEnrollment(page);
     await page.getByRole('button', { name: '生成 MFA 配置', exact: true }).click();
     await expect(page.getByLabel('MFA 配置 URI', { exact: true })).toHaveText(URI);
     await page.getByLabel('认证器验证码', { exact: true }).fill('123456');
-    const request = page.waitForRequest(request => new URL(request.url()).pathname === CONFIRM);
+    const request = page.waitForRequest((request) => new URL(request.url()).pathname === CONFIRM);
     await page.getByRole('button', { name: '确认 MFA', exact: true }).click();
     await request;
     await page.getByRole('link', { name: '返回登录', exact: true }).click();
@@ -228,13 +267,22 @@ test('leaving a pending confirmation isolates late success from a fresh enrollme
     await assertNoSensitiveDisplay(page);
     expect(calls).toMatchObject({ starts: 1, confirms: 1, logins: 0, unexpected: [] });
     await assertNoPersistence(page, calls.urls);
-  } finally { confirmGate.release(); await page.unrouteAll({ behavior: 'wait' }); }
+  } finally {
+    confirmGate.release();
+    await page.unrouteAll({ behavior: 'wait' });
+  }
 });
 
-test('raw sensitive confirmation errors are never rendered and a rejected confirmation clears the configuration', async ({ page }) => {
+test('raw sensitive confirmation errors are never rendered and a rejected confirmation clears the configuration', async ({
+  page,
+}) => {
   const raw = `${TOKEN} ${CONFIRMATION} ${URI} 123456 <img src=x onerror=window.mfaErrorLeak=1>`;
   const calls = await mockApi(page, {
-    confirm: route => route.fulfill({ status: 401, json: { error: { code: 'MFA_CONFIRMATION_INVALID', message: raw, requestId: raw } } }),
+    confirm: (route) =>
+      route.fulfill({
+        status: 401,
+        json: { error: { code: 'MFA_CONFIRMATION_INVALID', message: raw, requestId: raw } },
+      }),
   });
   await openEnrollment(page);
   await page.getByRole('button', { name: '生成 MFA 配置', exact: true }).click();
@@ -252,7 +300,7 @@ test('raw sensitive confirmation errors are never rendered and a rejected confir
 });
 
 test('network loss is unknown, not permission to retry or reissue', async ({ page }) => {
-  const calls = await mockApi(page, { start: route => route.abort('failed') });
+  const calls = await mockApi(page, { start: (route) => route.abort('failed') });
   await openEnrollment(page);
   await page.getByRole('button', { name: '生成 MFA 配置', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('操作结果未知');
@@ -263,10 +311,12 @@ test('network loss is unknown, not permission to retry or reissue', async ({ pag
   await assertNoPersistence(page, calls.urls);
 });
 
-test('malformed confirmation response is unknown and clears secrets without treating it as a failed enrollment', async ({ page }) => {
+test('malformed confirmation response is unknown and clears secrets without treating it as a failed enrollment', async ({
+  page,
+}) => {
   const raw = `${TOKEN} ${CONFIRMATION} ${URI} 123456`;
   const calls = await mockApi(page, {
-    confirm: route => route.fulfill({ status: 200, contentType: 'text/plain', body: raw }),
+    confirm: (route) => route.fulfill({ status: 200, contentType: 'text/plain', body: raw }),
   });
   await openEnrollment(page);
   await page.getByRole('button', { name: '生成 MFA 配置', exact: true }).click();

@@ -31,6 +31,16 @@ interface Fixture {
   byokEntitlement: EffectiveByokEntitlement | null;
   planResolverExecutors: unknown[];
   readonly statements: string[];
+  /** §4.4 composite: the billing-group resolution the fake store returns. */
+  compositeGroup?: { readonly id: string; readonly composite: boolean };
+  /** §4.4 composite: enabled registry rows (empty = none). */
+  compositeRoutes?: Row[];
+  /** §4.4 composite: the ownership-catalog platforms for the requested model. */
+  compositeOwnershipPlatforms?: string[];
+  /** §4.4 composite: the target capability row (null = none); defaults to the nominal pin. */
+  compositeTargetCapability?: { readonly product_id: string; readonly endpoint: string } | null;
+  /** §4.4 composite: the catalog eligibility the fake returns for the target. */
+  eligibilityResult?: ProviderEligibilityResult;
 }
 
 function caller(mode: Mode): RequestPreparationCaller {
@@ -326,7 +336,7 @@ function platformCandidateFor(accountId: string, credentialId: string, overrides
   });
 }
 
-function poolRight(): Row {
+function poolRight(overrides: Row = {}): Row {
   return {
     rights_id: 'pool-rights-a',
     version: '17',
@@ -344,6 +354,7 @@ function poolRight(): Row {
     evidence_ref: 'rights-evidence-a',
     evidence_sha256: HASH,
     status: 'active',
+    ...overrides,
   };
 }
 
@@ -357,6 +368,20 @@ class FakeAuthorityFactsRepository {
         let rows: Row[];
         if (sql.startsWith('SET TRANSACTION')) rows = [];
         else if (sql.includes('SELECT clock_timestamp()')) rows = [{ authority_now: NOW }];
+        else if (sql.includes('composite-route-store:billing-group'))
+          rows = [
+            {
+              id: this.fixture.compositeGroup?.id ?? 'default',
+              composite: this.fixture.compositeGroup?.composite ?? false,
+            },
+          ];
+        else if (sql.includes('composite-route-store:enabled-routes'))
+          rows = structuredClone(this.fixture.compositeRoutes ?? []) as Row[];
+        else if (sql.includes('composite-route-store:model-ownership'))
+          rows = (this.fixture.compositeOwnershipPlatforms ?? []).map((provider_id) => ({ provider_id }));
+        else if (sql.includes('composite-route-store:target-capability'))
+          rows = this.fixture.compositeTargetCapability === null ? [] : [this.fixture.compositeTargetCapability];
+        else if (sql.includes('composite-route-store:')) rows = [];
         else if (sql.includes('FROM saas_public_model_versions')) rows = [this.fixture.alias];
         else if (sql.includes('FROM saas_supply_profiles')) rows = [this.fixture.profile];
         else if (sql.includes('preparation-authority:byok')) rows = this.fixture.byokRows;
@@ -387,7 +412,7 @@ function adapter(fixture: Fixture): PostgresRequestPreparationAuthorityAdapter {
     },
     catalog: {
       async evaluateProviderEligibility() {
-        return eligibility();
+        return fixture.eligibilityResult ?? eligibility();
       },
     },
     byokEntitlements: {
@@ -763,5 +788,178 @@ test('fails closed when catalog mapping provenance is unknown or versionless', a
       code: 'route_denied',
       message: 'A current route and commercial authority could not be established.',
     });
+  });
+});
+
+/*
+ * §4.4 composite model routing (task #18): when the request's billing group
+ * is marked composite, the three-level resolver replaces the public model
+ * version's nominal provider/product/model/endpoint pin with the resolved
+ * target platform's. New-behavior tests live here so the pre-composite
+ * assertions above stay untouched (the #5/F2 separate-file convention).
+ */
+const GEMINI_PLATFORM = 'google-gemini';
+const GEMINI_PRODUCT = 'gemini-subscription';
+const GEMINI_ENDPOINT = 'gemini-generate-content';
+const GEMINI_UPSTREAM_MODEL = 'gemini-2.5-pro';
+
+function geminiEligibility(): ProviderEligibilityResult {
+  return {
+    decision: 'allow',
+    providerId: GEMINI_PLATFORM,
+    productId: GEMINI_PRODUCT,
+    model: GEMINI_UPSTREAM_MODEL,
+    endpoint: GEMINI_ENDPOINT,
+    supportLevel: 'supported',
+    limited: false,
+    capability: { version: 11, protocol: 'openai', validationState: 'verified' },
+    rights: {
+      rightsId: 'account-rights-a',
+      version: 12,
+      status: 'active',
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: null,
+    },
+  };
+}
+
+function geminiPlatformRow(): Row {
+  return platformCandidate({
+    pool_provider_id: GEMINI_PLATFORM,
+    pool_product_id: GEMINI_PRODUCT,
+    member_provider_id: GEMINI_PLATFORM,
+    member_product_id: GEMINI_PRODUCT,
+    account_provider_id: GEMINI_PLATFORM,
+    account_product_id: GEMINI_PRODUCT,
+    credential_provider_id: GEMINI_PLATFORM,
+    credential_product_id: GEMINI_PRODUCT,
+  });
+}
+
+function geminiPoolRight(overrides: Row = {}): Row {
+  return poolRight({
+    provider_id: GEMINI_PLATFORM,
+    product_id: GEMINI_PRODUCT,
+    model_scope: [GEMINI_UPSTREAM_MODEL],
+    endpoint_scope: [GEMINI_ENDPOINT],
+    ...overrides,
+  });
+}
+
+function compositeRouteRow(): Row {
+  return {
+    id: '5',
+    group_id: 'composite-a',
+    public_model: 'public-model',
+    match_type: 'exact',
+    target_platform: GEMINI_PLATFORM,
+    upstream_model: GEMINI_UPSTREAM_MODEL,
+    endpoint: 'any',
+    priority: 100,
+    enabled: true,
+    notes: '',
+  };
+}
+
+test('composite groups resolve the serving platform and rewrite the model with provenance', async (t) => {
+  await t.test('a Level-1 route decision swaps the nominal pin end to end', async () => {
+    const { fixture, result } = await resolve('platform', (current) => {
+      current.compositeGroup = { id: 'composite-a', composite: true };
+      current.compositeRoutes = [compositeRouteRow()];
+      current.compositeOwnershipPlatforms = [];
+      current.compositeTargetCapability = { product_id: GEMINI_PRODUCT, endpoint: GEMINI_ENDPOINT };
+      current.eligibilityResult = geminiEligibility();
+      current.platformRows = [geminiPlatformRow()];
+      current.poolRights = [geminiPoolRight()];
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision !== 'allow') return;
+    const authority: RequestPreparationAuthority = result.value;
+    assert.equal(authority.candidate.providerId, GEMINI_PLATFORM);
+    assert.equal(authority.candidate.productId, GEMINI_PRODUCT);
+    assert.equal(authority.candidate.resolvedModel, GEMINI_UPSTREAM_MODEL);
+    assert.equal(authority.candidate.endpoint, GEMINI_ENDPOINT);
+    assert.equal(authority.route.endpoint, GEMINI_ENDPOINT);
+    assert.deepEqual(authority.composite, {
+      billingGroupId: 'composite-a',
+      source: 'route',
+      routeId: '5',
+      targetPlatform: GEMINI_PLATFORM,
+      productId: GEMINI_PRODUCT,
+      upstreamModel: GEMINI_UPSTREAM_MODEL,
+      endpoint: GEMINI_ENDPOINT,
+    });
+    // The rewrite carries explicit provenance (the payload compiler's
+    // non-identity enforcement): alias mapping with the route id as version.
+    assert.deepEqual(authority.modelResolution, {
+      requestedModel: 'public-model',
+      mappedModel: GEMINI_UPSTREAM_MODEL,
+      resolvedModel: GEMINI_UPSTREAM_MODEL,
+      mappingSource: 'alias',
+      mappingVersion: 5,
+    });
+    assert.deepEqual(authority.modelMappingRules, [
+      {
+        pattern: 'public-model',
+        mappedModel: GEMINI_UPSTREAM_MODEL,
+        mappingSource: 'alias',
+        mappingVersion: 5,
+      },
+    ]);
+    for (const marker of [
+      'composite-route-store:billing-group',
+      'composite-route-store:enabled-routes',
+      'composite-route-store:model-ownership',
+      'composite-route-store:target-capability',
+    ]) {
+      assert.ok(
+        fixture.statements.some((sql) => sql.includes(marker)),
+        `missing ${marker}`,
+      );
+    }
+  });
+
+  await t.test('a Level-2 ownership decision passes the requested model through', async () => {
+    const { result } = await resolve('platform', (current) => {
+      current.compositeGroup = { id: 'composite-a', composite: true };
+      current.compositeRoutes = [];
+      current.compositeOwnershipPlatforms = [GEMINI_PLATFORM];
+      current.compositeTargetCapability = { product_id: GEMINI_PRODUCT, endpoint: GEMINI_ENDPOINT };
+      current.eligibilityResult = {
+        ...geminiEligibility(),
+        model: 'public-model',
+      };
+      current.platformRows = [geminiPlatformRow()];
+      current.poolRights = [geminiPoolRight({ model_scope: ['public-model'] })];
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision !== 'allow') return;
+    const authority: RequestPreparationAuthority = result.value;
+    assert.deepEqual(
+      [authority.composite?.source, authority.candidate.providerId, authority.candidate.resolvedModel],
+      ['account_model', GEMINI_PLATFORM, 'public-model'],
+    );
+  });
+
+  await t.test('an unknown model fails closed with the safe route denial', async () => {
+    const { result } = await resolve('platform', (current) => {
+      current.compositeGroup = { id: 'composite-a', composite: true };
+      current.compositeRoutes = [];
+      current.compositeOwnershipPlatforms = [];
+    });
+    assert.equal(result.decision, 'reject');
+    if (result.decision !== 'reject') return;
+    assert.equal(result.code, 'route_denied');
+  });
+
+  await t.test('BYOK keeps the nominal pin even when the group is composite', async () => {
+    const { result } = await resolve('byok', (current) => {
+      current.compositeGroup = { id: 'composite-a', composite: true };
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision !== 'allow') return;
+    const authority: RequestPreparationAuthority = result.value;
+    assert.equal(authority.candidate.providerId, 'provider-a');
+    assert.equal(authority.composite, undefined);
   });
 });

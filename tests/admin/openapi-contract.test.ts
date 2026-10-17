@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { adminRequestSchemas } from '../../src/admin/contracts.js';
-import { adminBodylessActions, adminContractOperations, adminOpenApiDocument, parseAdminRequest } from '../../src/admin/openapi.js';
+import {
+  adminBodylessActions,
+  adminContractOperations,
+  adminOpenApiDocument,
+  parseAdminRequest,
+} from '../../src/admin/openapi.js';
 import { adminDispatchOperations } from '../../src/admin/server.js';
 
 test('OpenAPI 3.1 is generated from shared Zod contracts and contains no credential values', () => {
@@ -47,7 +52,11 @@ test('OpenAPI method/path manifest exactly matches admin dispatch routes', () =>
   const documented = adminContractOperations.map(({ method, path }) => `${method.toUpperCase()} ${path}`).sort();
   assert.deepEqual(documented, [...adminDispatchOperations].sort());
   for (const operation of adminContractOperations) {
-    if (!['get', 'delete'].includes(operation.method) && !adminBodylessActions.has(`${operation.method.toUpperCase()} ${operation.path}`)) assert.ok(operation.schema, `${operation.method} ${operation.path} requires a runtime body schema`);
+    if (
+      !['get', 'delete'].includes(operation.method) &&
+      !adminBodylessActions.has(`${operation.method.toUpperCase()} ${operation.path}`)
+    )
+      assert.ok(operation.schema, `${operation.method} ${operation.path} requires a runtime body schema`);
   }
 });
 
@@ -57,19 +66,24 @@ test('non-JSON response media types and accepted job statuses are accurate', () 
   assert.ok(path('/events').responses['200'].content['text/event-stream']);
   assert.ok(path('/exports/{id}/download').responses['200'].content['text/csv']);
   assert.ok(path('/config/export').responses['200'].content['application/json']);
-  for (const name of ['/exports','/playground/runs','/maintenance/jobs']) {
+  for (const name of ['/exports', '/playground/runs', '/maintenance/jobs']) {
     const operation = path(name, 'post');
     assert.ok(operation.responses['202']);
     assert.equal(operation.responses['200'], undefined);
   }
-  assert.ok(path('/requests').parameters.some((parameter: any) => parameter.in === 'query' && parameter.name === 'cursor'));
+  assert.ok(
+    path('/requests').parameters.some((parameter: any) => parameter.in === 'query' && parameter.name === 'cursor'),
+  );
 });
 
 test('telemetry operations document only their supported query parameters and parser bounds', () => {
   const operation = (path: string) => adminOpenApiDocument.paths[path].get as any;
   const queryParameters = (path: string) =>
     operation(path).parameters.filter((parameter: any) => parameter.in === 'query');
-  const queryNames = (path: string) => queryParameters(path).map((parameter: any) => parameter.name).sort();
+  const queryNames = (path: string) =>
+    queryParameters(path)
+      .map((parameter: any) => parameter.name)
+      .sort();
   const querySchema = (path: string, name: string) =>
     queryParameters(path).find((parameter: any) => parameter.name === name)?.schema;
   const common = ['from', 'keyId', 'model', 'protocol', 'source', 'to', 'upstreamId'];
@@ -88,7 +102,12 @@ test('telemetry operations document only their supported query parameters and pa
   }
   assert.deepEqual(querySchema('/usage/timeseries', 'grain').enum, ['hour', 'day']);
   assert.deepEqual(querySchema('/usage/breakdown', 'groupBy').enum, [
-    'keyId', 'upstreamId', 'model', 'protocol', 'source', 'upstream',
+    'keyId',
+    'upstreamId',
+    'model',
+    'protocol',
+    'source',
+    'upstream',
   ]);
   assert.deepEqual(querySchema('/usage/breakdown', 'upstreamFilterMode').enum, ['final', 'attempt']);
   assert.equal(querySchema('/requests', 'limit').minimum, 1);

@@ -3,11 +3,24 @@ import {
   TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY,
 } from '../../billing/groups/multiplier.js';
 import type { TopupAmountTier } from '../../billing/groups/types.js';
+import { MODEL_PLAZA_SETTINGS_KEYS, parseModelPlazaSettingValue } from '../../gateway/model-plaza/settings.js';
 import {
   parseRegistrationSettingValue,
   REGISTRATION_SECRET_SETTINGS_KEYS,
   REGISTRATION_SETTINGS_KEYS,
 } from '../../identity/registration-settings.js';
+import {
+  parseBrandApiBaseUrlSetting,
+  parseBrandContactUrlSetting,
+  parseBrandCustomEndpointsSetting,
+  parseBrandCustomMenuItemsSetting,
+  parseBrandCustomPagesSetting,
+  parseBrandDocUrlSetting,
+  parseBrandFrameAncestorsSetting,
+  parseBrandSiteLogoSetting,
+  parseBrandSiteNameSetting,
+  parseBrandSiteSubtitleSetting,
+} from '../brand/snapshot.js';
 
 /**
  * F1 platform settings store (task #34): the typed key registry.
@@ -130,6 +143,106 @@ const DEFINITIONS: readonly PlatformSettingDefinition[] = [
     description:
       'Wallet-topup amount-tier discounts: an ascending list of { thresholdMinorUnits, discountNumerator, discountDenominator } entries; at or above a threshold the credit is multiplied by numerator/denominator (no greater than one).',
     parse: parseTopupAmountTierDiscountsSetting,
+  },
+  // Batch-5 §5.5 model plaza (task #22): the `saas.plaza.*` runtime
+  // switches, parsed by the plaza settings grammar (store-first, env
+  // fallback, fail-closed defaults).
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.enabled,
+    kind: 'plain',
+    description:
+      'Model plaza master switch (default false = the GET /v1/model-plaza showcase answers 404 PLAZA_DISABLED).',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.enabled, value),
+  },
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.requireAuth,
+    kind: 'plain',
+    description:
+      'When true, the model plaza requires authentication (proxy key or console session) instead of serving the anonymous view.',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.requireAuth, value),
+  },
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.description,
+    kind: 'plain',
+    description: 'Model plaza description echoed at the top of the plaza response (0-512 characters).',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.description, value),
+  },
+  {
+    key: MODEL_PLAZA_SETTINGS_KEYS.exclusiveGroups,
+    kind: 'plain',
+    description:
+      'Billing group ids treated as exclusive: visible only to callers whose access tier authorizes the group; anonymous callers never see them (max 64 ids).',
+    parse: (value: unknown) => parseModelPlazaSettingValue(MODEL_PLAZA_SETTINGS_KEYS.exclusiveGroups, value),
+  },
+  // Batch-5 §5.2 OEM white-label (task #20): the `saas.brand.*` public brand
+  // keys. All plain, all strictly parsed by the shared brand grammar in
+  // src/saas/platform/brand/snapshot.ts (the same parsers the snapshot
+  // materializer re-runs), so a stored row can only ever hold values the
+  // public snapshot plane would accept. The control-plane materializer
+  // copies these into the gateway-readable saas_public_brand_settings row.
+  {
+    key: 'saas.brand.site_name',
+    kind: 'plain',
+    description: 'OEM site name (1-64 characters); replaces the default document title and header brand.',
+    parse: parseBrandSiteNameSetting,
+  },
+  {
+    key: 'saas.brand.site_subtitle',
+    kind: 'plain',
+    description: 'OEM site subtitle (0-200 characters); empty clears it.',
+    parse: parseBrandSiteSubtitleSetting,
+  },
+  {
+    key: 'saas.brand.site_logo',
+    kind: 'plain',
+    description:
+      'OEM logo URL: a relative site path, an https/http URL, or a data:image/*;base64 payload (max 2048 characters). The origin of an absolute URL joins the console CSP img-src allowlist.',
+    parse: parseBrandSiteLogoSetting,
+  },
+  {
+    key: 'saas.brand.api_base_url',
+    kind: 'plain',
+    description: 'Public API base URL shown to customers (relative path or http(s) URL); empty clears it.',
+    parse: parseBrandApiBaseUrlSetting,
+  },
+  {
+    key: 'saas.brand.contact_url',
+    kind: 'plain',
+    description: 'Contact surface: an https/http or mailto: URL; empty clears it.',
+    parse: parseBrandContactUrlSetting,
+  },
+  {
+    key: 'saas.brand.doc_url',
+    kind: 'plain',
+    description: 'Documentation URL (relative path or http(s) URL); empty clears it.',
+    parse: parseBrandDocUrlSetting,
+  },
+  {
+    key: 'saas.brand.custom_menu_items',
+    kind: 'plain',
+    description:
+      'Custom console menu items (max 20): [{ label (1-32 chars), url, pageSlug? }]. pageSlug links the item to a custom page.',
+    parse: parseBrandCustomMenuItemsSetting,
+  },
+  {
+    key: 'saas.brand.custom_endpoints',
+    kind: 'plain',
+    description: 'Custom API endpoints for quick copy (max 20): [{ name, url, description? }].',
+    parse: parseBrandCustomEndpointsSetting,
+  },
+  {
+    key: 'saas.brand.custom_pages',
+    kind: 'plain',
+    description:
+      'Custom pages (max 20): markdown pages [{ slug, title, mode: "markdown", content (≤32 KiB) }] or iframe embeds [{ slug, title, mode: "iframe", url, userIdParam?, themeParam?, langParam? }]. Iframe origins join the console CSP frame-src allowlist.',
+    parse: parseBrandCustomPagesSetting,
+  },
+  {
+    key: 'saas.brand.frame_ancestors',
+    kind: 'plain',
+    description:
+      'Exact https origins allowed to embed the console (max 8); empty keeps frame-ancestors none (the default).',
+    parse: parseBrandFrameAncestorsSetting,
   },
 ];
 

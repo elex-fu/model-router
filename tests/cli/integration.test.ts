@@ -64,13 +64,19 @@ async function run(args: string[], configPath: string): Promise<CliResult> {
       ['--import', 'tsx', cliEntry, ...args, '--config', configPath],
       { cwd: cliCwd, timeout: 30_000 },
       (error, stdout, stderr) => {
-        const code = !error && child.exitCode === 0 ? 0
-          : error && typeof error.code === 'number' && error.code > 0 && error.code === child.exitCode
-            ? error.code : null;
+        const code =
+          !error && child.exitCode === 0
+            ? 0
+            : error && typeof error.code === 'number' && error.code > 0 && error.code === child.exitCode
+              ? error.code
+              : null;
         if (code === null) {
-          const failureMode: CliFailureMode = child.signalCode !== null ? 'signalled'
-            : error?.code === 'ENOENT' || error?.code === 'EACCES' || error?.code === 'ENOEXEC'
-              ? 'launch_failed' : 'execution_failed';
+          const failureMode: CliFailureMode =
+            child.signalCode !== null
+              ? 'signalled'
+              : error?.code === 'ENOENT' || error?.code === 'EACCES' || error?.code === 'ENOEXEC'
+                ? 'launch_failed'
+                : 'execution_failed';
           // Do not return an ambiguous code even to a caller that permits nonzero exits.
           reject(new Error(`CLI invocation failed (${failureMode})`));
           return;

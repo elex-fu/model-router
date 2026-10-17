@@ -84,14 +84,15 @@ function exportToFile(input: ExportWorkerInput): number {
         THEN NULL ELSE SUM(json_extract(a.usage_json,'$.outputTotal')) END AS outputTokens
       FROM requests r LEFT JOIN attempts a ON a.request_id=r.id
       WHERE ${where} GROUP BY r.id ORDER BY r.started_at_ms DESC,r.id DESC LIMIT ?`);
-    descriptor = openSync(input.temporary, 'wx', 0o600);
+    const openedDescriptor = openSync(input.temporary, 'wx', 0o600);
+    descriptor = openedDescriptor;
     created = true;
     let bytes = 0;
     const write = (chunk: string) => {
       const size = Buffer.byteLength(chunk);
       if (bytes + size > MAX_BYTES) throw new ExportLimitError('Export exceeds 5 MB');
       const data = Buffer.from(chunk);
-      for (let offset = 0; offset < data.length; ) offset += writeSync(descriptor!, data, offset);
+      for (let offset = 0; offset < data.length; ) offset += writeSync(openedDescriptor, data, offset);
       bytes += size;
     };
     write(input.format === 'csv' ? `${fields.join(',')}\r\n` : '{"schemaVersion":1,"rows":[');

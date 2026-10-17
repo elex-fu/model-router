@@ -2,6 +2,7 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Agent, type buildConnector, type Dispatcher, ProxyAgent } from 'undici';
 import { createSocks5HConnector } from './provider-http-socks5-connector.js';
+import type { ProviderTlsFingerprintEgress } from './provider-http-tls-fingerprint-connector.js';
 
 export interface ProviderHttpResolvedAddress {
   readonly address: string;
@@ -38,6 +39,12 @@ export interface ProviderHttpConnectorInput extends ProviderHttpResolvedAddress 
   readonly port: number;
   /** R3: when set, the connector tunnels through this egress proxy. */
   readonly proxy?: ProviderHttpEgressProxyTarget;
+  /**
+   * Batch-2 §2.4: when set, the connector dials through the TLS fingerprint
+   * sidecar with this ClientHello profile (per-account egress mode, parallel
+   * to the proxy above). Unset keeps the ordinary connector path.
+   */
+  readonly tlsFingerprint?: ProviderTlsFingerprintEgress;
 }
 
 export interface ProviderHttpPinnedConnector {

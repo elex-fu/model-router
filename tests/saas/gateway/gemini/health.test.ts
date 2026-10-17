@@ -48,3 +48,17 @@ test('429 is rate-limited with failover; 5xx maps to transient without failover'
   assert.equal(badRequest.kind, 'request-error');
   assert.equal(shouldFailover(badRequest), false);
 });
+
+test('batch 2.3: the shared matrix extension reaches the gemini transport view', () => {
+  assert.equal(classifyUpstreamError({ status: 402, bodyText: 'insufficient balance' }).kind, 'insufficient-balance');
+  assert.equal(classifyUpstreamError({ status: 404, bodyText: 'model not found' }).kind, 'model-unavailable');
+  assert.equal(classifyUpstreamError({ status: 403, bodyText: 'quota will reset' }).kind, 'rate-limited');
+  assert.equal(
+    classifyUpstreamError({
+      status: 403,
+      bodyText:
+        "You've reached your concurrent request limit. Please wait for your ongoing requests to finish and try again.",
+    }).kind,
+    'concurrency-limited',
+  );
+});

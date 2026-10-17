@@ -171,6 +171,11 @@ export class FakePaymentDatabase {
       return result<Row>();
     }
 
+    // The per-wallet billing fence (batch 1.2 step 3): a transaction-scoped
+    // exclusive advisory lock. The fake is single-threaded per transaction
+    // with snapshot rollback, so the fence is a no-op here.
+    if (statement.startsWith('select pg_advisory_xact_lock')) return result<Row>();
+
     if (statement.startsWith('select o.id, o.tenant_id, o.project_id')) {
       const order = statement.includes('where o.provider_key =')
         ? this.state.servicePlanOrders.find(

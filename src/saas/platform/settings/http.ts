@@ -35,6 +35,13 @@ export interface PlatformSettingsHttpOptions {
   readonly authService: Pick<PlatformAdminAuthHttpService, 'verifyCsrfToken'>;
   readonly service: Pick<PlatformSettingsService, 'list' | 'set' | 'setSecret' | 'get'>;
   readonly publicOrigin: string;
+  /**
+   * Best-effort post-write notification (batch-5 §5.2): called with the
+   * written key after every successful mutation, never awaited and never
+   * allowed to fail the response. The managed runtime uses it to trigger an
+   * eager public brand snapshot re-materialization on `saas.brand.*` writes.
+   */
+  readonly afterWrite?: (key: string) => void;
 }
 
 export type PlatformSettingsHttpHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
@@ -228,6 +235,16 @@ function settingsErrorStatus(error: PlatformSettingsError): { status: number; co
   }
 }
 
+/** Fires the optional afterWrite hook; a hook failure never fails the response. */
+function notifyAfterWrite(options: PlatformSettingsHttpOptions, key: string): void {
+  if (options.afterWrite === undefined) return;
+  try {
+    options.afterWrite(key);
+  } catch (error) {
+    console.error('model-router platform settings afterWrite hook failed', error);
+  }
+}
+
 function settingDto(record: PlatformSettingRecord): Record<string, unknown> {
   return record.secret
     ? {
@@ -303,11 +320,13 @@ export function createPlatformSettingsHttpHandler(options: PlatformSettingsHttpO
           throw new HttpError(400, 'INVALID_BODY', 'Request body contains an invalid secret value');
         }
         const record = await options.service.setSecret({ key, secret, expectedVersion, actor: actorContext });
+        notifyAfterWrite(options, key);
         sendJson(res, 200, requestId, settingDto(record));
         return true;
       }
       requireExactKeys(body, ['key', 'value', 'expectedVersion']);
       const record = await options.service.set({ key, value: body.value, expectedVersion, actor: actorContext });
+      notifyAfterWrite(options, key);
       sendJson(res, 200, requestId, settingDto(record));
       return true;
     } catch (error) {

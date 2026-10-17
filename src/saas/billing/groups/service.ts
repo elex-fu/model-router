@@ -27,7 +27,7 @@ const GROUP_COLUMNS = `
   model_pricing,
   rpm_limit, daily_limit_minor_units, weekly_limit_minor_units, monthly_limit_minor_units,
   profit_min_margin_num, profit_min_margin_den, profit_safety_buffer_num, profit_safety_buffer_den,
-  claude_code_only, fallback_group_id, supported_model_scopes,
+  claude_code_only, fallback_group_id, supported_model_scopes, composite,
   status, created_at, updated_at`;
 
 function fail(code: SaasBillingGroupsErrorCode): never {
@@ -50,6 +50,7 @@ function normalizeUpsert(
     fail('INVALID_INPUT');
   }
   if (input.status !== 'active' && input.status !== 'disabled') fail('INVALID_INPUT');
+  if (typeof input.composite !== 'boolean') fail('INVALID_INPUT');
   if (input.rateMultiplier.numerator <= 0n || input.rateMultiplier.denominator <= 0n) fail('INVALID_MULTIPLIER');
   if (input.topupMultiplier.numerator <= 0n || input.topupMultiplier.denominator <= 0n) fail('INVALID_MULTIPLIER');
   if (input.peakEnabled) {
@@ -126,10 +127,10 @@ export class SaasBillingGroupsService {
            model_pricing,
            rpm_limit, daily_limit_minor_units, weekly_limit_minor_units, monthly_limit_minor_units,
            profit_min_margin_num, profit_min_margin_den, profit_safety_buffer_num, profit_safety_buffer_den,
-           claude_code_only, fallback_group_id, supported_model_scopes,
+           claude_code_only, fallback_group_id, supported_model_scopes, composite,
            status, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
          ON CONFLICT (id) DO NOTHING
          RETURNING ${GROUP_COLUMNS}`,
         upsertValues(normalized, createdAt),
@@ -159,7 +160,8 @@ export class SaasBillingGroupsService {
            profit_min_margin_num = $17, profit_min_margin_den = $18,
            profit_safety_buffer_num = $19, profit_safety_buffer_den = $20,
            claude_code_only = $21, fallback_group_id = $22, supported_model_scopes = $23,
-           status = $24, updated_at = $26
+           composite = $24,
+           status = $25, updated_at = $27
          WHERE id = $1
          RETURNING ${GROUP_COLUMNS}`,
         values,
@@ -339,7 +341,7 @@ export class SaasBillingGroupsService {
               g.rpm_limit, g.daily_limit_minor_units, g.weekly_limit_minor_units, g.monthly_limit_minor_units,
               g.profit_min_margin_num, g.profit_min_margin_den,
               g.profit_safety_buffer_num, g.profit_safety_buffer_den,
-              g.claude_code_only, g.fallback_group_id, g.supported_model_scopes,
+              g.claude_code_only, g.fallback_group_id, g.supported_model_scopes, g.composite,
               g.status, g.created_at, g.updated_at
          FROM saas_tenants t
          JOIN saas_billing_groups g ON g.id = COALESCE(t.default_billing_group_id, 'default')
@@ -397,6 +399,7 @@ function upsertValues(
     normalized.claudeCodeOnly,
     normalized.fallbackGroupId,
     normalized.supportedModelScopes === null ? null : [...normalized.supportedModelScopes],
+    normalized.composite,
     normalized.status,
     timestamp,
     timestamp,

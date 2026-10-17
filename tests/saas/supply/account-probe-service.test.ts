@@ -569,3 +569,94 @@ test('gemini probe classifies upstream 429 and 401 through the shared taxonomy',
   assert.equal(invalid.reason, 'credential_invalid');
   assert.equal(malformed.requests.length, 0);
 });
+
+test('vertex probe posts the Anthropic-on-Vertex rawPredict challenge with the vertex body', async () => {
+  const h = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-vertex',
+      product_id: 'vertex-ai',
+      credential_type: 'service_account',
+    }),
+    secret: JSON.stringify({
+      type: 'service_account',
+      client_email: 'vertex-sa@test.iam.gserviceaccount.com',
+      private_key: 'runtime-generated-in-production',
+      project_id: 'project-1',
+      location: 'europe-west4',
+      access_token: 'vertex-access-token',
+      expires_at: new Date(1_000_000 + 3_600_000).toISOString(),
+    }),
+    response: new Response(
+      JSON.stringify({
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-haiku-4-5',
+        content: [{ type: 'text', text: '17' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 9, output_tokens: 2 },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  });
+  const outcome = await h.probe('tenant', 'vertex');
+  assert.deepEqual(
+    { ...outcome, latencyMs: 0 },
+    {
+      category: 'ok',
+      httpStatus: 200,
+      latencyMs: 0,
+      resetAt: null,
+      usage: { inputTokens: 9, outputTokens: 2 },
+      reason: null,
+    },
+  );
+  const request = h.requests[0];
+  assert.ok(request);
+  // The pinned production URL: regional host, publishers/anthropic, rawPredict.
+  assert.equal(
+    request.url,
+    'https://europe-west4-aiplatform.googleapis.com/v1/projects/project-1/locations/europe-west4/publishers/anthropic/models/claude-haiku-4-5:rawPredict',
+  );
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.headers?.authorization, 'Bearer vertex-access-token');
+  assert.equal(request.init.redirect, 'manual');
+  // The vertex body: no model field, anthropic_version injected.
+  const body = JSON.parse(String(request.init.body)) as Record<string, unknown>;
+  assert.equal('model' in body, false);
+  assert.equal(body.anthropic_version, 'vertex-2023-10-16');
+  assert.deepEqual(body.messages, [{ role: 'user', content: CHALLENGE.prompt }]);
+});
+
+test('vertex probe exchanges a fresh JWT when the envelope token is stale or absent', async () => {
+  const h = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-vertex',
+      product_id: 'vertex-ai',
+      credential_type: 'service_account',
+    }),
+    // No access_token: the probe must exchange the SA JWT inline first.
+    secret: JSON.stringify({
+      type: 'service_account',
+      client_email: 'vertex-sa@test.iam.gserviceaccount.com',
+      private_key: 'needs-a-real-key-for-signing',
+      project_id: 'project-1',
+      token_uri: 'https://oauth2.googleapis.com/token',
+    }),
+  });
+  const invalid = await h.probe('tenant', 'vertex');
+  assert.equal(invalid.category, 'error');
+  assert.equal(invalid.reason, 'credential_invalid');
+  // A non-service-account envelope fails closed the same way.
+  const notSa = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-vertex',
+      product_id: 'vertex-ai',
+      credential_type: 'service_account',
+    }),
+    secret: JSON.stringify({ access_token: 'x' }),
+  });
+  const invalidMaterial = await notSa.probe('tenant', 'vertex');
+  assert.equal(invalidMaterial.category, 'error');
+  assert.equal(invalidMaterial.reason, 'credential_invalid');
+  assert.equal(notSa.requests.length, 0);
+});

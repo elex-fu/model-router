@@ -7,6 +7,7 @@ import {
   keyBudgetUtcDayFrom,
   reserveKeyBudgetCounters,
   selectKeyBudgetPolicyHead,
+  selectKeyBudgetRollingChargeWindows,
 } from '../keys/budget-store.js';
 import type { SupplyMode } from './contracts.js';
 
@@ -166,6 +167,57 @@ export function createPostgresKeyBudgetAdmission(options: PostgresKeyBudgetAdmis
       );
       if (!verdict.allowed) {
         throw new KeyBudgetAdmissionDeniedError(verdict.deniedDimension);
+      }
+
+      // R1 (roadmap 1.3, phase 3): the rolling 5h/7d USD windows. The
+      // trailing ledger sum already includes this request's reservation (the
+      // reserve above inserted it), so the new reservation is re-exposed the
+      // same way the daily/lifetime windows do. Only platform charges apply;
+      // caps are optional and absent means unlimited.
+      const rollingCapsConfigured = head.charge5h !== null || head.charge7d !== null;
+      if (facts.supplyMode === 'platform' && rollingCapsConfigured) {
+        if (charge === null) storageFailure();
+        const rollingChargeCurrency = charge?.currency ?? reserved.chargeCurrency;
+        if (rollingChargeCurrency === null) storageFailure();
+        const rolling = await selectKeyBudgetRollingChargeWindows(executor, {
+          tenantId: facts.tenantId,
+          lineageId: head.lineageId,
+          chargeCurrency: rollingChargeCurrency as string,
+          now: options.now(),
+        });
+        const chargeAmount = charge?.amountMinorUnits ?? '0';
+        const rollingVerdict = evaluateProxyKeyBudgetAdmission(
+          {
+            supplyMode: 'platform',
+            tokenCaps: { daily: null, lifetime: null },
+            customerChargeCaps: {
+              currency: rollingChargeCurrency as string,
+              daily: null,
+              lifetime: null,
+              fiveHour: head.charge5h,
+              sevenDay: head.charge7d,
+            },
+          },
+          {
+            supplyMode: 'platform',
+            customerChargeUsage: {
+              currency: rollingChargeCurrency as string,
+              fiveHour: {
+                settled: '0',
+                outstandingReserved: subtract(rolling.fiveHour, chargeAmount),
+                newReservation: chargeAmount,
+              },
+              sevenDay: {
+                settled: '0',
+                outstandingReserved: subtract(rolling.sevenDay, chargeAmount),
+                newReservation: chargeAmount,
+              },
+            },
+          },
+        );
+        if (!rollingVerdict.allowed) {
+          throw new KeyBudgetAdmissionDeniedError(rollingVerdict.deniedDimension);
+        }
       }
     },
   };

@@ -57,7 +57,7 @@ test('worker uses file-backed read-only SQLite and preserves CSV escaping and pe
     assert.equal(rows, 1);
     const csv = readFileSync(input.destination, 'utf8');
     assert.match(csv, /requestId,source,startedAt/);
-    assert.match(csv, /'  =HYPERLINK\(""bad""\)/);
+    assert.match(csv, /' {2}=HYPERLINK\(""bad""\)/);
     assert.equal(statSync(input.destination).mode & 0o777, 0o600);
     assert.equal(existsSync(input.temporary), false);
   } finally {

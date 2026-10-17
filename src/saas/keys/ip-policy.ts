@@ -91,7 +91,7 @@ function parseAddress(input: unknown): ParsedAddress {
 
 function parsePeerAddress(input: unknown): ParsedAddress {
   const address = parseAddress(input);
-  if (address.version === 6 && (address.value >> 32n) === 0xffffn) {
+  if (address.version === 6 && address.value >> 32n === 0xffffn) {
     return { version: 4, bits: 32, value: address.value & IPV4_MASK };
   }
   return address;
@@ -125,7 +125,7 @@ function parseNetwork(input: unknown): ParsedNetwork {
     return { ...address, value: address.value & mask, prefix };
   }
 
-  if ((address.value >> 32n) === 0xffffn) {
+  if (address.value >> 32n === 0xffffn) {
     if (prefix < 96) return invalid('IPv4-mapped IPv6 CIDRs must use a /96..128 prefix');
     const mappedPrefix = prefix - 96;
     const mappedValue = address.value & IPV4_MASK;
@@ -142,15 +142,11 @@ function parseNetwork(input: unknown): ParsedNetwork {
 }
 
 function formatIPv4(value: bigint): string {
-  return [24n, 16n, 8n, 0n]
-    .map((shift) => Number((value >> shift) & 0xffn).toString(10))
-    .join('.');
+  return [24n, 16n, 8n, 0n].map((shift) => Number((value >> shift) & 0xffn).toString(10)).join('.');
 }
 
 function formatIPv6(value: bigint): string {
-  const words = Array.from({ length: 8 }, (_, index) =>
-    Number((value >> BigInt((7 - index) * 16)) & 0xffffn),
-  );
+  const words = Array.from({ length: 8 }, (_, index) => Number((value >> BigInt((7 - index) * 16)) & 0xffffn));
 
   let bestStart = -1;
   let bestLength = 1;

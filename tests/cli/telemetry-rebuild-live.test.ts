@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -59,9 +59,13 @@ function watchSqliteHolder(child: ChildProcess) {
   let closed = false;
   let exited = false;
   let processError: Error | undefined;
-  const onError = (error: Error) => { processError = error; };
+  const onError = (error: Error) => {
+    processError = error;
+  };
   child.on('error', onError);
-  child.once('exit', () => { exited = true; });
+  child.once('exit', () => {
+    exited = true;
+  });
   const close = new Promise<void>((resolve) => {
     child.once('close', () => {
       closed = true;
@@ -77,9 +81,13 @@ function watchSqliteHolder(child: ChildProcess) {
     try {
       return await Promise.race([
         close.then(() => true),
-        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), milliseconds); }),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), milliseconds);
+        }),
       ]);
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function waitForReady(): Promise<void> {
@@ -92,12 +100,21 @@ function watchSqliteHolder(child: ChildProcess) {
         child.off('exit', onFailure);
         child.off('close', onFailure);
       };
-      const onFailure = () => { cleanup(); reject(new Error('SQLite holder failed before readiness')); };
+      const onFailure = () => {
+        cleanup();
+        reject(new Error('SQLite holder failed before readiness'));
+      };
       const onData = (data: Buffer) => {
         output += data.toString();
-        if (output.length > 4096) { onFailure(); return; }
+        if (output.length > 4096) {
+          onFailure();
+          return;
+        }
         if (/(?:^|\n)ready\n/.test(output)) {
-          if (processError || hasExited() || closed) { onFailure(); return; }
+          if (processError || hasExited() || closed) {
+            onFailure();
+            return;
+          }
           cleanup();
           resolve();
         }
@@ -118,13 +135,16 @@ function watchSqliteHolder(child: ChildProcess) {
   async function terminateAndClose(): Promise<void> {
     const signal = (name: NodeJS.Signals) => {
       if (closed || hasExited()) return;
-      try { child.kill(name); }
-      catch { processError = new Error('SQLite holder signal failed'); }
+      try {
+        child.kill(name);
+      } catch {
+        processError = new Error('SQLite holder signal failed');
+      }
     };
     signal('SIGTERM');
-    if (!await waitForClose(2_000)) {
+    if (!(await waitForClose(2_000))) {
       signal('SIGKILL');
-      if (!await waitForClose(2_000)) throw new Error('SQLite holder close deadline; cleanup unproved');
+      if (!(await waitForClose(2_000))) throw new Error('SQLite holder close deadline; cleanup unproved');
     }
     if (processError) throw new Error('SQLite holder lifecycle failed');
   }

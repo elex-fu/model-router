@@ -27,6 +27,16 @@ export interface ProviderSseUsageEvidence {
   /** Provider-side values from the signed/persisted prepared evidence. */
   readonly providerProtocol?: string;
   readonly providerOperation?: string;
+  /**
+   * §4.1 (roadmap batch 4) media observation seam. Media responses are JSON
+   * documents, not SSE event streams, so the SSE observer itself never
+   * extracts per-unit usage; this reserved hook lets a #16/#17 category
+   * transport surface a usage observation it captured out-of-band (e.g. a
+   * terminal JSON body recorded by the async-task path) through the same
+   * settle channel instead of the stream parser. Null (the default) keeps
+   * the pure parser behavior.
+   */
+  readonly mediaUsage?: NormalSuccessObservedUsage | null;
 }
 
 export interface ProviderSseObservedStream {
@@ -545,6 +555,12 @@ export function observeProviderSseUsage(
       // The reader may have been released while cancellation was in flight.
     }
   };
+  /*
+   * §4.1 seam: an out-of-band media observation (recorded by a #16/#17
+   * category transport) settles immediately at EOF when the stream parser
+   * found nothing — media bodies carry no SSE usage events.
+   */
+  const mediaUsage = evidence.mediaUsage ?? null;
 
   const observedBody = new ReadableStream<Uint8Array>(
     {
@@ -558,7 +574,12 @@ export function observeProviderSseUsage(
           }
           if (next.done) {
             controller.close();
-            settle(parser.finish());
+            const parsed = parser.finish();
+            if (parsed.state === 'unknown' && mediaUsage !== null) {
+              settle({ state: 'reported', usage: mediaUsage });
+            } else {
+              settle(parsed);
+            }
             releaseReader();
             return;
           }

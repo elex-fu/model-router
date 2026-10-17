@@ -6,8 +6,10 @@ import { pathToFileURL } from 'node:url';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
 import { CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION } from '../../../../src/saas/db/migrations/035_credential_validation_jobs.js';
 import {
-  CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS, CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS,
-  CREDENTIAL_VALIDATION_INVALIDATION_TRIGGER_EXECUTION_SAAS_MIGRATION, CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS,
+  CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS,
+  CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS,
+  CREDENTIAL_VALIDATION_INVALIDATION_TRIGGER_EXECUTION_SAAS_MIGRATION,
+  CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS,
 } from '../../../../src/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.js';
 
 // Static/source assertions, not PostgreSQL execution or a financial/worker proof.
@@ -19,16 +21,31 @@ test('058 is the exact second forward after frozen 001-056; 057 retains its FIN 
   assert.equal(migration.version, 58);
   assert.equal(migration.name, 'credential_validation_invalidation_trigger_execution');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
-  assert.deepEqual(SAAS_MIGRATIONS.slice(0, 56).map(({ version }) => version), Array.from({ length: 56 }, (_, i) => i + 1));
-  assert.deepEqual(SAAS_MIGRATIONS.slice(0, 58).map(({ version }) => version), Array.from({ length: 58 }, (_, i) => i + 1));
+  assert.deepEqual(
+    SAAS_MIGRATIONS.slice(0, 56).map(({ version }) => version),
+    Array.from({ length: 56 }, (_, i) => i + 1),
+  );
+  assert.deepEqual(
+    SAAS_MIGRATIONS.slice(0, 58).map(({ version }) => version),
+    Array.from({ length: 58 }, (_, i) => i + 1),
+  );
   assert.equal(SAAS_MIGRATIONS[56]?.name, 'normal_success_usage_evidence_reference');
   assert.equal(SAAS_MIGRATIONS[57], migration);
   for (const [file, hash] of [
     ['035_credential_validation_jobs.ts', '5dce54853124a8bae3ff9f4e43ddd4787f1f77ac07e39fdab484279c8ad410d9'],
-    ['054_trigger_only_trusted_execution.ts', '6375222a33353e1dafed61826e062024d8291e911ffb7cd173d1e3e0fa98f7a3'],
-    ['055_prepared_evidence_optional_validity_scalars.ts', 'ed8ef3bfe1a3ddaa6d39111486429b3b86b193aee8dda01fe58e62634d8ba660'],
-    ['056_restricted_role_check_and_platform_auth_execution.ts', '13e1e5330447ecfb78e137b7054d0ec384254e865e91e7e98004222fe450ac13'],
-    ['057_normal_success_usage_evidence_reference.ts', 'f718700b39171675983af642dddc4135e4d236e930c758a77fd9bb7c2aa73ca1'],
+    ['054_trigger_only_trusted_execution.ts', 'f0491dcb5faade8b3f5424fbbe00c1c21ba63f32a66bc59c5550725e1642142e'],
+    [
+      '055_prepared_evidence_optional_validity_scalars.ts',
+      'b12307336855edc86e3386154ae085e73cae7e82dd3b05a228624bdfd15fcbb4',
+    ],
+    [
+      '056_restricted_role_check_and_platform_auth_execution.ts',
+      'bc6f3ca5466597eeb4e65a4c6cfd288a532f43cbb230c54fe40d69fff0f35a59',
+    ],
+    [
+      '057_normal_success_usage_evidence_reference.ts',
+      'f718700b39171675983af642dddc4135e4d236e930c758a77fd9bb7c2aa73ca1',
+    ],
   ] as const) {
     const source = readFileSync(new URL(`../../../../src/saas/db/migrations/${file}`, pathToFileURL(__filename)));
     assert.equal(createHash('sha256').update(source).digest('hex'), hash, file);
@@ -37,7 +54,8 @@ test('058 is the exact second forward after frozen 001-056; 057 retains its FIN 
 
 test('058 pins both exact 035 invalidation bodies and leaves the identity/delete helpers unchanged', () => {
   assert.deepEqual(CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS, [
-    'saas_invalidate_account_credential_validation_jobs()', 'saas_invalidate_credential_validation_jobs()',
+    'saas_invalidate_account_credential_validation_jobs()',
+    'saas_invalidate_credential_validation_jobs()',
   ]);
   assert.equal(CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS.length, 4);
   const historical = CREDENTIAL_VALIDATION_JOBS_SAAS_MIGRATION.sql;
@@ -46,9 +64,16 @@ test('058 pins both exact 035 invalidation bodies and leaves the identity/delete
     const first = historical.indexOf(marker);
     assert.ok(first >= 0);
     assert.equal(historical.indexOf(marker, first + marker.length), -1);
-    assert.equal(source, historical.slice(first + marker.length, historical.indexOf('\n$$;', first + marker.length) + 1));
+    assert.equal(
+      source,
+      historical.slice(first + marker.length, historical.indexOf('\n$$;', first + marker.length) + 1),
+    );
     assert.ok(sql.includes(source));
-    assert.doesNotMatch(source, /\b(?:PERFORM|SELECT)\b|\bsaas_[a-z_]+\s*\(/i, 'original wrappers/guards introduce no nested application helper');
+    assert.doesNotMatch(
+      source,
+      /\b(?:PERFORM|SELECT)\b|\bsaas_[a-z_]+\s*\(/i,
+      'original wrappers/guards introduce no nested application helper',
+    );
   }
   assert.match(sql, /lease_generation = lease_generation \+ 1/);
   assert.match(sql, /NEW\.current_version IS DISTINCT FROM OLD\.current_version/);
@@ -59,9 +84,17 @@ test('058 pins both exact 035 invalidation bodies and leaves the identity/delete
 });
 
 test('058 binds exactly the two AFTER UPDATE wrappers and the original immutable/no-delete helpers', () => {
-  assert.deepEqual(CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS.map(([, , , type, columns]) => [type, columns]),
-    [[17, ['status']], [17, ['current_version', 'status']], [19, []], [11, []]]);
-  for (const [, name] of CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS) assert.ok(sql.includes(`'${name.slice(0, 63)}'`));
+  assert.deepEqual(
+    CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS.map(([, , , type, columns]) => [type, columns]),
+    [
+      [17, ['status']],
+      [17, ['current_version', 'status']],
+      [19, []],
+      [11, []],
+    ],
+  );
+  for (const [, name] of CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS)
+    assert.ok(sql.includes(`'${name.slice(0, 63)}'`));
   assert.match(commands, /t\.tgattr::text = pg_catalog\.array_to_string/);
   assert.match(commands, /ORDER BY cols\.position/);
   assert.match(commands, /t\.tgnargs = 0 AND t\.tgargs = pg_catalog\.decode\('', 'hex'\)/);
@@ -73,7 +106,10 @@ test('058 binds exactly the two AFTER UPDATE wrappers and the original immutable
 });
 
 test('058 fails closed on original owner/source/invoker/role drift before its bounded metadata changes', () => {
-  assert.match(commands, /current_user IS DISTINCT FROM 'model_router_saas_migrator' OR session_user IS DISTINCT FROM current_user/);
+  assert.match(
+    commands,
+    /current_user IS DISTINCT FROM 'model_router_saas_migrator' OR session_user IS DISTINCT FROM current_user/,
+  );
   assert.match(commands, /routine\.proowner IS DISTINCT FROM trusted_owner/);
   assert.match(commands, /routine\.prosrc IS DISTINCT FROM expected\.source/);
   assert.match(commands, /OR routine\.prosecdef OR routine\.proconfig IS NOT NULL/);
@@ -82,23 +118,46 @@ test('058 fails closed on original owner/source/invoker/role drift before its bo
   assert.match(commands, /pg_catalog\.has_function_privilege\(r\.oid, p\.oid, 'EXECUTE'\)/);
   assert.match(commands, /a\.grantee = 0 AND a\.privilege_type = 'EXECUTE'/);
   assert.match(commands, /a\.grantee <> trusted_owner AND a\.privilege_type = 'CREATE'/);
-  assert.match(commands, /LOCK TABLE model_router_saas\.saas_tenant_provider_accounts,\s+model_router_saas\.saas_tenant_provider_credentials,\s+model_router_saas\.saas_tenant_provider_credential_validation_jobs IN ACCESS EXCLUSIVE MODE/);
+  assert.match(
+    commands,
+    /LOCK TABLE model_router_saas\.saas_tenant_provider_accounts,\s+model_router_saas\.saas_tenant_provider_credentials,\s+model_router_saas\.saas_tenant_provider_credential_validation_jobs IN ACCESS EXCLUSIVE MODE/,
+  );
   assert.match(commands, /'ALTER FUNCTION model_router_saas\.%s SECURITY DEFINER'/);
-  assert.match(commands, /'ALTER FUNCTION model_router_saas\.%s SET search_path TO pg_catalog, model_router_saas, pg_temp'/);
+  assert.match(
+    commands,
+    /'ALTER FUNCTION model_router_saas\.%s SET search_path TO pg_catalog, model_router_saas, pg_temp'/,
+  );
   assert.match(commands, /pg_catalog\.cardinality\(target_oids\) <> 2/);
 });
 
 test('058 compares the whole managed catalog, exempting only target prosecdef/proconfig and no other function attributes', () => {
   assert.equal((commands.match(/CASE WHEN p\.oid = ANY\(target_oids\)/g) ?? []).length, 2);
-  assert.equal((commands.match(/pg_catalog\.to_jsonb\(p\) - 'prosecdef' - 'proconfig' ELSE pg_catalog\.to_jsonb\(p\)/g) ?? []).length, 2);
-  for (const catalog of ['function_catalog', 'table_acl', 'column_catalog', 'constraint_catalog', 'trigger_catalog', 'index_catalog']) {
+  assert.equal(
+    (commands.match(/pg_catalog\.to_jsonb\(p\) - 'prosecdef' - 'proconfig' ELSE pg_catalog\.to_jsonb\(p\)/g) ?? [])
+      .length,
+    2,
+  );
+  for (const catalog of [
+    'function_catalog',
+    'table_acl',
+    'column_catalog',
+    'constraint_catalog',
+    'trigger_catalog',
+    'index_catalog',
+  ]) {
     assert.ok(commands.includes(`${catalog}_after IS DISTINCT FROM ${catalog}_before`));
   }
   assert.match(commands, /p\.prosecdef IS DISTINCT FROM \(p\.oid = ANY\(target_oids\)\)/);
   assert.match(commands, /p\.proconfig IS DISTINCT FROM ARRAY\['search_path=pg_catalog, model_router_saas, pg_temp'\]/);
   assert.match(commands, /NOT p\.oid = ANY\(target_oids\) AND p\.proconfig IS NOT NULL/);
-  assert.doesNotMatch(commands, /\b(?:CREATE(?: OR REPLACE)? FUNCTION|ALTER TABLE|CREATE TRIGGER|ALTER TRIGGER|DISABLE TRIGGER|GRANT|REVOKE|ALTER ROLE|CREATE ROLE|SET ROLE|DROP|TRUNCATE|OWNER TO)\b/i);
-  assert.doesNotMatch(commands, /\b(?:ADD\s+(?:(?:COLUMN|CONSTRAINT)\s+)?IF\s+NOT\s+EXISTS|NOT VALID|VALIDATE CONSTRAINT)\b/i);
+  assert.doesNotMatch(
+    commands,
+    /\b(?:CREATE(?: OR REPLACE)? FUNCTION|ALTER TABLE|CREATE TRIGGER|ALTER TRIGGER|DISABLE TRIGGER|GRANT|REVOKE|ALTER ROLE|CREATE ROLE|SET ROLE|DROP|TRUNCATE|OWNER TO)\b/i,
+  );
+  assert.doesNotMatch(
+    commands,
+    /\b(?:ADD\s+(?:(?:COLUMN|CONSTRAINT)\s+)?IF\s+NOT\s+EXISTS|NOT VALID|VALIDATE CONSTRAINT)\b/i,
+  );
   // The only UPDATE text is the byte-identical body inside $source_0/1$;
   // the DO block never executes business DML or a historical/ledger rewrite.
   const outsideExpectedBodies = commands.replace(/\$source_\d+\$[\s\S]*?\$source_\d+\$/g, '');

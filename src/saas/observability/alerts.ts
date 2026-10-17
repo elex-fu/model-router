@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { computeCustomerWebhookSignature } from '../webhooks/signatures.js';
+import { type AlertSilenceRecord, isRuleSilenced } from './alert-silences.js';
 
 /**
  * Phase 3 observability alerts (design:
@@ -501,6 +502,26 @@ interface ChannelMinuteRow {
   readonly errors: number;
 }
 
+interface AlertSilenceScopeRow {
+  readonly rule_id: string | null;
+  readonly platform: string | null;
+  readonly group_id: string | null;
+  readonly region: string | null;
+  readonly until: Date | string;
+}
+
+function silenceScopeToRecord(
+  row: AlertSilenceScopeRow,
+): Pick<AlertSilenceRecord, 'ruleId' | 'platform' | 'groupId' | 'region' | 'until'> {
+  return {
+    ruleId: row.rule_id,
+    platform: row.platform,
+    groupId: row.group_id,
+    region: row.region,
+    until: row.until instanceof Date ? row.until.toISOString() : new Date(row.until).toISOString(),
+  };
+}
+
 async function loadChannelSamples(
   database: SaasDatabase,
   metric: ParsedAlertMetric,
@@ -542,11 +563,20 @@ export async function runAlertEvaluatorCycle(
   const rules = await database.query<AlertRuleRow>(
     'SELECT * FROM saas_obs_alert_rules WHERE enabled ORDER BY created_at, id',
   );
+  // Batch 5 §5.6: operator silences (migration 127). A silenced rule is
+  // skipped entirely this cycle — it neither triggers nor auto-resolves.
+  const silences = await database
+    .query<AlertSilenceScopeRow>(
+      'SELECT rule_id, platform, group_id, region, until FROM saas_obs_alert_silences WHERE until > now()',
+    )
+    .then((result) => result.rows.map(silenceScopeToRecord))
+    .catch(() => []);
   let triggered = 0;
   for (const row of rules.rows) {
     const rule = toRuleRecord(row);
     const parsed = parseAlertMetric(rule.metric);
     if (!parsed) continue;
+    if (isRuleSilenced(rule.id, parsed.provider, silences, now().getTime())) continue;
     // The rule-row lease: another replica evaluating this rule skips it.
     const triggeredEntry = await database.transaction(async (tx) => {
       const locked = await tx.query<AlertRuleRow>(
@@ -570,7 +600,20 @@ export async function runAlertEvaluatorCycle(
         nowMs: now().getTime(),
         pointInTime: parsed.name === 'wallet_active_holds',
       });
-      if (!evaluation.shouldTrigger) return null;
+      // Batch 5 §5.6 auto-resolve: a cycle that does not violate the window
+      // closes the rule's open (firing) events. Resolution rides the same
+      // rule-row lease as triggering, so at most one replica writes it.
+      let resolvedCount = 0;
+      if (!evaluation.violates) {
+        const resolved = await tx.query(
+          'UPDATE saas_obs_alert_events SET resolved_at = $2 WHERE rule_id = $1 AND resolved_at IS NULL',
+          [rule.id, now().toISOString()],
+        );
+        resolvedCount = resolved.rowCount ?? 0;
+      }
+      if (!evaluation.shouldTrigger) {
+        return resolvedCount > 0 ? { rule, evaluation, payload: null, resolvedCount } : null;
+      }
       const eventId = randomUUID();
       const triggeredAt = now().toISOString();
       const payload: AlertNotificationPayload = {
@@ -591,11 +634,12 @@ export async function runAlertEvaluatorCycle(
         [eventId, rule.id, triggeredAt, JSON.stringify(payload)],
       );
       await tx.query('UPDATE saas_obs_alert_rules SET last_triggered_at = $2 WHERE id = $1', [rule.id, triggeredAt]);
-      return { rule, evaluation, payload };
+      return { rule, evaluation, payload, resolvedCount };
     });
     if (!triggeredEntry) continue;
-    triggered += 1;
+    if (triggeredEntry.payload !== null) triggered += 1;
     options.onTriggered?.(triggeredEntry.rule, triggeredEntry.evaluation);
+    if (triggeredEntry.payload === null) continue;
     // Notifications are outside the trigger transaction: a failed notify must
     // never roll back the durable event or reset the cooldown.
     if (triggeredEntry.rule.notifyEmail) {

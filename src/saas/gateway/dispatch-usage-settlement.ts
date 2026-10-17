@@ -35,6 +35,13 @@ export interface NormalSuccessCompletionInput {
   readonly snapshot: NormalSuccessSettlementSnapshot;
   readonly usage: NormalSuccessObservedUsage;
   readonly usageEvidenceDigest?: string;
+  /**
+   * §4.1 service-tier settlement terms (requested tier from the request
+   * payload, observed tier from the response). Absent keeps the base rate;
+   * the only-lower rule means an observed tier can never raise the charge.
+   * The category transports (#16/#17) feed this from their observers.
+   */
+  readonly serviceTier?: { readonly requested: string | null; readonly observed: string | null } | null;
 }
 
 export interface NormalSuccessUncertaintyInput {
@@ -95,7 +102,19 @@ const USAGE_FIELDS = [
 ] as const;
 
 function usageDigest(usage: NormalizedUsage): string {
-  const material = USAGE_FIELDS.map((field) => `${field}=${usage[field] ?? 'null'}`).join('&');
+  /*
+   * §4.1 (task #15) anti-drift, the #14 policy applied to usage evidence:
+   * the media fields enter the digest material ONLY when the observation is
+   * media (non-token mode, unit count, or tier present). A token-only
+   * observation digests to exactly its pre-4.1 value — verified by
+   * regression test, because this digest is the normal-success usage
+   * evidence reference bound into the settlement proof.
+   */
+  const material =
+    USAGE_FIELDS.map((field) => `${field}=${usage[field] ?? 'null'}`).join('&') +
+    (usage.billingMode === 'token' && usage.units === null && usage.sizeTier === null
+      ? ''
+      : `&billingMode=${usage.billingMode ?? 'token'}&units=${usage.units ?? 'null'}&sizeTier=${usage.sizeTier ?? 'null'}`);
   return createHash('sha256').update(material).digest('hex');
 }
 
@@ -110,6 +129,9 @@ function exactUsage(usage: NormalizedUsage): UsageValues {
     cacheWrite1h: exact(usage.cacheWrite1h),
     outputTotal: exact(usage.outputTotal),
     reasoningOutput: exact(usage.reasoningOutput),
+    billingMode: usage.billingMode ?? 'token',
+    units: exact(usage.units ?? null),
+    sizeTier: usage.sizeTier ?? null,
     status: 'reported',
     source: 'upstream',
     semanticsVersion: usage.semanticsVersion,
@@ -119,12 +141,19 @@ function exactUsage(usage: NormalizedUsage): UsageValues {
 }
 
 function assertUsage(usage: NormalizedUsage): asserts usage is NormalSuccessObservedUsage {
-  if (
-    usage.status !== 'reported' ||
-    usage.source !== 'upstream' ||
-    usage.inputTotal === null ||
-    usage.outputTotal === null
-  ) {
+  // §4.1: a media observation is complete with a unit count even when the
+  // transport reports no token counters at all (image generation).
+  const media = (usage.billingMode ?? 'token') !== 'token' || usage.units !== null;
+  if (usage.status !== 'reported' || usage.source !== 'upstream') {
+    throw new Error('provider usage is not a complete upstream report');
+  }
+  if (media) {
+    if (usage.units === null) {
+      throw new Error('provider usage is not a complete upstream report');
+    }
+    return;
+  }
+  if (usage.inputTotal === null || usage.outputTotal === null) {
     throw new Error('provider usage is not a complete upstream report');
   }
 }
@@ -209,8 +238,10 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
           cacheWrite1h: input.usage.cacheWrite1h,
           outputTotal: input.usage.outputTotal,
           reasoningOutput: input.usage.reasoningOutput,
+          perUnitUnits: input.usage.units ?? null,
+          sizeTier: input.usage.sizeTier ?? null,
         },
-        { requireComplete: false },
+        { requireComplete: false, serviceTier: input.serviceTier ?? null },
       );
       if (!calculation.complete) throw new Error('provider usage is insufficient for the selected price');
       chargeAmountMinorUnits = multiplyMinorUnits(

@@ -75,14 +75,26 @@ test('053 is a forward registration with no new callable function or privilege e
 
 test('053 attests exact matching 050 exclusive writers and actual immutable guard contracts', () => {
   const historical = PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql;
-  assert.equal(dollarBody(sql, 'expected_writer'), originalBody(historical, 'saas_prepared_evidence_authorization_writer_fence'));
-  assert.equal(dollarBody(sql, 'expected_writer_layer'),
-    originalBody(historical, 'saas_prepared_evidence_writer_lock_layer', '(fence_keys text[]) RETURNS void'));
-  assert.equal(dollarBody(sql, 'expected_immutable'), originalBody(INITIAL_SAAS_MIGRATION.sql, 'saas_reject_immutable_change'));
+  assert.equal(
+    dollarBody(sql, 'expected_writer'),
+    originalBody(historical, 'saas_prepared_evidence_authorization_writer_fence'),
+  );
+  assert.equal(
+    dollarBody(sql, 'expected_writer_layer'),
+    originalBody(historical, 'saas_prepared_evidence_writer_lock_layer', '(fence_keys text[]) RETURNS void'),
+  );
+  assert.equal(
+    dollarBody(sql, 'expected_immutable'),
+    originalBody(INITIAL_SAAS_MIGRATION.sql, 'saas_reject_immutable_change'),
+  );
   assert.match(sql, /tgenabled IN \('O', 'A'\)/);
   assert.match(sql, /tgtype = 31/); // BEFORE ROW INSERT/UPDATE/DELETE, not just UPDATE.
   assert.match(sql, /position\(expected_arguments IN pg_get_triggerdef\(oid\)\) > 0/);
-  for (const table of ['saas_route_config_heads', 'saas_customer_metering_policy_heads', 'saas_provider_metering_policy_heads']) {
+  for (const table of [
+    'saas_route_config_heads',
+    'saas_customer_metering_policy_heads',
+    'saas_provider_metering_policy_heads',
+  ]) {
     assert.ok(sql.includes(`'${table}:`));
   }
   assert.ok(sql.includes("'(''project'', ''tenant_id'', ''project_id'')'"));
@@ -90,9 +102,15 @@ test('053 attests exact matching 050 exclusive writers and actual immutable guar
   assert.ok(sql.includes("'(''commercial'', ''provider'', ''tenant_id'', ''project_id'', ''policy_id'')'"));
   assert.match(sql, /tgtype = 27/); // BEFORE ROW UPDATE/DELETE.
   assert.match(sql, /tgfoid = to_regprocedure\('model_router_saas.saas_reject_immutable_change\(\)'\)/);
-  for (const table of ['saas_route_config_versions', 'saas_route_config_commercial_authorities',
-    'saas_customer_metering_policy_versions', 'saas_provider_metering_policy_versions',
-    'saas_contract_test_attestations', 'saas_customer_price_versions', 'saas_supplier_cost_versions']) {
+  for (const table of [
+    'saas_route_config_versions',
+    'saas_route_config_commercial_authorities',
+    'saas_customer_metering_policy_versions',
+    'saas_provider_metering_policy_versions',
+    'saas_contract_test_attestations',
+    'saas_customer_price_versions',
+    'saas_supplier_cost_versions',
+  ]) {
     assert.ok(sql.includes(`'${table}'`));
   }
 });
@@ -100,9 +118,10 @@ test('053 attests exact matching 050 exclusive writers and actual immutable guar
 for (const name of names) {
   test(`053 ${name} changes only fencing, SELECT-only tuple locks and initialized optional dates`, () => {
     const { original, replacement } = guardSources(name);
-    const canonical = name === names[0]
-      ? COMMERCIAL_AUTHORITY_GUARD_ROWTYPE_SAFETY_SAAS_MIGRATION.sql
-      : COMMERCIAL_METERING_POLICY_AUTHORITY_SAAS_MIGRATION.sql;
+    const canonical =
+      name === names[0]
+        ? COMMERCIAL_AUTHORITY_GUARD_ROWTYPE_SAFETY_SAAS_MIGRATION.sql
+        : COMMERCIAL_METERING_POLICY_AUTHORITY_SAAS_MIGRATION.sql;
     assert.equal(original, originalBody(canonical, name), 'historical prosrc, including final newline, must match');
     assert.equal((replacement.match(/FOR SHARE;/g) ?? []).length, name === names[2] ? 1 : 0);
     const fenceStart = replacement.indexOf('  IF NEW.tenant_id IS NULL OR ');
@@ -122,15 +141,18 @@ for (const name of names) {
     if (name === names[2]) {
       restored = restored.replace('  commercial_project_id uuid;\n', '');
       restored = restored.replace(
-        /  SELECT project_id INTO commercial_project_id FROM saas_requests\n   WHERE tenant_id = NEW.tenant_id AND id = NEW.request_id;\n  IF NOT FOUND THEN\n    RAISE EXCEPTION 'SaaS attempt commercial authority request is missing'\n      USING ERRCODE = '23514';\n  END IF;\n/,
+        / {2}SELECT project_id INTO commercial_project_id FROM saas_requests\n {3}WHERE tenant_id = NEW.tenant_id AND id = NEW.request_id;\n {2}IF NOT FOUND THEN\n {4}RAISE EXCEPTION 'SaaS attempt commercial authority request is missing'\n {6}USING ERRCODE = '23514';\n {2}END IF;\n/,
         '',
       );
-      assert.ok(replacement.indexOf('saas-authz:project:') < replacement.indexOf('  SELECT r.project_id, r.supply_mode,'));
-      assert.match(replacement, /AND r.id = NEW.request_id\n   FOR SHARE;/);
+      assert.ok(
+        replacement.indexOf('saas-authz:project:') < replacement.indexOf('  SELECT r.project_id, r.supply_mode,'),
+      );
+      assert.match(replacement, /AND r.id = NEW.request_id\n {3}FOR SHARE;/);
     }
     for (const kind of ['price', 'cost']) {
       if (!original.includes(`  ${kind}_record record;`)) continue;
-      restored = restored.replace(`  ${kind}_effective_at timestamptz;\n  ${kind}_expires_at timestamptz;`, `  ${kind}_record record;`)
+      restored = restored
+        .replace(`  ${kind}_effective_at timestamptz;\n  ${kind}_expires_at timestamptz;`, `  ${kind}_record record;`)
         .replace(`INTO ${kind}_effective_at, ${kind}_expires_at`, `INTO ${kind}_record`)
         .replaceAll(`${kind}_effective_at`, `${kind}_record.effective_at`)
         .replaceAll(`${kind}_expires_at`, `${kind}_record.expires_at`);

@@ -21,7 +21,7 @@ test('097 registers after 096 with the documented gaps', () => {
 test('097 widens the validation_state enum and adds nullable quarantine columns to both account tables', () => {
   for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
     assert.match(commands, new RegExp(`ALTER TABLE ${table}\\s+ADD COLUMN quarantine_entered_at timestamptz`));
-    assert.match(commands, new RegExp(`ADD COLUMN quarantine_reason_code text`));
+    assert.match(commands, /ADD COLUMN quarantine_reason_code text/);
     assert.match(
       commands,
       new RegExp(
@@ -40,7 +40,7 @@ test('097 widens the validation_state enum and adds nullable quarantine columns 
         `ADD CONSTRAINT ${table}_quarantine_reason_length\\s+CHECK \\(quarantine_reason_code IS NULL OR \\(btrim\\(quarantine_reason_code\\) <> '' AND char_length\\(quarantine_reason_code\\) <= 128\\)\\)`,
       ),
     );
-    assert.doesNotMatch(commands, new RegExp(`ADD COLUMN quarantine_entered_at timestamptz NOT NULL`));
+    assert.doesNotMatch(commands, /ADD COLUMN quarantine_entered_at timestamptz NOT NULL/);
   }
 });
 
@@ -50,7 +50,10 @@ test('097 confines the quarantine transition graph with pinned-search-path guard
     ['saas_platform_provider_account_quarantine_guard', 'saas_platform_provider_accounts'],
   ] as const) {
     assert.match(commands, new RegExp(`CREATE FUNCTION ${fn}\\(\\) RETURNS trigger`));
-    assert.match(commands, new RegExp(`ALTER FUNCTION ${fn}\\(\\)\\s+SET search_path TO pg_catalog, model_router_saas, pg_temp`));
+    assert.match(
+      commands,
+      new RegExp(`ALTER FUNCTION ${fn}\\(\\)\\s+SET search_path TO pg_catalog, model_router_saas, pg_temp`),
+    );
     assert.match(commands, new RegExp(`CREATE TRIGGER ${table}_quarantine_guard\\s+BEFORE UPDATE ON ${table}`));
   }
   assert.match(commands, /Provider account quarantine may only be entered from failed/);

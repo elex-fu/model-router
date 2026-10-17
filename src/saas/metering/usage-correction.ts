@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
+import { USAGE_BILLING_MODES, USAGE_SIZE_TIERS } from '../../telemetry/usage.js';
 import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor } from '../db/types.js';
 import { usageCorrectionDigest } from './digest.js';
+
+interface UsageCorrectionMediaInput {
+  readonly billingMode?: UsageBillingMode | null;
+  readonly units?: ExactIntegerInput | null;
+  readonly sizeTier?: UsageSizeTier | null;
+}
+
 import { SaasMeteringError, type SaasMeteringErrorCode } from './errors.js';
 import type {
   ExactIntegerInput,
@@ -97,11 +106,29 @@ export interface UsageCorrectionKeyBudget {
   ): Promise<boolean>;
 }
 
+/**
+ * R1 (roadmap 1.3, phase 3): a non-negative settled charge delta moves the
+ * settled side of the billing group spend windows of the original admission;
+ * a missing row is pre-114 drift (no-op). Negative corrections stay
+ * conservative (the window stays consumed), mirroring KEY-BUD.
+ */
+export interface UsageCorrectionBillingGroupSpend {
+  correct(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly requestId: string;
+      readonly chargeSettledDelta: string;
+    },
+  ): Promise<boolean>;
+}
+
 export interface UsageCorrectionServiceOptions {
   readonly now?: () => Date;
   readonly idFactory?: () => string;
   readonly ledger?: UsageCorrectionLedgerPort;
   readonly keyBudget?: UsageCorrectionKeyBudget;
+  readonly billingGroupSpend?: UsageCorrectionBillingGroupSpend;
 }
 
 type Row = Record<string, unknown>;
@@ -207,6 +234,13 @@ function normalizeUsage(input: UsageValues): NormalizedUsageExact {
   ) {
     fail('METERING_INVALID_INPUT');
   }
+  // §4.1: media fields; a non-token mode requires a unit count (never zero).
+  const billingMode = (input as UsageCorrectionMediaInput).billingMode ?? 'token';
+  if (!USAGE_BILLING_MODES.includes(billingMode)) fail('METERING_INVALID_INPUT');
+  const units = asToken((input as UsageCorrectionMediaInput).units ?? null);
+  if (billingMode !== 'token' && units === null) fail('METERING_INVALID_INPUT');
+  const sizeTier = (input as UsageCorrectionMediaInput).sizeTier ?? null;
+  if (sizeTier !== null && !USAGE_SIZE_TIERS.includes(sizeTier)) fail('METERING_INVALID_INPUT');
   return {
     inputTotal: asToken(input.inputTotal),
     inputUncached: asToken(input.inputUncached),
@@ -216,6 +250,9 @@ function normalizeUsage(input: UsageValues): NormalizedUsageExact {
     cacheWrite1h: asToken(input.cacheWrite1h),
     outputTotal: asToken(input.outputTotal),
     reasoningOutput: asToken(input.reasoningOutput),
+    billingMode,
+    units,
+    sizeTier,
     status,
     source,
     semanticsVersion: input.semanticsVersion,
@@ -236,6 +273,9 @@ function asStoredUsage(value: unknown): NormalizedUsageExact {
     cacheWrite1h: stored.cacheWrite1h as ExactIntegerInput | null,
     outputTotal: stored.outputTotal as ExactIntegerInput | null,
     reasoningOutput: stored.reasoningOutput as ExactIntegerInput | null,
+    billingMode: 'token',
+    units: null,
+    sizeTier: null,
     status: stored.status as UsageValues['status'],
     source: stored.source as UsageValues['source'],
     semanticsVersion: stored.semanticsVersion as string,
@@ -326,6 +366,7 @@ export class UsageCorrectionService {
   private readonly idFactory: () => string;
   private readonly ledger: UsageCorrectionLedgerPort | undefined;
   private readonly keyBudget: UsageCorrectionKeyBudget | undefined;
+  private readonly billingGroupSpend: UsageCorrectionBillingGroupSpend | undefined;
 
   constructor(database: MeteringDatabase, options: UsageCorrectionServiceOptions = {}) {
     this.database = database;
@@ -333,6 +374,7 @@ export class UsageCorrectionService {
     this.idFactory = options.idFactory ?? randomUUID;
     this.ledger = options.ledger;
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
   }
 
   /**
@@ -504,6 +546,13 @@ export class UsageCorrectionService {
             });
           }
         }
+      }
+      if (this.billingGroupSpend && delta > 0n) {
+        await this.billingGroupSpend.correct(tx, {
+          tenantId,
+          requestId,
+          chargeSettledDelta: delta.toString(10),
+        });
       }
       // Contract C-1.4: every created correction appends a platform audit row
       // in the same transaction; replays add nothing.

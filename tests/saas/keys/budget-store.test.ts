@@ -257,6 +257,11 @@ test('token units sum input and output for bounds and exact usage', () => {
   assert.equal(keyBudgetTokenUnitsFromBounds({ inputTotalUpperBound: '10', outputTotalUpperBound: '5' }), '15');
   assert.equal(keyBudgetTokenUnitsFromUsage({ inputTotal: 3, outputTotal: '4' }), '7');
   assert.equal(KEY_BUDGET_TOKEN_SEMANTICS_VERSION, 'token-units-v1');
+  // §4.1: media envelopes/reports may omit token counters entirely; the
+  // missing bounds count zero tokens (media units never enter TPM/KEY-BUD
+  // token windows — the charge windows carry the media cost).
+  assert.equal(keyBudgetTokenUnitsFromBounds({ perUnitUnitsUpperBound: '4' }), '0');
+  assert.equal(keyBudgetTokenUnitsFromUsage({ billingMode: 'image', units: '4' }), '0');
   for (const value of [null, {}, { inputTotalUpperBound: '1' }, 'x', { inputTotal: '-1', outputTotal: '0' }]) {
     assert.throws(
       () =>
@@ -430,6 +435,8 @@ test('selectKeyBudgetPolicyHead and selectKeyBudgetCounters normalize rows and t
     tokenLifetime: null,
     chargeDaily: null,
     chargeLifetime: null,
+    charge5h: null,
+    charge7d: null,
   });
   assert.ok(normalized(database.statements.at(-1) ?? '').endsWith('for update'));
   const counters = await selectKeyBudgetCounters(database, 'tenant-1', 'key-1', DAY);

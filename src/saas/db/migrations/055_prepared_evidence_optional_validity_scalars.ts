@@ -45,10 +45,18 @@ if ([...expected.matchAll(historyLock)].length !== 1) {
   throw new Error('Migration 055 historical policy lock contract drifted');
 }
 expected = expected.replace(historyLock, 'AND version = NEW.project_policy_version;');
-const advisory = (name: string) => historicalConstant(PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql, name);
-expected = replaceOnce(expected, advisory('target_fence_key_declaration_anchor'), advisory('target_fence_key_declaration_replacement'));
-expected = replaceOnce(expected, advisory('tenant_read_anchor'),
-  advisory('authorization_fence_preamble') + advisory('supply_fence_preamble') + advisory('tenant_read_anchor'));
+const advisory = (name: string) =>
+  historicalConstant(PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql, name);
+expected = replaceOnce(
+  expected,
+  advisory('target_fence_key_declaration_anchor'),
+  advisory('target_fence_key_declaration_replacement'),
+);
+expected = replaceOnce(
+  expected,
+  advisory('tenant_read_anchor'),
+  advisory('authorization_fence_preamble') + advisory('supply_fence_preamble') + advisory('tenant_read_anchor'),
+);
 for (const kind of ['request', 'attempt']) {
   const anchor = advisory(`${kind}_lock_anchor`);
   expected = replaceOnce(expected, anchor, anchor.replace('FOR SHARE;', `__KEEP_${kind.toUpperCase()}_LOCK__`));
@@ -62,28 +70,39 @@ let replacement = expected;
 for (const kind of ['mapping', 'grant', 'price', 'cost']) {
   const declaration = `  ${kind}_record record;`;
   const scalars = `  ${kind}_effective_at timestamptz := NULL;\n  ${kind}_expires_at timestamptz := NULL;`;
-  replacement = replaceOnce(replacement, declaration,
-    kind === 'mapping' || kind === 'grant' ? `${declaration}\n${scalars}` : scalars);
+  replacement = replaceOnce(
+    replacement,
+    declaration,
+    kind === 'mapping' || kind === 'grant' ? `${declaration}\n${scalars}` : scalars,
+  );
   // Scalar NULL means this optional branch was not selected, not a composite
   // tuple test. A present row with nullable columns must still check its dates.
-  replacement = replaceOnce(replacement,
+  replacement = replaceOnce(
+    replacement,
     `  IF ${kind}_record IS NOT NULL\n    AND (${kind}_record.effective_at > locked_at\n      OR (${kind}_record.expires_at IS NOT NULL AND ${kind}_record.expires_at <= locked_at))`,
-    `  IF ${kind}_effective_at > locked_at\n    OR (${kind}_expires_at IS NOT NULL AND ${kind}_expires_at <= locked_at)`);
+    `  IF ${kind}_effective_at > locked_at\n    OR (${kind}_expires_at IS NOT NULL AND ${kind}_expires_at <= locked_at)`,
+  );
 }
 for (const [kind, error] of [
-  ['mapping', 'BYOK profile mapping'], ['grant', 'platform pool grant'],
+  ['mapping', 'BYOK profile mapping'],
+  ['grant', 'platform pool grant'],
 ]) {
   const anchor = `      RAISE EXCEPTION 'Prepared-request evidence ${error} is stale'\n        USING ERRCODE = '23514';\n    END IF;`;
-  replacement = replaceOnce(replacement, anchor,
-    `${anchor}\n    ${kind}_effective_at := ${kind}_record.effective_at;\n    ${kind}_expires_at := ${kind}_record.expires_at;`);
+  replacement = replaceOnce(
+    replacement,
+    anchor,
+    `${anchor}\n    ${kind}_effective_at := ${kind}_record.effective_at;\n    ${kind}_expires_at := ${kind}_record.expires_at;`,
+  );
 }
 for (const [kind, version, table, error] of [
   ['price', 'customer_price_version', 'saas_customer_price_versions', 'customer price'],
   ['cost', 'supplier_cost_version', 'saas_supplier_cost_versions', 'provider cost'],
 ]) {
-  replacement = replaceOnce(replacement,
+  replacement = replaceOnce(
+    replacement,
     `    SELECT * INTO ${kind}_record FROM ${table}\n     WHERE id = NEW.${version} ;`,
-    `    SELECT effective_at, expires_at INTO ${kind}_effective_at, ${kind}_expires_at\n      FROM ${table}\n     WHERE id = NEW.${version} ;\n    IF NOT FOUND THEN\n      RAISE EXCEPTION 'Prepared-request evidence ${error} is missing' USING ERRCODE = '23514';\n    END IF;`);
+    `    SELECT effective_at, expires_at INTO ${kind}_effective_at, ${kind}_expires_at\n      FROM ${table}\n     WHERE id = NEW.${version} ;\n    IF NOT FOUND THEN\n      RAISE EXCEPTION 'Prepared-request evidence ${error} is missing' USING ERRCODE = '23514';\n    END IF;`,
+  );
 }
 
 const sql = `

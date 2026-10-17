@@ -17,24 +17,32 @@ import type {
  * affinity source).
  *
  * Semantics:
- * - resolve(): the Redis sticky key is checked FIRST; a hit whose account is
- *   still in eligibleAccountIds returns immediately (the fast path). A miss,
- *   an ineligible hit, or an unavailable Redis falls back to the inner PG
- *   affinity source, and a successful allow with a non-null account is
- *   backfilled into Redis with the 1h TTL.
+ * - resolve(): the Redis sticky key is checked FIRST with a sliding-TTL read
+ *   (GET+PEXPIRE in one atomic EVAL): a hit whose account is still in
+ *   eligibleAccountIds returns immediately (the fast path) and its 1h window
+ *   is refreshed, so the TTL bounds session IDLENESS, not absolute mapping
+ *   age. A miss falls back to the inner PG affinity source, and a successful
+ *   allow with a non-null account is backfilled into Redis with the 1h TTL.
+ *   An ineligible hit also falls back to PG; whatever PG then decides, the
+ *   stale Redis row is cleared (shouldClearStickySession, batch 2 §2.1): a
+ *   PG 'stale' (binding cleared, degrade to load balancing) or a PG miss
+ *   both delete the key, and a PG allow overwrites it via the backfill.
+ *   (The atomic refresh cannot be conditional on the caller's eligible set —
+ *   an ineligible hit may extend a stale row's lifetime, which is harmless:
+ *   eligibility is re-checked on every read and PG re-decides.)
  * - bind(): always forwards to the inner port (PG stays authoritative) and
  *   backfills the Redis mapping afterwards.
  * - The sessionHash priority is sub2api's — session-id → conversation_id →
- *   prompt_cache_key → content-hash fallback. The affinity scheduling context
- *   carries sessionId and previousResponseId today; richer inbound sources
- *   (headers/body) require the http-handler scheduling seam, which nothing
- *   populates yet — computeStickySessionHash is the single shared
- *   implementation for that future seam.
+ *   prompt_cache_key → content-hash fallback. The http-handler scheduling
+ *   seam (sticky-session-reference.ts) derives that reference at the trusted
+ *   boundary and fills input.scheduling.sessionId;
+ *   computeStickySessionHash is the single shared implementation of the
+ *   priority chain.
  * - Invalidation: the RESP client deliberately has no SUBSCRIBE, so PubSub
- *   invalidation is NOT wired (documented deviation). The 1h TTL bounds
- *   Redis↔PG drift and the PG source remains authoritative on every miss;
- *   the PG affinity resolver additionally CAS-invalidates a stale target
- *   itself when it is no longer eligible.
+ *   invalidation is NOT wired (documented deviation). The sliding 1h TTL
+ *   bounds Redis↔PG drift for idle sessions and the PG source remains
+ *   authoritative on every miss; the PG affinity resolver additionally
+ *   CAS-invalidates a stale target itself when it is no longer eligible.
  *
  * STRICT ROLE: this is a cache/coordination layer only. PG (the 041 table)
  * stays the durable affinity source of record; every Redis decision is
@@ -43,10 +51,12 @@ import type {
  *
  * Integration point (R7 / combined deployments): the decorator wraps the
  * PostgresProviderAccountAffinity instance handed to the gateway
- * composition as schedulerAffinity. The dedicated gateway workload cannot
- * hold a Redis connection by deployment contract, so the decoration is only
- * available where the Redis provider is loaded (combined/control-plane
- * topologies) — absent a cache, construct the inner port directly.
+ * composition as schedulerAffinity. The dedicated gateway workload may hold
+ * ONE core-owned Redis connection when the gateway-scoped deployment
+ * setting (MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL) is present — core loads it
+ * and passes the cache client here; absent the setting, the pure-PG path
+ * runs unchanged (combined/control-plane topologies wire the shared Redis
+ * provider's cache client instead).
  */
 
 export interface RedisStickyAffinityOptions {
@@ -116,23 +126,47 @@ export function createRedisStickyProviderAccountAffinity(
     void cache.set(key, Buffer.from(accountId, 'utf8'), ttlMs).catch(() => undefined);
   };
 
+  const clear = (key: string | null): void => {
+    if (key === null) return;
+    void cache.delete(key).catch(() => undefined);
+  };
+
   return {
     async resolve(input): Promise<ProviderAccountSchedulerAffinityDecision> {
       const key = stickyKey(input as AffinityResolveInput);
+      let staleHit = false;
       if (key !== null) {
-        const entry = await cache.get(key);
+        // Sliding-TTL read: a hit atomically refreshes the 1h idle window
+        // (REDIS_CACHE_GET_SLIDING_SCRIPT) before eligibility is checked.
+        const entry = await cache.getAndRefreshTtl(key, ttlMs);
         if (entry.state === 'hit' && entry.value !== null) {
           const accountId = entry.value.toString('utf8');
           if ((input.eligibleAccountIds as readonly string[]).includes(accountId)) {
             return { decision: 'allow', accountId };
           }
           // Ineligible hit: fall through to the authoritative PG source,
-          // which also performs its own CAS invalidation of the stale row.
+          // which performs its own CAS invalidation of the stale row. The
+          // Redis copy is drift whatever PG decides, so remember to clear.
+          staleHit = true;
         }
       }
       const decision = await inner.resolve(input);
       if (decision.decision === 'allow') {
-        backfill(key, decision.accountId);
+        if (decision.accountId !== null) {
+          // Overwrites any stale drift with PG's authoritative mapping.
+          backfill(key, decision.accountId);
+        } else if (staleHit) {
+          // PG holds no active binding: the ineligible Redis row is pure
+          // drift (e.g. PG's row expired first) — drop it.
+          clear(key);
+        }
+        return decision;
+      }
+      if (decision.decision === 'stale') {
+        // PG cleared the binding (target no longer schedulable): drop the
+        // stale Redis copy too and let the caller degrade to load balancing.
+        clear(key);
+        return decision;
       }
       return decision;
     },

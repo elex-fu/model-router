@@ -197,10 +197,13 @@ test('returns a read-only wallet balance and safe, paginated ledger projection',
   const refundFreezeCalls = database.calls.filter(({ sql }) => sql.includes('FROM saas_refund_wallet_freezes'));
   assert.equal(refundFreezeCalls.length, 2);
   assert.ok(refundFreezeCalls.every(({ sql }) => /WHERE tenant_id = \$1 AND currency = \$2/.test(sql)));
-  assert.deepEqual(refundFreezeCalls.map(({ values }) => values), [
-    [TENANT_ID, 'USD'],
-    [TENANT_ID, 'USD'],
-  ]);
+  assert.deepEqual(
+    refundFreezeCalls.map(({ values }) => values),
+    [
+      [TENANT_ID, 'USD'],
+      [TENANT_ID, 'USD'],
+    ],
+  );
   assert.ok(database.calls.every(({ sql }) => !/\b(INSERT|UPDATE|DELETE)\b/i.test(sql)));
   assert.ok(database.calls.some(({ sql }) => sql.includes('READ ONLY')));
 });
@@ -276,18 +279,26 @@ test('projects wallet refunds as positive debit amounts across mixed read-only l
   });
   const service = new SaasCustomerWalletQueryService(database);
   const first = await service.getWallet(context({ tenantRole: 'admin' }), { currency: 'USD', limit: 2 });
-  assert.deepEqual(first.ledger.items.map(({ type, direction }) => ({ type, direction })), [
-    { type: 'top_up', direction: 'credit' },
-    { type: 'wallet_refund', direction: 'debit' },
-  ]);
+  assert.deepEqual(
+    first.ledger.items.map(({ type, direction }) => ({ type, direction })),
+    [
+      { type: 'top_up', direction: 'credit' },
+      { type: 'wallet_refund', direction: 'debit' },
+    ],
+  );
   assert.equal(first.ledger.items[1]?.amountMinorUnits, amount);
   assert.equal(typeof first.ledger.items[1]?.amountMinorUnits, 'string');
   assert.equal(first.ledger.hasMore, true);
   assert.ok(first.ledger.nextCursor);
   const second = await service.getWallet(context({ tenantRole: 'admin' }), {
-    currency: 'USD', limit: 2, cursor: first.ledger.nextCursor,
+    currency: 'USD',
+    limit: 2,
+    cursor: first.ledger.nextCursor,
   });
-  assert.deepEqual(second.ledger.items.map((entry) => entry.type), ['usage_charge', 'usage_charge']);
+  assert.deepEqual(
+    second.ledger.items.map((entry) => entry.type),
+    ['usage_charge', 'usage_charge'],
+  );
   assert.equal(second.ledger.hasMore, false);
   assert.equal(second.ledger.nextCursor, null);
   assert.deepEqual(second.wallet, first.wallet);
@@ -301,7 +312,10 @@ test('projects wallet refunds as positive debit amounts across mixed read-only l
   assert.equal(serialized.includes('internal-metadata-ref'), false);
   assert.equal(serialized.includes('must-not-be-returned'), false);
   assert.ok(database.calls.every(({ sql }) => !/\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP)\b/i.test(sql)));
-  assert.equal(database.calls.filter(({ sql }) => sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY').length, 2);
+  assert.equal(
+    database.calls.filter(({ sql }) => sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY').length,
+    2,
+  );
 });
 
 test('rejects wallet refund credit, invalid direction, unknown source, and nonpositive or lossy amounts', async () => {
@@ -357,11 +371,21 @@ test('rejects foreign-currency refund rows and foreign-tenant refund page or cur
   const lookup = database.calls.filter(({ sql }) => sql.includes('FROM saas_wallets')).at(-1);
   assert.deepEqual(lookup?.values, ['tenant-b', 'USD']);
 
-  database.ledgerEntries.splice(0, database.ledgerEntries.length,
-    ledgerRow('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-      '2026-09-28T03:00:00.000Z', 'wallet_refund'),
-    ledgerRow('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc',
-      '2026-09-28T02:00:00.000Z', 'billing_settlement'),
+  database.ledgerEntries.splice(
+    0,
+    database.ledgerEntries.length,
+    ledgerRow(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      '2026-09-28T03:00:00.000Z',
+      'wallet_refund',
+    ),
+    ledgerRow(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab',
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbc',
+      '2026-09-28T02:00:00.000Z',
+      'billing_settlement',
+    ),
   );
   const page = await service.getWallet(context(), { currency: 'USD', limit: 1 });
   const callCount = database.calls.length;

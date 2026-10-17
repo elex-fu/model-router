@@ -37,8 +37,8 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   assert.equal(
     SAAS_MIGRATIONS.length,
-    93,
-    '060 active + 063 + 080-085 + 087/088 + 089-092 marketing + 093 D4 + 094 R4 + 095 R8 + 096 payload rewrite + 097 quarantine + 098 rate/health + 099 codex scheduling + 100 claude scheduling + 101-106, 107 egress, 108 R5b, 109 R6a, 110 platform settings, 111 gemini scheduling and 112 K2 durable fault classification registered; audited061 registration remains an explicit later gate',
+    110,
+    '060 active + 063 + 080-085 + 087/088 + 089-092 marketing + 093 D4 + 094 R4 + 095 R8 + 096 payload rewrite + 097 quarantine + 098 rate/health + 099 codex scheduling + 100 claude scheduling + 101-106, 107 egress, 108 R5b, 109 R6a, 110 platform settings, 111 gemini scheduling, 112-114 R1 billing-group limit enforcement, 115 scheduling-threshold pause, 116 TLS fingerprints, 117-120 batch-3 (bedrock/vertex/grok/cn) scheduling, 121 composite model routing, 122 multimodal billing, 124 video tasks, 125 risk control, 128 plugin system and 129 K2 durable fault classification registered; audited061 registration remains an explicit later gate',
   );
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -77,6 +77,33 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
       110,
       111,
       112,
+      113,
+      114,
+      115,
+      116,
+      117,
+      118,
+      119,
+      120,
+      // Batch-4 §4.4 composite model routing (task #18).
+      121,
+      // Batch-4 §4.1 multimodal billing dimensions (task #15).
+      122,
+      // Batch-4 §4.2 async image tasks (task #16).
+      123,
+      // Batch-4 §4.3 async video tasks (task #17) — create-time
+      // snapshot + binding + billing claim.
+      124,
+      // Batch-5 §5.4 content risk control (task #19).
+      125,
+      // Batch-5 §5.2 public brand settings (task #20).
+      126,
+      // Batch-5 §5.6 alert silences/report state (task #23).
+      127,
+      // Batch-5 §5.1 plugin system (task #24).
+      128,
+      // K2 durable fault classification (renumbered from main's 112).
+      129,
     ],
   );
   assert.equal(SAAS_MIGRATIONS[60], USAGE_CORRECTIONS_SAAS_MIGRATION);
@@ -85,12 +112,12 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
     ['035_credential_validation_jobs.ts', '5dce54853124a8bae3ff9f4e43ddd4787f1f77ac07e39fdab484279c8ad410d9'],
     [
       '058_credential_validation_invalidation_trigger_execution.ts',
-      '2763f296f5f591c8ca3e4ef547d9b217f5c17021b15d1619ad184975ec87b8bc',
+      '0b36516f7e0fbf57e9fd8d254010e7d646b5d40aa618b3447e284a826f19cbe7',
     ],
-    ['059_pre_dispatch_terminal_cancellation.ts', '7c86dc81ea1ddea6b0a46c2bcea4837c9a83e705ae817106e3cbae5ccdb8b5ed'],
+    ['059_pre_dispatch_terminal_cancellation.ts', '597a0f645d25e2dbd2bb9a7ad475427cc10f4bf4ab3cd73baeb6d5ab019ccb2a'],
     [
       '060_prepared_evidence_claim_generated_account.ts',
-      '380bf3a1ceb103a0276b281d1e06eff613d1e4341edd6e7c24581f268280ae6c',
+      'cb51be910fc883cdfe7b4b86c5df9579c232feb786201342942bce366f7716d1',
     ],
   ] as const)
     assert.equal(

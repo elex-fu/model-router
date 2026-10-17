@@ -53,8 +53,10 @@ export function estimateCost(usage: NormalizedUsage, profile: PricingProfile | n
   }
   const read = usage.cacheRead;
   const write = usage.cacheWrite;
-  const hasCacheWritePricing = profile.cacheWritePerMillion !== undefined ||
-    profile.cacheWrite5mPerMillion !== undefined || profile.cacheWrite1hPerMillion !== undefined ||
+  const hasCacheWritePricing =
+    profile.cacheWritePerMillion !== undefined ||
+    profile.cacheWrite5mPerMillion !== undefined ||
+    profile.cacheWrite1hPerMillion !== undefined ||
     profile.cacheWriteIncludedInInput === true;
   if (write === null && hasCacheWritePricing)
     return { pricingVersion, currency, costMicros: null, partial: true, reason: 'cache_write_unknown' };
@@ -73,8 +75,18 @@ export function estimateCost(usage: NormalizedUsage, profile: PricingProfile | n
   if (!inclusive && writeCount > 0) {
     const classified = usage.cacheWrite5m !== null || usage.cacheWrite1h !== null;
     if (classified) {
-      if (usage.cacheWrite5m === null || usage.cacheWrite1h === null || usage.cacheWrite5m + usage.cacheWrite1h !== write)
-        return { pricingVersion, currency, costMicros: null, partial: true, reason: 'cache_write_classification_missing' };
+      if (
+        usage.cacheWrite5m === null ||
+        usage.cacheWrite1h === null ||
+        usage.cacheWrite5m + usage.cacheWrite1h !== write
+      )
+        return {
+          pricingVersion,
+          currency,
+          costMicros: null,
+          partial: true,
+          reason: 'cache_write_classification_missing',
+        };
       const fiveMinuteRate = usage.cacheWrite5m > 0 ? scaledRate(profile.cacheWrite5mPerMillion) : 0n;
       const oneHourRate = usage.cacheWrite1h > 0 ? scaledRate(profile.cacheWrite1hPerMillion) : 0n;
       if (fiveMinuteRate === null || oneHourRate === null)
@@ -90,10 +102,20 @@ export function estimateCost(usage: NormalizedUsage, profile: PricingProfile | n
         return { pricingVersion, currency, costMicros: null, partial: true, reason: 'cache_price_missing' };
       writeScaled = BigInt(writeCount) * aggregateRate;
     } else {
-      return { pricingVersion, currency, costMicros: null, partial: true, reason: 'cache_write_classification_missing' };
+      return {
+        pricingVersion,
+        currency,
+        costMicros: null,
+        partial: true,
+        reason: 'cache_write_classification_missing',
+      };
     }
   }
-  const scaled = BigInt(ordinaryInput) * inputRate + BigInt(readCount) * readRate + writeScaled + BigInt(usage.outputTotal) * outputRate;
+  const scaled =
+    BigInt(ordinaryInput) * inputRate +
+    BigInt(readCount) * readRate +
+    writeScaled +
+    BigInt(usage.outputTotal) * outputRate;
   const micros = (scaled + 500_000n) / 1_000_000n;
   if (micros > BigInt(Number.MAX_SAFE_INTEGER)) {
     return { pricingVersion, currency, costMicros: null, partial: true, reason: 'cost_overflow' };

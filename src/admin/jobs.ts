@@ -49,7 +49,9 @@ export class AdminJobs {
     const id = `job_${randomUUID()}`;
     const now = new Date().toISOString();
     this.store.db
-      .prepare('INSERT INTO admin_jobs(id,type,state,progress,result_json,error,created_at,updated_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?)')
+      .prepare(
+        'INSERT INTO admin_jobs(id,type,state,progress,result_json,error,created_at,updated_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?)',
+      )
       .run(id, type, 'queued', 0, null, null, now, now, resourceId ?? null);
     this.store.audit(actor, 'job.start', { id, type });
     this.publishProgress?.({ jobId: id, type, state: 'queued', progress: 0 });

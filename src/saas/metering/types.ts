@@ -1,3 +1,4 @@
+import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import type {
   GatewayProtocol,
@@ -237,6 +238,25 @@ export interface RequestRecord extends Omit<AuthorizationBindingInput, 'projectP
   readonly providerProtocol?: MeteringProtocol;
   readonly clientOperation?: string;
   readonly providerOperation?: string;
+  /**
+   * §4.4 composite model routing: the resolved composite decision, present
+   * only when the request's billing group is marked composite. In-memory
+   * admission contract only (the gateway's in-memory fields precedent);
+   * durable rows are unmodified — the persisted prepared evidence carries the
+   * durable copy for dispatch-time revalidation.
+   */
+  readonly compositeRoute?: MeteringCompositeRouteContext;
+}
+
+/** Structurally identical to the gateway's RequestPreparationCompositeRoute. */
+export interface MeteringCompositeRouteContext {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
 }
 
 /** Reconciliation event and outbox identifiers are coordinator-owned and intentionally absent here. */
@@ -320,6 +340,17 @@ export interface UsageValues {
   readonly cacheWrite1h: ExactIntegerInput | null;
   readonly outputTotal: ExactIntegerInput | null;
   readonly reasoningOutput: ExactIntegerInput | null;
+  /**
+   * §4.1 (roadmap batch 4, task #15) multimodal metering kind. Absent and
+   * 'token' are equivalent (the pre-4.1 shape); a non-token mode requires a
+   * non-null `units` counter. Digest-optional: token-only rows never carry
+   * the media fields in their canonical form or event digest.
+   */
+  readonly billingMode?: UsageBillingMode | null;
+  /** Billable unit count (images, seconds, characters, …); null on token rows. */
+  readonly units?: ExactIntegerInput | null;
+  /** Canonical per-unit size tier; null on token rows. */
+  readonly sizeTier?: UsageSizeTier | null;
   readonly status: 'reported' | 'partial' | 'missing' | 'estimated';
   readonly source: 'upstream' | 'local-estimate' | 'legacy';
   readonly semanticsVersion: string;
@@ -336,6 +367,9 @@ export interface NormalizedUsageExact {
   readonly cacheWrite1h: ExactTokenCount;
   readonly outputTotal: ExactTokenCount;
   readonly reasoningOutput: ExactTokenCount;
+  readonly billingMode: UsageBillingMode;
+  readonly units: ExactTokenCount;
+  readonly sizeTier: UsageSizeTier | null;
   readonly status: UsageValues['status'];
   readonly source: UsageValues['source'];
   readonly semanticsVersion: string;

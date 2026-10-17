@@ -287,6 +287,7 @@ M1=内伤清零+bench达标 → M2=账号运营同级 → M3=平台广度+多模
 
 - **v1（2026-10-16 上午）**：初版，五路调研整合。
 - **v2（2026-10-16，四路核验后）**：① P15 与 P4-Step1 标记已完成（cd29865/8b4661f）；② CAS 方案按字面不可实现（无 available 列），重排为语句削减→advisory lock→反规范化 CAS 最后手段，补冻结门/锁序风险；③ 1.3 补快照横切与 API key 5h/7d 窗口；④ gemini 跨协议对从「顺带」升格（4 方向零实现，2 个完整 bridge）；⑤ 2.1 改为升级现有 Redis 快路径 + sessionHash 口径对齐 + 部署契约前置；⑥ 2.3 改为扩展现有矩阵；⑦ 2.5 标记已完成；⑧ 2.4 落点改 provider-http-address + 缓存方案重设计 + 四套部署成本；⑨ 批次三凭据管线/transport 适配器显式化，Bedrock 改自带签名 transport + 手写 SigV4，智谱/MiniMax 改全新品类；⑩ 批次四新增 4.0 五项致命前置（1MiB/JSON-only/GET 405/WS 零设施/digest 漂移）+ 017 三表 + tier 决策 + service_tier/长上下文补入；⑪ 异步任务改 RecordingClientStream；⑫ 插件补部署形态与 KMS 边界决策；⑬ 白标补 CSP 与 public 只读面；⑭ 告警 sustained/cooldown 已实现收窄缺口；⑮ 广场补匿名认证缺失；⑯ 零依赖纪律与迁移 112 起编入决策表；⑰ 补入 8 项遗漏能力 + 8 项明确不做；⑱ 索引表修正（websearch 包归属、代理回退双文件、函数归属）；⑲ 工时重估 130→140–165 人日。
+- **v3（2026-10-17，merge origin/main 冲突解决）**：合入 main 侧 K1/K2（durable fail-away + egress allowlist 四传输接线）与 L1-L5（saas deploy/doctor/upgrade CLI、特权镜像 codegen、CI deploy-smoke）。关键裁决：① main 的迁移 `112_provider_account_durable_fault_classification` 与本分支 112-128 撞号，重编号为 **129**（001 注册表尾部追加，迁移内 version 同步改 129）；② 特权四镜像（runtime-privileges.ts / roles.sql / worker 两份）改用 main 的 **privileges-manifest 单一来源 + generate-privileges codegen 架构**，本分支 112-128 的全部授权事实经 `--extract` 反向录入 manifest，`--check` 字节一致通过；③ runtime-health store 语义并集——K2 的 durable 词汇（account_access/rate_limited/stream_abort + 短冷却曲线）与本分支 batch-2.3 的模型级注册表/401 升级/402/403/流超时共存，feedback outcome 词表取七值并集；④ 顺手修复本分支 roles.sql 三处潜在缺陷（VALUES 缺逗号、守卫排除表缺 video_tasks、128 注释截断残留）。
 
 ## 实施进度（worktree-capability-parity 分支）
 
@@ -301,14 +302,34 @@ M1=内伤清零+bench达标 → M2=账号运营同级 → M3=平台广度+多模
 | #3 apicompat PhaseA | 236bae2 | responses↔CC 双向真转换（reverse-request/response/chat 三模块 2979 行）+ bridge stub 重写 + pair 注册，77 测试 |
 | #2 R1 限额执法 | aa0ffc4→d0921f0 | 四 Phase：快照横切（迁移 112）→ 组 RPM fence（113）→ d/w/m 储备制 + key 5h/7d 真滚动窗口（114）→ scopes + fallback 环检测；20 个 PG 门禁 + 金样零漂移 |
 
-**Wave 2（批次二）— 进行中**
+**Wave 2（批次二）— 全部完成（2026-10-17）**
 
 | 任务 | 状态 | 摘要 |
 |---|---|---|
 | #7 dateline | ✅ b077b5b | system prompt 日期句规范化（反文本指纹） |
 | #5 粘性调度 | ✅ f9f5c16 | sessionHash 协议感知四级合并 + stickyScheduling 显式能力（默认关零变化）+ 三态门（新增 stale 降级语义）+ golden byte-identical |
-| #4 P4/P16 | Step2 ✅ 601cfd1（语句削减）；Step3 进行中 | freeze writer 审计 + advisory lock |
-| #6 5h 窗口/状态机 | 进行中 | 迁移 115 + dormant 列激活 + 矩阵扩展 |
-| #7 TLS sidecar 主体 | 进行中 | 迁移 116（jsonpath bug 修复中）+ Go sidecar + connector |
+| #4 P4/P16 | ✅ 601cfd1+f5c9b3d | Step2 语句削减 93→73（预算门钉死）；Step3 钱包 XACT advisory fence（freeze 审计通过、互斥域闭合、跨 fence 元组锁消除）；Step4 跳过（Step3 已消除根因） |
+| #6 5h 窗口/状态机 | ✅ 91a62c8+dae3d5b | 三品类观测管线（claude 成功路径头解析/codex 首写入方/gemini attempt 聚合 worker）+ 阈值停调（复用 dormant auto_pause 列、选号惰性评估、迁移 115）+ 矩阵扩展（402 CN/403 再分类/模型级限流/401 升级/429 fallback，三层保留） |
+| #7 TLS sidecar | ✅ c2325e2 | Go sidecar（utls 三 dialer + IPC 隧道 + JA3 抓包自测）+ 迁移 116 档案表 + TS connector 全链 + PG 权威 30s TTL 缓存 fail-open + compose 服务；fingerprint_mode 裁决=与 profile_id 正交并存 |
+| payments 修复 | ✅ 035b504 | drill fakes 适配钱包 advisory fence |
 
-**待办**：批次三四平台（Bedrock/Vertex/Grok/智谱MiniMax，seam #8 已就绪）、批次四（4.0 前置 + 计费横切 + 多模态）、批次五（生态六线）。
+Wave 2 终检：5051/5051 测试全绿、tsc 零错、golden 全部 byte-identical。遗留项见各任务报告（bench 复测待合流后统一、FIN057×PG18 环境问题、模型级停调调度侧消费、#5 预留带判定、探针路径档案接入）。
+
+**Wave 3（批次三，进行中）**
+
+| 任务 | 状态 | 摘要 |
+|---|---|---|
+| #12 Grok | ✅ | platform/grok-oauth（PKCE S256 base64url-32B verifier + plan=generic、loopback 粘贴 code 绑定、JWT email/sub/team_id、tier 只信 access_token）+ R4 刷新 worker `xai-grok-oauth-v1` 绑定（passthrough 保 tier/user_id/team_id；6h TTL/5min lead 钉死）+ gateway/grok 品类（CLI 身份四头仅对 cli-chat-proxy 注入、api.x.ai 不打；OAuth SSRF 硬门官方主机白名单、api-key 走运营方 host allowlist；x-ratelimit 双拼写 + reset ms/s/相对三档歧义消解；/billing?format=credits + /billing 月度 $150/$1500 探测；free 档本地 24h 95% 软门 fail-open；x-grok-conv-id 粘性头）+ 迁移 119（grok 列族 + billing jsonb + probe category 'grok'，与 117/118 累积 CHECK 协调）+ validation worker `xai-grok-api-models-v1`（api-key models 探针）+ catalog grok-registration（双产品 grok-subscription/grok-api，媒体能力边界注明批次四）+ quota-snapshot store grok 写入方/汇 + 授权镜像（validation-worker privileges + grants SQL + mirror 测试）；63 项新测试（PKCE/CLI 头矩阵/reset 表驱动/软门/SSRF 负例/绑定管线/catalog） |
+| #10 Bedrock | ✅（并行） | 迁移 117 + bedrock 品类（自带签名 transport） |
+| #11 Vertex | ✅（并行） | 迁移 118 + vertex-sa 品类 |
+| #13 智谱/MiniMax | 进行中（并行） | 迁移 120 + cn-providers 品类 |
+
+**待办**：批次三收尾（#13 完成后统一终检）、批次四（4.0 前置 + 计费横切 + 多模态——Grok 媒体/音频端点届时接入）、批次五（生态六线）。
+
+**批次三终检（2026-10-17）— 全部通过**：tsc 零错误、5339/5339 测试全绿（基线 5051 → 净增 288）、PG 链 117-120 真库落库 + 角色三面探针验证、工作区干净。#13 智谱/MiniMax 最终态见 febdf17（~90 测试：adaptive 分流矩阵、quota unit 分类/百分比换算、thinking 回传表驱动、分类装饰器余额文案→20min 可恢复停调、三份镜像测试）。提交归属说明：Bedrock 文件被并行 Vertex 提交先行扫入共享 index（内容零丢失），343716b 为标记提交。遗留登记：生产装配/导入端点挂载/free 软门调度侧消费/智谱团队版 org 存储/逐账号协议读取——后续小项。
+
+**批次四任务面板**：#14 4.0 致命前置（唯一串行）→ #15 4.1 计费横切 → #16 图片 / #17 视频音频搜索（并行）；#18 Composite ✅。
+
+**#18 Composite 组合路由（2026-10-17）**：迁移 121（`saas_composite_model_routes` 路由注册表 + `saas_billing_groups.composite` 标记 + `saas_prepared_request_evidence.composite_route` 持久决策列，五覆盖索引 + 形状唯一约束，授权镜像三处）；纯函数三级解析器 `composite-route-resolver.ts`（Level 1 显式路由五级排序：exact>prefix、端点精确>any、更长前缀、更小 priority、更小 id；Level 2 组内账号模型归属目录，多平台歧义 fail-closed、目录不可用但可探测则降级；Level 3 前缀探测器照搬 sub2api DetectModelPlatform，目标平台对齐本仓 providerId 词汇）+ 未知模型 fail-closed；决策对象贯穿 preparation（adapter 交换 provider/product/model/endpoint 供给解析 → 调度 revalidation 复合分支（平台列匹配走既有 $5/$6 参数）→ 准入 guard 复合分支（customer/provider policy 端点与 provider 归属）→ evidence 复合列（preflight/claim 重校验）→ body.model 改写带 alias provenance（复用 payload-compiler :173 强制））；结算/用量平台归因自动跟随 candidate.providerId（normalSuccessSnapshot 既有字段，零额外改动）；管理面 CRUD + 三级 preview（`/admin/api/v1/composite-routes/*`，billing-groups-http 契约）；调度 golden 全部 byte-identical。遗留：composite 组合的供应商侧计费（provider metering policy/supplier cost 仍绑定路由的名义 provider，待商业链接入按目标平台解析）、composite fallback 链与调度侧组解析的一致性（违反组走 fail-closed）、mr-parity-pg 为 PG16（scheduling-threshold PG 门禁的 fixture 要求 15/18，环境遗留）。
+
+**#20 OEM 白标（2026-10-17，批次五 5.2）**：迁移 126 `saas_public_brand_settings`（单行快照表 + 空快照种子行，pg_column_size ≤1MiB 界）；数据面 `src/saas/platform/brand/`——snapshot.ts 纯语法层（`saas.brand.*` 十键严格解析器：site_name/subtitle/logo/api_base_url/contact_url/doc_url/custom_menu_items≤20/custom_endpoints≤20/custom_pages≤20/frame_ancestors≤8；sanitizeBrandUrl 白名单=相对路径+http(s)+mailto(仅 contact)+data:image/*;base64(仅 image)，javascript:/vbscript:/file:/协议相对/内嵌空白全拒）、store.ts（control-plane 物化器=读 settings → 严格重组 → 版本递增 upsert；周期 worker 首周期延迟到 interval 保 startup 只读；gateway 侧 TTL 读缓存 fail-open）、http.ts（`GET /settings/public` + `/settings/public/pages/:slug` markdown 正文，免认证 /metrics 先例，405/404 语义自持）、local.ts（BYOK brand.json 同语法、坏文件 fail-closed 空快照）。SSR 注入双点：managed-saas serveMountedStatic（/console、/admin 双挂载）与 admin/server.ts serveStatic 均在 HTML 响应注入 `window.__APP_CONFIG__`（nonce script、`<`/`>`/`&`/U+2028/U+2029 全 `\u` 转义防 `</script>` 逃逸）；CSP 按快照动态派生（基线 byte-identical 兜底；logo origin→img-src、iframe 页 origin→frame-src、frame_ancestors 可配默认 'none'、注入时 script-src 'self' 'nonce-…'），web/index.html 静态 hook（nonce 占位符逐响应改写）设 title/favicon，无品牌时 CSP 拦截为 no-op。管理面复用 platform-settings 通用端点（注册即得），`saas.brand.*` 写后 afterWrite 钩子即时再物化+缓存失效。授权镜像三处（runtime-privileges + roles.sql + 126 静态测试断言）：control-plane SELECT/INSERT/UPDATE 无 DELETE、gateway 动态只读表、validation-worker 无授权；顺带修复 123 遗留 bug（roles 模板给 gateway 授 saas_image_tasks DELETE 但校验排除表未同步——模板自绊）。PG 门禁：迁移 126 落 mr-parity-pg@5433 + 角色模板重放 + 双角色探针 + 物化/读回/坏行 fail-closed 全过。测试 31 项新增（sanitize 白名单负例矩阵、XSS 转义负例、CSP 矩阵、注入字节等价、物化周期/版本递增/坏行保持、端点 404/405、hook、双注入点真 HTTP、镜像断言）+ 全量枚举注册表测试尾巴对齐。遗留：前端 CustomPageView 页面（本任务只交 API+数据面，__APP_CONFIG__/pages 端点已可用）、iframe 页 user_id/theme/lang 参数的前端拼接协议、managed 部署的品牌管理 UI（现在走 platform-settings 通用 PUT）、brand.json 的文档化。

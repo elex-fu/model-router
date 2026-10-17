@@ -455,9 +455,6 @@ export class PostgresProviderAccountAffinity implements ProviderAccountScheduler
         }
 
         const activeRows = snapshots.filter(({ row }) => row.state === 'active' && !rowIsExpired(row));
-        if (snapshots.some(({ row }) => row.state === 'invalidated' && row.is_expired !== true)) {
-          return { decision: 'block', reason: 'provider account affinity target was invalidated' };
-        }
         const activeAccounts = new Set(activeRows.map(({ row }) => String(row.account_id)));
         if (activeAccounts.size > 1) {
           return { decision: 'block', reason: 'provider account affinity references conflict' };
@@ -469,6 +466,15 @@ export class PostgresProviderAccountAffinity implements ProviderAccountScheduler
           }
         }
 
+        /*
+         * An 'invalidated' row is a binding a previous resolve cleared because
+         * its target lost eligibility (batch 2 §2.1): it is no active binding,
+         * so the selection degrades to load balancing and may immediately
+         * re-bind. The anti-flap "block until original TTL expiry" posture is
+         * deliberately dropped for the sub2api shouldClearStickySession
+         * semantics — a sticky target that becomes unschedulable must not
+         * reject the session's subsequent requests.
+         */
         const accountId = activeRows.length > 0 ? String(activeRows[0].row.account_id) : null;
         if (accountId === null) return { decision: 'allow', accountId: null };
         if (!input.eligibleAccountIds.includes(accountId)) {
@@ -477,7 +483,9 @@ export class PostgresProviderAccountAffinity implements ProviderAccountScheduler
               throw new AffinityConflict('stale affinity invalidation compare-and-swap failed');
             }
           }
-          return { decision: 'block', reason: 'persisted provider account affinity target is no longer eligible' };
+          // The binding is cleared: tell the scheduler to degrade to load
+          // balancing (it re-binds whatever account wins that round).
+          return { decision: 'stale' };
         }
         return { decision: 'allow', accountId };
       });
@@ -527,9 +535,9 @@ export class PostgresProviderAccountAffinity implements ProviderAccountScheduler
             }
             continue;
           }
-          if (row.state === 'invalidated' && row.is_expired !== true) {
-            throw new AffinityConflict('invalidated affinity has not reached its expiry');
-          }
+          // An invalidated row (a previous stale clear) is rebindable: the
+          // degrade-to-load-balancing flow selects a fresh account and this
+          // bind resurrects the same row via the CAS-guarded update below.
           if (rowIsExpired(row) && !(await transitionExpired(tx, input.scope, kind, row))) {
             throw new AffinityConflict('expired affinity compare-and-swap failed');
           }

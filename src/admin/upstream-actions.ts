@@ -45,12 +45,17 @@ export class UpstreamActions {
           ? process.env[credential.secret.name]
           : this.control.store.secrets.get(credential.secret.id);
     if (!secret) throw new ControlError(422, 'CREDENTIAL_UNAVAILABLE', 'Credential reference cannot be resolved');
-    const headerName =
-      upstream.auth.mode === 'custom-header'
-        ? auth.data.headerName!
-        : upstream.auth.mode === 'bearer'
-          ? 'authorization'
-          : 'x-api-key';
+    let headerName: string;
+    if (upstream.auth.mode === 'custom-header') {
+      const name = auth.data.headerName;
+      if (name === undefined)
+        throw new ControlError(422, 'INVALID_AUTH_HEADER', 'Configured authentication header is invalid');
+      headerName = name;
+    } else if (upstream.auth.mode === 'bearer') {
+      headerName = 'authorization';
+    } else {
+      headerName = 'x-api-key';
+    }
     headers.set(headerName, upstream.auth.mode === 'bearer' ? `Bearer ${secret}` : secret);
     return { headers, secret };
   }
@@ -91,9 +96,7 @@ export class UpstreamActions {
       let size = 0;
       // The DOM-lib ReadableStream type predates the async-iterable body that
       // Node's fetch returns; the runtime object is async-iterable.
-      const responseBody = response.body as
-        | (AsyncIterable<Uint8Array> & { cancel(): Promise<void> })
-        | null;
+      const responseBody = response.body as (AsyncIterable<Uint8Array> & { cancel(): Promise<void> }) | null;
       if (responseBody)
         for await (const chunk of responseBody) {
           size += chunk.length;

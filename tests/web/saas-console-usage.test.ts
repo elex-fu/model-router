@@ -3,7 +3,12 @@ import { after, afterEach, test } from 'node:test';
 import * as React from 'react';
 import type { ConsoleRequest, ConsoleRequestDetail, Project } from '../../web/src/api/saas-client.ts';
 import { SaasApiError, saasClient } from '../../web/src/api/saas-client.ts';
-import { formatExactDecimal, RequestFinancialStatus, RequestReconciliationStatus, resolveProjectSelection } from '../../web/src/features/saas-console.tsx';
+import {
+  formatExactDecimal,
+  RequestFinancialStatus,
+  RequestReconciliationStatus,
+  resolveProjectSelection,
+} from '../../web/src/features/saas-console.tsx';
 
 const reactGlobal = globalThis as typeof globalThis & { React?: typeof React };
 const originalReact = reactGlobal.React;
@@ -129,18 +134,27 @@ test('token presentation keeps large decimal strings exact', () => {
 
 function stateRequest(): ConsoleRequestDetail {
   return {
-    id: 'request-pending', projectId: 'project-one', model: 'model-one',
-    protocol: 'openai', supplyMode: 'platform', status: 'succeeded',
-    financialStatus: 'reconciliation_pending', reconciliationState: 'resolved',
-    createdAt: '2026-09-28T00:00:00.000Z', updatedAt: '2026-09-28T00:00:01.000Z',
-    attempts: [], usageEvents: [],
+    id: 'request-pending',
+    projectId: 'project-one',
+    model: 'model-one',
+    protocol: 'openai',
+    supplyMode: 'platform',
+    status: 'succeeded',
+    financialStatus: 'reconciliation_pending',
+    reconciliationState: 'resolved',
+    createdAt: '2026-09-28T00:00:00.000Z',
+    updatedAt: '2026-09-28T00:00:01.000Z',
+    attempts: [],
+    usageEvents: [],
   };
 }
 
 function respondWith(data: unknown): void {
-  globalThis.fetch = async () => new Response(JSON.stringify({ data }), {
-    status: 200, headers: { 'content-type': 'application/json' },
-  });
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ data }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
 }
 
 test('HTTP 200 request metadata and both detail aliases preserve financial pending independently of execution success', async () => {
@@ -168,8 +182,10 @@ test('older API responses leave new axes absent, while malformed or mode-conflic
   assert.equal(Object.hasOwn(detail, 'financialStatus'), false);
   assert.equal(Object.hasOwn(detail, 'reconciliationState'), false);
   const malformed = [
-    { financialStatus: null }, { financialStatus: 'future-state' },
-    { reconciliationState: null }, { reconciliationState: 'settled' },
+    { financialStatus: null },
+    { financialStatus: 'future-state' },
+    { reconciliationState: null },
+    { reconciliationState: 'settled' },
     { supplyMode: 'byok', financialStatus: 'settled' },
     { supplyMode: 'platform', financialStatus: 'not_applicable' },
     { status: 'unknown', reconciliationState: 'resolved' },
@@ -178,24 +194,34 @@ test('older API responses leave new axes absent, while malformed or mode-conflic
   for (const invalid of malformed) {
     const value = { ...stateRequest(), ...invalid };
     respondWith({ items: [value], hasMore: false, nextCursor: null });
-    await assert.rejects(saasClient.listRequests('tenant-one'), (error: unknown) =>
-      error instanceof SaasApiError && error.code === 'INVALID_RESPONSE' &&
-      error.message === '服务返回了无效请求状态');
+    await assert.rejects(
+      saasClient.listRequests('tenant-one'),
+      (error: unknown) =>
+        error instanceof SaasApiError &&
+        error.code === 'INVALID_RESPONSE' &&
+        error.message === '服务返回了无效请求状态',
+    );
     for (const getDetail of [saasClient.getRequest, saasClient.getRequestDetail]) {
       respondWith(value);
-      await assert.rejects(getDetail('tenant-one', value.id), (error: unknown) =>
-        error instanceof SaasApiError && error.code === 'INVALID_RESPONSE');
+      await assert.rejects(
+        getDetail('tenant-one', value.id),
+        (error: unknown) => error instanceof SaasApiError && error.code === 'INVALID_RESPONSE',
+      );
     }
   }
 });
 
 test('financial and execution-reconciliation labels never turn resolved or missing metadata into settled', async () => {
   const { renderToStaticMarkup } = await import('react-dom/server');
-  const renderStates = (request: ConsoleRequest) => renderToStaticMarkup(React.createElement(
-    React.Fragment, null,
-    React.createElement(RequestFinancialStatus, { request }),
-    React.createElement(RequestReconciliationStatus, { request }),
-  ));
+  const renderStates = (request: ConsoleRequest) =>
+    renderToStaticMarkup(
+      React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(RequestFinancialStatus, { request }),
+        React.createElement(RequestReconciliationStatus, { request }),
+      ),
+    );
   const pending = renderStates(stateRequest());
   assert.match(pending, /财务待对账（尚未结算）/);
   assert.match(pending, /执行对账已完成/);
@@ -211,12 +237,15 @@ test('financial and execution-reconciliation labels never turn resolved or missi
   assert.match(byok, /BYOK 无平台 Token 扣费/);
   assert.doesNotMatch(byok, /已结算|待结算/);
   for (const [financialStatus, label] of [
-    ['pending', '待结算'], ['settled', '已结算'], ['released', '预留已释放'],
+    ['pending', '待结算'],
+    ['settled', '已结算'],
+    ['released', '预留已释放'],
   ] as const) {
     assert.ok(renderStates({ ...stateRequest(), financialStatus }).includes(label));
   }
   for (const [reconciliationState, label] of [
-    ['none', '未进入执行对账'], ['pending', '执行结果待对账'],
+    ['none', '未进入执行对账'],
+    ['pending', '执行结果待对账'],
   ] as const) {
     assert.ok(renderStates({ ...stateRequest(), reconciliationState }).includes(label));
   }
@@ -228,30 +257,64 @@ test('actual customer list and detail render separate axes with safe explanation
   const { MemoryRouter } = await import('react-router-dom');
   const { RequestsPage, RequestDetailPage } = await import('../../web/src/features/saas-console.tsx');
   const request = stateRequest();
-  const byok = { ...request, id: 'request-byok', supplyMode: 'byok', financialStatus: 'not_applicable' } satisfies ConsoleRequestDetail;
+  const byok = {
+    ...request,
+    id: 'request-byok',
+    supplyMode: 'byok',
+    financialStatus: 'not_applicable',
+  } satisfies ConsoleRequestDetail;
   const detail = {
     ...request,
-    attempts: [{
-      id: 'attempt-one', sequence: 1, status: 'succeeded', responseStarted: true,
-      responseStartedAt: request.updatedAt, httpStatus: 200,
-      createdAt: request.createdAt, updatedAt: request.updatedAt,
-    }],
-    usageEvents: [{
-      id: 'usage-one', supplyMode: 'platform',
-      inputTotal: '900719925474099312345', inputUncached: null, cacheRead: null,
-      cacheWrite: null, cacheWrite5m: null, cacheWrite1h: null, outputTotal: '2',
-      reasoningOutput: null, status: 'reported', source: 'upstream',
-      measurementKind: 'snapshot', billableBasis: 'exact', createdAt: request.updatedAt,
-    }],
+    attempts: [
+      {
+        id: 'attempt-one',
+        sequence: 1,
+        status: 'succeeded',
+        responseStarted: true,
+        responseStartedAt: request.updatedAt,
+        httpStatus: 200,
+        createdAt: request.createdAt,
+        updatedAt: request.updatedAt,
+      },
+    ],
+    usageEvents: [
+      {
+        id: 'usage-one',
+        supplyMode: 'platform',
+        inputTotal: '900719925474099312345',
+        inputUncached: null,
+        cacheRead: null,
+        cacheWrite: null,
+        cacheWrite5m: null,
+        cacheWrite1h: null,
+        outputTotal: '2',
+        reasoningOutput: null,
+        status: 'reported',
+        source: 'upstream',
+        measurementKind: 'snapshot',
+        billableBasis: 'exact',
+        createdAt: request.updatedAt,
+      },
+    ],
   } satisfies ConsoleRequestDetail;
   const tenant = {
-    id: 'tenant-one', name: 'Tenant One', slug: 'tenant-one', status: 'active',
-    role: 'developer', defaultProjectId: 'project-one',
-    createdAt: request.createdAt, updatedAt: request.updatedAt,
+    id: 'tenant-one',
+    name: 'Tenant One',
+    slug: 'tenant-one',
+    status: 'active',
+    role: 'developer',
+    defaultProjectId: 'project-one',
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
   } as const;
   const project = {
-    id: 'project-one', tenantId: tenant.id, name: 'Project One', slug: 'project-one',
-    role: 'developer', createdAt: request.createdAt, updatedAt: request.updatedAt,
+    id: 'project-one',
+    tenantId: tenant.id,
+    name: 'Project One',
+    slug: 'project-one',
+    role: 'developer',
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
   } satisfies Project;
   for (const page of ['list', 'detail'] as const) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
@@ -266,9 +329,20 @@ test('actual customer list and detail render separate axes with safe explanation
       } else {
         queryClient.setQueryData(['saas-console', 'requests', 'detail', tenant.id, request.id, ''], detail);
       }
-      const element = React.createElement(page === 'list' ? RequestsPage : RequestDetailPage, { onLogout: async () => {} });
-      const html = renderToStaticMarkup(React.createElement(QueryClientProvider, { client: queryClient },
-        React.createElement(MemoryRouter, { initialEntries: [`/console/requests/${request.id}?tenantId=${tenant.id}`] }, element)));
+      const element = React.createElement(page === 'list' ? RequestsPage : RequestDetailPage, {
+        onLogout: async () => {},
+      });
+      const html = renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          React.createElement(
+            MemoryRouter,
+            { initialEntries: [`/console/requests/${request.id}?tenantId=${tenant.id}`] },
+            element,
+          ),
+        ),
+      );
       assert.match(html, /执行状态/);
       assert.match(html, /财务状态/);
       assert.match(html, /执行对账/);

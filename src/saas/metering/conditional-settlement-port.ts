@@ -90,6 +90,23 @@ export interface ConditionalSettlementKeyBudget {
   ): Promise<boolean>;
 }
 
+/**
+ * R1 (roadmap 1.3, phase 3): the billing-group spend windows resolve with the
+ * ACTUAL platform charge (settled reservations contribute their actual
+ * amount). BYOK has no group spend rows and the store is a no-op.
+ */
+export interface ConditionalSettlementBillingGroupSpend {
+  settle(
+    executor: SqlExecutor,
+    input: {
+      readonly tenantId: string;
+      readonly requestId: string;
+      readonly actualChargeMinorUnits: string;
+      readonly actualChargeCurrency: string;
+    },
+  ): Promise<boolean>;
+}
+
 export interface ConditionalSettlementPortOptions {
   readonly metering?: ConditionalSettlementMetering;
   readonly billing?: ConditionalSettlementBilling;
@@ -97,6 +114,7 @@ export interface ConditionalSettlementPortOptions {
   readonly meteringService?: ConditionalSettlementMetering;
   readonly billingService?: ConditionalSettlementBilling;
   readonly keyBudget?: ConditionalSettlementKeyBudget;
+  readonly billingGroupSpend?: ConditionalSettlementBillingGroupSpend;
   /**
    * F3: customer webhook producer invoked at the settlement terminal commit.
    * Events enqueue inside the settlement transaction; absent disables them.
@@ -410,6 +428,25 @@ function normalizeUsage(value: unknown): NormalizedUsageExact | null {
     token(usage.reasoningOutput),
   ];
   if (values.some((value) => value === undefined)) return null;
+  // §4.1: media facts ride the same strict shape — absent keeps the neutral
+  // token-only values; a non-token mode requires a unit count.
+  const billingMode = usage.billingMode ?? 'token';
+  if (
+    billingMode !== 'token' &&
+    billingMode !== 'per_request' &&
+    billingMode !== 'image' &&
+    billingMode !== 'video' &&
+    billingMode !== 'audio'
+  ) {
+    return null;
+  }
+  const units = token(usage.units ?? null);
+  if (units === undefined) return null;
+  if (billingMode !== 'token' && units === null) return null;
+  const sizeTier = usage.sizeTier ?? null;
+  if (sizeTier !== null && !['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'].includes(sizeTier)) {
+    return null;
+  }
   return {
     inputTotal: values[0] as string | null,
     inputUncached: values[1] as string | null,
@@ -419,6 +456,9 @@ function normalizeUsage(value: unknown): NormalizedUsageExact | null {
     cacheWrite1h: values[5] as string | null,
     outputTotal: values[6] as string | null,
     reasoningOutput: values[7] as string | null,
+    billingMode,
+    units,
+    sizeTier,
     status: 'reported',
     source: 'upstream',
     semanticsVersion,
@@ -639,6 +679,7 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
   private readonly metering: ConditionalSettlementMetering;
   private readonly billing: ConditionalSettlementBilling;
   private readonly keyBudget: ConditionalSettlementKeyBudget | undefined;
+  private readonly billingGroupSpend: ConditionalSettlementBillingGroupSpend | undefined;
   private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
@@ -648,6 +689,7 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
     this.metering = options.metering ?? options.meteringService ?? new SaasMeteringService(database);
     this.billing = options.billing ?? options.billingService ?? new PlatformWalletLedgerService();
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
     if (
       options.webhookEvents !== undefined &&
       (typeof options.webhookEvents.requestCompleted !== 'function' ||
@@ -832,6 +874,14 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
             actualChargeMinorUnits: normalized.charge.amountMinorUnits,
           });
         }
+        if (this.billingGroupSpend) {
+          await this.billingGroupSpend.settle(tx, {
+            tenantId: normalized.tenantId,
+            requestId: normalized.requestId,
+            actualChargeMinorUnits: normalized.charge.amountMinorUnits,
+            actualChargeCurrency: normalized.charge.currency,
+          });
+        }
         if (terminal) {
           return {
             status: 'replayed',
@@ -905,6 +955,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
   private readonly metering: ConditionalSettlementMetering;
   private readonly billing: ConditionalSettlementBilling;
   private readonly keyBudget: ConditionalSettlementKeyBudget | undefined;
+  private readonly billingGroupSpend: ConditionalSettlementBillingGroupSpend | undefined;
   private readonly webhookEvents: CustomerWebhookEventProducer | undefined;
 
   constructor(
@@ -914,6 +965,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
     this.metering = options.metering ?? options.meteringService ?? new SaasMeteringService(database);
     this.billing = options.billing ?? options.billingService ?? new PlatformWalletLedgerService();
     this.keyBudget = options.keyBudget;
+    this.billingGroupSpend = options.billingGroupSpend;
     if (
       options.webhookEvents !== undefined &&
       (typeof options.webhookEvents.requestCompleted !== 'function' ||
@@ -1189,6 +1241,14 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
           requestId: input.requestId,
           actualTokenUnits: keyBudgetTokenUnitsFromUsage(input.usage),
           actualChargeMinorUnits: input.supplyMode === 'platform' ? (input.chargeAmountMinorUnits as string) : '0',
+        });
+      }
+      if (this.billingGroupSpend && input.supplyMode === 'platform') {
+        await this.billingGroupSpend.settle(tx, {
+          tenantId: input.tenantId,
+          requestId: input.requestId,
+          actualChargeMinorUnits: input.chargeAmountMinorUnits as string,
+          actualChargeCurrency: input.currency as string,
         });
       }
 

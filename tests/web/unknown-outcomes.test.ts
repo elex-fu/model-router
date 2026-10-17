@@ -6,8 +6,8 @@ import {
   clearPlatformCsrfToken,
   hasPlatformCsrfToken,
   PlatformApiError,
-  platformClient,
   type PlatformUnknownOutcomeCaseDetail,
+  platformClient,
 } from '../../web/src/api/saas-platform-client.ts';
 
 const reactGlobal = globalThis as typeof globalThis & { React?: typeof React };
@@ -142,7 +142,8 @@ test('unknown-outcome client uses tenant query, strict safe projection, CSRF, an
   globalThis.fetch = async (input, init) => {
     calls.push({ url: String(input), init: init ?? {} });
     const url = String(input);
-    if (url.endsWith('/auth/session')) return jsonResponse({ session: { userId: 'admin-user' }, csrfToken: 'csrf-token' });
+    if (url.endsWith('/auth/session'))
+      return jsonResponse({ session: { userId: 'admin-user' }, csrfToken: 'csrf-token' });
     if (url.includes('/resolve-not-executed')) {
       return jsonResponse({ status: 'resolved', caseId: CASE_ID, requestId: SUMMARY.requestId }, 200);
     }
@@ -158,7 +159,7 @@ test('unknown-outcome client uses tenant query, strict safe projection, CSRF, an
     caseId: CASE_ID,
     supportTicketRef: 'SUP-1001',
     reason: '证据定位显示没有执行。',
-    coverage: ATTEMPT_IDS.map(attemptId => ({ attemptId, evidenceReference: `ticket://SUP-1001/${attemptId}` })),
+    coverage: ATTEMPT_IDS.map((attemptId) => ({ attemptId, evidenceReference: `ticket://SUP-1001/${attemptId}` })),
     idempotencyKey: 'resolution-key-001',
   });
 
@@ -187,7 +188,7 @@ test('unknown-outcome client uses tenant query, strict safe projection, CSRF, an
     supportTicketRef: 'SUP-1001',
     reason: '证据定位显示没有执行。',
     outcome: 'not_executed',
-    coverage: ATTEMPT_IDS.map(attemptId => ({
+    coverage: ATTEMPT_IDS.map((attemptId) => ({
       attemptId,
       outcome: 'not_executed',
       evidenceReference: `ticket://SUP-1001/${attemptId}`,
@@ -201,7 +202,9 @@ test('401 clears the in-memory platform CSRF token and malformed unknown-outcome
   globalThis.fetch = async (_input, _init) => {
     callNumber += 1;
     if (callNumber === 1) return jsonResponse({ session: { userId: 'admin-user' }, csrfToken: 'csrf-token' });
-    return new Response(JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: 'must-not-leak' } }), { status: 401 });
+    return new Response(JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: 'must-not-leak' } }), {
+      status: 401,
+    });
   };
   await platformClient.login({ email: 'admin@example.test', password: 'not-retained', code: '123456' });
   assert.equal(hasPlatformCsrfToken(), true);
@@ -240,7 +243,9 @@ test('unknown-outcome UI exposes safe form fields, fixed outcome, evidence warni
 });
 
 test('unknown-outcome UI maps success, conflict, and authorization failure without server detail', () => {
-  const render = (state: { kind: 'success'; status: 'resolved' | 'replayed' } | { kind: 'conflict' } | { kind: 'forbidden' }) =>
+  const render = (
+    state: { kind: 'success'; status: 'resolved' | 'replayed' } | { kind: 'conflict' } | { kind: 'forbidden' },
+  ) =>
     renderToStaticMarkup(
       React.createElement(platformFeature.UnknownOutcomeResolutionForm, {
         detail: DETAIL,

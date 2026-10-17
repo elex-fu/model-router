@@ -2,16 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   DispatchCompletionBarrierError,
-  DispatchCompletionTracker,
   type DispatchCompletionCleanupDiagnostic,
   type DispatchCompletionFailureCode,
   type DispatchCompletionOutcome,
+  DispatchCompletionTracker,
 } from './dispatch-completion-test-helper.js';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((fulfill, fail) => { resolve = fulfill; reject = fail; });
+  const promise = new Promise<T>((fulfill, fail) => {
+    resolve = fulfill;
+    reject = fail;
+  });
   return { promise, resolve, reject };
 }
 
@@ -32,7 +35,9 @@ test('completion observer correlates fresh request identities even when promises
   tracker.track('second-http-request', second.promise, (outcome) => outcome);
 
   let firstCompleted = false;
-  const firstWait = tracker.waitForCompletion('first-http-request', firstCheckpoint).then(() => { firstCompleted = true; });
+  const firstWait = tracker.waitForCompletion('first-http-request', firstCheckpoint).then(() => {
+    firstCompleted = true;
+  });
   second.resolve('sent');
   await tracker.waitForCompletion('second-http-request', secondCheckpoint);
   assert.equal(firstCompleted, false, 'completion of a different request must not release the first barrier');
@@ -40,13 +45,22 @@ test('completion observer correlates fresh request identities even when promises
   first.resolve(originalResult);
   await firstWait;
   assert.equal(await first.promise, originalResult, 'observation must not replace the actual result');
-  await assert.rejects(tracker.waitForCompletion('previous-http-request', firstCheckpoint), barrierCode('stale_dispatch'));
-  await assert.rejects(tracker.waitForCompletion('unobserved-http-request', firstCheckpoint), barrierCode('missing_dispatch'));
+  await assert.rejects(
+    tracker.waitForCompletion('previous-http-request', firstCheckpoint),
+    barrierCode('stale_dispatch'),
+  );
+  await assert.rejects(
+    tracker.waitForCompletion('unobserved-http-request', firstCheckpoint),
+    barrierCode('missing_dispatch'),
+  );
   await assert.rejects(tracker.waitForCompletion(null, firstCheckpoint), barrierCode('missing_request_id'));
   const duplicateCheckpoint = tracker.checkpoint();
   tracker.track('duplicate-http-request', Promise.resolve('sent' as const), (outcome) => outcome);
   tracker.track('duplicate-http-request', Promise.resolve('sent' as const), (outcome) => outcome);
-  await assert.rejects(tracker.waitForCompletion('duplicate-http-request', duplicateCheckpoint), barrierCode('duplicate_dispatch'));
+  await assert.rejects(
+    tracker.waitForCompletion('duplicate-http-request', duplicateCheckpoint),
+    barrierCode('duplicate_dispatch'),
+  );
   assert.equal(await tracker.drain(), null);
 });
 
@@ -63,16 +77,24 @@ test('completion observer rejects actual rejection, unknown, lease-release failu
   rejectedTracker.track('rejected-http-request', rejected.promise, (result) => result);
   const originalError = new Error('controlled original rejection');
   rejected.reject(originalError);
-  await assert.rejects(rejectedTracker.waitForCompletion('rejected-http-request', rejectedCheckpoint), barrierCode('dispatch_rejected'));
+  await assert.rejects(
+    rejectedTracker.waitForCompletion('rejected-http-request', rejectedCheckpoint),
+    barrierCode('dispatch_rejected'),
+  );
   await assert.rejects(rejected.promise, (error: unknown) => error === originalError);
 
   const timeoutTracker = new DispatchCompletionTracker(10);
   const late = deferred<{ outcome: DispatchCompletionOutcome; originalValue: number }>();
   const timeoutCheckpoint = timeoutTracker.checkpoint();
   let actualCompleted = false;
-  void late.promise.then(() => { actualCompleted = true; });
+  void late.promise.then(() => {
+    actualCompleted = true;
+  });
   timeoutTracker.track('late-http-request', late.promise, (result) => result.outcome);
-  await assert.rejects(timeoutTracker.waitForCompletion('late-http-request', timeoutCheckpoint), barrierCode('completion_timeout'));
+  await assert.rejects(
+    timeoutTracker.waitForCompletion('late-http-request', timeoutCheckpoint),
+    barrierCode('completion_timeout'),
+  );
   assert.equal(actualCompleted, false);
   const lateResult = { outcome: 'sent' as const, originalValue: 23 };
   late.resolve(lateResult);
@@ -86,7 +108,10 @@ test('completion observer permits no-dispatch replay and drains before cleanup w
   await replayTracker.waitForCompletion('canonical-http-request', 0);
   const replayCheckpoint = replayTracker.checkpoint();
   replayTracker.assertNoDispatchSince(replayCheckpoint);
-  await assert.rejects(replayTracker.waitForCompletion('canonical-http-request', replayCheckpoint), barrierCode('stale_dispatch'));
+  await assert.rejects(
+    replayTracker.waitForCompletion('canonical-http-request', replayCheckpoint),
+    barrierCode('stale_dispatch'),
+  );
   replayTracker.track('unexpected-replay-dispatch', Promise.resolve('sent' as const), (outcome) => outcome);
   assert.throws(() => replayTracker.assertNoDispatchSince(replayCheckpoint), barrierCode('unexpected_dispatch'));
 
@@ -97,13 +122,21 @@ test('completion observer permits no-dispatch replay and drains before cleanup w
   let closeCalled = false;
   const primary = new Error('controlled first assertion failure');
   const failedTest = (async () => {
-    try { await tracker.preserveFailure(async () => { throw primary; }); }
-    finally {
-      await tracker.finalize(async () => {
-        closeCalled = true;
-        assert.equal(tracker.closeStarted, true);
-        throw new Error('controlled cleanup rejection');
-      }, (diagnostic) => { reports.push(diagnostic); });
+    try {
+      await tracker.preserveFailure(async () => {
+        throw primary;
+      });
+    } finally {
+      await tracker.finalize(
+        async () => {
+          closeCalled = true;
+          assert.equal(tracker.closeStarted, true);
+          throw new Error('controlled cleanup rejection');
+        },
+        (diagnostic) => {
+          reports.push(diagnostic);
+        },
+      );
     }
   })();
   assert.equal(closeCalled, false, 'resources must remain open while actual completion is pending');
@@ -118,13 +151,27 @@ test('completion observer permits no-dispatch replay and drains before cleanup w
   const noPrimary = new DispatchCompletionTracker();
   noPrimary.track('unobserved-failed-dispatch', Promise.resolve('lease_release_failed' as const), (outcome) => outcome);
   let closedAfterFailure = false;
-  await assert.rejects(noPrimary.finalize(async () => { closedAfterFailure = true; }, () => {}), barrierCode('lease_release_failed'));
+  await assert.rejects(
+    noPrimary.finalize(
+      async () => {
+        closedAfterFailure = true;
+      },
+      () => {},
+    ),
+    barrierCode('lease_release_failed'),
+  );
   assert.equal(closedAfterFailure, true, 'a drain failure must not prevent resource closing');
 
   const timeout = new DispatchCompletionTracker(10);
   const unfinished = deferred<DispatchCompletionOutcome>();
   timeout.track('unfinished-cleanup-request', unfinished.promise, (outcome) => outcome);
-  await assert.rejects(timeout.finalize(async () => {}, () => {}), barrierCode('completion_timeout'));
+  await assert.rejects(
+    timeout.finalize(
+      async () => {},
+      () => {},
+    ),
+    barrierCode('completion_timeout'),
+  );
   unfinished.resolve('sent');
   assert.equal(await unfinished.promise, 'sent');
 
@@ -134,12 +181,25 @@ test('completion observer permits no-dispatch replay and drains before cleanup w
   const timeoutReports: DispatchCompletionCleanupDiagnostic[] = [];
   const primaryBeforeTimeout = new Error('controlled first failure before drain timeout');
   let closedAfterTimeout = false;
-  await assert.rejects((async () => {
-    try { await timeoutWithPrimary.preserveFailure(async () => { throw primaryBeforeTimeout; }); }
-    finally {
-      await timeoutWithPrimary.finalize(async () => { closedAfterTimeout = true; }, (diagnostic) => { timeoutReports.push(diagnostic); });
-    }
-  })(), (error: unknown) => error === primaryBeforeTimeout);
+  await assert.rejects(
+    (async () => {
+      try {
+        await timeoutWithPrimary.preserveFailure(async () => {
+          throw primaryBeforeTimeout;
+        });
+      } finally {
+        await timeoutWithPrimary.finalize(
+          async () => {
+            closedAfterTimeout = true;
+          },
+          (diagnostic) => {
+            timeoutReports.push(diagnostic);
+          },
+        );
+      }
+    })(),
+    (error: unknown) => error === primaryBeforeTimeout,
+  );
   assert.equal(closedAfterTimeout, true);
   assert.deepEqual(timeoutReports, [{ phase: 'before_close_drain', code: 'completion_timeout' }]);
   unfinishedAfterPrimary.resolve('sent');
@@ -147,8 +207,17 @@ test('completion observer permits no-dispatch replay and drains before cleanup w
 
   const empty = new DispatchCompletionTracker();
   let closedWithoutDispatch = false;
-  await empty.finalize(async () => { closedWithoutDispatch = true; }, () => {});
-  assert.equal(closedWithoutDispatch, true, 'an early failure/no-dispatch response must not wait for a nonexistent dispatch');
+  await empty.finalize(
+    async () => {
+      closedWithoutDispatch = true;
+    },
+    () => {},
+  );
+  assert.equal(
+    closedWithoutDispatch,
+    true,
+    'an early failure/no-dispatch response must not wait for a nonexistent dispatch',
+  );
 });
 
 test('expected unknown requires one fresh exact dispatch and does not accept sent, release failure or rejection', async () => {
@@ -159,24 +228,34 @@ test('expected unknown requires one fresh exact dispatch and does not accept sen
   tracker.track('receipt-correlated-request', actual.promise, (result) => result);
   assert.equal(tracker.requestIdSince(checkpoint), 'receipt-correlated-request');
   let completed = false;
-  const barrier = tracker.waitForCompletion('receipt-correlated-request', checkpoint, 'unknown')
-    .then(() => { completed = true; });
+  const barrier = tracker.waitForCompletion('receipt-correlated-request', checkpoint, 'unknown').then(() => {
+    completed = true;
+  });
   assert.equal(completed, false);
   actual.resolve('unknown');
   await barrier;
   assert.equal(completed, true);
   assert.equal(await tracker.drain(), null, 'explicit unknown observation must not be reclassified by cleanup');
-  await tracker.finalize(async () => {}, () => { assert.fail('unexpected cleanup diagnostic'); });
+  await tracker.finalize(
+    async () => {},
+    () => {
+      assert.fail('unexpected cleanup diagnostic');
+    },
+  );
   const replayCheckpoint = tracker.checkpoint();
   tracker.assertNoDispatchSince(replayCheckpoint);
   assert.throws(() => tracker.requestIdSince(replayCheckpoint), barrierCode('missing_dispatch'));
-  await assert.rejects(tracker.waitForCompletion('receipt-correlated-request', replayCheckpoint, 'unknown'),
-    barrierCode('stale_dispatch'));
+  await assert.rejects(
+    tracker.waitForCompletion('receipt-correlated-request', replayCheckpoint, 'unknown'),
+    barrierCode('stale_dispatch'),
+  );
   tracker.track('second-fresh-request', Promise.resolve('unknown' as const), (value) => value);
   assert.throws(() => tracker.requestIdSince(checkpoint), barrierCode('duplicate_dispatch'));
 
   for (const [outcome, code] of [
-    ['sent', 'unexpected_outcome'], ['lease_release_failed', 'lease_release_failed'], ['threw', 'dispatch_rejected'],
+    ['sent', 'unexpected_outcome'],
+    ['lease_release_failed', 'lease_release_failed'],
+    ['threw', 'dispatch_rejected'],
   ] as const) {
     const rejected = new DispatchCompletionTracker();
     rejected.track('bad-unknown-result', Promise.resolve(outcome), (value) => value);
@@ -187,12 +266,18 @@ test('expected unknown requires one fresh exact dispatch and does not accept sen
   const originalError = new Error('controlled actual unknown-dispatch rejection');
   rejected.track('rejected-unknown-request', failed.promise, (value) => value);
   failed.reject(originalError);
-  await assert.rejects(rejected.waitForCompletion('rejected-unknown-request', 0, 'unknown'), barrierCode('dispatch_rejected'));
+  await assert.rejects(
+    rejected.waitForCompletion('rejected-unknown-request', 0, 'unknown'),
+    barrierCode('dispatch_rejected'),
+  );
   await assert.rejects(failed.promise, (error: unknown) => error === originalError);
   const timeout = new DispatchCompletionTracker(10);
   const unfinished = deferred<DispatchCompletionOutcome>();
   timeout.track('unknown-still-running', unfinished.promise, (value) => value);
-  await assert.rejects(timeout.waitForCompletion('unknown-still-running', 0, 'unknown'), barrierCode('completion_timeout'));
+  await assert.rejects(
+    timeout.waitForCompletion('unknown-still-running', 0, 'unknown'),
+    barrierCode('completion_timeout'),
+  );
   unfinished.resolve('unknown');
   assert.equal(await timeout.drain(), 'unknown', 'a timeout does not approve a late unknown or cancel actual work');
 });

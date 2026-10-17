@@ -53,7 +53,7 @@ test('managed PostgreSQL role template creates distinct least-privilege principa
   );
   assert.match(
     roleTemplate,
-    /has_table_privilege\(v_gateway_oid, relation\.oid, 'DELETE'\)[\s\S]+relation\.relname <> 'saas_billing_spending_freezes'/,
+    /has_table_privilege\(v_gateway_oid, relation\.oid, 'DELETE'\)[\s\S]+relation\.relname NOT IN \('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks'\)/,
   );
 });
 
@@ -246,7 +246,7 @@ test('gateway pricing template grants only exact snapshot INSERTs while worker a
     'utf8',
   );
   for (const [table, columnCount] of [
-    ['saas_request_customer_price_snapshots', 36],
+    ['saas_request_customer_price_snapshots', 44],
     ['saas_attempt_supplier_cost_snapshots', 22],
   ] as const) {
     const expected = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([relation]) => relation === table);

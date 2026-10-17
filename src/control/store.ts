@@ -86,9 +86,11 @@ export class ControlStore {
         const version = { ...profile, id: row.id, versionId, effectiveFrom };
         insert.run(versionId, row.id, JSON.stringify(version), effectiveFrom, row.updated_at);
       }
-      const unsequenced = this.db.prepare(`SELECT version_id FROM pricing_versions
+      const unsequenced = this.db
+        .prepare(`SELECT version_id FROM pricing_versions
         WHERE version_id NOT IN (SELECT version_id FROM pricing_version_sequence)
-        ORDER BY effective_from,created_at,version_id`).all() as Array<{ version_id: string }>;
+        ORDER BY effective_from,created_at,version_id`)
+        .all() as Array<{ version_id: string }>;
       const sequence = this.db.prepare('INSERT OR IGNORE INTO pricing_version_sequence (version_id) VALUES(?)');
       for (const row of unsequenced) sequence.run(row.version_id);
     });
@@ -206,14 +208,18 @@ export class ControlStore {
     const remove = this.db.prepare('DELETE FROM secrets WHERE id=?');
     const tx = this.db.transaction(() => {
       const rows = this.db.prepare('SELECT id FROM secrets').all() as Array<{ id: string }>;
-      const orphaned = rows
-        .map(({ id }) => id)
-        .filter((id) => generatedId.test(id) && !referencedIds.has(id));
+      const orphaned = rows.map(({ id }) => id).filter((id) => generatedId.test(id) && !referencedIds.has(id));
       for (const id of orphaned) remove.run(id);
       if (orphaned.length)
         this.db
           .prepare('INSERT INTO audit_events VALUES(?,?,?,?,?)')
-          .run(randomBytes(16).toString('hex'), 'system', 'credential.orphan_gc', JSON.stringify({ count: orphaned.length }), new Date().toISOString());
+          .run(
+            randomBytes(16).toString('hex'),
+            'system',
+            'credential.orphan_gc',
+            JSON.stringify({ count: orphaned.length }),
+            new Date().toISOString(),
+          );
       return orphaned.length;
     });
     return tx();
@@ -258,31 +264,46 @@ export class ControlStore {
   prepareLegacyMigration(baseChecksum: string, candidate: { revision: number; checksum: string }): string {
     const id = `migration-${candidate.checksum}`;
     const now = new Date().toISOString();
-    this.db.prepare(`INSERT INTO config_journal
+    this.db
+      .prepare(`INSERT INTO config_journal
       (id,base_revision,base_checksum,candidate_revision,candidate_checksum,actor_id,changed_paths,state,apply_error,created_at,updated_at)
       VALUES(?,0,?,?,?,'migration','["schemaVersion"]','prepared',NULL,?,?)
       ON CONFLICT(id) DO UPDATE SET state='prepared',updated_at=excluded.updated_at
       WHERE config_journal.state='aborted' AND config_journal.base_checksum=excluded.base_checksum
         AND config_journal.candidate_checksum=excluded.candidate_checksum`)
       .run(id, baseChecksum, candidate.revision, candidate.checksum, now, now);
-    const row = this.db.prepare('SELECT base_checksum,candidate_revision,candidate_checksum,state FROM config_journal WHERE id=?').get(id) as
-      { base_checksum: string; candidate_revision: number; candidate_checksum: string; state: string };
-    if (row.base_checksum !== baseChecksum || row.candidate_revision !== candidate.revision || row.candidate_checksum !== candidate.checksum || row.state !== 'prepared')
+    const row = this.db
+      .prepare('SELECT base_checksum,candidate_revision,candidate_checksum,state FROM config_journal WHERE id=?')
+      .get(id) as { base_checksum: string; candidate_revision: number; candidate_checksum: string; state: string };
+    if (
+      row.base_checksum !== baseChecksum ||
+      row.candidate_revision !== candidate.revision ||
+      row.candidate_checksum !== candidate.checksum ||
+      row.state !== 'prepared'
+    )
       throw new Error('Config migration journal checksum conflict; refusing migration');
     return id;
   }
   finalizeLegacyMigration(candidate: unknown): void {
     const cfg = candidate as { revision: number };
     const checksum = hash(JSON.stringify(candidate));
-    const row = this.db.prepare("SELECT id FROM config_journal WHERE actor_id='migration' AND state='prepared' AND candidate_revision=? AND candidate_checksum=?").get(cfg.revision, checksum) as { id: string } | undefined;
+    const row = this.db
+      .prepare(
+        "SELECT id FROM config_journal WHERE actor_id='migration' AND state='prepared' AND candidate_revision=? AND candidate_checksum=?",
+      )
+      .get(cfg.revision, checksum) as { id: string } | undefined;
     if (!row) throw new Error('Missing or conflicting config migration journal; refusing finalize');
     this.recoverPrepared({ revision: cfg.revision, checksum }, candidate);
   }
   recoverLegacy(baseChecksum: string): void {
-    const rows = this.db.prepare("SELECT id,base_checksum FROM config_journal WHERE actor_id='migration' AND state='prepared'").all() as Array<{id:string;base_checksum:string}>;
+    const rows = this.db
+      .prepare("SELECT id,base_checksum FROM config_journal WHERE actor_id='migration' AND state='prepared'")
+      .all() as Array<{ id: string; base_checksum: string }>;
     for (const row of rows) {
       if (row.base_checksum !== baseChecksum) throw new Error('Config migration checksum conflict; refusing retry');
-      this.db.prepare("UPDATE config_journal SET state='aborted',updated_at=? WHERE id=?").run(new Date().toISOString(), row.id);
+      this.db
+        .prepare("UPDATE config_journal SET state='aborted',updated_at=? WHERE id=?")
+        .run(new Date().toISOString(), row.id);
     }
   }
   finalizeConfigCommit(
@@ -422,7 +443,7 @@ export class ControlStore {
             state: string;
           }
         | undefined;
-      if (!row || row.actor_id !== 'external' || !['prepared', 'committed'].includes(row.state))
+      if (row?.actor_id !== 'external' || !['prepared', 'committed'].includes(row.state))
         throw new Error(`Missing or invalid external config journal record ${id}`);
       const candidate = this.historyConfig(row.candidate_revision, row.candidate_checksum);
       if (candidate === undefined)
@@ -502,7 +523,9 @@ export class ControlStore {
         const tx = this.db.transaction(() => {
           if (
             row.actor_id !== 'migration' &&
-            (!prior || hash(JSON.stringify(this.decodeHistoryConfig(JSON.parse(prior.config_json) as unknown))) !== row.base_checksum)
+            (!prior ||
+              hash(JSON.stringify(this.decodeHistoryConfig(JSON.parse(prior.config_json) as unknown))) !==
+                row.base_checksum)
           )
             throw new Error(`Missing or conflicting base config history for revision ${row.base_revision}`);
           const now = new Date().toISOString();
@@ -581,8 +604,10 @@ export class ControlStore {
           this.historyConfig(item.candidate_revision, item.candidate_checksum) !== undefined,
       );
       if (successors.length !== 1) return false;
-      revision = successors[0]!.candidate_revision;
-      checksum = successors[0]!.candidate_checksum;
+      const successor = successors[0];
+      if (successor === undefined) return false;
+      revision = successor.candidate_revision;
+      checksum = successor.candidate_checksum;
     }
     return revision === targetRevision && checksum === targetChecksum;
   }

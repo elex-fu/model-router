@@ -146,13 +146,26 @@ test('migration 046 leaves SELECT-only member row locks for the ordered 047 fenc
       SAAS_GATEWAY_RUNTIME_READ_TABLES.some((readTable) => readTable === table),
       `${table} must remain readable by the gateway runtime role`,
     );
-    assert.equal(
-      SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
-        ([grantTable, , privilege]) => grantTable === table && privilege === 'UPDATE',
-      ),
-      false,
-      `${table} must not gain gateway UPDATE merely to satisfy a row-lock clause`,
-    );
+    if (table === 'saas_users') {
+      // 125 (batch-5 §5.4) risk control is the single sanctioned exception:
+      // the auto-ban seam flips the user's disabled_at/updated_at. The 046
+      // row-lock clause itself must never widen the gateway UPDATE face.
+      assert.deepEqual(
+        SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+          ([grantTable, , privilege]) => grantTable === table && privilege === 'UPDATE',
+        ).map(([, column]) => column),
+        ['disabled_at', 'updated_at'],
+        'saas_users gateway UPDATE stays limited to the 125 auto-ban columns',
+      );
+    } else {
+      assert.equal(
+        SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
+          ([grantTable, , privilege]) => grantTable === table && privilege === 'UPDATE',
+        ),
+        false,
+        `${table} must not gain gateway UPDATE merely to satisfy a row-lock clause`,
+      );
+    }
   }
   assert.doesNotMatch(originalGuard[1], /SECURITY DEFINER/i);
 });

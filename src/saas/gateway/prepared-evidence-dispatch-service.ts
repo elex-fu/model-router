@@ -39,15 +39,35 @@ export interface PreparedEvidenceTransportRequest {
   readonly signal: AbortSignal;
   readonly payloadBytes: Uint8Array;
   readonly evidence: PreparedRequestEvidenceRecord;
+  /**
+   * §4.3 (task #17): the client-side protocol operation fact, carried for
+   * per-operation transport behavior (the search body/usage adaptation).
+   * Absent on legacy evidence keeps the transport byte-identical.
+   */
+  readonly clientOperation?: string;
 }
 
 export interface PreparedEvidenceTransportResponse {
   readonly responseStarted: boolean;
   readonly resultHttpStatus?: number | null;
+  /**
+   * Batch 2.3: the transport's upstream error classification (the shared
+   * health-classifier kind), when the category transport recorded one for a
+   * non-2xx result. Optional and read-side only: adapters that do not set
+   * it keep the status-only feedback mapping.
+   */
+  readonly upstreamErrorKind?: string | null;
   /** Response headers already reduced to the transport's safe allowlist. */
   readonly headers?: Readonly<Record<string, string>>;
   /** Trustworthy, normalized provider usage supplied by a bounded transport observer. */
   readonly providerUsage?: NormalSuccessObservedUsage | null;
+  /**
+   * §4.1/§4.2 (tasks #15/#16): category-supplied service-tier settlement
+   * terms — the requested tier from the request payload and the observed
+   * tier from the response. Absent keeps the base rate; the settlement's
+   * only-lower rule means an observed tier can never raise the charge.
+   */
+  readonly serviceTier?: { readonly requested: string | null; readonly observed: string | null } | null;
   /** A one-reader body stream; dispatch consumes it without buffering the body. */
   readonly body?: ReadableStream<Uint8Array> | null;
 }
@@ -706,6 +726,18 @@ export class SaasPreparedEvidenceDispatchService {
     // so 401/403/429 dispatch outcomes would otherwise never de-prioritize
     // the account. Optional so existing compositions stay unchanged.
     private readonly dispatchFailureFeedback?: ProviderAccountDispatchFailureFeedbackPort,
+    /**
+     * Batch 2.3: the model-level rate limit registry (the sub2api
+     * SetModelRateLimit port). A model-not-found 404 or plan-gated 400 cools
+     * the (account, model) pair while the account stays schedulable for
+     * other models. Optional so existing compositions stay unchanged.
+     */
+    private readonly modelRateLimit?: {
+      recordModelRateLimit(input: {
+        readonly candidate: ProviderAccountRuntimeHealthCandidate;
+        readonly model: string;
+      }): void;
+    },
   ) {}
 
   async dispatch(input: PreparedEvidenceDispatchInput): Promise<PreparedEvidenceDispatchResult> {
@@ -849,6 +881,10 @@ export class SaasPreparedEvidenceDispatchService {
             signal: transportSignal.signal,
             payloadBytes,
             evidence,
+            // §4.3 (task #17): the client-side operation fact rides the
+            // transport request so per-operation transports (search
+            // adaptation) need no evidence-shape change.
+            clientOperation: evidence.clientOperation,
           }),
         );
         await deliverTransportResponse(transportResult, input.client, heartbeat.signal, delivery, async () => {
@@ -998,6 +1034,9 @@ export class SaasPreparedEvidenceDispatchService {
                     attemptId: evidence.attemptId,
                     snapshot,
                     usage: transportResult.providerUsage,
+                    // §4.2: the category transport's service-tier terms reach
+                    // the settlement input here; absent keeps the base rate.
+                    serviceTier: transportResult.serviceTier ?? null,
                   });
                   reconciliationPersisted = completion.kind === 'reconciliation_pending';
                   outcome = { kind: 'sent', evidence, attempt: completion.attempt, transport: transportResult };
@@ -1102,11 +1141,32 @@ export class SaasPreparedEvidenceDispatchService {
       // retryable transport failures are left to the durable health write
       // above, and other 4xx are request-attributable.
       if (healthCandidate && this.dispatchFailureFeedback) {
-        const feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = midstreamAbort
+        let feedbackOutcome: ProviderAccountDispatchFeedbackOutcome | null = midstreamAbort
           ? 'stream_abort'
           : retryableTransportFailure(transportError)
             ? null
-            : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus);
+            : providerDispatchFeedbackOutcome(transportResult?.resultHttpStatus, transportResult?.upstreamErrorKind);
+        // Batch 2.3 — stream-timeout threshold counting: a transport TIMEOUT
+        // that produced no HTTP status is the stream-timeout signal (the
+        // sub2api stream_timeout port); the registry counts it per account
+        // over the window and cools at the threshold.
+        if (
+          feedbackOutcome === null &&
+          !midstreamAbort &&
+          transportError instanceof ProviderHttpTransportError &&
+          transportError.code === 'TIMEOUT'
+        ) {
+          feedbackOutcome = 'stream_timeout';
+        }
+        // Batch 2.3 — model-level rate limit: a model-unavailable
+        // classification cools the (account, model) pair for 30 minutes;
+        // the account keeps serving every other model.
+        if (transportResult?.upstreamErrorKind === 'model-unavailable' && this.modelRateLimit) {
+          const model = evidence.resolvedModel;
+          if (typeof model === 'string' && model.trim().length > 0) {
+            this.modelRateLimit.recordModelRateLimit({ candidate: healthCandidate, model });
+          }
+        }
         if (feedbackOutcome !== null) {
           this.dispatchFailureFeedback.recordDispatchOutcome({
             candidate: healthCandidate,

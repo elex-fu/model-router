@@ -209,11 +209,7 @@ async function alignPlatformPool(
   const resolvedModel = fixture.sent.resolvedModel;
   const accountId = fixture.sent.accountId;
   assert.ok(
-    providerId !== null &&
-      productId !== null &&
-      endpoint !== null &&
-      resolvedModel !== null &&
-      accountId !== null,
+    providerId !== null && productId !== null && endpoint !== null && resolvedModel !== null && accountId !== null,
     'seeded dispatch fields must be present',
   );
   const supply = new ProviderSupplyService(migrator as never, {

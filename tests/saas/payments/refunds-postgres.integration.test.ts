@@ -103,11 +103,7 @@ function resolveTestDatabaseTarget(value: string | undefined): TestDatabaseTarge
     // An invalid encoded database name cannot qualify for the loopback exception.
   }
   const hasExplicitNonDefaultPort =
-    Boolean(parsed.port) &&
-    Number.isInteger(port) &&
-    port >= 1 &&
-    port <= 65_535 &&
-    ![5432, 6432].includes(port);
+    Boolean(parsed.port) && Number.isInteger(port) && port >= 1 && port <= 65_535 && ![5432, 6432].includes(port);
   const isAllowedEphemeralLoopbackTarget =
     allowEphemeralLoopbackTestTarget &&
     parsed.protocol === 'postgres:' &&

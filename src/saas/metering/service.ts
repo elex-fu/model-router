@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
+import { USAGE_BILLING_MODES, USAGE_SIZE_TIERS } from '../../telemetry/usage.js';
 import { PlatformWalletLedgerService } from '../billing/service.js';
 import type { SqlExecutor } from '../db/types.js';
 import type { ModelResolutionProvenance } from '../gateway/contracts.js';
@@ -329,6 +331,23 @@ function asToken(value: ExactIntegerInput | null, _field: string): string | null
   }
   if (!/^\d+$/.test(text) || BigInt(text) > MAX_POSTGRES_BIGINT) fail('METERING_INVALID_INPUT');
   return BigInt(text).toString(10);
+}
+
+function asStoredBillingMode(value: unknown): UsageBillingMode {
+  // 4.1: pre-migration-122 rows read back with the column default 'token'.
+  if (value === null || value === undefined) return 'token';
+  if (typeof value !== 'string' || !(USAGE_BILLING_MODES as readonly string[]).includes(value)) {
+    fail('METERING_STORAGE_ERROR');
+  }
+  return value as UsageBillingMode;
+}
+
+function asStoredSizeTier(value: unknown): UsageSizeTier | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || !(USAGE_SIZE_TIERS as readonly string[]).includes(value)) {
+    fail('METERING_STORAGE_ERROR');
+  }
+  return value as UsageSizeTier;
 }
 
 function asStoredToken(value: unknown): ExactTokenCount {
@@ -805,6 +824,19 @@ function normalizeUsage(input: UsageValues): NormalizedUsage {
   if (!['snapshot', 'delta'].includes(measurementKind)) fail('METERING_INVALID_INPUT');
   if (!['exact', 'estimated', 'unknown', 'not_billable'].includes(billableBasis)) fail('METERING_INVALID_INPUT');
   const semanticsVersion = asNonEmptyText(input.semanticsVersion, 'semanticsVersion', 64);
+  /*
+   * §4.1 (task #15) media fields. Absent input resolves to the neutral
+   * token-only values, and a non-token billing mode requires a unit count —
+   * an unknown media counter is never recorded as zero.
+   */
+  const billingMode = input.billingMode ?? 'token';
+  if (!(USAGE_BILLING_MODES as readonly string[]).includes(billingMode)) fail('METERING_INVALID_INPUT');
+  const units = input.units === undefined || input.units === null ? null : asToken(input.units, 'units');
+  if (billingMode !== 'token' && units === null) fail('METERING_INVALID_INPUT');
+  const sizeTier = input.sizeTier ?? null;
+  if (sizeTier !== null && !(USAGE_SIZE_TIERS as readonly string[]).includes(sizeTier)) {
+    fail('METERING_INVALID_INPUT');
+  }
   return {
     inputTotal: asToken(input.inputTotal, 'inputTotal'),
     inputUncached: asToken(input.inputUncached, 'inputUncached'),
@@ -814,6 +846,9 @@ function normalizeUsage(input: UsageValues): NormalizedUsage {
     cacheWrite1h: asToken(input.cacheWrite1h, 'cacheWrite1h'),
     outputTotal: asToken(input.outputTotal, 'outputTotal'),
     reasoningOutput: asToken(input.reasoningOutput, 'reasoningOutput'),
+    billingMode,
+    units,
+    sizeTier,
     status,
     source,
     semanticsVersion,
@@ -1223,6 +1258,10 @@ function mapUsage(row: Row): UsageEventRecord {
     cacheWrite1h: asStoredToken(row.cache_write_1h),
     outputTotal: asStoredToken(row.output_total),
     reasoningOutput: asStoredToken(row.reasoning_output),
+    // 4.1: migration 122 columns; pre-122 rows carry the neutral defaults.
+    billingMode: asStoredBillingMode(row.billing_mode),
+    units: asStoredToken(row.units),
+    sizeTier: asStoredSizeTier(row.size_tier),
     status: row.status as UsageValues['status'],
     source: row.source as UsageValues['source'],
     semanticsVersion: asNonEmptyText(row.semantics_version, 'semanticsVersion', 64),
@@ -1386,6 +1425,9 @@ const usageColumns = [
   'cache_write_1h',
   'output_total',
   'reasoning_output',
+  'billing_mode',
+  'units',
+  'size_tier',
   'status',
   'source',
   'semantics_version',
@@ -2573,9 +2615,9 @@ export class SaasMeteringService {
         `INSERT INTO saas_usage_events
            (id, tenant_id, request_id, attempt_id, supply_mode, dedupe_key_digest, event_digest,
             input_total, input_uncached, cache_read, cache_write, cache_write_5m, cache_write_1h,
-            output_total, reasoning_output, status, source, semantics_version, measurement_kind,
-            billable_basis, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            output_total, reasoning_output, billing_mode, units, size_tier, status, source,
+            semantics_version, measurement_kind, billable_basis, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
          ON CONFLICT (tenant_id, attempt_id, dedupe_key_digest)
          DO UPDATE SET event_digest = saas_usage_events.event_digest
          WHERE FALSE
@@ -2596,6 +2638,9 @@ export class SaasMeteringService {
           usage.cacheWrite1h,
           usage.outputTotal,
           usage.reasoningOutput,
+          usage.billingMode,
+          usage.units,
+          usage.sizeTier,
           usage.status,
           usage.source,
           usage.semanticsVersion,

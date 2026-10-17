@@ -143,6 +143,11 @@ export class FakeBillingDatabase {
 
     if (statement.startsWith('select set_config')) return result<Row>();
 
+    // The per-wallet billing fence (batch 1.2 step 3): a transaction-scoped
+    // exclusive advisory lock. The fake is single-threaded per transaction
+    // with snapshot rollback, so the fence is a no-op here.
+    if (statement.startsWith('select pg_advisory_xact_lock')) return result<Row>();
+
     if (statement.startsWith('insert into saas_wallets')) {
       const exists = this.state.wallets.some((row) => row.tenant_id === a && row.currency === c);
       if (!exists) {
