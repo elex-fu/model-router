@@ -17,7 +17,8 @@ test('095 registers after 094 with the documented gaps; 103 is the current forwa
   }
   // 104 (R2 embeddings), 105 (R1 billing groups), 106 (R4 registration
   // admission) and 108 (R5b OpenCode Go scheduling) follow at the tail.
-  assert.equal(registered.at(-1), 111);
+  // K2: 112 (provider_account_durable_fault_classification) is the new head.
+  assert.equal(registered.at(-1), 112);
   assert.equal(SAAS_MIGRATIONS[75], migration);
 });
 

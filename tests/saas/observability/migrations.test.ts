@@ -71,21 +71,25 @@ test('migration 103 creates alert rules and events with the pinned shape', () =>
 
 test('migrations 102 and 103 are registered in order ahead of the R1/R2/R4/R5/R5b forwards', () => {
   const versions = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(versions.at(-10), 102);
-  assert.equal(versions.at(-9), 103);
-  assert.equal(SAAS_MIGRATIONS.at(-10), OBS_CHANNEL_METRICS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS.at(-9), OBS_ALERTS_SAAS_MIGRATION);
+  // 112 (K2 durable fault classification) appends after 111, shifting the
+  // tail indices by one.
+  assert.equal(versions.at(-11), 102);
+  assert.equal(versions.at(-10), 103);
+  assert.equal(SAAS_MIGRATIONS.at(-11), OBS_CHANNEL_METRICS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS.at(-10), OBS_ALERTS_SAAS_MIGRATION);
   // 104 (R2 embeddings operation), 105 (R1 billing groups), 106 (R4
   // registration admission), 107 (R3 egress proxies), 108 (R5b OpenCode Go
   // scheduling), 109 (R6a probe monitors), 110 (F1 platform settings) and
-  // 111 (F4 gemini scheduling) are the tail; 100 (R5 claude scheduling)
+  // 111 (F4 gemini scheduling) and 112 (K2 durable fault classification)
+  // are the tail; 100 (R5 claude scheduling)
   // slots in behind 099.
-  assert.equal(versions.at(-8), 104);
-  assert.equal(versions.at(-7), 105);
-  assert.equal(versions.at(-6), 106);
-  assert.equal(versions.at(-5), 107);
-  assert.equal(versions.at(-4), 108);
-  assert.equal(versions.at(-3), 109);
-  assert.equal(versions.at(-2), 110);
-  assert.equal(versions.at(-1), 111);
+  assert.equal(versions.at(-9), 104);
+  assert.equal(versions.at(-8), 105);
+  assert.equal(versions.at(-7), 106);
+  assert.equal(versions.at(-6), 107);
+  assert.equal(versions.at(-5), 108);
+  assert.equal(versions.at(-4), 109);
+  assert.equal(versions.at(-3), 110);
+  assert.equal(versions.at(-2), 111);
+  assert.equal(versions.at(-1), 112);
 });

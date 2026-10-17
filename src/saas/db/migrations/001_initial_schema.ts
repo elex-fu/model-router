@@ -89,6 +89,7 @@ import { PROVIDER_ACCOUNT_OPENCODE_GO_SCHEDULING_SAAS_MIGRATION } from './108_pr
 import { PROBE_MONITORS_SAAS_MIGRATION } from './109_probe_monitors.js';
 import { PLATFORM_SETTINGS_SAAS_MIGRATION } from './110_platform_settings.js';
 import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provider_account_gemini_scheduling.js';
+import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './112_provider_account_durable_fault_classification.js';
 
 export interface SaasMigration {
   version: number;
@@ -590,4 +591,12 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // the migration-109 monitors table. Scheduling signal only, never billing;
   // 110 is taken by the parallel F1 platform-settings workstream above.
   PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION,
+  // 112: K2 account-attributable runtime-health outcomes — extends the 040
+  // last_outcome/outcome_shape CHECKs with gateway_account_access_failure
+  // (401/403), gateway_rate_limited_failure (429) and
+  // gateway_stream_abort_failure (mid-stream abort after ≥1 delivered chunk)
+  // so the durable classification can cool a faulted account in the
+  // scheduler's P17 fail-open fallback. Same-table constraint rewrite only;
+  // 115/116 are claimed by the parallel capability-parity workstream.
+  PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
 ];
