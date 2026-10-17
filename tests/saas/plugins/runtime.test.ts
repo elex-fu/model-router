@@ -5,15 +5,15 @@
  * (tests/saas/plugins/fixtures/mock-transport-plugin.mjs).
  */
 
+import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile, mkdtemp, copyFile, chmod } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, readFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer, type Server } from 'node:http';
-import { PluginRuntime, PluginRuntimeError } from '../../../src/saas/plugins/runtime.js';
 import type { PluginHostServices } from '../../../src/saas/plugins/protocol.js';
+import { PluginRuntime, PluginRuntimeError } from '../../../src/saas/plugins/runtime.js';
 import { PluginTransportError } from '../../../src/saas/plugins/types.js';
 
 const FIXTURE = new URL('./fixtures/mock-transport-plugin.mjs', import.meta.url).pathname;
@@ -53,7 +53,9 @@ async function stageMockPlugin(): Promise<{ dir: string; entryPath: string; sha2
   const entryPath = join(dir, 'plugin.mjs');
   await copyFile(FIXTURE, entryPath);
   await chmod(entryPath, 0o755);
-  const sha256 = createHash('sha256').update(await readFile(entryPath)).digest('hex');
+  const sha256 = createHash('sha256')
+    .update(await readFile(entryPath))
+    .digest('hex');
   return { dir, entryPath, sha256 };
 }
 

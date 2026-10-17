@@ -20,8 +20,8 @@
  */
 
 import type { SqlExecutor } from '../db/types.js';
-import type { PluginAccountCatalogEntry, PluginKvEntry } from './types.js';
 import type { PluginHostServices } from './protocol.js';
+import type { PluginAccountCatalogEntry, PluginKvEntry } from './types.js';
 
 export type { PluginHostServices } from './protocol.js';
 
@@ -261,7 +261,7 @@ function requireExactKeys(value: unknown, keys: readonly string[]): Record<strin
   }
   const record = value as Record<string, unknown>;
   const actual = Object.keys(record);
-  if (actual.length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(record, key))) {
+  if (actual.length !== keys.length || keys.some((key) => !Object.hasOwn(record, key))) {
     throw new PluginHostServiceError('INVALID_ARGUMENT', 'params keys are invalid');
   }
   return record;

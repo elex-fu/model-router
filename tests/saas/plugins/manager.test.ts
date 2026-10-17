@@ -7,20 +7,20 @@
  */
 
 import assert from 'node:assert/strict';
-import test from 'node:test';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import test from 'node:test';
 import { PluginManager } from '../../../src/saas/plugins/manager.js';
-import type { PluginRuntime, PluginRuntimeOptions } from '../../../src/saas/plugins/runtime.js';
 import type { PluginForwardRequestWire } from '../../../src/saas/plugins/protocol.js';
+import type { PluginRuntime, PluginRuntimeOptions } from '../../../src/saas/plugins/runtime.js';
 import {
-  PLUGIN_CAPABILITY_AUTHORIZATIONS,
-  PluginTransportError,
   accountInPluginRollout,
-  stablePluginBucket,
+  PLUGIN_CAPABILITY_AUTHORIZATIONS,
   type PluginCapabilityId,
   type PluginInstallationRecord,
+  PluginTransportError,
+  stablePluginBucket,
 } from '../../../src/saas/plugins/types.js';
 import { InMemoryPluginStore, testPluginManifest } from './in-memory-plugin-store.js';
 
@@ -104,7 +104,7 @@ async function harness(setup?: (harness: Harness) => Promise<void>): Promise<Har
     // signed package.
     resolveEntryPath: async () => join(dataDir, 'fake-entry'),
   });
-  let pluginKey = 'com.example.mr-mock-transport';
+  const pluginKey = 'com.example.mr-mock-transport';
   await store.upsertInstallation({
     pluginKey,
     name: 'Mock',
@@ -130,7 +130,8 @@ async function harness(setup?: (harness: Harness) => Promise<void>): Promise<Har
     store,
     runtimes,
     installation,
-    reconcile: () => manager.runOperation(() => (manager as unknown as { reconcileOnce(): Promise<void> }).reconcileOnce()),
+    reconcile: () =>
+      manager.runOperation(() => (manager as unknown as { reconcileOnce(): Promise<void> }).reconcileOnce()),
   };
   if (setup !== undefined) await setup(harness);
   return harness;
@@ -231,12 +232,14 @@ test('a spawn failure records the error state and publishes an unavailable route
     current.manager; // no-op; failure injected via factory below
   });
   // Inject the failure through the first created runtime.
-  const originalCreate = (h as unknown as { options: { createRuntime?: unknown } });
+  const originalCreate = h as unknown as { options: { createRuntime?: unknown } };
   void originalCreate;
   await enable(h);
   // Pre-seed a failing runtime by monkey-patching the factory outcome: the
   // harness factory always creates FakeRuntime; make the next one fail.
-  const managerInternals = h.manager as unknown as { options: { createRuntime: (options: PluginRuntimeOptions) => PluginRuntime } };
+  const managerInternals = h.manager as unknown as {
+    options: { createRuntime: (options: PluginRuntimeOptions) => PluginRuntime };
+  };
   const inner = managerInternals.options.createRuntime;
   managerInternals.options.createRuntime = (options: PluginRuntimeOptions) => {
     const runtime = inner(options) as unknown as FakeRuntime;
@@ -254,7 +257,9 @@ test('a spawn failure records the error state and publishes an unavailable route
 test('error state backs off before retrying the spawn', async () => {
   const h = await harness();
   await enable(h);
-  const managerInternals = h.manager as unknown as { options: { createRuntime: (options: PluginRuntimeOptions) => PluginRuntime } };
+  const managerInternals = h.manager as unknown as {
+    options: { createRuntime: (options: PluginRuntimeOptions) => PluginRuntime };
+  };
   const inner = managerInternals.options.createRuntime;
   let attempts = 0;
   managerInternals.options.createRuntime = (options: PluginRuntimeOptions) => {
@@ -320,15 +325,12 @@ test('disabling the binding clears the route (native path returns)', async () =>
 
 test('forward fails closed when no route is available', async () => {
   const h = await harness();
-  await assert.rejects(
-    h.manager.forward(forwardWire('acct-1'), new AbortController().signal),
-    (error: unknown) => {
-      assert.ok(error instanceof PluginTransportError);
-      assert.equal(error.code, 'PLUGIN_ROUTE_UNAVAILABLE');
-      assert.equal(error.requestSent, false);
-      return true;
-    },
-  );
+  await assert.rejects(h.manager.forward(forwardWire('acct-1'), new AbortController().signal), (error: unknown) => {
+    assert.ok(error instanceof PluginTransportError);
+    assert.equal(error.code, 'PLUGIN_ROUTE_UNAVAILABLE');
+    assert.equal(error.requestSent, false);
+    return true;
+  });
   await h.manager.stop();
 });
 
@@ -355,10 +357,7 @@ test('the stable rollout bucket is deterministic and roughly uniform', () => {
   // Boundary semantics.
   assert.equal(accountInPluginRollout('acct-1', 0), false);
   assert.equal(accountInPluginRollout('acct-1', 100), true);
-  assert.equal(
-    accountInPluginRollout('acct-1', 1),
-    stablePluginBucket('acct-1') < 1,
-  );
+  assert.equal(accountInPluginRollout('acct-1', 1), stablePluginBucket('acct-1') < 1);
   // Stability: the same account set partitions identically across calls.
   const first = Array.from({ length: 50 }, (_, i) => accountInPluginRollout(`acct-${i}`, 30));
   const second = Array.from({ length: 50 }, (_, i) => accountInPluginRollout(`acct-${i}`, 30));

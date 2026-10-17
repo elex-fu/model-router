@@ -17,6 +17,7 @@
  * usage-observation / settlement chain can consume it unchanged.
  */
 
+import { type ChildProcess, spawn } from 'node:child_process';
 import {
   createCipheriv,
   createHash,
@@ -24,18 +25,17 @@ import {
   diffieHellman,
   generateKeyPairSync,
   hkdfSync,
-  randomBytes,
   type KeyObject,
+  randomBytes,
 } from 'node:crypto';
-import { spawn, type ChildProcess } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
+  type ForwardAccountContext,
+  type InitializeParams,
   PLUGIN_BODY_CHUNK_MAX_BYTES,
   PLUGIN_MAX_WIRE_LINE_BYTES,
   PLUGIN_STDERR_RING_BYTES,
-  type ForwardAccountContext,
-  type InitializeParams,
   type PluginHostServices,
   type PluginRpcId,
   type PluginRpcNotification,
@@ -43,11 +43,11 @@ import {
   type SessionWrappedCredential,
 } from './protocol.js';
 import {
-  PluginTransportError,
   PLUGIN_HOST_VERSION,
   PLUGIN_MAGIC_COOKIE_VALUE,
   PLUGIN_PROTOCOL_VERSION,
   PLUGIN_TRANSPORT_API_VERSION,
+  PluginTransportError,
 } from './types.js';
 
 export class PluginRuntimeError extends Error {
@@ -528,7 +528,11 @@ export class PluginRuntime {
         if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) {
           this.failForward(
             state,
-            new PluginTransportError('PLUGIN_INVALID_RESPONSE', 'plugin response start carried an invalid status', true),
+            new PluginTransportError(
+              'PLUGIN_INVALID_RESPONSE',
+              'plugin response start carried an invalid status',
+              true,
+            ),
             { closeBody: true },
           );
           state.finish();
@@ -710,11 +714,9 @@ export class PluginRuntime {
 
   private handleProtocolViolation(reason: string): void {
     for (const state of this.forwards.values()) {
-      this.failForward(
-        state,
-        new PluginTransportError('PLUGIN_PROTOCOL_ERROR', reason, state.beginAccepted),
-        { closeBody: true },
-      );
+      this.failForward(state, new PluginTransportError('PLUGIN_PROTOCOL_ERROR', reason, state.beginAccepted), {
+        closeBody: true,
+      });
       state.finish();
     }
     this.forwards.clear();
@@ -730,9 +732,7 @@ export class PluginRuntime {
 
 /** Distinguishes an explicit plugin JSON-RPC error from transport failure. */
 export class PluginRpcRejection extends Error {
-  constructor(
-    readonly wire: { readonly code: number; readonly message: string; readonly data?: unknown },
-  ) {
+  constructor(readonly wire: { readonly code: number; readonly message: string; readonly data?: unknown }) {
     super(wire.message);
     this.name = 'PluginRpcRejection';
   }
@@ -752,7 +752,7 @@ function once(fn: () => void): () => void {
 }
 
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
+  return Object.hasOwn(value, key);
 }
 
 function decodeBase64Bytes(value: unknown, expectedLength: number): Buffer | null {

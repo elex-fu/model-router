@@ -17,8 +17,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { verifyPluginPackage, type PluginTrustedPublishers } from './package/verify.js';
 import { evaluatePluginCompatibility } from './package/manifest.js';
+import { type PluginTrustedPublishers, verifyPluginPackage } from './package/verify.js';
 import { PLUGIN_CAPABILITY_AUTHORIZATIONS, type PluginInstallationRecord, type PluginStore } from './types.js';
 
 export type PluginAdminErrorCode =
@@ -58,7 +58,7 @@ export class PluginAdminService {
 
   /** Verify + persist a `.mrplugin` upload (insert or versioned replace). */
   async install(packageBytes: Uint8Array, actorUserId: string | null): Promise<PluginInstallationRecord> {
-    let verified;
+    let verified: Awaited<ReturnType<typeof verifyPluginPackage>>;
     try {
       verified = await verifyPluginPackage({
         data: packageBytes,

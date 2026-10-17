@@ -31,19 +31,19 @@
 
 import {
   createProviderCredentialContext,
-  withUnsealedProviderCredential,
   type ProviderCredentialEnvelope,
   type ProviderCredentialUnsealingKms,
+  withUnsealedProviderCredential,
 } from '../credentials/provider-crypto.js';
 import type { SqlExecutor } from '../db/types.js';
+import type { SessionWrappedCredential } from './protocol.js';
+import type { PluginRuntime } from './runtime.js';
 import {
-  PLUGIN_CAPABILITY_AUTHORIZATIONS,
   accountInPluginRollout,
+  PLUGIN_CAPABILITY_AUTHORIZATIONS,
   type PluginCapabilityId,
   type PluginRouteSnapshot,
 } from './types.js';
-import type { PluginRuntime } from './runtime.js';
-import type { SessionWrappedCredential } from './protocol.js';
 
 const GRANT_TTL_MS = 60_000;
 
@@ -98,8 +98,7 @@ interface EnvelopeRow {
 }
 
 export class PluginCredentialService {
-  private readonly options: Required<Pick<PluginCredentialServiceOptions, 'nowMs'>> &
-    PluginCredentialServiceOptions;
+  private readonly options: Required<Pick<PluginCredentialServiceOptions, 'nowMs'>> & PluginCredentialServiceOptions;
 
   constructor(options: PluginCredentialServiceOptions) {
     this.options = { ...options, nowMs: options.nowMs ?? (() => Date.now()) };

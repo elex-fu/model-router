@@ -30,21 +30,21 @@
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import type { ClaudeMessagesUsage } from '../gateway/claude/response-bridge.js';
+import {
+  buildClaudeOutboundHeadersSansAuth,
+  type ClaudeRequestIdentityContext,
+  claudeUsageToObservedUsage,
+  MessagesUsageWatcher,
+} from '../gateway/claude/transport.js';
 import type {
   PreparedEvidenceTransport,
   PreparedEvidenceTransportRequest,
   PreparedEvidenceTransportResponse,
 } from '../gateway/prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../gateway/prepared-request-evidence-service.js';
-import type { ClaudeMessagesUsage } from '../gateway/claude/response-bridge.js';
-import {
-  MessagesUsageWatcher,
-  buildClaudeOutboundHeadersSansAuth,
-  claudeUsageToObservedUsage,
-  type ClaudeRequestIdentityContext,
-} from '../gateway/claude/transport.js';
 import type { PluginForwardRequestWire, PluginRoutesWire } from './protocol.js';
-import { PluginTransportError, accountInPluginRollout, type PluginCapabilityId } from './types.js';
+import { accountInPluginRollout, type PluginCapabilityId, PluginTransportError } from './types.js';
 
 const ROUTE_CACHE_TTL_MS = 1_000;
 

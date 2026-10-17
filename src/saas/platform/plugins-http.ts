@@ -120,9 +120,7 @@ export function createPluginsHttpHandler(options: PluginsHttpOptions): PluginsHt
         requireExactKeys(body, ['pluginKey']);
         const pluginKey = bodyText(body, 'pluginKey', 160);
         const record = await options.service.get(pluginKey);
-        const bindings = (await options.store.listBindings()).filter(
-          (binding) => binding.installationId === record.id,
-        );
+        const bindings = (await options.store.listBindings()).filter((binding) => binding.installationId === record.id);
         sendJson(res, 200, requestId, {
           plugin: pluginDto(record),
           bindings: bindings.map((binding) => ({
@@ -302,7 +300,7 @@ function requireExactKeys(body: unknown, keys: readonly string[]): Record<string
   }
   const record = body as Record<string, unknown>;
   const actual = Object.keys(record);
-  if (actual.length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(record, key))) {
+  if (actual.length !== keys.length || keys.some((key) => !Object.hasOwn(record, key))) {
     throw new HttpError(400, 'INVALID_BODY', 'The request body fields are invalid');
   }
   return record;

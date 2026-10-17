@@ -272,13 +272,7 @@ export interface PluginHostServices {
   readonly 'accounts.list': PluginHostServiceHandler;
 }
 
-export const PLUGIN_HOST_SERVICE_METHODS = [
-  'kv.get',
-  'kv.set',
-  'kv.delete',
-  'kv.list',
-  'accounts.list',
-] as const;
+export const PLUGIN_HOST_SERVICE_METHODS = ['kv.get', 'kv.set', 'kv.delete', 'kv.list', 'accounts.list'] as const;
 
 export type PluginHostServiceMethod = (typeof PLUGIN_HOST_SERVICE_METHODS)[number];
 

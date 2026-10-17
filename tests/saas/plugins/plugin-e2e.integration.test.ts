@@ -7,19 +7,22 @@
  * plugin child process and a real mock upstream.
  */
 
-import { createHash, generateKeyPairSync, sign as ed25519Sign } from 'node:crypto';
-import { readFile, mkdtemp } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { createHash, sign as ed25519Sign, generateKeyPairSync } from 'node:crypto';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'node:http';
-import { writeZip } from '../../../src/saas/plugins/package/zip.js';
 import { PluginAdminService } from '../../../src/saas/plugins/admin-service.js';
-import { PluginManager } from '../../../src/saas/plugins/manager.js';
-import { createPluginHostServices } from '../../../src/saas/plugins/host-services.js';
-import { createPluginHostHttpServer, listenPluginHostHttpServer } from '../../../src/saas/plugins/plugin-host-server.js';
 import { PluginHostClient } from '../../../src/saas/plugins/gateway-plugin-router.js';
+import { createPluginHostServices } from '../../../src/saas/plugins/host-services.js';
+import { PluginManager } from '../../../src/saas/plugins/manager.js';
+import { writeZip } from '../../../src/saas/plugins/package/zip.js';
+import {
+  createPluginHostHttpServer,
+  listenPluginHostHttpServer,
+} from '../../../src/saas/plugins/plugin-host-server.js';
 import { InMemoryPluginStore } from './in-memory-plugin-store.js';
 
 const CAPABILITY = 'claude.oauth.outbound_transport.v1';
@@ -92,8 +95,16 @@ test('mock plugin walks install → enable → forward → drain end to end', as
   assert.equal(bindings[0].rolloutPercent, 100);
 
   // --- reconcile (plugin-host: re-verify package, extract, spawn, CAS healthy) ---
-  const fakeExecutor = { async query() { return { rows: [] }; } };
-  const kms = { async decryptDataKey() { return new Uint8Array(32); } };
+  const fakeExecutor = {
+    async query() {
+      return { rows: [] };
+    },
+  };
+  const kms = {
+    async decryptDataKey() {
+      return new Uint8Array(32);
+    },
+  };
   const kvPort = {
     store,
     async get(pluginKey: string, namespace: string, key: string) {
@@ -122,7 +133,11 @@ test('mock plugin walks install → enable → forward → drain end to end', as
       createPluginHostServices({
         pluginKey,
         kv: kvPort,
-        accounts: { async list() { return []; } },
+        accounts: {
+          async list() {
+            return [];
+          },
+        },
       }),
   });
   await manager.start();
@@ -182,8 +197,8 @@ function startMockUpstream(): Promise<{
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
       received.push({ headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ echo: 'upstream-ok' }));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ echo: 'upstream-ok' }));
     });
   });
   return new Promise((resolve) => {

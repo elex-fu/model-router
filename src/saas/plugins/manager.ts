@@ -24,24 +24,24 @@ import { mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ProviderCredentialUnsealingKms } from '../credentials/provider-crypto.js';
 import type { SqlExecutor } from '../db/types.js';
-import { verifyPluginPackage, type PluginTrustedPublishers } from './package/verify.js';
 import { PluginCredentialService } from './credentials.js';
 import {
   createPluginHostServices,
   createPostgresPluginHostServicePorts,
   type PluginHostServices,
 } from './host-services.js';
-import { PluginRuntime, type PluginForwardStreamResult, type PluginRuntimeOptions } from './runtime.js';
+import { type PluginTrustedPublishers, verifyPluginPackage } from './package/verify.js';
 import type { PluginForwardRequestWire } from './protocol.js';
+import { type PluginForwardStreamResult, PluginRuntime, type PluginRuntimeOptions } from './runtime.js';
 import {
   PLUGIN_CAPABILITY_AUTHORIZATIONS,
   PLUGIN_CAPABILITY_IDS,
-  PluginTransportError,
   type PluginBindingRecord,
   type PluginCapabilityId,
   type PluginInstallationRecord,
   type PluginRouteSnapshot,
   type PluginStore,
+  PluginTransportError,
 } from './types.js';
 
 const DEFAULT_RECONCILE_INTERVAL_MS = 1_000;
@@ -334,13 +334,12 @@ export class PluginManager {
     const configFingerprint = fingerprintConfig(installation.configJson);
 
     // Fast path: live runtime, same binary/config/rollout → health probe.
-    if (
-      managed !== undefined &&
-      managed.runtime.alive &&
-      managed.binarySha256 === installation.binarySha256 &&
-      managed.configFingerprint === configFingerprint &&
-      managed.rolloutPercent === binding.rolloutPercent
-    ) {
+    const fastPath =
+      managed?.runtime.alive === true &&
+      managed?.binarySha256 === installation.binarySha256 &&
+      managed?.configFingerprint === configFingerprint &&
+      managed?.rolloutPercent === binding.rolloutPercent;
+    if (fastPath && managed !== undefined) {
       const healthy = await managed.runtime.checkHealth(DEFAULT_HEALTH_TIMEOUT_MS);
       if (healthy) {
         publish(true, null);
@@ -381,8 +380,7 @@ export class PluginManager {
       const entryPath = await (this.options.resolveEntryPath?.(installation) ??
         this.ensureLocalInstallation(installation));
       const createRuntime =
-        this.options.createRuntime ??
-        ((runtimeOptions: PluginRuntimeOptions) => new PluginRuntime(runtimeOptions));
+        this.options.createRuntime ?? ((runtimeOptions: PluginRuntimeOptions) => new PluginRuntime(runtimeOptions));
       const createHostServices =
         this.options.createHostServices ??
         ((pluginKey: string) => {

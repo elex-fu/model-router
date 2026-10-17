@@ -1,6 +1,6 @@
-import {
-  type DecryptProviderCredentialDataKeyRequest,
-  type ProviderCredentialUnsealingKms,
+import type {
+  DecryptProviderCredentialDataKeyRequest,
+  ProviderCredentialUnsealingKms,
 } from '../credentials/provider-crypto.js';
 import { MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE } from '../deployment.js';
 import { loadValidationWorkerProviderCredentialKms } from './validation-worker-provider-credential-kms.js';

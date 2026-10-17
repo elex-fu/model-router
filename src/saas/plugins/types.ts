@@ -69,25 +69,18 @@ export interface PluginCapabilityAuthorization {
 }
 
 /** The centralized capability → scope authorization table (const, not config). */
-export const PLUGIN_CAPABILITY_AUTHORIZATIONS: Readonly<
-  Record<PluginCapabilityId, PluginCapabilityAuthorization>
-> = Object.freeze({
-  'claude.oauth.outbound_transport.v1': Object.freeze({
-    platform: 'claude',
-    accountType: 'oauth',
-    endpoints: Object.freeze(['claude-messages']),
-    providerId: 'anthropic-claude',
-  }),
-});
+export const PLUGIN_CAPABILITY_AUTHORIZATIONS: Readonly<Record<PluginCapabilityId, PluginCapabilityAuthorization>> =
+  Object.freeze({
+    'claude.oauth.outbound_transport.v1': Object.freeze({
+      platform: 'claude',
+      accountType: 'oauth',
+      endpoints: Object.freeze(['claude-messages']),
+      providerId: 'anthropic-claude',
+    }),
+  });
 
 /** All valid plugin installation states (mirrors sub2api; CHECK-constrained in migration 128). */
-export const PLUGIN_INSTALLATION_STATES = [
-  'disabled',
-  'starting',
-  'enabled',
-  'error',
-  'incompatible',
-] as const;
+export const PLUGIN_INSTALLATION_STATES = ['disabled', 'starting', 'enabled', 'error', 'incompatible'] as const;
 export type PluginInstallationState = (typeof PLUGIN_INSTALLATION_STATES)[number];
 
 export type PluginSignatureStatus = 'trusted' | 'unsigned';
@@ -222,10 +215,7 @@ export interface PluginStore {
    * a matching binary hash, and an enabled binding exists. 0 rows = benign
    * concurrent change (sub2api ErrPluginStateChanged).
    */
-  markRuntimeHealthy(input: {
-    id: number;
-    expectedBinarySha256: string;
-  }): Promise<boolean>;
+  markRuntimeHealthy(input: { id: number; expectedBinarySha256: string }): Promise<boolean>;
   updateConfigJson(input: {
     id: number;
     configJson: Readonly<Record<string, unknown>> | null;
@@ -244,13 +234,7 @@ export interface PluginStore {
   listBindings(): Promise<PluginBindingRecord[]>;
   deleteInstallation(id: number): Promise<boolean>;
   kvGet(pluginKey: string, namespace: string, key: string): Promise<PluginKvEntry | null>;
-  kvSet(
-    pluginKey: string,
-    namespace: string,
-    key: string,
-    value: string,
-    ttlSeconds: number | null,
-  ): Promise<void>;
+  kvSet(pluginKey: string, namespace: string, key: string, value: string, ttlSeconds: number | null): Promise<void>;
   kvDelete(pluginKey: string, namespace: string, key: string): Promise<boolean>;
   kvList(pluginKey: string, namespace: string, keyPrefix: string, limit: number): Promise<string[]>;
 }

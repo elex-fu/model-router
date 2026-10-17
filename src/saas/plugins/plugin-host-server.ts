@@ -16,12 +16,12 @@
  * the outcome is uncertain and must NOT be replayed or failed over.
  */
 
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { PluginManager } from './manager.js';
 import type { PluginForwardRequestWire, PluginRouteSnapshotWire } from './protocol.js';
 import { PluginTransportError } from './types.js';
-import type { PluginManager } from './manager.js';
 
 const MAX_FORWARD_BODY_BYTES = 16 * 1024 * 1024;
 

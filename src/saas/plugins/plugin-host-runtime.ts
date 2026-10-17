@@ -10,16 +10,16 @@
  * unseal (types.ts decision #2).
  */
 
-import {
-  MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
-  type DeploymentEnvironment,
-  type ManagedSaasDeploymentConfig,
-} from '../deployment.js';
 import { closeSaasDatabase, createSaasDatabase, pingSaasDatabase, type SaasDatabase } from '../db/index.js';
 import { verifyPluginHostRuntimePrivileges } from '../db/plugin-host-privileges.js';
 import {
-  loadPluginHostProviderCredentialKms,
+  type DeploymentEnvironment,
+  type ManagedSaasDeploymentConfig,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+} from '../deployment.js';
+import {
   type LoadedPluginHostProviderCredentialKms,
+  loadPluginHostProviderCredentialKms,
 } from '../runtime/plugin-host-provider-credential-kms.js';
 import { PluginManager } from './manager.js';
 import {
@@ -63,8 +63,7 @@ export async function startPluginHostRuntime(
   ) {
     throw new Error('Plugin-host configuration is unavailable');
   }
-  const createDatabase =
-    options.createDatabase ?? ((input: { connectionString: string }) => createSaasDatabase(input));
+  const createDatabase = options.createDatabase ?? ((input: { connectionString: string }) => createSaasDatabase(input));
   const pingDatabase = options.pingDatabase ?? ((database: SaasDatabase) => pingSaasDatabase(database));
   const closeDatabase = options.closeDatabase ?? ((database: SaasDatabase) => closeSaasDatabase(database));
   const loadKms = options.loadKms ?? ((env: DeploymentEnvironment) => loadPluginHostProviderCredentialKms({ env }));

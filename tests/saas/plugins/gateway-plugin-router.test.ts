@@ -6,35 +6,32 @@
  * rethrow rule — against a REAL plugin-host HTTP server + client pair.
  */
 
-import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import test from 'node:test';
 import type {
-  PreparedEvidenceTransport,
   PreparedEvidenceTransportRequest,
   PreparedEvidenceTransportResponse,
 } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import {
-  PluginHostClient,
-  PluginRoutingClaudeTransport,
   type EnabledPluginBinding,
+  PluginHostClient,
   type PluginRouteReader,
+  PluginRoutingClaudeTransport,
 } from '../../../src/saas/plugins/gateway-plugin-router.js';
-import { createPluginHostHttpServer, listenPluginHostHttpServer } from '../../../src/saas/plugins/plugin-host-server.js';
+import {
+  createPluginHostHttpServer,
+  listenPluginHostHttpServer,
+} from '../../../src/saas/plugins/plugin-host-server.js';
 import type { PluginRouteSnapshot } from '../../../src/saas/plugins/types.js';
-import { PluginTransportError, accountInPluginRollout, stablePluginBucket } from '../../../src/saas/plugins/types.js';
+import { accountInPluginRollout, PluginTransportError } from '../../../src/saas/plugins/types.js';
 
 const CAPABILITY = 'claude.oauth.outbound_transport.v1';
 const PLUGIN_KEY = 'com.example.mr-mock-transport';
 const INTERNAL_TOKEN = 'test-internal-token-0123456789abcdef';
-
-interface StubManager {
-  routesSnapshot(): Map<string, PluginRouteSnapshot>;
-  forward(): never;
-}
 
 function startPluginHost(stub: {
   routes: Record<string, PluginRouteSnapshot>;
