@@ -522,6 +522,10 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_email_verification_codes', 'DELETE'],
     // R3 (107): proxy registry lifecycle; in-use proxies are FK-protected.
     ['saas_egress_proxies', 'DELETE'],
+    // Batch-2 §2.4 (116): TLS fingerprint profile registry lifecycle. There
+    // is no FK from the tri-state account column (0/-1 are sentinels), so
+    // deleting a referenced profile leaves the resolver's fail-open default.
+    ['saas_tls_fingerprint_profiles', 'DELETE'],
     // R6a (109): probe monitor lifecycle (runs cascade with the monitor) and
     // the 30-day probe run retention cleanup (control-plane retention loop).
     ['saas_probe_monitors', 'DELETE'],
@@ -657,7 +661,29 @@ test('058 changes no CP rotation columns and grants neither CP job UPDATE nor ga
     ),
     false,
   );
-  for (const table of ['saas_api_keys', 'saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+  // 115 (R-dormant batch 2.2) is the single sanctioned exception: the
+  // scheduler's lazy scheduling-threshold pause columns. Every other
+  // account-table column — credentials, rotation, quota state — stays
+  // gateway-read-only.
+  const gatewayAccountUpdates = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+    ([relation, , privilege]) =>
+      privilege === 'UPDATE' &&
+      (relation === 'saas_tenant_provider_accounts' || relation === 'saas_platform_provider_accounts'),
+  );
+  assert.deepEqual(
+    gatewayAccountUpdates
+      .map(([relation, field]) => [relation, field])
+      .sort(([aRelation, aField], [bRelation, bField]) =>
+        aRelation === bRelation ? aField.localeCompare(bField) : aRelation.localeCompare(bRelation),
+      ),
+    [
+      ['saas_platform_provider_accounts', 'scheduling_threshold_pause_reason'],
+      ['saas_platform_provider_accounts', 'scheduling_threshold_pause_until'],
+      ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_reason'],
+      ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_until'],
+    ],
+  );
+  for (const table of ['saas_api_keys']) {
     assert.equal(
       SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
         ([relation, , privilege]) => relation === table && privilege === 'UPDATE',

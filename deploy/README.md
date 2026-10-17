@@ -42,6 +42,21 @@ The starter config does not trust any `X-Forwarded-For` source. If client IP for
 
 [com.modelrouter.plist](launchd/com.modelrouter.plist) is a per-user LaunchAgent example. Install the built repository at `/usr/local/share/model-router`, replace `REPLACE_ME` with the account name, and adjust the Node path (Apple Silicon Homebrew commonly uses `/opt/homebrew/bin/node`). Place the plist in `~/Library/LaunchAgents/`, create the config directory under `~/Library/Application Support/model-router/`, then run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.modelrouter.plist`. Use `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.modelrouter.plist` to stop it. Its config location is persistent across restarts; keep both listeners on loopback unless a local TLS reverse proxy serves them. The agent runs the CLI in the foreground.
 
+## TLS fingerprint sidecar (batch-2 §2.4) — deployment notes
+
+The TLS fingerprint sidecar (`sidecar/tlsfingerprint/`, a Go binary owning uTLS) is deployed and supervised by the deployment; the Node gateway only connects to its Unix socket (`MODEL_ROUTER_TLS_FINGERPRINT_SIDECAR_SOCKET`, default `/run/model-router/tls-fingerprint.sock`) and never spawns or kills the process (documented MVP decision — process management stays with the orchestrator).
+
+- **Compose** (the one complete asset set, in `deploy/compose/docker-compose.yml`): enable with `docker compose --profile tls-fingerprint up -d`. The `tls-fingerprint-sidecar` service builds from `sidecar/tlsfingerprint/Dockerfile`, shares the `tls-fingerprint-socket` volume with every gateway replica, and is healthchecked on socket presence + process liveness. The gateway reads the socket at `/run/model-router/tls-fingerprint.sock` when its runtime module enables `tlsFingerprintResolution`.
+- **Build the binary without Docker**: `make -C sidecar/tlsfingerprint build` (requires a local Go ≥1.27 toolchain; `make test` / `make vet` run the module's tests).
+- **Enabling per account**: bind `tls_fingerprint_profile_id` on the provider account (NULL=off default, 0=built-in Node 24.x profile, -1=randomized, >0=a `saas_tls_fingerprint_profiles` row, migration 116).
+
+Remaining deployment assets (deliberately out of scope for the §2.4 transport seam, tracked as leftovers):
+
+- **systemd unit** for the sidecar (analogous to `systemd/model-router.service`, plus a `RuntimeDirectory=model-router-tlsfp` for the socket).
+- **launchd plist** for the sidecar.
+- **Standalone Docker image publication** (the Dockerfile exists; no registry workflow yet).
+- **Bench topology**: `deploy/compose/BENCH.md` and its override files intentionally do not include the sidecar — bench traffic is fingerprint-off by default; enabling it is a bench follow-up once profile-bound accounts exist.
+
 ## Managed SaaS startup contract
 
 Managed SaaS is selected from the process environment; it does not use the local V2 JSON config or local SQLite state. The Docker Compose, systemd, and launchd examples above describe the local/self-hosted runtime. The Compose file does not configure SaaS databases, Redis, provider modules, or role-specific listeners. The contract is implemented in [deployment.ts](../src/saas/deployment.ts) and [managed-saas.ts](../src/server/managed-saas.ts).

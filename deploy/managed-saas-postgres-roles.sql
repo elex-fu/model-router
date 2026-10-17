@@ -591,6 +591,18 @@ $runtime_column_acl_normalization$;
 -- through the dynamic all-current-columns read grant below. Re-apply this
 -- template after running migration 107 on a database that predates it —
 -- until then the runtime privilege probes fail closed by design.
+-- DEPLOYMENT NOTE (migration 115, R-dormant activation batch 2.2): the
+-- scheduling-threshold pause columns on both provider account tables are
+-- gateway-written only (the scheduler's lazy candidate-collection
+-- evaluation; the sub2api account_scheduling_threshold port). They are
+-- granted through the fixed column manifest in the gateway block below and
+-- read through the dynamic all-current-columns grants; the control plane
+-- owns no threshold-pause column. The quota-snapshot writer (the 099/100
+-- codex/claude columns) and the gemini usage worker's saas_attempts read
+-- surface are granted in deploy/managed-saas-validation-worker-role-grants.sql.
+-- Re-apply both templates after running migration 115 on a database that
+-- predates it — until then the runtime privilege probes fail closed by
+-- design.
 -- DEPLOYMENT NOTE (migration 109, R6a active probing): the control plane
 -- owns the saas_probe_monitors registry and reads saas_probe_runs (the
 -- admin trigger/list surface); the probe monitor worker — which runs on the
@@ -735,6 +747,10 @@ BEGIN
       ('saas_egress_proxies', 'SELECT', 'id name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id last_probe_at last_probe_latency_ms last_probe_ip last_probe_quality created_at updated_at'),
       ('saas_egress_proxies', 'INSERT', 'id name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id created_at updated_at'),
       ('saas_egress_proxies', 'UPDATE', 'name protocol host port auth_sealed_envelope status expires_at fallback_mode backup_proxy_id last_probe_at last_probe_latency_ms last_probe_ip last_probe_quality updated_at'),
+      -- Batch-2 §2.4 (116) TLS fingerprint profiles: control-plane registry.
+      ('saas_tls_fingerprint_profiles', 'SELECT', 'id name description enable_grease cipher_suites curves point_formats signature_algorithms alpn_protocols supported_versions key_share_groups psk_modes extensions created_at updated_at'),
+      ('saas_tls_fingerprint_profiles', 'INSERT', 'id name description enable_grease cipher_suites curves point_formats signature_algorithms alpn_protocols supported_versions key_share_groups psk_modes extensions created_at updated_at'),
+      ('saas_tls_fingerprint_profiles', 'UPDATE', 'name description enable_grease cipher_suites curves point_formats signature_algorithms alpn_protocols supported_versions key_share_groups psk_modes extensions updated_at'),
       -- R6a (109) probe monitors: the control plane owns the monitor registry
       -- (admin trigger/list surface) and reads the run history; the probe
       -- monitor worker claims and writes through the validation-worker grants.
@@ -798,12 +814,12 @@ BEGIN
       ('saas_project_entitlements', 'INSERT', 'id tenant_id project_id supply_profile_id supply_mode status model_scopes authz_version created_at updated_at last_audited_at disabled_at effective_at expires_at superseded_at source_type source_ref service_plan_snapshot_id'),
       ('saas_project_entitlements', 'UPDATE', 'status disabled_at superseded_at authz_version updated_at last_audited_at'),
       ('saas_supply_profiles', 'SELECT', 'tenant_id id supply_mode status model_scopes authz_version'),
-      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until'),
-      ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id created_at updated_at'),
-      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
-      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until'),
-      ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id created_at updated_at'),
-      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'owner_kind tenant_id supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
+      ('saas_tenant_provider_accounts', 'INSERT', 'tenant_id id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id tls_fingerprint_profile_id created_at updated_at'),
+      ('saas_tenant_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'owner_kind supply_mode id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override quarantine_entered_at quarantine_reason_code rpm_limit tpm_limit created_at updated_at disabled_at revoked_at egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until'),
+      ('saas_platform_provider_accounts', 'INSERT', 'id display_name provider_id product_id credential_type region purpose rights_id rights_version status validation_state revalidation_interval_seconds priority weight rpm_limit tpm_limit egress_proxy_id tls_fingerprint_profile_id created_at updated_at'),
+      ('saas_platform_provider_accounts', 'UPDATE', 'status validation_state validation_error_code last_validated_at revalidation_interval_seconds authz_version priority weight quota_state quota_remaining_minor_units quota_currency quota_checked_at opencode_go_protocol_rules claude_cli_version_override rpm_limit tpm_limit egress_proxy_id proxy_fallback_origin_id tls_fingerprint_profile_id probe_temp_unschedulable_until updated_at disabled_at revoked_at'),
       ('saas_tenant_provider_account_capabilities', 'SELECT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_tenant_provider_account_capabilities', 'INSERT', 'tenant_id account_id provider_id product_id model endpoint capability_version'),
       ('saas_platform_provider_account_capabilities', 'SELECT', 'account_id provider_id product_id model endpoint capability_version'),
@@ -994,6 +1010,7 @@ BEGIN
       -- R3 (107): proxy registry lifecycle; in-use proxies are protected by
       -- the egress_proxy_id FK (ON DELETE RESTRICT).
       ('saas_egress_proxies', 'DELETE'),
+      ('saas_tls_fingerprint_profiles', 'DELETE'),
       -- R6a (109): probe monitor lifecycle (runs cascade with the monitor)
       -- and the 30-day probe run retention cleanup.
       ('saas_probe_monitors', 'DELETE'),
@@ -1079,6 +1096,7 @@ BEGIN
       ('saas_billing_group_account_pools'),
       -- R3 (107): the dispatch profile resolves the account's egress proxy.
       ('saas_egress_proxies'),
+      ('saas_tls_fingerprint_profiles'),
       -- R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
       -- RPM admission counters (capacity-side rate evidence, never billing).
       ('saas_billing_group_rate_counters'),
@@ -1232,6 +1250,13 @@ BEGIN
       ('saas_provider_account_rate_counters', 'tokens', 'INSERT'),
       ('saas_provider_account_rate_counters', 'requests', 'UPDATE'),
       ('saas_provider_account_rate_counters', 'tokens', 'UPDATE'),
+      -- R-dormant (115, batch 2.2): the scheduler's lazy scheduling-threshold
+      -- pause write at candidate-collection time — the only account-table DML
+      -- the gateway role owns (the 109 probe pause is worker-written).
+      ('saas_tenant_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'),
+      ('saas_tenant_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'),
+      ('saas_platform_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'),
+      ('saas_platform_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'),
       -- R1 (113, roadmap 1.3): the capacity adapter upserts the billing-group
       -- RPM admission counter inside the admission transaction.
       ('saas_billing_group_rate_counters', 'group_id', 'SELECT'),

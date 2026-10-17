@@ -40,6 +40,11 @@ import {
 import type { PostgresProviderAccountSchedulerOptions } from '../saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresProviderAccountScheduler } from '../saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresProviderEgressProxyResolver } from '../saas/gateway/postgres-provider-egress-proxy-resolver.js';
+import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
+import {
+  createTlsFingerprintSidecarConnectorFactory,
+  type ProviderTlsFingerprintEgress,
+} from '../saas/gateway/provider-http-tls-fingerprint-connector.js';
 import {
   PostgresRequestPreparationAuthorityAdapter,
   type PostgresRequestPreparationAuthorityAdapterDependencies,
@@ -736,6 +741,19 @@ export interface ManagedSaasGatewayProductionOptions {
    */
   readonly egressProxyResolution?: { readonly enabled?: boolean };
   /**
+   * Batch-2 §2.4 TLS fingerprints: when enabled, the composition resolves
+   * each claimed account's bound TLS-fingerprint profile (migration 116,
+   * fail-open posture) and mounts the sidecar connector factory on the
+   * generic transport. The sidecar process itself is deployment-managed
+   * (compose/systemd); the gateway only connects to the Unix socket.
+   * Unset keeps the exact pre-116 connector behavior.
+   */
+  readonly tlsFingerprintResolution?: {
+    readonly enabled?: boolean;
+    /** The sidecar's Unix socket path. */
+    readonly sidecarSocketPath: string;
+  };
+  /**
    * F3: when enabled, settlement terminal commits and terminal request
    * failures enqueue customer webhook events inside their own transactions.
    */
@@ -1138,6 +1156,12 @@ function createProviderDispatchProfileResolver(
     readonly accountOwnerKind: 'tenant' | 'platform' | undefined;
     readonly accountId: string;
   }) => Promise<{ readonly url: string } | null>,
+  resolveTlsFingerprint?: (input: {
+    readonly tenantId: string;
+    readonly supplyMode: 'byok' | 'platform' | undefined;
+    readonly accountOwnerKind: 'tenant' | 'platform' | undefined;
+    readonly accountId: string;
+  }) => Promise<ProviderTlsFingerprintEgress | null>,
 ): ConstructorParameters<typeof ProviderHttpTransport>[0]['resolveDispatchProfile'] {
   requireDependency(options.providerTargetResolver, 'resolve');
   requireCallable(options.providerTargetRoute);
@@ -1158,17 +1182,36 @@ function createProviderDispatchProfileResolver(
     }
     const url = target.url ?? target.targetUrl;
     if (typeof url !== 'string' || url.length === 0) return null;
-    if (resolveEgressProxy === undefined) return { url };
     // R3: the per-account egress proxy rides on the dispatch profile. The
     // resolver's failures propagate — a bound proxy that cannot be read must
     // fail the dispatch, never silently direct-egress the account.
-    const egressProxy = await resolveEgressProxy({
-      tenantId: input.tenantId,
-      supplyMode: input.supplyMode,
-      accountOwnerKind: input.accountOwnerKind,
-      accountId: input.accountId,
-    });
-    return egressProxy === null ? { url } : { url, egressProxy };
+    const egressProxy =
+      resolveEgressProxy === undefined
+        ? null
+        : await resolveEgressProxy({
+            tenantId: input.tenantId,
+            supplyMode: input.supplyMode,
+            accountOwnerKind: input.accountOwnerKind,
+            accountId: input.accountId,
+          });
+    // Batch-2 §2.4: the per-account TLS fingerprint rides alongside. The
+    // resolver itself fails open (null descriptor = ordinary connector), so
+    // unlike the proxy a resolution miss never fails the dispatch.
+    const tlsFingerprint =
+      resolveTlsFingerprint === undefined
+        ? null
+        : await resolveTlsFingerprint({
+            tenantId: input.tenantId,
+            supplyMode: input.supplyMode,
+            accountOwnerKind: input.accountOwnerKind,
+            accountId: input.accountId,
+          });
+    if (egressProxy === null && tlsFingerprint === null) return { url };
+    return {
+      url,
+      ...(egressProxy === null ? {} : { egressProxy }),
+      ...(tlsFingerprint === null ? {} : { tlsFingerprint }),
+    };
   };
 }
 
@@ -1330,6 +1373,21 @@ export function createManagedSaasGatewayProductionComposition(
         credentialContext: options.credentialContext,
       })
     : undefined;
+  // Batch-2 §2.4: the per-account TLS-fingerprint resolver (PG authoritative
+  // + short-TTL in-process profile cache; fail-open by design). The sidecar
+  // connector factory composes over the ordinary pinned connector, so
+  // accounts without a bound profile keep the exact previous path.
+  const tlsFingerprintResolver = options.tlsFingerprintResolution?.enabled
+    ? new PostgresProviderTlsFingerprintResolver({ database })
+    : undefined;
+  const tlsFingerprintConnectorFactory =
+    options.tlsFingerprintResolution?.enabled === true &&
+    typeof options.tlsFingerprintResolution.sidecarSocketPath === 'string' &&
+    options.tlsFingerprintResolution.sidecarSocketPath !== ''
+      ? createTlsFingerprintSidecarConnectorFactory({
+          socketPath: options.tlsFingerprintResolution.sidecarSocketPath,
+        })
+      : undefined;
   // F6: OpenRouter supplier-attribute headers, built once (input validation
   // happens at composition time, not per request).
   const openRouterFixedRequestHeaders = createOpenRouterFixedRequestHeaders(options.openRouterAttribution);
@@ -1338,6 +1396,9 @@ export function createManagedSaasGatewayProductionComposition(
     resolveDispatchProfile: createProviderDispatchProfileResolver(
       options,
       egressProxyResolver === undefined ? undefined : egressProxyResolver.resolveEgressProxy.bind(egressProxyResolver),
+      tlsFingerprintResolver === undefined
+        ? undefined
+        : tlsFingerprintResolver.resolveTlsFingerprint.bind(tlsFingerprintResolver),
     ),
     resolveCredential: credentialResolver.resolveCredential,
     endpointPolicy: options.endpointPolicy,
@@ -1356,6 +1417,7 @@ export function createManagedSaasGatewayProductionComposition(
     // in front of it — the two endpoint scopes are disjoint, so at most one
     // resolver ever matches.
     resolveFixedRequestHeaders: (input) => openRouterFixedRequestHeaders(input) ?? openCodeGoFixedRequestHeaders(input),
+    ...(tlsFingerprintConnectorFactory === undefined ? {} : { createConnector: tlsFingerprintConnectorFactory }),
     timeoutMs: options.timeoutMs,
   });
   // P1c codex dispatch split: the codex transport takes over exactly the

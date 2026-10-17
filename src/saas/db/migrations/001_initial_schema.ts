@@ -92,6 +92,8 @@ import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provide
 import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from './112_billing_group_snapshot_limits.js';
 import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from './113_billing_group_rate_counters.js';
 import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from './114_billing_group_spend_windows.js';
+import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from './116_tls_fingerprint_profiles.js';
+import { PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION } from './115_provider_account_scheduling_threshold_pause.js';
 
 export interface SaasMigration {
   version: number;
@@ -613,4 +615,21 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // head and the settled-amount column + lineage/created_at index that let
   // the reservation ledger answer trailing-window sums exactly.
   BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
+  // 115: R-dormant activation (batch 2.2) — the scheduling-threshold
+  // temporary-pause columns on both account owner tables. The lazy
+  // candidate-collection evaluator writes them when a 099/100/108/111
+  // quota-snapshot window is at or above the account's dormant
+  // auto_pause_*_threshold (099); the pause runs to the latest breaching
+  // window reset and recovers when the deadline passes (the 109
+  // probe_temp_unschedulable_until eligibility precedent). Scheduling
+  // signal only — never billing.
+  PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
+  // 116: batch-2 §2.4 TLS fingerprints — the ClientHello profile registry
+  // (sub2api tls_fingerprint_profiles parity) plus the tri-state account
+  // binding column (NULL=off, 0=built-in Node 24.x default, -1=randomized,
+  // >0=specific profile). Orthogonal to 099's dormant
+  // codex_fingerprint_mode/seed (application-layer Codex device identity —
+  // see the migration comment for the adjudication); 115 is the parallel
+  // batch-2 threshold-pause workstream tail above.
+  TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
 ];

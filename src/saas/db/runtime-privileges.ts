@@ -574,6 +574,59 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'last_probe_quality',
     'updated_at',
   ]),
+  // Batch-2 §2.4 (116) TLS fingerprint profiles: the control plane owns the
+  // ClientHello profile registry; the gateway reads it through the dynamic
+  // read-table grants below (profile resolution is fail-open, never a
+  // control-plane write path).
+  ...columnGrants('saas_tls_fingerprint_profiles', 'SELECT', [
+    'id',
+    'name',
+    'description',
+    'enable_grease',
+    'cipher_suites',
+    'curves',
+    'point_formats',
+    'signature_algorithms',
+    'alpn_protocols',
+    'supported_versions',
+    'key_share_groups',
+    'psk_modes',
+    'extensions',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_tls_fingerprint_profiles', 'INSERT', [
+    'id',
+    'name',
+    'description',
+    'enable_grease',
+    'cipher_suites',
+    'curves',
+    'point_formats',
+    'signature_algorithms',
+    'alpn_protocols',
+    'supported_versions',
+    'key_share_groups',
+    'psk_modes',
+    'extensions',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_tls_fingerprint_profiles', 'UPDATE', [
+    'name',
+    'description',
+    'enable_grease',
+    'cipher_suites',
+    'curves',
+    'point_formats',
+    'signature_algorithms',
+    'alpn_protocols',
+    'supported_versions',
+    'key_share_groups',
+    'psk_modes',
+    'extensions',
+    'updated_at',
+  ]),
   // R6a (109) probe monitors: the control plane owns the monitor registry
   // (admin trigger/list surface) and reads the run history; the probe
   // monitor worker claims and writes through the validation-worker grants.
@@ -1204,7 +1257,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
     // (written by the probe monitor worker; consumed by R7 scheduling).
-    'probe_temp_unschedulable_until',
+    'probe_temp_unschedulable_until',    // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
+    // (tri-state: NULL=off, 0=default, -1=random, >0=profile row).
+    'tls_fingerprint_profile_id',
+
   ]),
   ...columnGrants('saas_tenant_provider_accounts', 'INSERT', [
     'tenant_id',
@@ -1225,6 +1281,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'rpm_limit',
     'tpm_limit',
     'egress_proxy_id',
+    'tls_fingerprint_profile_id',
     'created_at',
     'updated_at',
   ]),
@@ -1253,6 +1310,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe monitor worker unschedule/recovery writes.
     'probe_temp_unschedulable_until',
+    // Batch-2 §2.4 (116): admin fingerprint-binding mutation.
+    'tls_fingerprint_profile_id',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -1298,7 +1357,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe-derived temporary-unschedulable scheduling signal
     // (written by the probe monitor worker; consumed by R7 scheduling).
-    'probe_temp_unschedulable_until',
+    'probe_temp_unschedulable_until',    // Batch-2 §2.4 (116): per-account TLS fingerprint profile binding
+    // (tri-state: NULL=off, 0=default, -1=random, >0=profile row).
+    'tls_fingerprint_profile_id',
+
   ]),
   ...columnGrants('saas_platform_provider_accounts', 'INSERT', [
     'id',
@@ -1318,6 +1380,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'rpm_limit',
     'tpm_limit',
     'egress_proxy_id',
+    'tls_fingerprint_profile_id',
     'created_at',
     'updated_at',
   ]),
@@ -1346,6 +1409,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'proxy_fallback_origin_id',
     // 109 (R6a): probe monitor worker unschedule/recovery writes.
     'probe_temp_unschedulable_until',
+    // Batch-2 §2.4 (116): admin fingerprint-binding mutation.
+    'tls_fingerprint_profile_id',
     'updated_at',
     'disabled_at',
     'revoked_at',
@@ -3229,6 +3294,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // R3 (107): proxy registry lifecycle. In-use proxies are protected by the
   // egress_proxy_id FK (ON DELETE RESTRICT); only unbound proxies delete.
   ['saas_egress_proxies', 'DELETE'],
+  // Batch-2 §2.4 (116): TLS fingerprint profile registry lifecycle. There is
+  // no FK from the tri-state account column (0/-1 are sentinels), so deletion
+  // of a referenced profile leaves the resolver's fail-open default path —
+  // documented and application-level.
+  ['saas_tls_fingerprint_profiles', 'DELETE'],
   // R6a (109): probe monitor lifecycle (runs cascade with the monitor) and
   // the 30-day probe run retention cleanup.
   ['saas_probe_monitors', 'DELETE'],
@@ -3655,6 +3725,9 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_billing_group_account_pools',
   // R3 (107): the dispatch profile resolves the account's egress proxy.
   'saas_egress_proxies',
+  // Batch-2 §2.4 (116): the dispatch profile resolves the account's TLS
+  // fingerprint binding (saas_tls_fingerprint_profiles join).
+  'saas_tls_fingerprint_profiles',
   // R1 (113, roadmap 1.3): the gateway writes and reads the billing-group
   // RPM admission counters (capacity-side rate evidence, never billing).
   'saas_billing_group_rate_counters',
@@ -3819,6 +3892,14 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_provider_account_rate_counters', 'tokens', 'INSERT'],
   ['saas_provider_account_rate_counters', 'requests', 'UPDATE'],
   ['saas_provider_account_rate_counters', 'tokens', 'UPDATE'],
+  // R-dormant (115, batch 2.2): the scheduler's lazy scheduling-threshold
+  // pause write at candidate-collection time — the only account-table DML
+  // the gateway role owns (the 109 probe pause is worker-written).
+  // SELECT arrives through the dynamic read-table grant.
+  ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'],
+  ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'],
+  ['saas_platform_provider_accounts', 'scheduling_threshold_pause_until', 'UPDATE'],
+  ['saas_platform_provider_accounts', 'scheduling_threshold_pause_reason', 'UPDATE'],
   // R1 (113, roadmap 1.3): the capacity adapter upserts the billing-group
   // RPM admission counter inside the admission transaction (rate evidence
   // only; the counters never touch billing state).

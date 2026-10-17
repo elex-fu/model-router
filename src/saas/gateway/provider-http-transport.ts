@@ -23,6 +23,7 @@ import {
 } from './provider-http-address.js';
 import { observeProviderJsonUsage } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
+import { isProviderTlsFingerprintEgress, type ProviderTlsFingerprintEgress } from './provider-http-tls-fingerprint-connector.js';
 
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -66,6 +67,13 @@ export interface ProviderHttpDispatchProfile {
    * keeps the exact pre-R3 direct-egress behavior.
    */
   readonly egressProxy?: { readonly url: string };
+  /**
+   * Batch-2 §2.4 TLS fingerprints: the account's resolved egress descriptor
+   * (selector + inline profile for custom rows, resolved from PG at dispatch
+   * time). Absent keeps the ordinary connector path; the profile payload
+   * never carries credentials.
+   */
+  readonly tlsFingerprint?: ProviderTlsFingerprintEgress;
 }
 
 export interface ProviderHttpDispatchProfileResolveInput {
@@ -208,6 +216,7 @@ export type ProviderHttpTransportErrorCode =
   | 'PROFILE_INVALID'
   | 'ENDPOINT_POLICY_VIOLATION'
   | 'EGRESS_PROXY_INVALID'
+  | 'TLS_FINGERPRINT_INVALID'
   | 'PAYLOAD_BINDING_MISMATCH'
   | 'CREDENTIAL_UNAVAILABLE'
   | 'CREDENTIAL_INVALID'
@@ -568,6 +577,22 @@ function egressProxyFromProfile(profile: ProviderHttpDispatchProfile | null): { 
   return { url };
 }
 
+/**
+ * Batch-2 §2.4: normalize the profile's TLS-fingerprint descriptor. The
+ * shape is validated strictly (isProviderTlsFingerprintEgress — unknown keys
+ * rejected) so a malformed descriptor fails closed at the dispatch-profile
+ * boundary; a missing descriptor keeps the ordinary connector.
+ */
+function tlsFingerprintFromProfile(profile: ProviderHttpDispatchProfile | null): ProviderTlsFingerprintEgress | null {
+  if (!profile || typeof profile !== 'object') fail('PROFILE_UNAVAILABLE', 'dispatch profile is unavailable');
+  const descriptor = (profile as { readonly tlsFingerprint?: unknown }).tlsFingerprint;
+  if (descriptor === undefined || descriptor === null) return null;
+  if (!isProviderTlsFingerprintEgress(descriptor)) {
+    fail('TLS_FINGERPRINT_INVALID', 'dispatch profile tls fingerprint is invalid');
+  }
+  return descriptor;
+}
+
 function validateTargetUrl(value: string, policy: NormalizedEndpointPolicy): ValidatedTarget {
   if (value !== value.trim()) fail('ENDPOINT_POLICY_VIOLATION', 'dispatch profile target is not a valid URL');
   for (let index = 0; index < value.length; index += 1) {
@@ -902,6 +927,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         }
       }
       assertActive(context);
+      // Batch-2 §2.4: the account's resolved TLS-fingerprint descriptor rides
+      // on the dispatch profile next to the egress proxy. Unlike a bound
+      // proxy, a malformed/unreadable fingerprint never fails the dispatch —
+      // resolution happens in the profile resolver (fail-open to the default
+      // profile); this boundary only rejects structurally invalid payloads.
+      const tlsFingerprint = tlsFingerprintFromProfile(profile);
+      assertActive(context);
       // R5b-4: deployment-owned per-protocol fixed headers (e.g. the OpenCode
       // Go anthropic-version header), resolved from the signed dispatch facts
       // before any credential material exists.
@@ -942,6 +974,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
               headerValue.value,
               fixedRequestHeaders,
               egressProxy,
+              tlsFingerprint ?? undefined,
             );
             return result;
           } finally {
@@ -978,6 +1011,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     credentialHeaderValue: string,
     fixedRequestHeaders: Readonly<Record<string, string>> = {},
     egressProxy?: ProviderHttpEgressProxyTarget,
+    tlsFingerprint?: ProviderTlsFingerprintEgress,
   ): Promise<PreparedEvidenceTransportResponse> {
     const headers = new Headers(FIXED_REQUEST_HEADERS);
     // R5b-4 per-protocol fixed headers sit between the transport-owned fixed
@@ -995,6 +1029,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         address: pinnedAddress.address,
         family: pinnedAddress.family,
         ...(egressProxy === undefined ? {} : { proxy: egressProxy }),
+        ...(tlsFingerprint === undefined ? {} : { tlsFingerprint }),
       });
       if (
         !connector ||

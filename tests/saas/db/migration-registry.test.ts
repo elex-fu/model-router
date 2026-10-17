@@ -73,6 +73,8 @@ import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from '../../../src/
 import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/112_billing_group_snapshot_limits.js';
 import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/113_billing_group_rate_counters.js';
 import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/114_billing_group_spend_windows.js';
+import { PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/115_provider_account_scheduling_threshold_pause.js';
+import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/116_tls_fingerprint_profiles.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -146,6 +148,12 @@ test('SaaS migration registry keeps a stable append order with only documented g
       112,
       113,
       114,
+      // R-dormant activation (batch 2.2): 115 scheduling-threshold pause
+      // columns on both provider account tables.
+      115,
+      // Batch-2 §2.4 (task #7): 116 TLS fingerprint profile registry + the
+      // tri-state account binding column.
+      116,
     ],
   );
 });
@@ -205,9 +213,11 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
     BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
     BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
+    TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 95);
+  assert.equal(SAAS_MIGRATIONS.length, 97);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -264,6 +274,8 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'billing_group_snapshot_limits',
       'billing_group_rate_counters',
       'billing_group_spend_windows',
+      'provider_account_scheduling_threshold_pause',
+      'tls_fingerprint_profiles',
     ],
   );
   assert.deepEqual(
@@ -305,10 +317,14 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       112,
       113,
       114,
+      115,
+      // Batch-2 §2.4 (task #7): 116 TLS fingerprint profile registry + the
+      // tri-state account binding column.
+      116,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 95);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 95);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 97);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 97);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -398,7 +414,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 95);
+  assert.equal(SAAS_MIGRATIONS.length, 97);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -441,6 +457,8 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION,
     BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION,
     BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
+    TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -541,6 +559,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[93]?.name, 'billing_group_rate_counters');
   assert.equal(SAAS_MIGRATIONS[94]?.version, 114);
   assert.equal(SAAS_MIGRATIONS[94]?.name, 'billing_group_spend_windows');
+  assert.equal(SAAS_MIGRATIONS[95]?.version, 115);
+  assert.equal(SAAS_MIGRATIONS[95]?.name, 'provider_account_scheduling_threshold_pause');
+  assert.equal(SAAS_MIGRATIONS[96]?.version, 116);
+  assert.equal(SAAS_MIGRATIONS[96]?.name, 'tls_fingerprint_profiles');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

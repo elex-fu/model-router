@@ -174,6 +174,11 @@ services:
       # gateway (no Redis dependency); an explicitly EMPTY value fails
       # startup closed by parser contract.
       MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL: ${MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL:-redis://redis:6379}
+    volumes:
+      # Batch-2 §2.4: shared Unix socket with the TLS fingerprint sidecar.
+      # The volume exists regardless of the sidecar profile; an absent socket
+      # simply keeps the gateway's default connector (fail-open by contract).
+      - tls-fingerprint-socket:/run/model-router
     ports:
       # One host port per replica out of this inclusive range.
       - "${GATEWAY_HOST_PORT_START:-15007}-${GATEWAY_HOST_PORT_END:-15009}:${MODEL_ROUTER_SAAS_GATEWAY_PORT:-15007}"
@@ -222,5 +227,34 @@ services:
       retries: 3
       start_period: 60s
 
+  # Batch-2 §2.4 TLS fingerprint sidecar: an independent Go process that owns
+  # uTLS and dials provider endpoints with a pinned ClientHello fingerprint
+  # for accounts bound to a migration-116 profile. The gateway never spawns
+  # or supervises it — it only connects to the Unix socket; lifecycle is this
+  # service definition (restart policy, socket volume, healthcheck).
+  # Optional by design: leave it disabled (profiles: ["tls-fingerprint"])
+  # and the gateway runs with its exact pre-116 connector until an operator
+  # binds accounts and enables tlsFingerprintResolution.
+  tls-fingerprint-sidecar:
+    profiles: ["tls-fingerprint"]
+    build:
+      context: ../..
+      dockerfile: sidecar/tlsfingerprint/Dockerfile
+    image: model-router-tls-fingerprint-sidecar:local
+    init: true
+    restart: on-failure
+    environment:
+      MODEL_ROUTER_TLS_FINGERPRINT_SIDECAR_SOCKET: /run/model-router/tls-fingerprint.sock
+    volumes:
+      - tls-fingerprint-socket:/run/model-router
+    healthcheck:
+      # No HTTP surface: liveness is the process tree plus socket presence.
+      test: ["CMD-SHELL", "test -S /run/model-router/tls-fingerprint.sock && kill -0 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   postgres-data:
+  tls-fingerprint-socket:
