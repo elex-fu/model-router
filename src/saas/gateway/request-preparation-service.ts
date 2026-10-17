@@ -689,7 +689,12 @@ function normalizeOperationForProtocol(value: unknown, protocol: GatewayProtocol
 function operationAllowedForProtocol(protocol: GatewayProtocol, operation: string): boolean {
   return (
     operation === canonicalOperationForProtocol(protocol) ||
-    (protocol === 'openai' && (operation === 'embeddings' || operation === 'images.generations'))
+    (protocol === 'openai' && (operation === 'embeddings' || operation === 'images.generations')) ||
+    // §4.3 (task #17): the Responses family additionally hosts the
+    // standalone search operations (the emulation rides /responses; the
+    // payload compiler constructs the outbound body server-side) and the
+    // TTS audio passthrough (the xAI Voice /tts surface).
+    (protocol === 'responses' && (operation === 'web_search' || operation === 'x_search' || operation === 'audio.tts'))
   );
 }
 

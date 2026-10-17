@@ -7,12 +7,9 @@ import {
   recordGatewayRequestEnd,
 } from '../observability/metrics.js';
 import { resolveClientAddress } from './client-address.js';
-import type {
-  SaasGatewayAsyncMediaPort,
-  SaasGatewayAsyncMediaSubmission,
-} from './images/async-media-port.js';
-import { RecordingClientStream } from './images/recording-client-stream.js';
+import type { SaasGatewayAsyncMediaPort, SaasGatewayAsyncMediaSubmission } from './images/async-media-port.js';
 import { JsonKeepaliveClientStream } from './images/json-keepalive-client-stream.js';
+import { RecordingClientStream } from './images/recording-client-stream.js';
 import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceClientStream,
@@ -76,6 +73,11 @@ const MULTIPART_ONLY_ENDPOINT_PATHS = new Set<string>([
   '/v1/images/edits',
   '/v1/audio/transcriptions',
   '/v1/audio/translations',
+  // §4.3 (task #17): the xAI Voice STT surface is multipart-only upstream
+  // (sub2api bills it from the multipart body-size heuristic), so the JSON
+  // gateway reserves the sub2api path shape with the same precise 501
+  // instead of a 404 — the recorded STT legacy boundary.
+  '/v1/stt',
 ]);
 const MULTIPART_UNSUPPORTED_MESSAGE =
   'This endpoint requires multipart/form-data, which the hosted gateway does not support yet; use the JSON media generation endpoints with base64-encoded input instead';
@@ -185,6 +187,19 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   // R2: the OpenAI embeddings operation rides the OpenAI inbound protocol
   // family; the per-route client operation below distinguishes it from chat.
   ['/v1/embeddings', 'openai'],
+  // §4.3 (task #17): the standalone search endpoints ride the Responses
+  // inbound family (the emulation constructs the outbound Responses body);
+  // the per-route client operation below distinguishes web/x search.
+  ['/v1/web_search', 'responses'],
+  ['/v1/x_search', 'responses'],
+  // §4.3 (task #17): the TTS audio passthrough rides the Responses inbound
+  // family (the xAI Voice /tts surface rides the responses-family catalog
+  // endpoint); the per-route client operation below distinguishes it. STT
+  // stays unimplemented (the upstream /stt surface is multipart-only — see
+  // the 501 reservation below); custom-voices CRUD stays unexposed this
+  // phase (GET/PATCH/DELETE method dispatch + an unbilled admission shape
+  // are its follow-up).
+  ['/v1/tts', 'responses'],
   // §4.2 (task #16): the images.generations operation rides the OpenAI
   // inbound protocol family (the R2 embeddings precedent); the async
   // submission endpoint is the same operation with a 202+task contract.
@@ -199,6 +214,12 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
  */
 const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
   ['/v1/embeddings', 'embeddings'],
+  // §4.3 (task #17): search operations (server-owned, path-derived).
+  ['/v1/web_search', 'web_search'],
+  ['/v1/x_search', 'x_search'],
+  // §4.3 (task #17): the TTS audio passthrough (server-owned, path-derived;
+  // stateless — the spoken text is the entire billable input).
+  ['/v1/tts', 'audio.tts'],
   // §4.2 (task #16): image generation operations (server-owned,
   // path-derived; stateless — the sub2api /v1/images precedent).
   ['/v1/images/generations', 'images.generations'],
@@ -1468,8 +1489,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         requestId,
       };
       const dispatchRouteAsync =
-        isRecord(preparedRequest.evidenceInput) &&
-        typeof preparedRequest.evidenceInput.routeConfigId === 'string'
+        isRecord(preparedRequest.evidenceInput) && typeof preparedRequest.evidenceInput.routeConfigId === 'string'
           ? preparedRequest.evidenceInput.routeConfigId
           : 'unknown';
       const executionTimer = setTimeout(() => recording.abort(), executionTimeoutMs);
@@ -1605,7 +1625,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         client,
       });
       const attemptStatus =
-        dispatched.kind === 'sent' ? ((dispatched.transport?.resultHttpStatus as number | null | undefined) ?? null) : null;
+        dispatched.kind === 'sent'
+          ? ((dispatched.transport?.resultHttpStatus as number | null | undefined) ?? null)
+          : null;
       recordGatewayAttemptOutcome({
         route: dispatchRoute,
         ok: dispatched.kind === 'sent' && attemptStatus !== null && attemptStatus >= 200 && attemptStatus < 300,
@@ -1638,8 +1660,8 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
   };
 }
 
-export { createSaasGatewayHandler as createSaasHostedGatewayHandler };
 export type {
   SaasGatewayAsyncMediaPort,
   SaasGatewayAsyncMediaSubmission,
 } from './images/async-media-port.js';
+export { createSaasGatewayHandler as createSaasHostedGatewayHandler };

@@ -39,6 +39,12 @@ export interface PreparedEvidenceTransportRequest {
   readonly signal: AbortSignal;
   readonly payloadBytes: Uint8Array;
   readonly evidence: PreparedRequestEvidenceRecord;
+  /**
+   * §4.3 (task #17): the client-side protocol operation fact, carried for
+   * per-operation transport behavior (the search body/usage adaptation).
+   * Absent on legacy evidence keeps the transport byte-identical.
+   */
+  readonly clientOperation?: string;
 }
 
 export interface PreparedEvidenceTransportResponse {
@@ -816,6 +822,10 @@ export class SaasPreparedEvidenceDispatchService {
             signal: transportSignal.signal,
             payloadBytes,
             evidence,
+            // §4.3 (task #17): the client-side operation fact rides the
+            // transport request so per-operation transports (search
+            // adaptation) need no evidence-shape change.
+            clientOperation: evidence.clientOperation,
           }),
         );
         await deliverTransportResponse(transportResult, input.client, heartbeat.signal, delivery, async () => {

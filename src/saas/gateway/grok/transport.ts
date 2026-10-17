@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { normalizeUsage } from '../../../telemetry/usage.js';
+import { observedTtsUsage, TTS_PROVIDER_OPERATION, ttsBillingRunes } from '../audio/tts.js';
 import type { NormalSuccessObservedUsage } from '../dispatch-usage-settlement.js';
 import {
   classifyUpstreamError,
@@ -19,6 +20,11 @@ import type {
   PreparedEvidenceTransportResponse,
 } from '../prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../prepared-request-evidence-service.js';
+import {
+  observeSearchProviderResponse,
+  type SearchResponsesBodyDescriptor,
+  searchDescriptorForDispatch,
+} from '../websearch/response-observer.js';
 import {
   applyGrokCliProxyHeaders,
   GROK_API_KEY_DEFAULT_BASE_URL,
@@ -68,8 +74,11 @@ const MAX_ERROR_BODY_BYTES = 32_768;
 const MAX_DRAIN_BUFFER_BYTES = 8 * 1024 * 1024;
 const PREPARED_PAYLOAD_SHA256 = /^[0-9a-f]{64}$/;
 
-/** The upstream path a request is dispatched onto (both native OpenAI wire shapes). */
-export type GrokUpstreamPath = 'responses' | 'chat/completions';
+/**
+ * The upstream path a request is dispatched onto (both native OpenAI wire
+ * shapes, plus the §4.3 xAI Voice TTS passthrough surface).
+ */
+export type GrokUpstreamPath = 'responses' | 'chat/completions' | 'tts';
 
 export type GrokTransportErrorCode =
   | 'INVALID_INPUT'
@@ -191,6 +200,21 @@ export interface GrokTransportRequest {
    * stamped as `x-grok-conv-id` so upstream shard routing stays sticky.
    */
   readonly conversationId: string | null;
+  /**
+   * §4.3 (task #17): the search-response descriptor recovered from the
+   * verified payload (web_search/x_search emulations). Set means the JSON
+   * response body is transformed into the client search body and the
+   * per-call usage observation replaces the SSE watcher.
+   */
+  readonly searchResponse?: SearchResponsesBodyDescriptor | null;
+  /**
+   * §4.3 (task #17): the TTS billing unit count (characters of the spoken
+   * text) re-derived from the verified payload. Set means the request rides
+   * the xAI Voice `/tts` passthrough path, the accept header is the voice
+   * header, the audio response bytes stream to the client unchanged, and the
+   * per-call usage observation replaces the SSE watcher.
+   */
+  readonly ttsUsageRunes?: number | null;
   readonly signal: AbortSignal;
 }
 
@@ -201,6 +225,13 @@ export interface GrokTransportStreamResult {
   readonly body: ReadableStream<Uint8Array> | null;
   /** Settles with the usage from the terminal SSE event. */
   readonly usage: Promise<GrokResponseUsage | null>;
+  /**
+   * §4.3: the per-call usage observation of a non-streaming media operation
+   * (the search emulation's one unit; the TTS passthrough's character
+   * count). Null for ordinary traffic; the adapter prefers it over the SSE
+   * watcher.
+   */
+  readonly searchUsage?: Promise<NormalSuccessObservedUsage | null>;
   readonly rateLimitWritten: boolean;
 }
 
@@ -338,12 +369,16 @@ export class GrokHttpTransport {
         : { operatorHostAllowlist: this.options.operatorHostAllowlist }),
     });
     // CLI identity masquerade: stamped only when the target is the CLI proxy.
+    const isTts = request.ttsUsageRunes !== undefined && request.ttsUsageRunes !== null;
     const headers = applyGrokCliProxyHeaders(
       {
         host: url.host,
         authorization: `Bearer ${token}`,
         'content-type': 'application/json',
-        accept: request.stream ? 'text/event-stream' : 'application/json',
+        // §4.3: the xAI Voice TTS surface answers with audio bytes (sub2api
+        // sends the same voice accept header); everything else keeps the
+        // stream-derived JSON/SSE accept.
+        accept: isTts ? 'application/json, audio/*' : request.stream ? 'text/event-stream' : 'application/json',
       },
       url.hostname,
     );
@@ -394,6 +429,23 @@ export class GrokHttpTransport {
       return { ok: false, status: response.status, classification, failover, bodyText, rateLimitWritten };
     }
     const body = response.body ?? null;
+    /*
+     * §4.3 (task #17): the TTS passthrough is a plain byte relay — the
+     * upstream audio body streams to the client unchanged (no SSE watcher,
+     * no JSON observer) and the billing observation is the request-derived
+     * character count, available immediately on the 2xx.
+     */
+    if (request.ttsUsageRunes !== undefined && request.ttsUsageRunes !== null) {
+      return {
+        ok: true,
+        status: response.status,
+        headers: responseHeaders,
+        body,
+        usage: Promise.resolve(null),
+        searchUsage: Promise.resolve(observedTtsUsage(request.ttsUsageRunes)),
+        rateLimitWritten,
+      };
+    }
     if (body === null) {
       return {
         ok: true,
@@ -401,6 +453,21 @@ export class GrokHttpTransport {
         headers: responseHeaders,
         body: null,
         usage: Promise.resolve(null),
+        rateLimitWritten,
+      };
+    }
+    // §4.3 (task #17): the search emulation is non-streaming; its JSON
+    // envelope is transformed into the client search body with the per-call
+    // billing observation, replacing the SSE usage watcher.
+    if (request.searchResponse !== undefined && request.searchResponse !== null) {
+      const observed = observeSearchProviderResponse(body, request.searchResponse);
+      return {
+        ok: true,
+        status: response.status,
+        headers: responseHeaders,
+        body: observed.body,
+        usage: Promise.resolve(null),
+        searchUsage: observed.usage,
         rateLimitWritten,
       };
     }
@@ -518,6 +585,34 @@ export class GrokPreparedEvidenceTransport implements PreparedEvidenceTransport 
     const body = assertPayloadBinding(input);
     const evidence = input.evidence;
     const context = await this.resolveRequestContext(evidence);
+    /*
+     * §4.3 (task #17): the search descriptor is recovered from the verified
+     * payload bytes themselves (the server-owned construction round-trips
+     * exactly) gated on the signed provider operation — ordinary responses
+     * traffic never hits the transform even if a prompt accidentally
+     * resembles the template. A search dispatch whose payload does not
+     * round-trip is a construction failure and fails closed here.
+     */
+    const searchDescriptor = searchDescriptorForDispatch(body, evidence.providerOperation);
+    if (
+      (evidence.providerOperation === 'web_search' || evidence.providerOperation === 'x_search') &&
+      searchDescriptor === null
+    ) {
+      fail('INVALID_INPUT', 'search evidence payload is not the search emulation body');
+    }
+    /*
+     * §4.3 (task #17): the TTS billing units are re-derived from the
+     * verified payload bytes themselves (the passthrough body round-trips
+     * exactly) gated on the signed provider operation. A TTS dispatch whose
+     * payload carries no speakable input is a construction failure and
+     * fails closed here; the upstream path is the xAI Voice /tts surface
+     * regardless of the chat context's path selection.
+     */
+    const ttsOperation = evidence.providerOperation === TTS_PROVIDER_OPERATION;
+    const ttsUsageRunes = ttsOperation ? ttsBillingRunes(body) : null;
+    if (ttsOperation && ttsUsageRunes === null) {
+      fail('INVALID_INPUT', 'tts evidence payload is not the tts passthrough body');
+    }
     const result = await this.transport.send({
       accountId: evidence.accountId,
       credentialId: evidence.credentialId,
@@ -525,8 +620,10 @@ export class GrokPreparedEvidenceTransport implements PreparedEvidenceTransport 
       model: context.model,
       body,
       stream: context.stream,
-      upstreamPath: context.upstreamPath,
+      upstreamPath: ttsOperation ? 'tts' : context.upstreamPath,
       conversationId: context.conversationId,
+      searchResponse: searchDescriptor,
+      ...(ttsUsageRunes === null ? {} : { ttsUsageRunes }),
       signal: input.signal,
     });
     if (!result.ok) {
@@ -547,12 +644,24 @@ export class GrokPreparedEvidenceTransport implements PreparedEvidenceTransport 
         return usage;
       })
       .catch(() => null);
+    // §4.3: the search emulation's per-call observation settles with the
+    // transformed response body and takes priority over the SSE watcher.
+    let observedSearchUsage: NormalSuccessObservedUsage | null = null;
+    if (result.searchUsage !== undefined) {
+      void result.searchUsage
+        .then((usage) => {
+          observedSearchUsage = usage;
+          return usage;
+        })
+        .catch(() => null);
+    }
     return {
       responseStarted: false,
       resultHttpStatus: result.status,
       headers: result.headers,
       body: result.body,
       get providerUsage(): NormalSuccessObservedUsage | null {
+        if (result.searchUsage !== undefined) return observedSearchUsage;
         return observedUsage === null ? null : grokUsageToObservedUsage(observedUsage);
       },
     };
