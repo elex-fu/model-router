@@ -15,6 +15,7 @@ import { saasBootstrapAdmin } from './saas-management.js';
 import { saasMigrationAudit } from './saas-migration-audit.js';
 import { saasMigrate } from './saas-migrations.js';
 import { saasPlatformMfaEnroll } from './saas-platform-mfa-enrollment.js';
+import { saasUpgrade } from './saas-upgrade.js';
 import { tryV2, v2Config } from './v2.js';
 import {
   adminBootstrap,
@@ -174,6 +175,37 @@ program
   .action((options) =>
     management(async () => {
       const result = await saasDoctor(options);
+      process.exitCode = result.exitCode;
+    }),
+  );
+
+program
+  .command('saas:upgrade')
+  .description(
+    'In-place managed SaaS upgrade: pre-checks (migration audit + doctor subset), backup point, explicit migration, role template replay, runtime probes, rolling restart, post-check + optional smoke',
+  )
+  .option(
+    '--env-file <path>',
+    'Deployment environment file (same surface as saas:deploy: administrator and per-role database URLs)',
+  )
+  .option('--smoke-url <url>', 'Single smoke request after the upgrade (expects HTTP 200; skipped when unset)')
+  .option('--dry-run', 'Run the pre-checks and print the step plan only; zero mutations')
+  .option('--verbose', 'Print the equivalent manual command for every step')
+  .option(
+    '--rollback-to <version>',
+    'Print the documented backup-restore rollback path for this registry version; down-migrations do not exist and are refused',
+  )
+  .option(
+    '--allow-local-plaintext',
+    'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS',
+  )
+  .addHelpText(
+    'after',
+    '\nRestart mechanism: MODEL_ROUTER_SAAS_UPGRADE_RESTART_MECHANISM=manual (default; prints the sequence) | compose (docker compose up -d --no-deps per service with health gating) | systemd (systemctl restart per unit with is-active gating). Backup point: MODEL_ROUTER_SAAS_UPGRADE_BACKUP_DIR (pg_dump custom archive) or MODEL_ROUTER_SAAS_UPGRADE_BACKUP_COMMAND; without either, the step records only the registry anchor — backup:create covers the local V2 config/secrets/telemetry and does NOT back up PostgreSQL. Fail-closed per step; no credential value is ever printed. Rollback is the documented backup-restore path only (never a down-migration).\n',
+  )
+  .action((options) =>
+    management(async () => {
+      const result = await saasUpgrade(options);
       process.exitCode = result.exitCode;
     }),
   );
