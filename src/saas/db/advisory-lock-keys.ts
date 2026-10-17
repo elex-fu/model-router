@@ -40,6 +40,27 @@ export const saasAdvisoryKey = {
   /** Serializes append-only usage corrections with reconciliation writers for one request. */
   usageCorrectionRequest: (tenantId: string, requestId: string): string =>
     `saas-metering:usage-correction:${utf8Hex(tenantId)}:${utf8Hex(requestId)}`,
+  /**
+   * R9 P4/P16 (roadmap batch 1.2 step 3): the per-wallet billing fence key.
+   * One wallet = one tenant + one currency (saas_wallets unique constraint).
+   * Every writer of wallet-derived billing state — billing reservations, the
+   * spending-freeze gate, refund wallet freezes, ledger postings, the posted
+   * balance projection — takes this EXCLUSIVE transaction-scoped advisory lock
+   * instead of a `saas_wallets` row FOR UPDATE. Same-wallet writers still
+   * serialize (the freeze-gate semantics are preserved verbatim), but no
+   * admission transaction holds a wallet tuple lock across the capacity fence,
+   * and lock waits no longer queue on the wallet row's tuple lock. The lock is
+   * released automatically at transaction end. Both fence takers (the billing
+   * ledger service and the payment refund service) MUST derive this key
+   * through this helper so the two entry points stay one mutual-exclusion
+   * domain — a row lock here and an advisory lock there would open a
+   * double-entry race window.
+   */
+  walletFence: (tenantId: string, currency: string): string =>
+    `model-router:wallet-fence:${utf8Hex(tenantId)}:${utf8Hex(currency)}`,
 } as const;
+
+/** The wallet-fence acquisition statement (see saasAdvisoryKey.walletFence). */
+export const WALLET_FENCE_SQL = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))';
 
 export const sortAndDedupeAdvisoryKeys = (keys: readonly string[]): string[] => [...new Set(keys)].sort();

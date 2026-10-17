@@ -116,7 +116,7 @@ test('funding posts balanced positive double-entry records and is replay-safe', 
   assert.equal(replay.wallet.availableMinorUnits, 125n);
 });
 
-test('spending freezes use the wallet fence before reservation locks without UPDATE row-lock rights', async () => {
+test('spending freezes use the wallet advisory fence before reservation locks without UPDATE row-lock rights', async () => {
   const database = new FakeBillingDatabase();
   const service = createService();
   await fund(database, service, '100');
@@ -124,15 +124,24 @@ test('spending freezes use the wallet fence before reservation locks without UPD
   const statements: string[] = [];
   await database.transaction((tx) => service.reserve(observeQueries(tx, statements), reserveInput()));
 
-  const walletLock = statements.findIndex((sql) => sql.includes('from saas_wallets') && sql.includes('for update'));
+  // The per-wallet fence is the EXCLUSIVE transaction-scoped advisory lock
+  // (batch 1.2 step 3), taken BEFORE the wallet row read.
+  const walletFence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
+  const walletRead = statements.findIndex((sql) => sql.includes('from saas_wallets') && !sql.includes('pg_advisory'));
   const freezeRead = statements.find((sql) => sql.includes('from saas_billing_spending_freezes'));
   const reservationLock = statements.findIndex(
     (sql) => sql.includes('from saas_billing_reservations') && sql.includes('for update'),
   );
-  assert.ok(walletLock >= 0);
+  assert.ok(walletFence >= 0, 'the wallet advisory fence must be taken');
+  assert.ok(walletRead > walletFence, 'the wallet row read must follow the fence');
+  assert.ok(
+    !statements.some((sql) => sql.includes('from saas_wallets') && sql.includes('for update')),
+    'the wallet row is no longer tuple-locked',
+  );
   assert.ok(freezeRead);
   assert.ok(!freezeRead.includes('for update'));
-  assert.ok(reservationLock > walletLock);
+  assert.ok(freezeRead && statements.indexOf(freezeRead) > walletFence);
+  assert.ok(reservationLock > walletFence);
 });
 
 test('reserve reads the spending freeze exactly once inside the wallet critical section', async () => {
@@ -143,14 +152,14 @@ test('reserve reads the spending freeze exactly once inside the wallet critical 
   const statements: string[] = [];
   await database.transaction((tx) => service.reserve(observeQueries(tx, statements), reserveInput()));
 
-  const walletLock = statements.findIndex((sql) => sql.includes('from saas_wallets') && sql.includes('for update'));
+  const walletFence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
   const freezeReads = statements
     .map((sql, index) => ({ sql, index }))
     .filter(({ sql }) => sql.includes('from saas_billing_spending_freezes'));
-  assert.ok(walletLock >= 0);
+  assert.ok(walletFence >= 0);
   // Exactly one freeze read, after the wallet fence and before the insert.
   assert.equal(freezeReads.length, 1);
-  assert.ok(freezeReads[0] && freezeReads[0].index > walletLock);
+  assert.ok(freezeReads[0] && freezeReads[0].index > walletFence);
   const insertAt = statements.findIndex((sql) => sql.startsWith('insert into saas_billing_reservations'));
   assert.ok(insertAt > (freezeReads[0]?.index ?? -1));
 });
@@ -178,10 +187,10 @@ test('refund-freeze and immutable ledger reads do not request row-update locks',
       refundOrderId: 'refund-1',
     }),
   );
-  const walletLock = statements.findIndex((sql) => sql.includes('from saas_wallets') && sql.includes('for update'));
+  const walletFence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
   const refundFreezeRead = statements.findIndex((sql) => sql.includes('from saas_refund_wallet_freezes'));
-  assert.ok(walletLock >= 0);
-  assert.ok(refundFreezeRead > walletLock);
+  assert.ok(walletFence >= 0);
+  assert.ok(refundFreezeRead > walletFence);
   assert.ok(!statements[refundFreezeRead]?.includes('for update'));
 
   statements.length = 0;
@@ -197,15 +206,13 @@ test('refund-freeze and immutable ledger reads do not request row-update locks',
   const identityRead = statements.find(
     (sql) => sql.includes('from saas_ledger_transactions') && sql.includes('business_key'),
   );
-  const replayWalletLock = statements.findIndex(
-    (sql) => sql.includes('from saas_wallets') && sql.includes('for update'),
-  );
+  const replayWalletFence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
   const identityReadIndex = statements.findIndex(
     (sql) => sql.includes('from saas_ledger_transactions') && sql.includes('business_key'),
   );
   assert.ok(identityRead);
   assert.ok(!identityRead.includes('for update'));
-  assert.ok(replayWalletLock >= 0 && replayWalletLock < identityReadIndex);
+  assert.ok(replayWalletFence >= 0 && replayWalletFence < identityReadIndex);
 
   statements.length = 0;
   await assert.rejects(
@@ -223,9 +230,7 @@ test('refund-freeze and immutable ledger reads do not request row-update locks',
   const sourceOrderRead = statements.find(
     (sql) => sql.includes('from saas_ledger_transactions') && sql.includes('source_order_ref'),
   );
-  const conflictWalletLock = statements.findIndex(
-    (sql) => sql.includes('from saas_wallets') && sql.includes('for update'),
-  );
+  const conflictWalletLock = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
   const sourceOrderReadIndex = statements.findIndex(
     (sql) => sql.includes('from saas_ledger_transactions') && sql.includes('source_order_ref'),
   );

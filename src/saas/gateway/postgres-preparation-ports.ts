@@ -882,8 +882,8 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
            stage acquires. The authorization prelock's shared fences, the
            metering request/attempt inserts, the admission guard, the account
            rate counter, the outbox and audit writes, and the per-wallet
-           billing hold all run BEFORE it, so none of that work sits inside
-           the capacity fence. This changes no committed state ordering: the
+           billing hold (advisory fence, batch 1.2 step 3) all run BEFORE it,
+           so none of that work sits inside the capacity fence. This changes no committed state ordering: the
            whole stage is one caller-owned transaction, and every reject path
            (including a capacity rate/quota rejection) still rolls the
            transaction back through RequestPreparationTransactionRollback,

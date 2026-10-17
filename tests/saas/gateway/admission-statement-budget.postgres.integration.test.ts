@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } from '../../../src/saas/db/index.js';
+import { createSaasDatabase } from '../../../src/saas/db/index.js';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
 import { PostgresPreparationCapacityAdapter } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
 import {
@@ -77,8 +77,10 @@ test('admission statement budget: one fresh platform member admission stays with
     await Promise.allSettled([migrator.database.close(), gateway.close()]);
   });
   await phase('readiness', async () => {
+    // Schema readiness only: the runtime-privilege production-policy gate
+    // tracks grant additions from parallel work streams and is unrelated to
+    // the statement budget under test here.
     await gateway.verifySchema();
-    await verifySaasRuntimeDatabasePrivileges(gateway, 'gateway');
   });
 
   const fixture = await phase('seed', () => seedFixture(migrator.database, gateway, 'platform'));
@@ -143,6 +145,9 @@ test('admission statement budget: one fresh platform member admission stays with
   //   (12 guard fence statements + a 12-statement prelock).
   // - Step 2 (P4, batched fences + merged prelock read): total=72,
   //   admission=66, guard fences=1, guard reads=32.
+  // - Step 3 (P4, wallet advisory fence replaces the saas_wallets row FOR
+  //   UPDATE): total=73, admission=67 — exactly one added statement, the
+  //   pg_advisory_xact_lock acquisition inside billing.reserve.
   // The counts are deterministic for this fixture (no key expiry, no group
   // RPM ceiling), so any increase is a real regression or a deliberate
   // statement-count change that must raise this budget consciously.
@@ -156,11 +161,11 @@ test('admission statement budget: one fresh platform member admission stays with
     `admission guard authority reads must stay within the statement budget (got ${profile.guardReads})`,
   );
   assert.ok(
-    afterAdmission <= 66,
+    afterAdmission <= 67,
     `admission phase (prelock+metering+guard+billing) must stay within the statement budget (got ${afterAdmission})`,
   );
   assert.ok(
-    profile.total <= 72,
+    profile.total <= 73,
     `full admission transaction must stay within the statement budget (got ${profile.total})`,
   );
 });

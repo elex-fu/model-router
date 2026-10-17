@@ -4,6 +4,8 @@ import { PlatformWalletLedgerService } from '../billing/service.js';
 import {
   SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL,
   SAAS_PLATFORM_AUTHORIZATION_WRITER_TIMEOUTS_SQL,
+  saasAdvisoryKey,
+  WALLET_FENCE_SQL,
 } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
 import { ByokServicePlanService } from '../plans/service.js';
@@ -798,10 +800,23 @@ export class PaymentRefundService {
     if (unresolved.rows.length !== 0) throw new PaymentError('REFUND_STATE_CONFLICT');
   }
 
+  /**
+   * The per-wallet billing fence (R9 P4/P16, roadmap batch 1.2 step 3): the
+   * refund request path takes the SAME EXCLUSIVE transaction-scoped advisory
+   * lock the billing ledger service takes (saasAdvisoryKey.walletFence —
+   * keyed by the wallet's tenant + currency business identity) instead of a
+   * `saas_wallets` row FOR UPDATE. The refund wallet-freeze INSERT below and
+   * the refundable-amount reads therefore still serialize against every
+   * billing writer (reservations, spending freezes, ledger postings) for the
+   * same wallet; a row lock here and an advisory lock in the ledger service
+   * would open a double-entry race window, which is why both entry points
+   * MUST derive the key through the shared helper.
+   */
   private async lockWallet(executor: SqlExecutor, tenantId: string, currency: string): Promise<WalletRow> {
+    await executor.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
     const result = await executor.query<WalletRow>(
       `SELECT id, tenant_id, currency, posted_balance_minor_units
-       FROM saas_wallets WHERE tenant_id = $1 AND currency = $2 FOR UPDATE`,
+       FROM saas_wallets WHERE tenant_id = $1 AND currency = $2`,
       [tenantId, currency],
     );
     if (!rowsHaveOne(result)) throw new PaymentError('ORDER_STATE_CONFLICT');

@@ -762,13 +762,15 @@ export class SaasRequestAdmissionService {
       );
 
       // R9 finding P4 (critical-section shrink): bookkeeping writes run BEFORE
-      // the platform hold so the per-wallet FOR UPDATE fence — acquired inside
-      // billing.reserve and held until COMMIT — covers only the wallet balance
-      // check, the reservation insert, and the commit itself. The rate counter,
-      // outbox, and audit writes never read billing state, and the wallet row
-      // remains the LAST lock this transaction acquires, so lock ordering is
-      // unchanged. If the reserve fails (insufficient funds, spending freeze),
-      // these writes roll back with the transaction exactly as before.
+      // the platform hold so the per-wallet advisory fence — acquired inside
+      // billing.reserve (saasAdvisoryKey.walletFence, roadmap batch 1.2 step 3)
+      // and held until COMMIT — covers only the wallet balance check, the
+      // reservation insert, and the commit itself. The rate counter, outbox,
+      // and audit writes never read billing state, and the wallet fence
+      // remains the LAST wallet-domain lock this transaction acquires, so lock
+      // ordering is unchanged. If the reserve fails (insufficient funds,
+      // spending freeze), these writes roll back with the transaction exactly
+      // as before.
       await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
 
       const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);

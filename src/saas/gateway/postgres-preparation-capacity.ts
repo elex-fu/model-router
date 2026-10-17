@@ -272,10 +272,16 @@ async function queryRows<T extends Row>(
  * Lock ordering (deadlock safety): admission is the sole taker of the
  * `model-router:request-capacity:*` advisory namespace. All locks acquired
  * before this fence (idempotency row, shared authz fences, per-request
- * metering rows, per-candidate guard rows, the billing wallet row) are taken
+ * metering rows, per-candidate guard rows, the billing wallet advisory fence
+ * — model-router:wallet-fence:*, see saasAdvisoryKey.walletFence) are taken
  * in the same relative order by every admission, and no other transaction
- * class (control plane, settlement, compensation, release) ever takes a
- * capacity advisory lock — so no wait cycle can pass through this fence.
+ * class (control plane, settlement, compensation, release, refunds) ever
+ * takes a capacity advisory lock — so no wait cycle can pass through this
+ * fence. The wallet fence namespace is disjoint from every authz namespace:
+ * billing operations take only the wallet fence (+ per-reservation tuple
+ * locks) and refunds take the refund order row then the wallet fence, both
+ * strictly inside-out; admission takes the wallet fence after its authority
+ * fences and before this capacity fence, so the global order is consistent.
  * Within a tenant, the exclusive fence linearizes every post-fence writer,
  * which additionally guarantees that per-key rows touched after the fence
  * (key budgets, this reservation INSERT) are never held by two admissions
