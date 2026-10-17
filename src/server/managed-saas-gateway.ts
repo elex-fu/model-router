@@ -3,7 +3,21 @@ import { randomUUID } from 'node:crypto';
 import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
+import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
 import { CLAUDE_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
+import {
+  MINIMAX_ENDPOINT,
+  ZHIPU_CODING_ENDPOINT,
+  ZHIPU_ENDPOINT,
+} from '../saas/gateway/cn-providers/catalog-identity.js';
+import {
+  type CnProvidersProtocolRoutingConfig,
+  cnProviderOperationForProtocol,
+  resolveCnNativeProtocol,
+  resolveCnProviderApiProtocol,
+} from '../saas/gateway/cn-providers/protocol-rules.js';
+import { cnProvidersProviderRequestTransform } from '../saas/gateway/cn-providers/transform.js';
+import { cnProvidersFixedRequestHeaders } from '../saas/gateway/cn-providers/transport-headers.js';
 import { CODEX_ENDPOINT } from '../saas/gateway/codex/catalog-identity.js';
 import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from '../saas/gateway/contracts.js';
@@ -12,6 +26,7 @@ import {
   type NormalSuccessSettlementPort,
 } from '../saas/gateway/dispatch-usage-settlement.js';
 import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
+import { GROK_ENDPOINT } from '../saas/gateway/grok/catalog-identity.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
@@ -115,6 +130,7 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
+import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
@@ -729,6 +745,67 @@ export interface ManagedSaasGatewayProductionOptions {
    */
   readonly opencodeGoEvidenceTransport?: PreparedEvidenceTransport;
   /**
+   * Batch-3 dispatch seam for the CN-provider category adapter
+   * (CnProvidersPreparedEvidenceTransport — a classifying decorator over the
+   * generic transport). When set, prepared evidence whose signed endpoint
+   * scope is a CN-provider catalog endpoint (`zhipu-glm`,
+   * `zhipu-glm-coding`, `minimax-m`, any provider protocol) is dispatched
+   * through it instead of the generic provider HTTP transport directly. The
+   * adapter delegates the actual send to the generic transport (URL,
+   * credential, egress proxy, TLS fingerprint, usage observation all stay
+   * its job) and adds the bounded error-body classification a payg
+   * insufficient-balance 429 needs to reach the failure-feedback layer as
+   * `insufficient-balance` instead of the status-only `rate-limited`
+   * fallback. Unset keeps CN-provider traffic on the generic transport with
+   * the status-only classification.
+   */
+  readonly cnProvidersEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-3 CN-provider adaptive protocol routing (the opencode-go
+   * `opencodeGoProtocolRouting` shape): the per-provider api_protocol the
+   * authority decorator and payload-compile layer resolve the native
+   * protocol from. Explicit map first, then the lenient config value (the
+   * migration-120 account columns read through the runtime module or the
+   * sub2api credentials-map wrapper), then the adaptive default (the native
+   * endpoint follows the inbound client protocol).
+   */
+  readonly cnProvidersProtocolRouting?: CnProvidersProtocolRoutingConfig;
+  /**
+   * Batch-3 dispatch seam for the Grok category transport
+   * (GrokPreparedEvidenceTransport). When set, prepared evidence whose signed
+   * endpoint scope is the Grok catalog endpoint (`grok-responses`, provider
+   * protocol `responses`) is dispatched through it instead of the generic
+   * provider HTTP transport — the direct analog of `codexEvidenceTransport`.
+   * Unset keeps grok traffic on the generic transport path unchanged.
+   */
+  readonly grokEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-3 dispatch seam for the Bedrock category transport
+   * (BedrockPreparedEvidenceTransport). When set, prepared evidence whose
+   * signed endpoint scope is the Bedrock catalog endpoint
+   * (`bedrock-invoke`, provider protocol `anthropic`) is dispatched through
+   * it instead of the generic provider HTTP transport — the direct analog
+   * of `codexEvidenceTransport`. Bedrock cannot ride the generic transport:
+   * SigV4 signing, the InvokeModel request-body transform and the binary
+   * EventStream decoding all live inside the category transport. Unset
+   * keeps bedrock traffic undispatchable (no catalog route exists yet).
+   */
+  readonly bedrockEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-3 dispatch seam for the Vertex AI service-account category
+   * transport (VertexPreparedEvidenceTransport). When set, prepared
+   * evidence whose signed endpoint scope is the Vertex catalog endpoint
+   * (`vertex-raw-predict`, provider protocol `anthropic` OR `gemini` — the
+   * scope covers both the Anthropic-on-Vertex rawPredict family and the
+   * Gemini-on-Vertex generateContent family) is dispatched through it
+   * instead of the generic provider HTTP transport — the direct analog of
+   * `geminiEvidenceTransport`. The transport authenticates with the
+   * service-account JWT→OAuth Bearer token, so it cannot ride the generic
+   * transport's static-header resolver. Unset keeps vertex traffic
+   * undispatchable (no catalog route exists yet).
+   */
+  readonly vertexEvidenceTransport?: PreparedEvidenceTransport;
+  /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
    * `X-Title`). When set, the values are mounted on the generic transport's
    * fixed-request-header resolver for every request whose signed endpoint
@@ -1056,6 +1133,95 @@ export function createOpenCodeGoProtocolRoutingAuthority(
 }
 
 /**
+ * Batch-3 CN-provider adaptive protocol routing (the opencode-go
+ * applyOpenCodeGoProtocolRouting analog): after modelMap resolution, the
+ * candidate's provider-resolved api_protocol (composition routing config,
+ * default adaptive) decides the native protocol — pinned
+ * (chat_completions/anthropic/responses) or inbound-client-following — and
+ * the matched native protocol and its canonical provider operation replace
+ * the route's provider-side protocol before payload compilation and
+ * endpoint signing. Non-CN-provider candidates keep the route untouched.
+ *
+ * The returned second element is true when the client protocol has no
+ * servable native route for this provider (a gemini client — defensive: the
+ * capability-protocol eligibility check never surfaces a CN candidate for a
+ * gemini client); callers fail closed on it instead of guessing.
+ *
+ * Exported for direct testing; production wiring is the two call sites in
+ * this module (the authority decorator below and the payload-compile route).
+ */
+export function applyCnProvidersProtocolRouting(
+  route: ManagedSaasProviderPreparationRoute,
+  candidate: { readonly providerId: string },
+  routing: CnProvidersProtocolRoutingConfig | undefined,
+): { readonly route: ManagedSaasProviderPreparationRoute; readonly blocked: boolean } {
+  if (candidate.providerId !== 'zhipu' && candidate.providerId !== 'minimax') {
+    return { route, blocked: false };
+  }
+  const native = resolveCnNativeProtocol({
+    providerId: candidate.providerId,
+    apiProtocol: resolveCnProviderApiProtocol(routing, candidate.providerId),
+    clientProtocol: route.clientProtocol,
+  });
+  if (native === null) return { route, blocked: true };
+  return {
+    route: {
+      ...route,
+      providerProtocol: native,
+      providerOperation: cnProviderOperationForProtocol(native),
+    },
+    blocked: false,
+  };
+}
+
+/**
+ * Batch-3 CN-provider adaptive protocol routing, authority layer (the
+ * opencode-go decorator analog): the resolved native protocol is written
+ * into `authority.route.providerProtocol` — the field the preparation
+ * service's route facts, `validatePayload` and the signed prepared-evidence
+ * statement all derive from — so the per-request protocol decision is
+ * signed and later dispatch (endpoint scope + providerProtocol keys,
+ * per-protocol provider-target bindings, usage observers) sees exactly one
+ * consistent value. Non-CN-provider authorities pass through unchanged; a
+ * blocked resolution keeps the route untouched (the payload-compile layer
+ * owns the fail-closed block).
+ */
+export function createCnProvidersProtocolRoutingAuthority(
+  authority: RequestPreparationAuthorityPort,
+  routing: CnProvidersProtocolRoutingConfig | undefined,
+): RequestPreparationAuthorityPort {
+  return {
+    async resolve(input) {
+      const decision = await authority.resolve(input);
+      if (decision.decision !== 'allow') return decision;
+      const value = decision.value;
+      const providerId = value.candidate.providerId;
+      if (providerId !== 'zhipu' && providerId !== 'minimax') return decision;
+      // value.route.protocol is the client protocol (the compile-layer
+      // route's clientProtocol); a blocked resolution (no servable native
+      // for this client protocol) keeps the route untouched — the
+      // payload-compile layer owns the fail-closed block.
+      const native = resolveCnNativeProtocol({
+        providerId,
+        apiProtocol: resolveCnProviderApiProtocol(routing, providerId),
+        clientProtocol: value.route.protocol,
+      });
+      if (native === null) return decision;
+      if (value.route.providerProtocol === native) return decision;
+      return allowRequestPreparation({
+        ...value,
+        route: {
+          ...value.route,
+          providerProtocol: native,
+          providerOperation: cnProviderOperationForProtocol(native),
+        },
+      });
+    },
+    underlyingAuthority: authority,
+  } as RequestPreparationAuthorityPort & { readonly underlyingAuthority: RequestPreparationAuthorityPort };
+}
+
+/**
  * Exported for direct testing (the production composition is the only other
  * caller): the production payload-compile wrapper that applies OpenCode Go
  * protocol routing and (unless restricted via
@@ -1090,6 +1256,12 @@ export function createProviderPayloadCompiler(
     maxPayloadBytes: payloadOptions.maxPayloadBytes,
     compilerVersion: payloadOptions.compilerVersion,
     allowIdentityModelResolution: false,
+    // Batch-3: the CN-provider thinking-protocol transform (MiniMax M-series
+    // thinking.type enabled→adaptive on the Anthropic native; verbatim
+    // passback for glm-/minimax-m-) — the dormant providerRequestTransform
+    // seam's first consumer. Copy-on-write and provider-scoped: every other
+    // provider's payload bytes are unchanged.
+    providerRequestTransform: cnProvidersProviderRequestTransform,
   });
 
   return {
@@ -1148,14 +1320,31 @@ export function createProviderPayloadCompiler(
           message: 'opencode-go responses-routed models require a responses client protocol',
         };
       }
+      // Batch-3: CN-provider candidates re-derive the provider protocol from
+      // the per-provider api_protocol (default adaptive: the native endpoint
+      // follows the inbound client protocol). A blocked resolution (no
+      // servable native for this client protocol) fails closed here instead
+      // of compiling a wrong-shaped payload.
+      const cnRouted = applyCnProvidersProtocolRouting(
+        routedRoute,
+        input.authority.candidate,
+        options.cnProvidersProtocolRouting,
+      );
+      if (cnRouted.blocked) {
+        return {
+          decision: 'block',
+          code: 'capability_unsupported',
+          message: 'cn-provider accounts cannot serve this client protocol',
+        };
+      }
       return compiler.compile({
         ...input,
-        clientProtocol: routedRoute.clientProtocol,
-        providerProtocol: routedRoute.providerProtocol,
-        clientOperation: routedRoute.clientOperation,
-        providerOperation: routedRoute.providerOperation,
-        operation: routedRoute.providerOperation,
-        modelResolution: routedRoute.modelResolution,
+        clientProtocol: cnRouted.route.clientProtocol,
+        providerProtocol: cnRouted.route.providerProtocol,
+        clientOperation: cnRouted.route.clientOperation,
+        providerOperation: cnRouted.route.providerOperation,
+        operation: cnRouted.route.providerOperation,
+        modelResolution: cnRouted.route.modelResolution,
       } as ProviderPayloadCompilerInput);
     },
   };
@@ -1337,7 +1526,13 @@ export function createManagedSaasGatewayProductionComposition(
     DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
   );
   const authority: RequestPreparationAuthorityPort = createOpenCodeGoProtocolRoutingAuthority(
-    new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
+    // Batch-3: CN-provider adaptive routing wraps OUTSIDE the OpenCode Go
+    // decorator (the provider sets are disjoint, so the two decorators
+    // commute; non-CN-provider decisions pass through unchanged).
+    createCnProvidersProtocolRoutingAuthority(
+      new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
+      options.cnProvidersProtocolRouting,
+    ),
     openCodeGoProtocolRules,
   );
 
@@ -1429,7 +1624,10 @@ export function createManagedSaasGatewayProductionComposition(
     // headers (HTTP-Referer / X-Title, endpoint-keyed across all protocols)
     // in front of it — the two endpoint scopes are disjoint, so at most one
     // resolver ever matches.
-    resolveFixedRequestHeaders: (input) => openRouterFixedRequestHeaders(input) ?? openCodeGoFixedRequestHeaders(input),
+    resolveFixedRequestHeaders: (input) =>
+      openRouterFixedRequestHeaders(input) ??
+      openCodeGoFixedRequestHeaders(input) ??
+      cnProvidersFixedRequestHeaders(input),
     ...(tlsFingerprintConnectorFactory === undefined ? {} : { createConnector: tlsFingerprintConnectorFactory }),
     timeoutMs: options.timeoutMs,
   });
@@ -1452,6 +1650,18 @@ export function createManagedSaasGatewayProductionComposition(
   }
   if (options.opencodeGoEvidenceTransport !== undefined) {
     requireDependency(options.opencodeGoEvidenceTransport, 'send');
+  }
+  if (options.cnProvidersEvidenceTransport !== undefined) {
+    requireDependency(options.cnProvidersEvidenceTransport, 'send');
+  }
+  if (options.grokEvidenceTransport !== undefined) {
+    requireDependency(options.grokEvidenceTransport, 'send');
+  }
+  if (options.bedrockEvidenceTransport !== undefined) {
+    requireDependency(options.bedrockEvidenceTransport, 'send');
+  }
+  if (options.vertexEvidenceTransport !== undefined) {
+    requireDependency(options.vertexEvidenceTransport, 'send');
   }
   const endpointRoutingRoutes: EndpointRoutingRoute[] = [];
   if (options.codexEvidenceTransport !== undefined) {
@@ -1477,6 +1687,41 @@ export function createManagedSaasGatewayProductionComposition(
   }
   if (options.opencodeGoEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({ endpoint: OPENCODE_GO_ENDPOINT, transport: options.opencodeGoEvidenceTransport });
+  }
+  // Batch-3: the CN-provider adapter takes over all three endpoint scopes
+  // with no providerProtocol narrowing (the opencode-go whole-scope
+  // precedent) — the adapter itself delegates to the generic transport and
+  // only adds the error-body classification.
+  if (options.cnProvidersEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: ZHIPU_ENDPOINT, transport: options.cnProvidersEvidenceTransport });
+    endpointRoutingRoutes.push({
+      endpoint: ZHIPU_CODING_ENDPOINT,
+      transport: options.cnProvidersEvidenceTransport,
+    });
+    endpointRoutingRoutes.push({ endpoint: MINIMAX_ENDPOINT, transport: options.cnProvidersEvidenceTransport });
+  }
+  if (options.grokEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: GROK_ENDPOINT,
+      providerProtocol: 'responses',
+      transport: options.grokEvidenceTransport,
+    });
+  }
+  if (options.bedrockEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: BEDROCK_ENDPOINT,
+      providerProtocol: 'anthropic',
+      transport: options.bedrockEvidenceTransport,
+    });
+  }
+  // The Vertex route takes over the whole `vertex-raw-predict` endpoint
+  // scope with no providerProtocol narrowing — the scope covers BOTH
+  // provider protocols (anthropic for the rawPredict family, gemini for the
+  // generateContent family) and the transport selects the endpoint family
+  // from the signed provider protocol on the evidence (the opencode-go
+  // whole-scope precedent).
+  if (options.vertexEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: VERTEX_ENDPOINT, transport: options.vertexEvidenceTransport });
   }
   const dispatchTransport =
     endpointRoutingRoutes.length === 0 ? transport : createEndpointRoutingTransport(transport, endpointRoutingRoutes);

@@ -314,4 +314,13 @@ M1=内伤清零+bench达标 → M2=账号运营同级 → M3=平台广度+多模
 
 Wave 2 终检：5051/5051 测试全绿、tsc 零错、golden 全部 byte-identical。遗留项见各任务报告（bench 复测待合流后统一、FIN057×PG18 环境问题、模型级停调调度侧消费、#5 预留带判定、探针路径档案接入）。
 
-**待办**：批次三四平台（Bedrock/Vertex/Grok/智谱MiniMax，seam #8 已就绪）、批次四（4.0 前置 + 计费横切 + 多模态）、批次五（生态六线）。
+**Wave 3（批次三，进行中）**
+
+| 任务 | 状态 | 摘要 |
+|---|---|---|
+| #12 Grok | ✅ | platform/grok-oauth（PKCE S256 base64url-32B verifier + plan=generic、loopback 粘贴 code 绑定、JWT email/sub/team_id、tier 只信 access_token）+ R4 刷新 worker `xai-grok-oauth-v1` 绑定（passthrough 保 tier/user_id/team_id；6h TTL/5min lead 钉死）+ gateway/grok 品类（CLI 身份四头仅对 cli-chat-proxy 注入、api.x.ai 不打；OAuth SSRF 硬门官方主机白名单、api-key 走运营方 host allowlist；x-ratelimit 双拼写 + reset ms/s/相对三档歧义消解；/billing?format=credits + /billing 月度 $150/$1500 探测；free 档本地 24h 95% 软门 fail-open；x-grok-conv-id 粘性头）+ 迁移 119（grok 列族 + billing jsonb + probe category 'grok'，与 117/118 累积 CHECK 协调）+ validation worker `xai-grok-api-models-v1`（api-key models 探针）+ catalog grok-registration（双产品 grok-subscription/grok-api，媒体能力边界注明批次四）+ quota-snapshot store grok 写入方/汇 + 授权镜像（validation-worker privileges + grants SQL + mirror 测试）；63 项新测试（PKCE/CLI 头矩阵/reset 表驱动/软门/SSRF 负例/绑定管线/catalog） |
+| #10 Bedrock | ✅（并行） | 迁移 117 + bedrock 品类（自带签名 transport） |
+| #11 Vertex | ✅（并行） | 迁移 118 + vertex-sa 品类 |
+| #13 智谱/MiniMax | 进行中（并行） | 迁移 120 + cn-providers 品类 |
+
+**待办**：批次三收尾（#13 完成后统一终检）、批次四（4.0 前置 + 计费横切 + 多模态——Grok 媒体/音频端点届时接入）、批次五（生态六线）。

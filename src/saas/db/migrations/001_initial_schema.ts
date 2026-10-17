@@ -92,8 +92,12 @@ import { PROVIDER_ACCOUNT_GEMINI_SCHEDULING_SAAS_MIGRATION } from './111_provide
 import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from './112_billing_group_snapshot_limits.js';
 import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from './113_billing_group_rate_counters.js';
 import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from './114_billing_group_spend_windows.js';
-import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from './116_tls_fingerprint_profiles.js';
 import { PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION } from './115_provider_account_scheduling_threshold_pause.js';
+import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from './116_tls_fingerprint_profiles.js';
+import { PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION } from './117_provider_account_bedrock_scheduling.js';
+import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from './118_provider_account_vertex_scheduling.js';
+import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from './119_provider_account_grok_scheduling.js';
+import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider_account_scheduling.js';
 
 export interface SaasMigration {
   version: number;
@@ -632,4 +636,42 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // see the migration comment for the adjudication); 115 is the parallel
   // batch-2 threshold-pause workstream tail above.
   TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
+  // 117: batch-3 Bedrock scheduling signals — the minimal defensible
+  // column family (bedrock_rate_limited_until + bedrock_usage_updated_at on
+  // both account tables; Bedrock responses expose no quota windows, so the
+  // ThrottlingException cooldown is the only observable scheduling signal)
+  // plus the probe-category CHECK rewrite that admits the 'bedrock' probe
+  // category on the migration-109 monitors table. Scheduling signal only,
+  // never billing (the 099/111 precedent); 118 stays reserved for the
+  // parallel Vertex workstream.
+  PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION,
+  // 118: batch-3 Vertex AI service-account scheduling signals — the minimal
+  // defensible column family (vertex_rate_limited_until +
+  // vertex_usage_updated_at on both account tables; Vertex service accounts
+  // are pay-as-you-go with no daily quota windows, so the 429 cooldown —
+  // retry-after, else google.rpc.RetryInfo capped at 15 minutes, else the
+  // 60-second fallback — is the only observable scheduling signal) plus the
+  // probe-category CHECK rewrite that admits the 'vertex' probe category on
+  // the migration-109 monitors table. Scheduling signal only, never billing
+  // (the 099/111/117 precedent).
+  PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION,
+  // 119: batch-3 Grok scheduling signals — the xAI quota-header window
+  // family (token + request windows with the ms/s/relative reset
+  // disambiguation), the 429 cooldown deadline, the access-token-derived
+  // subscription tier and the weekly/monthly billing probe snapshot, plus
+  // the probe-category CHECK rewrite that admits the 'grok' probe category
+  // on the migration-109 monitors table. 117/118 stay reserved for the
+  // parallel batch-3 Bedrock/Vertex workstreams. Scheduling signal only,
+  // never billing (the 099/111 precedent).
+  PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION,
+  // 120: batch-3 CN providers (zhipu / minimax) — the dual-mode account
+  // configuration columns (account_mode payg/coding + api_protocol
+  // chat_completions/anthropic/responses/adaptive, the adaptive mode routing
+  // the native endpoint per inbound client protocol) plus the Coding Plan
+  // rolling-window quota snapshot family ({provider}_5h/weekly
+  // used_percent/reset_at + the worker lease/backoff/cooldown columns) the
+  // cn-providers quota worker writes and the 115 threshold evaluator
+  // consumes. Scheduling signal only — never billing (the 099/108
+  // precedent).
+  CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
 ];

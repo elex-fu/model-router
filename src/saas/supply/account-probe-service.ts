@@ -9,6 +9,10 @@ import {
   withUnsealedProviderCredential,
 } from '../credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
+import { BEDROCK_DEFAULT_REGION } from '../gateway/bedrock/constants.js';
+import { signBedrockRequest } from '../gateway/bedrock/sigv4.js';
+import { buildBedrockInvokeUrl, prepareBedrockRequestBody, resolveBedrockModel } from '../gateway/bedrock/transform.js';
+import { parseBedrockCredentialMaterial } from '../gateway/bedrock/transport.js';
 import { CLAUDE_MESSAGES_ENDPOINT } from '../gateway/claude/catalog-identity.js';
 import {
   CLAUDE_ANTHROPIC_VERSION,
@@ -26,9 +30,18 @@ import { GEMINI_CLI_BASE_URL } from '../gateway/gemini/catalog-identity.js';
 import { GEMINI_CLI_USER_AGENT } from '../gateway/gemini/constants.js';
 import { normalizeGeminiTierId } from '../gateway/gemini/identity.js';
 import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
+import { GROK_OAUTH_DEFAULT_BASE_URL, grokCliIdentityHeaders } from '../gateway/grok/constants.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { OPENCODE_GO_TEST_MODEL } from '../gateway/opencode-go/model-catalog.js';
 import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
+import { VERTEX_TOKEN_CACHE_SKEW_MS } from '../gateway/vertex/constants.js';
+import {
+  applyVertexAnthropicTransform,
+  buildVertexAnthropicUrl,
+  normalizeVertexAnthropicModelId,
+} from '../gateway/vertex/transform.js';
+import { vertexServiceAccountKeyFromEnvelopeMaterial } from '../platform/vertex-sa/service-account.js';
+import { exchangeVertexSaToken } from '../platform/vertex-sa/token-service.js';
 import { resolveFixedCredentialProbeEndpoint } from './credential-validation-adapters.js';
 import { type EgressProxyOwnerKind, type EgressProxyRecord, readEgressProxyForAccount } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
@@ -53,6 +66,9 @@ import { parseRetryAfterMs } from './opencode-go-usage-worker.js';
  * - gemini: the Code Assist v1internal:generateContent probe with the pinned
  *   GeminiCLI user agent and the `{model, project, request}` dispatch wrap —
  *   gateway/gemini/** is reused READ-ONLY exactly like the claude probe.
+ * - grok (batch 3): the CLI chat-proxy /responses probe with the pinned
+ *   Grok CLI identity headers (gateway/grok/constants.ts read-only reuse) —
+ *   the same masquerade the forwarding transport stamps.
  * - api-key: the existing credential-validation fixed-adapter endpoints
  *   (kimi/deepseek and friends); chat/messages probes carry the arithmetic
  *   few-shot challenge, models probes keep their list semantics.
@@ -84,7 +100,15 @@ import { parseRetryAfterMs } from './opencode-go-usage-worker.js';
  * gateway/codex/** are imported read-only and never modified.
  */
 
-export type AccountProbeCategory = 'claude' | 'codex' | 'opencode-go' | 'api-key' | 'gemini';
+export type AccountProbeCategory =
+  | 'claude'
+  | 'codex'
+  | 'opencode-go'
+  | 'api-key'
+  | 'gemini'
+  | 'grok'
+  | 'bedrock'
+  | 'vertex';
 export type AccountProbeResultCategory = 'ok' | 'rate_limited' | 'auth_revoked' | 'banned' | 'error';
 
 export interface AccountProbeUsage {
@@ -125,6 +149,9 @@ export interface AccountProbeServiceOptions {
   readonly claudeProbeModel?: string;
   readonly codexProbeModel?: string;
   readonly geminiProbeModel?: string;
+  readonly grokProbeModel?: string;
+  readonly bedrockProbeModel?: string;
+  readonly vertexProbeModel?: string;
   readonly fetch?: (url: string, init: AccountProbeFetchInit) => Promise<Response>;
   readonly createConnection?: AccountProbeConnectionFactory;
   readonly signal?: AbortSignal;
@@ -147,6 +174,9 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
 const DEFAULT_CLAUDE_PROBE_MODEL = 'claude-haiku-4-5';
 const DEFAULT_CODEX_PROBE_MODEL = 'gpt-5.3-codex';
 const DEFAULT_GEMINI_PROBE_MODEL = 'gemini-2.5-flash';
+const DEFAULT_GROK_PROBE_MODEL = 'grok-4.6';
+const DEFAULT_BEDROCK_PROBE_MODEL = 'us.anthropic.claude-haiku-4-5-v1:0';
+const DEFAULT_VERTEX_PROBE_MODEL = 'claude-haiku-4-5';
 const PROBE_PROXY_KEY_ID = 'probe';
 
 const ACCOUNT_TABLES = Object.freeze({
@@ -251,6 +281,12 @@ export function accountProbeCategoryForProvider(providerId: string): AccountProb
       return 'opencode-go';
     case 'google-gemini':
       return 'gemini';
+    case 'xai-grok':
+      return 'grok';
+    case 'aws-bedrock':
+      return 'bedrock';
+    case 'google-vertex':
+      return 'vertex';
     default:
       return 'api-key';
   }
@@ -375,6 +411,9 @@ export function createAccountProbeService(
   const claudeProbeModel = options.claudeProbeModel ?? DEFAULT_CLAUDE_PROBE_MODEL;
   const codexProbeModel = options.codexProbeModel ?? DEFAULT_CODEX_PROBE_MODEL;
   const geminiProbeModel = options.geminiProbeModel ?? DEFAULT_GEMINI_PROBE_MODEL;
+  const grokProbeModel = options.grokProbeModel ?? DEFAULT_GROK_PROBE_MODEL;
+  const bedrockProbeModel = options.bedrockProbeModel ?? DEFAULT_BEDROCK_PROBE_MODEL;
+  const vertexProbeModel = options.vertexProbeModel ?? DEFAULT_VERTEX_PROBE_MODEL;
   const fetcher = options.fetch ?? ((url, init) => fetch(url, init));
   const connectionFactory = options.createConnection ?? createProviderEgressProxyConnection;
   const now = options.now ?? Date.now;
@@ -691,6 +730,117 @@ export function createAccountProbeService(
     };
   }
 
+  function buildGrokProbe(request: AccountProbeRequest, accessToken: string): BuiltProbeRequest {
+    return {
+      url: `${GROK_OAUTH_DEFAULT_BASE_URL}/responses`,
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        // The CLI proxy requires the pinned Grok CLI identity on every call;
+        // gateway/grok/constants.ts is reused read-only (the transport's
+        // exact masquerade, never a copied constant).
+        ...grokCliIdentityHeaders(),
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: grokProbeModel,
+        input: [{ role: 'user', content: [{ type: 'input_text', text: request.challengePrompt }] }],
+        max_output_tokens: 16,
+        stream: false,
+        store: false,
+      }),
+      responseKind: 'responses',
+    };
+  }
+
+  function buildBedrockProbe(
+    request: AccountProbeRequest,
+    credential: NonNullable<ReturnType<typeof parseBedrockCredentialMaterial>>,
+  ): BuiltProbeRequest | null {
+    const region =
+      credential.region === undefined || credential.region === '' ? BEDROCK_DEFAULT_REGION : credential.region;
+    // The probe reuses the gateway transport's exact model resolution, body
+    // transform and SigV4 signer read-only (gateway/bedrock/**) — the probe
+    // is indistinguishable from a real dispatch at the protocol layer and
+    // the signer can never drift from the transport's (the roadmap's
+    // shared-header-builder discipline).
+    const resolution = resolveBedrockModel(bedrockProbeModel, { region, forceGlobal: credential.forceGlobal === true });
+    if (!resolution.ok) return null;
+    const prepared = prepareBedrockRequestBody(
+      {
+        model: resolution.modelId,
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: 'user', content: request.challengePrompt }],
+      },
+      { modelId: resolution.modelId },
+    );
+    const payload = Buffer.from(JSON.stringify(prepared.body), 'utf8');
+    const target = buildBedrockInvokeUrl({ region, modelId: resolution.modelId, stream: false });
+    const signed = signBedrockRequest({
+      credential: {
+        accessKeyId: credential.accessKeyId as string,
+        secretAccessKey: credential.secretAccessKey as string,
+        sessionToken: credential.sessionToken ?? null,
+      },
+      method: 'POST',
+      host: target.host,
+      path: target.path,
+      payload,
+      region,
+      nowMs: now(),
+    });
+    return {
+      url: target.url,
+      method: 'POST',
+      headers: { ...signed.headers },
+      body: payload.toString('utf8'),
+      responseKind: 'claude',
+    };
+  }
+
+  function buildVertexProbe(
+    request: AccountProbeRequest,
+    accessToken: string,
+    projectId: string,
+    location: string | null,
+  ): BuiltProbeRequest {
+    // The probe reuses the gateway transport's exact body transform, model
+    // normalization and URL builder read-only (gateway/vertex/**) — the
+    // probe is indistinguishable from a real dispatch at the protocol layer
+    // and the beta/header policy can never drift from the transport's (the
+    // roadmap's shared-header-builder discipline).
+    const model = normalizeVertexAnthropicModelId(vertexProbeModel);
+    const { body } = applyVertexAnthropicTransform(
+      {
+        model,
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: 'user', content: request.challengePrompt }],
+      },
+      { anthropicBetaHeader: null },
+    );
+    const url = buildVertexAnthropicUrl({
+      projectId,
+      location: location === null || location === '' ? 'us-central1' : location,
+      model,
+      stream: false,
+    });
+    return {
+      url,
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'user-agent': 'model-router',
+      },
+      body: JSON.stringify(body),
+      responseKind: 'claude',
+    };
+  }
+
   function buildChatCompletionsProbe(
     request: AccountProbeRequest,
     url: string,
@@ -897,7 +1047,10 @@ export function createAccountProbeService(
           request.category !== 'codex' &&
           request.category !== 'opencode-go' &&
           request.category !== 'api-key' &&
-          request.category !== 'gemini') ||
+          request.category !== 'gemini' &&
+          request.category !== 'grok' &&
+          request.category !== 'bedrock' &&
+          request.category !== 'vertex') ||
         typeof request.challengePrompt !== 'string' ||
         typeof request.challengeAnswer !== 'string' ||
         !/^[0-9]{1,6}$/.test(request.challengeAnswer)
@@ -934,6 +1087,72 @@ export function createAccountProbeService(
             projectId,
             typeof material.tier_id === 'string' ? normalizeGeminiTierId(material.tier_id) : null,
           );
+        } else if (request.category === 'grok') {
+          let material: Record<string, unknown>;
+          try {
+            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+          } catch {
+            return probeError('credential_invalid');
+          }
+          const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
+          if (accessToken === null || accessToken === '') {
+            return probeError('credential_invalid');
+          }
+          built = buildGrokProbe(request, accessToken);
+        } else if (request.category === 'bedrock') {
+          let material: Record<string, unknown>;
+          try {
+            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+          } catch {
+            return probeError('credential_invalid');
+          }
+          const credential = parseBedrockCredentialMaterial(material);
+          if (credential === null || credential.accessKeyId === undefined) {
+            return probeError('credential_invalid');
+          }
+          built = buildBedrockProbe(request, credential);
+          if (built === null) return probeError('probe_endpoint_unsupported');
+        } else if (request.category === 'vertex') {
+          let material: Record<string, unknown>;
+          try {
+            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+          } catch {
+            return probeError('credential_invalid');
+          }
+          let key: ReturnType<typeof vertexServiceAccountKeyFromEnvelopeMaterial>;
+          try {
+            key = vertexServiceAccountKeyFromEnvelopeMaterial(material);
+          } catch {
+            return probeError('credential_invalid');
+          }
+          const projectId = typeof material.project_id === 'string' ? material.project_id.trim() : '';
+          if (projectId === '') return probeError('credential_invalid');
+          const location =
+            typeof material.location === 'string' && material.location.trim() !== '' ? material.location : null;
+          // Use the envelope's access token while it is fresh (the token
+          // refresher keeps it warm); otherwise exchange the SA JWT inline —
+          // the probe works even on a cold credential.
+          const expiresAtMs =
+            typeof material.expires_at === 'string' && material.expires_at !== ''
+              ? Date.parse(material.expires_at)
+              : Number.NaN;
+          let accessToken =
+            typeof material.access_token === 'string' && material.access_token !== '' ? material.access_token : null;
+          if (
+            accessToken !== null &&
+            (!Number.isFinite(expiresAtMs) || expiresAtMs - VERTEX_TOKEN_CACHE_SKEW_MS <= now())
+          ) {
+            accessToken = null;
+          }
+          if (accessToken === null) {
+            try {
+              const exchanged = await exchangeVertexSaToken({ key, fetch: fetcher });
+              accessToken = exchanged.accessToken;
+            } catch {
+              return probeError('credential_invalid');
+            }
+          }
+          built = buildVertexProbe(request, accessToken, projectId, location);
         } else if (request.category === 'claude' || request.category === 'codex') {
           let material: Record<string, unknown>;
           try {

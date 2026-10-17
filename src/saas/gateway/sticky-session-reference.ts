@@ -261,6 +261,9 @@ function sessionIdReference(input: StickySessionReferenceRequest): string | null
 }
 
 function conversationIdReference(input: StickySessionReferenceRequest): string | null {
+  // Batch-3 grok: the CLI proxy's own conversation header is a first-class
+  // conversation reference (upstream shard routing keys on it).
+  if (headerValue(input.headers, 'x-grok-conv-id') !== null) return headerValue(input.headers, 'x-grok-conv-id');
   const fromHeader = headerValue(input.headers, 'conversation_id');
   if (fromHeader !== null) return fromHeader;
   if (isRecord(input.body)) return boundedText(input.body.conversation_id, MAX_REFERENCE_BYTES);

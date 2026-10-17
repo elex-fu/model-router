@@ -625,9 +625,18 @@ test('store claims one due credential, refreshes, rotates and schedules the next
       assert.match(candidate.sql, /credential\.status = 'active' AND account\.status = 'active'/);
       assert.match(candidate.sql, /credential\.oauth_force_refresh_requested = true/);
       assert.match(candidate.sql, /ORDER BY credential\.oauth_force_refresh_requested DESC/);
-      assert.deepEqual(candidate.values[0], ['anthropic', 'anthropic-claude', 'openai', 'openai-codex']);
-      assert.deepEqual(candidate.values[1], ['claude-code', 'claude-subscription', 'codex-cli', 'codex-chatgpt']);
-      assert.deepEqual(candidate.values[2], ['oauth', 'oauth', 'oauth', 'oauth']);
+      // The due scan binds the fixed adapter triples and prioritizes force-flagged rows
+      // (batch 3 adds the grok CLI subscription binding; the gemini adapter only
+      // appears when its client secret is configured).
+      assert.deepEqual(candidate.values[0], ['anthropic', 'anthropic-claude', 'openai', 'openai-codex', 'xai-grok']);
+      assert.deepEqual(candidate.values[1], [
+        'claude-code',
+        'claude-subscription',
+        'codex-cli',
+        'codex-chatgpt',
+        'grok-subscription',
+      ]);
+      assert.deepEqual(candidate.values[2], ['oauth', 'oauth', 'oauth', 'oauth', 'oauth']);
       assert.equal(candidate.values[3], OAUTH_REFRESH_STALE_REFRESHING_MS);
       const lock = state.statements.find(({ sql }) => sql.includes('FOR UPDATE OF credential SKIP LOCKED'));
       assert.ok(lock, 'the claim must take the row lock without waiting');

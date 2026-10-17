@@ -251,6 +251,11 @@ GRANT SELECT (
   claude_usage_updated_at, claude_5h_reset_at,
   gemini_usage_updated_at, gemini_daily_reset_at, gemini_rate_limited_until,
   gemini_tier_id,
+  grok_usage_updated_at, grok_rate_limited_until,
+  bedrock_rate_limited_until, bedrock_usage_updated_at,
+  vertex_rate_limited_until, vertex_usage_updated_at,
+  zhipu_account_mode, zhipu_usage_next_due_at, zhipu_usage_updated_at, zhipu_rate_limited_until,
+  minimax_account_mode, minimax_usage_next_due_at, minimax_usage_updated_at, minimax_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code,
   egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
@@ -264,6 +269,10 @@ GRANT UPDATE (
   opencode_go_monthly_used_percent, opencode_go_monthly_reset_at,
   opencode_go_usage_updated_at, opencode_go_usage_next_due_at,
   opencode_go_usage_failure_count, opencode_go_rate_limited_until,
+  zhipu_5h_used_percent, zhipu_5h_reset_at, zhipu_weekly_used_percent, zhipu_weekly_reset_at,
+  zhipu_usage_updated_at, zhipu_usage_next_due_at, zhipu_usage_failure_count, zhipu_rate_limited_until,
+  minimax_5h_used_percent, minimax_5h_reset_at, minimax_weekly_used_percent, minimax_weekly_reset_at,
+  minimax_usage_updated_at, minimax_usage_next_due_at, minimax_usage_failure_count, minimax_rate_limited_until,
   claude_5h_utilization, claude_5h_reset_at,
   claude_7d_utilization, claude_7d_reset_at,
   claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
@@ -277,6 +286,12 @@ GRANT UPDATE (
   gemini_rate_limited_until, gemini_tier_id,
   codex_5h_used_percent, codex_5h_reset_at,
   codex_7d_used_percent, codex_7d_reset_at, codex_usage_updated_at,
+  grok_5h_used_percent, grok_5h_reset_at,
+  grok_requests_used_percent, grok_requests_reset_at,
+  grok_rate_limited_until, grok_usage_updated_at,
+  grok_subscription_tier, grok_billing, grok_billing_updated_at,
+  bedrock_rate_limited_until, bedrock_usage_updated_at,
+  vertex_rate_limited_until, vertex_usage_updated_at,
   quarantine_entered_at, quarantine_reason_code,
   probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
@@ -350,6 +365,11 @@ GRANT SELECT (
   claude_usage_updated_at, claude_5h_reset_at,
   gemini_usage_updated_at, gemini_daily_reset_at, gemini_rate_limited_until,
   gemini_tier_id,
+  grok_usage_updated_at, grok_rate_limited_until,
+  bedrock_rate_limited_until, bedrock_usage_updated_at,
+  vertex_rate_limited_until, vertex_usage_updated_at,
+  zhipu_account_mode, zhipu_usage_next_due_at, zhipu_usage_updated_at, zhipu_rate_limited_until,
+  minimax_account_mode, minimax_usage_next_due_at, minimax_usage_updated_at, minimax_rate_limited_until,
   quarantine_entered_at, quarantine_reason_code,
   egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
@@ -363,6 +383,10 @@ GRANT UPDATE (
   opencode_go_monthly_used_percent, opencode_go_monthly_reset_at,
   opencode_go_usage_updated_at, opencode_go_usage_next_due_at,
   opencode_go_usage_failure_count, opencode_go_rate_limited_until,
+  zhipu_5h_used_percent, zhipu_5h_reset_at, zhipu_weekly_used_percent, zhipu_weekly_reset_at,
+  zhipu_usage_updated_at, zhipu_usage_next_due_at, zhipu_usage_failure_count, zhipu_rate_limited_until,
+  minimax_5h_used_percent, minimax_5h_reset_at, minimax_weekly_used_percent, minimax_weekly_reset_at,
+  minimax_usage_updated_at, minimax_usage_next_due_at, minimax_usage_failure_count, minimax_rate_limited_until,
   claude_5h_utilization, claude_5h_reset_at,
   claude_7d_utilization, claude_7d_reset_at,
   claude_7d_sonnet_utilization, claude_7d_sonnet_reset_at,
@@ -376,6 +400,12 @@ GRANT UPDATE (
   gemini_rate_limited_until, gemini_tier_id,
   codex_5h_used_percent, codex_5h_reset_at,
   codex_7d_used_percent, codex_7d_reset_at, codex_usage_updated_at,
+  grok_5h_used_percent, grok_5h_reset_at,
+  grok_requests_used_percent, grok_requests_reset_at,
+  grok_rate_limited_until, grok_usage_updated_at,
+  grok_subscription_tier, grok_billing, grok_billing_updated_at,
+  bedrock_rate_limited_until, bedrock_usage_updated_at,
+  vertex_rate_limited_until, vertex_usage_updated_at,
   quarantine_entered_at, quarantine_reason_code,
   probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts

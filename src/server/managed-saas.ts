@@ -182,6 +182,15 @@ import {
   PlatformUserGovernanceService,
 } from '../saas/platform/governance/index.js';
 import {
+  GrokOAuthBindingService,
+  InMemoryGrokBindingSessionStore,
+} from '../saas/platform/grok-oauth/binding-service.js';
+import { createGrokOauthHttpHandler, type GrokOauthHttpHandler } from '../saas/platform/grok-oauth/http.js';
+import {
+  createPostgresGrokCatalogBindingResolver,
+  createProviderSupplyGrokCredentialSink,
+} from '../saas/platform/grok-oauth/supply-sink.js';
+import {
   createPlatformAdminReadHandler,
   type PlatformAdminCapacityPolicyTargetSelectors,
   type PlatformAdminReadHttpHandler,
@@ -233,6 +242,12 @@ import {
   loadValidationWorkerProviderCredentialKms,
   SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/runtime/validation-worker-provider-credential-kms.js';
+import { PostgresCnProvidersQuotaStore } from '../saas/supply/cn-providers-quota-store-postgres.js';
+import {
+  type CnProvidersQuotaWorkerHandle,
+  type CnProvidersQuotaWorkerOptions,
+  startCnProvidersQuotaWorker,
+} from '../saas/supply/cn-providers-quota-worker.js';
 import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
 import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
 import {
@@ -346,6 +361,8 @@ export interface ManagedSaasRuntime {
   readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
   /** R5b OpenCode Go usage-snapshot loop; same workload as quota sync. */
   readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
+  /** Batch-3 CN-provider coding-plan quota probe loop; same workload. */
+  readonly cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | null;
   /** R-dormant (batch 2.2): the gemini usage-snapshot loop; same workload. */
   readonly geminiUsageWorker: GeminiUsageWorkerHandle | null;
   /** F6 OpenRouter model-catalog/pricing sync loop; opt-in on the worker workload. */
@@ -494,6 +511,7 @@ export interface ManagedSaasStartOptions {
   ) => OpencodeGoUsageStore;
   /** Optional usage loop tuning or test fetch; deployment identity always reaches the store. */
   opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
+  cnProvidersQuotaWorkerOptions?: Partial<CnProvidersQuotaWorkerOptions>;
   /** Deterministic seam for the R-dormant quota-snapshot store (gemini loop). */
   createQuotaSnapshotStore?: (
     database: SaasDatabase,
@@ -835,6 +853,7 @@ function createPlatformHandler(
   refundHandler: PlatformRefundHttpHandler | undefined,
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
   codexOauthHandler: CodexOauthHttpHandler | undefined,
+  grokOauthHandler: GrokOauthHttpHandler | undefined,
   accountProbeHandler: AccountProbeHttpHandler | undefined,
   platformSettingsHandler: PlatformSettingsHttpHandler,
   billingGroupsHandler: BillingGroupsHttpHandler | undefined,
@@ -866,6 +885,7 @@ function createPlatformHandler(
         if (refundHandler && (await refundHandler(req, res))) return;
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
         if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
+        if (grokOauthHandler && (await grokOauthHandler(req, res))) return;
         if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
         if (await platformSettingsHandler(req, res)) return;
         if (billingGroupsHandler && (await billingGroupsHandler(req, res))) return;
@@ -1330,6 +1350,7 @@ async function startCredentialValidationWorkerRuntime(
   let worker: CredentialValidationWorkerHandle | undefined;
   let quotaWorker: QuotaSyncWorkerHandle | undefined;
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
+  let cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | undefined;
   let geminiUsageWorker: GeminiUsageWorkerHandle | undefined;
   let openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
@@ -1345,6 +1366,7 @@ async function startCredentialValidationWorkerRuntime(
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
       if (geminiUsageWorker) await Promise.allSettled([geminiUsageWorker.close()]);
+      if (cnProvidersQuotaWorker) await Promise.allSettled([cnProvidersQuotaWorker.close()]);
       if (openRouterModelPricingSyncWorker) {
         await Promise.allSettled([openRouterModelPricingSyncWorker.close()]);
       }
@@ -1433,6 +1455,19 @@ async function startCredentialValidationWorkerRuntime(
     // Same workload, role and lease semantics as the opencode-go loop above;
     // a deployment without gemini accounts simply idles every round.
     geminiUsageWorker = startGeminiUsageWorker(createSnapshotStore(database, {}), options.geminiUsageWorkerOptions);
+    // Batch-3 (task #13): the CN-provider coding-plan quota probe loop
+    // (zhipu /api/monitor/usage/quota/limit without Bearer; minimax
+    // coding_plan/remains with Bearer). Same workload, role and lease
+    // semantics as the opencode-go loop above; the due scan only ever claims
+    // coding-mode accounts, so a deployment without zhipu/minimax accounts
+    // simply idles every round.
+    cnProvidersQuotaWorker = startCnProvidersQuotaWorker(
+      new PostgresCnProvidersQuotaStore(database, kms, {
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      }),
+      options.cnProvidersQuotaWorkerOptions,
+    );
     // F6 (task #39): the OpenRouter model-catalog/pricing sync loop. It is
     // strictly opt-in (the R4 OAuth-refresh precedent): the sync appends
     // provider catalog, public-model alias and supplier-cost version rows,
@@ -1496,6 +1531,7 @@ async function startCredentialValidationWorkerRuntime(
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
       geminiUsageWorker: geminiUsageWorker,
+      cnProvidersQuotaWorker: cnProvidersQuotaWorker,
       openRouterModelPricingSyncWorker: openRouterModelPricingSyncWorker ?? null,
       egressProxyProbeWorker,
       probeMonitorWorker: probeMonitorWorker ?? null,
@@ -2315,6 +2351,23 @@ export async function startManagedSaasServer(
             publicOrigin: deploymentListener(deployment, 'platform').origin,
           })
         : undefined;
+      // Batch-3 Grok OAuth account binding surface: available exactly when
+      // the supply service is wired, mirroring the codex mount. The sink
+      // resolves the xai-grok catalog binding from the control-plane
+      // database and fails closed until the provider is registered
+      // (saas/catalog/grok-registration.ts).
+      const grokOauthHandler = providerSupplyService
+        ? createGrokOauthHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            service: new GrokOAuthBindingService({ sessionStore: new InMemoryGrokBindingSessionStore() }),
+            sink: createProviderSupplyGrokCredentialSink({
+              supply: providerSupplyService,
+              resolveCatalogBinding: createPostgresGrokCatalogBindingResolver(database),
+            }),
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+          })
+        : undefined;
       // R6a active probing admin surface: the trigger/list endpoints run on
       // the control-plane role (monitor registry CRUD). The probe itself
       // executes asynchronously in the probe monitor worker on the
@@ -2680,6 +2733,7 @@ export async function startManagedSaasServer(
         platformRefundHandler,
         platformCredentialRewrapHandler,
         codexOauthHandler,
+        grokOauthHandler,
         accountProbeHandler,
         platformSettingsAdminHandler,
         billingGroupsAdminHandler,
@@ -2724,6 +2778,7 @@ export async function startManagedSaasServer(
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
       geminiUsageWorker: null,
+      cnProvidersQuotaWorker: null,
       openRouterModelPricingSyncWorker: null,
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,

@@ -3,6 +3,8 @@ import type { ClaudeQuotaSnapshot, ClaudeRateLimitClassification } from '../gate
 import type { CodexRateLimitSnapshot } from '../gateway/codex/quota-headers.js';
 import { GEMINI_CREDENTIAL_TYPE, GEMINI_PRODUCT_ID, GEMINI_PROVIDER_ID } from '../gateway/gemini/catalog-identity.js';
 import type { GeminiUsageProgress, GeminiUsageSnapshot } from '../gateway/gemini/quota-usage.js';
+import type { GrokBillingSummary } from '../gateway/grok/billing.js';
+import type { GrokQuotaHeaderSnapshot } from '../gateway/grok/quota-headers.js';
 
 /**
  * R-dormant activation: the in-repo Postgres writer for the migration
@@ -18,7 +20,13 @@ import type { GeminiUsageProgress, GeminiUsageSnapshot } from '../gateway/gemini
  * - gemini (111): the request-count snapshot computed by the usage worker
  *   from `saas_attempts` (Gemini exposes no upstream usage endpoint; the
  *   sub2api gemini_quota.go port folds per-model-class request counts
- *   against the tier RPD/RPM policy).
+ *   against the tier RPD/RPM policy);
+ * - grok (119, batch 3): the transport's `parseGrokQuotaHeaders` snapshot
+ *   (token + request windows with the ms/s/relative reset disambiguation
+ *   plus the retry-after cooldown), the access-token-derived subscription
+ *   tier (written by the binding/refresh pipeline only — response-header
+ *   tiers never overwrite it) and the weekly/monthly billing probe snapshot
+ *   (the gateway/grok/billing.ts merge result).
  *
  * Owner scoping follows the opencode-go store: the transport sinks carry
  * only the owner-neutral account id, so `resolveQuotaSnapshotAccountOwner`
@@ -335,6 +343,66 @@ export class PostgresProviderQuotaSnapshotStore {
     );
   }
 
+  /** Grok (migration 119): the quota-header window snapshot plus 429 cooldown. */
+  async writeGrokSnapshot(
+    account: QuotaSnapshotAccountRef,
+    snapshot: GrokQuotaHeaderSnapshot,
+    observedAtMs: number,
+  ): Promise<void> {
+    if (!snapshot || typeof snapshot !== 'object') storeUnavailable();
+    const observedAt = isoTimestamp(observedAtMs);
+    const percent = (value: number | null): number | null => nullableFinite(value);
+    const reset = (value: number | null): string | null => nullableIsoTimestamp(value);
+    await this.updateAccount(
+      account,
+      (start) => [
+        `grok_5h_used_percent = $${start}`,
+        `grok_5h_reset_at = $${start + 1}`,
+        `grok_requests_used_percent = $${start + 2}`,
+        `grok_requests_reset_at = $${start + 3}`,
+        `grok_rate_limited_until = $${start + 4}`,
+        `grok_usage_updated_at = $${start + 5}`,
+      ],
+      [
+        percent(snapshot.tokens?.usedPercent ?? null),
+        reset(snapshot.tokens?.resetAtMs ?? null),
+        percent(snapshot.requests?.usedPercent ?? null),
+        reset(snapshot.requests?.resetAtMs ?? null),
+        // A retry-after on any response (not only 429s reaches the sink) sets
+        // the cooldown deadline; absent leaves the column untouched semantics
+        // via an explicit clear on a fresh snapshot without one.
+        snapshot.retryAfterSeconds !== null && snapshot.retryAfterSeconds > 0
+          ? isoTimestamp(observedAtMs + snapshot.retryAfterSeconds * 1000)
+          : null,
+        observedAt,
+      ],
+    );
+  }
+
+  /**
+   * Grok (migration 119): the access-token-derived subscription tier. Only
+   * the binding/refresh pipeline may call this — a response-header tier is
+   * advisory and never overwrites the trusted copy.
+   */
+  async writeGrokSubscriptionTier(account: QuotaSnapshotAccountRef, tier: string): Promise<void> {
+    if (typeof tier !== 'string' || tier.trim() === '' || tier.length > 64) storeUnavailable();
+    await this.updateAccount(account, (start) => [`grok_subscription_tier = $${start}`], [tier]);
+  }
+
+  /** Grok (migration 119): the merged weekly/monthly billing probe snapshot. */
+  async writeGrokBilling(
+    account: QuotaSnapshotAccountRef,
+    summary: GrokBillingSummary,
+    observedAtMs: number,
+  ): Promise<void> {
+    if (!summary || typeof summary !== 'object') storeUnavailable();
+    await this.updateAccount(
+      account,
+      (start) => [`grok_billing = $${start}::jsonb`, `grok_billing_updated_at = $${start + 1}`],
+      [JSON.stringify(summary), isoTimestamp(observedAtMs)],
+    );
+  }
+
   /**
    * Gemini worker claim (the opencode-go attempt-stamp lease): one atomic
    * UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING per
@@ -477,6 +545,46 @@ export class PostgresProviderQuotaSnapshotStore {
       isoTimestamp(untilMs),
     ]);
   }
+
+  /**
+   * Bedrock ThrottlingException cooldown write (the BedrockRateLimitSink
+   * sink, migration 117, batch 3): stamps the cooldown deadline and the
+   * observation timestamp in one UPDATE (the 111 gemini precedent; there is
+   * no bedrock usage worker, so the rate-limit observation is also the
+   * column family's only writer).
+   */
+  async writeBedrockRateLimited(
+    account: QuotaSnapshotAccountRef,
+    untilMs: number,
+    observedAtMs: number,
+  ): Promise<void> {
+    await this.updateAccount(
+      account,
+      (start) => [
+        `bedrock_rate_limited_until = $${start}::timestamptz`,
+        `bedrock_usage_updated_at = $${start + 1}::timestamptz`,
+      ],
+      [isoTimestamp(untilMs), isoTimestamp(observedAtMs)],
+    );
+  }
+
+  /**
+   * Vertex 429 cooldown write (the VertexRateLimitSink sink, migration 118,
+   * batch 3): stamps the cooldown deadline (retry-after, else the capped
+   * google.rpc.RetryInfo delay, else the 60-second pay-as-you-go fallback)
+   * and the observation timestamp in one UPDATE (the 117 bedrock precedent;
+   * Vertex service accounts are pay-as-you-go with no usage worker).
+   */
+  async writeVertexRateLimited(account: QuotaSnapshotAccountRef, untilMs: number, observedAtMs: number): Promise<void> {
+    await this.updateAccount(
+      account,
+      (start) => [
+        `vertex_rate_limited_until = $${start}::timestamptz`,
+        `vertex_usage_updated_at = $${start + 1}::timestamptz`,
+      ],
+      [isoTimestamp(untilMs), isoTimestamp(observedAtMs)],
+    );
+  }
 }
 
 /**
@@ -517,6 +625,33 @@ export interface ProviderQuotaSnapshotSinks {
     readonly observedAtMs: number;
     readonly fromStatus: number;
   }) => Promise<void>;
+  /** Bedrock transport `writeRateLimit` sink (ThrottlingException cooldown, migration 117, batch 3). */
+  readonly bedrockRateLimit: (record: {
+    readonly accountId: string;
+    readonly classification: { readonly resetAtMs: number };
+    readonly observedAtMs: number;
+    readonly fromStatus: number;
+  }) => Promise<void>;
+  /** Vertex transport `writeRateLimit` sink (429 cooldown, migration 118, batch 3). */
+  readonly vertexRateLimit: (record: {
+    readonly accountId: string;
+    readonly classification: { readonly resetAtMs: number };
+    readonly observedAtMs: number;
+    readonly fromStatus: number;
+  }) => Promise<void>;
+  /** Grok transport `writeQuotaSnapshot` sink (every-response headers, batch 3). */
+  readonly grokQuotaSnapshot: (record: {
+    readonly accountId: string;
+    readonly snapshot: GrokQuotaHeaderSnapshot;
+    readonly observedAtMs: number;
+    readonly fromStatus: number;
+  }) => Promise<void>;
+  /** Grok billing probe sink (weekly + monthly merge, batch 3). */
+  readonly grokBilling: (record: {
+    readonly accountId: string;
+    readonly summary: GrokBillingSummary;
+    readonly observedAtMs: number;
+  }) => Promise<void>;
 }
 
 export function createProviderQuotaSnapshotSinks(
@@ -544,6 +679,26 @@ export function createProviderQuotaSnapshotSinks(
       const account = await resolveOwner(record.accountId);
       if (account === null) return;
       await store.writeGeminiRateLimited(account, record.classification.resetAtMs);
+    },
+    async bedrockRateLimit(record) {
+      const account = await resolveOwner(record.accountId);
+      if (account === null) return;
+      await store.writeBedrockRateLimited(account, record.classification.resetAtMs, record.observedAtMs);
+    },
+    async vertexRateLimit(record) {
+      const account = await resolveOwner(record.accountId);
+      if (account === null) return;
+      await store.writeVertexRateLimited(account, record.classification.resetAtMs, record.observedAtMs);
+    },
+    async grokQuotaSnapshot(record) {
+      const account = await resolveOwner(record.accountId);
+      if (account === null) return;
+      await store.writeGrokSnapshot(account, record.snapshot, record.observedAtMs);
+    },
+    async grokBilling(record) {
+      const account = await resolveOwner(record.accountId);
+      if (account === null) return;
+      await store.writeGrokBilling(account, record.summary, record.observedAtMs);
     },
   };
 }

@@ -75,6 +75,10 @@ import { BILLING_GROUP_RATE_COUNTERS_SAAS_MIGRATION } from '../../../src/saas/db
 import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/114_billing_group_spend_windows.js';
 import { PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/115_provider_account_scheduling_threshold_pause.js';
 import { TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/116_tls_fingerprint_profiles.js';
+import { PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/117_provider_account_bedrock_scheduling.js';
+import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/118_provider_account_vertex_scheduling.js';
+import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/119_provider_account_grok_scheduling.js';
+import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/120_cn_provider_account_scheduling.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -154,6 +158,22 @@ test('SaaS migration registry keeps a stable append order with only documented g
       // Batch-2 §2.4 (task #7): 116 TLS fingerprint profile registry + the
       // tri-state account binding column.
       116,
+      // Batch-3 (task #10): 117 Bedrock scheduling signals — the
+      // ThrottlingException cooldown deadline and the observation stamp
+      // (Bedrock responses expose no quota windows) plus the probe-category
+      // CHECK rewrite admitting 'bedrock'.
+      117,
+      // Batch-3 (task #11): 118 Vertex AI service-account scheduling
+      // signals — the 429 cooldown deadline (retry-after, else capped
+      // RetryInfo, else the 60s pay-as-you-go fallback) and the observation
+      // stamp plus the probe-category CHECK rewrite admitting 'vertex'.
+      118,
+      // Batch-3 (parallel Grok workstream): 119 xAI quota-header scheduling
+      // windows + the 'grok' probe category.
+      119,
+      // Batch-3 (task #13): 120 CN providers (zhipu/minimax) dual-mode
+      // account columns + Coding Plan quota-window snapshots.
+      120,
     ],
   );
 });
@@ -217,7 +237,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 97);
+  assert.equal(SAAS_MIGRATIONS.length, 101);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -276,6 +296,10 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'billing_group_spend_windows',
       'provider_account_scheduling_threshold_pause',
       'tls_fingerprint_profiles',
+      'provider_account_bedrock_scheduling',
+      'provider_account_vertex_scheduling',
+      'provider_account_grok_scheduling',
+      'cn_provider_account_scheduling',
     ],
   );
   assert.deepEqual(
@@ -321,10 +345,26 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       // Batch-2 §2.4 (task #7): 116 TLS fingerprint profile registry + the
       // tri-state account binding column.
       116,
+      // Batch-3 (task #10): 117 Bedrock scheduling signals — the
+      // ThrottlingException cooldown deadline and the observation stamp
+      // (Bedrock responses expose no quota windows) plus the probe-category
+      // CHECK rewrite admitting 'bedrock'.
+      117,
+      // Batch-3 (task #11): 118 Vertex AI service-account scheduling
+      // signals — the 429 cooldown deadline (retry-after, else capped
+      // RetryInfo, else the 60s pay-as-you-go fallback) and the observation
+      // stamp plus the probe-category CHECK rewrite admitting 'vertex'.
+      118,
+      // Batch-3 (parallel Grok workstream): 119 xAI quota-header scheduling
+      // windows + the 'grok' probe category.
+      119,
+      // Batch-3 (task #13): 120 CN providers (zhipu/minimax) dual-mode
+      // account columns + Coding Plan quota-window snapshots.
+      120,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 97);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 97);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 101);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 101);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -414,7 +454,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 97);
+  assert.equal(SAAS_MIGRATIONS.length, 101);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -459,6 +499,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_SCHEDULING_THRESHOLD_PAUSE_SAAS_MIGRATION,
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION,
+    CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -563,6 +607,26 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[95]?.name, 'provider_account_scheduling_threshold_pause');
   assert.equal(SAAS_MIGRATIONS[96]?.version, 116);
   assert.equal(SAAS_MIGRATIONS[96]?.name, 'tls_fingerprint_profiles');
+  // 117: batch-3 Bedrock scheduling (parallel workstream tail; 118/119 are
+  // the parallel Vertex/Grok batch-3 workstreams' slots).
+  assert.equal(SAAS_MIGRATIONS[97], PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[97]?.version, 117);
+  assert.equal(SAAS_MIGRATIONS[97]?.name, 'provider_account_bedrock_scheduling');
+  // 118: batch-3 Vertex AI service-account scheduling (task #11; the
+  // parallel workstream's reserved slot).
+  assert.equal(SAAS_MIGRATIONS[98], PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[98]?.version, 118);
+  assert.equal(SAAS_MIGRATIONS[98]?.name, 'provider_account_vertex_scheduling');
+  // 119: batch-3 Grok scheduling (the parallel workstream's tail; its CHECK
+  // rewrite carries 'bedrock'/'vertex' forward per the batch-3 chain note).
+  assert.equal(SAAS_MIGRATIONS[99], PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[99]?.version, 119);
+  assert.equal(SAAS_MIGRATIONS[99]?.name, 'provider_account_grok_scheduling');
+  // 120: batch-3 CN providers (zhipu/minimax) dual-mode columns + Coding
+  // Plan quota-window snapshot family (task #13).
+  assert.equal(SAAS_MIGRATIONS[100], CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[100]?.version, 120);
+  assert.equal(SAAS_MIGRATIONS[100]?.name, 'cn_provider_account_scheduling');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

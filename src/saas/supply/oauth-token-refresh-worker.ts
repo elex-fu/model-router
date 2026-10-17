@@ -31,6 +31,12 @@ import {
   GEMINI_OAUTH_TOKEN_USER_AGENT,
   resolveGeminiOauthClientSecret,
 } from '../platform/gemini-oauth/oauth.js';
+import {
+  GROK_OAUTH_CLIENT_ID,
+  GROK_OAUTH_REFRESH_SCOPE,
+  GROK_OAUTH_TOKEN_ENDPOINT,
+  GROK_OAUTH_TOKEN_USER_AGENT,
+} from '../platform/grok-oauth/oauth.js';
 import { readEgressProxyForAccount } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
 import { withUnsealedEgressProxyCredentials } from './egress-proxy-seal.js';
@@ -243,6 +249,23 @@ export const CLAUDE_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Objec
   'email',
 ]);
 
+/**
+ * Envelope fields the Grok CLI subscription binding preserves across a
+ * rotation (batch 3): the gateway needs user_id/team_id (identity
+ * namespace, conversation isolation) and subscription_tier (the free-tier
+ * soft gate — the access token itself is rotated away, so the tier derived
+ * from the previous token is the only durable copy) even though the refresh
+ * response never returns them. client_id and email are shared with the
+ * codex/claude lists.
+ */
+export const GROK_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Object.freeze([
+  'user_id',
+  'team_id',
+  'subscription_tier',
+  'client_id',
+  'email',
+]);
+
 /*
  * The only verified OAuth token bindings. Both are public OAuth clients
  * (RFC 6749 §2.1: the client id is not a secret) for the subscription
@@ -315,6 +338,28 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
     passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
     userAgent: 'model-router',
+  }),
+  Object.freeze({
+    // Batch-3 Grok CLI subscription category package
+    // (src/saas/gateway/grok/catalog-identity.ts). The xAI public OAuth
+    // client refreshes at auth.x.ai/oauth2/token; the refresh grant sends no
+    // scope parameter so the endpoint keeps the original grant's scopes
+    // (grok-cli:access / api:access must survive every rotation). The
+    // subscription tier and account coordinates survive rotations through
+    // GROK_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS (the tier is only ever derived
+    // from an access token, and the rotated-away token's copy is the durable
+    // one). The pinned CLI workspace UA keeps the grant off non-CLI
+    // fingerprints — the token endpoint fingerprints callers like the proxy
+    // does.
+    providerId: 'xai-grok',
+    productId: 'grok-subscription',
+    credentialType: 'oauth',
+    adapterId: 'xai-grok-oauth-v1',
+    tokenEndpoint: GROK_OAUTH_TOKEN_ENDPOINT,
+    clientId: GROK_OAUTH_CLIENT_ID,
+    refreshScope: GROK_OAUTH_REFRESH_SCOPE,
+    passthroughFields: GROK_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+    userAgent: GROK_OAUTH_TOKEN_USER_AGENT,
   }),
   ...geminiOauthTokenAdapters(),
 ]);
