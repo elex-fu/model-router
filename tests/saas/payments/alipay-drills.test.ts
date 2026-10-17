@@ -544,6 +544,9 @@ class FakeRefundDatabase {
       this.state.walletFreezes = this.state.walletFreezes.filter((row) => row.refund_order_id !== a);
       return result<Row>();
     }
+    // Wallet fence is a session-level advisory lock (P4 step3): the fake is
+    // single-threaded per transaction, so acquiring it is a no-op here.
+    if (statement.startsWith('select pg_advisory_xact_lock')) return result<Row>();
     throw new Error(`Unhandled fake SQL: ${statement}`);
   }
 }
