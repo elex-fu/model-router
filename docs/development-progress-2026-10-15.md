@@ -164,3 +164,19 @@
 | I4 第三轮基准 | aa91fd7 | 三轮对比 | **FAIL(mixed)**:P17 恢复(0.067→0.425,403 饥饿消失)、P18 原生解决(零 warmer 流量自预热)、P15 半修(新 P15b:keyBudget 释放缺 2 表 UPDATE 授权,sweep 25 死事务/周期,I1 warn 数分钟内定位);P4/P16 未解——c=8 诊断 1.13× 证明单租户 ~10/s 是围栏设计上限,多 key/钱包无法帮助(围栏覆盖全部 project/key);2-of-4 成功 0.920 PASS、窗口 4 个中 3 个达标;延迟绝对值受多轮 VM 负载背景影响,报告披露 |
 
 **I 系列终态**:全量单测 4804/4782/0 失败;秘密扫描干净。剩余:P15b(小授权修复)、P4/P16(需要租户级准入并行化——围栏内 CTE 重设计或多租户基准验证扩展)、故障撤离速度(2-of-4 已近达标,all-4 撤离仍慢)。
+
+## K/L 系列:P15b+撤离速度修复 与 DOps 部署运维方案(2026-10-17)
+
+| 任务 | 提交 | 证据 |
+|---|---|---|
+| J1/K0 P15b keyBudget 授权 | 37931e2 | 一次性 PG 18.6 服务级合法拓扑播种(identity→policy→catalog→pricing→commercial bind→route→key→request→reservation),正/负/幂等三控全绿 |
+| K1 durable 故障撤离 | 6c71ef2 | 根因=4xx 证据在源头被跳过(runtimeHealthEvidence null)+midstream 2xx 误分类 success;三杠杆(账号归因证据 5/10/15s 冷却+迁移 112、stream_abort 双层信号、全拒 503);真 PG 容器实测曲线 |
+| K2 验证/探针白名单接线 | a376ba8 | 6 个缺口全接线,单次解析三 workload 共享;153/153 |
+| DOps 方案文档 | 595ae6f | 五工作流 11-15 人日,全复用现成积木 |
+| L1 saas:deploy | a73cae8 | 空库→三探针全绿 2.2s(目标 10min);P15b 注入点名;重跑治愈授权;探针直连角色登录 |
+| L3 saas:doctor | 6c5bfee | 9 检查全映射现成探针,零授权新增;P15b 复现一条命令点名;33/33 |
+| L5 CI deploy-smoke | 08a05bc | 本地端到端 6-9s;逐角色 doctor 并集覆盖;CI 运行时生成密码/KMS 键零提交 |
+| L2 授权镜像生成器 | 36d82c7 | 零 diff 反向提取(四镜像 byte-identical);双防线(既有 101/9/8 零修改+5 新 byte-identity);演练只改 manifest 更新正确镜像 |
+| L4 saas:upgrade | 72cc8c3 | 实测停机窗口 765ms(目标 2min);步骤 4 故障注入安全重跑;--rollback-to 拒绝 down-migration 打印 pg_restore runbook;backup:create 不覆盖 PG 的诚实披露 |
+
+**L 系列终态**:全量单测 4908/4886/0 失败;DOps 方案五任务(L1-L5)全部按验收落地——冷启动 1-2h→2.2s、授权变更三处→一处 manifest(CI 强制)、升级 runbook→单命令 765ms 窗口、排障→doctor 分级单命令、部署回归→CI deploy-smoke 拦截。协调项:capability-parity worktree 合并时其授权改动须走 manifest 流程(CI 字节围栏强制)。
