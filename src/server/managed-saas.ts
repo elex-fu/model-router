@@ -157,6 +157,12 @@ import {
   createBillingGroupsHttpHandler,
   createPostgresBillingGroupsAuditWriter,
 } from '../saas/platform/billing-groups-http.js';
+import {
+  type CompositeModelRoutesHttpHandler,
+  createCompositeModelRoutesHttpHandler,
+  createPostgresCompositeModelRoutesAuditWriter,
+} from '../saas/platform/composite-routes-http.js';
+import { SaasCompositeModelRoutesService } from '../saas/billing/composite-routes/service.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
@@ -857,6 +863,7 @@ function createPlatformHandler(
   accountProbeHandler: AccountProbeHttpHandler | undefined,
   platformSettingsHandler: PlatformSettingsHttpHandler,
   billingGroupsHandler: BillingGroupsHttpHandler | undefined,
+  compositeModelRoutesHandler: CompositeModelRoutesHttpHandler | undefined,
   egressProxiesHandler: EgressProxiesHttpHandler | undefined,
   opencodeGoRulesHandler: OpencodeGoRulesHttpHandler | undefined,
   opencodeGoModelsHandler: OpencodeGoModelCatalogHttpHandler | undefined,
@@ -889,6 +896,7 @@ function createPlatformHandler(
         if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
         if (await platformSettingsHandler(req, res)) return;
         if (billingGroupsHandler && (await billingGroupsHandler(req, res))) return;
+        if (compositeModelRoutesHandler && (await compositeModelRoutesHandler(req, res))) return;
         if (egressProxiesHandler && (await egressProxiesHandler(req, res))) return;
         if (opencodeGoRulesHandler && (await opencodeGoRulesHandler(req, res))) return;
         if (opencodeGoModelsHandler && (await opencodeGoModelsHandler(req, res))) return;
@@ -2404,6 +2412,15 @@ export async function startManagedSaasServer(
         audit: createPostgresBillingGroupsAuditWriter(database),
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
+      // Batch-4 §4.4 composite model routing: the composite-group route
+      // registry admin surface (CRUD + the three-level resolution preview).
+      const compositeModelRoutesAdminHandler = createCompositeModelRoutesHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: new SaasCompositeModelRoutesService(database),
+        audit: createPostgresCompositeModelRoutesAuditWriter(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
       const egressProxiesAdminHandler =
         providers.providerCredentialSealingKms && deployment.providerCredentialKmsKeyId
           ? createEgressProxiesHttpHandler({
@@ -2737,6 +2754,7 @@ export async function startManagedSaasServer(
         accountProbeHandler,
         platformSettingsAdminHandler,
         billingGroupsAdminHandler,
+        compositeModelRoutesAdminHandler,
         egressProxiesAdminHandler,
         opencodeGoRulesAdminHandler,
         opencodeGoModelsAdminHandler,

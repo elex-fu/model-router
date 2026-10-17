@@ -55,6 +55,14 @@ export interface PreparedRequestEvidenceInput {
   readonly publicModel: string;
   /** Migration 029 snapshot; identity inputs may omit this for legacy compatibility. */
   readonly modelResolution?: ModelResolutionProvenance;
+  /**
+   * §4.4 composite model routing: the resolved composite decision (migration
+   * 121). Persisted as the `composite_route` jsonb column so dispatch-time
+   * preflight/claim revalidation can honor the serving endpoint; the signed
+   * statement already covers the composite outcome through its
+   * provider/product/model/endpoint fields.
+   */
+  readonly composite?: PreparedEvidenceCompositeRoute;
   readonly protocol: PreparedEvidenceProtocol;
   /** Migration 029 persists the provider route facts; client protocol is `protocol`. */
   readonly clientProtocol?: PreparedEvidenceProtocol;
@@ -215,6 +223,40 @@ export class SaasPreparedRequestEvidenceError extends Error {
   }
 }
 
+/** §4.4 composite decision persisted on the evidence row (jsonb). */
+export interface PreparedEvidenceCompositeRoute {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
+}
+
+function normalizeCompositeRoute(value: unknown): PreparedEvidenceCompositeRoute | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail('INVALID_INPUT', 'composite route context is invalid');
+  }
+  const record = value as Record<string, unknown>;
+  const source = record.source;
+  const routeId = record.routeId;
+  const composite: PreparedEvidenceCompositeRoute = {
+    billingGroupId: text(record.billingGroupId, 'composite route billing group'),
+    source:
+      source === 'route' || source === 'account_model' || source === 'detector'
+        ? source
+        : fail('INVALID_INPUT', 'composite route source is invalid'),
+    routeId: routeId === null || routeId === undefined ? null : text(routeId, 'composite route id'),
+    targetPlatform: text(record.targetPlatform, 'composite route target platform'),
+    productId: text(record.productId, 'composite route product'),
+    upstreamModel: text(record.upstreamModel, 'composite route upstream model'),
+    endpoint: text(record.endpoint, 'composite route endpoint'),
+  };
+  return composite;
+}
+
 interface NormalizedEvidence {
   readonly evidenceId: string;
   readonly tenantId: string;
@@ -238,6 +280,7 @@ interface NormalizedEvidence {
   readonly protocol: PreparedEvidenceProtocol;
   readonly legacyProvenance: boolean;
   readonly modelResolution?: ModelResolutionProvenance;
+  readonly composite?: PreparedEvidenceCompositeRoute;
   readonly clientProtocol?: PreparedEvidenceProtocol;
   readonly providerProtocol?: PreparedEvidenceProtocol;
   readonly clientOperation?: string;
@@ -574,6 +617,7 @@ function normalizeInput(
     protocol,
     legacyProvenance,
     modelResolution: normalizeModelResolution(input.modelResolution, publicModel, resolvedModel, legacyProvenance),
+    composite: normalizeCompositeRoute(input.composite),
     clientProtocol: optionalProtocol(input.clientProtocol, 'clientProtocol'),
     providerProtocol: optionalProtocol(input.providerProtocol, 'providerProtocol'),
     clientOperation: optionalOperation(input.clientOperation, 'clientOperation'),
@@ -954,6 +998,7 @@ const EVIDENCE_COLUMNS = [
   'request_fingerprint_version',
   'payload_compiler_version',
   'usage_estimator_version',
+  'composite_route',
   'endpoint',
   'route_config_id',
   'route_config_version',
@@ -1044,6 +1089,7 @@ function evidenceValues(input: NormalizedEvidence, statementSha256: string): rea
     input.requestFingerprintVersion,
     input.payloadCompilerVersion,
     input.usageEstimatorVersion,
+    input.composite === undefined ? null : JSON.stringify(input.composite),
     input.endpoint,
     input.routeConfigId,
     input.routeConfigVersion,
@@ -1902,7 +1948,13 @@ export class SaasPreparedRequestEvidenceService {
       route.protocol !== input.routeProtocol ||
       route.target_mode !== input.routeTargetMode ||
       route.upstream_id !== input.routeUpstreamId ||
-      route.endpoint !== input.endpoint
+      /*
+       * §4.4 composite: the serving endpoint is the resolved target's (the
+       * persisted composite_route jsonb); the nominal route-config endpoint
+       * does not describe the composite dispatch. Everything else about the
+       * route authority is still enforced exactly.
+       */
+      (input.composite === undefined ? route.endpoint !== input.endpoint : input.composite.endpoint !== input.endpoint)
     ) {
       fail('AUTHORITY_MISMATCH', 'route authority does not match prepared evidence');
     }
@@ -2282,8 +2334,22 @@ function storedMappingVersion(value: unknown): number | null {
   return parsed;
 }
 
-function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedRequestEvidenceAudit>): NormalizedEvidence {
-  const buckets = normalizedRowValue(row, 'usage_feasible_input_buckets', 'usage buckets');
+/** Parses the persisted composite_route jsonb (object or JSON text); absent stays absent. */
+function storedCompositeRoute(row: EvidenceRow): PreparedEvidenceCompositeRoute | undefined {
+  const value = row.composite_route;
+  if (value === undefined || value === null) return undefined;
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      fail('STORAGE_ERROR', 'stored composite route context is invalid');
+    }
+  }
+  return normalizeCompositeRoute(parsed);
+}
+
+function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedRequestEvidenceAudit>): NormalizedEvidence {  const buckets = normalizedRowValue(row, 'usage_feasible_input_buckets', 'usage buckets');
   if (!Array.isArray(buckets)) fail('STORAGE_ERROR', 'stored usage buckets are invalid');
   const modelResolutionValues = [
     storedProvenanceValue(row, 'model_resolution_requested_model', 'requested model provenance'),
@@ -2323,6 +2389,7 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
   if (modelResolutionAbsent && publicModel !== resolvedModel) {
     fail('AUTHORITY_MISMATCH', 'legacy evidence without model provenance cannot bind a non-identity mapping');
   }
+  const composite = storedCompositeRoute(row);
   const input: PreparedRequestEvidenceInput = {
     evidenceId: identifier(normalizedRowValue(row, 'id', 'evidence id'), 'evidenceId'),
     tenantId: identifier(normalizedRowValue(row, 'tenant_id', 'tenant id'), 'tenantId'),
@@ -2367,6 +2434,7 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
             mappingVersion: storedMappingVersion(modelResolutionValues[3]),
           },
         }),
+    ...(composite === undefined ? {} : { composite }),
     ...(transportProvenanceAbsent
       ? {}
       : {

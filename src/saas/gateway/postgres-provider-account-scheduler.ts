@@ -22,6 +22,7 @@ import {
   type ProviderAccountSchedulerAffinityBindDecision,
   type ProviderAccountSchedulerAffinityBindingInput,
   type ProviderAccountSchedulerAffinityPort,
+  type ProviderAccountSchedulerCompositeContext,
   type ProviderAccountSchedulerConcurrencyDecision,
   type ProviderAccountSchedulerEligibilityDecision,
   type ProviderAccountSchedulerFailureFeedbackPort,
@@ -1097,7 +1098,28 @@ function candidateMatchesRoute(
   candidate: RequestPreparationCandidateAuthority,
   route: PersistedRoute,
   input: ProviderAccountSchedulerInput,
+  composite: ProviderAccountSchedulerCompositeContext | undefined,
 ): boolean {
+  if (composite !== undefined) {
+    /*
+     * §4.4 composite: the candidate is expected on the RESOLVED target
+     * platform — not the route config's nominal pin. The eligibility SQL
+     * below still narrows the platform column through the candidate's own
+     * provider/product params ($5/$6) and revalidates the pool/grant chain
+     * from the candidate's pool facts; the nominal route's upstreamId is not
+     * the composite target's pool, so the pool-id equality check does not
+     * apply (the SQL joins enforce membership instead).
+     */
+    return (
+      candidate.protocol === input.protocol &&
+      candidate.supplyMode === input.caller.supplyMode &&
+      candidate.supplyMode === 'platform' &&
+      candidate.resolvedModel === composite.upstreamModel &&
+      candidate.providerId === composite.targetPlatform &&
+      candidate.productId === composite.productId &&
+      candidate.endpoint === composite.endpoint
+    );
+  }
   if (
     candidate.protocol !== input.protocol ||
     candidate.supplyMode !== input.caller.supplyMode ||
@@ -1307,6 +1329,7 @@ class PostgresEligibilityAuthority {
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
     readonly billingGroupId?: string;
+    readonly composite?: ProviderAccountSchedulerCompositeContext;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerEligibilityDecision> {
     try {
@@ -1335,6 +1358,11 @@ class PostgresEligibilityAuthority {
       // enforce pool narrowing — fail closed rather than guessing unrestricted.
       if (input.caller.supplyMode === 'platform' && !nonEmpty(input.billingGroupId)) {
         return { decision: 'block', reason: 'billing group authority is unavailable' };
+      }
+      // §4.4 composite: the resolved decision is platform-pool routing; a
+      // composite context on a BYOK selection can never be honored.
+      if (input.composite !== undefined && input.caller.supplyMode !== 'platform') {
+        return { decision: 'block', reason: 'composite route context is outside the platform supply mode' };
       }
 
       return await this.database.transaction(async (tx) => {
@@ -1368,14 +1396,16 @@ class PostgresEligibilityAuthority {
             candidates: [input.candidate],
             publicModel: input.publicModel,
             protocol: input.protocol,
-          })
+          }, input.composite)
         ) {
           return { decision: 'deny', reason: 'candidate is outside the exact persisted route provider/product' };
         }
 
         const rowResult = await tx.query<EligibilityRow>(
           input.caller.supplyMode === 'byok' ? BYOK_ELIGIBILITY_SQL : PLATFORM_ELIGIBILITY_SQL,
-          input.caller.supplyMode === 'byok' ? byokValues(input, route) : platformValues(input, route),
+          input.caller.supplyMode === 'byok'
+            ? byokValues(input, route)
+            : platformValues(input, route),
         );
         if (rowResult.rows.length === 0) {
           return {
@@ -1517,7 +1547,17 @@ class PostgresEligibilityAuthority {
         return {
           decision: 'allow',
           candidate: input.candidate,
-          route,
+          // §4.4 composite: the revalidated route identity carries the
+          // resolved target platform so downstream route checks compare the
+          // candidate against its actual serving provider.
+          route:
+            input.composite !== undefined
+              ? {
+                  ...route,
+                  providerId: input.composite.targetPlatform,
+                  productId: input.composite.productId,
+                }
+              : route,
           status: 'active',
           capability: {
             protocol: input.protocol,
@@ -1578,6 +1618,7 @@ function platformValues(
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly publicModel: string;
     readonly billingGroupId?: string;
+    readonly composite?: ProviderAccountSchedulerCompositeContext;
     readonly now: Date;
   },
   route: PersistedRoute,
@@ -1599,7 +1640,9 @@ function platformValues(
     candidate.providerId,
     candidate.productId,
     candidate.resolvedModel,
-    route.endpoint,
+    // §4.4 composite: the serving endpoint is the resolved target's; the
+    // nominal route endpoint does not describe the composite dispatch.
+    input.composite !== undefined ? input.composite.endpoint : route.endpoint,
     candidate.credentialId,
     candidate.credentialVersion,
     candidate.credentialAuthzVersion,

@@ -9,10 +9,25 @@ import {
 } from './commercial-metering-policy-service.js';
 import type { ModelMappingSource, ModelResolutionProvenance } from './contracts.js';
 import {
+  compositeRouteEndpointFromProtocol,
+  compositeRouteModelResolutionSource,
+  resolveCompositeRoute,
+  type CompositeModelOwnershipResolution,
+  type CompositeModelRoute,
+} from './composite-route-resolver.js';
+import {
+  loadEnabledCompositeRoutes,
+  resolveCompositeBillingGroup,
+  resolveCompositeModelOwnership,
+  resolveCompositeTargetCapability,
+  type CompositeBillingGroupResolution,
+} from './composite-route-store.js';
+import {
   blockRequestPreparation,
   type RequestPreparationAuthority,
   type RequestPreparationAuthorityPort,
   type RequestPreparationCaller,
+  type RequestPreparationCompositeRoute,
   type RequestPreparationDecision,
   type RequestPreparationEntitlement,
   rejectRequestPreparation,
@@ -491,6 +506,102 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
           if (!planEntitlement.allowedProviderIds.includes(providerId)) fail('account');
         }
 
+        /*
+         * Batch 4 §4.4 composite model routing: when the request's billing
+         * group is marked composite (migration 121), the three-level resolver
+         * — the admin route registry, then the group accounts' model-catalog
+         * ownership, then the built-in prefix detector — replaces the public
+         * model version's nominal provider/product/model/endpoint pin with
+         * the resolved target platform's. This is the ONLY place the swap can
+         * happen: the supply-resolution SQL below (and the scheduler
+         * eligibility revalidation) narrow the candidate domain by these
+         * values, so overriding them here rewrites `body.model` (through the
+         * candidate's resolvedModel + the explicit provenance below),
+         * narrows scheduling to the target platform, and flows the target
+         * platform into pricing/settlement attribution. Unknown models fail
+         * closed (sub2api DetectModelPlatform's ambiguity contract); BYOK
+         * keeps the nominal pin (composite groups are platform pools, the F2
+         * precedent).
+         */
+        let effectiveProviderId = providerId;
+        let effectiveProductId = productId;
+        let effectiveModel = resolvedModel;
+        let effectiveEndpoint = route.endpoint;
+        let effectiveRoute: RouteConfigRecord = route;
+        let composite: RequestPreparationCompositeRoute | undefined;
+        let compositeModelResolution: ModelResolutionProvenance | undefined;
+        if (input.entitlement.supplyMode === 'platform') {
+          let group: CompositeBillingGroupResolution;
+          try {
+            group = await resolveCompositeBillingGroup(executor, input.caller);
+          } catch {
+            throw new Error('composite billing group authority is unavailable');
+          }
+          if (group.composite) {
+            // Route-registry read failures are storage failures (throw); an
+            // ownership-catalog read failure degrades per the resolver's
+            // contract — 'unavailable' falls through to the detector when the
+            // model is recognizable and fails closed when it is not.
+            const routes = await loadEnabledCompositeRoutes(executor, group.groupId);
+            let ownership: CompositeModelOwnershipResolution;
+            try {
+              ownership = await resolveCompositeModelOwnership(executor, group.groupId, input.publicModel);
+            } catch {
+              ownership = { outcome: 'unavailable' };
+            }
+            const decision = resolveCompositeRoute({
+              groupId: group.groupId,
+              model: input.publicModel,
+              endpoint: compositeRouteEndpointFromProtocol(input.protocol),
+              routes,
+              ownership,
+            });
+            if (!decision.matched || decision.source === null) fail('route');
+            const target = await resolveCompositeTargetCapability(
+              executor,
+              decision.targetPlatform,
+              decision.upstreamModel,
+              input.protocol,
+            );
+            if (target === 'none' || target === 'ambiguous') fail('route');
+            effectiveProviderId = decision.targetPlatform;
+            effectiveProductId = target.productId;
+            effectiveModel = decision.upstreamModel;
+            effectiveEndpoint = target.endpoint;
+            effectiveRoute = { ...route, endpoint: target.endpoint };
+            composite = {
+              billingGroupId: group.groupId,
+              source: decision.source,
+              routeId: decision.routeId,
+              targetPlatform: decision.targetPlatform,
+              productId: target.productId,
+              upstreamModel: decision.upstreamModel,
+              endpoint: target.endpoint,
+            };
+            const provenance = compositeRouteModelResolutionSource(decision);
+            compositeModelResolution =
+              provenance === null
+                ? {
+                    requestedModel: decision.publicModel,
+                    mappedModel: decision.publicModel,
+                    resolvedModel: decision.upstreamModel,
+                    mappingSource: 'none',
+                    mappingVersion: null,
+                  }
+                : {
+                    requestedModel: provenance.requestedModel,
+                    mappedModel: provenance.mappedModel,
+                    resolvedModel: provenance.resolvedModel,
+                    mappingSource: provenance.mappingSource,
+                    // A rewriting alias requires a safe-integer mapping
+                    // version (the catalogModelResolution contract); the
+                    // matched route id is that version. An unsafe id is
+                    // control-plane drift — fail closed rather than guess.
+                    mappingVersion: provenance.mappingVersion === null ? fail('route') : provenance.mappingVersion,
+                  };
+          }
+        }
+
         let commercial: RouteCommercialAuthorityRecord | null;
         try {
           commercial = await this.dependencies.commercial.resolveDispatchableRoute(
@@ -527,8 +638,22 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
 
         const supplies =
           input.entitlement.supplyMode === 'byok'
-            ? await this.resolveByok(executor, input.caller, input.entitlement, authorityAt, providerId, productId)
-            : await this.resolvePlatform(executor, input.caller, input.entitlement, authorityAt, providerId, productId);
+            ? await this.resolveByok(
+                executor,
+                input.caller,
+                input.entitlement,
+                authorityAt,
+                effectiveProviderId,
+                effectiveProductId,
+              )
+            : await this.resolvePlatform(
+                executor,
+                input.caller,
+                input.entitlement,
+                authorityAt,
+                effectiveProviderId,
+                effectiveProductId,
+              );
 
         const customerPriceVersion = nullableText(commercial.customerPriceVersion);
         const supplierCostVersion = nullableText(commercial.supplierCostVersion);
@@ -547,10 +672,10 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
         for (const supply of supplies) {
           try {
             const eligibilityInput: ProviderEligibilityRequest = {
-              providerId,
-              productId,
-              model: resolvedModel,
-              endpoint: route.endpoint,
+              providerId: effectiveProviderId,
+              productId: effectiveProductId,
+              model: effectiveModel,
+              endpoint: effectiveEndpoint,
               credentialType: supply.credentialType,
               supplyMode: input.entitlement.supplyMode,
               region: supply.region,
@@ -563,10 +688,10 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
             );
             if (
               eligibility.decision !== 'allow' ||
-              eligibility.providerId !== providerId ||
-              eligibility.productId !== productId ||
-              eligibility.model !== resolvedModel ||
-              eligibility.endpoint !== route.endpoint ||
+              eligibility.providerId !== effectiveProviderId ||
+              eligibility.productId !== effectiveProductId ||
+              eligibility.model !== effectiveModel ||
+              eligibility.endpoint !== effectiveEndpoint ||
               eligibility.capability.protocol !== input.protocol ||
               String(eligibility.rights.rightsId) !== supply.accountRightsId ||
               !sameVersion(eligibility.rights.version, supply.accountRightsVersion)
@@ -577,23 +702,23 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
               executor,
               supply.accountId,
               input.caller,
-              providerId,
-              productId,
-              resolvedModel,
-              route.endpoint,
+              effectiveProviderId,
+              effectiveProductId,
+              effectiveModel,
+              effectiveEndpoint,
               eligibility.capability.version,
             );
             if (supply.poolRights) {
               validateRightsRow(
                 supply.poolRights,
                 {
-                  providerId,
-                  productId,
+                  providerId: effectiveProviderId,
+                  productId: effectiveProductId,
                   credentialType: supply.credentialType,
                   region: supply.region,
                   purpose: supply.purpose,
-                  model: resolvedModel,
-                  endpoint: route.endpoint,
+                  model: effectiveModel,
+                  endpoint: effectiveEndpoint,
                 },
                 authorityAt,
               );
@@ -601,10 +726,10 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
             verified.push({
               candidate: supply.candidate(
                 input,
-                route,
-                resolvedModel,
-                providerId,
-                productId,
+                effectiveRoute,
+                effectiveModel,
+                effectiveProviderId,
+                effectiveProductId,
                 profileVersion,
                 supplierCostVersion,
               ),
@@ -626,7 +751,8 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
         if (!first) fail('account');
         const candidate = first.candidate;
         const candidates = verified.map(({ candidate: value }) => value);
-        const modelResolution = catalogModelResolution(input.publicModel, resolvedModel, alias);
+        const modelResolution =
+          compositeModelResolution ?? catalogModelResolution(input.publicModel, effectiveModel, alias);
         return {
           route: {
             tenantId: route.tenantId,
@@ -641,10 +767,11 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
             ...routeOperations(route.protocol, input.clientOperation),
             targetMode: route.targetMode,
             upstreamId: route.upstreamId,
-            endpoint: route.endpoint,
+            endpoint: effectiveEndpoint,
           },
           candidate,
           ...(candidates.length > 1 ? { candidates } : {}),
+          ...(composite !== undefined ? { composite } : {}),
           modelMappingRules:
             modelResolution.mappingSource === 'none'
               ? []

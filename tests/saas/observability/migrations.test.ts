@@ -71,32 +71,34 @@ test('migration 103 creates alert rules and events with the pinned shape', () =>
 
 test('migrations 102 and 103 are registered in order ahead of the R1/R2/R4/R5/R5b forwards', () => {
   const versions = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(versions.at(-19), 102);
-  assert.equal(versions.at(-18), 103);
-  assert.equal(SAAS_MIGRATIONS.at(-19), OBS_CHANNEL_METRICS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS.at(-18), OBS_ALERTS_SAAS_MIGRATION);
+  assert.equal(versions.at(-20), 102);
+  assert.equal(versions.at(-19), 103);
+  assert.equal(SAAS_MIGRATIONS.at(-20), OBS_CHANNEL_METRICS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS.at(-19), OBS_ALERTS_SAAS_MIGRATION);
   // 104 (R2 embeddings operation), 105 (R1 billing groups), 106 (R4
   // registration admission), 107 (R3 egress proxies), 108 (R5b OpenCode Go
   // scheduling), 109 (R6a probe monitors), 110 (F1 platform settings) and
   // 111 (F4 gemini scheduling) follow; 112-114 (R1 billing-group limit
   // enforcement), 115 (scheduling-threshold pause), 116 (TLS fingerprints)
-  // and the batch-3 117-120 (bedrock/vertex/grok/cn) scheduling tails are
-  // the tail; 100 (R5 claude scheduling) slots in behind 099.
-  assert.equal(versions.at(-17), 104);
-  assert.equal(versions.at(-16), 105);
-  assert.equal(versions.at(-15), 106);
-  assert.equal(versions.at(-14), 107);
-  assert.equal(versions.at(-13), 108);
-  assert.equal(versions.at(-12), 109);
-  assert.equal(versions.at(-11), 110);
-  assert.equal(versions.at(-10), 111);
-  assert.equal(versions.at(-9), 112);
-  assert.equal(versions.at(-8), 113);
-  assert.equal(versions.at(-7), 114);
-  assert.equal(versions.at(-6), 115);
-  assert.equal(versions.at(-5), 116);
-  assert.equal(versions.at(-4), 117);
-  assert.equal(versions.at(-3), 118);
-  assert.equal(versions.at(-2), 119);
-  assert.equal(versions.at(-1), 120);
+  // the batch-3 117-120 (bedrock/vertex/grok/cn) scheduling tails and the
+  // batch-4 121 composite model routing registry are the tail; 100 (R5
+  // claude scheduling) slots in behind 099.
+  assert.equal(versions.at(-18), 104);
+  assert.equal(versions.at(-17), 105);
+  assert.equal(versions.at(-16), 106);
+  assert.equal(versions.at(-15), 107);
+  assert.equal(versions.at(-14), 108);
+  assert.equal(versions.at(-13), 109);
+  assert.equal(versions.at(-12), 110);
+  assert.equal(versions.at(-11), 111);
+  assert.equal(versions.at(-10), 112);
+  assert.equal(versions.at(-9), 113);
+  assert.equal(versions.at(-8), 114);
+  assert.equal(versions.at(-7), 115);
+  assert.equal(versions.at(-6), 116);
+  assert.equal(versions.at(-5), 117);
+  assert.equal(versions.at(-4), 118);
+  assert.equal(versions.at(-3), 119);
+  assert.equal(versions.at(-2), 120);
+  assert.equal(versions.at(-1), 121);
 });

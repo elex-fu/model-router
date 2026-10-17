@@ -12,7 +12,7 @@ test('112 registers as the applied head after the 111 Gemini forward', () => {
   assert.equal(migration.name, 'billing_group_snapshot_limits');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(registered.at(-1), 120);
+  assert.equal(registered.at(-1), 121);
   assert.equal(registered.includes(migration.version), true);
 });
 

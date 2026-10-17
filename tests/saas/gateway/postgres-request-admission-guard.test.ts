@@ -335,6 +335,7 @@ function makeFixture(supplyMode: 'byok' | 'platform'): Fixture {
       claude_code_only: false,
       fallback_group_id: null,
       supported_model_scopes: null,
+      composite: false,
       status: 'active',
       created_at: '2026-01-01T00:00:00.000Z',
       updated_at: '2026-01-01T00:00:00.000Z',

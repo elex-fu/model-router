@@ -412,6 +412,7 @@ function bodyGroupInput(body: Record<string, unknown>): BillingGroupUpsertInput 
     claudeCodeOnly: bodyBoolean(body, 'claudeCodeOnly'),
     fallbackGroupId,
     supportedModelScopes: bodyScopes(body),
+    composite: bodyBoolean(body, 'composite'),
     status: bodyStatus(body),
   };
 }
@@ -436,6 +437,7 @@ const GROUP_BODY_KEYS = [
   'claudeCodeOnly',
   'fallbackGroupId',
   'supportedModelScopes',
+  'composite',
 ] as const;
 
 function bodyStatus(body: Record<string, unknown>): string {
@@ -484,6 +486,7 @@ function groupDto(record: BillingGroupRecord): Record<string, unknown> {
     claudeCodeOnly: record.claudeCodeOnly,
     fallbackGroupId: record.fallbackGroupId,
     supportedModelScopes: record.supportedModelScopes === null ? null : [...record.supportedModelScopes],
+    composite: record.composite,
   };
 }
 

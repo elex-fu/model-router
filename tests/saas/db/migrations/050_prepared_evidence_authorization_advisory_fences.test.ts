@@ -205,6 +205,9 @@ test('migration 050 is registered in append order and remains forward-only', () 
       118,
       119,
       120,
+      // Batch-4 §4.4 composite model routing (task #18).
+      121,
+      // Batch-4 §4.1 multimodal billing dimensions (task #15).
     ],
   );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);

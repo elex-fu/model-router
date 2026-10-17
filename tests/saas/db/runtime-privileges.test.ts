@@ -530,6 +530,8 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     // the 30-day probe run retention cleanup (control-plane retention loop).
     ['saas_probe_monitors', 'DELETE'],
     ['saas_probe_runs', 'DELETE'],
+    // (121) composite model routes: registry row lifecycle.
+    ['saas_composite_model_routes', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });

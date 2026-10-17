@@ -395,6 +395,9 @@ function createRequestAndAttempt(input: {
     routeProtocol: route.protocol,
     routeTargetMode: route.targetMode,
     routeUpstreamId: route.upstreamId,
+    // §4.4 composite: thread the resolved decision so admission revalidation
+    // expects the target platform instead of the nominal route pin.
+    ...(authority.composite !== undefined ? { compositeRoute: authority.composite } : {}),
     initialAttempt: commonAttempt,
   };
   return { request, initialAttempt: commonAttempt };

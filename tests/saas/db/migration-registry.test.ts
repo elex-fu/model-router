@@ -79,6 +79,7 @@ import { PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION } from '../../../src
 import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/118_provider_account_vertex_scheduling.js';
 import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/119_provider_account_grok_scheduling.js';
 import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/120_cn_provider_account_scheduling.js';
+import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/121_composite_model_routes.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -174,6 +175,10 @@ test('SaaS migration registry keeps a stable append order with only documented g
       // Batch-3 (task #13): 120 CN providers (zhipu/minimax) dual-mode
       // account columns + Coding Plan quota-window snapshots.
       120,
+      // Batch-4 §4.4 (task #18): 121 composite model routing — the composite
+      // route registry, the group composite marker, and the durable evidence
+      // composite decision column.
+      121,
     ],
   );
 });
@@ -237,7 +242,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 101);
+  assert.equal(SAAS_MIGRATIONS.length, 102);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -300,6 +305,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'provider_account_vertex_scheduling',
       'provider_account_grok_scheduling',
       'cn_provider_account_scheduling',
+      'composite_model_routes',
     ],
   );
   assert.deepEqual(
@@ -361,10 +367,14 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       // Batch-3 (task #13): 120 CN providers (zhipu/minimax) dual-mode
       // account columns + Coding Plan quota-window snapshots.
       120,
+      // Batch-4 §4.4 (task #18): 121 composite model routing — the composite
+      // route registry, the group composite marker, and the durable evidence
+      // composite decision column.
+      121,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 101);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 101);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 102);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 102);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -454,7 +464,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 101);
+  assert.equal(SAAS_MIGRATIONS.length, 102);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -503,6 +513,7 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION,
     CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
+    COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -627,6 +638,11 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[100], CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[100]?.version, 120);
   assert.equal(SAAS_MIGRATIONS[100]?.name, 'cn_provider_account_scheduling');
+  // 121: batch-4 composite model routing (task #18) — the three-level
+  // resolver's registry table + group marker + evidence decision column.
+  assert.equal(SAAS_MIGRATIONS[101], COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[101]?.version, 121);
+  assert.equal(SAAS_MIGRATIONS[101]?.name, 'composite_model_routes');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

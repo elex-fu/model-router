@@ -98,6 +98,7 @@ import { PROVIDER_ACCOUNT_BEDROCK_SCHEDULING_SAAS_MIGRATION } from './117_provid
 import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from './118_provider_account_vertex_scheduling.js';
 import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from './119_provider_account_grok_scheduling.js';
 import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider_account_scheduling.js';
+import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
 
 export interface SaasMigration {
   version: number;
@@ -674,4 +675,12 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // consumes. Scheduling signal only — never billing (the 099/108
   // precedent).
   CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
+  // 121: batch-4 §4.4 composite model routing (task #18) — the admin route
+  // registry saas_composite_model_routes (public model → concrete provider
+  // platform + optional upstream model; the gateway resolves composite-group
+  // requests with the three-level resolver in
+  // src/saas/gateway/composite-route-resolver.ts) plus the composite marker
+  // column on the migration-105 billing-group head. Control-plane CRUD with
+  // gateway read-only (the 105 grants mirror); unknown models fail closed.
+  COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
 ];

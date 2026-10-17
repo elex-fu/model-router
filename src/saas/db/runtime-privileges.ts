@@ -459,6 +459,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'claude_code_only',
     'fallback_group_id',
     'supported_model_scopes',
+    'composite',
     'status',
     'created_at',
     'updated_at',
@@ -487,6 +488,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'claude_code_only',
     'fallback_group_id',
     'supported_model_scopes',
+    'composite',
     'status',
     'created_at',
     'updated_at',
@@ -514,12 +516,54 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'claude_code_only',
     'fallback_group_id',
     'supported_model_scopes',
+    'composite',
     'status',
     'updated_at',
   ]),
   ...columnGrants('saas_billing_group_account_pools', 'SELECT', ['group_id', 'account_id', 'priority', 'created_at']),
   ...columnGrants('saas_billing_group_account_pools', 'INSERT', ['group_id', 'account_id', 'priority']),
   ...columnGrants('saas_billing_group_account_pools', 'UPDATE', ['priority']),
+  // (121) composite model routes: the control plane manages the composite
+  // route registry; the gateway reads it during composite-group resolution
+  // (the dynamic read-table grant below).
+  ...columnGrants('saas_composite_model_routes', 'SELECT', [
+    'id',
+    'group_id',
+    'public_model',
+    'match_type',
+    'target_platform',
+    'upstream_model',
+    'endpoint',
+    'priority',
+    'enabled',
+    'notes',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_composite_model_routes', 'INSERT', [
+    'group_id',
+    'public_model',
+    'match_type',
+    'target_platform',
+    'upstream_model',
+    'endpoint',
+    'priority',
+    'enabled',
+    'notes',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_composite_model_routes', 'UPDATE', [
+    'public_model',
+    'match_type',
+    'target_platform',
+    'upstream_model',
+    'endpoint',
+    'priority',
+    'enabled',
+    'notes',
+    'updated_at',
+  ]),
   // R1 (113): no control-plane grant on saas_billing_group_rate_counters —
   // the gateway alone upserts the group RPM admission counters (the gateway
   // column manifest below carries the DML).
@@ -3328,6 +3372,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // the 30-day probe run retention cleanup.
   ['saas_probe_monitors', 'DELETE'],
   ['saas_probe_runs', 'DELETE'],
+  // (121) composite model routes: registry row lifecycle (group rows cascade
+  // with the group head; this grant is the per-row admin delete).
+  ['saas_composite_model_routes', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */
@@ -3760,6 +3807,10 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // group spend windows (the KEY-BUD counters pattern at group scope).
   'saas_billing_group_spend_counters',
   'saas_billing_group_spend_reservations',
+  // (121) composite model routing: the gateway scheduler reads the composite
+  // route registry while resolving a composite-group request (control-plane
+  // CRUD only; the gateway never writes it).
+  'saas_composite_model_routes',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [

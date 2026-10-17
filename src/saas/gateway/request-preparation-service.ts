@@ -256,6 +256,29 @@ export interface RequestPreparationCommercialAuthority {
 }
 
 /**
+ * Batch 4 §4.4 composite model routing: the resolved composite decision for a
+ * request whose billing group is marked composite. Produced once by the
+ * authority adapter (the three-level resolver: admin route registry →
+ * group-account model ownership → built-in prefix detector) and threaded
+ * explicitly through scheduling, admission and evidence — the sub2api ctxkey
+ * pattern (ResolvedTargetPlatform / ResolvedUpstreamModel / RequestedPublicModel /
+ * CompositeRouteSource) collapsed into one server-owned value. `targetPlatform`
+ * is a concrete provider id: scheduling narrows the candidate domain to it,
+ * the payload compiler rewrites `model` to `upstreamModel` under this
+ * provenance, and settlement attribution follows the candidate's platform.
+ */
+export interface RequestPreparationCompositeRoute {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  /** The matched Level-1 admin route identity; null for the other levels. */
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
+}
+
+/**
  * This is the non-secret account/credential authority selected by a server
  * adapter. It intentionally contains credential identity and version only.
  */
@@ -273,6 +296,8 @@ export interface RequestPreparationAuthority {
   readonly modelMappingRules?: readonly ModelMappingRule[];
   /** Optional server-owned precomputed form of the same mapping decision. */
   readonly modelResolution?: ModelResolutionProvenance;
+  /** §4.4 composite decision; present only for composite billing groups. */
+  readonly composite?: RequestPreparationCompositeRoute;
   /** Independent epoch of the platform pool-member relationship. */
   readonly poolMemberAuthzVersion: RequestPreparationExactInteger | null;
   readonly credentialRef: string;
@@ -1751,6 +1776,7 @@ function evidenceInputFor(
     publicModel: input.publicModel,
     protocol: input.protocol,
     modelResolution,
+    ...(authority.composite !== undefined ? { composite: authority.composite } : {}),
     clientProtocol: route.clientProtocol,
     providerProtocol: route.providerProtocol,
     clientOperation: route.clientOperation,
@@ -1978,6 +2004,9 @@ export class SaasRequestPreparationService {
           // G1 (task #41): trusted-boundary client evidence, forwarded
           // verbatim; absent stays absent (fail-closed downstream).
           ...(input.claudeCodeClient !== undefined ? { claudeCodeClient: input.claudeCodeClient } : {}),
+          // §4.4 composite: the resolved decision narrows revalidation to the
+          // target platform (trusted server data from the authority adapter).
+          ...(authority.composite !== undefined ? { composite: authority.composite } : {}),
         }),
       );
       if (schedulerDecision.decision !== 'allow') return decisionFailure('authority', schedulerDecision, ids);

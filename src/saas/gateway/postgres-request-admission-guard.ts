@@ -931,6 +931,13 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       [request.tenantId, request.projectId, request.routeConfigId, request.routeConfigVersion],
     );
     const route = requiredOne(routeRows);
+    // §4.4 composite: when the request carries a resolved composite decision,
+    // the candidate serves on the resolved target platform/model/endpoint, not
+    // the route config's nominal pin. The route identity checks stay; the
+    // nominal pin comparisons are replaced by composite-context comparisons,
+    // and the endpoint-scope gate is enforced by the target-platform
+    // capability recheck below (the candidate's own provider/model/endpoint).
+    const composite = request.compositeRoute;
     assertMatch(route, [
       ['tenant_id', request.tenantId],
       ['project_id', request.projectId],
@@ -942,11 +949,15 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       ['supply_mode', request.supplyMode],
       ['target_mode', request.routeTargetMode],
       ['upstream_id', request.routeUpstreamId],
-      ['endpoint', request.endpoint],
+      ...(composite === undefined
+        ? ([
+            ['endpoint', request.endpoint],
+            ['public_model_name', candidate.resolvedModel],
+            ['model_provider_id', candidate.providerId],
+            ['model_product_id', candidate.productId],
+          ] as [string, unknown][])
+        : ([] as [string, unknown][])),
       ['public_model_alias', request.publicModel],
-      ['public_model_name', candidate.resolvedModel],
-      ['model_provider_id', candidate.providerId],
-      ['model_product_id', candidate.productId],
       ['head_version', request.routeConfigVersion],
     ]);
     if (
@@ -971,15 +982,26 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       candidate.routeTargetMode !== request.routeTargetMode
     )
       deny('AUTHORITY_MISMATCH');
-    if (!Array.isArray(route.endpoint_scope) || !route.endpoint_scope.includes(request.endpoint))
-      deny('AUTHORITY_MISMATCH');
-    if (
-      candidate.upstreamId !== request.routeUpstreamId ||
-      candidate.resolvedModel !== route.public_model_name ||
-      candidate.providerId !== route.model_provider_id ||
-      candidate.productId !== route.model_product_id
-    )
-      deny('AUTHORITY_MISMATCH');
+    if (composite !== undefined) {
+      if (
+        request.endpoint !== composite.endpoint ||
+        candidate.upstreamId !== request.routeUpstreamId ||
+        candidate.resolvedModel !== composite.upstreamModel ||
+        candidate.providerId !== composite.targetPlatform ||
+        candidate.productId !== composite.productId
+      )
+        deny('AUTHORITY_MISMATCH');
+    } else {
+      if (!Array.isArray(route.endpoint_scope) || !route.endpoint_scope.includes(request.endpoint))
+        deny('AUTHORITY_MISMATCH');
+      if (
+        candidate.upstreamId !== request.routeUpstreamId ||
+        candidate.resolvedModel !== route.public_model_name ||
+        candidate.providerId !== route.model_provider_id ||
+        candidate.productId !== route.model_product_id
+      )
+        deny('AUTHORITY_MISMATCH');
+    }
 
     const commercial = await lockOne(
       executor,
@@ -1032,7 +1054,10 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       ['public_model_id', request.routePublicModelId],
       ['public_model_version', request.routePublicModelVersion],
       ['protocol', request.protocol],
-      ['endpoint', request.endpoint],
+      // §4.4 composite: the customer-facing policy stays bound to the route
+      // as configured (the nominal endpoint); the serving endpoint is the
+      // composite target's.
+      ['endpoint', composite === undefined ? request.endpoint : route.endpoint],
       ['supply_mode', request.supplyMode],
       ['target_mode', request.routeTargetMode],
       ['head_version', request.customerMeteringPolicyVersion],
@@ -1040,11 +1065,24 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     assertMatch(providerPolicy, [
       ['public_model_id', request.routePublicModelId],
       ['public_model_version', request.routePublicModelVersion],
-      ['provider_id', candidate.providerId],
-      ['product_id', candidate.productId],
-      ['resolved_model', candidate.resolvedModel],
+      // §4.4 composite: the supplier-side policy is bound to the route's
+      // nominal provider/product/model/endpoint as configured. Composite
+      // supplier-cost attribution on the resolved platform is a recorded
+      // follow-up (the commercial chain resolves per route today).
+      ...(composite === undefined
+        ? ([
+            ['provider_id', candidate.providerId],
+            ['product_id', candidate.productId],
+            ['resolved_model', candidate.resolvedModel],
+            ['endpoint', request.endpoint],
+          ] as [string, unknown][])
+        : ([
+            ['provider_id', route.model_provider_id],
+            ['product_id', route.model_product_id],
+            ['resolved_model', route.public_model_name],
+            ['endpoint', route.endpoint],
+          ] as [string, unknown][])),
       ['protocol', request.protocol],
-      ['endpoint', request.endpoint],
       ['supply_mode', request.supplyMode],
       ['target_mode', request.routeTargetMode],
       ['head_version', request.providerMeteringPolicyVersion],
@@ -1070,7 +1108,8 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       ['public_model_id', request.routePublicModelId],
       ['public_model_version', request.routePublicModelVersion],
       ['protocol', request.protocol],
-      ['endpoint', request.endpoint],
+      // §4.4 composite: bound to the nominal route endpoint (as configured).
+      ['endpoint', composite === undefined ? request.endpoint : route.endpoint],
       ['supply_mode', request.supplyMode],
       ['target_mode', request.routeTargetMode],
     ]);

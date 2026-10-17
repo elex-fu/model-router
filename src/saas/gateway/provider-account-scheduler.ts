@@ -170,6 +170,8 @@ export interface ProviderAccountSchedulerEligibilityPort {
     readonly protocol: GatewayProtocol;
     readonly route?: RequestPreparationRouteAuthority;
     readonly billingGroupId?: string;
+    /** §4.4 composite: revalidate against the resolved target platform. */
+    readonly composite?: ProviderAccountSchedulerCompositeContext;
     readonly now: Date;
   }): Promise<ProviderAccountSchedulerEligibilityDecision>;
 }
@@ -402,6 +404,12 @@ export interface ProviderAccountSchedulerInput {
    * it from anything client-controlled beyond these forwarded signals.
    */
   readonly claudeCodeClient?: ProviderAccountSchedulerClientEvidence;
+  /**
+   * §4.4 composite: the authority adapter's resolved composite decision.
+   * Present only when the request's billing group is composite; absent keeps
+   * the selection path byte-identical (the golden-fixture red line).
+   */
+  readonly composite?: ProviderAccountSchedulerCompositeContext;
 }
 
 /**
@@ -414,6 +422,27 @@ export interface ProviderAccountSchedulerClientEvidence {
   readonly path: string | null;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: unknown;
+}
+
+/**
+ * Batch 4 §4.4 composite model routing: the resolved composite decision for
+ * a request whose billing group is marked composite. Set only by a trusted
+ * server adapter (the PostgreSQL preparation authority resolved it from the
+ * migration-121 registry plus the group's account catalog) — never client
+ * input. When present, eligibility revalidation expects the candidate on the
+ * resolved target platform/product/model/endpoint instead of the route
+ * config's nominal pin (the platform-column predicates in the eligibility
+ * SQL narrow through the candidate's own provider facts, the model_scopes
+ * pattern). Structurally identical to RequestPreparationCompositeRoute.
+ */
+export interface ProviderAccountSchedulerCompositeContext {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
 }
 
 export interface ProviderAccountSchedulerPort {
@@ -1208,6 +1237,26 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       ) {
         return schedulerBlock('scheduler input is invalid');
       }
+      // §4.4 composite: the context is server-owned and complete or absent;
+      // composite groups are platform pools (the F2 precedent), so a BYOK or
+      // partial composite context is invalid input, never a fallback to the
+      // nominal route pin.
+      const composite = input.composite;
+      if (composite !== undefined) {
+        if (
+          !isRecord(composite) ||
+          !nonEmpty(composite.billingGroupId) ||
+          (composite.source !== 'route' && composite.source !== 'account_model' && composite.source !== 'detector') ||
+          (composite.routeId !== null && composite.routeId !== undefined && !nonEmpty(composite.routeId)) ||
+          !nonEmpty(composite.targetPlatform) ||
+          !nonEmpty(composite.productId) ||
+          !nonEmpty(composite.upstreamModel) ||
+          !nonEmpty(composite.endpoint) ||
+          input.caller.supplyMode !== 'platform'
+        ) {
+          return schedulerBlock('scheduler composite route context is invalid');
+        }
+      }
       if (!validAffinityContext(input.scheduling)) return schedulerBlock('scheduler affinity context is invalid');
       if (!Array.isArray(input.candidates) || input.candidates.length === 0) {
         return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
@@ -1417,6 +1466,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         protocol: input.protocol,
         route: input.route,
         billingGroupId: input.billingGroupId,
+        composite: input.composite,
         now,
       });
       if (

@@ -237,6 +237,25 @@ export interface RequestRecord extends Omit<AuthorizationBindingInput, 'projectP
   readonly providerProtocol?: MeteringProtocol;
   readonly clientOperation?: string;
   readonly providerOperation?: string;
+  /**
+   * §4.4 composite model routing: the resolved composite decision, present
+   * only when the request's billing group is marked composite. In-memory
+   * admission contract only (the gateway's in-memory fields precedent);
+   * durable rows are unmodified — the persisted prepared evidence carries the
+   * durable copy for dispatch-time revalidation.
+   */
+  readonly compositeRoute?: MeteringCompositeRouteContext;
+}
+
+/** Structurally identical to the gateway's RequestPreparationCompositeRoute. */
+export interface MeteringCompositeRouteContext {
+  readonly billingGroupId: string;
+  readonly source: 'route' | 'account_model' | 'detector';
+  readonly routeId: string | null;
+  readonly targetPlatform: string;
+  readonly productId: string;
+  readonly upstreamModel: string;
+  readonly endpoint: string;
 }
 
 /** Reconciliation event and outbox identifiers are coordinator-owned and intentionally absent here. */

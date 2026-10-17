@@ -42,6 +42,7 @@ function groupRecord(overrides: Partial<BillingGroupRecord> = {}): BillingGroupR
     claudeCodeOnly: false,
     fallbackGroupId: null,
     supportedModelScopes: null,
+    composite: false,
     status: 'active',
     ...overrides,
   };
@@ -73,6 +74,7 @@ function validGroupBody(overrides: Record<string, unknown> = {}): Record<string,
     claudeCodeOnly: false,
     fallbackGroupId: null,
     supportedModelScopes: null,
+    composite: false,
     ...overrides,
   };
 }

@@ -41,6 +41,8 @@ export interface BillingGroupRecord {
   readonly claudeCodeOnly: boolean;
   readonly fallbackGroupId: string | null;
   readonly supportedModelScopes: readonly string[] | null;
+  /** §4.4 composite model routing marker (migration 121). */
+  readonly composite: boolean;
   readonly status: string;
 }
 
@@ -96,6 +98,8 @@ export interface BillingGroupUpsertInput {
   readonly claudeCodeOnly: boolean;
   readonly fallbackGroupId: string | null;
   readonly supportedModelScopes: readonly string[] | null;
+  /** §4.4 composite model routing marker (migration 121). */
+  readonly composite: boolean;
   readonly status: string;
 }
 

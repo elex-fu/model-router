@@ -62,6 +62,9 @@ test('migration 036 is registered immediately before subsequent append-only migr
       118,
       119,
       120,
+      // Batch-4 §4.4 composite model routing (task #18).
+      121,
+      // Batch-4 §4.1 multimodal billing dimensions (task #15).
     ],
   );
 });

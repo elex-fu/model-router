@@ -587,6 +587,13 @@ $runtime_column_acl_normalization$;
 -- columns read grant below. Re-apply this template after the F2 change on a
 -- database that predates it — until then the gateway runtime privilege probe
 -- fails closed by design.
+-- DEPLOYMENT NOTE (migration 121, composite model routing): the control
+-- plane owns the composite route registry saas_composite_model_routes and
+-- the composite marker column on saas_billing_groups; the gateway scheduler
+-- reads the registry (and the marker through the existing group read grant)
+-- while resolving composite-group requests. Re-apply this template after
+-- running migration 121 on a database that predates it — until then the
+-- gateway runtime privilege probe fails closed by design.
 -- DEPLOYMENT NOTE (migration 106, R4 registration admission): the identity
 -- control plane owns saas_email_verification_codes exclusively (issue,
 -- verify-and-consume, attempt counting, expiry pruning); the gateway has no
@@ -756,12 +763,18 @@ BEGIN
       ('saas_tenants', 'UPDATE', 'status requests_per_minute tokens_per_minute max_concurrent_requests capacity_policy_revision updated_at default_billing_group_id'),
       -- R1 (105) billing groups: the control plane manages group heads and
       -- account-pool bindings; the gateway reads groups at admission only.
-      ('saas_billing_groups', 'SELECT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status created_at updated_at'),
-      ('saas_billing_groups', 'INSERT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status created_at updated_at'),
-      ('saas_billing_groups', 'UPDATE', 'display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes status updated_at'),
+      ('saas_billing_groups', 'SELECT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes composite status created_at updated_at'),
+      ('saas_billing_groups', 'INSERT', 'id display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes composite status created_at updated_at'),
+      ('saas_billing_groups', 'UPDATE', 'display_name rate_multiplier_num rate_multiplier_den topup_multiplier_num topup_multiplier_den peak_enabled peak_start peak_end peak_multiplier_num peak_multiplier_den model_pricing rpm_limit daily_limit_minor_units weekly_limit_minor_units monthly_limit_minor_units profit_min_margin_num profit_min_margin_den profit_safety_buffer_num profit_safety_buffer_den claude_code_only fallback_group_id supported_model_scopes composite status updated_at'),
       ('saas_billing_group_account_pools', 'SELECT', 'group_id account_id priority created_at'),
       ('saas_billing_group_account_pools', 'INSERT', 'group_id account_id priority'),
       ('saas_billing_group_account_pools', 'UPDATE', 'priority'),
+      -- (121) composite model routes: the control plane manages the composite
+      -- route registry; the gateway reads it during composite-group resolution
+      -- (the dynamic read-table grant below).
+      ('saas_composite_model_routes', 'SELECT', 'id group_id public_model match_type target_platform upstream_model endpoint priority enabled notes created_at updated_at'),
+      ('saas_composite_model_routes', 'INSERT', 'group_id public_model match_type target_platform upstream_model endpoint priority enabled notes created_at updated_at'),
+      ('saas_composite_model_routes', 'UPDATE', 'public_model match_type target_platform upstream_model endpoint priority enabled notes updated_at'),
       -- R3 (107) egress proxies: the control plane manages the proxy registry
       -- and runs the probe/sweep worker; the gateway and the OAuth refresh
       -- worker read through the dynamic read-table grant below.
@@ -1035,7 +1048,10 @@ BEGIN
       -- R6a (109): probe monitor lifecycle (runs cascade with the monitor)
       -- and the 30-day probe run retention cleanup.
       ('saas_probe_monitors', 'DELETE'),
-      ('saas_probe_runs', 'DELETE')
+      ('saas_probe_runs', 'DELETE'),
+      -- (121) composite model routes: registry row lifecycle (group rows
+      -- cascade with the group head; this is the per-row admin delete).
+      ('saas_composite_model_routes', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
@@ -1124,7 +1140,10 @@ BEGIN
       -- R1 (114, roadmap 1.3): the gateway reserves and resolves the billing
       -- group spend windows (the KEY-BUD counters pattern at group scope).
       ('saas_billing_group_spend_counters'),
-      ('saas_billing_group_spend_reservations')
+      ('saas_billing_group_spend_reservations'),
+      -- (121) composite model routing: the gateway scheduler reads the
+      -- composite route registry while resolving a composite-group request.
+      ('saas_composite_model_routes')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
