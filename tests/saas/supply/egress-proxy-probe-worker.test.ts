@@ -6,6 +6,10 @@ import type { ProviderCredentialUnsealingKms } from '../../../src/saas/credentia
 import type { SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { PostgresProviderEgressProxyResolver } from '../../../src/saas/gateway/postgres-provider-egress-proxy-resolver.js';
 import type { ProviderHttpPinnedConnector } from '../../../src/saas/gateway/provider-http-address.js';
+import {
+  createProviderHttpEgressAllowlist,
+  type ProviderHttpEgressAllowlist,
+} from '../../../src/saas/gateway/provider-http-address.js';
 import type { EgressProxyRecord } from '../../../src/saas/supply/egress-proxy-lookup.js';
 import { readEgressProxyById, readEgressProxyForAccount } from '../../../src/saas/supply/egress-proxy-lookup.js';
 import {
@@ -102,6 +106,71 @@ function makeStore(
     ...(options.degradedLatencyMs === undefined ? {} : { degradedLatencyMs: options.degradedLatencyMs }),
   });
 }
+
+test('proxy probe connections consult the operator egress allowlist (R9 §4 P1)', async () => {
+  const database = new FakeDatabase((sql) => {
+    const normalized = sql.replace(/\s+/g, ' ');
+    if (normalized.includes('FROM saas_egress_proxies') && normalized.includes('FOR UPDATE SKIP LOCKED')) {
+      return { rows: [proxyRow()], rowCount: 1 };
+    }
+    if (normalized.includes('FROM saas_egress_proxies')) {
+      return { rows: [{ id: 'proxy-1' }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 1 };
+  });
+  const connectionOptions: Array<{ readonly signal?: AbortSignal; readonly egressAllowlist?: unknown }> = [];
+  const allowlist = createProviderHttpEgressAllowlist(['172.20.0.0/16']);
+  const store = new PostgresEgressProxyProbeWorkerStore(database.executor as never, DUMMY_KMS, {
+    deployment: 'test-deployment',
+    environment: 'test-environment',
+    fetch: async () => jsonResponse({ ip: '203.0.113.9', country: 'AU' }),
+    createConnection: async (_proxy, init) => {
+      connectionOptions.push(init);
+      return FAKE_CONNECTION;
+    },
+    egressAllowlist: allowlist,
+  });
+  assert.equal(await store.probeNext(), true);
+  assert.equal(connectionOptions.length, 1);
+  // The configured allowlist reaches the connection factory verbatim.
+  assert.equal(connectionOptions[0]?.egressAllowlist, allowlist);
+
+  // Without the option the default factory call carries no allowlist — the
+  // exact pre-R9 strict posture.
+  const strictOptions: Array<{ readonly egressAllowlist?: unknown }> = [];
+  const strictDatabase = new FakeDatabase((sql) => {
+    const normalized = sql.replace(/\s+/g, ' ');
+    if (normalized.includes('FROM saas_egress_proxies') && normalized.includes('FOR UPDATE SKIP LOCKED')) {
+      return { rows: [proxyRow()], rowCount: 1 };
+    }
+    if (normalized.includes('FROM saas_egress_proxies')) {
+      return { rows: [{ id: 'proxy-1' }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 1 };
+  });
+  const strictStore = new PostgresEgressProxyProbeWorkerStore(strictDatabase.executor as never, DUMMY_KMS, {
+    deployment: 'test-deployment',
+    environment: 'test-environment',
+    fetch: async () => jsonResponse({ ip: '203.0.113.9', country: 'AU' }),
+    createConnection: async (_proxy, init) => {
+      strictOptions.push(init);
+      return FAKE_CONNECTION;
+    },
+  });
+  assert.equal(await strictStore.probeNext(), true);
+  assert.equal(strictOptions[0]?.egressAllowlist, undefined);
+
+  // A malformed allowlist fails store construction closed.
+  assert.throws(
+    () =>
+      new PostgresEgressProxyProbeWorkerStore(database.executor as never, DUMMY_KMS, {
+        deployment: 'test-deployment',
+        environment: 'test-environment',
+        egressAllowlist: {} as unknown as ProviderHttpEgressAllowlist,
+      }),
+    (error: unknown) => error instanceof Error && error.name === 'EgressProxyProbeWorkerError',
+  );
+});
 
 test('a probe claims one due proxy with SKIP LOCKED and writes the measured quality', async () => {
   const database = new FakeDatabase((sql) => {

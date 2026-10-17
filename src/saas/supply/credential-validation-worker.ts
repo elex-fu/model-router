@@ -11,6 +11,7 @@ import {
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import { verifyCredentialValidationWorkerSchemaReadiness } from '../db/credential-validation-worker-schema-readiness.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import type { ProviderHttpEgressAllowlist } from '../gateway/provider-http-address.js';
 import {
   credentialValidationCapabilityProtocol,
   isSupportedCredentialValidationTarget,
@@ -1424,6 +1425,16 @@ export interface CredentialValidationWorkerOptions {
   readonly fetch?: ProviderCredentialValidationFetch;
   readonly approvedTargets?: ApprovedCredentialValidationTargets;
   readonly transportTestOptions?: CredentialValidationTransportTestOptions;
+  /**
+   * R9 §4 P1: operator-configured egress allowlist shared with the gateway
+   * dispatch transport. Validated CIDR entries additionally permit custom
+   * validation probes to otherwise-denied provider addresses
+   * (container-network deployments: Docker 172.x, k8s services, private
+   * VPCs). Unset keeps the exact global-only fail-closed posture, so an
+   * in-cluster provider can be dispatched to but never validated until the
+   * operator opts in.
+   */
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   readonly deployment: string;
   readonly environment: string;
   readonly pollIntervalMs?: number;
@@ -1474,7 +1485,10 @@ export class CredentialValidationWorker {
       ...this.options,
       signal: this.halt.signal,
     });
-    this.transport = new CredentialValidationHttpTransport(this.options.transportTestOptions);
+    this.transport = new CredentialValidationHttpTransport(
+      this.options.transportTestOptions,
+      this.options.egressAllowlist,
+    );
   }
 
   async runOnce(): Promise<CredentialValidationWorkerResult> {

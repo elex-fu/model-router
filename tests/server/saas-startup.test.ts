@@ -27,6 +27,7 @@ import {
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
   SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
 } from '../../src/saas/deployment.js';
+import { PROVIDER_EGRESS_ALLOWLIST_ENV_VAR } from '../../src/saas/gateway/provider-http-egress-allowlist.js';
 import {
   CUSTOMER_KEY_MUTATION_CURRENT_SQL,
   CUSTOMER_KEY_MUTATION_ISSUE_SQL,
@@ -1983,6 +1984,73 @@ test('validation startup supplies an immutable operator registry explicitly; gen
   assert.ok(events.indexOf('validation-worker-runtime-privileges-verify') < events.indexOf('loop-start'));
   assert.ok(events.indexOf('loop-close') < events.indexOf('kms-close'));
   assert.equal(events.at(-1), 'database-close');
+});
+
+test('the operator egress allowlist reaches the validation worker and fails every workload startup closed (R9 §4 P1)', async () => {
+  const events: string[] = [];
+  const baseEnvironment = {
+    [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas',
+    NODE_ENV: 'production',
+    [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'credential-validation-worker',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerDatabaseUrl]: 'postgresql://validation-worker:fixture@db.example/saas',
+    [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: 'trusted-worker-kms',
+    [DEPLOYMENT_ENV_VARS.saas.deploymentId]: 'validation-startup-test',
+    [DEPLOYMENT_ENV_VARS.saas.environmentId]: 'test',
+  } satisfies DeploymentEnvironment;
+  const kms: LoadedValidationWorkerProviderCredentialKms = {
+    decryptDataKey: async () => {
+      assert.fail('startup does not decrypt provider credentials');
+    },
+    checkReady: async () => {},
+    close: async () => {},
+  };
+
+  // A malformed CIDR fails the worker-workload startup closed before the
+  // database or KMS is ever touched (same fail-closed as the gateway).
+  await assert.rejects(
+    startManagedSaasServer(
+      deploymentFrom({ ...baseEnvironment, [PROVIDER_EGRESS_ALLOWLIST_ENV_VAR]: '10.1.2.3/8' }),
+      managedOptions(events, {
+        environment: { ...baseEnvironment, [PROVIDER_EGRESS_ALLOWLIST_ENV_VAR]: '10.1.2.3/8' },
+        loadValidationWorkerKms: async () => {
+          assert.fail('a malformed egress allowlist must precede KMS loading');
+        },
+      }),
+    ),
+    /egress allowlist entry must be a canonical network address/,
+  );
+  assert.deepEqual(events, []);
+
+  // A valid allowlist reaches the validation worker transport options.
+  let seenEntries: readonly string[] | undefined;
+  const runtime = await startManagedSaasServer(
+    deploymentFrom({ ...baseEnvironment, [PROVIDER_EGRESS_ALLOWLIST_ENV_VAR]: '172.20.0.0/16, fd00::/8' }),
+    managedOptions(events, {
+      environment: { ...baseEnvironment, [PROVIDER_EGRESS_ALLOWLIST_ENV_VAR]: '172.20.0.0/16, fd00::/8' },
+      loadValidationWorkerKms: async () => kms,
+      startCredentialValidationWorker: (_database, _kms, options) => {
+        assert.ok(options.egressAllowlist);
+        seenEntries = [...options.egressAllowlist.entries];
+        return { close: async () => {} };
+      },
+    }),
+  );
+  await runtime.close();
+  assert.deepEqual(seenEntries, ['172.20.0.0/16', 'fd00::/8']);
+
+  // Unset keeps the exact strict posture: no allowlist in worker options.
+  const strictRuntime = await startManagedSaasServer(
+    deploymentFrom(baseEnvironment),
+    managedOptions(events, {
+      environment: baseEnvironment,
+      loadValidationWorkerKms: async () => kms,
+      startCredentialValidationWorker: (_database, _kms, options) => {
+        assert.equal(options.egressAllowlist, undefined);
+        return { close: async () => {} };
+      },
+    }),
+  );
+  await strictRuntime.close();
 });
 
 test('invalid validation binding configuration fails before database/KMS startup, and default configuration remains empty', async () => {

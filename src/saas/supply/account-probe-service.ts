@@ -28,7 +28,10 @@ import { normalizeGeminiTierId } from '../gateway/gemini/identity.js';
 import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { OPENCODE_GO_TEST_MODEL } from '../gateway/opencode-go/model-catalog.js';
-import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
+import {
+  createProviderEgressProxyConnection,
+  type ProviderHttpEgressAllowlist,
+} from '../gateway/provider-http-address.js';
 import { resolveFixedCredentialProbeEndpoint } from './credential-validation-adapters.js';
 import { type EgressProxyOwnerKind, type EgressProxyRecord, readEgressProxyForAccount } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
@@ -127,6 +130,13 @@ export interface AccountProbeServiceOptions {
   readonly geminiProbeModel?: string;
   readonly fetch?: (url: string, init: AccountProbeFetchInit) => Promise<Response>;
   readonly createConnection?: AccountProbeConnectionFactory;
+  /**
+   * R9 §4 P1: operator-configured egress allowlist shared with the gateway
+   * dispatch transport. Validated CIDR entries additionally permit the
+   * account probe's bound egress-proxy address (container-network proxies).
+   * Unset keeps the exact global-only fail-closed posture.
+   */
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   readonly signal?: AbortSignal;
   readonly now?: () => number;
 }
@@ -370,6 +380,12 @@ export function createAccountProbeService(
   if (!database || typeof database.query !== 'function') throw new AccountProbeServiceError('INVALID_INPUT');
   if (!kms || typeof kms.decryptDataKey !== 'function') throw new AccountProbeServiceError('INVALID_INPUT');
   if (!options || typeof options !== 'object') throw new AccountProbeServiceError('INVALID_INPUT');
+  if (
+    options.egressAllowlist !== undefined &&
+    (typeof options.egressAllowlist.allows !== 'function' || !Array.isArray(options.egressAllowlist.entries))
+  ) {
+    throw new AccountProbeServiceError('INVALID_INPUT');
+  }
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const claudeProbeModel = options.claudeProbeModel ?? DEFAULT_CLAUDE_PROBE_MODEL;
@@ -781,7 +797,13 @@ export function createAccountProbeService(
               ...(credentials.password === undefined ? {} : { password: credentials.password }),
             }).url,
         );
-        connection = await connectionFactory({ url: proxyUrl }, { signal });
+        connection = await connectionFactory(
+          { url: proxyUrl },
+          {
+            signal,
+            ...(options.egressAllowlist === undefined ? {} : { egressAllowlist: options.egressAllowlist }),
+          },
+        );
         dispatcher = connection.dispatcher;
       }
       const response = await fetcher(built.url, {

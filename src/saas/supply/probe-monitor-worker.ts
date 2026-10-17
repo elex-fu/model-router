@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ProviderCredentialUnsealingKms } from '../credentials/provider-crypto.js';
 import type { SaasDatabase } from '../db/types.js';
+import type { ProviderHttpEgressAllowlist } from '../gateway/provider-http-address.js';
 import {
   type AccountProbeCategory,
   type AccountProbeOutcome,
@@ -195,6 +196,13 @@ export interface PostgresProbeMonitorStoreOptions {
   readonly deployment: string;
   readonly environment: string;
   readonly probe?: AccountProbeService;
+  /**
+   * R9 §4 P1: operator-configured egress allowlist shared with the gateway
+   * dispatch transport; forwarded to the account probe service so its bound
+   * egress-proxy connections honor the same container-network entries.
+   * Unset keeps the exact global-only fail-closed posture.
+   */
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   readonly unscheduleHorizonMs?: number;
   readonly signal?: AbortSignal;
 }
@@ -219,6 +227,7 @@ export class PostgresProbeMonitorStore {
         deployment: options.deployment,
         environment: options.environment,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.egressAllowlist === undefined ? {} : { egressAllowlist: options.egressAllowlist }),
       });
     this.unscheduleHorizonMs = boundedInteger(
       options.unscheduleHorizonMs,

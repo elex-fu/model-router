@@ -6,6 +6,10 @@ import {
   sealProviderCredential,
 } from '../../../src/saas/credentials/provider-crypto.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import {
+  createProviderHttpEgressAllowlist,
+  type ProviderHttpEgressAllowlist,
+} from '../../../src/saas/gateway/provider-http-address.js';
 import { GEMINI_OAUTH_CLIENT_SECRET_ENV } from '../../../src/saas/platform/gemini-oauth/oauth.js';
 import { sealEgressProxyCredentials } from '../../../src/saas/supply/egress-proxy-seal.js';
 import {
@@ -1086,6 +1090,91 @@ test('a bound egress proxy tunnels the refresh fetch and preserves the sealed re
     });
     assert.equal(seenDispatchers.length, 1);
     assert.deepEqual(seenDispatchers[0], { tunneled: true });
+  } finally {
+    FakeDatabase.prototype.query = originalQuery;
+  }
+});
+
+test('refresh egress connections consult the operator egress allowlist (R9 §4 P1)', async () => {
+  const versionRow = await sealFixtureCredential('tenant', 'credential-a');
+  const state = fakeState('tenant', versionRow);
+  const originalQuery = FakeDatabase.prototype.query;
+  FakeDatabase.prototype.query = async function queryPatch<RowType>(
+    sql: string,
+    values: readonly unknown[] = [],
+  ): Promise<SqlResult<RowType>> {
+    if (sql.includes('JOIN saas_egress_proxies AS proxy')) {
+      return {
+        rows: [
+          {
+            id: 'proxy-a',
+            name: 'primary',
+            protocol: 'http',
+            host: 'egress.example',
+            port: 3128,
+            auth_sealed_envelope: null,
+            status: 'active',
+            expires_at: null,
+            fallback_mode: 'none',
+            backup_proxy_id: null,
+            last_probe_at: null,
+            last_probe_latency_ms: null,
+            last_probe_ip: null,
+            last_probe_quality: null,
+          },
+        ] as RowType[],
+        rowCount: 1,
+      };
+    }
+    return originalQuery.call(this, sql, values) as Promise<SqlResult<RowType>>;
+  };
+  try {
+    const allowlist = createProviderHttpEgressAllowlist(['172.20.0.0/16']);
+    const connectionOptions: Array<{ readonly signal?: AbortSignal; readonly egressAllowlist?: unknown }> = [];
+    const capture = (init?: { readonly signal?: AbortSignal; readonly egressAllowlist?: unknown }) => {
+      connectionOptions.push(init ?? {});
+      return { dispatcher: { tunneled: true } as never, close: async () => {}, destroy: async () => {} };
+    };
+    const store = new PostgresOauthTokenRefreshWorkerStore(
+      new FakeDatabase(state),
+      unsealingKms,
+      storeOptions({
+        fetch: async () => jsonResponse(tokenSuccess),
+        createEgressConnection: async (_proxy, init) => capture(init),
+        egressAllowlist: allowlist,
+      }),
+    );
+    assert.equal((await store.refreshNext(async () => ({ version: 2 }))).outcome, 'refreshed');
+    assert.equal(connectionOptions.length, 1);
+    // The configured allowlist reaches the connection factory verbatim.
+    assert.equal(connectionOptions[0]?.egressAllowlist, allowlist);
+
+    // Without the option the default factory call carries no allowlist — the
+    // exact pre-R9 strict posture. A fresh claim queue keeps the run eligible.
+    const strictState = fakeState('tenant', await sealFixtureCredential('tenant', 'credential-a'));
+    const strict = new PostgresOauthTokenRefreshWorkerStore(
+      new FakeDatabase(strictState),
+      unsealingKms,
+      storeOptions({
+        fetch: async () => jsonResponse(tokenSuccess),
+        createEgressConnection: async (_proxy, init) => capture(init),
+      }),
+    );
+    assert.equal((await strict.refreshNext(async () => ({ version: 2 }))).outcome, 'refreshed');
+    assert.equal(connectionOptions[1]?.egressAllowlist, undefined);
+
+    // A malformed allowlist fails store construction closed.
+    assert.throws(
+      () =>
+        new PostgresOauthTokenRefreshWorkerStore(
+          new FakeDatabase(state),
+          unsealingKms,
+          storeOptions({
+            egressAllowlist: {} as unknown as ProviderHttpEgressAllowlist,
+          }),
+        ),
+      (error: unknown) => error instanceof OauthTokenRefreshWorkerError,
+    );
   } finally {
     FakeDatabase.prototype.query = originalQuery;
   }

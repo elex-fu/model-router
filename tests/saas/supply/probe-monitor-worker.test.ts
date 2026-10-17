@@ -298,6 +298,32 @@ test('the store constructor fails closed on an unusable database or KMS', async 
   assert.throws(() => new PostgresProbeMonitorStore(new FakeDatabase().executor, DUMMY_KMS, null as never));
 });
 
+test('the store forwards the operator egress allowlist to the account probe service (R9 §4 P1)', async () => {
+  const { PostgresProbeMonitorStore } = await import('../../../src/saas/supply/probe-monitor-worker.js');
+  const { createProviderHttpEgressAllowlist } = await import('../../../src/saas/gateway/provider-http-address.js');
+  // A valid allowlist constructs the default account probe service cleanly.
+  const allowed = new PostgresProbeMonitorStore(new FakeDatabase().executor, DUMMY_KMS, {
+    deployment: 'd',
+    environment: 'e',
+    egressAllowlist: createProviderHttpEgressAllowlist(['172.20.0.0/16']),
+  });
+  assert.ok(allowed);
+  // A malformed allowlist fails store construction closed (the probe service
+  // rejects it with INVALID_INPUT before any probe can run).
+  assert.throws(
+    () =>
+      new PostgresProbeMonitorStore(new FakeDatabase().executor, DUMMY_KMS, {
+        deployment: 'd',
+        environment: 'e',
+        egressAllowlist: {} as never,
+      }),
+  );
+  // Unset keeps the exact pre-R9 strict posture.
+  assert.ok(
+    new PostgresProbeMonitorStore(new FakeDatabase().executor, DUMMY_KMS, { deployment: 'd', environment: 'e' }),
+  );
+});
+
 test('the monitor mapping covers both owner scopes', async () => {
   const { PostgresProbeMonitorStore } = await import('../../../src/saas/supply/probe-monitor-worker.js');
   const database = new FakeDatabase();
