@@ -33,8 +33,20 @@ import {
   type ModelDiscoveryPort,
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
+  type SaasGatewayAsyncMediaPort,
   type SaasGatewayHttpHandler,
+  type SaasGatewayQueryPort,
 } from '../saas/gateway/http-handler.js';
+import { SaasGatewayAsyncImageMediaPort } from '../saas/gateway/images/async-image-media-port.js';
+import { ImageResultOffloader } from '../saas/gateway/images/image-result-offloader.js';
+import {
+  IMAGE_TASK_EXECUTION_TIMEOUT_MS,
+  IMAGE_TASK_TTL_MS,
+  SaasImageTaskService,
+} from '../saas/gateway/images/image-task-service.js';
+import { PostgresImageTaskStore } from '../saas/gateway/images/image-task-store.js';
+import { SaasGatewayImagesQueryPort } from '../saas/gateway/images/images-query-port.js';
+import { createImagesMediaUsagePlan } from '../saas/gateway/images/media-usage-plan.js';
 import { OPENCODE_GO_ENDPOINT, OPENCODE_GO_PROVIDER_ID } from '../saas/gateway/opencode-go/catalog-identity.js';
 import {
   DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
@@ -155,6 +167,7 @@ import {
 } from '../saas/runtime/request-preparation-signer-adapter.js';
 import { PostgresProviderSupplyRepository } from '../saas/supply/repository.js';
 import { createCustomerWebhookEventProducer } from '../saas/webhooks/producers.js';
+import { S3ObjectClient, type S3ObjectClientConfig } from '../storage/s3-object-client.js';
 
 /** Stable safe error used when the `/v1` graph cannot be constructed. */
 export class ManagedSaasGatewayCompositionError extends Error {
@@ -222,6 +235,25 @@ export interface ManagedSaasGatewayDispatchDependencies {
  * already assembled HTTP handler, so the builder owns construction of the
  * preparation service, dispatch service, and HTTP boundary.
  */
+/**
+ * Roadmap batch 4 §4.2 (task #16): the async image media binding. The
+ * resolved S3 config is injected by the deployment runtime (the
+ * egress-proxy credential convention — plaintext never lives in a column;
+ * a sealed platform-settings surface is the recorded follow-up).
+ */
+export interface SaasGatewayImageMediaOptions {
+  /** Zero-dep S3-compatible storage config (endpoint/bucket/region/keys/path style/public base URL). */
+  readonly s3: S3ObjectClientConfig;
+  /** Object key prefix for offloaded images; default `images/`. */
+  readonly keyPrefix?: string;
+  /** Task TTL; default 24 h. */
+  readonly taskTtlMs?: number;
+  /** Execution timeout; default 30 min. */
+  readonly executionTimeoutMs?: number;
+  /** Sync-path JSON keepalive heartbeat cadence; default 0 (disabled). */
+  readonly keepaliveIntervalMs?: number;
+}
+
 export interface ManagedSaasGatewayCompositionDependencies {
   readonly authenticator: ProxyKeyAuthenticator;
   readonly preparation: ManagedSaasGatewayPreparationDependencies;
@@ -235,6 +267,16 @@ export interface ManagedSaasGatewayCompositionDependencies {
   readonly entryPoint: string;
   /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
   readonly trustedProxyCidrs?: readonly string[];
+  /**
+   * Roadmap batch 4 §4.2 (task #16): the async image task media binding —
+   * the object-storage config plus task lifecycle tuning. Absent keeps the
+   * async images endpoints and the task query route closed (503).
+   */
+  readonly imageMedia?: SaasGatewayImageMediaOptions & {
+    /** Built by the production composition; the plain composition accepts them pre-built. */
+    readonly queryEndpoints: SaasGatewayQueryPort;
+    readonly asyncMedia: SaasGatewayAsyncMediaPort;
+  };
   /**
    * Roadmap batch 2 §2.1: enable the sticky-session scheduling seam at the
    * HTTP boundary. Only compositions that wire an account scheduler with
@@ -588,6 +630,16 @@ export function createManagedSaasGatewayComposition(
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
+    ...(dependencies.imageMedia
+      ? {
+          queryEndpoints: dependencies.imageMedia.queryEndpoints,
+          asyncMedia: dependencies.imageMedia.asyncMedia,
+          asyncExecutionTimeoutMs: dependencies.imageMedia.executionTimeoutMs,
+          ...(dependencies.imageMedia.keepaliveIntervalMs
+            ? { imageKeepaliveIntervalMs: dependencies.imageMedia.keepaliveIntervalMs }
+            : {}),
+        }
+      : {}),
   });
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
@@ -805,6 +857,14 @@ export interface ManagedSaasGatewayProductionOptions {
    * undispatchable (no catalog route exists yet).
    */
   readonly vertexEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Roadmap batch 4 §4.2 (task #16): the async image media binding — S3
+   * config plus task lifecycle tuning. Absent keeps the async images
+   * endpoints and the task query route closed (503). The resolved secret
+   * supply is the deployment runtime module's concern (the egress-proxy
+   * credential convention).
+   */
+  readonly imageMedia?: SaasGatewayImageMediaOptions;
   /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
    * `X-Title`). When set, the values are mounted on the generic transport's
@@ -1630,6 +1690,10 @@ export function createManagedSaasGatewayProductionComposition(
       cnProvidersFixedRequestHeaders(input),
     ...(tlsFingerprintConnectorFactory === undefined ? {} : { createConnector: tlsFingerprintConnectorFactory }),
     timeoutMs: options.timeoutMs,
+    // §4.2 (task #16): the images media usage plan (units + output-first
+    // tier + service-tier terms) rides the generic transport's 2xx JSON
+    // branch; other operations get no plan and stay byte-identical.
+    mediaUsagePlan: createImagesMediaUsagePlan,
   });
   // P1c codex dispatch split: the codex transport takes over exactly the
   // signed `codex-responses` endpoint scope (provider protocol `responses`);
@@ -1725,6 +1789,28 @@ export function createManagedSaasGatewayProductionComposition(
   }
   const dispatchTransport =
     endpointRoutingRoutes.length === 0 ? transport : createEndpointRoutingTransport(transport, endpointRoutingRoutes);
+  // §4.2 (task #16): the async image media binding — the zero-dep S3
+  // client, the offloader, the PG-backed task service and the two boundary
+  // ports (async submit + task-status query). Absent keeps the endpoints closed.
+  const imageMedia = options.imageMedia
+    ? (() => {
+        const storage = new S3ObjectClient(options.imageMedia.s3);
+        const taskService = new SaasImageTaskService({
+          store: new PostgresImageTaskStore(database),
+          offloader: new ImageResultOffloader({
+            storage,
+            keyPrefix: options.imageMedia.keyPrefix,
+          }),
+          ttlMs: options.imageMedia.taskTtlMs ?? IMAGE_TASK_TTL_MS,
+          executionTimeoutMs: options.imageMedia.executionTimeoutMs ?? IMAGE_TASK_EXECUTION_TIMEOUT_MS,
+        });
+        return {
+          ...options.imageMedia,
+          queryEndpoints: new SaasGatewayImagesQueryPort(taskService),
+          asyncMedia: new SaasGatewayAsyncImageMediaPort(taskService),
+        };
+      })()
+    : undefined;
   const payload = createProviderPayloadCompiler(options);
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
@@ -1767,6 +1853,7 @@ export function createManagedSaasGatewayProductionComposition(
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
     trustedProxyCidrs: options.trustedProxyCidrs,
+    ...(imageMedia ? { imageMedia } : {}),
     // Batch 2 §2.1: the production composition always wires the scheduler
     // with the affinity port (required above), so the sticky-session
     // scheduling seam is unconditionally live here.

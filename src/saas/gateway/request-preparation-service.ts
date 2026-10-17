@@ -682,9 +682,15 @@ function normalizeOperationForProtocol(value: unknown, protocol: GatewayProtocol
  * operation. Every other protocol still accepts only its canonical
  * operation, so an embeddings request can never be bridged onto an
  * Anthropic/Gemini/Responses provider.
+ * §4.2 (task #16): the OpenAI family also hosts the images.generations
+ * operation with the same constraint — image requests are passthrough-only
+ * onto OpenAI-family providers.
  */
 function operationAllowedForProtocol(protocol: GatewayProtocol, operation: string): boolean {
-  return operation === canonicalOperationForProtocol(protocol) || (protocol === 'openai' && operation === 'embeddings');
+  return (
+    operation === canonicalOperationForProtocol(protocol) ||
+    (protocol === 'openai' && (operation === 'embeddings' || operation === 'images.generations'))
+  );
 }
 
 interface RequestPreparationRouteFacts {

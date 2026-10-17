@@ -528,9 +528,12 @@ test('enforces endpoint-family body ceilings before route resolution (4.0 ①)',
   imagesBoundary.request.url = '/v1/images/generations';
   imagesBoundary.request.headers['content-length'] = String(10 * 1024 * 1024);
   await imagesBoundary.handler(asRequest(imagesBoundary.request), asResponse(imagesBoundary.response));
-  assert.equal(imagesBoundary.response.writeHeadCalls[0]?.status, 404);
-  assert.equal(imagesBoundary.request.resumed, true);
-  assert.equal(imagesBoundary.preparationInputs.length, 0);
+  // §4.2 (task #16): /v1/images/generations is now a registered route, so
+  // the boundary case proceeds through the full pipeline (the default
+  // harness's dispatch returns a sent result with no client interaction —
+  // no response body is committed, which the 413 rejects stay below).
+  assert.equal(imagesBoundary.response.writeHeadCalls.length, 0);
+  assert.equal(imagesBoundary.preparationInputs.length, 1);
 
   const imagesOver = harness();
   imagesOver.request.url = '/v1/images/generations';
@@ -563,7 +566,8 @@ test('enforces endpoint-family body ceilings before route resolution (4.0 ①)',
   injectedBoundary.request.url = '/v1/images/generations';
   injectedBoundary.request.headers['content-length'] = '2048';
   await injectedBoundary.handler(asRequest(injectedBoundary.request), asResponse(injectedBoundary.response));
-  assert.equal(injectedBoundary.response.writeHeadCalls[0]?.status, 404);
+  assert.equal(injectedBoundary.response.writeHeadCalls.length, 0);
+  assert.equal(injectedBoundary.preparationInputs.length, 1);
 
   const injectedOver = harness({ endpointBodyLimits: { images: 2048 } });
   injectedOver.request.url = '/v1/images/generations';

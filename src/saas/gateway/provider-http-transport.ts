@@ -21,7 +21,7 @@ import {
   resolveProviderHttpAddresses,
   selectPinnedProviderAddress,
 } from './provider-http-address.js';
-import { observeProviderJsonUsage } from './provider-json-usage-observer.js';
+import { observeProviderJsonUsage, type ProviderMediaUsageExtractor } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
 import { isProviderTlsFingerprintEgress, type ProviderTlsFingerprintEgress } from './provider-http-tls-fingerprint-connector.js';
 
@@ -208,7 +208,33 @@ export interface ProviderHttpTransportOptions {
    * for every existing composition) keeps the exact previous header set.
    */
   readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
+  /**
+   * §4.2 (task #16): per-request media usage plan for operations the token
+   * observers do not know (images.generations; the #17 video/audio
+   * operations reuse the same seam). Invoked on the 2xx JSON response
+   * branch with the signed payload bytes; a null plan or a throw keeps the
+   * observation at the observer's documented unknown outcome, and the
+   * plan's serviceTier terms ride the transport response into the dispatch
+   * settlement input.
+   */
+  readonly mediaUsagePlan?: ProviderMediaUsagePlanFactory | null;
 }
+
+/**
+ * §4.2: the per-request media usage plan bound by the mediaUsagePlan
+ * factory. Defined here (not in the images module) so the seam stays
+ * available to the #17 category without a cross-module import cycle.
+ */
+export interface ProviderMediaUsagePlan {
+  readonly extractor: ProviderMediaUsageExtractor | null;
+  readonly serviceTier: { readonly requested: string | null; readonly observed: string | null } | null;
+}
+
+/** The factory binds a plan per request; returning null keeps the token path. */
+export type ProviderMediaUsagePlanFactory = (input: {
+  readonly providerOperation: string | undefined;
+  readonly payloadBytes: Uint8Array;
+}) => ProviderMediaUsagePlan | null;
 
 export type ProviderHttpTransportErrorCode =
   | 'INVALID_INPUT'
@@ -255,6 +281,7 @@ interface NormalizedOptions {
   readonly maxPayloadBytes: number;
   readonly allowedCredentialHeaderNames: ReadonlySet<string>;
   readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
+  readonly mediaUsagePlan?: ProviderMediaUsagePlanFactory;
 }
 
 interface RequestContext {
@@ -456,6 +483,9 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
   if (options.resolveFixedRequestHeaders !== undefined && typeof options.resolveFixedRequestHeaders !== 'function') {
     fail('INVALID_INPUT', 'a fixed request header resolver must be callable');
   }
+  if (options.mediaUsagePlan !== undefined && options.mediaUsagePlan !== null && typeof options.mediaUsagePlan !== 'function') {
+    fail('INVALID_INPUT', 'a media usage plan factory must be callable');
+  }
   const timeoutMs = boundedPositiveInteger(options.timeoutMs, 'timeoutMs', MAX_TIMEOUT_MS);
   const maxPayloadBytes = boundedPositiveInteger(
     options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES,
@@ -492,6 +522,9 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     ...(options.resolveFixedRequestHeaders === undefined
       ? {}
       : { resolveFixedRequestHeaders: options.resolveFixedRequestHeaders }),
+    ...(options.mediaUsagePlan === undefined || options.mediaUsagePlan === null
+      ? {}
+      : { mediaUsagePlan: options.mediaUsagePlan }),
   };
 }
 
@@ -1097,15 +1130,36 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
 
     const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
     if (responseBody && mediaType === 'application/json' && response.status >= 200 && response.status < 300) {
-      const observed = observeProviderJsonUsage(responseBody, {
-        providerProtocol: context.request.evidence.providerProtocol,
-        providerOperation: context.request.evidence.providerOperation,
-      });
+      // §4.2: bind the media usage plan (if a factory is wired) for
+      // operations the token observers do not know; a factory failure keeps
+      // the observation at the observer's unknown outcome, never a guess.
+      let mediaPlan: ProviderMediaUsagePlan | null = null;
+      if (this.options.mediaUsagePlan) {
+        try {
+          mediaPlan = this.options.mediaUsagePlan({
+            providerOperation: context.request.evidence.providerOperation,
+            payloadBytes: context.request.payloadBytes,
+          });
+        } catch {
+          mediaPlan = null;
+        }
+      }
+      const observed = observeProviderJsonUsage(
+        responseBody,
+        {
+          providerProtocol: context.request.evidence.providerProtocol,
+          providerOperation: context.request.evidence.providerOperation,
+        },
+        mediaPlan?.extractor ?? null,
+      );
       const result = {
         responseStarted: false,
         resultHttpStatus: response.status,
         headers: safeResponseHeaders,
         body: observed.body,
+        ...(mediaPlan?.serviceTier !== null && mediaPlan?.serviceTier !== undefined
+          ? { serviceTier: mediaPlan.serviceTier }
+          : {}),
         get providerUsage() {
           const observation = observed.getObservation();
           return observation?.state === 'reported' ? observation.usage : null;

@@ -100,6 +100,7 @@ import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from './119_provider_
 import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider_account_scheduling.js';
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
+import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
 
 export interface SaasMigration {
   version: number;
@@ -692,4 +693,9 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // hardcoded column list extended). All additive/defaulted: token-only
   // rows and their digests are byte-identical (the #14 anti-drift policy).
   MULTIMODAL_BILLING_SAAS_MIGRATION,
+  // 123: batch-4 §4.2 async image tasks (task #16) — the saas_image_tasks
+  // lifecycle registry (processing/completed/failed + 24 h TTL); gateway
+  // role owns the lifecycle (column-scoped INSERT/UPDATE + dynamic read),
+  // control plane has no access.
+  IMAGE_TASKS_SAAS_MIGRATION,
 ];

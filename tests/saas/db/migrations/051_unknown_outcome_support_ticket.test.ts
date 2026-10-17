@@ -263,6 +263,8 @@ test('migration 051 is registered in append order and remains forward-only', () 
       121,
       // Batch-4 §4.1 multimodal billing dimensions (task #15).
       122,
+      // Batch-4 §4.2 async image tasks (task #16).
+      123,
     ],
   );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);

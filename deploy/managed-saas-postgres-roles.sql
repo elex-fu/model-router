@@ -1143,7 +1143,10 @@ BEGIN
       ('saas_billing_group_spend_reservations'),
       -- (121) composite model routing: the gateway scheduler reads the
       -- composite route registry while resolving a composite-group request.
-      ('saas_composite_model_routes')
+      ('saas_composite_model_routes'),
+      -- (123) batch-4 §4.2 async image tasks: the gateway owns the task
+      -- lifecycle (create/finish/read plus the expiry purge).
+      ('saas_image_tasks')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1696,7 +1699,17 @@ BEGIN
       ('saas_customer_webhook_tenant_usage', 'pending_deliveries', 'UPDATE'),
       ('saas_customer_webhook_tenant_usage', 'minute_bucket', 'UPDATE'),
       ('saas_customer_webhook_tenant_usage', 'events_in_bucket', 'UPDATE'),
-      ('saas_customer_webhook_tenant_usage', 'updated_at', 'UPDATE')
+      ('saas_customer_webhook_tenant_usage', 'updated_at', 'UPDATE'),
+      -- (123) batch-4 §4.2 async image tasks: the gateway owns the task
+      -- lifecycle — create insert, finish transition, expiry purge.
+      ('saas_image_tasks', 'id', 'INSERT'), ('saas_image_tasks', 'tenant_id', 'INSERT'),
+      ('saas_image_tasks', 'proxy_key_id', 'INSERT'), ('saas_image_tasks', 'status', 'INSERT'),
+      ('saas_image_tasks', 'http_status', 'INSERT'), ('saas_image_tasks', 'result', 'INSERT'),
+      ('saas_image_tasks', 'error', 'INSERT'), ('saas_image_tasks', 'created_at', 'INSERT'),
+      ('saas_image_tasks', 'completed_at', 'INSERT'), ('saas_image_tasks', 'expires_at', 'INSERT'),
+      ('saas_image_tasks', 'status', 'UPDATE'), ('saas_image_tasks', 'http_status', 'UPDATE'),
+      ('saas_image_tasks', 'result', 'UPDATE'), ('saas_image_tasks', 'error', 'UPDATE'),
+      ('saas_image_tasks', 'completed_at', 'UPDATE'), ('saas_image_tasks', 'expires_at', 'UPDATE')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP
@@ -1738,6 +1751,11 @@ BEGIN
 
   IF pg_catalog.to_regclass('model_router_saas.saas_billing_spending_freezes') IS NOT NULL THEN
     EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_billing_spending_freezes TO model_router_saas_gateway';
+  END IF;
+  -- (123) batch-4 §4.2 async image tasks: the gateway owns the task rows'
+  -- expiry purge (PostgresImageTaskStore.purgeExpired).
+  IF pg_catalog.to_regclass('model_router_saas.saas_image_tasks') IS NOT NULL THEN
+    EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_image_tasks TO model_router_saas_gateway';
   END IF;
   IF pg_catalog.to_regclass('model_router_saas.saas_provider_account_lease_fencing_seq') IS NOT NULL THEN
     EXECUTE 'GRANT USAGE ON SEQUENCE model_router_saas.saas_provider_account_lease_fencing_seq TO model_router_saas_gateway';

@@ -7,6 +7,12 @@ import {
   recordGatewayRequestEnd,
 } from '../observability/metrics.js';
 import { resolveClientAddress } from './client-address.js';
+import type {
+  SaasGatewayAsyncMediaPort,
+  SaasGatewayAsyncMediaSubmission,
+} from './images/async-media-port.js';
+import { RecordingClientStream } from './images/recording-client-stream.js';
+import { JsonKeepaliveClientStream } from './images/json-keepalive-client-stream.js';
 import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceClientStream,
@@ -179,6 +185,11 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   // R2: the OpenAI embeddings operation rides the OpenAI inbound protocol
   // family; the per-route client operation below distinguishes it from chat.
   ['/v1/embeddings', 'openai'],
+  // §4.2 (task #16): the images.generations operation rides the OpenAI
+  // inbound protocol family (the R2 embeddings precedent); the async
+  // submission endpoint is the same operation with a 202+task contract.
+  ['/v1/images/generations', 'openai'],
+  ['/v1/images/generations/async', 'openai'],
 ]);
 
 /**
@@ -186,7 +197,22 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
  * more than one canonical operation. Values are never read from the request
  * body; only this trusted HTTP boundary may set them.
  */
-const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([['/v1/embeddings', 'embeddings']]);
+const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
+  ['/v1/embeddings', 'embeddings'],
+  // §4.2 (task #16): image generation operations (server-owned,
+  // path-derived; stateless — the sub2api /v1/images precedent).
+  ['/v1/images/generations', 'images.generations'],
+  ['/v1/images/generations/async', 'images.generations'],
+]);
+
+/**
+ * §4.2 (task #16): the async image submission endpoint. It shares the
+ * images.generations preparation/dispatch path; only the response contract
+ * differs (202 + task poll instead of the upstream JSON body).
+ */
+const ASYNC_IMAGE_SUBMIT_PATH = '/v1/images/generations/async';
+/** The poll route prefix a submitted task's Location header points at. */
+const ASYNC_IMAGE_POLL_PATH_PREFIX = '/v1/images/tasks/';
 
 /**
  * Per-endpoint-family POST body ceilings (roadmap 4.0 ①). Values are
@@ -271,6 +297,12 @@ export interface SaasGatewayQueryResult {
   readonly contentType?: string;
   /** Body sent verbatim: string (JSON text) or Uint8Array (binary content). */
   readonly body?: Uint8Array | string | null;
+  /**
+   * §4.2 (task #16): optional Retry-After polling hint (integer seconds)
+   * for task endpoints — a processing image task reports 3 (the sub2api
+   * image_task_handler.Get precedent). The boundary owns the actual header.
+   */
+  readonly retryAfterSeconds?: number;
 }
 
 /** Reserved query-endpoint port for #16/#17: async task status/content reads. */
@@ -305,6 +337,25 @@ export interface SaasGatewayHttpOptions {
    * and hits fail closed with 503.
    */
   readonly queryEndpoints?: SaasGatewayQueryPort;
+  /**
+   * §4.2 (task #16): the async image task port (task store + S3 offload).
+   * Absent keeps POST /v1/images/generations/async closed with 503.
+   */
+  readonly asyncMedia?: SaasGatewayAsyncMediaPort;
+  /**
+   * §4.2 (task #16): non-streaming JSON keepalive for the synchronous
+   * images endpoint — whitespace heartbeats while waiting for a slow
+   * upstream (the sub2api StartOpenAIImagesJSONKeepalive semantics; the
+   * first heartbeat commits status 200 and late upstream errors pass
+   * through as an error JSON body). Default 0 (disabled) keeps every
+   * pre-#16 response byte-identical.
+   */
+  readonly imageKeepaliveIntervalMs?: number;
+  /**
+   * §4.2: the async task execution timeout (default 30 minutes, the
+   * sub2api defaultImageTaskExecutionTimeout).
+   */
+  readonly asyncExecutionTimeoutMs?: number;
   readonly entryPoint?: string;
   /**
    * CIDRs of trusted reverse proxies allowed to attest X-Forwarded-For. Empty
@@ -463,6 +514,52 @@ function sendCanonicalRequestStatus(
         id: canonicalRequest.requestId,
         status: canonicalRequest.status,
         response_replayed: false,
+      }),
+    );
+  } catch {
+    try {
+      res.destroy();
+    } catch {
+      // Nothing else is safe to send after the response write failed.
+    }
+  }
+}
+
+/**
+ * §4.2 (task #16): the async submission acceptance response — the sub2api
+ * image_task_handler.Submit contract (202 + Cache-Control: no-store +
+ * Location + Retry-After: 3 + the accepted task body).
+ */
+function sendAsyncAccepted(
+  res: ServerResponse,
+  requestId: string,
+  submission: { readonly taskId: string; readonly createdAt: number; readonly expiresAt: number },
+): void {
+  if (res.destroyed || res.writableEnded) return;
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  const pollUrl = `${ASYNC_IMAGE_POLL_PATH_PREFIX}${submission.taskId}`;
+  try {
+    res.writeHead(202, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-request-id': requestId,
+      location: pollUrl,
+      'retry-after': '3',
+    });
+    res.end(
+      JSON.stringify({
+        id: submission.taskId,
+        task_id: submission.taskId,
+        object: 'image.generation.task',
+        status: 'processing',
+        created_at: submission.createdAt,
+        expires_at: submission.expiresAt,
+        poll_url: pollUrl,
       }),
     );
   } catch {
@@ -658,6 +755,12 @@ function sendQueryResult(res: ServerResponse, requestId: string, result: SaasGat
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
       'x-request-id': requestId,
+      ...(typeof result.retryAfterSeconds === 'number' &&
+      Number.isSafeInteger(result.retryAfterSeconds) &&
+      result.retryAfterSeconds >= 0 &&
+      result.retryAfterSeconds <= 86400
+        ? { 'retry-after': String(result.retryAfterSeconds) }
+        : {}),
     });
     res.end(result.body ?? '');
   } catch {
@@ -961,6 +1064,23 @@ export class NodePreparedEvidenceClientStream implements PreparedEvidenceClientS
       if (this.signal.aborted || this.response.destroyed) onAbort();
     });
   }
+}
+
+/**
+ * §4.2: the async task execution timeout — default 30 minutes (the sub2api
+ * defaultImageTaskExecutionTimeout); invalid injected values fall back to
+ * the default rather than failing the boundary.
+ */
+const DEFAULT_ASYNC_EXECUTION_TIMEOUT_MS = 30 * 60 * 1000;
+function validAsyncExecutionTimeout(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_ASYNC_EXECUTION_TIMEOUT_MS;
+  return Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_ASYNC_EXECUTION_TIMEOUT_MS;
+}
+
+/** §4.2: the keepalive heartbeat cadence; default 0 (disabled). */
+function validKeepaliveInterval(value: number | undefined): number {
+  if (value === undefined) return 0;
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function validMaxBodyBytes(value: number | undefined): number | null {
@@ -1300,8 +1420,144 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
-    const client = new NodePreparedEvidenceClientStream(req, res, requestId);
     const preparedRequest = prepared;
+
+    /*
+     * §4.2 (task #16) async image submission: once the request is prepared,
+     * create the task, answer 202 + Location + Retry-After: 3 (the sub2api
+     * "替换响应" contract), then run the dispatch in the background against
+     * a RecordingClientStream and settle the task through the media port.
+     * A background promise rejection settles the task failed; a stranded
+     * attempt (e.g. a process crash between dispatch classification and
+     * task settlement) is the unknown-outcome recovery worker's
+     * reconciliation domain (the dispatching→unknown→failed guarded path).
+     */
+    if (path === ASYNC_IMAGE_SUBMIT_PATH) {
+      const asyncMedia = options.asyncMedia;
+      if (!asyncMedia) {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      const compensate = async (cause: 'client_cancelled' | 'dispatch_failed') => {
+        try {
+          await options.preDispatchCompensation?.compensate({
+            prepared: preparedRequest,
+            cause,
+            responseMayHaveStarted: res.headersSent,
+          });
+        } catch {
+          // The transaction owner retains unresolved reservations.
+        }
+      };
+      let submission: SaasGatewayAsyncMediaSubmission;
+      try {
+        submission = await asyncMedia.createTask({ authenticatedCaller });
+      } catch {
+        await compensate('dispatch_failed');
+        sendHttpError(res, new GatewayHttpError(503, 'IMAGE_TASK_UNAVAILABLE'), requestId);
+        return true;
+      }
+      // 202 goes out before dispatch starts; a client disconnect after this
+      // point can never cancel the background execution (sub2api parity).
+      sendAsyncAccepted(res, requestId, submission);
+      const recording = new RecordingClientStream({ maxRecordedBytes: bodyLimits.images });
+      const executionTimeoutMs = validAsyncExecutionTimeout(options.asyncExecutionTimeoutMs);
+      const dispatchAuditAsync: PreparedRequestEvidenceAudit = {
+        ...auditContext,
+        actorUserId: authenticatedCaller.authorization.principalId,
+        requestId,
+      };
+      const dispatchRouteAsync =
+        isRecord(preparedRequest.evidenceInput) &&
+        typeof preparedRequest.evidenceInput.routeConfigId === 'string'
+          ? preparedRequest.evidenceInput.routeConfigId
+          : 'unknown';
+      const executionTimer = setTimeout(() => recording.abort(), executionTimeoutMs);
+      const dispatchStartedAtMs = Date.now();
+      void (async () => {
+        let dispatched: PreparedEvidenceDispatchResult;
+        try {
+          dispatched = await dispatch.dispatch({
+            evidenceId: preparedRequest.evidence.evidenceId,
+            payloadBytes: preparedRequest.payloadBytes,
+            normalSuccessSnapshot: preparedRequest.normalSuccessSnapshot,
+            audit: dispatchAuditAsync,
+            client: recording,
+          });
+        } catch {
+          // The dispatch service durably classifies the attempt before
+          // throwing; the task settles failed and compensation fires.
+          recordGatewayAttemptOutcome({
+            route: dispatchRouteAsync,
+            ok: false,
+            durationMs: Date.now() - dispatchStartedAtMs,
+          });
+          await compensate(recording.signal.aborted ? 'client_cancelled' : 'dispatch_failed');
+          await asyncMedia.failTask({
+            taskId: submission.taskId,
+            httpStatus: recording.signal.aborted ? 504 : 502,
+            error: recording.signal.aborted
+              ? { type: 'timeout_error', message: 'image generation task timed out' }
+              : { type: 'api_error', message: 'image generation failed' },
+          });
+          return;
+        }
+        recordGatewayAttemptOutcome({
+          route: dispatchRouteAsync,
+          ok:
+            dispatched.kind === 'sent' &&
+            typeof dispatched.transport?.resultHttpStatus === 'number' &&
+            dispatched.transport.resultHttpStatus >= 200 &&
+            dispatched.transport.resultHttpStatus < 300,
+          durationMs: Date.now() - dispatchStartedAtMs,
+        });
+        if (dispatched.kind !== 'sent' || !recording.isComplete) {
+          await asyncMedia.failTask({
+            taskId: submission.taskId,
+            httpStatus: 502,
+            error: { type: 'api_error', message: 'the upstream image request outcome is unknown' },
+          });
+          return;
+        }
+        await asyncMedia.completeTask({
+          taskId: submission.taskId,
+          resultHttpStatus: dispatched.transport.resultHttpStatus ?? null,
+          recordedBody: recording.recordedBody(),
+        });
+      })()
+        .catch(() => {
+          // Settlement failures are last-ditch: fail the task idempotently.
+          return asyncMedia
+            .failTask({
+              taskId: submission.taskId,
+              httpStatus: 502,
+              error: { type: 'api_error', message: 'image generation failed' },
+            })
+            .catch(() => undefined);
+        })
+        .finally(() => {
+          clearTimeout(executionTimer);
+        });
+      return true;
+    }
+
+    /*
+     * §4.2 keepalive decision: the generic prepared-evidence transport has
+     * no client keepalive mechanism (headers commit only when the first
+     * upstream body chunk arrives). For the synchronous images endpoint the
+     * handler installs a whitespace-heartbeat stream when configured —
+     * sub2api StartOpenAIImagesJSONKeepalive semantics: the first heartbeat
+     * commits status 200, and a late upstream error passes through as an
+     * OpenAI-compatible JSON error body. This architecture has no
+     * post-response-start failover (dispatch is a single attempt per
+     * prepared request), so the sub2api "written bytes forbid failover"
+     * constraint is structurally satisfied.
+     */
+    const keepaliveIntervalMs = validKeepaliveInterval(options.imageKeepaliveIntervalMs);
+    const client =
+      path === '/v1/images/generations' && keepaliveIntervalMs > 0
+        ? new JsonKeepaliveClientStream(req, res, requestId, { intervalMs: keepaliveIntervalMs })
+        : new NodePreparedEvidenceClientStream(req, res, requestId);
     const compensate = async (cause: 'client_cancelled' | 'dispatch_failed') => {
       try {
         await options.preDispatchCompensation?.compensate({
@@ -1348,7 +1604,8 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         audit: dispatchAudit,
         client,
       });
-      const attemptStatus = dispatched.kind === 'sent' ? (dispatched.transport.resultHttpStatus ?? null) : null;
+      const attemptStatus =
+        dispatched.kind === 'sent' ? ((dispatched.transport?.resultHttpStatus as number | null | undefined) ?? null) : null;
       recordGatewayAttemptOutcome({
         route: dispatchRoute,
         ok: dispatched.kind === 'sent' && attemptStatus !== null && attemptStatus >= 200 && attemptStatus < 300,
@@ -1382,3 +1639,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 }
 
 export { createSaasGatewayHandler as createSaasHostedGatewayHandler };
+export type {
+  SaasGatewayAsyncMediaPort,
+  SaasGatewayAsyncMediaSubmission,
+} from './images/async-media-port.js';

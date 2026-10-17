@@ -3820,6 +3820,9 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // route registry while resolving a composite-group request (control-plane
   // CRUD only; the gateway never writes it).
   'saas_composite_model_routes',
+  // (123) batch-4 §4.2 async image tasks: the gateway owns the task
+  // lifecycle (create/finish/read plus the expiry purge delete below).
+  'saas_image_tasks',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -4569,12 +4572,35 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ...(['pending_deliveries', 'minute_bucket', 'events_in_bucket', 'updated_at'] as const).map(
     (column) => ['saas_customer_webhook_tenant_usage', column, 'UPDATE'] as const,
   ),
+  // (123) batch-4 §4.2 async image tasks: the gateway owns the task
+  // lifecycle — the create insert, the finish transition (status/http
+  // status/result-or-error/completed_at/expires_at) and the read; row
+  // identity columns (tenant/proxy key/created) are insert-only.
+  ...(
+    [
+      'id',
+      'tenant_id',
+      'proxy_key_id',
+      'status',
+      'http_status',
+      'result',
+      'error',
+      'created_at',
+      'completed_at',
+      'expires_at',
+    ] as const
+  ).map((column) => ['saas_image_tasks', column, 'INSERT'] as const),
+  ...(
+    ['status', 'http_status', 'result', 'error', 'completed_at', 'expires_at'] as const
+  ).map((column) => ['saas_image_tasks', column, 'UPDATE'] as const),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
 
 const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
-const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes'] as const;
+// (123) batch-4 §4.2 async image tasks: the gateway owns the task rows'
+// expiry purge (PostgresImageTaskStore.purgeExpired).
+const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes', 'saas_image_tasks'] as const;
 const GATEWAY_SEQUENCE = 'saas_provider_account_lease_fencing_seq' as const;
 
 function sqlText(value: string): string {

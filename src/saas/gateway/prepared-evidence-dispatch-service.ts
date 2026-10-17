@@ -55,6 +55,13 @@ export interface PreparedEvidenceTransportResponse {
   readonly headers?: Readonly<Record<string, string>>;
   /** Trustworthy, normalized provider usage supplied by a bounded transport observer. */
   readonly providerUsage?: NormalSuccessObservedUsage | null;
+  /**
+   * §4.1/§4.2 (tasks #15/#16): category-supplied service-tier settlement
+   * terms — the requested tier from the request payload and the observed
+   * tier from the response. Absent keeps the base rate; the settlement's
+   * only-lower rule means an observed tier can never raise the charge.
+   */
+  readonly serviceTier?: { readonly requested: string | null; readonly observed: string | null } | null;
   /** A one-reader body stream; dispatch consumes it without buffering the body. */
   readonly body?: ReadableStream<Uint8Array> | null;
 }
@@ -958,6 +965,9 @@ export class SaasPreparedEvidenceDispatchService {
                     attemptId: evidence.attemptId,
                     snapshot,
                     usage: transportResult.providerUsage,
+                    // §4.2: the category transport's service-tier terms reach
+                    // the settlement input here; absent keeps the base rate.
+                    serviceTier: transportResult.serviceTier ?? null,
                   });
                   reconciliationPersisted = completion.kind === 'reconciliation_pending';
                   outcome = { kind: 'sent', evidence, attempt: completion.attempt, transport: transportResult };

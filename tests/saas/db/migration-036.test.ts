@@ -66,6 +66,8 @@ test('migration 036 is registered immediately before subsequent append-only migr
       121,
       // Batch-4 §4.1 multimodal billing dimensions (task #15).
       122,
+      // Batch-4 §4.2 async image tasks (task #16).
+      123,
     ],
   );
 });

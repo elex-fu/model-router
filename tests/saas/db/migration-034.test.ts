@@ -71,6 +71,8 @@ test('migration 034 registers after the immutable 033 history', () => {
       121,
       // Batch-4 §4.1 multimodal billing dimensions (task #15).
       122,
+      // Batch-4 §4.2 async image tasks (task #16).
+      123,
     ],
   );
 });

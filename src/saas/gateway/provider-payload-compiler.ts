@@ -42,14 +42,22 @@ const PER_UNIT_TIER_SET = new Set([
 ]);
 
 /** Canonical provider operations understood by this compiler. */
-export type ProviderPayloadOperation = 'chat.completions' | 'messages' | 'responses' | 'generateContent' | 'embeddings';
+export type ProviderPayloadOperation =
+  | 'chat.completions'
+  | 'messages'
+  | 'responses'
+  | 'generateContent'
+  | 'embeddings'
+  | 'images.generations';
 
 /**
  * R2: the OpenAI protocol family additionally hosts the embeddings
  * operation. It is passthrough-only (openai -> openai) and is never bridged
  * onto another provider protocol.
+ * §4.2 (task #16): the OpenAI family also hosts the images.generations
+ * operation — passthrough-only, never bridged.
  */
-const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['chat.completions', 'embeddings']);
+const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['chat.completions', 'embeddings', 'images.generations']);
 
 /**
  * A server-owned route description. It contains no URL, credential, or caller
@@ -382,6 +390,7 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'responses') return 'responses';
   if (value === 'generateContent') return 'generateContent';
   if (value === 'embeddings') return 'embeddings';
+  if (value === 'images.generations') return 'images.generations';
   compilerFailure('UNSUPPORTED_OPERATION');
 }
 
@@ -523,6 +532,11 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   // generic operation/bridge pair validation so the family mismatch is never
   // shadowed by an UNSUPPORTED_OPERATION fallback.
   if (normalizedClientOperation === 'embeddings' && resolvedProviderProtocol !== 'openai') {
+    compilerFailure('CAPABILITY_UNSUPPORTED');
+  }
+  // §4.2 (task #16): the same gate applies to the image generation
+  // operation — passthrough-only onto OpenAI-protocol-family providers.
+  if (normalizedClientOperation === 'images.generations' && resolvedProviderProtocol !== 'openai') {
     compilerFailure('CAPABILITY_UNSUPPORTED');
   }
   if (
@@ -677,6 +691,15 @@ function validateClientBody(body: unknown, route: NormalizedRoute, publicModel: 
   if (route.clientOperation === 'embeddings') {
     if (!Object.hasOwn(body, 'input')) compilerFailure('INVALID_INPUT');
     assertJsonCompatible(body.input);
+    return body;
+  }
+  // §4.2 (task #16): an image generations request carries a non-empty
+  // `prompt`; `n`/`size`/`response_format`/`quality`/`service_tier` stay
+  // opaque JSON (the media estimator bounds `n`/`size`; invalid n fails
+  // closed at the estimator, and the payload cap bounds everything else).
+  if (route.clientOperation === 'images.generations') {
+    if (!Object.hasOwn(body, 'prompt')) compilerFailure('INVALID_INPUT');
+    text(body.prompt, 'INVALID_INPUT', 64 * 1024);
     return body;
   }
   if (route.clientProtocol === 'responses') {
@@ -935,6 +958,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
     // R2: catalog-rights incompatibility for the embeddings operation is a
     // missing capability (404 at the HTTP boundary), unlike chat-model
     // incompatibility which stays a closed 503.
+    // §4.2: the images.generations operation shares the rule.
     let embeddingsOperation = false;
     try {
       if (this.configurationError !== null || this.options === null) {
@@ -947,7 +971,8 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       const candidate = authority.candidate;
       if (!isRecord(candidate)) compilerFailure('INVALID_INPUT');
       const route = normalizeRoute(input, this.options);
-      embeddingsOperation = route.providerOperation === 'embeddings';
+      embeddingsOperation =
+        route.providerOperation === 'embeddings' || route.providerOperation === 'images.generations';
       if (
         !isProtocol(authority.route.protocol) ||
         authority.route.protocol !== route.clientProtocol ||

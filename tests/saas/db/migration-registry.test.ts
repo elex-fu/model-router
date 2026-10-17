@@ -81,6 +81,7 @@ import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from '../../../src/sa
 import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/120_cn_provider_account_scheduling.js';
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/122_multimodal_billing_dimensions.js';
+import { IMAGE_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/123_image_tasks.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -182,6 +183,8 @@ test('SaaS migration registry keeps a stable append order with only documented g
       121,
       // Batch-4 §4.1 (task #15): 122 multimodal billing dimensions.
       122,
+      // Batch-4 §4.2 (task #16): 123 async image tasks.
+      123,
     ],
   );
 });
@@ -245,7 +248,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 103);
+  assert.equal(SAAS_MIGRATIONS.length, 104);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -310,6 +313,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'cn_provider_account_scheduling',
       'composite_model_routes',
       'multimodal_billing_dimensions',
+      'image_tasks',
     ],
   );
   assert.deepEqual(
@@ -377,10 +381,12 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       121,
       // Batch-4 §4.1 (task #15): 122 multimodal billing dimensions.
       122,
+      // Batch-4 §4.2 (task #16): 123 async image tasks.
+      123,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 103);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 103);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 104);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 104);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -470,7 +476,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 103);
+  assert.equal(SAAS_MIGRATIONS.length, 104);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -521,6 +527,7 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION,
     COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
     MULTIMODAL_BILLING_SAAS_MIGRATION,
+    IMAGE_TASKS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -650,6 +657,13 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[101], COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[101]?.version, 121);
   assert.equal(SAAS_MIGRATIONS[101]?.name, 'composite_model_routes');
+  // 122: batch-4 §4.1 multimodal billing (task #15); 123: batch-4 §4.2
+  // async image tasks (task #16) — the saas_image_tasks lifecycle registry.
+  assert.equal(SAAS_MIGRATIONS[102]?.version, 122);
+  assert.equal(SAAS_MIGRATIONS[102]?.name, 'multimodal_billing_dimensions');
+  assert.equal(SAAS_MIGRATIONS[103], IMAGE_TASKS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[103]?.version, 123);
+  assert.equal(SAAS_MIGRATIONS[103]?.name, 'image_tasks');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {
