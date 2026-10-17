@@ -82,7 +82,10 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/123_image_tasks.js';
+import { RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/125_risk_control_content_moderation.js';
 import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/126_public_brand_settings.js';
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
+import { PLUGIN_SYSTEM_SAAS_MIGRATION } from '../../../src/saas/db/migrations/128_plugin_system.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -186,9 +189,16 @@ test('SaaS migration registry keeps a stable append order with only documented g
       122,
       // Batch-4 §4.2 (task #16): 123 async image tasks.
       123,
+      // Batch-5 §5.4 (task #19): 125 content risk control.
+      125,
       // Batch-5 §5.2 (task #20): 126 public brand settings — the
       // gateway-readable OEM white-label snapshot table.
       126,
+      // Batch-5 §5.6 (task #23): 127 alert silences/report state.
+      127,
+      // Batch-5 §5.1 (task #24): 128 plugin system — installation registry,
+      // capability bindings and the host-service KV store.
+      128,
     ],
   );
 });
@@ -252,7 +262,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 104);
+  assert.equal(SAAS_MIGRATIONS.length, 108);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -318,6 +328,10 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'composite_model_routes',
       'multimodal_billing_dimensions',
       'image_tasks',
+      'risk_control_content_moderation',
+      'public_brand_settings',
+      'obs_alert_silences_and_report_state',
+      'plugin_system',
     ],
   );
   assert.deepEqual(
@@ -387,13 +401,20 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       122,
       // Batch-4 §4.2 (task #16): 123 async image tasks.
       123,
+      // Batch-5 §5.4 (task #19): 125 content risk control.
+      125,
       // Batch-5 §5.2 (task #20): 126 public brand settings — the
       // gateway-readable OEM white-label snapshot table.
       126,
+      // Batch-5 §5.6 (task #23): 127 alert silences/report state.
+      127,
+      // Batch-5 §5.1 (task #24): 128 plugin system — installation registry,
+      // capability bindings and the host-service KV store.
+      128,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 105);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 105);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 108);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 108);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -483,7 +504,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 104);
+  assert.equal(SAAS_MIGRATIONS.length, 108);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -535,7 +556,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
     MULTIMODAL_BILLING_SAAS_MIGRATION,
     IMAGE_TASKS_SAAS_MIGRATION,
+    RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION,
     PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
+    OBS_ALERT_SILENCES_SAAS_MIGRATION,
+    PLUGIN_SYSTEM_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -672,6 +696,21 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[103], IMAGE_TASKS_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[103]?.version, 123);
   assert.equal(SAAS_MIGRATIONS[103]?.name, 'image_tasks');
+  assert.equal(SAAS_MIGRATIONS[104], RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[104]?.version, 125);
+  assert.equal(SAAS_MIGRATIONS[104]?.name, 'risk_control_content_moderation');
+  // 126: batch-5 §5.2 public brand settings (task #20).
+  assert.equal(SAAS_MIGRATIONS[105], PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[105]?.version, 126);
+  assert.equal(SAAS_MIGRATIONS[105]?.name, 'public_brand_settings');
+  // 127: batch-5 §5.6 alert silences/report state (task #23).
+  assert.equal(SAAS_MIGRATIONS[106], OBS_ALERT_SILENCES_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[106]?.version, 127);
+  assert.equal(SAAS_MIGRATIONS[106]?.name, 'obs_alert_silences_and_report_state');
+  // 128: batch-5 §5.1 plugin system (task #24).
+  assert.equal(SAAS_MIGRATIONS[107], PLUGIN_SYSTEM_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[107]?.version, 128);
+  assert.equal(SAAS_MIGRATIONS[107]?.name, 'plugin_system');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

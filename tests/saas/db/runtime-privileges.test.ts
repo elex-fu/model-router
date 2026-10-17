@@ -519,6 +519,9 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_obs_channel_metrics_1m', 'DELETE'],
     ['saas_obs_channel_metrics_hourly', 'DELETE'],
     ['saas_obs_alert_rules', 'DELETE'],
+    // Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+    // rides the same DELETE).
+    ['saas_obs_alert_silences', 'DELETE'],
     // R1 (105): billing group account-pool membership replacement.
     ['saas_billing_group_account_pools', 'DELETE'],
     // R4 (106): verification-code expiry pruning and delivery-failure
@@ -536,6 +539,15 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_probe_runs', 'DELETE'],
     // (121) composite model routes: registry row lifecycle.
     ['saas_composite_model_routes', 'DELETE'],
+    // 125 (batch-5 §5.4) risk control: moderation log retention (hit/non-hit
+    // windows) and the flagged-hash blocklist lifecycle (admin delete/clear).
+    ['saas_content_moderation_logs', 'DELETE'],
+    ['saas_content_moderation_flagged_hashes', 'DELETE'],
+    // 128 (batch-5 §5.1) plugin system: installation lifecycle (bindings
+    // cascade via the FK) and the binding-set replacement DELETE inside
+    // upsertInstallation/replaceBindings.
+    ['saas_plugin_installations', 'DELETE'],
+    ['saas_plugin_bindings', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });
@@ -566,7 +578,7 @@ test('role template mirrors the control-plane manifest and grants no broad table
   );
   assert.doesNotMatch(
     sql,
-    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b|saas_billing_group_account_pools\b|saas_email_verification_codes\b|saas_egress_proxies\b|saas_probe_monitors\b|saas_probe_runs\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
+    /GRANT\s+DELETE\s+ON\s+TABLE\s+model_router_saas\.(?!saas_billing_spending_freezes\b|saas_refund_wallet_freezes\b|saas_platform_role_assignments\b|saas_customer_webhook_deliveries\b|saas_customer_webhook_delivery_attempts\b|saas_obs_channel_metrics_1m\b|saas_obs_channel_metrics_hourly\b|saas_obs_alert_rules\b|saas_billing_group_account_pools\b|saas_email_verification_codes\b|saas_egress_proxies\b|saas_probe_monitors\b|saas_probe_runs\b|saas_plugin_installations\b|saas_plugin_bindings\b)[^\s;]+[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
   assert.doesNotMatch(
     sql,
@@ -1318,7 +1330,7 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
   assert.ok(SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.every(([, , verb]) => ['SELECT', 'INSERT', 'UPDATE'].includes(verb)));
   assert.equal(
     SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
-      ([table, , verb]) =>
+      ([table, column, verb]) =>
         [
           'saas_users',
           'saas_memberships',
@@ -1328,7 +1340,13 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
           'saas_tenant_provider_credential_versions',
           'saas_platform_provider_credentials',
           'saas_platform_provider_credential_versions',
-        ].includes(table) && verb !== 'SELECT',
+        ].includes(table) &&
+        verb !== 'SELECT' &&
+        // 125 (batch-5 §5.4) risk control: the moderation seam's auto-ban
+        // flips the user's disabled_at through the same columns the
+        // control-plane governance service uses — the single sanctioned
+        // non-SELECT exception on saas_users.
+        !(table === 'saas_users' && (column === 'disabled_at' || column === 'updated_at')),
     ),
     false,
   );

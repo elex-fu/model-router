@@ -37,7 +37,7 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   assert.equal(
     SAAS_MIGRATIONS.length,
-    104,
+    106,
     '060 active + 063 + 080-085 + 087/088 + 089-092 marketing + 093 D4 + 094 R4 + 095 R8 + 096 payload rewrite + 097 quarantine + 098 rate/health + 099 codex scheduling + 100 claude scheduling + 101-106, 107 egress, 108 R5b, 109 R6a, 110 platform settings, 111 gemini scheduling, 112-114 R1 billing-group limit enforcement, 115 scheduling-threshold pause, 116 TLS fingerprints, 117-120 batch-3 (bedrock/vertex/grok/cn) scheduling, 121 composite model routing and 122 multimodal billing registered; audited061 registration remains an explicit later gate',
   );
   assert.deepEqual(
@@ -91,6 +91,10 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
       122,
       // Batch-4 §4.2 async image tasks (task #16).
       123,
+      // Batch-5 §5.2 public brand settings (task #20).
+      126,
+      // Batch-5 §5.6 alert silences/report state (task #23).
+      127,
     ],
   );
   assert.equal(SAAS_MIGRATIONS[60], USAGE_CORRECTIONS_SAAS_MIGRATION);

@@ -101,7 +101,11 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
+import { RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION } from './125_risk_control_content_moderation.js';
 import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_settings.js';
+import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
+
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
 
 export interface SaasMigration {
   version: number;
@@ -699,10 +703,32 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // role owns the lifecycle (column-scoped INSERT/UPDATE + dynamic read),
   // control plane has no access.
   IMAGE_TASKS_SAAS_MIGRATION,
+  // 125: batch-5 §5.4 content risk control (task #19) — single-row gateway-
+  // readable JSONB config, the moderation decision log (hit/non-hit rows,
+  // auto-ban violation counting, admin filter dimensions), and the pre-hash
+  // blocklist for previously flagged inputs. Retention cleanup runs on the
+  // control plane; the gateway seam writes logs and hashes only.
+  RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION,
   // 126: batch-5 §5.2 OEM white-label (task #20) — the gateway-readable
   // public brand snapshot single-row table. The control plane materializes
   // the non-secret `saas.brand.*` settings subset into it; the gateway and
   // the console-serving workloads read it (SSR `window.__APP_CONFIG__`
   // injection, `GET /settings/public`) through read-only grants.
   PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
+  // 127: batch-5 §5.6 alert/report gaps (task #23) — the operator silence
+  // table the alert evaluator consults each cycle (a silenced rule neither
+  // triggers nor auto-resolves; rule/platform scope, group/region reserved)
+  // plus the per-report-type last_run state row the scheduled email reports
+  // claim under a SKIP LOCKED lease BEFORE generating content, so a broken
+  // SMTP config can never retry every minute.
+  OBS_ALERT_SILENCES_SAAS_MIGRATION,
+  // 128: batch-5 §5.1 plugin system (task #24) — the DB-authoritative
+  // installation registry (with the signed artifact bytes for replica
+  // re-verify), the capability-scope binding table (partial unique index =
+  // one enabled plugin per capability scope), and the PG-backed host-service
+  // KV store. The plugin-host workload converges from these rows (1s
+  // reconcile); grants live in runtime-privileges.ts and the new
+  // plugin-host role template. 123/124/127 stay reserved for the parallel
+  // media/websearch/observability workstreams.
+  PLUGIN_SYSTEM_SAAS_MIGRATION,
 ];

@@ -594,6 +594,17 @@ $runtime_column_acl_normalization$;
 -- while resolving composite-group requests. Re-apply this template after
 -- running migration 121 on a database that predates it — until then the
 -- gateway runtime privilege probe fails closed by design.
+-- DEPLOYMENT NOTE (migration 128, batch-5 §5.1 plugin system): the control
+-- plane owns the plugin installation registry and every binding edit; the
+-- gateway reads routing truth only (the full saas_plugin_bindings row set
+-- through the dynamic read-table grant, and the seven routing columns of
+-- saas_plugin_installations through the fixed column manifest — never
+-- artifact_data, the manifest blob or config_json). The standalone
+-- plugin-host workload uses its own template
+-- (deploy/managed-saas-plugin-host-role-grants.sql — apply it after the
+-- migrate). Re-apply this template after running migration 128 on a
+-- database that predates it — until then the runtime privilege probes fail
+-- closed by design.
 -- DEPLOYMENT NOTE (migration 106, R4 registration admission): the identity
 -- control plane owns saas_email_verification_codes exclusively (issue,
 -- verify-and-consume, attempt counting, expiry pruning); the gateway has no
@@ -686,6 +697,14 @@ $runtime_column_acl_normalization$;
 -- grant. Re-apply this template after running migration 112 on a database
 -- that predates it — until then the gateway runtime privilege probe fails
 -- closed by design.
+-- DEPLOYMENT NOTE (migration 125, content risk control): the control plane
+-- owns the single-row JSONB config (saas_risk_control_config), the admin log
+-- surface and the retention cleanup (DELETE on the log and flagged-hash
+-- tables); the gateway moderation seam reads the config and blocklist, writes
+-- decision logs and flagged hashes, and flips saas_users.disabled_at for
+-- auto-ban (the same column the governance service uses). Re-apply this
+-- template after running migration 125 on a database that predates it —
+-- until then both runtime privilege probes fail closed by design.
 DO $control_plane_runtime_grants$
 DECLARE
   v_grant record;
@@ -752,6 +771,15 @@ BEGIN
       ('saas_obs_alert_rules', 'UPDATE', 'name enabled metric operator threshold window_minutes sustained_minutes cooldown_minutes notify_email webhook_url last_triggered_at'),
       ('saas_obs_alert_events', 'SELECT', 'id rule_id triggered_at resolved_at payload'),
       ('saas_obs_alert_events', 'INSERT', 'id rule_id triggered_at payload'),
+      -- Batch-5 §5.6 (migration 127): alert auto-resolve (the evaluator
+      -- closes a rule's open events when a cycle does not violate), the
+      -- operator silence registry, and the report scheduler's last_run rows.
+      ('saas_obs_alert_events', 'UPDATE', 'resolved_at'),
+      ('saas_obs_alert_silences', 'SELECT', 'id rule_id platform group_id region until reason created_by created_at'),
+      ('saas_obs_alert_silences', 'INSERT', 'id rule_id platform group_id region until reason created_by'),
+      ('saas_obs_report_state', 'SELECT', 'report_type last_run_at updated_at'),
+      ('saas_obs_report_state', 'INSERT', 'report_type last_run_at'),
+      ('saas_obs_report_state', 'UPDATE', 'last_run_at updated_at'),
       ('saas_platform_mfa_enrollment_tokens', 'SELECT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'INSERT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'UPDATE', 'consumed_at'),
@@ -769,6 +797,15 @@ BEGIN
       ('saas_billing_group_account_pools', 'SELECT', 'group_id account_id priority created_at'),
       ('saas_billing_group_account_pools', 'INSERT', 'group_id account_id priority'),
       ('saas_billing_group_account_pools', 'UPDATE', 'priority'),
+      -- 125 (batch-5 §5.4) risk control: the control plane owns the
+      -- single-row JSONB config (admin PUT), reads the moderation decision
+      -- log for the admin surface, and runs the retention cleanup; the
+      -- flagged-hash blocklist deletes ride the table-level DELETE manifest.
+      ('saas_risk_control_config', 'SELECT', 'id config updated_at'),
+      ('saas_risk_control_config', 'INSERT', 'id config updated_at'),
+      ('saas_risk_control_config', 'UPDATE', 'config updated_at'),
+      ('saas_content_moderation_logs', 'SELECT', 'id request_id tenant_id user_id api_key_id api_key_name model protocol mode action flagged highest_category highest_score matched_keyword category_scores threshold_snapshot input_excerpt input_hash upstream_latency_ms error violation_count auto_banned email_sent created_at'),
+      ('saas_content_moderation_flagged_hashes', 'SELECT', 'input_hash created_at'),
       -- (121) composite model routes: the control plane manages the composite
       -- route registry; the gateway reads it during composite-group resolution
       -- (the dynamic read-table grant below).
@@ -1013,7 +1050,17 @@ BEGIN
       ('saas_customer_webhook_delivery_attempts', 'UPDATE', 'state http_status latency_ms error_code finished_at'),
       ('saas_customer_webhook_tenant_usage', 'SELECT', 'tenant_id pending_deliveries minute_bucket events_in_bucket'),
       ('saas_customer_webhook_tenant_usage', 'INSERT', 'tenant_id minute_bucket events_in_bucket pending_deliveries'),
-      ('saas_customer_webhook_tenant_usage', 'UPDATE', 'pending_deliveries minute_bucket events_in_bucket updated_at')
+      ('saas_customer_webhook_tenant_usage', 'UPDATE', 'pending_deliveries minute_bucket events_in_bucket updated_at'),
+      -- 128 (batch-5 §5.1) plugin system: the control plane owns the
+      -- installation registry CRUD (upload/replace, state admin, config)
+      -- and every binding edit; the plugin-host workload runs its own role
+      -- template and the gateway reads routing truth only.
+      ('saas_plugin_installations', 'SELECT', 'id plugin_key name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 installed_by installed_at updated_at enabled_at'),
+      ('saas_plugin_installations', 'INSERT', 'plugin_key name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 installed_by'),
+      ('saas_plugin_installations', 'UPDATE', 'name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 updated_at enabled_at'),
+      ('saas_plugin_bindings', 'SELECT', 'id installation_id capability platform account_type enabled rollout_percent created_at updated_at'),
+      ('saas_plugin_bindings', 'INSERT', 'installation_id capability platform account_type enabled rollout_percent'),
+      ('saas_plugin_bindings', 'UPDATE', 'enabled rollout_percent updated_at')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1046,6 +1093,9 @@ BEGIN
       ('saas_obs_channel_metrics_1m', 'DELETE'),
       ('saas_obs_channel_metrics_hourly', 'DELETE'),
       ('saas_obs_alert_rules', 'DELETE'),
+      -- Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+      -- rides the same DELETE).
+      ('saas_obs_alert_silences', 'DELETE'),
       ('saas_billing_group_account_pools', 'DELETE'),
       ('saas_email_verification_codes', 'DELETE'),
       -- R3 (107): proxy registry lifecycle; in-use proxies are protected by
@@ -1058,7 +1108,17 @@ BEGIN
       ('saas_probe_runs', 'DELETE'),
       -- (121) composite model routes: registry row lifecycle (group rows
       -- cascade with the group head; this is the per-row admin delete).
-      ('saas_composite_model_routes', 'DELETE')
+      ('saas_composite_model_routes', 'DELETE'),
+      -- 125 (batch-5 §5.4) risk control: moderation log retention
+      -- (hit/non-hit windows) and the flagged-hash blocklist lifecycle
+      -- (admin delete/clear).
+      ('saas_content_moderation_logs', 'DELETE'),
+      ('saas_content_moderation_flagged_hashes', 'DELETE'),
+      -- 128 (batch-5 §5.1) plugin system: installation lifecycle (bindings
+      -- cascade via the FK) and the binding-set replacement DELETE inside
+      -- upsertInstallation/replaceBindings.
+      ('saas_plugin_installations', 'DELETE'),
+      ('saas_plugin_bindings', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
@@ -1157,7 +1217,17 @@ BEGIN
       -- 126 (batch-5 §5.2) OEM white-label: the gateway serves the public
       -- brand snapshot (GET /settings/public + custom page content)
       -- read-only; materialization writes run on the control plane only.
-      ('saas_public_brand_settings')
+      ('saas_public_brand_settings'),
+      -- 125 (batch-5 §5.4) risk control: the moderation seam reads the
+      -- JSONB config snapshot (short TTL) and the flagged-hash blocklist,
+      -- and counts the auto-ban violation window over its own log rows.
+      ('saas_risk_control_config'),
+      ('saas_content_moderation_logs'),
+      ('saas_content_moderation_flagged_hashes'),
+      -- 128 (batch-5 §5.1) plugin routing read (gateway decorator): the
+      -- routing snapshot for a capability comes from the enabled binding
+      -- row; no sensitive column exists on the table.
+      ('saas_plugin_bindings')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1720,7 +1790,53 @@ BEGIN
       ('saas_image_tasks', 'completed_at', 'INSERT'), ('saas_image_tasks', 'expires_at', 'INSERT'),
       ('saas_image_tasks', 'status', 'UPDATE'), ('saas_image_tasks', 'http_status', 'UPDATE'),
       ('saas_image_tasks', 'result', 'UPDATE'), ('saas_image_tasks', 'error', 'UPDATE'),
-      ('saas_image_tasks', 'completed_at', 'UPDATE'), ('saas_image_tasks', 'expires_at', 'UPDATE')
+      ('saas_image_tasks', 'completed_at', 'UPDATE'), ('saas_image_tasks', 'expires_at', 'UPDATE'),
+      -- 125 (batch-5 §5.4) risk control: the moderation seam writes
+      -- decision logs (identity columns only — id is the identity default)
+      -- and records flagged input hashes; auto-ban flips the user's
+      -- disabled_at through the same column the control-plane governance
+      -- service uses.
+      ('saas_content_moderation_logs', 'request_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'tenant_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'user_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'api_key_id', 'INSERT'),
+      ('saas_content_moderation_logs', 'api_key_name', 'INSERT'),
+      ('saas_content_moderation_logs', 'model', 'INSERT'),
+      ('saas_content_moderation_logs', 'protocol', 'INSERT'),
+      ('saas_content_moderation_logs', 'mode', 'INSERT'),
+      ('saas_content_moderation_logs', 'action', 'INSERT'),
+      ('saas_content_moderation_logs', 'flagged', 'INSERT'),
+      ('saas_content_moderation_logs', 'highest_category', 'INSERT'),
+      ('saas_content_moderation_logs', 'highest_score', 'INSERT'),
+      ('saas_content_moderation_logs', 'matched_keyword', 'INSERT'),
+      ('saas_content_moderation_logs', 'category_scores', 'INSERT'),
+      ('saas_content_moderation_logs', 'threshold_snapshot', 'INSERT'),
+      ('saas_content_moderation_logs', 'input_excerpt', 'INSERT'),
+      ('saas_content_moderation_logs', 'input_hash', 'INSERT'),
+      ('saas_content_moderation_logs', 'upstream_latency_ms', 'INSERT'),
+      ('saas_content_moderation_logs', 'error', 'INSERT'),
+      ('saas_content_moderation_logs', 'violation_count', 'INSERT'),
+      ('saas_content_moderation_logs', 'auto_banned', 'INSERT'),
+      ('saas_content_moderation_logs', 'email_sent', 'INSERT'),
+      ('saas_content_moderation_logs', 'created_at', 'INSERT'),
+      ('saas_content_moderation_flagged_hashes', 'input_hash', 'INSERT'),
+      ('saas_content_moderation_flagged_hashes', 'created_at', 'INSERT'),
+      ('saas_users', 'disabled_at', 'UPDATE'),
+      ('saas_users', 'updated_at', 'UPDATE'),
+      -- 125 auto-ban guard: the platform-role existence probe (SELECT-only,
+      -- user_id alone).
+      ('saas_platform_role_assignments', 'user_id', 'SELECT'),
+decorator): routing
+      -- columns only — never artifact_data, the manifest blob or
+      -- config_json.
+      ('saas_plugin_installations', 'id', 'SELECT'),
+      ('saas_plugin_installations', 'plugin_key', 'SELECT'),
+      ('saas_plugin_installations', 'version', 'SELECT'),
+      ('saas_plugin_installations', 'state', 'SELECT'),
+      ('saas_plugin_installations', 'binary_sha256', 'SELECT'),
+      ('saas_plugin_installations', 'signature_status', 'SELECT'),
+      ('saas_plugin_installations', 'updated_at', 'SELECT')
+    ) AS manifest(table_name, column_name, privilege_type)
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP

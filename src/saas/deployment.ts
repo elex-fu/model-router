@@ -14,6 +14,22 @@ export const MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL = 'MODEL_ROUTER_SAAS_C
 export const MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL = 'MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL' as const;
 export const MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL =
   'MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL' as const;
+/** Batch-5 §5.1 plugin system: dedicated plugin-host workload settings. */
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL' as const;
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE =
+  'MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE' as const;
+/** JSON object {keyId: base64-ed25519-public-key}; control-plane + plugin-host only. */
+export const MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS = 'MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS' as const;
+/** Development-only escape hatch; refused in production. */
+export const MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED = 'MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED' as const;
+/** Shared internal bearer token between the gateway and plugin-host workloads. */
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN =
+  'MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN' as const;
+/** Internal plugin-host listener (never a public listener). */
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS' as const;
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT' as const;
+/** Gateway-side base URL of the plugin-host internal listener. */
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_URL = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_URL' as const;
 export const MODEL_ROUTER_SAAS_REDIS_URL = 'MODEL_ROUTER_SAAS_REDIS_URL' as const;
 export const MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL = 'MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL' as const;
 export const MODEL_ROUTER_SAAS_REDIS_PROVIDER = 'MODEL_ROUTER_SAAS_REDIS_PROVIDER' as const;
@@ -74,6 +90,15 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
     controlPlaneDatabaseUrl: MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
     gatewayDatabaseUrl: MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
     validationWorkerDatabaseUrl: MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
+    pluginHostDatabaseUrl: MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
+    pluginHostProviderCredentialDecryptKmsModule:
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+    pluginsTrustedPublishers: MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS,
+    pluginsAllowUnsigned: MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED,
+    pluginHostInternalToken: MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN,
+    pluginHostBindAddress: MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS,
+    pluginHostPort: MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT,
+    gatewayPluginHostUrl: MODEL_ROUTER_SAAS_PLUGIN_HOST_URL,
     redisUrl: MODEL_ROUTER_SAAS_REDIS_URL,
     gatewayRedisUrl: MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
     redisProviderModule: MODEL_ROUTER_SAAS_REDIS_PROVIDER,
@@ -121,13 +146,20 @@ const LISTENER_ROUTE_PREFIXES = {
   gateway: '/v1',
 } as const satisfies Record<(typeof LISTENER_NAMES)[number], string>;
 
-const WORKLOAD_ROLES = ['combined', 'control-plane', 'gateway', 'credential-validation-worker'] as const;
+const WORKLOAD_ROLES = [
+  'combined',
+  'control-plane',
+  'gateway',
+  'credential-validation-worker',
+  'plugin-host',
+] as const;
 
 const WORKLOAD_ROLE_LISTENERS = deepFreeze({
   combined: ['customer', 'platform', 'gateway'],
   'control-plane': ['customer', 'platform'],
   gateway: ['gateway'],
   'credential-validation-worker': [],
+  'plugin-host': [],
 } as const);
 
 /** Exact listener names owned by each managed SaaS workload role. */
@@ -142,6 +174,14 @@ export const SAAS_DEPLOYMENT_ENV_NAMES = deepFreeze([
   MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
   MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+  MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS,
+  MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT,
+  MODEL_ROUTER_SAAS_PLUGIN_HOST_URL,
   MODEL_ROUTER_SAAS_REDIS_URL,
   MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
   MODEL_ROUTER_SAAS_REDIS_PROVIDER,
@@ -213,6 +253,20 @@ export interface ManagedSaasDeploymentConfig {
   readonly customerPasskeyCapabilityModule?: string;
   /** Dedicated decrypt-only KMS module; present only for the validation worker role. */
   readonly validationWorkerProviderCredentialDecryptKmsModule?: string;
+  /** Batch-5 §5.1: dedicated decrypt-only KMS module; plugin-host role only. */
+  readonly pluginHostProviderCredentialDecryptKmsModule?: string;
+  /** Batch-5 §5.1: shared internal token (gateway ↔ plugin-host); gateway/plugin-host roles only. */
+  readonly pluginHostInternalToken?: string;
+  /** Batch-5 §5.1: internal plugin-host listener bind; plugin-host role only. */
+  readonly pluginHostBindAddress?: string;
+  /** Batch-5 §5.1: internal plugin-host listener port; plugin-host role only. */
+  readonly pluginHostPort?: number;
+  /** Batch-5 §5.1: gateway's plugin-host base URL; gateway role only. */
+  readonly gatewayPluginHostUrl?: string;
+  /** Batch-5 §5.1: trusted plugin publisher keys (keyId → base64 ed25519 public key). */
+  readonly pluginsTrustedPublishers?: Readonly<Record<string, string>>;
+  /** Batch-5 §5.1: development-only unsigned plugin acceptance; never true in production. */
+  readonly pluginsAllowUnsigned?: boolean;
   /** Reviewed metadata-only target factory; worker-only, never an approval of database catalog authority. */
   readonly credentialValidationTargetsModule?: string;
   /** Stable non-secret AAD identity used when sealing or unsealing provider credentials. */
@@ -240,6 +294,7 @@ export type DeploymentConfigErrorCode =
   | 'INVALID_PROVIDER_MODULE'
   | 'UNEXPECTED_WORKLOAD_SETTING'
   | 'INVALID_CREDENTIAL_CONTEXT'
+  | 'INVALID_PLUGIN_SETTING'
   | 'INVALID_BIND_ADDRESS'
   | 'INVALID_PORT'
   | 'INVALID_ORIGIN'
@@ -416,6 +471,7 @@ const WORKLOAD_ROLE_DATABASE_ENV_NAMES = {
   'control-plane': MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
   gateway: MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
   'credential-validation-worker': MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
+  'plugin-host': MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
 } as const satisfies Record<Exclude<ManagedSaasWorkloadRole, 'combined'>, string>;
 
 function resolveWorkloadRole(environment: DeploymentEnvironment): ManagedSaasWorkloadRole {
@@ -431,7 +487,7 @@ function resolveWorkloadRole(environment: DeploymentEnvironment): ManagedSaasWor
   if (typeof value !== 'string') {
     invalid(
       'INVALID_WORKLOAD_ROLE',
-      `${name} must be exactly combined, control-plane, gateway, or credential-validation-worker.`,
+      `${name} must be exactly combined, control-plane, gateway, credential-validation-worker, or plugin-host.`,
       name,
     );
   }
@@ -440,7 +496,7 @@ function resolveWorkloadRole(environment: DeploymentEnvironment): ManagedSaasWor
   if (role === undefined) {
     invalid(
       'INVALID_WORKLOAD_ROLE',
-      `${name} must be exactly combined, control-plane, gateway, or credential-validation-worker.`,
+      `${name} must be exactly combined, control-plane, gateway, credential-validation-worker, or plugin-host.`,
       name,
     );
   }
@@ -454,6 +510,80 @@ function postgresUrlEnvironmentName(role: ManagedSaasWorkloadRole): string {
   return role === 'combined' ? MODEL_ROUTER_SAAS_DATABASE_URL : WORKLOAD_ROLE_DATABASE_ENV_NAMES[role];
 }
 
+/** Bounded internal bearer token (gateway ↔ plugin-host); visible charset only. */
+function requiredBoundedToken(environment: DeploymentEnvironment, name: string): string {
+  const value = requiredSetting(environment, name, 'internal token', 'INVALID_PLUGIN_SETTING');
+  if (!/^[\x21-\x7e]{32,256}$/.test(value)) {
+    invalid('INVALID_PLUGIN_SETTING', `${name} must be 32-256 visible characters.`, name);
+  }
+  return value;
+}
+
+/** Internal listener bind: an IP literal or localhost (never a public origin). */
+function requiredBindAddress(environment: DeploymentEnvironment, name: string): string {
+  const value = requiredSetting(environment, name, 'bind address', 'INVALID_PLUGIN_SETTING');
+  if (isIP(value) === 0 && value !== 'localhost') {
+    invalid('INVALID_PLUGIN_SETTING', `${name} must be an IP literal or localhost.`, name);
+  }
+  return value;
+}
+
+function requiredPort(environment: DeploymentEnvironment, name: string): number {
+  const raw = requiredSetting(environment, name, 'port', 'INVALID_PLUGIN_SETTING');
+  const port = Number.parseInt(raw, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || String(port) !== raw.trim()) {
+    invalid('INVALID_PLUGIN_SETTING', `${name} must be an integer between 1 and 65535.`, name);
+  }
+  return port;
+}
+
+function validateHttpServiceUrl(environment: DeploymentEnvironment, name: string): string {
+  const value = requiredSetting(environment, name, 'plugin-host URL', 'INVALID_PLUGIN_SETTING');
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return invalid('INVALID_PLUGIN_SETTING', `${name} must be a valid http(s) URL.`, name);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hostname.length === 0) {
+    return invalid('INVALID_PLUGIN_SETTING', `${name} must be a valid http(s) URL.`, name);
+  }
+  return value;
+}
+
+/** JSON {keyId: base64 raw ed25519 public key}; strict shape, ≤64 entries. */
+function parsePluginsTrustedPublishers(
+  environment: DeploymentEnvironment,
+  name: string,
+): Readonly<Record<string, string>> {
+  const value = requiredSetting(environment, name, 'trusted plugin publishers', 'INVALID_PLUGIN_SETTING');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return invalid('INVALID_PLUGIN_SETTING', `${name} must be a JSON object.`, name);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return invalid('INVALID_PLUGIN_SETTING', `${name} must be a JSON object.`, name);
+  }
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length > 64) {
+    return invalid('INVALID_PLUGIN_SETTING', `${name} accepts at most 64 publisher keys.`, name);
+  }
+  const result: Record<string, string> = {};
+  for (const [keyId, keyValue] of entries) {
+    if (!/^[A-Za-z0-9._-]{1,256}$/.test(keyId) || typeof keyValue !== 'string') {
+      return invalid('INVALID_PLUGIN_SETTING', `${name} contains an invalid publisher entry.`, name);
+    }
+    const keyBytes = Buffer.from(keyValue, 'base64');
+    if (keyValue.length > 128 || keyBytes.length !== 32) {
+      return invalid('INVALID_PLUGIN_SETTING', `${name} publisher keys must be base64 ed25519 public keys.`, name);
+    }
+    result[keyId] = keyValue;
+  }
+  return deepFreeze(result);
+}
+
 function validateRequiredSettings(
   environment: DeploymentEnvironment,
   postgresUrlName: string,
@@ -465,7 +595,14 @@ function validateRequiredSettings(
       ? [MODEL_ROUTER_SAAS_REDIS_URL, MODEL_ROUTER_SAAS_REDIS_PROVIDER, MODEL_ROUTER_SAAS_KMS_PROVIDER]
       : workloadRole === 'gateway'
         ? [SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE, MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE]
-        : [MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE];
+        : workloadRole === 'plugin-host'
+          ? [
+              MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+              MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN,
+              MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS,
+              MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT,
+            ]
+          : [MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE];
   const requiredNames = [
     postgresUrlName,
     ...requiredProviderSettings,
@@ -612,6 +749,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
   const listenerNames = managedSaasListenerNames(workloadRole);
   const validationWorker = workloadRole === 'credential-validation-worker';
   const gateway = workloadRole === 'gateway';
+  const pluginHost = workloadRole === 'plugin-host';
   const customerMfaCapabilityModule = optionalCustomerMfaCapabilityModule(environment);
   if (customerMfaCapabilityModule !== undefined && workloadRole !== 'combined' && workloadRole !== 'control-plane') {
     invalid(
@@ -644,6 +782,12 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
       MODEL_ROUTER_SAAS_DATABASE_URL,
       MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
       MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_URL,
       MODEL_ROUTER_SAAS_REDIS_URL,
       MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
       MODEL_ROUTER_SAAS_REDIS_PROVIDER,
@@ -662,6 +806,36 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
         unexpected,
       );
     }
+  } else if (pluginHost) {
+    // The plugin-host is an isolated workload: it loads none of the other
+    // roles' providers, opens no public listener, and must not even see the
+    // other database URL spellings.
+    const forbiddenSettings = [
+      MODEL_ROUTER_SAAS_DATABASE_URL,
+      MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
+      MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
+      MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
+      MODEL_ROUTER_SAAS_PLUGIN_HOST_URL,
+      MODEL_ROUTER_SAAS_REDIS_URL,
+      MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL,
+      MODEL_ROUTER_SAAS_REDIS_PROVIDER,
+      MODEL_ROUTER_SAAS_KMS_PROVIDER,
+      SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
+      SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE,
+      SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+      MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
+      MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+      MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
+      ...Object.values(DEPLOYMENT_ENV_VARS.listeners).flatMap((listener) => Object.values(listener)),
+    ];
+    const unexpected = forbiddenSettings.find((name) => isPresent(environment, name));
+    if (unexpected) {
+      invalid(
+        'UNEXPECTED_WORKLOAD_SETTING',
+        `${unexpected} is not permitted for the plugin-host workload.`,
+        unexpected,
+      );
+    }
   } else {
     // The gateway keeps rejecting the control-plane Redis pair (a gateway
     // must not load the control-plane Redis provider module or its URL
@@ -672,6 +846,12 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
           MODEL_ROUTER_SAAS_DATABASE_URL,
           MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
           MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT,
+          MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS,
+          MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED,
           MODEL_ROUTER_SAAS_REDIS_URL,
           MODEL_ROUTER_SAAS_REDIS_PROVIDER,
           MODEL_ROUTER_SAAS_KMS_PROVIDER,
@@ -687,6 +867,12 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
           MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
           SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
           MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT,
+          MODEL_ROUTER_SAAS_PLUGIN_HOST_URL,
         ];
     const unexpected = forbiddenSettings.find((name) => isPresent(environment, name));
     if (unexpected) {
@@ -772,6 +958,53 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
     ? optionalCredentialValidationTargetsModule(environment)
     : undefined;
 
+  // Batch-5 §5.1 plugin-host settings.
+  const pluginHostKmsModule = pluginHost
+    ? requiredSetting(
+        environment,
+        MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+        'trusted plugin-host credential-decryption KMS module spec',
+        'INVALID_PROVIDER_MODULE',
+      )
+    : undefined;
+  const pluginHostInternalToken = pluginHost
+    ? requiredBoundedToken(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN)
+    : undefined;
+  const pluginHostBindAddress = pluginHost
+    ? requiredBindAddress(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS)
+    : undefined;
+  const pluginHostPort = pluginHost ? requiredPort(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT) : undefined;
+  const gatewayPluginHostUrl = gateway
+    ? isPresent(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_URL)
+      ? validateHttpServiceUrl(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_URL)
+      : undefined
+    : undefined;
+  const gatewayPluginHostInternalToken =
+    gateway && isPresent(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN)
+      ? requiredBoundedToken(environment, MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN)
+      : undefined;
+  const pluginsTrustedPublishers =
+    (workloadRole === 'combined' || workloadRole === 'control-plane' || pluginHost) &&
+    isPresent(environment, MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS)
+      ? parsePluginsTrustedPublishers(environment, MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS)
+      : undefined;
+  const pluginsAllowUnsignedSetting = environment[MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED];
+  if (pluginsAllowUnsignedSetting !== undefined && pluginsAllowUnsignedSetting !== 'true') {
+    invalid(
+      'INVALID_PLUGIN_SETTING',
+      `${MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED} must be exactly 'true' or unset.`,
+      MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED,
+    );
+  }
+  const pluginsAllowUnsigned = pluginsAllowUnsignedSetting === 'true';
+  if (pluginsAllowUnsigned && environment.NODE_ENV === 'production') {
+    invalid(
+      'INVALID_PLUGIN_SETTING',
+      `${MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED} is not permitted in production.`,
+      MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED,
+    );
+  }
+
   const sealingKmsModule = environment[SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE];
   const providerCredentialKmsKeyId = optionalKmsKeyId(environment);
   const sealingKmsConfigured = sealingKmsModule !== undefined || providerCredentialKmsKeyId !== undefined;
@@ -832,6 +1065,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
     environment.NODE_ENV === 'production' ||
     sealingKmsConfigured ||
     validationWorker ||
+    pluginHost ||
     gatewayKmsModule !== undefined ||
     customerMfaCapabilityModule !== undefined ||
     customerPasskeyCapabilityModule !== undefined;
@@ -878,6 +1112,14 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
       ? {}
       : { validationWorkerProviderCredentialDecryptKmsModule: validationWorkerKmsModule }),
     ...(credentialValidationTargetsModule === undefined ? {} : { credentialValidationTargetsModule }),
+    ...(pluginHostKmsModule === undefined ? {} : { pluginHostProviderCredentialDecryptKmsModule: pluginHostKmsModule }),
+    ...(pluginHostInternalToken === undefined ? {} : { pluginHostInternalToken }),
+    ...(pluginHostBindAddress === undefined ? {} : { pluginHostBindAddress }),
+    ...(pluginHostPort === undefined ? {} : { pluginHostPort }),
+    ...(gatewayPluginHostUrl === undefined ? {} : { gatewayPluginHostUrl }),
+    ...(gatewayPluginHostInternalToken === undefined ? {} : { pluginHostInternalToken: gatewayPluginHostInternalToken }),
+    ...(pluginsTrustedPublishers === undefined ? {} : { pluginsTrustedPublishers }),
+    ...(pluginsAllowUnsigned ? { pluginsAllowUnsigned: true } : {}),
     deploymentId: deploymentIdSetting ?? 'model-router-development',
     environmentId:
       environmentIdSetting ??

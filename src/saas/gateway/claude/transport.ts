@@ -193,8 +193,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Incremental Messages SSE watcher: extracts the usage facts from
  * `message_start` (input side) and the terminal `message_delta`
  * (authoritative output_tokens) without buffering whole events.
+ *
+ * Exported for the batch-5 §5.1 plugin routing decorator
+ * (src/saas/plugins/gateway-plugin-router.ts): the plugin path returns a
+ * plain response stream and reuses this watcher for usage observation so
+ * billing is identical across the native and plugin routes.
  */
-class MessagesUsageWatcher {
+export class MessagesUsageWatcher {
   private buffer = '';
   private usage: ClaudeMessagesUsage | null = null;
   private complete = false;
@@ -548,6 +553,30 @@ export class ClaudeHttpTransport {
 /** Deterministic metadata user id seed helper shared with the payload layer. */
 export function claudeMetadataUserSeed(proxyKeyId: string, accountUuid: string): string {
   return `${CLAUDE_METADATA_USER_ID_NAMESPACE}${proxyKeyId}:${accountUuid}`;
+}
+
+/**
+ * The Claude Code mimicry header set WITHOUT `authorization` — the exact
+ * `buildHeaders` shape minus the credential line. The batch-5 §5.1 plugin
+ * routing decorator sends this to the plugin transport; the plugin injects
+ * the Authorization header itself after decrypting its per-request session
+ * credential envelope (the host never serializes the token).
+ */
+export function buildClaudeOutboundHeadersSansAuth(
+  baseUrl: URL,
+  cliVersionOverride?: string | null,
+): Record<string, string> {
+  const cliVersion = resolveClaudeCliVersion(cliVersionOverride ?? undefined);
+  return {
+    host: baseUrl.host,
+    'anthropic-version': CLAUDE_ANTHROPIC_VERSION,
+    'anthropic-beta': CLAUDE_CODE_MIMICRY_BETA_HEADER,
+    'user-agent': buildClaudeUserAgent(cliVersion),
+    accept: 'text/event-stream',
+    'content-type': 'application/json',
+    ...CLAUDE_STAINLESS_HEADERS,
+    ...CLAUDE_CLIENT_IDENTITY_HEADERS,
+  };
 }
 
 /** The deriveStableUUIDv4-based metadata user id (identity namespace kernel). */

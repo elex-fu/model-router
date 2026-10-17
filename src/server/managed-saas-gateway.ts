@@ -1,10 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
+import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
-import { CLAUDE_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
+import { CLAUDE_ENDPOINT, CLAUDE_MESSAGES_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
+import {
+  PluginHostClient,
+  PluginRoutingClaudeTransport,
+  type PluginRouteReader,
+} from '../saas/plugins/gateway-plugin-router.js';
 import {
   MINIMAX_ENDPOINT,
   ZHIPU_CODING_ENDPOINT,
@@ -38,6 +44,11 @@ import {
   type SaasGatewayQueryPort,
 } from '../saas/gateway/http-handler.js';
 import { SaasGatewayAsyncImageMediaPort } from '../saas/gateway/images/async-image-media-port.js';
+import { createSaasModelPlazaEndpoint, type SaasModelPlazaPort } from '../saas/gateway/model-plaza/endpoint.js';
+import { ModelsDevOfficialPricingRegistry } from '../saas/gateway/model-plaza/official-pricing.js';
+import { SaasModelPlazaService } from '../saas/gateway/model-plaza/service.js';
+import { PostgresModelPlazaFacts } from '../saas/gateway/model-plaza/store.js';
+import { createModelPlazaSettingsProvider } from '../saas/gateway/model-plaza/settings.js';
 import { ImageResultOffloader } from '../saas/gateway/images/image-result-offloader.js';
 import {
   IMAGE_TASK_EXECUTION_TIMEOUT_MS,
@@ -74,6 +85,7 @@ import {
 } from '../saas/gateway/postgres-request-preparation-authority-adapter.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
 import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
+import type { ContentModerationPort } from '../saas/gateway/http-handler.js';
 import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   type PreparedEvidenceLeaseProvider,
@@ -167,6 +179,8 @@ import {
 } from '../saas/runtime/request-preparation-signer-adapter.js';
 import { PostgresProviderSupplyRepository } from '../saas/supply/repository.js';
 import { createCustomerWebhookEventProducer } from '../saas/webhooks/producers.js';
+import { SaasContentModerationService, type ModerationEmailSender } from '../saas/risk/moderation.js';
+import { PostgresContentModerationStore } from '../saas/risk/postgres-store.js';
 import { S3ObjectClient, type S3ObjectClientConfig } from '../storage/s3-object-client.js';
 
 /** Stable safe error used when the `/v1` graph cannot be constructed. */
@@ -284,6 +298,17 @@ export interface ManagedSaasGatewayCompositionDependencies {
    * this; default false keeps preparation input byte-identical.
    */
   readonly stickyScheduling?: boolean;
+  /**
+   * Model plaza port (roadmap batch 5 §5.5, task #22): the read-only
+   * GET /v1/model-plaza showcase. Absent keeps the endpoint closed (503).
+   */
+  readonly modelPlaza?: SaasModelPlazaPort;
+  /**
+   * Content risk control (roadmap batch 5 §5.4, task #19): the post-auth,
+   * pre-preparation moderation seam. Absent keeps the gateway without risk
+   * control (the request path is byte-identical).
+   */
+  readonly contentModeration?: ContentModerationPort;
 }
 
 export interface ManagedSaasGatewayComposition {
@@ -630,6 +655,8 @@ export function createManagedSaasGatewayComposition(
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
+    ...(dependencies.modelPlaza ? { modelPlaza: dependencies.modelPlaza } : {}),
+    ...(dependencies.contentModeration ? { contentModeration: dependencies.contentModeration } : {}),
     ...(dependencies.imageMedia
       ? {
           queryEndpoints: dependencies.imageMedia.queryEndpoints,
@@ -732,6 +759,16 @@ export interface ManagedSaasGatewayProductionOptions {
    * transport path unchanged.
    */
   readonly claudeEvidenceTransport?: PreparedEvidenceTransport;
+  /**
+   * Batch-5 §5.1 plugin routing dependencies. When set (gateway deployment
+   * with MODEL_ROUTER_SAAS_PLUGIN_HOST_URL + the shared internal token), the
+   * claude route is wrapped by PluginRoutingClaudeTransport; unset keeps the
+   * native claude path byte-identical.
+   */
+  readonly pluginRouting?: {
+    readonly routeReader: PluginRouteReader;
+    readonly pluginHostClient: PluginHostClient;
+  };
   /**
    * Dispatch seam for the Gemini CLI subscription transport
    * (GeminiPreparedEvidenceTransport). When set, prepared evidence whose
@@ -865,6 +902,30 @@ export interface ManagedSaasGatewayProductionOptions {
    * credential convention).
    */
   readonly imageMedia?: SaasGatewayImageMediaOptions;
+  /**
+   * Model plaza (roadmap batch 5 §5.5, task #22): the settings overlay
+   * source (store-first; the deployment resolves what its database role can
+   * read). Absent resolves the plaza switches from the environment only.
+   */
+  readonly modelPlazaSettingsOverlay?: () => Promise<Readonly<Record<string, unknown>>>;
+  /**
+   * Model plaza console-session validation for the session tier. Absent
+   * degrades presented session credentials to the anonymous view (the
+   * split-gateway deployment holds no saas_sessions grant).
+   */
+  readonly modelPlazaSessionAuth?: {
+    readonly getSession: (token: string) => Promise<{ readonly userId: string } | null>;
+  };
+  /**
+   * Content risk control (roadmap batch 5 §5.4, task #19): optional email
+   * sender (violation / account-disabled notices) and site name for the
+   * moderation service. The moderation store is always the gateway database
+   * (fail-open on any store failure); absent sender skips emails.
+   */
+  readonly riskControl?: {
+    readonly emailSender?: ModerationEmailSender;
+    readonly siteName?: string;
+  };
   /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
    * `X-Title`). When set, the values are mounted on the generic transport's
@@ -1735,11 +1796,24 @@ export function createManagedSaasGatewayProductionComposition(
       transport: options.codexEvidenceTransport,
     });
   }
-  if (options.claudeEvidenceTransport !== undefined) {
+if (options.claudeEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: CLAUDE_ENDPOINT,
       providerProtocol: 'anthropic',
-      transport: options.claudeEvidenceTransport,
+      // Batch-5 §5.1: the optional plugin routing layer wraps the claude
+      // transport at its exit. Unrouted accounts and no-binding deployments
+      // delegate to the inner transport unchanged; routed accounts whose
+      // plugin cannot serve fail closed (see gateway-plugin-router.ts).
+      transport:
+        options.pluginRouting === undefined
+          ? options.claudeEvidenceTransport
+          : new PluginRoutingClaudeTransport({
+              inner: options.claudeEvidenceTransport,
+              capability: 'claude.oauth.outbound_transport.v1',
+              routeReader: options.pluginRouting.routeReader,
+              pluginHostClient: options.pluginRouting.pluginHostClient,
+              baseUrl: CLAUDE_MESSAGES_ENDPOINT,
+            }),
     });
   }
   if (options.geminiEvidenceTransport !== undefined) {
@@ -1816,6 +1890,29 @@ export function createManagedSaasGatewayProductionComposition(
     resolver: new PostgresSupplyProfileResolver(database),
   });
 
+  // Model plaza (batch 5 §5.5, task #22): the read-only showcase rides the
+  // same database and the same pricing service as admission (the facts port
+  // resolves every display price through resolveCustomerPriceVersion inside
+  // one snapshot transaction). Settings resolve store-first when the
+  // deployment supplies an overlay reader, env-only otherwise; the session
+  // tier is wired by the deployment when a console-session authority is in
+  // scope (the split-gateway role holds no saas_sessions grant).
+  const modelPlaza = createSaasModelPlazaEndpoint({
+    service: new SaasModelPlazaService({
+      facts: new PostgresModelPlazaFacts({
+        database,
+        pricing: new SaasPricingService(database),
+        groups: new SaasBillingGroupsService(database),
+      }),
+      officialPricing: new ModelsDevOfficialPricingRegistry(),
+    }),
+    settings: createModelPlazaSettingsProvider({
+      ...(options.modelPlazaSettingsOverlay ? { overlay: options.modelPlazaSettingsOverlay } : {}),
+    }),
+    ...(options.modelPlazaSessionAuth ? { sessionAuth: options.modelPlazaSessionAuth } : {}),
+  });
+
+
   return createManagedSaasGatewayComposition({
     authenticator: keyService,
     preparation: {
@@ -1858,6 +1955,15 @@ export function createManagedSaasGatewayProductionComposition(
     // with the affinity port (required above), so the sticky-session
     // scheduling seam is unconditionally live here.
     stickyScheduling: true,
+    modelPlaza,
+    // Batch 5 §5.4 (task #19): content risk control — always wired with the
+    // gateway database store; the service itself fails open when the feature
+    // is disabled or the store errors, so this never gates startup.
+    contentModeration: new SaasContentModerationService({
+      store: new PostgresContentModerationStore(database),
+      ...(options.riskControl?.emailSender ? { emailSender: options.riskControl.emailSender } : {}),
+      ...(options.riskControl?.siteName ? { siteName: options.riskControl.siteName } : {}),
+    }),
   });
 }
 
