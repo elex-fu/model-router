@@ -444,10 +444,7 @@ function normalizeUsage(value: unknown): NormalizedUsageExact | null {
   if (units === undefined) return null;
   if (billingMode !== 'token' && units === null) return null;
   const sizeTier = usage.sizeTier ?? null;
-  if (
-    sizeTier !== null &&
-    !['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'].includes(sizeTier)
-  ) {
+  if (sizeTier !== null && !['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'].includes(sizeTier)) {
     return null;
   }
   return {

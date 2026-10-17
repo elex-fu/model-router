@@ -15,7 +15,10 @@ function replaceOnce(source: string, before: string, after: string): string {
   return source.replace(before, after);
 }
 
-let body = replaceOnce(PRE_DISPATCH_ATTEMPT_GUARD_EXPECTED_SOURCE, '\nBEGIN\n', `
+let body = replaceOnce(
+  PRE_DISPATCH_ATTEMPT_GUARD_EXPECTED_SOURCE,
+  '\nBEGIN\n',
+  `
 BEGIN
   IF OLD.dispatch_state = 'not_sent' AND OLD.result_state = 'failed'
     AND (NEW.dispatch_state IS DISTINCT FROM OLD.dispatch_state
@@ -31,13 +34,18 @@ BEGIN
       AND NEW.unknown_reason IS NULL) THEN
     RAISE EXCEPTION 'Pre-dispatch cancellation requires authoritative non-dispatch' USING ERRCODE = '55000';
   END IF;
-`);
-body = replaceOnce(body,
+`,
+);
+body = replaceOnce(
+  body,
   "IF NEW.dispatch_state = 'not_sent' AND (NEW.result_state <> 'pending' OR NEW.response_started) THEN",
-  "IF NEW.dispatch_state = 'not_sent' AND (NEW.result_state NOT IN ('pending', 'failed') OR NEW.response_started) THEN");
-body = replaceOnce(body,
+  "IF NEW.dispatch_state = 'not_sent' AND (NEW.result_state NOT IN ('pending', 'failed') OR NEW.response_started) THEN",
+);
+body = replaceOnce(
+  body,
   "AND NEW.dispatch_state NOT IN ('sent', 'unknown') THEN\n    RAISE EXCEPTION 'A terminal SaaS attempt result requires sent or unknown dispatch evidence'",
-  "AND NEW.dispatch_state NOT IN ('sent', 'unknown')\n    AND NOT (NEW.dispatch_state = 'not_sent' AND NEW.result_state = 'failed' AND NOT NEW.response_started) THEN\n    RAISE EXCEPTION 'A terminal SaaS attempt result requires sent or unknown dispatch evidence'");
+  "AND NEW.dispatch_state NOT IN ('sent', 'unknown')\n    AND NOT (NEW.dispatch_state = 'not_sent' AND NEW.result_state = 'failed' AND NOT NEW.response_started) THEN\n    RAISE EXCEPTION 'A terminal SaaS attempt result requires sent or unknown dispatch evidence'",
+);
 export const PRE_DISPATCH_ATTEMPT_GUARD_SOURCE = body;
 
 export const PRE_DISPATCH_TERMINAL_CHECK_SQL = `

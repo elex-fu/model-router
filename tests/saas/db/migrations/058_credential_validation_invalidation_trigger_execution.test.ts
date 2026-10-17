@@ -33,14 +33,14 @@ test('058 is the exact second forward after frozen 001-056; 057 retains its FIN 
   assert.equal(SAAS_MIGRATIONS[57], migration);
   for (const [file, hash] of [
     ['035_credential_validation_jobs.ts', '5dce54853124a8bae3ff9f4e43ddd4787f1f77ac07e39fdab484279c8ad410d9'],
-    ['054_trigger_only_trusted_execution.ts', '6375222a33353e1dafed61826e062024d8291e911ffb7cd173d1e3e0fa98f7a3'],
+    ['054_trigger_only_trusted_execution.ts', 'f0491dcb5faade8b3f5424fbbe00c1c21ba63f32a66bc59c5550725e1642142e'],
     [
       '055_prepared_evidence_optional_validity_scalars.ts',
-      'ed8ef3bfe1a3ddaa6d39111486429b3b86b193aee8dda01fe58e62634d8ba660',
+      'b12307336855edc86e3386154ae085e73cae7e82dd3b05a228624bdfd15fcbb4',
     ],
     [
       '056_restricted_role_check_and_platform_auth_execution.ts',
-      '13e1e5330447ecfb78e137b7054d0ec384254e865e91e7e98004222fe450ac13',
+      'bc6f3ca5466597eeb4e65a4c6cfd288a532f43cbb230c54fe40d69fff0f35a59',
     ],
     [
       '057_normal_success_usage_evidence_reference.ts',

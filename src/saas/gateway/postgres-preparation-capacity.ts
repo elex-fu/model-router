@@ -174,8 +174,7 @@ function payloadTokenUnits(bounds: unknown): bigint | null {
    * tokens at all. Media units are NOT tokens and never enter the TPM
    * count; the envelope stays admissible with a zero token reservation.
    */
-  const media =
-    usage.perUnitUnitsUpperBound !== undefined && usage.perUnitUnitsUpperBound !== null;
+  const media = usage.perUnitUnitsUpperBound !== undefined && usage.perUnitUnitsUpperBound !== null;
   if (
     media &&
     input === 0n &&

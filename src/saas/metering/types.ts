@@ -1,3 +1,4 @@
+import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import type {
   GatewayProtocol,
@@ -5,7 +6,6 @@ import type {
   SaasRouteTargetMode,
   SupplyMode,
 } from '../gateway/contracts.js';
-import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
 
 export type MeteringProtocol = GatewayProtocol;
 export type MeteringSupplyMode = SupplyMode;

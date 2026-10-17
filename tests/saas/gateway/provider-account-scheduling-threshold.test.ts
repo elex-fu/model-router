@@ -252,10 +252,8 @@ test('candidate rows map each column family with its unit and staleness rules', 
   assert.equal(minimax[1]?.window, 'weekly');
   // payg accounts never get snapshots: a NULL family contributes nothing.
   assert.equal(
-    schedulingThresholdCandidatesFromRow(
-      baseRow({ auto_pause_5h_threshold: 90, auto_pause_7d_threshold: 80 }),
-      NOW_MS,
-    ).length,
+    schedulingThresholdCandidatesFromRow(baseRow({ auto_pause_5h_threshold: 90, auto_pause_7d_threshold: 80 }), NOW_MS)
+      .length,
     0,
   );
 });

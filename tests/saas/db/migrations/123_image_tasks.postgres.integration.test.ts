@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } from '../../../../src/saas/db/index.js';
 import type { SaasDatabase } from '../../../../src/saas/db/types.js';
+import { SaasImageTaskService } from '../../../../src/saas/gateway/images/image-task-service.js';
 import {
   InMemoryImageTaskStore,
   PostgresImageTaskStore,
-  SaasImageTaskStoreError,
   type SaasImageTaskRecord,
+  SaasImageTaskStoreError,
 } from '../../../../src/saas/gateway/images/image-task-store.js';
-import { SaasImageTaskService } from '../../../../src/saas/gateway/images/image-task-service.js';
 
 /**
  * Batch 4 §4.2 (task #16, migration 123): the saas_image_tasks table exists
@@ -193,7 +193,9 @@ test('123 image task registry holds on live PostgreSQL with the gateway-only gra
     // mirror runtime-privileges.ts and the re-applied roles template).
     await verifySaasRuntimeDatabasePrivileges(gateway, 'gateway');
   } finally {
-    await gateway.query('DELETE FROM model_router_saas.saas_image_tasks WHERE id = $1', [TASK_ID]).catch(() => undefined);
+    await gateway
+      .query('DELETE FROM model_router_saas.saas_image_tasks WHERE id = $1', [TASK_ID])
+      .catch(() => undefined);
     await gateway.close().catch(() => undefined);
     await migrator.close().catch(() => undefined);
   }
@@ -224,7 +226,9 @@ test('123 the image task service runs the full lifecycle against the live gatewa
     assert.equal(view?.error?.message, 'boom');
     assert.equal(await service.readTask({ taskId: submission.taskId, tenantId: 'other', proxyKeyId: 'key-lc' }), null);
   } finally {
-    await gateway.query("DELETE FROM model_router_saas.saas_image_tasks WHERE tenant_id = 'tenant-lc'").catch(() => undefined);
+    await gateway
+      .query("DELETE FROM model_router_saas.saas_image_tasks WHERE tenant_id = 'tenant-lc'")
+      .catch(() => undefined);
     await gateway.close().catch(() => undefined);
   }
 });
@@ -233,7 +237,7 @@ test('123 the in-memory store enforces the same contract for unit wiring', async
   const store = new InMemoryImageTaskStore();
   await store.create(processingRecord());
   assert.equal((await store.get(TASK_ID))?.status, 'processing');
-  assert.equal((await store.get('imgtask_' + '0'.repeat(32))), null);
+  assert.equal(await store.get('imgtask_' + '0'.repeat(32)), null);
   await assert.rejects(store.create(processingRecord()), SaasImageTaskStoreError);
   const finished = await store.finish(TASK_ID, {
     status: 'failed',

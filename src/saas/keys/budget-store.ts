@@ -130,13 +130,9 @@ export function keyBudgetTokenUnitsFromBounds(bounds: unknown): string {
    */
   const media = envelope.perUnitUnitsUpperBound !== undefined && envelope.perUnitUnitsUpperBound !== null;
   const input =
-    media && envelope.inputTotalUpperBound == null
-      ? 0n
-      : BigInt(parseKeyBudgetAmount(envelope.inputTotalUpperBound));
+    media && envelope.inputTotalUpperBound == null ? 0n : BigInt(parseKeyBudgetAmount(envelope.inputTotalUpperBound));
   const output =
-    media && envelope.outputTotalUpperBound == null
-      ? 0n
-      : BigInt(parseKeyBudgetAmount(envelope.outputTotalUpperBound));
+    media && envelope.outputTotalUpperBound == null ? 0n : BigInt(parseKeyBudgetAmount(envelope.outputTotalUpperBound));
   return parseKeyBudgetAmount(input + output);
 }
 

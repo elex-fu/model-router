@@ -326,9 +326,13 @@ function validateIsolatedRunner(source: string): void {
     .split('\n')
     .filter((line) => !/^\s*\/\//.test(line))
     .join('\n');
-  const gates = [...code.matchAll(/^ {2}'([a-z0-9-]+)': \{ root: '([^']+)', httpFixture: (true|false) \},$/gm)].map(
-    ([, selector, root, httpFixture]) => [selector, root, httpFixture === 'true'],
-  );
+  // Biome keeps a gate entry on one line when it fits 120 columns and expands
+  // it across four lines otherwise, so both shapes must parse.
+  const gates = [
+    ...code.matchAll(
+      /^ {2}'([a-z0-9-]+)': (?:\{ root: '([^']+)', httpFixture: (true|false) \}|\{\n {4}root: '([^']+)',\n {4}httpFixture: (true|false),\n {2}\}),$/gm,
+    ),
+  ].map((match) => [match[1], match[2] ?? match[4], (match[3] ?? match[5]) === 'true']);
   assert.deepEqual(
     gates,
     isolatedGates,
@@ -387,8 +391,12 @@ function validateIsolatedRunner(source: string): void {
   assert.equal(
     normalized(main[1]!),
     normalized(`
-    if (process.env.CI !== 'true' || process.env.GITHUB_ACTIONS !== 'true' ||
-      process.argv.length !== 3 || !Object.hasOwn(gates, process.argv[2]!)) {
+    if (
+      process.env.CI !== 'true' ||
+      process.env.GITHUB_ACTIONS !== 'true' ||
+      process.argv.length !== 3 ||
+      !Object.hasOwn(gates, process.argv[2]!)
+    ) {
       throw new Error('one fixed CI matrix selector in GitHub Actions is required');
     }
     const gate = gates[process.argv[2] as keyof typeof gates];
@@ -398,7 +406,12 @@ function validateIsolatedRunner(source: string): void {
     await runtimeProbes();
     if (gate.httpFixture) {
       phase = 'http_fixture';
-      run('node', ['--import', 'tsx', '--test', '${HTTP}']);
+      run('node', [
+        '--import',
+        'tsx',
+        '--test',
+        '${HTTP}',
+      ]);
     }
     phase = 'required_root';
     run('node', ['--import', 'tsx', '--test', gate.root]);
@@ -410,10 +423,10 @@ function validateIsolatedRunner(source: string): void {
   assert.match(code, /await database\.verifySchema\(\)/);
   assert.match(code, /SELECT NOT initialized AS virgin FROM saas_platform_state WHERE singleton = TRUE/);
   assert.match(code, /virgin\.length !== 1 \|\| virgin\[0\]\?\.virgin !== true/);
-  assert.match(code, /identity\.principal !== expectedRole \|\| identity\.session !== expectedRole/);
+  assert.match(code, /identity\.principal !== expectedRole \|\|\s*identity\.session !== expectedRole/);
   assert.match(
     code,
-    /identity\.database !== 'model_router_saas_ci' \|\| !identity\.safe_role \|\| !\[15, 18\]\.includes\(identity\.version\)/,
+    /identity\.database !== 'model_router_saas_ci' \|\|\s*!identity\.safe_role \|\|\s*!\[15, 18\]\.includes\(identity\.version\)/,
   );
   assert.match(
     code,
@@ -433,7 +446,7 @@ function validateIsolatedRunner(source: string): void {
     /\breturn\b|\bif\s*\((?:false|true)\)/,
     'no early success or constant-condition probe/root bypass',
   );
-  assert.match(code, /void main\(\)\.catch\(error =>/);
+  assert.match(code, /void main\(\)\.catch\(\(?error\)? =>/);
   assert.match(code, /typeof code === 'string' && sqlStates\.has\(code\) \? code : null/);
   assert.match(code, /process\.exitCode \?\?= 1/);
 }
@@ -613,20 +626,21 @@ test('each isolated root and helper must remain an explicit strict root and an e
     assert.throws(() =>
       validateIsolatedWorkflow(changeIsolatedJob(workflow, (body) => body.replace(`"${selector}"`, '"missing-gate"'))),
     );
-    assert.throws(() =>
-      validateIsolatedRunner(
-        isolatedRunner.replace(`  '${selector}': { root: '${root}', httpFixture: ${httpFixture} },\n`, ''),
-      ),
-    );
+    const inlineGate = `  '${selector}': { root: '${root}', httpFixture: ${httpFixture} },\n`;
+    const expandedGate = `  '${selector}': {\n    root: '${root}',\n    httpFixture: ${httpFixture},\n  },\n`;
+    const gateEntry = isolatedRunner.includes(inlineGate) ? inlineGate : expandedGate;
+    assert.throws(() => validateIsolatedRunner(isolatedRunner.replace(gateEntry, '')));
     assert.throws(() => validateIsolatedRunner(isolatedRunner.replace(root, 'tests/not-an-executable-root.ts')));
-    assert.throws(() =>
-      validateIsolatedRunner(
-        isolatedRunner.replace(
-          `root: '${root}', httpFixture: ${httpFixture}`,
-          `root: '${root}', httpFixture: ${!httpFixture}`,
-        ),
-      ),
-    );
+    const flipInline = [
+      `root: '${root}', httpFixture: ${httpFixture}`,
+      `root: '${root}', httpFixture: ${!httpFixture}`,
+    ];
+    const flipExpanded = [
+      `root: '${root}',\n    httpFixture: ${httpFixture}`,
+      `root: '${root}',\n    httpFixture: ${!httpFixture}`,
+    ];
+    const flip = isolatedRunner.includes(flipInline[0]) ? flipInline : flipExpanded;
+    assert.throws(() => validateIsolatedRunner(isolatedRunner.replace(flip[0], flip[1])));
   }
   for (const root of isolatedStrictRoots) {
     assert.throws(() =>
@@ -697,7 +711,7 @@ test('fixed runner rejects flags0, admin business actors, local/shared targets, 
 test('real complete HTTP prerequisites and child failures cannot be skipped, filtered, reset or turned into success', () => {
   for (const [original, replacement] of [
     ['if (gate.httpFixture)', 'if (false)'],
-    [`'--test', '${HTTP}'`, `'--test', '--test-name-pattern=one-case', '${HTTP}'`],
+    [`'--test',\n      '${HTTP}'`, `'--test',\n      '--test-name-pattern=one-case',\n      '${HTTP}'`],
     ['  await runtimeProbes();', '  // await runtimeProbes();'],
     ["  run('node', ['--import', 'tsx', '--test', gate.root]);", '  // required gate omitted'],
     ['if (result.error || result.status !== 0)', 'if (false)'],

@@ -33,26 +33,65 @@ export const PREPARED_EVIDENCE_BUCKET_CHECK_SQL = `CASE
 END`;
 
 const historical = PLATFORM_AUTHORIZATION_FENCES_SAAS_MIGRATION.sql;
-export const PLATFORM_AUTHORIZATION_FENCE_ROW_EXPECTED_SOURCE = body(historical, 'saas_platform_authorization_fence_row');
+export const PLATFORM_AUTHORIZATION_FENCE_ROW_EXPECTED_SOURCE = body(
+  historical,
+  'saas_platform_authorization_fence_row',
+);
 const functions = [
-  ['saas_prepared_evidence_valid_input_buckets(text[])', body(PREPARED_REQUEST_EVIDENCE_SAAS_MIGRATION.sql,
-    'saas_prepared_evidence_valid_input_buckets'), 'bool', 'i'],
+  [
+    'saas_prepared_evidence_valid_input_buckets(text[])',
+    body(PREPARED_REQUEST_EVIDENCE_SAAS_MIGRATION.sql, 'saas_prepared_evidence_valid_input_buckets'),
+    'bool',
+    'i',
+  ],
   ['saas_platform_authorization_fence_row()', PLATFORM_AUTHORIZATION_FENCE_ROW_EXPECTED_SOURCE, 'trigger', 'v'],
-  ['saas_platform_authorization_fence_users(uuid[])', body(historical, 'saas_platform_authorization_fence_users'), 'void', 'v'],
-  ['saas_platform_authorization_writer_statement()', body(historical, 'saas_platform_authorization_writer_statement'), 'trigger', 'v'],
+  [
+    'saas_platform_authorization_fence_users(uuid[])',
+    body(historical, 'saas_platform_authorization_fence_users'),
+    'void',
+    'v',
+  ],
+  [
+    'saas_platform_authorization_writer_statement()',
+    body(historical, 'saas_platform_authorization_writer_statement'),
+    'trigger',
+    'v',
+  ],
 ] as const;
-const mfaColumns = ['id', 'user_id', 'kind', 'credential_id', 'public_key', 'encrypted_secret', 'created_at', 'verified_at', 'revoked_at'];
+const mfaColumns = [
+  'id',
+  'user_id',
+  'kind',
+  'credential_id',
+  'public_key',
+  'encrypted_secret',
+  'created_at',
+  'verified_at',
+  'revoked_at',
+];
 const sessionColumns = ['id', 'user_id', 'credential_id', 'token_hash', 'csrf_token_hash', 'expires_at', 'revoked_at'];
 export const PLATFORM_AUTHORIZATION_ROW_BINDINGS = [
   ['saas_platform_role_assignments', 'saas_platform_role_assignments_authorization_fence', 'user_id', 29, []],
   ['saas_platform_sessions', 'saas_platform_sessions_authorization_fence', 'user_id', 29, sessionColumns],
-  ['saas_users', 'saas_users_platform_authorization_fence', 'id', 17, ['disabled_at', 'anonymized_at', 'email', 'password_hash']],
+  [
+    'saas_users',
+    'saas_users_platform_authorization_fence',
+    'id',
+    17,
+    ['disabled_at', 'anonymized_at', 'email', 'password_hash'],
+  ],
   ['saas_mfa_credentials', 'saas_mfa_credentials_platform_authorization_fence', 'user_id', 29, mfaColumns],
 ] as const;
-const bindings = PLATFORM_AUTHORIZATION_ROW_BINDINGS.map(([relation, name, argument, type, columns]) =>
-  `('${relation}', '${name}', '${argument}', ${type}, ARRAY[${columns.map((c) => `'${c}'`).join(', ')}]::text[], '${Buffer.from(`${argument}\0`).toString('hex')}')`).join(',\n    ');
-const expectedFunctions = functions.map(([signature, source, returnType, volatility], i) =>
-  `('${signature}', $source_${i}$${source}$source_${i}$, '${returnType}', '${volatility}')`).join(',\n    ');
+const bindings = PLATFORM_AUTHORIZATION_ROW_BINDINGS.map(
+  ([relation, name, argument, type, columns]) =>
+    `('${relation}', '${name}', '${argument}', ${type}, ARRAY[${columns.map((c) => `'${c}'`).join(', ')}]::text[], '${Buffer.from(`${argument}\0`).toString('hex')}')`,
+).join(',\n    ');
+const expectedFunctions = functions
+  .map(
+    ([signature, source, returnType, volatility], i) =>
+      `('${signature}', $source_${i}$${source}$source_${i}$, '${returnType}', '${volatility}')`,
+  )
+  .join(',\n    ');
 
 const sql = `
 /* Only two confirmed restricted-role execution repairs. The 024 bucket helper

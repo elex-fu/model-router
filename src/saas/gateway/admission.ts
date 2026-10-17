@@ -257,17 +257,7 @@ function requireAdmissionAuthenticatedKey(value: unknown): SaasRequestAdmissionA
   };
 }
 
-const PER_UNIT_TIER_SET = new Set([
-  '1k',
-  '2k',
-  '4k',
-  '480p',
-  '720p',
-  '1080p',
-  'tts',
-  'stt',
-  'realtime',
-]);
+const PER_UNIT_TIER_SET = new Set(['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime']);
 
 const HOLD_INPUT_KEYS = [
   'inputTotal',

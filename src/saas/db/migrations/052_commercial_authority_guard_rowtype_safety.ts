@@ -35,7 +35,11 @@ guardSql = replaceExactlyOnce(
   '  cost_record record;',
   '  cost_effective_at timestamptz;\n  cost_expires_at timestamptz;',
 );
-guardSql = replaceExactlyOnce(guardSql, '      INTO price_record\n', '      INTO price_effective_at, price_expires_at\n');
+guardSql = replaceExactlyOnce(
+  guardSql,
+  '      INTO price_record\n',
+  '      INTO price_effective_at, price_expires_at\n',
+);
 guardSql = replaceExactlyOnce(guardSql, '      INTO cost_record\n', '      INTO cost_effective_at, cost_expires_at\n');
 guardSql = replaceExactlyOnce(
   guardSql,

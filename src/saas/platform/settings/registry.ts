@@ -3,12 +3,12 @@ import {
   TOPUP_AMOUNT_TIER_DISCOUNTS_SETTINGS_KEY,
 } from '../../billing/groups/multiplier.js';
 import type { TopupAmountTier } from '../../billing/groups/types.js';
+import { MODEL_PLAZA_SETTINGS_KEYS, parseModelPlazaSettingValue } from '../../gateway/model-plaza/settings.js';
 import {
   parseRegistrationSettingValue,
   REGISTRATION_SECRET_SETTINGS_KEYS,
   REGISTRATION_SETTINGS_KEYS,
 } from '../../identity/registration-settings.js';
-import { MODEL_PLAZA_SETTINGS_KEYS, parseModelPlazaSettingValue } from '../../gateway/model-plaza/settings.js';
 import {
   parseBrandApiBaseUrlSetting,
   parseBrandContactUrlSetting,
@@ -227,8 +227,7 @@ const DEFINITIONS: readonly PlatformSettingDefinition[] = [
   {
     key: 'saas.brand.custom_endpoints',
     kind: 'plain',
-    description:
-      'Custom API endpoints for quick copy (max 20): [{ name, url, description? }].',
+    description: 'Custom API endpoints for quick copy (max 20): [{ name, url, description? }].',
     parse: parseBrandCustomEndpointsSetting,
   },
   {

@@ -53,8 +53,14 @@ const rewrites = specs.map(([name, sql, expectedLocks]) => {
     // A request's project identity is immutable. Obtain only that hint before
     // the earlier authorization fences; retain the full request integrity lock
     // and its fresh snapshot afterwards. No cached authority is trusted.
-    rewritten = replaceOnce(rewritten, '  request_record record;', '  request_record record;\n  commercial_project_id uuid;');
-    rewritten = replaceOnce(rewritten, '  SELECT r.project_id, r.supply_mode, r.customer_price_version,',
+    rewritten = replaceOnce(
+      rewritten,
+      '  request_record record;',
+      '  request_record record;\n  commercial_project_id uuid;',
+    );
+    rewritten = replaceOnce(
+      rewritten,
+      '  SELECT r.project_id, r.supply_mode, r.customer_price_version,',
       `  SELECT project_id INTO commercial_project_id FROM saas_requests
    WHERE tenant_id = NEW.tenant_id AND id = NEW.request_id;
   IF NOT FOUND THEN
@@ -63,27 +69,37 @@ const rewrites = specs.map(([name, sql, expectedLocks]) => {
   END IF;
 ${readFences('commercial_project_id')}
 
-  SELECT r.project_id, r.supply_mode, r.customer_price_version,`);
-    rewritten = replaceOnce(rewritten,
+  SELECT r.project_id, r.supply_mode, r.customer_price_version,`,
+    );
+    rewritten = replaceOnce(
+      rewritten,
       '     AND r.id = NEW.request_id\n   FOR SHARE;',
-      '     AND r.id = NEW.request_id\n   __KEEP_REQUEST_INTEGRITY_LOCK__;');
+      '     AND r.id = NEW.request_id\n   __KEEP_REQUEST_INTEGRITY_LOCK__;',
+    );
   } else {
-    const anchor = name === 'saas_requests_guard_commercial_authority'
-      ? '  SELECT a.customer_policy_id, a.customer_policy_version,'
-      : '  SELECT rv.public_model_id, rv.public_model_version, rv.protocol, rv.supply_mode,';
-    rewritten = replaceOnce(rewritten, anchor,
-      `${readFences('NEW.project_id')}\n\n${anchor}`);
+    const anchor =
+      name === 'saas_requests_guard_commercial_authority'
+        ? '  SELECT a.customer_policy_id, a.customer_policy_version,'
+        : '  SELECT rv.public_model_id, rv.public_model_version, rv.protocol, rv.supply_mode,';
+    rewritten = replaceOnce(rewritten, anchor, `${readFences('NEW.project_id')}\n\n${anchor}`);
   }
   // Route/policy heads are mutable, protected by the matching 050 project
   // fence. Route/authority/policy/attestation/price/cost versions are immutable.
   rewritten = rewritten.replace(/FOR SHARE;/g, ';').replace('__KEEP_REQUEST_INTEGRITY_LOCK__;', 'FOR SHARE;');
   for (const kind of ['price', 'cost'] as const) {
     if (!rewritten.includes(`  ${kind}_record record;`)) continue;
-    rewritten = replaceOnce(rewritten, `  ${kind}_record record;`,
-      `  ${kind}_effective_at timestamptz;\n  ${kind}_expires_at timestamptz;`);
-    rewritten = replaceOnce(rewritten, `      INTO ${kind}_record\n`,
-      `      INTO ${kind}_effective_at, ${kind}_expires_at\n`);
-    rewritten = rewritten.replaceAll(`${kind}_record.effective_at`, `${kind}_effective_at`)
+    rewritten = replaceOnce(
+      rewritten,
+      `  ${kind}_record record;`,
+      `  ${kind}_effective_at timestamptz;\n  ${kind}_expires_at timestamptz;`,
+    );
+    rewritten = replaceOnce(
+      rewritten,
+      `      INTO ${kind}_record\n`,
+      `      INTO ${kind}_effective_at, ${kind}_expires_at\n`,
+    );
+    rewritten = rewritten
+      .replaceAll(`${kind}_record.effective_at`, `${kind}_effective_at`)
       .replaceAll(`${kind}_record.expires_at`, `${kind}_expires_at`);
   }
   return { name, original, rewritten };
@@ -95,7 +111,8 @@ const writerBody = functionBody(
 );
 const writerLayerBody = functionBody(
   PREPARED_EVIDENCE_AUTHORIZATION_ADVISORY_FENCES_SAAS_MIGRATION.sql,
-  'saas_prepared_evidence_writer_lock_layer', '(fence_keys text[]) RETURNS void',
+  'saas_prepared_evidence_writer_lock_layer',
+  '(fence_keys text[]) RETURNS void',
 );
 
 const sql = `
@@ -174,7 +191,9 @@ $expected_immutable$ THEN
 END;
 $commercial_writer_contract$;
 
-${rewrites.map(({ name, original, rewritten }) => `DO $rewrite_${name}$
+${rewrites
+  .map(
+    ({ name, original, rewritten }) => `DO $rewrite_${name}$
 DECLARE
   function_oid regprocedure := to_regprocedure('model_router_saas.${name}()');
   installed_source text;
@@ -192,7 +211,9 @@ BEGIN
     RAISE EXCEPTION 'Migration 053 ${name} rewrite changed an unapproved clause';
   END IF;
 END;
-$rewrite_${name}$;`).join('\n\n')}
+$rewrite_${name}$;`,
+  )
+  .join('\n\n')}
 `;
 
 export const COMMERCIAL_AUTHORITY_READ_FENCES_SAAS_MIGRATION: SaasMigration = {

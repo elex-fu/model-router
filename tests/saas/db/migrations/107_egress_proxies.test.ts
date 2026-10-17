@@ -21,7 +21,11 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   assert.equal(registered[index + 1], 108, '107 lands directly before the 108 forward');
   // K2: 129 (provider_account_durable_fault_classification, renumbered from
   // main's 112 in this merge) is the new head.
-  assert.equal(registered.at(-1), 129, 'the batch-4/5 tails and the K2 durable fault classification follow the 108 head');
+  assert.equal(
+    registered.at(-1),
+    129,
+    'the batch-4/5 tails and the K2 durable fault classification follow the 108 head',
+  );
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

@@ -83,9 +83,10 @@ test('migrations 102 and 103 are registered in order ahead of the later forwards
   // scheduling, 112-114 billing-group limit enforcement, 115 threshold
   // pause, 116 TLS fingerprints, 117-120 the batch-3 scheduling tails, 121
   // composite routing, 122 multimodal billing, 123 async image tasks, and (post-merge) 124-129 incl. the K2 durable fault classification.
-  assert.deepEqual(versions.slice(index + 2, index + 22), [
-    104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123,
-  ]);
+  assert.deepEqual(
+    versions.slice(index + 2, index + 22),
+    [104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123],
+  );
   // 127 (this task) registers directly after 126 (public brand settings).
   // The absolute tail stays unpinned: later parallel workstreams keep
   // appending (128 plugins, 125 risk in flight), so only the relative

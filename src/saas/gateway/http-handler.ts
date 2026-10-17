@@ -10,6 +10,7 @@ import { resolveClientAddress } from './client-address.js';
 import type { SaasGatewayAsyncMediaPort, SaasGatewayAsyncMediaSubmission } from './images/async-media-port.js';
 import { JsonKeepaliveClientStream } from './images/json-keepalive-client-stream.js';
 import { RecordingClientStream } from './images/recording-client-stream.js';
+import type { SaasModelPlazaPort } from './model-plaza/endpoint.js';
 import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceClientStream,
@@ -25,7 +26,6 @@ import type {
   RequestPreparationPreparedResult,
   RequestPreparationResult,
 } from './request-preparation-service.js';
-import type { SaasModelPlazaPort } from './model-plaza/endpoint.js';
 import { stickySchedulingContext } from './sticky-session-reference.js';
 import { TeeRecordingClientStream } from './videos/tee-recording-client-stream.js';
 import { extractVideoRequestIdFromBody } from './videos/video-billing.js';
@@ -801,7 +801,6 @@ function plazaSessionToken(req: IncomingMessage): string | null {
   }
   return null;
 }
-
 
 async function authenticateCaller(
   req: IncomingMessage,

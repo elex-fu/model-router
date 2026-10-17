@@ -82,11 +82,11 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/123_image_tasks.js';
+import { VIDEO_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/124_video_tasks.js';
 import { RISK_CONTROL_CONTENT_MODERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/125_risk_control_content_moderation.js';
 import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/126_public_brand_settings.js';
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
 import { PLUGIN_SYSTEM_SAAS_MIGRATION } from '../../../src/saas/db/migrations/128_plugin_system.js';
-import { VIDEO_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/124_video_tasks.js';
 import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/129_provider_account_durable_fault_classification.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
@@ -514,7 +514,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
   );
   assert.equal(
     createHash('sha256').update(source).digest('hex'),
-    '7c86dc81ea1ddea6b0a46c2bcea4837c9a83e705ae817106e3cbae5ccdb8b5ed',
+    '597a0f645d25e2dbd2bb9a7ad475427cc10f4bf4ab3cd73baeb6d5ab019ccb2a',
   );
 });
 

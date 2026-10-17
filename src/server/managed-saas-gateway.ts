@@ -1,16 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
+import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
 import { CLAUDE_ENDPOINT, CLAUDE_MESSAGES_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
-import {
-  PluginHostClient,
-  PluginRoutingClaudeTransport,
-  type PluginRouteReader,
-} from '../saas/plugins/gateway-plugin-router.js';
 import {
   MINIMAX_ENDPOINT,
   ZHIPU_CODING_ENDPOINT,
@@ -34,6 +29,7 @@ import {
 import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
 import { GROK_ENDPOINT } from '../saas/gateway/grok/catalog-identity.js';
 import type { GrokCredentialResolver } from '../saas/gateway/grok/transport.js';
+import type { ContentModerationPort } from '../saas/gateway/http-handler.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
@@ -45,11 +41,6 @@ import {
   type SaasGatewayQueryPort,
 } from '../saas/gateway/http-handler.js';
 import { SaasGatewayAsyncImageMediaPort } from '../saas/gateway/images/async-image-media-port.js';
-import { createSaasModelPlazaEndpoint, type SaasModelPlazaPort } from '../saas/gateway/model-plaza/endpoint.js';
-import { ModelsDevOfficialPricingRegistry } from '../saas/gateway/model-plaza/official-pricing.js';
-import { SaasModelPlazaService } from '../saas/gateway/model-plaza/service.js';
-import { PostgresModelPlazaFacts } from '../saas/gateway/model-plaza/store.js';
-import { createModelPlazaSettingsProvider } from '../saas/gateway/model-plaza/settings.js';
 import { ImageResultOffloader } from '../saas/gateway/images/image-result-offloader.js';
 import {
   IMAGE_TASK_EXECUTION_TIMEOUT_MS,
@@ -59,6 +50,11 @@ import {
 import { PostgresImageTaskStore } from '../saas/gateway/images/image-task-store.js';
 import { SaasGatewayImagesQueryPort } from '../saas/gateway/images/images-query-port.js';
 import { createImagesMediaUsagePlan } from '../saas/gateway/images/media-usage-plan.js';
+import { createSaasModelPlazaEndpoint, type SaasModelPlazaPort } from '../saas/gateway/model-plaza/endpoint.js';
+import { ModelsDevOfficialPricingRegistry } from '../saas/gateway/model-plaza/official-pricing.js';
+import { SaasModelPlazaService } from '../saas/gateway/model-plaza/service.js';
+import { createModelPlazaSettingsProvider } from '../saas/gateway/model-plaza/settings.js';
+import { PostgresModelPlazaFacts } from '../saas/gateway/model-plaza/store.js';
 import { OPENCODE_GO_ENDPOINT, OPENCODE_GO_PROVIDER_ID } from '../saas/gateway/opencode-go/catalog-identity.js';
 import {
   DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
@@ -86,7 +82,6 @@ import {
 } from '../saas/gateway/postgres-request-preparation-authority-adapter.js';
 import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/postgres-request-preparation-entitlement-adapter.js';
 import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
-import type { ContentModerationPort } from '../saas/gateway/http-handler.js';
 import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
   type PreparedEvidenceLeaseProvider,
@@ -176,7 +171,14 @@ import {
 } from '../saas/metering/conditional-settlement-port.js';
 import { SaasMeteringService } from '../saas/metering/service.js';
 import { ByokServicePlanService } from '../saas/plans/service.js';
+import {
+  type PluginHostClient,
+  type PluginRouteReader,
+  PluginRoutingClaudeTransport,
+} from '../saas/plugins/gateway-plugin-router.js';
 import { SaasPricingService } from '../saas/pricing/service.js';
+import { type ModerationEmailSender, SaasContentModerationService } from '../saas/risk/moderation.js';
+import { PostgresContentModerationStore } from '../saas/risk/postgres-store.js';
 import type { ProviderCredentialUnsealingKms } from '../saas/runtime/gateway-provider-credential-kms.js';
 import {
   GatewayProviderCredentialUnsealer,
@@ -193,8 +195,6 @@ import {
 } from '../saas/runtime/request-preparation-signer-adapter.js';
 import { PostgresProviderSupplyRepository } from '../saas/supply/repository.js';
 import { createCustomerWebhookEventProducer } from '../saas/webhooks/producers.js';
-import { SaasContentModerationService, type ModerationEmailSender } from '../saas/risk/moderation.js';
-import { PostgresContentModerationStore } from '../saas/risk/postgres-store.js';
 import { S3ObjectClient, type S3ObjectClientConfig } from '../storage/s3-object-client.js';
 
 /** Stable safe error used when the `/v1` graph cannot be constructed. */
@@ -1867,7 +1867,7 @@ export function createManagedSaasGatewayProductionComposition(
       transport: options.codexEvidenceTransport,
     });
   }
-if (options.claudeEvidenceTransport !== undefined) {
+  if (options.claudeEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: CLAUDE_ENDPOINT,
       providerProtocol: 'anthropic',
@@ -2023,7 +2023,6 @@ if (options.claudeEvidenceTransport !== undefined) {
     }),
     ...(options.modelPlazaSessionAuth ? { sessionAuth: options.modelPlazaSessionAuth } : {}),
   });
-
 
   return createManagedSaasGatewayComposition({
     authenticator: keyService,

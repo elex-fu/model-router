@@ -486,24 +486,8 @@ function isOneOf<T extends string>(value: unknown, values: readonly T[]): value 
 const attemptDispatchStates: readonly AttemptDispatchState[] = ['not_sent', 'dispatching', 'sent', 'unknown'];
 const attemptResultStates: readonly AttemptResultState[] = ['pending', 'succeeded', 'failed', 'cancelled', 'unknown'];
 const usageStatuses: readonly GatewayUsage['status'][] = ['reported', 'partial', 'missing', 'estimated'];
-const usageBillingModes: readonly GatewayUsage['billingMode'][] = [
-  'token',
-  'per_request',
-  'image',
-  'video',
-  'audio',
-];
-const usageSizeTiers = [
-  '1k',
-  '2k',
-  '4k',
-  '480p',
-  '720p',
-  '1080p',
-  'tts',
-  'stt',
-  'realtime',
-] as const;
+const usageBillingModes: readonly GatewayUsage['billingMode'][] = ['token', 'per_request', 'image', 'video', 'audio'];
+const usageSizeTiers = ['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'] as const;
 const usageSources: readonly GatewayUsage['source'][] = ['upstream', 'local-estimate', 'legacy'];
 const usageTokenFields = [
   'inputTotal',
@@ -568,7 +552,11 @@ function createNormalizedUsage(input: GatewayUsage): GatewayUsage {
     throw new Error('Normalized usage has an unsupported billing mode');
   }
   const unitsRaw = value.units;
-  if (unitsRaw !== null && unitsRaw !== undefined && (typeof unitsRaw !== 'number' || !Number.isSafeInteger(unitsRaw) || unitsRaw < 0)) {
+  if (
+    unitsRaw !== null &&
+    unitsRaw !== undefined &&
+    (typeof unitsRaw !== 'number' || !Number.isSafeInteger(unitsRaw) || unitsRaw < 0)
+  ) {
     throw new Error('Normalized usage units must be a non-negative safe integer or null');
   }
   const sizeTier = value.sizeTier ?? null;

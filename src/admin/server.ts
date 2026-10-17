@@ -15,6 +15,7 @@ import { ConfigConflictError, ConfigValidationError, ControlError, ControlServic
 import { ControlStore } from '../control/store.js';
 import type { SQLiteQuotaLedger } from '../quota/ledger.js';
 import type { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
+import { injectBrandAppConfig, type PublicBrandSnapshot } from '../saas/platform/brand/snapshot.js';
 import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
 import type { TelemetryWriterStatus } from '../storage/telemetry-write-client.js';
 import { connectTemplate } from './connect.js';
@@ -24,10 +25,6 @@ import { AdminMaintenance } from './maintenance.js';
 import { adminOpenApiDocument, parseAdminRequest } from './openapi.js';
 import { type PlaygroundExecutor, PlaygroundRuns } from './playground.js';
 import { validatePricing } from './pricing.js';
-import {
-  injectBrandAppConfig,
-  type PublicBrandSnapshot,
-} from '../saas/platform/brand/snapshot.js';
 import { AdminRuntime, type AdminRuntimeBridge } from './runtime.js';
 import { telemetryAdapters } from './telemetry.js';
 import {

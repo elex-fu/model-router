@@ -22,22 +22,45 @@ export const CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS = [
   'saas_provider_credential_validation_job_reject_delete()',
 ].map((signature) => ({ signature, source: historicalBody(signature.slice(0, -2)) }));
 export const CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS = [
-  ['saas_tenant_provider_accounts', 'saas_tenant_provider_accounts_invalidate_validation_jobs',
-    CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS[0], 17, ['status']],
-  ['saas_tenant_provider_credentials', 'saas_tenant_provider_credentials_invalidate_validation_jobs',
-    CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS[1], 17, ['current_version', 'status']],
-  ['saas_tenant_provider_credential_validation_jobs', 'saas_tenant_provider_credential_validation_jobs_identity_immutable',
-    'saas_credential_validation_job_identity_immutable()', 19, []],
-  ['saas_tenant_provider_credential_validation_jobs', 'saas_tenant_provider_credential_validation_jobs_no_delete',
-    'saas_provider_credential_validation_job_reject_delete()', 11, []],
+  [
+    'saas_tenant_provider_accounts',
+    'saas_tenant_provider_accounts_invalidate_validation_jobs',
+    CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS[0],
+    17,
+    ['status'],
+  ],
+  [
+    'saas_tenant_provider_credentials',
+    'saas_tenant_provider_credentials_invalidate_validation_jobs',
+    CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS[1],
+    17,
+    ['current_version', 'status'],
+  ],
+  [
+    'saas_tenant_provider_credential_validation_jobs',
+    'saas_tenant_provider_credential_validation_jobs_identity_immutable',
+    'saas_credential_validation_job_identity_immutable()',
+    19,
+    [],
+  ],
+  [
+    'saas_tenant_provider_credential_validation_jobs',
+    'saas_tenant_provider_credential_validation_jobs_no_delete',
+    'saas_provider_credential_validation_job_reject_delete()',
+    11,
+    [],
+  ],
 ] as const;
 
-const expectedFunctions = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS.map(({ signature, source }, i) =>
-  `('${signature}', $source_${i}$${source}$source_${i}$)`).join(',\n    ');
+const expectedFunctions = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_FUNCTIONS.map(
+  ({ signature, source }, i) => `('${signature}', $source_${i}$${source}$source_${i}$)`,
+).join(',\n    ');
 // The original job trigger identifiers exceed PostgreSQL's 63-byte name limit.
 // All identifiers here are trusted ASCII; compare their actual catalog names.
-const expectedBindings = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS.map(([relation, name, signature, type, columns]) =>
-  `('${relation}', '${name.slice(0, 63)}', '${signature}', ${type}, ARRAY[${columns.map((column) => `'${column}'`).join(', ')}]::text[])`).join(',\n    ');
+const expectedBindings = CREDENTIAL_VALIDATION_INVALIDATION_EXPECTED_BINDINGS.map(
+  ([relation, name, signature, type, columns]) =>
+    `('${relation}', '${name.slice(0, 63)}', '${signature}', ${type}, ARRAY[${columns.map((column) => `'${column}'`).join(', ')}]::text[])`,
+).join(',\n    ');
 const targetList = CREDENTIAL_VALIDATION_INVALIDATION_WRAPPERS.map((signature) => `'${signature}'`).join(', ');
 
 const sql = `

@@ -13,7 +13,7 @@ const source = readFileSync(
 test('retry fixture is exactly the failed result branch with unchanged synthetic outcome facts', () => {
   assert.match(
     source,
-    /export const REQUEUE_PG_FAILED: Extract<ProviderCredentialValidationResult, \{ state: 'failed' \}> = \{\s*state: 'failed',\s*errorCode: 'provider_timeout',\s*retryable: false,\s*adapterId: 'synthetic-requeue-controlled-probe',\s*httpStatus: null,\s*durationMs: 0\s*\};/,
+    /export const REQUEUE_PG_FAILED: Extract<ProviderCredentialValidationResult, \{ state: 'failed' \}> = \{\s*state: 'failed',\s*errorCode: 'provider_timeout',\s*retryable: false,\s*adapterId: 'synthetic-requeue-controlled-probe',\s*httpStatus: null,\s*durationMs: 0,?\s*\};/,
   );
   assert.doesNotMatch(source, /export const REQUEUE_PG_FAILED:\s*ProviderCredentialValidationResult\s*=/);
   assert.doesNotMatch(source, /\bas\s+(?:any|unknown)\b|@ts-(?:ignore|expect-error|nocheck)\b/);
@@ -22,11 +22,11 @@ test('retry fixture is exactly the failed result branch with unchanged synthetic
 test('claim and retry/terminal completion remain calls to the actual dedicated worker store', () => {
   assert.match(
     source,
-    /import \{ PostgresCredentialValidationWorkerStore, type CredentialValidationLease \} from '\.\.\/\.\.\/\.\.\/src\/saas\/supply\/credential-validation-worker\.js';/,
+    /import \{\s*type CredentialValidationLease,\s*PostgresCredentialValidationWorkerStore,\s*\} from '\.\.\/\.\.\/\.\.\/src\/saas\/supply\/credential-validation-worker\.js';/,
   );
   assert.match(
     source,
-    /store: new PostgresCredentialValidationWorkerStore\(worker, kms, \{ \.\.\.invalidationStoreOptions\(\), approvedTargets: targets \}\)/,
+    /store: new PostgresCredentialValidationWorkerStore\(worker, kms, \{\s*\.\.\.invalidationStoreOptions\(\),\s*approvedTargets: targets,?\s*\}\)/,
   );
   const claim = source.match(
     /export async function actualRequeueClaim\b[\s\S]*?(?=\nexport async function actualRequeueTerminal\b)/,
@@ -43,7 +43,7 @@ test('claim and retry/terminal completion remain calls to the actual dedicated w
   assert.match(terminal, /last = await actualRequeueClaim\(fixture\);/);
   assert.match(
     terminal,
-    /assert\.ok\(await fixture\.store\.complete\(last, \{ \.\.\.REQUEUE_PG_FAILED, retryable: index < attempts - 1 \}\) === true,/,
+    /\(await fixture\.store\.complete\(last, \{ \.\.\.REQUEUE_PG_FAILED, retryable: index < attempts - 1 \}\)\) === true,/,
   );
   assert.match(terminal, /assert\.ok\(last, 'at least one genuine worker attempt required'\);/);
   assert.match(terminal, /return last;/);
@@ -69,7 +69,7 @@ test('fixture retains real restricted actors and only legal migrator seed writes
     assert.ok(source.includes('INSERT INTO ' + table + '('), 'retain legal actor/session/project seed facts');
   }
   assert.match(source, /const result = await tx\.query<Row>\(sql, values\);/);
-  assert.match(source, /assert\.ok\(result\.rowCount === 1 && result\.rows\.length === 1,/);
+  assert.match(source, /result\.rowCount === 1 && result\.rows\.length === 1,/);
   assert.match(source, /await afterSuccessfulInsert\(tx, result\);/);
   assert.match(source, /return result;/);
 });

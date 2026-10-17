@@ -3,6 +3,7 @@ import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { SaasCompositeModelRoutesService } from '../saas/billing/composite-routes/service.js';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
 import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
@@ -33,8 +34,8 @@ import {
 } from '../saas/deployment.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
-import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
 import { MODEL_PLAZA_SETTINGS_KEYS } from '../saas/gateway/model-plaza/settings.js';
+import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
 import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgres-billing-group-spend.js';
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
@@ -105,6 +106,7 @@ import {
 } from '../saas/metering/usage-correction-platform-http.js';
 import {
   type AlertEvaluatorWorkerHandle,
+  type AlertSilencesHttpHandler,
   type ChannelStatusWorkerHandle,
   createAlertSilencesHttpHandler,
   createObservabilityHttpHandler,
@@ -112,11 +114,10 @@ import {
   getChannelStatusPage,
   ObservabilityAlertService,
   ObservabilityAlertSilenceService,
-  type AlertSilencesHttpHandler,
   type ObservabilityHttpHandler,
+  type ReportSchedulerWorkerHandle,
   refreshSaasRuntimeGauges,
   renderSaasMetrics,
-  type ReportSchedulerWorkerHandle,
   startAlertEvaluatorWorker,
   startChannelStatusWorker,
   startReportSchedulerWorker,
@@ -157,20 +158,6 @@ import {
   createPostgresProbeMonitorAdminStore,
 } from '../saas/platform/account-probe-http.js';
 import { PlatformAuditQueryService } from '../saas/platform/audit/index.js';
-import { createPublicBrandSettingsHttpHandler, type PublicBrandSettingsHttpHandler } from '../saas/platform/brand/http.js';
-import {
-  BRAND_SETTINGS_KEY_PREFIX,
-  EMPTY_BRAND_SNAPSHOT,
-  injectBrandAppConfig,
-  type PublicBrandSnapshot,
-} from '../saas/platform/brand/snapshot.js';
-import {
-  createCachedBrandSnapshotReader,
-  type CachedBrandSnapshotReader,
-  PublicBrandSnapshotStore,
-  startPublicBrandSnapshotWorker,
-  type PublicBrandSnapshotWorkerHandle,
-} from '../saas/platform/brand/store.js';
 import {
   createPlatformAdminAuthHandler,
   PLATFORM_ADMIN_AUTH_PREFIX,
@@ -182,31 +169,23 @@ import {
   createBillingGroupsHttpHandler,
   createPostgresBillingGroupsAuditWriter,
 } from '../saas/platform/billing-groups-http.js';
-import { type PluginsHttpHandler, createPluginsHttpHandler } from '../saas/platform/plugins-http.js';
-import { PluginAdminService } from '../saas/plugins/admin-service.js';
-import { PostgresPluginStore } from '../saas/plugins/store.js';
 import {
-  startPluginHostRuntime,
-  type StartPluginHostRuntimeOptions,
-} from '../saas/plugins/plugin-host-runtime.js';
-import { PluginHostClient, PostgresPluginRouteReader } from '../saas/plugins/gateway-plugin-router.js';
+  createPublicBrandSettingsHttpHandler,
+  type PublicBrandSettingsHttpHandler,
+} from '../saas/platform/brand/http.js';
 import {
-  type CompositeModelRoutesHttpHandler,
-  createCompositeModelRoutesHttpHandler,
-  createPostgresCompositeModelRoutesAuditWriter,
-} from '../saas/platform/composite-routes-http.js';
+  BRAND_SETTINGS_KEY_PREFIX,
+  EMPTY_BRAND_SNAPSHOT,
+  injectBrandAppConfig,
+  type PublicBrandSnapshot,
+} from '../saas/platform/brand/snapshot.js';
 import {
-  createPostgresRiskControlAuditWriter,
-  createRiskControlHttpHandler,
-  type RiskControlHttpHandler,
-} from '../saas/platform/risk-control-http.js';
-import { PostgresRiskControlAdminStore } from '../saas/risk/postgres-store.js';
-import {
-  startRiskControlRetentionWorker,
-  type RiskControlRetentionWorkerHandle,
-} from '../saas/risk/retention-worker.js';
-import type { ModerationEmailSender } from '../saas/risk/moderation.js';
-import { SaasCompositeModelRoutesService } from '../saas/billing/composite-routes/service.js';
+  type CachedBrandSnapshotReader,
+  createCachedBrandSnapshotReader,
+  PublicBrandSnapshotStore,
+  type PublicBrandSnapshotWorkerHandle,
+  startPublicBrandSnapshotWorker,
+} from '../saas/platform/brand/store.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
@@ -215,6 +194,11 @@ import {
   createPostgresCodexCatalogBindingResolver,
   createProviderSupplyCodexCredentialSink,
 } from '../saas/platform/codex-oauth/supply-sink.js';
+import {
+  type CompositeModelRoutesHttpHandler,
+  createCompositeModelRoutesHttpHandler,
+  createPostgresCompositeModelRoutesAuditWriter,
+} from '../saas/platform/composite-routes-http.js';
 import {
   createPlatformCredentialRewrapHttpHandler,
   type PlatformCredentialRewrapHttpHandler,
@@ -254,13 +238,29 @@ import {
   type OpencodeGoRulesHttpHandler,
 } from '../saas/platform/opencode-go-rules-http.js';
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
+import { createPluginsHttpHandler, type PluginsHttpHandler } from '../saas/platform/plugins-http.js';
+import {
+  createPostgresRiskControlAuditWriter,
+  createRiskControlHttpHandler,
+  type RiskControlHttpHandler,
+} from '../saas/platform/risk-control-http.js';
 import {
   createPlatformSettingsHttpHandler,
   PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION,
   type PlatformSettingsHttpHandler,
   PlatformSettingsService,
 } from '../saas/platform/settings/index.js';
+import { PluginAdminService } from '../saas/plugins/admin-service.js';
+import { PluginHostClient, PostgresPluginRouteReader } from '../saas/plugins/gateway-plugin-router.js';
+import { type StartPluginHostRuntimeOptions, startPluginHostRuntime } from '../saas/plugins/plugin-host-runtime.js';
+import { PostgresPluginStore } from '../saas/plugins/store.js';
 import { SaasPricingService } from '../saas/pricing/index.js';
+import type { ModerationEmailSender } from '../saas/risk/moderation.js';
+import { PostgresRiskControlAdminStore } from '../saas/risk/postgres-store.js';
+import {
+  type RiskControlRetentionWorkerHandle,
+  startRiskControlRetentionWorker,
+} from '../saas/risk/retention-worker.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
   assertCustomerMfaDeploymentConfiguration,
@@ -2220,7 +2220,8 @@ export async function startManagedSaasServer(
     // brand surface is cosmetic and must never take the console down.
     const publicBrandSnapshotStore = new PublicBrandSnapshotStore({ database });
     const brandSnapshotReader = createCachedBrandSnapshotReader(publicBrandSnapshotStore, {
-      onError: (error) => console.error('model-router public brand snapshot read failed; serving the cached brand', error),
+      onError: (error) =>
+        console.error('model-router public brand snapshot read failed; serving the cached brand', error),
     });
     const refreshPublicBrandSnapshotAfterWrite = (key: string): void => {
       if (!key.startsWith(BRAND_SETTINGS_KEY_PREFIX)) return;

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
+import { USAGE_BILLING_MODES, USAGE_SIZE_TIERS } from '../../telemetry/usage.js';
 import { PlatformWalletLedgerService } from '../billing/service.js';
 import type { SqlExecutor } from '../db/types.js';
 import type { ModelResolutionProvenance } from '../gateway/contracts.js';
@@ -12,8 +14,6 @@ import {
   settlementDigest,
   usageEventDigest,
 } from './digest.js';
-import type { UsageBillingMode, UsageSizeTier } from '../../telemetry/usage.js';
-import { USAGE_BILLING_MODES, USAGE_SIZE_TIERS } from '../../telemetry/usage.js';
 import { SaasMeteringError, type SaasMeteringErrorCode } from './errors.js';
 import type {
   AttemptRecord,
@@ -831,8 +831,7 @@ function normalizeUsage(input: UsageValues): NormalizedUsage {
    */
   const billingMode = input.billingMode ?? 'token';
   if (!(USAGE_BILLING_MODES as readonly string[]).includes(billingMode)) fail('METERING_INVALID_INPUT');
-  const units =
-    input.units === undefined || input.units === null ? null : asToken(input.units, 'units');
+  const units = input.units === undefined || input.units === null ? null : asToken(input.units, 'units');
   if (billingMode !== 'token' && units === null) fail('METERING_INVALID_INPUT');
   const sizeTier = input.sizeTier ?? null;
   if (sizeTier !== null && !(USAGE_SIZE_TIERS as readonly string[]).includes(sizeTier)) {

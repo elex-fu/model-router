@@ -112,12 +112,12 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
     ['035_credential_validation_jobs.ts', '5dce54853124a8bae3ff9f4e43ddd4787f1f77ac07e39fdab484279c8ad410d9'],
     [
       '058_credential_validation_invalidation_trigger_execution.ts',
-      '2763f296f5f591c8ca3e4ef547d9b217f5c17021b15d1619ad184975ec87b8bc',
+      '0b36516f7e0fbf57e9fd8d254010e7d646b5d40aa618b3447e284a826f19cbe7',
     ],
-    ['059_pre_dispatch_terminal_cancellation.ts', '7c86dc81ea1ddea6b0a46c2bcea4837c9a83e705ae817106e3cbae5ccdb8b5ed'],
+    ['059_pre_dispatch_terminal_cancellation.ts', '597a0f645d25e2dbd2bb9a7ad475427cc10f4bf4ab3cd73baeb6d5ab019ccb2a'],
     [
       '060_prepared_evidence_claim_generated_account.ts',
-      '380bf3a1ceb103a0276b281d1e06eff613d1e4341edd6e7c24581f268280ae6c',
+      'cb51be910fc883cdfe7b4b86c5df9579c232feb786201342942bce366f7716d1',
     ],
   ] as const)
     assert.equal(

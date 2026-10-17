@@ -10429,7 +10429,7 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     table: 'saas_video_tasks',
     privilege: 'UPDATE',
     columns: ['billing_state', 'billed_at'],
-    tsStyle: 'map-callback',
+    tsStyle: 'map-flat',
   },
 ];
 

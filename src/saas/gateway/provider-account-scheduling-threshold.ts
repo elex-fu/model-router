@@ -25,13 +25,7 @@
 /** A snapshot older than this no longer pauses (the codex 2h precedent). */
 export const SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
-export type SchedulingThresholdPlatform =
-  | 'codex'
-  | 'claude'
-  | 'gemini'
-  | 'opencode-go'
-  | 'zhipu'
-  | 'minimax';
+export type SchedulingThresholdPlatform = 'codex' | 'claude' | 'gemini' | 'opencode-go' | 'zhipu' | 'minimax';
 
 /** One window candidate as persisted in the quota-snapshot column family. */
 export interface SchedulingThresholdWindowCandidate {

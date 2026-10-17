@@ -912,7 +912,10 @@ test('composite groups resolve the serving platform and rewrite the model with p
       'composite-route-store:model-ownership',
       'composite-route-store:target-capability',
     ]) {
-      assert.ok(fixture.statements.some((sql) => sql.includes(marker)), `missing ${marker}`);
+      assert.ok(
+        fixture.statements.some((sql) => sql.includes(marker)),
+        `missing ${marker}`,
+      );
     }
   });
 

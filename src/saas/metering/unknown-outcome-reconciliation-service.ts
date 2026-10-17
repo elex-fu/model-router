@@ -298,10 +298,11 @@ function text(value: unknown, maxLength = IDENTIFIER_MAX_LENGTH): value is strin
   return typeof value === 'string' && value.trim() !== '' && value.length <= maxLength;
 }
 
-function isUsageSizeTier(value: unknown): value is '1k' | '2k' | '4k' | '480p' | '720p' | '1080p' | 'tts' | 'stt' | 'realtime' {
+function isUsageSizeTier(
+  value: unknown,
+): value is '1k' | '2k' | '4k' | '480p' | '720p' | '1080p' | 'tts' | 'stt' | 'realtime' {
   return (
-    typeof value === 'string' &&
-    ['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'].includes(value)
+    typeof value === 'string' && ['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'].includes(value)
   );
 }
 
@@ -359,7 +360,13 @@ function normalizeTrustedUsage(value: UsageValues): NormalizedUsageExact | null 
   }
   // §4.1: media facts are optional; a non-token mode requires a unit count.
   const billingMode = value.billingMode ?? 'token';
-  if (billingMode !== 'token' && billingMode !== 'per_request' && billingMode !== 'image' && billingMode !== 'video' && billingMode !== 'audio') {
+  if (
+    billingMode !== 'token' &&
+    billingMode !== 'per_request' &&
+    billingMode !== 'image' &&
+    billingMode !== 'video' &&
+    billingMode !== 'audio'
+  ) {
     return null;
   }
   const units = exactCount(value.units) ?? null;

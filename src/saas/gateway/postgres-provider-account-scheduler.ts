@@ -1389,23 +1389,26 @@ class PostgresEligibilityAuthority {
         });
         if (!route) return { decision: 'block', reason: 'active persisted route authority is malformed' };
         if (
-          !candidateMatchesRoute(input.candidate, route, {
-            requestId: 'scheduler-revalidation',
-            caller: input.caller,
-            entitlement: input.entitlement,
-            candidates: [input.candidate],
-            publicModel: input.publicModel,
-            protocol: input.protocol,
-          }, input.composite)
+          !candidateMatchesRoute(
+            input.candidate,
+            route,
+            {
+              requestId: 'scheduler-revalidation',
+              caller: input.caller,
+              entitlement: input.entitlement,
+              candidates: [input.candidate],
+              publicModel: input.publicModel,
+              protocol: input.protocol,
+            },
+            input.composite,
+          )
         ) {
           return { decision: 'deny', reason: 'candidate is outside the exact persisted route provider/product' };
         }
 
         const rowResult = await tx.query<EligibilityRow>(
           input.caller.supplyMode === 'byok' ? BYOK_ELIGIBILITY_SQL : PLATFORM_ELIGIBILITY_SQL,
-          input.caller.supplyMode === 'byok'
-            ? byokValues(input, route)
-            : platformValues(input, route),
+          input.caller.supplyMode === 'byok' ? byokValues(input, route) : platformValues(input, route),
         );
         if (rowResult.rows.length === 0) {
           return {

@@ -25,8 +25,7 @@ test('FIN057 admission and signed evidence use the same published route version'
   ]) {
     const input = initializer(source, declaration);
     assert.match(input, /\.\.\.routeFacts\b/);
-    const configVersions = [...input.matchAll(/\bconfigVersion:\s*([^,\n}]+)/g)]
-      .map((match) => match[1]?.trim());
+    const configVersions = [...input.matchAll(/\bconfigVersion:\s*([^,\n}]+)/g)].map((match) => match[1]?.trim());
     assert.deepEqual(configVersions, ['route.version'], 'configVersion must bind the published version exactly once');
   }
 });

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
-import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
-import { SaasPricingService } from '../../../src/saas/pricing/service.js';
-import { normalizeRates } from '../../../src/saas/pricing/calculator.js';
 import {
   modelPricingOverrideDigest,
   parseAppliedModelPricingOverride,
 } from '../../../src/saas/billing/groups/override.js';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import { normalizeRates } from '../../../src/saas/pricing/calculator.js';
+import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
+import { SaasPricingService } from '../../../src/saas/pricing/service.js';
 import type { AppendCustomerPriceVersionInput, PriceHoldInput } from '../../../src/saas/pricing/types.js';
 
 type Row = Record<string, unknown>;
@@ -678,10 +678,7 @@ test('per_unit rates register and round-trip once persisted (4.1 — #14 guard r
   // collapse per_unit or the tiers to null against the same digest.
   const reread = await service.getCustomerPriceVersion(customer.id);
   assert.equal(reread.rates.per_unit?.denominatorUnits, 1n);
-  assert.deepEqual(
-    Object.keys(reread.rates.per_unit_tiers ?? {}).sort(),
-    ['1k', '4k'],
-  );
+  assert.deepEqual(Object.keys(reread.rates.per_unit_tiers ?? {}).sort(), ['1k', '4k']);
 
   const supplier = await service.appendSupplierCostVersion({
     publicModelId: 'public-model-1',

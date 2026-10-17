@@ -1,4 +1,4 @@
-import { normalizeUsage, type NormalizedUsage } from '../../telemetry/usage.js';
+import { type NormalizedUsage, normalizeUsage } from '../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from './dispatch-usage-settlement.js';
 
 export const PROVIDER_JSON_USAGE_MAX_BODY_BYTES = 1024 * 1024;

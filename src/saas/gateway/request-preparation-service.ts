@@ -696,7 +696,8 @@ function operationAllowedForProtocol(protocol: GatewayProtocol, operation: strin
     // standalone search operations (the emulation rides /responses; the
     // payload compiler constructs the outbound body server-side) and the
     // TTS audio passthrough (the xAI Voice /tts surface).
-    (protocol === 'responses' && (operation === 'web_search' || operation === 'x_search' || operation === 'audio.tts')) ||
+    (protocol === 'responses' &&
+      (operation === 'web_search' || operation === 'x_search' || operation === 'audio.tts')) ||
     (protocol === 'openai' &&
       (operation === 'embeddings' ||
         operation === 'images.generations' ||

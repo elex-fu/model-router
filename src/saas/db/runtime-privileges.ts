@@ -4871,9 +4871,7 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'expires_at',
     ] as const
   ).map((column) => ['saas_video_tasks', column, 'INSERT'] as const),
-  ...(['billing_state', 'billed_at'] as const).map(
-    (column) => ['saas_video_tasks', column, 'UPDATE'] as const,
-  ),
+  ...(['billing_state', 'billed_at'] as const).map((column) => ['saas_video_tasks', column, 'UPDATE'] as const),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
@@ -4883,11 +4881,7 @@ const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
 // §4.2 async image tasks + (124) batch-4 §4.3 async video tasks: the gateway
 // owns the task rows' expiry purge (Postgres*TaskStore.purgeExpired) alongside
 // the spending-freeze DELETE.
-export const GATEWAY_DELETE_TABLES = [
-  'saas_billing_spending_freezes',
-  'saas_image_tasks',
-  'saas_video_tasks',
-] as const;
+export const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks'] as const;
 const GATEWAY_SEQUENCE = 'saas_provider_account_lease_fencing_seq' as const;
 
 function sqlText(value: string): string {

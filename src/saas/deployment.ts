@@ -23,8 +23,7 @@ export const MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS = 'MODEL_ROUTER_SAAS_P
 /** Development-only escape hatch; refused in production. */
 export const MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED = 'MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED' as const;
 /** Shared internal bearer token between the gateway and plugin-host workloads. */
-export const MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN =
-  'MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN' as const;
+export const MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN' as const;
 /** Internal plugin-host listener (never a public listener). */
 export const MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_BIND_ADDRESS' as const;
 export const MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT = 'MODEL_ROUTER_SAAS_PLUGIN_HOST_PORT' as const;
@@ -91,8 +90,7 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
     gatewayDatabaseUrl: MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
     validationWorkerDatabaseUrl: MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
     pluginHostDatabaseUrl: MODEL_ROUTER_SAAS_PLUGIN_HOST_DATABASE_URL,
-    pluginHostProviderCredentialDecryptKmsModule:
-      MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
+    pluginHostProviderCredentialDecryptKmsModule: MODEL_ROUTER_SAAS_PLUGIN_HOST_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
     pluginsTrustedPublishers: MODEL_ROUTER_SAAS_PLUGINS_TRUSTED_PUBLISHERS,
     pluginsAllowUnsigned: MODEL_ROUTER_SAAS_PLUGINS_ALLOW_UNSIGNED,
     pluginHostInternalToken: MODEL_ROUTER_SAAS_PLUGIN_HOST_INTERNAL_TOKEN,
@@ -146,13 +144,7 @@ const LISTENER_ROUTE_PREFIXES = {
   gateway: '/v1',
 } as const satisfies Record<(typeof LISTENER_NAMES)[number], string>;
 
-const WORKLOAD_ROLES = [
-  'combined',
-  'control-plane',
-  'gateway',
-  'credential-validation-worker',
-  'plugin-host',
-] as const;
+const WORKLOAD_ROLES = ['combined', 'control-plane', 'gateway', 'credential-validation-worker', 'plugin-host'] as const;
 
 const WORKLOAD_ROLE_LISTENERS = deepFreeze({
   combined: ['customer', 'platform', 'gateway'],
@@ -1117,7 +1109,9 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
     ...(pluginHostBindAddress === undefined ? {} : { pluginHostBindAddress }),
     ...(pluginHostPort === undefined ? {} : { pluginHostPort }),
     ...(gatewayPluginHostUrl === undefined ? {} : { gatewayPluginHostUrl }),
-    ...(gatewayPluginHostInternalToken === undefined ? {} : { pluginHostInternalToken: gatewayPluginHostInternalToken }),
+    ...(gatewayPluginHostInternalToken === undefined
+      ? {}
+      : { pluginHostInternalToken: gatewayPluginHostInternalToken }),
     ...(pluginsTrustedPublishers === undefined ? {} : { pluginsTrustedPublishers }),
     ...(pluginsAllowUnsigned ? { pluginsAllowUnsigned: true } : {}),
     deploymentId: deploymentIdSetting ?? 'model-router-development',
