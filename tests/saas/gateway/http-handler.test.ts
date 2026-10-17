@@ -7,6 +7,8 @@ import {
   type PreparedEvidenceDispatchPort,
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
+  resolveSaasGatewayBodyLimits,
+  type SaasGatewayEndpointFamilyBodyLimits,
 } from '../../../src/saas/gateway/http-handler.js';
 import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 import type {
@@ -245,6 +247,8 @@ function harness(
     ) => Promise<PreparedEvidenceDispatchResult>;
     readonly modelDiscovery?: (authenticatedCaller: AuthenticatedApiKey) => Promise<readonly string[]>;
     readonly maxBodyBytes?: number;
+    /** Roadmap 4.0 ①: endpoint-family body limits injected at construction. */
+    readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
     /** Batch 2 §2.1: enable the sticky scheduling seam at the boundary. */
     readonly stickyScheduling?: boolean;
     /** Constructor options for the inbound FakeRequest (url/body/headers). */
@@ -301,6 +305,7 @@ function harness(
     preDispatchCompensation: options.preDispatchCompensation,
     modelDiscovery,
     maxBodyBytes: options.maxBodyBytes,
+    endpointBodyLimits: options.endpointBodyLimits,
     ...(options.stickyScheduling ? { stickyScheduling: true } : {}),
   });
   const requestId =
@@ -473,6 +478,113 @@ test('rejects unsupported paths, methods, content types, and body sizes before p
   streamedTooLarge.request.chunks = [new TextEncoder().encode('{"model":"too-large"}')];
   await streamedTooLarge.handler(asRequest(streamedTooLarge.request), asResponse(streamedTooLarge.response));
   assert.equal(streamedTooLarge.response.writeHeadCalls[0]?.status, 413);
+});
+
+test('resolves endpoint-family body limits with documented defaults and fails closed on invalid injection (4.0 ①)', () => {
+  const defaults = resolveSaasGatewayBodyLimits(1024, undefined);
+  assert.deepEqual(defaults, { default: 1024, images: 10 * 1024 * 1024, audio: 26 * 1024 * 1024 });
+
+  const injected = resolveSaasGatewayBodyLimits(1024, { images: 2048, audio: 4096 });
+  assert.deepEqual(injected, { default: 1024, images: 2048, audio: 4096 });
+
+  // Partial injection keeps family defaults for the omitted family only.
+  const partial = resolveSaasGatewayBodyLimits(1024, { images: 2048 });
+  assert.deepEqual(partial, { default: 1024, images: 2048, audio: 26 * 1024 * 1024 });
+
+  assert.equal(resolveSaasGatewayBodyLimits(null, undefined), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { images: 0 }), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { audio: -1 }), null);
+  assert.equal(resolveSaasGatewayBodyLimits(1024, { audio: 1.5 }), null);
+});
+
+test('enforces endpoint-family body ceilings before route resolution (4.0 ①)', async () => {
+  // Images family default ceiling: exactly 10 MiB passes the bound.
+  const imagesBoundary = harness();
+  imagesBoundary.request.url = '/v1/images/generations';
+  imagesBoundary.request.headers['content-length'] = String(10 * 1024 * 1024);
+  await imagesBoundary.handler(asRequest(imagesBoundary.request), asResponse(imagesBoundary.response));
+  assert.equal(imagesBoundary.response.writeHeadCalls[0]?.status, 404);
+  assert.equal(imagesBoundary.request.resumed, true);
+  assert.equal(imagesBoundary.preparationInputs.length, 0);
+
+  const imagesOver = harness();
+  imagesOver.request.url = '/v1/images/generations';
+  imagesOver.request.headers['content-length'] = String(10 * 1024 * 1024 + 1);
+  await imagesOver.handler(asRequest(imagesOver.request), asResponse(imagesOver.response));
+  assert.equal(imagesOver.response.writeHeadCalls[0]?.status, 413);
+
+  // Audio family default ceiling: 26 MiB passes, 26 MiB + 1 byte rejects.
+  const audioBoundary = harness();
+  audioBoundary.request.url = '/v1/audio/speech';
+  audioBoundary.request.headers['content-length'] = String(26 * 1024 * 1024);
+  await audioBoundary.handler(asRequest(audioBoundary.request), asResponse(audioBoundary.response));
+  assert.equal(audioBoundary.response.writeHeadCalls[0]?.status, 404);
+
+  const audioOver = harness();
+  audioOver.request.url = '/v1/audio/speech';
+  audioOver.request.headers['content-length'] = String(26 * 1024 * 1024 + 1);
+  await audioOver.handler(asRequest(audioOver.request), asResponse(audioOver.response));
+  assert.equal(audioOver.response.writeHeadCalls[0]?.status, 413);
+
+  // The text family keeps the global ceiling and never inherits media limits.
+  const textOver = harness();
+  textOver.request.url = '/v1/chat/completions';
+  textOver.request.headers['content-length'] = String(1024 * 1024 + 1);
+  await textOver.handler(asRequest(textOver.request), asResponse(textOver.response));
+  assert.equal(textOver.response.writeHeadCalls[0]?.status, 413);
+
+  // Injected family limits override the defaults exactly.
+  const injectedBoundary = harness({ endpointBodyLimits: { images: 2048 } });
+  injectedBoundary.request.url = '/v1/images/generations';
+  injectedBoundary.request.headers['content-length'] = '2048';
+  await injectedBoundary.handler(asRequest(injectedBoundary.request), asResponse(injectedBoundary.response));
+  assert.equal(injectedBoundary.response.writeHeadCalls[0]?.status, 404);
+
+  const injectedOver = harness({ endpointBodyLimits: { images: 2048 } });
+  injectedOver.request.url = '/v1/images/generations';
+  injectedOver.request.headers['content-length'] = '2049';
+  await injectedOver.handler(asRequest(injectedOver.request), asResponse(injectedOver.response));
+  assert.equal(injectedOver.response.writeHeadCalls[0]?.status, 413);
+
+  // An invalid injected family limit fails the whole boundary closed.
+  const invalid = harness({ endpointBodyLimits: { images: 0 } });
+  invalid.request.url = '/v1/chat/completions';
+  await invalid.handler(asRequest(invalid.request), asResponse(invalid.response));
+  assert.equal(invalid.response.writeHeadCalls[0]?.status, 503);
+
+  // Transport-level bound precedes routing: an unknown path with an oversized
+  // declared length gets 413, not 404.
+  const unknownOver = harness();
+  unknownOver.request.url = '/v1/unknown';
+  unknownOver.request.headers['content-length'] = String(2 * 1024 * 1024);
+  await unknownOver.handler(asRequest(unknownOver.request), asResponse(unknownOver.response));
+  assert.equal(unknownOver.response.writeHeadCalls[0]?.status, 413);
+});
+
+test('rejects multipart-only media endpoints with an explicit JSON-only policy (4.0 ②)', async () => {
+  for (const path of ['/v1/images/edits', '/v1/audio/transcriptions', '/v1/audio/translations']) {
+    const multipart = harness();
+    multipart.request.url = path;
+    await multipart.handler(asRequest(multipart.request), asResponse(multipart.response));
+    assert.equal(multipart.response.writeHeadCalls[0]?.status, 501);
+    const body = JSON.parse(String(multipart.response.endBody)) as {
+      error: { code: string; message: string };
+    };
+    assert.equal(body.error.code, 'MULTIPART_NOT_SUPPORTED');
+    assert.ok(body.error.message.includes('multipart'));
+    assert.ok(body.error.message.includes('JSON'));
+    assert.equal(multipart.request.resumed, true);
+    assert.equal(multipart.preparationInputs.length, 0);
+    assert.equal(multipart.dispatchInputs.length, 0);
+  }
+
+  // The policy answer precedes size enforcement: an oversized declared upload
+  // to a multipart endpoint still gets the precise 501, not a bare 413.
+  const oversized = harness();
+  oversized.request.url = '/v1/audio/transcriptions';
+  oversized.request.headers['content-length'] = String(100 * 1024 * 1024);
+  await oversized.handler(asRequest(oversized.request), asResponse(oversized.response));
+  assert.equal(oversized.response.writeHeadCalls[0]?.status, 501);
 });
 
 test('accepts only Bearer authorization and never exposes the raw secret in errors', async () => {

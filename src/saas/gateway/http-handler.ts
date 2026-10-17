@@ -26,6 +26,53 @@ import { stickySchedulingContext } from './sticky-session-reference.js';
 
 const GATEWAY_PREFIX = '/v1';
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+/*
+ * Roadmap batch 4 §4.0 ① (task #14): endpoint-family POST body limits.
+ *
+ * The 1 MiB default is the text-family bound (chat/messages/responses/
+ * embeddings JSON). Media endpoints need a family-specific ceiling because
+ * first-phase media support is JSON `generations` + `b64_json` mode (§4.0 ②):
+ * base64 inflates payloads by ~4/3, so a 25 MiB raw audio file (the OpenAI
+ * STT cap) arrives as ~34 MiB of JSON — hence a 26 MiB family ceiling for
+ * JSON-mode audio inputs near that cap, and 10 MiB for image payloads
+ * (b64-encoded 1024×1024 PNG/JPEG plus prompt stays well under it).
+ *
+ * Cost evaluation for the larger ceilings: a 10–26 MiB body is fully
+ * buffered once (readJsonBody chunk array) plus the parsed JSON object
+ * (transiently ~2× the byte size), and flows through the standard
+ * preparation chain: a single streaming SHA-256 pass for the request
+ * fingerprint (no additional retention — only the 64-hex digest survives
+ * admission) and the payload compiler's canonical re-serialization. That
+ * per-request memory is bounded by the family ceiling itself, and aggregate
+ * exposure is bounded by the existing preparation-capacity admission guard,
+ * so raising the per-request ceiling does not change the worst-case
+ * concurrent buffer profile the deployment was sized for.
+ */
+const DEFAULT_IMAGE_FAMILY_BODY_BYTES = 10 * 1024 * 1024;
+const DEFAULT_AUDIO_FAMILY_BODY_BYTES = 26 * 1024 * 1024;
+const IMAGE_FAMILY_PATH_PREFIX = '/v1/images/';
+const AUDIO_FAMILY_PATH_PREFIX = '/v1/audio/';
+
+/*
+ * Roadmap batch 4 §4.0 ② (task #14): JSON-only media policy.
+ *
+ * First-phase hosted media support is JSON generations with b64_json input
+ * only. These endpoints are multipart/form-data file-upload surfaces, which
+ * the hosted gateway deliberately does not accept: multipart is a new
+ * transport face (a second body channel, a new admission-fingerprint
+ * strategy for non-JSON parts, and the entire preparation chain's
+ * JSON-body assumption), so it is an explicitly deferred follow-up task.
+ * The paths are still reserved here (fail closed with a precise 501
+ * instead of a generic 404) so clients get an actionable answer and task
+ * #16/#17 route registration never has to touch this policy.
+ */
+const MULTIPART_ONLY_ENDPOINT_PATHS = new Set<string>([
+  '/v1/images/edits',
+  '/v1/audio/transcriptions',
+  '/v1/audio/translations',
+]);
+const MULTIPART_UNSUPPORTED_MESSAGE =
+  'This endpoint requires multipart/form-data, which the hosted gateway does not support yet; use the JSON media generation endpoints with base64-encoded input instead';
 const MAX_MODEL_LENGTH = 512;
 const MAX_AUTHORIZATION_LENGTH = 4096;
 const MAX_AUDIT_VALUE_LENGTH = 1024;
@@ -67,6 +114,51 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
  */
 const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([['/v1/embeddings', 'embeddings']]);
 
+/**
+ * Per-endpoint-family POST body ceilings (roadmap 4.0 ①). Values are
+ * positive safe integers injected by the trusted composition boundary —
+ * never derived from the environment inside this handler. Omitted families
+ * keep their documented defaults (images 10 MiB, audio 26 MiB); every other
+ * path family uses the global {@link SaasGatewayHttpOptions.maxBodyBytes}.
+ */
+export interface SaasGatewayEndpointFamilyBodyLimits {
+  /** Ceiling for POST bodies on /v1/images/* endpoints. Default 10 MiB. */
+  readonly images?: number;
+  /** Ceiling for POST bodies on /v1/audio/* endpoints. Default 26 MiB. */
+  readonly audio?: number;
+}
+
+/** Resolved, immutable per-family body ceilings. `default` is the text family. */
+export interface SaasGatewayBodyLimits {
+  readonly default: number;
+  readonly images: number;
+  readonly audio: number;
+}
+
+/** Path-family body limit for one request path. Unmatched prefixes are text. */
+export function bodyLimitForPath(path: string, limits: SaasGatewayBodyLimits): number {
+  if (path.startsWith(IMAGE_FAMILY_PATH_PREFIX)) return limits.images;
+  if (path.startsWith(AUDIO_FAMILY_PATH_PREFIX)) return limits.audio;
+  return limits.default;
+}
+
+/**
+ * Validates and resolves the endpoint-family ceilings. Any invalid injected
+ * value fails closed to `null`, which the handler surfaces as 503 — the
+ * same posture as an invalid global `maxBodyBytes`.
+ */
+export function resolveSaasGatewayBodyLimits(
+  maxBodyBytes: number | null,
+  families: SaasGatewayEndpointFamilyBodyLimits | undefined,
+): SaasGatewayBodyLimits | null {
+  if (maxBodyBytes === null) return null;
+  const images = families?.images ?? DEFAULT_IMAGE_FAMILY_BODY_BYTES;
+  const audio = families?.audio ?? DEFAULT_AUDIO_FAMILY_BODY_BYTES;
+  const valid = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
+  if (!valid(images) || !valid(audio)) return null;
+  return { default: maxBodyBytes, images, audio };
+}
+
 /** The only authentication capability accepted by the hosted HTTP boundary. */
 export interface ProxyKeyAuthenticator {
   authenticate(rawKey: string): Promise<AuthenticatedApiKey | null>;
@@ -100,6 +192,12 @@ export interface SaasGatewayHttpOptions {
   readonly preDispatchCompensation?: GatewayPreDispatchCompensationPort;
   readonly modelDiscovery?: ModelDiscoveryPort;
   readonly maxBodyBytes?: number;
+  /**
+   * Endpoint-family POST body ceilings (roadmap 4.0 ①). Optional; each
+   * family falls back to its documented default. Invalid values fail the
+   * whole boundary closed (503), mirroring `maxBodyBytes`.
+   */
+  readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
   readonly entryPoint?: string;
   /**
    * CIDRs of trusted reverse proxies allowed to attest X-Forwarded-For. Empty
@@ -198,7 +296,13 @@ function requestPath(req: IncomingMessage): string | undefined {
   }
 }
 
-function writeJsonError(res: ServerResponse, status: number, code: string, requestId: string): void {
+function writeJsonError(
+  res: ServerResponse,
+  status: number,
+  code: string,
+  requestId: string,
+  message = 'The request could not be completed',
+): void {
   if (res.destroyed || res.writableEnded) return;
   if (res.headersSent) {
     res.end();
@@ -212,7 +316,7 @@ function writeJsonError(res: ServerResponse, status: number, code: string, reque
       'referrer-policy': 'no-referrer',
       'x-request-id': requestId,
     });
-    res.end(JSON.stringify({ error: { code, message: 'The request could not be completed', requestId } }));
+    res.end(JSON.stringify({ error: { code, message, requestId } }));
   } catch {
     try {
       res.destroy();
@@ -222,8 +326,8 @@ function writeJsonError(res: ServerResponse, status: number, code: string, reque
   }
 }
 
-function sendHttpError(res: ServerResponse, error: GatewayHttpError, requestId: string): void {
-  writeJsonError(res, error.status, error.code, requestId);
+function sendHttpError(res: ServerResponse, error: GatewayHttpError, requestId: string, message?: string): void {
+  writeJsonError(res, error.status, error.code, requestId, message);
 }
 
 function sendCanonicalRequestStatus(
@@ -740,7 +844,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
   const preparation = options.preparation ?? options.preparationService;
   const dispatch = options.dispatch ?? options.dispatchService;
   const modelDiscovery = options.modelDiscovery;
-  const maxBodyBytes = validMaxBodyBytes(options.maxBodyBytes);
+  const bodyLimits = resolveSaasGatewayBodyLimits(validMaxBodyBytes(options.maxBodyBytes), options.endpointBodyLimits);
   const entryPoint = validEntryPoint(options.entryPoint);
 
   return async (req, res, context) => {
@@ -755,7 +859,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
     res.setHeader('x-request-id', requestId);
 
-    if (maxBodyBytes === null || !authenticator) {
+    if (bodyLimits === null || !authenticator) {
       drainRequest(req);
       sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
       return true;
@@ -804,6 +908,39 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
+    // §4.0 ② (task #14): reserved multipart-only media endpoints fail closed
+    // with a precise, actionable 501 before any routing decision.
+    if (MULTIPART_ONLY_ENDPOINT_PATHS.has(path)) {
+      drainRequest(req);
+      sendHttpError(
+        res,
+        new GatewayHttpError(501, 'MULTIPART_NOT_SUPPORTED'),
+        requestId,
+        MULTIPART_UNSUPPORTED_MESSAGE,
+      );
+      return true;
+    }
+
+    /*
+     * §4.0 ① (task #14): the declared content-length bound is transport-level
+     * admission control, so it runs before route resolution — every /v1
+     * request, registered or not, is bounded by its endpoint family's
+     * ceiling. The streaming accumulation below enforces the same resolved
+     * value for bodies that do reach the read stage.
+     */
+    const pathBodyLimit = bodyLimitForPath(path, bodyLimits);
+    const length = declaredBodyLength(req, pathBodyLimit);
+    if (length === 'too_large') {
+      drainRequest(req);
+      sendHttpError(res, new GatewayHttpError(413, 'BODY_TOO_LARGE'), requestId);
+      return true;
+    }
+    if (length === 'invalid') {
+      drainRequest(req);
+      sendHttpError(res, new GatewayHttpError(400, 'INVALID_BODY'), requestId);
+      return true;
+    }
+
     const protocol = ROUTES.get(path);
     if (protocol === undefined) {
       drainRequest(req);
@@ -823,18 +960,6 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
-    const length = declaredBodyLength(req, maxBodyBytes);
-    if (length === 'too_large') {
-      drainRequest(req);
-      sendHttpError(res, new GatewayHttpError(413, 'BODY_TOO_LARGE'), requestId);
-      return true;
-    }
-    if (length === 'invalid') {
-      drainRequest(req);
-      sendHttpError(res, new GatewayHttpError(400, 'INVALID_BODY'), requestId);
-      return true;
-    }
-
     let authenticatedCaller: AuthenticatedApiKey | null;
     try {
       authenticatedCaller = await authenticateCaller(req, authenticator);
@@ -850,7 +975,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
     let body: Record<string, unknown>;
     try {
-      body = await readJsonBody(req, maxBodyBytes);
+      body = await readJsonBody(req, pathBodyLimit);
       if (clientAuthorityField(body)) throw new GatewayHttpError(400, 'INVALID_BODY');
     } catch (error) {
       const httpError = error instanceof GatewayHttpError ? error : new GatewayHttpError(400, 'INVALID_BODY');
