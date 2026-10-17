@@ -4827,11 +4827,6 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_plugin_installations', 'binary_sha256', 'SELECT'],
   ['saas_plugin_installations', 'signature_status', 'SELECT'],
   ['saas_plugin_installations', 'updated_at', 'SELECT'],
-  // 123 (batch-4 §4.2) async image tasks: gateway owns the lifecycle UPDATE
-  // face (status/http_status/result/error/completed_at/expires_at only).
-  ...(
-    ['status', 'http_status', 'result', 'error', 'completed_at', 'expires_at'] as const
-  ).map((column) => ['saas_image_tasks', column, 'UPDATE'] as const),
   // (124) batch-4 §4.3 async video tasks: the gateway owns the create-time
   // snapshot + bound-account binding + the one-shot billing claim. The
   // claim/release/skip transitions touch only the billing-state columns;

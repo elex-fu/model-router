@@ -265,10 +265,17 @@ test('migration 051 is registered in append order and remains forward-only', () 
       122,
       // Batch-4 §4.2 async image tasks (task #16).
       123,
+      // Batch-4 §4.3 async video tasks (task #17) — create-time
+      // snapshot + binding + billing claim.
+      124,
+      // Batch-5 §5.4 content risk control (task #19).
+      125,
       // Batch-5 §5.2 public brand settings (task #20).
       126,
       // Batch-5 §5.6 alert silences/report state (task #23).
       127,
+      // Batch-5 §5.1 plugin system (task #24).
+      128,
     ],
   );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);

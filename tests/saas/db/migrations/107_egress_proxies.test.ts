@@ -19,7 +19,7 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   assert.ok(index > 0, '107 is registered');
   assert.equal(registered[index - 1], 106, '107 lands directly after the 106 head');
   assert.equal(registered[index + 1], 108, '107 lands directly before the 108 forward');
-  assert.equal(registered.at(-1), 127, 'the R6a, F1 and Gemini forwards follow the 108 head');
+  assert.equal(registered.at(-1), 128, 'the batch-4/5 tails (124 video, 125 risk, 128 plugin) follow the 108 head');
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

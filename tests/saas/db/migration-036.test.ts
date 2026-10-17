@@ -68,10 +68,17 @@ test('migration 036 is registered immediately before subsequent append-only migr
       122,
       // Batch-4 §4.2 async image tasks (task #16).
       123,
+      // Batch-4 §4.3 async video tasks (task #17) — create-time
+      // snapshot + binding + billing claim.
+      124,
+      // Batch-5 §5.4 content risk control (task #19).
+      125,
       // Batch-5 §5.2 public brand settings (task #20).
       126,
       // Batch-5 §5.6 alert silences/report state (task #23).
       127,
+      // Batch-5 §5.1 plugin system (task #24).
+      128,
     ],
   );
 });

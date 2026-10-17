@@ -17,9 +17,9 @@ test('125 registers after the 122 multimodal tail without squatting reserved slo
   assert.ok(registered.includes(125));
   assert.ok(registered.indexOf(125) > registered.indexOf(122));
   assert.equal(SAAS_MIGRATIONS[registered.indexOf(125)], migration);
-  // 124 stays reserved for the parallel websearch line: this migration must
-  // not squat it (123 belongs to the parallel images line).
-  assert.equal(registered.includes(124), false);
+  // 124 landed as the async video tasks migration (batch-4 §4.3): this
+  // migration follows it in append order instead of squatting a free slot.
+  assert.equal(registered[registered.indexOf(125) - 1], 124);
 });
 
 test('125 creates the single-row gateway-readable config table', () => {
