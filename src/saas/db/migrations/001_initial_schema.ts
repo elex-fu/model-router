@@ -99,6 +99,7 @@ import { PROVIDER_ACCOUNT_VERTEX_SCHEDULING_SAAS_MIGRATION } from './118_provide
 import { PROVIDER_ACCOUNT_GROK_SCHEDULING_SAAS_MIGRATION } from './119_provider_account_grok_scheduling.js';
 import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider_account_scheduling.js';
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
+import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
 
 export interface SaasMigration {
   version: number;
@@ -683,4 +684,12 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // column on the migration-105 billing-group head. Control-plane CRUD with
   // gateway read-only (the 105 grants mirror); unknown models fail closed.
   COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
+  // 122: batch-4 §4.1 multimodal billing (task #15) — per_unit rate pair +
+  // tier ladder + token-multiplier policy on both 017 version tables, the
+  // per-unit hold witness on customer price snapshots, the media metering
+  // columns on usage events, the per-unit evidence envelope columns on
+  // prepared-request evidence (with the 024 immutability function's
+  // hardcoded column list extended). All additive/defaulted: token-only
+  // rows and their digests are byte-identical (the #14 anti-drift policy).
+  MULTIMODAL_BILLING_SAAS_MIGRATION,
 ];

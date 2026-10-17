@@ -498,12 +498,16 @@ class MemoryDatabase implements SaasDatabase {
       cache_write_1h: values[12],
       output_total: values[13],
       reasoning_output: values[14],
-      status: values[15],
-      source: values[16],
-      semantics_version: values[17],
-      measurement_kind: values[18],
-      billable_basis: values[19],
-      created_at: values[20],
+      // 4.1 (122): media metering columns.
+      billing_mode: values[15],
+      units: values[16],
+      size_tier: values[17],
+      status: values[18],
+      source: values[19],
+      semantics_version: values[20],
+      measurement_kind: values[21],
+      billable_basis: values[22],
+      created_at: values[23],
     };
     this.state.usage.push(row);
     return [row];

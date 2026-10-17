@@ -25,7 +25,7 @@ export function normalizeFingerprint(value: string, version = 'v1'): string {
 }
 
 export function canonicalUsage(usage: NormalizedUsageExact): string {
-  return JSON.stringify([
+  const base = [
     usage.inputTotal,
     usage.inputUncached,
     usage.cacheRead,
@@ -39,7 +39,21 @@ export function canonicalUsage(usage: NormalizedUsageExact): string {
     usage.semanticsVersion,
     usage.measurementKind,
     usage.billableBasis,
-  ]);
+  ];
+  /*
+   * §4.1 (task #15) anti-drift policy, mirroring the #14 per_unit rate
+   * policy: the media fields are digest-optional. A token-only usage object
+   * (billingMode 'token', units null, sizeTier null) serializes to exactly
+   * the pre-4.1 canonical form, so every stored event digest and replay
+   * comparison stays byte-identical. Any media fact (non-token mode, unit
+   * count, or tier) appends the three fields as one trailing group.
+   */
+  const billingMode = usage.billingMode ?? 'token';
+  const units = usage.units ?? null;
+  const sizeTier = usage.sizeTier ?? null;
+  const isMedia = billingMode !== 'token' || units !== null || sizeTier !== null;
+  if (!isMedia) return JSON.stringify(base);
+  return JSON.stringify([...base, billingMode, units, sizeTier]);
 }
 
 export function usageEventDigest(
@@ -124,7 +138,7 @@ export function usageCorrectionDigest(input: {
 }
 
 export function canonicalUsageValues(usage: UsageValues): string {
-  return JSON.stringify([
+  const base = [
     usage.inputTotal,
     usage.inputUncached,
     usage.cacheRead,
@@ -138,5 +152,12 @@ export function canonicalUsageValues(usage: UsageValues): string {
     usage.semanticsVersion,
     usage.measurementKind,
     usage.billableBasis,
-  ]);
+  ];
+  // §4.1: the same digest-optional media policy as canonicalUsage — a
+  // token-only usage object serializes to its exact pre-4.1 form.
+  const billingMode = usage.billingMode ?? 'token';
+  const units = usage.units ?? null;
+  const sizeTier = usage.sizeTier ?? null;
+  if (billingMode === 'token' && units === null && sizeTier === null) return JSON.stringify(base);
+  return JSON.stringify([...base, billingMode, units, sizeTier]);
 }

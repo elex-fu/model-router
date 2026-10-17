@@ -59,48 +59,22 @@ function customerPriceRow(values: readonly unknown[]): Row {
     cache_write_1h_rate_denominator_units: values[23],
     output_rate_numerator_minor_units: values[24],
     output_rate_denominator_units: values[25],
-    effective_at: values[26],
-    expires_at: values[27],
-    idempotency_key: values[28],
-    definition_digest: values[29],
-    created_at: values[30],
+    per_unit_rate_numerator_minor_units: values[26],
+    per_unit_rate_denominator_units: values[27],
+    per_unit_tier_rates: values[28],
+    token_multipliers: values[29],
+    effective_at: values[30],
+    expires_at: values[31],
+    idempotency_key: values[32],
+    definition_digest: values[33],
+    created_at: values[34],
   };
 }
 
 function supplierPriceRow(values: readonly unknown[]): Row {
-  const customerValues = [
-    values[0],
-    values[1],
-    values[2],
-    values[3],
-    values[4],
-    values[5],
-    values[7],
-    values[8],
-    values[9],
-    values[10],
-    values[11],
-    values[12],
-    values[13],
-    values[14],
-    values[15],
-    values[16],
-    values[17],
-    values[18],
-    values[19],
-    values[20],
-    values[21],
-    values[22],
-    values[23],
-    values[24],
-    values[25],
-    values[26],
-    values[27],
-    values[28],
-    values[29],
-    values[30],
-    values[31],
-  ];
+  // Supplier rows carry resolved_model at index 6; the remaining 35 columns
+  // (31 legacy + the four 4.1 columns) follow in customer order.
+  const customerValues = [values[0], values[1], values[2], values[3], values[4], values[5], ...values.slice(7)];
   return { ...customerPriceRow(customerValues), resolved_model: values[6] };
 }
 

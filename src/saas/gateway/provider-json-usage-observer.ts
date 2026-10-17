@@ -1,4 +1,4 @@
-import { normalizeUsage } from '../../telemetry/usage.js';
+import { normalizeUsage, type NormalizedUsage } from '../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from './dispatch-usage-settlement.js';
 
 export const PROVIDER_JSON_USAGE_MAX_BODY_BYTES = 1024 * 1024;
@@ -19,6 +19,23 @@ export type ProviderJsonUsageObservation =
 export interface ProviderJsonUsageEvidence {
   readonly providerProtocol?: string;
   readonly providerOperation?: string;
+}
+
+/**
+ * §4.1 (roadmap batch 4) media usage extraction seam — the point where the
+ * #16 image / #17 video-audio category transports plug per-unit usage
+ * extraction into the JSON observer. A media extractor receives the parsed
+ * final body and returns the media usage (billingMode/units/sizeTier set;
+ * token counters as reported) or null for an untrusted/absent report.
+ *
+ * The built-in token protocols are unchanged: a media extractor is only
+ * consulted for operations the token observer does not know, so every
+ * existing token observation path is byte-identical.
+ */
+export interface ProviderMediaUsageExtractor {
+  /** Provider operations this extractor serves (e.g. 'images.generations'). */
+  readonly operations: ReadonlySet<string>;
+  extract(body: Record<string, unknown>): NormalizedUsage | null;
 }
 
 export interface ProviderJsonObservedStream {
@@ -196,6 +213,10 @@ function embeddingsTrustedUsage(raw: Fields): NormalSuccessObservedUsage | null 
     cacheWrite1h: null,
     outputTotal: 0,
     reasoningOutput: 0,
+    // §4.1: embeddings are token-billed; the media fields stay neutral.
+    billingMode: 'token',
+    units: null,
+    sizeTier: null,
     status: 'reported',
     source: 'upstream',
     semanticsVersion: 'v1',
@@ -260,7 +281,11 @@ function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObse
   return Object.freeze({ ...usage, source: 'upstream' });
 }
 
-function parseBody(bytes: Uint8Array, protocol: JsonProtocol): ProviderJsonUsageObservation {
+function parseBody(
+  bytes: Uint8Array,
+  protocol: JsonProtocol | null,
+  mediaExtractor: ProviderMediaUsageExtractor | null,
+): ProviderJsonUsageObservation {
   let body: Fields | null;
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -269,7 +294,25 @@ function parseBody(bytes: Uint8Array, protocol: JsonProtocol): ProviderJsonUsage
   } catch {
     return unknown('malformed_body');
   }
-  if (!body || !validEnvelope(protocol, body)) return unknown('malformed_body');
+  if (!body || (protocol !== null && !validEnvelope(protocol, body))) return unknown('malformed_body');
+  // §4.1 seam: an operation the token observer does not know goes to the
+  // registered media extractor (never silently zero-billed).
+  if (protocol === null) {
+    if (mediaExtractor !== null) {
+      try {
+        const mediaUsage = mediaExtractor.extract(body);
+        if (mediaUsage !== null && mediaUsage.units !== null && mediaUsage.status === 'reported') {
+          return {
+            state: 'reported',
+            usage: Object.freeze({ ...mediaUsage, source: 'upstream' }) as NormalSuccessObservedUsage,
+          };
+        }
+      } catch {
+        return unknown('invalid_usage');
+      }
+    }
+    return unknown('unsupported_protocol_operation');
+  }
   if (!Object.hasOwn(body, 'usage') || body.usage === null) return unknown('no_usage');
   try {
     const usage = trustedUsage(protocol, body.usage);
@@ -283,8 +326,16 @@ function parseBody(bytes: Uint8Array, protocol: JsonProtocol): ProviderJsonUsage
 export function observeProviderJsonUsage(
   body: ReadableStream<Uint8Array>,
   evidence: ProviderJsonUsageEvidence,
+  /** §4.1 seam: media usage extraction for operations the token path does not know. */
+  mediaExtractor: ProviderMediaUsageExtractor | null = null,
 ): ProviderJsonObservedStream {
   const protocol = selectedProtocol(evidence);
+  const media =
+    mediaExtractor !== null &&
+    typeof evidence.providerOperation === 'string' &&
+    mediaExtractor.operations.has(evidence.providerOperation)
+      ? mediaExtractor
+      : null;
   const reader = body.getReader();
   let buffer: Uint8Array | undefined;
   let length = 0;
@@ -320,17 +371,21 @@ export function observeProviderJsonUsage(
           if (next.done) {
             settle(
               protocol === null
-                ? unknown('unsupported_protocol_operation')
+                ? media === null
+                  ? unknown('unsupported_protocol_operation')
+                  : oversized
+                    ? unknown('oversized_body')
+                    : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), null, media)
                 : oversized
                   ? unknown('oversized_body')
-                  : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), protocol),
+                  : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), protocol, null),
             );
             release();
             controller.close();
             return;
           }
           if (!(next.value instanceof Uint8Array)) throw new TypeError('invalid provider response chunk');
-          if (protocol !== null && !oversized) {
+          if ((protocol !== null || media !== null) && !oversized) {
             if (next.value.byteLength > PROVIDER_JSON_USAGE_MAX_BODY_BYTES - length) {
               oversized = true;
               buffer = undefined;

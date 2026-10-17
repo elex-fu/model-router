@@ -486,6 +486,24 @@ function isOneOf<T extends string>(value: unknown, values: readonly T[]): value 
 const attemptDispatchStates: readonly AttemptDispatchState[] = ['not_sent', 'dispatching', 'sent', 'unknown'];
 const attemptResultStates: readonly AttemptResultState[] = ['pending', 'succeeded', 'failed', 'cancelled', 'unknown'];
 const usageStatuses: readonly GatewayUsage['status'][] = ['reported', 'partial', 'missing', 'estimated'];
+const usageBillingModes: readonly GatewayUsage['billingMode'][] = [
+  'token',
+  'per_request',
+  'image',
+  'video',
+  'audio',
+];
+const usageSizeTiers = [
+  '1k',
+  '2k',
+  '4k',
+  '480p',
+  '720p',
+  '1080p',
+  'tts',
+  'stt',
+  'realtime',
+] as const;
 const usageSources: readonly GatewayUsage['source'][] = ['upstream', 'local-estimate', 'legacy'];
 const usageTokenFields = [
   'inputTotal',
@@ -541,6 +559,22 @@ function createNormalizedUsage(input: GatewayUsage): GatewayUsage {
   if (!isOneOf(value.status, usageStatuses) || !isOneOf(value.source, usageSources)) {
     throw new Error('Normalized usage has an unsupported status or source');
   }
+  /*
+   * §4.1 media fields are optional in this trusted contract: absent input
+   * keeps the neutral token-only shape; a present value must be well-formed.
+   */
+  const billingMode = value.billingMode ?? 'token';
+  if (!isOneOf(billingMode, usageBillingModes)) {
+    throw new Error('Normalized usage has an unsupported billing mode');
+  }
+  const unitsRaw = value.units;
+  if (unitsRaw !== null && unitsRaw !== undefined && (typeof unitsRaw !== 'number' || !Number.isSafeInteger(unitsRaw) || unitsRaw < 0)) {
+    throw new Error('Normalized usage units must be a non-negative safe integer or null');
+  }
+  const sizeTier = value.sizeTier ?? null;
+  if (sizeTier !== null && !isOneOf(sizeTier, usageSizeTiers)) {
+    throw new Error('Normalized usage has an unsupported size tier');
+  }
   return {
     inputTotal: value.inputTotal as number | null,
     inputUncached: value.inputUncached as number | null,
@@ -550,6 +584,9 @@ function createNormalizedUsage(input: GatewayUsage): GatewayUsage {
     cacheWrite1h: value.cacheWrite1h as number | null,
     outputTotal: value.outputTotal as number | null,
     reasoningOutput: value.reasoningOutput as number | null,
+    billingMode,
+    units: unitsRaw ?? null,
+    sizeTier: sizeTier as GatewayUsage['sizeTier'],
     status: value.status,
     source: value.source,
     semanticsVersion: nonEmptyString(value.semanticsVersion, 'usage.semanticsVersion'),

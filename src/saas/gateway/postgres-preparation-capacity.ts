@@ -168,6 +168,32 @@ function payloadTokenUnits(bounds: unknown): bigint | null {
   const output = exactInteger(usage.outputTotalUpperBound);
   const reasoning = exactInteger(usage.reasoningOutputUpperBound);
   const buckets = usage.feasibleInputBuckets;
+  /*
+   * §4.1 (task #15) TPM semantics: a media envelope (per-unit upper bound
+   * present) may carry all-zero token bounds — image generation reports no
+   * tokens at all. Media units are NOT tokens and never enter the TPM
+   * count; the envelope stays admissible with a zero token reservation.
+   */
+  const media =
+    usage.perUnitUnitsUpperBound !== undefined && usage.perUnitUnitsUpperBound !== null;
+  if (
+    media &&
+    input === 0n &&
+    inputUncached === 0n &&
+    cacheRead === 0n &&
+    cacheWrite === 0n &&
+    cacheWrite5m === 0n &&
+    cacheWrite1h === 0n &&
+    output === 0n &&
+    reasoning === 0n &&
+    Array.isArray(buckets) &&
+    buckets.length > 0 &&
+    buckets.every((bucket) => text(bucket)) &&
+    new Set(buckets).size === buckets.length
+  ) {
+    // Pure media envelope: zero tokens, valid shape, zero TPM reservation.
+    return 0n;
+  }
   if (
     input === null ||
     inputUncached === null ||

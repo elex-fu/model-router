@@ -428,6 +428,28 @@ function normalizeUsage(value: unknown): NormalizedUsageExact | null {
     token(usage.reasoningOutput),
   ];
   if (values.some((value) => value === undefined)) return null;
+  // §4.1: media facts ride the same strict shape — absent keeps the neutral
+  // token-only values; a non-token mode requires a unit count.
+  const billingMode = usage.billingMode ?? 'token';
+  if (
+    billingMode !== 'token' &&
+    billingMode !== 'per_request' &&
+    billingMode !== 'image' &&
+    billingMode !== 'video' &&
+    billingMode !== 'audio'
+  ) {
+    return null;
+  }
+  const units = token(usage.units ?? null);
+  if (units === undefined) return null;
+  if (billingMode !== 'token' && units === null) return null;
+  const sizeTier = usage.sizeTier ?? null;
+  if (
+    sizeTier !== null &&
+    !['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime'].includes(sizeTier)
+  ) {
+    return null;
+  }
   return {
     inputTotal: values[0] as string | null,
     inputUncached: values[1] as string | null,
@@ -437,6 +459,9 @@ function normalizeUsage(value: unknown): NormalizedUsageExact | null {
     cacheWrite1h: values[5] as string | null,
     outputTotal: values[6] as string | null,
     reasoningOutput: values[7] as string | null,
+    billingMode,
+    units,
+    sizeTier,
     status: 'reported',
     source: 'upstream',
     semanticsVersion,

@@ -23,6 +23,16 @@ export interface PreparedRequestUsageEnvelope {
   readonly outputTotalUpperBound: PreparedEvidenceInteger;
   readonly reasoningOutputUpperBound: PreparedEvidenceInteger;
   readonly feasibleInputBuckets: readonly string[];
+  /**
+   * §4.1 (roadmap batch 4) per-unit (media) upper bounds. Absent/null keeps
+   * the token-only envelope — and therefore the signed statement —
+   * byte-identical to the pre-4.1 form (the digest-optional policy). A media
+   * envelope may carry all-zero token bounds (image generation reports no
+   * tokens at all).
+   */
+  readonly perUnitUnitsUpperBound?: PreparedEvidenceInteger | null;
+  /** Canonical size tier fixed by the request; null when the tier is open. */
+  readonly sizeTier?: string | null;
 }
 
 export interface PreparedRequestEvidenceAudit {
@@ -335,6 +345,8 @@ interface NormalizedEvidence {
     readonly outputTotalUpperBound: string;
     readonly reasoningOutputUpperBound: string;
     readonly feasibleInputBuckets: readonly string[];
+    readonly perUnitUnitsUpperBound?: string;
+    readonly sizeTier?: string | null;
   };
   readonly maxHoldCurrency: string | null;
   readonly maxHoldMinorUnits: string;
@@ -347,6 +359,8 @@ interface NormalizedEvidence {
 }
 
 const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
+// §4.1: canonical per-unit size tiers (pricing registry, migration 122 CHECK).
+const PER_UNIT_TIER_SET = new Set(['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime']);
 const PROTOCOLS = new Set<PreparedEvidenceProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
 const MAX_BIGINT = 9223372036854775807n;
 
@@ -497,7 +511,19 @@ function digest(value: unknown, label: string): string {
 
 function normalizeUsage(input: PreparedRequestUsageEnvelope): NormalizedEvidence['usage'] {
   if (!input || typeof input !== 'object') fail('INVALID_INPUT', 'usage is required');
-  const usage = {
+  const usage: {
+    inputTotalUpperBound: string;
+    inputUncachedUpperBound: string;
+    cacheReadUpperBound: string;
+    cacheWriteUpperBound: string;
+    cacheWrite5mUpperBound: string;
+    cacheWrite1hUpperBound: string;
+    outputTotalUpperBound: string;
+    reasoningOutputUpperBound: string;
+    feasibleInputBuckets: string[];
+    perUnitUnitsUpperBound?: string;
+    sizeTier?: string | null;
+  } = {
     inputTotalUpperBound: nonNegative(input.inputTotalUpperBound, 'usage.inputTotalUpperBound'),
     inputUncachedUpperBound: nonNegative(input.inputUncachedUpperBound, 'usage.inputUncachedUpperBound'),
     cacheReadUpperBound: nonNegative(input.cacheReadUpperBound, 'usage.cacheReadUpperBound'),
@@ -510,6 +536,26 @@ function normalizeUsage(input: PreparedRequestUsageEnvelope): NormalizedEvidence
       ? input.feasibleInputBuckets.map((bucket) => text(bucket, 'usage.feasibleInputBuckets'))
       : fail('INVALID_INPUT', 'usage.feasibleInputBuckets is required'),
   };
+  /*
+   * §4.1: the media bound and tier join the SIGNED statement only when they
+   * carry a value (the digest-optional anti-drift policy — a token-only
+   * statement must stay byte-identical so existing verifier signatures keep
+   * verifying). A tier value must be canonical.
+   */
+  const perUnitUnitsUpperBound =
+    input.perUnitUnitsUpperBound === undefined || input.perUnitUnitsUpperBound === null
+      ? undefined
+      : nonNegative(input.perUnitUnitsUpperBound, 'usage.perUnitUnitsUpperBound');
+  const sizeTier =
+    input.sizeTier === undefined || input.sizeTier === null
+      ? undefined
+      : PER_UNIT_TIER_SET.has(String(input.sizeTier))
+        ? String(input.sizeTier)
+        : fail('INVALID_INPUT', 'usage.sizeTier is not a canonical size tier');
+  if (perUnitUnitsUpperBound !== undefined) {
+    usage.perUnitUnitsUpperBound = perUnitUnitsUpperBound;
+    if (sizeTier !== undefined) usage.sizeTier = sizeTier;
+  }
   if (
     usage.feasibleInputBuckets.length === 0 ||
     new Set(usage.feasibleInputBuckets).size !== usage.feasibleInputBuckets.length
@@ -1043,6 +1089,8 @@ const EVIDENCE_COLUMNS = [
   'usage_cache_write_1h_upper_bound',
   'usage_output_total_upper_bound',
   'usage_reasoning_output_upper_bound',
+  'usage_per_unit_units_upper_bound',
+  'usage_size_tier',
   'usage_feasible_input_buckets',
   'max_hold_currency',
   'max_hold_minor_units',
@@ -1134,6 +1182,8 @@ function evidenceValues(input: NormalizedEvidence, statementSha256: string): rea
     input.usage.cacheWrite1hUpperBound,
     input.usage.outputTotalUpperBound,
     input.usage.reasoningOutputUpperBound,
+    input.usage.perUnitUnitsUpperBound ?? '0',
+    input.usage.perUnitUnitsUpperBound === undefined ? null : (input.usage.sizeTier ?? null),
     [...input.usage.feasibleInputBuckets],
     input.maxHoldCurrency,
     input.maxHoldMinorUnits,
@@ -2349,7 +2399,8 @@ function storedCompositeRoute(row: EvidenceRow): PreparedEvidenceCompositeRoute 
   return normalizeCompositeRoute(parsed);
 }
 
-function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedRequestEvidenceAudit>): NormalizedEvidence {  const buckets = normalizedRowValue(row, 'usage_feasible_input_buckets', 'usage buckets');
+function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedRequestEvidenceAudit>): NormalizedEvidence {
+  const buckets = normalizedRowValue(row, 'usage_feasible_input_buckets', 'usage buckets');
   if (!Array.isArray(buckets)) fail('STORAGE_ERROR', 'stored usage buckets are invalid');
   const modelResolutionValues = [
     storedProvenanceValue(row, 'model_resolution_requested_model', 'requested model provenance'),
@@ -2568,6 +2619,20 @@ function normalizeStoredEvidence(row: EvidenceRow, audit: Required<PreparedReque
         'usage_reasoning_output_upper_bound',
         'reasoning upper bound',
       ) as PreparedEvidenceInteger,
+      // §4.1: media columns (migration 122); the neutral column values on a
+      // pre-122 row (0/NULL, or absent entirely in older readers) map back
+      // to an envelope WITHOUT the media keys so the recomputed statement
+      // matches its stored signature.
+      ...(Number(row.usage_per_unit_units_upper_bound ?? 0) > 0
+        ? {
+            perUnitUnitsUpperBound: normalizedRowValue(
+              row,
+              'usage_per_unit_units_upper_bound',
+              'per-unit upper bound',
+            ) as PreparedEvidenceInteger,
+            sizeTier: row.usage_size_tier == null ? null : String(row.usage_size_tier),
+          }
+        : {}),
       feasibleInputBuckets: buckets.map((value) => String(value)),
     },
     maxHoldCurrency: row.max_hold_currency == null ? null : String(row.max_hold_currency),

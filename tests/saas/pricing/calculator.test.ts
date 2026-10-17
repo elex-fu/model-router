@@ -161,14 +161,17 @@ test('returns separate customer and supplier currency amounts for later settleme
   assert.equal(result.supplier.amountMinorUnits, 18n);
 });
 
-test('per_unit is a nullable rate metric reserved for media pricing (4.0 ⑤)', () => {
+test('per_unit is a nullable rate metric with an optional tier ladder (4.0 ⑤ / 4.1)', () => {
   const tokenOnly = normalizeRates({
     input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
     output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
   });
-  // Every normalized rate set now carries per_unit, null by default.
+  // Every normalized rate set now carries per_unit, null by default, and the
+  // tier ladder is a separate trailing key (digest-stable ordering).
   assert.equal(tokenOnly.per_unit, null);
-  // Digest-stable ordering: per_unit is appended after the six legacy metrics.
+  assert.equal(tokenOnly.per_unit_tiers, null);
+  // Digest-stable ordering: per_unit is appended after the six legacy
+  // metrics and per_unit_tiers after per_unit.
   assert.deepEqual(Object.keys(tokenOnly), [
     'input',
     'cache_read',
@@ -177,6 +180,7 @@ test('per_unit is a nullable rate metric reserved for media pricing (4.0 ⑤)', 
     'cache_write_1h',
     'output',
     'per_unit',
+    'per_unit_tiers',
   ]);
 
   // A per_unit rate normalizes and validates like any other metric...
@@ -188,8 +192,38 @@ test('per_unit is a nullable rate metric reserved for media pricing (4.0 ⑤)', 
   assert.equal(withPerUnit.per_unit?.numeratorMinorUnits, 1000n);
   assert.equal(withPerUnit.per_unit?.denominatorUnits, 1n);
 
-  // ...but the token calculator never charges it (no per-unit usage counter
-  // exists in TokenUsageInput yet; the charging branch is #15 / roadmap 4.1).
+  // ...and the tier ladder normalizes in registry order.
+  const withTiers = normalizeRates({
+    input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+    output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+    per_unit_tiers: {
+      '4k': { numeratorMinorUnits: '4000', denominatorUnits: '1' },
+      '1k': { numeratorMinorUnits: '500', denominatorUnits: '1' },
+    },
+  });
+  assert.deepEqual(Object.keys(withTiers.per_unit_tiers ?? {}), ['1k', '4k']);
+  // An unknown tier key fails closed.
+  assert.throws(
+    () =>
+      normalizeRates({
+        input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+        output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+        per_unit_tiers: { '8k': { numeratorMinorUnits: '1', denominatorUnits: '1' } },
+      }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+  // An empty tier map fails closed.
+  assert.throws(
+    () =>
+      normalizeRates({
+        input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+        output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+        per_unit_tiers: {},
+      }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+
+  // Token-only usage never charges per_unit, even when the rate is present.
   const charged = calculatePrice(withPerUnit, usage(), { roundingMode: 'half_up' });
   assert.equal(charged.chargedMetrics.includes('per_unit'), false);
   assert.equal(charged.amountMinorUnits, 18n);

@@ -56,6 +56,11 @@ const COMMERCIAL_PRICE_VERSION_COLUMNS = [
   'cache_write_1h_rate_denominator_units',
   'output_rate_numerator_minor_units',
   'output_rate_denominator_units',
+  // 4.1 (122): per-unit rate pair, tier ladder, token-multiplier policy.
+  'per_unit_rate_numerator_minor_units',
+  'per_unit_rate_denominator_units',
+  'per_unit_tier_rates',
+  'token_multipliers',
   'effective_at',
   'expires_at',
   'idempotency_key',
@@ -2732,6 +2737,10 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'cache_write_1h',
     'output_total',
     'reasoning_output',
+    // 4.1 (122): media metering columns.
+    'billing_mode',
+    'units',
+    'size_tier',
     'status',
     'source',
     'measurement_kind',
@@ -3858,6 +3867,9 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'hold_input_cache_write_1h',
       'hold_input_output_total',
       'hold_input_reasoning_output',
+      // 4.1 (122): per-unit hold witness.
+      'hold_input_per_unit_units',
+      'hold_input_size_tier',
       'hold_amount_minor_units',
       'wallet_hold_required',
       'admission_expires_at',
@@ -4442,6 +4454,10 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'cache_write_1h',
       'output_total',
       'reasoning_output',
+      // 4.1 (122): media metering columns.
+      'billing_mode',
+      'units',
+      'size_tier',
       'status',
       'source',
       'semantics_version',

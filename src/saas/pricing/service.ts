@@ -11,9 +11,12 @@ import {
   calculateUsageSettlement,
   normalizeHoldInput,
   normalizeRates,
+  parsePerUnitTier,
+  perUnitTiersDigestMaterial,
   priceHoldInputToUsage,
 } from './calculator.js';
 import { SaasPricingError } from './errors.js';
+import { normalizeTokenMultiplierPolicy, tokenMultiplierPolicyDigestMaterial } from './multipliers.js';
 import type {
   AppendCustomerPriceVersionInput,
   AppendSupplierCostVersionInput,
@@ -25,6 +28,9 @@ import type {
   CustomerPriceVersionRecord,
   ExactIntegerInput,
   NormalizedPriceHoldInput,
+  NormalizedTokenMultiplierPolicy,
+  PerUnitTier,
+  PerUnitTierRatesInput,
   PlatformPriceAuditContext,
   PlatformPriceVersionHistoryPage,
   PlatformPriceVersionHistoryQuery,
@@ -36,6 +42,7 @@ import type {
   PricingIdentity,
   PricingSettlementInput,
   RateSet,
+  RationalRate,
   RegisterPlatformPriceVersionInput,
   ResolveCustomerPriceVersionInput,
   ResolveSupplierCostVersionInput,
@@ -45,9 +52,10 @@ import type {
   SupplierCostSnapshotRecord,
   SupplierCostVersionRecord,
   SupplierPricingIdentity,
+  TokenMultiplierPolicyInput,
   UsageSettlementCalculation,
 } from './types.js';
-import { SUPPLIER_ATTEMPT_BINDING_REQUIRED_COLUMNS } from './types.js';
+import { PER_UNIT_TIERS, SUPPLIER_ATTEMPT_BINDING_REQUIRED_COLUMNS } from './types.js';
 
 const MAX_TEXT_LENGTH = 512;
 const MAX_DIGEST = /^[0-9a-f]{64}$/;
@@ -61,6 +69,8 @@ const CUSTOMER_PRICE_COLUMNS = `
   cache_write_5m_rate_numerator_minor_units, cache_write_5m_rate_denominator_units,
   cache_write_1h_rate_numerator_minor_units, cache_write_1h_rate_denominator_units,
   output_rate_numerator_minor_units, output_rate_denominator_units,
+  per_unit_rate_numerator_minor_units, per_unit_rate_denominator_units,
+  per_unit_tier_rates, token_multipliers,
   effective_at, expires_at, idempotency_key, definition_digest, created_at`;
 
 const SUPPLIER_COST_COLUMNS = `
@@ -72,6 +82,8 @@ const SUPPLIER_COST_COLUMNS = `
   cache_write_5m_rate_numerator_minor_units, cache_write_5m_rate_denominator_units,
   cache_write_1h_rate_numerator_minor_units, cache_write_1h_rate_denominator_units,
   output_rate_numerator_minor_units, output_rate_denominator_units,
+  per_unit_rate_numerator_minor_units, per_unit_rate_denominator_units,
+  per_unit_tier_rates, token_multipliers,
   effective_at, expires_at, idempotency_key, definition_digest, created_at`;
 
 const CUSTOMER_SNAPSHOT_COLUMNS = `
@@ -79,7 +91,8 @@ const CUSTOMER_SNAPSHOT_COLUMNS = `
   provider_id, product_id, protocol, endpoint, currency, commercial_policy_version, calculator_version,
   rounding_version, rounding_mode, rounding_boundary, hold_input_total, hold_input_uncached,
   hold_input_cache_read, hold_input_cache_write, hold_input_cache_write_5m, hold_input_cache_write_1h,
-  hold_input_output_total, hold_input_reasoning_output, hold_amount_minor_units, wallet_hold_required,
+  hold_input_output_total, hold_input_reasoning_output, hold_input_per_unit_units, hold_input_size_tier,
+  hold_amount_minor_units, wallet_hold_required,
   admission_expires_at, idempotency_key, snapshot_digest, created_at,
   billing_group_id, rate_multiplier_num, rate_multiplier_den, peak_applied,
   model_pricing_override_digest, model_pricing_override,
@@ -104,6 +117,7 @@ interface NormalizedCommonPriceInput {
   readonly roundingMode: RoundingMode;
   readonly roundingBoundary: RoundingBoundary;
   readonly rates: RateSet;
+  readonly tokenMultipliers: NormalizedTokenMultiplierPolicy | null;
 }
 
 type CustomerPriceRow = Row;
@@ -344,18 +358,24 @@ function normalizeCommonPriceInput(input: {
   readonly roundingMode: RoundingMode;
   readonly roundingBoundary?: RoundingBoundary;
   readonly rates: Parameters<typeof normalizeRates>[0];
+  readonly tokenMultipliers?: TokenMultiplierPolicyInput | null;
 }): NormalizedCommonPriceInput {
   const window = normalizeWindow(input.effectiveAt, input.expiresAt);
   const rates = normalizeRates(input.rates);
   /*
-   * 4.0 ⑤ (task #14): `per_unit` is type-visible but not yet persistable —
-   * the version tables gain their per_unit columns with the 4.1 billing
-   * migration (#15). Fail closed here instead of silently dropping a rate
-   * that shapes billing: a per-unit price version registered today could
-   * round-trip from storage as per_unit: null and bill differently from
-   * its own definition digest.
+   * 4.1 (#15): per_unit, its tier ladder, and the token multipliers are now
+   * persistable — the version tables carry their columns and the digest
+   * policy covers them (non-null material appended after the legacy metrics).
+   * The #14 fail-closed guards are removed by this change; a per-unit rate
+   * registered now round-trips from storage with its own digest intact.
    */
-  if (rates.per_unit !== null) fail('INVALID_RATE');
+  let tokenMultipliers: NormalizedTokenMultiplierPolicy | null = null;
+  try {
+    tokenMultipliers = normalizeTokenMultiplierPolicy(input.tokenMultipliers ?? null);
+  } catch (error) {
+    if (error instanceof TypeError) fail('INVALID_RATE');
+    throw error;
+  }
   return {
     idempotencyKey: normalizeText(input.idempotencyKey),
     effectiveAt: window.effectiveAt,
@@ -366,6 +386,7 @@ function normalizeCommonPriceInput(input: {
     roundingMode: normalizeRoundingMode(input.roundingMode),
     roundingBoundary: normalizeRoundingBoundary(input.roundingBoundary),
     rates,
+    tokenMultipliers,
   };
 }
 
@@ -444,7 +465,80 @@ function storedRates(row: Row): RateSet {
     cache_write_5m: storedRate(row, 'cache_write_5m'),
     cache_write_1h: storedRate(row, 'cache_write_1h'),
     output: storedRate(row, 'output') ?? fail('PRICING_STORAGE_ERROR'),
+    per_unit: storedRate(row, 'per_unit'),
+    per_unit_tiers: storedPerUnitTiers(row),
   });
+}
+
+/**
+ * Stored per-unit tier ladder (jsonb, migration 122). Registry-ordered
+ * {tier → {numeratorMinorUnits, denominatorUnits}} with decimal-string parts;
+ * anything outside the registry or with a non-positive denominator fails
+ * closed as a storage error.
+ */
+function storedPerUnitTiers(row: Row): PerUnitTierRatesInput | null {
+  const value = row.per_unit_tier_rates;
+  if (value === null || value === undefined) return null;
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      fail('PRICING_STORAGE_ERROR');
+    }
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) fail('PRICING_STORAGE_ERROR');
+  const tiers: Partial<Record<PerUnitTier, { numeratorMinorUnits: string; denominatorUnits: string }>> = {};
+  for (const [tier, rate] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!(PER_UNIT_TIERS as readonly string[]).includes(tier)) fail('PRICING_STORAGE_ERROR');
+    if (rate === null || typeof rate !== 'object' || Array.isArray(rate)) fail('PRICING_STORAGE_ERROR');
+    const candidate = rate as Record<string, unknown>;
+    const numerator = candidate.numeratorMinorUnits;
+    const denominator = candidate.denominatorUnits;
+    if (
+      typeof numerator !== 'string' ||
+      typeof denominator !== 'string' ||
+      !/^(0|[1-9][0-9]*)$/.test(numerator) ||
+      !/^[1-9][0-9]*$/.test(denominator)
+    ) {
+      fail('PRICING_STORAGE_ERROR');
+    }
+    tiers[tier as PerUnitTier] = { numeratorMinorUnits: numerator, denominatorUnits: denominator };
+  }
+  if (Object.keys(tiers).length === 0) fail('PRICING_STORAGE_ERROR');
+  return tiers;
+}
+
+/** Canonical stored JSON for the tier ladder; registry key order, decimal strings. */
+function perUnitTiersStoredJson(rates: RateSet): string | null {
+  if (rates.per_unit_tiers === null) return null;
+  const material = perUnitTiersDigestMaterial(rates);
+  return material === null ? null : JSON.stringify(material);
+}
+
+function storedTokenMultipliers(row: Row): NormalizedTokenMultiplierPolicy | null {
+  const value = row.token_multipliers;
+  if (value === null || value === undefined) return null;
+  let parsed: unknown = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      fail('PRICING_STORAGE_ERROR');
+    }
+  }
+  try {
+    return normalizeTokenMultiplierPolicy(parsed as TokenMultiplierPolicyInput);
+  } catch (error) {
+    if (error instanceof TypeError) fail('PRICING_STORAGE_ERROR');
+    throw error;
+  }
+}
+
+/** Canonical stored JSON for the multiplier policy (sorted keys, decimal strings). */
+function tokenMultipliersStoredJson(policy: NormalizedTokenMultiplierPolicy | null): string | null {
+  const material = tokenMultiplierPolicyDigestMaterial(policy);
+  return material === null ? null : JSON.stringify(material);
 }
 
 function storedRoundingMode(row: Row): RoundingMode {
@@ -474,6 +568,7 @@ function mapPriceBase(row: Row): CommercialPriceVersionRecordBase {
     roundingMode: storedRoundingMode(row),
     roundingBoundary: storedRoundingBoundary(row),
     rates: storedRates(row),
+    tokenMultipliers: storedTokenMultipliers(row),
     effectiveAt: storedTimestamp(row, 'effective_at'),
     expiresAt: storedNullableTimestamp(row, 'expires_at'),
     idempotencyKey: storedText(row, 'idempotency_key'),
@@ -519,7 +614,34 @@ function mapHoldInput(row: Row): NormalizedPriceHoldInput {
     cacheWrite1h: parseStoredInteger(row.hold_input_cache_write_1h),
     outputTotal: parseStoredInteger(row.hold_input_output_total),
     reasoningOutput: parseStoredInteger(row.hold_input_reasoning_output),
+    // 4.1 (migration 122): absent/0 on token-only snapshots (column default).
+    perUnitUnits: parseStoredInteger(row.hold_input_per_unit_units ?? 0),
+    sizeTier: parsePerUnitTier(row.hold_input_size_tier ?? null),
   };
+}
+
+/**
+ * Snapshot digest material for the hold witness. The eight legacy counters
+ * always serialize; the per-unit witness fields are digest-optional (the
+ * #14/#15 anti-drift policy) so a token-only snapshot's digest is
+ * byte-identical to its pre-4.1 computation and a pre-122 row replays.
+ */
+function holdInputDigestMaterial(holdInput: NormalizedPriceHoldInput): Record<string, string> {
+  const material: Record<string, string> = {
+    inputTotal: holdInput.inputTotal.toString(10),
+    inputUncached: holdInput.inputUncached.toString(10),
+    cacheRead: holdInput.cacheRead.toString(10),
+    cacheWrite: holdInput.cacheWrite.toString(10),
+    cacheWrite5m: holdInput.cacheWrite5m.toString(10),
+    cacheWrite1h: holdInput.cacheWrite1h.toString(10),
+    outputTotal: holdInput.outputTotal.toString(10),
+    reasoningOutput: holdInput.reasoningOutput.toString(10),
+  };
+  if (holdInput.perUnitUnits > 0n || holdInput.sizeTier !== null) {
+    material.perUnitUnits = holdInput.perUnitUnits.toString(10);
+    if (holdInput.sizeTier !== null) material.sizeTier = holdInput.sizeTier;
+  }
+  return material;
 }
 
 function storedBoolean(row: Row, key: string): boolean {
@@ -671,9 +793,10 @@ function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
-function rateDigest(rates: RateSet): Record<string, { numeratorMinorUnits: string; denominatorUnits: string } | null> {
-  const material: Record<string, { numeratorMinorUnits: string; denominatorUnits: string } | null> = {};
+function rateDigest(rates: RateSet): Record<string, unknown> {
+  const material: Record<string, unknown> = {};
   for (const [metric, rate] of Object.entries(rates)) {
+    if (metric === 'per_unit_tiers') continue;
     /*
      * 4.0 ⑤ (task #14) anti-drift policy: `per_unit` is digest-optional.
      *
@@ -698,14 +821,20 @@ function rateDigest(rates: RateSet): Record<string, { numeratorMinorUnits: strin
       rate === null
         ? null
         : {
-            numeratorMinorUnits: rate.numeratorMinorUnits.toString(10),
-            denominatorUnits: rate.denominatorUnits.toString(10),
+            numeratorMinorUnits: (rate as RationalRate).numeratorMinorUnits.toString(10),
+            denominatorUnits: (rate as RationalRate).denominatorUnits.toString(10),
           };
   }
+  // 4.1 (#15): the tier ladder follows the same digest-optional policy —
+  // omitted entirely when absent (legacy digests unchanged), canonical
+  // registry order when present.
+  const tiers = perUnitTiersDigestMaterial(rates);
+  if (tiers !== null) material.per_unit_tiers = tiers;
   return material;
 }
 
 function priceDigest(identity: PricingIdentity | SupplierPricingIdentity, common: NormalizedCommonPriceInput): string {
+  const multipliers = tokenMultiplierPolicyDigestMaterial(common.tokenMultipliers);
   return digest({
     ...identity,
     publicModelVersion: String(identity.publicModelVersion),
@@ -717,6 +846,9 @@ function priceDigest(identity: PricingIdentity | SupplierPricingIdentity, common
     roundingMode: common.roundingMode,
     roundingBoundary: common.roundingBoundary,
     rates: rateDigest(common.rates),
+    // 4.1: token multipliers are digest-optional like per_unit — absent
+    // policies keep legacy digests byte-identical.
+    ...(multipliers === null ? {} : { tokenMultipliers: multipliers }),
   });
 }
 
@@ -737,7 +869,7 @@ function snapshotTerms(snapshot: CustomerPriceSnapshotRecord): {
   };
 }
 
-function rateColumns(rates: RateSet): unknown[] {
+function rateColumns(rates: RateSet, tokenMultipliers: NormalizedTokenMultiplierPolicy | null): unknown[] {
   return [
     rates.input?.numeratorMinorUnits ?? null,
     rates.input?.denominatorUnits ?? null,
@@ -751,6 +883,11 @@ function rateColumns(rates: RateSet): unknown[] {
     rates.cache_write_1h?.denominatorUnits ?? null,
     rates.output?.numeratorMinorUnits ?? null,
     rates.output?.denominatorUnits ?? null,
+    // 4.1 (migration 122): per-unit pair, tier ladder, token multipliers.
+    rates.per_unit?.numeratorMinorUnits ?? null,
+    rates.per_unit?.denominatorUnits ?? null,
+    perUnitTiersStoredJson(rates),
+    tokenMultipliersStoredJson(tokenMultipliers),
   ];
 }
 
@@ -914,14 +1051,11 @@ function normalizeSnapshotBillingGroup(
     if (typeof model !== 'string' || model.trim().length === 0 || model.length > 255) fail('INVALID_INPUT');
     const rates = normalizeRates(value.modelPricingOverride.rates);
     /*
-     * 4.0 ⑤ (task #14): the billing-group override codec (billing/groups/
-     * override.ts, R1 domain) serializes and digests the six legacy metrics
-     * only. A per_unit rate here would normalize fine and then silently
-     * vanish from the override digest and the frozen snapshot JSON — the
-     * caller-supplied digest would even match. Fail closed instead; #15
-     * extends the codec together with the calculator.
+     * 4.1 (#15): the billing-group override codec now serializes and digests
+     * per_unit and its tier ladder (digest-optional, like the version-table
+     * policy), so an override carrying per-unit rates round-trips through
+     * the frozen snapshot JSON. The #14 fail-closed guard is removed.
      */
-    if (rates.per_unit !== null) fail('INVALID_INPUT');
     const digest = modelPricingOverrideDigest(model, rates);
     if (value.modelPricingOverride.digest !== digest) fail('INVALID_INPUT');
     override = {
@@ -1419,7 +1553,7 @@ export class SaasPricingService {
         common.roundingVersion,
         common.roundingMode,
         common.roundingBoundary,
-        ...rateColumns(common.rates),
+        ...rateColumns(common.rates, common.tokenMultipliers),
         common.effectiveAt,
         common.expiresAt,
         common.idempotencyKey,
@@ -1487,7 +1621,7 @@ export class SaasPricingService {
         common.roundingVersion,
         common.roundingMode,
         common.roundingBoundary,
-        ...rateColumns(common.rates),
+        ...rateColumns(common.rates, common.tokenMultipliers),
         common.effectiveAt,
         common.expiresAt,
         common.idempotencyKey,
@@ -1610,7 +1744,7 @@ export class SaasPricingService {
       tenantId,
       requestId,
       customerPriceVersion: priceReference,
-      holdInput: Object.fromEntries(Object.entries(holdInput).map(([key, value]) => [key, value.toString(10)])),
+      holdInput: holdInputDigestMaterial(holdInput),
       admissionExpiresAt,
       idempotencyKey,
       ...snapshotDigestMaterial(billingGroup),
@@ -1698,6 +1832,8 @@ export class SaasPricingService {
         holdInput.cacheWrite1h,
         holdInput.outputTotal,
         holdInput.reasoningOutput,
+        holdInput.perUnitUnits,
+        holdInput.sizeTier,
         holdAmountMinorUnits,
         walletHoldRequired,
         admissionExpiresAt,
@@ -1881,6 +2017,7 @@ export class SaasPricingService {
       supplierCost,
       usage: input.usage,
       requireComplete: input.requireComplete,
+      serviceTier: input.serviceTier ?? null,
     });
   }
 }

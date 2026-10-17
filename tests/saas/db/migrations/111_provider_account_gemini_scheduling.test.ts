@@ -19,7 +19,7 @@ test('111 registers directly after 110 as the applied head (the slot 110 documen
   assert.equal(registered[index - 1], 110, '111 lands directly after 110');
   // Batch-3 (117 bedrock / 119 grok) tails registered after 116; 111's
   // direct-predecessor contract above is what pins the ordering.
-  assert.equal(registered.at(-1), 121, 'the batch-3 CN-providers tail is the applied head');
+  assert.equal(registered.at(-1), 122, 'the batch-3 CN-providers tail is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 111).length, 1);

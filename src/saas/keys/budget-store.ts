@@ -121,16 +121,36 @@ function record(value: unknown): Record<string, unknown> {
 /** Conservative reservation units from the admission usage upper-bound envelope. */
 export function keyBudgetTokenUnitsFromBounds(bounds: unknown): string {
   const envelope = record(bounds);
-  const input = BigInt(parseKeyBudgetAmount(envelope.inputTotalUpperBound));
-  const output = BigInt(parseKeyBudgetAmount(envelope.outputTotalUpperBound));
+  /*
+   * §4.1: media envelopes may omit the token bounds entirely (image
+   * generation reports no tokens); the missing bounds then count zero —
+   * media units NEVER count as tokens (KEY-BUD token windows are token-only;
+   * the media charge rides the charge windows). A token-only envelope keeps
+   * the strict pre-4.1 validation.
+   */
+  const media = envelope.perUnitUnitsUpperBound !== undefined && envelope.perUnitUnitsUpperBound !== null;
+  const input =
+    media && envelope.inputTotalUpperBound == null
+      ? 0n
+      : BigInt(parseKeyBudgetAmount(envelope.inputTotalUpperBound));
+  const output =
+    media && envelope.outputTotalUpperBound == null
+      ? 0n
+      : BigInt(parseKeyBudgetAmount(envelope.outputTotalUpperBound));
   return parseKeyBudgetAmount(input + output);
 }
 
 /** Actual settled units from the upstream-reported exact usage. */
 export function keyBudgetTokenUnitsFromUsage(usage: unknown): string {
   const exact = record(usage);
-  const input = BigInt(parseKeyBudgetAmount(exact.inputTotal));
-  const output = BigInt(parseKeyBudgetAmount(exact.outputTotal));
+  // §4.1: media usage reports carry null token counters; media units do not
+  // inflate token budgets (charge windows capture the media cost). A
+  // token-only report keeps the strict pre-4.1 validation.
+  const media =
+    (exact.billingMode !== undefined && exact.billingMode !== null && exact.billingMode !== 'token') ||
+    (exact.units !== undefined && exact.units !== null);
+  const input = media && exact.inputTotal == null ? 0n : BigInt(parseKeyBudgetAmount(exact.inputTotal));
+  const output = media && exact.outputTotal == null ? 0n : BigInt(parseKeyBudgetAmount(exact.outputTotal));
   return parseKeyBudgetAmount(input + output);
 }
 

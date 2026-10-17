@@ -468,6 +468,17 @@ function admissionHoldEvidence(
   payloadBounds: RequestPreparationPayloadBounds,
   admissionExpiresAt: Date,
 ): PlatformRequestAdmissionHoldEvidence {
+  // §4.1: media bounds ride the hold evidence only when the payload verifier
+  // produced them; token-only admissions keep the exact pre-4.1 shape.
+  const perUnitBounds = payloadBounds as { perUnitUnitsUpperBound?: unknown; sizeTier?: unknown };
+  const perUnitUnits =
+    perUnitBounds.perUnitUnitsUpperBound === undefined || perUnitBounds.perUnitUnitsUpperBound === null
+      ? undefined
+      : (perUnitBounds.perUnitUnitsUpperBound as bigint | number | string);
+  const sizeTier =
+    perUnitBounds.sizeTier === undefined || perUnitBounds.sizeTier === null
+      ? undefined
+      : (perUnitBounds.sizeTier as string);
   return {
     inputTotal: payloadBounds.inputTotalUpperBound,
     inputUncached: payloadBounds.inputUncachedUpperBound,
@@ -477,6 +488,8 @@ function admissionHoldEvidence(
     cacheWrite1h: payloadBounds.cacheWrite1hUpperBound,
     outputTotal: payloadBounds.outputTotalUpperBound,
     reasoningOutput: payloadBounds.reasoningOutputUpperBound,
+    ...(perUnitUnits === undefined ? {} : { perUnitUnits }),
+    ...(sizeTier === undefined ? {} : { sizeTier }),
     admissionExpiresAt,
   };
 }

@@ -28,6 +28,18 @@ const SHA256 = /^[0-9a-f]{64}$/;
 
 const PROTOCOLS = new Set<GatewayProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
 const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
+// §4.1: canonical per-unit size tiers (the pricing registry).
+const PER_UNIT_TIER_SET = new Set([
+  '1k',
+  '2k',
+  '4k',
+  '480p',
+  '720p',
+  '1080p',
+  'tts',
+  'stt',
+  'realtime',
+]);
 
 /** Canonical provider operations understood by this compiler. */
 export type ProviderPayloadOperation = 'chat.completions' | 'messages' | 'responses' | 'generateContent' | 'embeddings';
@@ -806,6 +818,19 @@ function validateUsage(value: unknown): PreparedRequestUsageEnvelope {
     if (bound === undefined) compilerFailure('USAGE_BOUND_INVALID');
     return bound.toString(10);
   };
+  /*
+   * §4.1: optional per-unit (media) bounds. Absent keeps the token-only
+   * envelope; present values must be an exact non-negative unit count and,
+   * for the tier, a canonical registry tier.
+   */
+  const perUnitUnitsRaw = value.perUnitUnitsUpperBound;
+  const media =
+    perUnitUnitsRaw !== undefined && perUnitUnitsRaw !== null;
+  const sizeTierRaw = value.sizeTier;
+  if (!media && sizeTierRaw !== undefined && sizeTierRaw !== null) {
+    // A tier without a unit bound shapes nothing; reject the shape.
+    compilerFailure('USAGE_BOUND_INVALID');
+  }
   return {
     inputTotalUpperBound: decimal(inputTotal),
     inputUncachedUpperBound: decimal(inputUncached),
@@ -816,6 +841,19 @@ function validateUsage(value: unknown): PreparedRequestUsageEnvelope {
     outputTotalUpperBound: decimal(outputTotal),
     reasoningOutputUpperBound: decimal(reasoningOutput),
     feasibleInputBuckets: [...buckets] as readonly string[],
+    ...(media
+      ? {
+          perUnitUnitsUpperBound: exactNonNegative(perUnitUnitsRaw).toString(10),
+          ...(sizeTierRaw !== undefined && sizeTierRaw !== null
+            ? {
+                sizeTier:
+                  typeof sizeTierRaw === 'string' && PER_UNIT_TIER_SET.has(sizeTierRaw)
+                    ? sizeTierRaw
+                    : compilerFailure('USAGE_BOUND_INVALID'),
+              }
+            : {}),
+        }
+      : {}),
   };
 }
 

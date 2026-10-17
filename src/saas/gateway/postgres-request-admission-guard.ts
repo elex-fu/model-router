@@ -1540,11 +1540,24 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     let conservative: ConservativePriceHold;
     let conservativeHold: ConservativePriceHold;
     try {
-      conservative = calculateConservativePriceHold(effectiveCustomerPrice, {
-        inputUpperBound: evidence.inputTotal,
-        outputUpperBound: evidence.outputTotal,
-        feasibleInputBuckets: INPUT_BILLING_BUCKETS,
-      });
+      /*
+       * §4.1: media admissions (per-unit evidence on the hold input) take the
+       * per-unit envelope branch; token admissions keep the exact pre-4.1
+       * conservative hold (bounds + feasible bucket families unchanged).
+       */
+      conservative =
+        evidence.perUnitUnits === undefined || evidence.perUnitUnits === null
+          ? calculateConservativePriceHold(effectiveCustomerPrice, {
+              inputUpperBound: evidence.inputTotal,
+              outputUpperBound: evidence.outputTotal,
+              feasibleInputBuckets: INPUT_BILLING_BUCKETS,
+            })
+          : calculateConservativePriceHold(effectiveCustomerPrice, {
+              perUnitUnitsUpperBound: evidence.perUnitUnits,
+              sizeTier: evidence.sizeTier ?? null,
+              inputUpperBound: evidence.inputTotal,
+              outputUpperBound: evidence.outputTotal,
+            });
       // R1: the group multiplier is an exact outer rational multiply on the
       // conservative hold; holds round up so the reservation is never short.
       conservativeHold = applyGroupMultiplierToHold(conservative, composedGroupMultiplier.multiplier);

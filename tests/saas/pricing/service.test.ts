@@ -4,6 +4,11 @@ import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
 import { SaasPricingService } from '../../../src/saas/pricing/service.js';
+import { normalizeRates } from '../../../src/saas/pricing/calculator.js';
+import {
+  modelPricingOverrideDigest,
+  parseAppliedModelPricingOverride,
+} from '../../../src/saas/billing/groups/override.js';
 import type { AppendCustomerPriceVersionInput, PriceHoldInput } from '../../../src/saas/pricing/types.js';
 
 type Row = Record<string, unknown>;
@@ -56,6 +61,10 @@ function customerRow(values: readonly unknown[]): Row {
     cacheWrite1hDenominator,
     outputNumerator,
     outputDenominator,
+    perUnitNumerator,
+    perUnitDenominator,
+    perUnitTierRates,
+    tokenMultipliers,
     effectiveAt,
     expiresAt,
     idempotencyKey,
@@ -89,6 +98,10 @@ function customerRow(values: readonly unknown[]): Row {
     cache_write_1h_rate_denominator_units: cacheWrite1hDenominator,
     output_rate_numerator_minor_units: outputNumerator,
     output_rate_denominator_units: outputDenominator,
+    per_unit_rate_numerator_minor_units: perUnitNumerator,
+    per_unit_rate_denominator_units: perUnitDenominator,
+    per_unit_tier_rates: perUnitTierRates,
+    token_multipliers: tokenMultipliers,
     effective_at: effectiveAt,
     expires_at: expiresAt,
     idempotency_key: idempotencyKey,
@@ -126,6 +139,10 @@ function supplierPriceRow(): Row {
     cache_write_1h_rate_denominator_units: null,
     output_rate_numerator_minor_units: 1n,
     output_rate_denominator_units: 1n,
+    per_unit_rate_numerator_minor_units: null,
+    per_unit_rate_denominator_units: null,
+    per_unit_tier_rates: null,
+    token_multipliers: null,
     effective_at: '2026-09-01T00:00:00.000Z',
     expires_at: null,
     idempotency_key: 'supplier-price-1',
@@ -146,6 +163,15 @@ class FakePricingDatabase implements SaasDatabase {
     const h = values[7];
 
     if (statement.startsWith('select pg_advisory_xact_lock')) return result();
+
+    if (statement.startsWith('select version from saas_supplier_cost_versions')) {
+      return result(
+        this.supplierPrices
+          .sort((left, right) => Number(right.version) - Number(left.version))
+          .slice(0, 1)
+          .map((row) => ({ version: row.version })) as RowType[],
+      );
+    }
 
     if (statement.startsWith('select version from saas_customer_price_versions')) {
       const rows = this.customerPrices
@@ -172,7 +198,27 @@ class FakePricingDatabase implements SaasDatabase {
     }
 
     if (statement.startsWith('select id, version') && statement.includes('from saas_supplier_cost_versions')) {
-      return result(this.supplierPrices as RowType[]);
+      let rows = this.supplierPrices;
+      // 4.1: the idempotency lookup keys on idempotency_key = $9; the
+      // resolve/latest queries carry their own predicates. The fake filters
+      // only the idempotency shape (the 9-parameter supplier binding).
+      if (statement.includes('idempotency_key = $9')) {
+        const key = values[8];
+        rows = rows.filter((row) => String(row.idempotency_key) === String(key));
+      }
+      return result(rows as RowType[]);
+    }
+
+    if (statement.startsWith('insert into saas_supplier_cost_versions')) {
+      // Supplier rows carry resolved_model after product_id (35+1 values).
+      const [id, version, publicModelId, publicModelVersion, providerId, productId, resolvedModel] = values;
+      const rest = values.slice(7);
+      const row = {
+        ...customerRow([id, version, publicModelId, publicModelVersion, providerId, productId, ...rest]),
+        resolved_model: resolvedModel,
+      };
+      this.supplierPrices.push(row);
+      return result([row] as RowType[]);
     }
 
     if (statement.startsWith('insert into saas_customer_price_versions')) {
@@ -240,6 +286,8 @@ class FakePricingDatabase implements SaasDatabase {
         holdInputCacheWrite1h,
         holdInputOutputTotal,
         holdInputReasoningOutput,
+        holdInputPerUnitUnits,
+        holdInputSizeTier,
         holdAmountMinorUnits,
         walletHoldRequired,
         admissionExpiresAt,
@@ -284,6 +332,8 @@ class FakePricingDatabase implements SaasDatabase {
         hold_input_cache_write_1h: holdInputCacheWrite1h,
         hold_input_output_total: holdInputOutputTotal,
         hold_input_reasoning_output: holdInputReasoningOutput,
+        hold_input_per_unit_units: holdInputPerUnitUnits,
+        hold_input_size_tier: holdInputSizeTier,
         hold_amount_minor_units: holdAmountMinorUnits,
         wallet_hold_required: walletHoldRequired,
         admission_expires_at: admissionExpiresAt,
@@ -568,6 +618,10 @@ test('per_unit digest policy keeps pre-per_unit price versions idempotently repl
       null,
       4n,
       1n,
+      null,
+      null,
+      null,
+      null,
       '2026-09-01T00:00:00.000Z',
       null,
       'price-append-1',
@@ -593,43 +647,63 @@ test('per_unit digest policy keeps pre-per_unit price versions idempotently repl
   assert.equal(replay.rates.per_unit, null);
 });
 
-test('per_unit rates fail closed at registration until #15 persists them (4.0 ⑤)', async () => {
-  const service = new SaasPricingService(new FakePricingDatabase(), {
+test('per_unit rates register and round-trip once persisted (4.1 — #14 guard removed)', async () => {
+  const database = new FakePricingDatabase();
+  database.supplierPrices.length = 0;
+  let id = 0;
+  const service = new SaasPricingService(database, {
     now: () => new Date('2026-09-28T00:00:00.000Z'),
+    idFactory: () => `pricing-${++id}`,
   });
 
   const perUnitRates = {
     input: { numeratorMinorUnits: '2', denominatorUnits: '1' },
     output: { numeratorMinorUnits: '4', denominatorUnits: '1' },
     per_unit: { numeratorMinorUnits: '1000', denominatorUnits: '1' },
+    per_unit_tiers: {
+      '1k': { numeratorMinorUnits: '500', denominatorUnits: '1' },
+      '4k': { numeratorMinorUnits: '4000', denominatorUnits: '1' },
+    },
   };
-  await assert.rejects(
-    service.appendCustomerPriceVersion(priceInput({ rates: perUnitRates })),
-    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  const customer = await service.appendCustomerPriceVersion(priceInput({ rates: perUnitRates }));
+  assert.equal(customer.rates.per_unit?.numeratorMinorUnits, 1000n);
+  assert.equal(customer.rates.per_unit_tiers?.['1k']?.numeratorMinorUnits, 500n);
+  assert.equal(customer.rates.per_unit_tiers?.['4k']?.numeratorMinorUnits, 4000n);
+  // A re-registration under the same idempotency key replays the stored row
+  // (the digest covers the tier ladder in canonical order).
+  const replay = await service.appendCustomerPriceVersion(priceInput({ rates: perUnitRates }));
+  assert.equal(replay.id, customer.id);
+  assert.equal(replay.definitionDigest, customer.definitionDigest);
+  // The stored row round-trips the per-unit family: reading it back cannot
+  // collapse per_unit or the tiers to null against the same digest.
+  const reread = await service.getCustomerPriceVersion(customer.id);
+  assert.equal(reread.rates.per_unit?.denominatorUnits, 1n);
+  assert.deepEqual(
+    Object.keys(reread.rates.per_unit_tiers ?? {}).sort(),
+    ['1k', '4k'],
   );
-  await assert.rejects(
-    service.appendSupplierCostVersion({
-      publicModelId: 'public-model-1',
-      publicModelVersion: 1,
-      providerId: 'provider-1',
-      productId: 'product-1',
-      resolvedModel: 'provider-model-1',
-      protocol: 'openai',
-      endpoint: 'chat-completions',
-      currency: 'USD',
-      idempotencyKey: 'supplier-per-unit-1',
-      effectiveAt: '2026-09-01T00:00:00.000Z',
-      commercialPolicyVersion: 'policy-1',
-      calculatorVersion: 'calculator-1',
-      roundingVersion: 'rounding-1',
-      roundingMode: 'half_up',
-      rates: perUnitRates,
-    }),
-    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
-  );
+
+  const supplier = await service.appendSupplierCostVersion({
+    publicModelId: 'public-model-1',
+    publicModelVersion: 1,
+    providerId: 'provider-1',
+    productId: 'product-1',
+    resolvedModel: 'provider-model-1',
+    protocol: 'openai',
+    endpoint: 'chat-completions',
+    currency: 'USD',
+    idempotencyKey: 'supplier-per-unit-1',
+    effectiveAt: '2026-09-01T00:00:00.000Z',
+    commercialPolicyVersion: 'policy-1',
+    calculatorVersion: 'calculator-1',
+    roundingVersion: 'rounding-1',
+    roundingMode: 'half_up',
+    rates: perUnitRates,
+  });
+  assert.equal(supplier.rates.per_unit?.numeratorMinorUnits, 1000n);
 });
 
-test('billing-group model pricing overrides reject per_unit rates until the codec extends (4.0 ⑤)', async () => {
+test('billing-group model pricing overrides serialize per_unit through the frozen snapshot (4.1)', async () => {
   const database = new FakePricingDatabase();
   let id = 0;
   const service = new SaasPricingService(database, {
@@ -638,33 +712,41 @@ test('billing-group model pricing overrides reject per_unit rates until the code
   });
   const price = await service.appendCustomerPriceVersion(priceInput());
 
-  // A per_unit override rate would silently vanish from the frozen override
-  // (the R1 codec serializes the six legacy metrics only), so it fails
-  // closed before the caller-supplied digest is even consulted.
-  await assert.rejects(
-    service.createCustomerPriceSnapshot({
-      tenantId: 'tenant-1',
-      requestId: 'request-1',
-      customerPriceVersion: price.id,
-      holdInput,
-      admissionExpiresAt: '2026-09-28T00:05:00.000Z',
-      idempotencyKey: 'request-1',
-      billingGroup: {
-        billingGroupId: 'vip',
-        rateMultiplier: { numerator: 1n, denominator: 1n },
-        peakApplied: false,
-        modelPricingOverride: {
-          model: 'public-model-1',
-          rates: {
-            input: { numeratorMinorUnits: '2', denominatorUnits: '1' },
-            output: { numeratorMinorUnits: '4', denominatorUnits: '1' },
-            per_unit: { numeratorMinorUnits: '1000', denominatorUnits: '1' },
-          },
-          digest: 'a'.repeat(64),
-        },
+  const overrideRates = {
+    input: { numeratorMinorUnits: '2', denominatorUnits: '1' },
+    output: { numeratorMinorUnits: '4', denominatorUnits: '1' },
+    per_unit: { numeratorMinorUnits: '1000', denominatorUnits: '1' },
+    per_unit_tiers: { '2k': { numeratorMinorUnits: '2000', denominatorUnits: '1' } },
+  };
+  // The caller digest is recomputed from the normalized override rates; the
+  // codec now covers per_unit and the tier ladder, so the snapshot freezes
+  // and replays them instead of failing closed (the #14 guard is removed).
+  const normalized = normalizeRates(overrideRates);
+  const digest = modelPricingOverrideDigest('public-model-1', normalized);
+  const snapshot = await service.createCustomerPriceSnapshot({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    customerPriceVersion: price.id,
+    holdInput,
+    admissionExpiresAt: '2026-09-28T00:05:00.000Z',
+    idempotencyKey: 'request-1',
+    billingGroup: {
+      billingGroupId: 'vip',
+      rateMultiplier: { numerator: 1n, denominator: 1n },
+      peakApplied: false,
+      modelPricingOverride: {
+        model: 'public-model-1',
+        rates: overrideRates,
+        digest,
       },
-    }),
-    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_INPUT',
-  );
-  assert.equal(database.customerSnapshots.length, 0);
+    },
+  });
+  assert.equal(database.customerSnapshots.length, 1);
+  assert.equal(snapshot.snapshot.modelPricingOverrideDigest, digest);
+  const frozen = parseAppliedModelPricingOverride(snapshot.snapshot.modelPricingOverride);
+  assert.ok(frozen !== null);
+  assert.equal(frozen.rates.per_unit?.numeratorMinorUnits, 1000n);
+  assert.equal(frozen.rates.per_unit_tiers?.['2k']?.numeratorMinorUnits, 2000n);
+  // The frozen override parses back to the same digest (round-trip).
+  assert.equal(frozen.digest, digest);
 });
