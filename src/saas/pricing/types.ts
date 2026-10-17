@@ -9,7 +9,28 @@ export interface PlatformRequestAdmissionTerms {
   readonly expiresAt: string | Date;
 }
 
-export type PriceMetric = 'input' | 'cache_read' | 'cache_write' | 'cache_write_5m' | 'cache_write_1h' | 'output';
+/**
+ * Priced usage metrics.
+ *
+ * `per_unit` (roadmap batch 4 §4.0 ⑤ / task #14) is per-request/per-item
+ * pricing for media work (e.g. price per generated image). It is type-visible
+ * and nullable on every rate set now so #15 (§4.1 billing horizontal) can
+ * add the calculator branch, usage envelope, and version-table columns
+ * without another RateSet shape change. Until then:
+ * - every stored/normalized rate set carries `per_unit: null` (no per-unit
+ *   price version can be registered — registration fails closed), and
+ * - `per_unit: null` is omitted from the price-version digest material, so
+ *   every `definition_digest` computed before this metric existed stays
+ *   byte-identical and old price versions re-register idempotently.
+ */
+export type PriceMetric =
+  | 'input'
+  | 'cache_read'
+  | 'cache_write'
+  | 'cache_write_5m'
+  | 'cache_write_1h'
+  | 'output'
+  | 'per_unit';
 
 export type RoundingMode = 'floor' | 'ceil' | 'half_up' | 'half_even';
 export type RoundingBoundary = 'total';

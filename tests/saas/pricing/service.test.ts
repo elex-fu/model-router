@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { SaasPricingError } from '../../../src/saas/pricing/errors.js';
@@ -498,4 +499,172 @@ test('fails closed when the current attempt contract cannot bind supplier accoun
     }),
     (error: unknown) => error instanceof SaasPricingError && error.code === 'SUPPLIER_ATTEMPT_BINDING_UNAVAILABLE',
   );
+});
+
+test('per_unit digest policy keeps pre-per_unit price versions idempotently replayable (4.0 ⑤)', async () => {
+  /*
+   * Reproduction of the digest-drift hazard: this stored row is exactly what
+   * pre-4.0 code wrote — its definition digest covers the six legacy metrics
+   * (explicit nulls included) with no per_unit material. If rateDigest ever
+   * serializes a null per_unit into the material, the recomputed digest for
+   * the same registration stops matching this value and the replay below
+   * fails with IDEMPOTENCY_CONFLICT instead of returning the stored version.
+   */
+  const legacyDefinitionDigest = createHash('sha256')
+    .update(
+      JSON.stringify({
+        publicModelId: 'public-model-1',
+        publicModelVersion: '1',
+        providerId: 'provider-1',
+        productId: 'product-1',
+        protocol: 'openai',
+        endpoint: 'chat-completions',
+        currency: 'USD',
+        effectiveAt: '2026-09-01T00:00:00.000Z',
+        expiresAt: null,
+        commercialPolicyVersion: 'policy-1',
+        calculatorVersion: 'calculator-1',
+        roundingVersion: 'rounding-1',
+        roundingMode: 'half_up',
+        roundingBoundary: 'total',
+        rates: {
+          input: { numeratorMinorUnits: '2', denominatorUnits: '1' },
+          cache_read: null,
+          cache_write: null,
+          cache_write_5m: null,
+          cache_write_1h: null,
+          output: { numeratorMinorUnits: '4', denominatorUnits: '1' },
+        },
+      }),
+    )
+    .digest('hex');
+
+  const database = new FakePricingDatabase();
+  database.customerPrices.push(
+    customerRow([
+      'pricing-legacy-1',
+      1,
+      'public-model-1',
+      1,
+      'provider-1',
+      'product-1',
+      'openai',
+      'chat-completions',
+      'USD',
+      'policy-1',
+      'calculator-1',
+      'rounding-1',
+      'half_up',
+      'total',
+      2n,
+      1n,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      4n,
+      1n,
+      '2026-09-01T00:00:00.000Z',
+      null,
+      'price-append-1',
+      legacyDefinitionDigest,
+      '2026-09-01T00:00:00.000Z',
+    ]),
+  );
+  const service = new SaasPricingService(database, {
+    now: () => new Date('2026-09-28T00:00:00.000Z'),
+    idFactory: () => 'pricing-new',
+  });
+
+  // The identical registration under the same idempotency key must replay
+  // the stored version: today's recomputed digest still equals the digest
+  // the pre-per_unit code computed for the same terms.
+  const replay = await service.appendCustomerPriceVersion(priceInput());
+  assert.equal(replay.id, 'pricing-legacy-1');
+  assert.equal(replay.version, 1);
+  assert.equal(database.customerPrices.length, 1);
+
+  // The digested rates of the replayed record keep the legacy shape.
+  assert.equal(replay.definitionDigest, legacyDefinitionDigest);
+  assert.equal(replay.rates.per_unit, null);
+});
+
+test('per_unit rates fail closed at registration until #15 persists them (4.0 ⑤)', async () => {
+  const service = new SaasPricingService(new FakePricingDatabase(), {
+    now: () => new Date('2026-09-28T00:00:00.000Z'),
+  });
+
+  const perUnitRates = {
+    input: { numeratorMinorUnits: '2', denominatorUnits: '1' },
+    output: { numeratorMinorUnits: '4', denominatorUnits: '1' },
+    per_unit: { numeratorMinorUnits: '1000', denominatorUnits: '1' },
+  };
+  await assert.rejects(
+    service.appendCustomerPriceVersion(priceInput({ rates: perUnitRates })),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+  await assert.rejects(
+    service.appendSupplierCostVersion({
+      publicModelId: 'public-model-1',
+      publicModelVersion: 1,
+      providerId: 'provider-1',
+      productId: 'product-1',
+      resolvedModel: 'provider-model-1',
+      protocol: 'openai',
+      endpoint: 'chat-completions',
+      currency: 'USD',
+      idempotencyKey: 'supplier-per-unit-1',
+      effectiveAt: '2026-09-01T00:00:00.000Z',
+      commercialPolicyVersion: 'policy-1',
+      calculatorVersion: 'calculator-1',
+      roundingVersion: 'rounding-1',
+      roundingMode: 'half_up',
+      rates: perUnitRates,
+    }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+});
+
+test('billing-group model pricing overrides reject per_unit rates until the codec extends (4.0 ⑤)', async () => {
+  const database = new FakePricingDatabase();
+  let id = 0;
+  const service = new SaasPricingService(database, {
+    now: () => new Date('2026-09-28T00:00:00.000Z'),
+    idFactory: () => `pricing-${++id}`,
+  });
+  const price = await service.appendCustomerPriceVersion(priceInput());
+
+  // A per_unit override rate would silently vanish from the frozen override
+  // (the R1 codec serializes the six legacy metrics only), so it fails
+  // closed before the caller-supplied digest is even consulted.
+  await assert.rejects(
+    service.createCustomerPriceSnapshot({
+      tenantId: 'tenant-1',
+      requestId: 'request-1',
+      customerPriceVersion: price.id,
+      holdInput,
+      admissionExpiresAt: '2026-09-28T00:05:00.000Z',
+      idempotencyKey: 'request-1',
+      billingGroup: {
+        billingGroupId: 'vip',
+        rateMultiplier: { numerator: 1n, denominator: 1n },
+        peakApplied: false,
+        modelPricingOverride: {
+          model: 'public-model-1',
+          rates: {
+            input: { numeratorMinorUnits: '2', denominatorUnits: '1' },
+            output: { numeratorMinorUnits: '4', denominatorUnits: '1' },
+            per_unit: { numeratorMinorUnits: '1000', denominatorUnits: '1' },
+          },
+          digest: 'a'.repeat(64),
+        },
+      },
+    }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_INPUT',
+  );
+  assert.equal(database.customerSnapshots.length, 0);
 });

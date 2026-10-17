@@ -160,3 +160,68 @@ test('returns separate customer and supplier currency amounts for later settleme
   assert.equal(result.customer.amountMinorUnits, 18n);
   assert.equal(result.supplier.amountMinorUnits, 18n);
 });
+
+test('per_unit is a nullable rate metric reserved for media pricing (4.0 ⑤)', () => {
+  const tokenOnly = normalizeRates({
+    input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+    output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+  });
+  // Every normalized rate set now carries per_unit, null by default.
+  assert.equal(tokenOnly.per_unit, null);
+  // Digest-stable ordering: per_unit is appended after the six legacy metrics.
+  assert.deepEqual(Object.keys(tokenOnly), [
+    'input',
+    'cache_read',
+    'cache_write',
+    'cache_write_5m',
+    'cache_write_1h',
+    'output',
+    'per_unit',
+  ]);
+
+  // A per_unit rate normalizes and validates like any other metric...
+  const withPerUnit = normalizeRates({
+    input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+    output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+    per_unit: { numeratorMinorUnits: '1000', denominatorUnits: '1' },
+  });
+  assert.equal(withPerUnit.per_unit?.numeratorMinorUnits, 1000n);
+  assert.equal(withPerUnit.per_unit?.denominatorUnits, 1n);
+
+  // ...but the token calculator never charges it (no per-unit usage counter
+  // exists in TokenUsageInput yet; the charging branch is #15 / roadmap 4.1).
+  const charged = calculatePrice(withPerUnit, usage(), { roundingMode: 'half_up' });
+  assert.equal(charged.chargedMetrics.includes('per_unit'), false);
+  assert.equal(charged.amountMinorUnits, 18n);
+
+  // Invalid per_unit rates are rejected exactly like invalid token rates.
+  assert.throws(
+    () =>
+      normalizeRates({
+        input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+        output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+        per_unit: { numeratorMinorUnits: '-1', denominatorUnits: '1' },
+      }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+  assert.throws(
+    () =>
+      normalizeRates({
+        input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+        output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+        per_unit: { numeratorMinorUnits: '1', denominatorUnits: '0' },
+      }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+
+  // Unknown metrics are still rejected.
+  assert.throws(
+    () =>
+      normalizeRates({
+        input: { numeratorMinorUnits: '3', denominatorUnits: '1000000' },
+        output: { numeratorMinorUnits: '15', denominatorUnits: '1000000' },
+        bogus: { numeratorMinorUnits: '1', denominatorUnits: '1' },
+      }),
+    (error: unknown) => error instanceof SaasPricingError && error.code === 'INVALID_RATE',
+  );
+});

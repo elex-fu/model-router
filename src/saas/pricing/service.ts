@@ -346,6 +346,16 @@ function normalizeCommonPriceInput(input: {
   readonly rates: Parameters<typeof normalizeRates>[0];
 }): NormalizedCommonPriceInput {
   const window = normalizeWindow(input.effectiveAt, input.expiresAt);
+  const rates = normalizeRates(input.rates);
+  /*
+   * 4.0 ⑤ (task #14): `per_unit` is type-visible but not yet persistable —
+   * the version tables gain their per_unit columns with the 4.1 billing
+   * migration (#15). Fail closed here instead of silently dropping a rate
+   * that shapes billing: a per-unit price version registered today could
+   * round-trip from storage as per_unit: null and bill differently from
+   * its own definition digest.
+   */
+  if (rates.per_unit !== null) fail('INVALID_RATE');
   return {
     idempotencyKey: normalizeText(input.idempotencyKey),
     effectiveAt: window.effectiveAt,
@@ -355,7 +365,7 @@ function normalizeCommonPriceInput(input: {
     roundingVersion: normalizeText(input.roundingVersion, 128),
     roundingMode: normalizeRoundingMode(input.roundingMode),
     roundingBoundary: normalizeRoundingBoundary(input.roundingBoundary),
-    rates: normalizeRates(input.rates),
+    rates,
   };
 }
 
@@ -662,17 +672,37 @@ function digest(value: unknown): string {
 }
 
 function rateDigest(rates: RateSet): Record<string, { numeratorMinorUnits: string; denominatorUnits: string } | null> {
-  return Object.fromEntries(
-    Object.entries(rates).map(([metric, rate]) => [
-      metric,
+  const material: Record<string, { numeratorMinorUnits: string; denominatorUnits: string } | null> = {};
+  for (const [metric, rate] of Object.entries(rates)) {
+    /*
+     * 4.0 ⑤ (task #14) anti-drift policy: `per_unit` is digest-optional.
+     *
+     * A null per_unit carries no billing meaning (no usage counter exists
+     * for it yet — #15), so it is omitted from the digest material. Every
+     * legacy metric keeps its explicit null entry, so each
+     * definition_digest computed before per_unit existed is byte-identical
+     * to its recomputation today: an old pure-token price version
+     * re-registers idempotently instead of raising IDEMPOTENCY_CONFLICT,
+     * and no golden/migration fixture drifts. A non-null per_unit rate
+     * DOES enter the digest (appended last, preserving legacy key order),
+     * so per-unit-priced versions can never collide with token-only ones
+     * once #15 makes them persistable.
+     *
+     * Chosen over bumping calculatorVersion: a bump would make every
+     * existing price version permanently non-replayable under its
+     * idempotency key and force a full golden/migration fixture rewrite,
+     * for a metric that today prices nothing.
+     */
+    if (metric === 'per_unit' && rate === null) continue;
+    material[metric] =
       rate === null
         ? null
         : {
             numeratorMinorUnits: rate.numeratorMinorUnits.toString(10),
             denominatorUnits: rate.denominatorUnits.toString(10),
-          },
-    ]),
-  );
+          };
+  }
+  return material;
 }
 
 function priceDigest(identity: PricingIdentity | SupplierPricingIdentity, common: NormalizedCommonPriceInput): string {
@@ -883,6 +913,15 @@ function normalizeSnapshotBillingGroup(
     const model = value.modelPricingOverride.model;
     if (typeof model !== 'string' || model.trim().length === 0 || model.length > 255) fail('INVALID_INPUT');
     const rates = normalizeRates(value.modelPricingOverride.rates);
+    /*
+     * 4.0 ⑤ (task #14): the billing-group override codec (billing/groups/
+     * override.ts, R1 domain) serializes and digests the six legacy metrics
+     * only. A per_unit rate here would normalize fine and then silently
+     * vanish from the override digest and the frozen snapshot JSON — the
+     * caller-supplied digest would even match. Fail closed instead; #15
+     * extends the codec together with the calculator.
+     */
+    if (rates.per_unit !== null) fail('INVALID_INPUT');
     const digest = modelPricingOverrideDigest(model, rates);
     if (value.modelPricingOverride.digest !== digest) fail('INVALID_INPUT');
     override = {

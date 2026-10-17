@@ -20,6 +20,13 @@ import type {
 export const COMMERCIAL_CALCULATOR_VERSION = 'commercial-token-v1' as const;
 export const TOTAL_ROUNDING_BOUNDARY: RoundingBoundary = 'total';
 
+/*
+ * Metric order is digest-stable: it defines the insertion order of every
+ * normalized RateSet, which the price-version digest material serializes.
+ * `per_unit` (4.0 ⑤) must stay LAST so the six legacy metrics keep their
+ * exact pre-per_unit ordering; a null per_unit is omitted from that digest
+ * material (see rateDigest in service.ts), keeping old digests identical.
+ */
 const PRICE_METRICS: readonly PriceMetric[] = [
   'input',
   'cache_read',
@@ -27,6 +34,7 @@ const PRICE_METRICS: readonly PriceMetric[] = [
   'cache_write_5m',
   'cache_write_1h',
   'output',
+  'per_unit',
 ];
 
 function fail(
@@ -107,6 +115,13 @@ export function normalizeRates(input: RateSetInput): RateSet {
     if (!(PRICE_METRICS as readonly string[]).includes(key)) fail('INVALID_RATE');
   }
   if (normalized.input === null || normalized.output === null) fail('INVALID_RATE');
+  /*
+   * 4.0 ⑤: a per_unit rate normalizes and validates, but the token-metric
+   * calculator below never charges it — there is no per-unit usage counter
+   * in TokenUsageInput yet. Task #15 (#4.1) adds the usage-envelope branch
+   * that consumes it; price-version registration fails closed on a non-null
+   * per_unit in the meantime (see normalizeCommonPriceInput in service.ts).
+   */
   return normalized;
 }
 
