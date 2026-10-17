@@ -35,12 +35,7 @@
  * - `base_resp.status_code != 0` is a business error.
  */
 
-import {
-  MINIMAX_QUOTA_URL,
-  MINIMAX_QUOTA_URL_INTL,
-  ZHIPU_QUOTA_URL,
-  ZHIPU_QUOTA_URL_INTL,
-} from './constants.js';
+import { MINIMAX_QUOTA_URL, MINIMAX_QUOTA_URL_INTL, ZHIPU_QUOTA_URL, ZHIPU_QUOTA_URL_INTL } from './constants.js';
 
 export type CnQuotaWindow = '5h' | 'weekly';
 
@@ -59,11 +54,7 @@ export interface CnQuotaParseResult {
   readonly planLevel: string;
 }
 
-export type CnQuotaParseErrorCode =
-  | 'business_error'
-  | 'response_invalid'
-  | 'general_not_found'
-  | 'base_resp_error';
+export type CnQuotaParseErrorCode = 'business_error' | 'response_invalid' | 'general_not_found' | 'base_resp_error';
 
 export type CnQuotaParse =
   | { readonly state: 'ok'; readonly result: CnQuotaParseResult }
@@ -216,7 +207,8 @@ export function parseZhipuQuotaResponseBody(bytes: Uint8Array): CnQuotaParse {
   }
   if (!isRecord(body)) return { state: 'error', errorCode: 'response_invalid', message: 'body is not an object' };
   if (body.success === false) {
-    const message = typeof body.msg === 'string' && body.msg.trim() !== '' ? body.msg.trim() : 'unknown zhipu quota error';
+    const message =
+      typeof body.msg === 'string' && body.msg.trim() !== '' ? body.msg.trim() : 'unknown zhipu quota error';
     return { state: 'error', errorCode: 'business_error', message };
   }
   return parseZhipuQuotaData(body.data);

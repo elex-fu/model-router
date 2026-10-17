@@ -135,9 +135,7 @@ test('zhipu old-plan single TOKENS_LIMIT entry degrades to 5h only', () => {
 
 test('zhipu business errors and malformed payloads never produce a snapshot', () => {
   // HTTP 2xx with success=false.
-  const business = parseZhipuQuotaResponseBody(
-    encode({ success: false, msg: '当前用户不存在coding plan' }),
-  );
+  const business = parseZhipuQuotaResponseBody(encode({ success: false, msg: '当前用户不存在coding plan' }));
   assert.equal(business.state, 'error');
   if (business.state === 'error') assert.equal(business.errorCode, 'business_error');
   // Missing data object.
@@ -217,7 +215,10 @@ test('minimax errors: base_resp status and missing general entry never produce a
   if (business.state === 'error') assert.equal(business.errorCode, 'base_resp_error');
 
   const noGeneral = parseMinimaxQuotaResponseBody(
-    encode({ base_resp: { status_code: 0 }, model_remains: [{ model_name: 'video', current_interval_remaining_percent: 50 }] }),
+    encode({
+      base_resp: { status_code: 0 },
+      model_remains: [{ model_name: 'video', current_interval_remaining_percent: 50 }],
+    }),
   );
   assert.equal(noGeneral.state, 'error');
   if (noGeneral.state === 'error') assert.equal(noGeneral.errorCode, 'general_not_found');
@@ -255,5 +256,8 @@ test('quota probe URL builders carry the team-plan and international variants', 
     'https://api.z.ai/api/monitor/usage/quota/limit?type=2',
   );
   assert.equal(minimaxQuotaUrl(), 'https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains');
-  assert.equal(minimaxQuotaUrl({ international: true }), 'https://api.minimax.io/v1/api/openplatform/coding_plan/remains');
+  assert.equal(
+    minimaxQuotaUrl({ international: true }),
+    'https://api.minimax.io/v1/api/openplatform/coding_plan/remains',
+  );
 });

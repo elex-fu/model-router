@@ -39,7 +39,9 @@ import type { CnProviderApiProtocol } from './constants.js';
 export type CnNativeProtocol = Extract<GatewayProtocol, 'openai' | 'anthropic' | 'responses'>;
 
 /** Canonical provider operation for each native protocol (compiler vocabulary). */
-export function cnProviderOperationForProtocol(protocol: CnNativeProtocol): 'chat.completions' | 'messages' | 'responses' {
+export function cnProviderOperationForProtocol(
+  protocol: CnNativeProtocol,
+): 'chat.completions' | 'messages' | 'responses' {
   if (protocol === 'responses') return 'responses';
   if (protocol === 'anthropic') return 'messages';
   return 'chat.completions';
@@ -51,9 +53,7 @@ export function cnProviderSupportsNativeResponses(providerId: string): boolean {
 }
 
 function isCnApiProtocol(value: unknown): value is CnProviderApiProtocol {
-  return (
-    value === 'chat_completions' || value === 'anthropic' || value === 'responses' || value === 'adaptive'
-  );
+  return value === 'chat_completions' || value === 'anthropic' || value === 'responses' || value === 'adaptive';
 }
 
 export type CnProviderApiProtocolValidation =
@@ -68,10 +68,7 @@ export type CnProviderApiProtocolValidation =
  * default for providers without a native Responses endpoint (zhipu), the
  * sub2api behavior.
  */
-export function normalizeCnProviderApiProtocol(
-  providerId: string,
-  value: unknown,
-): CnProviderApiProtocol {
+export function normalizeCnProviderApiProtocol(providerId: string, value: unknown): CnProviderApiProtocol {
   if (!isCnApiProtocol(value)) return 'adaptive';
   if (value === 'responses' && !cnProviderSupportsNativeResponses(providerId)) {
     return 'adaptive';

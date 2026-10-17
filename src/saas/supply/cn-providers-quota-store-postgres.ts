@@ -272,10 +272,7 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
    * null when no verified credential is available; the callback's result
    * (and errors) pass through unchanged.
    */
-  async withUnsealedApiKey<T>(
-    account: CnQuotaAccountRef,
-    callback: (secret: Buffer) => Promise<T>,
-  ): Promise<T | null> {
+  async withUnsealedApiKey<T>(account: CnQuotaAccountRef, callback: (secret: Buffer) => Promise<T>): Promise<T | null> {
     if (!account || typeof account !== 'object' || typeof callback !== 'function') storeUnavailable();
     const scope = scopeFor(account.ownerKind);
     const prefix = columnPrefixFor(account.providerId);

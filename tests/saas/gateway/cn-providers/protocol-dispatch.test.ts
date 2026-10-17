@@ -1,15 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  allowRequestPreparation,
-  rejectRequestPreparation,
-  type RequestPreparationAuthorityPort,
-} from '../../../../src/saas/gateway/request-preparation-service.js';
-import {
-  applyCnProvidersProtocolRouting,
-  createCnProvidersProtocolRoutingAuthority,
-} from '../../../../src/server/managed-saas-gateway.js';
-import {
   CN_PROVIDER_ENDPOINTS,
   MINIMAX_ENDPOINT,
   MINIMAX_PROVIDER_ID,
@@ -19,6 +10,15 @@ import {
 } from '../../../../src/saas/gateway/cn-providers/catalog-identity.js';
 import type { CnProvidersProtocolRoutingConfig } from '../../../../src/saas/gateway/cn-providers/protocol-rules.js';
 import { cnProvidersFixedRequestHeaders } from '../../../../src/saas/gateway/cn-providers/transport-headers.js';
+import {
+  allowRequestPreparation,
+  type RequestPreparationAuthorityPort,
+  rejectRequestPreparation,
+} from '../../../../src/saas/gateway/request-preparation-service.js';
+import {
+  applyCnProvidersProtocolRouting,
+  createCnProvidersProtocolRoutingAuthority,
+} from '../../../../src/server/managed-saas-gateway.js';
 
 /** The compile-layer route shape the routing helpers rewrite. */
 function route(overrides: Partial<Parameters<typeof applyCnProvidersProtocolRouting>[0]> = {}) {
@@ -96,10 +96,7 @@ test('the authority decorator signs the resolved native protocol into the route'
   assert.equal(passthrough.decision, 'allow');
 
   // An openai-native route under adaptive + anthropic client: rewritten.
-  const rewrite = createCnProvidersProtocolRoutingAuthority(
-    fixtureAuthority(ZHIPU_PROVIDER_ID, 'openai'),
-    undefined,
-  );
+  const rewrite = createCnProvidersProtocolRoutingAuthority(fixtureAuthority(ZHIPU_PROVIDER_ID, 'openai'), undefined);
   const rewritten = await rewrite.resolve({} as never);
   assert.equal(rewritten.decision, 'allow');
   if (rewritten.decision === 'allow') {
@@ -119,10 +116,9 @@ test('the authority decorator signs the resolved native protocol into the route'
   }
 
   // Non-CN providers pass through unchanged.
-  const foreign = createCnProvidersProtocolRoutingAuthority(
-    fixtureAuthority('opencode-go', 'openai'),
-    { apiProtocol: { zhipu: 'responses' } },
-  );
+  const foreign = createCnProvidersProtocolRoutingAuthority(fixtureAuthority('opencode-go', 'openai'), {
+    apiProtocol: { zhipu: 'responses' },
+  });
   const foreignDecision = await foreign.resolve({} as never);
   assert.equal(foreignDecision.decision, 'allow');
   if (foreignDecision.decision === 'allow') {

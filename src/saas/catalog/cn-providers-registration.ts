@@ -19,10 +19,7 @@ import {
   ZHIPU_REGION,
   ZHIPU_SUPPLY_MODE,
 } from '../gateway/cn-providers/catalog-identity.js';
-import {
-  MINIMAX_FALLBACK_MODEL_IDS,
-  ZHIPU_FALLBACK_MODEL_IDS,
-} from '../gateway/cn-providers/constants.js';
+import { MINIMAX_FALLBACK_MODEL_IDS, ZHIPU_FALLBACK_MODEL_IDS } from '../gateway/cn-providers/constants.js';
 import type { SaasPricingService } from '../pricing/service.js';
 import type { PlatformPriceAuditContext, RegisterPlatformPriceVersionInput } from '../pricing/types.js';
 import type { SaasCatalogService } from './service.js';
@@ -412,10 +409,9 @@ export async function registerCnProvidersPlaceholderSupplierCosts(
  * request either the namespaced alias or a bare alias the operator adds
  * separately.
  */
-export function cnProvidersPublicModelAliasInputs(options: {
-  readonly zhipuModels?: readonly string[];
-  readonly minimaxModels?: readonly string[];
-} = {}): readonly RegisterPublicModelAliasInput[] {
+export function cnProvidersPublicModelAliasInputs(
+  options: { readonly zhipuModels?: readonly string[]; readonly minimaxModels?: readonly string[] } = {},
+): readonly RegisterPublicModelAliasInput[] {
   const zhipuModels = options.zhipuModels ?? ZHIPU_FALLBACK_MODEL_IDS;
   const minimaxModels = options.minimaxModels ?? MINIMAX_FALLBACK_MODEL_IDS;
   const inputs: RegisterPublicModelAliasInput[] = [];

@@ -60,7 +60,10 @@ export function resolveThinkingProtocol(modelId: string): CnThinkingProtocol {
     if (id.startsWith(prefix)) return 'passback-required';
   }
   // Qwen thinking variants: qwen* prefix + "-thinking" anywhere.
-  if ((id.startsWith('qwen-') || id.startsWith('qwen2-') || id.startsWith('qwen3-') || id.startsWith('qwen4-')) && id.includes('-thinking')) {
+  if (
+    (id.startsWith('qwen-') || id.startsWith('qwen2-') || id.startsWith('qwen3-') || id.startsWith('qwen4-')) &&
+    id.includes('-thinking')
+  ) {
     return 'passback-required';
   }
   for (const prefix of ANTHROPIC_STRICT_PREFIXES) {

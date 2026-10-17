@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  clampCnQuotaDebounceMs,
-  clampCnQuotaIntervalMs,
-  cnQuotaFailureBackoffMs,
   CnProvidersQuotaWorker,
   type CnQuotaAccountRef,
   type CnQuotaFailure,
   type CnQuotaFetch,
   type CnQuotaSnapshot,
   type CnQuotaStore,
+  clampCnQuotaDebounceMs,
+  clampCnQuotaIntervalMs,
+  cnQuotaFailureBackoffMs,
   fetchCnProviderQuota,
   parseCnQuotaRetryAfterMs,
 } from '../../../src/saas/supply/cn-providers-quota-worker.js';
@@ -279,11 +279,20 @@ test('clamp + backoff helpers mirror the opencode-go worker bounds', () => {
   assert.equal(clampCnQuotaDebounceMs(5_000), 60_000);
 
   // No failures: the interval itself (no jitter with random() = 0.5).
-  assert.equal(cnQuotaFailureBackoffMs(15 * 60_000, 0, null, () => 0.5), 15 * 60_000);
+  assert.equal(
+    cnQuotaFailureBackoffMs(15 * 60_000, 0, null, () => 0.5),
+    15 * 60_000,
+  );
   // Failure streak 3: interval × 2^2.
-  assert.equal(cnQuotaFailureBackoffMs(15 * 60_000, 3, null, () => 0.5), 60 * 60_000);
+  assert.equal(
+    cnQuotaFailureBackoffMs(15 * 60_000, 3, null, () => 0.5),
+    60 * 60_000,
+  );
   // Retry-After never shortens the horizon below the hint.
-  assert.equal(cnQuotaFailureBackoffMs(15 * 60_000, 0, 2 * 60 * 60_000, () => 0.5), 2 * 60 * 60_000);
+  assert.equal(
+    cnQuotaFailureBackoffMs(15 * 60_000, 0, 2 * 60 * 60_000, () => 0.5),
+    2 * 60 * 60_000,
+  );
   // Floor: never below one minute.
   assert.equal(cnQuotaFailureBackoffMs(15 * 60_000, 0, null, () => 0.5) < 60_000, false);
 
@@ -320,7 +329,7 @@ class MemoryCnQuotaStore implements CnQuotaStore {
   }
 
   async withUnsealedApiKey<T>(
-    account: CnQuotaAccountRef,
+    _account: CnQuotaAccountRef,
     callback: (secret: Buffer) => Promise<T>,
   ): Promise<T | null> {
     if (!this.unsealed) return null;
@@ -331,7 +340,7 @@ class MemoryCnQuotaStore implements CnQuotaStore {
     this.snapshots.push({ account, snapshot });
   }
 
-  async writeQuotaFailure(account: CnQuotaAccountRef, failure: CnQuotaFailure): Promise<void> {
+  async writeQuotaFailure(_account: CnQuotaAccountRef, failure: CnQuotaFailure): Promise<void> {
     this.failures.push(failure);
   }
 

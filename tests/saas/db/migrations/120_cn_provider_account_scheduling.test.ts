@@ -25,10 +25,12 @@ test('120 registers after the 117/119 batch-3 tails in forward order', () => {
 test('120 adds nullable CN-provider scheduling signal and dual-mode config columns to both account owner families', () => {
   for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
     for (const prefix of ['zhipu', 'minimax']) {
+      // Each ALTER adds the full per-provider family in order; the zhipu
+      // family leads, so the minimax match must not anchor on the table name.
       assert.match(
         commands,
         new RegExp(
-          `ALTER TABLE ${table}\\s+ADD COLUMN ${prefix}_5h_used_percent real,\\s+ADD COLUMN ${prefix}_5h_reset_at timestamptz,\\s+ADD COLUMN ${prefix}_weekly_used_percent real,\\s+ADD COLUMN ${prefix}_weekly_reset_at timestamptz,`,
+          `ADD COLUMN ${prefix}_5h_used_percent real,\\s+ADD COLUMN ${prefix}_5h_reset_at timestamptz,\\s+ADD COLUMN ${prefix}_weekly_used_percent real,\\s+ADD COLUMN ${prefix}_weekly_reset_at timestamptz,`,
         ),
       );
       assert.match(
@@ -44,7 +46,10 @@ test('120 adds nullable CN-provider scheduling signal and dual-mode config colum
       // 'responses is minimax-only' matrix stays application-layer).
       assert.match(commands, new RegExp(`${table}_${prefix}_percent_range`));
       assert.match(commands, new RegExp(`${table}_${prefix}_failure_count_range`));
-      assert.match(commands, new RegExp(`${prefix}_account_mode IS NULL OR ${prefix}_account_mode IN \\('payg', 'coding'\\)`));
+      assert.match(
+        commands,
+        new RegExp(`${prefix}_account_mode IS NULL OR ${prefix}_account_mode IN \\('payg', 'coding'\\)`),
+      );
       assert.match(
         commands,
         new RegExp(

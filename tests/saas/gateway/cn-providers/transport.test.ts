@@ -176,8 +176,5 @@ test('a bodyless error result passes through with no classification', async () =
 
 test('construction requires an inner transport with send', () => {
   assert.throws(() => new CnProvidersPreparedEvidenceTransport({ inner: {} as PreparedEvidenceTransport }), TypeError);
-  assert.throws(
-    () => new CnProvidersPreparedEvidenceTransport({} as { inner: PreparedEvidenceTransport }),
-    TypeError,
-  );
+  assert.throws(() => new CnProvidersPreparedEvidenceTransport({} as { inner: PreparedEvidenceTransport }), TypeError);
 });

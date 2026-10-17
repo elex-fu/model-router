@@ -2,11 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CN_PROVIDER_CAPABILITY_PROTOCOLS,
+  cnProviderProductInputs,
+  cnProvidersPublicModelAliasInputs,
   MINIMAX_DEFAULT_RIGHTS_ID,
   MINIMAX_ENDPOINT,
   MINIMAX_FALLBACK_MODEL_IDS,
   MINIMAX_PRODUCT_ID,
   MINIMAX_PROVIDER_ID,
+  minimaxCapabilityInputs,
+  minimaxPlatformRightsInput,
+  registerCnProvidersCatalog,
   ZHIPU_CODING_DEFAULT_RIGHTS_ID,
   ZHIPU_CODING_ENDPOINT,
   ZHIPU_CODING_PRODUCT_ID,
@@ -15,15 +20,10 @@ import {
   ZHIPU_FALLBACK_MODEL_IDS,
   ZHIPU_PRODUCT_ID,
   ZHIPU_PROVIDER_ID,
-  cnProviderProductInputs,
-  cnProvidersPublicModelAliasInputs,
-  minimaxCapabilityInputs,
-  registerCnProvidersCatalog,
   zhipuCapabilityInputs,
   zhipuCodingCapabilityInputs,
   zhipuCodingPlatformRightsInput,
   zhipuPlatformRightsInput,
-  minimaxPlatformRightsInput,
 } from '../../../src/saas/catalog/cn-providers-registration.js';
 import { SaasCatalogService } from '../../../src/saas/catalog/service.js';
 import { FakeCatalogDatabase } from './fake-database.js';

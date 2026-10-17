@@ -75,12 +75,7 @@ function validateAccountMode(value: unknown): 'payg' | 'coding' | null {
 
 function validateApiProtocol(value: unknown): 'chat_completions' | 'anthropic' | 'responses' | 'adaptive' | null {
   if (value === null || value === undefined) return null;
-  if (
-    value !== 'chat_completions' &&
-    value !== 'anthropic' &&
-    value !== 'responses' &&
-    value !== 'adaptive'
-  ) {
+  if (value !== 'chat_completions' && value !== 'anthropic' && value !== 'responses' && value !== 'adaptive') {
     storeUnavailable();
   }
   return value;
@@ -109,7 +104,11 @@ export class PostgresCnProvidersAccountConfigStore {
   }
 
   private predicate(
-    account: { readonly ownerKind: CnProviderConfigOwnerKind; readonly tenantId: string | null; readonly accountId: string },
+    account: {
+      readonly ownerKind: CnProviderConfigOwnerKind;
+      readonly tenantId: string | null;
+      readonly accountId: string;
+    },
     next: number,
   ): { sql: string; values: unknown[] } {
     if (account.ownerKind === 'tenant') {

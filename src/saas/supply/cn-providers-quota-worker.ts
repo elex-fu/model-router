@@ -34,10 +34,7 @@
  *   loops).
  */
 
-import {
-  MINIMAX_PROVIDER_ID,
-  ZHIPU_PROVIDER_ID,
-} from '../gateway/cn-providers/catalog-identity.js';
+import { MINIMAX_PROVIDER_ID, ZHIPU_PROVIDER_ID } from '../gateway/cn-providers/catalog-identity.js';
 import {
   type CnQuotaTierSnapshot,
   minimaxQuotaUrl,
@@ -237,7 +234,12 @@ function cancelResponseBody(response: Response): void {
 async function boundedResponseBody(
   response: Response,
   signal: AbortSignal,
-): Promise<{ readonly state: 'ok'; readonly bytes: Uint8Array } | { readonly state: 'too_large' } | { readonly state: 'read_error' } | { readonly state: 'timeout' }> {
+): Promise<
+  | { readonly state: 'ok'; readonly bytes: Uint8Array }
+  | { readonly state: 'too_large' }
+  | { readonly state: 'read_error' }
+  | { readonly state: 'timeout' }
+> {
   if (signal.aborted) {
     cancelResponseBody(response);
     return { state: 'timeout' };
@@ -465,7 +467,11 @@ function delay(durationMs: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function runWithConcurrency<T>(items: readonly T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
+async function runWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<void>,
+): Promise<void> {
   let index = 0;
   const runner = async (): Promise<void> => {
     for (;;) {

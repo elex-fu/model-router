@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  MINIMAX_ENDPOINT,
+  MINIMAX_PRODUCT_ID,
+  MINIMAX_PROVIDER_ID,
+  ZHIPU_CODING_ENDPOINT,
+  ZHIPU_CODING_PRODUCT_ID,
+  ZHIPU_ENDPOINT,
+  ZHIPU_PRODUCT_ID,
+  ZHIPU_PROVIDER_ID,
+} from '../../../../src/saas/gateway/cn-providers/catalog-identity.js';
+import {
+  CN_PROVIDER_TARGET_BINDINGS,
+  cnProviderDefaultBase,
   MINIMAX_ANTHROPIC_BASE_URL,
   MINIMAX_ANTHROPIC_BASE_URL_INTL,
   MINIMAX_CHAT_BASE_URL,
@@ -18,19 +30,7 @@ import {
   ZHIPU_PAYG_MODELS_URL,
   ZHIPU_QUOTA_URL,
   ZHIPU_QUOTA_URL_INTL,
-  cnProviderDefaultBase,
-  CN_PROVIDER_TARGET_BINDINGS,
 } from '../../../../src/saas/gateway/cn-providers/constants.js';
-import {
-  MINIMAX_ENDPOINT,
-  MINIMAX_PRODUCT_ID,
-  MINIMAX_PROVIDER_ID,
-  ZHIPU_CODING_ENDPOINT,
-  ZHIPU_CODING_PRODUCT_ID,
-  ZHIPU_ENDPOINT,
-  ZHIPU_PRODUCT_ID,
-  ZHIPU_PROVIDER_ID,
-} from '../../../../src/saas/gateway/cn-providers/catalog-identity.js';
 
 test('the default endpoint table mirrors the sub2api constants verbatim', () => {
   assert.equal(ZHIPU_PAYG_CHAT_BASE_URL, 'https://open.bigmodel.cn/api/paas/v4');
@@ -131,7 +131,9 @@ test('adaptive api_base_urls overrides win over the default table', () => {
 });
 
 test('the provider-target binding set covers every product × native protocol pair on domestic hosts', () => {
-  const keys = CN_PROVIDER_TARGET_BINDINGS.map((binding) => `${binding.upstreamId}:${binding.productId}:${binding.protocol}:${binding.operation}`);
+  const keys = CN_PROVIDER_TARGET_BINDINGS.map(
+    (binding) => `${binding.upstreamId}:${binding.productId}:${binding.protocol}:${binding.operation}`,
+  );
   assert.deepEqual(keys, [
     'zhipu:zhipu-glm:openai:chat.completions',
     'zhipu:zhipu-glm:anthropic:messages',

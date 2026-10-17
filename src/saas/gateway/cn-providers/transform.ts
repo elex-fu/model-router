@@ -48,7 +48,7 @@ export function cnProvidersProviderRequestTransform(input: CnProviderRequestTran
   // provider alias keeps strict semantics and is left untouched here.
   if (resolveThinkingProtocol(model) !== 'passback-required') return input.body;
   const transformed = normalizeChineseLlmThinking(input.body, model);
-  return (isTransformedBody(transformed) ? transformed : input.body);
+  return isTransformedBody(transformed) ? transformed : input.body;
 }
 
 function isTransformedBody(value: unknown): value is Record<string, unknown> {

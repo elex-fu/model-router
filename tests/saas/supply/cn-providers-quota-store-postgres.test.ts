@@ -1,13 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
-import {
-  PostgresCnProvidersQuotaStore,
-} from '../../../src/saas/supply/cn-providers-quota-store-postgres.js';
+import { createPostgresCnProvidersAccountConfigStore } from '../../../src/saas/platform/cn-providers/account-config-store.js';
+import { PostgresCnProvidersQuotaStore } from '../../../src/saas/supply/cn-providers-quota-store-postgres.js';
 import type { CnQuotaAccountRef } from '../../../src/saas/supply/cn-providers-quota-worker.js';
-import {
-  createPostgresCnProvidersAccountConfigStore,
-} from '../../../src/saas/platform/cn-providers/account-config-store.js';
 
 type Row = Record<string, unknown>;
 
@@ -171,12 +167,12 @@ test('the account-config store reads and CAS-updates the dual-mode columns', asy
   const database = new FakeDatabase(state);
   const store = createPostgresCnProvidersAccountConfigStore(database);
 
-  const read = await store.read(
-    { ownerKind: 'tenant', tenantId: 'tenant-1', accountId: 'account-zhipu' },
-    'zhipu',
-  );
+  const read = await store.read({ ownerKind: 'tenant', tenantId: 'tenant-1', accountId: 'account-zhipu' }, 'zhipu');
   assert.deepEqual(read, { authzVersion: 7, accountMode: 'coding', apiProtocol: 'adaptive' });
-  assert.match(state.statements[0]?.sql ?? '', /SELECT authz_version,\s+zhipu_account_mode AS account_mode,\s+zhipu_api_protocol AS api_protocol/);
+  assert.match(
+    state.statements[0]?.sql ?? '',
+    /SELECT authz_version,\s+zhipu_account_mode AS account_mode,\s+zhipu_api_protocol AS api_protocol/,
+  );
 
   const updated = await store.update(
     { ownerKind: 'tenant', tenantId: 'tenant-1', accountId: 'account-zhipu' },
@@ -200,11 +196,11 @@ test('the account-config store reads and CAS-updates the dual-mode columns', asy
   );
   // Invalid enum values fail closed before any SQL runs.
   await assert.rejects(
-    store.update(
-      { ownerKind: 'platform', tenantId: null, accountId: 'a' },
-      'zhipu',
-      { accountMode: 'oops' as 'payg', apiProtocol: null, expectedAuthzVersion: 1 },
-    ),
+    store.update({ ownerKind: 'platform', tenantId: null, accountId: 'a' }, 'zhipu', {
+      accountMode: 'oops' as 'payg',
+      apiProtocol: null,
+      expectedAuthzVersion: 1,
+    }),
     /CN provider account config store is unavailable/,
   );
 });

@@ -23,8 +23,12 @@
  * drain) observe the exact same bytes.
  */
 
+import type {
+  PreparedEvidenceTransport,
+  PreparedEvidenceTransportRequest,
+  PreparedEvidenceTransportResponse,
+} from '../prepared-evidence-dispatch-service.js';
 import { CN_PROVIDER_ENDPOINTS } from './catalog-identity.js';
-import type { PreparedEvidenceTransport, PreparedEvidenceTransportRequest, PreparedEvidenceTransportResponse } from '../prepared-evidence-dispatch-service.js';
 import { classifyCnProviderUpstreamError } from './health.js';
 
 /** Bounded upstream error-body read (the codex/claude MAX_ERROR_BODY_BYTES precedent). */

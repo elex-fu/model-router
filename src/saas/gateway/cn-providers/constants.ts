@@ -19,12 +19,9 @@
 
 import type { ProviderTargetBinding } from '../../runtime/provider-target-resolver.js';
 import {
-  MINIMAX_ENDPOINT,
   MINIMAX_PRODUCT_ID,
   MINIMAX_PROVIDER_ID,
-  ZHIPU_CODING_ENDPOINT,
   ZHIPU_CODING_PRODUCT_ID,
-  ZHIPU_ENDPOINT,
   ZHIPU_PRODUCT_ID,
   ZHIPU_PROVIDER_ID,
 } from './catalog-identity.js';
@@ -114,15 +111,13 @@ export const MINIMAX_FALLBACK_MODEL_IDS: readonly string[] = Object.freeze([
  * sub2api adaptive `api_base_urls` per-protocol account configuration; an
  * override present for the requested protocol wins over the table.
  */
-export function cnProviderDefaultBase(
-  input: {
-    readonly providerId: string;
-    readonly accountMode: CnProviderAccountMode;
-    readonly protocol: 'openai' | 'anthropic' | 'responses';
-    readonly overrides?: Readonly<Partial<Record<'openai' | 'anthropic' | 'responses', string>>> | null;
-    readonly international?: boolean;
-  },
-  ): string | null {
+export function cnProviderDefaultBase(input: {
+  readonly providerId: string;
+  readonly accountMode: CnProviderAccountMode;
+  readonly protocol: 'openai' | 'anthropic' | 'responses';
+  readonly overrides?: Readonly<Partial<Record<'openai' | 'anthropic' | 'responses', string>>> | null;
+  readonly international?: boolean;
+}): string | null {
   const key: 'openai' | 'anthropic' | 'responses' = input.protocol;
   const override = input.overrides?.[key];
   if (typeof override === 'string' && override.trim() !== '') return override.trim();
