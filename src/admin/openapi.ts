@@ -46,6 +46,13 @@ const queryByPath: Record<string, Record<string, unknown>> = {
     groupBy: { type: 'string', enum: ['keyId', 'upstreamId', 'model', 'protocol', 'source', 'upstream'] },
     upstreamFilterMode: { type: 'string', enum: ['final', 'attempt'], default: 'final' },
   },
+  '/system/updates/check': {
+    force: {
+      type: 'string',
+      enum: ['true', 'false'],
+      description: 'Bypass the 20-minute check cache and query GitHub directly.',
+    },
+  },
   '/requests': {
     ...queryRangeAndDimensions,
     state: {
@@ -106,6 +113,12 @@ const rows: Array<[string, string, AdminRequestSchemaKey?, boolean?, boolean?, n
   ['get', '/provider-presets'],
   ['get', '/capabilities'],
   ['get', '/system'],
+  ['get', '/system/version'],
+  ['get', '/system/updates/check'],
+  ['get', '/system/updates/rollback-versions'],
+  ['post', '/system/updates/apply', undefined, false, false, 200],
+  ['post', '/system/updates/rollback', 'updateRollback', false, false, 200],
+  ['post', '/system/restart', undefined, false, false, 200],
   ['get', '/overview'],
   ['get', '/upstreams'],
   ['get', '/upstreams/{id}'],
@@ -198,6 +211,10 @@ export const adminBodylessActions = new Set([
   'POST /upstreams/{id}/test-jobs/{jobId}/cancel',
   'POST /playground/runs/{id}/cancel',
   'POST /accounts/{id}/refresh',
+  // Batch-5 §5.3 online update: the apply/restart actions carry no body —
+  // their safety comes from the session, CSRF and the Idempotency-Key header.
+  'POST /system/updates/apply',
+  'POST /system/restart',
 ]);
 for (const operation of adminContractOperations) {
   if (
@@ -353,12 +370,6 @@ export function parseAdminRequest(method: string, path: string, input: unknown):
   const key = schemaForAdminOperation(method, path);
   if (!key) {
     const normalized = path.replace(/^\/admin\/api\/v1/, '');
-    const bodyless = [
-      'POST /upstreams/{id}/circuit-reset',
-      'POST /upstreams/{id}/test-jobs/{jobId}/cancel',
-      'POST /playground/runs/{id}/cancel',
-      'POST /accounts/{id}/refresh',
-    ];
     const operation = adminContractOperations.find(
       (candidate) =>
         candidate.method === method.toLowerCase() &&
@@ -372,7 +383,7 @@ export function parseAdminRequest(method: string, path: string, input: unknown):
     );
     if (
       !operation ||
-      !bodyless.includes(`${method.toUpperCase()} ${operation.path}`) ||
+      !adminBodylessActions.has(`${method.toUpperCase()} ${operation.path}`) ||
       (input && typeof input === 'object' && Object.keys(input).length === 0)
     )
       return input;

@@ -26,11 +26,32 @@ import { type PlaygroundExecutor, PlaygroundRuns } from './playground.js';
 import { validatePricing } from './pricing.js';
 import { AdminRuntime, type AdminRuntimeBridge } from './runtime.js';
 import { telemetryAdapters } from './telemetry.js';
+import {
+  createFetchUpdateHttpClient,
+  resolveBuildType,
+  resolveRuntimeVersion,
+  resolveUpdateTargetPath,
+  SqliteUpdateCheckCache,
+  scheduleProcessRestart,
+  UPDATE_BUILD_TYPE_ENV,
+  UPDATE_GITHUB_REPO_ENV,
+  UPDATE_GITHUB_TOKEN_ENV,
+  UpdateOperationGuard,
+  UpdateService,
+  updateHttpError,
+} from './update.js';
 import { UpstreamActions } from './upstream-actions.js';
 
 type Json = Record<string, unknown>;
 type Handler = (input: Json) => Promise<unknown>;
 export type AdminMountedRequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+
+/** First value of a repeated-or-single header, if present. */
+function requestHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  if (Array.isArray(value)) return value[0];
+  return typeof value === 'string' ? value : undefined;
+}
 
 function redactInlineValues(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactInlineValues);
@@ -157,6 +178,10 @@ export interface AdminServerOptions {
   publicOrigin?: string | (() => string);
   /** Read-only process-owned listener diagnostics used by GET /system. */
   listenerStatus?: () => unknown;
+  /** Batch-5 §5.3 online update service override (tests). */
+  updateService?: UpdateService;
+  /** Idempotency guard override for the mutating update endpoints (tests). */
+  updateOperationGuard?: UpdateOperationGuard;
   /** Optional customer-facing SaaS handler mounted under /console/api/v1. */
   saasIdentityHandler?: AdminMountedRequestHandler;
   adapters?: AdminAdapters;
@@ -189,6 +214,12 @@ export const adminDispatchOperations = [
   'GET /provider-presets',
   'GET /capabilities',
   'GET /system',
+  'GET /system/version',
+  'GET /system/updates/check',
+  'GET /system/updates/rollback-versions',
+  'POST /system/updates/apply',
+  'POST /system/updates/rollback',
+  'POST /system/restart',
   'GET /overview',
   'GET /upstreams',
   'GET /upstreams/{id}',
@@ -599,6 +630,25 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     ? new AdminExports(store, options.telemetryStore, jobs, store.dataDir)
     : undefined;
   const maintenance = new AdminMaintenance(control, store, options.telemetryStore);
+  // Batch-5 §5.3 online update (BYOK admin face): the check cache persists
+  // in the control SQLite store — the only always-present durable store on
+  // this plane (see src/admin/update.ts header for the Redis/PG decision).
+  // The service is inert until an endpoint is hit; an unconfigured repo
+  // degrades check-updates to a warning instead of an error.
+  const updateService =
+    options.updateService ??
+    new UpdateService({
+      currentVersion: resolveRuntimeVersion(),
+      buildType: resolveBuildType(),
+      repo: process.env[UPDATE_GITHUB_REPO_ENV]?.trim() || undefined,
+      client: createFetchUpdateHttpClient({
+        repo: process.env[UPDATE_GITHUB_REPO_ENV]?.trim() || '',
+        token: process.env[UPDATE_GITHUB_TOKEN_ENV]?.trim() || undefined,
+      }),
+      cache: new SqliteUpdateCheckCache(store.db),
+      targetPath: resolveUpdateTargetPath(),
+    });
+  const updateGuard = options.updateOperationGuard ?? new UpdateOperationGuard();
   const runtime = new AdminRuntime(control, options.telemetryStore, options.runtime);
   const builtIn: AdminAdapters = {
     upstreamRuntime: async (input) => runtime.snapshot(String(input.upstreamId)),
@@ -903,6 +953,52 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
           databases: databaseDiagnostics(store, options.telemetryStore),
           timezone: config.quota.timezone,
         });
+      // Batch-5 §5.3 online update (task #21): runtime version, GitHub
+      // release detection with checksum-verified download and atomic swap,
+      // the rollback whitelist, and a supervisor-reliant restart. The
+      // mutating actions carry no body — their idempotency rides the
+      // Idempotency-Key header (the quota-adjustments precedent).
+      const idempotencyKey = requestHeader(req, 'idempotency-key');
+      const updateCall = async <T>(action: () => Promise<T>): Promise<T> => {
+        try {
+          return await action();
+        } catch (error) {
+          throw updateHttpError(error);
+        }
+      };
+      if (is('system', 'version') && method === 'GET') return result(updateService.versionInfo());
+      if (is('system', 'updates', 'check') && method === 'GET')
+        return result(
+          await updateCall(() =>
+            updateService.checkUpdate(input.force === 'true' || input.force === '1' || input.force === true),
+          ),
+        );
+      if (is('system', 'updates', 'rollback-versions') && method === 'GET')
+        return result({ versions: await updateCall(() => updateService.listRollbackVersions()) });
+      if (is('system', 'updates', 'apply') && method === 'POST')
+        return result(await updateCall(() => updateGuard.run(idempotencyKey, () => updateService.performUpdate())));
+      if (is('system', 'updates', 'rollback') && method === 'POST')
+        return result(
+          await updateCall(() =>
+            updateGuard.run(idempotencyKey, () => updateService.rollbackToVersion(String(input.version ?? ''))),
+          ),
+        );
+      if (is('system', 'restart') && method === 'POST')
+        return result(
+          await updateCall(() =>
+            updateGuard.run(idempotencyKey, async () => {
+              const schedule = scheduleProcessRestart();
+              return {
+                restarting: true,
+                ...schedule,
+                semantics:
+                  'The process exits(0) 500ms after this response and relies on a supervisor to come back ' +
+                  '(systemd Restart=always). Under docker compose the container is recreated — anything not on a ' +
+                  'volume is lost, so prefer image-tag upgrades there.',
+              };
+            }),
+          ),
+        );
       if (method === 'GET' && is('overview')) {
         const value = await call(adapters.overview);
         const usage = record(record(value).usage);

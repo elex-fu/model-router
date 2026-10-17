@@ -220,6 +220,10 @@ export const adminRequestSchemas = {
       })
       .strict(),
   ]),
+  // Batch-5 §5.3 online update: rollback targets one of the whitelisted
+  // older releases (validated server-side); apply/restart carry no body and
+  // ride the Idempotency-Key header instead.
+  updateRollback: z.object({ version: z.string().trim().min(1).max(64) }).strict(),
 } as const;
 
 export type AdminRequestSchemaKey = keyof typeof adminRequestSchemas;
