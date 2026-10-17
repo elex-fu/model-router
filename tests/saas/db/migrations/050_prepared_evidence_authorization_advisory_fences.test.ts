@@ -199,6 +199,8 @@ test('migration 050 is registered in append order and remains forward-only', () 
       112,
       113,
       114,
+      115,
+      116,
     ],
   );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);
@@ -513,7 +515,18 @@ test('migration 050 stays within the existing gateway privilege contract', () =>
     'saas_customer_price_versions',
     'saas_supplier_cost_versions',
   ]) {
-    assert.equal(gatewayUpdateTables.has(table), false, `${table} must not receive UPDATE merely to support FOR SHARE`);
+    // 115 (R-dormant batch 2.2) is the single sanctioned exception: the
+    // scheduler's lazy scheduling-threshold pause columns. Every other
+    // account-table column stays gateway-read-only (the 058 precedent).
+    const sanctioned = new Set([
+      'saas_tenant_provider_accounts',
+      'saas_platform_provider_accounts',
+    ]);
+    assert.equal(
+      sanctioned.has(table) || gatewayUpdateTables.has(table) === false,
+      true,
+      `${table} must not receive UPDATE merely to support FOR SHARE`,
+    );
   }
   assert.match(
     migration.sql,

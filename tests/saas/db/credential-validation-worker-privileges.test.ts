@@ -404,6 +404,60 @@ test('109 grants the probe monitor worker its claim/write surface only', () => {
   );
 });
 
+test('115 grants the quota snapshot writer and gemini usage worker their surface only', () => {
+  const workerGrantSql = readFileSync(
+    new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  // The quota-snapshot writer's codex columns (the transport's every-response
+  // parseCodexRateLimitHeaders sink) — UPDATE only, no due-predicate reads.
+  for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
+    for (const column of [
+      'codex_5h_used_percent',
+      'codex_5h_reset_at',
+      'codex_7d_used_percent',
+      'codex_7d_reset_at',
+      'codex_usage_updated_at',
+    ]) {
+      assert.ok(
+        probeSql.includes(`('${table}', '${column}', 'UPDATE')`),
+        `probe manifest missing UPDATE ${table}.${column}`,
+      );
+      assert.match(
+        workerGrantSql,
+        new RegExp(`GRANT UPDATE \\([^)]*\\b${column}\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+      );
+    }
+    // The gemini usage worker's claim RETURNING reads the tier id.
+    assert.ok(probeSql.includes(`('${table}', 'gemini_tier_id', 'SELECT')`));
+    assert.match(
+      workerGrantSql,
+      new RegExp(`GRANT SELECT \\([^)]*\\bgemini_tier_id\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
+    );
+    // The scheduling-threshold pause columns stay gateway-owned (115): this
+    // role must never write them.
+    for (const column of ['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']) {
+      assert.equal(probeSql.includes(`('${table}', '${column}',`), false);
+      assert.doesNotMatch(workerGrantSql, new RegExp(`GRANT [A-Z]+ \\([^)]*\\b${column}\\b`));
+    }
+  }
+  // The gemini usage worker's request-count aggregation: minimal read-only
+  // attempt surface (usage events carry no account or model binding).
+  for (const column of ['account_id', 'resolved_model', 'created_at', 'result_state']) {
+    assert.ok(
+      probeSql.includes(`('saas_attempts', '${column}', 'SELECT')`),
+      `probe manifest missing SELECT saas_attempts.${column}`,
+    );
+  }
+  assert.match(
+    workerGrantSql,
+    /GRANT SELECT \(account_id, resolved_model, created_at, result_state\)\s+ON TABLE model_router_saas\.saas_attempts/,
+  );
+  assert.doesNotMatch(probeSql, /\('saas_attempts', '[^']+', '(?:INSERT|UPDATE|DELETE)'\)/);
+  assert.doesNotMatch(workerGrantSql, /GRANT (?:INSERT|UPDATE|DELETE)[^;]*saas_attempts/);
+});
+
 test('G2 grants the OpenRouter pricing sync worker its append-only catalog and supplier-cost surface only', () => {
   const workerGrantSql = readFileSync(
     new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),

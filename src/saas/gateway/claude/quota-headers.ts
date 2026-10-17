@@ -29,7 +29,7 @@ export const CLAUDE_WINDOW_7D_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
 /** Configurable fallback cooldown for a 429 with no usable reset header. */
 export const CLAUDE_429_FALLBACK_COOLDOWN_MS = 60_000;
 
-export type ClaudeRateLimitWindow = '5h' | '7d' | '7d_oi';
+export type ClaudeRateLimitWindow = '5h' | '7d' | '7d_sonnet' | '7d_oi';
 
 /** Parsed per-window signal off the unified rate-limit headers. */
 export interface ClaudeRateLimitWindowSnapshot {
@@ -109,6 +109,55 @@ export function parseClaudeRateLimitWindow(
     exhausted: isWindowExceeded(headers, window),
     rejected: isWindowRejected(headers, window),
   };
+}
+
+/** All window labels the unified header family can carry. */
+export const CLAUDE_QUOTA_WINDOW_LABELS: readonly ClaudeRateLimitWindow[] = ['5h', '7d', '7d_sonnet', '7d_oi'];
+
+/** One window's observed quota facts, regardless of exhaustion. */
+export interface ClaudeQuotaWindowSnapshot {
+  readonly window: ClaudeRateLimitWindow;
+  readonly status: string | null;
+  /** Upstream-observed utilization fraction (0..1+); null when absent. */
+  readonly utilization: number | null;
+  readonly surpassedThreshold: boolean;
+  /** Epoch milliseconds; null when absent or outside the plausibility window. */
+  readonly resetAtMs: number | null;
+}
+
+/** The success-path quota snapshot the PG writer persists (per-window). */
+export interface ClaudeQuotaSnapshot {
+  readonly observedAtMs: number;
+  /** Windows that carried at least one parsable signal, header order. */
+  readonly windows: readonly ClaudeQuotaWindowSnapshot[];
+}
+
+/**
+ * Parses the unified quota headers off ANY response (success included). Each
+ * window label contributes when it carries a status, utilization or reset
+ * signal; windows with no signal stay absent. The 5h session-window anchor
+ * follows the reset: [reset − 5h, reset] (the sub2api UpdateSessionWindow
+ * semantics; the writer persists it into the session-window columns).
+ */
+export function parseClaudeQuotaSnapshot(headers: Record<string, string>, nowMs: number): ClaudeQuotaSnapshot | null {
+  const windows: ClaudeQuotaWindowSnapshot[] = [];
+  for (const label of CLAUDE_QUOTA_WINDOW_LABELS) {
+    const raw = parseClaudeRateLimitWindow(headers, label, nowMs);
+    const hasSignal =
+      raw.status !== null || raw.utilization !== null || raw.resetAtMs !== null || raw.surpassedThreshold;
+    if (!hasSignal) continue;
+    windows.push(raw);
+  }
+  if (windows.length === 0) return null;
+  return { observedAtMs: nowMs, windows };
+}
+
+/** Session window [start, end] = [reset − 5h, reset] for a 5h reset anchor. */
+export function claudeSessionWindowFromResetMs(resetAtMs: number): {
+  readonly startMs: number;
+  readonly endMs: number;
+} {
+  return { startMs: resetAtMs - 5 * 60 * 60 * 1000, endMs: resetAtMs };
 }
 
 /** The 429 classification outcome the scheduler persists. */

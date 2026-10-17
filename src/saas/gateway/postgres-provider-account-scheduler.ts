@@ -12,6 +12,11 @@ import type {
   ProviderAccountRuntimeHealthWriter,
 } from './postgres-provider-account-runtime-health-store.js';
 import {
+  accountWindowStatsOrZero,
+  getAccountWindowStatsBatch,
+  groupAccountIdsByWindowStart,
+} from './postgres-provider-account-window-stats.js';
+import {
   MAX_HEALTH_OBSERVED_AT_SKEW_MS,
   ProviderAccountScheduler,
   type ProviderAccountSchedulerAffinityBindDecision,
@@ -30,6 +35,14 @@ import {
   type ProviderAccountSchedulerSelectionTrace,
   resolveMaxHealthAgeMs,
 } from './provider-account-scheduler.js';
+import {
+  buildSchedulingThresholdPauseReason,
+  evaluateSchedulingThresholdPause,
+  type SchedulingThresholdAccountRow,
+  schedulingThresholdCandidatesFromRow,
+  schedulingThresholdPauseMatches,
+  schedulingThresholdWindowStartMs,
+} from './provider-account-scheduling-threshold.js';
 import type {
   RequestPreparationCaller,
   RequestPreparationCandidateAuthority,
@@ -401,6 +414,11 @@ SELECT product.status AS product_status,
     * window predicate in this query. */
    AND (account.probe_temp_unschedulable_until IS NULL
         OR account.probe_temp_unschedulable_until <= $14::timestamptz)
+   /* R-dormant (migration 115): the scheduling-threshold lazy pause — same
+    * NULL-or-elapsed shape as the 109 probe signal; NULL (never paused)
+    * keeps the pre-115 behavior exactly. */
+   AND (account.scheduling_threshold_pause_until IS NULL
+        OR account.scheduling_threshold_pause_until <= $14::timestamptz)
    AND mapping.supply_mode = 'byok' AND mapping.provider_id = $4 AND mapping.product_id = $5
    AND mapping.account_authz_version = account.authz_version
    AND mapping.authz_version = $13 AND mapping.status = 'active'
@@ -583,6 +601,11 @@ SELECT product.status AS product_status,
     * revalidation clock. */
    AND (account.probe_temp_unschedulable_until IS NULL
         OR account.probe_temp_unschedulable_until <= $20::timestamptz)
+   /* R-dormant (migration 115): the scheduling-threshold lazy pause — same
+    * NULL-or-elapsed shape as the 109 probe signal; NULL (never paused)
+    * keeps the pre-115 behavior exactly. */
+   AND (account.scheduling_threshold_pause_until IS NULL
+        OR account.scheduling_threshold_pause_until <= $20::timestamptz)
    AND (NOT EXISTS (SELECT 1 FROM saas_billing_group_account_pools guard_pool
                     WHERE guard_pool.group_id = $23)
         OR group_pool.account_id IS NOT NULL)
@@ -670,6 +693,78 @@ SELECT input_rate_numerator_minor_units, input_rate_denominator_units,
   FROM saas_supplier_cost_versions
  WHERE id = $1
  LIMIT 1`;
+
+/*
+ * R-dormant activation (batch 2.2, migration 115): the scheduling-threshold
+ * lazy evaluation reads every quota-snapshot window family (099/100/108/111)
+ * plus the dormant auto_pause_*_threshold overrides (099) and the current
+ * pause state in ONE batched id lookup per owner scope — the sub2api
+ * account_scheduling_threshold_eval candidate read. Accounts with no
+ * threshold configured produce zero candidates and the selection proceeds
+ * byte-identically to the pre-activation path.
+ */
+function schedulingThresholdCandidatesSql(
+  accountsTable: 'saas_tenant_provider_accounts' | 'saas_platform_provider_accounts',
+): string {
+  return `/* postgres-provider-account-scheduler:threshold-candidates */
+SELECT account.id AS account_id,
+       account.codex_5h_used_percent, account.codex_5h_reset_at,
+       account.codex_7d_used_percent, account.codex_7d_reset_at,
+       account.codex_usage_updated_at,
+       account.claude_5h_utilization, account.claude_5h_reset_at,
+       account.claude_7d_utilization, account.claude_7d_reset_at,
+       account.claude_7d_sonnet_utilization, account.claude_7d_sonnet_reset_at,
+       account.claude_7d_oi_utilization, account.claude_7d_oi_reset_at,
+       account.claude_usage_updated_at, account.claude_session_window_start,
+       account.gemini_shared_daily_used, account.gemini_shared_daily_limit,
+       account.gemini_pro_daily_used, account.gemini_pro_daily_limit,
+       account.gemini_flash_daily_used, account.gemini_flash_daily_limit,
+       account.gemini_daily_reset_at, account.gemini_usage_updated_at,
+       account.opencode_go_rolling_5h_used_percent, account.opencode_go_rolling_5h_reset_at,
+       account.opencode_go_weekly_used_percent, account.opencode_go_weekly_reset_at,
+       account.opencode_go_monthly_used_percent, account.opencode_go_monthly_reset_at,
+       account.opencode_go_usage_updated_at,
+       account.auto_pause_5h_threshold, account.auto_pause_7d_threshold,
+       account.scheduling_threshold_pause_until, account.scheduling_threshold_pause_reason
+  FROM ${accountsTable} account
+ WHERE account.id = ANY($1::text[])`;
+}
+
+/*
+ * The pause write (sub2api SetTempUnschedulable port): the guard
+ * `scheduling_threshold_pause_until IS NULL OR < until` means a live pause is
+ * only ever EXTENDED, never shortened — a rows-affected zero is a no-op, not
+ * an error. Idempotent re-evaluations (same deadline at second granularity,
+ * same reason with triggered_at zeroed) are skipped in TypeScript before the
+ * statement ever runs.
+ */
+function schedulingThresholdPauseWriteSql(
+  accountsTable: 'saas_tenant_provider_accounts' | 'saas_platform_provider_accounts',
+  ownerKind: 'tenant' | 'platform',
+): {
+  sql: string;
+  values: (untilIso: string, reasonJson: string, accountId: string, tenantId: string | null) => unknown[];
+} {
+  const predicate = ownerKind === 'tenant' ? 'tenant_id = $1 AND id = $2' : 'id = $1';
+  const untilParam = ownerKind === 'tenant' ? 3 : 2;
+  const reasonParam = untilParam + 1;
+  return {
+    sql: `/* postgres-provider-account-scheduler:threshold-pause-write */
+UPDATE ${accountsTable}
+   SET scheduling_threshold_pause_until = $${untilParam}::timestamptz,
+       scheduling_threshold_pause_reason = $${reasonParam}::jsonb
+ WHERE ${predicate}
+   AND (scheduling_threshold_pause_until IS NULL
+        OR scheduling_threshold_pause_until < $${untilParam}::timestamptz)`,
+    values: (untilIso, reasonJson, accountId, tenantId) =>
+      ownerKind === 'tenant' ? [tenantId, accountId, untilIso, reasonJson] : [accountId, untilIso, reasonJson],
+  };
+}
+
+interface SchedulingThresholdCandidateRow extends SchedulingThresholdAccountRow {
+  readonly scheduling_threshold_pause_until: Date | string | null;
+  readonly scheduling_threshold_pause_reason: unknown;
+}
 
 /*
  * F2 (task #35): resolve the request's billing group — the key's binding
@@ -1893,6 +1988,13 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       if (resolution.decision !== 'allow') return resolution.decision;
       schedulingInput = { ...input, billingGroupId: resolution.billingGroupId };
     }
+    // R-dormant (batch 2.2, migration 115): lazy scheduling-threshold
+    // evaluation at candidate-collection time. Fail-open by design — a
+    // threshold read/write failure must never break selection (the accounts
+    // simply stay schedulable until the next evaluation).
+    if (hasCandidates) {
+      schedulingInput = await this.applySchedulingThresholdPause(schedulingInput);
+    }
     const decision = await this.scheduler.select(schedulingInput).then((result) => {
       // R7: record the chosen strategy dimensions on the attempt audit. The
       // trace exists only when a strategy is enabled, so the default path
@@ -1910,6 +2012,150 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       decision.decision === 'allow' ? decision.value.accountId : null,
     );
     return decision;
+  }
+
+  /**
+   * R-dormant (batch 2.2, migration 115; sub2api
+   * ApplyAccountSchedulingThreshold port): lazy candidate-collection-time
+   * evaluation of the scheduling-threshold pause. One batched id lookup per
+   * owner scope reads the 099/100/108/111 quota windows, the dormant
+   * auto_pause_*_threshold overrides and the current pause state; a window
+   * at or above its threshold pauses the account until the LATEST breaching
+   * window reset (the write never shortens a live pause, and an identical
+   * re-evaluation is skipped without a statement). Paused candidates are
+   * filtered out before the core scheduler sees them; the eligibility SQL's
+   * pause predicate keeps the exclusion durable for any later revalidation.
+   * Accounts with no threshold configured produce zero candidates — the
+   * pre-activation behavior, byte-identical (the golden-fixture red line).
+   */
+  private async applySchedulingThresholdPause(
+    input: ProviderAccountSchedulerInput,
+  ): Promise<ProviderAccountSchedulerInput> {
+    try {
+      const candidates = Array.isArray(input?.candidates) ? input.candidates : [];
+      if (candidates.length === 0) return input;
+      const nowMs = this.now().getTime();
+      const byScope = new Map<'tenant' | 'platform', { accountId: string; tenantId: string | null }[]>();
+      for (const candidate of candidates) {
+        if (!isRecord(candidate)) continue;
+        const accountId = typeof candidate.accountId === 'string' ? candidate.accountId : '';
+        if (accountId === '') continue;
+        const scope: 'tenant' | 'platform' =
+          (candidate as { supplyMode?: unknown }).supplyMode === 'byok' ? 'tenant' : 'platform';
+        const bucket = byScope.get(scope) ?? [];
+        bucket.push({ accountId, tenantId: (input.caller as { tenantId?: unknown }).tenantId as string | null });
+        byScope.set(scope, bucket);
+      }
+      const paused = new Set<string>();
+      for (const [scope, accounts] of byScope) {
+        const accountsTable = scope === 'tenant' ? 'saas_tenant_provider_accounts' : 'saas_platform_provider_accounts';
+        const result = await this.database.query<SchedulingThresholdCandidateRow>(
+          schedulingThresholdCandidatesSql(accountsTable),
+          [accounts.map((account) => account.accountId)],
+        );
+        const rows = result.rows;
+        if (rows.length === 0) continue;
+        // First pass: honor live pauses, evaluate new ones.
+        const pendingWrites: {
+          row: SchedulingThresholdCandidateRow;
+          pause: ReturnType<typeof evaluateSchedulingThresholdPause>;
+        }[] = [];
+        for (const row of rows) {
+          if (typeof row.account_id !== 'string' || row.account_id === '') continue;
+          const storedUntilMs =
+            row.scheduling_threshold_pause_until instanceof Date
+              ? row.scheduling_threshold_pause_until.getTime()
+              : typeof row.scheduling_threshold_pause_until === 'string' && row.scheduling_threshold_pause_until !== ''
+                ? Date.parse(row.scheduling_threshold_pause_until)
+                : Number.NaN;
+          const storedUntil = Number.isFinite(storedUntilMs) ? storedUntilMs : null;
+          if (storedUntil !== null && storedUntil > nowMs) {
+            paused.add(row.account_id);
+          }
+          const pause = evaluateSchedulingThresholdPause({
+            nowMs,
+            candidates: schedulingThresholdCandidatesFromRow(row, nowMs),
+          });
+          if (pause === null) continue;
+          // Never shorten: a stored pause at or beyond the new deadline
+          // stays as-is (the sub2api SetTempUnschedulable guard).
+          if (storedUntil !== null && storedUntil >= pause.untilMs) {
+            if (pause.untilMs > nowMs) paused.add(row.account_id);
+            continue;
+          }
+          const reason = buildSchedulingThresholdPauseReason({ pause, triggeredAtMs: nowMs });
+          if (
+            schedulingThresholdPauseMatches(
+              { untilMs: storedUntil, reason: row.scheduling_threshold_pause_reason },
+              pause,
+              reason,
+            )
+          ) {
+            if (pause.untilMs > nowMs) paused.add(row.account_id);
+            continue;
+          }
+          pendingWrites.push({ row, pause });
+        }
+        if (pendingWrites.length === 0) continue;
+        // Window-cost enrichment (the GetAccountWindowStats batch pattern):
+        // one grouped aggregation per DISTINCT window start, fail-open.
+        let windowCosts: ReadonlyMap<string, { requests: number; tokens: bigint }> = new Map();
+        try {
+          const starts = new Map<string, number>();
+          for (const write of pendingWrites) {
+            starts.set(write.row.account_id, schedulingThresholdWindowStartMs(write.row, nowMs));
+          }
+          const buckets = groupAccountIdsByWindowStart(
+            starts,
+            [...starts.keys()],
+            Math.floor(nowMs / 3_600_000) * 3_600_000,
+          );
+          const merged = new Map<string, { requests: number; tokens: bigint }>();
+          for (const [startMs, accountIds] of buckets) {
+            const batch = await getAccountWindowStatsBatch(this.database, accountIds, startMs);
+            for (const [accountId, stats] of batch) merged.set(accountId, stats);
+          }
+          windowCosts = merged;
+        } catch {
+          // The cost observation is enrichment only; the pause stands without it.
+        }
+        const writeStatement = schedulingThresholdPauseWriteSql(accountsTable, scope);
+        for (const write of pendingWrites) {
+          const pause = write.pause;
+          if (pause === null) continue;
+          const reason = buildSchedulingThresholdPauseReason({
+            pause,
+            triggeredAtMs: nowMs,
+            windowCost: windowCosts.size > 0 ? accountWindowStatsOrZero(windowCosts, write.row.account_id) : null,
+          });
+          const tenantId =
+            scope === 'tenant'
+              ? (accounts.find((account) => account.accountId === write.row.account_id)?.tenantId ?? null)
+              : null;
+          if (scope === 'tenant' && (typeof tenantId !== 'string' || tenantId === '')) continue;
+          await this.database.query(writeStatement.sql, [
+            ...writeStatement.values(
+              new Date(pause.untilMs).toISOString(),
+              JSON.stringify(reason),
+              write.row.account_id,
+              tenantId,
+            ),
+          ]);
+          if (pause.untilMs > nowMs) paused.add(write.row.account_id);
+        }
+      }
+      if (paused.size === 0) return input;
+      const remaining = candidates.filter(
+        (candidate) =>
+          !isRecord(candidate) || typeof candidate.accountId !== 'string' || !paused.has(candidate.accountId),
+      );
+      return { ...input, candidates: remaining };
+    } catch {
+      // Fail-open: the threshold pause is a scheduling optimization; a read
+      // or write failure leaves the accounts schedulable until the next
+      // evaluation (the eligibility-SQL predicate stays the durable guard).
+      return input;
+    }
   }
 
   /**

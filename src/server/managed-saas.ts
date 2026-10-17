@@ -247,6 +247,11 @@ import {
   PostgresEgressProxyProbeWorkerStore,
   startEgressProxyProbeWorker,
 } from '../saas/supply/egress-proxy-probe-worker.js';
+import {
+  type GeminiUsageWorkerHandle,
+  type GeminiUsageWorkerOptions,
+  startGeminiUsageWorker,
+} from '../saas/supply/gemini-usage-worker.js';
 import { ProviderSupplyService } from '../saas/supply/index.js';
 import {
   type OauthCredentialRotator,
@@ -277,6 +282,10 @@ import {
   startProbeMonitorWorker,
   startProbeRunRetentionWorker,
 } from '../saas/supply/probe-monitor-worker.js';
+import {
+  PostgresProviderQuotaSnapshotStore,
+  type PostgresProviderQuotaSnapshotStoreOptions,
+} from '../saas/supply/provider-account-quota-snapshot-store-postgres.js';
 import {
   type QuotaSyncWorkerHandle,
   type QuotaSyncWorkerOptions,
@@ -337,6 +346,8 @@ export interface ManagedSaasRuntime {
   readonly quotaSyncWorker: QuotaSyncWorkerHandle | null;
   /** R5b OpenCode Go usage-snapshot loop; same workload as quota sync. */
   readonly opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | null;
+  /** R-dormant (batch 2.2): the gemini usage-snapshot loop; same workload. */
+  readonly geminiUsageWorker: GeminiUsageWorkerHandle | null;
   /** F6 OpenRouter model-catalog/pricing sync loop; opt-in on the worker workload. */
   readonly openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | null;
   /** R3 egress-proxy probe + expiry-sweep loop; same workload as quota sync. */
@@ -483,6 +494,13 @@ export interface ManagedSaasStartOptions {
   ) => OpencodeGoUsageStore;
   /** Optional usage loop tuning or test fetch; deployment identity always reaches the store. */
   opencodeGoUsageWorkerOptions?: Partial<OpencodeGoUsageWorkerOptions>;
+  /** Deterministic seam for the R-dormant quota-snapshot store (gemini loop). */
+  createQuotaSnapshotStore?: (
+    database: SaasDatabase,
+    options: PostgresProviderQuotaSnapshotStoreOptions,
+  ) => PostgresProviderQuotaSnapshotStore;
+  /** Optional gemini usage loop tuning; same workload as quota sync. */
+  geminiUsageWorkerOptions?: Partial<GeminiUsageWorkerOptions>;
   /**
    * F6 (task #39): OpenRouter catalog/pricing sync loop on the
    * credential-validation-worker workload. Presence of this option ENABLES
@@ -1302,12 +1320,17 @@ async function startCredentialValidationWorkerRuntime(
       kms: LoadedValidationWorkerProviderCredentialKms,
       storeOptions: PostgresOpencodeGoUsageStoreOptions,
     ) => new PostgresOpencodeGoUsageStore(database, kms, storeOptions));
+  const createSnapshotStore =
+    options.createQuotaSnapshotStore ??
+    ((database: SaasDatabase, storeOptions: PostgresProviderQuotaSnapshotStoreOptions) =>
+      new PostgresProviderQuotaSnapshotStore(database, storeOptions));
 
   let database: ManagedSaasDatabase | undefined;
   let kms: LoadedValidationWorkerProviderCredentialKms | undefined;
   let worker: CredentialValidationWorkerHandle | undefined;
   let quotaWorker: QuotaSyncWorkerHandle | undefined;
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
+  let geminiUsageWorker: GeminiUsageWorkerHandle | undefined;
   let openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let egressProxyProbeWorker: EgressProxyProbeWorkerHandle | undefined;
@@ -1321,6 +1344,7 @@ async function startCredentialValidationWorkerRuntime(
       if (worker) await Promise.allSettled([worker.close()]);
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
+      if (geminiUsageWorker) await Promise.allSettled([geminiUsageWorker.close()]);
       if (openRouterModelPricingSyncWorker) {
         await Promise.allSettled([openRouterModelPricingSyncWorker.close()]);
       }
@@ -1404,6 +1428,11 @@ async function startCredentialValidationWorkerRuntime(
       }),
       options.opencodeGoUsageWorkerOptions,
     );
+    // R-dormant (batch 2.2): the gemini usage-snapshot loop folds per-model
+    // request counts from saas_attempts into the migration-111 tier snapshot.
+    // Same workload, role and lease semantics as the opencode-go loop above;
+    // a deployment without gemini accounts simply idles every round.
+    geminiUsageWorker = startGeminiUsageWorker(createSnapshotStore(database, {}), options.geminiUsageWorkerOptions);
     // F6 (task #39): the OpenRouter model-catalog/pricing sync loop. It is
     // strictly opt-in (the R4 OAuth-refresh precedent): the sync appends
     // provider catalog, public-model alias and supplier-cost version rows,
@@ -1466,6 +1495,7 @@ async function startCredentialValidationWorkerRuntime(
       credentialValidationWorker: worker,
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
+      geminiUsageWorker: geminiUsageWorker,
       openRouterModelPricingSyncWorker: openRouterModelPricingSyncWorker ?? null,
       egressProxyProbeWorker,
       probeMonitorWorker: probeMonitorWorker ?? null,
@@ -2693,6 +2723,7 @@ export async function startManagedSaasServer(
       credentialValidationWorker: null,
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
+      geminiUsageWorker: null,
       openRouterModelPricingSyncWorker: null,
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,

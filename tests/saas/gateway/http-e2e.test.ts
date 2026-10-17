@@ -1229,6 +1229,10 @@ test('a claude_code_only group admits genuine Claude Code clients past the group
   // at the gate (403) — proving the evidence carried all the way through.
   assert.equal(setup.response.writeHeadCalls[0]?.status, 503);
   assert.equal(JSON.parse(setup.response.bodyText()).error.code, 'REQUEST_BLOCKED');
-  assert.equal(setup.statements.length, 1);
+  // R-dormant (115): the scheduling-threshold candidate read runs between
+  // the group resolution and the eligibility authority — a scheduling-signal
+  // side read that never gates the group decision.
+  assert.equal(setup.statements.length, 2);
   assert.match(setup.statements[0]?.sql ?? '', /postgres-provider-account-scheduler:billing-group/);
+  assert.match(setup.statements[1]?.sql ?? '', /postgres-provider-account-scheduler:threshold-candidates/);
 });

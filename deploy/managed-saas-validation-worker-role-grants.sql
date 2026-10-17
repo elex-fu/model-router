@@ -250,6 +250,7 @@ GRANT SELECT (
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   claude_usage_updated_at, claude_5h_reset_at,
   gemini_usage_updated_at, gemini_daily_reset_at, gemini_rate_limited_until,
+  gemini_tier_id,
   quarantine_entered_at, quarantine_reason_code,
   egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
@@ -274,9 +275,19 @@ GRANT UPDATE (
   gemini_minute_used, gemini_minute_limit,
   gemini_daily_reset_at, gemini_usage_updated_at,
   gemini_rate_limited_until, gemini_tier_id,
+  codex_5h_used_percent, codex_5h_reset_at,
+  codex_7d_used_percent, codex_7d_reset_at, codex_usage_updated_at,
   quarantine_entered_at, quarantine_reason_code,
   probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+
+-- 115 (R-dormant batch 2.2): the gemini usage worker's request-count
+-- aggregation reads the attempt table's per-account model facts (usage
+-- events carry no account or model binding). Minimal column surface; no
+-- attempt writes.
+GRANT SELECT (account_id, resolved_model, created_at, result_state)
+  ON TABLE model_router_saas.saas_attempts
   TO model_router_saas_validation_worker;
 
 GRANT SELECT (
@@ -338,6 +349,7 @@ GRANT SELECT (
   opencode_go_usage_next_due_at, opencode_go_usage_updated_at, opencode_go_rate_limited_until,
   claude_usage_updated_at, claude_5h_reset_at,
   gemini_usage_updated_at, gemini_daily_reset_at, gemini_rate_limited_until,
+  gemini_tier_id,
   quarantine_entered_at, quarantine_reason_code,
   egress_proxy_id, probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts
@@ -362,6 +374,8 @@ GRANT UPDATE (
   gemini_minute_used, gemini_minute_limit,
   gemini_daily_reset_at, gemini_usage_updated_at,
   gemini_rate_limited_until, gemini_tier_id,
+  codex_5h_used_percent, codex_5h_reset_at,
+  codex_7d_used_percent, codex_7d_reset_at, codex_usage_updated_at,
   quarantine_entered_at, quarantine_reason_code,
   probe_temp_unschedulable_until
 ) ON TABLE model_router_saas.saas_platform_provider_accounts

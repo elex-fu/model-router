@@ -27,9 +27,14 @@ import {
   CLAUDE_CODE_MIMICRY_BETA_HEADER,
   CLAUDE_STAINLESS_HEADERS,
 } from './constants.js';
-import { buildClaudeUserAgent, resolveClaudeCliVersion } from './identity.js';
 import { normalizeClaudeDatelineBody } from './dateline.js';
-import { type ClaudeRateLimitClassification, classifyClaude429 } from './quota-headers.js';
+import { buildClaudeUserAgent, resolveClaudeCliVersion } from './identity.js';
+import {
+  type ClaudeQuotaSnapshot,
+  type ClaudeRateLimitClassification,
+  classifyClaude429,
+  parseClaudeQuotaSnapshot,
+} from './quota-headers.js';
 import { type ClaudeMessagesUsage, parseMessagesUsage } from './response-bridge.js';
 
 /**
@@ -52,6 +57,9 @@ import { type ClaudeMessagesUsage, parseMessagesUsage } from './response-bridge.
  *   accounts;
  * - `anthropic-ratelimit-unified-*` parsing on every 429 with an
  *   at-least-30s throttled, best-effort classification write;
+ * - the same unified headers parsed off every response (success included)
+ *   into a per-window quota snapshot with its own throttled best-effort
+ *   sink (R-dormant: the 099/100 column writer);
  * - upstream error classification (shared health classifier) split into the
  *   account health signal and the in-flight failover signal;
  * - SSE relay that keeps draining the upstream after the client disconnects
@@ -95,6 +103,19 @@ export type ClaudeRateLimitSink = (record: {
   readonly fromStatus: number;
 }) => void | Promise<void>;
 
+/**
+ * Throttled, best-effort quota-snapshot write observed off ANY response
+ * (success included — the `anthropic-ratelimit-unified-*` utilization/status
+ * headers ride on 2xx traffic too). The record carries the owner-neutral
+ * account id; owner-scope resolution is the sink's job.
+ */
+export type ClaudeQuotaSnapshotSink = (record: {
+  readonly accountId: string;
+  readonly snapshot: ClaudeQuotaSnapshot;
+  readonly observedAtMs: number;
+  readonly fromStatus: number;
+}) => void | Promise<void>;
+
 /** Account health signal (classification) separate from the failover signal. */
 export type ClaudeAccountHealthSink = (signal: {
   readonly accountId: string;
@@ -123,6 +144,8 @@ export interface ClaudeTransportStreamResult {
   /** Settles with the usage from the terminal message events. */
   readonly usage: Promise<ClaudeMessagesUsage | null>;
   readonly rateLimitWritten: boolean;
+  /** Whether a success-path quota snapshot write was dispatched (R-dormant). */
+  readonly quotaSnapshotWritten: boolean;
 }
 
 export interface ClaudeTransportErrorResult {
@@ -133,6 +156,7 @@ export interface ClaudeTransportErrorResult {
   readonly failover: boolean;
   readonly bodyText: string | null;
   readonly rateLimitWritten: boolean;
+  readonly quotaSnapshotWritten: boolean;
 }
 
 export type ClaudeTransportResult = ClaudeTransportStreamResult | ClaudeTransportErrorResult;
@@ -250,6 +274,7 @@ export interface ClaudeHttpTransportOptions {
   readonly baseUrl?: string;
   readonly resolveCredential: ClaudeCredentialResolver;
   readonly writeRateLimit?: ClaudeRateLimitSink;
+  readonly writeQuotaSnapshot?: ClaudeQuotaSnapshotSink;
   readonly recordAccountHealth?: ClaudeAccountHealthSink;
   readonly timeoutMs?: number;
   readonly snapshotMinIntervalMs?: number;
@@ -261,6 +286,7 @@ interface NormalizedTransportOptions {
   readonly baseUrl: URL;
   readonly resolveCredential: ClaudeCredentialResolver;
   readonly writeRateLimit: ClaudeRateLimitSink | null;
+  readonly writeQuotaSnapshot: ClaudeQuotaSnapshotSink | null;
   readonly recordAccountHealth: ClaudeAccountHealthSink | null;
   readonly timeoutMs: number;
   readonly snapshotMinIntervalMs: number;
@@ -274,6 +300,7 @@ interface NormalizedTransportOptions {
 export class ClaudeHttpTransport {
   private readonly options: NormalizedTransportOptions;
   private readonly rateLimitThrottle: QuotaSnapshotWriteThrottle;
+  private readonly quotaSnapshotThrottle: QuotaSnapshotWriteThrottle;
 
   constructor(options: ClaudeHttpTransportOptions) {
     if (!options || typeof options.fetch !== 'function') fail('INVALID_INPUT', 'an injected fetch adapter is required');
@@ -294,12 +321,17 @@ export class ClaudeHttpTransport {
       baseUrl,
       resolveCredential: options.resolveCredential,
       writeRateLimit: options.writeRateLimit ?? null,
+      writeQuotaSnapshot: options.writeQuotaSnapshot ?? null,
       recordAccountHealth: options.recordAccountHealth ?? null,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       snapshotMinIntervalMs: options.snapshotMinIntervalMs ?? DEFAULT_SNAPSHOT_MIN_INTERVAL_MS,
       nowMs: options.nowMs ?? (() => Date.now()),
     };
     this.rateLimitThrottle = new QuotaSnapshotWriteThrottle(this.options.snapshotMinIntervalMs, this.options.nowMs);
+    // The success-path quota snapshot and the 429 classification are separate
+    // observations: a snapshot write must never suppress the classification
+    // write of a 429 that immediately follows it (and vice versa).
+    this.quotaSnapshotThrottle = new QuotaSnapshotWriteThrottle(this.options.snapshotMinIntervalMs, this.options.nowMs);
   }
 
   async send(request: ClaudeTransportRequest): Promise<ClaudeTransportResult> {
@@ -392,6 +424,7 @@ export class ClaudeHttpTransport {
 
     const responseHeaders = flattenHeaders(response);
     const rateLimitWritten = this.maybeWriteRateLimit(request.accountId, responseHeaders, response.status);
+    const quotaSnapshotWritten = this.maybeWriteQuotaSnapshot(request.accountId, responseHeaders, response.status);
 
     if (response.status < 200 || response.status >= 300) {
       const bodyText = await boundedErrorBody(response, controller.signal, MAX_ERROR_BODY_BYTES);
@@ -402,7 +435,15 @@ export class ClaudeHttpTransport {
       });
       const failover = shouldFailover(classification);
       await this.recordHealth(request.accountId, classification, failover);
-      return { ok: false, status: response.status, classification, failover, bodyText, rateLimitWritten };
+      return {
+        ok: false,
+        status: response.status,
+        classification,
+        failover,
+        bodyText,
+        rateLimitWritten,
+        quotaSnapshotWritten,
+      };
     }
 
     const body = response.body ?? null;
@@ -414,6 +455,7 @@ export class ClaudeHttpTransport {
         body: null,
         usage: Promise.resolve(null),
         rateLimitWritten,
+        quotaSnapshotWritten,
       };
     }
     const relay = createDrainingRelay(body, controller.signal, new MessagesUsageWatcher(), {
@@ -427,6 +469,7 @@ export class ClaudeHttpTransport {
       body: relay.stream,
       usage: relay.usage,
       rateLimitWritten,
+      quotaSnapshotWritten,
     };
   }
 
@@ -461,6 +504,29 @@ export class ClaudeHttpTransport {
     // Best-effort by contract: persistence failures never affect the response.
     void Promise.resolve()
       .then(() => this.options.writeRateLimit?.({ accountId, classification, observedAtMs, fromStatus: status }))
+      .catch(() => undefined);
+    return true;
+  }
+
+  /**
+   * Success-path quota observation (R-dormant activation): the unified
+   * utilization/status headers ride on every response, not only 429s. The
+   * write is throttled per account, best-effort, and never gates the
+   * response. A response carrying no window signal writes nothing.
+   */
+  private maybeWriteQuotaSnapshot(
+    accountId: string,
+    headers: Readonly<Record<string, string>>,
+    status: number,
+  ): boolean {
+    if (this.options.writeQuotaSnapshot === null) return false;
+    const snapshot = parseClaudeQuotaSnapshot(headers as Record<string, string>, this.options.nowMs());
+    if (snapshot === null) return false;
+    if (!this.quotaSnapshotThrottle.shouldWrite(accountId)) return false;
+    const observedAtMs = this.options.nowMs();
+    // Best-effort by contract: persistence failures never affect the response.
+    void Promise.resolve()
+      .then(() => this.options.writeQuotaSnapshot?.({ accountId, snapshot, observedAtMs, fromStatus: status }))
       .catch(() => undefined);
     return true;
   }

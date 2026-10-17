@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import {
   CLAUDE_WINDOW_5H_MAX_AGE_MS,
   classifyClaude429,
+  claudeSessionWindowFromResetMs,
+  parseClaudeQuotaSnapshot,
   parseClaudeRateLimitWindow,
 } from '../../../../src/saas/gateway/claude/quota-headers.js';
 
@@ -132,4 +134,52 @@ test('a 429 without any parsable reset yields null (caller applies the short fal
     ),
     null,
   );
+});
+
+test('success-path quota snapshot parses every signaling window off any response', () => {
+  const snapshot = parseClaudeQuotaSnapshot(
+    {
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-utilization': '0.42',
+      'anthropic-ratelimit-unified-5h-reset': String(Math.floor(IN_5H / 1000)),
+      'anthropic-ratelimit-unified-7d-utilization': '0.91',
+      'anthropic-ratelimit-unified-7d-reset': String(Math.floor(IN_7D / 1000)),
+    },
+    NOW_MS,
+  );
+  assert.ok(snapshot !== null);
+  assert.equal(snapshot.observedAtMs, NOW_MS);
+  assert.equal(snapshot.windows.length, 2);
+  const fiveHour = snapshot.windows.find((window) => window.window === '5h');
+  const sevenDay = snapshot.windows.find((window) => window.window === '7d');
+  assert.ok(fiveHour !== undefined && sevenDay !== undefined);
+  assert.equal(fiveHour.status, 'allowed');
+  assert.equal(fiveHour.utilization, 0.42);
+  assert.equal(fiveHour.resetAtMs, IN_5H - (IN_5H % 1000));
+  assert.equal(sevenDay.utilization, 0.91);
+  assert.equal(sevenDay.resetAtMs, IN_7D - (IN_7D % 1000));
+  assert.equal(fiveHour.exhausted, false);
+  assert.equal(sevenDay.exhausted, false);
+
+  // A response with no window signal at all writes nothing.
+  assert.equal(parseClaudeQuotaSnapshot({}, NOW_MS), null);
+  // Surpassed-threshold alone is a signal (status/utilization absent).
+  const surpassedOnly = parseClaudeQuotaSnapshot(
+    { 'anthropic-ratelimit-unified-5h-surpassed-threshold': 'true' },
+    NOW_MS,
+  );
+  assert.ok(surpassedOnly !== null);
+  assert.equal(surpassedOnly.windows.length, 1);
+  assert.equal(surpassedOnly.windows[0]?.surpassedThreshold, true);
+
+  // The 7d_sonnet label participates when the upstream advertises it.
+  const sonnet = parseClaudeQuotaSnapshot({ 'anthropic-ratelimit-unified-7d_sonnet-utilization': '0.55' }, NOW_MS);
+  assert.ok(sonnet !== null);
+  assert.equal(sonnet.windows[0]?.window, '7d_sonnet');
+});
+
+test('the session window anchors to [reset − 5h, reset]', () => {
+  const window = claudeSessionWindowFromResetMs(IN_5H);
+  assert.equal(window.endMs, IN_5H);
+  assert.equal(window.startMs, IN_5H - 5 * 60 * 60 * 1000);
 });

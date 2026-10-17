@@ -12,8 +12,8 @@ test('114 registers as the applied head after the 113 group rate counters', () =
   assert.equal(migration.name, 'billing_group_spend_windows');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(registered.at(-1), 114);
-  assert.equal(SAAS_MIGRATIONS[SAAS_MIGRATIONS.length - 1], migration);
+  assert.equal(registered.at(-1), 116);
+  assert.equal(SAAS_MIGRATIONS[SAAS_MIGRATIONS.length - 3], migration);
 });
 
 test('114 creates the KEY-BUD-shaped group spend counters and reservations', () => {

@@ -59,6 +59,11 @@ function baseRequest(overrides: Partial<ClaudeTransportRequest> = {}): ClaudeTra
 interface Harness {
   readonly seen: SeenRequest[];
   readonly rateLimits: Array<{ accountId: string; resetAtMs: number }>;
+  readonly quotaSnapshots: Array<{
+    accountId: string;
+    fromStatus: number;
+    windows: ReadonlyArray<{ window: string; utilization: number | null }>;
+  }>;
   readonly health: Array<{ accountId: string; kind: string; failover: boolean }>;
   request(
     body: unknown,
@@ -71,6 +76,11 @@ interface Harness {
 function harness(options: { baseUrl?: string } = {}): Harness {
   const seen: SeenRequest[] = [];
   const rateLimits: Array<{ accountId: string; resetAtMs: number }> = [];
+  const quotaSnapshots: Array<{
+    accountId: string;
+    fromStatus: number;
+    windows: ReadonlyArray<{ window: string; utilization: number | null }>;
+  }> = [];
   const health: Array<{ accountId: string; kind: string; failover: boolean }> = [];
   let nextResponse: Response = sseResponse([]);
   const transport = new ClaudeHttpTransport({
@@ -87,6 +97,13 @@ function harness(options: { baseUrl?: string } = {}): Harness {
     writeRateLimit: (async (record) => {
       rateLimits.push({ accountId: record.accountId, resetAtMs: record.classification.resetAtMs });
     }) as ClaudeRateLimitSink,
+    writeQuotaSnapshot: async (record) => {
+      quotaSnapshots.push({
+        accountId: record.accountId,
+        fromStatus: record.fromStatus,
+        windows: record.snapshot.windows.map((window) => ({ window: window.window, utilization: window.utilization })),
+      });
+    },
     recordAccountHealth: async (signal) => {
       health.push({ accountId: signal.accountId, kind: signal.classification.kind, failover: signal.failover });
     },
@@ -94,6 +111,7 @@ function harness(options: { baseUrl?: string } = {}): Harness {
   return {
     seen,
     rateLimits,
+    quotaSnapshots,
     health,
     setResponse(response: Response) {
       nextResponse = response;
@@ -150,10 +168,7 @@ test('the outbound body dateline watermark is normalized at the egress chokepoin
   // User prose outside the system-reminder block keeps its watermark characters.
   assert.ok(content.includes('Today’s date is 2026/07/01. (user prose, must survive)'));
   // The caller's body object is never mutated.
-  assert.equal(
-    (body.system as Array<{ text: string }>)[0]?.text.includes('2026/07/01'),
-    true,
-  );
+  assert.equal((body.system as Array<{ text: string }>)[0]?.text.includes('2026/07/01'), true);
 });
 
 test('a 429 classification is written through the throttled sink', async () => {
@@ -425,4 +440,68 @@ test('prepared-evidence adapter surfaces non-2xx results without a body stream',
   assert.equal(response.resultHttpStatus, 529);
   assert.equal(response.responseStarted, false);
   assert.equal(response.body, null);
+});
+
+test('a success response writes its quota snapshot through the throttled sink (R-dormant)', async () => {
+  const h = harness();
+  const resetAtMs = Date.now() + 2 * 60 * 60 * 1000;
+  const result = await h.request(
+    { model: 'm', messages: [] },
+    sseResponse([], {
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-utilization': '0.42',
+      'anthropic-ratelimit-unified-5h-reset': String(Math.floor(resetAtMs / 1000)),
+      'anthropic-ratelimit-unified-7d-utilization': '0.9',
+    }),
+  );
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.quotaSnapshotWritten, true);
+  assert.equal(h.quotaSnapshots.length, 1);
+  assert.equal(h.quotaSnapshots[0]?.accountId, 'account-1');
+  assert.equal(h.quotaSnapshots[0]?.fromStatus, 200);
+  const fiveHour = h.quotaSnapshots[0]?.windows.find((window) => window.window === '5h');
+  const sevenDay = h.quotaSnapshots[0]?.windows.find((window) => window.window === '7d');
+  assert.ok(fiveHour !== undefined && sevenDay !== undefined);
+  assert.equal(fiveHour.utilization, 0.42);
+  assert.equal(sevenDay.utilization, 0.9);
+  // Throttled per account: an immediate second success does not write again.
+  await h.request(
+    { model: 'm', messages: [] },
+    sseResponse([], { 'anthropic-ratelimit-unified-5h-utilization': '0.5' }),
+  );
+  assert.equal(h.quotaSnapshots.length, 1);
+  // A success response never triggers the 429 classification sink.
+  assert.equal(h.rateLimits.length, 0);
+});
+
+test('a 429 with quota headers writes both sinks and the snapshot never suppresses the classification', async () => {
+  const h = harness();
+  const resetAtMs = Date.now() + 3 * 60 * 60 * 1000;
+  // Prime the snapshot throttle with a success observation...
+  await h.request(
+    { model: 'm', messages: [] },
+    sseResponse([], { 'anthropic-ratelimit-unified-5h-utilization': '0.42' }),
+  );
+  assert.equal(h.quotaSnapshots.length, 1);
+  // ...then an immediate 429 must still reach the classification sink.
+  await h.request(
+    { model: 'm', messages: [] },
+    new Response('rate limited', {
+      status: 429,
+      headers: {
+        'anthropic-ratelimit-unified-5h-status': 'rejected',
+        'anthropic-ratelimit-unified-5h-reset': String(Math.floor(resetAtMs / 1000)),
+      },
+    }),
+  );
+  assert.equal(h.rateLimits.length, 1);
+  assert.equal(h.quotaSnapshots.length, 1);
+});
+
+test('a response without quota headers writes no snapshot', async () => {
+  const h = harness();
+  const result = await h.request({ model: 'm', messages: [] }, sseResponse([]));
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.quotaSnapshotWritten, false);
+  assert.equal(h.quotaSnapshots.length, 0);
 });
