@@ -101,6 +101,7 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from './120_cn_provider
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from './121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
+import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_settings.js';
 
 export interface SaasMigration {
   version: number;
@@ -698,4 +699,10 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // role owns the lifecycle (column-scoped INSERT/UPDATE + dynamic read),
   // control plane has no access.
   IMAGE_TASKS_SAAS_MIGRATION,
+  // 126: batch-5 §5.2 OEM white-label (task #20) — the gateway-readable
+  // public brand snapshot single-row table. The control plane materializes
+  // the non-secret `saas.brand.*` settings subset into it; the gateway and
+  // the console-serving workloads read it (SSR `window.__APP_CONFIG__`
+  // injection, `GET /settings/public`) through read-only grants.
+  PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
 ];

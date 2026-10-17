@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
@@ -146,6 +147,20 @@ import {
   createPostgresProbeMonitorAdminStore,
 } from '../saas/platform/account-probe-http.js';
 import { PlatformAuditQueryService } from '../saas/platform/audit/index.js';
+import { createPublicBrandSettingsHttpHandler, type PublicBrandSettingsHttpHandler } from '../saas/platform/brand/http.js';
+import {
+  BRAND_SETTINGS_KEY_PREFIX,
+  EMPTY_BRAND_SNAPSHOT,
+  injectBrandAppConfig,
+  type PublicBrandSnapshot,
+} from '../saas/platform/brand/snapshot.js';
+import {
+  createCachedBrandSnapshotReader,
+  type CachedBrandSnapshotReader,
+  PublicBrandSnapshotStore,
+  startPublicBrandSnapshotWorker,
+  type PublicBrandSnapshotWorkerHandle,
+} from '../saas/platform/brand/store.js';
 import {
   createPlatformAdminAuthHandler,
   PLATFORM_ADMIN_AUTH_PREFIX,
@@ -379,6 +394,8 @@ export interface ManagedSaasRuntime {
   readonly probeMonitorWorker: ProbeMonitorWorkerHandle | null;
   /** R6a probe run retention loop; control-plane workload only. */
   readonly probeRunRetentionWorker: ProbeMonitorWorkerHandle | null;
+  /** Batch-5 §5.2 public brand snapshot materialization loop; control-plane workload only. */
+  readonly publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | null;
   /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
   readonly oauthTokenRefreshWorker: OauthTokenRefreshWorkerHandle | null;
   /** G4.5 announcement fan-out loop; only when customer webhooks are enabled. */
@@ -558,6 +575,12 @@ export interface ManagedSaasStartOptions {
   /** R6a: optional probe run retention loop tuning. */
   probeRunRetentionWorkerOptions?: ProbeMonitorWorkerOptions;
   /**
+   * Batch-5 §5.2 OEM white-label: optional public brand snapshot
+   * materialization loop tuning (control-plane workload only; the loop runs
+   * with the default 60s cadence otherwise).
+   */
+  publicBrandSnapshot?: { readonly intervalMs?: number };
+  /**
    * R4: the privileged rotation seam for the OAuth refresh worker. Rotation
    * writes the new credential version chain through the audited supply path,
    * which the restricted worker role cannot perform; a deployment wires this
@@ -674,13 +697,30 @@ function sendJsonError(
   res.end(JSON.stringify({ error: { code, message, requestId } }));
 }
 
-function serveMountedStatic(
+/**
+ * Serves the mounted web console (customer /console, platform /admin).
+ *
+ * Batch-5 §5.2 OEM white-label: when a brand reader is wired, every HTML
+ * document is served through `injectBrandAppConfig` — the materialized public
+ * brand snapshot is embedded as `window.__APP_CONFIG__` (nonce'd script, HTML
+ * breakers escaped) and the CSP is derived from the snapshot (logo origin →
+ * img-src, iframe page origins → frame-src, configurable frame-ancestors).
+ * A reader failure serves the empty snapshot fail-open: the console must
+ * never hard-fail on a brand hiccup. Non-HTML assets keep the fixed baseline
+ * CSP and stream unchanged; an empty snapshot keeps the pre-brand response
+ * byte-identical.
+ *
+ * Exported for the brand injection tests (the createManagedOauthTokenRefresh-
+ * Rotator test-seam precedent).
+ */
+export async function serveMountedStatic(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
   mount: typeof CUSTOMER_MOUNT | typeof PLATFORM_MOUNT,
   webDistPath: string | undefined,
-): void {
+  brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
+): Promise<void> {
   if (!webDistPath || (req.method !== 'GET' && req.method !== 'HEAD')) {
     sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
     return;
@@ -752,6 +792,31 @@ function serveMountedStatic(
   }
 
   const extension = extname(target);
+  if (extension === '.html' && brandReader !== undefined) {
+    // OEM white-label HTML path: read → inject → serve with the derived CSP.
+    let snapshot: PublicBrandSnapshot;
+    try {
+      snapshot = await brandReader.read();
+    } catch {
+      snapshot = EMPTY_BRAND_SNAPSHOT;
+    }
+    const source = await readFile(target, 'utf8');
+    const injected = injectBrandAppConfig(source, snapshot);
+    const body = Buffer.from(injected.html, 'utf8');
+    res.writeHead(200, {
+      'content-type': MIME_TYPES['.html'] ?? 'text/html; charset=utf-8',
+      'content-length': body.length,
+      'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': injected.contentSecurityPolicy,
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(body);
+    return;
+  }
   res.writeHead(200, {
     'content-type': MIME_TYPES[extension] ?? 'application/octet-stream',
     'content-length': statSync(target).size,
@@ -789,6 +854,7 @@ function createCustomerHandler(
   marketingAffiliateHandler: MarketingAffiliateHttpHandler,
   paymentHandler: SaasPaymentHttpHandler | undefined,
   webDistPath: string | undefined,
+  brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
 ): RequestListener {
   return (req, res) => {
     void (async () => {
@@ -814,7 +880,7 @@ function createCustomerHandler(
         return;
       }
       if (isMountedPath(pathname, CUSTOMER_MOUNT)) {
-        serveMountedStatic(req, res, pathname, CUSTOMER_MOUNT, webDistPath);
+        await serveMountedStatic(req, res, pathname, CUSTOMER_MOUNT, webDistPath, brandReader);
         return;
       }
       sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
@@ -876,6 +942,7 @@ function createPlatformHandler(
   observabilityHandler: ObservabilityHttpHandler,
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
+  brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
 ): RequestListener {
   return (req, res) => {
     void (async () => {
@@ -911,7 +978,7 @@ function createPlatformHandler(
         return;
       }
       if (isMountedPath(pathname, PLATFORM_MOUNT)) {
-        serveMountedStatic(req, res, pathname, PLATFORM_MOUNT, webDistPath);
+        await serveMountedStatic(req, res, pathname, PLATFORM_MOUNT, webDistPath, brandReader);
         return;
       }
       sendJsonError(res, 404, 'NOT_FOUND', 'Not found');
@@ -919,7 +986,19 @@ function createPlatformHandler(
   };
 }
 
-function createGatewayHandler(gatewayHandler?: SaasGatewayHttpHandler): RequestListener {
+/**
+ * The gateway listener handler. Exported for the public brand surface tests
+ * (the createManagedOauthTokenRefreshRotator test-seam precedent).
+ *
+ * Batch-5 §5.2: `publicBrandHandler` mounts the unauthenticated
+ * `GET /settings/public` (+ `/settings/public/pages/:slug`) surface on this
+ * listener — the /metrics precedent: public, non-secret data (the
+ * gateway-read-only brand snapshot table), no session.
+ */
+export function createGatewayHandler(
+  gatewayHandler?: SaasGatewayHttpHandler,
+  publicBrandHandler?: PublicBrandSettingsHttpHandler,
+): RequestListener {
   return (req, res) => {
     void (async () => {
       const pathname = requestPath(req);
@@ -927,6 +1006,10 @@ function createGatewayHandler(gatewayHandler?: SaasGatewayHttpHandler): RequestL
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
         return;
       }
+      // Batch-5 §5.2 OEM white-label: public brand snapshot + custom page
+      // content, unauthenticated by design (no secrets in the snapshot by
+      // construction; the handler owns its own 404/405 semantics).
+      if (publicBrandHandler && (await publicBrandHandler(req, res))) return;
       // Phase 3 observability: read-only Prometheus exposition on the gateway
       // listener. Unauthenticated by design (counters only, no secrets);
       // deployments should restrict scraper network access.
@@ -1544,6 +1627,7 @@ async function startCredentialValidationWorkerRuntime(
       egressProxyProbeWorker,
       probeMonitorWorker: probeMonitorWorker ?? null,
       probeRunRetentionWorker: null,
+      publicBrandSnapshotWorker: null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: null,
       unknownOutcomeScanner: null,
@@ -1697,6 +1781,7 @@ export async function startManagedSaasServer(
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
   let probeRunRetentionWorker: ProbeMonitorWorkerHandle | undefined;
+  let publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let customerWebhookWorker: CustomerWebhookDeliveryWorkerHandle | undefined;
@@ -1716,6 +1801,7 @@ export async function startManagedSaasServer(
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
         ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
+        ...(publicBrandSnapshotWorker ? [publicBrandSnapshotWorker.close()] : []),
       ]);
       await closeAllResources(
         listeners.values(),
@@ -1936,6 +2022,24 @@ export async function startManagedSaasServer(
       }
       gateway = createManagedSaasGatewayProductionComposition(database, options.gateway);
     }
+
+    // Batch-5 §5.2 OEM white-label: the public brand snapshot data plane.
+    // Every workload that serves the console HTML or the public endpoint
+    // reads through this TTL cache; the control plane additionally
+    // materializes the snapshot (the worker started below). A read failure
+    // serves the last good snapshot (or the empty default) fail-open — the
+    // brand surface is cosmetic and must never take the console down.
+    const publicBrandSnapshotStore = new PublicBrandSnapshotStore({ database });
+    const brandSnapshotReader = createCachedBrandSnapshotReader(publicBrandSnapshotStore, {
+      onError: (error) => console.error('model-router public brand snapshot read failed; serving the cached brand', error),
+    });
+    const refreshPublicBrandSnapshotAfterWrite = (key: string): void => {
+      if (!key.startsWith(BRAND_SETTINGS_KEY_PREFIX)) return;
+      void publicBrandSnapshotStore
+        .materialize()
+        .then(() => brandSnapshotReader.invalidate())
+        .catch((error) => console.error('model-router public brand snapshot eager refresh failed', error));
+    };
 
     const handlers: Partial<Record<ListenerName, RequestListener>> = {};
     if (controlPlaneEnabled) {
@@ -2397,6 +2501,9 @@ export async function startManagedSaasServer(
         authService: platformAuthService,
         service: platformSettingsService,
         publicOrigin: deploymentListener(deployment, 'platform').origin,
+        // Batch-5 §5.2: a brand-key write re-materializes the public snapshot
+        // immediately instead of waiting for the periodic cycle.
+        afterWrite: refreshPublicBrandSnapshotAfterWrite,
       });
       // F5 console surfaces (task #38): the R1 billing-groups admin CRUD,
       // the R3 egress-proxy admin CRUD (credentials sealed server-side
@@ -2730,6 +2837,17 @@ export async function startManagedSaasServer(
         onError: () => console.error('model-router managed probe run retention cycle failed'),
       });
 
+      // Batch-5 §5.2 OEM white-label: the control plane owns the snapshot
+      // materialization loop (periodic cycles; the first is delayed by the
+      // interval so startup stays read-only). A failed cycle keeps the
+      // previously materialized snapshot serving and reschedules.
+      publicBrandSnapshotWorker = startPublicBrandSnapshotWorker(publicBrandSnapshotStore, {
+        ...(options.publicBrandSnapshot?.intervalMs === undefined
+          ? {}
+          : { intervalMs: options.publicBrandSnapshot.intervalMs }),
+        onError: (error) => console.error('model-router public brand snapshot materialization cycle failed', error),
+      });
+
       handlers.customer = createCustomerHandler(
         customerKeyHandler,
         customerIdentityHandler,
@@ -2744,6 +2862,7 @@ export async function startManagedSaasServer(
         customerMarketingAffiliateHandler,
         paymentHandler,
         webDistPath,
+        brandSnapshotReader,
       );
       handlers.platform = createPlatformHandler(
         platformAuthHandler,
@@ -2767,10 +2886,19 @@ export async function startManagedSaasServer(
         observabilityHandler,
         platformReadHandler,
         webDistPath,
+        brandSnapshotReader,
       );
     }
 
-    if (gatewayEnabled) handlers.gateway = createGatewayHandler(gateway?.handler);
+    if (gatewayEnabled) {
+      handlers.gateway = createGatewayHandler(
+        gateway?.handler,
+        createPublicBrandSettingsHttpHandler({
+          read: brandSnapshotReader.read,
+          onError: (error) => console.error('model-router public brand snapshot read failed', error),
+        }),
+      );
+    }
 
     for (const name of listenerNames) {
       const handler = handlers[name];
@@ -2801,6 +2929,7 @@ export async function startManagedSaasServer(
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,
       probeRunRetentionWorker: probeRunRetentionWorker ?? null,
+      publicBrandSnapshotWorker: publicBrandSnapshotWorker ?? null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: announcementFanoutWorker ?? null,
       unknownOutcomeScanner: unknownOutcomeScanner ?? null,

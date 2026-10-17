@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import {
   createServer,
   type IncomingMessage,
@@ -24,6 +24,10 @@ import { AdminMaintenance } from './maintenance.js';
 import { adminOpenApiDocument, parseAdminRequest } from './openapi.js';
 import { type PlaygroundExecutor, PlaygroundRuns } from './playground.js';
 import { validatePricing } from './pricing.js';
+import {
+  injectBrandAppConfig,
+  type PublicBrandSnapshot,
+} from '../saas/platform/brand/snapshot.js';
 import { AdminRuntime, type AdminRuntimeBridge } from './runtime.js';
 import { telemetryAdapters } from './telemetry.js';
 import {
@@ -184,6 +188,13 @@ export interface AdminServerOptions {
   updateOperationGuard?: UpdateOperationGuard;
   /** Optional customer-facing SaaS handler mounted under /console/api/v1. */
   saasIdentityHandler?: AdminMountedRequestHandler;
+  /**
+   * Batch-5 §5.2 OEM white-label: optional public brand snapshot provider
+   * (the local brand.json override wired by the BYOK bootstrap). When set,
+   * every served HTML document carries `window.__APP_CONFIG__` and the
+   * snapshot-derived CSP; an empty snapshot keeps responses byte-identical.
+   */
+  publicBrand?: () => PublicBrandSnapshot;
   adapters?: AdminAdapters;
 }
 
@@ -448,13 +459,22 @@ function tokenCookie(req: IncomingMessage): string | undefined {
   return /(?:^|;\s*)mr_admin_session=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
 }
 
-function serveMountedStatic(
+/**
+ * Batch-5 §5.2 OEM white-label: serves the BYOK admin/console static site.
+ * When a `brand` provider is wired and the target is an HTML document, the
+ * public brand snapshot is injected as `window.__APP_CONFIG__` (nonce'd
+ * script, HTML breakers escaped) and the CSP is derived from the snapshot —
+ * the same injectBrandAppConfig path the managed SaaS deployment uses. A
+ * missing/empty brand keeps the response byte-identical.
+ */
+async function serveMountedStatic(
   req: IncomingMessage,
   res: ServerResponse,
   path: string,
   mountPath: '/admin' | '/console',
   distPath?: string,
-): void {
+  brand?: () => PublicBrandSnapshot,
+): Promise<void> {
   if (!distPath || (req.method !== 'GET' && req.method !== 'HEAD')) {
     res.writeHead(404);
     res.end();
@@ -526,6 +546,23 @@ function serveMountedStatic(
     res.end();
     return;
   }
+  if (extname(target) === '.html' && brand !== undefined) {
+    const injected = injectBrandAppConfig(readFileSync(target, 'utf8'), brand());
+    const body = Buffer.from(injected.html, 'utf8');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': body.length,
+      'cache-control': 'no-cache',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': injected.contentSecurityPolicy,
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(body);
+    return;
+  }
   res.writeHead(200, {
     'content-type': mime[extname(target)] ?? 'application/octet-stream',
     'content-length': statSync(target).size,
@@ -543,8 +580,14 @@ function serveMountedStatic(
     .pipe(res);
 }
 
-function serveStatic(req: IncomingMessage, res: ServerResponse, path: string, distPath?: string): void {
-  serveMountedStatic(req, res, path, '/admin', distPath);
+async function serveStatic(
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  distPath?: string,
+  brand?: () => PublicBrandSnapshot,
+): Promise<void> {
+  await serveMountedStatic(req, res, path, '/admin', distPath, brand);
 }
 
 function rewriteSaasCookie(value: string): string {
@@ -750,19 +793,19 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
     const requestId = `admin_${randomUUID()}`;
     try {
       const url = new URL(req.url ?? '/', 'http://admin.local');
-      if (url.pathname === '/') return serveStatic(req, res, '/admin/', options.webDistPath);
+      if (url.pathname === '/') return serveStatic(req, res, '/admin/', options.webDistPath, options.publicBrand);
       if (options.saasIdentityHandler && isConsoleApiPath(url.pathname)) {
         const handled = await handleSaasIdentity(options.saasIdentityHandler, req, res);
         if (!handled && !res.headersSent) fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
         return;
       }
       if (options.saasIdentityHandler && isConsolePath(url.pathname))
-        return serveMountedStatic(req, res, url.pathname, '/console', options.webDistPath);
+        return serveMountedStatic(req, res, url.pathname, '/console', options.webDistPath, options.publicBrand);
       if (
         url.pathname === '/admin' ||
         (url.pathname.startsWith('/admin/') && url.pathname !== '/admin/api' && !url.pathname.startsWith('/admin/api/'))
       )
-        return serveStatic(req, res, url.pathname, options.webDistPath);
+        return serveStatic(req, res, url.pathname, options.webDistPath, options.publicBrand);
       if (!url.pathname.startsWith(`${PREFIX}/`) && url.pathname !== PREFIX)
         return fail(res, 404, requestId, 'NOT_FOUND', 'Not found');
       const retryAfter = adminRequestLimiter.take(req.socket.remoteAddress ?? 'unknown', Date.now());

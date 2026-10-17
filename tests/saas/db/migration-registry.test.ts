@@ -82,6 +82,7 @@ import { CN_PROVIDER_ACCOUNT_SCHEDULING_SAAS_MIGRATION } from '../../../src/saas
 import { COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/121_composite_model_routes.js';
 import { MULTIMODAL_BILLING_SAAS_MIGRATION } from '../../../src/saas/db/migrations/122_multimodal_billing_dimensions.js';
 import { IMAGE_TASKS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/123_image_tasks.js';
+import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/126_public_brand_settings.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -185,6 +186,9 @@ test('SaaS migration registry keeps a stable append order with only documented g
       122,
       // Batch-4 §4.2 (task #16): 123 async image tasks.
       123,
+      // Batch-5 §5.2 (task #20): 126 public brand settings — the
+      // gateway-readable OEM white-label snapshot table.
+      126,
     ],
   );
 });
@@ -383,10 +387,13 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       122,
       // Batch-4 §4.2 (task #16): 123 async image tasks.
       123,
+      // Batch-5 §5.2 (task #20): 126 public brand settings — the
+      // gateway-readable OEM white-label snapshot table.
+      126,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 104);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 104);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 105);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 105);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -528,6 +535,7 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     COMPOSITE_MODEL_ROUTES_SAAS_MIGRATION,
     MULTIMODAL_BILLING_SAAS_MIGRATION,
     IMAGE_TASKS_SAAS_MIGRATION,
+    PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');

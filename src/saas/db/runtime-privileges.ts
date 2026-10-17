@@ -569,6 +569,25 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'notes',
     'updated_at',
   ]),
+  // 126 (batch-5 §5.2) OEM white-label: the control plane materializes the
+  // public brand snapshot (the non-secret `saas.brand.*` settings subset)
+  // into the single-row table the gateway and console-serving workloads read
+  // (SSR `__APP_CONFIG__` injection + `GET /settings/public`). No DELETE —
+  // the snapshot row is never removed, only re-materialized; no grant on the
+  // table for the credential-validation-worker.
+  ...columnGrants('saas_public_brand_settings', 'SELECT', [
+    'singleton',
+    'snapshot',
+    'version',
+    'materialized_at',
+  ]),
+  ...columnGrants('saas_public_brand_settings', 'INSERT', [
+    'singleton',
+    'snapshot',
+    'version',
+    'materialized_at',
+  ]),
+  ...columnGrants('saas_public_brand_settings', 'UPDATE', ['snapshot', 'version', 'materialized_at']),
   // R1 (113): no control-plane grant on saas_billing_group_rate_counters —
   // the gateway alone upserts the group RPM admission counters (the gateway
   // column manifest below carries the DML).
@@ -3823,6 +3842,10 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // (123) batch-4 §4.2 async image tasks: the gateway owns the task
   // lifecycle (create/finish/read plus the expiry purge delete below).
   'saas_image_tasks',
+  // 126 (batch-5 §5.2) OEM white-label: the gateway serves the public brand
+  // snapshot (`GET /settings/public` + custom page content) read-only; the
+  // materialization writes run on the control plane only.
+  'saas_public_brand_settings',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [

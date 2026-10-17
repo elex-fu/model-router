@@ -15,6 +15,7 @@ import { SQLiteQuotaLedger } from '../quota/ledger.js';
 import { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
 import type { DeploymentEnvironment } from '../saas/deployment.js';
 import { parseDeploymentConfig } from '../saas/deployment.js';
+import { readLocalBrandSnapshot } from '../saas/platform/brand/local.js';
 import { importLegacyRequestLogs, UnsafeLegacyImportError } from '../storage/legacy-import.js';
 import { ResponseOwnershipStore } from '../storage/response-ownership.js';
 import { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
@@ -448,6 +449,11 @@ async function startLocalServer(
           bootstrapExpiresAt: Date.now() + 15 * 60_000,
           publicOrigin: () => effectiveRaw.admin.publicAdminBaseUrl,
           webDistPath: path.resolve(__dirname, '../../web/dist'),
+          // Batch-5 §5.2 OEM white-label: the optional local brand override
+          // (brand.json next to config.json). A missing file serves the
+          // default brand; an invalid file fails closed to the default with
+          // one console error per read.
+          publicBrand: () => readLocalBrandSnapshot(path.resolve(configDir, 'brand.json')),
         })
       : null;
     startupAdmin = admin;

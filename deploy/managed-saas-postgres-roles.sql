@@ -327,7 +327,7 @@ BEGIN
           OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
           OR (
             pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-            AND relation.relname <> 'saas_billing_spending_freezes'
+            AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks')
           )
         )
       )
@@ -350,7 +350,7 @@ BEGIN
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
         OR (
           pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-          AND relation.relname <> 'saas_billing_spending_freezes'
+          AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks')
         )
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'TRUNCATE')
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'REFERENCES')
@@ -775,6 +775,13 @@ BEGIN
       ('saas_composite_model_routes', 'SELECT', 'id group_id public_model match_type target_platform upstream_model endpoint priority enabled notes created_at updated_at'),
       ('saas_composite_model_routes', 'INSERT', 'group_id public_model match_type target_platform upstream_model endpoint priority enabled notes created_at updated_at'),
       ('saas_composite_model_routes', 'UPDATE', 'public_model match_type target_platform upstream_model endpoint priority enabled notes updated_at'),
+      -- 126 (batch-5 §5.2) OEM white-label: the control plane materializes
+      -- the public brand snapshot (the non-secret saas.brand.* settings
+      -- subset) into the single-row table the gateway and the
+      -- console-serving workloads read. No DELETE: the row is never removed.
+      ('saas_public_brand_settings', 'SELECT', 'singleton snapshot version materialized_at'),
+      ('saas_public_brand_settings', 'INSERT', 'singleton snapshot version materialized_at'),
+      ('saas_public_brand_settings', 'UPDATE', 'snapshot version materialized_at'),
       -- R3 (107) egress proxies: the control plane manages the proxy registry
       -- and runs the probe/sweep worker; the gateway and the OAuth refresh
       -- worker read through the dynamic read-table grant below.
@@ -1146,7 +1153,11 @@ BEGIN
       ('saas_composite_model_routes'),
       -- (123) batch-4 §4.2 async image tasks: the gateway owns the task
       -- lifecycle (create/finish/read plus the expiry purge).
-      ('saas_image_tasks')
+      ('saas_image_tasks'),
+      -- 126 (batch-5 §5.2) OEM white-label: the gateway serves the public
+      -- brand snapshot (GET /settings/public + custom page content)
+      -- read-only; materialization writes run on the control plane only.
+      ('saas_public_brand_settings')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
