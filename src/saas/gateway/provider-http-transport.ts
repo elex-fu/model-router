@@ -21,9 +21,22 @@ import {
   resolveProviderHttpAddresses,
   selectPinnedProviderAddress,
 } from './provider-http-address.js';
+import {
+  isProviderTlsFingerprintEgress,
+  type ProviderTlsFingerprintEgress,
+} from './provider-http-tls-fingerprint-connector.js';
 import { observeProviderJsonUsage, type ProviderMediaUsageExtractor } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
-import { isProviderTlsFingerprintEgress, type ProviderTlsFingerprintEgress } from './provider-http-tls-fingerprint-connector.js';
+import { observeSearchProviderResponse, searchDescriptorForDispatch } from './websearch/response-observer.js';
+
+/** §4.3: parse the verified payload bytes for the search descriptor round-trip. */
+function parsePayloadJson(payloadBytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes));
+  } catch {
+    return null;
+  }
+}
 
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -211,11 +224,11 @@ export interface ProviderHttpTransportOptions {
   /**
    * §4.2 (task #16): per-request media usage plan for operations the token
    * observers do not know (images.generations; the #17 video/audio
-   * operations reuse the same seam). Invoked on the 2xx JSON response
-   * branch with the signed payload bytes; a null plan or a throw keeps the
-   * observation at the observer's documented unknown outcome, and the
-   * plan's serviceTier terms ride the transport response into the dispatch
-   * settlement input.
+   * operations reuse the same seam). The factory is invoked with the signed
+   * payload bytes on the 2xx JSON response branch; a null plan (or a throw)
+   * keeps the observation at the observer's documented unknown outcome, and
+   * the plan's serviceTier terms are carried on the transport response into
+   * the dispatch settlement input.
    */
   readonly mediaUsagePlan?: ProviderMediaUsagePlanFactory | null;
 }
@@ -483,7 +496,11 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
   if (options.resolveFixedRequestHeaders !== undefined && typeof options.resolveFixedRequestHeaders !== 'function') {
     fail('INVALID_INPUT', 'a fixed request header resolver must be callable');
   }
-  if (options.mediaUsagePlan !== undefined && options.mediaUsagePlan !== null && typeof options.mediaUsagePlan !== 'function') {
+  if (
+    options.mediaUsagePlan !== undefined &&
+    options.mediaUsagePlan !== null &&
+    typeof options.mediaUsagePlan !== 'function'
+  ) {
     fail('INVALID_INPUT', 'a media usage plan factory must be callable');
   }
   const timeoutMs = boundedPositiveInteger(options.timeoutMs, 'timeoutMs', MAX_TIMEOUT_MS);
@@ -1109,6 +1126,42 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     }
     const responseBody = response.body ? managedResponseBody(response.body, context) : null;
     const safeResponseHeaders = responseHeaders(response);
+
+    /*
+     * §4.3 (task #17): the search emulation operations adapt the upstream
+     * Responses envelope into the client search body before any generic
+     * observer sees it. The descriptor is recovered from the signed,
+     * digest-verified payload bytes themselves (the server-owned
+     * construction round-trips exactly) and requires the client-side search
+     * operation fact; a payload that does not round-trip fails the dispatch
+     * closed rather than leaking an untransformed envelope.
+     */
+    const searchClientOperation = context.request.clientOperation ?? context.request.evidence.clientOperation;
+    if (
+      responseBody &&
+      response.status >= 200 &&
+      response.status < 300 &&
+      (searchClientOperation === 'web_search' || searchClientOperation === 'x_search')
+    ) {
+      const descriptor = searchDescriptorForDispatch(parsePayloadJson(body), searchClientOperation);
+      if (descriptor === null) {
+        await cancelResponseBody(response);
+        fail('INVALID_INPUT', 'search dispatch payload is not the search emulation body');
+      }
+      const observed = observeSearchProviderResponse(responseBody, descriptor);
+      const result: PreparedEvidenceTransportResponse = {
+        responseStarted: false,
+        resultHttpStatus: response.status,
+        headers: safeResponseHeaders,
+        body: observed.body,
+        get providerUsage() {
+          return observed.getUsage();
+        },
+      };
+      context.transferCleanup();
+      return result;
+    }
+
     if (responseBody && isEventStreamContentType(response.headers.get('content-type'))) {
       const observed = observeProviderSseUsage(responseBody, {
         providerProtocol: context.request.evidence.providerProtocol,
