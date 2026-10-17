@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
 import { OBS_CHANNEL_METRICS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/102_obs_channel_metrics.js';
 import { OBS_ALERTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/103_obs_alerts.js';
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
 
 test('migration 102 creates the channel metrics tables with the pinned shape', () => {
   assert.equal(OBS_CHANNEL_METRICS_SAAS_MIGRATION.version, 102);
@@ -69,37 +70,24 @@ test('migration 103 creates alert rules and events with the pinned shape', () =>
   assert.match(sql, /CONSTRAINT saas_obs_alert_events_resolved_after_trigger/);
 });
 
-test('migrations 102 and 103 are registered in order ahead of the R1/R2/R4/R5/R5b forwards', () => {
+test('migrations 102 and 103 are registered in order ahead of the later forwards', () => {
   const versions = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(versions.at(-22), 102);
-  assert.equal(versions.at(-21), 103);
-  assert.equal(SAAS_MIGRATIONS.at(-22), OBS_CHANNEL_METRICS_SAAS_MIGRATION);
-  assert.equal(SAAS_MIGRATIONS.at(-21), OBS_ALERTS_SAAS_MIGRATION);
-  // 104 (R2 embeddings operation), 105 (R1 billing groups), 106 (R4
-  // registration admission), 107 (R3 egress proxies), 108 (R5b OpenCode Go
-  // scheduling), 109 (R6a probe monitors), 110 (F1 platform settings) and
-  // 111 (F4 gemini scheduling) follow; 112-114 (R1 billing-group limit
-  // enforcement), 115 (scheduling-threshold pause), 116 (TLS fingerprints)
-  // the batch-3 117-120 (bedrock/vertex/grok/cn) scheduling tails and the
-  // batch-4 121 composite model routing registry are the tail; 100 (R5
-  // claude scheduling) slots in behind 099.
-  assert.equal(versions.at(-20), 104);
-  assert.equal(versions.at(-19), 105);
-  assert.equal(versions.at(-18), 106);
-  assert.equal(versions.at(-17), 107);
-  assert.equal(versions.at(-16), 108);
-  assert.equal(versions.at(-15), 109);
-  assert.equal(versions.at(-14), 110);
-  assert.equal(versions.at(-13), 111);
-  assert.equal(versions.at(-12), 112);
-  assert.equal(versions.at(-11), 113);
-  assert.equal(versions.at(-10), 114);
-  assert.equal(versions.at(-9), 115);
-  assert.equal(versions.at(-8), 116);
-  assert.equal(versions.at(-7), 117);
-  assert.equal(versions.at(-6), 118);
-  assert.equal(versions.at(-5), 119);
-  assert.equal(versions.at(-4), 120);
-  assert.equal(versions.at(-3), 121);
-  assert.equal(versions.at(-1), 123);
+  const index = versions.indexOf(102);
+  assert.ok(index > 0, '102 is registered');
+  assert.equal(versions[index + 1], 103);
+  assert.equal(SAAS_MIGRATIONS[index], OBS_CHANNEL_METRICS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[index + 1], OBS_ALERTS_SAAS_MIGRATION);
+  // The documented forward chain behind 103: 104 embeddings, 105 billing
+  // groups, 106 registration admission, 107 egress proxies, 108 opencode-go
+  // scheduling, 109 probe monitors, 110 platform settings, 111 gemini
+  // scheduling, 112-114 billing-group limit enforcement, 115 threshold
+  // pause, 116 TLS fingerprints, 117-120 the batch-3 scheduling tails, 121
+  // composite routing, 122 multimodal billing, 123 async image tasks.
+  assert.deepEqual(versions.slice(index + 2, index + 22), [
+    104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123,
+  ]);
+  // The batch-5 tail: 126 public brand settings, then this task's 127
+  // alert silences/report state.
+  assert.deepEqual(versions.slice(-2), [126, 127]);
+  assert.equal(SAAS_MIGRATIONS.at(-1), OBS_ALERT_SILENCES_SAAS_MIGRATION);
 });

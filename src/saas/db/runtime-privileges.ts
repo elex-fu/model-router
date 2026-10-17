@@ -367,6 +367,35 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
   ]),
   ...columnGrants('saas_obs_alert_events', 'SELECT', ['id', 'rule_id', 'triggered_at', 'resolved_at', 'payload']),
   ...columnGrants('saas_obs_alert_events', 'INSERT', ['id', 'rule_id', 'triggered_at', 'payload']),
+  // Batch-5 §5.6 (migration 127): the alert evaluator auto-resolves a
+  // rule's open events when a cycle does not violate the window; the
+  // silence service manages operator silences; the report scheduler claims
+  // runs by advancing the per-type last_run row under a SKIP LOCKED lease.
+  ...columnGrants('saas_obs_alert_events', 'UPDATE', ['resolved_at']),
+  ...columnGrants('saas_obs_alert_silences', 'SELECT', [
+    'id',
+    'rule_id',
+    'platform',
+    'group_id',
+    'region',
+    'until',
+    'reason',
+    'created_by',
+    'created_at',
+  ]),
+  ...columnGrants('saas_obs_alert_silences', 'INSERT', [
+    'id',
+    'rule_id',
+    'platform',
+    'group_id',
+    'region',
+    'until',
+    'reason',
+    'created_by',
+  ]),
+  ...columnGrants('saas_obs_report_state', 'SELECT', ['report_type', 'last_run_at', 'updated_at']),
+  ...columnGrants('saas_obs_report_state', 'INSERT', ['report_type', 'last_run_at']),
+  ...columnGrants('saas_obs_report_state', 'UPDATE', ['last_run_at', 'updated_at']),
   ...columnGrants('saas_platform_mfa_enrollment_tokens', 'SELECT', [
     'id',
     'user_id',
@@ -3383,6 +3412,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   ['saas_obs_channel_metrics_1m', 'DELETE'],
   ['saas_obs_channel_metrics_hourly', 'DELETE'],
   ['saas_obs_alert_rules', 'DELETE'],
+  // Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+  // rides the same DELETE).
+  ['saas_obs_alert_silences', 'DELETE'],
   // R1 (105): billing group account-pool membership replacement.
   ['saas_billing_group_account_pools', 'DELETE'],
   // R4 (106): verification-code expiry pruning and delivery-failure

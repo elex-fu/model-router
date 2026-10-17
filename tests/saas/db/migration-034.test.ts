@@ -73,6 +73,10 @@ test('migration 034 registers after the immutable 033 history', () => {
       122,
       // Batch-4 §4.2 async image tasks (task #16).
       123,
+      // Batch-5 §5.2 public brand settings (task #20).
+      126,
+      // Batch-5 §5.6 alert silences/report state (task #23).
+      127,
     ],
   );
 });

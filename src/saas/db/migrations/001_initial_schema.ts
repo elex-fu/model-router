@@ -103,6 +103,8 @@ import { MULTIMODAL_BILLING_SAAS_MIGRATION } from './122_multimodal_billing_dime
 import { IMAGE_TASKS_SAAS_MIGRATION } from './123_image_tasks.js';
 import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_settings.js';
 
+import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
+
 export interface SaasMigration {
   version: number;
   name: string;
@@ -705,4 +707,11 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // the console-serving workloads read it (SSR `window.__APP_CONFIG__`
   // injection, `GET /settings/public`) through read-only grants.
   PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION,
+  // 127: batch-5 §5.6 alert/report gaps (task #23) — the operator silence
+  // table the alert evaluator consults each cycle (a silenced rule neither
+  // triggers nor auto-resolves; rule/platform scope, group/region reserved)
+  // plus the per-report-type last_run state row the scheduled email reports
+  // claim under a SKIP LOCKED lease BEFORE generating content, so a broken
+  // SMTP config can never retry every minute.
+  OBS_ALERT_SILENCES_SAAS_MIGRATION,
 ];

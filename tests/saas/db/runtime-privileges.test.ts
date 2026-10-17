@@ -519,6 +519,9 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     ['saas_obs_channel_metrics_1m', 'DELETE'],
     ['saas_obs_channel_metrics_hourly', 'DELETE'],
     ['saas_obs_alert_rules', 'DELETE'],
+    // Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+    // rides the same DELETE).
+    ['saas_obs_alert_silences', 'DELETE'],
     // R1 (105): billing group account-pool membership replacement.
     ['saas_billing_group_account_pools', 'DELETE'],
     // R4 (106): verification-code expiry pruning and delivery-failure

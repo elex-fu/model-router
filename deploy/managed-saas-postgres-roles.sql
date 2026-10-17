@@ -752,6 +752,15 @@ BEGIN
       ('saas_obs_alert_rules', 'UPDATE', 'name enabled metric operator threshold window_minutes sustained_minutes cooldown_minutes notify_email webhook_url last_triggered_at'),
       ('saas_obs_alert_events', 'SELECT', 'id rule_id triggered_at resolved_at payload'),
       ('saas_obs_alert_events', 'INSERT', 'id rule_id triggered_at payload'),
+      -- Batch-5 §5.6 (migration 127): alert auto-resolve (the evaluator
+      -- closes a rule's open events when a cycle does not violate), the
+      -- operator silence registry, and the report scheduler's last_run rows.
+      ('saas_obs_alert_events', 'UPDATE', 'resolved_at'),
+      ('saas_obs_alert_silences', 'SELECT', 'id rule_id platform group_id region until reason created_by created_at'),
+      ('saas_obs_alert_silences', 'INSERT', 'id rule_id platform group_id region until reason created_by'),
+      ('saas_obs_report_state', 'SELECT', 'report_type last_run_at updated_at'),
+      ('saas_obs_report_state', 'INSERT', 'report_type last_run_at'),
+      ('saas_obs_report_state', 'UPDATE', 'last_run_at updated_at'),
       ('saas_platform_mfa_enrollment_tokens', 'SELECT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'INSERT', 'id user_id token_hash created_at expires_at consumed_at'),
       ('saas_platform_mfa_enrollment_tokens', 'UPDATE', 'consumed_at'),
@@ -1046,6 +1055,9 @@ BEGIN
       ('saas_obs_channel_metrics_1m', 'DELETE'),
       ('saas_obs_channel_metrics_hourly', 'DELETE'),
       ('saas_obs_alert_rules', 'DELETE'),
+      -- Batch-5 §5.6 (127): operator silence lifecycle (expired-row pruning
+      -- rides the same DELETE).
+      ('saas_obs_alert_silences', 'DELETE'),
       ('saas_billing_group_account_pools', 'DELETE'),
       ('saas_email_verification_codes', 'DELETE'),
       -- R3 (107): proxy registry lifecycle; in-use proxies are protected by

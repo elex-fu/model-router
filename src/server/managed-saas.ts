@@ -102,14 +102,20 @@ import {
 import {
   type AlertEvaluatorWorkerHandle,
   type ChannelStatusWorkerHandle,
+  createAlertSilencesHttpHandler,
   createObservabilityHttpHandler,
+  createPostgresAlertSilencesAuditWriter,
   getChannelStatusPage,
   ObservabilityAlertService,
+  ObservabilityAlertSilenceService,
+  type AlertSilencesHttpHandler,
   type ObservabilityHttpHandler,
   refreshSaasRuntimeGauges,
   renderSaasMetrics,
+  type ReportSchedulerWorkerHandle,
   startAlertEvaluatorWorker,
   startChannelStatusWorker,
+  startReportSchedulerWorker,
 } from '../saas/observability/index.js';
 import type { PaymentProviderAdapter, PaymentProviderRefundAdapter } from '../saas/payments/adapter.js';
 import { SaasCustomerPaymentOrderQueryService } from '../saas/payments/customer-order-query.js';
@@ -940,6 +946,7 @@ function createPlatformHandler(
   marketingOpsPromoCodesHandler: MarketingPromoHttpHandler,
   marketingOpsAffiliateHandler: MarketingAffiliateHttpHandler,
   observabilityHandler: ObservabilityHttpHandler,
+  alertSilencesHandler: AlertSilencesHttpHandler | undefined,
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
   brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
@@ -952,6 +959,7 @@ function createPlatformHandler(
         return;
       }
       if (await observabilityHandler(req, res)) return;
+      if (alertSilencesHandler && (await alertSilencesHandler(req, res))) return;
       if (isApiPath(pathname, PLATFORM_API_PREFIX)) {
         if (pathname === PLATFORM_ADMIN_AUTH_PREFIX || pathname.startsWith(`${PLATFORM_ADMIN_AUTH_PREFIX}/`)) {
           if (await authHandler(req, res)) return;
@@ -1780,6 +1788,7 @@ export async function startManagedSaasServer(
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
+  let reportSchedulerWorker: ReportSchedulerWorkerHandle | undefined;
   let probeRunRetentionWorker: ProbeMonitorWorkerHandle | undefined;
   let publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
@@ -1800,6 +1809,7 @@ export async function startManagedSaasServer(
       await Promise.allSettled([
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
+        ...(reportSchedulerWorker ? [reportSchedulerWorker.close()] : []),
         ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
         ...(publicBrandSnapshotWorker ? [publicBrandSnapshotWorker.close()] : []),
       ]);
@@ -2814,6 +2824,17 @@ export async function startManagedSaasServer(
       // control-plane listener plus the two single-leader workers behind it.
       const observabilityDatabase = database;
       const observabilityAlertService = new ObservabilityAlertService(observabilityDatabase);
+      const observabilityAlertSilenceService = new ObservabilityAlertSilenceService(observabilityDatabase);
+      // Batch-5 §5.6: the operator silence CRUD surface (the
+      // composite-routes contract shape) mounted next to the read-only
+      // observability handler.
+      const alertSilencesHandler = createAlertSilencesHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: observabilityAlertSilenceService,
+        audit: createPostgresAlertSilencesAuditWriter(observabilityDatabase),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
       const observabilityHandler = createObservabilityHttpHandler({
         access: platformAccessService,
         channelStatus: (query) => getChannelStatusPage(observabilityDatabase, query),
@@ -2827,6 +2848,16 @@ export async function startManagedSaasServer(
       });
       alertEvaluatorWorker = startAlertEvaluatorWorker(database, {
         onError: (error) => console.error('model-router managed observability alert evaluator cycle failed', error),
+      });
+      // Batch-5 §5.6: the scheduled email reports (daily/weekly summary,
+      // error digest, account health). The SMTP transport reuses the
+      // registration email sender seam (settings-resolved, console fallback
+      // when unconfigured); last_run persists in the migration-127 PG rows.
+      reportSchedulerWorker = startReportSchedulerWorker(database, {
+        emailSender: registrationEmailSender,
+        templateDir: process.env.MODEL_ROUTER_SAAS_OBS_REPORT_TEMPLATE_DIR?.trim() || undefined,
+        onError: (error, type) =>
+          console.error(`model-router managed observability report ${type ?? 'scheduler'} cycle failed`, error),
       });
       // R6a: probe run retention (30 days) prunes on the control-plane role —
       // the validation-worker role that appends the history rows holds no
@@ -2884,6 +2915,7 @@ export async function startManagedSaasServer(
         marketingOpsPromoCodesHandler,
         marketingOpsAffiliateHandler,
         observabilityHandler,
+        alertSilencesHandler,
         platformReadHandler,
         webDistPath,
         brandSnapshotReader,

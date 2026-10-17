@@ -68,6 +68,10 @@ test('migration 036 is registered immediately before subsequent append-only migr
       122,
       // Batch-4 §4.2 async image tasks (task #16).
       123,
+      // Batch-5 §5.2 public brand settings (task #20).
+      126,
+      // Batch-5 §5.6 alert silences/report state (task #23).
+      127,
     ],
   );
 });

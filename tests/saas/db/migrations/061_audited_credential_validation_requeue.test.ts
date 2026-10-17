@@ -91,6 +91,10 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
       122,
       // Batch-4 §4.2 async image tasks (task #16).
       123,
+      // Batch-5 §5.2 public brand settings (task #20).
+      126,
+      // Batch-5 §5.6 alert silences/report state (task #23).
+      127,
     ],
   );
   assert.equal(SAAS_MIGRATIONS[60], USAGE_CORRECTIONS_SAAS_MIGRATION);
