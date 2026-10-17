@@ -738,7 +738,7 @@ async function checkRedisContract(context: DoctorContext): Promise<SaasDoctorChe
     return fail(
       'redis-contract',
       'MODEL_ROUTER_SAAS_REDIS_URL is not configured',
-      'set MODEL_ROUTER_SAAS_REDIS_URL and MODEL_ROUTER_SAAS_REDIS_PROVIDER for the control-plane deployment',
+      'control-plane/combined deployments REQUIRE Redis (cache/coordination; the deployment contract assigns it to the control plane — the gateway role has no Redis URL by design and its absent URL is a warn, not a fail). Set MODEL_ROUTER_SAAS_REDIS_URL and MODEL_ROUTER_SAAS_REDIS_PROVIDER for the control-plane deployment, or re-run with --role gateway/--role credential-validation-worker to scope the diagnostic',
     );
   }
   const connect = dependencies.connectRedis ?? defaultConnectRedis;

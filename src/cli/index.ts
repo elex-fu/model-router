@@ -159,6 +159,10 @@ program
   .description(
     'Read-only leveled diagnosis of a managed SaaS deployment: migrations, per-role grants, KMS readiness, Redis, sweep/health/freeze status, systemd posture',
   )
+  .addHelpText(
+    'after',
+    '\nCheck-level semantics: redis-contract FAILS for control-plane/combined (Redis is deployment-required there) but WARNS for gateway (the gateway has no Redis URL by design). Run per role on deployment hosts — the combined default cannot pass role-privileges against the migrator login. Each --verbose line prints probe provenance.\n',
+  )
   .option(
     '--role <role>',
     'Diagnose one workload role (combined, control-plane, gateway, credential-validation-worker); default follows MODEL_ROUTER_SAAS_WORKLOAD_ROLE or combined',
