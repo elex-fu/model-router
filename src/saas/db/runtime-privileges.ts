@@ -4346,7 +4346,9 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
 
 const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
-const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes'] as const;
+// Exported for the saas:doctor missing-grant diagnosis (L3): the gateway's
+// only expected table-level DML is the spending-freeze DELETE.
+export const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes'] as const;
 const GATEWAY_SEQUENCE = 'saas_provider_account_lease_fencing_seq' as const;
 
 function sqlText(value: string): string {
