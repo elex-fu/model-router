@@ -12,6 +12,7 @@ import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
 import { saasDeploy } from './saas-deploy.js';
 import { saasDoctor } from './saas-doctor.js';
 import { saasBootstrapAdmin } from './saas-management.js';
+import { saasMigrateLegacy112 } from './saas-migrate-legacy-112.js';
 import { saasMigrationAudit } from './saas-migration-audit.js';
 import { saasMigrate } from './saas-migrations.js';
 import { saasPlatformMfaEnroll } from './saas-platform-mfa-enrollment.js';
@@ -125,6 +126,45 @@ program
   .command('saas:migrate')
   .description('Apply SaaS database migrations explicitly. Server startup never runs migrations.')
   .action(() => management(() => saasMigrate()));
+
+program
+  .command('saas:migrate-legacy-112')
+  .description(
+    'Explicit legacy-main-112-to-129 compat plan: normalize an old-main ledger (shared 001..111 + old fault-classification 112) onto the current registry in ONE atomic transaction; the normal migrator and its checks are unchanged',
+  )
+  .option('--dry-run', 'Classify the full ledger and verify prerequisites without any mutation')
+  .option('--env-file <path>', 'Deployment environment file (same surface as saas:deploy/saas:upgrade)')
+  .option('--release-id <id>', 'Release label binding the reviewed baseline and the compat receipt')
+  .option('--schema <name>', 'Explicit SaaS schema name (the migrator login search_path schema)')
+  .option(
+    '--source-catalog-baseline <path>',
+    'Reviewed saas-ddl-v1 catalog baseline of the OLD-MAIN schema; required on the apply path and re-verified inside the transaction',
+  )
+  .option(
+    '--receipt-file <path>',
+    'Audit-only compatibility receipt output path (required on the apply path; never overwritten)',
+  )
+  .option(
+    '--confirm-writes-stopped',
+    'Operator attestation: writes and background tasks are stopped before the compat transaction',
+  )
+  .option('--confirm-backup-taken', 'Operator attestation: a restorable PostgreSQL backup of the database exists')
+  .option('--smoke-url <url>', 'Single smoke request after the upgrade (expects HTTP 200; skipped when unset)')
+  .option(
+    '--allow-local-plaintext',
+    'Permit sslmode=disable only for an explicit loopback disposable database or trusted local tunnel; default verifies TLS',
+  )
+  .option('--verbose', 'Print the equivalent manual command for every step')
+  .addHelpText(
+    'after',
+    '\nSeparate, explicitly-invoked upgrade path for the one known history fork (plan §5.2). The only ledger rewrite is the old-112 → 129 move keyed on the exact known name+checksum, after the FULL source history is re-verified inside the same transaction that applies target 112..128. Fail-closed: reruns only match the complete source state or the complete target state; drift, clean prefixes and unknown histories are refused (use the normal saas:migrate for those). The receipt is audit-only, never a second migration authority; rollback is the documented backup-restore path only. No credential value is ever printed.\n',
+  )
+  .action((options) =>
+    management(async () => {
+      const result = await saasMigrateLegacy112(options);
+      process.exitCode = result.exitCode;
+    }),
+  );
 
 program
   .command('saas:deploy')

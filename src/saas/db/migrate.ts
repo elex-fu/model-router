@@ -2,8 +2,14 @@ import { createHash } from 'node:crypto';
 import { SAAS_MIGRATIONS, type SaasMigration } from './migrations/001_initial_schema.js';
 import type { SaasDatabaseClient, SaasDatabasePool } from './types.js';
 
-const MIGRATION_LOCK_CLASS = 1_384_101_203;
-const MIGRATION_LOCK_ID = 1;
+/**
+ * The migration advisory lock class/id. Exported so the explicitly-invoked
+ * legacy-main-112-to-129 compat plan (migrate-compat-legacy-112.ts) takes
+ * the SAME lock as the normal migrator; the normal migrator's history and
+ * identity checks are unchanged.
+ */
+export const MIGRATION_LOCK_CLASS = 1_384_101_203;
+export const MIGRATION_LOCK_ID = 1;
 
 interface AppliedMigration {
   version: number;
