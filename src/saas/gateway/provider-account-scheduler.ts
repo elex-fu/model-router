@@ -371,6 +371,19 @@ export interface ProviderAccountSchedulerDependencies {
    * would otherwise empty. Absent keeps the selection path unchanged.
    */
   readonly modelCooldown?: ProviderAccountSchedulerModelCooldownPort;
+  /**
+   * Gap-remediation G-B1 (window three-state): the window-cost gate read
+   * seam. Resolves the account's three-state window schedulability from the
+   * migration-130 frozen policy and the exact supplier-cost fact
+   * (getAccountWindowCostFactsBatch + evaluateWindowCostSchedulability —
+   * the composition wires the PG reader). 'sticky_only' skips the candidate
+   * for non-sticky selections exactly like a hint exclude; a sticky binding
+   * whose target is 'sticky_only' stays selectable (the reserve band admits
+   * existing sessions). 'paused' skips both. A read failure must resolve
+   * 'admit' (fail-open — a missing observation never removes capacity).
+   * Absent keeps the selection path byte-identical (golden red line).
+   */
+  readonly windowCost?: ProviderAccountSchedulerWindowCostPort;
 }
 
 /**
@@ -398,6 +411,22 @@ export interface ProviderAccountSchedulerModelCooldownPort {
     readonly model: string;
     readonly now: Date;
   }): boolean;
+}
+
+/**
+ * G-B1: the window three-state read seam. Implementations must be
+ * non-throwing; an unavailable read resolves 'admit' (fail-open).
+ */
+export interface ProviderAccountSchedulerWindowCostPort {
+  resolveWindowCostSchedulability(input: {
+    readonly candidate: RequestPreparationCandidateAuthority;
+    readonly now: Date;
+    /**
+     * True when the selection is resolving an existing sticky binding (the
+     * reserve band admits it); false for open-session selection.
+     */
+    readonly isSticky: boolean;
+  }): Promise<'admit' | 'sticky_only' | 'paused'>;
 }
 
 /**
@@ -821,6 +850,25 @@ function affinityScopeFromSelection(
   }
   return {
     ...first.route,
+    supplyProfileId: input.caller.supplyProfileId,
+    accountOwnerKind: input.caller.supplyMode === 'byok' ? 'tenant' : 'platform',
+  };
+}
+
+/**
+ * G-B1: the empty-eligible fallback scope — the caller-validated input
+ * route (the same identity facts affinityScopeFromSelection derives from a
+ * revalidated candidate's route), used when the window gate skipped every
+ * candidate and the sticky re-admission still needs to resolve a binding.
+ */
+function affinityScopeFromInputRoute(
+  input: ProviderAccountSchedulerInput,
+  candidate: RequestPreparationCandidateAuthority,
+): ProviderAccountSchedulerAffinityScope | null {
+  const route = input.route;
+  if (!isRecord(route) || !validRevalidatedRoute(route, input, candidate)) return null;
+  return {
+    ...(route as ProviderAccountSchedulerRevalidatedRoute),
     supplyProfileId: input.caller.supplyProfileId,
     accountOwnerKind: input.caller.supplyMode === 'byok' ? 'tenant' : 'platform',
   };
@@ -1347,6 +1395,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       const firstPass = await this.collectEligibleCandidates(input, now, input.candidates, {
         ignoreFailureFeedback: false,
         ignoreModelCooldown: false,
+        ignoreWindowCost: false,
       });
       if (firstPass.outcome === 'blocked') return schedulerBlock(firstPass.reason);
       let eligible = firstPass.eligible;
@@ -1369,6 +1418,12 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
        * fail-open contract — when only cooldown hints (account, model, or
        * both) emptied the viable set, the union of skipped candidates is
        * re-run with both hints cleared instead of starved.
+       *
+       * G-B1: the window gate deliberately does NOT join this union — the
+       * P17 fail-open is for in-process TRANSIENT hints whose durable state
+       * is healthy; a window over-limit is a real capacity state (the
+       * sub2api posture: the DB-READ failure fails open, an over-limit
+       * window never does). A window-emptied viable set rejects below.
        */
       if (
         eligible.length === 0 &&
@@ -1383,10 +1438,77 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         const fallbackPass = await this.collectEligibleCandidates(input, now, fallbackCandidates, {
           ignoreFailureFeedback: true,
           ignoreModelCooldown: true,
+          ignoreWindowCost: false,
         });
         if (fallbackPass.outcome === 'blocked') return schedulerBlock(fallbackPass.reason);
         eligible = fallbackPass.eligible;
         durableHealthDenies += fallbackPass.healthDenied;
+      }
+
+      /*
+       * G-B1 sticky rescue: when the ONLY viable candidates were skipped by
+       * the window gate and this request carries an affinity reference, the
+       * binding's target is re-checked with isSticky=true BEFORE the
+       * empty-set rejection — a reserve-band session must not be starved by
+       * the band that exists to protect it. Only 'sticky_only' re-enters
+       * ('paused' is genuinely out of window); the re-admission runs the
+       * FULL check chain on the target with the gate cleared, so an account
+       * that also fails eligibility/health/concurrency still rejects.
+       */
+      if (eligible.length === 0 && firstPass.windowCostSkipped.length > 0 && this.dependencies.windowCost) {
+        if (hasAffinityReference(input.scheduling) && this.dependencies.affinity) {
+          const rescueScope =
+            affinityScopeFromInputRoute(input, firstPass.windowCostSkipped[0]) ??
+            affinityScopeFromSelection(input, eligible);
+          const rescueAffinity = await this.dependencies.affinity
+            .resolve({
+              caller: input.caller,
+              entitlement: input.entitlement,
+              publicModel: input.publicModel,
+              protocol: input.protocol,
+              context: input.scheduling as RequestPreparationSchedulingContext,
+              scope: rescueScope as never,
+              eligibleAccountIds: firstPass.windowCostSkipped.map((c) => c.accountId),
+            })
+            .catch(() => null);
+          if (
+            isRecord(rescueAffinity) &&
+            rescueAffinity.decision === 'allow' &&
+            typeof rescueAffinity.accountId === 'string' &&
+            rescueAffinity.accountId !== ''
+          ) {
+            const target = firstPass.windowCostSkipped.find((c) => c.accountId === rescueAffinity.accountId);
+            if (target !== undefined) {
+              let targetState: 'admit' | 'sticky_only' | 'paused' = 'admit';
+              try {
+                targetState = await this.dependencies.windowCost.resolveWindowCostSchedulability({
+                  candidate: target,
+                  now,
+                  isSticky: true,
+                });
+              } catch {
+                targetState = 'admit';
+              }
+              if (targetState === 'sticky_only') {
+                const rescued = await this.collectEligibleCandidates(input, now, [target], {
+                  ignoreFailureFeedback: false,
+                  ignoreModelCooldown: false,
+                  ignoreWindowCost: true,
+                });
+                const rescuedCandidate =
+                  rescued.outcome === 'collected'
+                    ? rescued.eligible.find(({ accountId }) => accountId === target.accountId)
+                    : undefined;
+                if (rescuedCandidate) {
+                  return allowRequestPreparation(rescuedCandidate.candidate, {
+                    strategy: 'affinity',
+                    reasons: ['affinity', 'window-reserve-band'],
+                  });
+                }
+              }
+            }
+          }
+        }
       }
 
       if (eligible.length === 0) {
@@ -1442,11 +1564,28 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
            * sticky target enters the bounded re-check loop below instead of
            * degrading or blocking.
            */
-          const scope = affinityScopeFromSelection(input, eligible);
+          // G-B1: when the window gate emptied the eligible set, the scope
+          // falls back to the caller-validated input route — the
+          // window-skipped candidates passed eligibility before the gate
+          // skipped them, so their binding remains resolvable for the
+          // sticky re-admission below.
+          const scope =
+            affinityScopeFromSelection(input, eligible) ??
+            (eligible.length === 0 && firstPass.windowCostSkipped.length > 0
+              ? affinityScopeFromInputRoute(input, firstPass.windowCostSkipped[0])
+              : null);
           if (!scope) return schedulerBlock('provider account affinity route scope is unavailable or stale');
+          // G-B1: the affinity resolution domain extends to the
+          // window-skipped population too — a sticky binding in the reserve
+          // band must stay resolvable even when the gate emptied the
+          // eligible set (the busy-domain extension precedent).
           const affinityDomainAccountIds = this.stickyWait
-            ? [...eligible.map(({ accountId }) => accountId), ...busyByAccountId.keys()]
-            : eligible.map(({ accountId }) => accountId);
+            ? [
+                ...eligible.map(({ accountId }) => accountId),
+                ...busyByAccountId.keys(),
+                ...firstPass.windowCostSkipped.map((c) => c.accountId),
+              ]
+            : [...eligible.map(({ accountId }) => accountId), ...firstPass.windowCostSkipped.map((c) => c.accountId)];
           const affinity = await this.dependencies.affinity?.resolve({
             caller: input.caller,
             entitlement: input.entitlement,
@@ -1577,6 +1716,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         const pass = await this.collectEligibleCandidates(input, now, input.candidates, {
           ignoreFailureFeedback: false,
           ignoreModelCooldown: false,
+          ignoreWindowCost: false,
         });
         if (pass.outcome === 'blocked') return schedulerBlock(pass.reason);
         const freed = pass.eligible.find(({ accountId }) => accountId === targetAccountId);
@@ -1612,6 +1752,11 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
    * chain remains the only authoritative gate. `failureFeedbackSkipped`
    * carries the excluded candidates (in encounter order) for that fallback.
    *
+   * G-B1: `ignoreWindowCost` extends the same fail-open contract to the
+   * window three-state gate — when only window hints emptied the viable
+   * set, the union of skipped candidates is re-run with the gate cleared.
+   * `windowCostSkipped` carries them (per-selection hint semantics).
+   *
    * K2: `healthDenied` counts candidates the DURABLE health authority
    * denied (cooldown/unhealthy row, or a live-cooldown deny). select()
    * surfaces an all-durably-denied emptiness as a 503 availability block
@@ -1621,7 +1766,11 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     input: ProviderAccountSchedulerInput,
     now: Date,
     candidates: readonly RequestPreparationCandidateAuthority[],
-    options: { readonly ignoreFailureFeedback: boolean; readonly ignoreModelCooldown: boolean },
+    options: {
+      readonly ignoreFailureFeedback: boolean;
+      readonly ignoreModelCooldown: boolean;
+      readonly ignoreWindowCost: boolean;
+    },
   ): Promise<
     | { readonly outcome: 'blocked'; readonly reason: string }
     | {
@@ -1629,6 +1778,8 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         readonly eligible: EligibleCandidate[];
         readonly failureFeedbackSkipped: RequestPreparationCandidateAuthority[];
         readonly modelCooldownSkipped: RequestPreparationCandidateAuthority[];
+        /** G-B1: candidates the window three-state gate skipped (hint semantics). */
+        readonly windowCostSkipped: RequestPreparationCandidateAuthority[];
         /**
          * Core-plan 9.2: candidates that passed eligibility and health but
          * are at (or over) their concurrency limit — the in-process "busy"
@@ -1645,6 +1796,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     const eligible: EligibleCandidate[] = [];
     const failureFeedbackSkipped: RequestPreparationCandidateAuthority[] = [];
     const modelCooldownSkipped: RequestPreparationCandidateAuthority[] = [];
+    const windowCostSkipped: RequestPreparationCandidateAuthority[] = [];
     const busySkipped: RequestPreparationCandidateAuthority[] = [];
     let healthDenied = 0;
     // select() has already validated these; the local bindings keep the same
@@ -1715,6 +1867,32 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       if (eligibility.decision === 'deny') continue;
       if (!validEligibility(eligibility, candidateValue, input, now)) {
         return { outcome: 'blocked', reason: 'provider eligibility authority returned an invalid candidate' };
+      }
+
+      // G-B1 (window three-state): the migration-130 gate. Non-sticky
+      // selection: 'sticky_only' and 'paused' both skip (the reserve band
+      // admits existing sessions only). Sticky selection (the affinity
+      // target — see the post-resolution re-admission in select()):
+      // 'sticky_only' passes — the reserve band exists precisely for those
+      // sessions — while 'paused' still skips. Per-candidate hint
+      // semantics, exactly like the cooldowns above; never an admission
+      // deny. The re-admission step re-queries the gate for the resolved
+      // target, so this loop always treats 'sticky_only' as a skip.
+      if (!options.ignoreWindowCost && this.dependencies.windowCost) {
+        let windowState: 'admit' | 'sticky_only' | 'paused' = 'admit';
+        try {
+          windowState = await this.dependencies.windowCost.resolveWindowCostSchedulability({
+            candidate: candidateValue,
+            now,
+            isSticky: false,
+          });
+        } catch {
+          windowState = 'admit'; // fail-open: a failed read never removes capacity
+        }
+        if (windowState !== 'admit') {
+          windowCostSkipped.push(candidateValue);
+          continue;
+        }
       }
 
       const health = await healthPort.get({
@@ -1798,6 +1976,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       eligible,
       failureFeedbackSkipped,
       modelCooldownSkipped,
+      windowCostSkipped,
       busySkipped,
       healthDenied,
     };

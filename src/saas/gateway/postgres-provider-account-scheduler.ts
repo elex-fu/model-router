@@ -36,6 +36,7 @@ import {
   type ProviderAccountSchedulerRevalidatedRoute,
   type ProviderAccountSchedulerRights,
   type ProviderAccountSchedulerSelectionTrace,
+  type ProviderAccountSchedulerWindowCostPort,
   resolveMaxHealthAgeMs,
 } from './provider-account-scheduler.js';
 import {
@@ -277,6 +278,13 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
    * Absent keeps the selection byte-identical.
    */
   readonly modelCooldown?: ProviderAccountSchedulerModelCooldownPort;
+  /**
+   * G-B1 (window three-state): forwarded to the core scheduler verbatim —
+   * the composition wires the PG facts reader
+   * (getAccountWindowCostFactsBatch + evaluateWindowCostSchedulability).
+   * Absent keeps the selection byte-identical.
+   */
+  readonly windowCost?: ProviderAccountSchedulerWindowCostPort;
 }
 
 interface PersistedRoute extends ProviderAccountSchedulerRevalidatedRoute {
@@ -2081,6 +2089,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
         // candidate loop byte-identical.
         failureFeedback: options.failureFeedback,
         modelCooldown: options.modelCooldown,
+        windowCost: options.windowCost,
       },
       options,
     );

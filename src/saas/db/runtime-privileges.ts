@@ -4123,10 +4123,26 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
     ] as const
   ).map((column) => ['saas_attempt_supplier_cost_snapshots', column, 'INSERT'] as const),
   ...(
-    ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'] as const
+    [
+      'id',
+      'tenant_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'amount_minor_units',
+      'currency',
+      'created_at',
+    ] as const
   ).map((column) => ['saas_attempt_supplier_costs', column, 'INSERT'] as const),
   ...(
-    ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'] as const
+    [
+      'id',
+      'tenant_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'amount_minor_units',
+      'currency',
+      'created_at',
+    ] as const
   ).map((column) => ['saas_attempt_supplier_costs', column, 'SELECT'] as const),
   // Health reads include filter predicates; the UPSERT reads current/EXCLUDED expressions and RETURNING.
   ...(
@@ -4884,9 +4900,15 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   // the six-class poll failure counter. INSERT never sets them (column
   // defaults); the billing-state columns above stay the only settlement
   // surface.
-  ...(['lease_owner', 'lease_epoch', 'lease_until', 'next_poll_at', 'poll_failures'] as const).map(
-    (column) => ['saas_video_tasks', column, 'UPDATE'] as const,
-  ),
+  ...(
+    [
+      'lease_owner',
+      'lease_epoch',
+      'lease_until',
+      'next_poll_at',
+      'poll_failures',
+    ] as const
+  ).map((column) => ['saas_video_tasks', column, 'UPDATE'] as const),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;

@@ -103,6 +103,10 @@ import type {
   ProviderAccountSchedulerStrategiesOptions,
 } from '../saas/gateway/provider-account-scheduler.js';
 import {
+  evaluateWindowCostSchedulability,
+  getAccountWindowCostFactsBatch,
+} from '../saas/gateway/provider-account-window-cost-gate.js';
+import {
   isProviderHttpTestAddressCapability,
   type ProviderHttpEgressAllowlist,
   type ProviderHttpTestAddressCapability,
@@ -1737,6 +1741,26 @@ export function createManagedSaasGatewayProductionComposition(
     // H5c (P8): fast fail-away from accounts returning 401/403/429.
     failureFeedback: dispatchFailureFeedback,
     modelCooldown: modelRateLimitRegistry,
+    // G-B1 (window three-state): the migration-130 gate — batch PG facts
+    // (policy columns + exact supplier-cost window aggregation) feeding the
+    // pure three-state judgment. Fail-open on any read failure.
+    windowCost: {
+      resolveWindowCostSchedulability: async ({ candidate, now, isSticky }) => {
+        try {
+          const facts = await getAccountWindowCostFactsBatch(database, [candidate.accountId], now.getTime());
+          const fact = facts.get(candidate.accountId);
+          if (fact === undefined) return 'admit'; // no frozen policy — the gate is OFF
+          return evaluateWindowCostSchedulability({
+            usageMinorUnits: fact.usageMinorUnits ?? 0n,
+            limitMinorUnits: fact.limitMinorUnits,
+            reserveMinorUnits: fact.reserveMinorUnits,
+          });
+        } catch {
+          return 'admit'; // fail-open: a failed read never removes capacity
+        }
+        void isSticky; // the core scheduler owns the sticky/pass-through split
+      },
+    },
     affinity: schedulerAffinityPort,
     leaseConcurrencyLimit: options.maxConcurrency,
     strategies: options.schedulerStrategies,
