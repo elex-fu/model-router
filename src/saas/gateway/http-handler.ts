@@ -7,6 +7,17 @@ import {
   recordGatewayRequestEnd,
 } from '../observability/metrics.js';
 import { resolveClientAddress } from './client-address.js';
+import type { GatewayProtocol } from './contracts.js';
+import {
+  COUNT_TOKENS_POLICY_HEADER,
+  CountTokensRateLimiter,
+  countTokensPolicyHeader,
+  DEFAULT_COUNT_TOKENS_RATE_LIMIT_PER_MINUTE,
+  estimateCountTokensInputTokens,
+  resolveCountTokensPolicy,
+} from './count-tokens.js';
+import { matchGeminiNativeContentPath, matchSaasEndpointEntry } from './endpoint-registry.js';
+import { geminiModelListResponseBody } from './gemini-model-list.js';
 import type { SaasGatewayAsyncMediaPort, SaasGatewayAsyncMediaSubmission } from './images/async-media-port.js';
 import { JsonKeepaliveClientStream } from './images/json-keepalive-client-stream.js';
 import { RecordingClientStream } from './images/recording-client-stream.js';
@@ -32,6 +43,12 @@ import { extractVideoRequestIdFromBody } from './videos/video-billing.js';
 import type { SaasGatewayVideoCreatePort } from './videos/video-create-port.js';
 
 const GATEWAY_PREFIX = '/v1';
+/**
+ * R2 §7.2: the native Gemini inbound mount (`/v1beta/...`). Like /v1 it is
+ * served by this handler; unknown /v1beta paths fall through to the generic
+ * 404 exactly like unknown /v1 paths.
+ */
+const GATEWAY_BETA_PREFIX = '/v1beta';
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 /*
  * Roadmap batch 4 §4.0 ① (task #14): endpoint-family POST body limits.
@@ -391,7 +408,8 @@ export interface ContentModerationCheckRequest {
   readonly userId: string | null;
   readonly apiKeyId: string;
   readonly apiKeyName: string;
-  readonly protocol: 'anthropic' | 'openai' | 'responses';
+  /** R2 §7.2: native Gemini inbound bodies join the moderation seam. */
+  readonly protocol: 'anthropic' | 'openai' | 'responses' | 'gemini';
   readonly model: string;
   readonly body: Record<string, unknown>;
 }
@@ -490,6 +508,25 @@ export interface SaasGatewayHttpOptions {
    * (the managed production gateway always does) may enable it.
    */
   readonly stickyScheduling?: boolean;
+  /**
+   * R2 §7.2: independent per-key rate limit for POST
+   * /v1/messages/count_tokens (requests per 60s window). The auxiliary
+   * operation must not share the generation admission budget. Default 120.
+   */
+  readonly countTokensRateLimitPerMinute?: number;
+  /**
+   * R2 §7.2: per-model predicate for supplies that declare NATIVE upstream
+   * token counting. Absent (or false) keeps the boundary on the explicit
+   * local-estimate policy, labeled on every response.
+   */
+  readonly countTokensNativeSupply?: (model: string) => boolean;
+  /**
+   * R2 §7.2: per-model predicate for supplies that declare NATIVE compact
+   * support. Absent (or false) fails /v1/responses/compact closed with 404
+   * CAPABILITY_UNSUPPORTED — opaque compact items are never forged through
+   * the Chat bridge.
+   */
+  readonly responsesCompactNativeSupply?: (model: string) => boolean;
 }
 
 /** Server-created request identity passed by a trusted composition boundary. */
@@ -883,6 +920,34 @@ function validatedDiscoveredModels(
     seen.add(model);
   }
   return [...models].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * R2 §7.2: the native Gemini ListModels envelope for the caller-scoped
+ * model list (same scope-validated input as sendModelList).
+ */
+function sendGeminiModelList(res: ServerResponse, requestId: string, models: readonly string[]): void {
+  if (res.destroyed || res.writableEnded) return;
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  try {
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-request-id': requestId,
+    });
+    res.end(JSON.stringify(geminiModelListResponseBody(models)));
+  } catch {
+    try {
+      res.destroy();
+    } catch {
+      // Nothing else is safe to send after the response write failed.
+    }
+  }
 }
 
 function sendModelList(res: ServerResponse, requestId: string, models: readonly string[]): void {
@@ -1297,6 +1362,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
   const trustedProxyCidrs = options.trustedProxyCidrs;
   const bodyLimits = resolveSaasGatewayBodyLimits(validMaxBodyBytes(options.maxBodyBytes), options.endpointBodyLimits);
   const entryPoint = validEntryPoint(options.entryPoint);
+  const countTokensRateLimiter = new CountTokensRateLimiter(
+    options.countTokensRateLimitPerMinute ?? DEFAULT_COUNT_TOKENS_RATE_LIMIT_PER_MINUTE,
+  );
 
   return async (req, res, context) => {
     const requestId = trustedRequestId(context) ?? `gateway_${randomUUID()}`;
@@ -1306,7 +1374,14 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       sendHttpError(res, new GatewayHttpError(400, 'INVALID_PATH'), requestId);
       return true;
     }
-    if (!path.startsWith(`${GATEWAY_PREFIX}/`) && path !== GATEWAY_PREFIX) return false;
+    if (
+      !path.startsWith(`${GATEWAY_PREFIX}/`) &&
+      path !== GATEWAY_PREFIX &&
+      !path.startsWith(`${GATEWAY_BETA_PREFIX}/`) &&
+      path !== GATEWAY_BETA_PREFIX
+    ) {
+      return false;
+    }
 
     res.setHeader('x-request-id', requestId);
 
@@ -1391,6 +1466,284 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         return true;
       }
       sendQueryResult(res, requestId, plazaResult);
+      return true;
+    }
+
+    /*
+     * R2 §7.2 (docs/core-capability-alignment-technical-plan-2026-10-18.md):
+     * GET /v1beta/models — the native Gemini ListModels surface. Like
+     * GET /v1/models it reads state instead of creating billable work, but
+     * the list is strictly the CURRENT caller's key permissions ∩ assembled
+     * capabilities (§6.3): the scope-validated modelDiscovery port output,
+     * never the raw provider list.
+     */
+    if (path === '/v1beta/models') {
+      drainRequest(req);
+      const endpointMatch = matchSaasEndpointEntry(req.method ?? '', path);
+      if (!endpointMatch.matched || !endpointMatch.methodAllowed) {
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      if (!modelDiscovery) {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      let authenticatedCaller: AuthenticatedApiKey;
+      try {
+        authenticatedCaller = await authenticateCaller(req, authenticator);
+      } catch (error) {
+        sendHttpError(
+          res,
+          error instanceof GatewayHttpError ? error : new GatewayHttpError(503, 'AUTHENTICATION_UNAVAILABLE'),
+          requestId,
+        );
+        return true;
+      }
+      let models: readonly string[] | null;
+      try {
+        models = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
+      } catch {
+        models = null;
+      }
+      if (!models) {
+        sendHttpError(res, new GatewayHttpError(503, 'MODEL_DISCOVERY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      sendGeminiModelList(res, requestId, models);
+      return true;
+    }
+
+    /*
+     * R2 §7.2: POST /v1/messages/count_tokens — a metered-but-not-generation
+     * auxiliary operation. It does NOT ride the generation preparation path
+     * (that hold reserves an output bound, which §7.2 explicitly forbids
+     * count_tokens from consuming); instead the boundary enforces the full
+     * auth → model-scope → independent-rate-limit admission itself and
+     * answers under an EXPLICIT counting policy. The policy is labeled on
+     * every response via x-model-router-count-policy; the pricing policy is
+     * declared (explicit-zero), never implicit free. When a supply declares
+     * native upstream counting (countTokensNativeSupply), the boundary
+     * fails closed toward the native path rather than silently estimating.
+     */
+    if (path === '/v1/messages/count_tokens') {
+      const endpointMatch = matchSaasEndpointEntry(req.method ?? '', path);
+      if (!endpointMatch.matched || !endpointMatch.methodAllowed) {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      let authenticatedCaller: AuthenticatedApiKey;
+      try {
+        authenticatedCaller = await authenticateCaller(req, authenticator);
+      } catch (error) {
+        drainRequest(req);
+        sendHttpError(
+          res,
+          error instanceof GatewayHttpError ? error : new GatewayHttpError(503, 'AUTHENTICATION_UNAVAILABLE'),
+          requestId,
+        );
+        return true;
+      }
+      const pathBodyLimit = bodyLimitForPath(path, bodyLimits);
+      const length = declaredBodyLength(req, pathBodyLimit);
+      if (length === 'too_large') {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(413, 'BODY_TOO_LARGE'), requestId);
+        return true;
+      }
+      if (length === 'invalid') {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(400, 'INVALID_BODY'), requestId);
+        return true;
+      }
+      if (!supportedContentType(req)) {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(415, 'UNSUPPORTED_MEDIA_TYPE'), requestId);
+        return true;
+      }
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(req, pathBodyLimit);
+        if (clientAuthorityField(body)) throw new GatewayHttpError(400, 'INVALID_BODY');
+      } catch (error) {
+        const httpError = error instanceof GatewayHttpError ? error : new GatewayHttpError(400, 'INVALID_BODY');
+        sendHttpError(res, httpError, requestId);
+        return true;
+      }
+      let model: string;
+      try {
+        model = publicModel(body);
+      } catch (error) {
+        sendHttpError(
+          res,
+          error instanceof GatewayHttpError ? error : new GatewayHttpError(400, 'INVALID_BODY'),
+          requestId,
+        );
+        return true;
+      }
+      // Model-scope enforcement: the same PG-authoritative scope surface as
+      // GET /v1/models — the caller's key permissions ∩ assembled
+      // capabilities. Out-of-scope fails closed with 403, exactly like a
+      // preparation-stage account_denied.
+      if (!modelDiscovery) {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      let discovered: readonly string[] | null;
+      try {
+        discovered = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
+      } catch {
+        discovered = null;
+      }
+      if (!discovered?.includes(model)) {
+        sendHttpError(
+          res,
+          new GatewayHttpError(403, 'REQUEST_REJECTED'),
+          requestId,
+          'the requested model is not available to this key',
+        );
+        return true;
+      }
+      // Independent rate limit: never shares the generation RPM budget.
+      const rateDecision = countTokensRateLimiter.check(authenticatedCaller.metadata.id);
+      if (!rateDecision.allowed) {
+        sendHttpError(res, new GatewayHttpError(429, 'RATE_LIMITED', rateDecision.retryAfterSeconds), requestId);
+        return true;
+      }
+      const policy = resolveCountTokensPolicy(options.countTokensNativeSupply?.(model) ?? false);
+      if (policy.kind === 'native-upstream') {
+        // A supply declared native counting but this boundary has no
+        // assembled native count transport yet: fail closed, never
+        // silently substitute the estimate.
+        sendHttpError(
+          res,
+          new GatewayHttpError(501, 'NATIVE_COUNT_TOKENS_UNAVAILABLE'),
+          requestId,
+          'the resolved supply declares native token counting but no native count transport is assembled in this deployment',
+        );
+        return true;
+      }
+      const inputTokens = estimateCountTokensInputTokens(body);
+      if (res.destroyed || res.writableEnded) return true;
+      try {
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'referrer-policy': 'no-referrer',
+          'x-request-id': requestId,
+          [COUNT_TOKENS_POLICY_HEADER]: countTokensPolicyHeader(policy),
+        });
+        res.end(JSON.stringify({ input_tokens: inputTokens }));
+      } catch {
+        try {
+          res.destroy();
+        } catch {
+          // Nothing else is safe after the response write failed.
+        }
+      }
+      return true;
+    }
+
+    /*
+     * R2 §7.2: POST /v1/responses/compact — served ONLY by supplies that
+     * explicitly declare NATIVE compact support. Opaque compact items are
+     * never forged through the Chat bridge: a supply without the declared
+     * capability is a missing capability (404 CAPABILITY_UNSUPPORTED, the
+     * embeddings precedent), not an outage, and a declared supply without
+     * an assembled native compact transport fails closed with 501 rather
+     * than degrading to an emulated compact.
+     */
+    if (path === '/v1/responses/compact') {
+      const endpointMatch = matchSaasEndpointEntry(req.method ?? '', path);
+      if (!endpointMatch.matched || !endpointMatch.methodAllowed) {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      let authenticatedCaller: AuthenticatedApiKey;
+      try {
+        authenticatedCaller = await authenticateCaller(req, authenticator);
+      } catch (error) {
+        drainRequest(req);
+        sendHttpError(
+          res,
+          error instanceof GatewayHttpError ? error : new GatewayHttpError(503, 'AUTHENTICATION_UNAVAILABLE'),
+          requestId,
+        );
+        return true;
+      }
+      const pathBodyLimit = bodyLimitForPath(path, bodyLimits);
+      const length = declaredBodyLength(req, pathBodyLimit);
+      if (length === 'too_large') {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(413, 'BODY_TOO_LARGE'), requestId);
+        return true;
+      }
+      if (length === 'invalid') {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(400, 'INVALID_BODY'), requestId);
+        return true;
+      }
+      if (!supportedContentType(req)) {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(415, 'UNSUPPORTED_MEDIA_TYPE'), requestId);
+        return true;
+      }
+      let body: Record<string, unknown>;
+      try {
+        body = await readJsonBody(req, pathBodyLimit);
+        if (clientAuthorityField(body)) throw new GatewayHttpError(400, 'INVALID_BODY');
+      } catch (error) {
+        const httpError = error instanceof GatewayHttpError ? error : new GatewayHttpError(400, 'INVALID_BODY');
+        sendHttpError(res, httpError, requestId);
+        return true;
+      }
+      let model: string;
+      try {
+        model = publicModel(body);
+      } catch (error) {
+        sendHttpError(
+          res,
+          error instanceof GatewayHttpError ? error : new GatewayHttpError(400, 'INVALID_BODY'),
+          requestId,
+        );
+        return true;
+      }
+      if (!modelDiscovery) {
+        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+        return true;
+      }
+      let discovered: readonly string[] | null;
+      try {
+        discovered = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
+      } catch {
+        discovered = null;
+      }
+      if (!discovered?.includes(model)) {
+        sendHttpError(
+          res,
+          new GatewayHttpError(403, 'REQUEST_REJECTED'),
+          requestId,
+          'the requested model is not available to this key',
+        );
+        return true;
+      }
+      if (!options.responsesCompactNativeSupply?.(model)) {
+        sendHttpError(
+          res,
+          new GatewayHttpError(404, 'CAPABILITY_UNSUPPORTED'),
+          requestId,
+          'responses.compact is served only by supplies that declare native compact support; compact items are never served through the chat bridge',
+        );
+        return true;
+      }
+      sendHttpError(
+        res,
+        new GatewayHttpError(501, 'COMPACT_TRANSPORT_UNAVAILABLE'),
+        requestId,
+        'the resolved supply declares native compact support but no native compact transport is assembled in this deployment',
+      );
       return true;
     }
 
@@ -1518,7 +1871,16 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
-    const protocol = ROUTES.get(path);
+    /*
+     * R2 §7.2: native Gemini inbound content paths
+     * (`/v1beta/models/{model}:generateContent|:streamGenerateContent`)
+     * resolve to the gemini client protocol here; every other path keeps
+     * the registered route-table lookup. A matched Gemini path with a
+     * non-POST method answers 405 exactly like a registered /v1 route;
+     * unmatched /v1beta paths keep the generic 404.
+     */
+    const geminiNative = matchGeminiNativeContentPath(path);
+    const protocol: GatewayProtocol | undefined = geminiNative !== null ? 'gemini' : ROUTES.get(path);
     if (protocol === undefined) {
       drainRequest(req);
       sendHttpError(res, new GatewayHttpError(404, 'NOT_FOUND'), requestId);
@@ -1562,7 +1924,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
     let model: string;
     try {
-      model = publicModel(body);
+      // R2 §7.2: native Gemini requests carry the public model in the path
+      // (`/v1beta/models/{model}:generateContent`), never in the body.
+      model = geminiNative !== null ? geminiNative.model : publicModel(body);
     } catch (error) {
       sendHttpError(
         res,
@@ -1570,6 +1934,23 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         requestId,
       );
       return true;
+    }
+
+    /*
+     * R2 §7.2: native Gemini carries the public model in the path and the
+     * SSE action in the path suffix — the body has neither. The trusted
+     * boundary injects both as server-owned facts before fingerprinting
+     * (the same discipline as the path-derived client operations): the
+     * payload compiler's canonical body and the billing input then carry
+     * exactly one consistent model. The path is authoritative; a body
+     * `model`, if a client sends one, is never trusted.
+     */
+    if (geminiNative !== null) {
+      body = {
+        ...body,
+        model: geminiNative.model,
+        ...(geminiNative.stream ? { stream: true } : {}),
+      };
     }
 
     /*
@@ -1642,19 +2023,27 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
      * request-scoped scheduler input only: never logged, never audited, and
      * HMACed by the durable affinity store before any SQL.
      */
-    const scheduling = options.stickyScheduling
-      ? stickySchedulingContext({
-          protocol,
-          headers: req.headers,
-          body,
-          clientIp: clientAddress.status === 'resolved' ? clientAddress.address : null,
-          userAgent: oneHeader(req, 'user-agent') ?? null,
-          proxyKeyId: authenticatedCaller.metadata.id,
-          // Stateless operations (embeddings) never pin content-derived
-          // sessions (the sub2api /v1/images precedent).
-          stateless: ROUTE_CLIENT_OPERATIONS.has(path),
-        })
-      : undefined;
+    /*
+     * R2 §7.2: native Gemini inbound stays outside the sticky seam for now —
+     * the reference derivation knows the anthropic/openai/responses header
+     * and body shapes only, and a Gemini client must never inherit a
+     * misparsed session reference. (Follow-up: a gemini tier once the
+     * reference grammar covers Gemini bodies.)
+     */
+    const scheduling =
+      options.stickyScheduling && protocol !== 'gemini'
+        ? stickySchedulingContext({
+            protocol,
+            headers: req.headers,
+            body,
+            clientIp: clientAddress.status === 'resolved' ? clientAddress.address : null,
+            userAgent: oneHeader(req, 'user-agent') ?? null,
+            proxyKeyId: authenticatedCaller.metadata.id,
+            // Stateless operations (embeddings) never pin content-derived
+            // sessions (the sub2api /v1/images precedent).
+            stateless: ROUTE_CLIENT_OPERATIONS.has(path),
+          })
+        : undefined;
     let prepared: RequestPreparationResult;
     try {
       prepared = await preparation.prepare({

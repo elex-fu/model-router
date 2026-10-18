@@ -18,7 +18,7 @@
 
 import { createHash } from 'node:crypto';
 
-export type ModerationProtocol = 'anthropic' | 'openai' | 'responses';
+export type ModerationProtocol = 'anthropic' | 'openai' | 'responses' | 'gemini';
 
 /** Maximum runes of extracted text forwarded to the moderation API. */
 export const MAX_MODERATION_INPUT_RUNES = 12000;
@@ -154,6 +154,34 @@ function collectLastResponsesInput(input: unknown, parts: string[], filterRemind
 }
 
 /**
+ * R2 §7.2 native Gemini inbound: take the LAST `contents[]` entry whose
+ * role is `user` and collect its `parts[].text` values (the same
+ * last-user-turn semantics as the other protocols; `model` turns and
+ * function-call parts carry no moderation text).
+ */
+function collectLastGeminiContent(contents: unknown, parts: string[], filterReminders: boolean): void {
+  if (!Array.isArray(contents) || contents.length === 0) return;
+  let last: Record<string, unknown> | null = null;
+  for (const entry of contents) {
+    if (!isRecord(entry)) continue;
+    const role = typeof entry.role === 'string' ? entry.role.trim().toLowerCase() : '';
+    if (role !== 'user') continue;
+    last = entry;
+  }
+  if (last === null) return;
+  const candidate: string[] = [];
+  if (Array.isArray(last.parts)) {
+    for (const part of last.parts) {
+      if (isRecord(part) && typeof part.text === 'string') {
+        addText(candidate, part.text, filterReminders);
+      }
+    }
+  }
+  if (normalizeText(candidate.join('\n')) === '') return;
+  parts.push(...candidate);
+}
+
+/**
  * Extract the moderation text for a protocol from the already-parsed client
  * body. Returns the whitespace-normalized text (possibly empty).
  */
@@ -172,6 +200,9 @@ export function extractModerationText(
       break;
     case 'responses':
       collectLastResponsesInput(body.input, parts, filterReminders);
+      break;
+    case 'gemini':
+      collectLastGeminiContent(body.contents, parts, filterReminders);
       break;
   }
   return normalizeText(parts.join('\n'));
