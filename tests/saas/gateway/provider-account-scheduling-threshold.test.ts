@@ -62,6 +62,9 @@ function baseRow(overrides: Partial<SchedulingThresholdAccountRow> = {}): Schedu
     minimax_weekly_used_percent: null,
     minimax_weekly_reset_at: null,
     minimax_usage_updated_at: null,
+    grok_5h_used_percent: null,
+    grok_5h_reset_at: null,
+    grok_usage_updated_at: null,
     auto_pause_5h_threshold: null,
     auto_pause_7d_threshold: null,
     ...overrides,
@@ -254,6 +257,54 @@ test('candidate rows map each column family with its unit and staleness rules', 
   assert.equal(
     schedulingThresholdCandidatesFromRow(baseRow({ auto_pause_5h_threshold: 90, auto_pause_7d_threshold: 80 }), NOW_MS)
       .length,
+    0,
+  );
+
+  // Migration 119 (batch 3 grok; core-plan 9.1): the 5h token window joins
+  // the threshold families — auto_pause_5h_threshold gates it, a fresh
+  // grok_usage_updated_at is required, and the 429 cooldown is NOT a window
+  // here (it is consumed by the eligibility SQL).
+  const grok = schedulingThresholdCandidatesFromRow(
+    baseRow({
+      grok_5h_used_percent: 96,
+      grok_5h_reset_at: iso(IN_3H),
+      grok_usage_updated_at: iso(NOW_MS - 60_000),
+      auto_pause_5h_threshold: 90,
+      auto_pause_7d_threshold: 80,
+    }),
+    NOW_MS,
+  );
+  assert.equal(grok.length, 1);
+  assert.equal(grok[0]?.platform, 'grok');
+  assert.equal(grok[0]?.window, '5h');
+  const grokPause = evaluateSchedulingThresholdPause({ nowMs: NOW_MS, candidates: grok });
+  assert.ok(grokPause !== null);
+  assert.equal(grokPause.platform, 'grok');
+});
+
+test('a grok window without a configured threshold contributes nothing (dormant default)', () => {
+  assert.equal(
+    schedulingThresholdCandidatesFromRow(
+      baseRow({
+        grok_5h_used_percent: 96,
+        grok_5h_reset_at: iso(IN_3H),
+        grok_usage_updated_at: iso(NOW_MS - 60_000),
+      }),
+      NOW_MS,
+    ).length,
+    0,
+  );
+  // Stale grok snapshot contributes nothing either.
+  assert.equal(
+    schedulingThresholdCandidatesFromRow(
+      baseRow({
+        grok_5h_used_percent: 96,
+        grok_5h_reset_at: iso(IN_3H),
+        grok_usage_updated_at: iso(NOW_MS - SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS - 1),
+        auto_pause_5h_threshold: 90,
+      }),
+      NOW_MS,
+    ).length,
     0,
   );
 });

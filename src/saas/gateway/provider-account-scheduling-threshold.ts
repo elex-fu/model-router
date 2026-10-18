@@ -10,7 +10,7 @@
  * Thresholds reuse the dormant migration-099 `auto_pause_*_threshold`
  * columns — the per-account operator override, one per window family:
  * `auto_pause_5h_threshold` gates short windows (codex 5h, claude 5h,
- * opencode-go rolling 5h, zhipu/minimax coding-plan 5h),
+ * opencode-go rolling 5h, zhipu/minimax coding-plan 5h, grok 5h),
  * `auto_pause_7d_threshold` gates long windows (codex 7d, claude
  * 7d/7d_sonnet/7d_oi, opencode-go weekly/monthly, gemini daily,
  * zhipu/minimax coding-plan weekly). No threshold configured (NULL) produces
@@ -25,7 +25,7 @@
 /** A snapshot older than this no longer pauses (the codex 2h precedent). */
 export const SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
-export type SchedulingThresholdPlatform = 'codex' | 'claude' | 'gemini' | 'opencode-go' | 'zhipu' | 'minimax';
+export type SchedulingThresholdPlatform = 'codex' | 'claude' | 'gemini' | 'opencode-go' | 'zhipu' | 'minimax' | 'grok';
 
 /** One window candidate as persisted in the quota-snapshot column family. */
 export interface SchedulingThresholdWindowCandidate {
@@ -235,6 +235,10 @@ export interface SchedulingThresholdAccountRow {
   readonly minimax_weekly_used_percent: number | null;
   readonly minimax_weekly_reset_at: Date | string | null;
   readonly minimax_usage_updated_at: Date | string | null;
+  /* Migration 119 (batch 3 grok): the quota-header-observed 5h token window. */
+  readonly grok_5h_used_percent: number | null;
+  readonly grok_5h_reset_at: Date | string | null;
+  readonly grok_usage_updated_at: Date | string | null;
   readonly auto_pause_5h_threshold: number | null;
   readonly auto_pause_7d_threshold: number | null;
 }
@@ -405,6 +409,14 @@ export function schedulingThresholdCandidatesFromRow(
         timestampMs(row.minimax_weekly_reset_at),
         threshold7d,
       );
+    }
+    // Batch-3 Grok (migration 119): the quota-header observer writes the 5h
+    // token window (upstream-observed used percent, never extrapolated). An
+    // account whose 429 cooldown is live is already excluded by the
+    // eligibility SQL; this family contributes only the auto-pause threshold
+    // port of the sub2api grok scheduling semantics.
+    if (familyFresh(row.grok_usage_updated_at, nowMs)) {
+      push('grok', '5h', finiteNumber(row.grok_5h_used_percent), timestampMs(row.grok_5h_reset_at), threshold5h);
     }
   }
   return candidates;

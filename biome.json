@@ -32,6 +32,16 @@
     }
   },
   "files": {
-    "includes": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.sh", "*.json", "!node_modules", "!dist"]
+    "includes": [
+      "src/**/*.ts",
+      "tests/**/*.ts",
+      "scripts/**/*.sh",
+      "*.json",
+      "!node_modules",
+      "!dist",
+      "!.claude",
+      "!kimi-validation.config.json",
+      "!web/dist"
+    ]
   }
 }

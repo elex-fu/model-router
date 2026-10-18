@@ -83,6 +83,13 @@ export interface RequestPreparationRejected {
   readonly code: RequestPreparationFailureCode;
   readonly message: string;
   readonly canonicalRequest?: CanonicalRequestStatusReference;
+  /**
+   * Core-plan 9.2 (bounded sticky wait): optional Retry-After hint (integer
+   * seconds) carried on rate-limit rejections — the wait budget expiry uses
+   * it; all other rejections leave it absent. Emitted as the Retry-After
+   * response header on the 429 mapping only.
+   */
+  readonly retryAfterSeconds?: number;
 }
 
 export interface RequestPreparationBlocked {
@@ -612,6 +619,8 @@ export interface RequestPreparationFailureResult {
   readonly compensation?: RequestPreparationCompensationResult | null;
   /** Existing canonical request reference for same-fingerprint idempotent retries. */
   readonly canonicalRequest?: CanonicalRequestStatusReference;
+  /** Core-plan 9.2: passthrough Retry-After hint for the 429 mapping. */
+  readonly retryAfterSeconds?: number;
   /** A failure never returns evidence as if it were dispatchable. */
   readonly evidence: null;
 }
@@ -850,9 +859,15 @@ function decisionFailure(
     decision.message,
     ids,
   );
-  return decision.decision === 'reject' && decision.canonicalRequest
-    ? { ...result, canonicalRequest: decision.canonicalRequest }
-    : result;
+  return {
+    ...result,
+    ...(decision.decision === 'reject' && typeof decision.retryAfterSeconds === 'number'
+      ? { retryAfterSeconds: decision.retryAfterSeconds }
+      : {}),
+    ...(decision.decision === 'reject' && decision.canonicalRequest
+      ? { canonicalRequest: decision.canonicalRequest }
+      : {}),
+  };
 }
 
 function isDecision<T>(value: unknown): value is RequestPreparationDecision<T> {

@@ -360,6 +360,44 @@ export interface ProviderAccountSchedulerDependencies {
    * authoritative admission gate; see collectEligibleCandidates.
    */
   readonly failureFeedback?: ProviderAccountSchedulerFailureFeedbackPort;
+  /**
+   * Core-plan 9.1 (B06 consumption half): the model-level cooldown read seam.
+   * The SAME ProviderAccountModelRateLimit instance the dispatch side records
+   * (a model-not-found 404 / plan-gated 400 cools the (account, model) pair
+   * for 30 min) must also be read by the scheduler, otherwise the state is
+   * written and never consumed. A cooled (account, model) pair is skipped
+   * exactly like a failure-feedback exclude: a per-selection scheduling hint,
+   * never an admission deny, with the same P17 fail-open when the viable set
+   * would otherwise empty. Absent keeps the selection path unchanged.
+   */
+  readonly modelCooldown?: ProviderAccountSchedulerModelCooldownPort;
+}
+
+/**
+ * Core-plan 9.2 — the sticky-wait budget (initial defaults are a composition
+ * concern, to be frozen after load testing): a per-request wait budget
+ * (recommended 2 s, strictly positive), a per-sticky-target waiter queue
+ * length, and the re-check tick. All process-local; nothing here touches
+ * durable scheduling state.
+ */
+export interface ProviderAccountSchedulerStickyWaitConfig {
+  readonly maxWaitMs: number;
+  readonly maxQueueLength: number;
+  readonly tickMs: number;
+}
+
+/**
+ * Core-plan 9.1: the model-cooldown read seam consumed by the candidate loop.
+ * Synchronous, non-throwing, process-local; the durable account-level
+ * authority is never substituted by it.
+ */
+export interface ProviderAccountSchedulerModelCooldownPort {
+  /** True while the (account, model) pair is inside its dispatch-derived cooldown. */
+  isModelExcluded(input: {
+    readonly candidate: RequestPreparationCandidateAuthority;
+    readonly model: string;
+    readonly now: Date;
+  }): boolean;
 }
 
 /**
@@ -525,6 +563,16 @@ export interface ProviderAccountSchedulerOptions {
   readonly now?: () => Date;
   readonly maxHealthAgeMs?: number;
   readonly strategies?: ProviderAccountSchedulerStrategiesOptions;
+  /**
+   * Core-plan 9.2: the bounded sticky-wait seam. When set, a sticky binding
+   * whose target is busy (every lease slot observed in flight, but the
+   * account passed eligibility and health) enters a bounded wait instead of
+   * immediately degrading the session: the selection re-checks the target on
+   * an in-process tick WITHOUT holding any database transaction, lease, or
+   * wallet hold. Defaults to OFF (unset) — the selection path stays
+   * byte-identical (golden-fixture red line).
+   */
+  readonly stickyWait?: ProviderAccountSchedulerStickyWaitConfig;
 }
 
 /** Exact non-negative integer as persisted by PostgreSQL (bigint/text/safe number). */
@@ -1154,6 +1202,24 @@ function positiveMsOption(value: unknown, fallback: number): number {
   return value;
 }
 
+/**
+ * Core-plan 9.2: sticky-wait budget validation. Absent is the default OFF;
+ * present but malformed is a composition error (constructor TypeError),
+ * matching how the strategy options fail.
+ */
+function resolveStickyWait(value: ProviderAccountSchedulerStickyWaitConfig | undefined) {
+  if (value === undefined) return undefined;
+  const positive = (field: string, v: number, minimum: number) => {
+    if (!Number.isSafeInteger(v) || v < minimum) {
+      throw new TypeError(`scheduler sticky wait ${field} must be a safe integer ≥ ${minimum}`);
+    }
+  };
+  positive('maxWaitMs', value.maxWaitMs, 1);
+  positive('maxQueueLength', value.maxQueueLength, 1);
+  positive('tickMs', value.tickMs, 1);
+  return value;
+}
+
 function resolveStrategies(options: ProviderAccountSchedulerStrategiesOptions | undefined): ResolvedStrategies {
   const soonestReset = options?.soonestReset;
   const windowMs = positiveMsOption(soonestReset?.windowMs, SOONEST_RESET_DEFAULT_WINDOW_MS);
@@ -1186,6 +1252,15 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
   private readonly maxHealthAgeMs: number;
   private readonly strategies: ResolvedStrategies;
   /**
+   * Core-plan 9.2: per-(supplyMode, account) in-process waiter count. Only
+   * consulted when `stickyWait` is configured; the map is keyed so a BYOK
+   * tenant and a platform pool member with the same account id never share a
+   * queue. It never touches durable state.
+   */
+  private readonly stickyWaitQueue = new Map<string, number>();
+  /** Validated 9.2 sticky-wait budget; `undefined` keeps the path OFF. */
+  private readonly stickyWait: ProviderAccountSchedulerStickyWaitConfig | undefined;
+  /**
    * R7 strategy registry: the ordered comparators applied before the
    * account-id tie-break when strategies are enabled. Cost priority leads
    * (commercial tiering inside the priority tier), the existing load-ratio
@@ -1203,6 +1278,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     this.now = options.now ?? (() => new Date());
     this.maxHealthAgeMs = resolveMaxHealthAgeMs(options.maxHealthAgeMs);
     this.strategies = resolveStrategies(options.strategies);
+    this.stickyWait = resolveStickyWait(options.stickyWait);
     const chain: OrderingStrategy[] = [];
     if (this.strategies.costPriorityEnabled) {
       chain.push({ name: 'cost-priority', compare: compareSupplierCost });
@@ -1270,6 +1346,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
 
       const firstPass = await this.collectEligibleCandidates(input, now, input.candidates, {
         ignoreFailureFeedback: false,
+        ignoreModelCooldown: false,
       });
       if (firstPass.outcome === 'blocked') return schedulerBlock(firstPass.reason);
       let eligible = firstPass.eligible;
@@ -1287,10 +1364,25 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
        * pass like any other) stays the authoritative admission gate: if the
        * excluded candidates also fail eligibility/health/concurrency there,
        * the selection still rejects exactly as before.
+       *
+       * Core-plan 9.1: the model-level cooldown hint shares this exact
+       * fail-open contract — when only cooldown hints (account, model, or
+       * both) emptied the viable set, the union of skipped candidates is
+       * re-run with both hints cleared instead of starved.
        */
-      if (eligible.length === 0 && firstPass.failureFeedbackSkipped.length > 0) {
-        const fallbackPass = await this.collectEligibleCandidates(input, now, firstPass.failureFeedbackSkipped, {
+      if (
+        eligible.length === 0 &&
+        (firstPass.failureFeedbackSkipped.length > 0 || firstPass.modelCooldownSkipped.length > 0)
+      ) {
+        const fallbackCandidates = [
+          ...firstPass.failureFeedbackSkipped,
+          ...firstPass.modelCooldownSkipped.filter(
+            (c) => !firstPass.failureFeedbackSkipped.some((f) => f.accountId === c.accountId),
+          ),
+        ];
+        const fallbackPass = await this.collectEligibleCandidates(input, now, fallbackCandidates, {
           ignoreFailureFeedback: true,
+          ignoreModelCooldown: true,
         });
         if (fallbackPass.outcome === 'blocked') return schedulerBlock(fallbackPass.reason);
         eligible = fallbackPass.eligible;
@@ -1321,6 +1413,16 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
 
       try {
         let affinityAccountId: string | null = null;
+        /*
+         * Core-plan 9.2: the busy population of the FIRST pass. With the
+         * sticky-wait seam configured, the affinity resolution domain extends
+         * to busy-but-otherwise-schedulable accounts so a binding whose target
+         * is at its lease wall survives as 'allow' (the wait path can hold it)
+         * instead of being invalidated as 'stale' — the sub2api bounded-wait
+         * posture. Without the seam the domain is the eligible set only and
+         * the semantics stay byte-identical (golden red line).
+         */
+        const busyByAccountId = new Map(firstPass.busySkipped.map((c) => [c.accountId, c]));
         if (hasAffinityReference(input.scheduling)) {
           /*
            * Roadmap batch 2 §2.1 (task #5) — the sticky three-state gate
@@ -1334,13 +1436,17 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
            *     normal ranking chain — the session re-binds to whatever the
            *     load balancer picks instead of rejecting the request;
            *  3. no binding at all → the normal ranking chain.
-           * The sub2api wait/queue state and the window-cost reserve band
-           * (limit+reserve) are deliberately NOT implemented here: they need
-           * the 5h window-cost aggregation pipeline owned by task #6, so
-           * this branch only distinguishes schedulable / cleared / absent.
+           * The window-cost reserve band (limit+reserve) still needs the
+           * per-window cost policy (migration + freeze) — NOT implemented
+           * here. The bounded wait plan IS (9.2): when configured, a busy
+           * sticky target enters the bounded re-check loop below instead of
+           * degrading or blocking.
            */
           const scope = affinityScopeFromSelection(input, eligible);
           if (!scope) return schedulerBlock('provider account affinity route scope is unavailable or stale');
+          const affinityDomainAccountIds = this.stickyWait
+            ? [...eligible.map(({ accountId }) => accountId), ...busyByAccountId.keys()]
+            : eligible.map(({ accountId }) => accountId);
           const affinity = await this.dependencies.affinity?.resolve({
             caller: input.caller,
             entitlement: input.entitlement,
@@ -1348,7 +1454,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
             protocol: input.protocol,
             context: input.scheduling as RequestPreparationSchedulingContext,
             scope,
-            eligibleAccountIds: eligible.map(({ accountId }) => accountId),
+            eligibleAccountIds: affinityDomainAccountIds,
           });
           if (
             !isRecord(affinity) ||
@@ -1391,7 +1497,20 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         const preferred =
           affinityAccountId === null ? undefined : eligible.find(({ accountId }) => accountId === affinityAccountId);
         if (affinityAccountId !== null && !preferred) {
-          return schedulerBlock('persisted provider account affinity target is no longer eligible');
+          const busyTarget = this.stickyWait ? busyByAccountId.get(affinityAccountId) : undefined;
+          if (busyTarget) {
+            const waited = await this.waitForBusyStickyTarget(input, affinityAccountId, busyTarget);
+            if (waited !== null) return waited;
+            /*
+             * waited === null: the waiter queue is full — degrade to the
+             * ranking chain below instead of blocking. The busy target is
+             * excluded from `eligible`, so the ranking can never pick it;
+             * the caller re-binds on the selected account exactly like the
+             * stale-degrade path.
+             */
+          } else {
+            return schedulerBlock('persisted provider account affinity target is no longer eligible');
+          }
         }
         if (preferred) {
           return allowRequestPreparation(
@@ -1409,6 +1528,70 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       }
     } catch {
       return schedulerBlock('provider account scheduler failed closed');
+    }
+  }
+
+  /**
+   * Core-plan 9.2: the bounded wait for a busy sticky target. The re-check
+   * loop re-runs the full candidate check chain on `tickMs` sleeps; between
+   * ticks NOTHING is held — no database transaction (every port opens its
+   * own), no inference lease, no wallet hold (those are acquired later, after
+   * a successful selection). Waiting is capped by `maxWaitMs` and, per
+   * (supplyMode, account) sticky target, by `maxQueueLength` concurrent
+   * waiters tracked in-process — a full queue returns null (degrade to the
+   * ranking chain). Outcomes:
+   *   - the target became eligible → allow (selection trace notes the wait);
+   *   - an authority block on any re-check pass → the same block decision;
+   *   - budget exhausted → 429-mapped reject with a Retry-After hint, the
+   *     binding intact for the next request (this request is NOT degraded,
+   *     matching the sub2api wait plan).
+   * Returns null only when the waiter queue is full.
+   */
+  private async waitForBusyStickyTarget(
+    input: ProviderAccountSchedulerInput,
+    targetAccountId: string,
+    busyTarget: RequestPreparationCandidateAuthority,
+  ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority> | null> {
+    const config = this.stickyWait as ProviderAccountSchedulerStickyWaitConfig;
+    const queueKey = `${busyTarget.supplyMode}:${targetAccountId}`;
+    const waiters = this.stickyWaitQueue.get(queueKey) ?? 0;
+    if (waiters >= config.maxQueueLength) {
+      return null; // queue full → degrade to the ranking chain immediately
+    }
+    this.stickyWaitQueue.set(queueKey, waiters + 1);
+    try {
+      const deadline = this.now().getTime() + config.maxWaitMs;
+      const tickMs = Math.min(config.tickMs, Math.max(config.maxWaitMs, 1));
+      for (;;) {
+        await new Promise<void>((resolve) => setTimeout(resolve, tickMs));
+        const now = this.now();
+        if (now.getTime() >= deadline) {
+          return {
+            decision: 'reject',
+            code: 'rate_limited',
+            message:
+              'the sticky provider account is still busy; the bounded wait budget expired — retry shortly (the session binding is kept)',
+            retryAfterSeconds: Math.max(1, Math.ceil(config.maxWaitMs / 1000)),
+          };
+        }
+        const pass = await this.collectEligibleCandidates(input, now, input.candidates, {
+          ignoreFailureFeedback: false,
+          ignoreModelCooldown: false,
+        });
+        if (pass.outcome === 'blocked') return schedulerBlock(pass.reason);
+        const freed = pass.eligible.find(({ accountId }) => accountId === targetAccountId);
+        if (freed) {
+          return allowRequestPreparation(freed.candidate, {
+            strategy: 'affinity',
+            reasons: ['affinity', 'sticky-wait'],
+          });
+        }
+        // Still busy (or transiently skipped): sleep and re-check.
+      }
+    } finally {
+      const remaining = (this.stickyWaitQueue.get(queueKey) ?? 1) - 1;
+      if (remaining <= 0) this.stickyWaitQueue.delete(queueKey);
+      else this.stickyWaitQueue.set(queueKey, remaining);
     }
   }
 
@@ -1438,13 +1621,22 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     input: ProviderAccountSchedulerInput,
     now: Date,
     candidates: readonly RequestPreparationCandidateAuthority[],
-    options: { readonly ignoreFailureFeedback: boolean },
+    options: { readonly ignoreFailureFeedback: boolean; readonly ignoreModelCooldown: boolean },
   ): Promise<
     | { readonly outcome: 'blocked'; readonly reason: string }
     | {
         readonly outcome: 'collected';
         readonly eligible: EligibleCandidate[];
         readonly failureFeedbackSkipped: RequestPreparationCandidateAuthority[];
+        readonly modelCooldownSkipped: RequestPreparationCandidateAuthority[];
+        /**
+         * Core-plan 9.2: candidates that passed eligibility and health but
+         * are at (or over) their concurrency limit — the in-process "busy"
+         * population the bounded sticky wait consults. A hint list only;
+         * these candidates are still skipped from the ranking exactly as
+         * before, so an absent wait seam keeps the selection untouched.
+         */
+        readonly busySkipped: RequestPreparationCandidateAuthority[];
         readonly healthDenied: number;
       }
   > {
@@ -1452,6 +1644,8 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     const seenAccounts = new Set<string>();
     const eligible: EligibleCandidate[] = [];
     const failureFeedbackSkipped: RequestPreparationCandidateAuthority[] = [];
+    const modelCooldownSkipped: RequestPreparationCandidateAuthority[] = [];
+    const busySkipped: RequestPreparationCandidateAuthority[] = [];
     let healthDenied = 0;
     // select() has already validated these; the local bindings keep the same
     // narrowing for the extracted loop body and fail closed defensively.
@@ -1483,6 +1677,20 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         this.dependencies.failureFeedback?.isExcluded({ candidate: candidateValue, now })
       ) {
         failureFeedbackSkipped.push(candidateValue);
+        continue;
+      }
+      // Core-plan 9.1 (B06): model-level cooldown read. Same hint semantics as
+      // failure feedback: skip only this (account, model) candidate, exactly
+      // like a health deny, never the whole selection.
+      if (
+        !options.ignoreModelCooldown &&
+        this.dependencies.modelCooldown?.isModelExcluded({
+          candidate: candidateValue,
+          model: candidateValue.resolvedModel,
+          now,
+        })
+      ) {
+        modelCooldownSkipped.push(candidateValue);
         continue;
       }
 
@@ -1536,14 +1744,20 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         return { outcome: 'blocked', reason: 'provider account concurrency authority returned an invalid decision' };
       }
       if (concurrency.decision === 'block') return { outcome: 'blocked', reason: concurrency.reason };
-      if (concurrency.decision === 'deny') continue;
+      if (concurrency.decision === 'deny') {
+        busySkipped.push(candidateValue);
+        continue;
+      }
       if (
         !isRecord(concurrency.value) ||
         !nonNegativeInteger(concurrency.value.inFlight) ||
         !positiveInteger(concurrency.value.limit) ||
         concurrency.value.inFlight >= concurrency.value.limit
       ) {
-        if (isRecord(concurrency.value) && concurrency.value.inFlight >= concurrency.value.limit) continue;
+        if (isRecord(concurrency.value) && concurrency.value.inFlight >= concurrency.value.limit) {
+          busySkipped.push(candidateValue);
+          continue;
+        }
         return { outcome: 'blocked', reason: 'provider account concurrency authority is invalid' };
       }
 
@@ -1579,7 +1793,14 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       });
     }
 
-    return { outcome: 'collected', eligible, failureFeedbackSkipped, healthDenied };
+    return {
+      outcome: 'collected',
+      eligible,
+      failureFeedbackSkipped,
+      modelCooldownSkipped,
+      busySkipped,
+      healthDenied,
+    };
   }
 
   /**

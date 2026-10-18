@@ -6,6 +6,8 @@ import {
 } from '../../../../src/saas/gateway/grok/constants.js';
 import {
   evaluateGrokFreeTierGate,
+  evaluateGrokFreeTierGateSnapshot,
+  GROK_FREE_SOFT_GATE_PERCENT_FLOOR,
   GROK_FREE_SOFT_GATE_TOKEN_FLOOR,
 } from '../../../../src/saas/gateway/grok/free-tier-gate.js';
 
@@ -50,5 +52,109 @@ test('free-tier soft gate decision table', () => {
   ];
   for (const { name, tier, rolling24hTokens, expected } of cases) {
     assert.equal(evaluateGrokFreeTierGate({ subscriptionTier: tier, rolling24hTokens }), expected, name);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Core-plan 9.1 (B06): the scheduler-side snapshot adapter             */
+/* ------------------------------------------------------------------ */
+
+const NOW = 1_800_000_000_000;
+
+test('free-tier snapshot adapter: percent floor derives from the same 95% fraction', () => {
+  assert.equal(GROK_FREE_SOFT_GATE_PERCENT_FLOOR, 95);
+});
+
+test('free-tier snapshot adapter decision table', () => {
+  const cases: ReadonlyArray<{
+    readonly name: string;
+    readonly tier: string | null;
+    readonly usedPercent: number | null;
+    readonly observedAtMs: number | null;
+    readonly expected: 'admit' | 'excluded';
+  }> = [
+    {
+      name: 'free at 95% observed is excluded',
+      tier: 'free',
+      usedPercent: 95,
+      observedAtMs: NOW - 1_000,
+      expected: 'excluded',
+    },
+    {
+      name: 'free above the floor is excluded',
+      tier: 'free',
+      usedPercent: 100,
+      observedAtMs: NOW - 1_000,
+      expected: 'excluded',
+    },
+    {
+      name: 'free just under the floor is admitted',
+      tier: 'free',
+      usedPercent: 94.9,
+      observedAtMs: NOW - 1_000,
+      expected: 'admit',
+    },
+    {
+      name: 'free with never-observed percent is admitted (fail-open)',
+      tier: 'free',
+      usedPercent: null,
+      observedAtMs: NOW - 1_000,
+      expected: 'admit',
+    },
+    {
+      name: 'free with stale snapshot is admitted (fail-open)',
+      tier: 'free',
+      usedPercent: 100,
+      observedAtMs: NOW - 2 * 60 * 60 * 1000 - 1,
+      expected: 'admit',
+    },
+    {
+      name: 'free with snapshot exactly at the freshness bound is evaluated',
+      tier: 'free',
+      usedPercent: 100,
+      observedAtMs: NOW - 2 * 60 * 60 * 1000,
+      expected: 'excluded',
+    },
+    {
+      name: 'free with never-observed snapshot is admitted (fail-open)',
+      tier: 'free',
+      usedPercent: 100,
+      observedAtMs: null,
+      expected: 'admit',
+    },
+    {
+      name: 'free tier alias normalizes',
+      tier: 'Free-Tier',
+      usedPercent: 96,
+      observedAtMs: NOW - 1_000,
+      expected: 'excluded',
+    },
+    {
+      name: 'supergrok is never gated',
+      tier: 'supergrok',
+      usedPercent: 100,
+      observedAtMs: NOW - 1_000,
+      expected: 'admit',
+    },
+    { name: 'missing tier is admitted', tier: null, usedPercent: 100, observedAtMs: NOW - 1_000, expected: 'admit' },
+    {
+      name: 'malformed percent admits (fail-open)',
+      tier: 'free',
+      usedPercent: Number.NaN,
+      observedAtMs: NOW - 1_000,
+      expected: 'admit',
+    },
+  ];
+  for (const { name, tier, usedPercent, observedAtMs, expected } of cases) {
+    assert.equal(
+      evaluateGrokFreeTierGateSnapshot({
+        subscriptionTier: tier,
+        observedUsedPercent: usedPercent,
+        observedAtMs,
+        nowMs: NOW,
+      }),
+      expected,
+      name,
+    );
   }
 });

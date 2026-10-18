@@ -557,6 +557,152 @@ test('every candidate denied by durable health blocks closed even without failur
   });
 });
 
+/* ------------------------------------------------------------------ */
+/* Core-plan 9.1 (B06): model-level cooldown consumed by the scheduler  */
+/* ------------------------------------------------------------------ */
+
+test('model cooldown excludes the cooled (account, model) candidate before eligibility (9.1)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  let revalidations = 0;
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+      {
+        async revalidate(input) {
+          revalidations += 1;
+          return eligibilityPort(new Map([[input.candidate.accountId, { priority: 1, weight: 1 }]])).revalidate(input);
+        },
+      },
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    modelCooldown: {
+      isModelExcluded(input) {
+        // Only the (account-a, provider-model-a) pair is cooled; the model
+        // passed to the seam is the candidate's resolved upstream model.
+        assert.equal(input.model, 'provider-model-a');
+        assert.ok(input.now instanceof Date);
+        return input.candidate.accountId === 'account-a';
+      },
+    },
+  }).select(baseInput(candidates));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  // The cooled pair is skipped before the eligibility authority is consulted.
+  assert.equal(revalidations, 1);
+});
+
+test('model cooldown cooling every candidate fails open like the failure-feedback hint (9.1, P17)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    modelCooldown: {
+      isModelExcluded() {
+        return true;
+      },
+    },
+  }).select(baseInput(candidates));
+  // The model cooldown is the same class of in-process hint: with every
+  // candidate cooled the request still dispatches so the client observes the
+  // provider's real status instead of a gateway rejection.
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') {
+    assert.ok(['account-a', 'account-b'].includes(result.value.accountId));
+  }
+});
+
+test('model cooldown still blocks closed when the durable authorities deny every candidate (9.1, K2)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(
+      new Map([
+        ['account-a', 'cooldown'],
+        ['account-b', 'cooldown'],
+      ]),
+    ),
+    concurrency: concurrencyPort(new Map()),
+    modelCooldown: {
+      isModelExcluded() {
+        return true;
+      },
+    },
+  }).select(baseInput(candidates));
+  assert.deepEqual(result, {
+    decision: 'block',
+    code: 'capability_unavailable',
+    message: 'no schedulable provider account is available',
+  });
+});
+
+test('model cooldown AND failure feedback both emptying the set re-run the union fail-open (9.1, P17)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  let sawFallback = false;
+  const result = await scheduler({
+    eligibility: eligibilityPort(new Map(), {
+      async revalidate(input) {
+        sawFallback = true;
+        return eligibilityPort(new Map([[input.candidate.accountId, { priority: 1, weight: 1 }]])).revalidate(input);
+      },
+    }),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    failureFeedback: {
+      isExcluded(input) {
+        return input.candidate.accountId === 'account-a';
+      },
+    },
+    modelCooldown: {
+      isModelExcluded(input) {
+        return input.candidate.accountId === 'account-b';
+      },
+    },
+  }).select(baseInput(candidates));
+  // account-a is cooled by feedback, account-b by the model registry: the
+  // union fallback re-runs BOTH with the hints cleared instead of starved.
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') {
+    assert.ok(['account-a', 'account-b'].includes(result.value.accountId));
+  }
+  assert.ok(sawFallback, 'eligibility should have been consulted in the fallback pass');
+});
+
+test('a surviving candidate keeps the model-cooldown exclusion effective (9.1)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    modelCooldown: {
+      isModelExcluded(input) {
+        return input.candidate.accountId === 'account-a';
+      },
+    },
+  }).select(baseInput(candidates));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+});
+
 test('all candidates denied without any durable health deny keeps the account_denied rejection (K2)', async () => {
   const candidates = [candidate('account-a'), candidate('account-b')];
   const result = await scheduler({
@@ -636,4 +782,198 @@ test('absent failure feedback keeps the default selection path (golden-fixture r
     concurrency: concurrencyPort(new Map()),
   }).select(baseInput([candidate('account-a'), candidate('account-b')]));
   assert.equal(result.decision, 'allow');
+});
+
+/*
+ * Core-plan 9.2 — the bounded sticky wait. The seam is default-OFF: every
+ * pre-existing test in this file runs without `stickyWait` and therefore
+ * keeps the byte-identical selection path (including the busy-skip and the
+ * defensive block). These tests cover the enabled seam only.
+ *
+ * The clock is virtual and advances one fixed step per `now()` call, so the
+ * wait loop terminates deterministically after ~maxWaitMs/step ticks while
+ * the real sleeps (tickMs) stay sub-millisecond.
+ */
+function advancingClock(stepMs = 25): () => Date {
+  let virtualMs = NOW.getTime();
+  return () => {
+    virtualMs += stepMs;
+    return new Date(virtualMs);
+  };
+}
+
+function stickyWaitScheduler(
+  dependencies: ProviderAccountSchedulerDependencies,
+  config: { readonly maxWaitMs: number; readonly maxQueueLength: number; readonly tickMs: number },
+): ProviderAccountScheduler {
+  return new ProviderAccountScheduler(dependencies, {
+    now: advancingClock(),
+    maxHealthAgeMs: 60_000,
+    stickyWait: config,
+  });
+}
+
+test('sticky wait: a busy target is held and selected when a lease slot frees', async () => {
+  const observedDomains: readonly string[][] = [];
+  let concurrencyCalls = 0;
+  const dependencies: ProviderAccountSchedulerDependencies = {
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: {
+      async get(input) {
+        concurrencyCalls += 1;
+        if (input.candidate.accountId !== 'account-a') {
+          return { decision: 'allow', value: { inFlight: 0, limit: 2 } };
+        }
+        // First pass busy → wait re-check frees the lease slot.
+        return concurrencyCalls <= 1
+          ? { decision: 'deny', reason: 'no free lease slot' }
+          : { decision: 'allow', value: { inFlight: 0, limit: 2 } };
+      },
+    },
+    affinity: {
+      async resolve(input) {
+        observedDomains.push(input.eligibleAccountIds);
+        return { decision: 'allow', accountId: 'account-a' };
+      },
+    },
+  };
+  const result = await stickyWaitScheduler(dependencies, { maxWaitMs: 200, maxQueueLength: 2, tickMs: 5 }).select(
+    baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
+  );
+
+  assert.equal(concurrencyCalls >= 2, true, 'the selection re-checked the busy target');
+  // The resolution domain EXTENDED to the busy population, so the binding
+  // holder sees the busy target as still-bound (no 'stale' invalidation).
+  assert.deepEqual(observedDomains, [['account-b', 'account-a']]);
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') {
+    assert.equal(result.value.accountId, 'account-a');
+  }
+});
+
+test('sticky wait: an exhausted budget answers 429 with a Retry-After hint', async () => {
+  const observedDomains: readonly string[][] = [];
+  const dependencies: ProviderAccountSchedulerDependencies = {
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: {
+      async get(input) {
+        if (input.candidate.accountId !== 'account-a') {
+          return { decision: 'allow', value: { inFlight: 0, limit: 2 } };
+        }
+        return { decision: 'deny', reason: 'no free lease slot' };
+      },
+    },
+    affinity: {
+      async resolve(input) {
+        observedDomains.push(input.eligibleAccountIds);
+        return { decision: 'allow', accountId: 'account-a' };
+      },
+    },
+  };
+  const result = await stickyWaitScheduler(dependencies, { maxWaitMs: 100, maxQueueLength: 2, tickMs: 5 }).select(
+    baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
+  );
+
+  assert.deepEqual(observedDomains, [['account-b', 'account-a']]);
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') {
+    assert.equal(result.code, 'rate_limited');
+    assert.match(result.message, /bounded wait budget expired/);
+    assert.equal(result.retryAfterSeconds, 1);
+  }
+});
+
+test('sticky wait: a full waiter queue degrades to the ranking chain immediately', async () => {
+  const dependencies: ProviderAccountSchedulerDependencies = {
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    // account-a is saturated FOREVER; the second waiter must not enqueue.
+    // account-b's `get` yields once so the first waiter registers first.
+    concurrency: (() => {
+      let bCalls = 0;
+      return {
+        async get(input: { candidate: { accountId: string } }) {
+          if (input.candidate.accountId !== 'account-a') {
+            bCalls += 1;
+            if (bCalls <= 4) await new Promise<void>((resolve) => setTimeout(resolve, 5));
+            return { decision: 'allow', value: { inFlight: 0, limit: 2 } };
+          }
+          return { decision: 'deny', reason: 'no free lease slot' };
+        },
+      };
+    })(),
+    affinity: {
+      async resolve() {
+        return { decision: 'allow', accountId: 'account-a' };
+      },
+    },
+  };
+  const instance = stickyWaitScheduler(dependencies, { maxWaitMs: 250, maxQueueLength: 1, tickMs: 5 });
+  const first = instance.select(
+    baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
+  );
+  // The first waiter is inside its bounded loop by now; the second must
+  // observe a full queue and degrade without waiting.
+  await new Promise<void>((resolve) => setTimeout(resolve, 40));
+  const second = instance.select(
+    baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
+  );
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(secondResult.decision, 'allow');
+  if (secondResult.decision === 'allow') assert.equal(secondResult.value.accountId, 'account-b');
+  assert.equal(firstResult.decision, 'reject');
+  if (firstResult.decision === 'reject') assert.equal(firstResult.code, 'rate_limited');
+});
+
+test('sticky wait: a target that died (neither eligible nor busy) still blocks defensively', async () => {
+  const result = await stickyWaitScheduler(
+    {
+      eligibility: eligibilityPort(new Map([['account-b', { priority: 1, weight: 1 }]])),
+      health: healthPort(),
+      concurrency: concurrencyPort(new Map()),
+      affinity: {
+        async resolve() {
+          return { decision: 'allow', accountId: 'account-a' };
+        },
+      },
+    },
+    { maxWaitMs: 100, maxQueueLength: 2, tickMs: 5 },
+  ).select(baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }));
+
+  assert.equal(result.decision, 'block');
+  if (result.decision === 'block') assert.match(result.message, /no longer eligible/);
+});
+
+test('sticky wait: malformed budgets are a composition error', () => {
+  const dependencies: ProviderAccountSchedulerDependencies = {
+    eligibility: eligibilityPort(new Map()),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+  };
+  const base: { readonly maxWaitMs: number; readonly maxQueueLength: number; readonly tickMs: number } = {
+    maxWaitMs: 100,
+    maxQueueLength: 2,
+    tickMs: 5,
+  };
+  for (const field of ['maxWaitMs', 'maxQueueLength', 'tickMs'] as const) {
+    assert.throws(() => new ProviderAccountScheduler(dependencies, { stickyWait: { ...base, [field]: 0 } }), TypeError);
+  }
 });

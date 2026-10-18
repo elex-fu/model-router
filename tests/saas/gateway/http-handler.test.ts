@@ -628,8 +628,43 @@ test('rejects multipart-only media endpoints with an explicit JSON-only policy (
   assert.equal(oversized.response.writeHeadCalls[0]?.status, 501);
 });
 
-test('accepts only Bearer authorization and never exposes the raw secret in errors', async () => {
-  const missing = harness();
+test('a rate-limit rejection maps to 429 and carries the Retry-After hint (core-plan 9.2)', async () => {
+  const hinted = harness({
+    preparationResult: {
+      outcome: 'rejected',
+      stage: 'authority',
+      code: 'rate_limited',
+      reason: 'bounded sticky wait expired',
+      retryAfterSeconds: 2,
+      evidence: null,
+    },
+  });
+  await hinted.handler(asRequest(hinted.request), asResponse(hinted.response));
+  assert.equal(hinted.response.writeHeadCalls[0]?.status, 429);
+  assert.equal(hinted.response.writeHeadCalls[0]?.headers['retry-after'], '2');
+
+  // The hint is optional: other rate-limit rejections keep the response
+  // header absent exactly as before.
+  const plain = harness({
+    preparationResult: {
+      outcome: 'rejected',
+      stage: 'authority',
+      code: 'rate_limited',
+      reason: 'authoritative rate ceiling',
+      evidence: null,
+    },
+  });
+  await plain.handler(asRequest(plain.request), asResponse(plain.response));
+  assert.equal(plain.response.writeHeadCalls[0]?.status, 429);
+  assert.equal(
+    Object.keys(plain.response.writeHeadCalls[0]?.headers ?? {}).some((name) => name.toLowerCase() === 'retry-after'),
+    false,
+  );
+  assert.equal(hinted.dispatchInputs.length, 0);
+  assert.equal(plain.dispatchInputs.length, 0);
+});
+
+test('accepts only Bearer authorization and never exposes the raw secret in errors', async () => {  const missing = harness();
   delete missing.request.headers.authorization;
   await missing.handler(asRequest(missing.request), asResponse(missing.response));
   assert.equal(missing.response.writeHeadCalls[0]?.status, 401);

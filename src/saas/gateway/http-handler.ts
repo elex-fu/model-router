@@ -507,6 +507,8 @@ class GatewayHttpError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    /** Core-plan 9.2: optional Retry-After (integer seconds) on 429 responses. */
+    readonly retryAfterSeconds?: number,
   ) {
     super();
     this.name = 'GatewayHttpError';
@@ -593,6 +595,7 @@ function writeJsonError(
   code: string,
   requestId: string,
   message = 'The request could not be completed',
+  retryAfterSeconds?: number,
 ): void {
   if (res.destroyed || res.writableEnded) return;
   if (res.headersSent) {
@@ -606,6 +609,12 @@ function writeJsonError(
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
       'x-request-id': requestId,
+      ...(typeof retryAfterSeconds === 'number' &&
+      Number.isSafeInteger(retryAfterSeconds) &&
+      retryAfterSeconds >= 0 &&
+      retryAfterSeconds <= 86400
+        ? { 'retry-after': String(retryAfterSeconds) }
+        : {}),
     });
     res.end(JSON.stringify({ error: { code, message, requestId } }));
   } catch {
@@ -618,7 +627,16 @@ function writeJsonError(
 }
 
 function sendHttpError(res: ServerResponse, error: GatewayHttpError, requestId: string, message?: string): void {
-  writeJsonError(res, error.status, error.code, requestId, message);
+  writeJsonError(
+    res,
+    error.status,
+    error.code,
+    requestId,
+    message,
+    error.retryAfterSeconds !== undefined && Number.isSafeInteger(error.retryAfterSeconds)
+      ? error.retryAfterSeconds
+      : undefined,
+  );
 }
 
 function sendCanonicalRequestStatus(
@@ -1030,7 +1048,7 @@ function preparationError(result: RequestPreparationResult): GatewayHttpError {
     // TPM and concurrency, and the billing-group RPM ceiling) are rate-limit
     // rejections — 429, not the generic 403 refusal.
     if (result.code === 'rate_limited' || result.code === 'quota_exceeded') {
-      return new GatewayHttpError(429, 'RATE_LIMITED');
+      return new GatewayHttpError(429, 'RATE_LIMITED', result.retryAfterSeconds);
     }
     // R1 (roadmap 1.3, phase 3): spend ceilings (the wallet hold, the KEY-BUD
     // budget, and the billing-group daily/weekly/monthly spend windows) are

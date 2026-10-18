@@ -695,6 +695,136 @@ test('null, unknown, and ok quota snapshots leave scheduling untouched', async (
   }
 });
 
+test('a live grok 429 cooldown and the free-tier soft gate deny the candidate (migration 119, 9.1)', async (t) => {
+  const now = NOW.getTime();
+  const fresh = new Date(now - 60_000).toISOString();
+  const future = new Date(now + 10 * 60_000).toISOString();
+
+  await t.test('a live persisted 429 cooldown denies only this candidate', async () => {
+    const rows = new Map([
+      [
+        'account-a',
+        [
+          {
+            ...eligibilityRow('byok', 'account-a'),
+            account_grok_subscription_tier: 'free',
+            account_grok_5h_used_percent: 10,
+            account_grok_usage_updated_at: fresh,
+            account_grok_rate_limited_until: future,
+          },
+        ],
+      ],
+      ['account-b', [eligibilityRow('byok', 'account-b')]],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a'), candidate('byok', 'account-b')]));
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  });
+
+  await t.test('a past 429 cooldown keeps the candidate eligible (NULL-or-elapsed semantics)', async () => {
+    const rows = new Map([
+      [
+        'account-a',
+        [
+          {
+            ...eligibilityRow('byok', 'account-a'),
+            account_grok_subscription_tier: 'free',
+            account_grok_5h_used_percent: 10,
+            account_grok_usage_updated_at: fresh,
+            account_grok_rate_limited_until: new Date(now - 1_000).toISOString(),
+          },
+        ],
+      ],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a')]));
+    assert.equal(result.decision, 'allow');
+  });
+
+  await t.test('a fresh free-tier snapshot at the 95% floor excludes the candidate', async () => {
+    const rows = new Map([
+      [
+        'account-a',
+        [
+          {
+            ...eligibilityRow('byok', 'account-a'),
+            account_grok_subscription_tier: 'free',
+            account_grok_5h_used_percent: 95,
+            account_grok_usage_updated_at: fresh,
+            account_grok_rate_limited_until: null,
+          },
+        ],
+      ],
+      ['account-b', [eligibilityRow('byok', 'account-b')]],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a'), candidate('byok', 'account-b')]));
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  });
+
+  await t.test('a paid tier at 100% observed is never gated', async () => {
+    const rows = new Map([
+      [
+        'account-a',
+        [
+          {
+            ...eligibilityRow('byok', 'account-a'),
+            account_grok_subscription_tier: 'supergrok',
+            account_grok_5h_used_percent: 100,
+            account_grok_usage_updated_at: fresh,
+            account_grok_rate_limited_until: null,
+          },
+        ],
+      ],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a')]));
+    assert.equal(result.decision, 'allow');
+  });
+
+  await t.test('a stale free-tier snapshot is admitted (fail-open)', async () => {
+    const rows = new Map([
+      [
+        'account-a',
+        [
+          {
+            ...eligibilityRow('byok', 'account-a'),
+            account_grok_subscription_tier: 'free',
+            account_grok_5h_used_percent: 100,
+            account_grok_usage_updated_at: new Date(now - 2 * 60 * 60 * 1000 - 1).toISOString(),
+            account_grok_rate_limited_until: null,
+          },
+        ],
+      ],
+    ]);
+    const { scheduler, input } = setup('byok', { eligibilityRows: rows });
+    const result = await scheduler.select(input([candidate('byok', 'account-a')]));
+    assert.equal(result.decision, 'allow');
+  });
+
+  await t.test('row columns absent entirely keep the default selection (fixture red line)', async () => {
+    const { scheduler, input } = setup('byok');
+    const result = await scheduler.select(input([candidate('byok')]));
+    assert.equal(result.decision, 'allow');
+  });
+
+  await t.test('the eligibility SQL projects the migration-119 columns', async () => {
+    const { scheduler: projected, state: queried, input: projectedInput } = setup('byok');
+    await projected.select(projectedInput([candidate('byok')]));
+    const eligibilitySql = queried.statements.find(({ sql }) => sql.includes('eligibility'))?.sql;
+    for (const column of [
+      'account.grok_subscription_tier AS account_grok_subscription_tier',
+      'account.grok_5h_used_percent AS account_grok_5h_used_percent',
+      'account.grok_usage_updated_at AS account_grok_usage_updated_at',
+      'account.grok_rate_limited_until AS account_grok_rate_limited_until',
+    ]) {
+      assert.ok(eligibilitySql?.includes(column), `missing ${column}`);
+    }
+  });
+});
+
 test('a low persisted quota snapshot demotes but never removes the candidate', async (t) => {
   for (const mode of ['byok', 'platform'] as const) {
     await t.test(mode, async () => {
@@ -1355,6 +1485,24 @@ test('failureFeedback is forwarded to the core scheduler and cools only the faul
     {
       failureFeedback: {
         isExcluded(probe: { candidate: RequestPreparationCandidateAuthority }) {
+          return probe.candidate.accountId === 'account-a';
+        },
+      },
+    },
+  );
+  const result = await scheduler.select(input([candidate('byok'), candidate('byok', 'account-b')]));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+});
+
+test('modelCooldown is forwarded to the core scheduler and cools only the (account, model) pair (9.1)', async () => {
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    {
+      modelCooldown: {
+        isModelExcluded(probe: { candidate: RequestPreparationCandidateAuthority; model: string }) {
+          assert.equal(probe.model, 'provider-model-a');
           return probe.candidate.accountId === 'account-a';
         },
       },

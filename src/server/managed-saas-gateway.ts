@@ -98,6 +98,7 @@ import {
 import { PostgresProviderAccountLeaseService } from '../saas/gateway/provider-account-lease-service.js';
 import type {
   ProviderAccountSchedulerAffinityPort,
+  ProviderAccountSchedulerStickyWaitConfig,
   ProviderAccountSchedulerStrategiesOptions,
 } from '../saas/gateway/provider-account-scheduler.js';
 import {
@@ -1053,6 +1054,17 @@ export interface ManagedSaasGatewayProductionOptions {
    */
   readonly schedulerStrategies?: ProviderAccountSchedulerStrategiesOptions;
   /**
+   * Core-plan 9.2: the bounded sticky-wait budget. Optional and default-OFF:
+   * when absent, a busy sticky target behaves exactly as before (invalidated
+   * as stale → load balancing). When set, a busy-but-schedulable sticky
+   * target holds the session's binding and waits up to `maxWaitMs`
+   * (recommended initial 2000) for a free lease slot, with a per-target
+   * in-process waiter queue (`maxQueueLength`) and re-check tick (`tickMs`);
+   * expiry answers 429 + Retry-After (values are initial suggestions, to be
+   * frozen after load testing per plan §9.2 — no durable state involved).
+   */
+  readonly schedulerStickyWait?: ProviderAccountSchedulerStickyWaitConfig;
+  /**
    * F2 (task #35): optional Redis concurrency-slot pre-check in front of the
    * PostgreSQL lease snapshot (R6b hot state). Default absent = OFF, keeping
    * the concurrency port byte-identical. Only combined/control-plane
@@ -1668,6 +1680,13 @@ export function createManagedSaasGatewayProductionComposition(
   // (exclusion hint) and dispatch (outcome recording). Purely in-memory; the
   // PostgreSQL runtime health rows remain the durable authority.
   const dispatchFailureFeedback = new ProviderAccountDispatchFailureFeedback();
+  /*
+   * Core-plan 9.1 (B06): one shared model-cooldown registry — the dispatch
+   * side records model-unavailable outcomes into it and the scheduler reads
+   * the same instance via modelCooldown, so the (account, model) cooldown is
+   * both written AND consumed.
+   */
+  const modelRateLimitRegistry = new ProviderAccountModelRateLimit();
   // The lease service is created before the scheduler so the same fenced
   // lease authority can back the scheduler's half-open health probes (H5a).
   const leaseProvider = new PostgresProviderAccountLeaseService({
@@ -1690,9 +1709,11 @@ export function createManagedSaasGatewayProductionComposition(
     healthProbe: { store: runtimeHealthStore, leaseProvider },
     // H5c (P8): fast fail-away from accounts returning 401/403/429.
     failureFeedback: dispatchFailureFeedback,
+    modelCooldown: modelRateLimitRegistry,
     affinity: schedulerAffinityPort,
     leaseConcurrencyLimit: options.maxConcurrency,
     strategies: options.schedulerStrategies,
+    ...(options.schedulerStickyWait ? { stickyWait: options.schedulerStickyWait } : {}),
     ...(options.schedulerRedisConcurrencySlots
       ? { redisConcurrencySlots: options.schedulerRedisConcurrencySlots }
       : {}),
@@ -2051,7 +2072,7 @@ export function createManagedSaasGatewayProductionComposition(
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
       dispatchFailureFeedback,
-      modelRateLimit: new ProviderAccountModelRateLimit(),
+      modelRateLimit: modelRateLimitRegistry,
     },
     lifecycle: {
       close: async () => {

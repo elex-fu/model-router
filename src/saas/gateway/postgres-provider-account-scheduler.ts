@@ -4,6 +4,7 @@ import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.j
 import { CLAUDE_PRODUCT_ID, CLAUDE_PROVIDER_ID } from './claude/catalog-identity.js';
 import { validateClaudeCodeClient } from './claude/claude-code-validator.js';
 import type { GatewayProtocol } from './contracts.js';
+import { evaluateGrokFreeTierGateSnapshot } from './grok/free-tier-gate.js';
 import { effectiveWeight, parseHealthScoreColumn } from './health-score.js';
 import type {
   ProviderAccountHalfOpenProbeAdmissionPort,
@@ -29,6 +30,7 @@ import {
   type ProviderAccountSchedulerHealthDecision,
   type ProviderAccountSchedulerHealthPort,
   type ProviderAccountSchedulerInput,
+  type ProviderAccountSchedulerModelCooldownPort,
   type ProviderAccountSchedulerOptions,
   type ProviderAccountSchedulerPort,
   type ProviderAccountSchedulerRevalidatedRoute,
@@ -117,6 +119,11 @@ interface EligibilityRow extends Row {
   account_opencode_go_weekly_reset_at?: unknown;
   account_opencode_go_monthly_reset_at?: unknown;
   account_opencode_go_usage_updated_at?: unknown;
+  /* Migration 119 (batch 3 grok): the free-tier soft gate + 429 cooldown inputs. */
+  account_grok_subscription_tier?: unknown;
+  account_grok_5h_used_percent?: unknown;
+  account_grok_usage_updated_at?: unknown;
+  account_grok_rate_limited_until?: unknown;
   /* F2 (migration 105): billing-group account-pool priority signal. */
   group_pool_priority?: unknown;
   credential_owner_kind: unknown;
@@ -263,6 +270,13 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
    * like a health deny. Absent keeps the selection byte-identical.
    */
   readonly failureFeedback?: ProviderAccountSchedulerFailureFeedbackPort;
+  /**
+   * Core-plan 9.1 (B06): the model-level cooldown read. The composition passes
+   * the SAME ProviderAccountModelRateLimit instance the dispatch side records
+   * into, so a cooled (account, model) pair is skipped during selection.
+   * Absent keeps the selection byte-identical.
+   */
+  readonly modelCooldown?: ProviderAccountSchedulerModelCooldownPort;
 }
 
 interface PersistedRoute extends ProviderAccountSchedulerRevalidatedRoute {
@@ -324,6 +338,13 @@ SELECT product.status AS product_status,
        account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
        account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
        account.opencode_go_usage_updated_at AS account_opencode_go_usage_updated_at,
+       /* Migration 119 (batch 3 grok): the trusted tier + observed 5h window,
+        * consumed by the TS-side free-tier soft gate below; never a billing
+        * input (the 093 quota-snapshot precedent). */
+       account.grok_subscription_tier AS account_grok_subscription_tier,
+       account.grok_5h_used_percent AS account_grok_5h_used_percent,
+       account.grok_usage_updated_at AS account_grok_usage_updated_at,
+       account.grok_rate_limited_until AS account_grok_rate_limited_until,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -473,6 +494,11 @@ SELECT product.status AS product_status,
        account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
        account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
        account.opencode_go_usage_updated_at AS account_opencode_go_usage_updated_at,
+       /* Migration 119 (batch 3 grok): see the BYOK projection above. */
+       account.grok_subscription_tier AS account_grok_subscription_tier,
+       account.grok_5h_used_percent AS account_grok_5h_used_percent,
+       account.grok_usage_updated_at AS account_grok_usage_updated_at,
+       account.grok_rate_limited_until AS account_grok_rate_limited_until,
        group_pool.priority AS group_pool_priority,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
@@ -731,6 +757,8 @@ SELECT account.id AS account_id,
        account.minimax_5h_used_percent, account.minimax_5h_reset_at,
        account.minimax_weekly_used_percent, account.minimax_weekly_reset_at,
        account.minimax_usage_updated_at,
+       account.grok_5h_used_percent, account.grok_5h_reset_at,
+       account.grok_usage_updated_at,
        account.auto_pause_5h_threshold, account.auto_pause_7d_threshold,
        account.scheduling_threshold_pause_until, account.scheduling_threshold_pause_reason
   FROM ${accountsTable} account
@@ -942,6 +970,12 @@ function rateWindowSum(value: unknown): bigint | null {
 function timestamp(value: unknown): Date | null {
   const parsed = value instanceof Date ? new Date(value.getTime()) : typeof value === 'string' ? new Date(value) : null;
   return parsed && Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+/** Epoch ms of a persisted timestamp column; null/unknown/malformed → null (fail-open). */
+function timestampMs(value: unknown): number | null {
+  const parsed = timestamp(value);
+  return parsed === null ? null : parsed.getTime();
 }
 
 /** Exact non-negative integer as persisted by PostgreSQL (bigint/text/safe number). */
@@ -1451,6 +1485,39 @@ class PostgresEligibilityAuthority {
         }
         if (quotaSignal === 'exhausted') {
           return { decision: 'deny', reason: 'persisted account quota snapshot is exhausted' };
+        }
+        // Migration 119 (batch 3 grok; core-plan 9.1 B06): the persisted Grok
+        // 429 cooldown deadline and the free-tier soft gate are consumed here.
+        // Both are fail-open on absent/malformed data: a quota-header write in
+        // flight (or a never-probed account) never removes availability —
+        // matching the free-tier gate's fail-open rule and the R3 egress
+        // precedent for jitters that must not block scheduling. A live 429
+        // cooldown is a DURABLE scheduling signal (the SQL 109/115 precedent),
+        // so an excluded candidate is denied for this attempt only, exactly
+        // like an exhausted quota snapshot — the durable authority stays the
+        // pause-write and the next request re-evaluates.
+        const grokRateLimitedUntilMs = timestampMs(row.account_grok_rate_limited_until);
+        const nowMs = input.now.getTime();
+        if (grokRateLimitedUntilMs !== null && Number.isFinite(nowMs) && grokRateLimitedUntilMs > nowMs) {
+          return { decision: 'deny', reason: 'persisted grok 429 cooldown is still active' };
+        }
+        const grokGateDecision = evaluateGrokFreeTierGateSnapshot({
+          subscriptionTier:
+            row.account_grok_subscription_tier === null || row.account_grok_subscription_tier === undefined
+              ? null
+              : typeof row.account_grok_subscription_tier === 'string'
+                ? row.account_grok_subscription_tier
+                : null,
+          observedUsedPercent:
+            typeof row.account_grok_5h_used_percent === 'number' ? row.account_grok_5h_used_percent : null,
+          observedAtMs: timestampMs(row.account_grok_usage_updated_at),
+          nowMs,
+        });
+        if (grokGateDecision === 'excluded') {
+          return {
+            decision: 'deny',
+            reason: 'grok free-tier soft gate: observed window at or above the 95% allowance floor',
+          };
         }
         // R6: account-level rpm/tpm ceilings deny only this candidate (the D4
         // exhausted semantics); NULL limits skip the window read entirely.
@@ -2013,6 +2080,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
         // H5c (P8): in-process post-failure cooldown; absent keeps the
         // candidate loop byte-identical.
         failureFeedback: options.failureFeedback,
+        modelCooldown: options.modelCooldown,
       },
       options,
     );
