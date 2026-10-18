@@ -10,7 +10,7 @@ import {
   SAAS_ENDPOINT_REGISTRY,
 } from '../../../src/saas/gateway/endpoint-registry.js';
 
-test('R2 §7.2: the registry declares exactly the five SaaS entries with the §4 declaration fields', () => {
+test('R2 §7.2 + G-B3: the registry declares exactly the six SaaS entries with the §4 declaration fields', () => {
   assert.deepEqual(
     SAAS_ENDPOINT_REGISTRY.map((entry) => `${entry.method} ${entry.path}`),
     [
@@ -19,6 +19,7 @@ test('R2 §7.2: the registry declares exactly the five SaaS entries with the §4
       'POST /v1beta/models/:model:generateContent',
       'POST /v1beta/models/:model:streamGenerateContent',
       'GET /v1beta/models',
+      'POST /v1/rerank',
     ],
   );
   for (const entry of SAAS_ENDPOINT_REGISTRY) {
@@ -92,6 +93,7 @@ test('R2 §7.2: matchSaasEndpointEntry answers method routing with 405 semantics
     ['GET', '/v1/messages/count_tokens'],
     ['DELETE', '/v1/responses/compact'],
     ['POST', '/v1beta/models'],
+    ['GET', '/v1/rerank'],
   ] as const) {
     const match = matchSaasEndpointEntry(method, path);
     assert.ok(match.matched, `${method} ${path} must still match the registry`);

@@ -119,6 +119,23 @@ export const SAAS_ENDPOINT_REGISTRY: readonly SaasEndpointRegistration[] = [
     // capabilities — never the raw provider model list.
     supportedFeatures: ['caller-scoped'],
   },
+  {
+    // G-B3 (gap-remediation §4): the rerank entry is REGISTERED but not
+    // yet assembled — no catalog supply declares the rerank operation, so
+    // the boundary answers the precise capability-unavailable 503 (the
+    // new-api RelayFormatRerank surface reserved; the 能力不可售 principle:
+    // registered ≠ sellable). The provenance rides the OpenAI chat family
+    // until a dedicated rerank catalog migration widens the operation CHECK.
+    id: 'openai.rerank',
+    method: 'POST',
+    path: '/v1/rerank',
+    protocol: 'openai',
+    operation: 'rerank',
+    provenanceOperation: 'chat.completions',
+    inputShape: 'json',
+    transformVersion: 'rerank-boundary/v1',
+    supportedFeatures: ['reserved'],
+  },
 ];
 
 /** Bounded, printable path-segment model identifiers (mirrors QUERY_PATH_PARAMETER). */

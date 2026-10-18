@@ -554,14 +554,16 @@ test('enforces endpoint-family body ceilings before route resolution (4.0 ①)',
   assert.equal(imagesOver.response.writeHeadCalls[0]?.status, 413);
 
   // Audio family default ceiling: 26 MiB passes, 26 MiB + 1 byte rejects.
+  // (G-B3 note: /v1/audio/speech is now a live /v1/tts alias, so the
+  // family-limit boundary check rides a still-unknown audio-family path.)
   const audioBoundary = harness();
-  audioBoundary.request.url = '/v1/audio/speech';
+  audioBoundary.request.url = '/v1/audio/unknown';
   audioBoundary.request.headers['content-length'] = String(26 * 1024 * 1024);
   await audioBoundary.handler(asRequest(audioBoundary.request), asResponse(audioBoundary.response));
   assert.equal(audioBoundary.response.writeHeadCalls[0]?.status, 404);
 
   const audioOver = harness();
-  audioOver.request.url = '/v1/audio/speech';
+  audioOver.request.url = '/v1/audio/unknown';
   audioOver.request.headers['content-length'] = String(26 * 1024 * 1024 + 1);
   await audioOver.handler(asRequest(audioOver.request), asResponse(audioOver.response));
   assert.equal(audioOver.response.writeHeadCalls[0]?.status, 413);
@@ -1233,4 +1235,35 @@ test('rejects WebSocket upgrade requests with an explicit 501 boundary (4.0 ④)
     assert.equal(ws.preparationInputs.length, 0);
     assert.equal(ws.dispatchInputs.length, 0);
   }
+});
+
+test('G-B3: /v1/audio/speech is a pure alias of /v1/tts — same audio.tts operation, same pricing domain', async () => {
+  for (const path of ['/v1/tts', '/v1/audio/speech']) {
+    const setup = harness();
+    setup.request.url = path;
+    setup.request.method = 'POST';
+    assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+    // Both aliases must reach preparation with the SAME server-owned
+    // client operation (audio.tts) — the 别名不双扣 rule.
+    assert.ok(setup.preparationInputs.length >= 1, `${path} must reach preparation`);
+    const input = setup.preparationInputs[0];
+    assert.equal(input.clientOperation, 'audio.tts', `${path} must carry audio.tts`);
+  }
+});
+
+test('G-B3: POST /v1/rerank answers the precise capability 503 (registered, not assembled)', async () => {
+  const setup = harness();
+  setup.request.url = '/v1/rerank';
+  setup.request.method = 'POST';
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 503);
+  assert.equal(setup.preparationInputs.length, 0, 'the reserved boundary never reaches preparation');
+});
+
+test('G-B3: /v1/rerank with a wrong method answers 405 via the registry match', async () => {
+  const setup = harness();
+  setup.request.url = '/v1/rerank';
+  setup.request.method = 'GET';
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 405);
 });

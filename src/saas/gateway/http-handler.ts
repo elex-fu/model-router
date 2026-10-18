@@ -223,6 +223,11 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   // phase (GET/PATCH/DELETE method dispatch + an unbilled admission shape
   // are its follow-up).
   ['/v1/tts', 'responses'],
+  // G-B3: the OpenAI-standard speech path is a pure alias of /v1/tts — the
+  // SAME audio.tts operation, request idempotency domain and pricing
+  // policy (the plan's 别名不双扣 rule); only the route table entry
+  // differs.
+  ['/v1/audio/speech', 'responses'],
   // §4.2 (task #16): the images.generations operation rides the OpenAI
   // inbound protocol family (the R2 embeddings precedent); the async
   // submission endpoint is the same operation with a 202+task contract.
@@ -251,6 +256,8 @@ const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
   // §4.3 (task #17): the TTS audio passthrough (server-owned, path-derived;
   // stateless — the spoken text is the entire billable input).
   ['/v1/tts', 'audio.tts'],
+  // G-B3: /v1/audio/speech shares the audio.tts client operation.
+  ['/v1/audio/speech', 'audio.tts'],
   // §4.2 (task #16): image generation operations (server-owned,
   // path-derived; stateless — the sub2api /v1/images precedent).
   ['/v1/images/generations', 'images.generations'],
@@ -1822,6 +1829,30 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     if (!preparation || !dispatch) {
       drainRequest(req);
       sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
+      return true;
+    }
+
+    /*
+     * G-B3 (gap-remediation §4): POST /v1/rerank is REGISTERED in the
+     * endpoint registry (openai.rerank) but no catalog supply declares the
+     * rerank operation yet — the 能力不可售 principle keeps the boundary
+     * closed with the precise capability 503 (method-aware via the
+     * registry: a wrong method answers 405) until a rerank-capable supply
+     * is assembled. Registered ≠ sellable.
+     */
+    if (path === '/v1/rerank') {
+      drainRequest(req);
+      const rerankMatch = matchSaasEndpointEntry(req.method ?? '', path);
+      if (!rerankMatch.matched || !rerankMatch.methodAllowed) {
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      sendHttpError(
+        res,
+        new GatewayHttpError(503, 'CAPABILITY_NOT_ASSEMBLED'),
+        requestId,
+        'This rerank endpoint is registered but no assembled supply declares rerank capability yet',
+      );
       return true;
     }
 
