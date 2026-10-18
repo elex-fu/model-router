@@ -44,6 +44,7 @@ export type ProviderPayloadOperation =
   | 'web_search'
   | 'x_search'
   | 'audio.tts'
+  | 'audio.stt'
   | 'videos.generations'
   | 'videos.edits'
   | 'videos.extensions';
@@ -78,7 +79,13 @@ const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
  * verbatim with the resolved model). All of them are servable only by
  * responses-protocol providers (the capability gate below).
  */
-const RESPONSES_FAMILY_OPERATIONS: ReadonlySet<string> = new Set(['responses', 'web_search', 'x_search', 'audio.tts']);
+const RESPONSES_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
+  'responses',
+  'web_search',
+  'x_search',
+  'audio.tts',
+  'audio.stt',
+]);
 
 /**
  * A server-owned route description. It contains no URL, credential, or caller
@@ -415,6 +422,7 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'web_search') return 'web_search';
   if (value === 'x_search') return 'x_search';
   if (value === 'audio.tts') return 'audio.tts';
+  if (value === 'audio.stt') return 'audio.stt';
   if (value === 'videos.generations') return 'videos.generations';
   if (value === 'videos.edits') return 'videos.edits';
   if (value === 'videos.extensions') return 'videos.extensions';
@@ -588,7 +596,10 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   // §4.3: the TTS audio passthrough is servable only by responses-protocol
   // providers (the xAI Voice surface rides the responses-family catalog
   // endpoint); any other provider protocol is a capability miss.
-  if (normalizedClientOperation === 'audio.tts' && resolvedProviderProtocol !== 'responses') {
+  if (
+    (normalizedClientOperation === 'audio.tts' || normalizedClientOperation === 'audio.stt') &&
+    resolvedProviderProtocol !== 'responses'
+  ) {
     compilerFailure('CAPABILITY_UNSUPPORTED');
   }
   if (
@@ -770,6 +781,18 @@ function validateClientBody(body: unknown, route: NormalizedRoute, publicModel: 
   // validation is the billing constructor's (a parse miss fails closed).
   if (route.clientOperation === 'audio.tts') {
     if (ttsBillingRunes(body) === null) compilerFailure('INVALID_INPUT');
+    return body;
+  }
+  // G-B2: an STT transcription/translation request carries the b64 audio
+  // payload (multipart inputs are normalized at the boundary; direct JSON
+  // b64_json bodies take the same path). All other fields stay opaque
+  // JSON riding the passthrough verbatim; billing rides the per-unit 'stt'
+  // size tier (122), so the compiler only requires the payload's presence
+  // and boundedness here.
+  if (route.clientOperation === 'audio.stt') {
+    const payload = body.b64_json;
+    if (typeof payload !== 'string' || payload === '') compilerFailure('INVALID_INPUT');
+    if (payload.length > 64 * 1024 * 1024) compilerFailure('INVALID_INPUT');
     return body;
   }
   // §4.3 (task #17): a video create request carries a non-empty `prompt`;

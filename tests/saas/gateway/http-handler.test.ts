@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   createSaasGatewayHandler,
@@ -254,6 +257,8 @@ function harness(
     readonly maxBodyBytes?: number;
     /** G-C1: the readiness provider for GET /readyz. */
     readonly readiness?: SaasGatewayReadinessProvider;
+    /** G-B2: the multipart staging root. */
+    readonly multipartStagingRoot?: string;
     /** Roadmap 4.0 ①: endpoint-family body limits injected at construction. */
     readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
     /** Batch 2 §2.1: enable the sticky scheduling seam at the boundary. */
@@ -326,6 +331,7 @@ function harness(
     maxBodyBytes: options.maxBodyBytes,
     endpointBodyLimits: options.endpointBodyLimits,
     ...(options.readiness ? { readiness: options.readiness } : {}),
+    ...(options.multipartStagingRoot ? { multipartStagingRoot: options.multipartStagingRoot } : {}),
     ...(options.stickyScheduling ? { stickyScheduling: true } : {}),
   });
   const requestId =
@@ -608,8 +614,9 @@ test('enforces endpoint-family body ceilings before route resolution (4.0 ①)',
   assert.equal(unknownOver.response.writeHeadCalls[0]?.status, 413);
 });
 
-test('rejects multipart-only media endpoints with an explicit JSON-only policy (4.0 ②)', async () => {
-  for (const path of ['/v1/images/edits', '/v1/audio/transcriptions', '/v1/audio/translations']) {
+test('4.0 ② + G-B2: images/edits keeps the JSON-only reservation; audio normalizing endpoints take JSON', async () => {
+  // The still-unwired images/edits endpoint keeps the precise 501.
+  for (const path of ['/v1/images/edits', '/v1/stt']) {
     const multipart = harness();
     multipart.request.url = path;
     await multipart.handler(asRequest(multipart.request), asResponse(multipart.response));
@@ -618,17 +625,15 @@ test('rejects multipart-only media endpoints with an explicit JSON-only policy (
       error: { code: string; message: string };
     };
     assert.equal(body.error.code, 'MULTIPART_NOT_SUPPORTED');
-    assert.ok(body.error.message.includes('multipart'));
-    assert.ok(body.error.message.includes('JSON'));
     assert.equal(multipart.request.resumed, true);
     assert.equal(multipart.preparationInputs.length, 0);
     assert.equal(multipart.dispatchInputs.length, 0);
   }
 
-  // The policy answer precedes size enforcement: an oversized declared upload
-  // to a multipart endpoint still gets the precise 501, not a bare 413.
+  // An oversized declared upload to a reserved endpoint still gets the
+  // precise 501, not a bare 413.
   const oversized = harness();
-  oversized.request.url = '/v1/audio/transcriptions';
+  oversized.request.url = '/v1/images/edits';
   oversized.request.headers['content-length'] = String(100 * 1024 * 1024);
   await oversized.handler(asRequest(oversized.request), asResponse(oversized.response));
   assert.equal(oversized.response.writeHeadCalls[0]?.status, 501);
@@ -1327,4 +1332,74 @@ test('G-C1: an absent readiness provider answers the process-only payload; a wro
   const body = JSON.parse(String(plain.response.endBody ?? '{}')) as Record<string, unknown>;
   assert.equal(body.database, 'unknown');
   assert.deepEqual(body.dependencies, {});
+});
+
+test('G-B2: a multipart /v1/audio/transcriptions normalizes to the JSON b64 body and reaches preparation', async () => {
+  const stagingRoot = await mkdtemp(join(tmpdir(), 'mr-mp-route-'));
+  try {
+    const setup = harness({ multipartStagingRoot: stagingRoot });
+    setup.request.url = '/v1/audio/transcriptions';
+    setup.request.method = 'POST';
+    const boundary = '----mrtestbound';
+    const audioBytes = 'fake-audio-bytes';
+    const multipart = [
+      `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n${audioBytes}\r\n`,
+      `--${boundary}--\r\n`,
+    ].join('');
+    setup.request.chunks = [new TextEncoder().encode(multipart)];
+    (setup.request.headers as Record<string, string>)['content-type'] = `multipart/form-data; boundary=${boundary}`;
+    setup.request.headers['content-length'] = String(multipart.length);
+    assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+    assert.ok(
+      setup.preparationInputs.length >= 1,
+      `preparation not reached (status ${setup.response.writeHeadCalls[0]?.status}, body ${String(setup.response.endBody ?? '').slice(0, 300)})`,
+    );
+    const input = setup.preparationInputs[0];
+    assert.equal(input.clientOperation, 'audio.stt');
+    const requestBody = input.clientRequest as Record<string, unknown>;
+    assert.equal(requestBody.model, 'whisper-1');
+    assert.equal(requestBody.b64_json, Buffer.from(audioBytes).toString('base64'));
+    assert.equal(requestBody.file, 'audio.mp3');
+  } finally {
+    await rm(stagingRoot, { recursive: true, force: true });
+  }
+});
+
+test('G-B2: a multipart request without a staging root keeps the reserved 501', async () => {
+  const setup = harness();
+  setup.request.url = '/v1/audio/transcriptions';
+  setup.request.method = 'POST';
+  const boundary = '----mrtestbound';
+  const multipart = [
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="model"',
+    '',
+    'whisper-1',
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
+  setup.request.chunks = [new TextEncoder().encode(multipart)];
+  (setup.request.headers as Record<string, string>)['content-type'] = `multipart/form-data; boundary=${boundary}`;
+  await setup.handler(asRequest(setup.request), asResponse(setup.response));
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 501);
+  assert.equal(setup.preparationInputs.length, 0);
+});
+
+test('G-B2: a JSON b64_json STT body takes the direct path without any staging', async () => {
+  const setup = harness();
+  setup.request.url = '/v1/audio/transcriptions';
+  setup.request.method = 'POST';
+  setup.request.chunks = [
+    new TextEncoder().encode(
+      JSON.stringify({ model: 'whisper-1', b64_json: Buffer.from('direct-json-audio').toString('base64') }),
+    ),
+  ];
+  setup.request.headers['content-type'] = 'application/json';
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.ok(
+    setup.preparationInputs.length >= 1,
+    `preparation not reached (status ${setup.response.writeHeadCalls[0]?.status}, body ${String(setup.response.endBody ?? '').slice(0, 200)})`,
+  );
+  assert.equal(setup.preparationInputs[0].clientOperation, 'audio.stt');
 });

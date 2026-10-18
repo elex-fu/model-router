@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import type { AuthenticatedApiKey } from '../keys/types.js';
 import {
   beginGatewayInflightRequest,
@@ -22,6 +24,7 @@ import type { SaasGatewayAsyncMediaPort, SaasGatewayAsyncMediaSubmission } from 
 import { JsonKeepaliveClientStream } from './images/json-keepalive-client-stream.js';
 import { RecordingClientStream } from './images/recording-client-stream.js';
 import type { SaasModelPlazaPort } from './model-plaza/endpoint.js';
+import { type GatewayMultipartEnvelope, GatewayMultipartParseError, parseMultipartBody } from './multipart-envelope.js';
 import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
 import type {
   PreparedEvidenceClientStream,
@@ -92,10 +95,14 @@ const VIDEO_FAMILY_PATH_PREFIX = '/v1/videos/';
  * instead of a generic 404) so clients get an actionable answer and task
  * #16/#17 route registration never has to touch this policy.
  */
+/*
+ * G-B2: the STT family accepts multipart (normalized at the boundary when
+ * a staging root is configured) AND direct JSON b64_json bodies — both
+ * shapes are live. The remaining paths stay JSON-only for now.
+ */
+const MULTIPART_NORMALIZING_ENDPOINT_PATHS = new Set<string>(['/v1/audio/transcriptions', '/v1/audio/translations']);
 const MULTIPART_ONLY_ENDPOINT_PATHS = new Set<string>([
   '/v1/images/edits',
-  '/v1/audio/transcriptions',
-  '/v1/audio/translations',
   // §4.3 (task #17): the xAI Voice STT surface is multipart-only upstream
   // (sub2api bills it from the multipart body-size heuristic), so the JSON
   // gateway reserves the sub2api path shape with the same precise 501
@@ -103,7 +110,9 @@ const MULTIPART_ONLY_ENDPOINT_PATHS = new Set<string>([
   '/v1/stt',
 ]);
 const MULTIPART_UNSUPPORTED_MESSAGE =
-  'This endpoint requires multipart/form-data, which the hosted gateway does not support yet; use the JSON media generation endpoints with base64-encoded input instead';
+  'This endpoint accepts multipart/form-data or a JSON body with base64-encoded input; send a multipart/form-data request or a JSON body';
+const MULTIPART_STAGING_UNAVAILABLE_MESSAGE =
+  'Multipart parsing is not enabled on this deployment; use the JSON request shape with base64-encoded input instead';
 const WEBSOCKET_UNSUPPORTED_MESSAGE =
   'Realtime WebSocket sessions are not supported by the hosted gateway; use the HTTP media endpoints instead';
 
@@ -228,6 +237,11 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   // policy (the plan's 别名不双扣 rule); only the route table entry
   // differs.
   ['/v1/audio/speech', 'responses'],
+  // G-B2: the OpenAI-standard transcription/translation surfaces ride the
+  // Responses family exactly like /v1/tts (the xAI Voice upstream); the
+  // client operation below distinguishes the STT per-unit 'stt' tier.
+  ['/v1/audio/transcriptions', 'responses'],
+  ['/v1/audio/translations', 'responses'],
   // §4.2 (task #16): the images.generations operation rides the OpenAI
   // inbound protocol family (the R2 embeddings precedent); the async
   // submission endpoint is the same operation with a 202+task contract.
@@ -258,6 +272,10 @@ const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
   ['/v1/tts', 'audio.tts'],
   // G-B3: /v1/audio/speech shares the audio.tts client operation.
   ['/v1/audio/speech', 'audio.tts'],
+  // G-B2: the STT family (multipart normalized at the boundary or direct
+  // JSON b64_json) — one server-owned operation for both surfaces.
+  ['/v1/audio/transcriptions', 'audio.stt'],
+  ['/v1/audio/translations', 'audio.stt'],
   // §4.2 (task #16): image generation operations (server-owned,
   // path-derived; stateless — the sub2api /v1/images precedent).
   ['/v1/images/generations', 'images.generations'],
@@ -459,6 +477,15 @@ export interface SaasGatewayReadinessProvider {
 }
 
 export interface SaasGatewayHttpOptions {
+  /**
+   * G-B2: the multipart staging root for /v1/audio/transcriptions,
+   * /v1/audio/translations and /v1/images/edits multipart inputs. Each
+   * request parses into its own subdirectory (mode 0700) under this root;
+   * the request handler removes it after the body normalizes to JSON
+   * (b64_inline) — files are never retained past the boundary. Absent
+   * keeps the multipart endpoints closed with the reserved 501.
+   */
+  readonly multipartStagingRoot?: string;
   /**
    * G-C1: the readiness authority for GET /readyz — reports the process,
    * database/migration state, required dependencies and per-capability
@@ -1404,6 +1431,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
   return async (req, res, context) => {
     const requestId = trustedRequestId(context) ?? `gateway_${randomUUID()}`;
+    // G-B2: set when a multipart media request was normalized at the
+    // boundary; the JSON body read then consumes this instead of the wire.
+    let multipartNormalizedBody: { body: string; contentType: string; contentLength: number } | undefined;
     const path = requestPath(req);
     if (path === undefined) {
       drainRequest(req);
@@ -1931,18 +1961,19 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
-    // §4.0 ② (task #14): reserved multipart-only media endpoints fail closed
-    // with a precise, actionable 501 before any routing decision.
-    if (MULTIPART_ONLY_ENDPOINT_PATHS.has(path)) {
-      drainRequest(req);
-      sendHttpError(
-        res,
-        new GatewayHttpError(501, 'MULTIPART_NOT_SUPPORTED'),
-        requestId,
-        MULTIPART_UNSUPPORTED_MESSAGE,
-      );
-      return true;
-    }
+    /*
+     * §4.0 ② → G-B2: the multipart media endpoints. With a staging root
+     * configured, a multipart/form-data request on one of these paths is
+     * parsed by the streamed envelope (eight-resource bounds, SHA-256 per
+     * file, private random-named staging) and NORMALIZED at this boundary
+     * into the JSON body shape the existing audio/images pipeline already
+     * serves: every file part inlines as a b64_json field, non-file fields
+     * pass through verbatim, and the request continues as JSON. The staged
+     * bytes are removed immediately after normalization — no file survives
+     * the boundary (§11.2: input shapes live only here and the transport).
+     * A JSON request keeps its fast path unchanged; without a staging root
+     * the reserved 501 stands.
+     */
 
     /*
      * §4.3 (task #17): the video create family requires the create-time
@@ -1955,6 +1986,92 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       drainRequest(req);
       sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
       return true;
+    }
+
+    /*
+     * G-B2: multipart normalization — see the block header below.
+     */
+    // G-B2: the still-unwired multipart-only surfaces keep the precise
+    // JSON-only 501 reservation (4.0 ②).
+    if (MULTIPART_ONLY_ENDPOINT_PATHS.has(path)) {
+      drainRequest(req);
+      sendHttpError(
+        res,
+        new GatewayHttpError(501, 'MULTIPART_NOT_SUPPORTED'),
+        requestId,
+        MULTIPART_UNSUPPORTED_MESSAGE,
+      );
+      return true;
+    }
+
+    if (MULTIPART_NORMALIZING_ENDPOINT_PATHS.has(path)) {
+      const contentTypeHeader = String(oneHeader(req, 'content-type') ?? '');
+      const isMultipart = /^multipart\/form-data/i.test(contentTypeHeader);
+      const isJson = contentTypeHeader === '' || /^application\/json/i.test(contentTypeHeader);
+      // A JSON body (the base64-encoded shape) takes the normal flow below;
+      // only a multipart body needs the staging root.
+      if (isMultipart && options.multipartStagingRoot === undefined) {
+        drainRequest(req);
+        sendHttpError(
+          res,
+          new GatewayHttpError(501, 'MULTIPART_NOT_SUPPORTED'),
+          requestId,
+          MULTIPART_STAGING_UNAVAILABLE_MESSAGE,
+        );
+        return true;
+      }
+      if (!isMultipart && !isJson) {
+        drainRequest(req);
+        sendHttpError(
+          res,
+          new GatewayHttpError(415, 'UNSUPPORTED_MEDIA_TYPE'),
+          requestId,
+          MULTIPART_UNSUPPORTED_MESSAGE,
+        );
+        return true;
+      }
+      if (isMultipart) {
+        const stagingDirectory = join(options.multipartStagingRoot ?? '.', `req-${requestId}`);
+        await mkdir(stagingDirectory, { recursive: true, mode: 0o700 }).catch(() => undefined);
+        let envelope: GatewayMultipartEnvelope;
+        try {
+          envelope = await parseMultipartBody(req, req, { stagingDirectory });
+        } catch (error) {
+          drainRequest(req);
+          const code = error instanceof GatewayMultipartParseError ? error.code : 'READ_FAILED';
+          const oversized = code === 'FILE_TOO_LARGE' || code === 'TOTAL_TOO_LARGE';
+          sendHttpError(
+            res,
+            new GatewayHttpError(oversized ? 413 : 400, oversized ? 'BODY_TOO_LARGE' : 'INVALID_BODY'),
+            requestId,
+            error instanceof Error ? error.message : 'the multipart body was rejected',
+          );
+          return true;
+        }
+        try {
+          const normalized: Record<string, unknown> = {};
+          for (const field of envelope.fields) {
+            normalized[field.name] = field.value;
+          }
+          for (const [index, file] of envelope.files.entries()) {
+            const bytes = await readFile(file.path);
+            normalized[envelope.files.length === 1 ? 'b64_json' : `b64_json_${index + 1}`] = bytes.toString('base64');
+            if (normalized.file === undefined) {
+              normalized.file = file.filename;
+            }
+            if (normalized.file_content_type === undefined) {
+              normalized.file_content_type = file.contentType;
+            }
+          }
+          multipartNormalizedBody = {
+            body: JSON.stringify(normalized),
+            contentType: 'application/json',
+            contentLength: Buffer.byteLength(JSON.stringify(normalized)),
+          };
+        } finally {
+          await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
     }
 
     /*
@@ -1999,7 +2116,12 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
-    if (!supportedContentType(req)) {
+    // G-B2: a multipart body on a normalizing endpoint already normalized
+    // above (multipartNormalizedBody set); the JSON gate must not reject it.
+    const contentTypeForJsonGate = String(oneHeader(req, 'content-type') ?? '');
+    const multipartNormalizingPass =
+      MULTIPART_NORMALIZING_ENDPOINT_PATHS.has(path) && /^multipart\/form-data/i.test(contentTypeForJsonGate);
+    if (!supportedContentType(req) && !multipartNormalizingPass && multipartNormalizedBody === undefined) {
       drainRequest(req);
       sendHttpError(res, new GatewayHttpError(415, 'UNSUPPORTED_MEDIA_TYPE'), requestId);
       return true;
@@ -2020,7 +2142,16 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
     let body: Record<string, unknown>;
     try {
-      body = await readJsonBody(req, pathBodyLimit);
+      if (multipartNormalizedBody !== undefined) {
+        if (multipartNormalizedBody.contentLength > pathBodyLimit) {
+          throw new GatewayHttpError(413, 'BODY_TOO_LARGE');
+        }
+        const parsed: unknown = JSON.parse(multipartNormalizedBody.body);
+        if (!isRecord(parsed)) throw new GatewayHttpError(400, 'INVALID_BODY');
+        body = parsed;
+      } else {
+        body = await readJsonBody(req, pathBodyLimit);
+      }
       if (clientAuthorityField(body)) throw new GatewayHttpError(400, 'INVALID_BODY');
     } catch (error) {
       const httpError = error instanceof GatewayHttpError ? error : new GatewayHttpError(400, 'INVALID_BODY');

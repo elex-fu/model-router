@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import { createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Transform } from 'node:stream';
+import { PassThrough, Transform } from 'node:stream';
 
 import busboy from 'busboy';
 
@@ -149,6 +150,27 @@ export function parseMultipartBody(
     );
   }
 
+  // The wire source must be a pipe-able stream; an async-iterable body
+  // (test harnesses, adapters) is pumped through a PassThrough so busboy
+  // sees a real Readable either way.
+  let stream: NodeJS.ReadableStream = source;
+  if (typeof (source as { pipe?: unknown }).pipe !== 'function') {
+    const pump = new PassThrough();
+    stream = pump;
+    void (async () => {
+      try {
+        const iterable = source as AsyncIterable<unknown>;
+        for await (const chunk of iterable) {
+          const view = chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk));
+          if (!pump.write(view)) await once(pump, 'drain');
+        }
+        pump.end();
+      } catch {
+        pump.destroy();
+      }
+    })();
+  }
+
   const fields: Array<{ name: string; value: string }> = [];
   const files: GatewayMultipartFilePart[] = [];
   /** Accepted file PARTS (counted at part-open, not at write-finish). */
@@ -163,7 +185,7 @@ export function parseMultipartBody(
       if (settled) return;
       settled = true;
       try {
-        source.unpipe?.(parser);
+        stream.unpipe?.(parser);
       } catch {
         // the parser may already be detached
       }
@@ -288,9 +310,9 @@ export function parseMultipartBody(
       })();
     });
 
-    source.on('error', () => {
+    stream.on('error', () => {
       fail('READ_FAILED', 'reading the request body failed');
     });
-    source.pipe(parser);
+    stream.pipe(parser);
   });
 }
