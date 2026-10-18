@@ -107,6 +107,7 @@ import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_setting
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
 import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
 import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './129_provider_account_durable_fault_classification.js';
+import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from './131_resolved_supply_billing_identity.js';
 
 export interface SaasMigration {
   version: number;
@@ -746,4 +747,8 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // authored as 112 on main (head 111) and renumbered to 129 here because
   // 112-128 are taken by the capability-parity workstream.
   PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
+  // R3 §8.1: the supplier identity guard accepts the composite target
+  // platform (capability-verified) while the customer guard stays pinned to
+  // the public model version's nominal identity.
+  RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION,
 ];

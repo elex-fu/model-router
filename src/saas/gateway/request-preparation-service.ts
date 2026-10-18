@@ -25,6 +25,7 @@ import type {
   ProviderAccountSchedulerSelectionTrace,
 } from './provider-account-scheduler.js';
 import type { GatewayRequestIdempotencyClaimed } from './request-idempotency.js';
+import type { CustomerSaleBillingIdentity, ResolvedSupplyBillingIdentity } from './resolved-supply-billing-identity.js';
 
 /** Exact integers are kept at the orchestration boundary; no floating point is accepted. */
 export type RequestPreparationExactInteger = bigint | number | string;
@@ -305,6 +306,18 @@ export interface RequestPreparationAuthority {
   readonly modelResolution?: ModelResolutionProvenance;
   /** §4.4 composite decision; present only for composite billing groups. */
   readonly composite?: RequestPreparationCompositeRoute;
+  /**
+   * R3 §8.1: the resolved SUPPLY billing identity frozen per attempt (the
+   * actual serving provider/product/model + the per-attempt supplier cost
+   * version + the frozen provider metering policy version). Absent on BYOK.
+   */
+  readonly supplyBilling?: ResolvedSupplyBillingIdentity;
+  /**
+   * R3 §8.1: the customer sale identity the customer price version is
+   * registered under — the route's nominal pin, never rewritten by a
+   * composite switch.
+   */
+  readonly customerPriceIdentity?: CustomerSaleBillingIdentity;
   /** Independent epoch of the platform pool-member relationship. */
   readonly poolMemberAuthzVersion: RequestPreparationExactInteger | null;
   readonly credentialRef: string;
@@ -1292,8 +1305,31 @@ function validateAuthority(
       return issue('binding_mismatch', 'BYOK candidate cannot carry a supplier-cost version');
     }
   } else {
-    if (
-      nonEmpty(commercial.customerPriceVersion, 'customerPriceVersion') === null ||
+    if (nonEmpty(commercial.customerPriceVersion, 'customerPriceVersion') === null) {
+      return issue('capability_unavailable', 'platform price/cost authority is incomplete or mismatched');
+    }
+    /*
+     * R3 §8.1: on composite dispatches the candidate's supplier cost
+     * version is RESOLVED per attempt on the target-platform identity (it
+     * deliberately differs from the route commercial row's nominal version).
+     * The drift fence instead requires the resolved supply identity to be
+     * present and to match the candidate's serving identity exactly.
+     */
+    if (authority.composite !== undefined) {
+      const supplyBilling = authority.supplyBilling;
+      if (supplyBilling === undefined) {
+        return issue('capability_unavailable', 'resolved supply billing identity is unavailable');
+      }
+      if (
+        candidate.supplierCostVersion === null ||
+        supplyBilling.supplierCostVersion !== candidate.supplierCostVersion ||
+        supplyBilling.providerId !== candidate.providerId ||
+        supplyBilling.productId !== candidate.productId ||
+        supplyBilling.upstreamModel !== candidate.resolvedModel
+      ) {
+        return issue('binding_mismatch', 'resolved supply billing identity does not match the candidate');
+      }
+    } else if (
       nonEmpty(commercial.supplierCostVersion, 'supplierCostVersion') === null ||
       candidate.supplierCostVersion !== commercial.supplierCostVersion
     ) {
@@ -2519,10 +2555,25 @@ export class SaasRequestPreparationService {
             admission.holdReservation === null ? null : String(admission.holdReservation.amountMinorUnits),
           publicModelId: authority.route.publicModelId,
           publicModelVersion: String(authority.route.publicModelVersion),
-          providerId: authority.candidate.providerId,
-          productId: authority.candidate.productId,
-          endpoint: authority.route.endpoint,
+          /*
+           * R3 §8.1: the snapshot's provider/product/endpoint are the
+           * CUSTOMER sale identity the customer price version is registered
+           * under — the route's nominal pin. On composite dispatches these
+           * deliberately differ from the candidate's resolved serving
+           * identity, which travels in supplyBilling below.
+           */
+          providerId: authority.customerPriceIdentity?.providerId ?? authority.candidate.providerId,
+          productId: authority.customerPriceIdentity?.productId ?? authority.candidate.productId,
+          endpoint: authority.customerPriceIdentity?.endpoint ?? authority.route.endpoint,
           usageEstimatorVersion,
+          ...(authority.supplyBilling !== undefined
+            ? {
+                supplyBilling: {
+                  ...authority.supplyBilling,
+                  providerOperation: authority.supplyBilling.providerOperation ?? preparationRoute.providerOperation,
+                },
+              }
+            : {}),
         },
         attempt,
         evidenceInput: signedEvidence,

@@ -19,6 +19,12 @@ import type {
 import type { PreparedRequestEvidenceRecord } from '../prepared-request-evidence-service.js';
 import type { ProviderHttpAddressResolver, ProviderHttpPinnedConnector } from '../provider-http-address.js';
 import { createProviderEgressProxyConnection } from '../provider-http-address.js';
+import {
+  CODEX_RESPONSES_WATCHER_VERSION,
+  createUsageEvidence,
+  type NormalizedUsageEvidence,
+  type TransportServiceTierEvidence,
+} from '../usage-evidence.js';
 import { type CodexUpstreamErrorClassification, classifyUpstreamError, shouldFailover } from './health.js';
 import {
   accountIdentityNamespace,
@@ -142,6 +148,12 @@ export interface CodexTransportStreamResult {
   readonly body: ReadableStream<Uint8Array> | null;
   /** Settles with the usage from the terminal response.completed event. */
   readonly usage: Promise<CodexResponsesUsage | null>;
+  /**
+   * R3 §8.2/§8.3: the tier the terminal event declared. Resolves only after
+   * the stream (or its post-disconnect drain) finished — read lazily like
+   * the usage.
+   */
+  readonly serviceTier: string | null;
   readonly quotaSnapshotWritten: boolean;
 }
 
@@ -220,6 +232,14 @@ export function codexUsageToObservedUsage(usage: CodexResponsesUsage): NormalSuc
 class ResponsesUsageWatcher {
   private buffer = '';
   private usage: CodexResponsesUsage | null = null;
+  /**
+   * R3 §8.3: the served tier the terminal event declares. Recorded for
+   * evidence only — the Codex OAuth category treats it as
+   * NON-AUTHORITATIVE (sub2api service_tier_billing.go precedent: a
+   * `default` response does not prove an actual downgrade), so settlement
+   * keeps the outbound tier and explains the retention.
+   */
+  private tier: string | null = null;
 
   feed(chunk: Uint8Array): void {
     if (this.usage !== null) return;
@@ -256,11 +276,21 @@ class ResponsesUsageWatcher {
       const response = isRecord(parsed.response) ? parsed.response : null;
       const usage = response === null ? null : parseResponsesUsage(response.usage);
       if (usage !== null) this.usage = usage;
+      // §8.3: capture the declared tier whenever the terminal event carries
+      // one, even when the usage object was absent or unparseable.
+      if (response !== null && typeof response.service_tier === 'string') {
+        const tier = response.service_tier.trim().toLowerCase();
+        if (tier !== '' && tier.length <= 32) this.tier = tier;
+      }
     }
   }
 
   get observed(): CodexResponsesUsage | null {
     return this.usage;
+  }
+
+  get serviceTier(): string | null {
+    return this.tier;
   }
 }
 
@@ -526,10 +556,12 @@ export class CodexHttpTransport {
         headers: responseHeaders,
         body: null,
         usage: Promise.resolve(null),
+        serviceTier: null,
         quotaSnapshotWritten,
       };
     }
-    const relay = createDrainingRelay(body, controller.signal, new ResponsesUsageWatcher(), {
+    const watcher = new ResponsesUsageWatcher();
+    const relay = createDrainingRelay(body, controller.signal, watcher, {
       maxDrainBufferBytes: MAX_DRAIN_BUFFER_BYTES,
       errorMessage: 'codex drain buffer exceeded',
     });
@@ -545,6 +577,10 @@ export class CodexHttpTransport {
       headers: responseHeaders,
       body: relay.stream,
       usage: relay.usage,
+      // Lazy: the watcher's tier is only complete after the drain finished.
+      get serviceTier(): string | null {
+        return watcher.serviceTier;
+      },
       quotaSnapshotWritten,
     };
   }
@@ -722,6 +758,28 @@ export class CodexPreparedEvidenceTransport implements PreparedEvidenceTransport
       body: result.body,
       get providerUsage(): NormalSuccessObservedUsage | null {
         return observedUsage === null ? null : codexUsageToObservedUsage(observedUsage);
+      },
+      // R3 §8.2/§8.3: the dedicated codex transport carries tier evidence.
+      // The requested side stays null — the codex transform strips
+      // `service_tier` from the outbound payload — and the observed side is
+      // the terminal event's declaration (non-authoritative at settlement).
+      get serviceTier(): TransportServiceTierEvidence | null {
+        const observed = result.serviceTier;
+        return observed === null ? null : { requested: null, observed };
+      },
+      // R3 §8.2: the bounded usage-evidence object (the §8.3 trust rules
+      // classify this account as codex-oauth at settlement).
+      get usageEvidence(): NormalizedUsageEvidence | null {
+        return createUsageEvidence({
+          meteringSource: 'codex-responses-watcher',
+          observerVersion: CODEX_RESPONSES_WATCHER_VERSION,
+          outboundServiceTier: null,
+          serviceTier: { requested: null, observed: result.serviceTier },
+          model: evidence.resolvedModel ?? null,
+          operation: evidence.providerOperation ?? null,
+          completeness: observedUsage === null ? 'incomplete-missing' : 'complete',
+          adapterVersion: evidence.payloadCompilerVersion ?? null,
+        });
       },
     };
   }

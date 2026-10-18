@@ -27,6 +27,15 @@ import {
 } from './provider-http-tls-fingerprint-connector.js';
 import { observeProviderJsonUsage, type ProviderMediaUsageExtractor } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
+import {
+  createUsageEvidence,
+  type NormalizedUsageEvidence,
+  outboundServiceTierFromPayload,
+  PROVIDER_JSON_USAGE_OBSERVER_VERSION,
+  PROVIDER_SSE_USAGE_OBSERVER_VERSION,
+  type TransportServiceTierEvidence,
+  usageEvidenceCompleteness,
+} from './usage-evidence.js';
 import { observeSearchProviderResponse, searchDescriptorForDispatch } from './websearch/response-observer.js';
 
 /** §4.3: parse the verified payload bytes for the search descriptor round-trip. */
@@ -1126,6 +1135,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     }
     const responseBody = response.body ? managedResponseBody(response.body, context) : null;
     const safeResponseHeaders = responseHeaders(response);
+    /*
+     * R3 §8.2: freeze the tier actually sent upstream from the signed payload
+     * bytes (post-transform truth). Every 2xx observation branch below pairs
+     * it with the tier the response declares, so tier evidence flows for
+     * regular text, SSE, and the media/dedicated operations alike.
+     */
+    const outboundServiceTier = outboundServiceTierFromPayload(context.request.payloadBytes);
 
     /*
      * §4.3 (task #17): the search emulation operations adapt the upstream
@@ -1172,6 +1188,43 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         resultHttpStatus: response.status,
         headers: safeResponseHeaders,
         body: observed.body,
+        // R3 §8.2/§8.3: the SSE branch carries tier evidence too — the
+        // frozen outbound tier plus the stream's declared (merged) tier. The
+        // lazy getter resolves at body EOF, the same contract as providerUsage.
+        get serviceTier(): TransportServiceTierEvidence | null {
+          const observation = observed.getObservation();
+          const tier: TransportServiceTierEvidence = {
+            requested: outboundServiceTier,
+            observed: observation?.observedServiceTier ?? null,
+            ...(observation?.observedServiceTierConflict === true ? { observedConflict: true } : {}),
+          };
+          return tier.requested === null && tier.observed === null && tier.observedConflict !== true ? null : tier;
+        },
+        // R3 §8.2: the bounded usage-evidence object — same lazy contract.
+        get usageEvidence(): NormalizedUsageEvidence | null {
+          const observation = observed.getObservation();
+          const usage = observation?.state === 'reported' ? observation.usage : null;
+          return createUsageEvidence({
+            meteringSource: 'provider-sse-usage-observer',
+            observerVersion: PROVIDER_SSE_USAGE_OBSERVER_VERSION,
+            outboundServiceTier,
+            serviceTier: {
+              requested: outboundServiceTier,
+              observed: observation?.observedServiceTier ?? null,
+              ...(observation?.observedServiceTierConflict === true ? { observedConflict: true } : {}),
+            },
+            billingMode: usage?.billingMode ?? null,
+            units: usage?.units === null || usage?.units === undefined ? null : String(usage.units),
+            sizeTier: usage?.sizeTier ?? null,
+            model: context.request.evidence.resolvedModel ?? null,
+            operation: context.request.evidence.providerOperation ?? null,
+            completeness: usageEvidenceCompleteness({
+              state: observation?.state === 'reported' ? 'reported' : 'unknown',
+              reason: observation?.state === 'unknown' ? observation.reason : undefined,
+            }),
+            adapterVersion: context.request.evidence.payloadCompilerVersion ?? null,
+          });
+        },
         get providerUsage() {
           const observation = observed.getObservation();
           return observation?.state === 'reported' ? observation.usage : null;
@@ -1210,9 +1263,44 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         resultHttpStatus: response.status,
         headers: safeResponseHeaders,
         body: observed.body,
-        ...(mediaPlan?.serviceTier !== null && mediaPlan?.serviceTier !== undefined
-          ? { serviceTier: mediaPlan.serviceTier }
-          : {}),
+        // R3 §8.2/§8.3 (B05): tier evidence no longer rides the media plan
+        // alone — every JSON observation pairs the frozen outbound tier with
+        // the response's declared tier (images included), resolved lazily at
+        // body EOF exactly like providerUsage.
+        get serviceTier(): TransportServiceTierEvidence | null {
+          const observation = observed.getObservation();
+          // A category plan may pin the requested tier under a field the
+          // generic payload scan does not know; it is a fallback, never an
+          // override of the frozen outbound value.
+          const requested = outboundServiceTier ?? mediaPlan?.serviceTier?.requested ?? null;
+          const tier: TransportServiceTierEvidence = {
+            requested,
+            observed: observation?.observedServiceTier ?? null,
+          };
+          return tier.requested === null && tier.observed === null ? null : tier;
+        },
+        // R3 §8.2: the bounded usage-evidence object — same lazy contract.
+        get usageEvidence(): NormalizedUsageEvidence | null {
+          const observation = observed.getObservation();
+          const usage = observation?.state === 'reported' ? observation.usage : null;
+          const requested = outboundServiceTier ?? mediaPlan?.serviceTier?.requested ?? null;
+          return createUsageEvidence({
+            meteringSource: 'provider-json-usage-observer',
+            observerVersion: PROVIDER_JSON_USAGE_OBSERVER_VERSION,
+            outboundServiceTier: requested,
+            serviceTier: { requested, observed: observation?.observedServiceTier ?? null },
+            billingMode: usage?.billingMode ?? null,
+            units: usage?.units === null || usage?.units === undefined ? null : String(usage.units),
+            sizeTier: usage?.sizeTier ?? null,
+            model: context.request.evidence.resolvedModel ?? null,
+            operation: context.request.evidence.providerOperation ?? null,
+            completeness: usageEvidenceCompleteness({
+              state: observation?.state === 'reported' ? 'reported' : 'unknown',
+              reason: observation?.state === 'unknown' ? observation.reason : undefined,
+            }),
+            adapterVersion: context.request.evidence.payloadCompilerVersion ?? null,
+          });
+        },
         get providerUsage() {
           const observation = observed.getObservation();
           return observation?.state === 'reported' ? observation.usage : null;

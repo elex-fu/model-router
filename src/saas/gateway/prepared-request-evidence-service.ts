@@ -2021,14 +2021,31 @@ export class SaasPreparedRequestEvidenceService {
     sameStored(commercial, 'provider_policy_id', input.providerMeteringPolicyId, 'provider policy');
     sameStored(commercial, 'provider_policy_version', input.providerMeteringPolicyVersion, 'provider policy version');
     sameStored(commercial, 'contract_attestation_id', input.contractAttestationId, 'contract attestation');
+    /*
+     * R3 §8.1: the customer price version is ALWAYS the route commercial
+     * row's (the customer sale identity never drifts). The supplier cost
+     * version is the route row's on nominal dispatches; on composite
+     * dispatches it is resolved per attempt on the target-platform identity
+     * and is verified against that resolved identity instead — the same
+     * identity the admission precheck verified and settlement will verify.
+     */
     if (
       (input.customerPriceVersion === null && commercial.customer_price_version != null) ||
       (input.customerPriceVersion !== null &&
-        String(commercial.customer_price_version) !== input.customerPriceVersion) ||
-      (input.supplierCostVersion === null && commercial.supplier_cost_version != null) ||
-      (input.supplierCostVersion !== null && String(commercial.supplier_cost_version) !== input.supplierCostVersion)
+        String(commercial.customer_price_version) !== input.customerPriceVersion)
     ) {
       fail('AUTHORITY_MISMATCH', 'commercial authority versions do not match prepared evidence');
+    }
+    if (input.composite === undefined) {
+      if (
+        (input.supplierCostVersion === null && commercial.supplier_cost_version != null) ||
+        (input.supplierCostVersion !== null &&
+          String(commercial.supplier_cost_version) !== input.supplierCostVersion)
+      ) {
+        fail('AUTHORITY_MISMATCH', 'commercial authority versions do not match prepared evidence');
+      }
+    } else if (input.supplierCostVersion === null) {
+      fail('AUTHORITY_MISMATCH', 'composite prepared evidence is missing the resolved supplier cost version');
     }
 
     const attestation = await lockOne<EvidenceRow>(
@@ -2139,6 +2156,26 @@ export class SaasPreparedRequestEvidenceService {
       supplierCost = await lockOne<EvidenceRow>(tx, 'supplier-cost', 'saas_supplier_cost_versions', 'id = $1', [
         input.supplierCostVersion,
       ]);
+      /*
+       * R3 §8.1: on composite dispatches the cost version was resolved on
+       * the target-platform identity; the locked row must carry exactly that
+       * identity (the public model of the route + the resolved
+       * provider/product/model/endpoint/protocol). This is the claim-side
+       * verification of the same identity the admission precheck verified.
+       */
+      if (input.composite !== undefined && supplierCost) {
+        if (
+          String(supplierCost.provider_id) !== input.providerId ||
+          String(supplierCost.product_id) !== input.productId ||
+          String(supplierCost.resolved_model) !== input.resolvedModel ||
+          String(supplierCost.endpoint) !== input.endpoint ||
+          String(supplierCost.protocol) !== input.protocol ||
+          String(supplierCost.public_model_id) !== input.routePublicModelId ||
+          String(supplierCost.public_model_version) !== input.routePublicModelVersion
+        ) {
+          fail('AUTHORITY_MISMATCH', 'supplier cost version does not match the resolved supply identity');
+        }
+      }
     }
 
     const lockedAt = await this.databaseClock(tx);

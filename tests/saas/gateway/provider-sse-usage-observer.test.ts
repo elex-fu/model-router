@@ -304,6 +304,8 @@ test('Anthropic missing cache counters are unknown instead of being treated as z
     state: 'unknown',
     usage: null,
     reason: 'invalid_usage',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
   });
 });
 
@@ -318,12 +320,20 @@ test('unsupported or client-side protocol evidence never selects a parser', asyn
         providerOperation: 'responses',
       },
     ),
-    { state: 'unknown', usage: null, reason: 'unsupported_protocol_operation' },
+    {
+      state: 'unknown',
+      usage: null,
+      reason: 'unsupported_protocol_operation',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
+    },
   );
   assert.deepEqual(await observeText(sse(JSON.stringify({ choices: [], usage: openAiUsage() })) + sse('[DONE]'), {}), {
     state: 'unknown',
     usage: null,
     reason: 'unsupported_protocol_operation',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
   });
 });
 
@@ -334,6 +344,8 @@ test('missing usage, malformed JSON, and an unterminated event remain unknown', 
       state: 'unknown',
       usage: null,
       reason: 'no_usage',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
     });
   });
   await context.test('bad JSON', async () => {
@@ -341,6 +353,8 @@ test('missing usage, malformed JSON, and an unterminated event remain unknown', 
       state: 'unknown',
       usage: null,
       reason: 'malformed_event',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
     });
   });
   await context.test('truncated final event', async () => {
@@ -349,6 +363,8 @@ test('missing usage, malformed JSON, and an unterminated event remain unknown', 
       state: 'unknown',
       usage: null,
       reason: 'truncated',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
     });
   });
 });
@@ -362,7 +378,13 @@ test('oversized events are ignored for usage while every response byte is forwar
   const observed = observeProviderSseUsage(streamFromChunks(chunks), openAiEvidence);
   const output = await drain(observed.body);
 
-  assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'oversized_event' });
+  assert.deepEqual(await observed.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'oversized_event',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
+  });
   assert.deepEqual(
     output.map((chunk) => [...chunk]),
     chunks.map((chunk) => [...chunk]),
@@ -377,7 +399,13 @@ test('unsafe totals and contradictory duplicate usage reports are unknown', asyn
           sse('[DONE]'),
         openAiEvidence,
       ),
-      { state: 'unknown', usage: null, reason: 'invalid_usage' },
+      {
+        state: 'unknown',
+        usage: null,
+        reason: 'invalid_usage',
+        observedServiceTier: null,
+        observedServiceTierConflict: false,
+      },
     );
   });
   await context.test('overflowing aggregate', async () => {
@@ -391,7 +419,13 @@ test('unsafe totals and contradictory duplicate usage reports are unknown', asyn
         ) + sse('[DONE]'),
         openAiEvidence,
       ),
-      { state: 'unknown', usage: null, reason: 'invalid_usage' },
+      {
+        state: 'unknown',
+        usage: null,
+        reason: 'invalid_usage',
+        observedServiceTier: null,
+        observedServiceTierConflict: false,
+      },
     );
   });
   await context.test('conflicting repeated usage trailer', async () => {
@@ -399,7 +433,13 @@ test('unsafe totals and contradictory duplicate usage reports are unknown', asyn
     const second = { choices: [], usage: openAiUsage({ prompt_tokens: 11, total_tokens: 18 }) };
     assert.deepEqual(
       await observeText(sse(JSON.stringify(first)) + sse(JSON.stringify(second)) + sse('[DONE]'), openAiEvidence),
-      { state: 'unknown', usage: null, reason: 'conflicting_usage' },
+      {
+        state: 'unknown',
+        usage: null,
+        reason: 'conflicting_usage',
+        observedServiceTier: null,
+        observedServiceTierConflict: false,
+      },
     );
   });
 });
@@ -419,7 +459,13 @@ test('downstream cancellation cancels the source and resolves only an unknown ob
   await reader.cancel('client disconnected');
 
   assert.equal(cancelled, true);
-  assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'cancelled' });
+  assert.deepEqual(await observed.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'cancelled',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
+  });
 });
 
 const audit: PreparedRequestEvidenceAudit = {
@@ -946,7 +992,13 @@ test('upstream cancellation from ProviderHttpTransport propagates and cannot pro
   );
   assert.equal(upstreamCancelled, true);
   const observation = await (response as ProviderSseObservedTransportResponse).usageObservation;
-  assert.deepEqual(observation, { state: 'unknown', usage: null, reason: 'stream_error' });
+  assert.deepEqual(observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'stream_error',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
+  });
 });
 
 test('successful delivery without trusted usage retains the reconciliation hold', async () => {
@@ -1039,5 +1091,129 @@ test('observer completion stays pending until EOF and resolves unknown after can
   assert.equal(completed, false);
   await observed.body.cancel('downstream closed');
   assert.equal(sourceCancelled, true);
-  assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'cancelled' });
+  assert.deepEqual(await observed.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'cancelled',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
+  });
+});
+
+/*
+ * R3 §8.2/§8.3: SSE tier declarations merge by event semantics; repeats must
+ * agree and conflicts are recorded without invalidating the usage.
+ */
+
+test('SSE tier declarations are merged, conflict-flagged, and independent of the usage outcome', async (t) => {
+  await t.test('an openai chunk-level declaration is captured at EOF', async () => {
+    const chunks = openAiUsageStream();
+    const withTier = [
+      chunks[0] as Uint8Array,
+      encoder.encode(
+        sse(
+          JSON.stringify({
+            id: 'chatcmpl-local',
+            object: 'chat.completion.chunk',
+            choices: [],
+            usage: openAiUsage(),
+            service_tier: 'flex',
+          }),
+        ),
+      ),
+      encoder.encode(sse('[DONE]')),
+    ];
+    const observed = observeProviderSseUsage(streamFromChunks(withTier), openAiEvidence);
+    await drain(observed.body);
+    const result = await observed.observation;
+    assert.equal(result.state, 'reported');
+    if (result.state === 'reported') {
+      assert.equal(result.observedServiceTier, 'flex');
+      assert.equal(result.observedServiceTierConflict, false);
+    }
+  });
+
+  await t.test('disagreeing declarations are a recorded conflict, never a billed tier', async () => {
+    const withTier = [
+      encoder.encode(
+        sse(
+          JSON.stringify({
+            id: 'chatcmpl-local',
+            object: 'chat.completion.chunk',
+            choices: [],
+            usage: openAiUsage(),
+            service_tier: 'flex',
+          }),
+        ),
+      ),
+      encoder.encode(
+        sse(
+          JSON.stringify({
+            id: 'chatcmpl-local',
+            object: 'chat.completion.chunk',
+            choices: [],
+            usage: openAiUsage(),
+            service_tier: 'priority',
+          }),
+        ),
+      ),
+      encoder.encode(sse('[DONE]')),
+    ];
+    const observed = observeProviderSseUsage(streamFromChunks(withTier), openAiEvidence);
+    await drain(observed.body);
+    const result = await observed.observation;
+    assert.equal(result.state, 'reported');
+    if (result.state === 'reported') {
+      assert.equal(result.observedServiceTier, null);
+      assert.equal(result.observedServiceTierConflict, true);
+    }
+  });
+
+  await t.test('an anthropic usage.speed declaration rides message_start', async () => {
+    const observed = observeProviderSseUsage(
+      streamFromChunks([
+        encoder.encode(
+          sse(
+            JSON.stringify({
+              type: 'message_start',
+              message: {
+                usage: {
+                  input_tokens: 9,
+                  cache_read_input_tokens: 2,
+                  cache_creation_input_tokens: 1,
+                  output_tokens: 0,
+                  speed: 'standard',
+                },
+              },
+            }),
+            'message_start',
+          ),
+        ),
+        encoder.encode(sse(JSON.stringify({ type: 'message_delta', usage: { output_tokens: 4 } }), 'message_delta')),
+        encoder.encode(sse(JSON.stringify({ type: 'message_stop' }), 'message_stop')),
+      ]),
+      { providerProtocol: 'anthropic', providerOperation: 'messages' },
+    );
+    await drain(observed.body);
+    const result = await observed.observation;
+    assert.equal(result.state, 'reported');
+    if (result.state === 'reported') {
+      assert.equal(result.observedServiceTier, 'standard');
+      assert.equal(result.observedServiceTierConflict, false);
+      assert.equal(result.usage.inputTotal, 12);
+      assert.equal(result.usage.outputTotal, 4);
+    }
+  });
+
+  await t.test('a client disconnect keeps the tier unknown-adjacent evidence without a usage report', async () => {
+    const observed = observeProviderSseUsage(streamFromChunks(openAiUsageStream()), openAiEvidence);
+    await observed.body.cancel('client went away');
+    const result = await observed.observation;
+    assert.equal(result.state, 'unknown');
+    if (result.state === 'unknown') {
+      assert.equal(result.reason, 'cancelled');
+      assert.equal(result.observedServiceTier, null);
+      assert.equal(result.observedServiceTierConflict, false);
+    }
+  });
 });

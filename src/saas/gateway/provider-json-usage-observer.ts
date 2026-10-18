@@ -13,8 +13,23 @@ export type ProviderJsonUsageUnknownReason =
   | 'stream_error';
 
 export type ProviderJsonUsageObservation =
-  | { readonly state: 'reported'; readonly usage: NormalSuccessObservedUsage }
-  | { readonly state: 'unknown'; readonly usage: null; readonly reason: ProviderJsonUsageUnknownReason };
+  | {
+      readonly state: 'reported';
+      readonly usage: NormalSuccessObservedUsage;
+      /**
+       * R3 §8.3: the service tier declared by the response body (OpenAI
+       * `service_tier`, Anthropic `usage.speed`). Parsed independently of
+       * usage validity so the tier evidence survives an unknown usage
+       * outcome; null when the body declares none or cannot be parsed.
+       */
+      readonly observedServiceTier: string | null;
+    }
+  | {
+      readonly state: 'unknown';
+      readonly usage: null;
+      readonly reason: ProviderJsonUsageUnknownReason;
+      readonly observedServiceTier: string | null;
+    };
 
 export interface ProviderJsonUsageEvidence {
   readonly providerProtocol?: string;
@@ -59,21 +74,28 @@ const counterShapes = {
     required: ['prompt_tokens', 'completion_tokens'],
     optional: ['total_tokens', 'cached_tokens'],
     details: { prompt_tokens_details: ['cached_tokens'], completion_tokens_details: ['reasoning_tokens'] },
+    strings: [] as const,
   },
   anthropic: {
     required: ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'],
     optional: [],
     details: { cache_creation: ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'] },
+    // §8.3: Anthropic's `usage.speed` is the served-tier declaration (a
+    // short string, not a counter); accepting it cannot invalidate a report
+    // that omits it.
+    strings: ['speed'] as const,
   },
   responses: {
     required: ['input_tokens', 'output_tokens'],
     optional: ['total_tokens', 'cached_tokens'],
     details: { input_tokens_details: ['cached_tokens'], output_tokens_details: ['reasoning_tokens'] },
+    strings: [] as const,
   },
   embeddings: {
     required: [],
     optional: ['prompt_tokens', 'total_tokens'],
     details: {},
+    strings: [] as const,
   },
 } satisfies Record<
   JsonProtocol,
@@ -81,6 +103,7 @@ const counterShapes = {
     required: readonly string[];
     optional: readonly string[];
     details: Record<string, readonly string[]>;
+    strings: readonly string[];
   }
 >;
 
@@ -100,8 +123,34 @@ function selectedProtocol(evidence: ProviderJsonUsageEvidence): JsonProtocol | n
   return null;
 }
 
-function unknown(reason: ProviderJsonUsageUnknownReason): ProviderJsonUsageObservation {
-  return { state: 'unknown', usage: null, reason };
+function unknown(
+  reason: ProviderJsonUsageUnknownReason,
+  observedServiceTier: string | null = null,
+): ProviderJsonUsageObservation {
+  return { state: 'unknown', usage: null, reason, observedServiceTier };
+}
+
+const MAX_TIER_TEXT_BYTES = 32;
+
+/**
+ * R3 §8.3 category-specific verified field mapping: OpenAI-family responses
+ * declare the served tier at the top level (`service_tier`); Anthropic
+ * declares it inside `usage` as `speed` (the fast/standard tier), with a
+ * top-level `service_tier` accepted as the same fact. Only short non-empty
+ * strings are trusted; anything else is "no declaration" (never a guess).
+ */
+function observedTierFromJson(protocol: JsonProtocol | null, body: Fields): string | null {
+  const read = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === '' || trimmed.length > MAX_TIER_TEXT_BYTES) return null;
+    return trimmed;
+  };
+  if (protocol === 'anthropic') {
+    const usage = record(body.usage);
+    return read(usage?.speed) ?? read(body.service_tier);
+  }
+  return read(body.service_tier);
 }
 
 // JSON.parse accepts duplicate names silently. Reject ambiguous usage/envelope
@@ -231,12 +280,19 @@ function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObse
     required: readonly string[];
     optional: readonly string[];
     details: Record<string, readonly string[]>;
+    strings: readonly string[];
   } = counterShapes[protocol];
   const scalarNames = [...shape.required, ...shape.optional];
   if (shape.required.some((name) => !Object.hasOwn(raw, name) || !token(raw[name]))) return null;
   for (const [name, counter] of Object.entries(raw)) {
     if (scalarNames.includes(name)) {
       if (!token(counter)) return null;
+    } else if (shape.strings.includes(name)) {
+      // §8.3: the anthropic served-tier declaration rides inside usage; a
+      // non-string or oversized value invalidates the report.
+      if (typeof counter !== 'string' || counter.trim() === '' || counter.trim().length > MAX_TIER_TEXT_BYTES) {
+        return null;
+      }
     } else {
       const allowed = Object.hasOwn(shape.details, name) ? shape.details[name] : undefined;
       const details = record(counter);
@@ -294,7 +350,12 @@ function parseBody(
   } catch {
     return unknown('malformed_body');
   }
-  if (!body || (protocol !== null && !validEnvelope(protocol, body))) return unknown('malformed_body');
+  if (!body) return unknown('malformed_body');
+  // §8.3: the tier declaration is read from the parsed body even when the
+  // envelope or usage is unusable, so tier evidence never depends on the
+  // usage outcome.
+  const observedServiceTier = observedTierFromJson(protocol, body);
+  if (protocol !== null && !validEnvelope(protocol, body)) return unknown('malformed_body', observedServiceTier);
   // §4.1 seam: an operation the token observer does not know goes to the
   // registered media extractor (never silently zero-billed).
   if (protocol === null) {
@@ -305,20 +366,21 @@ function parseBody(
           return {
             state: 'reported',
             usage: Object.freeze({ ...mediaUsage, source: 'upstream' }) as NormalSuccessObservedUsage,
+            observedServiceTier,
           };
         }
       } catch {
-        return unknown('invalid_usage');
+        return unknown('invalid_usage', observedServiceTier);
       }
     }
-    return unknown('unsupported_protocol_operation');
+    return unknown('unsupported_protocol_operation', observedServiceTier);
   }
-  if (!Object.hasOwn(body, 'usage') || body.usage === null) return unknown('no_usage');
+  if (!Object.hasOwn(body, 'usage') || body.usage === null) return unknown('no_usage', observedServiceTier);
   try {
     const usage = trustedUsage(protocol, body.usage);
-    return usage ? { state: 'reported', usage } : unknown('invalid_usage');
+    return usage ? { state: 'reported', usage, observedServiceTier } : unknown('invalid_usage', observedServiceTier);
   } catch {
-    return unknown('invalid_usage');
+    return unknown('invalid_usage', observedServiceTier);
   }
 }
 

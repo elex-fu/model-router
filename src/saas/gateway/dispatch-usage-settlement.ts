@@ -4,8 +4,21 @@ import { multiplyMinorUnits } from '../billing/groups/multiplier.js';
 import { snapshotBillingGroupTerms } from '../billing/groups/snapshot.js';
 import type { AttemptRecord, UsageValues } from '../metering/types.js';
 import { calculatePriceVersion } from '../pricing/calculator.js';
-import type { CustomerPriceSnapshotRecord, CustomerPriceVersionRecord } from '../pricing/types.js';
+import {
+  resolveServiceTierBillingTerms,
+  type ServiceTierTrustResolution,
+  serviceTierObservedAuthority,
+  serviceTierTrustCategory,
+  settlementServiceTierTerms,
+} from '../pricing/service-tier-trust.js';
+import type {
+  CustomerPriceSnapshotRecord,
+  CustomerPriceVersionRecord,
+  SupplierCostVersionRecord,
+} from '../pricing/types.js';
 import type { GatewayProtocol, SupplyMode } from './contracts.js';
+import type { ResolvedSupplyBillingIdentity } from './resolved-supply-billing-identity.js';
+import type { TransportServiceTierEvidence } from './usage-evidence.js';
 
 /** Server-selected commercial and reservation facts carried from preparation to dispatch. */
 export interface NormalSuccessSettlementSnapshot {
@@ -22,6 +35,15 @@ export interface NormalSuccessSettlementSnapshot {
   readonly productId: string;
   readonly endpoint: string;
   readonly usageEstimatorVersion: string;
+  /**
+   * R3 §8.1: the resolved SUPPLY billing identity frozen per attempt. On
+   * composite dispatches `providerId`/`productId`/`endpoint` above stay the
+   * CUSTOMER (nominal route) identity the customer price version is
+   * registered under; this block carries the actual supply identity the
+   * supplier cost version was resolved for, so precheck, claim and
+   * settlement verify the same identity. Absent on legacy snapshots.
+   */
+  readonly supplyBilling?: ResolvedSupplyBillingIdentity | null;
 }
 
 export interface NormalSuccessObservedUsage extends NormalizedUsage {
@@ -36,12 +58,13 @@ export interface NormalSuccessCompletionInput {
   readonly usage: NormalSuccessObservedUsage;
   readonly usageEvidenceDigest?: string;
   /**
-   * §4.1 service-tier settlement terms (requested tier from the request
-   * payload, observed tier from the response). Absent keeps the base rate;
-   * the only-lower rule means an observed tier can never raise the charge.
-   * The category transports (#16/#17) feed this from their observers.
+   * §4.1 and R3 §8.3 service-tier settlement terms: the requested tier
+   * frozen from the final outbound payload, the observed tier declared by
+   * the response. The per-category trust rules are applied HERE (never at
+   * the calculator): an authoritative observed tier can only lower the
+   * charge, and non-authoritative categories (Codex OAuth) never apply it.
    */
-  readonly serviceTier?: { readonly requested: string | null; readonly observed: string | null } | null;
+  readonly serviceTier?: TransportServiceTierEvidence | null;
 }
 
 export interface NormalSuccessUncertaintyInput {
@@ -83,6 +106,12 @@ export interface NormalSuccessPricingPort {
   getCustomerPriceVersion(id: string): Promise<CustomerPriceVersionRecord>;
   /** Reads the immutable admission snapshot so settlement never re-queries the group table. */
   getCustomerPriceSnapshot(id: string): Promise<CustomerPriceSnapshotRecord>;
+  /**
+   * R3 §8.1: settlement verifies the supplier cost version against the
+   * SAME resolved supply identity precheck and claim verified. Optional so
+   * legacy compositions keep settling without it.
+   */
+  getSupplierCostVersion?(id: string): Promise<SupplierCostVersionRecord>;
 }
 
 export interface NormalSuccessSettlementPort {
@@ -101,7 +130,7 @@ const USAGE_FIELDS = [
   'reasoningOutput',
 ] as const;
 
-function usageDigest(usage: NormalizedUsage): string {
+function usageDigest(usage: NormalizedUsage, tierResolution: ServiceTierTrustResolution | null = null): string {
   /*
    * §4.1 (task #15) anti-drift, the #14 policy applied to usage evidence:
    * the media fields enter the digest material ONLY when the observation is
@@ -109,12 +138,20 @@ function usageDigest(usage: NormalizedUsage): string {
    * observation digests to exactly its pre-4.1 value — verified by
    * regression test, because this digest is the normal-success usage
    * evidence reference bound into the settlement proof.
+   *
+   * R3 §8.3 follows the same policy for the tier resolution: it enters the
+   * digest material only when tier evidence exists, so tierless settlements
+   * keep byte-identical evidence references while every downgrade,
+   * retention and conflict becomes explainable in the settlement proof.
    */
   const material =
     USAGE_FIELDS.map((field) => `${field}=${usage[field] ?? 'null'}`).join('&') +
     (usage.billingMode === 'token' && usage.units === null && usage.sizeTier === null
       ? ''
-      : `&billingMode=${usage.billingMode ?? 'token'}&units=${usage.units ?? 'null'}&sizeTier=${usage.sizeTier ?? 'null'}`);
+      : `&billingMode=${usage.billingMode ?? 'token'}&units=${usage.units ?? 'null'}&sizeTier=${usage.sizeTier ?? 'null'}`) +
+    (tierResolution === null
+      ? ''
+      : `&serviceTier=${tierResolution.requested}>${tierResolution.observed}:${tierResolution.billing}:${tierResolution.reason}`);
   return createHash('sha256').update(material).digest('hex');
 }
 
@@ -163,6 +200,13 @@ function assertPriceIdentity(
   snapshot: NormalSuccessSettlementSnapshot,
   priceSnapshot: CustomerPriceSnapshotRecord,
 ): void {
+  /*
+   * R3 §8.1: the snapshot's providerId/productId/endpoint are the CUSTOMER
+   * sale identity — the route's nominal pins on composite dispatches. The
+   * customer price version is registered under exactly that identity, so
+   * the check is unchanged for composite; the supplier side is verified
+   * separately against the resolved supply identity.
+   */
   if (
     price.id !== snapshot.customerPriceVersion ||
     price.kind !== 'customer' ||
@@ -191,6 +235,63 @@ function assertPriceIdentity(
 }
 
 /**
+ * R3 §8.1: settlement re-verifies the supplier cost version against the
+ * SAME resolved supply identity the admission precheck verified and the
+ * signed prepared-evidence claim carries. The conservative profit fence and
+ * any later cost resolution reuse this identity — they never fall back to
+ * the route's nominal provider.
+ */
+async function assertSupplyBillingIdentity(
+  pricing: NormalSuccessPricingPort,
+  snapshot: NormalSuccessSettlementSnapshot,
+): Promise<void> {
+  const supplyBilling = snapshot.supplyBilling ?? null;
+  if (supplyBilling === null) return;
+  if (pricing.getSupplierCostVersion === undefined) return;
+  if (snapshot.supplyMode !== 'platform') {
+    throw new Error('resolved supply billing identity requires a platform quote');
+  }
+  if (snapshot.customerPriceVersion === null) {
+    throw new Error('platform settlement quote is incomplete');
+  }
+  const supplierCost = await pricing.getSupplierCostVersion(supplyBilling.supplierCostVersion);
+  if (
+    supplierCost.kind !== 'supplier' ||
+    supplierCost.providerId !== supplyBilling.providerId ||
+    supplierCost.productId !== supplyBilling.productId ||
+    supplierCost.resolvedModel !== supplyBilling.upstreamModel ||
+    supplierCost.publicModelId !== snapshot.publicModelId ||
+    String(supplierCost.publicModelVersion) !== snapshot.publicModelVersion
+  ) {
+    throw new Error('supplier cost version does not match the resolved supply billing identity');
+  }
+}
+
+/**
+ * R3 §8.3: resolves the billing tier under the per-category trust rules.
+ * The category comes from the frozen supply identity (the composite target
+ * platform), so Codex OAuth dispatches keep their outbound tier while
+ * verified public APIs may bill at the trusted lower tier.
+ */
+function resolveSettlementServiceTier(
+  snapshot: NormalSuccessSettlementSnapshot,
+  serviceTier: TransportServiceTierEvidence | null | undefined,
+): ServiceTierTrustResolution | null {
+  if (serviceTier === null || serviceTier === undefined) return null;
+  if (serviceTier.requested === null && serviceTier.observed === null && serviceTier.observedConflict !== true) {
+    return null;
+  }
+  const providerId = snapshot.supplyBilling?.providerId ?? snapshot.providerId;
+  const category = serviceTierTrustCategory({ providerId });
+  return resolveServiceTierBillingTerms({
+    requested: serviceTier.requested,
+    observed: serviceTier.observed,
+    observedAuthority: serviceTierObservedAuthority(category),
+    observedConflict: serviceTier.observedConflict === true,
+  });
+}
+
+/**
  * Coordinates trusted provider usage, immutable preparation-time pricing, and
  * the normal-success SQL transaction. Incomplete facts are retained for
  * reconciliation; they are never converted into a zero charge.
@@ -204,6 +305,10 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
   async complete(input: NormalSuccessCompletionInput): Promise<NormalSuccessTransactionResult> {
     assertUsage(input.usage);
     const snapshot = input.snapshot;
+    // R3 §8.3: the per-category tier trust resolution happens here, once,
+    // against the frozen supply identity — settlement never re-interprets
+    // the tier against newer adapter or price-policy configuration.
+    const tierResolution = resolveSettlementServiceTier(snapshot, input.serviceTier);
     let chargeAmountMinorUnits: string | null = null;
 
     if (snapshot.supplyMode === 'platform') {
@@ -216,6 +321,9 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
       ) {
         throw new Error('platform settlement quote is incomplete');
       }
+      // R3 §8.1: the supplier side is verified against the resolved supply
+      // identity before any amount is computed.
+      await assertSupplyBillingIdentity(this.pricing, snapshot);
       const price = await this.pricing.getCustomerPriceVersion(snapshot.customerPriceVersion);
       const priceSnapshot = await this.pricing.getCustomerPriceSnapshot(snapshot.priceSnapshotRef);
       assertPriceIdentity(price, snapshot, priceSnapshot);
@@ -241,7 +349,10 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
           perUnitUnits: input.usage.units ?? null,
           sizeTier: input.usage.sizeTier ?? null,
         },
-        { requireComplete: false, serviceTier: input.serviceTier ?? null },
+        // §8.3: only the trust-resolved terms reach the calculator; a
+        // non-authoritative or conflicting observed tier is suppressed
+        // before the only-lower rule can see it.
+        { requireComplete: false, serviceTier: settlementServiceTierTerms(tierResolution) },
       );
       if (!calculation.complete) throw new Error('provider usage is insufficient for the selected price');
       chargeAmountMinorUnits = multiplyMinorUnits(
@@ -257,9 +368,12 @@ export class DispatchUsageSettlementCoordinator implements NormalSuccessSettleme
       snapshot.holdAmountMinorUnits !== null
     ) {
       throw new Error('BYOK completion cannot contain a platform wallet quote');
+    } else if (snapshot.supplyBilling != null) {
+      // §8.1: a resolved supply identity exists only for platform quotes.
+      throw new Error('resolved supply billing identity requires a platform quote');
     }
 
-    const digest = input.usageEvidenceDigest || usageDigest(input.usage);
+    const digest = input.usageEvidenceDigest || usageDigest(input.usage, tierResolution);
     if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error('provider usage evidence digest is invalid');
     const usageKey = `saas-normal-success-usage:${createHash('sha256')
       .update(`${input.tenantId}\0${input.requestId}\0${input.attemptId}`)

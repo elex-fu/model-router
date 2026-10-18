@@ -2,6 +2,8 @@ import type { SaasCatalogService } from '../catalog/service.js';
 import type { ProviderEligibilityRequest } from '../catalog/types.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import type { ByokPlanEntitlementResolver, EffectiveByokEntitlement } from '../plans/types.js';
+import type { SaasPricingService } from '../pricing/index.js';
+import { SaasPricingError } from '../pricing/index.js';
 import {
   type RouteCommercialAuthorityRecord,
   SaasCommercialMeteringPolicyError,
@@ -9,7 +11,6 @@ import {
 } from './commercial-metering-policy-service.js';
 import {
   type CompositeModelOwnershipResolution,
-  type CompositeModelRoute,
   compositeRouteEndpointFromProtocol,
   compositeRouteModelResolutionSource,
   resolveCompositeRoute,
@@ -39,6 +40,7 @@ type RouteReader = Pick<SaasRouteConfigService, 'resolve'>;
 type CommercialReader = Pick<SaasCommercialMeteringPolicyService, 'resolveDispatchableRoute'>;
 type CatalogReader = Pick<SaasCatalogService, 'evaluateProviderEligibility'>;
 type PlanEntitlementReader = Pick<ByokPlanEntitlementResolver, 'resolveBoundForRequest'>;
+type PricingReader = Pick<SaasPricingService, 'resolveSupplierCostVersion'>;
 type Row = Record<string, unknown>;
 
 export interface PostgresRequestPreparationAuthorityAdapterDependencies {
@@ -48,6 +50,13 @@ export interface PostgresRequestPreparationAuthorityAdapterDependencies {
   readonly catalog: CatalogReader;
   /** Required for BYOK; platform resolution does not consult this reader. */
   readonly byokEntitlements?: PlanEntitlementReader;
+  /**
+   * R3 §8.1: resolves the supplier cost version for composite dispatches on
+   * the RESOLVED target-platform identity (the route's nominal cost version
+   * does not describe a cross-platform composite dispatch). Absent keeps
+   * composite requests fail-closed.
+   */
+  readonly pricing?: PricingReader;
 }
 
 type SafeFailureStage = 'route' | 'account' | 'capability';
@@ -656,7 +665,35 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
               );
 
         const customerPriceVersion = nullableText(commercial.customerPriceVersion);
-        const supplierCostVersion = nullableText(commercial.supplierCostVersion);
+        /*
+         * R3 §8.1: the supplier cost identity is resolved on the identity
+         * this attempt ACTUALLY serves on. Non-composite dispatches reuse
+         * the route commercial authority's cost version (the nominal pin IS
+         * the serving identity). Composite dispatches resolve the real
+         * supply commercial chain on the resolved target platform — after
+         * the composite decision, before admission — so each attempt (and
+         * every retry / cross-platform fallback) freezes its own actual cost
+         * identity while the customer price version stays bound to the
+         * route and never drifts.
+         */
+        let supplierCostVersion = nullableText(commercial.supplierCostVersion);
+        if (input.entitlement.supplyMode === 'platform') {
+          if (!customerPriceVersion) fail('route');
+          if (composite !== undefined) {
+            supplierCostVersion = await this.resolveCompositeSupplierCostVersion(executor, {
+              route,
+              protocol: input.protocol,
+              providerId: effectiveProviderId,
+              productId: effectiveProductId,
+              resolvedModel: effectiveModel,
+              endpoint: effectiveEndpoint,
+              customerPriceVersion,
+              at: authorityAt,
+            });
+          } else if (!supplierCostVersion) {
+            fail('route');
+          }
+        }
         if (
           (input.entitlement.supplyMode === 'byok' &&
             (customerPriceVersion !== null || supplierCostVersion !== null)) ||
@@ -772,6 +809,31 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
           candidate,
           ...(candidates.length > 1 ? { candidates } : {}),
           ...(composite !== undefined ? { composite } : {}),
+          /*
+           * R3 §8.1: the frozen supply billing identity (the actual serving
+           * identity + the per-attempt resolved supplier cost version and
+           * the route's frozen provider metering policy version), plus the
+           * customer sale identity the customer price version is registered
+           * under (the route's nominal pin — unchanged by the composite
+           * switch). BYOK has no platform supply identity.
+           */
+          ...(supplierCostVersion !== null
+            ? {
+                supplyBilling: {
+                  providerId: effectiveProviderId,
+                  productId: effectiveProductId,
+                  upstreamModel: effectiveModel,
+                  providerOperation: routeOperations(route.protocol, input.clientOperation).providerOperation,
+                  supplierCostVersion,
+                  meteringPolicyVersion: version(commercial.providerPolicyVersion),
+                },
+              }
+            : {}),
+          customerPriceIdentity: {
+            providerId,
+            productId,
+            endpoint: route.endpoint,
+          },
           modelMappingRules:
             modelResolution.mappingSource === 'none'
               ? []
@@ -807,6 +869,61 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
         return rejectRequestPreparation('account_denied', SAFE_MESSAGES.account);
       }
       return blockRequestPreparation('storage_failure', SAFE_MESSAGES.storage);
+    }
+  }
+
+  /**
+   * R3 §8.1: resolves the supplier cost version for a composite dispatch on
+   * the RESOLVED target-platform identity, inside the preparation
+   * transaction. The supplier cost must share the customer price currency
+   * (the admission profit fence requires equality), and a missing or
+   * non-effective cost version for the target platform fails closed — the
+   * route's nominal cost version is never silently reused across platforms.
+   */
+  private async resolveCompositeSupplierCostVersion(
+    executor: SqlExecutor,
+    input: {
+      readonly route: RouteConfigRecord;
+      readonly protocol: Parameters<RequestPreparationAuthorityPort['resolve']>[0]['protocol'];
+      readonly providerId: string;
+      readonly productId: string;
+      readonly resolvedModel: string;
+      readonly endpoint: string;
+      readonly customerPriceVersion: string;
+      readonly at: Date;
+    },
+  ): Promise<string> {
+    const pricing = this.dependencies.pricing;
+    if (!pricing) fail('route');
+    const currencyRows = await queryRows(
+      executor,
+      `SELECT currency FROM saas_customer_price_versions WHERE id = $1 LIMIT 2`,
+      [input.customerPriceVersion],
+    );
+    if (currencyRows.length !== 1) fail('route');
+    const currencyRow = currencyRows[0];
+    if (!currencyRow) fail('route');
+    const currency = currencyRow.currency;
+    if (typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency)) fail('route');
+    try {
+      const cost = await pricing.resolveSupplierCostVersion(
+        {
+          publicModelId: input.route.publicModelId,
+          publicModelVersion: input.route.publicModelVersion,
+          providerId: input.providerId,
+          productId: input.productId,
+          resolvedModel: input.resolvedModel,
+          protocol: input.protocol,
+          endpoint: input.endpoint,
+          currency,
+          at: input.at,
+        },
+        { executor },
+      );
+      return cost.id;
+    } catch (error) {
+      if (error instanceof SaasPricingError) fail('route');
+      throw error;
     }
   }
 

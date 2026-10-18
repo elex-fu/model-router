@@ -370,6 +370,15 @@ export interface CreateCustomerPriceSnapshotInput {
   readonly admissionExpiresAt: string | Date;
   readonly idempotencyKey: string;
   /**
+   * R3 §8.1: the protocol/endpoint the customer price version is registered
+   * under. Composite dispatches serve on the resolved target's endpoint while
+   * the customer price stays bound to the route's nominal endpoint, so the
+   * binding check must not read the serving endpoint off the request row.
+   * Absent keeps the pre-8.1 behavior (the request row's own protocol and
+   * endpoint).
+   */
+  readonly priceBinding?: { readonly protocol: string; readonly endpoint: string } | null;
+  /**
    * R1 billing-group terms composed at admission. When present the hold
    * amount is the effective price (group model-pricing override applied)
    * multiplied by the composed group rate multiplier, and all terms are

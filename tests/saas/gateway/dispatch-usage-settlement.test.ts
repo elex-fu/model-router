@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { SettleBillingInput } from '../../../src/saas/billing/types.js';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
@@ -20,6 +21,7 @@ import type {
   RecordUsageSettlementInput,
 } from '../../../src/saas/metering/types.js';
 import { normalizeRates } from '../../../src/saas/pricing/calculator.js';
+import { normalizeTokenMultiplierPolicy } from '../../../src/saas/pricing/multipliers.js';
 import type {
   CustomerPriceSnapshotRecord,
   CustomerPriceVersionRecord,
@@ -513,5 +515,234 @@ test('durable normal success writes usage, wallet settlement, and terminal state
         reconciliationState: 'resolved',
       },
     ],
+  );
+});
+
+/*
+ * R3 §8.1/§8.3: the settlement-side tier trust matrix and the resolved
+ * supply identity verification. Rates: input 1/token, output 1/token; the
+ * price version carries a 1/2 flex multiplier so a trusted downgrade halves
+ * the charge (5 input + 2 output = 7 base; flex = 3.5 → 4 half_up).
+ */
+
+const tieredCustomerPrice: CustomerPriceVersionRecord = {
+  ...customerPrice,
+  id: 'price-tiered',
+  rates: rateSet,
+  tokenMultipliers: normalizeTokenMultiplierPolicy({
+    serviceTiers: { flex: { numerator: 1n, denominator: 2n } },
+  }),
+};
+
+const tieredPriceSnapshot: CustomerPriceSnapshotRecord = {
+  ...priceSnapshotRecord,
+  id: 'snapshot-tiered',
+  customerPriceVersion: 'price-tiered',
+};
+
+const tieredSnapshot: NormalSuccessSettlementSnapshot = {
+  ...snapshot,
+  customerPriceVersion: 'price-tiered',
+  priceSnapshotRef: 'snapshot-tiered',
+};
+
+function expectedUsageDigest(tierMaterial: string | null): string {
+  const base =
+    'inputTotal=5&inputUncached=5&cacheRead=0&cacheWrite=0&cacheWrite5m=0&cacheWrite1h=0&outputTotal=2&reasoningOutput=0&billingMode=token&units=null&sizeTier=null';
+  return createHash('sha256')
+    .update(tierMaterial === null ? base : `${base}&serviceTier=${tierMaterial}`)
+    .digest('hex');
+}
+
+function tieredCoordinator(supplyBilling: NormalSuccessSettlementSnapshot['supplyBilling'] = null): {
+  coordinator: DispatchUsageSettlementCoordinator;
+  committed: () => NormalSuccessTransactionInput | undefined;
+} {
+  let committed: NormalSuccessTransactionInput | undefined;
+  return {
+    committed: () => committed,
+    coordinator: new DispatchUsageSettlementCoordinator(
+      {
+        async getCustomerPriceVersion(id) {
+          assert.equal(id, 'price-tiered');
+          return tieredCustomerPrice;
+        },
+        async getCustomerPriceSnapshot(id) {
+          assert.equal(id, 'snapshot-tiered');
+          return tieredPriceSnapshot;
+        },
+        async getSupplierCostVersion(id) {
+          assert.equal(id, supplyBilling?.supplierCostVersion ?? 'cost-v1');
+          return {
+            kind: 'supplier',
+            id: supplyBilling?.supplierCostVersion ?? 'cost-v1',
+            version: 1,
+            publicModelId: supplyBilling === null ? 'model-1' : 'model-1',
+            publicModelVersion: 1,
+            providerId: supplyBilling?.providerId ?? 'provider-1',
+            productId: supplyBilling?.productId ?? 'product-1',
+            resolvedModel: supplyBilling?.upstreamModel ?? 'model-1',
+            protocol: 'openai',
+            endpoint: 'chat-completions',
+            currency: 'USD',
+            commercialPolicyVersion: 'policy-v1',
+            calculatorVersion: 'calculator-v1',
+            roundingVersion: 'rounding-v1',
+            roundingMode: 'half_up',
+            roundingBoundary: 'total',
+            rates: rateSet,
+            tokenMultipliers: null,
+            effectiveAt: '2026-09-01T00:00:00.000Z',
+            expiresAt: null,
+            idempotencyKey: 'cost-key-v1',
+            definitionDigest: 'e'.repeat(64),
+            createdAt: '2026-09-01T00:00:00.000Z',
+          };
+        },
+      },
+      transactionSpy((input) => {
+        committed = input;
+      }),
+    ),
+  };
+}
+
+test('a trusted public-api downgrade bills at the lower tier; the tier resolution enters the evidence digest', async () => {
+  const { coordinator, committed } = tieredCoordinator();
+  await coordinator.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    snapshot: tieredSnapshot,
+    usage: { ...observedUsage, source: 'upstream' },
+    serviceTier: { requested: 'priority', observed: 'flex' },
+  });
+  assert.equal(committed()?.chargeAmountMinorUnits, '4');
+  assert.equal(committed()?.usageEvidenceRef, expectedUsageDigest('priority>flex:flex:observed-lower'));
+});
+
+test('a codex observed default is non-authoritative: the outbound tier is kept and recorded', async () => {
+  const supplyBilling = {
+    providerId: 'openai-codex',
+    productId: 'codex-chatgpt',
+    upstreamModel: 'gpt-5.3-codex',
+    providerOperation: 'responses',
+    supplierCostVersion: 'cost-codex-v1',
+    meteringPolicyVersion: '7',
+  };
+  const { coordinator, committed } = tieredCoordinator(supplyBilling);
+  await coordinator.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    snapshot: {
+      ...tieredSnapshot,
+      supplyBilling,
+    },
+    usage: { ...observedUsage, source: 'upstream' },
+    // The codex transform strips the outbound service_tier, so the requested
+    // side is null while the response declares default.
+    serviceTier: { requested: null, observed: 'default' },
+  });
+  // No requested tier → no downgrade path; the charge stays at the base rate
+  // and the retention is explainable in the evidence digest.
+  assert.equal(committed()?.chargeAmountMinorUnits, '7');
+  assert.equal(committed()?.usageEvidenceRef, expectedUsageDigest('>default::observed-non-authoritative'));
+});
+
+test('conflicting tier reports keep the outbound tier and never apply either declaration', async () => {
+  const { coordinator, committed } = tieredCoordinator();
+  await coordinator.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    snapshot: tieredSnapshot,
+    usage: { ...observedUsage, source: 'upstream' },
+    serviceTier: { requested: 'priority', observed: 'flex', observedConflict: true },
+  });
+  assert.equal(committed()?.chargeAmountMinorUnits, '7');
+  assert.equal(committed()?.usageEvidenceRef, expectedUsageDigest('priority>flex:priority:observed-conflict'));
+});
+
+test('a tierless settlement keeps the pre-8.3 evidence digest byte-identical', async () => {
+  const { coordinator, committed } = tieredCoordinator();
+  await coordinator.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    snapshot: tieredSnapshot,
+    usage: { ...observedUsage, source: 'upstream' },
+  });
+  const digest = committed()?.usageEvidenceRef ?? '';
+  // The §4.1 anti-drift policy: a tierless settlement digests to exactly its
+  // pre-8.3 value (no serviceTier segment).
+  assert.equal(digest, expectedUsageDigest(null));
+});
+
+test('settlement verifies the supplier cost version against the resolved supply identity', async () => {
+  const supplyBilling = {
+    providerId: 'google-gemini',
+    productId: 'gemini-subscription',
+    upstreamModel: 'gemini-2.5-pro',
+    providerOperation: 'chat.completions',
+    supplierCostVersion: 'cost-gemini-v1',
+    meteringPolicyVersion: '7',
+  };
+  const { coordinator, committed } = tieredCoordinator(supplyBilling);
+  await coordinator.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    // R3 §8.1: the customer identity stays the nominal route pin.
+    snapshot: { ...tieredSnapshot, supplyBilling },
+    usage: { ...observedUsage, source: 'upstream' },
+  });
+  assert.equal(committed()?.chargeAmountMinorUnits, '7');
+  assert.equal(committed()?.customerPriceVersion, 'price-tiered');
+});
+
+test('a supplier cost version that does not match the resolved supply identity fails closed', async () => {
+  const supplyBilling = {
+    providerId: 'google-gemini',
+    productId: 'gemini-subscription',
+    upstreamModel: 'gemini-2.5-pro',
+    providerOperation: 'chat.completions',
+    supplierCostVersion: 'cost-gemini-v1',
+    meteringPolicyVersion: '7',
+  };
+  // The port returns a cost row registered under a DIFFERENT provider — the
+  // pre-8.1 nominal-provider fallback shape.
+  const coordinator = new DispatchUsageSettlementCoordinator(
+    {
+      async getCustomerPriceVersion() {
+        return tieredCustomerPrice;
+      },
+      async getCustomerPriceSnapshot() {
+        return tieredPriceSnapshot;
+      },
+      async getSupplierCostVersion() {
+        return {
+          ...tieredCustomerPrice,
+          kind: 'supplier',
+          id: 'cost-gemini-v1',
+          providerId: 'anthropic',
+          productId: 'claude-subscription',
+          resolvedModel: 'claude-sonnet-5',
+        } as unknown as import('../../../src/saas/pricing/types.js').SupplierCostVersionRecord;
+      },
+    },
+    transactionSpy(() => {
+      throw new Error('settlement must not run');
+    }),
+  );
+  await assert.rejects(
+    coordinator.complete({
+      tenantId: 'tenant-1',
+      requestId: 'request-1',
+      attemptId: 'attempt-1',
+      snapshot: { ...tieredSnapshot, supplyBilling },
+      usage: { ...observedUsage, source: 'upstream' },
+    }),
+    /does not match the resolved supply billing identity/,
   );
 });

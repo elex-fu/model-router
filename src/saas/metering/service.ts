@@ -32,6 +32,7 @@ import type {
   FinancialTransitionInput,
   IdempotencyRecord,
   InitialAttemptInput,
+  MeteringCompositeRouteContext,
   MeteringDatabase,
   MeteringOperationOptions,
   MeteringRouteTargetMode,
@@ -184,6 +185,8 @@ interface NormalizedRequestInput
   readonly requestFingerprintVersion: string;
   readonly idempotencyKeyDigest: string | null;
   readonly customerPriceVersion: string | null;
+  /** R3 §8.1: in-memory composite context threaded to the admission guard. */
+  readonly compositeRoute: MeteringCompositeRouteContext | null;
   readonly initialAttempt: InitialAttemptInput | null;
 }
 
@@ -555,6 +558,7 @@ function normalizeRequest(input: CreateRequestInput, hmacSecret?: HmacSecret): N
     fail('METERING_INVALID_INPUT');
   }
   const requestFingerprintVersion = asNonEmptyText(input.requestFingerprintVersion, 'requestFingerprintVersion', 64);
+  const compositeRoute = normalizeCompositeRoute(input.compositeRoute);
   let idempotencyKeyDigest: string | null = null;
   if (input.idempotencyKey !== undefined && input.idempotencyKey !== null) {
     const key = asNonEmptyText(input.idempotencyKey, 'idempotencyKey', 4096);
@@ -571,7 +575,41 @@ function normalizeRequest(input: CreateRequestInput, hmacSecret?: HmacSecret): N
     requestFingerprintVersion,
     idempotencyKeyDigest,
     customerPriceVersion,
+    compositeRoute,
     initialAttempt: input.initialAttempt ?? null,
+  };
+}
+
+/**
+ * R3 §8.1: the composite decision is server-resolved and threaded in-memory
+ * (durable rows stay unchanged; the signed prepared evidence carries the
+ * durable copy). The shape is validated exactly like every other in-memory
+ * admission field.
+ */
+function normalizeCompositeRoute(value: CreateRequestInput['compositeRoute']): MeteringCompositeRouteContext | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) fail('METERING_INVALID_INPUT');
+  const context = value as MeteringCompositeRouteContext;
+  const text = (input: unknown, label: string, max: number): string => {
+    if (typeof input !== 'string' || input.trim() === '' || input.length > max) {
+      fail('METERING_INVALID_INPUT', `compositeRoute.${label} is invalid`);
+    }
+    return input;
+  };
+  if (
+    (context.source !== 'route' && context.source !== 'account_model' && context.source !== 'detector') ||
+    (context.routeId !== null && typeof context.routeId !== 'string')
+  ) {
+    fail('METERING_INVALID_INPUT');
+  }
+  return {
+    billingGroupId: text(context.billingGroupId, 'billingGroupId', 128),
+    source: context.source,
+    routeId: context.routeId === undefined ? null : context.routeId,
+    targetPlatform: text(context.targetPlatform, 'targetPlatform', 128),
+    productId: text(context.productId, 'productId', 128),
+    upstreamModel: text(context.upstreamModel, 'upstreamModel', 512),
+    endpoint: text(context.endpoint, 'endpoint', 1024),
   };
 }
 
@@ -1997,7 +2035,18 @@ export class SaasMeteringService {
       );
       if (existingAttemptIdentity && !existingRequest) fail('IDEMPOTENCY_CONFLICT');
       if (existingRequest) {
-        return this.replayPreparedAdmission(tx, normalized, normalizedAttempt, requestId, attemptId, existingRequest);
+        const replayed = await this.replayPreparedAdmission(
+          tx,
+          normalized,
+          normalizedAttempt,
+          requestId,
+          attemptId,
+          existingRequest,
+        );
+        if (replayed.kind === 'replayed' && normalized.compositeRoute !== null) {
+          return { ...replayed, request: { ...replayed.request, compositeRoute: normalized.compositeRoute } };
+        }
+        return replayed;
       }
 
       let idempotency: IdempotencyRecord | null = null;
@@ -2063,6 +2112,7 @@ export class SaasMeteringService {
       let request: RequestRecord;
       try {
         request = await this.insertRequest(tx, normalized, requestId, createdAt);
+        if (normalized.compositeRoute !== null) request = { ...request, compositeRoute: normalized.compositeRoute };
       } catch (error) {
         const cause = error instanceof SaasMeteringError ? error.cause : error;
         if (isUniqueViolation(cause, 'saas_requests_tenant_id_unique')) fail('IDEMPOTENCY_CONFLICT');

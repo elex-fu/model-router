@@ -1208,3 +1208,112 @@ test('a malformed stored policy head fails closed instead of failing open', asyn
   );
   assert.equal(fixture.snapshot, null);
 });
+
+/*
+ * R3 §8.1: composite dispatches — the customer price identity stays on the
+ * route's nominal pin while the supplier cost identity is the RESOLVED
+ * target-platform identity the attempt froze.
+ */
+
+function compositeFixture(): Fixture {
+  const fixture = makeFixture('platform');
+  const target = {
+    providerId: 'google-gemini',
+    productId: 'gemini-subscription',
+    model: 'gemini-2.5-pro',
+    endpoint: 'gemini-generate-content',
+  };
+  fixture.request = {
+    ...fixture.request,
+    endpoint: target.endpoint,
+    compositeRoute: {
+      billingGroupId: 'default',
+      source: 'route',
+      routeId: 'route-a',
+      targetPlatform: target.providerId,
+      productId: target.productId,
+      upstreamModel: target.model,
+      endpoint: target.endpoint,
+    },
+  };
+  fixture.attempt = {
+    ...fixture.attempt,
+    providerId: target.providerId,
+    productId: target.productId,
+    resolvedModel: target.model,
+    endpoint: target.endpoint,
+    supplierCostVersion: 'supplier-gemini',
+  };
+  // The persisted rows must mirror the in-memory request/candidate exactly.
+  fixture.rows.request = { ...fixture.rows.request, endpoint: target.endpoint };
+  fixture.rows.attempt = {
+    ...fixture.rows.attempt,
+    provider_id: target.providerId,
+    product_id: target.productId,
+    resolved_model: target.model,
+    endpoint: target.endpoint,
+    supplier_cost_version: 'supplier-gemini',
+  };
+  // Serving-side authority rows carry the RESOLVED identity.
+  for (const stage of [
+    'account',
+    'account-rights',
+    'credential',
+    'pool',
+    'pool-rights',
+    'pool-member',
+    'capability',
+    'account-capability',
+    'product',
+  ]) {
+    const row = fixture.rows[stage];
+    if (row && !Array.isArray(row)) {
+      fixture.rows[stage] = {
+        ...row,
+        ...(row.provider_id !== undefined ? { provider_id: target.providerId } : {}),
+        ...(row.product_id !== undefined ? { product_id: target.productId } : {}),
+        ...(row.model !== undefined ? { model: target.model } : {}),
+        ...(row.endpoint !== undefined ? { endpoint: target.endpoint } : {}),
+        ...(row.model_scope !== undefined ? { model_scope: [target.model] } : {}),
+        ...(row.endpoint_scope !== undefined ? { endpoint_scope: [target.endpoint] } : {}),
+      };
+    }
+  }
+  // The supplier cost version is the RESOLVED target-platform identity row;
+  // the customer price version stays the nominal route registration.
+  fixture.supplierCost = {
+    ...priceRow('supplier'),
+    id: 'supplier-gemini',
+    provider_id: target.providerId,
+    product_id: target.productId,
+    resolved_model: target.model,
+    endpoint: target.endpoint,
+  };
+  return fixture;
+}
+
+test('composite admission verifies the resolved supply identity and the nominal customer identity separately', async () => {
+  const fixture = compositeFixture();
+  const result = await run(fixture);
+  assert.equal(result.platformPriceHold?.customerPriceVersion, 'price-v1');
+  assert.equal(result.platformPriceHold?.supplierCostVersion, 'supplier-gemini');
+  // The customer price snapshot keeps the NOMINAL identity (no customer drift).
+  assert.equal(fixture.snapshot?.provider_id, 'provider-a');
+  assert.equal(fixture.snapshot?.product_id, 'product-a');
+  assert.equal(fixture.snapshot?.endpoint, '/v1/chat/completions');
+});
+
+test('a composite candidate whose supplier cost row is the nominal version fails closed', async () => {
+  const fixture = compositeFixture();
+  // The attempt carries the NOMINAL cost version instead of the resolved one.
+  fixture.attempt = { ...fixture.attempt, supplierCostVersion: 'supplier-v1' };
+  fixture.rows.attempt = { ...fixture.rows.attempt, supplier_cost_version: 'supplier-v1' };
+  // The supplier cost row is now the nominal registration; the resolved
+  // candidate identity (gemini) no longer matches it.
+  fixture.supplierCost = priceRow('supplier');
+  await assert.rejects(run(fixture), (error: unknown) => {
+    assert.ok(error instanceof PostgresRequestAdmissionGuardError);
+    assert.equal(error.code, 'AUTHORITY_MISMATCH');
+    return true;
+  });
+});

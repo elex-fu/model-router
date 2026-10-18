@@ -11,6 +11,7 @@ import type {
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import type { RouteConfigRecord } from '../../../src/saas/gateway/route-config-service.js';
 import type { EffectiveByokEntitlement } from '../../../src/saas/plans/types.js';
+import { SaasPricingError } from '../../../src/saas/pricing/index.js';
 
 type Row = Record<string, unknown>;
 type Mode = 'byok' | 'platform';
@@ -41,6 +42,10 @@ interface Fixture {
   compositeTargetCapability?: { readonly product_id: string; readonly endpoint: string } | null;
   /** §4.4 composite: the catalog eligibility the fake returns for the target. */
   eligibilityResult?: ProviderEligibilityResult;
+  /** R3 §8.1: the supplier cost version the fake pricing port resolves (null = none). */
+  compositeSupplierCost?: string | null;
+  /** R3 §8.1: the identity inputs the composite resolution received. */
+  compositeSupplierCostRequests: Array<Record<string, unknown>>;
 }
 
 function caller(mode: Mode): RequestPreparationCaller {
@@ -199,6 +204,8 @@ function baseFixture(mode: Mode): Fixture {
     providerScope: ['provider-a'],
     byokEntitlement: effectiveByokEntitlement(),
     planResolverExecutors: [],
+    compositeSupplierCost: 'supplier-cost-gemini',
+    compositeSupplierCostRequests: [],
     statements: [],
   };
 }
@@ -383,6 +390,7 @@ class FakeAuthorityFactsRepository {
           rows = this.fixture.compositeTargetCapability === null ? [] : [this.fixture.compositeTargetCapability];
         else if (sql.includes('composite-route-store:')) rows = [];
         else if (sql.includes('FROM saas_public_model_versions')) rows = [this.fixture.alias];
+        else if (sql.includes('FROM saas_customer_price_versions')) rows = [{ currency: 'USD' }];
         else if (sql.includes('FROM saas_supply_profiles')) rows = [this.fixture.profile];
         else if (sql.includes('preparation-authority:byok')) rows = this.fixture.byokRows;
         else if (sql.includes('preparation-authority:platform')) rows = this.fixture.platformRows;
@@ -419,6 +427,20 @@ function adapter(fixture: Fixture): PostgresRequestPreparationAuthorityAdapter {
       async resolveBoundForRequest(_context, _entitlementId, options) {
         fixture.planResolverExecutors.push(options?.executor);
         return fixture.byokEntitlement;
+      },
+    },
+    // R3 §8.1: composite dispatches resolve the supplier cost version on the
+    // resolved target-platform identity through this port.
+    pricing: {
+      async resolveSupplierCostVersion(input) {
+        fixture.compositeSupplierCostRequests.push(input);
+        if (fixture.compositeSupplierCost === null) {
+          throw new SaasPricingError('PRICE_VERSION_NOT_EFFECTIVE');
+        }
+        return {
+          id: fixture.compositeSupplierCost,
+          ...input,
+        };
       },
     },
   });
@@ -880,6 +902,35 @@ test('composite groups resolve the serving platform and rewrite the model with p
     assert.equal(authority.candidate.resolvedModel, GEMINI_UPSTREAM_MODEL);
     assert.equal(authority.candidate.endpoint, GEMINI_ENDPOINT);
     assert.equal(authority.route.endpoint, GEMINI_ENDPOINT);
+    // R3 §8.1: the supplier cost version is resolved per attempt on the
+    // TARGET identity (not the nominal route's version), and the frozen
+    // supply identity + nominal customer identity ride the authority.
+    assert.equal(authority.candidate.supplierCostVersion, 'supplier-cost-gemini');
+    assert.deepEqual(authority.supplyBilling, {
+      providerId: GEMINI_PLATFORM,
+      productId: GEMINI_PRODUCT,
+      upstreamModel: GEMINI_UPSTREAM_MODEL,
+      providerOperation: 'chat.completions',
+      supplierCostVersion: 'supplier-cost-gemini',
+      meteringPolicyVersion: '3',
+    });
+    assert.deepEqual(authority.customerPriceIdentity, {
+      providerId: 'provider-a',
+      productId: 'product-a',
+      endpoint: '/v1/chat/completions',
+    });
+    assert.equal(fixture.compositeSupplierCostRequests.length, 1);
+    assert.deepEqual(fixture.compositeSupplierCostRequests[0], {
+      publicModelId: 'public-model-id',
+      publicModelVersion: '9',
+      providerId: GEMINI_PLATFORM,
+      productId: GEMINI_PRODUCT,
+      resolvedModel: GEMINI_UPSTREAM_MODEL,
+      protocol: 'openai',
+      endpoint: GEMINI_ENDPOINT,
+      currency: 'USD',
+      at: fixture.compositeSupplierCostRequests[0]?.at,
+    });
     assert.deepEqual(authority.composite, {
       billingGroupId: 'composite-a',
       source: 'route',
@@ -939,6 +990,9 @@ test('composite groups resolve the serving platform and rewrite the model with p
       [authority.composite?.source, authority.candidate.providerId, authority.candidate.resolvedModel],
       ['account_model', GEMINI_PLATFORM, 'public-model'],
     );
+    // R3 §8.1: the Level-2 decision also freezes the resolved supply identity.
+    assert.equal(authority.candidate.supplierCostVersion, 'supplier-cost-gemini');
+    assert.equal(authority.supplyBilling?.upstreamModel, 'public-model');
   });
 
   await t.test('an unknown model fails closed with the safe route denial', async () => {

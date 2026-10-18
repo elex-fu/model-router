@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { KnownNonSuccessHttpResponseInput } from '../metering/service.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../metering/types.js';
+import { serviceTierTrustCategory } from '../pricing/service-tier-trust.js';
 import type { ModelResolutionProvenance } from './contracts.js';
 import type {
   NormalSuccessObservedUsage,
@@ -22,6 +23,7 @@ import type {
   PreparedRequestEvidenceRecord,
 } from './prepared-request-evidence-service.js';
 import { ProviderHttpTransportError } from './provider-http-transport.js';
+import type { NormalizedUsageEvidence, TransportServiceTierEvidence } from './usage-evidence.js';
 
 export interface PreparedEvidenceMeteringPort {
   getAttempt(tenantId: string, requestId: string, attemptId: string): Promise<AttemptRecord | null>;
@@ -62,12 +64,22 @@ export interface PreparedEvidenceTransportResponse {
   /** Trustworthy, normalized provider usage supplied by a bounded transport observer. */
   readonly providerUsage?: NormalSuccessObservedUsage | null;
   /**
-   * §4.1/§4.2 (tasks #15/#16): category-supplied service-tier settlement
-   * terms — the requested tier from the request payload and the observed
-   * tier from the response. Absent keeps the base rate; the settlement's
-   * only-lower rule means an observed tier can never raise the charge.
+   * §4.1/§4.2 (tasks #15/#16) and R3 §8.2/§8.3: transport-supplied
+   * service-tier settlement terms — the requested tier frozen from the final
+   * outbound payload and the observed tier declared by the response.
+   * Absent keeps the base rate; the settlement's trust rules mean an
+   * observed tier can never raise the charge, and non-authoritative
+   * categories (Codex OAuth) never apply it at all.
    */
-  readonly serviceTier?: { readonly requested: string | null; readonly observed: string | null } | null;
+  readonly serviceTier?: TransportServiceTierEvidence | null;
+  /**
+   * R3 §8.2: the bounded usage-evidence object observed at the raw upstream
+   * response point (metering source, frozen outbound tier, observed tier,
+   * units, model, operation, completeness, observation time, adapter
+   * version). Redaction-safe by construction — no credentials, no user
+   * text. Absent on transports that predate the contract.
+   */
+  readonly usageEvidence?: NormalizedUsageEvidence | null;
   /** A one-reader body stream; dispatch consumes it without buffering the body. */
   readonly body?: ReadableStream<Uint8Array> | null;
 }
@@ -120,6 +132,8 @@ export interface PreparedEvidenceDispatchSent {
   readonly evidence: PreparedRequestEvidenceRecord;
   readonly attempt: AttemptRecord;
   readonly transport: PreparedEvidenceTransportResponse;
+  /** R3 §8.2: the bounded, redaction-safe usage evidence (archival seam). */
+  readonly usageEvidence?: NormalizedUsageEvidence | null;
   /** Cleanup failed after the upstream result was durably classified as sent. */
   readonly leaseReleaseError?: SaasPreparedEvidenceDispatchError;
 }
@@ -557,6 +571,21 @@ function withLeaseReleaseError(
   return { ...result, leaseReleaseError: error };
 }
 
+/**
+ * R3 §8.2: fills the account category onto the transport's bounded usage
+ * evidence from the frozen supply identity (the composite target platform on
+ * composite dispatches). The trust rules themselves are applied once, at
+ * settlement, against the same category.
+ */
+function enrichUsageEvidence(
+  evidence: NormalizedUsageEvidence | null,
+  snapshot: NormalSuccessSettlementSnapshot | undefined,
+): NormalizedUsageEvidence | null {
+  if (evidence === null || snapshot === undefined || evidence.accountKind !== null) return evidence;
+  const providerId = snapshot.supplyBilling?.providerId ?? snapshot.providerId;
+  return { ...evidence, accountKind: serviceTierTrustCategory({ providerId }) };
+}
+
 async function persistUnknown(
   metering: PreparedEvidenceMeteringPort,
   evidence: PreparedRequestEvidenceRecord,
@@ -855,6 +884,8 @@ export class SaasPreparedEvidenceDispatchService {
     let transportSignal: CombinedAbortSignal | undefined;
     let transportResult: PreparedEvidenceTransportResponse | undefined;
     let transportError: unknown;
+    // R3 §8.2: the enriched usage evidence, filled on the sent path.
+    let usageEvidence: NormalizedUsageEvidence | null = null;
     // K2: hoisted so the finally-block evidence classification can see the
     // delivery facts (mid-stream upstream abort detection).
     const delivery: ResponseDeliveryState = { responseStarted: false, upstreamBodyFailed: false };
@@ -1025,6 +1056,12 @@ export class SaasPreparedEvidenceDispatchService {
               transportResult.resultHttpStatus !== undefined &&
               transportResult.resultHttpStatus >= 200 &&
               transportResult.resultHttpStatus < 300;
+            /*
+             * R3 §8.2: enrich the transport's bounded usage evidence with the
+             * account category (from the frozen supply identity) and carry it
+             * on the outcome for redacted archival. Read once, post-EOF.
+             */
+            usageEvidence = enrichUsageEvidence(transportResult.usageEvidence ?? null, snapshot);
             if (snapshot && successfulHttpResponse && this.normalSuccessSettlement) {
               try {
                 if (transportResult.providerUsage) {
@@ -1034,8 +1071,9 @@ export class SaasPreparedEvidenceDispatchService {
                     attemptId: evidence.attemptId,
                     snapshot,
                     usage: transportResult.providerUsage,
-                    // §4.2: the category transport's service-tier terms reach
-                    // the settlement input here; absent keeps the base rate.
+                    // §4.2 and R3 §8.3: the transport's service-tier terms
+                    // reach the settlement input here; the coordinator applies
+                    // the per-category trust rules before any pricing.
                     serviceTier: transportResult.serviceTier ?? null,
                   });
                   reconciliationPersisted = completion.kind === 'reconciliation_pending';
@@ -1188,6 +1226,9 @@ export class SaasPreparedEvidenceDispatchService {
 
     if (hasPrimaryError) throw primaryError;
     if (!outcome) fail('STATE_UPDATE_FAILED', 'dispatch did not produce a classified outcome');
+    // R3 §8.2: the enriched usage evidence rides the sent outcome (post-EOF,
+    // redaction-safe) for archival.
+    if (outcome.kind === 'sent' && usageEvidence !== null) outcome = { ...outcome, usageEvidence };
     return outcome;
   }
 }

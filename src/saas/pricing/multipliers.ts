@@ -24,9 +24,10 @@ import type {
  * Known service tiers, ordered by cost rank (lower rank = cheaper). Mirrors
  * sub2api `serviceTierCostRank`: flex is cheaper than the base tier family;
  * priority/fast are more expensive; unknown tiers rank at base but are
- * reported unknown so the resolver never bills on them.
+ * reported unknown so the resolver never bills on them. Exported for the
+ * §8.3 trust rules, which need the same ordering.
  */
-const SERVICE_TIER_COST_RANK: Readonly<Record<string, number>> = {
+export const SERVICE_TIER_COST_RANK: Readonly<Record<string, number>> = {
   flex: 0,
   '': 1,
   default: 1,

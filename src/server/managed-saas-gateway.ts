@@ -1729,6 +1729,11 @@ export function createManagedSaasGatewayProductionComposition(
     commercial,
     catalog,
     byokEntitlements,
+    // R3 §8.1: composite dispatches resolve their supplier cost version on
+    // the resolved target-platform identity inside the preparation
+    // transaction (fail-closed when the target platform has no effective
+    // cost version for the route's public model).
+    pricing: new SaasPricingService(database),
   };
   // R5b-2: OpenCode Go prepared requests re-derive their provider protocol
   // per request from the protocol rule table (after modelMap resolution,

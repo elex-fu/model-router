@@ -114,6 +114,7 @@ test('OpenAI JSON passes through every chunk and publishes normalized usage only
       source: 'upstream',
       semanticsVersion: 'v1',
     },
+    observedServiceTier: null,
   });
   assert.strictEqual(observed.getObservation(), result);
   if (result.state === 'reported') assert.equal(Object.isFrozen(result.usage), true);
@@ -149,6 +150,7 @@ test('Anthropic message JSON retains exclusive-input/cache semantics and cache-d
       source: 'upstream',
       semanticsVersion: 'v1',
     },
+    observedServiceTier: null,
   });
 });
 
@@ -183,6 +185,7 @@ test('completed Responses JSON uses the actual responses operation and input/out
       source: 'upstream',
       semanticsVersion: 'v1',
     },
+    observedServiceTier: null,
   });
 });
 
@@ -199,7 +202,14 @@ test('JSON and existing SSE observation agree on OpenAI and Anthropic normalized
   ] as const) {
     const sse = observeProviderSseUsage(source([encoder.encode(wire)]), evidence);
     await drain(sse.body);
-    assert.deepEqual(await observe(json, evidence), await sse.observation);
+    // R3 §8.3: the SSE observation additionally carries the merged tier
+    // declaration fields; the usage semantics must still agree exactly.
+    const jsonObservation = await observe(json, evidence);
+    const sseObservation = await sse.observation;
+    assert.equal(sseObservation.state, jsonObservation.state);
+    assert.deepEqual(jsonObservation.usage, sseObservation.usage);
+    assert.equal(sseObservation.observedServiceTier, null);
+    assert.equal(sseObservation.observedServiceTierConflict, false);
   }
 });
 
@@ -231,6 +241,7 @@ test('missing, partial, negative, fractional, unsafe, inconsistent or unknown co
         state: 'unknown',
         usage: null,
         reason: ['missing', 'null'].includes(name) ? 'no_usage' : 'invalid_usage',
+        observedServiceTier: null,
       });
     });
   }
@@ -241,7 +252,7 @@ test('missing, partial, negative, fractional, unsafe, inconsistent or unknown co
   ]) {
     assert.deepEqual(
       await observe({ type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage }, anthropic),
-      { state: 'unknown', usage: null, reason: 'invalid_usage' },
+      { state: 'unknown', usage: null, reason: 'invalid_usage', observedServiceTier: null },
     );
   }
   assert.deepEqual(
@@ -249,7 +260,7 @@ test('missing, partial, negative, fractional, unsafe, inconsistent or unknown co
       { object: 'response', status: 'completed', output: [], usage: { ...responseUsage, total_tokens: 1 } },
       responses,
     ),
-    { state: 'unknown', usage: null, reason: 'invalid_usage' },
+    { state: 'unknown', usage: null, reason: 'invalid_usage', observedServiceTier: null },
   );
 });
 
@@ -266,14 +277,24 @@ test('malformed, truncated, damaged UTF-8, duplicate-key and excessive-depth JSO
   for (const bytes of chunks) {
     const observed = observeProviderJsonUsage(source([bytes]), openai);
     assert.deepEqual(await drain(observed.body), [bytes]);
-    assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'malformed_body' });
+    assert.deepEqual(await observed.observation, {
+      state: 'unknown',
+      usage: null,
+      reason: 'malformed_body',
+      observedServiceTier: null,
+    });
   }
   for (const value of [[], { ...envelope(), error: { message: 'provider failed' } }, { ...envelope(), choices: [] }]) {
-    assert.deepEqual(await observe(value), { state: 'unknown', usage: null, reason: 'malformed_body' });
+    assert.deepEqual(await observe(value), {
+      state: 'unknown',
+      usage: null,
+      reason: 'malformed_body',
+      observedServiceTier: null,
+    });
   }
   assert.deepEqual(
     await observe({ object: 'response', status: 'incomplete', output: [], usage: responseUsage }, responses),
-    { state: 'unknown', usage: null, reason: 'malformed_body' },
+    { state: 'unknown', usage: null, reason: 'malformed_body', observedServiceTier: null },
   );
 });
 
@@ -292,7 +313,12 @@ test('the exact byte cap reports valid usage, while oversized bodies pass throug
   const tail = encoder.encode(' ');
   const tooLarge = observeProviderJsonUsage(source([bytes, tail, tail]), openai);
   assert.deepEqual(await drain(tooLarge.body), [bytes, tail, tail]);
-  assert.deepEqual(await tooLarge.observation, { state: 'unknown', usage: null, reason: 'oversized_body' });
+  assert.deepEqual(await tooLarge.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'oversized_body',
+    observedServiceTier: null,
+  });
 });
 
 test('server-owned protocol/operation selects the observer; unsupported pairs pass through without usage', async () => {
@@ -306,6 +332,7 @@ test('server-owned protocol/operation selects the observer; unsupported pairs pa
       state: 'unknown',
       usage: null,
       reason: 'unsupported_protocol_operation',
+      observedServiceTier: null,
     });
   }
 });
@@ -323,7 +350,12 @@ test('cancellation after a valid JSON chunk but before EOF cannot report usage',
   assert.equal(observed.getObservation(), null);
   await reader.cancel('client closed');
   assert.equal(cancelled, true);
-  assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'cancelled' });
+  assert.deepEqual(await observed.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'cancelled',
+    observedServiceTier: null,
+  });
   reader.releaseLock();
 });
 
@@ -358,7 +390,12 @@ test('a cancellation racing a pending EOF read settles unknown and propagates to
   await reader.cancel();
   assert.equal((await eof).done, true);
   assert.equal(cancelled, true);
-  assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'cancelled' });
+  assert.deepEqual(await observed.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'cancelled',
+    observedServiceTier: null,
+  });
   reader.releaseLock();
 });
 
@@ -380,7 +417,12 @@ test('upstream failure after a complete JSON prefix preserves the stream failure
     openai,
   );
   await assert.rejects(drain(observed.body), (error: unknown) => error === failure);
-  assert.deepEqual(await observed.observation, { state: 'unknown', usage: null, reason: 'stream_error' });
+  assert.deepEqual(await observed.observation, {
+    state: 'unknown',
+    usage: null,
+    reason: 'stream_error',
+    observedServiceTier: null,
+  });
 });
 
 test('R2: embeddings JSON reports input-only usage from prompt_tokens ?? total_tokens', async () => {
@@ -411,6 +453,7 @@ test('R2: embeddings JSON reports input-only usage from prompt_tokens ?? total_t
       source: 'upstream',
       semanticsVersion: 'v1',
     },
+    observedServiceTier: null,
   });
 
   const totalOnly = await observe(embeddingsEnvelope({ total_tokens: 9 }), embeddings);
@@ -462,7 +505,7 @@ test('R2: embeddings usage stays unknown for malformed envelopes and inconsisten
   ];
   for (const { name, body, reason } of cases) {
     const observation = await observe(body, embeddings);
-    assert.deepEqual(observation, { state: 'unknown', usage: null, reason }, name);
+    assert.deepEqual(observation, { state: 'unknown', usage: null, reason, observedServiceTier: null }, name);
   }
 
   // The operation never changes the chat observer: an embeddings operation on
@@ -471,5 +514,69 @@ test('R2: embeddings usage stays unknown for malformed envelopes and inconsisten
     providerProtocol: 'anthropic',
     providerOperation: 'embeddings',
   });
-  assert.deepEqual(mismatched, { state: 'unknown', usage: null, reason: 'unsupported_protocol_operation' });
+  assert.deepEqual(mismatched, {
+    state: 'unknown',
+    usage: null,
+    reason: 'unsupported_protocol_operation',
+    observedServiceTier: null,
+  });
+});
+
+/*
+ * R3 §8.2/§8.3: observed service-tier extraction at the raw response point.
+ */
+
+test('the observed tier is extracted from the response body independently of the usage outcome', async (t) => {
+  await t.test('openai top-level service_tier', async () => {
+    const reported = await observe({ ...envelope(), service_tier: 'Flex' }, openai);
+    assert.equal(reported.state, 'reported');
+    if (reported.state !== 'reported') return;
+    assert.equal(reported.observedServiceTier, 'flex');
+
+    // An envelope mismatch keeps the outcome unknown, but the declared tier
+    // is still recorded (the anthropic mapping accepts a top-level alias).
+    const invalid = await observe({ ...envelope(openAiUsage), service_tier: 'priority' }, anthropic);
+    assert.equal(invalid.state, 'unknown');
+    if (invalid.state === 'unknown') assert.equal(invalid.observedServiceTier, 'priority');
+  });
+
+  await t.test('anthropic usage.speed is the category-specific mapping', async () => {
+    const message = {
+      id: 'local-message',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      stop_reason: 'end_turn',
+      usage: { ...anthropicUsage, speed: 'standard' },
+    };
+    const reported = await observe(message, anthropic);
+    assert.equal(reported.state, 'reported');
+    if (reported.state !== 'reported') return;
+    assert.equal(reported.observedServiceTier, 'standard');
+  });
+
+  await t.test('a malformed usage payload still records the declared tier', async () => {
+    const message = {
+      id: 'local-message',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      stop_reason: 'end_turn',
+      service_tier: 'fast',
+      usage: { input_tokens: 5 },
+    };
+    const observation = await observe(message, anthropic);
+    assert.equal(observation.state, 'unknown');
+    if (observation.state === 'unknown') {
+      assert.equal(observation.reason, 'invalid_usage');
+      assert.equal(observation.observedServiceTier, 'fast');
+    }
+  });
+
+  await t.test('a non-string or oversized tier declaration is no declaration', async () => {
+    const numeric = await observe({ ...envelope(), service_tier: 3 }, openai);
+    if (numeric.state === 'reported') assert.equal(numeric.observedServiceTier, null);
+    const oversized = await observe({ ...envelope(), service_tier: 'x'.repeat(33) }, openai);
+    if (oversized.state === 'reported') assert.equal(oversized.observedServiceTier, null);
+  });
 });

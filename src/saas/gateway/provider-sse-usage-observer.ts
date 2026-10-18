@@ -20,8 +20,25 @@ export type ProviderSseUsageUnknownReason =
   | 'stream_error';
 
 export type ProviderSseUsageObservation =
-  | { readonly state: 'reported'; readonly usage: NormalSuccessObservedUsage }
-  | { readonly state: 'unknown'; readonly usage: null; readonly reason: ProviderSseUsageUnknownReason };
+  | {
+      readonly state: 'reported';
+      readonly usage: NormalSuccessObservedUsage;
+      /**
+       * R3 §8.3: the served tier declared by the stream (OpenAI chunk-level
+       * `service_tier`; Anthropic `usage.speed`). Merged by event semantics:
+       * repeated declarations must agree.
+       */
+      readonly observedServiceTier: string | null;
+      /** Multiple reports disagreed; the tier is never billed on (§8.3). */
+      readonly observedServiceTierConflict: boolean;
+    }
+  | {
+      readonly state: 'unknown';
+      readonly usage: null;
+      readonly reason: ProviderSseUsageUnknownReason;
+      readonly observedServiceTier: string | null;
+      readonly observedServiceTierConflict: boolean;
+    };
 
 export interface ProviderSseUsageEvidence {
   /** Provider-side values from the signed/persisted prepared evidence. */
@@ -169,7 +186,12 @@ function parseAnthropicInputUsage(value: UsageRecord, requireInputFields: boolea
     'cache_read_input_tokens',
     'cache_creation_input_tokens',
     'cache_creation',
+    // §8.3: the served-tier declaration rides inside usage as `speed`.
+    'speed',
   ]);
+  // A declared `speed` must be a short string; anything else invalidates the
+  // usage report (the tier value itself was already merged by the caller).
+  if (Object.hasOwn(value, 'speed') && tierText(value.speed) === null) rejectUsage('invalid_usage');
   const inputTokens =
     requireInputFields || Object.hasOwn(value, 'input_tokens') ? requiredToken(value, 'input_tokens') : undefined;
   const cacheRead =
@@ -265,8 +287,18 @@ function buildAnthropicUsage(input: AnthropicInputUsage, outputTokens: number): 
   });
 }
 
+const MAX_TIER_TEXT_BYTES = 32;
+
+/** §8.3: a short, trimmed, lowercased tier declaration; anything else is none. */
+function tierText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === '' || trimmed.length > MAX_TIER_TEXT_BYTES) return null;
+  return trimmed;
+}
+
 function unknown(reason: ProviderSseUsageUnknownReason): ProviderSseUsageObservation {
-  return { state: 'unknown', usage: null, reason };
+  return { state: 'unknown', usage: null, reason, observedServiceTier: null, observedServiceTierConflict: false };
 }
 
 class ProviderSseUsageParser {
@@ -285,6 +317,14 @@ class ProviderSseUsageParser {
   private anthropicDelta: { readonly input: AnthropicInputUsage; readonly outputTokens: number } | undefined;
   private anthropicStopped = false;
   private anthropicUsage: NormalSuccessObservedUsage | undefined;
+  /**
+   * R3 §8.3 observed-tier state. undefined = not yet declared; null declared
+   * absent. Disagreeing declarations set `tierConflict` without invalidating
+   * the usage observation — the conflict is recorded and the tier is never
+   * applied (never billed on, never double-accumulated).
+   */
+  private observedTier: string | null | undefined;
+  private tierConflict = false;
 
   constructor(evidence: ProviderSseUsageEvidence) {
     this.kind =
@@ -293,6 +333,25 @@ class ProviderSseUsageParser {
         : evidence.providerProtocol === 'anthropic' && evidence.providerOperation === 'messages'
           ? 'anthropic-messages'
           : null;
+  }
+
+  /** Merges one tier declaration by event semantics (repeats must agree). */
+  private observeTier(value: unknown, declared: boolean): void {
+    const tier = tierText(value);
+    if (!declared) return;
+    if (this.tierConflict) return;
+    if (this.observedTier === undefined) {
+      this.observedTier = tier;
+      return;
+    }
+    if (this.observedTier !== tier) this.tierConflict = true;
+  }
+
+  tierFields(): { readonly observedServiceTier: string | null; readonly observedServiceTierConflict: boolean } {
+    return {
+      observedServiceTier: this.tierConflict ? null : (this.observedTier ?? null),
+      observedServiceTierConflict: this.tierConflict,
+    };
   }
 
   feed(chunk: Uint8Array): void {
@@ -329,19 +388,26 @@ class ProviderSseUsageParser {
 
   finish(): ProviderSseUsageObservation {
     if (!this.kind) return unknown('unsupported_protocol_operation');
-    if (this.failure) return unknown(this.failure);
-    if (this.lineLength > 0 || this.eventType !== undefined || this.dataLines.length > 0) return unknown('truncated');
-    if (this.kind === 'openai-chat-completions') {
-      if (!this.openAiDone) return unknown('truncated');
-      return this.openAiUsage ? { state: 'reported', usage: this.openAiUsage } : unknown('no_usage');
+    const tier = this.tierFields();
+    if (this.failure) return { ...unknown(this.failure), ...tier };
+    if (this.lineLength > 0 || this.eventType !== undefined || this.dataLines.length > 0) {
+      return { ...unknown('truncated'), ...tier };
     }
-    if (this.anthropicStarted && !this.anthropicStopped) return unknown('truncated');
-    return this.anthropicUsage ? { state: 'reported', usage: this.anthropicUsage } : unknown('no_usage');
+    if (this.kind === 'openai-chat-completions') {
+      if (!this.openAiDone) return { ...unknown('truncated'), ...tier };
+      return this.openAiUsage
+        ? { state: 'reported', usage: this.openAiUsage, ...tier }
+        : { ...unknown('no_usage'), ...tier };
+    }
+    if (this.anthropicStarted && !this.anthropicStopped) return { ...unknown('truncated'), ...tier };
+    return this.anthropicUsage
+      ? { state: 'reported', usage: this.anthropicUsage, ...tier }
+      : { ...unknown('no_usage'), ...tier };
   }
 
   fail(reason: 'cancelled' | 'stream_error'): ProviderSseUsageObservation {
     if (this.kind === null) return unknown('unsupported_protocol_operation');
-    return unknown(this.failure ?? reason);
+    return { ...unknown(this.failure ?? reason), ...this.tierFields() };
   }
 
   private countEventByte(): void {
@@ -430,6 +496,9 @@ class ProviderSseUsageParser {
     const chunk = record(parsed);
     if (!chunk || !Array.isArray(chunk.choices)) rejectUsage('malformed_event');
     if (Object.hasOwn(chunk, 'object') && chunk.object !== 'chat.completion.chunk') rejectUsage('malformed_event');
+    // §8.3: the chunk-level served-tier declaration (present on the final
+    // usage chunk); repeats must agree or the conflict is recorded.
+    this.observeTier(chunk.service_tier, Object.hasOwn(chunk, 'service_tier'));
 
     if (Object.hasOwn(chunk, 'usage') && chunk.usage !== null) {
       if (chunk.choices.length !== 0) rejectUsage('invalid_usage');
@@ -458,6 +527,10 @@ class ProviderSseUsageParser {
       const message = record(event.message);
       const usage = record(message?.usage);
       if (!message || !usage) rejectUsage('invalid_usage');
+      // §8.3: Anthropic's served-tier declaration (`usage.speed`, with a
+      // message-level `service_tier` accepted as the same fact).
+      this.observeTier(usage.speed, Object.hasOwn(usage, 'speed'));
+      this.observeTier(message.service_tier, Object.hasOwn(message, 'service_tier'));
       const input = parseAnthropicInputUsage(usage, true);
       if (input.inputTokens === undefined || input.cacheRead === undefined || input.cacheWrite === undefined) {
         rejectUsage('invalid_usage');
@@ -472,6 +545,8 @@ class ProviderSseUsageParser {
       if (!this.anthropicStarted || !this.initialAnthropicInput) rejectUsage('malformed_event');
       const usage = record(event.usage);
       if (!usage) rejectUsage('invalid_usage');
+      // §8.3: a delta-side tier declaration must agree with message_start.
+      this.observeTier(usage.speed, Object.hasOwn(usage, 'speed'));
       const inputUpdate = parseAnthropicInputUsage(usage, false);
       const mergedInput = mergeAnthropicInputUsage(this.initialAnthropicInput, inputUpdate);
       const outputTokens = requiredToken(usage, 'output_tokens');
@@ -576,7 +651,14 @@ export function observeProviderSseUsage(
             controller.close();
             const parsed = parser.finish();
             if (parsed.state === 'unknown' && mediaUsage !== null) {
-              settle({ state: 'reported', usage: mediaUsage });
+              // §4.1 seam: the out-of-band media observation carries no
+              // stream tier declaration.
+              settle({
+                state: 'reported',
+                usage: mediaUsage,
+                observedServiceTier: null,
+                observedServiceTierConflict: false,
+              });
             } else {
               settle(parsed);
             }
@@ -642,6 +724,12 @@ export class ProviderSseUsageObservingTransport implements PreparedEvidenceTrans
       get providerUsage() {
         const result = observed.getObservation();
         return result?.state === 'reported' ? result.usage : null;
+      },
+      // R3 §8.2: preserve the inner transport's lazy tier evidence — reading
+      // it through the original object keeps the post-EOF resolution the
+      // spread above would otherwise evaluate eagerly.
+      get serviceTier() {
+        return response.serviceTier ?? null;
       },
     };
   }

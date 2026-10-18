@@ -1777,7 +1777,9 @@ export class SaasPricingService {
       );
       if (!priceRows[0]) fail('PRICE_VERSION_NOT_FOUND');
       const price = mapCustomerPrice(priceRows[0]);
-      this.assertRequestProtocolAndEndpoint(request, price.protocol, price.endpoint);
+      // R3 §8.1: composite dispatches bind the customer price to the route's
+      // nominal endpoint, not the request's resolved serving endpoint.
+      this.assertRequestProtocolAndEndpoint(input.priceBinding ?? request, price.protocol, price.endpoint);
       const nowMs = new Date(createdAt).getTime();
       if (
         new Date(price.effectiveAt).getTime() > nowMs ||

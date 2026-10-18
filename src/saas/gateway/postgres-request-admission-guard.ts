@@ -1022,7 +1022,17 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       ['provider_policy_version', request.providerMeteringPolicyVersion],
       ['contract_attestation_id', request.contractAttestationId],
       ['customer_price_version', request.customerPriceVersion],
-      ['supplier_cost_version', candidate.supplierCostVersion],
+      /*
+       * R3 §8.1: on composite dispatches the attempt's supplier cost
+       * version is resolved per attempt on the target-platform identity, so
+       * it deliberately differs from the route commercial row's nominal
+       * version. Its identity is verified against the resolved candidate
+       * identity below (supplier-cost row assert + re-resolution), the same
+       * identity precheck, claim and settlement verify.
+       */
+      ...(composite === undefined
+        ? ([['supplier_cost_version', candidate.supplierCostVersion]] as [string, unknown][])
+        : ([] as [string, unknown][])),
     ]);
     const customerPolicy = requiredOne(
       await rows(
@@ -1065,10 +1075,12 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     assertMatch(providerPolicy, [
       ['public_model_id', request.routePublicModelId],
       ['public_model_version', request.routePublicModelVersion],
-      // §4.4 composite: the supplier-side policy is bound to the route's
-      // nominal provider/product/model/endpoint as configured. Composite
-      // supplier-cost attribution on the resolved platform is a recorded
-      // follow-up (the commercial chain resolves per route today).
+      // §4.4 composite: the supplier-side metering POLICY stays bound to the
+      // route's nominal provider/product/model/endpoint as configured — it
+      // defines the metering contract and its version is frozen on the
+      // attempt. The actual COST identity (supplier cost version) is
+      // resolved per attempt on the target platform (R3 §8.1) and verified
+      // separately below against the resolved candidate identity.
       ...(composite === undefined
         ? ([
             ['provider_id', candidate.providerId],
@@ -1316,6 +1328,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         executor,
       );
     } catch (error) {
+      if (process.env.GUARD_DEBUG) console.error('catalog error', error);
       if (error instanceof SaasCatalogError) throw error;
       storage();
     }
@@ -1385,11 +1398,17 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     if (request.supplyMode === 'platform') {
       const customerPriceVersion = requiredText(request.customerPriceVersion);
       const supplierCostVersion = requiredText(candidate.supplierCostVersion);
-      if (
-        customerPolicy.customer_price_version !== customerPriceVersion ||
-        providerPolicy.supplier_cost_version !== supplierCostVersion
-      )
+      if (customerPolicy.customer_price_version !== customerPriceVersion) deny('AUTHORITY_MISMATCH');
+      /*
+       * R3 §8.1: on composite dispatches the attempt's supplier cost version
+       * was resolved on the target-platform identity and deliberately
+       * differs from the nominal route policy's version. The provider
+       * POLICY equality is therefore composite-conditional; the COST
+       * identity is verified against the resolved candidate identity below.
+       */
+      if (composite === undefined && providerPolicy.supplier_cost_version !== supplierCostVersion) {
         deny('AUTHORITY_MISMATCH');
+      }
       customerIdentityRow = await lockOne(
         executor,
         'customer-price-identity',
@@ -1444,22 +1463,32 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     const evidence = validateHoldEvidence(input.holdEvidence as PlatformRequestAdmissionHoldEvidence);
     const customerPriceVersion = requiredText(request.customerPriceVersion);
     const supplierCostVersion = requiredText(candidate.supplierCostVersion);
-    const customerCurrency = assertOutputPriceIdentity(customerIdentityRow ?? storage(), {
+    /*
+     * R3 §8.1: the CUSTOMER price identity is the route's nominal pin — the
+     * public alias, customer price and request idempotency identity never
+     * drift on an internal platform switch. The SUPPLIER cost identity is
+     * the resolved candidate identity (the composite target platform).
+     */
+    const customerIdentityExpected = {
       publicModelId: requiredText(request.routePublicModelId),
       publicModelVersion: requiredText(request.routePublicModelVersion),
-      providerId: requiredText(candidate.providerId),
-      productId: requiredText(candidate.productId),
       protocol: request.protocol,
-      endpoint: request.endpoint,
-    });
+      ...(composite === undefined
+        ? {
+            providerId: requiredText(candidate.providerId),
+            productId: requiredText(candidate.productId),
+            endpoint: request.endpoint,
+          }
+        : {
+            providerId: String(route.model_provider_id),
+            productId: String(route.model_product_id),
+            endpoint: String(route.endpoint),
+          }),
+    };
+    const customerCurrency = assertOutputPriceIdentity(customerIdentityRow ?? storage(), customerIdentityExpected);
     const customerPrice = await this.pricing.resolveCustomerPriceVersion(
       {
-        publicModelId: requiredText(request.routePublicModelId),
-        publicModelVersion: requiredText(request.routePublicModelVersion),
-        providerId: requiredText(candidate.providerId),
-        productId: requiredText(candidate.productId),
-        protocol: request.protocol,
-        endpoint: request.endpoint,
+        ...customerIdentityExpected,
         currency: customerCurrency,
         at: finalAt,
       },
@@ -1529,14 +1558,21 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       },
       { executor },
     );
-    if (
-      supplierCost.id !== supplierCostVersion ||
-      supplierCost.commercialPolicyVersion !== providerPolicy.commercial_policy_version ||
-      supplierCost.roundingVersion !== providerPolicy.rounding_version ||
-      supplierCost.roundingMode !== providerPolicy.rounding_mode ||
-      supplierCost.roundingBoundary !== providerPolicy.rounding_boundary
-    )
+    if (composite === undefined) {
+      if (
+        supplierCost.id !== supplierCostVersion ||
+        supplierCost.commercialPolicyVersion !== providerPolicy.commercial_policy_version ||
+        supplierCost.roundingVersion !== providerPolicy.rounding_version ||
+        supplierCost.roundingMode !== providerPolicy.rounding_mode ||
+        supplierCost.roundingBoundary !== providerPolicy.rounding_boundary
+      )
+        deny('PRICE_UNAVAILABLE');
+    } else if (supplierCost.id !== supplierCostVersion) {
+      // R3 §8.1: on composite dispatches the resolved supplier cost version
+      // carries its own commercial-policy/rounding terms; the identity was
+      // already verified against the resolved candidate above.
       deny('PRICE_UNAVAILABLE');
+    }
     let conservative: ConservativePriceHold;
     let conservativeHold: ConservativePriceHold;
     try {
@@ -1598,6 +1634,13 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         holdInput: conservative.witness,
         admissionExpiresAt: evidence.admissionExpiresAt,
         idempotencyKey: request.id,
+        // R3 §8.1: the customer price binding is the route's nominal
+        // endpoint — on composite dispatches the request row carries the
+        // resolved target's serving endpoint instead.
+        priceBinding: {
+          protocol: customerIdentityExpected.protocol,
+          endpoint: customerIdentityExpected.endpoint,
+        },
         billingGroup: {
           billingGroupId: billingGroup.id,
           rateMultiplier: composedGroupMultiplier.multiplier,

@@ -208,7 +208,12 @@ test('missing usage script reaches real response EOF and the production observer
   assert.equal(parsed.object, 'chat.completion');
   assert.equal(parsed.choices[0]?.finish_reason, 'stop');
   assert.equal(Object.hasOwn(parsed, 'usage'), false);
-  assert.deepEqual(await bounded(observed.observation), { state: 'unknown', usage: null, reason: 'no_usage' });
+  assert.deepEqual(await bounded(observed.observation), {
+    state: 'unknown',
+    usage: null,
+    reason: 'no_usage',
+    observedServiceTier: null,
+  });
   await scenario.waitFor('eof');
   await scenario.waitFor('close');
   const stats = scenario.snapshot();
@@ -239,6 +244,7 @@ test('every invalid usage script is complete real JSON but never a reported prod
         state: 'unknown',
         usage: null,
         reason: variant === 'duplicate_usage' ? 'malformed_body' : 'invalid_usage',
+        observedServiceTier: null,
       });
       await scenario.waitFor('eof');
       await scenario.waitFor('close');
@@ -274,7 +280,13 @@ test('partial SSE publishes one real chunk then peer cancellation, never usage o
   } finally {
     reader.releaseLock();
   }
-  assert.deepEqual(await bounded(observed.observation), { state: 'unknown', usage: null, reason: 'cancelled' });
+  assert.deepEqual(await bounded(observed.observation), {
+    state: 'unknown',
+    usage: null,
+    reason: 'cancelled',
+    observedServiceTier: null,
+    observedServiceTierConflict: false,
+  });
   await scenario.waitFor('close');
   const stats = scenario.snapshot();
   assert.equal(stats.receipts, 1);

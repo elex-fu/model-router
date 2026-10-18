@@ -158,6 +158,12 @@ export interface CreateRequestInput
     RouteAuthoritySnapshotInput,
     CommercialMeteringAuthoritySnapshotInput {
   readonly publicModel: string;
+  /**
+   * R3 §8.1: the server-resolved composite decision, threaded in-memory to
+   * the admission guard (durable rows are unchanged; the persisted prepared
+   * evidence carries the durable copy). Never client-supplied.
+   */
+  readonly compositeRoute?: MeteringCompositeRouteContext;
   readonly protocol: MeteringProtocol;
   readonly endpoint: string;
   /** In-memory provenance only; no migration-backed audit/billing column exists yet. */
