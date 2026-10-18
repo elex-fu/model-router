@@ -4,8 +4,9 @@ import { join, relative, resolve, sep } from 'node:path';
 
 const mode = process.argv[2];
 const provider = process.argv[3];
-if (!['unit', 'integration', 'live'].includes(mode) || (provider && !['kimi', 'deepseek', 'ollama'].includes(provider))) {
-  console.error('Usage: node scripts/run-tests.mjs <unit|integration|live> [kimi|deepseek|ollama]');
+const PROVIDERS = ['kimi', 'kimi-code', 'deepseek', 'ollama'];
+if (!['unit', 'integration', 'live'].includes(mode) || (provider && !PROVIDERS.includes(provider))) {
+  console.error(`Usage: node scripts/run-tests.mjs <unit|integration|live> [${PROVIDERS.join('|')}]`);
   process.exit(2);
 }
 if (provider && mode !== 'live') {
@@ -41,7 +42,7 @@ if (!selected.length) {
 }
 
 const env = { ...process.env };
-if (provider) env[`RUN_${provider.toUpperCase()}_SMOKE`] = '1';
+if (provider) env[`RUN_${provider.toUpperCase().replaceAll('-', '_')}_SMOKE`] = '1';
 console.log(`Running ${selected.length} ${mode} test files${provider ? ` (${provider})` : ''}.`);
 const result = spawnSync(process.execPath, ['--test', '--import', 'tsx', '--test-reporter=spec', ...selected], {
   cwd: root,

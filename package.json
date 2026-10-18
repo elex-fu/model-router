@@ -22,6 +22,7 @@
     "test:e2e": "npm run build && playwright test --config tests/e2e/playwright.config.ts",
     "test:live": "node scripts/run-tests.mjs live",
     "test:live:kimi": "node scripts/run-tests.mjs live kimi",
+    "test:live:kimi-code": "node scripts/run-tests.mjs live kimi-code",
     "test:live:deepseek": "node scripts/run-tests.mjs live deepseek",
     "test:live:ollama": "node scripts/run-tests.mjs live ollama",
     "lint": "biome check .",
