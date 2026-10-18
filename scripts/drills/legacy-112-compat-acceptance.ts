@@ -69,6 +69,7 @@ const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '..', '..', '..');
 const SANDBOX_FILES: readonly string[] = [
   'src/saas/db/migrate-compat-legacy-112.ts',
   'src/saas/db/migrate.ts',
+  'src/saas/db/runtime-privileges.ts',
   'src/cli/saas-migrate-legacy-112.ts',
   'src/cli/index.ts',
 ];
@@ -673,11 +674,18 @@ export async function runLegacy112Acceptance(): Promise<Legacy112AcceptanceResul
     await check('(a) post-upgrade: the NORMAL migrator verification passes on the normalized database', async () => {
       const verifyPool = compatPool(legacyUrlDatabase('legacy112_a', cluster.port));
       try {
-        await verifySaasMigrations(verifyPool, registry);
+        // G-A3: the compat plan normalizes through 129 — the strict check
+        // runs against the registry TRUNCATED to the compat target (the
+        // pending 130+ tail is the normal migrator's job; asserting the
+        // full-registry head on the mid-state would fail by construction).
+        await verifySaasMigrations(
+          verifyPool,
+          registry.filter((migration) => migration.version <= 129),
+        );
       } finally {
         await verifyPool.end();
       }
-      return 'verifySaasMigrations (strict full-registry check) is green on (a)';
+      return 'verifySaasMigrations (strict check against the compat target chain through 129) is green on (a)';
     });
 
     await check('(a) post-upgrade: the 129 constraint vocabulary still accepts the new outcomes', async () => {
@@ -820,8 +828,12 @@ export async function runLegacy112Acceptance(): Promise<Legacy112AcceptanceResul
       const result = runNormalMigrateCli(sandbox, legacyUrlDatabase('clean111_b', cluster.port));
       assert(result.status === 0, `normal migrate exited ${result.status}\n${result.stdout}\n${result.stderr}`);
       const rows = await ledgerRows(url('compat_owner', 'clean111_b', cluster.port));
-      assert(rows.length === 110 && rows[109].version === 129, `unexpected post-migrate ledger (${rows.length} rows)`);
-      return 'saas:migrate applied 112..129 on the clean prefix; ledger 110 rows';
+      const headVersion = registry[registry.length - 1].version;
+      assert(
+        rows[rows.length - 1].version === headVersion,
+        `unexpected post-migrate ledger head ${rows[rows.length - 1]?.version} (expected ${headVersion})`,
+      );
+      return `saas:migrate completed the clean prefix to the current chain; ledger ${rows.length} rows, head ${headVersion}`;
     });
 
     // ---------- (c): current chain ----------

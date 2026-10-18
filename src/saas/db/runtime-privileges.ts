@@ -5315,15 +5315,101 @@ function isGatewayProbeRow(value: unknown): value is GatewayRuntimePrivilegeProb
   return booleans.every((key) => isBoolean(row[key])) && counts.every((key) => countValue(row[key]) !== undefined);
 }
 
-async function verifyGatewayRuntimeDatabasePrivileges(database: Pick<SqlExecutor, 'query'>): Promise<void> {
+async function verifyGatewayRuntimeDatabasePrivileges(
+  database: Pick<SqlExecutor, 'query'>,
+  options: { readonly toleratePendingColumns?: boolean } = {},
+): Promise<void> {
   let row: GatewayRuntimePrivilegeProbeRow | undefined;
   try {
-    const result = await database.query<GatewayRuntimePrivilegeProbeRow>(SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL);
+    // G-A3 (legacy-112 compat): an intermediate-state probe must tolerate
+    // column-grant expectations for columns that DO NOT EXIST in the schema
+    // yet — the compat transaction upgrades through 129 while the manifest
+    // carries the full registry head; a not-yet-applied migration's columns
+    // are pending, not a privilege failure. A column that EXISTS but lacks
+    // its grant still fails closed. The default (every deploy/doctor/
+    // upgrade caller) keeps the strict full-manifest check.
+    const sql = options.toleratePendingColumns
+      ? SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.replace(
+          'WHERE column_row.oid IS NULL OR CASE expected.privilege_type',
+          "WHERE CASE expected.privilege_type WHEN 'PENDING_COLUMN_DOES_NOT_EXIST' THEN false",
+        )
+          .replace(
+            "     WHEN 'SELECT' THEN NOT pg_catalog.has_column_privilege(current_user, column_row.oid, column_row.attnum, 'SELECT')",
+            "     WHEN 'SELECT' THEN column_row.oid IS NOT NULL AND NOT pg_catalog.has_column_privilege(current_user, column_row.oid, column_row.attnum, 'SELECT')",
+          )
+          .replace(
+            "     WHEN 'INSERT' THEN NOT pg_catalog.has_column_privilege(current_user, column_row.oid, column_row.attnum, 'INSERT')",
+            "     WHEN 'INSERT' THEN column_row.oid IS NOT NULL AND NOT pg_catalog.has_column_privilege(current_user, column_row.oid, column_row.attnum, 'INSERT')",
+          )
+          .replace(
+            "     WHEN 'UPDATE' THEN NOT pg_catalog.has_column_privilege(current_user, column_row.oid, column_row.attnum, 'UPDATE')",
+            "     WHEN 'UPDATE' THEN column_row.oid IS NOT NULL AND NOT pg_catalog.has_column_privilege(current_user, column_row.oid, column_row.attnum, 'UPDATE')",
+          )
+          // Pending-RELATION tolerance: an expected table that does not exist
+          // in the schema at all (a not-yet-applied migration's table) is
+          // pending, not a privilege failure — the guard joins pg_class so a
+          // table that EXISTS but lacks its grants still fails closed.
+          .replace(
+            '   WHERE NOT EXISTS (SELECT 1 FROM application_relations AS relation WHERE relation.relname = expected.table_name))\n    AS missing_required_relation_count,',
+            '   WHERE NOT EXISTS (SELECT 1 FROM application_relations AS relation WHERE relation.relname = expected.table_name)\n     AND EXISTS (SELECT 1 FROM pg_catalog.pg_class AS pending_cls\n                 JOIN pg_catalog.pg_namespace AS pending_ns ON pending_ns.oid = pending_cls.relnamespace\n                 WHERE pending_ns.nspname = pg_catalog.current_schema() AND pending_cls.relname = expected.table_name))\n    AS missing_required_relation_count,',
+          )
+          .replace(
+            "  NOT EXISTS (SELECT 1 FROM application_privileges AS actual\n              WHERE actual.relname = 'saas_billing_spending_freezes' AND actual.table_delete)\n    AS missing_spending_freeze_delete,",
+            "  NOT EXISTS (SELECT 1 FROM application_privileges AS actual\n              WHERE actual.relname = 'saas_billing_spending_freezes' AND actual.table_delete)\n   AND EXISTS (SELECT 1 FROM pg_catalog.pg_class AS freeze_cls\n               JOIN pg_catalog.pg_namespace AS freeze_ns ON freeze_ns.oid = freeze_cls.relnamespace\n               WHERE freeze_ns.nspname = pg_catalog.current_schema() AND freeze_cls.relname = 'saas_billing_spending_freezes')\n    AS missing_spending_freeze_delete,",
+          )
+      : SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL;
+    const result = await database.query<GatewayRuntimePrivilegeProbeRow>(sql);
     if (result.rows.length !== 1 || !isGatewayProbeRow(result.rows[0])) throw new SaasRuntimePrivilegeError();
     row = result.rows[0];
   } catch (error) {
     if (error instanceof SaasRuntimePrivilegeError) throw error;
     throw new SaasRuntimePrivilegeError();
+  }
+
+  // G-A3 diagnosis aid: when MODEL_ROUTER_PROBE_DEBUG is set, the failing
+  // check NAMES print before the safe error surfaces (off by default; the
+  // output carries check names only, never data).
+  if (process.env.MODEL_ROUTER_PROBE_DEBUG === '1') {
+    const failed: string[] = [];
+    const flag = (name: string, isFailed: boolean): void => {
+      if (isFailed) failed.push(name);
+    };
+    flag('role_exists', !row.role_exists);
+    flag('gateway_role', !row.gateway_role);
+    flag('server_version_supported', !row.server_version_supported);
+    flag('managed_schema', !row.managed_schema);
+    flag('application_schema_usage', !row.application_schema_usage);
+    flag('login_role', !row.login_role);
+    flag('session_role_unchanged', !row.session_role_unchanged);
+    flag('superuser', row.superuser);
+    flag('create_database', row.create_database);
+    flag('create_role', row.create_role);
+    flag('inherit_role', row.inherit_role);
+    flag('replication_role', row.replication_role);
+    flag('bypass_rls', row.bypass_rls);
+    flag('any_role_membership', row.any_role_membership);
+    flag('owns_database', row.owns_database);
+    flag('owns_application_schema', row.owns_application_schema);
+    flag('owns_database_objects', row.owns_database_objects);
+    flag('schema_create', row.schema_create);
+    flag('database_create', row.database_create);
+    flag('database_temp', row.database_temp);
+    flag('out_of_schema_table_privilege', row.out_of_schema_table_privilege);
+    flag('out_of_schema_sequence_privilege', row.out_of_schema_sequence_privilege);
+    flag('out_of_schema_function_privilege', row.out_of_schema_function_privilege);
+    flag('missing_required_relation_count', countValue(row.missing_required_relation_count) !== 0);
+    flag('missing_column_privilege_count', countValue(row.missing_column_privilege_count) !== 0);
+    flag('missing_read_column_count', countValue(row.missing_read_column_count) !== 0);
+    flag('missing_full_insert_column_count', countValue(row.missing_full_insert_column_count) !== 0);
+    flag('unexpected_column_privilege_count', countValue(row.unexpected_column_privilege_count) !== 0);
+    flag('unexpected_table_privilege_count', countValue(row.unexpected_table_privilege_count) !== 0);
+    flag('unexpected_delete_privilege_count', countValue(row.unexpected_delete_privilege_count) !== 0);
+    flag('missing_spending_freeze_delete', !row.missing_spending_freeze_delete);
+    flag('missing_sequence_usage_count', countValue(row.missing_sequence_usage_count) !== 0);
+    flag('unexpected_sequence_privilege_count', countValue(row.unexpected_sequence_privilege_count) !== 0);
+    flag('application_function_execute_count', countValue(row.application_function_execute_count) !== 0);
+    flag('unsafe_security_definer_function_count', countValue(row.unsafe_security_definer_function_count) !== 0);
+    if (failed.length > 0) console.error(`gateway runtime privilege probe failing checks: ${failed.join(', ')}`);
   }
 
   if (
@@ -5424,8 +5510,9 @@ async function verifyControlPlaneRuntimeDatabasePrivileges(database: Pick<SqlExe
 export async function verifySaasRuntimeDatabasePrivileges(
   database: Pick<SqlExecutor, 'query'>,
   role: SaasRuntimeWorkloadRole = 'control_plane',
+  options: { readonly toleratePendingColumns?: boolean } = {},
 ): Promise<void> {
-  if (role === 'gateway') return verifyGatewayRuntimeDatabasePrivileges(database);
+  if (role === 'gateway') return verifyGatewayRuntimeDatabasePrivileges(database, options);
   if (role === 'control_plane') return verifyControlPlaneRuntimeDatabasePrivileges(database);
   throw new SaasRuntimePrivilegeError();
 }

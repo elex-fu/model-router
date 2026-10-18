@@ -596,7 +596,14 @@ export async function saasMigrateLegacy112(
           await verifyCredentialValidationWorkerRuntimePrivileges(executor);
           return;
         }
-        await verifySaasRuntimeDatabasePrivileges(executor, role === 'gateway' ? 'gateway' : 'control_plane');
+        // G-A3: the compat transaction upgrades through 129 while the
+        // privilege manifest carries the full registry head — a not-yet-
+        // applied migration's columns are PENDING, not a privilege failure
+        // (a column that exists but lacks its grant still fails closed).
+        // The normal saas:migrate that applies 130+ keeps the strict check.
+        await verifySaasRuntimeDatabasePrivileges(executor, role === 'gateway' ? 'gateway' : 'control_plane', {
+          toleratePendingColumns: true,
+        });
       });
     const probeResults: string[] = [];
     for (let index = 0; index < ROLE_PLANS.length; index += 1) {
