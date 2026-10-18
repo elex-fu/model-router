@@ -116,13 +116,16 @@ export interface ResponsesWsInboundEvent {
  */
 export class ResponsesWsEngine {
   private readonly executor: ResponsesWsRoundExecutor;
-  private readonly send: (event: ResponsesWsEvent) => void;
-  private readonly close: (code: number, reason: string) => void;
+  private readonly baseSend: (event: ResponsesWsEvent) => void;
+  private readonly baseClose: (code: number, reason: string) => void;
   private readonly roundTimeoutMs: number;
   private readonly maxQueuedCreates: number;
   private readonly now: () => number;
   private readonly idFactory: () => string;
 
+  /** G-B4 connection binding: the connection layer swaps the frame sink in after the socket attaches. */
+  private sendDelegate: ((event: ResponsesWsEvent) => void) | null = null;
+  private closeDelegate: ((code: number, reason: string) => void) | null = null;
   private pinned: ResponsesWsPinnedIdentity | null = null;
   private activeRound: {
     readonly requestId: string;
@@ -140,8 +143,8 @@ export class ResponsesWsEngine {
       throw new Error('the responses WS engine requires send and close callbacks');
     }
     this.executor = options.executor;
-    this.send = options.send;
-    this.close = options.close;
+    this.baseSend = options.send;
+    this.baseClose = options.close;
     this.roundTimeoutMs = options.roundTimeoutMs ?? DEFAULT_ROUND_TIMEOUT_MS;
     this.maxQueuedCreates = options.maxQueuedCreates ?? DEFAULT_MAX_QUEUED_CREATES;
     this.now = options.now ?? (() => Date.now());
@@ -150,6 +153,14 @@ export class ResponsesWsEngine {
 
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  private get send(): (event: ResponsesWsEvent) => void {
+    return (event) => (this.sendDelegate ?? this.baseSend)(event);
+  }
+
+  private get close(): (code: number, reason: string) => void {
+    return (code, reason) => (this.closeDelegate ?? this.baseClose)(code, reason);
   }
 
   get pinnedIdentity(): ResponsesWsPinnedIdentity | null {
@@ -266,6 +277,15 @@ export class ResponsesWsEngine {
       clearTimeout(timer);
       this.activeRound = null;
     }
+  }
+
+  /**
+   * The connection layer binds the real frame sink AFTER the socket
+   * attaches (the engine is constructed before the ws object exists).
+   */
+  bindTransport(send: (event: ResponsesWsEvent) => void, close: (code: number, reason: string) => void): void {
+    this.sendDelegate = send;
+    this.closeDelegate = close;
   }
 
   /** Client-side close: the active round is cancelled and settles inside. */
