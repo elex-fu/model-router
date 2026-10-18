@@ -1,5 +1,6 @@
 import type { Protocol } from '../protocol/bridge.js';
 import type { ProviderProfile } from '../providers/profiles.js';
+import { applyThinkingPolicy, type ThinkingProviderFamily } from './thinking-policy.js';
 
 /**
  * Pre-process a request body before protocol bridging and upstream forwarding.
@@ -14,7 +15,12 @@ export function preprocessRequest(
   upstreamProtocol: Protocol,
   resolvedModel: string,
   profile?: ProviderProfile,
-  policy?: { thinking?: 'preserve' | 'strip' | 'force'; autoCacheControl?: boolean },
+  policy?: {
+    thinking?: 'preserve' | 'strip' | 'force' | 'structured';
+    autoCacheControl?: boolean;
+    /** G-B6: the thinking provider family for 'structured' (defaults from the protocol). */
+    thinkingProvider?: ThinkingProviderFamily;
+  },
 ): any {
   if (!body || typeof body !== 'object') return body;
   const cloned = JSON.parse(JSON.stringify(body));
@@ -26,7 +32,22 @@ export function preprocessRequest(
   if (upstreamProtocol === 'anthropic') {
     const shouldCache = policy?.autoCacheControl ?? (!profile || profile.claudeOptimizations);
     if (shouldCache) injectCacheControl(cloned);
-    if (policy?.thinking === 'strip') {
+    if (policy?.thinking === 'structured') {
+      // G-B6: the three-stage policy (extract → validate → transform) with
+      // diagnostic codes; never mutates in place, never errors on a
+      // non-thinking model. The composition opts in per upstream.
+      const provider: ThinkingProviderFamily = policy.thinkingProvider ?? 'anthropic';
+      const decision = applyThinkingPolicy({ body: cloned, model: resolvedModel, provider });
+      if (decision.body !== undefined) {
+        const policyBody = decision.body;
+        for (const key of Object.keys(policyBody)) {
+          (cloned as Record<string, unknown>)[key] = policyBody[key];
+        }
+        for (const key of Object.keys(cloned as Record<string, unknown>)) {
+          if (!(key in policyBody)) delete (cloned as Record<string, unknown>)[key];
+        }
+      }
+    } else if (policy?.thinking === 'strip') {
       stripThinking(cloned);
     } else if (policy?.thinking === 'force' || (!policy?.thinking && (!profile || profile.claudeOptimizations))) {
       injectThinking(cloned, resolvedModel);
