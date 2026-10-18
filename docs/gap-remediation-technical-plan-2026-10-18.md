@@ -7,6 +7,22 @@
 > - **new-api** `6549a17e`（/Users/lex/play/new-api）
 > - **CLIProxyAPI** `911f49c`（/Users/lex/play/CLIProxyAPI）
 
+## 0.5 实施进度记录（2026-10-19）
+
+| 项 | 状态 | 交付 |
+|---|---|---|
+| G-A1 任务恢复 | ✅ 完整 | dc5e3d0（迁移 132 + 恢复 worker + 图片清扫 + 11 测试） |
+| G-A3 真库证据 | ✅ 完整 | 8645a4c（drill 22/22；probe pending-tolerance 修复了 compat 与 registry head 演进的集成缺陷） |
+| G-B1 三态门 | ✅ 完整 | 7dc4867 + 37ab4c1（纯函数+事实读取+调度接线+粘性救援；P17 边界修正：窗口超限不 fail-open） |
+| G-B2 multipart | ✅ 完整 | 8645a4c + f79d834（envelope 核心 + STT 端点归一化接线；busboy/ws 锁定） |
+| G-B3 rerank+别名 | ✅ 完整 | 97328ed（注册+预留 503；/v1/audio/speech 别名） |
+| G-B4 Responses WS | ✅ 完整 | f36c573 + 9663f2a + 39cdb5e（引擎+连接层+挂载；executor 绑定为装配缝） |
+| G-B6 thinking 三段式 | ✅ 完整 | 498e581（structured 模式 opt-in；默认路径零漂移） |
+| G-C1 readyz | ✅ 完整 | 030d533（探针分离+能力投影） |
+| G-A2 性能基线 | ⏳ 待执行 | R9 长跑压测需环境窗口 |
+| G-B5 Realtime WS | ⏳ 按方案 §6 | 独立能力门（音频维度计量先独立评审）；三参考均无完整实现 |
+| G-C2 控制台闭环 | ⏳ 待执行 | 任务运营/故障处置页（数据源 G-A1/G-B1 已就绪）+ 巨型文件拆分 |
+
 ## 0. 差距总表与本文结构
 
 | 编号 | 差距 | 参考主源 | 优先级 | 任务归属 |
