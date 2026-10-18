@@ -3968,6 +3968,7 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   'saas_supplier_cost_versions',
   'saas_request_customer_price_snapshots',
   'saas_attempt_supplier_cost_snapshots',
+  'saas_attempt_supplier_costs',
   'saas_billing_reservations',
   'saas_wallets',
   'saas_refund_wallet_freezes',
@@ -4121,6 +4122,28 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'created_at',
     ] as const
   ).map((column) => ['saas_attempt_supplier_cost_snapshots', column, 'INSERT'] as const),
+  ...(
+    [
+      'id',
+      'tenant_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'amount_minor_units',
+      'currency',
+      'created_at',
+    ] as const
+  ).map((column) => ['saas_attempt_supplier_costs', column, 'INSERT'] as const),
+  ...(
+    [
+      'id',
+      'tenant_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'amount_minor_units',
+      'currency',
+      'created_at',
+    ] as const
+  ).map((column) => ['saas_attempt_supplier_costs', column, 'SELECT'] as const),
   // Health reads include filter predicates; the UPSERT reads current/EXCLUDED expressions and RETURNING.
   ...(
     [

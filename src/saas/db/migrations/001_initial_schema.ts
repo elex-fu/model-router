@@ -107,6 +107,7 @@ import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from './126_public_brand_setting
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from './127_obs_alert_silences_reports.js';
 import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
 import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './129_provider_account_durable_fault_classification.js';
+import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from './130_provider_account_window_cost_policy.js';
 import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from './131_resolved_supply_billing_identity.js';
 
 export interface SaasMigration {
@@ -747,6 +748,17 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // authored as 112 on main (head 111) and renumbered to 129 here because
   // 112-128 are taken by the capability-parity workstream.
   PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
+  // 130: core-plan 9.2 window three-state — the per-account window cost
+  // policy (`window_cost_limit_minor_units` / `window_cost_sticky_reserve_
+  // minor_units`, NULL = the gate is OFF; the control plane freezes the
+  // values, the gateway only reads) plus the missing supplier half of the
+  // metering pipeline: `saas_attempt_supplier_costs`, ONE append-only exact
+  // amount per settled attempt (the customer side was durable in
+  // holds/settlements, the supplier side existed only as 017 rates). The
+  // normal-success settlement transaction is the sole writer (platform
+  // supply mode only); the scheduler aggregates the fact per account window
+  // (schedulingThresholdWindowStartMs) for the reserve band gate.
+  PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION,
   // R3 §8.1: the supplier identity guard accepts the composite target
   // platform (capability-verified) while the customer guard stays pinned to
   // the public model version's nominal identity.

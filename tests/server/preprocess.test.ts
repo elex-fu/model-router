@@ -242,16 +242,42 @@ test('leaves system prompt unchanged when no billing header present', () => {
   assert.equal(out.system[0].text, 'You are helpful');
 });
 
-test('returns empty string when system prompt is only billing header', () => {
+test('drops a system prompt that is only a billing header', () => {
   const body = {
     model: 'claude-test',
     system: 'x-anthropic-billing-header: cc_version=1.0; cch=abc123',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
   };
   const out = preprocessRequest(body, 'anthropic', 'claude-test');
-  // injectCacheControl converts string system to array
-  assert.ok(Array.isArray(out.system));
-  assert.equal(out.system[0].text, '');
+  // injectCacheControl converts string system to array; the emptied prompt is dropped
+  assert.deepEqual(out.system, []);
+});
+
+test('drops header-only array system blocks instead of forwarding empty text', () => {
+  const body = {
+    model: 'claude-test',
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.216.5f7; cc_entrypoint=sdk-cli;' },
+      { type: 'text', text: 'You are helpful' },
+    ],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  };
+  const out = preprocessRequest(body, 'anthropic', 'claude-test');
+  assert.equal(out.system.length, 1);
+  assert.equal(out.system[0].text, 'You are helpful');
+});
+
+test('drops all system blocks when every block is a billing header', () => {
+  const body = {
+    model: 'claude-test',
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.216.5f7; cc_entrypoint=sdk-cli;' },
+      { type: 'text', text: 'x-anthropic-billing-header: cc_version=2.1.216.5f7; cch=deadbeef;' },
+    ],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  };
+  const out = preprocessRequest(body, 'anthropic', 'claude-test');
+  assert.deepEqual(out.system, []);
 });
 
 test('does not mutate original body', () => {

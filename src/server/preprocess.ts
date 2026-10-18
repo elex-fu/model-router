@@ -90,16 +90,26 @@ function stripLeadingBillingHeader(text: string): string {
 /** Strip billing headers from system prompt to preserve prefix cache. */
 function stripBillingHeaders(body: any): void {
   if (typeof body.system === 'string') {
-    body.system = stripLeadingBillingHeader(body.system);
+    const stripped = stripLeadingBillingHeader(body.system);
+    // A header-only system prompt must not degrade into an empty text payload:
+    // upstreams that validate text content reject it (observed with Kimi:
+    // 400 "text content is empty").
+    body.system = stripped === '' && body.system !== '' ? [] : stripped;
     return;
   }
-  if (Array.isArray(body.system)) {
-    for (const block of body.system) {
-      if (block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string') {
-        block.text = stripLeadingBillingHeader(block.text);
-      }
+  if (!Array.isArray(body.system)) return;
+  body.system = body.system.filter((block: any) => {
+    if (!block || typeof block !== 'object' || block.type !== 'text' || typeof block.text !== 'string') {
+      return true;
     }
-  }
+    const stripped = stripLeadingBillingHeader(block.text);
+    // Drop header-only blocks entirely instead of forwarding an empty text
+    // block. Claude Code 2.1.x sends the billing header as a standalone
+    // system block without a trailing newline.
+    if (stripped === '' && block.text !== '') return false;
+    block.text = stripped;
+    return true;
+  });
 }
 
 /**

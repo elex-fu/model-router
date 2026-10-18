@@ -278,6 +278,8 @@ test('migration 051 is registered in append order and remains forward-only', () 
       128,
       // K2 durable fault classification (renumbered from main's 112).
       129,
+      130,
+      131,
     ],
   );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);

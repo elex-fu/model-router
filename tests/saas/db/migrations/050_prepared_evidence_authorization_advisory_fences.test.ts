@@ -224,6 +224,8 @@ test('migration 050 is registered in append order and remains forward-only', () 
       128,
       // K2 durable fault classification (renumbered from main's 112).
       129,
+      130,
+      131,
     ],
   );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);

@@ -86,6 +86,8 @@ test('migration 034 registers after the immutable 033 history', () => {
       128,
       // K2 durable fault classification (renumbered from main's 112).
       129,
+      130,
+      131,
     ],
   );
 });

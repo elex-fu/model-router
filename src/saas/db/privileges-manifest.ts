@@ -9026,6 +9026,11 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
     table: 'saas_attempt_supplier_cost_snapshots',
   },
   {
+    // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
+    // fact (settlement-side INSERT, scheduler-side SELECT).
+    table: 'saas_attempt_supplier_costs',
+  },
+  {
     table: 'saas_billing_reservations',
   },
   {
@@ -9210,6 +9215,11 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
   },
   {
     tables: ['saas_request_customer_price_snapshots', 'saas_attempt_supplier_cost_snapshots'],
+  },
+  {
+    // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
+    // fact (settlement-side INSERT, scheduler-side SELECT).
+    tables: ['saas_attempt_supplier_costs'],
   },
   {
     tables: ['saas_billing_reservations', 'saas_wallets', 'saas_refund_wallet_freezes'],
@@ -9412,6 +9422,39 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
       'rounding_boundary',
       'idempotency_key',
       'snapshot_digest',
+      'created_at',
+    ],
+    tsStyle: 'map-paren-multi',
+  },
+  {
+    tsComment: [
+      // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
+      // fact — the normal-success settlement transaction INSERTs it, the
+      // scheduler's window cost aggregation SELECTs it.
+    ],
+    table: 'saas_attempt_supplier_costs',
+    privilege: 'INSERT',
+    columns: [
+      'id',
+      'tenant_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'amount_minor_units',
+      'currency',
+      'created_at',
+    ],
+    tsStyle: 'map-paren-multi',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    privilege: 'SELECT',
+    columns: [
+      'id',
+      'tenant_id',
+      'attempt_id',
+      'supplier_cost_version',
+      'amount_minor_units',
+      'currency',
       'created_at',
     ],
     tsStyle: 'map-paren-multi',
@@ -10692,6 +10735,78 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   {
     table: 'saas_request_customer_price_snapshots',
     column: 'group_fallback_group_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'id',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'tenant_id',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'attempt_id',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'supplier_cost_version',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'amount_minor_units',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'currency',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'created_at',
+    privilege: 'SELECT',
+  },
+  {
+    // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
+    // fact (settlement-side INSERT, scheduler-side SELECT).
+    table: 'saas_attempt_supplier_costs',
+    column: 'id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'attempt_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'supplier_cost_version',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'amount_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'currency',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    column: 'created_at',
     privilege: 'INSERT',
   },
   {

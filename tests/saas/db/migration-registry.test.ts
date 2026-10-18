@@ -88,6 +88,8 @@ import { PUBLIC_BRAND_SETTINGS_SAAS_MIGRATION } from '../../../src/saas/db/migra
 import { OBS_ALERT_SILENCES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/127_obs_alert_silences_reports.js';
 import { PLUGIN_SYSTEM_SAAS_MIGRATION } from '../../../src/saas/db/migrations/128_plugin_system.js';
 import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/129_provider_account_durable_fault_classification.js';
+import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/130_provider_account_window_cost_policy.js';
+import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/131_resolved_supply_billing_identity.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -207,6 +209,12 @@ test('SaaS migration registry keeps a stable append order with only documented g
       // K2 (main-side, renumbered 112 → 129 in this merge): the durable
       // fault classification appends at the tail.
       129,
+      // Core-plan 9.2 (T05): 130 window cost policy — per-account window
+      // limits + the supplier-cost fact table for the reserve band gate.
+      130,
+      // Core-plan R3 §8.1 (T04): 131 resolved supply billing identity —
+      // composite-capable supplier identity guards.
+      131,
     ],
   );
 });
@@ -270,7 +278,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 110);
+  assert.equal(SAAS_MIGRATIONS.length, 112);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -342,6 +350,8 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'obs_alert_silences_and_report_state',
       'plugin_system',
       'provider_account_durable_fault_classification',
+      'provider_account_window_cost_policy',
+      'resolved_supply_billing_identity',
     ],
   );
   assert.deepEqual(
@@ -426,10 +436,16 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       // K2 (main-side, renumbered 112 → 129 in this merge): the durable
       // fault classification appends at the tail.
       129,
+      // Core-plan 9.2 (T05): 130 window cost policy — per-account window
+      // limits + the supplier-cost fact table for the reserve band gate.
+      130,
+      // Core-plan R3 §8.1 (T04): 131 resolved supply billing identity —
+      // composite-capable supplier identity guards.
+      131,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 110);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 110);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 112);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 112);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -519,7 +535,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 110);
+  assert.equal(SAAS_MIGRATIONS.length, 112);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -577,6 +593,8 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     OBS_ALERT_SILENCES_SAAS_MIGRATION,
     PLUGIN_SYSTEM_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION,
+    RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');

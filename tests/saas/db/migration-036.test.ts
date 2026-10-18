@@ -81,6 +81,8 @@ test('migration 036 is registered immediately before subsequent append-only migr
       128,
       // K2 durable fault classification (renumbered from main's 112).
       129,
+      130,
+      131,
     ],
   );
 });

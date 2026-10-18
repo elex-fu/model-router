@@ -612,6 +612,10 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     // K2 durable fault classification (main-side, renumbered 112 → 129 in
     // this merge; account-attributable 401/403/429/stream-abort vocabulary).
     129,
+    // Core-plan 9.2 (T05): window cost policy + supplier-cost fact table.
+    130,
+    // Core-plan R3 §8.1 (T04): resolved supply billing identity guards.
+    131,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -621,7 +625,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     pool.applied.map(({ version }) => version),
     versions,
   );
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 110);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 112);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -690,9 +694,11 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
       'obs_alert_silences_and_report_state',
       'plugin_system',
       'provider_account_durable_fault_classification',
+      'provider_account_window_cost_policy',
+      'resolved_supply_billing_identity',
     ],
   );
-  assert.equal(pool.applied.length, 110);
+  assert.equal(pool.applied.length, 112);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -862,6 +868,8 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       127,
       128,
       129,
+      130,
+      131,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );
