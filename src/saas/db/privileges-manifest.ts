@@ -9434,29 +9434,13 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     ],
     table: 'saas_attempt_supplier_costs',
     privilege: 'INSERT',
-    columns: [
-      'id',
-      'tenant_id',
-      'attempt_id',
-      'supplier_cost_version',
-      'amount_minor_units',
-      'currency',
-      'created_at',
-    ],
+    columns: ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'],
     tsStyle: 'map-paren-multi',
   },
   {
     table: 'saas_attempt_supplier_costs',
     privilege: 'SELECT',
-    columns: [
-      'id',
-      'tenant_id',
-      'attempt_id',
-      'supplier_cost_version',
-      'amount_minor_units',
-      'currency',
-      'created_at',
-    ],
+    columns: ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'],
     tsStyle: 'map-paren-multi',
   },
   {
@@ -10473,6 +10457,19 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     privilege: 'UPDATE',
     columns: ['billing_state', 'billed_at'],
     tsStyle: 'map-flat',
+  },
+  {
+    tsComment: [
+      "(132) gap-remediation G-A1: the media-task recovery worker's claim",
+      'writes — the lease triple (owner/epoch/until), the due cursor and',
+      'the six-class poll failure counter. INSERT never sets them (column',
+      'defaults); the billing-state columns above stay the only settlement',
+      'surface.',
+    ],
+    table: 'saas_video_tasks',
+    privilege: 'UPDATE',
+    columns: ['lease_owner', 'lease_epoch', 'lease_until', 'next_poll_at', 'poll_failures'],
+    tsStyle: 'map-paren-multi',
   },
 ];
 
@@ -14070,6 +14067,39 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   {
     table: 'saas_video_tasks',
     column: 'billed_at',
+    privilege: 'UPDATE',
+    sqlJoinLine: true,
+  },
+  {
+    sqlComment: [
+      "(132) gap-remediation G-A1: the media-task recovery worker's claim",
+      'writes — the lease triple (owner/epoch/until), the due cursor and',
+      'the six-class poll failure counter. INSERT never sets them (column',
+      'defaults); the billing-state columns above stay the only settlement',
+      'surface.',
+    ],
+    table: 'saas_video_tasks',
+    column: 'lease_owner',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_video_tasks',
+    column: 'lease_epoch',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_video_tasks',
+    column: 'lease_until',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_video_tasks',
+    column: 'next_poll_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_video_tasks',
+    column: 'poll_failures',
     privilege: 'UPDATE',
     sqlJoinLine: true,
   },

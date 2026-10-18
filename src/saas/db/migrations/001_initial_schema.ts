@@ -109,6 +109,7 @@ import { PLUGIN_SYSTEM_SAAS_MIGRATION } from './128_plugin_system.js';
 import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './129_provider_account_durable_fault_classification.js';
 import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from './130_provider_account_window_cost_policy.js';
 import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from './131_resolved_supply_billing_identity.js';
+import { MEDIA_TASK_RECOVERY_SAAS_MIGRATION } from './132_media_task_recovery.js';
 
 export interface SaasMigration {
   version: number;
@@ -763,4 +764,13 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // platform (capability-verified) while the customer guard stays pinned to
   // the public model version's nominal identity.
   RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION,
+  // Gap-remediation G-A1 (migration 132): the async-video recovery
+  // substrate — next_poll_at due cursor, lease owner/epoch/until for the
+  // PG-lease recovery claim, and the six-class poll failure counter. The
+  // recovery worker claims pending rows past next_poll_at under a 90 s
+  // lease, re-dials the bound account, and drives the existing one-shot
+  // billing state machine without any client poll (new-api task_polling
+  // CAS-winner-settles + sub2api heartbeat-lease fusion). Image tasks need
+  // no columns: their recovery is the guarded stuck-fail sweep.
+  MEDIA_TASK_RECOVERY_SAAS_MIGRATION,
 ];

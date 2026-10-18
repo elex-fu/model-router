@@ -254,4 +254,82 @@ export class SaasImageTaskService {
     if (Date.parse(record.expiresAt) <= this.now()) return null;
     return publicView(record);
   }
+
+  /**
+   * G-A1 stuck sweep: fails every `processing` row older than the execution
+   * timeout. A live task's own in-process timeout fires at the SAME
+   * deadline, so any row still processing past it belongs to a dead worker
+   * — the synchronous upstream dispatch has no task id to re-poll, the
+   * deliverable is unrecoverable by design, and the terminal row is what
+   * the client poll needs to see. The stranded attempt's billing stays with
+   * the unknown-outcome reconciliation worker (never this sweep).
+   *
+   * Returns the number of rows swept; 0 when the store cannot sweep.
+   */
+  async sweepStuckTasks(input: { readonly limit?: number } = {}): Promise<number> {
+    if (typeof this.store.failStuckProcessing !== 'function') return 0;
+    const limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new ImageTaskServiceError('INVALID_INPUT', 'the stuck sweep limit must be a positive integer');
+    }
+    const nowMs = this.now();
+    return this.store.failStuckProcessing({
+      deadline: new Date(nowMs - this.executionTimeoutMs).toISOString(),
+      httpStatus: 504,
+      error: imageTaskErrorEnvelope('api_error', 'image generation timed out'),
+      completedAt: new Date(nowMs).toISOString(),
+      expiresAt: new Date(nowMs + this.ttlMs).toISOString(),
+      limit,
+    });
+  }
+}
+
+/** The unref'd stuck-sweep timer (the customer-webhook worker's shape). */
+export interface ImageTaskStuckSweeperHandle {
+  readonly stop: () => Promise<void>;
+}
+
+export function startImageTaskStuckSweeper(
+  service: SaasImageTaskService,
+  options: { readonly intervalMs?: number; readonly limit?: number } = {},
+): ImageTaskStuckSweeperHandle {
+  // One sweep per execution-timeout quarter: frequent enough that a dead
+  // worker's rows terminate within deadline + interval, rare enough to be
+  // noise on the table.
+  const intervalMs = options.intervalMs ?? Math.max(15_000, Math.floor(service.executionTimeoutMs / 4));
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 5_000 || intervalMs > 60 * 60_000) {
+    throw new RangeError('image stuck sweep interval must be between 5000 and 3600000 ms');
+  }
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let running: Promise<void> | undefined;
+  const schedule = (delayMs: number): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      tick();
+    }, delayMs);
+    timer.unref();
+  };
+  const tick = (): void => {
+    if (stopped || running) return;
+    running = service
+      .sweepStuckTasks({ ...(options.limit === undefined ? {} : { limit: options.limit }) })
+      .then(() => schedule(intervalMs))
+      .catch(() => {
+        console.error('model-router image task stuck sweep cycle failed');
+        schedule(intervalMs);
+      })
+      .finally(() => {
+        running = undefined;
+      });
+  };
+  schedule(intervalMs);
+  return {
+    async stop(): Promise<void> {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      await running;
+    },
+  };
 }

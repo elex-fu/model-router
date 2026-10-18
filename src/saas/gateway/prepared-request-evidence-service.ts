@@ -2031,16 +2031,14 @@ export class SaasPreparedRequestEvidenceService {
      */
     if (
       (input.customerPriceVersion === null && commercial.customer_price_version != null) ||
-      (input.customerPriceVersion !== null &&
-        String(commercial.customer_price_version) !== input.customerPriceVersion)
+      (input.customerPriceVersion !== null && String(commercial.customer_price_version) !== input.customerPriceVersion)
     ) {
       fail('AUTHORITY_MISMATCH', 'commercial authority versions do not match prepared evidence');
     }
     if (input.composite === undefined) {
       if (
         (input.supplierCostVersion === null && commercial.supplier_cost_version != null) ||
-        (input.supplierCostVersion !== null &&
-          String(commercial.supplier_cost_version) !== input.supplierCostVersion)
+        (input.supplierCostVersion !== null && String(commercial.supplier_cost_version) !== input.supplierCostVersion)
       ) {
         fail('AUTHORITY_MISMATCH', 'commercial authority versions do not match prepared evidence');
       }

@@ -51,6 +51,8 @@
 
 ### 1.3 落地设计
 
+> **实施记录（2026-10-18，已交付）**：迁移 132 只为 `saas_video_tasks` 增列——图片任务**不加列**（偏离下方第 1 点的初稿）：图片生成是单次同步上游 HTTP 派发，无上游任务 ID 可回查，进程死亡即交付物不可恢复，恢复动作只能是"卡死行终结"（`created_at` 超过执行时限 → failed，status 守卫即 CAS），无需租约/游标列；计费侧由现有 unknown-outcome worker 持有。图片终结清扫为 `ImageTaskService.sweepStuckTasks()` + 默认开启的 unref 定时器。视频侧完整实现：`claimRecoveryBatch`（`FOR UPDATE SKIP LOCKED` 批量认领 + epoch 围栏）、`renewRecoveryLease`、`recordRecoveryOutcome`、`VideoTaskRecoveryWorker`（六类失败分类、指数退避 15s→15min、cap 20 → fail-closed skip、404/410 立即 skip、复用 `billing.observe` 一次性幂等结算、绑定账号精确重拨）。生产装配默认随 videoMedia/imageMedia 接线开启（`recovery.disabled`/`stuckSweep.disabled` 可退避），stop 句柄挂 `lifecycle.close`。权限走 privileges-manifest 生成（G-A1 五列 UPDATE 授权，镜像再生成）。
+
 以 model-router **现有 PG 任务表 + 现有结算通道**为基础，新增受租约保护的后台恢复循环，不引入 Redis 队列（方案 §11.3 已定调"复用现有任务机器，补租约、恢复"）：
 
 1. **迁移 132 `media_task_recovery`**：image/video 任务表增加 `lease_owner text`、`lease_epoch bigint`、`lease_until timestamptz`、`next_poll_at timestamptz`、`poll_failures int`、`recovered_at timestamptz`。默认 `next_poll_at = now()` 使存量任务立即可被恢复循环认领。

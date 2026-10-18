@@ -46,6 +46,7 @@ import {
   IMAGE_TASK_EXECUTION_TIMEOUT_MS,
   IMAGE_TASK_TTL_MS,
   SaasImageTaskService,
+  startImageTaskStuckSweeper,
 } from '../saas/gateway/images/image-task-service.js';
 import { PostgresImageTaskStore } from '../saas/gateway/images/image-task-store.js';
 import { SaasGatewayImagesQueryPort } from '../saas/gateway/images/images-query-port.js';
@@ -156,6 +157,7 @@ import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-up
 import { SaasVideoBillingStateMachine } from '../saas/gateway/videos/video-billing-state-machine.js';
 import type { SaasGatewayVideoCreatePort } from '../saas/gateway/videos/video-create-port.js';
 import { PersistentSaasGatewayVideoCreatePort } from '../saas/gateway/videos/video-create-port.js';
+import { startVideoTaskRecoveryWorker, VideoTaskRecoveryWorker } from '../saas/gateway/videos/video-recovery-worker.js';
 import { ReconciliationVideoSettlementPort } from '../saas/gateway/videos/video-settlement-port.js';
 import { PostgresVideoTaskStore } from '../saas/gateway/videos/video-task-store.js';
 import {
@@ -281,6 +283,17 @@ export interface SaasGatewayImageMediaOptions {
   readonly executionTimeoutMs?: number;
   /** Sync-path JSON keepalive heartbeat cadence; default 0 (disabled). */
   readonly keepaliveIntervalMs?: number;
+  /**
+   * G-A1: the stuck-task sweep timer (processing rows past the execution
+   * timeout → failed). Default ON whenever imageMedia is wired — a dead
+   * worker's rows must terminate without a client poll. `disabled: true`
+   * opts out (single-process deployments that prefer manual sweeps).
+   */
+  readonly stuckSweep?: {
+    readonly disabled?: boolean;
+    readonly intervalMs?: number;
+    readonly limit?: number;
+  };
 }
 
 export interface ManagedSaasGatewayCompositionDependencies {
@@ -997,6 +1010,20 @@ export interface ManagedSaasGatewayProductionOptions {
     readonly timeoutMs?: number;
     /** In-memory ceiling for one proxied content response; default 64 MiB. */
     readonly maxContentBytes?: number;
+    /**
+     * G-A1: the no-client-poll video recovery loop (migration 132 lease
+     * columns + the recovery worker). Default ON whenever videoMedia is
+     * wired — pending billing must settle even if the client never polls
+     * again. `disabled: true` opts out (single-process test deployments).
+     */
+    readonly recovery?: {
+      readonly disabled?: boolean;
+      readonly intervalMs?: number;
+      readonly batchSize?: number;
+      readonly leaseMs?: number;
+      readonly maxPollFailures?: number;
+      readonly interTaskDelayMs?: number;
+    };
   };
   /**
    * F6 (task #39): OpenRouter supplier-attribute headers (`HTTP-Referer` /
@@ -1963,6 +1990,7 @@ export function createManagedSaasGatewayProductionComposition(
   // §4.2 (task #16): the async image media binding — the zero-dep S3
   // client, the offloader, the PG-backed task service and the two boundary
   // ports (async submit + task-status query). Absent keeps the endpoints closed.
+  let imageTaskService: SaasImageTaskService | undefined;
   const imageMedia = options.imageMedia
     ? (() => {
         const storage = new S3ObjectClient(options.imageMedia.s3);
@@ -1975,6 +2003,7 @@ export function createManagedSaasGatewayProductionComposition(
           ttlMs: options.imageMedia.taskTtlMs ?? IMAGE_TASK_TTL_MS,
           executionTimeoutMs: options.imageMedia.executionTimeoutMs ?? IMAGE_TASK_EXECUTION_TIMEOUT_MS,
         });
+        imageTaskService = taskService;
         return {
           ...options.imageMedia,
           queryEndpoints: new SaasGatewayImagesQueryPort(taskService),
@@ -1982,6 +2011,24 @@ export function createManagedSaasGatewayProductionComposition(
         };
       })()
     : undefined;
+  /*
+   * G-A1 (image half): the stuck-task sweep timer. A dead worker's
+   * `processing` rows (synchronous upstream dispatch, nothing to re-poll)
+   * terminate at the execution deadline without any client poll; the
+   * stranded attempt's billing stays with the unknown-outcome worker.
+   * Default ON whenever imageMedia is wired; `stuckSweep.disabled` opts out.
+   */
+  const imageStuckSweeper =
+    imageTaskService !== undefined &&
+    options.imageMedia !== undefined &&
+    options.imageMedia.stuckSweep?.disabled !== true
+      ? startImageTaskStuckSweeper(imageTaskService, {
+          ...(options.imageMedia.stuckSweep?.intervalMs === undefined
+            ? {}
+            : { intervalMs: options.imageMedia.stuckSweep.intervalMs }),
+          ...(options.imageMedia.stuckSweep?.limit === undefined ? {} : { limit: options.imageMedia.stuckSweep.limit }),
+        })
+      : undefined;
   /*
    * §4.3 (task #17): the async video media binding — the PG-backed task
    * store (migration 124), the bound-account status/content forwarder, the
@@ -2020,9 +2067,41 @@ export function createManagedSaasGatewayProductionComposition(
             store,
             ...(options.videoMedia.taskTtlMs === undefined ? {} : { ttlMs: options.videoMedia.taskTtlMs }),
           }),
+          recoveryWorker: new VideoTaskRecoveryWorker({
+            store,
+            forwarder,
+            billing,
+            ...(options.videoMedia.recovery?.batchSize === undefined
+              ? {}
+              : { batchSize: options.videoMedia.recovery.batchSize }),
+            ...(options.videoMedia.recovery?.leaseMs === undefined
+              ? {}
+              : { leaseMs: options.videoMedia.recovery.leaseMs }),
+            ...(options.videoMedia.recovery?.maxPollFailures === undefined
+              ? {}
+              : { maxPollFailures: options.videoMedia.recovery.maxPollFailures }),
+            ...(options.videoMedia.recovery?.interTaskDelayMs === undefined
+              ? {}
+              : { interTaskDelayMs: options.videoMedia.recovery.interTaskDelayMs }),
+          }),
         };
       })()
     : undefined;
+  /*
+   * G-A1 (video half): the no-client-poll recovery loop — pending billing
+   * settles through the same one-shot state machine even if the client
+   * never polls again, under the migration-132 lease (any instance adopts
+   * an expired lease; the epoch fences zombie writes). Default ON whenever
+   * videoMedia is wired; `recovery.disabled` opts out.
+   */
+  const videoRecoveryHandle =
+    videoMedia !== undefined && options.videoMedia !== undefined && options.videoMedia.recovery?.disabled !== true
+      ? startVideoTaskRecoveryWorker(videoMedia.recoveryWorker, {
+          ...(options.videoMedia.recovery?.intervalMs === undefined
+            ? {}
+            : { intervalMs: options.videoMedia.recovery.intervalMs }),
+        })
+      : undefined;
   const payload = createProviderPayloadCompiler(options);
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
@@ -2081,6 +2160,10 @@ export function createManagedSaasGatewayProductionComposition(
     },
     lifecycle: {
       close: async () => {
+        // G-A1: stop the media recovery loops before the KMS (their PG
+        // leases expire on their own; an in-flight cycle finishes first).
+        await videoRecoveryHandle?.stop();
+        await imageStuckSweeper?.stop();
         await options.providerCredentialUnsealingKms.close();
       },
     },

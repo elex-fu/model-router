@@ -664,7 +664,8 @@ test('a rate-limit rejection maps to 429 and carries the Retry-After hint (core-
   assert.equal(plain.dispatchInputs.length, 0);
 });
 
-test('accepts only Bearer authorization and never exposes the raw secret in errors', async () => {  const missing = harness();
+test('accepts only Bearer authorization and never exposes the raw secret in errors', async () => {
+  const missing = harness();
   delete missing.request.headers.authorization;
   await missing.handler(asRequest(missing.request), asResponse(missing.response));
   assert.equal(missing.response.writeHeadCalls[0]?.status, 401);

@@ -52,6 +52,25 @@ export interface SaasImageTaskStore {
   get(id: string): Promise<SaasImageTaskRecord | null>;
   /** finish returns false when the task id is absent (never a silent no-op). */
   finish(id: string, input: SaasImageTaskFinishInput): Promise<boolean>;
+  /**
+   * G-A1 stuck sweep: fails every `processing` row created before the
+   * deadline in one guarded UPDATE (the status='processing' predicate is
+   * the CAS — a live task's own finish transition cannot lose to it). The
+   * worker whose process died mid-dispatch is unrecoverable by design:
+   * there is no upstream task id to re-poll, so the deliverable is lost and
+   * the row must terminate; billing for the stranded attempt belongs to the
+   * unknown-outcome reconciliation worker, never to this sweep.
+   */
+  failStuckProcessing?(input: {
+    /** ISO instant; rows with created_at strictly before it are failed. */
+    readonly deadline: string;
+    readonly httpStatus: number;
+    readonly error: string;
+    readonly completedAt: string;
+    /** A finished task's TTL restarts from completion. */
+    readonly expiresAt: string;
+    readonly limit: number;
+  }): Promise<number>;
   /** Deletes rows past their TTL; returns the number removed. */
   purgeExpired?(now: string): Promise<number>;
 }
@@ -195,6 +214,53 @@ export class PostgresImageTaskStore implements SaasImageTaskStore {
     const result = await this.database.query(`DELETE FROM saas_image_tasks WHERE expires_at <= $1`, [now]);
     return result.rowCount ?? 0;
   }
+
+  async failStuckProcessing(input: {
+    readonly deadline: string;
+    readonly httpStatus: number;
+    readonly error: string;
+    readonly completedAt: string;
+    readonly expiresAt: string;
+    readonly limit: number;
+  }): Promise<number> {
+    if (
+      Number.isNaN(Date.parse(input.deadline)) ||
+      Number.isNaN(Date.parse(input.completedAt)) ||
+      Number.isNaN(Date.parse(input.expiresAt)) ||
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1
+    ) {
+      throw new SaasImageTaskStoreError('INVALID_INPUT', 'image stuck sweep input is invalid');
+    }
+    if (
+      !Number.isSafeInteger(input.httpStatus) ||
+      input.httpStatus < 100 ||
+      input.httpStatus > 599 ||
+      typeof input.error !== 'string' ||
+      input.error.trim() === ''
+    ) {
+      throw new SaasImageTaskStoreError('INVALID_INPUT', 'image stuck sweep terminal shape is invalid');
+    }
+    const result = await this.database.query(
+      `UPDATE saas_image_tasks
+          SET status = 'failed',
+              http_status = $1,
+              result = NULL,
+              error = $2::jsonb,
+              completed_at = $3,
+              expires_at = $4
+        WHERE id IN (
+          SELECT id
+            FROM saas_image_tasks
+           WHERE status = 'processing' AND created_at < $5::timestamptz
+           ORDER BY created_at
+           LIMIT $6
+           FOR UPDATE SKIP LOCKED
+        )`,
+      [input.httpStatus, input.error, input.completedAt, input.expiresAt, input.deadline, input.limit],
+    );
+    return result.rowCount ?? 0;
+  }
 }
 
 /**
@@ -259,5 +325,43 @@ export class InMemoryImageTaskStore implements SaasImageTaskStore {
       }
     }
     return removed;
+  }
+
+  async failStuckProcessing(input: {
+    readonly deadline: string;
+    readonly httpStatus: number;
+    readonly error: string;
+    readonly completedAt: string;
+    readonly expiresAt: string;
+    readonly limit: number;
+  }): Promise<number> {
+    if (
+      Number.isNaN(Date.parse(input.deadline)) ||
+      Number.isNaN(Date.parse(input.completedAt)) ||
+      Number.isNaN(Date.parse(input.expiresAt)) ||
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1
+    ) {
+      throw new SaasImageTaskStoreError('INVALID_INPUT', 'image stuck sweep input is invalid');
+    }
+    const cutoff = Date.parse(input.deadline);
+    let failed = 0;
+    for (const [id, record] of [...this.records.entries()].sort(
+      (a, b) => Date.parse(a[1].createdAt) - Date.parse(b[1].createdAt),
+    )) {
+      if (failed >= input.limit) break;
+      if (record.status !== 'processing' || Date.parse(record.createdAt) >= cutoff) continue;
+      this.records.set(id, {
+        ...record,
+        status: 'failed',
+        httpStatus: input.httpStatus,
+        result: null,
+        error: input.error,
+        completedAt: input.completedAt,
+        expiresAt: input.expiresAt,
+      });
+      failed += 1;
+    }
+    return failed;
   }
 }

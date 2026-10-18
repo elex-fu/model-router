@@ -1869,7 +1869,16 @@ BEGIN
       ('saas_video_tasks', 'duration_seconds', 'INSERT'), ('saas_video_tasks', 'video_count', 'INSERT'),
       ('saas_video_tasks', 'billing_state', 'INSERT'), ('saas_video_tasks', 'settlement_facts', 'INSERT'),
       ('saas_video_tasks', 'created_at', 'INSERT'), ('saas_video_tasks', 'expires_at', 'INSERT'),
-      ('saas_video_tasks', 'billing_state', 'UPDATE'), ('saas_video_tasks', 'billed_at', 'UPDATE')
+      ('saas_video_tasks', 'billing_state', 'UPDATE'), ('saas_video_tasks', 'billed_at', 'UPDATE'),
+      -- (132) gap-remediation G-A1: the media-task recovery worker's claim
+      -- writes — the lease triple (owner/epoch/until), the due cursor and
+      -- the six-class poll failure counter. INSERT never sets them (column
+      -- defaults); the billing-state columns above stay the only settlement
+      -- surface.
+      ('saas_video_tasks', 'lease_owner', 'UPDATE'),
+      ('saas_video_tasks', 'lease_epoch', 'UPDATE'),
+      ('saas_video_tasks', 'lease_until', 'UPDATE'),
+      ('saas_video_tasks', 'next_poll_at', 'UPDATE'), ('saas_video_tasks', 'poll_failures', 'UPDATE')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP
