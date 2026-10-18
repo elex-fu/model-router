@@ -155,6 +155,8 @@ import {
   rejectRequestPreparation,
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
+import { createResponsesWsServer } from '../saas/gateway/responses-ws-connection.js';
+import { ResponsesWsEngine } from '../saas/gateway/responses-ws-engine.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
 import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
@@ -301,6 +303,15 @@ export interface SaasGatewayImageMediaOptions {
 }
 
 export interface ManagedSaasGatewayCompositionDependencies {
+  /**
+   * G-B4: the Responses WebSocket round executor — every response.create
+   * replays the FULL preparation/admission/dispatch/settlement chain (the
+   * engine owns pin/idempotency/cancel semantics). When present, the
+   * composition mounts the WS surface on GET /v1/responses (upgrade auth
+   * rides the composition's key authenticator); absent keeps the 501.
+   */
+  readonly responsesWsRoundExecutor?: import('../saas/gateway/responses-ws-engine.js').ResponsesWsRoundExecutor;
+  readonly responsesWsLimits?: import('../saas/gateway/responses-ws-connection.js').ResponsesWsConnectionLimits;
   /**
    * G-C1: the readiness authority for GET /readyz. The production
    * composition builds a PG-backed provider when unset; absent entirely
@@ -694,6 +705,39 @@ export function createManagedSaasGatewayComposition(
     dependencies.dispatch.dispatchFailureFeedback,
     dependencies.dispatch.modelRateLimit,
   );
+  /*
+   * G-B4: the Responses WebSocket surface. The connection layer's upgrade
+   * auth rides the composition's key authenticator (Authorization: Bearer
+   * / x-api-key on the upgrade request); every round then replays the
+   * full gateway chain through the executor. Absent keeps the 501.
+   */
+  const responsesWs = dependencies.responsesWsRoundExecutor
+    ? createResponsesWsServer({
+        authenticate: async (upgradeRequest: import('node:http').IncomingMessage) => {
+          // The same key extraction the HTTP boundary uses: Authorization
+          // Bearer or x-api-key on the upgrade request itself.
+          const authorization = String(upgradeRequest.headers.authorization ?? '');
+          const apiKeyHeader = String(upgradeRequest.headers['x-api-key'] ?? '');
+          const rawKey = authorization.startsWith('Bearer ')
+            ? authorization.slice('Bearer '.length).trim()
+            : apiKeyHeader.trim();
+          if (rawKey === '') return { ok: false, reason: 'unauthenticated' };
+          try {
+            const caller = await dependencies.authenticator.authenticate(rawKey);
+            return caller !== null ? { ok: true } : { ok: false, reason: 'unauthenticated' };
+          } catch {
+            return { ok: false, reason: 'unavailable' };
+          }
+        },
+        createEngine: () =>
+          new ResponsesWsEngine({
+            executor: dependencies.responsesWsRoundExecutor as never,
+            send: () => {},
+            close: () => {},
+          }),
+        ...(dependencies.responsesWsLimits ? { limits: dependencies.responsesWsLimits } : {}),
+      })
+    : undefined;
   const httpHandler = createSaasGatewayHandler({
     authenticator: dependencies.authenticator,
     preparation,
@@ -707,6 +751,7 @@ export function createManagedSaasGatewayComposition(
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
     ...(dependencies.readiness ? { readiness: dependencies.readiness } : {}),
+    ...(responsesWs !== undefined ? { responsesWs } : {}),
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
     ...(dependencies.modelPlaza ? { modelPlaza: dependencies.modelPlaza } : {}),
     ...(dependencies.contentModeration ? { contentModeration: dependencies.contentModeration } : {}),

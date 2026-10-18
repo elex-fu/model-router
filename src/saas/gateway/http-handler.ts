@@ -478,6 +478,18 @@ export interface SaasGatewayReadinessProvider {
 
 export interface SaasGatewayHttpOptions {
   /**
+   * G-B4: the Responses WebSocket surface. When present, an upgrade
+   * request on GET /v1/responses hands the socket to this handle (the
+   * connection layer's auth/Origin/limits already ran by construction);
+   * absent keeps the recorded 501 boundary. Non-upgrade GET /v1/responses
+   * answers the precise 426.
+   */
+  readonly responsesWs?: {
+    /** True when this handle owns the request (the /v1/responses path). */
+    readonly handleUpgrade: (req: IncomingMessage, socket: import('node:stream').Duplex, head: Buffer) => boolean;
+    readonly close: () => Promise<void>;
+  };
+  /**
    * G-B2: the multipart staging root for /v1/audio/transcriptions,
    * /v1/audio/translations and /v1/images/edits multipart inputs. Each
    * request parses into its own subdirectory (mode 0700) under this root;
@@ -1872,8 +1884,29 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
      * dispatch.
      */
     if (oneHeader(req, 'upgrade')?.trim().toLowerCase() === 'websocket') {
+      // G-B4: GET /v1/responses upgrades to the Responses WebSocket when
+      // the deployment mounted the surface; every other path keeps the
+      // recorded 501 boundary.
+      if (options.responsesWs !== undefined && path === '/v1/responses') {
+        // The raw socket upgrade leaves the ServerResponse world: the
+        // handler returns true (handled) and the WS layer owns the socket.
+        const socket = (req as unknown as { socket?: import('node:stream').Duplex }).socket;
+        if (socket !== undefined) {
+          options.responsesWs.handleUpgrade(req, socket, Buffer.alloc(0));
+          return true;
+        }
+      }
       drainRequest(req);
       sendHttpError(res, new GatewayHttpError(501, 'WEBSOCKET_UNSUPPORTED'), requestId, WEBSOCKET_UNSUPPORTED_MESSAGE);
+      return true;
+    }
+    // G-B4: a plain (non-upgrade) GET on the WS path answers 426.
+    if (options.responsesWs !== undefined && path === '/v1/responses' && (req.method ?? '').toUpperCase() === 'GET') {
+      drainRequest(req);
+      res.writeHead(426, { 'Content-Type': 'application/json', Upgrade: 'websocket' });
+      res.end(
+        JSON.stringify({ error: { code: 'UPGRADE_REQUIRED', message: 'this endpoint requires a WebSocket upgrade' } }),
+      );
       return true;
     }
 
