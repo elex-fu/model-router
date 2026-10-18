@@ -11,6 +11,7 @@ import {
   type SaasGatewayEndpointFamilyBodyLimits,
   type SaasGatewayQueryRequestContext,
   type SaasGatewayQueryResult,
+  type SaasGatewayReadinessProvider,
 } from '../../../src/saas/gateway/http-handler.js';
 import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 import type {
@@ -251,6 +252,8 @@ function harness(
     /** Roadmap 4.0 ③: fake query-endpoint port for GET task reads. */
     readonly queryEndpoints?: (context: SaasGatewayQueryRequestContext) => Promise<SaasGatewayQueryResult>;
     readonly maxBodyBytes?: number;
+    /** G-C1: the readiness provider for GET /readyz. */
+    readonly readiness?: SaasGatewayReadinessProvider;
     /** Roadmap 4.0 ①: endpoint-family body limits injected at construction. */
     readonly endpointBodyLimits?: SaasGatewayEndpointFamilyBodyLimits;
     /** Batch 2 §2.1: enable the sticky scheduling seam at the boundary. */
@@ -322,6 +325,7 @@ function harness(
     queryEndpoints,
     maxBodyBytes: options.maxBodyBytes,
     endpointBodyLimits: options.endpointBodyLimits,
+    ...(options.readiness ? { readiness: options.readiness } : {}),
     ...(options.stickyScheduling ? { stickyScheduling: true } : {}),
   });
   const requestId =
@@ -1266,4 +1270,61 @@ test('G-B3: /v1/rerank with a wrong method answers 405 via the registry match', 
   setup.request.method = 'GET';
   assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
   assert.equal(setup.response.writeHeadCalls[0]?.status, 405);
+});
+
+test('G-C1: GET /readyz answers the readiness report without authentication', async () => {
+  const setup = harness({
+    readiness: {
+      async readiness() {
+        return {
+          database: 'ok',
+          migrationHead: 132,
+          dependencies: { 'provider-credential-kms': 'ok' },
+          capabilities: { 'images.async': true, 'videos.create': false },
+        };
+      },
+    },
+  });
+  setup.request.url = '/readyz';
+  setup.request.method = 'GET';
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 200);
+  const body = JSON.parse(String(setup.response.endBody ?? '{}')) as Record<string, unknown>;
+  assert.equal(body.status, 'ready');
+  assert.equal(body.database, 'ok');
+  assert.equal(body.migrationHead, 132);
+  assert.equal(setup.preparationInputs.length, 0, 'the probe never reaches preparation');
+});
+
+test('G-C1: a required dependency down fails readiness with 503; optional capabilities do not', async () => {
+  const setup = harness({
+    readiness: {
+      async readiness() {
+        return {
+          database: 'ok',
+          migrationHead: 132,
+          dependencies: { 'provider-credential-kms': 'error' },
+          // An OPTIONAL upstream being down is reported but not fatal (§13.2).
+          capabilities: { 'grok.video': false, 'images.async': true },
+        };
+      },
+    },
+  });
+  setup.request.url = '/readyz';
+  setup.request.method = 'GET';
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 503);
+  const body = JSON.parse(String(setup.response.endBody ?? '{}')) as Record<string, unknown>;
+  assert.equal(body.status, 'not-ready');
+});
+
+test('G-C1: an absent readiness provider answers the process-only payload; a wrong method answers 405', async () => {
+  const plain = harness();
+  plain.request.url = '/readyz';
+  plain.request.method = 'GET';
+  assert.equal(await plain.handler(asRequest(plain.request), asResponse(plain.response)), true);
+  assert.equal(plain.response.writeHeadCalls[0]?.status, 200);
+  const body = JSON.parse(String(plain.response.endBody ?? '{}')) as Record<string, unknown>;
+  assert.equal(body.database, 'unknown');
+  assert.deepEqual(body.dependencies, {});
 });

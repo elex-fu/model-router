@@ -29,7 +29,7 @@ import {
 import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
 import { GROK_ENDPOINT } from '../saas/gateway/grok/catalog-identity.js';
 import type { GrokCredentialResolver } from '../saas/gateway/grok/transport.js';
-import type { ContentModerationPort } from '../saas/gateway/http-handler.js';
+import type { ContentModerationPort, SaasGatewayReadinessProvider } from '../saas/gateway/http-handler.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
@@ -301,6 +301,12 @@ export interface SaasGatewayImageMediaOptions {
 }
 
 export interface ManagedSaasGatewayCompositionDependencies {
+  /**
+   * G-C1: the readiness authority for GET /readyz. The production
+   * composition builds a PG-backed provider when unset; absent entirely
+   * answers the process-only payload.
+   */
+  readonly readiness?: SaasGatewayReadinessProvider;
   readonly authenticator: ProxyKeyAuthenticator;
   readonly preparation: ManagedSaasGatewayPreparationDependencies;
   readonly preparationOptions: {
@@ -700,6 +706,7 @@ export function createManagedSaasGatewayComposition(
     maxBodyBytes: dependencies.maxBodyBytes,
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
+    ...(dependencies.readiness ? { readiness: dependencies.readiness } : {}),
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
     ...(dependencies.modelPlaza ? { modelPlaza: dependencies.modelPlaza } : {}),
     ...(dependencies.contentModeration ? { contentModeration: dependencies.contentModeration } : {}),
@@ -2194,6 +2201,41 @@ export function createManagedSaasGatewayProductionComposition(
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
     trustedProxyCidrs: options.trustedProxyCidrs,
+    // G-C1: PG-backed readiness — database + migration head from the
+    // ledger, the KMS as the required dependency, and the media binding
+    // assemblies as capability flags. Never throws; secrets never appear.
+    readiness: {
+      readiness: async () => {
+        let databaseState: 'ok' | 'error' | 'unknown' = 'unknown';
+        let migrationHead: number | null = null;
+        try {
+          const result = await database.query<{ version: number }>(
+            'SELECT version FROM saas_schema_migrations ORDER BY version DESC LIMIT 1',
+          );
+          migrationHead = result.rows[0]?.version ?? null;
+          databaseState = 'ok';
+        } catch {
+          databaseState = 'error';
+        }
+        let kmsReady: 'ok' | 'error' = 'error';
+        try {
+          await options.providerCredentialUnsealingKms.checkReady();
+          kmsReady = 'ok';
+        } catch {
+          kmsReady = 'error';
+        }
+        return {
+          database: databaseState,
+          migrationHead,
+          dependencies: { 'provider-credential-kms': kmsReady },
+          capabilities: {
+            'images.async': imageMedia !== undefined,
+            'videos.create': videoMedia !== undefined,
+            'model-plaza': modelPlaza !== undefined,
+          },
+        };
+      },
+    },
     ...(imageMedia ? { imageMedia } : {}),
     ...(videoMedia ? { videoMedia } : {}),
     // Batch 2 §2.1: the production composition always wires the scheduler

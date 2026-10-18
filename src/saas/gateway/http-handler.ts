@@ -437,7 +437,36 @@ export interface ContentModerationPort {
  * being wired. A missing capability is handled as a closed 503 at request
  * time; this adapter never creates a local fallback authenticator or service.
  */
+/**
+ * G-C1: the readiness report — process liveness is implied by answering at
+ * all; every field beyond it must be non-secret (never a key, internal
+ * address or raw SQL). A single optional upstream being down does NOT make
+ * the gateway unready (§13.2); only required dependencies do.
+ */
+export interface SaasGatewayReadinessReport {
+  readonly database: 'ok' | 'error' | 'unknown';
+  /** The applied migration head when the database is readable; null otherwise. */
+  readonly migrationHead: number | null;
+  /** Required-dependency states; every value must be 'ok' for readiness. */
+  readonly dependencies: Readonly<Record<string, 'ok' | 'error' | 'unknown'>>;
+  /** Per-capability assembled flags (present only for registered capabilities). */
+  readonly capabilities: Readonly<Record<string, boolean>>;
+}
+
+export interface SaasGatewayReadinessProvider {
+  /** Must never throw — an unavailable authority reports 'unknown'. */
+  readiness(): Promise<SaasGatewayReadinessReport>;
+}
+
 export interface SaasGatewayHttpOptions {
+  /**
+   * G-C1: the readiness authority for GET /readyz — reports the process,
+   * database/migration state, required dependencies and per-capability
+   * assembled flags. Absent keeps /readyz answering the process-only
+   * payload (the same contract as the local proxy's /healthz liveness —
+   * probe SPLIT: /readyz = readiness, /healthz = liveness).
+   */
+  readonly readiness?: SaasGatewayReadinessProvider;
   readonly authenticator?: ProxyKeyAuthenticator;
   readonly proxyKeyAuthenticator?: ProxyKeyAuthenticator;
   readonly preparation?: RequestPreparationPort;
@@ -1381,6 +1410,52 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       sendHttpError(res, new GatewayHttpError(400, 'INVALID_PATH'), requestId);
       return true;
     }
+    /*
+     * G-C1: GET /readyz — the readiness probe (the process-liveness half is
+     * answering at all). Unauthenticated by design (a probe must not depend
+     * on key auth), never exposes secrets/internal addresses, and reports
+     * per-capability assembled flags from the readiness provider. A single
+     * optional upstream being down does NOT fail readiness — only required
+     * dependencies (the provider encodes which is which).
+     */
+    if (path === '/readyz' || path.startsWith('/readyz?')) {
+      const method = req.method ?? 'GET';
+      if (method !== 'GET' && method !== 'HEAD') {
+        drainRequest(req);
+        sendHttpError(res, new GatewayHttpError(405, 'METHOD_NOT_ALLOWED'), requestId);
+        return true;
+      }
+      let report: SaasGatewayReadinessReport = {
+        database: 'unknown',
+        migrationHead: null,
+        dependencies: {},
+        capabilities: {},
+      };
+      if (options.readiness) {
+        try {
+          report = await options.readiness.readiness();
+        } catch {
+          // an unavailable authority reports the process-only payload
+        }
+      }
+      const requiredOk = Object.values(report.dependencies).every((state) => state === 'ok');
+      const ready = report.database !== 'error' && requiredOk;
+      const body = JSON.stringify({
+        status: ready ? 'ready' : 'not-ready',
+        database: report.database,
+        migrationHead: report.migrationHead,
+        dependencies: report.dependencies,
+        capabilities: report.capabilities,
+      });
+      res.writeHead(ready ? 200 : 503, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      });
+      if (method === 'HEAD') res.end();
+      else res.end(body);
+      return true;
+    }
+
     if (
       !path.startsWith(`${GATEWAY_PREFIX}/`) &&
       path !== GATEWAY_PREFIX &&
