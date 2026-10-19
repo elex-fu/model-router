@@ -110,6 +110,7 @@ import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from './
 import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from './130_provider_account_window_cost_policy.js';
 import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from './131_resolved_supply_billing_identity.js';
 import { MEDIA_TASK_RECOVERY_SAAS_MIGRATION } from './132_media_task_recovery.js';
+import { PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION } from './133_provider_account_model_cooldowns.js';
 
 export interface SaasMigration {
   version: number;
@@ -773,4 +774,11 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // CAS-winner-settles + sub2api heartbeat-lease fusion). Image tasks need
   // no columns: their recovery is the guarded stuck-fail sweep.
   MEDIA_TASK_RECOVERY_SAAS_MIGRATION,
+  // Core-plan 9.1 (migration 133): the durable (account, model) cooldown
+  // table backing the model-level rate-limit registry. The dispatch side
+  // records model-unavailable outcomes (404 / plan-gated 400) as a 30-minute
+  // pair cooldown; every instance reads the same rows instead of a private
+  // in-process Map, with `cooled_until > now()` as the invalidation bound and
+  // GREATEST-merge upserts so cooldowns never shorten across instances.
+  PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION,
 ];

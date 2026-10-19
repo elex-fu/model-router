@@ -89,6 +89,9 @@ test('migration 034 registers after the immutable 033 history', () => {
       130,
       131,
       132,
+      // Core-plan 9.1: 133 provider account model cooldowns — the
+      // durable (account, model) cooldown registry (multi-instance).
+      133,
     ],
   );
 });

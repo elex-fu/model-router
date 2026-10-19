@@ -91,6 +91,7 @@ import { PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION } from '..
 import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/130_provider_account_window_cost_policy.js';
 import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/131_resolved_supply_billing_identity.js';
 import { MEDIA_TASK_RECOVERY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/132_media_task_recovery.js';
+import { PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/133_provider_account_model_cooldowns.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -219,6 +220,9 @@ test('SaaS migration registry keeps a stable append order with only documented g
       // Gap-remediation G-A1: 132 media task recovery — the async-video
       // lease/poll-failure substrate for the no-client-poll recovery loop.
       132,
+      // Core-plan 9.1: 133 provider account model cooldowns — the
+      // durable (account, model) cooldown registry (multi-instance).
+      133,
     ],
   );
 });
@@ -282,7 +286,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 113);
+  assert.equal(SAAS_MIGRATIONS.length, 114);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -357,6 +361,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'provider_account_window_cost_policy',
       'resolved_supply_billing_identity',
       'media_task_recovery',
+      'provider_account_model_cooldowns',
     ],
   );
   assert.deepEqual(
@@ -450,10 +455,13 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       // Gap-remediation G-A1: 132 media task recovery — the async-video
       // lease/poll-failure substrate for the no-client-poll recovery loop.
       132,
+      // Core-plan 9.1: 133 provider account model cooldowns — the
+      // durable (account, model) cooldown registry (multi-instance).
+      133,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 113);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 113);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 114);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 114);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -543,7 +551,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 113);
+  assert.equal(SAAS_MIGRATIONS.length, 114);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -604,6 +612,7 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION,
     RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION,
     MEDIA_TASK_RECOVERY_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -768,6 +777,19 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
   assert.equal(SAAS_MIGRATIONS[109], PROVIDER_ACCOUNT_DURABLE_FAULT_CLASSIFICATION_SAAS_MIGRATION);
   assert.equal(SAAS_MIGRATIONS[109]?.version, 129);
   assert.equal(SAAS_MIGRATIONS[109]?.name, 'provider_account_durable_fault_classification');
+  // 130: core-plan 9.2 window cost policy (T05); 131: R3 §8.1 resolved
+  // supply billing identity (T04); 132: gap-remediation G-A1 media task
+  // recovery (the async-video lease substrate); 133: core-plan 9.1 durable
+  // (account, model) cooldowns for multi-instance scheduling.
+  assert.equal(SAAS_MIGRATIONS[110]?.version, 130);
+  assert.equal(SAAS_MIGRATIONS[110]?.name, 'provider_account_window_cost_policy');
+  assert.equal(SAAS_MIGRATIONS[111]?.version, 131);
+  assert.equal(SAAS_MIGRATIONS[111]?.name, 'resolved_supply_billing_identity');
+  assert.equal(SAAS_MIGRATIONS[112]?.version, 132);
+  assert.equal(SAAS_MIGRATIONS[112]?.name, 'media_task_recovery');
+  assert.equal(SAAS_MIGRATIONS[113], PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION);
+  assert.equal(SAAS_MIGRATIONS[113]?.version, 133);
+  assert.equal(SAAS_MIGRATIONS[113]?.name, 'provider_account_model_cooldowns');
 });
 
 test('migration 041 appends after health without reordering the registered prefix', () => {

@@ -1232,7 +1232,8 @@ BEGIN
       ('saas_plugin_bindings'),
       -- (124) batch-4 §4.3 async video tasks: the gateway owns the
       -- snapshot + binding + claim lifecycle (plus the expiry purge).
-      ('saas_video_tasks')
+      ('saas_video_tasks'),
+      ('saas_provider_account_model_cooldowns')
     ) AS read_relation(table_name)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1878,7 +1879,14 @@ BEGIN
       ('saas_video_tasks', 'lease_owner', 'UPDATE'),
       ('saas_video_tasks', 'lease_epoch', 'UPDATE'),
       ('saas_video_tasks', 'lease_until', 'UPDATE'),
-      ('saas_video_tasks', 'next_poll_at', 'UPDATE'), ('saas_video_tasks', 'poll_failures', 'UPDATE')
+      ('saas_video_tasks', 'next_poll_at', 'UPDATE'), ('saas_video_tasks', 'poll_failures', 'UPDATE'),
+      -- 133 (core-plan 9.1): the durable model-cooldown upsert — the row key
+      -- and the cooled-until/updated-at write surface.
+      ('saas_provider_account_model_cooldowns', 'owner_scope_key', 'INSERT'),
+      ('saas_provider_account_model_cooldowns', 'account_id', 'INSERT'),
+      ('saas_provider_account_model_cooldowns', 'model', 'INSERT'),
+      ('saas_provider_account_model_cooldowns', 'cooled_until', 'INSERT'), ('saas_provider_account_model_cooldowns', 'updated_at', 'INSERT'),
+      ('saas_provider_account_model_cooldowns', 'cooled_until', 'UPDATE'), ('saas_provider_account_model_cooldowns', 'updated_at', 'UPDATE')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP

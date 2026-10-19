@@ -9156,6 +9156,15 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
     ],
     table: 'saas_video_tasks',
   },
+  {
+    tsComment: [
+      '133 (core-plan 9.1): the durable (account, model) cooldown registry —',
+      'the cross-instance authority behind the model-level rate limit. One',
+      '(owner scope, account, model) key with its cooled-until bound; no',
+      'sensitive column exists on the table.',
+    ],
+    table: 'saas_provider_account_model_cooldowns',
+  },
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
@@ -9320,6 +9329,11 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
       'snapshot + binding + claim lifecycle (plus the expiry purge).',
     ],
     tables: ['saas_video_tasks'],
+  },
+  {
+    // 133 (core-plan 9.1): the durable (account, model) cooldown registry —
+    // the scheduler's model-cooldown read (cooled_until is the bound).
+    tables: ['saas_provider_account_model_cooldowns'],
   },
 ];
 
@@ -10470,6 +10484,24 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     privilege: 'UPDATE',
     columns: ['lease_owner', 'lease_epoch', 'lease_until', 'next_poll_at', 'poll_failures'],
     tsStyle: 'map-paren-multi',
+  },
+  {
+    tsComment: [
+      '133 (core-plan 9.1): the durable model-cooldown upsert — the row key',
+      'and the cooled-until/updated-at write surface. Reads are the',
+      'read-table SELECT above; the upsert GREATEST-merges cooled_until so a',
+      'shorter cooldown never shortens a longer one from another instance.',
+    ],
+    table: 'saas_provider_account_model_cooldowns',
+    privilege: 'INSERT',
+    columns: ['owner_scope_key', 'account_id', 'model', 'cooled_until', 'updated_at'],
+    tsStyle: 'map-paren-multi',
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    privilege: 'UPDATE',
+    columns: ['cooled_until', 'updated_at'],
+    tsStyle: 'inline',
   },
 ];
 
@@ -14100,6 +14132,47 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   {
     table: 'saas_video_tasks',
     column: 'poll_failures',
+    privilege: 'UPDATE',
+    sqlJoinLine: true,
+  },
+  {
+    sqlComment: [
+      '133 (core-plan 9.1): the durable model-cooldown upsert — the row key',
+      'and the cooled-until/updated-at write surface.',
+    ],
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'owner_scope_key',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'account_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'model',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'cooled_until',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'updated_at',
+    privilege: 'INSERT',
+    sqlJoinLine: true,
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'cooled_until',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_provider_account_model_cooldowns',
+    column: 'updated_at',
     privilege: 'UPDATE',
     sqlJoinLine: true,
   },

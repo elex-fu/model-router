@@ -401,8 +401,10 @@ export interface ProviderAccountSchedulerStickyWaitConfig {
 
 /**
  * Core-plan 9.1: the model-cooldown read seam consumed by the candidate loop.
- * Synchronous, non-throwing, process-local; the durable account-level
- * authority is never substituted by it.
+ * Non-throwing. Implementations may be synchronous (the process-local
+ * `ProviderAccountModelRateLimit` L1) or promise-returning (the durable
+ * PostgreSQL registry, migration 133); a failed durable read resolves false
+ * (fail-open). The durable account-level authority is never substituted by it.
  */
 export interface ProviderAccountSchedulerModelCooldownPort {
   /** True while the (account, model) pair is inside its dispatch-derived cooldown. */
@@ -410,7 +412,7 @@ export interface ProviderAccountSchedulerModelCooldownPort {
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly model: string;
     readonly now: Date;
-  }): boolean;
+  }): boolean | Promise<boolean>;
 }
 
 /**
@@ -1833,14 +1835,16 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       }
       // Core-plan 9.1 (B06): model-level cooldown read. Same hint semantics as
       // failure feedback: skip only this (account, model) candidate, exactly
-      // like a health deny, never the whole selection.
+      // like a health deny, never the whole selection. The read may be
+      // promise-returning (the durable PostgreSQL registry); a failed durable
+      // read resolves false inside the registry (fail-open).
       if (
         !options.ignoreModelCooldown &&
-        this.dependencies.modelCooldown?.isModelExcluded({
+        (await this.dependencies.modelCooldown?.isModelExcluded({
           candidate: candidateValue,
           model: candidateValue.resolvedModel,
           now,
-        })
+        }))
       ) {
         modelCooldownSkipped.push(candidateValue);
         continue;

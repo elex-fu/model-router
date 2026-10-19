@@ -595,6 +595,39 @@ test('model cooldown excludes the cooled (account, model) candidate before eligi
   assert.equal(revalidations, 1);
 });
 
+test('model cooldown accepts a promise-returning durable read (9.1 multi-instance)', async () => {
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  let revalidations = 0;
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+      {
+        async revalidate(input) {
+          revalidations += 1;
+          return eligibilityPort(new Map([[input.candidate.accountId, { priority: 1, weight: 1 }]])).revalidate(input);
+        },
+      },
+    ),
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    modelCooldown: {
+      // The durable registry (migration 133) resolves the read from PG; the
+      // candidate loop awaits it with the same P17 skip semantics.
+      async isModelExcluded(input) {
+        assert.equal(input.model, 'provider-model-a');
+        assert.ok(input.now instanceof Date);
+        return Promise.resolve(input.candidate.accountId === 'account-a');
+      },
+    },
+  }).select(baseInput(candidates));
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  assert.equal(revalidations, 1);
+});
+
 test('model cooldown cooling every candidate fails open like the failure-feedback hint (9.1, P17)', async () => {
   const candidates = [candidate('account-a'), candidate('account-b')];
   const result = await scheduler({

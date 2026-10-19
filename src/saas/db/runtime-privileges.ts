@@ -4023,6 +4023,11 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // binding + claim lifecycle (create/read/claim/release/skip plus the
   // expiry purge delete below).
   'saas_video_tasks',
+  // 133 (core-plan 9.1): the durable (account, model) cooldown registry —
+  // the cross-instance authority behind the model-level rate limit. One
+  // (owner scope, account, model) key with its cooled-until bound; no
+  // sensitive column exists on the table.
+  'saas_provider_account_model_cooldowns',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -4909,6 +4914,21 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'poll_failures',
     ] as const
   ).map((column) => ['saas_video_tasks', column, 'UPDATE'] as const),
+  // 133 (core-plan 9.1): the durable model-cooldown upsert — the row key
+  // and the cooled-until/updated-at write surface. Reads are the
+  // read-table SELECT above; the upsert GREATEST-merges cooled_until so a
+  // shorter cooldown never shortens a longer one from another instance.
+  ...(
+    [
+      'owner_scope_key',
+      'account_id',
+      'model',
+      'cooled_until',
+      'updated_at',
+    ] as const
+  ).map((column) => ['saas_provider_account_model_cooldowns', column, 'INSERT'] as const),
+  ['saas_provider_account_model_cooldowns', 'cooled_until', 'UPDATE'],
+  ['saas_provider_account_model_cooldowns', 'updated_at', 'UPDATE'],
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;

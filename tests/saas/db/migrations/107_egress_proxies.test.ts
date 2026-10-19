@@ -20,10 +20,11 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   assert.equal(registered[index - 1], 106, '107 lands directly after the 106 head');
   assert.equal(registered[index + 1], 108, '107 lands directly before the 108 forward');
   // K2: 129 (durable fault classification) then T05/T04: 130 window cost
-  // policy, 131 resolved supply billing identity, 132 media task recovery.
+  // policy, 131 resolved supply billing identity, 132 media task recovery,
+  // 133 durable model cooldowns (core-plan 9.1).
   assert.equal(
     registered.at(-1),
-    132,
+    133,
     'the batch-4/5 tails and the K2 durable fault classification follow the 108 head',
   );
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));

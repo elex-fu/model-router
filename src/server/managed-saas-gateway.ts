@@ -67,6 +67,7 @@ import {
 } from '../saas/gateway/opencode-go/protocol-rules.js';
 import { openCodeGoFixedRequestHeaders } from '../saas/gateway/opencode-go/transport-headers.js';
 import { createOpenRouterFixedRequestHeaders } from '../saas/gateway/openrouter/transport-headers.js';
+import { PostgresProviderAccountModelCooldownRegistry } from '../saas/gateway/postgres-provider-account-model-cooldowns.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
   ProviderAccountDispatchFailureFeedback,
@@ -257,13 +258,14 @@ export interface ManagedSaasGatewayDispatchDependencies {
   /**
    * Batch 2.3: the model-level rate limit registry. A model-not-found 404
    * or plan-gated 400 cools the (account, model) pair for 30 minutes while
-   * the account stays schedulable for other models.
+   * the account stays schedulable for other models. Core-plan 9.1: the
+   * record may be promise-returning (the durable registry) and is awaited.
    */
   readonly modelRateLimit?: {
     recordModelRateLimit(input: {
       readonly candidate: import('../saas/gateway/postgres-provider-account-runtime-health-store.js').ProviderAccountRuntimeHealthCandidate;
       readonly model: string;
-    }): void;
+    }): void | Promise<void>;
   };
 }
 
@@ -1767,9 +1769,16 @@ export function createManagedSaasGatewayProductionComposition(
    * Core-plan 9.1 (B06): one shared model-cooldown registry — the dispatch
    * side records model-unavailable outcomes into it and the scheduler reads
    * the same instance via modelCooldown, so the (account, model) cooldown is
-   * both written AND consumed.
+   * both written AND consumed. Core-plan 9.1 (multi-instance, migration 133):
+   * the shared instance is the durable registry — the in-process Map stays an
+   * L1 (instant local reads), the PostgreSQL rows are the cross-instance
+   * authority with `cooled_until > now()` as the invalidation bound.
    */
   const modelRateLimitRegistry = new ProviderAccountModelRateLimit();
+  const modelCooldownRegistry = new PostgresProviderAccountModelCooldownRegistry({
+    database,
+    local: modelRateLimitRegistry,
+  });
   // The lease service is created before the scheduler so the same fenced
   // lease authority can back the scheduler's half-open health probes (H5a).
   const leaseProvider = new PostgresProviderAccountLeaseService({
@@ -1792,7 +1801,7 @@ export function createManagedSaasGatewayProductionComposition(
     healthProbe: { store: runtimeHealthStore, leaseProvider },
     // H5c (P8): fast fail-away from accounts returning 401/403/429.
     failureFeedback: dispatchFailureFeedback,
-    modelCooldown: modelRateLimitRegistry,
+    modelCooldown: modelCooldownRegistry,
     // G-B1 (window three-state): the migration-130 gate — batch PG facts
     // (policy columns + exact supplier-cost window aggregation) feeding the
     // pure three-state judgment. Fail-open on any read failure.
@@ -2232,7 +2241,7 @@ export function createManagedSaasGatewayProductionComposition(
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
       dispatchFailureFeedback,
-      modelRateLimit: modelRateLimitRegistry,
+      modelRateLimit: modelCooldownRegistry,
     },
     lifecycle: {
       close: async () => {

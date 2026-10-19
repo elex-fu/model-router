@@ -1143,6 +1143,29 @@ export const MODEL_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 /** Hard bound on tracked (account, model) pairs. */
 const MODEL_RATE_LIMIT_MAX_TRACKED = 100_000;
 
+/** The (owner scope, account, model) triple shared by the cooldown stores. */
+export interface ProviderAccountModelCooldownScope {
+  readonly ownerScopeKey: string;
+  readonly accountId: string;
+  readonly model: string;
+}
+
+/**
+ * Derives the model-cooldown key shared by the in-process registry and the
+ * durable PostgreSQL registry (migration 133): the account scope's owner key
+ * (the tenant id, or 'platform'), the account id, and the trimmed model id.
+ * Returns null for malformed candidates or an empty model.
+ */
+export function providerAccountModelCooldownScope(
+  candidate: unknown,
+  model: unknown,
+): ProviderAccountModelCooldownScope | null {
+  if (typeof model !== 'string' || model.trim().length === 0) return null;
+  const scope = accountScope(candidate);
+  if (!scope) return null;
+  return { ownerScopeKey: scope.ownerScopeKey, accountId: scope.accountId, model: model.trim() };
+}
+
 /** The model-scoped cooldown registry: record + isModelExcluded. */
 export class ProviderAccountModelRateLimit {
   private readonly until = new Map<string, number>();
@@ -1157,13 +1180,10 @@ export class ProviderAccountModelRateLimit {
     readonly model: string;
     readonly nowMs?: number;
   }): void {
-    const scope = accountScope(input?.candidate);
-    if (!scope || typeof input.model !== 'string' || input.model.trim().length === 0) return;
+    const scope = providerAccountModelCooldownScope(input?.candidate, input?.model);
+    if (!scope) return;
     const now = input.nowMs ?? this.now().getTime();
-    this.until.set(
-      `${scope.ownerScopeKey} ${scope.accountId} ${input.model.trim()}`,
-      now + MODEL_RATE_LIMIT_COOLDOWN_MS,
-    );
+    this.until.set(`${scope.ownerScopeKey} ${scope.accountId} ${scope.model}`, now + MODEL_RATE_LIMIT_COOLDOWN_MS);
     this.prune(now);
   }
 
@@ -1172,9 +1192,9 @@ export class ProviderAccountModelRateLimit {
     readonly model: string;
     readonly now: Date;
   }): boolean {
-    const scope = accountScope(input?.candidate);
-    if (!scope || typeof input.model !== 'string' || !(input.now instanceof Date)) return false;
-    const until = this.until.get(`${scope.ownerScopeKey} ${scope.accountId} ${input.model.trim()}`);
+    const scope = providerAccountModelCooldownScope(input?.candidate, input?.model);
+    if (!scope || !(input.now instanceof Date)) return false;
+    const until = this.until.get(`${scope.ownerScopeKey} ${scope.accountId} ${scope.model}`);
     return until !== undefined && input.now.getTime() < until;
   }
 

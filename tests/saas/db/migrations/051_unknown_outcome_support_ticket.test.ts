@@ -281,6 +281,8 @@ test('migration 051 is registered in append order and remains forward-only', () 
       130,
       131,
       132,
+      // Core-plan 9.1: 133 durable (account, model) cooldowns.
+      133,
     ],
   );
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|TRIGGER|FUNCTION)\b/i);

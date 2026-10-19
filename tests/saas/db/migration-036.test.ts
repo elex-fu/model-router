@@ -84,6 +84,9 @@ test('migration 036 is registered immediately before subsequent append-only migr
       130,
       131,
       132,
+      // Core-plan 9.1: 133 provider account model cooldowns — the
+      // durable (account, model) cooldown registry (multi-instance).
+      133,
     ],
   );
 });

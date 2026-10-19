@@ -759,13 +759,15 @@ export class SaasPreparedEvidenceDispatchService {
      * Batch 2.3: the model-level rate limit registry (the sub2api
      * SetModelRateLimit port). A model-not-found 404 or plan-gated 400 cools
      * the (account, model) pair while the account stays schedulable for
-     * other models. Optional so existing compositions stay unchanged.
+     * other models. Core-plan 9.1: implementations may be promise-returning
+     * (the durable PostgreSQL registry, migration 133) — the dispatch path
+     * awaits the record. Optional so existing compositions stay unchanged.
      */
     private readonly modelRateLimit?: {
       recordModelRateLimit(input: {
         readonly candidate: ProviderAccountRuntimeHealthCandidate;
         readonly model: string;
-      }): void;
+      }): void | Promise<void>;
     },
   ) {}
 
@@ -1198,11 +1200,14 @@ export class SaasPreparedEvidenceDispatchService {
         }
         // Batch 2.3 — model-level rate limit: a model-unavailable
         // classification cools the (account, model) pair for 30 minutes;
-        // the account keeps serving every other model.
+        // the account keeps serving every other model. Core-plan 9.1: the
+        // registry may be durable (PG, migration 133) — await it so the
+        // record is authoritative before the response settles. Failures stay
+        // inside the registry (best-effort durability).
         if (transportResult?.upstreamErrorKind === 'model-unavailable' && this.modelRateLimit) {
           const model = evidence.resolvedModel;
           if (typeof model === 'string' && model.trim().length > 0) {
-            this.modelRateLimit.recordModelRateLimit({ candidate: healthCandidate, model });
+            await this.modelRateLimit.recordModelRateLimit({ candidate: healthCandidate, model });
           }
         }
         if (feedbackOutcome !== null) {

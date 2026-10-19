@@ -463,6 +463,53 @@ test('dispatch records provider success with the acquired lease fencing token', 
   ]);
 });
 
+test('a model-unavailable outcome awaits the durable (account, model) cooldown record', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  proof.metering = metering;
+  const records: Array<{ candidate: { accountId: string }; model: string }> = [];
+  let settled = false;
+  const modelRateLimit = {
+    async recordModelRateLimit(input: { candidate: { accountId: string }; model: string }) {
+      await delay(5);
+      records.push(input);
+      settled = true;
+    },
+  };
+  const transport: PreparedEvidenceTransport = {
+    async send() {
+      return { responseStarted: true, resultHttpStatus: 404, upstreamErrorKind: 'model-unavailable' };
+    },
+  };
+  const dispatch = new SaasPreparedEvidenceDispatchService(
+    proof,
+    metering,
+    lease,
+    transport,
+    undefined,
+    undefined,
+    { recordDispatchOutcome() {} },
+    modelRateLimit,
+  );
+  await dispatch.dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
+  // The durable registry upsert is awaited before the dispatch settles, so a
+  // second instance can see the cooldown as soon as the client sees the 404.
+  assert.equal(settled, true, 'the dispatch path must await the durable record');
+  assert.deepEqual(records, [
+    {
+      candidate: {
+        tenantId: 'tenant-1',
+        accountId: 'account-1',
+        upstreamId: 'upstream-1',
+        supplyMode: 'byok',
+        accountOwnerKind: 'tenant',
+      },
+      model: 'resolved-model-1',
+    },
+  ]);
+});
+
 test('a confirmed successful execution with billing reconciliation remains a sent success', async () => {
   const proof = new FakeEvidence();
   const metering = new FakeMetering();

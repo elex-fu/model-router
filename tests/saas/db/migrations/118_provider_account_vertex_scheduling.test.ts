@@ -18,7 +18,7 @@ test('118 registers directly after 117 as the reserved Vertex slot', () => {
   assert.ok(index > 0, '118 is registered');
   assert.equal(registered[index - 1], 117, '118 lands directly after the bedrock 117');
   assert.equal(registered[index + 1], 119, 'the grok 119 follows the vertex 118');
-  assert.equal(registered.at(-1), 132, 'the K2 durable fault classification tail is the applied head');
+  assert.equal(registered.at(-1), 133, 'the K2 durable fault classification tail is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 118).length, 1);
