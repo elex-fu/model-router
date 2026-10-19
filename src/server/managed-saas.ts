@@ -112,6 +112,7 @@ import {
   createObservabilityHttpHandler,
   createPostgresAlertSilencesAuditWriter,
   getChannelStatusPage,
+  getMediaTaskOperationsPage,
   ObservabilityAlertService,
   ObservabilityAlertSilenceService,
   type ObservabilityHttpHandler,
@@ -3045,6 +3046,9 @@ export async function startManagedSaasServer(
       const observabilityHandler = createObservabilityHttpHandler({
         access: platformAccessService,
         channelStatus: (query) => getChannelStatusPage(observabilityDatabase, query),
+        // G-C2: the media-task operations projection (task-operations console
+        // page; read-only, secret-free by construction).
+        mediaTaskOperations: (query) => getMediaTaskOperationsPage(observabilityDatabase, query),
         alertRules: () => observabilityAlertService.listRules(),
         alertEvents: (limit) => observabilityAlertService.listEvents(limit),
         refreshMetrics: () => refreshSaasRuntimeGauges(observabilityDatabase),

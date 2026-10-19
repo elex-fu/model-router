@@ -8,3 +8,4 @@ export * from './qps-feed.js';
 export * from './reports.js';
 export * from './runtime-gauges.js';
 export * from './settings-diff.js';
+export * from './media-task-operations.js';

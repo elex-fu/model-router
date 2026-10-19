@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PlatformAdminAccessRequest, PlatformAdminActor } from '../platform/access/types.js';
 import type { AlertEventRecord, AlertRuleRecord } from './alerts.js';
 import type { ChannelStatusPage, ChannelStatusPageQuery } from './channel-status.js';
+import type { MediaTaskOperationsPage, MediaTaskKind } from './media-task-operations.js';
 import { renderSaasMetrics } from './metrics.js';
 import { type QpsSnapshot, qpsSnapshot } from './qps-feed.js';
 
@@ -26,6 +27,12 @@ export interface ObservabilityHttpOptions {
   /** Platform session authenticator; ops JSON/SSE routes require a session. */
   readonly access?: Pick<PlatformAccessLike, 'authenticate'>;
   readonly channelStatus?: (query: ChannelStatusPageQuery) => Promise<ChannelStatusPage>;
+  /** G-C2: the media-task operations projection (task-operations console page). */
+  readonly mediaTaskOperations?: (query: {
+    readonly kind?: MediaTaskKind;
+    readonly limit?: number;
+    readonly includeTerminal?: boolean;
+  }) => Promise<MediaTaskOperationsPage>;
   readonly alertRules?: () => Promise<readonly AlertRuleRecord[]>;
   readonly alertEvents?: (limit: number) => Promise<readonly AlertEventRecord[]>;
   /** Gauge refresh executed before each Prometheus scrape. */
@@ -46,6 +53,7 @@ const QPS_STREAM_PATH = `${OPS_PREFIX}/qps-stream`;
 const CHANNEL_STATUS_PATH = `${OPS_PREFIX}/channel-status`;
 const ALERT_RULES_PATH = `${OPS_PREFIX}/alert-rules`;
 const ALERT_EVENTS_PATH = `${OPS_PREFIX}/alert-events`;
+const MEDIA_TASKS_PATH = `${OPS_PREFIX}/media-tasks`;
 
 function requestPath(req: IncomingMessage): string | undefined {
   try {
@@ -100,6 +108,7 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
       path !== METRICS_PATH &&
       path !== QPS_STREAM_PATH &&
       path !== CHANNEL_STATUS_PATH &&
+      path !== MEDIA_TASKS_PATH &&
       path !== ALERT_RULES_PATH &&
       path !== ALERT_EVENTS_PATH
     ) {
@@ -159,6 +168,41 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
       return true;
     }
 
+    /*
+     * G-C2: the media-task operations projection — the task-operations
+     * console page's read model (lifecycle + G-A1 recovery facts; secret-
+     * free by construction).
+     */
+    if (path === MEDIA_TASKS_PATH) {
+      drainRequest(req);
+      if (method !== 'GET') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', 'Only GET is supported for media task operations');
+        return true;
+      }
+      if (!options.mediaTaskOperations) {
+        sendError(res, 503, 'MEDIA_TASKS_UNAVAILABLE', 'The media task operations projection is not available');
+        return true;
+      }
+      const url = new URL(req.url ?? '/', 'http://saas-observability.invalid');
+      const kindRaw = url.searchParams.get('kind');
+      const limitRaw = url.searchParams.get('limit');
+      const includeTerminalRaw = url.searchParams.get('includeTerminal');
+      const kind = kindRaw === 'image' || kindRaw === 'video' ? kindRaw : undefined;
+      const limit = limitRaw === null ? undefined : Number.parseInt(limitRaw, 10);
+      const includeTerminal = includeTerminalRaw === null ? undefined : includeTerminalRaw !== 'false';
+      try {
+        const page = await options.mediaTaskOperations({
+          ...(kind === undefined ? {} : { kind }),
+          ...(limit === undefined || !Number.isInteger(limit) ? {} : { limit }),
+          ...(includeTerminal === undefined ? {} : { includeTerminal }),
+        });
+        sendJson(res, 200, { data: page });
+      } catch {
+        sendError(res, 500, 'INTERNAL_ERROR', 'The media task operations page could not be read');
+      }
+      return true;
+    }
+
     if (path === CHANNEL_STATUS_PATH) {
       drainRequest(req);
       if (method !== 'GET') {
@@ -180,6 +224,7 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
       }
       return true;
     }
+
 
     if (path === ALERT_RULES_PATH) {
       drainRequest(req);

@@ -3521,6 +3521,19 @@ export const platformClient = {
     );
   },
 
+  /** G-C2: the media-task operations projection (task-operations console page). */
+  listOpsMediaTasks(
+    query: { kind?: 'image' | 'video'; limit?: number; includeTerminal?: boolean } = {},
+    options: ReadRequestOptions = {},
+  ): Promise<OpsMediaTaskPage> {
+    const params = new URLSearchParams();
+    if (query.kind !== undefined) params.set('kind', query.kind);
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.includeTerminal !== undefined) params.set('includeTerminal', String(query.includeTerminal));
+    const suffix = params.size > 0 ? `?${params.toString()}` : '';
+    return request<unknown>(`/ops/media-tasks${suffix}`, options).then(parseOpsMediaTasks);
+  },
+
   // ---- F5 console surfaces (task #38) ----
 
   listBillingGroups(options: ReadRequestOptions = {}): Promise<PlatformBillingGroup[]> {
@@ -3775,6 +3788,75 @@ export interface OpsChannelStatusPage {
   readonly rangeDays: number;
   readonly generatedAt: string;
   readonly channels: readonly OpsChannelStatusRow[];
+}
+
+export interface OpsMediaTaskRow {
+  kind: 'image' | 'video';
+  taskId: string;
+  tenantId: string;
+  proxyKeyId: string;
+  status: string;
+  recovery: {
+    leaseOwner: string | null;
+    leaseEpoch: number | null;
+    leaseUntil: string | null;
+    nextPollAt: string | null;
+    pollFailures: number | null;
+  } | null;
+  createdAt: string;
+  completedAt: string | null;
+  expiresAt: string;
+}
+
+export interface OpsMediaTaskPage {
+  rows: OpsMediaTaskRow[];
+  counts: { total: number; processing: number; terminalUnsettled: number; recoveryActive: number };
+}
+
+function parseOpsMediaTasks(value: unknown): OpsMediaTaskPage {
+  const raw = value as { data?: { rows?: unknown[]; counts?: Record<string, unknown> } };
+  const rows = Array.isArray(raw?.data?.rows) ? raw.data.rows : [];
+  const countsRaw = raw?.data?.counts ?? {};
+  return {
+    rows: rows.map((row) => {
+      const record = row as Record<string, unknown>;
+      return {
+        kind: record.kind === 'video' ? 'video' : 'image',
+        taskId: String(record.taskId ?? ''),
+        tenantId: String(record.tenantId ?? ''),
+        proxyKeyId: String(record.proxyKeyId ?? ''),
+        status: String(record.status ?? ''),
+        recovery:
+          record.recovery === null || record.recovery === undefined
+            ? null
+            : {
+                leaseOwner:
+                  typeof (record.recovery as Record<string, unknown>).leaseOwner === 'string'
+                    ? ((record.recovery as Record<string, unknown>).leaseOwner as string)
+                    : null,
+                leaseEpoch: Number((record.recovery as Record<string, unknown>).leaseEpoch ?? 0) || null,
+                leaseUntil:
+                  typeof (record.recovery as Record<string, unknown>).leaseUntil === 'string'
+                    ? ((record.recovery as Record<string, unknown>).leaseUntil as string)
+                    : null,
+                nextPollAt:
+                  typeof (record.recovery as Record<string, unknown>).nextPollAt === 'string'
+                    ? ((record.recovery as Record<string, unknown>).nextPollAt as string)
+                    : null,
+                pollFailures: Number((record.recovery as Record<string, unknown>).pollFailures ?? 0) || null,
+              },
+        createdAt: String(record.createdAt ?? ''),
+        completedAt: (record.completedAt as string) ?? null,
+        expiresAt: String(record.expiresAt ?? ''),
+      };
+    }),
+    counts: {
+      total: Number(countsRaw.total ?? 0),
+      processing: Number(countsRaw.processing ?? 0),
+      terminalUnsettled: Number(countsRaw.terminalUnsettled ?? 0),
+      recoveryActive: Number(countsRaw.recoveryActive ?? 0),
+    },
+  };
 }
 
 export interface OpsQpsRouteSnapshot {
