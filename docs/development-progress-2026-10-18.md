@@ -118,3 +118,25 @@
 - 单测 +9（注册表：L1/upsert 形状/GREATEST/Q-失败 fail-open/坏输入）+ 2（scheduler 异步读、dispatch 等待记录）；迁移注册表/尾部断言同步到 head 133。
 - 全量单测：6109 tests，6086 pass / 0 fail / 23 skip，EXIT=0。
 - 真实 PG（新建 disposable 库 `model_router_test_mc_local`，迁移到 head 133 + 角色授权重放）：跨实例记录/读取、owner-scope 隔离、GREATEST 合并、`cooled_until` 过期后恢复调度、gateway 角色 DELETE 得 42501（无删除权限）全部通过。
+
+## 9. 方案 6.1 第一部分完成：v2 runtime module 合同与 loader（T01）
+
+**背景**（B01）：`gateway-runtime-module.ts` 的 v1 合同对依赖键做精确匹配，新增 transport、媒体和 TLS 参数没有合法入口；自定义可信 module 仍是唯一装配方式，标准部署无法只选择内置 bundle。
+
+**实现**（`src/saas/runtime/gateway-runtime-module.ts`）：
+
+1. **v1 语义不变**：`{dependencies, checkReady, close}` 三键精确匹配保持原样；loader 返回值对 v1 不携带 `extensions` 键（`Object.hasOwn` 为 false），既有模块与既有测试逐字节不受影响。
+2. **v2 外层版本先识别**：v2 handle 固定五键 `{apiVersion: 2, dependencies, extensions, checkReady, close}`；`apiVersion` 不是数字 2（含 `'2'`、1、3、null）即拒绝；仅加 `apiVersion` 而无 `extensions` 的"半升级"同样拒绝；多键/少键一律 `MODULE_CONTRACT_INVALID`。依赖集合仍与 v1 完全相同（v2 不扩依赖键）。
+3. **extensions 固定 schema、未知字段拒绝**：
+   - `providerBundles`（必填，≤64 项，bundle id 唯一）：`{bundle, enabled, parameters?, secretReferences?}`，`bundle` 匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`，`enabled` 必须显式布尔；
+   - `media`: `{storage, parameters?, secretReferences?}`；`tlsFingerprint`: `{profile, parameters?, secretReferences?}`；两节只允许各自精确键（例如 media 带 `enabled` 即拒绝）；
+   - `parameters` ≤32 项，键 `^[a-zA-Z][a-zA-Z0-9._-]{0,63}$`，值只允许布尔、有限数（拒绝 NaN/Infinity/超安全整数）与 ≤4KiB 字符串；`secretReferences` 值为非空、可打印、≤1KiB 的引用名（如 `env://…`/`kms://…`），不收原始凭据。
+4. **所有权与冻结**：loader 对每一层（extensions/数组/条目/参数/引用）生成冻结副本，调用方之后修改源对象不影响已加载配置；扩展只携带声明式参数与 secret reference，认证、钱包、prepare/admission、证据验证与 listener 仍归 core。
+
+**验证**：
+
+- 新增 `tests/saas/runtime/gateway-runtime-module-v2-contract.test.ts`：15 用例（v2 接受/深冻结/脱离源对象、v1 无 extensions、版本标记 4 种非法值与半升级、handle 多键、extensions 三节精确性、bundle 字段/数量/重复 id、参数与 secret 边界）。
+- 回归：v1 合同 11 + affinity keyring 16 + v2 15 = 42 pass；`tests/server/saas-startup.test.ts` 58 pass；`tsc --noEmit` 与 `biome check` 干净。
+- 备注：该工作树此前的依赖安装误用 pnpm，导致 `saas-startup` 的 1 个用例因传递依赖版本差异失败；按仓库实际工具链 `npm ci` 重装后 58/58 通过（与代码无关）。
+
+**下一步（T01 余项）**：内置 bundle 装配入口（把 extensions 交给 core-owned entitlement/catalog/route/credential 服务解析，产出 dependencies）与 capability readiness（enabled/assembled/ready/verification level + 脱敏原因；显式启用但缺装配在启动阶段报错）。`src/server/managed-saas.ts` 的接线待并行会话的在途改动落地后进行，避免覆盖。
