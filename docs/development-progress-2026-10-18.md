@@ -81,7 +81,7 @@
 ## 5. 剩余工作（9.2 尾段）
 
 - **窗口三态预留带**（9.2 前半）：`limit <= usage < limit+reserve` → 仅接纳已有粘性会话、`usage >= limit+reserve` → 暂停调度。阈值/预留带来自"冻结策略"，需要每账号窗口费用上限的 schema + 冻结表 + 授权读者，遵循方案 14.1 数据纪律，独立任务开工。5h 窗口费用**聚合管线**（任务 #6 的 `getAccountWindowStatsBatch` / `groupAccountIdsByWindowStart`）已经存在，可直接复用。
-- Grok/multi-instance 下模型冷却仍是进程-local（方案 9.1"PG 权威记录或有界共享缓存"）：db 表暂无 (account, model) 冷却持久化，需后续迁移。
+- **模型冷却多实例持久化**（9.1）：原为进程-local（`ProviderAccountModelRateLimit` Map，多实例互不可见）；现已落地 PG 权威记录（迁移 133 + `PostgresProviderAccountModelCooldownRegistry`，L1 本地 Map + `cooled_until > now()` 失效界 + GREATEST 合并 upsert），见 §8。
 - `RUN_KIMI_SMOKE`（moonshot 平台线）如需可另行配置平台线 key；DEEPSEEK key 仍缺。
 - 集成套件存在计时型 flake（`4.2 the JSON keepalive stream writes whitespace heartbeats` 在全量单测高负载下偶现，单独跑 3/3 通过），与本轮无关，可另开小任务。
 
@@ -101,3 +101,20 @@
 **接线**：核心 scheduler options（postgres wrapper 原样透传）→ `ManagedSaasGatewayOptions.schedulerStickyWait`（默认不设 = OFF）；`RequestPreparationRejected.retryAfterSeconds` → `decisionFailure` 透传 → `GatewayHttpError` → `writeJsonError` 输出 `retry-after` 头（0–86400 校验）。
 
 **测试**（+6）：繁忙目标释放后选定（域扩展断言 `['account-b','account-a']`）、预算耗尽 429 + Retry-After、队列满并发降级（第二 waiter 不入队，顺利完成 account-b）、真死目标维持 block、配置非法 TypeError、HTTP 边界有/无 hint 的 429 头形。等待 OFF 路径由存量 golden 断言保护（`resolve` 收到的域不变）。
+
+## 8. 方案 9.1 完成：模型级冷却的 PG 持久化（多实例）
+
+**背景**（§5 尾项）：dispatch 侧把 `model-unavailable`（404 / plan-gated 400）记为 (account, model) 30 分钟冷却，但注册表是进程内 Map——多实例下 A 实例记录的冷却对 B 不可见（方案 9.1 要求"PG 权威记录或有界共享缓存和明确的失效上界"）。
+
+**实现**：
+
+1. **迁移 133**（`133_provider_account_model_cooldowns.ts`）：`saas_provider_account_model_cooldowns(owner_scope_key, account_id, model, cooled_until timestamptz, updated_at timestamptz)`，主键为三元组，`cooled_until` 建索引；行键与进程内 Map 完全一致（平台账号 → `'platform'`，租户账号 → tenantId；模型取 trim 后值）。过期行惰性失效且表按"账号×模型"有界（非事件增长），运行角色不取 DELETE 权限。权限走 manifest：read-table SELECT + 五列 INSERT + 两列（`cooled_until`/`updated_at`）UPDATE，镜像由 `scripts/generate-privileges.ts` 再生成（TS/SQL 双视图一致，fence 测试通过）。
+2. **`PostgresProviderAccountModelCooldownRegistry`**（`postgres-provider-account-model-cooldowns.ts`）：写路径 = 本地 L1 立即生效 + best-effort durable upsert（`ON CONFLICT ... DO UPDATE SET cooled_until = GREATEST(...)`，短冷却永不缩短长冷却；写失败仅诊断回调，不影响 dispatch 失败路径）；读路径 = L1 优先 + 单行点查 `cooled_until > now`（比较即失效界，无缓存 TTL），读失败 fail-open（不排除）——沿用调度器 P17 姿态。
+3. **端口加宽**：`ProviderAccountSchedulerModelCooldownPort.isModelExcluded` 允许返回 `boolean | Promise<boolean>`（候选循环 `await`，同步实现/测试不受影响）；dispatch 侧 `recordModelRateLimit` 允许 `void | Promise<void>` 并 `await`（响应返回前记录已是权威事实）。缺省不接线时选路逐字节不变。
+4. **接线**：`managed-saas-gateway.ts` 组合根创建共享注册表（`local: modelRateLimitRegistry`），同时供 scheduler 读与 dispatch 写。
+
+**验证**：
+
+- 单测 +9（注册表：L1/upsert 形状/GREATEST/Q-失败 fail-open/坏输入）+ 2（scheduler 异步读、dispatch 等待记录）；迁移注册表/尾部断言同步到 head 133。
+- 全量单测：6109 tests，6086 pass / 0 fail / 23 skip，EXIT=0。
+- 真实 PG（新建 disposable 库 `model_router_test_mc_local`，迁移到 head 133 + 角色授权重放）：跨实例记录/读取、owner-scope 隔离、GREATEST 合并、`cooled_until` 过期后恢复调度、gateway 角色 DELETE 得 42501（无删除权限）全部通过。
