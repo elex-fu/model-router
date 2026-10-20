@@ -166,3 +166,30 @@
 
 - `src/server/managed-saas.ts` 在并行会话在途改动落地后接线：v2 `extensions` → `assertGatewayCapabilityAssembly`（启动门禁）+ 从 PG/组合根采集 catalog/price/credential/dispatch 事实（doctor/管理 API 投影）。
 - 内置装配入口的依赖产出（entitlement/catalog/route/credential 解析）与各 bundle transport 构造，按 T02 逐供应商接入并做标准部署 smoke。
+
+## 11. 真实上游验证：kimi-for-coding 的 tools/thinking 能力声明（2026-10-20）
+
+**背景**：本地 `~/.model-router/config.json`（rev 16）只给 `kimi-for-coding` 声明了 `text: supported`，而 `capabilitiesSource` 标为 `preset`。运行时并不解析 preset（该字段仅作界面展示），`tools`/`thinking` 缺失按 fail-closed 处理，Claude Code 的工具请求会得到 422 `capability_unverified`。此前把该缺口登记为“待确认修复路径”。
+
+**真实上游证据**（直接调用 `https://api.kimi.com/coding/v1/messages`，凭据取自本地运行进程环境，未打印密钥）：
+
+1. `tools` + `tool_choice:{type:'any'}`：HTTP 200，`stop_reason:"tool_use"`，内容块 `thinking, tool_use`；证明端点接受工具声明并返回工具调用。
+2. `thinking:{type:'enabled', budget_tokens:512}`：HTTP 200，内容块 `thinking, text`；usage 含 `output_tokens_details.thinking_tokens`。
+3. 结论：缺口在声明层，不在上游能力。
+
+**配置修复**：`~/.model-router/config.json` 升级到 rev 17（同目录保留 0600 备份），仅修改该模型：
+
+- `capabilities`: `text/tools/thinking = supported`（其余保持未知，继续 fail-closed）；
+- `capabilitiesSource: "verified"`，`verifiedAt` 写入本次验证时间；
+- `configV2Schema.safeParse` 通过；
+- 未改动任何凭据、路由、其他 upstream/模型或密钥。
+
+**经代理冒烟**（隔离实例：更新后的配置副本、临时端口/临时代理 Key、真实 KIMI 凭据）：
+
+- `POST /v1/messages`（`tools` + `tool_choice:any`）→ 200，`stop_reason:"tool_use"`，`content: thinking,text,tool_use`；
+- `POST /v1/messages`（`thinking.enabled`）→ 200，`content: thinking,text`；
+- 未出现 422 `capability_unverified`；临时实例与临时配置已清理。
+
+**运行态**：按新配置重启本地 daemon（pid 99641，`/healthz` 200，pid 文件正常），新进程保留原 `KIMI_CODE_API_KEY` 环境引用。Claude Code 的后续工具请求走同一配置。
+
+**遗留**：`capabilitiesSource=preset` 仍无运行时解析；本次以 `verified` 手工声明落地。是否补仓库级 preset 解析另行决定。
