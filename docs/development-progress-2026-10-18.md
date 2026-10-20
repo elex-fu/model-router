@@ -140,3 +140,29 @@
 - 备注：该工作树此前的依赖安装误用 pnpm，导致 `saas-startup` 的 1 个用例因传递依赖版本差异失败；按仓库实际工具链 `npm ci` 重装后 58/58 通过（与代码无关）。
 
 **下一步（T01 余项）**：内置 bundle 装配入口（把 extensions 交给 core-owned entitlement/catalog/route/credential 服务解析，产出 dependencies）与 capability readiness（enabled/assembled/ready/verification level + 脱敏原因；显式启用但缺装配在启动阶段报错）。`src/server/managed-saas.ts` 的接线待并行会话的在途改动落地后进行，避免覆盖。
+
+## 10. 方案 6.2/6.3 第一部分完成：内置 provider bundle 注册表与 capability readiness（T01-b）
+
+**背景**：v2 loader 已能接受 `extensions.providerBundles`，但 core 尚无 bundle 清单与就绪投影——bundle id 拼写错误、启用后缺少专用 transport、媒体/TLS 配置指向不可用存储时，都只能在真实请求或人工巡检时暴露。方案 §6.2/§6.3、G-C1 §8.2 要求：bundle 单一事实源、四态投影（enabled/assembled/verified/operational）、显式启用但缺装配在启动阶段失败、就绪缺口按能力返回 503。
+
+**实现**：
+
+1. **`src/saas/runtime/provider-bundles.ts`（内置 bundle 注册表）**：
+   - 登记 10 个已实现类别：`anthropic-claude`、`openai-codex`、`google-gemini`、`xai-grok`、`zhipu`、`minimax`、`opencode-go`、`openrouter`、`aws-bedrock`、`google-vertex`；bundle id 与 provider id 一致，避免第二套命名。
+   - 每个 manifest 的 provider/product/credential/protocol/endpoint 全部从对应 `catalog-identity.ts` 导入（与 catalog 注册、凭据 sink、探针、派发 split 同源），不复制字面量；`zhipu` 保留 payg/Coding 两个 product 与两个 endpoint scope，`grok` 保留 OAuth + API-key 两种凭据，`opencode-go` 标明三协议按模型规则派生，Bedrock 的 `api-key` 凭据因尚无 catalog rights 注册而不在可选清单中广播。
+   - `dispatch` 明确 transport 面：`generic`（共享 HTTP transport 足够）与 `codex/claude/gemini/grok/cn-providers/opencode-go/bedrock/vertex`（每个 endpoint scope 必须有专用 prepared-evidence transport，禁止静默回退 generic）。
+2. **`src/saas/runtime/gateway-capability-readiness.ts`（四态投影 + 启动门禁）**：
+   - `enabled` = 配置显式启用；`assembled` = 对应 transport/存储/侧车面已挂载；`verified` = 存在 live 验证记录（mock/标准装配记录只展示、不进入可售）；`operational` = catalog 注册、supplier price、凭据均就绪；`isGatewayCapabilitySellable` = enabled ∩ assembled ∩ verified ∩ operational。
+   - 配置级致命码（启动失败）：`PROVIDER_BUNDLE_UNKNOWN`（未知 id，含 disabled，拼写错误不放行）、`PROVIDER_BUNDLE_DISPATCH_UNAVAILABLE`（缺少专用 transport，并列出 `unavailableEndpointScopes`）、`MEDIA_STORAGE_UNAVAILABLE`、`TLS_PROFILE_UNAVAILABLE`；就绪级原因码（不拖垮进程）：`CATALOG_PROVIDER_MISSING`、`CATALOG_ENDPOINT_MISSING`、`SUPPLIER_PRICE_MISSING`、`CREDENTIALS_NOT_PROVISIONED`、`VERIFICATION_NOT_RECORDED`。
+   - `assertGatewayCapabilityAssembly` 抛出 `GatewayCapabilityAssemblyError`，失败项只含 capability id、kind 与致命原因码；投影永不回显 `parameters` / `secretReferences`，输出逐层冻结，顺序与配置一致。
+   - 媒体/TLS：extension 出现即视为启用；storage/profile 未在事实集内则启动失败；已挂载则进入 assembled/operational，验证等级同样按 live 判定。
+
+**验证**：
+
+- 新增 `tests/saas/runtime/provider-bundle-readiness.test.ts`：17 用例（10 类清单/唯一性与同源断言、空选择与 v1 无 extensions、disabled 不评估、全绿 bundle 四态、缺专用 transport、generic 缺省 fail-closed、CN 双 scope、未知 id 含 disabled、catalog/价格/凭据缺口、mock 不可售与 malformed 记录 fail-closed、媒体/TLS 致命与挂载、assert 失败脱敏、冻结与顺序）。
+- `tsc --noEmit` 干净；`biome check` 干净；定向测试 17/17。
+
+**下一步**：
+
+- `src/server/managed-saas.ts` 在并行会话在途改动落地后接线：v2 `extensions` → `assertGatewayCapabilityAssembly`（启动门禁）+ 从 PG/组合根采集 catalog/price/credential/dispatch 事实（doctor/管理 API 投影）。
+- 内置装配入口的依赖产出（entitlement/catalog/route/credential 解析）与各 bundle transport 构造，按 T02 逐供应商接入并做标准部署 smoke。
