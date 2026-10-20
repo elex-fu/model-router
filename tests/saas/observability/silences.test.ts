@@ -205,7 +205,7 @@ test('isRuleSilenced matches by rule id, null rule, and platform scope', () => {
 test('createSilence validates shape, rule existence and persists the row', async () => {
   const fake = new FakeObservabilityDatabase();
   const service = new ObservabilityAlertSilenceService(fake as unknown as SqlExecutor);
-  const until = new Date('2026-10-20T00:00:00Z').toISOString();
+  const until = new Date('2099-01-01T00:00:00Z').toISOString();
 
   // Empty scope fails.
   await assert.rejects(
@@ -230,7 +230,7 @@ test('createSilence validates shape, rule existence and persists the row', async
   );
 
   // A valid platform silence inserts and returns the record.
-  fake.enqueueNext([silenceRow({ platform: 'kimi' })]);
+  fake.enqueueNext([silenceRow({ platform: 'kimi', until: new Date(until) })]);
   const created = await service.createSilence({ platform: 'kimi', until, reason: 'maint', createdBy: 'operator-1' });
   assert.equal(created.platform, 'kimi');
   assert.equal(created.until, until);
