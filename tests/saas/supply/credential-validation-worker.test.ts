@@ -81,6 +81,12 @@ interface WorkerTarget {
   readonly model: string;
   readonly endpoint: string;
   readonly protocol: string;
+  /** Defaults to api-key for the pre-existing fixtures. */
+  readonly credentialType?: string;
+}
+
+function targetCredentialType(target: WorkerTarget): string {
+  return target.credentialType ?? 'api-key';
 }
 
 const chatTarget: WorkerTarget = {
@@ -260,7 +266,7 @@ class FakeValidationDatabase implements SaasDatabase {
           tenant_id: 'tenant-a',
           provider_id: this.target.providerId,
           product_id: this.target.productId,
-          credential_type: 'api-key',
+          credential_type: targetCredentialType(this.target),
           region: 'test-region',
           purpose: 'inference',
           rights_id: 'rights-a',
@@ -279,7 +285,7 @@ class FakeValidationDatabase implements SaasDatabase {
           account_id: 'account-a',
           provider_id: this.target.providerId,
           product_id: this.target.productId,
-          credential_type: 'api-key',
+          credential_type: targetCredentialType(this.target),
           status: 'pending',
           validation_state: 'unverified',
           current_version: 1,
@@ -448,7 +454,7 @@ class FakeValidationDatabase implements SaasDatabase {
           id: 'account-a',
           provider_id: this.target.providerId,
           product_id: this.target.productId,
-          credential_type: 'api-key',
+          credential_type: targetCredentialType(this.target),
           region: 'test-region',
           purpose: 'inference',
           rights_id: 'rights-a',
@@ -466,7 +472,7 @@ class FakeValidationDatabase implements SaasDatabase {
           account_id: 'account-a',
           provider_id: this.target.providerId,
           product_id: this.target.productId,
-          credential_type: 'api-key',
+          credential_type: targetCredentialType(this.target),
           status: 'pending',
           validation_state: 'unverified',
           current_version: 1,
@@ -674,7 +680,7 @@ class FakeValidationDatabase implements SaasDatabase {
       credential_version: 1,
       provider_id: this.target.providerId,
       product_id: this.target.productId,
-      credential_type: 'api-key',
+      credential_type: targetCredentialType(this.target),
       allowed_models: [this.target.model],
       target_model: this.target.model,
       target_endpoint: this.target.endpoint,
@@ -698,6 +704,8 @@ async function setupWorker(
   afterDecrypt?: (database: FakeValidationDatabase) => void | Promise<void>,
   target: WorkerTarget = chatTarget,
   extraOptions: Partial<CredentialValidationWorkerOptions> = {},
+  secret: Buffer = Buffer.from('provider-test-token'),
+  owner: 'tenant' | 'platform' = 'tenant',
 ): Promise<{
   readonly database: FakeValidationDatabase;
   readonly worker: CredentialValidationWorker;
@@ -710,27 +718,38 @@ async function setupWorker(
       return Buffer.from(DATA_KEY);
     },
   };
-  const boundContext = createProviderCredentialContext({
-    ownerKind: 'tenant',
-    tenantId: 'tenant-a',
-    supplyMode: 'byok',
-    deployment: 'worker-test',
-    environment: 'test',
-    purpose: 'inference',
-    providerId: target.providerId,
-    productId: target.productId,
-    credentialType: 'api-key',
-    accountId: 'account-a',
-    credentialId: 'credential-a',
-    credentialVersion: 1,
-  });
-  const envelope = await sealProviderCredential(
-    Buffer.from('provider-test-token'),
-    boundContext,
-    sealingKms,
-    'kms/test',
+  const boundContext = createProviderCredentialContext(
+    owner === 'platform'
+      ? {
+          ownerKind: 'platform',
+          supplyMode: 'platform',
+          deployment: 'worker-test',
+          environment: 'test',
+          purpose: 'inference',
+          providerId: target.providerId,
+          productId: target.productId,
+          credentialType: targetCredentialType(target),
+          accountId: 'account-a',
+          credentialId: 'credential-a',
+          credentialVersion: 1,
+        }
+      : {
+          ownerKind: 'tenant',
+          tenantId: 'tenant-a',
+          supplyMode: 'byok',
+          deployment: 'worker-test',
+          environment: 'test',
+          purpose: 'inference',
+          providerId: target.providerId,
+          productId: target.productId,
+          credentialType: targetCredentialType(target),
+          accountId: 'account-a',
+          credentialId: 'credential-a',
+          credentialVersion: 1,
+        },
   );
-  const database = new FakeValidationDatabase(envelope, target);
+  const envelope = await sealProviderCredential(secret, boundContext, sealingKms, 'kms/test');
+  const database = new FakeValidationDatabase(envelope, target, owner);
   const kms: ProviderCredentialKms = {
     async generateDataKey() {
       throw new Error('worker must not seal credentials');
@@ -2254,4 +2273,75 @@ test('R5 quarantine cadence option is bounded to the 084 interval range', async 
   }
   construct(900);
   construct(604_800);
+});
+
+test('OAuth onboarding job probes the sealed grant and marks the platform account verified', async () => {
+  const target: WorkerTarget = {
+    providerId: 'openai-codex',
+    productId: 'codex-chatgpt',
+    model: 'gpt-5.3-codex',
+    endpoint: 'codex-responses',
+    protocol: 'responses',
+    credentialType: 'oauth',
+  };
+  const secret = Buffer.from(
+    JSON.stringify({
+      access_token: 'codex-access-token',
+      refresh_token: 'codex-refresh-token',
+      token_type: 'Bearer',
+      chatgpt_account_id: 'acct-123',
+    }),
+  );
+  let requests = 0;
+  const { database, worker } = await setupWorker(
+    async (url, init) => {
+      requests += 1;
+      assert.equal(url.href, 'https://chatgpt.com/backend-api/codex/responses');
+      const headers = new Headers(init.headers);
+      assert.equal(headers.get('authorization'), 'Bearer codex-access-token');
+      assert.equal(headers.get('chatgpt-account-id'), 'acct-123');
+      assert.equal(headers.get('openai-beta'), 'responses=experimental');
+      const body = JSON.parse(String(init.body)) as {
+        input?: Array<{ content?: Array<{ text?: unknown }> }>;
+      };
+      const prompt = body.input?.[0]?.content?.[0]?.text;
+      const challenge = /([0-9]{6})/.exec(String(prompt))?.[1];
+      assert.ok(challenge);
+      return new Response(
+        JSON.stringify({
+          id: 'resp_worker_test',
+          object: 'response',
+          status: 'completed',
+          output: [
+            {
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: challenge }],
+            },
+          ],
+          usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    },
+    undefined,
+    target,
+    {},
+    secret,
+    'platform',
+  );
+  try {
+    assert.equal(await worker.runOnce(), 'processed');
+    assert.equal(requests, 1);
+    assert.equal(database.state.jobStatus, 'verified');
+    assert.deepEqual(database.state.healthWrites, ['credential', 'account']);
+    assert.equal(database.state.credentialStatus, 'active');
+    assert.equal(database.state.credentialValidationState, 'verified');
+    assert.equal(database.state.accountStatus, 'active');
+    assert.equal(database.state.accountValidationState, 'verified');
+    assert.ok(database.state.requestedCapabilityProtocols.length >= 3);
+    assert.ok(database.state.requestedCapabilityProtocols.every((protocol) => protocol === 'responses'));
+  } finally {
+    await worker.close();
+  }
 });

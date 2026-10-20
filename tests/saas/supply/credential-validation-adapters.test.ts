@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { buildCanonicalIdentity } from '../../../src/saas/gateway/codex/identity.js';
+import { grokCliIdentityHeaders } from '../../../src/saas/gateway/grok/constants.js';
 import {
   credentialValidationCapabilityProtocol,
   isSupportedCredentialValidationTarget,
   PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
   PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS,
+  PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES,
+  PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
   validateProviderCredential,
 } from '../../../src/saas/supply/credential-validation-adapters.js';
 import type { ProviderCredentialValidationJobRecord } from '../../../src/saas/supply/types.js';
@@ -852,6 +856,257 @@ test('opencode-go probe fails closed on mismatched product, credential type or e
     const result = await validateProviderCredential(candidate, Buffer.from('unit-test-api-key'), async () => {
       calls += 1;
       return chatCompletion();
+    });
+    assert.deepEqual(result, {
+      state: 'failed',
+      errorCode: 'adapter_unsupported',
+      retryable: false,
+      adapterId: null,
+      httpStatus: null,
+      durationMs: 0,
+    });
+  }
+  assert.equal(calls, 0);
+});
+
+const oauthTargets = [
+  {
+    provider: 'codex',
+    providerId: 'openai-codex',
+    productId: 'codex-chatgpt',
+    model: 'gpt-5.3-codex',
+    endpoint: 'codex-responses',
+    url: 'https://chatgpt.com/backend-api/codex/responses',
+    adapterId: 'openai-codex-oauth-probe-v1',
+  },
+  {
+    provider: 'grok',
+    providerId: 'xai-grok',
+    productId: 'grok-subscription',
+    model: 'grok-4',
+    endpoint: 'grok-responses',
+    url: 'https://cli-chat-proxy.grok.com/v1/responses',
+    adapterId: 'xai-grok-oauth-probe-v1',
+  },
+] as const;
+
+function oauthJob(fixture: (typeof oauthTargets)[number]): ProviderCredentialValidationJobRecord {
+  return job({
+    providerId: fixture.providerId,
+    productId: fixture.productId,
+    credentialType: 'oauth',
+    allowedModels: [fixture.model],
+    target: { model: fixture.model, endpoint: fixture.endpoint, version: 1 },
+  });
+}
+
+function oauthSecret(provider: 'codex' | 'grok'): Buffer {
+  const material =
+    provider === 'codex'
+      ? {
+          access_token: 'codex-access-token',
+          refresh_token: 'codex-refresh-token',
+          token_type: 'Bearer',
+          chatgpt_account_id: 'acct-123',
+          client_id: 'codex-client',
+        }
+      : {
+          access_token: 'grok-access-token',
+          refresh_token: 'grok-refresh-token',
+          token_type: 'Bearer',
+        };
+  return Buffer.from(JSON.stringify(material));
+}
+
+function responsesEnvelope(text: string): unknown {
+  return {
+    id: 'resp_local_test',
+    object: 'response',
+    status: 'completed',
+    output: [
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text }],
+      },
+    ],
+    usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+  };
+}
+
+function challengeFrom(requestBody: string): string {
+  const body = JSON.parse(requestBody) as {
+    input?: Array<{ content?: Array<{ text?: unknown }> }>;
+  };
+  const prompt = body.input?.[0]?.content?.[0]?.text;
+  if (typeof prompt !== 'string') throw new Error('expected a challenge prompt');
+  const match = /([0-9]{6})/.exec(prompt);
+  if (!match?.[1]) throw new Error('expected a six-digit challenge');
+  return match[1];
+}
+
+test('Codex and Grok OAuth onboarding probes dispatch the canonical CLI request and verify the challenge', async (t) => {
+  for (const fixture of oauthTargets) {
+    await t.test(fixture.provider, async () => {
+      const candidate = oauthJob(fixture);
+      assert.equal(isSupportedCredentialValidationTarget(candidate), true);
+      assert.equal(credentialValidationCapabilityProtocol(candidate), 'responses');
+      let calls = 0;
+      const result = await validateProviderCredential(candidate, oauthSecret(fixture.provider), async (url, init) => {
+        calls += 1;
+        assert.equal(url.href, fixture.url);
+        assert.equal(init.method, 'POST');
+        assert.equal(init.redirect, 'manual');
+        const headers = new Headers(init.headers);
+        assert.equal(headers.get('authorization'), `Bearer ${fixture.provider}-access-token`);
+        assert.equal(headers.get('accept'), 'application/json');
+        assert.equal(headers.get('content-type'), 'application/json');
+        if (fixture.provider === 'codex') {
+          const identity = buildCanonicalIdentity();
+          assert.equal(headers.get('chatgpt-account-id'), 'acct-123');
+          assert.equal(headers.get('user-agent'), identity.userAgent);
+          assert.equal(headers.get('originator'), identity.originator);
+          assert.equal(headers.get('version'), identity.version);
+          assert.equal(headers.get('openai-beta'), 'responses=experimental');
+        } else {
+          for (const [name, value] of Object.entries(grokCliIdentityHeaders())) {
+            assert.equal(headers.get(name), value, `missing pinned Grok CLI header ${name}`);
+          }
+        }
+        const body = JSON.parse(String(init.body)) as {
+          model?: unknown;
+          stream?: unknown;
+          store?: unknown;
+        };
+        assert.equal(body.model, fixture.model);
+        assert.equal(body.stream, false);
+        assert.equal(body.store, false);
+        const challenge = challengeFrom(String(init.body));
+        assert.equal(
+          String(init.body).includes('access-token'),
+          false,
+          'the sealed token never enters the request body',
+        );
+        return jsonResponse(responsesEnvelope(challenge));
+      });
+      assert.equal(calls, 1);
+      assert.deepEqual(result, {
+        state: 'verified',
+        adapterId: fixture.adapterId,
+        httpStatus: 200,
+        durationMs: result.durationMs,
+      });
+      assert.equal(JSON.stringify(result).includes('access-token'), false);
+    });
+  }
+});
+
+test('OAuth onboarding probes verify only an exact numeric challenge answer', async () => {
+  const candidate = oauthJob(oauthTargets[0]);
+  for (const answer of ['000000', 'OK', '']) {
+    const result = await validateProviderCredential(candidate, oauthSecret('codex'), async () =>
+      jsonResponse(responsesEnvelope(answer)),
+    );
+    assert.equal(result.state, 'failed');
+    if (result.state !== 'failed') throw new Error('expected challenge failure');
+    assert.equal(result.errorCode, 'provider_response_invalid');
+    assert.equal(result.retryable, false);
+  }
+});
+
+test('OAuth onboarding probes fail closed on malformed sealed material before transport', async () => {
+  const candidate = oauthJob(oauthTargets[0]);
+  let calls = 0;
+  for (const secret of [
+    Buffer.from('plain-token'),
+    Buffer.from('{'),
+    Buffer.from(JSON.stringify({ refresh_token: 'only-refresh' })),
+    Buffer.from(JSON.stringify({ access_token: 'codex-access-token', chatgpt_account_id: 'bad id' })),
+  ]) {
+    const result = await validateProviderCredential(candidate, secret, async () => {
+      calls += 1;
+      return jsonResponse(responsesEnvelope('123456'));
+    });
+    assert.equal(result.state, 'failed');
+    if (result.state !== 'failed') throw new Error('expected format failure');
+    assert.equal(result.errorCode, 'credential_format_invalid');
+  }
+  assert.equal(calls, 0);
+});
+
+test('OAuth onboarding probes classify upstream rejection and use the larger bounded budget', async () => {
+  assert.equal(PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS, 20_000);
+  assert.equal(PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES, 65_536);
+
+  const rejected = await validateProviderCredential(
+    oauthJob(oauthTargets[1]),
+    oauthSecret('grok'),
+    async () => new Response(null, { status: 401 }),
+  );
+  assert.equal(rejected.state, 'failed');
+  if (rejected.state !== 'failed') throw new Error('expected rejection');
+  assert.equal(rejected.errorCode, 'credential_rejected');
+  assert.equal(rejected.retryable, false);
+
+  const fixture = oauthTargets[0];
+  const candidate = oauthJob(fixture);
+  let paddedBytes = 0;
+  const accepted = await validateProviderCredential(candidate, oauthSecret('codex'), async (_url, init) => {
+    const challenge = challengeFrom(String(init.body));
+    const envelope = JSON.stringify(responsesEnvelope(challenge));
+    const padded = envelope.replace(
+      '"status":"completed"',
+      `"status":"completed","padding":"${'x'.repeat(PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES)}"`,
+    );
+    paddedBytes = Buffer.byteLength(padded);
+    return new Response(padded, { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  assert.ok(paddedBytes > PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES);
+  assert.ok(paddedBytes < PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES);
+  assert.equal(accepted.state, 'verified');
+
+  let oversizedCancelled = false;
+  const oversized = await validateProviderCredential(candidate, oauthSecret('codex'), async () => {
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        oversizedCancelled = true;
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { 'content-length': String(PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES + 1) },
+    });
+  });
+  assert.equal(oversized.state, 'failed');
+  if (oversized.state !== 'failed') throw new Error('expected oversize failure');
+  assert.equal(oversized.errorCode, 'provider_response_too_large');
+  assert.equal(oversizedCancelled, true);
+});
+
+test('unmounted Claude/Gemini OAuth categories remain fail-closed', async () => {
+  const candidates = [
+    job({
+      providerId: 'anthropic-claude',
+      productId: 'claude-subscription',
+      credentialType: 'oauth',
+      allowedModels: ['claude-sonnet-4-5'],
+      target: { model: 'claude-sonnet-4-5', endpoint: 'claude-messages', version: 1 },
+    }),
+    job({
+      providerId: 'google-gemini',
+      productId: 'gemini-subscription',
+      credentialType: 'oauth',
+      allowedModels: ['gemini-2.5-pro'],
+      target: { model: 'gemini-2.5-pro', endpoint: 'gemini-generate-content', version: 1 },
+    }),
+  ];
+  let calls = 0;
+  for (const candidate of candidates) {
+    assert.equal(isSupportedCredentialValidationTarget(candidate), false);
+    assert.equal(credentialValidationCapabilityProtocol(candidate), null);
+    const result = await validateProviderCredential(candidate, Buffer.from('{}'), async () => {
+      calls += 1;
+      return new Response(null, { status: 200 });
     });
     assert.deepEqual(result, {
       state: 'failed',

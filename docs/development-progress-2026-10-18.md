@@ -250,3 +250,35 @@
 - **限制**：采集器目前只用 fake SQL executor 做单元验证，未连真实 PG；SQL 的 `DISTINCT ON`/时间窗语义与现有 catalog/pricing/凭据 SQL 一致，但真库 smoke 仍待接线时执行。`managed-saas.ts` 的在途改动尚未落地，本次未改组合根。
 
 **下一步**：在 `managed-saas.ts` 解冻后把 `collectGatewayCapabilityFacts` 的结果接入 `assertGatewayCapabilityAssembly`，并将报告投影到 doctor/管理 API；随后继续 T02 各 bundle 的生命周期面。
+
+## 14. T02 续：Codex/Grok OAuth onboarding 探针（2026-10-20）
+
+**背景**：Codex/Grok 的平台 OAuth 导入路径会创建 `pending/unverified` 账号，并在创建凭据时自动排入平台验证任务。但 `FIXED_ADAPTERS` 中没有 OAuth 类别，验证 worker 以 `adapter_unsupported` 终止；账号探针又只选择已 `verified` 的账号，形成“先验证才能探活、先探活才能验证”的死锁。此前只能依赖人工/外部路径，标准部署无法完成 OAuth onboarding。
+
+**决策**：不把“OAuth 授权交换成功”直接等同于可用性。新增一次真实上游 onboarding 探针：验证任务用固化 CLI 请求访问上游模型端点，模型必须回答一次性六位数字挑战，成功后才由既有 worker 完成路径把账号/凭据置为 `active + verified`。失败则保持 `pending`，不进入调度。
+
+**实现**：
+
+1. **新增 `src/saas/supply/oauth-probe-builders.ts`**：
+   - 抽出 Codex/Grok 共用的固定请求构造与 Responses 文本提取/挑战匹配；
+   - Codex 复用 gateway 的 canonical identity、fallback instructions 和固定 `/responses` 端点；
+   - Grok 复用固定 CLI proxy origin 与 pinned CLI identity headers；
+   - `account-probe-service.ts` 改为调用同一构造器，行为保持逐字节一致（既有 41 个探针/适配器用例全部通过）。
+2. **`credential-validation-adapters.ts`**：
+   - 新增 `oauth-responses` 探针种类，以及两个固定适配器：
+     - `openai-codex` / `codex-chatgpt` / `oauth` / `codex-responses` → `openai-codex-oauth-probe-v1`；
+     - `xai-grok` / `grok-subscription` / `oauth` / `grok-responses` → `xai-grok-oauth-probe-v1`。
+   - OAuth 探针在 worker 内生成一次性六位数字挑战，要求响应 `output_text` 严格为同一数字；错误数字、非数字、空答案都映射为不可重试的 `provider_response_invalid`。
+   - OAuth 探针使用独立边界：20s 超时（低于 worker 30s 默认 lease TTL，保证完成写回不会因租约过期被抢）、64KiB 响应上限；API-key 探针仍保持 5s / 4KiB，不因 OAuth 放宽而扩大原有攻击面。
+   - OAuth 密封材料按 JSON 解析并做有界可打印字符校验；缺少 `access_token`、非法 JSON、非法 `chatgpt_account_id` 等在传输前返回 `credential_format_invalid`，不会发出请求。
+   - `resolveFixedCredentialProbeEndpoint` 明确排除 OAuth 适配器，保证 API-key 探针路径永远不会把 OAuth 端点当作通用 bearer 端点使用。
+3. **worker 完成路径无需改动**：既有 `updateHealthState` 在验证成功后同时激活账号与当前凭据；新增用例证明 OAuth 平台任务经真实密封 envelope、KMS 解密、固定请求和挑战校验后，账号/凭据都变为 `active + verified`，且写入顺序仍为 credential → account。
+
+**验证**：
+
+- `credential-validation-adapters` + `account-probe-service`：48/48 pass，覆盖 Codex/Grok 固定 URL、CLI headers、挑战成功/错误/缺失、密封材料失败关闭、401 分类、4KiB 以上至 64KiB 响应接受、超 64KiB 拒绝。
+- 追加 `credential-validation-worker`、jobs/targets/http-transport、Codex/Grok supply-sink 与 HTTP：合计 141/141 pass。
+- `tsc --noEmit` 干净；`biome check` 仅保留既有 `useOptionalChain` 告警（未改动的消息/聊天响应解析）。
+- **限制**：本机没有 Codex/Grok OAuth 凭据，未做真实上游 smoke；本次以密封 envelope + 固定请求构造 + 响应边界用例证明链路。OAuth onboarding 探针与既有 API-key 固定适配器一样走 worker 的固定 fetch，不使用账号级 egress proxy；强制代理部署需在 worker 传输层另行接线。Claude/Gemini OAuth sink 尚未挂载到标准部署，也不在本轮覆盖范围；它们接入前必须在同一构造器中补齐请求/响应面，不能复用本次的 Codex/Grok 适配器冒充覆盖。
+
+**下一步**：有真实 Codex/Grok OAuth 凭据时跑一次“导入 → 自动验证 → 调度可用” smoke；随后继续 T02 其余生命周期面（Claude/Gemini OAuth 在 sink 挂载时补齐、quota/刷新接线）与 T01-b readiness 投影接线。

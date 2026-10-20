@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import {
@@ -5,6 +6,22 @@ import {
   ZHIPU_CODING_MODELS_URL,
   ZHIPU_PAYG_MODELS_URL,
 } from '../gateway/cn-providers/constants.js';
+import {
+  CODEX_CREDENTIAL_TYPE,
+  CODEX_ENDPOINT,
+  CODEX_PRODUCT_ID,
+  CODEX_PROTOCOL,
+  CODEX_PROVIDER_ID,
+} from '../gateway/codex/catalog-identity.js';
+import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
+import {
+  GROK_CREDENTIAL_TYPE_OAUTH,
+  GROK_ENDPOINT,
+  GROK_OAUTH_PRODUCT_ID,
+  GROK_PROTOCOL,
+  GROK_PROVIDER_ID,
+} from '../gateway/grok/catalog-identity.js';
+import { GROK_OAUTH_DEFAULT_BASE_URL } from '../gateway/grok/constants.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import {
   OPENROUTER_CAPABILITY_PROTOCOL,
@@ -15,10 +32,32 @@ import {
   OPENROUTER_PROVIDER_ID,
 } from '../gateway/openrouter/catalog-identity.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
+import {
+  buildCodexOAuthProbeRequest,
+  buildGrokOAuthProbeRequest,
+  challengeMatches,
+  firstResponsesText,
+  oauthValidationChallengePrompt,
+} from './oauth-probe-builders.js';
 import type { ProviderCredentialValidationJobRecord } from './types.js';
 
 export const PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS = 5_000;
 export const PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 4_096;
+/**
+ * OAuth onboarding probes are real model dispatches, not metadata reads.
+ * They keep the same bounded posture but need a longer deadline and a larger
+ * envelope budget than the API-key probes; the challenge must survive a
+ * normal Responses envelope with usage accounting.
+ *
+ * Keep this below the worker's 30s default lease TTL: the completion write
+ * still has to land before another worker may reclaim an expired lease.
+ */
+export const PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS = 20_000;
+export const PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
+
+export type CredentialValidationProbeKind = 'models' | 'key' | 'messages' | 'chat' | 'oauth-responses';
+
+export type OAuthValidationProvider = 'codex' | 'grok';
 
 export type ProviderCredentialValidationErrorCode =
   | 'adapter_unsupported'
@@ -69,9 +108,15 @@ export interface ProviderCredentialValidationResponse {
 export interface CredentialValidationProbe {
   readonly adapterId: string;
   /** `key` is an authenticated metadata GET (OpenRouter `GET /key`). */
-  readonly kind: 'models' | 'key' | 'messages' | 'chat';
+  readonly kind: CredentialValidationProbeKind;
   readonly model: string;
   readonly custom: boolean;
+  /** OAuth categories select the shared request builder and response parser. */
+  readonly oauthProvider?: OAuthValidationProvider;
+  /** One-shot numeric challenge for the OAuth onboarding probe. */
+  readonly challenge?: string;
+  readonly timeoutMs?: number;
+  readonly maxResponseBytes?: number;
 }
 
 export interface CredentialValidationProbeRequest {
@@ -89,7 +134,8 @@ interface FixedProviderValidationAdapter {
   readonly capabilityProtocol: string;
   readonly adapterId: string;
   readonly url: string;
-  readonly probe: 'models' | 'key' | 'messages' | 'chat';
+  readonly probe: CredentialValidationProbeKind;
+  readonly oauthProvider?: OAuthValidationProvider;
 }
 
 /*
@@ -148,11 +194,10 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
   }),
   Object.freeze({
     // Batch-3 grok API-key binding (src/saas/gateway/grok/catalog-identity.ts
-    // grok-api product): the official api.x.ai models list. OAuth grok
-    // credentials are refreshed (oauth-token-refresh-worker) and probed
-    // (account-probe-service 'grok' category) instead — never validated here,
-    // because the CLI-proxy surface requires the CLI identity masquerade this
-    // generic bearer probe cannot carry.
+    // grok-api product): the official api.x.ai models list. The OAuth
+    // subscription category has its own pinned CLI-proxy onboarding probe at
+    // the end of this table; it is never validated through this generic
+    // api-key surface.
     providerId: 'xai-grok',
     productId: 'grok-api',
     credentialType: 'api-key',
@@ -247,6 +292,37 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
     url: 'https://api.deepseek.com/anthropic/v1/messages',
     probe: 'messages',
   }),
+  Object.freeze({
+    // T02 OAuth onboarding. The Codex sink seals the OAuth grant, then the
+    // normal platform validation job must prove the credential before the
+    // account can become schedulable. This is the same canonical CLI
+    // `/responses` request the R6a account probe sends; the response must
+    // answer the one-shot numeric challenge.
+    providerId: CODEX_PROVIDER_ID,
+    productId: CODEX_PRODUCT_ID,
+    credentialType: CODEX_CREDENTIAL_TYPE,
+    capabilityEndpoint: CODEX_ENDPOINT,
+    capabilityProtocol: CODEX_PROTOCOL,
+    adapterId: 'openai-codex-oauth-probe-v1',
+    url: CODEX_RESPONSES_ENDPOINT,
+    probe: 'oauth-responses',
+    oauthProvider: 'codex',
+  }),
+  Object.freeze({
+    // T02 OAuth onboarding for the Grok CLI subscription. The CLI proxy
+    // rejects non-CLI fingerprints, so the shared builder stamps the exact
+    // pinned Grok CLI identity headers. A plain bearer probe would not prove
+    // the real dispatch path.
+    providerId: GROK_PROVIDER_ID,
+    productId: GROK_OAUTH_PRODUCT_ID,
+    credentialType: GROK_CREDENTIAL_TYPE_OAUTH,
+    capabilityEndpoint: GROK_ENDPOINT,
+    capabilityProtocol: GROK_PROTOCOL,
+    adapterId: 'xai-grok-oauth-probe-v1',
+    url: `${GROK_OAUTH_DEFAULT_BASE_URL}/responses`,
+    probe: 'oauth-responses',
+    oauthProvider: 'grok',
+  }),
 ]);
 
 function failed(
@@ -318,7 +394,7 @@ function modelIdentifier(value: unknown): value is string {
 export interface FixedCredentialProbeEndpoint {
   readonly adapterId: string;
   readonly url: string;
-  readonly probe: 'models' | 'key' | 'messages' | 'chat';
+  readonly probe: Extract<CredentialValidationProbeKind, 'models' | 'key' | 'messages' | 'chat'>;
 }
 
 /**
@@ -347,9 +423,14 @@ export function resolveFixedCredentialProbeEndpoint(input: {
       candidate.providerId === input.providerId &&
       candidate.productId === input.productId &&
       candidate.credentialType === input.credentialType &&
-      candidate.capabilityEndpoint === input.capabilityEndpoint,
+      candidate.capabilityEndpoint === input.capabilityEndpoint &&
+      // This resolver backs the API-key account-probe path only. OAuth
+      // categories have dedicated probe categories with their own secret
+      // material and must never be sent through a bearer api-key probe.
+      candidate.probe !== 'oauth-responses',
   );
-  return adapter === undefined ? null : { adapterId: adapter.adapterId, url: adapter.url, probe: adapter.probe };
+  if (adapter === undefined || adapter.probe === 'oauth-responses') return null;
+  return { adapterId: adapter.adapterId, url: adapter.url, probe: adapter.probe };
 }
 
 function asciiCredential(secret: Buffer): string | null {
@@ -379,6 +460,7 @@ async function boundedResponseBody(
   response: ProviderCredentialValidationResponse,
   signal: AbortSignal,
   capture: boolean,
+  maxResponseBytes: number,
 ): Promise<BoundedBodyResult> {
   if (signal.aborted) {
     cancelResponseBody(response);
@@ -386,7 +468,7 @@ async function boundedResponseBody(
   }
   if (!response.body) return { state: 'ok', bytes: capture ? new Uint8Array() : null };
   const reader = response.body.getReader();
-  const buffer = capture ? new Uint8Array(PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES) : null;
+  const buffer = capture ? new Uint8Array(maxResponseBytes) : null;
   let bytesRead = 0;
   const cancel = () => {
     void reader.cancel().catch(() => undefined);
@@ -401,7 +483,7 @@ async function boundedResponseBody(
         cancel();
         return { state: 'read_error' };
       }
-      if (value.byteLength > PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES - bytesRead) {
+      if (value.byteLength > maxResponseBytes - bytesRead) {
         cancel();
         return { state: 'too_large' };
       }
@@ -527,11 +609,69 @@ function validChatResponse(response: ProviderCredentialValidationResponse, bytes
   }
 }
 
+const OAUTH_SECRET_MAX_BYTES = 16_384;
+const OAUTH_MATERIAL_TEXT_MAX_LENGTH = 8_192;
+
+function parseOAuthSecret(secret: Buffer): Fields | null {
+  if (secret.length < 2 || secret.length > OAUTH_SECRET_MAX_BYTES) return null;
+  try {
+    return record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(secret)));
+  } catch {
+    return null;
+  }
+}
+
+function oauthMaterialText(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length < 1 || value.length > OAUTH_MATERIAL_TEXT_MAX_LENGTH) return null;
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code < 0x21 || code > 0x7e) return null;
+  }
+  return value;
+}
+
+function validOAuthResponsesResponse(
+  response: ProviderCredentialValidationResponse,
+  bytes: Uint8Array,
+  challenge: string,
+): boolean {
+  if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return false;
+  try {
+    const body: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return challengeMatches(challenge, firstResponsesText(body)) === 'ok';
+  } catch {
+    return false;
+  }
+}
+
 /** Protocol-owned allowlist; never merges job/operator/client supplied headers. */
 export function createCredentialValidationProbeRequest(
   probe: CredentialValidationProbe,
   secret: Buffer,
 ): CredentialValidationProbeRequest | null {
+  if (probe.kind === 'oauth-responses') {
+    if (!probe.oauthProvider || !probe.challenge) return null;
+    const material = parseOAuthSecret(secret);
+    if (!material) return null;
+    const accessToken = oauthMaterialText(material.access_token);
+    if (accessToken === null) return null;
+    const challengePrompt = oauthValidationChallengePrompt(probe.challenge);
+    if (probe.oauthProvider === 'codex') {
+      const rawAccountId = material.chatgpt_account_id;
+      const chatgptAccountId =
+        rawAccountId === undefined || rawAccountId === null ? null : oauthMaterialText(rawAccountId);
+      if (rawAccountId !== undefined && rawAccountId !== null && chatgptAccountId === null) return null;
+      const built = buildCodexOAuthProbeRequest({
+        accessToken,
+        chatgptAccountId,
+        model: probe.model,
+        challengePrompt,
+      });
+      return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
+    }
+    const built = buildGrokOAuthProbeRequest({ accessToken, model: probe.model, challengePrompt });
+    return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
+  }
   const token = asciiCredential(secret);
   if (token === null) return null;
   const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'model-router' };
@@ -571,9 +711,10 @@ export async function readCredentialValidationProbeResponse(
     cancelResponseBody(response);
     return failed('provider_timeout', true, probe.adapterId, response.status, durationMs);
   }
+  const maxResponseBytes = probe.maxResponseBytes ?? PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES;
   const contentLength = response.headers.get('content-length');
   const declaredBytes = contentLength !== null && /^\d{1,12}$/.test(contentLength) ? Number(contentLength) : null;
-  if (declaredBytes !== null && declaredBytes > PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES) {
+  if (declaredBytes !== null && declaredBytes > maxResponseBytes) {
     cancelResponseBody(response);
     return failed('provider_response_too_large', false, probe.adapterId, response.status, durationMs);
   }
@@ -586,6 +727,7 @@ export async function readCredentialValidationProbeResponse(
     response,
     signal,
     probe.kind !== 'models' && probe.kind !== 'key' && success,
+    maxResponseBytes,
   );
   const completedDurationMs = Math.max(0, Math.round(performance.now() - startedAt));
   if (bodyResult.state === 'too_large') {
@@ -607,7 +749,10 @@ export async function readCredentialValidationProbeResponse(
       (!bodyResult.bytes ||
         !(probe.kind === 'messages'
           ? validMessageResponse(response, bodyResult.bytes, probe.custom)
-          : validChatResponse(response, bodyResult.bytes)))
+          : probe.kind === 'chat'
+            ? validChatResponse(response, bodyResult.bytes)
+            : probe.challenge !== undefined &&
+              validOAuthResponsesResponse(response, bodyResult.bytes, probe.challenge)))
     ) {
       return failed('provider_response_invalid', false, probe.adapterId, response.status, completedDurationMs);
     }
@@ -641,17 +786,29 @@ export async function validateProviderCredential(
 
   const url = canonicalAdapterUrl(adapter.url);
   if (!url) return failed('adapter_unsupported', false, adapter.adapterId, null, 0);
+  const oauth = adapter.probe === 'oauth-responses';
   const probe: CredentialValidationProbe = {
     adapterId: adapter.adapterId,
     kind: adapter.probe,
     model: job.target.model,
     custom: false,
+    ...(adapter.oauthProvider === undefined ? {} : { oauthProvider: adapter.oauthProvider }),
+    // Six digits, generated inside the worker for exactly one probe. The
+    // account/credential are only marked verified when the upstream answer
+    // matches; a cached or fixed "OK" body cannot satisfy it.
+    ...(oauth ? { challenge: randomInt(100_000, 1_000_000).toString() } : {}),
+    ...(oauth
+      ? {
+          timeoutMs: PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
+          maxResponseBytes: PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES,
+        }
+      : {}),
   };
   const init = createCredentialValidationProbeRequest(probe, secret);
   if (!init) return failed('credential_format_invalid', false, adapter.adapterId, null, 0);
 
   let response: Response | undefined;
-  const deadline = AbortSignal.timeout(PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS);
+  const deadline = AbortSignal.timeout(probe.timeoutMs ?? PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS);
   const timeoutSignal = signal ? AbortSignal.any([deadline, signal]) : deadline;
   try {
     timeoutSignal.throwIfAborted();

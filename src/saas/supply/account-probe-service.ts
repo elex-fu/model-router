@@ -23,14 +23,10 @@ import {
 import { buildClaudeUserAgent, resolveClaudeCliVersionFromEnv } from '../gateway/claude/identity.js';
 import { applyClaudeOAuthTransform } from '../gateway/claude/transform.js';
 import { claudeMetadataUserId } from '../gateway/claude/transport.js';
-import { buildCanonicalIdentity } from '../gateway/codex/identity.js';
-import { CODEX_FALLBACK_INSTRUCTIONS } from '../gateway/codex/instructions.js';
-import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
 import { GEMINI_CLI_BASE_URL } from '../gateway/gemini/catalog-identity.js';
 import { GEMINI_CLI_USER_AGENT } from '../gateway/gemini/constants.js';
 import { normalizeGeminiTierId } from '../gateway/gemini/identity.js';
 import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
-import { GROK_OAUTH_DEFAULT_BASE_URL, grokCliIdentityHeaders } from '../gateway/grok/constants.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { OPENCODE_GO_TEST_MODEL } from '../gateway/opencode-go/model-catalog.js';
 import { OPENROUTER_KEY_URL } from '../gateway/openrouter/catalog-identity.js';
@@ -50,6 +46,12 @@ import { resolveFixedCredentialProbeEndpoint } from './credential-validation-ada
 import { type EgressProxyOwnerKind, type EgressProxyRecord, readEgressProxyForAccount } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
 import { withUnsealedEgressProxyCredentials } from './egress-proxy-seal.js';
+import {
+  buildCodexOAuthProbeRequest,
+  buildGrokOAuthProbeRequest,
+  challengeMatches,
+  firstResponsesText,
+} from './oauth-probe-builders.js';
 import { parseRetryAfterMs } from './opencode-go-usage-worker.js';
 
 /**
@@ -361,14 +363,6 @@ function usageTokens(body: unknown): AccountProbeUsage | null {
   return null;
 }
 
-/** sub2api challenge semantics: digits only, exact compare. */
-function challengeMatches(answer: string, extracted: string | null): 'ok' | 'non_numeric' | 'mismatch' | 'missing' {
-  if (extracted === null || extracted.trim() === '') return 'missing';
-  const trimmed = extracted.trim();
-  if (!/^[0-9]+$/.test(trimmed)) return 'non_numeric';
-  return trimmed === answer ? 'ok' : 'mismatch';
-}
-
 function firstAnthropicText(body: unknown): string | null {
   if (!isRecord(body) || !Array.isArray(body.content)) return null;
   for (const block of body.content) {
@@ -382,19 +376,6 @@ function firstChatText(body: unknown): string | null {
   const message = body.choices[0].message;
   if (!isRecord(message) || typeof message.content !== 'string') return null;
   return message.content;
-}
-
-function firstResponsesText(body: unknown): string | null {
-  if (!isRecord(body) || !Array.isArray(body.output)) return null;
-  for (const item of body.output) {
-    if (!isRecord(item) || !Array.isArray(item.content)) continue;
-    for (const block of item.content) {
-      if (isRecord(block) && block.type === 'output_text' && typeof block.text === 'string') {
-        return block.text;
-      }
-    }
-  }
-  return null;
 }
 
 /** Gemini native text: candidates[0].content.parts[].text (unwrapped when wrapped). */
@@ -707,27 +688,12 @@ export function createAccountProbeService(
     accessToken: string,
     chatgptAccountId: string | null,
   ): BuiltProbeRequest {
-    const identity = buildCanonicalIdentity();
     return {
-      url: CODEX_RESPONSES_ENDPOINT,
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        ...(chatgptAccountId === null ? {} : { 'chatgpt-account-id': chatgptAccountId }),
-        'user-agent': identity.userAgent,
-        originator: identity.originator,
-        version: identity.version,
-        'openai-beta': 'responses=experimental',
-        accept: 'application/json',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
+      ...buildCodexOAuthProbeRequest({
+        accessToken,
+        chatgptAccountId,
         model: codexProbeModel,
-        instructions: CODEX_FALLBACK_INSTRUCTIONS,
-        input: [{ role: 'user', content: [{ type: 'input_text', text: request.challengePrompt }] }],
-        max_output_tokens: 16,
-        stream: false,
-        store: false,
+        challengePrompt: request.challengePrompt,
       }),
       responseKind: 'responses',
     };
@@ -763,23 +729,10 @@ export function createAccountProbeService(
 
   function buildGrokProbe(request: AccountProbeRequest, accessToken: string): BuiltProbeRequest {
     return {
-      url: `${GROK_OAUTH_DEFAULT_BASE_URL}/responses`,
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        // The CLI proxy requires the pinned Grok CLI identity on every call;
-        // gateway/grok/constants.ts is reused read-only (the transport's
-        // exact masquerade, never a copied constant).
-        ...grokCliIdentityHeaders(),
-        accept: 'application/json',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
+      ...buildGrokOAuthProbeRequest({
+        accessToken,
         model: grokProbeModel,
-        input: [{ role: 'user', content: [{ type: 'input_text', text: request.challengePrompt }] }],
-        max_output_tokens: 16,
-        stream: false,
-        store: false,
+        challengePrompt: request.challengePrompt,
       }),
       responseKind: 'responses',
     };
