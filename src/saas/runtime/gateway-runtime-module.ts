@@ -86,8 +86,65 @@ export interface ManagedSaasGatewayRuntimeModule {
   ): ProviderAwaitable<ManagedSaasGatewayRuntimeModuleHandle>;
 }
 
+/**
+ * v2 extension configuration (core-plan §6.1). Extensions stay declarative:
+ * bounded scalars and secret references only — never executable content or raw
+ * credentials — and every section keeps exact-key validation. The built-in
+ * assembly (design §6.2) resolves references through core-owned credential,
+ * entitlement and catalog services; an extension never widens core ownership.
+ */
+export type GatewayRuntimeExtensionScalar = string | number | boolean;
+
+export type GatewayRuntimeExtensionScalarMap = Readonly<Record<string, GatewayRuntimeExtensionScalar>>;
+
+export type GatewayRuntimeExtensionSecretReferences = Readonly<Record<string, string>>;
+
+/** A built-in provider bundle selection; the bundle registry owns the known ids and their parameter schemas. */
+export interface ProviderBundleConfiguration {
+  readonly bundle: string;
+  readonly enabled: boolean;
+  readonly parameters?: GatewayRuntimeExtensionScalarMap;
+  readonly secretReferences?: GatewayRuntimeExtensionSecretReferences;
+}
+
+export interface MediaStorageConfiguration {
+  readonly storage: string;
+  readonly parameters?: GatewayRuntimeExtensionScalarMap;
+  readonly secretReferences?: GatewayRuntimeExtensionSecretReferences;
+}
+
+export interface TlsSidecarConfiguration {
+  readonly profile: string;
+  readonly parameters?: GatewayRuntimeExtensionScalarMap;
+  readonly secretReferences?: GatewayRuntimeExtensionSecretReferences;
+}
+
+export interface GatewayRuntimeModuleExtensionsV2 {
+  readonly providerBundles: readonly ProviderBundleConfiguration[];
+  readonly media?: MediaStorageConfiguration;
+  readonly tlsFingerprint?: TlsSidecarConfiguration;
+}
+
+/** v2 handle: the outermost `apiVersion` selects the contract revision before anything else is read. */
+export interface ManagedSaasGatewayRuntimeModuleHandleV2 {
+  readonly apiVersion: 2;
+  readonly dependencies: ManagedSaasGatewayRuntimeDependencies;
+  readonly extensions: GatewayRuntimeModuleExtensionsV2;
+  checkReady(): ProviderAwaitable<void>;
+  close(): ProviderAwaitable<void>;
+}
+
+/** v2 modules export the same factory name and return a versioned handle. */
+export interface ManagedSaasGatewayRuntimeModuleV2 {
+  createManagedSaasGatewayRuntime(
+    options: ManagedSaasGatewayRuntimeModuleOptions,
+  ): ProviderAwaitable<ManagedSaasGatewayRuntimeModuleHandleV2>;
+}
+
 export interface LoadedManagedSaasGatewayRuntimeModule {
   readonly dependencies: ManagedSaasGatewayRuntimeDependencies;
+  /** Present only for v2 modules; v1 handles never carry the key. */
+  readonly extensions?: GatewayRuntimeModuleExtensionsV2;
   checkReady(): Promise<void>;
   close(): Promise<void>;
 }
@@ -155,6 +212,27 @@ const DEPENDENCY_KEYS = Object.freeze([
 
 const TEST_DEPENDENCY_KEYS = Object.freeze([...DEPENDENCY_KEYS, 'providerHttpTestAddressCapability'] as const);
 
+/**
+ * Exact handle shapes: v1 modules stay byte-identical, and v2 is recognized
+ * only when the full five-key shape is present (an `apiVersion` on an
+ * otherwise-v1 handle is rejected — the outer version marker never partially
+ * upgrades a contract).
+ */
+const V1_HANDLE_KEYS = Object.freeze(['dependencies', 'checkReady', 'close'] as const);
+const V2_HANDLE_KEYS = Object.freeze(['apiVersion', 'dependencies', 'extensions', 'checkReady', 'close'] as const);
+
+const EXTENSION_KEYS: readonly string[] = Object.freeze(['providerBundles', 'media', 'tlsFingerprint'] as const);
+const BUNDLE_KEYS = Object.freeze(['bundle', 'enabled', 'parameters', 'secretReferences'] as const);
+const MEDIA_KEYS = Object.freeze(['storage', 'parameters', 'secretReferences'] as const);
+const TLS_FINGERPRINT_KEYS = Object.freeze(['profile', 'parameters', 'secretReferences'] as const);
+
+const EXTENSION_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const EXTENSION_KEY = /^[a-zA-Z][a-zA-Z0-9._-]{0,63}$/;
+const MAX_PROVIDER_BUNDLES = 64;
+const MAX_EXTENSION_MAP_ENTRIES = 32;
+const MAX_EXTENSION_STRING_BYTES = 4 * 1024;
+const MAX_SECRET_REFERENCE_BYTES = 1024;
+
 const AFFINITY_KEY_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_AFFINITY_KEY_VERSIONS = 8;
 const MAX_AFFINITY_KEY_BYTES = 4 * 1024;
@@ -209,6 +287,17 @@ function hasExactKeys(value: unknown, expected: readonly string[]): value is Rec
   } catch {
     return false;
   }
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(value, key);
+}
+
+/** The outermost version marker: v1 keeps its exact shape, v2 must match the full five-key handle. */
+function detectHandleContract(value: unknown): 'v1' | 'v2' | undefined {
+  if (hasExactKeys(value, V1_HANDLE_KEYS)) return 'v1';
+  if (hasExactKeys(value, V2_HANDLE_KEYS)) return 'v2';
+  return undefined;
 }
 
 function copyRuntimeEnvironment(environment: DeploymentEnvironment): ProviderEnvironment {
@@ -349,6 +438,173 @@ function checkedAffinityKeyring(value: unknown): GatewayProviderAccountAffinityK
   }
 }
 
+function checkedExtensionScalarMap(value: unknown): GatewayRuntimeExtensionScalarMap {
+  try {
+    if (!isRecord(value)) throw moduleError('MODULE_CONTRACT_INVALID');
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > MAX_EXTENSION_MAP_ENTRIES) throw moduleError('MODULE_CONTRACT_INVALID');
+    const snapshot = Object.create(null) as Record<string, GatewayRuntimeExtensionScalar>;
+    for (const key of keys) {
+      if (typeof key !== 'string' || !EXTENSION_KEY.test(key)) throw moduleError('MODULE_CONTRACT_INVALID');
+      const scalar = (value as Record<string, unknown>)[key];
+      if (typeof scalar === 'string') {
+        if (Buffer.byteLength(scalar, 'utf8') > MAX_EXTENSION_STRING_BYTES)
+          throw moduleError('MODULE_CONTRACT_INVALID');
+      } else if (typeof scalar === 'number') {
+        // Bounded finite numbers only: NaN, Infinity and precision-loss values are configuration errors.
+        if (!Number.isFinite(scalar) || Math.abs(scalar) > Number.MAX_SAFE_INTEGER) {
+          throw moduleError('MODULE_CONTRACT_INVALID');
+        }
+      } else if (typeof scalar !== 'boolean') {
+        throw moduleError('MODULE_CONTRACT_INVALID');
+      }
+      Object.defineProperty(snapshot, key, { enumerable: true, value: scalar, writable: false, configurable: false });
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    throw moduleError('MODULE_CONTRACT_INVALID');
+  }
+}
+
+function checkedSecretReferences(value: unknown): GatewayRuntimeExtensionSecretReferences {
+  try {
+    if (!isRecord(value)) throw moduleError('MODULE_CONTRACT_INVALID');
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > MAX_EXTENSION_MAP_ENTRIES) throw moduleError('MODULE_CONTRACT_INVALID');
+    const snapshot = Object.create(null) as Record<string, string>;
+    for (const key of keys) {
+      if (typeof key !== 'string' || !EXTENSION_KEY.test(key)) throw moduleError('MODULE_CONTRACT_INVALID');
+      const reference = (value as Record<string, unknown>)[key];
+      if (
+        typeof reference !== 'string' ||
+        reference.length === 0 ||
+        Buffer.byteLength(reference, 'utf8') > MAX_SECRET_REFERENCE_BYTES ||
+        hasControlCharacters(reference)
+      ) {
+        throw moduleError('MODULE_CONTRACT_INVALID');
+      }
+      Object.defineProperty(snapshot, key, {
+        enumerable: true,
+        value: reference,
+        writable: false,
+        configurable: false,
+      });
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    throw moduleError('MODULE_CONTRACT_INVALID');
+  }
+}
+
+/** References must be printable: control characters never belong in a configuration reference. */
+function hasControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 0x20 || codePoint === 0x7f) return true;
+  }
+  return false;
+}
+
+type CheckedExtensionSection = Readonly<{
+  identity: string;
+  enabled?: boolean;
+  parameters?: GatewayRuntimeExtensionScalarMap;
+  secretReferences?: GatewayRuntimeExtensionSecretReferences;
+}>;
+
+function checkedExtensionSection(
+  value: unknown,
+  identityKey: 'bundle' | 'storage' | 'profile',
+  allowedKeys: readonly string[],
+): CheckedExtensionSection {
+  if (!isRecord(value)) throw moduleError('MODULE_CONTRACT_INVALID');
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string' || !allowedKeys.includes(key))) {
+    throw moduleError('MODULE_CONTRACT_INVALID');
+  }
+  const identity = value[identityKey];
+  if (typeof identity !== 'string' || !EXTENSION_ID.test(identity)) throw moduleError('MODULE_CONTRACT_INVALID');
+  const section: {
+    identity: string;
+    enabled?: boolean;
+    parameters?: GatewayRuntimeExtensionScalarMap;
+    secretReferences?: GatewayRuntimeExtensionSecretReferences;
+  } = { identity };
+  if (hasOwn(value, 'enabled')) {
+    const enabled = value.enabled;
+    if (typeof enabled !== 'boolean') throw moduleError('MODULE_CONTRACT_INVALID');
+    section.enabled = enabled;
+  }
+  if (hasOwn(value, 'parameters')) section.parameters = checkedExtensionScalarMap(value.parameters);
+  if (hasOwn(value, 'secretReferences')) section.secretReferences = checkedSecretReferences(value.secretReferences);
+  return section;
+}
+
+function checkedBundleConfiguration(value: unknown): ProviderBundleConfiguration {
+  const section = checkedExtensionSection(value, 'bundle', BUNDLE_KEYS);
+  // `enabled` is explicit: readiness must never assume an assembled bundle was requested.
+  if (section.enabled === undefined) throw moduleError('MODULE_CONTRACT_INVALID');
+  return Object.freeze({
+    bundle: section.identity,
+    enabled: section.enabled,
+    ...(section.parameters ? { parameters: section.parameters } : {}),
+    ...(section.secretReferences ? { secretReferences: section.secretReferences } : {}),
+  });
+}
+
+function checkedMediaConfiguration(value: unknown): MediaStorageConfiguration {
+  const section = checkedExtensionSection(value, 'storage', MEDIA_KEYS);
+  return Object.freeze({
+    storage: section.identity,
+    ...(section.parameters ? { parameters: section.parameters } : {}),
+    ...(section.secretReferences ? { secretReferences: section.secretReferences } : {}),
+  });
+}
+
+function checkedTlsSidecarConfiguration(value: unknown): TlsSidecarConfiguration {
+  const section = checkedExtensionSection(value, 'profile', TLS_FINGERPRINT_KEYS);
+  return Object.freeze({
+    profile: section.identity,
+    ...(section.parameters ? { parameters: section.parameters } : {}),
+    ...(section.secretReferences ? { secretReferences: section.secretReferences } : {}),
+  });
+}
+
+function checkedExtensions(value: unknown): GatewayRuntimeModuleExtensionsV2 {
+  try {
+    if (!isRecord(value)) throw moduleError('MODULE_CONTRACT_INVALID');
+    const keys = Reflect.ownKeys(value);
+    if (keys.some((key) => typeof key !== 'string' || !EXTENSION_KEYS.includes(key))) {
+      throw moduleError('MODULE_CONTRACT_INVALID');
+    }
+    if (!hasOwn(value, 'providerBundles')) throw moduleError('MODULE_CONTRACT_INVALID');
+    const rawBundles = value.providerBundles;
+    if (!Array.isArray(rawBundles) || rawBundles.length > MAX_PROVIDER_BUNDLES) {
+      throw moduleError('MODULE_CONTRACT_INVALID');
+    }
+    const identities = new Set<string>();
+    const bundles: ProviderBundleConfiguration[] = [];
+    for (const rawBundle of rawBundles) {
+      const bundle = checkedBundleConfiguration(rawBundle);
+      // One configuration per built-in bundle id: accidental double assembly must fail closed.
+      if (identities.has(bundle.bundle)) throw moduleError('MODULE_CONTRACT_INVALID');
+      identities.add(bundle.bundle);
+      bundles.push(bundle);
+    }
+    const extensions: {
+      providerBundles: readonly ProviderBundleConfiguration[];
+      media?: MediaStorageConfiguration;
+      tlsFingerprint?: TlsSidecarConfiguration;
+    } = { providerBundles: Object.freeze(bundles) };
+    if (hasOwn(value, 'media')) extensions.media = checkedMediaConfiguration(value.media);
+    if (hasOwn(value, 'tlsFingerprint'))
+      extensions.tlsFingerprint = checkedTlsSidecarConfiguration(value.tlsFingerprint);
+    return Object.freeze(extensions);
+  } catch {
+    throw moduleError('MODULE_CONTRACT_INVALID');
+  }
+}
+
 /** Load the trusted gateway runtime module. This function accepts gateway deployments only. */
 export async function loadManagedSaasGatewayRuntimeModule(
   options: LoadManagedSaasGatewayRuntimeModuleOptions,
@@ -447,16 +703,20 @@ export async function loadManagedSaasGatewayRuntimeModule(
       })
     : undefined;
   try {
-    if (!hasExactKeys(raw, ['dependencies', 'checkReady', 'close'])) {
-      throw moduleError('MODULE_CONTRACT_INVALID');
-    }
+    const contract = detectHandleContract(raw);
+    if (!contract) throw moduleError('MODULE_CONTRACT_INVALID');
+    if (!isRecord(raw)) throw moduleError('MODULE_CONTRACT_INVALID');
+    // The outer version marker is read before any other v2 field is trusted.
+    if (contract === 'v2' && raw.apiVersion !== 2) throw moduleError('MODULE_CONTRACT_INVALID');
     const checkReady = boundMethod(raw, 'checkReady');
     if (!checkReady || !cleanup) throw moduleError('MODULE_CONTRACT_INVALID');
     const dependencies = checkedDependencies(raw.dependencies);
+    const extensions = contract === 'v2' ? checkedExtensions(raw.extensions) : undefined;
     partialHooksTransferred = true;
     partialCloseHooks.length = 0;
     return Object.freeze({
       dependencies,
+      ...(extensions ? { extensions } : {}),
       checkReady: async () => {
         try {
           await checkReady();
