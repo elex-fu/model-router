@@ -28,8 +28,8 @@ function emptyFacts(): GatewayCapabilityFacts {
     dispatch: { generic: true, routedEndpointScopes: [] },
     bundles: {
       catalogProviderIds: [],
-      catalogEndpointScopes: [],
-      pricedEndpointScopes: [],
+      catalogEndpointScopesByProvider: new Map(),
+      pricedEndpointScopesByProvider: new Map(),
       credentialProviderIds: [],
     },
     mediaStorages: [],
@@ -57,8 +57,12 @@ function completeFacts(overrides: Partial<GatewayCapabilityFacts> = {}): Gateway
     },
     bundles: {
       catalogProviderIds: PROVIDER_BUNDLE_MANIFESTS.map((manifest) => manifest.providerId),
-      catalogEndpointScopes: PROVIDER_BUNDLE_MANIFESTS.flatMap((manifest) => manifest.endpointScopes),
-      pricedEndpointScopes: PROVIDER_BUNDLE_MANIFESTS.flatMap((manifest) => manifest.endpointScopes),
+      catalogEndpointScopesByProvider: new Map(
+        PROVIDER_BUNDLE_MANIFESTS.map((manifest) => [manifest.providerId, manifest.endpointScopes]),
+      ),
+      pricedEndpointScopesByProvider: new Map(
+        PROVIDER_BUNDLE_MANIFESTS.map((manifest) => [manifest.providerId, manifest.endpointScopes]),
+      ),
       credentialProviderIds: PROVIDER_BUNDLE_MANIFESTS.map((manifest) => manifest.providerId),
     },
     mediaStorages: [],
@@ -222,8 +226,8 @@ test('an unknown bundle id is fatal even when disabled', () => {
 test('catalog, price and credential gaps are readiness reasons, not configuration errors', () => {
   const facts = completeFacts();
   facts.bundles.catalogProviderIds = [];
-  facts.bundles.catalogEndpointScopes = [];
-  facts.bundles.pricedEndpointScopes = [];
+  facts.bundles.catalogEndpointScopesByProvider = new Map();
+  facts.bundles.pricedEndpointScopesByProvider = new Map();
   facts.bundles.credentialProviderIds = [];
   const report = projectGatewayCapabilityReadiness({ extensions: extensions([bundle(CLAUDE)]), facts });
   assert.equal(report.configurationValid, true);

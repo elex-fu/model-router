@@ -67,11 +67,16 @@ export interface GatewayCapabilityDispatchFacts {
 export interface ProviderBundleReadinessFacts {
   /** Providers whose catalog registration rows exist. */
   readonly catalogProviderIds: readonly string[];
-  /** Endpoint scopes whose catalog registration rows exist. */
-  readonly catalogEndpointScopes: readonly string[];
-  /** Endpoint scopes with at least one supplier price identity. */
-  readonly pricedEndpointScopes: readonly string[];
-  /** Providers with at least one provisioned platform credential. */
+  /**
+   * Endpoint scopes whose latest catalog capability row is supported and
+   * verified, keyed by provider. Per-provider scoping is deliberate: a scope
+   * registered or priced for one provider must never make another provider's
+   * bundle look ready.
+   */
+  readonly catalogEndpointScopesByProvider: ReadonlyMap<string, readonly string[]>;
+  /** Endpoint scopes with a current supplier price, keyed by provider. */
+  readonly pricedEndpointScopesByProvider: ReadonlyMap<string, readonly string[]>;
+  /** Providers with at least one provisioned, verified platform credential. */
   readonly credentialProviderIds: readonly string[];
 }
 
@@ -210,11 +215,12 @@ function projectBundle(
 
   const catalogProvider = includes(facts.bundles.catalogProviderIds, manifest.providerId);
   if (config.enabled && !catalogProvider) pushReason(reasonCodes, 'CATALOG_PROVIDER_MISSING');
+  const catalogScopesForProvider = facts.bundles.catalogEndpointScopesByProvider.get(manifest.providerId) ?? [];
   const catalogScopes =
-    config.enabled && manifest.endpointScopes.every((scope) => includes(facts.bundles.catalogEndpointScopes, scope));
+    config.enabled && manifest.endpointScopes.every((scope) => includes(catalogScopesForProvider, scope));
   if (config.enabled && !catalogScopes) pushReason(reasonCodes, 'CATALOG_ENDPOINT_MISSING');
-  const priced =
-    config.enabled && manifest.endpointScopes.every((scope) => includes(facts.bundles.pricedEndpointScopes, scope));
+  const pricedScopesForProvider = facts.bundles.pricedEndpointScopesByProvider.get(manifest.providerId) ?? [];
+  const priced = config.enabled && manifest.endpointScopes.every((scope) => includes(pricedScopesForProvider, scope));
   if (config.enabled && !priced) pushReason(reasonCodes, 'SUPPLIER_PRICE_MISSING');
   const credentials = config.enabled && includes(facts.bundles.credentialProviderIds, manifest.providerId);
   if (config.enabled && !credentials) pushReason(reasonCodes, 'CREDENTIALS_NOT_PROVISIONED');

@@ -220,3 +220,33 @@
 - **限制**：本机没有 OpenRouter API Key，未做真实上游 smoke；本次只固定官方端点、方法与响应形状，真实 Key 的端到端验证留待有凭据时执行。`biome check` 仅有 2 个既有的 `useOptionalChain` 告警，均位于本次未改动的消息/聊天响应解析代码。
 
 **下一步**：有 OpenRouter Key 时跑一次真实导入→自动验证→探活→最小请求；随后继续 T02 其余 bundle 的生命周期面（导入端点、验证、刷新、quota）与 readiness 投影接线。
+
+## 13. T01-b 续：按 provider 的就绪事实与 PG 采集器（2026-10-20）
+
+**背景**：§10 的 readiness 投影已能判断 bundle 四态，但事实模型把 catalog endpoint 与 supplier price 建成全局列表：A 供应商注册/定价了 `claude-messages`，B 供应商即使没有该 scope 也会被判为已就绪。这会让 doctor/管理面给出错误的 `operational`。同时，事实采集仍停留在测试夹具，标准部署没有从 PG 生成事实的入口。
+
+**实现**：
+
+1. **`gateway-capability-readiness.ts` 事实模型改为按 provider**：
+   - `catalogEndpointScopesByProvider: ReadonlyMap<string, readonly string[]>`；
+   - `pricedEndpointScopesByProvider: ReadonlyMap<string, readonly string[]>`；
+   - 投影按 `manifest.providerId` 取对应 scope 列表，缺失即 `CATALOG_ENDPOINT_MISSING` / `SUPPLIER_PRICE_MISSING`，不再跨供应商借用。
+   - `catalogProviderIds` 与 `credentialProviderIds` 仍是 provider 级集合；四态与致命/就绪原因码语义不变。
+2. **新增 `src/saas/runtime/provider-bundle-readiness-facts.ts`**：
+   - `collectProviderBundleReadinessFacts(database)` 并行执行四条只读查询：
+     - active catalog products → provider 集合；
+     - active 产品的最新 capability 版本（`DISTINCT ON (provider, product, model, endpoint) ... version DESC`）中 `supported + verified` 的 endpoint scope；
+     - active 产品、active 公共模型/版本下，当前生效且未过期的 supplier cost endpoint scope；
+     - 平台账号与当前凭据都 `active + verified`、凭据有 `current_version` 且未过期的 provider。
+   - 行级 id/scope 做有界可打印字符校验，空值/非字符串直接跳过（fail-closed）；输出去重排序并冻结，重复行不会污染事实。
+   - `collectGatewayCapabilityFacts(database, deployment)` 把 PG 事实与组合根的 `dispatch`、媒体存储、TLS profile、live verification 记录合并；部署事实复制后冻结，调用方后续修改源数组不会改变已断言的装配结果。
+   - 只输出 provider/endpoint/capability id，不读取或回显凭据材料、账号名或上游响应。
+3. **测试**：新增 6 用例覆盖去重/分组、SQL 策略（最新版本、当前价格、账号+凭据双 verified）、部署事实复制冻结、跨 provider 隔离（Claude 就绪不使 OpenRouter 就绪）、空库存投影与非法入参；原 17 个 readiness 用例改为 per-provider 事实后全部保持通过。
+
+**验证**：
+
+- `tests/saas/runtime/provider-bundle-readiness.test.ts` + `provider-bundle-readiness-facts.test.ts`：23/23 pass。
+- `tsc --noEmit` 无错误；`biome check` 对 4 个改动文件干净。
+- **限制**：采集器目前只用 fake SQL executor 做单元验证，未连真实 PG；SQL 的 `DISTINCT ON`/时间窗语义与现有 catalog/pricing/凭据 SQL 一致，但真库 smoke 仍待接线时执行。`managed-saas.ts` 的在途改动尚未落地，本次未改组合根。
+
+**下一步**：在 `managed-saas.ts` 解冻后把 `collectGatewayCapabilityFacts` 的结果接入 `assertGatewayCapabilityAssembly`，并将报告投影到 doctor/管理 API；随后继续 T02 各 bundle 的生命周期面。
