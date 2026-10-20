@@ -459,6 +459,43 @@ test('proxy-bound probes consult the operator egress allowlist (R9 §4 P1)', asy
   );
 });
 
+test('OpenRouter api-key probes the authenticated /key metadata endpoint', async () => {
+  const h = await harness({
+    account: tenantAccountRow({
+      provider_id: 'openrouter',
+      product_id: 'openrouter-api',
+      credential_type: 'api-key',
+    }),
+    capability: { model: 'openai/gpt-4o', endpoint: 'openrouter-api' },
+    secret: 'openrouter-fixture-key',
+    response: new Response(JSON.stringify({ data: { label: 'production-key', usage: 12.5 } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  const outcome = await h.probe('tenant', 'api-key');
+  assert.equal(outcome.category, 'ok');
+  assert.equal(outcome.usage, null, 'the scalar key-info usage is not token usage');
+  const request = h.requests[0];
+  assert.ok(request);
+  assert.equal(request.url, 'https://openrouter.ai/api/v1/key');
+  assert.equal(request.init.method, 'GET');
+  assert.equal(request.init.headers?.authorization, 'Bearer openrouter-fixture-key');
+  assert.equal(request.init.body, undefined);
+  assert.equal(request.init.redirect, 'manual');
+  // The challenge is never sent: the key-info read cannot be spoofed by a
+  // model answer, and no model id is needed for a bodyless GET.
+  assert.equal(request.url.includes(CHALLENGE.prompt), false);
+  assert.equal(JSON.stringify(request.init.headers).includes(CHALLENGE.prompt), false);
+
+  h.setResponse(
+    new Response(JSON.stringify({ data: null }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  );
+  const invalid = await h.probe('tenant', 'api-key');
+  assert.equal(invalid.category, 'error');
+  assert.equal(invalid.reason, 'response_invalid_shape');
+});
+
 test('an unavailable account or credential is an error outcome, never a throw', async () => {
   const noAccount = await harness({ account: null, secret: 'x' });
   const outcome = await noAccount.probe('tenant', 'opencode-go');
@@ -474,6 +511,7 @@ test('the provider id maps to the migration-109 monitor categories', () => {
   assert.equal(accountProbeCategoryForProvider('opencode-go'), 'opencode-go');
   assert.equal(accountProbeCategoryForProvider('kimi'), 'api-key');
   assert.equal(accountProbeCategoryForProvider('deepseek'), 'api-key');
+  assert.equal(accountProbeCategoryForProvider('openrouter'), 'api-key');
   assert.equal(accountProbeCategoryForProvider('brand-new-provider'), 'api-key');
 });
 

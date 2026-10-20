@@ -193,3 +193,30 @@
 **运行态**：按新配置重启本地 daemon（pid 99641，`/healthz` 200，pid 文件正常），新进程保留原 `KIMI_CODE_API_KEY` 环境引用。Claude Code 的后续工具请求走同一配置。
 
 **遗留**：`capabilitiesSource=preset` 仍无运行时解析；本次以 `verified` 手工声明落地。是否补仓库级 preset 解析另行决定。
+
+## 12. T02 首个供应商生命周期补齐：OpenRouter 验证与探活（2026-10-20）
+
+**背景**：`openrouter` 已有 catalog 注册、`openai` 协议派发、F6 定价同步和平台 API-key 导入路径，但 `FIXED_ADAPTERS` 与账号探针注册表都没有 OpenRouter：平台凭据创建后自动入队的验证任务会以 `adapter_unsupported` 终止，账号无法进入 verified；手工探活同样返回 `probe_endpoint_unsupported`。这是 T02 “各供应商供给/验证/刷新/探活接线”中的一个真实断点。
+
+**上游事实**：OpenRouter 官方 OpenAPI 定义 `GET https://openrouter.ai/api/v1/key`（operationId `getCurrentKey`，Bearer 认证）返回当前 Key 的 `{data:{label, usage, limit, ...}}`；`/models` 是公开目录，不能证明凭据存活。因此验证与探活都固定到 `/key`，不使用 `/models`。
+
+**实现**：
+
+1. **`src/saas/gateway/openrouter/catalog-identity.ts`**：新增 `OPENROUTER_KEY_PATH` / `OPENROUTER_KEY_URL`，从既有 `OPENROUTER_BASE_URL` 派生，保持单一 origin 事实源；注释记录官方 `getCurrentKey` 语义与“公开 `/models` 不等于凭据验证”的原因。
+2. **`src/saas/supply/credential-validation-adapters.ts`**：
+   - 新增固定适配器 `openrouter-api-key-v1`：provider/product/credential/endpoint/protocol 全部引用 `catalog-identity.ts` 常量（`openai` 协议与 catalog capability 行一致），URL 固定为 `/key`，`probe: 'key'`。
+   - 新增 `key` 探针种类：bodyless `GET`、Bearer auth、无 `content-type`；成功只要求完整读取 ≤4KiB 的 2xx 响应，不把 Key 元数据当作模型或消息响应解析。
+   - 模型标识校验允许厂商 slug（`openai/gpt-4o`），同时继续拒绝 `://`、`//`、空白/控制字符、问号和超长 id；模型只进入 JSON body，不进入固定 URL，因此不构成路径注入面。
+3. **`src/saas/supply/account-probe-service.ts`**：
+   - provider 映射显式登记 `openrouter → api-key`（语义仍是通用 API-key 类别）。
+   - api-key 探针在固定端点返回 `probe: 'key'` 时使用新的 `buildKeyProbe`，固定请求 `/key`，不发送挑战问题/模型；响应必须是 `{data:{label:string,...}}`，否则 `response_invalid_shape`，避免把 2xx 错误页或无关 JSON 当作健康。
+   - `/key` 顶层的数值 `usage`（美元）不会被误读为 token usage；探针结果的 usage 保持 null。
+
+**验证**：
+
+- `tests/saas/supply/credential-validation-adapters.test.ts` 新增 2 用例：固定 URL/GET/Bearer/无 body/无凭据回显，以及 401 分类为不可重试的 `credential_rejected`。
+- `tests/saas/supply/account-probe-service.test.ts` 新增 1 用例：`/key` 探针成功、请求无挑战内容、非法 `data` 形状失败；类别映射断言补 `openrouter`。
+- 定向回归：`credential-validation-adapters` + `account-probe-service` 41/41；supply/catalog/openrouter/runtime readiness 追加 140/140；`tsc --noEmit` 无错误。
+- **限制**：本机没有 OpenRouter API Key，未做真实上游 smoke；本次只固定官方端点、方法与响应形状，真实 Key 的端到端验证留待有凭据时执行。`biome check` 仅有 2 个既有的 `useOptionalChain` 告警，均位于本次未改动的消息/聊天响应解析代码。
+
+**下一步**：有 OpenRouter Key 时跑一次真实导入→自动验证→探活→最小请求；随后继续 T02 其余 bundle 的生命周期面（导入端点、验证、刷新、quota）与 readiness 投影接线。

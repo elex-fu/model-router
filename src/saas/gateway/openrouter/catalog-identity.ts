@@ -54,6 +54,15 @@ export const OPENROUTER_CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}${OPENROUT
  */
 export const OPENROUTER_MODELS_PATH = '/models';
 export const OPENROUTER_MODELS_URL = `${OPENROUTER_BASE_URL}${OPENROUTER_MODELS_PATH}`;
+/**
+ * Pinned authenticated key-info endpoint (T02 credential validation/probe).
+ * `GET /key` is OpenRouter's documented "Get current API key" operation: a
+ * bearer-authenticated, side-effect-free metadata read. Unlike `/models` it
+ * proves the presented platform key is live, so it backs both the fixed
+ * credential-validation adapter and the api-key account probe.
+ */
+export const OPENROUTER_KEY_PATH = '/key';
+export const OPENROUTER_KEY_URL = `${OPENROUTER_BASE_URL}${OPENROUTER_KEY_PATH}`;
 export const OPENROUTER_DISPLAY_NAME = 'OpenRouter (metered aggregation)';
 /**
  * The single native protocol every OpenRouter capability row registers

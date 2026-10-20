@@ -6,6 +6,14 @@ import {
   ZHIPU_PAYG_MODELS_URL,
 } from '../gateway/cn-providers/constants.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
+import {
+  OPENROUTER_CAPABILITY_PROTOCOL,
+  OPENROUTER_CREDENTIAL_TYPE,
+  OPENROUTER_ENDPOINT,
+  OPENROUTER_KEY_URL,
+  OPENROUTER_PRODUCT_ID,
+  OPENROUTER_PROVIDER_ID,
+} from '../gateway/openrouter/catalog-identity.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
 import type { ProviderCredentialValidationJobRecord } from './types.js';
 
@@ -60,7 +68,8 @@ export interface ProviderCredentialValidationResponse {
 
 export interface CredentialValidationProbe {
   readonly adapterId: string;
-  readonly kind: 'models' | 'messages' | 'chat';
+  /** `key` is an authenticated metadata GET (OpenRouter `GET /key`). */
+  readonly kind: 'models' | 'key' | 'messages' | 'chat';
   readonly model: string;
   readonly custom: boolean;
 }
@@ -80,7 +89,7 @@ interface FixedProviderValidationAdapter {
   readonly capabilityProtocol: string;
   readonly adapterId: string;
   readonly url: string;
-  readonly probe: 'models' | 'messages' | 'chat';
+  readonly probe: 'models' | 'key' | 'messages' | 'chat';
 }
 
 /*
@@ -162,6 +171,21 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
     adapterId: 'opencode-go-zen-chat-v1',
     url: OPENCODE_GO_CHAT_COMPLETIONS_URL,
     probe: 'chat',
+  }),
+  Object.freeze({
+    // F6 OpenRouter metered aggregation. `/models` is public, so the truthful
+    // proof-of-life is the bearer-authenticated `GET /key` key-info read; the
+    // same fixed endpoint backs the api-key account probe. The catalog scope
+    // and capability protocol come from the shared identity constants so the
+    // validation target cannot drift from the registered `openai` rows.
+    providerId: OPENROUTER_PROVIDER_ID,
+    productId: OPENROUTER_PRODUCT_ID,
+    credentialType: OPENROUTER_CREDENTIAL_TYPE,
+    capabilityEndpoint: OPENROUTER_ENDPOINT,
+    capabilityProtocol: OPENROUTER_CAPABILITY_PROTOCOL,
+    adapterId: 'openrouter-api-key-v1',
+    url: OPENROUTER_KEY_URL,
+    probe: 'key',
   }),
   Object.freeze({
     providerId: 'kimi',
@@ -279,13 +303,22 @@ function resolveAdapter(job: ProviderCredentialValidationJobRecord): FixedProvid
 }
 
 function modelIdentifier(value: unknown): value is string {
-  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+  // Vendor-slug ids (`openai/gpt-4o`) are valid catalog model identifiers for
+  // aggregators such as OpenRouter. The model only ever travels in a JSON
+  // body (never in the fixed adapter URL), so one `/` is not a path-injection
+  // surface; scheme-like `://` and empty `//` segments stay rejected.
+  return (
+    typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value) &&
+    !value.includes('://') &&
+    !value.includes('//')
+  );
 }
 
 export interface FixedCredentialProbeEndpoint {
   readonly adapterId: string;
   readonly url: string;
-  readonly probe: 'models' | 'messages' | 'chat';
+  readonly probe: 'models' | 'key' | 'messages' | 'chat';
 }
 
 /**
@@ -508,11 +541,11 @@ export function createCredentialValidationProbeRequest(
   } else {
     headers.authorization = `Bearer ${token}`;
   }
-  if (probe.kind !== 'models') headers['content-type'] = 'application/json';
+  if (probe.kind !== 'models' && probe.kind !== 'key') headers['content-type'] = 'application/json';
   return {
-    method: probe.kind === 'models' ? 'GET' : 'POST',
+    method: probe.kind === 'models' || probe.kind === 'key' ? 'GET' : 'POST',
     headers,
-    ...(probe.kind === 'models'
+    ...(probe.kind === 'models' || probe.kind === 'key'
       ? {}
       : {
           body: JSON.stringify({
@@ -549,7 +582,11 @@ export async function readCredentialValidationProbeResponse(
     return failed('provider_redirect_rejected', false, probe.adapterId, response.status, durationMs);
   }
   const success = response.status >= 200 && response.status < 300;
-  const bodyResult = await boundedResponseBody(response, signal, probe.kind !== 'models' && success);
+  const bodyResult = await boundedResponseBody(
+    response,
+    signal,
+    probe.kind !== 'models' && probe.kind !== 'key' && success,
+  );
   const completedDurationMs = Math.max(0, Math.round(performance.now() - startedAt));
   if (bodyResult.state === 'too_large') {
     return failed('provider_response_too_large', false, probe.adapterId, response.status, completedDurationMs);
@@ -566,6 +603,7 @@ export async function readCredentialValidationProbeResponse(
   if (success) {
     if (
       probe.kind !== 'models' &&
+      probe.kind !== 'key' &&
       (!bodyResult.bytes ||
         !(probe.kind === 'messages'
           ? validMessageResponse(response, bodyResult.bytes, probe.custom)

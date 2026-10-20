@@ -33,6 +33,7 @@ import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { GROK_OAUTH_DEFAULT_BASE_URL, grokCliIdentityHeaders } from '../gateway/grok/constants.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { OPENCODE_GO_TEST_MODEL } from '../gateway/opencode-go/model-catalog.js';
+import { OPENROUTER_KEY_URL } from '../gateway/openrouter/catalog-identity.js';
 import {
   createProviderEgressProxyConnection,
   type ProviderHttpEgressAllowlist,
@@ -297,6 +298,11 @@ export function accountProbeCategoryForProvider(providerId: string): AccountProb
       return 'bedrock';
     case 'google-vertex':
       return 'vertex';
+    case 'openrouter':
+      // Metered aggregation key: the generic api-key probe resolves the
+      // fixed OpenRouter `GET /key` endpoint (see credential-validation
+      // adapters) instead of the public `/models` catalog.
+      return 'api-key';
     default:
       return 'api-key';
   }
@@ -406,6 +412,15 @@ function firstGeminiText(body: unknown): string | null {
 
 function modelsListLooksValid(body: unknown): boolean {
   return isRecord(body) && Array.isArray(body.data);
+}
+
+/**
+ * OpenRouter `GET /key` returns `{data: {label, ...}}` for a live key. Require
+ * the documented `data` object and label so a proxy error page or an
+ * unrelated JSON 2xx is never mistaken for credential health.
+ */
+function keyInfoLooksValid(body: unknown): boolean {
+  return isRecord(body) && isRecord(body.data) && typeof body.data.label === 'string';
 }
 
 export function createAccountProbeService(
@@ -648,7 +663,7 @@ export function createAccountProbeService(
     readonly method: 'GET' | 'POST';
     readonly headers: Readonly<Record<string, string>>;
     readonly body: string | null;
-    readonly responseKind: 'claude' | 'responses' | 'chat' | 'messages' | 'models' | 'gemini';
+    readonly responseKind: 'claude' | 'responses' | 'chat' | 'messages' | 'models' | 'key' | 'gemini';
   }
 
   function buildClaudeProbe(
@@ -922,6 +937,25 @@ export function createAccountProbeService(
     };
   }
 
+  /**
+   * OpenRouter's authenticated key-info read. The static URL is imported from
+   * the provider identity package, never derived from account input, so the
+   * bearer credential can only reach the pinned OpenRouter origin.
+   */
+  function buildKeyProbe(token: string): BuiltProbeRequest {
+    return {
+      url: OPENROUTER_KEY_URL,
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/json',
+        'user-agent': 'model-router',
+      },
+      body: null,
+      responseKind: 'key',
+    };
+  }
+
   async function probeThrough(
     built: BuiltProbeRequest,
     request: AccountProbeRequest,
@@ -1015,6 +1049,18 @@ export function createAccountProbeService(
       const usage = usageTokens(parsed);
       if (built.responseKind === 'models') {
         return modelsListLooksValid(parsed)
+          ? { category: 'ok', httpStatus: response.status, latencyMs, resetAt: null, usage, reason: null }
+          : {
+              category: 'error',
+              httpStatus: response.status,
+              latencyMs,
+              resetAt: null,
+              usage,
+              reason: 'response_invalid_shape',
+            };
+      }
+      if (built.responseKind === 'key') {
+        return keyInfoLooksValid(parsed)
           ? { category: 'ok', httpStatus: response.status, latencyMs, resetAt: null, usage, reason: null }
           : {
               category: 'error',
@@ -1224,6 +1270,8 @@ export function createAccountProbeService(
           const model = binding.capabilityModel;
           if (endpoint.probe === 'models') {
             built = buildModelsProbe(endpoint.url, token);
+          } else if (endpoint.probe === 'key') {
+            built = buildKeyProbe(token);
           } else if (model === null) {
             return probeError('capability_model_missing');
           } else if (endpoint.probe === 'messages') {

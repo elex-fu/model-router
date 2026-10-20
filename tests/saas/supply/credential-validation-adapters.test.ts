@@ -113,6 +113,66 @@ test('fixed adapter targets server-owned HTTPS origin and emits only health meta
   assert.equal(JSON.stringify(result).includes('unit-test-api-key'), false);
 });
 
+test('OpenRouter validates a platform key against the pinned authenticated /key endpoint', async () => {
+  const candidate = job({
+    providerId: 'openrouter',
+    productId: 'openrouter-api',
+    credentialType: 'api-key',
+    allowedModels: ['openai/gpt-4o'],
+    target: { model: 'openai/gpt-4o', endpoint: 'openrouter-api', version: 1 },
+  });
+  assert.equal(isSupportedCredentialValidationTarget(candidate), true);
+  assert.equal(credentialValidationCapabilityProtocol(candidate), 'openai');
+
+  let requestedUrl: URL | undefined;
+  let requestInit: RequestInit | undefined;
+  const result = await validateProviderCredential(candidate, Buffer.from('openrouter-unit-key'), async (url, init) => {
+    requestedUrl = url;
+    requestInit = init;
+    return new Response(JSON.stringify({ data: { label: 'production-key', usage: 12.5 } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+
+  assert.deepEqual(result, {
+    state: 'verified',
+    adapterId: 'openrouter-api-key-v1',
+    httpStatus: 200,
+    durationMs: result.durationMs,
+  });
+  assert.equal(requestedUrl?.href, 'https://openrouter.ai/api/v1/key');
+  assert.equal(requestInit?.method, 'GET');
+  assert.equal(requestInit?.redirect, 'manual');
+  assert.equal(requestInit?.body, undefined);
+  const headers = new Headers(requestInit?.headers);
+  assert.equal(headers.get('authorization'), 'Bearer openrouter-unit-key');
+  assert.equal(headers.get('accept'), 'application/json');
+  assert.equal(headers.get('content-type'), null, 'key-info is a bodyless GET');
+  assert.equal(JSON.stringify(result).includes('openrouter-unit-key'), false);
+});
+
+test('OpenRouter classified key rejection never retries as a provider outage', async () => {
+  const candidate = job({
+    providerId: 'openrouter',
+    productId: 'openrouter-api',
+    credentialType: 'api-key',
+    allowedModels: ['openai/gpt-4o'],
+    target: { model: 'openai/gpt-4o', endpoint: 'openrouter-api', version: 1 },
+  });
+  const result = await validateProviderCredential(candidate, Buffer.from('revoked-unit-key'), async () => {
+    return new Response(JSON.stringify({ error: { code: 401, message: 'No auth credentials found' } }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  assert.equal(result.state, 'failed');
+  if (result.state !== 'failed') throw new Error('expected rejection');
+  assert.equal(result.errorCode, 'credential_rejected');
+  assert.equal(result.retryable, false);
+  assert.equal(result.adapterId, 'openrouter-api-key-v1');
+});
+
 test('redirect responses are rejected without following caller-controlled locations', async () => {
   let calls = 0;
   const result = await validateProviderCredential(job(), Buffer.from('unit-test-api-key'), async (url, init) => {
