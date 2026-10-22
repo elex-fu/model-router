@@ -1,0 +1,815 @@
+{
+  "schema": 1,
+  "startedAt": "2026-10-22T18:21:36.946Z",
+  "mode": "real-provider-disposable-pg18",
+  "kms": "local-test-pilot-software-kms",
+  "runtime": "current-dist-cli-builtin",
+  "scope": "full-commercial-matrix",
+  "inventorySeedRole": "disposable-test-migrator",
+  "supplyLifecycleRole": "model_router_saas_control_plane",
+  "customerKeyRole": "model_router_saas_control_plane",
+  "providerInferenceCallsExpected": 8,
+  "scenes": [
+    {
+      "scene": "automatic-credential-onboarding",
+      "accountState": "active",
+      "credentialState": "active",
+      "validationState": "verified",
+      "validationAttempts": 1
+    },
+    {
+      "scene": "native-nonstreaming",
+      "requestId": "cfa90741-9ee3-4b6b-a098-a220c85a408a",
+      "state": "succeeded",
+      "inputTokens": "25",
+      "outputTokens": "11",
+      "amountMinorUnits": "83",
+      "priceVersion": "090c185e-13fc-4d36-beed-7c46c6b647e3",
+      "supplierCostVersion": "56c551ff-1186-425b-bee9-5e2ae76bad57"
+    },
+    {
+      "scene": "duplicate-and-conflict",
+      "completedReplayStatus": 200,
+      "conflictStatus": 409,
+      "unchangedFinancialSnapshot": true
+    },
+    {
+      "scene": "native-sse",
+      "requestId": "4943afd0-e6d9-4acb-82b4-977a5fc5d42a",
+      "state": "succeeded",
+      "inputTokens": "25",
+      "outputTokens": "11",
+      "amountMinorUnits": "83",
+      "priceVersion": "090c185e-13fc-4d36-beed-7c46c6b647e3",
+      "supplierCostVersion": "56c551ff-1186-425b-bee9-5e2ae76bad57"
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-first",
+      "requestId": "39abe056-ea91-46ad-b4a9-90f0ca19d8ee",
+      "state": "succeeded",
+      "inputTokens": "186",
+      "outputTokens": "62",
+      "amountMinorUnits": "558",
+      "priceVersion": "0c2f5acf-dbda-4095-abd2-81f55672a0b3",
+      "supplierCostVersion": "7802d1ba-19a2-4446-a1d1-4026055c1a01"
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-second",
+      "requestId": "f4ceb5e7-df49-4c94-8f11-b7aecaeedebe",
+      "state": "succeeded",
+      "inputTokens": "338",
+      "outputTokens": "11",
+      "amountMinorUnits": "709",
+      "priceVersion": "0c2f5acf-dbda-4095-abd2-81f55672a0b3",
+      "supplierCostVersion": "7802d1ba-19a2-4446-a1d1-4026055c1a01"
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-first",
+      "requestId": "fb73c3fc-3f3c-4747-8ae4-8c2d0d962f5b",
+      "state": "succeeded",
+      "inputTokens": "222",
+      "outputTokens": "62",
+      "amountMinorUnits": "630",
+      "priceVersion": "0c2f5acf-dbda-4095-abd2-81f55672a0b3",
+      "supplierCostVersion": "7802d1ba-19a2-4446-a1d1-4026055c1a01"
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-second",
+      "requestId": "f1a15cce-eb34-4f95-ac5d-68fc20a1c98a",
+      "state": "succeeded",
+      "inputTokens": "338",
+      "outputTokens": "11",
+      "amountMinorUnits": "709",
+      "priceVersion": "0c2f5acf-dbda-4095-abd2-81f55672a0b3",
+      "supplierCostVersion": "7802d1ba-19a2-4446-a1d1-4026055c1a01"
+    },
+    {
+      "scene": "native-sse-abort",
+      "requestId": "6b1c9b22-dafc-4540-9fa5-5721a6abea52",
+      "state": "unknown",
+      "usageEvents": "0",
+      "settlementEvents": "0",
+      "replayStatus": 202,
+      "retainedHoldMinorUnits": "263680"
+    }
+  ],
+  "postgresPreparedStatements": "off",
+  "passed": true,
+  "processesStopped": true,
+  "cliStartup": [
+    {
+      "role": "credential-validation-worker",
+      "exitCode": 0,
+      "signal": null,
+      "observedBytes": 402,
+      "truncated": false,
+      "messages": [],
+      "codes": [],
+      "exceptions": [],
+      "settings": []
+    },
+    {
+      "role": "gateway",
+      "exitCode": 0,
+      "signal": null,
+      "observedBytes": 460,
+      "truncated": false,
+      "messages": [],
+      "codes": [],
+      "exceptions": [],
+      "settings": []
+    }
+  ],
+  "credentialOnboarding": [
+    {
+      "account_status": "pending",
+      "account_validation": "unverified",
+      "credential_status": "pending",
+      "credential_validation": "unverified",
+      "job_status": "queued",
+      "attempt_count": 0,
+      "last_error_code": null,
+      "lease_until": null,
+      "available_at": "2026-10-22T18:21:37.358Z",
+      "lease_generation": "0"
+    },
+    {
+      "account_status": "pending",
+      "account_validation": "unverified",
+      "credential_status": "pending",
+      "credential_validation": "unverified",
+      "job_status": "leased",
+      "attempt_count": 1,
+      "last_error_code": null,
+      "lease_until": "2026-10-22T18:22:09.095Z",
+      "available_at": "2026-10-22T18:21:37.358Z",
+      "lease_generation": "1"
+    },
+    {
+      "account_status": "active",
+      "account_validation": "verified",
+      "credential_status": "active",
+      "credential_validation": "verified",
+      "job_status": "verified",
+      "attempt_count": 1,
+      "last_error_code": null,
+      "lease_until": null,
+      "available_at": "2026-10-22T18:21:37.358Z",
+      "lease_generation": "2"
+    }
+  ],
+  "httpFailures": [],
+  "settlements": [
+    {
+      "requestId": "cfa90741-9ee3-4b6b-a098-a220c85a408a",
+      "rawUsage": [
+        {
+          "input_tokens": 25,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "states": [
+        {
+          "found": true,
+          "request_id": "cfa90741-9ee3-4b6b-a098-a220c85a408a",
+          "execution_state": "pending",
+          "financial_status": "pending",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "pending",
+          "response_started": true,
+          "usage_source": null,
+          "input_total": null,
+          "output_total": null,
+          "usage_count": "0",
+          "attempt_count": "1",
+          "settlement_count": "0",
+          "reservation_state": "reserved",
+          "settlement_amount": null,
+          "ledger_amount": null,
+          "ledger_source": null,
+          "ledger_entries": "0",
+          "ledger_credit": "0",
+          "ledger_debit": "0",
+          "canonical_request_id": "cfa90741-9ee3-4b6b-a098-a220c85a408a",
+          "held_leases": "1"
+        },
+        {
+          "found": true,
+          "request_id": "cfa90741-9ee3-4b6b-a098-a220c85a408a",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "usage_source": "upstream",
+          "input_total": "25",
+          "output_total": "11",
+          "usage_count": "1",
+          "attempt_count": "1",
+          "settlement_count": "1",
+          "reservation_state": "settled",
+          "settlement_amount": "83",
+          "ledger_amount": "83",
+          "ledger_source": "billing_settlement",
+          "ledger_entries": "2",
+          "ledger_credit": "83",
+          "ledger_debit": "83",
+          "canonical_request_id": "cfa90741-9ee3-4b6b-a098-a220c85a408a",
+          "held_leases": "0"
+        }
+      ],
+      "usageCapturePoint": "native-provider-passthrough",
+      "usageShape": {
+        "unknownNativeKeyCount": 2,
+        "knownUnsupportedNativeKeys": [
+          "service_tier",
+          "inference_geo"
+        ],
+        "presentKnownCounterKeys": [
+          "input_tokens",
+          "output_tokens",
+          "cache_read_input_tokens",
+          "cache_creation_input_tokens"
+        ],
+        "cacheReadCounterPresent": true,
+        "cacheCreationCounterPresent": true
+      },
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": true,
+          "type": "string",
+          "value": "standard",
+          "unknownEnum": false,
+          "stringLength": 8
+        },
+        "inference_geo": {
+          "present": true,
+          "type": "string",
+          "value": "not_available",
+          "unknownEnum": false,
+          "stringLength": 13
+        }
+      },
+      "envelope": {
+        "nativeMessage": true,
+        "assistantRole": true,
+        "contentArray": true,
+        "nonemptyStopReason": true,
+        "errorAbsent": true,
+        "bodyBytes": 350,
+        "eof": true,
+        "jsonContentType": true
+      }
+    },
+    {
+      "requestId": "a948b948-182c-4dfc-8fc7-39f88774ed20",
+      "rawUsage": [],
+      "states": [],
+      "envelope": {
+        "nativeMessage": false,
+        "assistantRole": false,
+        "contentArray": false,
+        "nonemptyStopReason": false,
+        "errorAbsent": true,
+        "bodyBytes": 118,
+        "eof": true,
+        "jsonContentType": true
+      }
+    },
+    {
+      "requestId": "4943afd0-e6d9-4acb-82b4-977a5fc5d42a",
+      "rawUsage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        },
+        {
+          "input_tokens": 0,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "states": [
+        {
+          "found": true,
+          "request_id": "4943afd0-e6d9-4acb-82b4-977a5fc5d42a",
+          "execution_state": "pending",
+          "financial_status": "pending",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "pending",
+          "response_started": true,
+          "usage_source": null,
+          "input_total": null,
+          "output_total": null,
+          "usage_count": "0",
+          "attempt_count": "1",
+          "settlement_count": "0",
+          "reservation_state": "reserved",
+          "settlement_amount": null,
+          "ledger_amount": null,
+          "ledger_source": null,
+          "ledger_entries": "0",
+          "ledger_credit": "0",
+          "ledger_debit": "0",
+          "canonical_request_id": "4943afd0-e6d9-4acb-82b4-977a5fc5d42a",
+          "held_leases": "1"
+        },
+        {
+          "found": true,
+          "request_id": "4943afd0-e6d9-4acb-82b4-977a5fc5d42a",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "usage_source": "upstream",
+          "input_total": "25",
+          "output_total": "11",
+          "usage_count": "1",
+          "attempt_count": "1",
+          "settlement_count": "1",
+          "reservation_state": "settled",
+          "settlement_amount": "83",
+          "ledger_amount": "83",
+          "ledger_source": "billing_settlement",
+          "ledger_entries": "2",
+          "ledger_credit": "83",
+          "ledger_debit": "83",
+          "canonical_request_id": "4943afd0-e6d9-4acb-82b4-977a5fc5d42a",
+          "held_leases": "0"
+        }
+      ],
+      "usageCapturePoint": "native-provider-passthrough",
+      "usageShape": {
+        "unknownNativeKeyCount": 0,
+        "knownUnsupportedNativeKeys": [],
+        "presentKnownCounterKeys": [
+          "input_tokens",
+          "output_tokens",
+          "cache_read_input_tokens",
+          "cache_creation_input_tokens"
+        ],
+        "cacheReadCounterPresent": true,
+        "cacheCreationCounterPresent": true
+      },
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      }
+    },
+    {
+      "requestId": "39abe056-ea91-46ad-b4a9-90f0ca19d8ee",
+      "rawUsage": [
+        {
+          "prompt_tokens": 186,
+          "completion_tokens": 62,
+          "total_tokens": 248,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "states": [
+        {
+          "found": true,
+          "request_id": "39abe056-ea91-46ad-b4a9-90f0ca19d8ee",
+          "execution_state": "pending",
+          "financial_status": "pending",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "pending",
+          "response_started": true,
+          "usage_source": null,
+          "input_total": null,
+          "output_total": null,
+          "usage_count": "0",
+          "attempt_count": "1",
+          "settlement_count": "0",
+          "reservation_state": "reserved",
+          "settlement_amount": null,
+          "ledger_amount": null,
+          "ledger_source": null,
+          "ledger_entries": "0",
+          "ledger_credit": "0",
+          "ledger_debit": "0",
+          "canonical_request_id": "39abe056-ea91-46ad-b4a9-90f0ca19d8ee",
+          "held_leases": "1"
+        },
+        {
+          "found": true,
+          "request_id": "39abe056-ea91-46ad-b4a9-90f0ca19d8ee",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "usage_source": "upstream",
+          "input_total": "186",
+          "output_total": "62",
+          "usage_count": "1",
+          "attempt_count": "1",
+          "settlement_count": "1",
+          "reservation_state": "settled",
+          "settlement_amount": "558",
+          "ledger_amount": "558",
+          "ledger_source": "billing_settlement",
+          "ledger_entries": "2",
+          "ledger_credit": "558",
+          "ledger_debit": "558",
+          "canonical_request_id": "39abe056-ea91-46ad-b4a9-90f0ca19d8ee",
+          "held_leases": "0"
+        }
+      ],
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "usageShape": {
+        "unknownNativeKeyCount": 4,
+        "knownUnsupportedNativeKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "prompt_tokens_details"
+        ],
+        "presentKnownCounterKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "cacheReadCounterPresent": false,
+        "cacheCreationCounterPresent": false
+      },
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "envelope": {
+        "nativeMessage": false,
+        "assistantRole": false,
+        "contentArray": false,
+        "nonemptyStopReason": false,
+        "errorAbsent": true,
+        "bodyBytes": 500,
+        "eof": true,
+        "jsonContentType": true
+      }
+    },
+    {
+      "requestId": "f4ceb5e7-df49-4c94-8f11-b7aecaeedebe",
+      "rawUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "states": [
+        {
+          "found": true,
+          "request_id": "f4ceb5e7-df49-4c94-8f11-b7aecaeedebe",
+          "execution_state": "pending",
+          "financial_status": "pending",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "pending",
+          "response_started": true,
+          "usage_source": null,
+          "input_total": null,
+          "output_total": null,
+          "usage_count": "0",
+          "attempt_count": "1",
+          "settlement_count": "0",
+          "reservation_state": "reserved",
+          "settlement_amount": null,
+          "ledger_amount": null,
+          "ledger_source": null,
+          "ledger_entries": "0",
+          "ledger_credit": "0",
+          "ledger_debit": "0",
+          "canonical_request_id": "f4ceb5e7-df49-4c94-8f11-b7aecaeedebe",
+          "held_leases": "1"
+        },
+        {
+          "found": true,
+          "request_id": "f4ceb5e7-df49-4c94-8f11-b7aecaeedebe",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "usage_source": "upstream",
+          "input_total": "338",
+          "output_total": "11",
+          "usage_count": "1",
+          "attempt_count": "1",
+          "settlement_count": "1",
+          "reservation_state": "settled",
+          "settlement_amount": "709",
+          "ledger_amount": "709",
+          "ledger_source": "billing_settlement",
+          "ledger_entries": "2",
+          "ledger_credit": "709",
+          "ledger_debit": "709",
+          "canonical_request_id": "f4ceb5e7-df49-4c94-8f11-b7aecaeedebe",
+          "held_leases": "0"
+        }
+      ],
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "usageShape": {
+        "unknownNativeKeyCount": 4,
+        "knownUnsupportedNativeKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "prompt_tokens_details"
+        ],
+        "presentKnownCounterKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "cacheReadCounterPresent": false,
+        "cacheCreationCounterPresent": false
+      },
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "envelope": {
+        "nativeMessage": false,
+        "assistantRole": false,
+        "contentArray": false,
+        "nonemptyStopReason": false,
+        "errorAbsent": true,
+        "bodyBytes": 319,
+        "eof": true,
+        "jsonContentType": true
+      }
+    },
+    {
+      "requestId": "fb73c3fc-3f3c-4747-8ae4-8c2d0d962f5b",
+      "rawUsage": [
+        {
+          "prompt_tokens": 222,
+          "completion_tokens": 62,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "states": [
+        {
+          "found": true,
+          "request_id": "fb73c3fc-3f3c-4747-8ae4-8c2d0d962f5b",
+          "execution_state": "pending",
+          "financial_status": "pending",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "pending",
+          "response_started": true,
+          "usage_source": null,
+          "input_total": null,
+          "output_total": null,
+          "usage_count": "0",
+          "attempt_count": "1",
+          "settlement_count": "0",
+          "reservation_state": "reserved",
+          "settlement_amount": null,
+          "ledger_amount": null,
+          "ledger_source": null,
+          "ledger_entries": "0",
+          "ledger_credit": "0",
+          "ledger_debit": "0",
+          "canonical_request_id": "fb73c3fc-3f3c-4747-8ae4-8c2d0d962f5b",
+          "held_leases": "1"
+        },
+        {
+          "found": true,
+          "request_id": "fb73c3fc-3f3c-4747-8ae4-8c2d0d962f5b",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "usage_source": "upstream",
+          "input_total": "222",
+          "output_total": "62",
+          "usage_count": "1",
+          "attempt_count": "1",
+          "settlement_count": "1",
+          "reservation_state": "settled",
+          "settlement_amount": "630",
+          "ledger_amount": "630",
+          "ledger_source": "billing_settlement",
+          "ledger_entries": "2",
+          "ledger_credit": "630",
+          "ledger_debit": "630",
+          "canonical_request_id": "fb73c3fc-3f3c-4747-8ae4-8c2d0d962f5b",
+          "held_leases": "0"
+        }
+      ],
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "usageShape": {
+        "unknownNativeKeyCount": 4,
+        "knownUnsupportedNativeKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "prompt_tokens_details"
+        ],
+        "presentKnownCounterKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "cacheReadCounterPresent": false,
+        "cacheCreationCounterPresent": false
+      },
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "envelope": {
+        "nativeMessage": false,
+        "assistantRole": false,
+        "contentArray": false,
+        "nonemptyStopReason": false,
+        "errorAbsent": true,
+        "bodyBytes": 500,
+        "eof": true,
+        "jsonContentType": true
+      }
+    },
+    {
+      "requestId": "f1a15cce-eb34-4f95-ac5d-68fc20a1c98a",
+      "rawUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 338
+          }
+        }
+      ],
+      "states": [
+        {
+          "found": true,
+          "request_id": "f1a15cce-eb34-4f95-ac5d-68fc20a1c98a",
+          "execution_state": "pending",
+          "financial_status": "pending",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "pending",
+          "response_started": true,
+          "usage_source": null,
+          "input_total": null,
+          "output_total": null,
+          "usage_count": "0",
+          "attempt_count": "1",
+          "settlement_count": "0",
+          "reservation_state": "reserved",
+          "settlement_amount": null,
+          "ledger_amount": null,
+          "ledger_source": null,
+          "ledger_entries": "0",
+          "ledger_credit": "0",
+          "ledger_debit": "0",
+          "canonical_request_id": "f1a15cce-eb34-4f95-ac5d-68fc20a1c98a",
+          "held_leases": "1"
+        },
+        {
+          "found": true,
+          "request_id": "f1a15cce-eb34-4f95-ac5d-68fc20a1c98a",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "unknown_reason": null,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "usage_source": "upstream",
+          "input_total": "338",
+          "output_total": "11",
+          "usage_count": "1",
+          "attempt_count": "1",
+          "settlement_count": "1",
+          "reservation_state": "settled",
+          "settlement_amount": "709",
+          "ledger_amount": "709",
+          "ledger_source": "billing_settlement",
+          "ledger_entries": "2",
+          "ledger_credit": "709",
+          "ledger_debit": "709",
+          "canonical_request_id": "f1a15cce-eb34-4f95-ac5d-68fc20a1c98a",
+          "held_leases": "0"
+        }
+      ],
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "usageShape": {
+        "unknownNativeKeyCount": 4,
+        "knownUnsupportedNativeKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "prompt_tokens_details"
+        ],
+        "presentKnownCounterKeys": [
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens"
+        ],
+        "cacheReadCounterPresent": false,
+        "cacheCreationCounterPresent": false
+      },
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "envelope": {
+        "nativeMessage": false,
+        "assistantRole": false,
+        "contentArray": false,
+        "nonemptyStopReason": false,
+        "errorAbsent": true,
+        "bodyBytes": 321,
+        "eof": true,
+        "jsonContentType": true
+      }
+    }
+  ],
+  "finishedAt": "2026-10-22T18:21:53.816Z"
+}

@@ -594,3 +594,19 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 **R2 门禁结果（修复后）**：unit **6849 / 6826 pass / 0 fail / 23 skipped（exit 0）**；integration **349 / 255 pass / 0 fail / 94 skipped（exit 0，与既往基线一致）**；`tsc --noEmit` 干净；两条 workflow strict 命令（056 组与 059 组原样命令）均通过；改动文件 Biome 零错误；`build:server` exit 0，`dist/cli/index.js` 为新构建产物。首轮回归中 tests/admin/phase2.test.ts 的一次 waitJob 失败未在重跑复现，按 flake 记录观察，不作为已修复声明。
 
 **限制**：并发 flake 的根因是套件满并行下的 CPU/子进程启动争用，本轮只窄修已观测的 5 处；未改 runner 并发策略。真实 Kimi 主链（R3）与性能对照（R4）基于本构建产物执行。
+
+## 19. R3 完成：新构建真实 Kimi 主链 7/7（2026-10-23）
+
+**构建与执行**：基于 R2 重建的标准 CLI（commit `c8667195`，`dist/cli/index.js` 新产物），`run-commercial-postgres-gate.mjs --suite kimi`，一次性 initdb PG 18.6（Homebrew）、`postgresPreparedStatements=off`（复现原口径）、pilot 软件 KMS、runtime `current-dist-cli-builtin`、真实 Kimi 凭据（来自运行中部署的环境注入，未写入任何文件或仓库）。
+
+**结果：7/7、零跳过、ok=true、sourceChanges=0**（[runner summary](validation/implementation-2026-10-23/kimi-commercial-r3.json)、[收费链证据](validation/implementation-2026-10-23/kimi-commercial-r3-evidence.json)）：
+
+- **onboarding**：pending/unverified → leased（1 attempt、lease generation 1）→ **active + verified**（generation 2），worker/网关两个 CLI 子进程 exit 0、零 messages/codes/exceptions。
+- **六笔 settled**（金额与既往基线一致）：native 83/83、自动工具两轮 558/709、强制工具两轮 630/709，合计 **2772** 夹具最小货币单位；每笔 reserved+lease=1 → settled+lease=0，ledger 两条 credit/debit 各等于金额，`ledger_source=billing_settlement`；usage 捕获点按场景分别为 native-provider-passthrough（含 service_tier/inference_geo 兼容）与 client-after-protocol-bridge。
+- **幂等**：完成重放 200、冲突 409，资金快照不变。
+- **abort**：state=unknown、零 usage/结算事件、重放 202、保留 hold **263680**。
+- `providerInferenceCallsExpected=8` 满足；httpFailures 为空；自建集群已停止清理。
+
+**边界**：单真实凭据、夹具价格（客户 2/3、供应商 1/1）、pilot 软件 KMS、PG fsync/synchronous_commit off——不替代生产 KMS、压力或全供应商验收。R1 的 retryReason 遥测改写与 R2 的 refuseRunning fail-closed 均包含在本构建内,其行为随主链一并验证。
+
+**R3→R4**：同一构建产物执行串行性能与 HTTP 背压 off/8 对照（harness 透传已就位）。
