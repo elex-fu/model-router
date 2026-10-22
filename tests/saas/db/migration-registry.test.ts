@@ -92,6 +92,10 @@ import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from '../../../src
 import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/131_resolved_supply_billing_identity.js';
 import { MEDIA_TASK_RECOVERY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/132_media_task_recovery.js';
 import { PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/133_provider_account_model_cooldowns.js';
+import { RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/134_responses_compact_operation.js';
+import { KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/135_kimi_coding_quota_snapshots.js';
+import { OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/136_ops_media_requeue_requests.js';
+import { PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/137_platform_credential_validation_requeue.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -223,6 +227,11 @@ test('SaaS migration registry keeps a stable append order with only documented g
       // Core-plan 9.1: 133 provider account model cooldowns — the
       // durable (account, model) cooldown registry (multi-instance).
       133,
+      // Current operations/runtime forwards: compact, Kimi quota, media requeue, validation requeue.
+      134,
+      135,
+      136,
+      137,
     ],
   );
 });
@@ -286,7 +295,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 114);
+  assert.equal(SAAS_MIGRATIONS.length, 118);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -362,6 +371,10 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'resolved_supply_billing_identity',
       'media_task_recovery',
       'provider_account_model_cooldowns',
+      'responses_compact_operation',
+      'kimi_coding_quota_snapshots',
+      'ops_media_requeue_requests',
+      'platform_credential_validation_requeue',
     ],
   );
   assert.deepEqual(
@@ -458,10 +471,15 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       // Core-plan 9.1: 133 provider account model cooldowns — the
       // durable (account, model) cooldown registry (multi-instance).
       133,
+      // Current operations/runtime forwards: compact, Kimi quota, media requeue, validation requeue.
+      134,
+      135,
+      136,
+      137,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 114);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 114);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 118);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 118);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -551,7 +569,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 114);
+  assert.equal(SAAS_MIGRATIONS.length, 118);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -613,6 +631,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION,
     MEDIA_TASK_RECOVERY_SAAS_MIGRATION,
     PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION,
+    RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION,
+    KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
+    OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION,
+    PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -810,4 +832,30 @@ test('migrations 029-033 preserve append order without constraining later migrat
   assert.deepEqual(SAAS_MIGRATIONS[31], PAYMENT_CHECKOUT_AND_SUBMISSION_FENCING_SAAS_MIGRATION);
   assert.deepEqual(SAAS_MIGRATIONS[32], PAYMENT_WEBHOOK_DURABLE_INBOX_SAAS_MIGRATION);
   assert.ok(SAAS_MIGRATIONS.slice(33).every(({ version }) => version > 33));
+});
+
+test('134-137 are the exact runtime and operations forwards after the frozen 133 tail', () => {
+  assert.deepEqual(SAAS_MIGRATIONS.slice(114), [
+    RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION,
+    KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
+    OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION,
+    PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION,
+  ]);
+  assert.deepEqual(
+    SAAS_MIGRATIONS.slice(114).map(({ version, name }) => [version, name]),
+    [
+      [134, 'responses_compact_operation'],
+      [135, 'kimi_coding_quota_snapshots'],
+      [136, 'ops_media_requeue_requests'],
+      [137, 'platform_credential_validation_requeue'],
+    ],
+  );
+  assert.equal(
+    SAAS_MIGRATIONS.some(({ version }) => version === 61),
+    false,
+  );
+  assert.equal(
+    SAAS_MIGRATIONS.some(({ version }) => version === 62),
+    false,
+  );
 });

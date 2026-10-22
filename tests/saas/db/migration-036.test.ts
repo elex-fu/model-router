@@ -87,6 +87,11 @@ test('migration 036 is registered immediately before subsequent append-only migr
       // Core-plan 9.1: 133 provider account model cooldowns — the
       // durable (account, model) cooldown registry (multi-instance).
       133,
+      // Current operations/runtime forwards: compact, Kimi quota, media requeue, validation requeue.
+      134,
+      135,
+      136,
+      137,
     ],
   );
 });

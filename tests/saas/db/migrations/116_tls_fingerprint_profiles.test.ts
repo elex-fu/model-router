@@ -15,13 +15,13 @@ test('116 registers after the 115 threshold-pause tail with the next free slot',
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
   // Batch-3 (117 bedrock / 118 vertex / 119 grok / 120 cn) tails registered
   // after 116.
-  assert.equal(registered.at(-1), 133);
+  assert.equal(registered.at(-1), 137);
   const index = registered.indexOf(116);
   assert.ok(index > 0, '116 is registered');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   assert.deepEqual(
     registered.slice(index + 1),
-    [117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133],
+    [117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137],
   );
 });
 

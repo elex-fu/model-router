@@ -234,7 +234,7 @@ test('123 the image task service runs the full lifecycle against the live gatewa
 });
 
 test('123 the in-memory store enforces the same contract for unit wiring', async () => {
-  const store = new InMemoryImageTaskStore();
+  const store = new InMemoryImageTaskStore({ now: () => Date.parse('2026-10-17T00:00:00.000Z') });
   await store.create(processingRecord());
   assert.equal((await store.get(TASK_ID))?.status, 'processing');
   assert.equal(await store.get('imgtask_' + '0'.repeat(32)), null);

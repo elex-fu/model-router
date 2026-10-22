@@ -99,6 +99,11 @@ test('migration 052 uses initialized scalar snapshots for optional commercial pr
       132,
       // Core-plan 9.1: 133 durable (account, model) cooldowns.
       133,
+      // Current operations/runtime forwards: compact, Kimi quota, media requeue, validation requeue.
+      134,
+      135,
+      136,
+      137,
     ],
   );
   assert.equal(COMMERCIAL_AUTHORITY_GUARD_ROWTYPE_SAFETY_SAAS_MIGRATION.sql, expected);

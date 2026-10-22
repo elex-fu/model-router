@@ -123,6 +123,16 @@ export interface SaasWorkerGrantStatement {
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColumnGroup[] = [
   {
+    table: 'saas_provider_account_runtime_health',
+    privilege: 'SELECT',
+    columns: ['account_id', 'last_outcome'],
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    privilege: 'SELECT',
+    columns: ['tenant_id', 'attempt_id', 'amount_minor_units', 'created_at'],
+  },
+  {
     table: 'saas_schema_migrations',
     privilege: 'SELECT',
     columns: ['version', 'name', 'checksum'],
@@ -4545,9 +4555,180 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'UPDATE',
     columns: ['enabled', 'rollout_percent', 'updated_at'],
   },
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columns: [
+      'kimi_5h_used_percent',
+      'kimi_5h_reset_at',
+      'kimi_weekly_used_percent',
+      'kimi_weekly_reset_at',
+      'kimi_usage_updated_at',
+      'kimi_usage_attempted_at',
+      'kimi_usage_next_due_at',
+      'kimi_usage_failure_count',
+      'kimi_rate_limited_until',
+      'zhipu_usage_attempted_at',
+      'minimax_usage_attempted_at',
+    ],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columns: [
+      'kimi_5h_used_percent',
+      'kimi_5h_reset_at',
+      'kimi_weekly_used_percent',
+      'kimi_weekly_reset_at',
+      'kimi_usage_updated_at',
+      'kimi_usage_attempted_at',
+      'kimi_usage_next_due_at',
+      'kimi_usage_failure_count',
+      'kimi_rate_limited_until',
+      'zhipu_usage_attempted_at',
+      'minimax_usage_attempted_at',
+    ],
+  },
+  {
+    table: 'saas_ops_media_requeue_requests',
+    privilege: 'SELECT',
+    columns: [
+      'id',
+      'actor_user_id',
+      'actor_session_id',
+      'tenant_id',
+      'task_id',
+      'idempotency_key',
+      'request_digest',
+      'expected_lease_epoch',
+      'result_lease_epoch',
+      'reason',
+      'audit_event_id',
+      'recorded_at',
+    ],
+  },
+  {
+    table: 'saas_ops_media_requeue_requests',
+    privilege: 'INSERT',
+    columns: [
+      'id',
+      'actor_user_id',
+      'actor_session_id',
+      'tenant_id',
+      'task_id',
+      'idempotency_key',
+      'request_digest',
+      'expected_lease_epoch',
+      'result_lease_epoch',
+      'reason',
+      'audit_event_id',
+      'recorded_at',
+    ],
+  },
+  {
+    table: 'saas_video_tasks',
+    privilege: 'SELECT',
+    columns: [
+      'request_id',
+      'tenant_id',
+      'proxy_key_id',
+      'billing_state',
+      'provider_account_id',
+      'gateway_request_id',
+      'lease_owner',
+      'lease_epoch',
+      'lease_until',
+      'next_poll_at',
+      'poll_failures',
+      'billed_at',
+      'created_at',
+      'expires_at',
+    ],
+  },
+  {
+    table: 'saas_video_tasks',
+    privilege: 'UPDATE',
+    columns: ['next_poll_at', 'lease_epoch'],
+  },
+  {
+    table: 'saas_image_tasks',
+    privilege: 'SELECT',
+    columns: ['id', 'tenant_id', 'proxy_key_id', 'status', 'created_at', 'completed_at', 'expires_at'],
+  },
+  {
+    table: 'saas_platform_credential_validation_requeue_requests',
+    privilege: 'INSERT',
+    columns: [
+      'actor_user_id',
+      'actor_session_id',
+      'account_id',
+      'credential_id',
+      'job_id',
+      'expected_credential_version',
+      'expected_credential_authz_version',
+      'expected_lease_generation',
+      'idempotency_key',
+      'request_id',
+      'reason',
+    ],
+  },
+  {
+    table: 'saas_platform_credential_validation_requeue_requests',
+    privilege: 'SELECT',
+    columns: [
+      'actor_user_id',
+      'account_id',
+      'credential_id',
+      'job_id',
+      'expected_credential_version',
+      'expected_credential_authz_version',
+      'expected_lease_generation',
+      'idempotency_key',
+      'request_id',
+      'reason',
+      'id',
+      'audit_event_id',
+      'request_digest',
+      'result_lease_generation',
+      'recorded_at',
+    ],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columns: [
+      'scheduling_threshold_pause_until',
+      'scheduling_threshold_pause_reason',
+      'claude_usage_updated_at',
+      'codex_usage_updated_at',
+      'gemini_usage_updated_at',
+      'grok_usage_updated_at',
+      'bedrock_usage_updated_at',
+      'zhipu_usage_updated_at',
+      'minimax_usage_updated_at',
+      'window_cost_limit_minor_units',
+      'window_cost_sticky_reserve_minor_units',
+      'claude_session_window_start',
+    ],
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columns: ['window_cost_limit_minor_units', 'window_cost_sticky_reserve_minor_units', 'claude_session_window_start'],
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
+  {
+    table: 'saas_provider_account_runtime_health',
+    privilege: 'SELECT',
+    columns: ['account_id', 'last_outcome'],
+  },
+  {
+    table: 'saas_attempt_supplier_costs',
+    privilege: 'SELECT',
+    columns: ['tenant_id', 'attempt_id', 'amount_minor_units', 'created_at'],
+  },
   {
     table: 'saas_schema_migrations',
     privilege: 'SELECT',
@@ -8699,6 +8880,167 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     privilege: 'UPDATE',
     columns: ['enabled', 'rollout_percent', 'updated_at'],
   },
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columns: [
+      'kimi_5h_used_percent',
+      'kimi_5h_reset_at',
+      'kimi_weekly_used_percent',
+      'kimi_weekly_reset_at',
+      'kimi_usage_updated_at',
+      'kimi_usage_attempted_at',
+      'kimi_usage_next_due_at',
+      'kimi_usage_failure_count',
+      'kimi_rate_limited_until',
+      'zhipu_usage_attempted_at',
+      'minimax_usage_attempted_at',
+    ],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columns: [
+      'kimi_5h_used_percent',
+      'kimi_5h_reset_at',
+      'kimi_weekly_used_percent',
+      'kimi_weekly_reset_at',
+      'kimi_usage_updated_at',
+      'kimi_usage_attempted_at',
+      'kimi_usage_next_due_at',
+      'kimi_usage_failure_count',
+      'kimi_rate_limited_until',
+      'zhipu_usage_attempted_at',
+      'minimax_usage_attempted_at',
+    ],
+  },
+  {
+    table: 'saas_ops_media_requeue_requests',
+    privilege: 'SELECT',
+    columns: [
+      'id',
+      'actor_user_id',
+      'actor_session_id',
+      'tenant_id',
+      'task_id',
+      'idempotency_key',
+      'request_digest',
+      'expected_lease_epoch',
+      'result_lease_epoch',
+      'reason',
+      'audit_event_id',
+      'recorded_at',
+    ],
+  },
+  {
+    table: 'saas_ops_media_requeue_requests',
+    privilege: 'INSERT',
+    columns: [
+      'id',
+      'actor_user_id',
+      'actor_session_id',
+      'tenant_id',
+      'task_id',
+      'idempotency_key',
+      'request_digest',
+      'expected_lease_epoch',
+      'result_lease_epoch',
+      'reason',
+      'audit_event_id',
+      'recorded_at',
+    ],
+  },
+  {
+    table: 'saas_video_tasks',
+    privilege: 'SELECT',
+    columns: [
+      'request_id',
+      'tenant_id',
+      'proxy_key_id',
+      'billing_state',
+      'provider_account_id',
+      'gateway_request_id',
+      'lease_owner',
+      'lease_epoch',
+      'lease_until',
+      'next_poll_at',
+      'poll_failures',
+      'billed_at',
+      'created_at',
+      'expires_at',
+    ],
+  },
+  {
+    table: 'saas_video_tasks',
+    privilege: 'UPDATE',
+    columns: ['next_poll_at', 'lease_epoch'],
+  },
+  {
+    table: 'saas_image_tasks',
+    privilege: 'SELECT',
+    columns: ['id', 'tenant_id', 'proxy_key_id', 'status', 'created_at', 'completed_at', 'expires_at'],
+  },
+  {
+    table: 'saas_platform_credential_validation_requeue_requests',
+    privilege: 'INSERT',
+    columns: [
+      'actor_user_id',
+      'actor_session_id',
+      'account_id',
+      'credential_id',
+      'job_id',
+      'expected_credential_version',
+      'expected_credential_authz_version',
+      'expected_lease_generation',
+      'idempotency_key',
+      'request_id',
+      'reason',
+    ],
+  },
+  {
+    table: 'saas_platform_credential_validation_requeue_requests',
+    privilege: 'SELECT',
+    columns: [
+      'actor_user_id',
+      'account_id',
+      'credential_id',
+      'job_id',
+      'expected_credential_version',
+      'expected_credential_authz_version',
+      'expected_lease_generation',
+      'idempotency_key',
+      'request_id',
+      'reason',
+      'id',
+      'audit_event_id',
+      'request_digest',
+      'result_lease_generation',
+      'recorded_at',
+    ],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columns: [
+      'scheduling_threshold_pause_until',
+      'scheduling_threshold_pause_reason',
+      'claude_usage_updated_at',
+      'codex_usage_updated_at',
+      'gemini_usage_updated_at',
+      'grok_usage_updated_at',
+      'bedrock_usage_updated_at',
+      'zhipu_usage_updated_at',
+      'minimax_usage_updated_at',
+      'window_cost_limit_minor_units',
+      'window_cost_sticky_reserve_minor_units',
+      'claude_session_window_start',
+    ],
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columns: ['window_cost_limit_minor_units', 'window_cost_sticky_reserve_minor_units', 'claude_session_window_start'],
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_TABLE_GRANTS: readonly SaasControlPlaneTableGrant[] = [
@@ -9026,8 +9368,6 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
     table: 'saas_attempt_supplier_cost_snapshots',
   },
   {
-    // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
-    // fact (settlement-side INSERT, scheduler-side SELECT).
     table: 'saas_attempt_supplier_costs',
   },
   {
@@ -9226,8 +9566,6 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
     tables: ['saas_request_customer_price_snapshots', 'saas_attempt_supplier_cost_snapshots'],
   },
   {
-    // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
-    // fact (settlement-side INSERT, scheduler-side SELECT).
     tables: ['saas_attempt_supplier_costs'],
   },
   {
@@ -9331,8 +9669,6 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
     tables: ['saas_video_tasks'],
   },
   {
-    // 133 (core-plan 9.1): the durable (account, model) cooldown registry —
-    // the scheduler's model-cooldown read (cooled_until is the bound).
     tables: ['saas_provider_account_model_cooldowns'],
   },
 ];
@@ -9441,11 +9777,6 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     tsStyle: 'map-paren-multi',
   },
   {
-    tsComment: [
-      // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
-      // fact — the normal-success settlement transaction INSERTs it, the
-      // scheduler's window cost aggregation SELECTs it.
-    ],
     table: 'saas_attempt_supplier_costs',
     privilege: 'INSERT',
     columns: ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'],
@@ -10802,8 +11133,6 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
     privilege: 'SELECT',
   },
   {
-    // 130 (core-plan 9.2): the window cost gate's per-attempt supplier cost
-    // fact (settlement-side INSERT, scheduler-side SELECT).
     table: 'saas_attempt_supplier_costs',
     column: 'id',
     privilege: 'INSERT',
@@ -14185,6 +14514,10 @@ export const MANIFEST_GATEWAY_AUXILIARY: SaasGatewayAuxiliaryGrants = {
 };
 
 export const MANIFEST_WORKER_PROBE_GRANTS: readonly SaasWorkerProbeGrant[] = [
+  { table: 'saas_tenant_provider_accounts', column: 'claude_session_window_start', privilege: 'SELECT' },
+  { table: 'saas_tenant_provider_accounts', column: 'claude_session_window_end', privilege: 'SELECT' },
+  { table: 'saas_platform_provider_accounts', column: 'claude_session_window_start', privilege: 'SELECT' },
+  { table: 'saas_platform_provider_accounts', column: 'claude_session_window_end', privilege: 'SELECT' },
   {
     table: 'saas_tenant_provider_credential_validation_jobs',
     column: 'id',
@@ -17478,9 +17811,299 @@ export const MANIFEST_WORKER_PROBE_GRANTS: readonly SaasWorkerProbeGrant[] = [
     column: 'created_at',
     privilege: 'INSERT',
   },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_5h_used_percent',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_5h_reset_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_weekly_used_percent',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_weekly_reset_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_updated_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_attempted_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_next_due_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_failure_count',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_rate_limited_until',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'zhipu_usage_attempted_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'minimax_usage_attempted_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_5h_used_percent',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_5h_reset_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_weekly_used_percent',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_weekly_reset_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_updated_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_attempted_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_next_due_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_usage_failure_count',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'kimi_rate_limited_until',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'zhipu_usage_attempted_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'minimax_usage_attempted_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_5h_used_percent',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_5h_reset_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_weekly_used_percent',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_weekly_reset_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_updated_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_attempted_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_next_due_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_failure_count',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_rate_limited_until',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'zhipu_usage_attempted_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'minimax_usage_attempted_at',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_5h_used_percent',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_5h_reset_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_weekly_used_percent',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_weekly_reset_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_updated_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_attempted_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_next_due_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_usage_failure_count',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'kimi_rate_limited_until',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'zhipu_usage_attempted_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'minimax_usage_attempted_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'scheduling_threshold_pause_until',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'scheduling_threshold_pause_reason',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'scheduling_threshold_pause_until',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'scheduling_threshold_pause_reason',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'scheduling_threshold_pause_until',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'scheduling_threshold_pause_reason',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'scheduling_threshold_pause_until',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'scheduling_threshold_pause_reason',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'zhipu_usage_failure_count',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'minimax_usage_failure_count',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'zhipu_usage_failure_count',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'minimax_usage_failure_count',
+    privilege: 'SELECT',
+  },
 ];
 
 export const MANIFEST_WORKER_GRANT_STATEMENTS: readonly SaasWorkerGrantStatement[] = [
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columnLines: [['claude_session_window_start', 'claude_session_window_end']],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columnLines: [['claude_session_window_start', 'claude_session_window_end']],
+  },
   {
     privilege: 'SELECT',
     table: 'saas_tenant_provider_credential_validation_jobs',
@@ -17978,5 +18601,111 @@ export const MANIFEST_WORKER_GRANT_STATEMENTS: readonly SaasWorkerGrantStatement
       ['output_rate_numerator_minor_units', 'output_rate_denominator_units'],
       ['effective_at', 'expires_at', 'idempotency_key', 'definition_digest', 'created_at'],
     ],
+  },
+  {
+    privilege: 'SELECT',
+    table: 'saas_tenant_provider_accounts',
+    columnLines: [
+      [
+        'kimi_5h_used_percent',
+        'kimi_5h_reset_at',
+        'kimi_weekly_used_percent',
+        'kimi_weekly_reset_at',
+        'kimi_usage_updated_at',
+        'kimi_usage_attempted_at',
+        'kimi_usage_next_due_at',
+        'kimi_usage_failure_count',
+        'kimi_rate_limited_until',
+        'zhipu_usage_attempted_at',
+        'minimax_usage_attempted_at',
+      ],
+    ],
+  },
+  {
+    privilege: 'UPDATE',
+    table: 'saas_tenant_provider_accounts',
+    columnLines: [
+      [
+        'kimi_5h_used_percent',
+        'kimi_5h_reset_at',
+        'kimi_weekly_used_percent',
+        'kimi_weekly_reset_at',
+        'kimi_usage_updated_at',
+        'kimi_usage_attempted_at',
+        'kimi_usage_next_due_at',
+        'kimi_usage_failure_count',
+        'kimi_rate_limited_until',
+        'zhipu_usage_attempted_at',
+        'minimax_usage_attempted_at',
+      ],
+    ],
+  },
+  {
+    privilege: 'SELECT',
+    table: 'saas_platform_provider_accounts',
+    columnLines: [
+      [
+        'kimi_5h_used_percent',
+        'kimi_5h_reset_at',
+        'kimi_weekly_used_percent',
+        'kimi_weekly_reset_at',
+        'kimi_usage_updated_at',
+        'kimi_usage_attempted_at',
+        'kimi_usage_next_due_at',
+        'kimi_usage_failure_count',
+        'kimi_rate_limited_until',
+        'zhipu_usage_attempted_at',
+        'minimax_usage_attempted_at',
+      ],
+    ],
+  },
+  {
+    privilege: 'UPDATE',
+    table: 'saas_platform_provider_accounts',
+    columnLines: [
+      [
+        'kimi_5h_used_percent',
+        'kimi_5h_reset_at',
+        'kimi_weekly_used_percent',
+        'kimi_weekly_reset_at',
+        'kimi_usage_updated_at',
+        'kimi_usage_attempted_at',
+        'kimi_usage_next_due_at',
+        'kimi_usage_failure_count',
+        'kimi_rate_limited_until',
+        'zhipu_usage_attempted_at',
+        'minimax_usage_attempted_at',
+      ],
+    ],
+  },
+  {
+    privilege: 'SELECT',
+    table: 'saas_tenant_provider_accounts',
+    columnLines: [['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']],
+  },
+  {
+    privilege: 'UPDATE',
+    table: 'saas_tenant_provider_accounts',
+    columnLines: [['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']],
+  },
+  {
+    privilege: 'SELECT',
+    table: 'saas_platform_provider_accounts',
+    columnLines: [['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']],
+  },
+  {
+    privilege: 'UPDATE',
+    table: 'saas_platform_provider_accounts',
+    columnLines: [['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']],
+  },
+  {
+    privilege: 'SELECT',
+    table: 'saas_tenant_provider_accounts',
+    columnLines: [['zhipu_usage_failure_count', 'minimax_usage_failure_count']],
+  },
+  {
+    privilege: 'SELECT',
+    table: 'saas_platform_provider_accounts',
+    columnLines: [['zhipu_usage_failure_count', 'minimax_usage_failure_count']],
   },
 ];

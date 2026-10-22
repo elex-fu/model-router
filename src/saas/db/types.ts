@@ -3,8 +3,16 @@ export interface SqlResult<Row> {
   rowCount: number | null;
 }
 
+/** One immutable SQL statement selected by a trusted module at module load. */
+export interface PreparedSqlStatement {
+  readonly name: string;
+  readonly text: string;
+}
+
 export interface SqlExecutor {
   query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>>;
+  /** Optional native wire capability; absence keeps the ordinary query path. */
+  queryPrepared?<Row>(statement: PreparedSqlStatement, values?: readonly unknown[]): Promise<SqlResult<Row>>;
 }
 
 export interface SaasDatabaseClient extends SqlExecutor {
@@ -45,7 +53,14 @@ export interface SaasDatabaseOptions {
    */
   connectionTimeoutMillis?: number;
   /**
-   * Environment source for the pool-size overrides above. Defaults to
+   * Native wire prepared statements require a direct/session-compatible PostgreSQL
+   * connection or a verified pooler. Defaults to off. Explicit options win over
+   * MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS for an owned pool. Injected pools
+   * ignore the environment and only forward capabilities under an explicit native option.
+   */
+  preparedStatements?: 'off' | 'native';
+  /**
+   * Environment source for the pool settings above. Defaults to
    * process.env. Only consulted when no pool is injected.
    */
   env?: Record<string, string | undefined>;

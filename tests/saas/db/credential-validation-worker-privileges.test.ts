@@ -404,12 +404,42 @@ test('109 grants the probe monitor worker its claim/write surface only', () => {
   );
 });
 
-test('115 grants the quota snapshot writer and gemini usage worker their surface only', () => {
+test('115/135 grants quota writers, Gemini usage and pause recovery only their bounded surfaces', () => {
   const workerGrantSql = readFileSync(
     new URL('../../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
     'utf8',
   );
   const probeSql = SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL;
+  const probeGrants = [
+    ...probeSql.matchAll(/\('([^']+)', '([^']+)', '(SELECT|INSERT|UPDATE|DELETE|REFERENCES)'\)/g),
+  ].map((match) => {
+    const [, table, column, privilege] = match;
+    assert.ok(table && column && privilege, 'probe tuple must identify its complete surface');
+    return [table, column, privilege] as const;
+  });
+  const deploymentGrants = [
+    ...workerGrantSql.matchAll(
+      /GRANT\s+(SELECT|INSERT|UPDATE|DELETE|REFERENCES)\s*\(([^)]*)\)\s*ON TABLE model_router_saas\.(\w+)\s+TO model_router_saas_validation_worker;/gi,
+    ),
+  ].flatMap((match) => {
+    const [, privilege, columns, table] = match;
+    assert.ok(privilege && columns && table, 'column grant statement must identify its complete surface');
+    return columns.split(',').map((column) => [table, column.trim(), privilege.toUpperCase()] as const);
+  });
+  const assertSurface = (table: string, columns: RegExp, expected: readonly string[], privilege?: string): void => {
+    for (const [source, grants] of [
+      ['probe', probeGrants],
+      ['deployment', deploymentGrants],
+    ] as const) {
+      const actual = grants
+        .filter(
+          ([name, column, granted]) =>
+            name === table && columns.test(column) && (privilege === undefined || granted === privilege),
+        )
+        .map(([, column, granted]) => `${column}:${granted}`);
+      assert.deepEqual([...new Set(actual)].sort(), [...expected].sort(), `${source} surface on ${table}`);
+    }
+  };
   // The quota-snapshot writer's codex columns (the transport's every-response
   // parseCodexRateLimitHeaders sink) — UPDATE only, no due-predicate reads.
   for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
@@ -435,12 +465,55 @@ test('115 grants the quota snapshot writer and gemini usage worker their surface
       workerGrantSql,
       new RegExp(`GRANT SELECT \\([^)]*\\bgemini_tier_id\\b[^)]*\\)\\s+ON TABLE model_router_saas\\.${table}`),
     );
-    // The scheduling-threshold pause columns stay gateway-owned (115): this
-    // role must never write them.
-    for (const column of ['scheduling_threshold_pause_until', 'scheduling_threshold_pause_reason']) {
-      assert.equal(probeSql.includes(`('${table}', '${column}',`), false);
-      assert.doesNotMatch(workerGrantSql, new RegExp(`GRANT [A-Z]+ \\([^)]*\\b${column}\\b`));
-    }
+    // Pause recovery now shares this workload. It may read/clear exactly the
+    // existing pause state; INSERT/REFERENCES and other scheduling fields are
+    // still rejected by the exact family set on both probe and deployment.
+    assertSurface(table, /^scheduling_threshold_/, [
+      'scheduling_threshold_pause_until:SELECT',
+      'scheduling_threshold_pause_until:UPDATE',
+      'scheduling_threshold_pause_reason:SELECT',
+      'scheduling_threshold_pause_reason:UPDATE',
+    ]);
+    // Migration 135 separates last successful quota observation from attempts
+    // and failures. Both identities get exactly these Kimi snapshot columns.
+    assertSurface(
+      table,
+      /^kimi_/,
+      [
+        'kimi_5h_used_percent',
+        'kimi_5h_reset_at',
+        'kimi_weekly_used_percent',
+        'kimi_weekly_reset_at',
+        'kimi_usage_updated_at',
+        'kimi_usage_attempted_at',
+        'kimi_usage_next_due_at',
+        'kimi_usage_failure_count',
+        'kimi_rate_limited_until',
+      ].flatMap((column) => [`${column}:SELECT`, `${column}:UPDATE`]),
+    );
+    assertSurface(table, /^(?:zhipu|minimax)_usage_(?:attempted_at|failure_count)$/, [
+      'zhipu_usage_attempted_at:SELECT',
+      'zhipu_usage_attempted_at:UPDATE',
+      'minimax_usage_attempted_at:SELECT',
+      'minimax_usage_attempted_at:UPDATE',
+      'zhipu_usage_failure_count:SELECT',
+      'zhipu_usage_failure_count:UPDATE',
+      'minimax_usage_failure_count:SELECT',
+      'minimax_usage_failure_count:UPDATE',
+    ]);
+    // UPDATE CASE expressions read the existing session bounds. Other Claude
+    // utilization/tier/configuration columns do not gain SELECT permission.
+    assertSurface(
+      table,
+      /^claude_/,
+      [
+        'claude_usage_updated_at:SELECT',
+        'claude_5h_reset_at:SELECT',
+        'claude_session_window_start:SELECT',
+        'claude_session_window_end:SELECT',
+      ],
+      'SELECT',
+    );
   }
   // The gemini usage worker's request-count aggregation: minimal read-only
   // attempt surface (usage events carry no account or model binding).

@@ -1,6 +1,7 @@
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { runSaasMigrations, verifySaasMigrations, verifyUnknownOutcomeSaasMigrations } from './migrate.js';
 import type {
+  PreparedSqlStatement,
   SaasDatabase,
   SaasDatabaseClient,
   SaasDatabaseOptions,
@@ -16,6 +17,8 @@ export const SAAS_DATABASE_POOL_MAX_ENV = 'MODEL_ROUTER_SAAS_DB_POOL_MAX';
  * milliseconds (0 disables the timeout).
  */
 export const SAAS_DATABASE_POOL_ACQUISITION_TIMEOUT_MILLIS_ENV = 'MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS';
+/** Opt-in native wire prepared statements; unknown poolers keep the off default. */
+export const SAAS_DATABASE_PREPARED_STATEMENTS_ENV = 'MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS';
 
 /**
  * Default per-process pool maximum.
@@ -91,6 +94,19 @@ export function resolveSaasDatabasePoolSettings(
   };
 }
 
+export function resolveSaasDatabasePreparedStatements(
+  options: Pick<SaasDatabaseOptions, 'preparedStatements' | 'pool'>,
+  env: Record<string, string | undefined>,
+): 'off' | 'native' {
+  const value =
+    options.preparedStatements ?? (options.pool === undefined ? env[SAAS_DATABASE_PREPARED_STATEMENTS_ENV] : undefined);
+  if (value === undefined) return 'off';
+  if (value !== 'off' && value !== 'native') {
+    throw new TypeError(`${SAAS_DATABASE_PREPARED_STATEMENTS_ENV} must be off or native`);
+  }
+  return value;
+}
+
 function validateOptions(options: SaasDatabaseOptions): void {
   if (
     !options ||
@@ -144,6 +160,13 @@ function validateOptions(options: SaasDatabaseOptions): void {
   if (options.env !== undefined && (typeof options.env !== 'object' || options.env === null)) {
     throw new TypeError('env must be an environment record');
   }
+  if (
+    options.preparedStatements !== undefined &&
+    options.preparedStatements !== 'off' &&
+    options.preparedStatements !== 'native'
+  ) {
+    throw new TypeError('preparedStatements must be off or native');
+  }
 }
 
 function asSqlResult<Row>(result: QueryResult): SqlResult<Row> {
@@ -158,6 +181,15 @@ class NodePostgresClient implements SaasDatabaseClient {
 
   async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
     const result = await this.client.query(sql, values ? [...values] : undefined);
+    return asSqlResult<Row>(result);
+  }
+
+  async queryPrepared<Row>(statement: PreparedSqlStatement, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+    const result = await this.client.query({
+      name: statement.name,
+      text: statement.text,
+      values: values ? [...values] : undefined,
+    });
     return asSqlResult<Row>(result);
   }
 
@@ -178,6 +210,15 @@ class NodePostgresPool implements SaasDatabasePool {
     return asSqlResult<Row>(result);
   }
 
+  async queryPrepared<Row>(statement: PreparedSqlStatement, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+    const result = await this.pool.query({
+      name: statement.name,
+      text: statement.text,
+      values: values ? [...values] : undefined,
+    });
+    return asSqlResult<Row>(result);
+  }
+
   async connect(): Promise<SaasDatabaseClient> {
     return new NodePostgresClient(await this.pool.connect());
   }
@@ -187,8 +228,21 @@ class NodePostgresPool implements SaasDatabasePool {
   }
 }
 
+function scopedExecutor(underlying: SqlExecutor, preparedStatements: 'off' | 'native'): SqlExecutor {
+  const executor: SqlExecutor = {
+    query: <Row>(sql: string, values?: readonly unknown[]) => underlying.query<Row>(sql, values),
+  };
+  if (preparedStatements === 'native' && typeof underlying.queryPrepared === 'function') {
+    const queryPrepared = underlying.queryPrepared.bind(underlying);
+    executor.queryPrepared = <Row>(statement: PreparedSqlStatement, values?: readonly unknown[]) =>
+      queryPrepared<Row>(statement, values);
+  }
+  return executor;
+}
+
 export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
   validateOptions(options);
+  const preparedStatements = resolveSaasDatabasePreparedStatements(options, options.env ?? process.env);
   // Pool settings (and their environment overrides) are only resolved when
   // this call owns the pool; an injected pool keeps its caller's sizing.
   const pool =
@@ -199,12 +253,10 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
     });
   let closePromise: Promise<void> | undefined;
 
-  const executor: SqlExecutor = {
-    query: <Row>(sql: string, values?: readonly unknown[]) => pool.query<Row>(sql, values),
-  };
+  const executor = scopedExecutor(pool, preparedStatements);
 
   return {
-    query: executor.query,
+    ...executor,
     async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
       const client = await pool.connect();
       let transactionStarted = false;
@@ -215,7 +267,7 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
         // Each read needs a fresh snapshot even when the session default differs.
         await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         transactionStarted = true;
-        const value = await work(client);
+        const value = await work(scopedExecutor(client, preparedStatements));
         await client.query('COMMIT');
         return value;
       } catch (error) {

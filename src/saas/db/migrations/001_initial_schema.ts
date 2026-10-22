@@ -111,6 +111,10 @@ import { PROVIDER_ACCOUNT_WINDOW_COST_POLICY_SAAS_MIGRATION } from './130_provid
 import { RESOLVED_SUPPLY_BILLING_IDENTITY_SAAS_MIGRATION } from './131_resolved_supply_billing_identity.js';
 import { MEDIA_TASK_RECOVERY_SAAS_MIGRATION } from './132_media_task_recovery.js';
 import { PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION } from './133_provider_account_model_cooldowns.js';
+import { RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION } from './134_responses_compact_operation.js';
+import { KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION } from './135_kimi_coding_quota_snapshots.js';
+import { OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION } from './136_ops_media_requeue_requests.js';
+import { PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION } from './137_platform_credential_validation_requeue.js';
 
 export interface SaasMigration {
   version: number;
@@ -781,4 +785,8 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // in-process Map, with `cooled_until > now()` as the invalidation bound and
   // GREATEST-merge upserts so cooldowns never shorten across instances.
   PROVIDER_ACCOUNT_MODEL_COOLDOWNS_SAAS_MIGRATION,
+  RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION,
+  KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
+  OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION,
+  PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION,
 ];

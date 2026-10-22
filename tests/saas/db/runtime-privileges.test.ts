@@ -128,6 +128,9 @@ test('operations summary has only its exact additional control-plane SELECT gran
   assert.deepEqual(
     SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_provider_account_runtime_health'),
     [
+      // The scheduling fault page joins the account and shows its latest classified result.
+      ['saas_provider_account_runtime_health', 'account_id', 'SELECT'],
+      ['saas_provider_account_runtime_health', 'last_outcome', 'SELECT'],
       ['saas_provider_account_runtime_health', 'owner_scope_key', 'SELECT'],
       ['saas_provider_account_runtime_health', 'owner_kind', 'SELECT'],
       ['saas_provider_account_runtime_health', 'state', 'SELECT'],
@@ -145,6 +148,105 @@ test('operations summary has only its exact additional control-plane SELECT gran
       ['saas_requests', 'financial_status', 'UPDATE'],
     ],
   );
+});
+
+test('operations projections keep exact read sets and permit only video cursor and epoch updates', () => {
+  const taskReads = {
+    saas_image_tasks: ['id', 'tenant_id', 'proxy_key_id', 'status', 'created_at', 'completed_at', 'expires_at'],
+    saas_video_tasks: [
+      'request_id',
+      'tenant_id',
+      'proxy_key_id',
+      'billing_state',
+      'provider_account_id',
+      'gateway_request_id',
+      'lease_owner',
+      'lease_epoch',
+      'lease_until',
+      'next_poll_at',
+      'poll_failures',
+      'billed_at',
+      'created_at',
+      'expires_at',
+    ],
+    saas_attempt_supplier_costs: ['tenant_id', 'attempt_id', 'amount_minor_units', 'created_at'],
+  };
+  for (const [table, columns] of Object.entries(taskReads)) {
+    const expected = columns.map((column) => `${table}\t${column}\tSELECT`);
+    if (table === 'saas_video_tasks') expected.push(`${table}\tnext_poll_at\tUPDATE`, `${table}\tlease_epoch\tUPDATE`);
+    assert.deepEqual(
+      SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([relation]) => relation === table)
+        .map((grant) => grant.join('\t'))
+        .sort(),
+      expected.sort(),
+      `exact operations task read/write set ${table}`,
+    );
+    assert.equal(
+      SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([relation]) => relation === table),
+      false,
+    );
+  }
+  const receiptColumns = [
+    'id',
+    'actor_user_id',
+    'actor_session_id',
+    'tenant_id',
+    'task_id',
+    'idempotency_key',
+    'request_digest',
+    'expected_lease_epoch',
+    'result_lease_epoch',
+    'reason',
+    'audit_event_id',
+    'recorded_at',
+  ];
+  assert.deepEqual(
+    SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === 'saas_ops_media_requeue_requests')
+      .map((grant) => grant.join('\t'))
+      .sort(),
+    ['SELECT', 'INSERT']
+      .flatMap((privilege) =>
+        receiptColumns.map((column) => `saas_ops_media_requeue_requests\t${column}\t${privilege}`),
+      )
+      .sort(),
+  );
+  assert.equal(
+    SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([table]) => table === 'saas_ops_media_requeue_requests'),
+    false,
+  );
+
+  const schedulingColumns = [
+    'scheduling_threshold_pause_until',
+    'scheduling_threshold_pause_reason',
+    'claude_usage_updated_at',
+    'codex_usage_updated_at',
+    'gemini_usage_updated_at',
+    'grok_usage_updated_at',
+    'bedrock_usage_updated_at',
+    'zhipu_usage_updated_at',
+    'minimax_usage_updated_at',
+    'window_cost_limit_minor_units',
+    'window_cost_sticky_reserve_minor_units',
+    'claude_session_window_start',
+  ];
+  const windowColumns = [
+    'window_cost_limit_minor_units',
+    'window_cost_sticky_reserve_minor_units',
+    'claude_session_window_start',
+  ];
+  for (const table of ['saas_platform_provider_accounts', 'saas_tenant_provider_accounts']) {
+    assert.deepEqual(
+      SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
+        ([relation, column]) => relation === table && schedulingColumns.includes(column),
+      )
+        .map((grant) => grant.join('\t'))
+        .sort(),
+      (table === 'saas_platform_provider_accounts' ? schedulingColumns : windowColumns)
+        .map((column) => `${table}\t${column}\tSELECT`)
+        .sort(),
+      `read-only scheduling diagnostics ${table}`,
+    );
+  }
 });
 
 test('commercial price versions allow history reads and append inserts without UPDATE', () => {
@@ -1705,7 +1807,7 @@ test('108 grants the control plane only the opencode_go protocol rules column, n
   }
 });
 
-test('120 grants the control plane only the CN-provider dual-mode config columns, never the quota snapshot columns', () => {
+test('120 keeps CN quota writes worker-only and permits only exact platform freshness reads for operations', () => {
   for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
     for (const privilege of ['SELECT', 'UPDATE'] as const) {
       for (const column of [
@@ -1722,8 +1824,8 @@ test('120 grants the control plane only the CN-provider dual-mode config columns
         );
       }
     }
-    // The quota worker owns the scheduling snapshot columns; the control
-    // plane never reads or writes them (gateway reads stay dynamic).
+    // The quota worker owns every snapshot write. Operations reads only the
+    // platform success timestamps; tenant snapshots and other fields stay private.
     for (const column of [
       'zhipu_5h_used_percent',
       'zhipu_5h_reset_at',
@@ -1742,10 +1844,15 @@ test('120 grants the control plane only the CN-provider dual-mode config columns
       'minimax_usage_failure_count',
       'minimax_rate_limited_until',
     ]) {
-      assert.equal(
-        SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),
-        false,
-        `unexpected control-plane grant ${table}.${column}`,
+      const expected =
+        table === 'saas_platform_provider_accounts' &&
+        (column === 'zhipu_usage_updated_at' || column === 'minimax_usage_updated_at')
+          ? [[table, column, 'SELECT']]
+          : [];
+      assert.deepEqual(
+        SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([relation, field]) => relation === table && field === column),
+        expected,
+        `exact control-plane quota snapshot grant ${table}.${column}`,
       );
       assert.equal(
         SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(([relation, field]) => relation === table && field === column),

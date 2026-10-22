@@ -24,7 +24,7 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   // 133 durable model cooldowns (core-plan 9.1).
   assert.equal(
     registered.at(-1),
-    133,
+    137,
     'the batch-4/5 tails and the K2 durable fault classification follow the 108 head',
   );
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));

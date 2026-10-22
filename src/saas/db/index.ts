@@ -16,6 +16,7 @@ export {
   verifySaasRuntimeDatabasePrivileges,
 } from './runtime-privileges.js';
 export type {
+  PreparedSqlStatement,
   SaasDatabase,
   SaasDatabaseClient,
   SaasDatabaseOptions,

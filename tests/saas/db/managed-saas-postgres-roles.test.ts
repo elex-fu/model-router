@@ -68,6 +68,8 @@ test('control-plane grants mirror the source-backed column, table and sequence m
     .sort();
   const expectedDashboardReadGrants = [
     ['saas_requests', 'financial_status', 'SELECT'],
+    ['saas_provider_account_runtime_health', 'account_id', 'SELECT'],
+    ['saas_provider_account_runtime_health', 'last_outcome', 'SELECT'],
     ['saas_provider_account_runtime_health', 'owner_scope_key', 'SELECT'],
     ['saas_provider_account_runtime_health', 'owner_kind', 'SELECT'],
     ['saas_provider_account_runtime_health', 'state', 'SELECT'],

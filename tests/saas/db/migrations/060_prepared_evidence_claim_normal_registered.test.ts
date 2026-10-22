@@ -220,12 +220,28 @@ test('normal 060 adaptation retains the accepted signed fixture and its existing
   for (const [path, expected] of [
     [
       'tests/saas/metering/normal-success-postgres-fixture.ts',
-      '2180bd5d1ba9dd2f5ec062965b32db85d0711ad2c0b7d05c4c51beb3d444b6fe',
+      '2f340fb6579b6bf60ec3efc064c7d087e75379081a9cbcb6c027fc782d3ee7ac',
     ],
     [
       'tests/saas/metering/normal-success-postgres-fixture.test.ts',
       '7ced95b91a869ede2d4ec90262bd03921f1a78a3fedb0dd4e3bbf46a79bc0085',
     ],
-  ] as const)
-    assert.equal(createHash('sha256').update(source(path)).digest('hex'), expected, path);
+  ] as const) {
+    let historicalSource = source(path);
+    if (path === 'tests/saas/metering/normal-success-postgres-fixture.ts') {
+      // This pin includes the approved optional nativeProtocol declaration:
+      // its default remains OpenAI and only the initial catalog capability uses
+      // the option. Normalize the previously reviewed diagnostic phase labels
+      // and explicit token billing dimension required by 122 as before; every
+      // remaining source byte, including the native option, stays SHA-pinned.
+      for (const addition of [
+        "  | 'seed'\n  | 'pool-align'\n  | 'harness'\n  | 'admission-transaction'\n",
+        "    billingMode: 'token',\n    units: null,\n    sizeTier: null,\n",
+      ]) {
+        assert.equal(historicalSource.split(addition).length, 2, `exact reviewed fixture addition: ${path}`);
+        historicalSource = historicalSource.replace(addition, '');
+      }
+    }
+    assert.equal(createHash('sha256').update(historicalSource).digest('hex'), expected, path);
+  }
 });

@@ -177,6 +177,14 @@ GRANT EXECUTE ON FUNCTION model_router_saas.saas_catalog_valid_scope(text[])
   TO model_router_saas_validation_worker;
 
 GRANT SELECT (
+  claude_session_window_start, claude_session_window_end
+) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  claude_session_window_start, claude_session_window_end
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
   id, tenant_id, account_id, credential_id, credential_version, provider_id,
   product_id, credential_type, allowed_models, target_model, target_endpoint,
   capability_version, idempotency_key, status, attempt_count, available_at,
@@ -550,6 +558,46 @@ GRANT INSERT (
   output_rate_numerator_minor_units, output_rate_denominator_units,
   effective_at, expires_at, idempotency_key, definition_digest, created_at
 ) ON TABLE model_router_saas.saas_supplier_cost_versions
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  kimi_5h_used_percent, kimi_5h_reset_at, kimi_weekly_used_percent, kimi_weekly_reset_at, kimi_usage_updated_at, kimi_usage_attempted_at, kimi_usage_next_due_at, kimi_usage_failure_count, kimi_rate_limited_until, zhipu_usage_attempted_at, minimax_usage_attempted_at
+) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  kimi_5h_used_percent, kimi_5h_reset_at, kimi_weekly_used_percent, kimi_weekly_reset_at, kimi_usage_updated_at, kimi_usage_attempted_at, kimi_usage_next_due_at, kimi_usage_failure_count, kimi_rate_limited_until, zhipu_usage_attempted_at, minimax_usage_attempted_at
+) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  kimi_5h_used_percent, kimi_5h_reset_at, kimi_weekly_used_percent, kimi_weekly_reset_at, kimi_usage_updated_at, kimi_usage_attempted_at, kimi_usage_next_due_at, kimi_usage_failure_count, kimi_rate_limited_until, zhipu_usage_attempted_at, minimax_usage_attempted_at
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  kimi_5h_used_percent, kimi_5h_reset_at, kimi_weekly_used_percent, kimi_weekly_reset_at, kimi_usage_updated_at, kimi_usage_attempted_at, kimi_usage_next_due_at, kimi_usage_failure_count, kimi_rate_limited_until, zhipu_usage_attempted_at, minimax_usage_attempted_at
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  scheduling_threshold_pause_until, scheduling_threshold_pause_reason
+) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  scheduling_threshold_pause_until, scheduling_threshold_pause_reason
+) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  scheduling_threshold_pause_until, scheduling_threshold_pause_reason
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT UPDATE (
+  scheduling_threshold_pause_until, scheduling_threshold_pause_reason
+) ON TABLE model_router_saas.saas_platform_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  zhipu_usage_failure_count, minimax_usage_failure_count
+) ON TABLE model_router_saas.saas_tenant_provider_accounts
+  TO model_router_saas_validation_worker;
+GRANT SELECT (
+  zhipu_usage_failure_count, minimax_usage_failure_count
+) ON TABLE model_router_saas.saas_platform_provider_accounts
   TO model_router_saas_validation_worker;
 
 COMMIT;

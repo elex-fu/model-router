@@ -716,6 +716,8 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.string_to_array(manifest.column_names, ' ') AS column_names
     FROM (VALUES
+      ('saas_provider_account_runtime_health', 'SELECT', 'account_id last_outcome'),
+      ('saas_attempt_supplier_costs', 'SELECT', 'tenant_id attempt_id amount_minor_units created_at'),
       ('saas_schema_migrations', 'SELECT', 'version name checksum'),
       ('saas_platform_state', 'SELECT', 'singleton initialized initialized_at'),
       ('saas_platform_state', 'UPDATE', 'initialized'),
@@ -1061,7 +1063,18 @@ BEGIN
       ('saas_plugin_installations', 'UPDATE', 'name version description author manifest manifest_sha256 entrypoint_path binary_sha256 signature_status state config_json last_error artifact_data artifact_sha256 updated_at enabled_at'),
       ('saas_plugin_bindings', 'SELECT', 'id installation_id capability platform account_type enabled rollout_percent created_at updated_at'),
       ('saas_plugin_bindings', 'INSERT', 'installation_id capability platform account_type enabled rollout_percent'),
-      ('saas_plugin_bindings', 'UPDATE', 'enabled rollout_percent updated_at')
+      ('saas_plugin_bindings', 'UPDATE', 'enabled rollout_percent updated_at'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'kimi_5h_used_percent kimi_5h_reset_at kimi_weekly_used_percent kimi_weekly_reset_at kimi_usage_updated_at kimi_usage_attempted_at kimi_usage_next_due_at kimi_usage_failure_count kimi_rate_limited_until zhipu_usage_attempted_at minimax_usage_attempted_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'kimi_5h_used_percent kimi_5h_reset_at kimi_weekly_used_percent kimi_weekly_reset_at kimi_usage_updated_at kimi_usage_attempted_at kimi_usage_next_due_at kimi_usage_failure_count kimi_rate_limited_until zhipu_usage_attempted_at minimax_usage_attempted_at'),
+      ('saas_ops_media_requeue_requests', 'SELECT', 'id actor_user_id actor_session_id tenant_id task_id idempotency_key request_digest expected_lease_epoch result_lease_epoch reason audit_event_id recorded_at'),
+      ('saas_ops_media_requeue_requests', 'INSERT', 'id actor_user_id actor_session_id tenant_id task_id idempotency_key request_digest expected_lease_epoch result_lease_epoch reason audit_event_id recorded_at'),
+      ('saas_video_tasks', 'SELECT', 'request_id tenant_id proxy_key_id billing_state provider_account_id gateway_request_id lease_owner lease_epoch lease_until next_poll_at poll_failures billed_at created_at expires_at'),
+      ('saas_video_tasks', 'UPDATE', 'next_poll_at lease_epoch'),
+      ('saas_image_tasks', 'SELECT', 'id tenant_id proxy_key_id status created_at completed_at expires_at'),
+      ('saas_platform_credential_validation_requeue_requests', 'INSERT', 'actor_user_id actor_session_id account_id credential_id job_id expected_credential_version expected_credential_authz_version expected_lease_generation idempotency_key request_id reason'),
+      ('saas_platform_credential_validation_requeue_requests', 'SELECT', 'actor_user_id account_id credential_id job_id expected_credential_version expected_credential_authz_version expected_lease_generation idempotency_key request_id reason id audit_event_id request_digest result_lease_generation recorded_at'),
+      ('saas_platform_provider_accounts', 'SELECT', 'scheduling_threshold_pause_until scheduling_threshold_pause_reason claude_usage_updated_at codex_usage_updated_at gemini_usage_updated_at grok_usage_updated_at bedrock_usage_updated_at zhipu_usage_updated_at minimax_usage_updated_at window_cost_limit_minor_units window_cost_sticky_reserve_minor_units claude_session_window_start'),
+      ('saas_tenant_provider_accounts', 'SELECT', 'window_cost_limit_minor_units window_cost_sticky_reserve_minor_units claude_session_window_start')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)

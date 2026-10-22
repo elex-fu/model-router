@@ -704,6 +704,11 @@ test('migration 008 defines bounded append-only catalog tables and registry vers
     132,
     // Core-plan 9.1: durable (account, model) cooldowns.
     133,
+    // Current operations/runtime forwards: compact, Kimi quota, media requeue, validation requeue.
+    134,
+    135,
+    136,
+    137,
   ]);
   assert.equal(SAAS_MIGRATIONS[7], PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION);
   assert.match(PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION.sql, /CREATE TABLE saas_provider_capabilities/);
