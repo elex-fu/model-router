@@ -480,7 +480,7 @@ test('saas:upgrade refuses the pre-check probe failure when migrations are still
 // Backup coverage honesty
 // ---------------------------------------------------------------------------
 
-test('saas:upgrade records the skipped backup loudly when no PG backup mechanism is configured', async () => {
+test('saas:upgrade refuses migration when no verified PG backup policy is configured', async () => {
   const fixture = freshFixture();
   const dependencies = makeDependencies(fixture);
   const withoutBackup: SaasUpgradeCommandDependencies = {
@@ -498,8 +498,19 @@ test('saas:upgrade records the skipped backup loudly when no PG backup mechanism
     },
   };
   const result = await saasUpgrade(FULL_OPTIONS, withoutBackup);
-  assert.equal(result.exitCode, 0, output(fixture.events));
-  assert.match(output(fixture.events), /backup-point skipped .* does NOT protect the managed SaaS PostgreSQL database/);
+  assert.equal(result.exitCode, 1, output(fixture.events));
+  assert.equal(result.failure?.code, 'BACKUP_FAILED');
+  assert.match(output(fixture.events), /BACKUP_POLICY_REQUIRED/);
+  assert.ok(!fixture.events.includes('migrate'));
+});
+
+test('saas:upgrade refuses a backup executor that skips protection', async () => {
+  const fixture = freshFixture();
+  fixture.backupOutcome = { status: 'skipped', detail: 'operator registry anchor only' };
+  const result = await saasUpgrade(FULL_OPTIONS, makeDependencies(fixture));
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.failure?.code, 'BACKUP_FAILED');
+  assert.ok(!fixture.events.includes('migrate'));
 });
 
 // ---------------------------------------------------------------------------

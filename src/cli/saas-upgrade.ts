@@ -4,6 +4,7 @@ import { statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { protectSaasUpgrade, SAAS_BACKUP_POLICY_FILE_ENV, SaasBackupFailure } from '../saas/backup/service.js';
 import { verifyCredentialValidationWorkerRuntimePrivileges } from '../saas/db/credential-validation-worker-privileges.js';
 import { runSaasMigrations, verifySaasMigrations } from '../saas/db/migrate.js';
 import { SAAS_MIGRATIONS } from '../saas/db/migrations/001_initial_schema.js';
@@ -43,9 +44,8 @@ const exec = promisify(execFile);
  *                      the ledger is already at the release head) + a doctor
  *                      subset (PG / per-role probes / migration count) called
  *                      as a library
- *   [2] backup-point — record the pre-upgrade registry head as the rollback
- *                      anchor and take a PostgreSQL backup point when a
- *                      mechanism is configured (see the coverage note below)
+ *   [2] backup-point — require verified PostgreSQL protection and a recent
+ *                      passing isolated restore receipt before migrating
  *   [3] migrate      — explicit runSaasMigrations as the migrator login
  *                      (transactional; a failure rolls back and stops everything)
  *   [4] roles        — replay both idempotent role templates (administrator)
@@ -60,11 +60,10 @@ const exec = promisify(execFile);
  * Backup coverage (honesty note): `backup:create` is the offline V2
  * configuration/secrets/control/telemetry (SQLite) backup for local-mode
  * deployments. It does NOT back up the managed SaaS PostgreSQL database. For
- * a PG-backed deployment the backup point is a pg_dump custom archive (the
- * same tooling as scripts/drills/backup-restore.mjs), taken when
- * MODEL_ROUTER_SAAS_UPGRADE_BACKUP_DIR is configured, or an operator-supplied
- * command via MODEL_ROUTER_SAAS_UPGRADE_BACKUP_COMMAND. With neither set the
- * step records only the registry anchor and says so.
+ * a PG-backed deployment MODEL_ROUTER_SAAS_BACKUP_POLICY_FILE selects either
+ * a snapshot-consistent pg_dump with verified encrypted offsite retention or
+ * freshly verified externally managed PITR. Both require KMS recovery evidence
+ * and a recent restore drill. A registry anchor alone never permits migration.
  *
  * Rollback (plan §5.3 — explicit, never automatic, never a down-migration):
  * `--rollback-to <registry version>` refuses the down-migration reading and
@@ -164,6 +163,7 @@ export interface SaasUpgradeBackupContext {
   readonly version: number;
   readonly admin: ValidatedUrl;
   readonly env: NodeJS.ProcessEnv;
+  readonly allowLocalPlaintext?: boolean;
 }
 
 export interface SaasUpgradeBackupOutcome {
@@ -203,7 +203,6 @@ const RESTART_SERVICES: readonly { service: string; unit: string; role: SaasDepl
 ];
 const RESTART_HEALTH_TIMEOUT_MS = 180_000;
 const RESTART_POLL_INTERVAL_MS = 2_000;
-const BACKUP_COMMAND_TIMEOUT_MS = 600_000;
 const SMOKE_TIMEOUT_MS = 15_000;
 
 /** Doctor subset per plan §5.2 [1]/[7]: PG, probes, migration count. */
@@ -219,17 +218,6 @@ function shellJoin(command: readonly string[]): string {
   return command
     .map((part) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(part) ? part : `'${part.replaceAll("'", "'\\''")}'`))
     .join(' ');
-}
-
-/** libpq identity for child tools; credentials reach argv-adjacent env only, never output. */
-function pgIdentityEnv(admin: ValidatedUrl): NodeJS.ProcessEnv {
-  const env: Record<string, string> = {
-    PGHOST: admin.url.hostname.replace(/^\[|\]$/g, ''),
-    PGPORT: admin.url.port || '5432',
-    PGUSER: admin.username,
-  };
-  if (admin.password !== '') env.PGPASSWORD = admin.password;
-  return env;
 }
 
 async function defaultExecCommand(
@@ -263,65 +251,27 @@ async function defaultFetchSmoke(url: string, timeoutMs: number): Promise<{ stat
 }
 
 /**
- * Backup point. Coverage reality (see the module doc): `backup:create` is the
- * local V2 offline backup and does not touch PostgreSQL, so the PG restore
- * point is pg_dump (or an operator command). No mechanism configured is not
- * a failure — it is recorded loudly as a skipped backup with the anchor.
+ * The legacy directory/command settings do not prove offsite retention or
+ * recovery. Production upgrades now use the explicit SaaS backup policy.
+ * The second argument is retained for compatibility with existing callers.
  */
 export async function defaultRunBackup(
   context: SaasUpgradeBackupContext,
-  tools: {
+  _tools: {
     execCommand: SaasUpgradeCommandDependencies['execCommand'];
     fileSize: (path: string) => number | null;
   },
 ): Promise<SaasUpgradeBackupOutcome> {
-  const { execCommand, fileSize } = tools;
-  if (!execCommand) throw new SaasUpgradeFailure('BACKUP_FAILED', 'no backup executor is available');
-  const command = context.env[SAAS_UPGRADE_BACKUP_COMMAND_ENV];
-  if (typeof command === 'string' && command.trim() !== '') {
-    const env = {
-      PATH: process.env.PATH ?? '/usr/bin:/bin',
-      ...pgIdentityEnv(context.admin),
-      PGDATABASE: decodeURIComponent(context.admin.url.pathname.slice(1)),
-      MODEL_ROUTER_SAAS_UPGRADE_BACKUP_VERSION: String(context.version),
-    };
-    const result = await execCommand(['/bin/sh', '-c', command], { env, timeoutMs: BACKUP_COMMAND_TIMEOUT_MS });
-    if (result.status !== 0) {
-      throw new SaasUpgradeFailure(
-        'BACKUP_FAILED',
-        `the configured backup command failed (exit ${result.status}); its output is withheld because it may embed credentials — inspect the operator backup procedure`,
-      );
-    }
-    return { status: 'ok', detail: 'operator backup command completed (output withheld)' };
+  try {
+    return await protectSaasUpgrade(context.env, context.admin, context.allowLocalPlaintext);
+  } catch (error) {
+    throw new SaasUpgradeFailure(
+      'BACKUP_FAILED',
+      error instanceof SaasBackupFailure
+        ? `${error.code}: ${error.message}`
+        : 'PostgreSQL backup protection could not be verified; sensitive details withheld',
+    );
   }
-  const dir = context.env[SAAS_UPGRADE_BACKUP_DIR_ENV];
-  if (typeof dir === 'string' && dir.trim() !== '') {
-    const stamp = new Date().toISOString().replaceAll(/[:.]/g, '-');
-    const file = join(dir, `model-router-saas-upgrade-v${context.version}-${stamp}.dump`);
-    const database = decodeURIComponent(context.admin.url.pathname.slice(1));
-    const result = await execCommand(['pg_dump', '--format=custom', '--file', file, database], {
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...pgIdentityEnv(context.admin), PGDATABASE: database },
-      timeoutMs: BACKUP_COMMAND_TIMEOUT_MS,
-    });
-    if (result.status !== 0) {
-      throw new SaasUpgradeFailure(
-        'BACKUP_FAILED',
-        `pg_dump failed (exit ${result.status}); the pre-upgrade backup point was NOT taken — fix pg_dump before re-running saas:upgrade`,
-      );
-    }
-    const bytes = fileSize(file);
-    if (bytes === null || bytes <= 0) {
-      throw new SaasUpgradeFailure('BACKUP_FAILED', 'pg_dump exited 0 but the archive is missing or empty');
-    }
-    return { status: 'ok', detail: `pg_dump archive ${file} (${bytes} bytes)` };
-  }
-  return {
-    status: 'skipped',
-    detail:
-      `no PostgreSQL backup mechanism configured (${SAAS_UPGRADE_BACKUP_DIR_ENV} or ${SAAS_UPGRADE_BACKUP_COMMAND_ENV} unset); ` +
-      'backup:create covers only the local V2 configuration/secrets/control/telemetry (SQLite) and does NOT protect the managed SaaS PostgreSQL database — ' +
-      'the rollback anchor is the recorded registry head; take the restore point with the operator pg_dump procedure (scripts/drills/backup-restore.mjs) when a rollback path is required',
-  };
 }
 
 export function buildRestartPlan(
@@ -793,7 +743,7 @@ export async function saasUpgrade(
     if (options.dryRun) {
       writeLine('saas:upgrade dry-run — zero mutations from this point. Planned steps:');
       writeLine(
-        `  - backup-point: record registry head ${preState.head} as the rollback anchor${environment[SAAS_UPGRADE_BACKUP_DIR_ENV] || environment[SAAS_UPGRADE_BACKUP_COMMAND_ENV] ? ' and take the configured PostgreSQL backup point' : ' (no PostgreSQL backup mechanism configured)'}`,
+        `  - backup-point: require ${SAAS_BACKUP_POLICY_FILE_ENV}, fresh PostgreSQL backup/PITR evidence, KMS recovery evidence, and a recent passing restore receipt; record registry head ${preState.head}`,
       );
       writeLine(`  - migrate: runSaasMigrations as ${MIGRATOR_PG_ROLE} (transactional; failure rolls back and stops)`);
       writeLine(`  - roles: replay ${MAIN_TEMPLATE_FILE} and ${WORKER_TEMPLATE_FILE} (administrator)`);
@@ -833,9 +783,15 @@ export async function saasUpgrade(
     beginStep('backup-point', 'rollback anchor + PostgreSQL backup point');
     const runBackup = dependencies.runBackup ?? defaultRunBackup;
     const backup = await runBackup(
-      { version: preState.head, admin, env: environment },
+      { version: preState.head, admin, env: environment, allowLocalPlaintext },
       { execCommand: execCommandImpl, fileSize: fileSizeImpl },
     );
+    if (backup.status !== 'ok') {
+      throw new SaasUpgradeFailure(
+        'BACKUP_FAILED',
+        'PostgreSQL backup protection was skipped; a registry anchor does not permit an upgrade',
+      );
+    }
     finishStep(backup.status, `anchor registry head ${preState.head}; ${backup.detail}`);
 
     // ---------- [3] migrate ----------

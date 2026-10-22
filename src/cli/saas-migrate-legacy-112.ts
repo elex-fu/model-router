@@ -519,7 +519,12 @@ export async function saasMigrateLegacy112(
     const runBackup = dependencies.runBackup ?? defaultCompatRunBackup;
     let backup: { status: 'ok' | 'skipped'; detail: string };
     try {
-      backup = await runBackup({ version: LEGACY_MAIN_112_SOURCE_VERSION, admin, env: environment });
+      backup = await runBackup({
+        version: LEGACY_MAIN_112_SOURCE_VERSION,
+        admin,
+        env: environment,
+        allowLocalPlaintext,
+      });
     } catch (error) {
       throw new SaasMigrateLegacy112Failure(
         'BACKUP_FAILED',

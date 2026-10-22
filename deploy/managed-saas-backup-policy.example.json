@@ -1,0 +1,30 @@
+{
+  "format": "saas-backup-policy-v1",
+  "sourceId": "production-primary",
+  "mode": "pg-dump",
+  "databaseUrlEnv": "MODEL_ROUTER_SAAS_DEPLOY_ADMIN_URL",
+  "stateDirectory": "/var/lib/model-router-saas-backups",
+  "rpoSeconds": 7200,
+  "rtoSeconds": 3600,
+  "scheduleIntervalSeconds": 3600,
+  "maximumDurationSeconds": 1800,
+  "retentionDays": 30,
+  "localRetentionDays": 2,
+  "restoreVerificationMaxAgeHours": 168,
+  "kms": {
+    "requiredKeyIds": ["arn:aws:kms:REGION:ACCOUNT:key/BACKUP-KEY", "arn:aws:kms:REGION:ACCOUNT:key/CREDENTIAL-CURRENT", "arn:aws:kms:REGION:ACCOUNT:key/CREDENTIAL-RETIRED"],
+    "recoveryMaterialReference": "vault:operations/model-router/recovery-manifest",
+    "recoveryCheck": {
+      "argv": ["/usr/bin/node", "/opt/model-router/scripts/backup/verify-aws-kms-canaries.mjs"],
+      "envNames": ["MODEL_ROUTER_SAAS_BACKUP_KMS_CANARIES_FILE", "MODEL_ROUTER_SAAS_BACKUP_AWS_EXECUTABLE", "MODEL_ROUTER_SAAS_BACKUP_RECOVERY_AWS_PROFILE", "AWS_CONFIG_FILE", "AWS_PROFILE"]
+    }
+  },
+  "offsite": {
+    "bucket": "replace-with-offsite-backup-bucket",
+    "prefix": "model-router",
+    "region": "us-east-1",
+    "kmsKeyId": "arn:aws:kms:REGION:ACCOUNT:key/BACKUP-KEY",
+    "awsExecutable": "/usr/local/bin/aws",
+    "credentialEnvNames": ["AWS_CONFIG_FILE", "AWS_PROFILE"]
+  }
+}

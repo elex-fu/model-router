@@ -280,6 +280,68 @@ function check(result: SaasDoctorResult, id: string) {
   return found;
 }
 
+test('doctor reports the running gateway capability projection and warns on missing live verification', async () => {
+  const gatewayCapabilities = {
+    state: 'available' as const,
+    observedAt: new Date().toISOString(),
+    readiness: {
+      configurationValid: true,
+      fatalReasonCodes: [],
+      capabilities: [
+        {
+          capability: 'provider-bundle:kimi',
+          kind: 'provider-bundle' as const,
+          label: 'Kimi',
+          providerId: 'kimi',
+          enabled: true,
+          assembled: true,
+          verified: false,
+          operational: true,
+          verificationLevel: 'unverified' as const,
+          reasonCodes: ['VERIFICATION_NOT_RECORDED' as const],
+          productIds: ['kimi-code'],
+          endpointScopes: ['messages'],
+          unavailableEndpointScopes: [],
+        },
+      ],
+    },
+  };
+  const { result } = await runDoctor(
+    { json: true },
+    baseDependencies({
+      env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_GATEWAY_ORIGIN: 'https://gateway.example.invalid' },
+      readGatewayCapabilities: async () => gatewayCapabilities,
+    }),
+  );
+  assert.equal(check(result, 'gateway-capabilities').level, 'warn');
+  assert.match(check(result, 'gateway-capabilities').detail, /0\/1/);
+  assert.deepEqual(result.gatewayCapabilities, gatewayCapabilities);
+});
+
+test('doctor fails invalid gateway assembly and keeps an unreachable gateway visible as warning', async () => {
+  for (const state of ['available', 'unavailable'] as const) {
+    const { result } = await runDoctor(
+      {},
+      baseDependencies({
+        env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_GATEWAY_ORIGIN: 'https://gateway.example.invalid' },
+        readGatewayCapabilities: async () =>
+          state === 'available'
+            ? {
+                state,
+                observedAt: new Date().toISOString(),
+                readiness: {
+                  configurationValid: false,
+                  fatalReasonCodes: ['PROVIDER_BUNDLE_DISPATCH_UNAVAILABLE'],
+                  capabilities: [],
+                },
+              }
+            : { state },
+      }),
+    );
+    assert.equal(check(result, 'gateway-capabilities').level, state === 'available' ? 'fail' : 'warn');
+  }
+});
+
 test('control-plane scope runs all nine checks and reports all-pass', async () => {
   const { result, lines } = await runDoctor({}, baseDependencies());
   assert.equal(result.role, 'control-plane');

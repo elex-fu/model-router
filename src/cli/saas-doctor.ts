@@ -30,6 +30,10 @@ import {
   SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
 } from '../saas/deployment.js';
 import { CONCURRENCY_INFLIGHT_HORIZON_SECONDS } from '../saas/gateway/postgres-preparation-capacity.js';
+import {
+  type GatewayCapabilityStatus,
+  readGatewayCapabilityStatus,
+} from '../saas/runtime/gateway-capability-status.js';
 import { loadGatewayProviderCredentialUnsealingKms } from '../saas/runtime/gateway-provider-credential-kms.js';
 import { loadProviderCredentialSealingKms } from '../saas/runtime/provider-credential-kms.js';
 import { loadProviderCredentialRewrappingKms } from '../saas/runtime/provider-credential-rewrapping-kms.js';
@@ -54,6 +58,7 @@ export type SaasDoctorCheckId =
   | 'role-privileges'
   | 'kms-readiness'
   | 'redis-contract'
+  | 'gateway-capabilities'
   | 'stuck-executions'
   | 'recovery-sweep'
   | 'health-self-heal'
@@ -81,6 +86,7 @@ export interface SaasDoctorResult {
   readonly summary: SaasDoctorSummary;
   readonly checks: readonly SaasDoctorCheckResult[];
   readonly exitCode: 0 | 1;
+  readonly gatewayCapabilities?: GatewayCapabilityStatus;
 }
 
 export interface SaasDoctorCommandOptions {
@@ -119,6 +125,7 @@ export interface SaasDoctorDependencies {
   unitsDir?: string;
   envDir?: string;
   writeLine?: (line: string) => void;
+  readGatewayCapabilities?: (env: NodeJS.ProcessEnv) => Promise<GatewayCapabilityStatus>;
 }
 
 export class SaasDoctorOptionsError extends Error {
@@ -161,6 +168,8 @@ const PROBE_HINTS: Readonly<Record<SaasDoctorCheckId, string>> = Object.freeze({
   'role-privileges': 'probe: verifySaasRuntimeDatabasePrivileges / verifyCredentialValidationWorkerRuntimePrivileges',
   'kms-readiness': 'probe: per-role KMS module load + checkReady, then close',
   'redis-contract': 'probe: RedisRespClient RESP2 connect + PING within REDIS_RESP_BOUNDS',
+  'gateway-capabilities':
+    'probe: bounded GET /readyz on the configured running gateway; sanitized provider capability facts',
   'stuck-executions':
     'probe: read-only count over saas_requests/saas_attempts past CONCURRENCY_INFLIGHT_HORIZON_SECONDS',
   'recovery-sweep': 'probe: read-only count over saas_unknown_outcome_reconciliation_cases (open cases)',
@@ -1125,6 +1134,7 @@ export async function saasDoctor(
   const role = resolveRole(options, env);
   const context: DoctorContext = { role, env, dependencies, database: undefined };
   const checks: SaasDoctorCheckResult[] = [];
+  let gatewayCapabilities: GatewayCapabilityStatus | undefined;
   try {
     for (const check of checkScopes(role)) {
       switch (check) {
@@ -1157,6 +1167,41 @@ export async function saasDoctor(
           break;
       }
     }
+    if (env.MODEL_ROUTER_SAAS_GATEWAY_ORIGIN) {
+      gatewayCapabilities = await (dependencies.readGatewayCapabilities ?? readGatewayCapabilityStatus)(env);
+      if (gatewayCapabilities.state !== 'available') {
+        checks.push(
+          warn(
+            'gateway-capabilities',
+            'Running gateway capability facts are unavailable',
+            'Start the configured gateway and inspect its /readyz projection',
+          ),
+        );
+      } else if (!gatewayCapabilities.readiness.configurationValid) {
+        checks.push(
+          fail(
+            'gateway-capabilities',
+            'Gateway capability assembly is invalid',
+            'Inspect provider capability reason codes in the JSON report',
+          ),
+        );
+      } else {
+        const enabled = gatewayCapabilities.readiness.capabilities.filter((capability) => capability.enabled);
+        const sellable = enabled.filter(
+          (capability) => capability.assembled && capability.verified && capability.operational,
+        );
+        const detail = `${sellable.length}/${enabled.length} enabled provider capabilities have assembly, live verification and operational facts`;
+        checks.push(
+          sellable.length === enabled.length
+            ? pass('gateway-capabilities', detail)
+            : warn(
+                'gateway-capabilities',
+                detail,
+                'Review each capability reason code before offering it to customers',
+              ),
+        );
+      }
+    }
   } finally {
     await closeDatabase(context);
   }
@@ -1171,6 +1216,7 @@ export async function saasDoctor(
     summary,
     checks,
     exitCode: summary.fail > 0 ? 1 : 0,
+    ...(gatewayCapabilities === undefined ? {} : { gatewayCapabilities }),
   };
   const writeLine = dependencies.writeLine ?? ((line: string) => console.log(line));
   try {

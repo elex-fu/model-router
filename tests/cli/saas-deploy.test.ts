@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import {
   parseSaasDeployEnvFile,
@@ -236,12 +238,46 @@ test('saas:deploy env-file parsing rejects malformed lines without echoing value
 test('saas:deploy worker expected-column manifest parses from its probe SQL', () => {
   const grants = parseWorkerExpectedColumnGrants();
   assert.ok(grants.length > 400, 'the worker manifest is substantial');
-  assert.deepEqual(grants[0], ['saas_tenant_provider_credential_validation_jobs', 'id', 'SELECT']);
+  assert.ok(
+    grants.some(
+      ([table, column, privilege]) =>
+        table === 'saas_tenant_provider_credential_validation_jobs' && column === 'id' && privilege === 'SELECT',
+    ),
+  );
   for (const [table, column, privilege] of grants) {
     assert.match(table, /^[a-z0-9_]+$/);
     assert.match(column, /^[a-z0-9_]+$/);
     assert.match(privilege, /^(SELECT|INSERT|UPDATE|DELETE)$/);
   }
+  // Tuple order is not a permission boundary: the Claude CASE reads may be
+  // prepended. Pin the entire parsed permission set to the deployment SQL so
+  // reordered, missing, or over-broad grants cannot hide behind a count check.
+  const workerGrantSql = readFileSync(
+    new URL('../../deploy/managed-saas-validation-worker-role-grants.sql', pathToFileURL(__filename)),
+    'utf8',
+  );
+  const deploymentGrants: string[] = [];
+  for (const match of workerGrantSql.matchAll(
+    /GRANT\s+(SELECT|INSERT|UPDATE|DELETE|REFERENCES)\s*\(([^)]*)\)\s*ON TABLE model_router_saas\.(\w+)\s+TO model_router_saas_validation_worker;/gi,
+  )) {
+    const [, privilege, columns, table] = match;
+    assert.ok(privilege && columns && table, 'column grant statement must identify its complete surface');
+    for (const column of columns
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      deploymentGrants.push(`${table}\t${column}\t${privilege.toUpperCase()}`);
+    }
+  }
+  assert.deepEqual(
+    [...new Set(grants.map((grant) => grant.join('\t')))].sort(),
+    [...new Set(deploymentGrants)].sort(),
+    'the deploy diagnostic parser must preserve the exact worker probe/deployment column-permission set',
+  );
+  assert.doesNotMatch(
+    workerGrantSql,
+    /GRANT\s+(?:SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES)\s+ON\s+(?:TABLE\s+)?model_router_saas\./i,
+  );
 });
 
 // ---------------------------------------------------------------------------

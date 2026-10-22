@@ -1,0 +1,32 @@
+{
+  "format": "saas-backup-policy-v1",
+  "sourceId": "production-primary",
+  "mode": "external-pitr",
+  "databaseUrlEnv": "MODEL_ROUTER_SAAS_DEPLOY_ADMIN_URL",
+  "stateDirectory": "/var/lib/model-router-saas-backups",
+  "rpoSeconds": 900,
+  "rtoSeconds": 3600,
+  "scheduleIntervalSeconds": 300,
+  "maximumDurationSeconds": 300,
+  "retentionDays": 30,
+  "localRetentionDays": 2,
+  "restoreVerificationMaxAgeHours": 168,
+  "kms": {
+    "requiredKeyIds": ["credential-key-current", "credential-key-retired", "provider-storage-key"],
+    "recoveryMaterialReference": "vault:operations/model-router/recovery-manifest",
+    "recoveryCheck": {
+      "argv": ["/opt/model-router-ops/bin/verify-recovery-keys"],
+      "envNames": ["RECOVERY_IDENTITY_FILE"]
+    }
+  },
+  "external": {
+    "verify": {
+      "argv": ["/opt/model-router-ops/bin/verify-postgres-pitr"],
+      "envNames": ["PITR_PROVIDER_CREDENTIAL_FILE"]
+    },
+    "verifyRestore": {
+      "argv": ["/opt/model-router-ops/bin/read-isolated-restore-evidence"],
+      "envNames": ["PITR_PROVIDER_CREDENTIAL_FILE"]
+    }
+  }
+}

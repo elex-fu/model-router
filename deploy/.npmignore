@@ -1,0 +1,9 @@
+# Operator connection settings and recovery material are local to a deployment.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.env
+**/*.env.local
+**/*.key
+**/*.pem
+**/secrets.local.*

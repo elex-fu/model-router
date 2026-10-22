@@ -5,30 +5,11 @@ import {
   type DeploymentEnvironment,
   MODEL_ROUTER_DEPLOYMENT_MODE,
   MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
+  parseDeploymentConfig,
 } from '../saas/deployment.js';
 import { generateProxyKey } from '../utils/generate-key.js';
 import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { applyUpdateOptions, parseCreateOptions } from './key-options.js';
-import { saasDeploy } from './saas-deploy.js';
-import { saasDoctor } from './saas-doctor.js';
-import { saasBootstrapAdmin } from './saas-management.js';
-import { saasMigrateLegacy112 } from './saas-migrate-legacy-112.js';
-import { saasMigrationAudit } from './saas-migration-audit.js';
-import { saasMigrate } from './saas-migrations.js';
-import { saasPlatformMfaEnroll } from './saas-platform-mfa-enrollment.js';
-import { saasUpgrade } from './saas-upgrade.js';
-import { tryV2, v2Config } from './v2.js';
-import {
-  adminBootstrap,
-  backupCreate,
-  backupRestore,
-  configApply,
-  configMigrate,
-  configValidate,
-  telemetryRebuildLive,
-  upstreamTest,
-  upstreamUpdate,
-} from './v2-management.js';
 
 const program = new Command();
 
@@ -36,6 +17,10 @@ program.name('model-router').description('Lightweight AI model proxy').version('
 
 function getStore(options: { config?: string }) {
   return new ConfigStore(options.config ?? DEFAULT_CONFIG_PATH);
+}
+
+async function tryV2(...args: Parameters<typeof import('./v2.js')['tryV2']>): Promise<boolean> {
+  return (await import('./v2.js')).tryV2(...args);
 }
 
 type StartRoleOptions = {
@@ -86,26 +71,26 @@ program
   .command('config:validate')
   .description('Validate an offline V2 configuration without changing it')
   .option('-c, --config <path>', 'Path to V2 configuration')
-  .action((options) => management(() => configValidate(options)));
+  .action((options) => management(async () => (await import('./v2-management.js')).configValidate(options)));
 
 program
   .command('config:migrate')
   .description('Preview the V1-to-V2 conversion or perform an offline V2 migration')
   .option('--dry-run', 'Convert and validate without writing configuration, secrets, or backup')
   .option('-c, --config <path>', 'Path to configuration')
-  .action((options) => management(() => configMigrate(options)));
+  .action((options) => management(async () => (await import('./v2-management.js')).configMigrate(options)));
 
 program
   .command('admin:bootstrap')
   .description('Create the first administrator via the local admin listener')
   .option('-c, --config <path>', 'Path to V2 configuration')
   .option('--test-stdin', 'Test-only: read token, name, and password from three stdin lines')
-  .action((options) => management(() => adminBootstrap(options)));
+  .action((options) => management(async () => (await import('./v2-management.js')).adminBootstrap(options)));
 
 program
   .command('saas:bootstrap-admin')
   .description('Create the first SaaS platform administrator directly in PostgreSQL')
-  .action(() => management(() => saasBootstrapAdmin()));
+  .action(() => management(async () => (await import('./saas-management.js')).saasBootstrapAdmin()));
 
 program
   .command('saas:platform-mfa-enroll')
@@ -120,12 +105,14 @@ program
     'after',
     '\nRequires MODEL_ROUTER_SAAS_DATABASE_URL and the trusted MODEL_ROUTER_SAAS_KMS_PROVIDER module. Only platform-totp is loaded. The provider receives fixed non-secret region/deployment/workload labels and must use workload identity for authentication; no DB, Redis, upstream or API credentials are forwarded, and no embedded AES keys are supported. Remote PostgreSQL requires verified TLS; session/role/search_path/query overrides are rejected.\n',
   )
-  .action((options) => management(() => saasPlatformMfaEnroll({}, options)));
+  .action((options) =>
+    management(async () => (await import('./saas-platform-mfa-enrollment.js')).saasPlatformMfaEnroll({}, options)),
+  );
 
 program
   .command('saas:migrate')
   .description('Apply SaaS database migrations explicitly. Server startup never runs migrations.')
-  .action(() => management(() => saasMigrate()));
+  .action(() => management(async () => (await import('./saas-migrations.js')).saasMigrate()));
 
 program
   .command('saas:migrate-legacy-112')
@@ -161,6 +148,7 @@ program
   )
   .action((options) =>
     management(async () => {
+      const { saasMigrateLegacy112 } = await import('./saas-migrate-legacy-112.js');
       const result = await saasMigrateLegacy112(options);
       process.exitCode = result.exitCode;
     }),
@@ -189,6 +177,7 @@ program
   )
   .action((options) =>
     management(async () => {
+      const { saasDeploy } = await import('./saas-deploy.js');
       const result = await saasDeploy(options);
       process.exitCode = result.exitCode;
     }),
@@ -218,10 +207,37 @@ program
   )
   .action((options) =>
     management(async () => {
+      const { saasDoctor } = await import('./saas-doctor.js');
       const result = await saasDoctor(options);
       process.exitCode = result.exitCode;
     }),
   );
+
+for (const [command, action, description] of [
+  ['saas:backup', 'run', 'Create and verify the configured PostgreSQL backup or PITR protection'],
+  ['saas:backup-status', 'status', 'Show PostgreSQL backup protection and restore verification status'],
+  [
+    'saas:backup-verify-restore',
+    'verify-restore',
+    'Restore a backup into a new disposable database and record verification',
+  ],
+] as const) {
+  const backupCommand = program
+    .command(command)
+    .description(description)
+    .option('--policy <path>', 'Backup policy JSON file')
+    .option('--env-file <path>', 'Deployment environment file')
+    .option('--allow-local-plaintext', 'Permit plaintext PostgreSQL only on explicitly local connections');
+  if (action === 'run') backupCommand.option('--if-due', 'Run only when the configured backup interval is due');
+  if (action === 'verify-restore') backupCommand.requiredOption('--backup-id <uuid>', 'Backup receipt to verify');
+  backupCommand.action((options) =>
+    management(async () => {
+      const { saasBackup } = await import('./saas-backup.js');
+      const result = await saasBackup(action, options);
+      process.exitCode = result.exitCode;
+    }),
+  );
+}
 
 program
   .command('saas:upgrade')
@@ -249,6 +265,7 @@ program
   )
   .action((options) =>
     management(async () => {
+      const { saasUpgrade } = await import('./saas-upgrade.js');
       const result = await saasUpgrade(options);
       process.exitCode = result.exitCode;
     }),
@@ -277,6 +294,7 @@ program
   )
   .action((options) =>
     management(async () => {
+      const { saasMigrationAudit } = await import('./saas-migration-audit.js');
       const { legacyChecksum, ...rest } = options;
       const result = await saasMigrationAudit({ ...rest, legacyChecksums: legacyChecksum });
       process.exitCode = result.exitCode;
@@ -288,7 +306,7 @@ program
   .description('Apply a V2 JSON file to an offline target with revision CAS')
   .option('--expected-revision <revision>', 'Fail unless the current revision matches')
   .option('-c, --config <path>', 'Target configuration path')
-  .action((path, options) => management(() => configApply(path, options)));
+  .action((path, options) => management(async () => (await import('./v2-management.js')).configApply(path, options)));
 
 program
   .command('upstream:update <name>')
@@ -298,34 +316,38 @@ program
   .option('--enable', 'Enable upstream')
   .option('--disable', 'Disable upstream')
   .option('-c, --config <path>', 'Path to V2 configuration')
-  .action((name, options) => management(() => upstreamUpdate(name, options)));
+  .action((name, options) =>
+    management(async () => (await import('./v2-management.js')).upstreamUpdate(name, options)),
+  );
 
 program
   .command('upstream:test <name>')
   .description('Probe a V2 upstream without changing configuration')
   .option('--model <model>', 'Override model')
   .option('-c, --config <path>', 'Path to V2 configuration')
-  .action((name, options) => management(() => upstreamTest(name, options)));
+  .action((name, options) => management(async () => (await import('./v2-management.js')).upstreamTest(name, options)));
 
 program
   .command('backup:create')
   .description('Create an offline V2 config, secrets, control and telemetry backup')
   .option('-c, --config <path>', 'Path to V2 configuration')
-  .action((options) => management(() => backupCreate(options)));
+  .action((options) => management(async () => (await import('./v2-management.js')).backupCreate(options)));
 
 program
   .command('backup:restore <backupId>')
   .description('Restore a complete V2 backup to a fully stopped instance')
   .requiredOption('-c, --config <path>', 'Explicit path to the stopped V2 configuration')
   .requiredOption('--expected-revision <revision>', 'Current configuration revision CAS')
-  .action((backupId, options) => management(() => backupRestore(backupId, options)));
+  .action((backupId, options) =>
+    management(async () => (await import('./v2-management.js')).backupRestore(backupId, options)),
+  );
 
 program
   .command('telemetry:rebuild-live')
   .description('Rebuild live telemetry aggregates on a fully stopped V2 instance')
   .requiredOption('-c, --config <path>', 'Explicit path to the stopped V2 configuration')
   .requiredOption('--expected-revision <revision>', 'Current configuration revision CAS')
-  .action((options) => management(() => telemetryRebuildLive(options)));
+  .action((options) => management(async () => (await import('./v2-management.js')).telemetryRebuildLive(options)));
 
 // start
 program
@@ -378,6 +400,14 @@ program
         pidFile: options.pidFile,
       });
       console.log(`model-router started in background (pid ${pid})`);
+      return;
+    }
+    // Validate before loading either composition. Managed startup never needs
+    // the local SQLite/admin/proxy graph or the administrative CLI commands.
+    const deployment = parseDeploymentConfig(environment);
+    if (deployment.mode === 'managed-saas') {
+      const { startManagedSaasServer } = await import('../server/managed-saas.js');
+      await startManagedSaasServer(deployment, { environment });
       return;
     }
     const { startServer } = await import('../server/index.js');
@@ -841,6 +871,7 @@ program
   .option('--key <key>', 'Proxy key to use (defaults to first enabled key)')
   .option('-c, --config <path>', 'Path to config file')
   .action(async (model, message, options) => {
+    const { v2Config } = await import('./v2.js');
     const rawV2 = v2Config(options);
     const store = rawV2 ? undefined : getStore(options);
     const cfg = rawV2 ?? store?.load();

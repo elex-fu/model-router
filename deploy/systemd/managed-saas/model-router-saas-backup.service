@@ -1,0 +1,28 @@
+[Unit]
+Description=model-router PostgreSQL backup or external PITR verification
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=model-router-backup
+Group=model-router-backup
+WorkingDirectory=/opt/model-router
+EnvironmentFile=/etc/model-router-saas/backup.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/model-router/dist/cli/index.js saas:backup --if-due
+TimeoutStartSec=2h
+UMask=0077
+StateDirectory=model-router-saas-backups
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/model-router-saas-backups
+ReadWritePaths=/var/lib/model-router-saas-backup-status

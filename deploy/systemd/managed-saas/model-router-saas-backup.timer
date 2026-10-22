@@ -1,0 +1,12 @@
+[Unit]
+Description=Check model-router PostgreSQL backup policy every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+RandomizedDelaySec=5s
+AccuracySec=1s
+Unit=model-router-saas-backup.service
+
+[Install]
+WantedBy=timers.target
