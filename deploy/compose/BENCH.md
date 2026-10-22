@@ -119,6 +119,19 @@ Every CLI process and gateway replica owns an independent pool, so include all
 processes when budgeting PostgreSQL connections. Provider-account
 `maxConcurrency` controls upstream request slots separately from this pool.
 
+### Optional HTTP handler cap
+
+`MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT` is disabled by default when
+unset or empty. Set it in `deploy/compose/.env` and recreate the gateways to
+forward an explicit value to each replica; for direct CLI runs, export it in
+each process environment. A nonempty invalid value fails startup. The value
+`8` is an explicit candidate for future benchmark validation.
+
+Each admitted slot remains held until the HTTP handler promise settles,
+including its settlement or compensation work. Stream EOF or client abort
+does not release the slot early. Detached asynchronous image work after a
+`202` response and WebSocket connections are outside this cap.
+
 ## Performance suite
 
 ```bash

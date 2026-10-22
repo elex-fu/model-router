@@ -698,6 +698,20 @@ function requestPath(req: IncomingMessage): string | undefined {
   }
 }
 
+/** Classify inference using the same route authorities as the HTTP dispatcher. */
+export function isSaasGatewayInferenceRequest(req: IncomingMessage): boolean {
+  if ((req.method ?? '').toUpperCase() !== 'POST') return false;
+  if (oneHeader(req, 'upgrade')?.trim().toLowerCase() === 'websocket') return false;
+  const path = requestPath(req);
+  return path !== undefined && (ROUTES.has(path) || matchGeminiNativeContentPath(path) !== null);
+}
+
+/** Reject before authentication, preparation, or any database work. */
+export function rejectSaasGatewayCapacityRequest(req: IncomingMessage, res: ServerResponse, requestId: string): void {
+  drainRequest(req);
+  writeJsonError(res, 429, 'GATEWAY_CAPACITY_EXHAUSTED', requestId, undefined, 1);
+}
+
 /**
  * §4.3 (task #17): the bounded client `Range` header for the video content
  * proxy — single header value, capped, printable ASCII only. Anything else

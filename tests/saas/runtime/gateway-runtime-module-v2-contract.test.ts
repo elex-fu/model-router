@@ -203,6 +203,7 @@ test('gateway runtime reads the outer version marker before trusting a v2 handle
 
   await t.test('keeps v2 dependencies exact', async () => {
     await assertContractInvalid(v2Handle({ dependencies: dependencies({ unexpected: true }) }));
+    await assertContractInvalid(v2Handle({ dependencies: dependencies({ maxHttpInFlight: 1 }) }));
   });
 });
 

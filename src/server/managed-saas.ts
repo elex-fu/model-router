@@ -1787,6 +1787,15 @@ export async function startManagedSaasServer(
   }
 
   const environment = options.environment ?? process.env;
+  const httpInFlightRaw = environment.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT;
+  let maxHttpInFlight: number | undefined;
+  if (httpInFlightRaw !== undefined && httpInFlightRaw !== '') {
+    if (!/^[1-9][0-9]*$/.test(httpInFlightRaw) || !Number.isSafeInteger(Number(httpInFlightRaw))) {
+      throw new TypeError('MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT must be a positive safe integer');
+    }
+    maxHttpInFlight = Number(httpInFlightRaw);
+  }
+
   // R9 §4 P1: operator egress allowlist for container-network providers.
   // Strict env parsing — malformed CIDR entries fail EVERY workload startup
   // closed (gateway dispatch, credential validation, account probing and
@@ -2146,6 +2155,7 @@ export async function startManagedSaasServer(
       gateway = createManagedSaasGatewayProductionComposition(database, {
         riskControl: { emailSender: riskControlEmailSender },
         ...runtimeGatewayOptions,
+        ...(maxHttpInFlight === undefined ? {} : { maxHttpInFlight }),
         preparationObserver: observePreparation,
         dispatchObserver: observeDispatch,
         preparationFailureObserver: observePreparationFailure,
@@ -2236,7 +2246,10 @@ export async function startManagedSaasServer(
       } catch {
         throw new Error('Managed SaaS gateway credential KMS readiness failed');
       }
-      gateway = createManagedSaasGatewayProductionComposition(database, options.gateway);
+      gateway = createManagedSaasGatewayProductionComposition(database, {
+        ...options.gateway,
+        ...(options.gateway.maxHttpInFlight === undefined && maxHttpInFlight !== undefined ? { maxHttpInFlight } : {}),
+      });
     }
 
     // Batch-5 §5.2 OEM white-label: the public brand snapshot data plane.

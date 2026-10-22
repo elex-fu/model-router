@@ -1637,10 +1637,6 @@ test('managed OAuth rotator dispatches tenant and platform claims with the opera
     tenantId: 'tenant-a',
     accountId: 'account-a',
     credentialId: 'credential-a',
-    providerId: 'provider-a',
-    productId: 'product-a',
-    credentialType: 'oauth',
-    purpose: 'inference',
     expectedVersion: 3,
     secret,
   });
@@ -1665,10 +1661,6 @@ test('managed OAuth rotator dispatches tenant and platform claims with the opera
     tenantId: null,
     accountId: 'platform-account-a',
     credentialId: 'platform-credential-a',
-    providerId: 'provider-a',
-    productId: 'product-a',
-    credentialType: 'oauth',
-    purpose: 'inference',
     expectedVersion: 5,
     secret,
   });
@@ -1689,10 +1681,6 @@ test('managed OAuth rotator dispatches tenant and platform claims with the opera
       tenantId: null,
       accountId: 'account-a',
       credentialId: 'credential-a',
-      providerId: 'provider-a',
-      productId: 'product-a',
-      credentialType: 'oauth',
-      purpose: 'inference',
       expectedVersion: 1,
       secret,
     }),
@@ -1747,6 +1735,155 @@ test('standard startServer route composes gateway runtime and binds only the /v1
   await runtime.close();
   assert.ok(events.indexOf('gateway-kms-close') < events.indexOf('gateway-runtime-close'));
   assert.equal(events.at(-1), 'database-close');
+});
+
+test('standard startServer forwards HTTP cap env, preserves explicit typed priority, and leaves empty/unset disabled', async () => {
+  for (const { configured, typed } of [
+    { configured: '1', typed: undefined },
+    { configured: '', typed: undefined },
+    { configured: undefined, typed: undefined },
+    { configured: '1', typed: 2 },
+  ]) {
+    const environment = {
+      ...(typed === undefined ? gatewayEnvironment : managedEnvironment)({
+        customer: 45_123,
+        platform: 45_124,
+        gateway: 45_125,
+      }),
+      MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: configured,
+    };
+    const events: string[] = [];
+    const database = fakeDatabase(events);
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let authenticationTransactions = 0;
+    database.transaction = async (work) => {
+      authenticationTransactions += 1;
+      await barrier;
+      return work({ query: async () => ({ rows: [], rowCount: 0 }) });
+    };
+    let runtime: ManagedSaasRuntime | undefined;
+    const handling: Promise<boolean>[] = [];
+    try {
+      await startServer(undefined, '/unused/local-config.json', {
+        environment,
+        managedSaas: managedOptions(events, {
+          environment,
+          createDatabase: () => database,
+          ...(typed === undefined
+            ? {}
+            : {
+                gateway: {
+                  ...gatewayRuntimeDependencies(),
+                  maxHttpInFlight: typed,
+                  caller: {
+                    validate: async () => {
+                      throw new Error('authentication must reject before preparation');
+                    },
+                  },
+                  entitlement: {
+                    resolve: async () => {
+                      throw new Error('authentication must reject before entitlement');
+                    },
+                  },
+                  schedulerAffinity: { resolve: async () => ({ decision: 'allow' as const, accountId: null }) },
+                  admission: {
+                    authorizeAndReserve: async () => {
+                      throw new Error('authentication must reject before admission');
+                    },
+                  },
+                  attempt: {
+                    persist: async () => {
+                      throw new Error('authentication must reject before attempt persistence');
+                    },
+                  },
+                  compensation: {
+                    releasePreDispatch: async () => {
+                      throw new Error('authentication must reject before compensation');
+                    },
+                  },
+                  providerCredentialUnsealingKms: {
+                    decryptDataKey: async () => new Uint8Array(32),
+                    checkReady: async () => {},
+                    close: async () => {},
+                  },
+                  credentialContext: { deployment: 'model-router-startup-test', environment: 'test' },
+                },
+              }),
+          gatewayRuntimeModuleImporter: async () => fakeGatewayRuntimeModule(events),
+          gatewayProviderCredentialKmsImporter: async () => fakeGatewayKmsModule(events),
+          createListener: () => inertListener(),
+          onReady: (value) => {
+            runtime = value;
+          },
+        }),
+      });
+      assert.ok(runtime?.gateway);
+      const makeCall = () => {
+        const request = makeGatewayRequest('/v1/chat/completions', {
+          headers: { authorization: `Bearer mr_live_${'a'.repeat(43)}`, 'content-type': 'application/json' },
+        });
+        const response = makeGatewayResponse();
+        Object.assign(response.response, {
+          setHeader(name: string, value: unknown) {
+            response.record.headers[name.toLowerCase()] = value;
+            return response.response;
+          },
+        });
+        const pending = runtime!.gateway!.handler(request.request, response.response);
+        handling.push(pending);
+        return { pending, response };
+      };
+      const first = makeCall();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(authenticationTransactions, 1);
+      const second = makeCall();
+      if (typed === 2) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(authenticationTransactions, 2, 'typed cap=2 must take precedence over env cap=1');
+        const third = makeCall();
+        assert.equal(third.response.record.status, 429);
+        await third.pending;
+        assert.equal(authenticationTransactions, 2);
+      } else if (configured === '1') {
+        assert.equal(second.response.record.status, 429, 'the standard CLI env must reach the composed handler');
+        await second.pending;
+        assert.equal(JSON.parse(second.response.record.body).error.code, 'GATEWAY_CAPACITY_EXHAUSTED');
+        assert.equal(second.response.record.headers['retry-after'], '1');
+        assert.equal(authenticationTransactions, 1);
+      } else {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(authenticationTransactions, 2, 'unset/empty env must leave backpressure disabled');
+      }
+      release();
+      await Promise.all(handling);
+      assert.equal(first.response.record.status, 401);
+    } finally {
+      release();
+      await Promise.allSettled(handling);
+      await runtime?.close();
+    }
+  }
+});
+
+test('standard startServer rejects malformed HTTP cap env before database startup', async () => {
+  for (const configured of ['0', '-1', '1.5', 'NaN', 'Infinity', ' 1', '1 ', '01', '9007199254740992']) {
+    const environment = {
+      ...gatewayEnvironment({ customer: 45_123, platform: 45_124, gateway: 45_125 }),
+      MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: configured,
+    };
+    const events: string[] = [];
+    await assert.rejects(
+      startServer(undefined, '/unused/local-config.json', {
+        environment,
+        managedSaas: managedOptions(events, { environment }),
+      }),
+      /MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT must be a positive safe integer/,
+    );
+    assert.deepEqual(events, [], 'invalid configuration must precede database/KMS/listener startup');
+  }
 });
 
 test('gateway workload wires its scoped Redis sticky cache and closes it after the gateway', async () => {

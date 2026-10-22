@@ -159,6 +159,8 @@ services:
       # Each gateway replica owns its own PostgreSQL connection pool.
       MODEL_ROUTER_SAAS_DB_POOL_MAX: ${MODEL_ROUTER_SAAS_DB_POOL_MAX:-16}
       MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS: ${MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS:-5000}
+      # Optional HTTP handler cap; unset or empty leaves it disabled.
+      MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: ${MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT:-}
       # Explicit opt-in for a direct/session-compatible PG connection or a
       # verified pooler with native wire prepared-statement tracking enabled.
       MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS: ${MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS:-off}

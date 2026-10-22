@@ -29,6 +29,7 @@ import type { ProviderAwaitable, ProviderEnvironment, ProviderModuleImporter } f
 import { resolveProviderModuleSpecifier } from './providers.js';
 
 type CoreOwnedGatewayOption =
+  | 'maxHttpInFlight'
   | 'caller'
   | 'entitlement'
   | 'admission'

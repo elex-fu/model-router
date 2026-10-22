@@ -110,6 +110,7 @@ test('gateway runtime forwards the optional local HTTPS capability only inside a
 test('gateway runtime keeps dependency and scheduler-authority keys exact', async (t) => {
   await t.test('extra dependency key', async () => {
     await assertContractInvalid(dependencies({ unexpected: true }));
+    await assertContractInvalid(dependencies({ maxHttpInFlight: 1 }));
   });
 
   await t.test('extra scheduler-authority key', async () => {

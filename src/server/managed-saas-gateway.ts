@@ -33,9 +33,11 @@ import type { ContentModerationPort, SaasGatewayReadinessProvider } from '../saa
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort as GatewayPreparedEvidenceDispatchPort,
+  isSaasGatewayInferenceRequest,
   type ModelDiscoveryPort,
   type ProxyKeyAuthenticator,
   type RequestPreparationPort,
+  rejectSaasGatewayCapacityRequest,
   type SaasGatewayAsyncMediaPort,
   type SaasGatewayHttpHandler,
   type SaasGatewayQueryPort,
@@ -344,6 +346,8 @@ export interface ManagedSaasGatewayCompositionDependencies {
   };
   readonly dispatch: ManagedSaasGatewayDispatchDependencies;
   readonly lifecycle: ManagedSaasGatewayLifecycle;
+  /** Optional process-local inference cap; unset disables early HTTP backpressure. */
+  readonly maxHttpInFlight?: number;
   readonly maxBodyBytes: number;
   readonly entryPoint: string;
   /** Trusted reverse-proxy CIDRs for client address resolution; empty means socket peer only. */
@@ -690,6 +694,7 @@ function validateCompositionDependencies(dependencies: ManagedSaasGatewayComposi
     requireDependency(dispatch.runtimeHealthWriter, 'recordRuntimeOutcome');
   }
   requirePositiveInteger(dependencies.maxBodyBytes);
+  if (dependencies.maxHttpInFlight !== undefined) requirePositiveInteger(dependencies.maxHttpInFlight);
   requireText(dependencies.entryPoint);
   if (dependencies.responsesWsRoundExecutor !== undefined)
     requireDependency(dependencies.responsesWsRoundExecutor, 'executeRound');
@@ -849,20 +854,34 @@ export function createManagedSaasGatewayComposition(
     ...(dependencies.videoMedia ? { videoCreate: dependencies.videoMedia.videoCreate } : {}),
   });
   const pendingHttpHandlers = new Set<Promise<boolean>>();
+  const maxHttpInFlight = dependencies.maxHttpInFlight;
+  let httpInFlight = 0;
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
-    const pending = requestIdContext.run(currentRequestId, () =>
-      httpHandler(req, res, { requestId: currentRequestId }),
-    );
+    let limited = false;
+    if (maxHttpInFlight !== undefined && isSaasGatewayInferenceRequest(req)) {
+      if (httpInFlight >= maxHttpInFlight) {
+        rejectSaasGatewayCapacityRequest(req, res, currentRequestId);
+        return Promise.resolve(true);
+      }
+      httpInFlight += 1;
+      limited = true;
+    }
+    let pending: Promise<boolean>;
+    try {
+      pending = requestIdContext.run(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId }));
+    } catch (error) {
+      if (limited) httpInFlight -= 1;
+      throw error;
+    }
     pendingHttpHandlers.add(pending);
-    void pending.then(
-      () => {
-        pendingHttpHandlers.delete(pending);
-      },
-      () => {
-        pendingHttpHandlers.delete(pending);
-      },
-    );
+    const settled = () => {
+      pendingHttpHandlers.delete(pending);
+      if (limited) httpInFlight -= 1;
+    };
+    // Response EOF/close and client abort can precede financial cleanup.
+    // Retain the permit and the original drain promise until the handler settles.
+    void pending.then(settled, settled);
     return pending;
   };
   const close = closeOnce({
@@ -914,6 +933,8 @@ export interface ManagedSaasProviderPayloadOptions {
 }
 
 export interface ManagedSaasGatewayProductionOptions {
+  /** Optional process-local inference cap; unset disables early HTTP backpressure. */
+  readonly maxHttpInFlight?: number;
   readonly preparationObserver?: PostgresPreparationObserver;
   readonly preparationFailureObserver?: PreparationFailureObserver;
   readonly dispatchObserver?: PreparedEvidenceDispatchObserver;
@@ -1894,6 +1915,7 @@ export function createManagedSaasGatewayProductionComposition(
   validateEndpointPolicy(options.endpointPolicy);
   requireCallable(options.resolveAuthenticationHeader);
   requireCallable(options.fetch);
+  if (options.maxHttpInFlight !== undefined) requirePositiveInteger(options.maxHttpInFlight);
   requirePositiveInteger(options.timeoutMs);
   requirePositiveInteger(options.maxConcurrency);
   requirePositiveInteger(options.leaseTtlMs);
@@ -2442,6 +2464,7 @@ export function createManagedSaasGatewayProductionComposition(
         await options.providerCredentialUnsealingKms.close();
       },
     },
+    ...(options.maxHttpInFlight === undefined ? {} : { maxHttpInFlight: options.maxHttpInFlight }),
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
     ...(options.responsesWsLimits ? { responsesWsLimits: options.responsesWsLimits } : {}),

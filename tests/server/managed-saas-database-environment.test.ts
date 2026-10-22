@@ -147,3 +147,20 @@ test('gateway deployment examples forward database pool controls with the runtim
     );
   }
 });
+
+test('gateway deployment examples keep the optional HTTP handler cap disabled by default', () => {
+  const compose = readFileSync(new URL('../../deploy/compose/docker-compose.yml', import.meta.url), 'utf8');
+  const gateway = compose.split('\n  gateway:\n')[1]?.split(/\n[ ]{2}[a-z][a-z0-9-]*:\n/)[0];
+  assert.ok(gateway, 'the standard Compose gateway service must exist');
+  assert.ok(
+    gateway.includes(
+      '      MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: ${MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT:-}',
+    ),
+    'the optional HTTP handler cap must be forwarded with an empty default',
+  );
+  const systemdEnvironment = readFileSync(
+    new URL('../../deploy/systemd/managed-saas/gateway.env.example', import.meta.url),
+    'utf8',
+  );
+  assert.ok(systemdEnvironment.includes('# MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT=8'));
+});

@@ -1169,6 +1169,7 @@ class LifecycleResponse extends EventEmitter {
   writableEnded = false;
   destroyed = false;
   statusCode = 0;
+  body = '';
   readonly headers = new Map<string, unknown>();
 
   constructor(
@@ -1195,7 +1196,8 @@ class LifecycleResponse extends EventEmitter {
     return true;
   }
 
-  end(): this {
+  end(body?: unknown): this {
+    if (body !== undefined) this.body += String(body);
     this.writableEnded = true;
     this.event('response-ended');
     this.emit('finish');
@@ -1211,7 +1213,7 @@ class LifecycleResponse extends EventEmitter {
 }
 
 /** Real preparation and dispatch, with an explicit post-EOF settlement barrier and no sockets or database. */
-function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
+function lifecycleComposition(options: { close?: () => Promise<void>; maxHttpInFlight?: number } = {}) {
   const events: string[] = [];
   const executor: SqlExecutor = { query: async () => ({ rows: [], rowCount: 0 }) };
   const evidence = new Map<string, PreparedRequestEvidenceRecord>();
@@ -1232,6 +1234,7 @@ function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
   let attemptIds = 0;
   let evidenceIds = 0;
   let closeCalls = 0;
+  const counters = { authentication: 0, preparation: 0, transactions: 0 };
   const readEvidence = (evidenceId: string) => {
     const record = evidence.get(evidenceId);
     assert.ok(record);
@@ -1243,10 +1246,25 @@ function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
     return record;
   };
   const composition = createManagedSaasGatewayComposition({
-    authenticator: { authenticate: async () => authenticatedCaller() },
+    authenticator: {
+      authenticate: async () => {
+        counters.authentication += 1;
+        return authenticatedCaller();
+      },
+    },
     preparation: {
-      transaction: { transaction: async (work) => work(executor) },
-      caller: { validate: async () => allowRequestPreparation(caller()) },
+      transaction: {
+        transaction: async (work) => {
+          counters.transactions += 1;
+          return work(executor);
+        },
+      },
+      caller: {
+        validate: async () => {
+          counters.preparation += 1;
+          return allowRequestPreparation(caller());
+        },
+      },
       entitlement: { resolve: async () => allowRequestPreparation(entitlement()) },
       authority: { resolve: async () => allowRequestPreparation(authority()) },
       payload: payloadCompiler(),
@@ -1381,16 +1399,18 @@ function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
         await options.close?.();
       },
     },
+    ...(options.maxHttpInFlight === undefined ? {} : { maxHttpInFlight: options.maxHttpInFlight }),
     maxBodyBytes: 1024,
     entryPoint: 'lifecycle-test',
   });
   return {
     composition,
     events,
+    counters,
     get closeCalls() {
       return closeCalls;
     },
-    start(options: { path?: string; headerFailure?: Error } = {}) {
+    start(options: { path?: string; method?: string; headerFailure?: Error; key?: string | null } = {}) {
       const requestId = `lifecycle-request-${requestIds + 1}`;
       const response = new LifecycleResponse((event) => events.push(`${event}:${requestId}`), options.headerFailure);
       const state = {
@@ -1403,11 +1423,14 @@ function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
       };
       calls.set(requestId, state);
       const request = Object.assign(Readable.from([Buffer.from('{"model":"model-a","messages":[]}')]), {
-        method: 'POST',
+        method: options.method ?? 'POST',
         url: options.path ?? '/v1/chat/completions',
         complete: true,
         aborted: false,
-        headers: { authorization: 'Bearer lifecycle-fixture-key', 'content-type': 'application/json' },
+        headers: {
+          ...(options.key === null ? {} : { authorization: `Bearer ${options.key ?? 'lifecycle-fixture-key'}` }),
+          'content-type': 'application/json',
+        },
         socket: { remoteAddress: '127.0.0.1' },
       });
       const pending = composition.handler(request as unknown as IncomingMessage, response as unknown as ServerResponse);
@@ -1424,6 +1447,7 @@ function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
       handling.push(pending);
       return {
         requestId,
+        request,
         response,
         state,
         pending,
@@ -1442,6 +1466,159 @@ function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
     },
   };
 }
+
+test('managed gateway HTTP cap rejects overflow before auth/preparation/DB and retains post-EOF permits', async () => {
+  const graph = lifecycleComposition({ maxHttpInFlight: 2 });
+  const first = graph.start();
+  const second = graph.start();
+  try {
+    await Promise.all([first.entered, second.entered]);
+    assert.equal(first.response.writableEnded, true);
+    assert.equal(second.response.writableEnded, true);
+    const counters = { ...graph.counters };
+    assert.deepEqual(counters, { authentication: 2, preparation: 2, transactions: 2 });
+    const overflow = graph.start({ key: null });
+    void overflow.entered.catch(() => undefined);
+    assert.equal(overflow.response.statusCode, 429, 'overflow is rejected synchronously before the handler starts');
+    assert.equal(await overflow.pending, true);
+    assert.equal(overflow.response.headers.get('retry-after'), '1');
+    assert.equal(overflow.response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(JSON.parse(overflow.response.body), {
+      error: {
+        code: 'GATEWAY_CAPACITY_EXHAUSTED',
+        message: 'The request could not be completed',
+        requestId: overflow.requestId,
+      },
+    });
+    assert.deepEqual(graph.counters, counters, 'overflow must not authenticate or enter preparation/transactions');
+    for (const path of [
+      '/v1/messages',
+      '/v1/responses',
+      '/v1/responses/compact',
+      '/v1/embeddings',
+      '/v1/images/generations/async',
+      '/v1/videos/generations',
+      '/v1beta/models/gemini-test:generateContent',
+      '/v1beta/models/gemini-test:streamGenerateContent',
+    ]) {
+      const rejected = graph.start({ path });
+      void rejected.entered.catch(() => undefined);
+      assert.equal(rejected.response.statusCode, 429, path);
+      await rejected.pending;
+    }
+    assert.deepEqual(graph.counters, counters);
+
+    first.state.release.resolve();
+    await first.pending;
+    const replacement = graph.start();
+    await replacement.entered;
+    assert.equal(graph.counters.authentication, 3, 'settled original handler releases its permit');
+    const closing = graph.composition.close();
+    await lifecycleTurn();
+    assert.equal(graph.closeCalls, 0, 'close still drains original handlers after response EOF');
+    second.state.release.resolve();
+    replacement.state.release.resolve();
+    await Promise.all([second.pending, replacement.pending, closing]);
+    assert.equal(graph.closeCalls, 1);
+    assert.equal(first.state.leaseReleased, true);
+    assert.equal(second.state.leaseReleased, true);
+    assert.equal(replacement.state.leaseReleased, true);
+  } finally {
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway HTTP cap retains a client-aborted permit until the original handler settles', async () => {
+  const graph = lifecycleComposition({ maxHttpInFlight: 1 });
+  const first = graph.start();
+  try {
+    await first.entered;
+    first.request.aborted = true;
+    first.request.emit('aborted');
+    first.response.destroy();
+    const overflow = graph.start();
+    void overflow.entered.catch(() => undefined);
+    assert.equal(overflow.response.statusCode, 429);
+    await overflow.pending;
+    assert.equal(first.state.handlerSettled, false);
+    first.state.release.resolve();
+    await first.pending;
+    const replacement = graph.start();
+    await replacement.entered;
+    replacement.state.release.resolve();
+    await replacement.pending;
+    assert.equal(replacement.state.leaseReleased, true);
+  } finally {
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway HTTP cap releases a rejected handler permit without an unhandled cleanup rejection', async () => {
+  const graph = lifecycleComposition({ maxHttpInFlight: 1 });
+  const failure = new Error('synthetic response header failure');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const failed = graph.start({ headerFailure: failure });
+    void failed.entered.catch(() => undefined);
+    await assert.rejects(failed.pending, (error) => error === failure);
+    const replacement = graph.start();
+    await replacement.entered;
+    replacement.state.release.resolve();
+    await replacement.pending;
+    await graph.composition.close();
+    await lifecycleTurn();
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway HTTP cap leaves health, metrics, control and wrong-method paths outside the permit', async () => {
+  const graph = lifecycleComposition({ maxHttpInFlight: 1 });
+  const first = graph.start();
+  try {
+    await first.entered;
+    for (const [method, path, handled, status] of [
+      ['GET', '/readyz', true, 200],
+      ['GET', '/metrics', false, 0],
+      ['POST', '/admin/api/v1/me', false, 0],
+      ['GET', '/v1/chat/completions', true, 405],
+    ] as const) {
+      const call = graph.start({ method, path });
+      void call.entered.catch(() => undefined);
+      assert.equal(await call.pending, handled);
+      assert.equal(call.response.statusCode, status);
+    }
+    assert.equal(graph.counters.authentication, 1);
+    const overflow = graph.start();
+    void overflow.entered.catch(() => undefined);
+    assert.equal(overflow.response.statusCode, 429);
+    await overflow.pending;
+  } finally {
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway HTTP cap validates explicit configuration and defaults to disabled', async () => {
+  for (const maxHttpInFlight of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '1']) {
+    assert.throws(
+      () => lifecycleComposition({ maxHttpInFlight: maxHttpInFlight as number }),
+      (error) => error instanceof ManagedSaasGatewayCompositionError && error.code === 'INVALID_CONFIGURATION',
+    );
+  }
+  const graph = lifecycleComposition();
+  try {
+    const first = graph.start();
+    const second = graph.start();
+    await Promise.all([first.entered, second.entered]);
+    assert.equal(graph.counters.authentication, 2);
+  } finally {
+    await graph.cleanup();
+  }
+});
 
 test('managed gateway lifecycle waits for post-EOF HTTP settlement and lease release', async () => {
   const graph = lifecycleComposition();
