@@ -622,3 +622,9 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 5. **deploy smoke 作业**：两个步骤写 `set -euo pipefail`(dash 不支持)且用 `$SECONDS`,补 `shell: bash`。
 
 **验证**:worker lifecycle 门禁 3/3、credential-validation 门禁 8/8(新库、CI 顺序执行);E2E gateway spec 2/2(其余 spec 本地因 Playwright 浏览器版本不匹配无法运行,非代码问题,由远端 CI 验证);saas-startup 60/60;unit **6849/6826/0/23(exit 0)**;tsc 干净;改动文件 Biome 零错误。**边界**:隔离门禁矩阵(`Managed SaaS isolated required gate`)此前被跳过,需等推送后远端执行;browser E2E 与 PG15 双版本仍由远端验证,本地仅 PG18。
+
+## 21. R7 里程碑:远端 required CI 全绿（2026-10-23）
+
+推送 `7e862b3` 后远端 CI **conclusion: success**：build-and-test（含 browser E2E）、Managed SaaS PostgreSQL integration PG15/18、deploy smoke（PG16）与全部 **29 gate × 2 版本 = 58 个 isolated required gate** 首次全部通过——此前自 2026-10-20 起所有推送（354f214、bb9756c×2、ef9e3c9、c866719）均失败。§20 的五类修复在远端得到验证。
+
+**R7 剩余边界**：云恢复交付（生产 KMS、真实异地存储、PITR 与恢复材料演练）仍开放,属外部资源任务;CI 全绿不等于发布 GO（R4/R6 性能门槛与 R8 Codex 边界仍开放）。
