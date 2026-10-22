@@ -638,3 +638,7 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 **已完成并可用**:HTTP 背压 cap 的 harness 透传(§18 前 commit 483b3f9,27/27 ops 测试)——负载窗口出现后可直接执行 `MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT=off/n` 的完整对照。
 
 **恢复条件**:机器 1 分钟负载 < ~8(核数一半)时,重跑串行腿(替换本轮无效记录)再执行 off/8 对照;8 仍不升为默认值,30/10 ms 门槛不变。
+
+## 23. T02b 核销：OAuth 探针的 egress proxy 接线已完成（2026-10-23 复核）
+
+§14 记录的限制"OAuth onboarding 探针与既有 API-key 固定适配器一样走 worker 的固定 fetch,不使用账号级 egress proxy"**已过时**:`2dd157f`(§16"quota 与出站"行,2026-10-22)把 worker 的全部探针派发包进 `withAccountOutbound`——固定适配器探针(含 OAuth onboarding)经 `outbound.fetch` 使用账号绑定 egress proxy(代理存在时建立 SOCKS5h 连接,失败拒绝直连回退),custom target 另经 `transport.prepare(..., outbound.proxy)`。测试覆盖:`credential-validation-worker.test.ts` 的"fixed Kimi validation uses its account proxy and refuses a direct fallback when the proxy fails",以及 `account-outbound.test.ts` 的真实 CONNECT 代理遍历/失败不回退/dispatcher 生命周期三用例。无需新代码。
