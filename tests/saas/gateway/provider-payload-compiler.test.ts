@@ -181,6 +181,64 @@ test('uses the explicitly supported OpenAI to Anthropic request bridge', async (
   assert.equal(result.providerProtocol, 'anthropic');
 });
 
+test('Kimi compiler uses routed provider identity for forced-tool controls and preserves signed history bytes', async () => {
+  const nativeContent = [
+    { type: 'thinking', thinking: 'Use the tool result.', signature: 'fixture-signed-history' },
+    { type: 'redacted_thinking', data: 'fixture-redacted-history' },
+    { type: 'tool_use', id: 'call_add', name: 'add', input: { a: 2, b: 3 } },
+  ];
+  for (const providerId of ['kimi', 'provider-a']) {
+    for (const control of ['native-disabled', 'effort-none']) {
+      const auth = authority({ clientProtocol: 'openai', resolvedModel: 'kimi-for-coding' });
+      const result = allowed(
+        await createProviderPayloadCompiler(
+          options({
+            providerProtocol: 'anthropic',
+            operation: 'messages',
+            modelResolution: { ...RESOLUTION, resolvedModel: 'kimi-for-coding' },
+          }),
+        ).compile(
+          input(
+            {
+              model: 'public-alias',
+              ...(control === 'native-disabled' ? { thinking: { type: 'disabled' } } : { reasoning_effort: 'none' }),
+              tool_choice: { type: 'function', function: { name: 'add' } },
+              tools: [
+                { type: 'function', function: { name: 'subtract', parameters: { type: 'object' } } },
+                { type: 'function', function: { name: 'add', parameters: { type: 'object' } } },
+              ],
+              messages: [
+                { role: 'user', content: 'Add 2 and 3' },
+                {
+                  role: 'assistant',
+                  content: null,
+                  reasoning_content: 'Use the tool result.',
+                  anthropic_content: nativeContent,
+                },
+                { role: 'tool', tool_call_id: 'call_add', content: '5' },
+              ],
+            },
+            { authority: { ...auth, candidate: { ...auth.candidate, providerId } } },
+          ),
+        ),
+      );
+      const payload = JSON.parse(new TextDecoder().decode(result.payloadBytes));
+      assert.equal(payload.model, 'kimi-for-coding');
+      assert.deepEqual(
+        payload.thinking,
+        providerId === 'kimi' || control === 'native-disabled' ? { type: 'disabled' } : undefined,
+      );
+      assert.deepEqual(payload.tool_choice, providerId === 'kimi' ? { type: 'any' } : { type: 'tool', name: 'add' });
+      assert.deepEqual(
+        payload.tools.map((item: { name: string }) => item.name),
+        providerId === 'kimi' ? ['add'] : ['subtract', 'add'],
+      );
+      assert.deepEqual(payload.messages[1].content, nativeContent);
+      assert.deepEqual(payload.messages[2].content, [{ type: 'tool_result', tool_use_id: 'call_add', content: '5' }]);
+    }
+  }
+});
+
 test('uses the explicitly supported Anthropic to Gemini request bridge', async () => {
   const result = allowed(
     await createProviderPayloadCompiler(options({ providerProtocol: 'gemini', operation: 'generateContent' })).compile(
@@ -365,7 +423,7 @@ test('rejects unsupported operations and unsupported gemini to anthropic convers
     options({ providerProtocol: 'responses', operation: 'responses.compact' }),
   ).compile(input({ model: 'public-alias', messages: [{ role: 'user', content: 'hello' }] }));
   assert.equal(unsupportedOperation.decision, 'block');
-  if (unsupportedOperation.decision === 'block') assert.equal(unsupportedOperation.code, 'capability_unavailable');
+  if (unsupportedOperation.decision === 'block') assert.equal(unsupportedOperation.code, 'capability_unsupported');
 
   const unsupportedPair = await createProviderPayloadCompiler(
     options({ providerProtocol: 'anthropic', operation: 'messages' }),
@@ -380,6 +438,35 @@ test('rejects unsupported operations and unsupported gemini to anthropic convers
   );
   assert.equal(unsupportedPair.decision, 'block');
   if (unsupportedPair.decision === 'block') assert.equal(unsupportedPair.code, 'capability_unavailable');
+});
+
+test('native compact preserves opaque provider state and bypasses generation transforms', async () => {
+  const opaque = { type: 'compaction', id: 'compact-item', encrypted_content: 'opaque-compaction-state' };
+  const result = allowed(
+    await createProviderPayloadCompiler(
+      options({
+        providerProtocol: 'responses',
+        operation: 'responses.compact',
+        clientOperation: 'responses.compact',
+        providerRequestTransform: () => {
+          throw new Error('generation transforms must not inspect compact state');
+        },
+      }),
+    ).compile(
+      input(
+        { model: 'public-alias', input: [opaque], instructions: 'retain decisions' },
+        {
+          authority: authority({ clientProtocol: 'responses' }),
+        },
+      ),
+    ),
+  );
+  const body = JSON.parse(new TextDecoder().decode(result.payloadBytes)) as Record<string, unknown>;
+  assert.equal(result.providerOperation, 'responses.compact');
+  assert.equal(body.model, 'provider-model');
+  assert.deepEqual(body.input, [opaque]);
+  assert.equal(body.instructions, 'retain decisions');
+  assert.equal(body.messages, undefined);
 });
 
 test('fails closed when the versioned estimator is absent or returns invalid bounds', async () => {

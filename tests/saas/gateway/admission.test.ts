@@ -6,6 +6,7 @@ import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/
 import {
   type AdmissionCreateRequestInput,
   createRequestAdmissionReservationBusinessKey,
+  PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
   type SaasBillingReservationPort,
   type SaasMeteringAdmissionPort,
   type SaasRequestAdmissionGuard,
@@ -662,6 +663,35 @@ test('platform admission prelocks first and uses one executor for all admission 
   });
 });
 
+test('admission preserves an explicit independent-bound tag and the original overlapping bounds', async () => {
+  const { guard, service } = createService();
+  const command = platformCommand();
+  await service.admit({
+    ...command,
+    holdEvidence: {
+      ...command.holdEvidence,
+      evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
+      cacheRead: 100,
+      cacheWrite: 100,
+      cacheWrite5m: 100,
+      cacheWrite1h: 100,
+    },
+  });
+  const holdEvidence = guard.inputs[0]?.holdEvidence;
+  assert.ok(holdEvidence);
+  assert.equal(holdEvidence.evidenceKind, PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND);
+  for (const field of [
+    'inputTotal',
+    'inputUncached',
+    'cacheRead',
+    'cacheWrite',
+    'cacheWrite5m',
+    'cacheWrite1h',
+  ] as const) {
+    assert.equal(holdEvidence[field], 100);
+  }
+});
+
 test('joins a caller-owned outer executor without opening a nested transaction', async () => {
   const { database, metering, billing, guard, prelock, service } = createService();
   const outer = new FakeAdmissionExecutor(emptyState());
@@ -730,6 +760,23 @@ test('platform admission rejects incomplete or malformed hold evidence before op
       alter: (command) => ({
         ...command,
         holdEvidence: { ...command.holdEvidence, admissionExpiresAt: 'not-a-date' },
+      }),
+    },
+    ...['future-kind', undefined, null].map((evidenceKind) => ({
+      label: 'unknown or present-undefined evidence tag',
+      alter: (command: ReturnType<typeof platformCommand>) => ({
+        ...command,
+        holdEvidence: { ...command.holdEvidence, evidenceKind },
+      }),
+    })),
+    {
+      label: 'inherited evidence tag',
+      alter: (command) => ({
+        ...command,
+        holdEvidence: Object.assign(
+          Object.create({ evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND }),
+          command.holdEvidence,
+        ),
       }),
     },
   ];

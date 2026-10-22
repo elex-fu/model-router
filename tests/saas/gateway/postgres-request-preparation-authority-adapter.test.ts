@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { ProviderEligibilityResult } from '../../../src/saas/catalog/types.js';
-import type { SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import type { PreparedSqlStatement, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import type { RouteCommercialAuthorityRecord } from '../../../src/saas/gateway/commercial-metering-policy-service.js';
-import { PostgresRequestPreparationAuthorityAdapter } from '../../../src/saas/gateway/postgres-request-preparation-authority-adapter.js';
+import type { PostgresPreparationObservation } from '../../../src/saas/gateway/postgres-preparation-observer.js';
+import {
+  PostgresRequestPreparationAuthorityAdapter,
+  type PostgresRequestPreparationAuthorityAdapterDependencies,
+} from '../../../src/saas/gateway/postgres-request-preparation-authority-adapter.js';
 import type {
   RequestPreparationAuthority,
   RequestPreparationCaller,
@@ -12,6 +17,7 @@ import type {
 import type { RouteConfigRecord } from '../../../src/saas/gateway/route-config-service.js';
 import type { EffectiveByokEntitlement } from '../../../src/saas/plans/types.js';
 import { SaasPricingError } from '../../../src/saas/pricing/index.js';
+import type { SupplierCostVersionRecord } from '../../../src/saas/pricing/types.js';
 
 type Row = Record<string, unknown>;
 type Mode = 'byok' | 'platform';
@@ -28,9 +34,12 @@ interface Fixture {
   platformRows: Row[];
   accountCapabilities: Row[];
   poolRights: Row[];
+  poolRightsReader?: (values: readonly unknown[]) => Row[];
+  readonly poolRightsBindings: unknown[][];
   providerScope: string[];
   byokEntitlement: EffectiveByokEntitlement | null;
   planResolverExecutors: unknown[];
+  eligibilityCalls: number;
   readonly statements: string[];
   /** §4.4 composite: the billing-group resolution the fake store returns. */
   compositeGroup?: { readonly id: string; readonly composite: boolean };
@@ -155,7 +164,7 @@ function commercial(mode: Mode): RouteCommercialAuthorityRecord {
   };
 }
 
-function eligibility(): ProviderEligibilityResult {
+function eligibility(): Extract<ProviderEligibilityResult, { decision: 'allow' }> {
   return {
     decision: 'allow',
     providerId: 'provider-a',
@@ -201,9 +210,11 @@ function baseFixture(mode: Mode): Fixture {
     platformRows: mode === 'platform' ? [platformCandidate()] : [],
     accountCapabilities: [{ capability_version: '11' }],
     poolRights: mode === 'platform' ? [poolRight()] : [],
+    poolRightsBindings: [],
     providerScope: ['provider-a'],
     byokEntitlement: effectiveByokEntitlement(),
     planResolverExecutors: [],
+    eligibilityCalls: 0,
     compositeSupplierCost: 'supplier-cost-gemini',
     compositeSupplierCostRequests: [],
     statements: [],
@@ -370,7 +381,7 @@ class FakeAuthorityFactsRepository {
 
   async transaction<T>(work: (executor: SqlExecutor) => Promise<T>): Promise<T> {
     const executor: SqlExecutor = {
-      query: async <ResultRow>(sql: string): Promise<SqlResult<ResultRow>> => {
+      query: async <ResultRow>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<ResultRow>> => {
         this.fixture.statements.push(sql);
         let rows: Row[];
         if (sql.startsWith('SET TRANSACTION')) rows = [];
@@ -387,16 +398,24 @@ class FakeAuthorityFactsRepository {
         else if (sql.includes('composite-route-store:model-ownership'))
           rows = (this.fixture.compositeOwnershipPlatforms ?? []).map((provider_id) => ({ provider_id }));
         else if (sql.includes('composite-route-store:target-capability'))
-          rows = this.fixture.compositeTargetCapability === null ? [] : [this.fixture.compositeTargetCapability];
+          rows = this.fixture.compositeTargetCapability ? [this.fixture.compositeTargetCapability] : [];
         else if (sql.includes('composite-route-store:')) rows = [];
         else if (sql.includes('FROM saas_public_model_versions')) rows = [this.fixture.alias];
         else if (sql.includes('FROM saas_customer_price_versions')) rows = [{ currency: 'USD' }];
         else if (sql.includes('FROM saas_supply_profiles')) rows = [this.fixture.profile];
         else if (sql.includes('preparation-authority:byok')) rows = this.fixture.byokRows;
         else if (sql.includes('preparation-authority:platform')) rows = this.fixture.platformRows;
-        else if (sql.includes('preparation-authority:account-capability')) rows = this.fixture.accountCapabilities;
-        else if (sql.includes('FROM saas_provider_rights')) rows = this.fixture.poolRights;
-        else throw new Error(`Unexpected query in fake authority repository: ${sql}`);
+        else if (sql.includes('preparation-authority:account-capability')) {
+          const accountIds = values.find(Array.isArray) as string[];
+          rows = accountIds.flatMap((account_id) =>
+            this.fixture.accountCapabilities
+              .filter((row) => row.account_id === undefined || row.account_id === account_id)
+              .map((row) => ({ ...row, account_id })),
+          );
+        } else if (sql.includes('FROM saas_provider_rights')) {
+          this.fixture.poolRightsBindings.push([...values]);
+          rows = this.fixture.poolRightsReader?.(values) ?? this.fixture.poolRights;
+        } else throw new Error(`Unexpected query in fake authority repository: ${sql}`);
         return { rows: structuredClone(rows) as ResultRow[], rowCount: rows.length };
       },
     };
@@ -404,7 +423,10 @@ class FakeAuthorityFactsRepository {
   }
 }
 
-function adapter(fixture: Fixture): PostgresRequestPreparationAuthorityAdapter {
+function adapter(
+  fixture: Fixture,
+  overrides: Partial<PostgresRequestPreparationAuthorityAdapterDependencies> = {},
+): PostgresRequestPreparationAuthorityAdapter {
   const facts = new FakeAuthorityFactsRepository(fixture);
   return new PostgresRequestPreparationAuthorityAdapter({
     database: facts,
@@ -420,6 +442,7 @@ function adapter(fixture: Fixture): PostgresRequestPreparationAuthorityAdapter {
     },
     catalog: {
       async evaluateProviderEligibility() {
+        fixture.eligibilityCalls += 1;
         return fixture.eligibilityResult ?? eligibility();
       },
     },
@@ -433,16 +456,17 @@ function adapter(fixture: Fixture): PostgresRequestPreparationAuthorityAdapter {
     // resolved target-platform identity through this port.
     pricing: {
       async resolveSupplierCostVersion(input) {
-        fixture.compositeSupplierCostRequests.push(input);
+        fixture.compositeSupplierCostRequests.push({ ...input });
         if (fixture.compositeSupplierCost === null) {
           throw new SaasPricingError('PRICE_VERSION_NOT_EFFECTIVE');
         }
         return {
-          id: fixture.compositeSupplierCost,
+          id: fixture.compositeSupplierCost ?? 'supplier-cost-gemini',
           ...input,
-        };
+        } as SupplierCostVersionRecord;
       },
     },
+    ...overrides,
   });
 }
 
@@ -507,6 +531,233 @@ test('resolves one active BYOK mapping/account/credential without platform autho
   );
   assert.equal(fixture.planResolverExecutors.length, 1);
   assert.ok(fixture.planResolverExecutors[0]);
+});
+
+test('candidate eligibility and capability reads are reused only inside one authority snapshot', async () => {
+  const fixture = baseFixture('platform');
+  fixture.platformRows = Array.from({ length: 20 }, (_, index) =>
+    platformCandidateFor(`account-${index}`, `credential-${index}`),
+  );
+  const authority = adapter(fixture);
+  const input = {
+    caller: caller('platform'),
+    entitlement: entitlement('platform', fixture.providerScope),
+    publicModel: 'public-model',
+    protocol: 'openai' as const,
+  };
+  const first = await authority.resolve(input);
+  assert.equal(first.decision, 'allow');
+  if (first.decision !== 'allow') return;
+  assert.equal(first.value.candidates?.length, 20);
+  assert.equal(fixture.eligibilityCalls, 1);
+  assert.equal(fixture.statements.filter((sql) => sql.includes('preparation-authority:account-capability')).length, 1);
+
+  fixture.eligibilityResult = {
+    decision: 'deny',
+    reason: 'rights_revoked',
+    providerId: 'provider-a',
+    productId: 'product-a',
+    model: 'provider-model-a',
+    endpoint: '/v1/chat/completions',
+  };
+  const second = await authority.resolve(input);
+  assert.equal(second.decision, 'reject');
+  assert.equal(fixture.eligibilityCalls, 2, 'the next request must re-read current catalog authority');
+});
+
+test('platform pool rights reuse successful rows only inside one authority snapshot', async () => {
+  const fixture = baseFixture('platform');
+  fixture.platformRows = Array.from({ length: 4 }, (_, index) =>
+    platformCandidateFor(`account-${index}`, `credential-${index}`),
+  );
+  const authority = adapter(fixture);
+  const input = {
+    caller: caller('platform'),
+    entitlement: entitlement('platform', fixture.providerScope),
+    publicModel: 'public-model',
+    protocol: 'openai' as const,
+  };
+  const first = await authority.resolve(input);
+  assert.equal(first.decision, 'allow');
+  if (first.decision !== 'allow') return;
+  assert.deepEqual(
+    first.value.candidates?.map((candidate) => candidate.accountId),
+    ['account-0', 'account-1', 'account-2', 'account-3'],
+  );
+  assert.deepEqual(fixture.poolRightsBindings, [['pool-rights-a', '17']]);
+  assert.equal(fixture.statements[0], 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+
+  fixture.poolRights = [poolRight({ status: 'revoked' })];
+  const second = await authority.resolve(input);
+  assert.equal(second.decision, 'reject');
+  assert.deepEqual(
+    fixture.poolRightsBindings,
+    [
+      ['pool-rights-a', '17'],
+      ['pool-rights-a', '17'],
+    ],
+    'the next request must read the revoked rights row again',
+  );
+});
+
+test('platform pool rights reuse keeps both raw SQL binding types and values distinct', async (t) => {
+  for (const [name, first, second] of [
+    ['different rights id', ['pool-rights-a', '17'], ['pool-rights-b', '17']],
+    ['different rights version', ['pool-rights-a', '17'], ['pool-rights-a', '18']],
+    ['number and string id', [17, '17'], ['17', '17']],
+    ['number and string version', ['pool-rights-a', 17], ['pool-rights-a', '17']],
+  ] as const) {
+    await t.test(name, async () => {
+      const { fixture, result } = await resolve('platform', (current) => {
+        current.platformRows = [first, second].map(([pool_rights_id, pool_rights_version], index) =>
+          platformCandidateFor(`account-${index}`, `credential-${index}`, { pool_rights_id, pool_rights_version }),
+        );
+        current.poolRightsReader = (values) => [poolRight({ rights_id: values[0], version: values[1] })];
+      });
+      assert.equal(result.decision, 'allow');
+      if (result.decision !== 'allow') return;
+      assert.equal(result.value.candidates?.length, 2);
+      assert.deepEqual(fixture.poolRightsBindings, [first, second]);
+    });
+  }
+});
+
+test('platform candidate prechecks still run before the pool rights read or reuse', async (t) => {
+  for (const [name, invalid] of [
+    ['grant', { grant_status: 'revoked' }],
+    ['credential', { credential_expires_at: '2026-01-01T00:00:00.000Z' }],
+    ['account identity', { account_provider_id: 'provider-other' }],
+    ['pool boundary', { pool_region: 'region-other' }],
+  ] as const) {
+    await t.test(name, async () => {
+      const { fixture, result } = await resolve('platform', (current) => {
+        current.platformRows = [
+          platformCandidateFor('account-invalid', 'credential-invalid', {
+            ...invalid,
+            pool_rights_id: 'must-not-read',
+          }),
+          platformCandidateFor('account-valid', 'credential-valid'),
+          platformCandidateFor('account-invalid-after', 'credential-invalid-after', invalid),
+        ];
+      });
+      assert.equal(result.decision, 'allow');
+      if (result.decision !== 'allow') return;
+      assert.equal(result.value.candidate.accountId, 'account-valid');
+      assert.equal(result.value.candidates, undefined);
+      assert.deepEqual(fixture.poolRightsBindings, [['pool-rights-a', '17']]);
+    });
+  }
+});
+
+test('platform pool rights cardinality failures are not reused and storage failures are not retried', async (t) => {
+  for (const [name, rows] of [
+    ['zero rows', []],
+    ['ambiguous rows', [poolRight(), poolRight()]],
+  ] as const) {
+    await t.test(name, async () => {
+      const { fixture, result } = await resolve('platform', (current) => {
+        current.platformRows = Array.from({ length: 4 }, (_, index) =>
+          platformCandidateFor(`account-${index}`, `credential-${index}`),
+        );
+        current.poolRights = [...rows];
+      });
+      assert.equal(result.decision, 'reject');
+      assert.deepEqual(
+        fixture.poolRightsBindings,
+        Array.from({ length: 4 }, () => ['pool-rights-a', '17']),
+      );
+      assert.equal(fixture.eligibilityCalls, 0);
+    });
+  }
+
+  await t.test('a reused row is still validated against each candidate boundary', async () => {
+    const { fixture, result } = await resolve('platform', (current) => {
+      current.platformRows = [
+        platformCandidateFor('account-a', 'credential-a'),
+        platformCandidateFor('account-b', 'credential-b', { pool_region: 'region-other', region: 'region-other' }),
+      ];
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision !== 'allow') return;
+    assert.equal(result.value.candidate.accountId, 'account-a');
+    assert.equal(result.value.candidates, undefined);
+    assert.deepEqual(fixture.poolRightsBindings, [['pool-rights-a', '17']]);
+  });
+
+  await t.test('a query error blocks before the next candidate or catalog read', async () => {
+    const { fixture, result } = await resolve('platform', (current) => {
+      current.platformRows = [
+        platformCandidateFor('account-a', 'credential-a'),
+        platformCandidateFor('account-b', 'credential-b'),
+      ];
+      current.poolRightsReader = () => {
+        throw new Error('pool rights storage unavailable');
+      };
+    });
+    assert.equal(result.decision, 'block');
+    if (result.decision !== 'block') return;
+    assert.equal(result.code, 'storage_failure');
+    assert.deepEqual(fixture.poolRightsBindings, [['pool-rights-a', '17']]);
+    assert.equal(fixture.eligibilityCalls, 0);
+    assert.equal(
+      fixture.statements.some((sql) => sql.includes('preparation-authority:account-capability')),
+      false,
+    );
+  });
+});
+
+test('a batch capability read cannot authorize an account without its exact capability version', async () => {
+  const fixture = baseFixture('platform');
+  fixture.platformRows = [
+    platformCandidateFor('account-a', 'credential-a'),
+    platformCandidateFor('account-b', 'credential-b'),
+  ];
+  fixture.accountCapabilities = [
+    { account_id: 'account-a', capability_version: '10' },
+    { account_id: 'account-b', capability_version: '11' },
+  ];
+  const result = await adapter(fixture).resolve({
+    caller: caller('platform'),
+    entitlement: entitlement('platform', fixture.providerScope),
+    publicModel: 'public-model',
+    protocol: 'openai',
+  });
+  assert.equal(result.decision, 'allow');
+  if (result.decision !== 'allow') return;
+  assert.equal(result.value.candidate.accountId, 'account-b');
+  assert.equal(result.value.candidates, undefined);
+});
+
+test('trusted native protocol mapping preserves client identity and verifies the native catalog protocol', async () => {
+  const fixture = baseFixture('platform');
+  fixture.eligibilityResult = { ...eligibility(), capability: { ...eligibility().capability, protocol: 'anthropic' } };
+  const mappingCalls: unknown[][] = [];
+  const authority = adapter(fixture, {
+    providerNativeProtocol: (...args) => {
+      mappingCalls.push(args);
+      return 'anthropic';
+    },
+  });
+  const input = {
+    caller: caller('platform'),
+    entitlement: entitlement('platform', fixture.providerScope),
+    publicModel: 'public-model',
+    protocol: 'openai' as const,
+  };
+  const result = await authority.resolve(input);
+  assert.equal(result.decision, 'allow');
+  if (result.decision !== 'allow') return;
+  assert.deepEqual(mappingCalls, [['provider-a', 'product-a', 'provider-model-a', 'openai']]);
+  assert.equal(result.value.route.protocol, 'openai');
+  assert.equal(result.value.route.providerProtocol, 'anthropic');
+  assert.equal(result.value.route.clientOperation, 'chat.completions');
+  assert.equal(result.value.route.providerOperation, 'messages');
+  assert.equal(result.value.supplyBilling?.providerOperation, 'messages');
+
+  const denied = await authority.resolve({ ...input, clientOperation: 'embeddings' });
+  assert.equal(denied.decision, 'reject', 'native-only operations must not bridge');
+  fixture.eligibilityResult = eligibility();
+  assert.equal((await authority.resolve(input)).decision, 'reject', 'the actual native capability must match');
 });
 
 test('enforces the authoritative BYOK provider scope before candidate resolution', async (t) => {
@@ -1017,3 +1268,168 @@ test('composite groups resolve the serving platform and rewrite the model with p
     assert.equal(authority.composite, undefined);
   });
 });
+
+// Only immutable wire plans are reused; fixture facts and authority clocks stay fresh.
+for (const mode of ['byok', 'platform'] as const) {
+  for (const native of [false, true]) {
+    test(`${mode} initial supply SQL preserves current binds and fresh reads with native=${native}`, async () => {
+      const fixture = baseFixture(mode);
+      const facts = new FakeAuthorityFactsRepository(fixture);
+      const calls: Array<{
+        statement: PreparedSqlStatement | null;
+        sql: string;
+        values: readonly unknown[];
+        rowCount: number | null;
+      }> = [];
+      const observations: PostgresPreparationObservation[] = [];
+      let clockCalls = 0;
+      let anonymousSupplyCalls = 0;
+      const expectedSqlSha256 =
+        mode === 'byok'
+          ? '544cae2ff6fdee89a3915c80e9861ec47b860a58ef631ed8065e75b829b05c7a'
+          : '326b6c68db2b29e77e275bc4ebbaf1b5f228778ac68ee691c7d0558f4a061ba2';
+      const authority = adapter(fixture, {
+        observe: (item) => observations.push(item),
+        database: {
+          transaction: (work) =>
+            facts.transaction((base) => {
+              const tx: SqlExecutor = {
+                async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+                  if (sql.includes('SELECT clock_timestamp()')) {
+                    const clock = new Date(new Date(NOW).getTime() + clockCalls++ * 1000);
+                    return { rows: [{ authority_now: clock }] as Row[], rowCount: 1 };
+                  }
+                  const result = await base.query<Row>(sql, values);
+                  if (sql.includes(`/* preparation-authority:${mode} */`)) {
+                    anonymousSupplyCalls += 1;
+                    calls.push({ statement: null, sql, values, rowCount: result.rowCount });
+                  }
+                  return result;
+                },
+              };
+              if (native) {
+                tx.queryPrepared = async function <Row>(
+                  statement: PreparedSqlStatement,
+                  values: readonly unknown[] = [],
+                ) {
+                  assert.equal(this, tx);
+                  const result = await base.query<Row>(statement.text, values);
+                  calls.push({ statement, sql: statement.text, values, rowCount: result.rowCount });
+                  return result;
+                };
+              }
+              return work(tx);
+            }),
+        },
+      });
+      const input = {
+        caller: caller(mode),
+        entitlement: entitlement(mode, fixture.providerScope),
+        publicModel: 'public-model',
+        protocol: 'openai' as const,
+      };
+      assert.equal((await authority.resolve(input)).decision, 'allow');
+      const candidateRows = mode === 'byok' ? fixture.byokRows : fixture.platformRows;
+      assert.ok(candidateRows[0]);
+      candidateRows[0].credential_status = 'revoked';
+      const revoked = await authority.resolve(input);
+      assert.equal(revoked.decision, 'reject', 'a second request must read the newly revoked credential');
+      if (revoked.decision === 'reject') assert.equal(revoked.code, 'account_denied');
+      assert.equal(clockCalls, 2);
+      assert.equal(calls.length, 2);
+      assert.equal(anonymousSupplyCalls, native ? 0 : 2);
+      for (const [index, call] of calls.entries()) {
+        assert.equal(createHash('sha256').update(call.sql).digest('hex'), expectedSqlSha256);
+        const expectedValues = [
+          'tenant-a',
+          'profile-a',
+          new Date(new Date(NOW).getTime() + index * 1000),
+          ...(mode === 'platform' ? [6] : []),
+          'provider-a',
+          'product-a',
+        ];
+        assert.deepEqual(call.values, expectedValues);
+        assert.equal(call.values.length, mode === 'platform' ? 6 : 5);
+        assert.equal(call.rowCount, 1);
+        if (native) {
+          assert.ok(call.statement);
+          assert.ok(Object.isFrozen(call.statement));
+          assert.equal(
+            call.statement.name,
+            `mr_prep-${mode}_${createHash('sha256').update(call.sql).digest('base64url')}`,
+          );
+          assert.ok(call.statement.name.length <= 63);
+        } else {
+          assert.equal(call.statement, null);
+        }
+      }
+      if (native) assert.equal(calls[0]?.statement, calls[1]?.statement);
+      assert.notEqual(calls[0]?.values, calls[1]?.values);
+      assert.deepEqual(
+        observations
+          .filter((item) => item.kind === 'query' && item.operation === `preparation-authority:${mode}`)
+          .map(({ phase, outcome }) => ({ phase, outcome })),
+        [
+          { phase: 'authority', outcome: 'ok' },
+          { phase: 'authority', outcome: 'ok' },
+        ],
+      );
+    });
+  }
+
+  test(`${mode} native supply failure preserves the original error and never retries anonymously`, async () => {
+    const fixture = baseFixture(mode);
+    const facts = new FakeAuthorityFactsRepository(fixture);
+    const failure = new Error('expected initial supply native failure');
+    const calls: PreparedSqlStatement[] = [];
+    const observations: PostgresPreparationObservation[] = [];
+    let anonymousSupplyCalls = 0;
+    let transactionFailure: unknown;
+    const authority = adapter(fixture, {
+      observe: (item) => observations.push(item),
+      database: {
+        transaction: (work) =>
+          facts.transaction(async (base) => {
+            const tx: SqlExecutor = {
+              async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+                if (sql.includes(`/* preparation-authority:${mode} */`)) anonymousSupplyCalls += 1;
+                return base.query<Row>(sql, values);
+              },
+              async queryPrepared(statement, values) {
+                assert.equal(this, tx);
+                assert.equal(values?.length, mode === 'platform' ? 6 : 5);
+                calls.push(statement);
+                throw failure;
+              },
+            };
+            try {
+              return await work(tx);
+            } catch (error) {
+              transactionFailure = error;
+              throw error;
+            }
+          }),
+      },
+    });
+    const result = await authority.resolve({
+      caller: caller(mode),
+      entitlement: entitlement(mode, fixture.providerScope),
+      publicModel: 'public-model',
+      protocol: 'openai',
+    });
+    assert.equal(transactionFailure, failure);
+    assert.equal(calls.length, 1);
+    assert.equal(anonymousSupplyCalls, 0);
+    assert.deepEqual(result, {
+      decision: 'block',
+      code: 'storage_failure',
+      message: 'Request authority could not be resolved.',
+    });
+    assert.deepEqual(
+      observations
+        .filter((item) => item.kind === 'query' && item.operation === `preparation-authority:${mode}`)
+        .map(({ phase, outcome }) => ({ phase, outcome })),
+      [{ phase: 'authority', outcome: 'error' }],
+    );
+  });
+}

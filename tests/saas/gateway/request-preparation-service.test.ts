@@ -6,6 +6,7 @@ import type {
   AuthorizedPlatformUpstreamCandidate,
   ModelResolutionProvenance,
 } from '../../../src/saas/gateway/contracts.js';
+import type { PostgresPreparationObservation } from '../../../src/saas/gateway/postgres-preparation-observer.js';
 import type {
   PreparedRequestEvidenceInput,
   PreparedRequestEvidenceRecord,
@@ -283,14 +284,16 @@ function realScheduler(affinity?: ProviderAccountSchedulerAffinityPort): Provide
 function payloadCompiler(
   serializedPayload = '{"model":"provider-model-a","messages":[]}',
   observedInputs?: unknown[],
+  providerProtocol: 'openai' | 'anthropic' = 'openai',
 ): RequestPreparationPayloadCompiler {
+  const providerOperation = providerProtocol === 'anthropic' ? 'messages' : 'chat.completions';
   return {
     async compile(inputValue) {
       observedInputs?.push(inputValue);
       assert.equal(inputValue.clientProtocol, 'openai');
-      assert.equal(inputValue.providerProtocol, 'openai');
+      assert.equal(inputValue.providerProtocol, providerProtocol);
       assert.equal(inputValue.clientOperation, 'chat.completions');
-      assert.equal(inputValue.providerOperation, 'chat.completions');
+      assert.equal(inputValue.providerOperation, providerOperation);
       assert.deepEqual(inputValue.modelResolution, MODEL_RESOLUTION);
       return allowRequestPreparation({
         payloadBytes: new TextEncoder().encode(serializedPayload),
@@ -313,8 +316,8 @@ function payloadCompiler(
         mappedModel: 'catalog-model-a',
         resolvedModel: 'provider-model-a',
         modelResolution: MODEL_RESOLUTION,
-        providerProtocol: 'openai',
-        providerOperation: 'chat.completions',
+        providerProtocol,
+        providerOperation,
       });
     },
   };
@@ -561,6 +564,263 @@ function assertFailure(
   assert.equal(result.evidence, null);
 }
 
+test('preparation timings retain port order, affinity receiver, and total through transaction commit', async () => {
+  const events: PostgresPreparationObservation[] = [];
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [], transactionEvents: [] };
+  const base = dependencies(state);
+  let releaseCommit: (() => void) | undefined;
+  let markCommitting: (() => void) | undefined;
+  const commitGate = new Promise<void>((resolve) => {
+    releaseCommit = resolve;
+  });
+  const committing = new Promise<void>((resolve) => {
+    markCommitting = resolve;
+  });
+  const scheduler: ProviderAccountSchedulerPort = {
+    async select() {
+      state.calls.push('scheduler');
+      return allowRequestPreparation(candidate());
+    },
+    async bindAffinity() {
+      assert.equal(this, scheduler);
+      state.calls.push('affinity');
+      return { decision: 'allow' };
+    },
+  };
+  const pending = service(
+    state,
+    {
+      scheduler,
+      transaction: {
+        async transaction(work) {
+          assert.ok(base.transaction);
+          return base.transaction.transaction(async (executor) => {
+            const result = await work(executor);
+            markCommitting?.();
+            await commitGate;
+            return result;
+          });
+        },
+      },
+    },
+    { observe: (event) => events.push(event) },
+  ).prepare(input({ scheduling: { sessionId: 'private-session' } }));
+  await committing;
+  assert.deepEqual(
+    events.map(({ operation, outcome }) => [operation, outcome]),
+    [
+      ['scheduler-select', 'ok'],
+      ['affinity-bind', 'ok'],
+      ['evidence-register', 'ok'],
+    ],
+  );
+  assert.deepEqual(state.transactionEvents, ['begin']);
+  releaseCommit?.();
+  assert.equal((await pending).outcome, 'prepared');
+  assert.deepEqual(state.transactionEvents, ['begin', 'commit']);
+  assert.deepEqual(
+    events.map(({ operation, outcome }) => [operation, outcome]),
+    [
+      ['scheduler-select', 'ok'],
+      ['affinity-bind', 'ok'],
+      ['evidence-register', 'ok'],
+      ['preparation-total', 'ok'],
+    ],
+  );
+  assert.deepEqual(state.calls, [
+    'caller',
+    'entitlement',
+    'authority',
+    'scheduler',
+    'affinity',
+    'admission',
+    'attempt',
+    'signer',
+    'registrar',
+  ]);
+  assert.ok(
+    events.every(
+      (event) =>
+        event.phase === 'preparation' &&
+        event.kind === 'phase' &&
+        Number.isFinite(event.durationMs) &&
+        event.durationMs >= 0,
+    ),
+  );
+  assert.doesNotMatch(JSON.stringify(events), /private|tenant-a|key-a|account-a|hello/);
+});
+
+test('preparation total records caller early refusal without invoking later ports', async () => {
+  const events: PostgresPreparationObservation[] = [];
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+  const result = await service(state, {}, { observe: (event) => events.push(event) }).prepare(
+    input({ authenticatedCaller: authenticatedCaller('revoked') }),
+  );
+  assert.equal(result.outcome, 'rejected');
+  assert.deepEqual(state.calls, []);
+  assert.deepEqual(
+    events.map(({ operation, outcome }) => [operation, outcome]),
+    [['preparation-total', 'error']],
+  );
+});
+
+for (const mode of ['reject', 'block', 'throw'] as const) {
+  test(`scheduler ${mode} keeps the original decision and records fixed error timings`, async () => {
+    const events: PostgresPreparationObservation[] = [];
+    const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+    const result = await service(
+      state,
+      {
+        scheduler: {
+          async select() {
+            if (mode === 'throw') throw new Error('private scheduler error');
+            return mode === 'reject'
+              ? rejectRequestPreparation('account_denied', 'private refusal')
+              : blockRequestPreparation('capability_unavailable', 'private refusal');
+          },
+        },
+      },
+      { observe: (event) => events.push(event) },
+    ).prepare(input());
+    assert.equal(result.outcome, mode === 'reject' ? 'rejected' : 'blocked');
+    assert.equal(state.calls.includes('admission'), false);
+    assert.deepEqual(
+      events.map(({ operation, outcome }) => [operation, outcome]),
+      [
+        ['scheduler-select', 'error'],
+        ['preparation-total', 'error'],
+      ],
+    );
+    assert.doesNotMatch(JSON.stringify(events), /private|account-a/);
+  });
+}
+
+for (const mode of ['block', 'throw'] as const) {
+  test(`affinity ${mode} remains fail closed and records fixed error timings`, async () => {
+    const events: PostgresPreparationObservation[] = [];
+    const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+    const result = await service(
+      state,
+      {
+        scheduler: {
+          async select() {
+            return allowRequestPreparation(candidate());
+          },
+          async bindAffinity() {
+            if (mode === 'throw') throw new Error('private affinity error');
+            return { decision: 'block', reason: 'private refusal' };
+          },
+        },
+      },
+      { observe: (event) => events.push(event) },
+    ).prepare(input({ scheduling: { sessionId: 'private-session' } }));
+    assertFailure(result, { outcome: 'blocked', stage: 'authority', code: 'capability_unavailable' });
+    assert.equal(state.calls.includes('admission'), false);
+    assert.deepEqual(
+      events.map(({ operation, outcome }) => [operation, outcome]),
+      [
+        ['scheduler-select', 'ok'],
+        ['affinity-bind', 'error'],
+        ['preparation-total', 'error'],
+      ],
+    );
+    assert.doesNotMatch(JSON.stringify(events), /private/);
+  });
+}
+
+for (const mode of ['block', 'throw'] as const) {
+  test(`registration ${mode} preserves compensation and rollback while recording fixed errors`, async () => {
+    const events: PostgresPreparationObservation[] = [];
+    const state: FakeState = { calls: [], compensated: [], signed: [], registered: [], transactionEvents: [] };
+    const result = await service(
+      state,
+      {
+        registrar: {
+          async register() {
+            if (mode === 'throw') throw new Error('private registration error');
+            return blockRequestPreparation('evidence_registration_failed', 'private refusal');
+          },
+        },
+      },
+      { observe: (event) => events.push(event) },
+    ).prepare(input());
+    assertFailure(result, { outcome: 'blocked', stage: 'evidence', code: 'evidence_registration_failed' });
+    assert.equal(state.compensated.length, 1);
+    assert.deepEqual(state.transactionEvents, ['begin', 'rollback']);
+    assert.deepEqual(
+      events.map(({ operation, outcome }) => [operation, outcome]),
+      [
+        ['evidence-register', 'error'],
+        ['preparation-total', 'error'],
+      ],
+    );
+    assert.doesNotMatch(JSON.stringify(events), /private/);
+  });
+}
+
+test('commit failure records total error after successful registration without altering storage failure', async () => {
+  const events: PostgresPreparationObservation[] = [];
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+  const result = await service(
+    state,
+    {
+      transaction: {
+        async transaction(work) {
+          await work({ query: async () => ({ rows: [], rowCount: 0 }) });
+          throw new Error('private commit error');
+        },
+      },
+    },
+    { observe: (event) => events.push(event) },
+  ).prepare(input());
+  assertFailure(result, { outcome: 'blocked', stage: 'admission', code: 'storage_failure' });
+  assert.deepEqual(
+    events.map(({ operation, outcome }) => [operation, outcome]),
+    [
+      ['evidence-register', 'ok'],
+      ['preparation-total', 'error'],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(events), /private/);
+});
+
+test('throwing preparation observers do not change selected bindings or port decisions', async () => {
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+  const events: PostgresPreparationObservation[] = [];
+  const result = await service(
+    state,
+    {
+      scheduler: {
+        async select() {
+          return allowRequestPreparation(candidate());
+        },
+        async bindAffinity() {
+          return { decision: 'allow' };
+        },
+      },
+    },
+    {
+      observe(event) {
+        events.push(event);
+        throw new Error('private observer error');
+      },
+    },
+  ).prepare(input({ scheduling: { sessionId: 'private-session' } }));
+  assert.equal(result.outcome, 'prepared');
+  assert.equal(state.compensated.length, 0);
+  assert.equal(state.signed.length, 1);
+  assert.equal(state.registered.length, 1);
+  assert.deepEqual(
+    events.map(({ operation, outcome }) => [operation, outcome]),
+    [
+      ['scheduler-select', 'ok'],
+      ['affinity-bind', 'ok'],
+      ['evidence-register', 'ok'],
+      ['preparation-total', 'ok'],
+    ],
+  );
+});
+
 test('prepares a server-owned payload and binds its exact digest to attempt and evidence', async () => {
   const state: FakeState = {
     calls: [],
@@ -600,6 +860,7 @@ test('prepares a server-owned payload and binds its exact digest to attempt and 
     assert.equal(Object.hasOwn(context as object, 'idempotencyKey'), false);
   }
   assert.equal(result.normalSuccessSnapshot.customerPriceVersion, 'customer-price-1');
+  assert.equal(result.normalSuccessSnapshot.customerProtocol, 'openai');
   assert.equal(result.normalSuccessSnapshot.holdAmountMinorUnits, '42');
   assert.equal(result.attempt.requestFingerprint, result.requestFingerprint);
   assert.equal(result.attempt.payloadSha256, result.payloadSha256);
@@ -630,6 +891,31 @@ test('prepares a server-owned payload and binds its exact digest to attempt and 
   assert.equal(state.registered.length, 1);
   assert.deepEqual(state.calls, ['caller', 'entitlement', 'authority', 'admission', 'attempt', 'signer', 'registrar']);
   assert.ok(result.canonicalEvidencePayload.includes(expectedDigest));
+});
+
+test('preparation keeps the customer quote protocol separate from the native provider protocol', async () => {
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+  const result = await service(state, {
+    authority: {
+      async resolve() {
+        const selected = authority();
+        return allowRequestPreparation({
+          ...selected,
+          route: { ...selected.route, providerProtocol: 'anthropic', providerOperation: 'messages' },
+        });
+      },
+    },
+    payload: payloadCompiler(undefined, undefined, 'anthropic'),
+  }).prepare(input());
+
+  assert.equal(result.outcome, 'prepared');
+  if (result.outcome !== 'prepared') return;
+  assert.equal(result.normalSuccessSnapshot.customerProtocol, 'openai');
+  assert.equal(result.normalSuccessSnapshot.providerProtocol, 'anthropic');
+  assert.equal(result.normalSuccessSnapshot.customerPriceVersion, 'customer-price-1');
+  assert.equal(result.providerProtocol, 'anthropic');
+  assert.equal(result.evidenceInput.protocol, 'openai');
+  assert.equal(result.evidenceInput.providerProtocol, 'anthropic');
 });
 
 test('preparation records project-service execution scope without attributing it to the creator', async () => {
@@ -830,6 +1116,107 @@ test('binds the selected account only after request preparation accepts the cand
   assert.deepEqual(bindings, [{ accountId: 'account-b', routeConfigId: 'route-a' }]);
   assert.equal(state.calls.indexOf('affinity-bind') < state.calls.indexOf('admission'), true);
 });
+
+test('optional combined selection preserves its receiver and sends only the final candidate to payload and admission', async () => {
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [], admissionInputs: [] };
+  const final = alternateCandidate();
+  const scheduler: ProviderAccountSchedulerPort = {
+    async select() {
+      throw new Error('legacy select must not run');
+    },
+    async bindAffinity() {
+      throw new Error('legacy bind must not run');
+    },
+    async selectAndBind(value) {
+      assert.equal(this, scheduler);
+      assert.deepEqual(value.candidates, [candidate(), final]);
+      assert.equal(value.requestId, 'request-a');
+      assert.equal(value.attemptId, 'attempt-a');
+      state.calls.push('combined');
+      return allowRequestPreparation(final);
+    },
+  };
+  const base = dependencies(state);
+  const result = await service(state, {
+    scheduler,
+    authority: {
+      async resolve() {
+        return allowRequestPreparation({ ...authority(), candidates: [candidate(), final] });
+      },
+    },
+    payload: {
+      async compile(value) {
+        state.calls.push('payload');
+        assert.equal(value.authority.candidate.accountId, 'account-b');
+        assert.equal(value.authority.credentialRef, 'credential-b');
+        assert.equal(value.authority.poolMemberAuthzVersion, 8);
+        return base.payload.compile(value);
+      },
+    },
+  }).prepare(input({ scheduling: { sessionId: 'combined-preparation' } }));
+  assert.equal(result.outcome, 'prepared');
+  if (result.outcome !== 'prepared') return;
+  assert.equal(result.attempt.accountId, 'account-b');
+  assert.equal(result.evidence.accountId, 'account-b');
+  assert.equal(result.evidence.credentialId, 'credential-b');
+  assert.equal(result.evidenceInput.poolMemberAuthzVersion, 8);
+  assert.equal(state.calls.indexOf('combined') < state.calls.indexOf('payload'), true);
+  assert.equal(state.calls.indexOf('payload') < state.calls.indexOf('admission'), true);
+});
+
+for (const mode of ['outside-source', 'attempted', 'route-drift', 'block', 'throw', 'malformed-method'] as const) {
+  test(`combined selection ${mode} never falls back or enters admission`, async () => {
+    const state: FakeState = { calls: [], compensated: [], signed: [], registered: [] };
+    const selected =
+      mode === 'outside-source'
+        ? { ...candidate(), credentialId: 'foreign-credential' }
+        : mode === 'route-drift'
+          ? { ...alternateCandidate(), endpoint: 'https://foreign.example/v1' }
+          : alternateCandidate();
+    const scheduler: ProviderAccountSchedulerPort = {
+      async select() {
+        state.calls.push('legacy-select');
+        return allowRequestPreparation(candidate());
+      },
+      async bindAffinity() {
+        state.calls.push('legacy-bind');
+        return { decision: 'allow' };
+      },
+      async selectAndBind() {
+        state.calls.push('combined');
+        if (mode === 'throw') throw new Error('private combined error');
+        if (mode === 'block')
+          return blockRequestPreparation('capability_unavailable', 'combined authority unavailable');
+        return allowRequestPreparation(selected);
+      },
+    };
+    if (mode === 'malformed-method') Object.defineProperty(scheduler, 'selectAndBind', { value: null });
+    const result = await service(state, {
+      scheduler,
+      authority: {
+        async resolve() {
+          return allowRequestPreparation({
+            ...authority(),
+            candidates: [candidate(), mode === 'route-drift' ? selected : alternateCandidate()],
+          });
+        },
+      },
+    }).prepare(
+      input({
+        scheduling: {
+          sessionId: 'combined-preparation',
+          ...(mode === 'attempted' ? { attemptedAccountIds: ['account-b'] } : {}),
+        },
+      }),
+    );
+    assert.equal(result.outcome, 'blocked');
+    assert.equal(state.calls.includes('legacy-select'), false);
+    assert.equal(state.calls.includes('legacy-bind'), false);
+    assert.equal(state.calls.includes('admission'), false);
+    assert.equal(state.calls.includes('attempt'), false);
+    assert.deepEqual(state.compensated, []);
+  });
+}
 
 /* G1 (task #41): trusted-boundary Claude Code client evidence forwarding. */
 

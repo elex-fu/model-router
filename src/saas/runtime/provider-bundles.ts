@@ -154,6 +154,17 @@ function defineBundle(input: ProviderBundleManifest): ProviderBundleManifest {
  */
 export const PROVIDER_BUNDLE_MANIFESTS: readonly ProviderBundleManifest[] = Object.freeze([
   defineBundle({
+    bundle: 'kimi',
+    providerId: 'kimi',
+    displayName: 'Kimi Code',
+    productIds: ['kimi-code'],
+    credentialTypes: ['api-key'],
+    supplyMode: 'platform',
+    protocols: ['anthropic'],
+    endpointScopes: ['messages'],
+    dispatch: 'generic',
+  }),
+  defineBundle({
     bundle: CLAUDE_PROVIDER_ID,
     providerId: CLAUDE_PROVIDER_ID,
     displayName: CLAUDE_DISPLAY_NAME,

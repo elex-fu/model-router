@@ -39,6 +39,7 @@ export interface GatewayCapabilityDeploymentFacts {
   readonly tlsFingerprintProfiles: readonly string[];
   /** Live verification records keyed by capability id. */
   readonly verification: Readonly<Record<string, GatewayCapabilityVerificationLevel>>;
+  readonly unavailableUsageBoundProviderIds?: readonly string[];
 }
 
 interface ProviderRow {
@@ -201,6 +202,9 @@ export async function collectGatewayCapabilityFacts(
     mediaStorages: Object.freeze([...deployment.mediaStorages]),
     tlsFingerprintProfiles: Object.freeze([...deployment.tlsFingerprintProfiles]),
     verification: Object.freeze({ ...deployment.verification }),
+    ...(deployment.unavailableUsageBoundProviderIds
+      ? { unavailableUsageBoundProviderIds: Object.freeze([...deployment.unavailableUsageBoundProviderIds]) }
+      : {}),
   });
 }
 

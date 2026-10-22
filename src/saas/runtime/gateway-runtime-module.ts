@@ -23,6 +23,8 @@ import {
 import type { PostgresProviderAccountAffinityHmacKey } from '../gateway/postgres-provider-account-affinity.js';
 import { isProviderHttpTestAddressCapability } from '../gateway/provider-http-address.js';
 import type { RequestPreparationEntitlementPort } from '../gateway/request-preparation-service.js';
+import type { GatewayCapabilityReadiness } from './gateway-capability-readiness.js';
+import type { GatewayCapabilityDeploymentFacts } from './provider-bundle-readiness-facts.js';
 import type { ProviderAwaitable, ProviderEnvironment, ProviderModuleImporter } from './providers.js';
 import { resolveProviderModuleSpecifier } from './providers.js';
 
@@ -35,7 +37,11 @@ type CoreOwnedGatewayOption =
   | 'schedulerAffinity'
   | 'idempotencyHmacKey'
   | 'providerCredentialUnsealingKms'
-  | 'credentialContext';
+  | 'credentialContext'
+  | 'capabilityReadiness'
+  | 'preparationObserver'
+  | 'dispatchObserver'
+  | 'preparationFailureObserver';
 
 /** Runtime supplied capabilities; PostgreSQL preparation ports and KMS stay core-owned. */
 export type ManagedSaasGatewayRuntimeDependencies = Omit<
@@ -145,6 +151,9 @@ export interface LoadedManagedSaasGatewayRuntimeModule {
   readonly dependencies: ManagedSaasGatewayRuntimeDependencies;
   /** Present only for v2 modules; v1 handles never carry the key. */
   readonly extensions?: GatewayRuntimeModuleExtensionsV2;
+  /** Observations of mounted production faces, copied by the readiness collector. */
+  readonly deploymentFacts?: GatewayCapabilityDeploymentFacts;
+  getCapabilityReadiness?(): Promise<GatewayCapabilityReadiness>;
   checkReady(): Promise<void>;
   close(): Promise<void>;
 }
@@ -211,6 +220,43 @@ const DEPENDENCY_KEYS = Object.freeze([
 ] as const);
 
 const TEST_DEPENDENCY_KEYS = Object.freeze([...DEPENDENCY_KEYS, 'providerHttpTestAddressCapability'] as const);
+
+/** Version 2 adds typed dispatch/operations faces; no core auth, KMS or listener ownership is delegated. */
+const V2_OPTIONAL_DEPENDENCY_KEYS = Object.freeze([
+  'providerHttpEgressAllowlist',
+  'codexEvidenceTransport',
+  'claudeEvidenceTransport',
+  'geminiEvidenceTransport',
+  'opencodeGoEvidenceTransport',
+  'cnProvidersEvidenceTransport',
+  'grokEvidenceTransport',
+  'bedrockEvidenceTransport',
+  'vertexEvidenceTransport',
+  'responsesCompactEvidenceTransport',
+  'providerEvidenceTransports',
+  'providerNativeProtocol',
+  'responsesWsRoundExecutor',
+  'responsesWsLimits',
+  'responsesCompactNativeSupply',
+  'pluginRouting',
+  'opencodeGoProtocolRouting',
+  'opencodeGoCrossResponsesRouting',
+  'cnProvidersProtocolRouting',
+  'imageMedia',
+  'videoMedia',
+  'openRouterAttribution',
+  'egressProxyResolution',
+  'tlsFingerprintResolution',
+  'customerWebhooks',
+  'schedulerStrategies',
+  'schedulerStickyWait',
+  'schedulerRedisConcurrencySlots',
+  'schedulerAffinityStickyCache',
+  'trustedProxyCidrs',
+  'modelPlazaSettingsOverlay',
+  'modelPlazaSessionAuth',
+  'riskControl',
+] as const);
 
 /**
  * Exact handle shapes: v1 modules stay byte-identical, and v2 is recognized
@@ -346,15 +392,50 @@ async function closeQuietly(close: (() => Promise<void>) | undefined): Promise<v
   }
 }
 
-function checkedDependencies(value: unknown): ManagedSaasGatewayRuntimeDependencies {
+function checkedDependencies(value: unknown, version: 'v1' | 'v2' = 'v1'): ManagedSaasGatewayRuntimeDependencies {
   const productionContract = hasExactKeys(value, DEPENDENCY_KEYS);
   const testContract = hasExactKeys(value, TEST_DEPENDENCY_KEYS);
-  if (!productionContract && !testContract) throw moduleError('MODULE_CONTRACT_INVALID');
+  const v2Contract =
+    version === 'v2' &&
+    isRecord(value) &&
+    DEPENDENCY_KEYS.every((key) => hasOwn(value, key)) &&
+    Reflect.ownKeys(value).every(
+      (key) =>
+        typeof key === 'string' &&
+        (
+          [...DEPENDENCY_KEYS, ...V2_OPTIONAL_DEPENDENCY_KEYS, 'providerHttpTestAddressCapability'] as readonly string[]
+        ).includes(key),
+    );
+  if (!productionContract && !testContract && !v2Contract) throw moduleError('MODULE_CONTRACT_INVALID');
   if (
-    testContract &&
+    hasOwn(value, 'providerHttpTestAddressCapability') &&
     (process.env.NODE_ENV !== 'test' || !isProviderHttpTestAddressCapability(value.providerHttpTestAddressCapability))
   ) {
     throw moduleError('MODULE_CONTRACT_INVALID');
+  }
+  if (v2Contract) {
+    for (const key of [
+      'codexEvidenceTransport',
+      'claudeEvidenceTransport',
+      'geminiEvidenceTransport',
+      'opencodeGoEvidenceTransport',
+      'cnProvidersEvidenceTransport',
+      'grokEvidenceTransport',
+      'bedrockEvidenceTransport',
+      'vertexEvidenceTransport',
+      'responsesCompactEvidenceTransport',
+    ] as const) {
+      if (hasOwn(value, key) && !boundMethod(value[key], 'send')) throw moduleError('MODULE_CONTRACT_INVALID');
+    }
+    for (const key of [
+      'providerEvidenceTransports',
+      'providerNativeProtocol',
+      'responsesCompactNativeSupply',
+    ] as const) {
+      if (hasOwn(value, key) && typeof value[key] !== 'function') throw moduleError('MODULE_CONTRACT_INVALID');
+    }
+    if (hasOwn(value, 'responsesWsRoundExecutor') && !boundMethod(value.responsesWsRoundExecutor, 'executeRound'))
+      throw moduleError('MODULE_CONTRACT_INVALID');
   }
   const rawKey = value.idempotencyHmacKey;
   if (!(rawKey instanceof Uint8Array) || rawKey.byteLength < 32) throw moduleError('MODULE_CONTRACT_INVALID');
@@ -570,7 +651,7 @@ function checkedTlsSidecarConfiguration(value: unknown): TlsSidecarConfiguration
   });
 }
 
-function checkedExtensions(value: unknown): GatewayRuntimeModuleExtensionsV2 {
+export function parseGatewayRuntimeExtensions(value: unknown): GatewayRuntimeModuleExtensionsV2 {
   try {
     if (!isRecord(value)) throw moduleError('MODULE_CONTRACT_INVALID');
     const keys = Reflect.ownKeys(value);
@@ -630,6 +711,44 @@ export async function loadManagedSaasGatewayRuntimeModule(
     ...gatewayListener,
     routePrefix: '/v1',
   };
+
+  if (deployment.gatewayRuntimeModule === 'builtin') {
+    // Built-in composition is compiled into the normal CLI/release package;
+    // no executable module or importer is needed for standard deployments.
+    const { createBuiltinManagedSaasGatewayRuntime } = await import('./builtin-gateway-runtime.js');
+    const hooks: Array<() => ProviderAwaitable<void>> = [];
+    try {
+      const handle = await createBuiltinManagedSaasGatewayRuntime({
+        database,
+        deployment: Object.freeze({
+          workloadRole: 'gateway',
+          deploymentId: deployment.deploymentId,
+          environmentId: deployment.environmentId,
+          listener: gatewayListenerConfig,
+        }),
+        env: copyRuntimeEnvironment(environment),
+        lifecycle: {
+          registerCloseHook(hook) {
+            hooks.push(hook);
+          },
+        },
+      });
+      return Object.freeze({
+        dependencies: handle.dependencies,
+        extensions: handle.extensions,
+        deploymentFacts: handle.deploymentFacts,
+        getCapabilityReadiness: handle.getCapabilityReadiness,
+        checkReady: handle.checkReady,
+        close: closeOnce(handle.close),
+      });
+    } catch {
+      for (const hook of hooks.reverse())
+        await closeQuietly(async () => {
+          await hook();
+        });
+      throw moduleError('FACTORY_FAILED');
+    }
+  }
 
   let specifier: string;
   try {
@@ -710,13 +829,72 @@ export async function loadManagedSaasGatewayRuntimeModule(
     if (contract === 'v2' && raw.apiVersion !== 2) throw moduleError('MODULE_CONTRACT_INVALID');
     const checkReady = boundMethod(raw, 'checkReady');
     if (!checkReady || !cleanup) throw moduleError('MODULE_CONTRACT_INVALID');
-    const dependencies = checkedDependencies(raw.dependencies);
-    const extensions = contract === 'v2' ? checkedExtensions(raw.extensions) : undefined;
+    const checked = checkedDependencies(raw.dependencies, contract);
+    const extensions = contract === 'v2' ? parseGatewayRuntimeExtensions(raw.extensions) : undefined;
+    let mounted: Partial<ManagedSaasGatewayProductionOptions> = {};
+    const dependencies =
+      checked.providerEvidenceTransports === undefined
+        ? checked
+        : Object.freeze({
+            ...checked,
+            providerEvidenceTransports: (
+              context: Parameters<NonNullable<ManagedSaasGatewayProductionOptions['providerEvidenceTransports']>>[0],
+            ) => {
+              const result = checked.providerEvidenceTransports?.(context) ?? {};
+              mounted = result;
+              return result;
+            },
+          });
+    const routedScopes = () => {
+      const scopeByKey = [
+        ['codexEvidenceTransport', 'codex-responses'],
+        ['claudeEvidenceTransport', 'claude-messages'],
+        ['geminiEvidenceTransport', 'gemini-generate-content'],
+        ['opencodeGoEvidenceTransport', 'opencode-go-zen'],
+        ['cnProvidersEvidenceTransport', 'zhipu-glm'],
+        ['cnProvidersEvidenceTransport', 'zhipu-glm-coding'],
+        ['cnProvidersEvidenceTransport', 'minimax-m'],
+        ['grokEvidenceTransport', 'grok-responses'],
+        ['bedrockEvidenceTransport', 'bedrock-invoke'],
+        ['vertexEvidenceTransport', 'vertex-raw-predict'],
+      ] as const;
+      return Object.freeze(
+        scopeByKey.filter(([key]) => (mounted[key] ?? checked[key]) !== undefined).map(([, scope]) => scope),
+      );
+    };
+    const deploymentFacts: GatewayCapabilityDeploymentFacts | undefined =
+      extensions === undefined
+        ? undefined
+        : Object.freeze({
+            get dispatch() {
+              return Object.freeze({ generic: true, routedEndpointScopes: routedScopes() });
+            },
+            mediaStorages: Object.freeze(extensions.media && checked.imageMedia ? [extensions.media.storage] : []),
+            tlsFingerprintProfiles: Object.freeze(
+              extensions.tlsFingerprint && checked.tlsFingerprintResolution?.enabled
+                ? [extensions.tlsFingerprint.profile]
+                : [],
+            ),
+            verification: Object.freeze({}),
+          });
     partialHooksTransferred = true;
     partialCloseHooks.length = 0;
     return Object.freeze({
       dependencies,
       ...(extensions ? { extensions } : {}),
+      ...(deploymentFacts && extensions
+        ? {
+            deploymentFacts,
+            async getCapabilityReadiness() {
+              const { collectGatewayCapabilityFacts } = await import('./provider-bundle-readiness-facts.js');
+              const { projectGatewayCapabilityReadiness } = await import('./gateway-capability-readiness.js');
+              return projectGatewayCapabilityReadiness({
+                extensions,
+                facts: await collectGatewayCapabilityFacts(database, deploymentFacts),
+              });
+            },
+          }
+        : {}),
       checkReady: async () => {
         try {
           await checkReady();

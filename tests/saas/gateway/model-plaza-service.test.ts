@@ -17,6 +17,10 @@ import type {
   ModelPlazaTarget,
 } from '../../../src/saas/gateway/model-plaza/types.js';
 import type { CustomerPriceVersionRecord, RateSet } from '../../../src/saas/pricing/types.js';
+import type {
+  GatewayCapabilityProjection,
+  GatewayCapabilityReadiness,
+} from '../../../src/saas/runtime/gateway-capability-readiness.js';
 
 const NEUTRAL = { numerator: 1n, denominator: 1n };
 
@@ -187,6 +191,154 @@ function anonymousSettings(overrides: Partial<ModelPlazaSettings> = {}): ModelPl
 }
 
 const noOfficialPricing = () => Promise.resolve(null);
+
+function readyCapability(
+  identity: Pick<ModelPlazaTarget, 'providerId' | 'productId' | 'endpoint'>,
+  overrides: Partial<GatewayCapabilityProjection> = {},
+): GatewayCapabilityProjection {
+  return {
+    capability: `provider-bundle:${identity.providerId}`,
+    kind: 'provider-bundle',
+    label: identity.providerId,
+    providerId: identity.providerId,
+    productIds: [identity.productId],
+    endpointScopes: [identity.endpoint],
+    unavailableEndpointScopes: [],
+    enabled: true,
+    assembled: true,
+    verified: true,
+    operational: true,
+    verificationLevel: 'live',
+    reasonCodes: [],
+    ...overrides,
+  };
+}
+
+function readiness(capabilities: readonly GatewayCapabilityProjection[]): GatewayCapabilityReadiness {
+  return { configurationValid: true, fatalReasonCodes: [], capabilities };
+}
+
+test('advertised nominal models require exact provider/product/endpoint and preserve price authority', async () => {
+  const allowed = target({ publicModelId: 'ready', alias: 'same-alias' });
+  const others = [
+    target({ ...allowed, publicModelId: 'cross-product', productId: 'another-product' }),
+    target({ ...allowed, publicModelId: 'cross-endpoint', endpoint: 'other-endpoint' }),
+    target({ ...allowed, publicModelId: 'alias-as-provider', providerId: 'same-alias' }),
+  ];
+  const base = fakeFacts({ groups: [group({ id: 'public' })], targets: [allowed, ...others] });
+  const resolved: string[] = [];
+  const facts: ModelPlazaFactsPort = {
+    withSnapshot: (at, work) =>
+      base.withSnapshot(at, (snapshot) =>
+        work({
+          ...snapshot,
+          resolvePrice: async (identity) => {
+            resolved.push(identity.publicModelId);
+            return snapshot.resolvePrice(identity);
+          },
+        }),
+      ),
+  };
+  const service = new SaasModelPlazaService({
+    facts,
+    capabilityReadiness: async () => readiness([readyCapability(allowed)]),
+    officialPricing: { lookup: noOfficialPricing } as never,
+  });
+  const response = await service.list({ access: access('anonymous'), settings: anonymousSettings() });
+  assert.deepEqual(resolved, ['ready'], 'unavailable identities never reach authoritative price resolution');
+  assert.deepEqual(
+    response.groups[0]?.models.map((model) => [model.model, model.platform]),
+    [['same-alias', 'claude']],
+  );
+  assert.ok(response.groups[0]?.models[0]?.pricing);
+});
+
+test('composite price identities cannot bypass readiness and retain the public alias of a blocked nominal target', async () => {
+  const nominal = target({
+    publicModelId: 'public-id',
+    alias: 'customer-alias',
+    providerId: 'openai-codex',
+    productId: 'codex-chatgpt',
+    endpoint: 'codex-responses',
+  });
+  const resolved = { ...identityFor(nominal), providerId: 'kimi', productId: 'kimi-code', endpoint: 'messages' };
+  const wrongProduct = { ...resolved, productId: 'unverified-product' };
+  const wrongEndpoint = { ...resolved, endpoint: 'unverified-endpoint' };
+  const base = fakeFacts({
+    groups: [group({ id: 'composite', composite: true })],
+    targets: [nominal],
+    priceIdentities: [identityFor(nominal), resolved, wrongProduct, wrongEndpoint],
+    globalPlatforms: new Set(['openai-codex', 'kimi']),
+  });
+  const pricesRead: string[] = [];
+  const facts: ModelPlazaFactsPort = {
+    withSnapshot: (at, work) =>
+      base.withSnapshot(at, (snapshot) =>
+        work({
+          ...snapshot,
+          resolvePrice: async (identity) => {
+            pricesRead.push(`${identity.providerId}/${identity.productId}/${identity.endpoint}`);
+            return snapshot.resolvePrice(identity);
+          },
+        }),
+      ),
+  };
+  let reads = 0;
+  let current = readiness([
+    readyCapability(nominal, { operational: false, reasonCodes: ['USAGE_BOUNDS_UNAVAILABLE'] }),
+    readyCapability(resolved),
+  ]);
+  const service = new SaasModelPlazaService({
+    facts,
+    capabilityReadiness: async () => {
+      reads += 1;
+      return current;
+    },
+    officialPricing: { lookup: noOfficialPricing } as never,
+  });
+  const first = await service.list({ access: access('anonymous'), settings: anonymousSettings() });
+  assert.equal(reads, 1);
+  assert.deepEqual(pricesRead, ['kimi/kimi-code/messages']);
+  assert.deepEqual(
+    first.groups[0]?.models.map((model) => [model.model, model.platform]),
+    [['customer-alias', 'kimi']],
+  );
+  // An expired observation is projected as unverified by the runtime. The
+  // very next response must use it rather than a cached sellable report.
+  current = readiness([
+    readyCapability(nominal, { operational: false, reasonCodes: ['USAGE_BOUNDS_UNAVAILABLE'] }),
+    readyCapability(resolved, {
+      verified: false,
+      verificationLevel: 'unverified',
+      reasonCodes: ['VERIFICATION_NOT_RECORDED'],
+    }),
+  ]);
+  pricesRead.length = 0;
+  assert.deepEqual((await service.list({ access: access('session'), settings: anonymousSettings() })).groups, []);
+  assert.equal(reads, 2, 'one fresh readiness read per list, including session callers');
+  assert.deepEqual(pricesRead, []);
+});
+
+test('plaza readiness failures and invalid reports fail before reading display facts', async () => {
+  let snapshots = 0;
+  const facts: ModelPlazaFactsPort = {
+    withSnapshot: async () => {
+      snapshots += 1;
+      throw new Error('unexpected facts read');
+    },
+  };
+  for (const capabilityReadiness of [
+    async () => {
+      throw new Error('private capability detail');
+    },
+    async () => ({ configurationValid: false, fatalReasonCodes: [], capabilities: [] }),
+    async () => undefined as never,
+  ]) {
+    const service = new SaasModelPlazaService({ facts, capabilityReadiness });
+    await assert.rejects(service.list({ access: access('anonymous'), settings: anonymousSettings() }));
+  }
+  assert.equal(snapshots, 0);
+});
 
 test('same-name models are first-seen-wins per (platform, alias); an unpriced entry is upgraded by a priced one', async () => {
   // Two targets, same alias and platform, different products; the FIRST

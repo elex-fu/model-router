@@ -51,7 +51,7 @@ test('R2 §7.2: the Gemini native entries carry CHECK-legal provenance; the auxi
   // count_tokens / responses.compact wait for the migration-131+ CHECK
   // widening; their attempts ride the family-canonical operation.
   assert.equal(byId.get('anthropic.count_tokens')?.provenanceOperation, 'messages');
-  assert.equal(byId.get('responses.compact')?.provenanceOperation, 'responses');
+  assert.equal(byId.get('responses.compact')?.provenanceOperation, 'responses.compact');
 });
 
 test('R2 §7.2: matchGeminiNativeContentPath parses the public model from the path', () => {

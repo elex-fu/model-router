@@ -4,6 +4,7 @@ import { EventEmitter, once } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
+import WebSocket from 'ws';
 import {
   createProviderCredentialContext,
   type ProviderCredentialKms,
@@ -12,21 +13,28 @@ import {
 import type { SaasDatabase, SqlExecutor } from '../../src/saas/db/index.js';
 import type { ModelResolutionProvenance } from '../../src/saas/gateway/contracts.js';
 import { createSaasGatewayHandler, type SaasGatewayHttpHandler } from '../../src/saas/gateway/http-handler.js';
+import type { PostgresPreparationObservation } from '../../src/saas/gateway/postgres-preparation-observer.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
   type ProviderAccountRuntimeHealthWriter,
 } from '../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import { PostgresProviderAccountScheduler } from '../../src/saas/gateway/postgres-provider-account-scheduler.js';
-import type {
-  PreparedEvidenceLeaseProvider,
-  PreparedEvidenceMeteringPort,
-  PreparedEvidenceTransport,
+import {
+  type PreparedEvidenceLease,
+  type PreparedEvidenceLeaseProvider,
+  type PreparedEvidenceMeteringPort,
+  type PreparedEvidenceTransport,
+  SaasPreparedEvidenceDispatchError,
 } from '../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type {
   PreparedRequestEvidenceDispatchPort,
   PreparedRequestEvidenceInput,
   PreparedRequestEvidenceRecord,
 } from '../../src/saas/gateway/prepared-request-evidence-service.js';
+import {
+  PostgresProviderAccountLeaseService,
+  ProviderAccountLeaseError,
+} from '../../src/saas/gateway/provider-account-lease-service.js';
 import { ProviderHttpTransport, ProviderHttpTransportError } from '../../src/saas/gateway/provider-http-transport.js';
 import {
   allowRequestPreparation,
@@ -43,6 +51,10 @@ import {
 } from '../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../src/saas/keys/types.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../../src/saas/metering/types.js';
+import type {
+  GatewayCapabilityProjection,
+  GatewayCapabilityReadiness,
+} from '../../src/saas/runtime/gateway-capability-readiness.js';
 import { GatewayProviderCredentialUnsealer } from '../../src/saas/runtime/gateway-provider-credential-unsealer.js';
 import { ProviderSupplyHttpCredentialResolver } from '../../src/saas/runtime/provider-supply-http-credential-resolver.js';
 import type { RequestPreparationSigner } from '../../src/saas/runtime/request-preparation-signer-adapter.js';
@@ -53,6 +65,7 @@ import type {
 import {
   createManagedSaasGatewayComposition,
   createManagedSaasGatewayProductionComposition,
+  createPostgresDispatchLeaseProvider,
   type ManagedSaasGatewayCompositionDependencies,
   ManagedSaasGatewayCompositionError,
   type ManagedSaasGatewayProductionOptions,
@@ -500,6 +513,8 @@ function dispatchComposition(
   const payloadBytes = new Uint8Array([1]);
   const dispatchEvidence: PreparedRequestEvidenceRecord = {
     evidenceId: 'dispatch-evidence',
+    providerId: 'provider-a',
+    productId: 'product-a',
     tenantId: 'tenant-a',
     projectId: 'project-a',
     requestId: 'dispatch-request',
@@ -744,6 +759,8 @@ test('composition dispatch uses real credential unsealing, native bearer formatt
           providerId: 'provider-a',
           productId: 'product-a',
           protocol: 'openai',
+          providerProtocol: evidence.providerProtocol,
+          providerOperation: evidence.providerOperation,
           endpoint: evidence.endpoint,
           routeConfigId: 'route-a',
           routeConfigVersion: 1,
@@ -955,6 +972,7 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
   let closeCalls = 0;
   let cancellationResponse: { destroyed: boolean } | undefined;
   const compensationStages: string[] = [];
+  const observations: PostgresPreparationObservation[] = [];
   const dependencies: ManagedSaasGatewayCompositionDependencies = {
     authenticator: {
       authenticate: async () => authenticatedCaller(),
@@ -1036,6 +1054,7 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
     },
     preparationOptions: {
       evidenceVerifierKeyId: 'verifier-a',
+      observe: (observation) => observations.push(observation),
       idFactory: {
         requestId: () => 'gateway-request-a',
         attemptId: () => 'gateway-attempt-a',
@@ -1064,10 +1083,24 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
   assert.equal(transactionCalls, 1);
   assert.deepEqual(executors, [executor, executor, executor]);
   assert.deepEqual(calls, ['caller', 'entitlement', 'authority', 'admission', 'attempt', 'signer', 'registrar']);
+  assert.deepEqual(
+    observations.map(({ operation, outcome }) => [operation, outcome]),
+    [
+      ['evidence-register', 'ok'],
+      ['preparation-total', 'ok'],
+    ],
+  );
 
   const failed = await composition.preparation.prepare(preparationInput());
   assert.equal(failed.outcome, 'blocked');
   assert.equal(failed.code, 'evidence_registration_failed');
+  assert.deepEqual(
+    observations.slice(2).map(({ operation, outcome }) => [operation, outcome]),
+    [
+      ['evidence-register', 'error'],
+      ['preparation-total', 'error'],
+    ],
+  );
   assert.equal(executors.length, 7);
   assert.equal(new Set(executors).size, 1);
   assert.deepEqual(calls, [
@@ -1119,6 +1152,412 @@ test('complete test-mode graph uses gateway-owned IDs and one executor through e
   assert.equal(closeCalls, 1);
 });
 
+function lifecycleDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function lifecycleTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+class LifecycleResponse extends EventEmitter {
+  headersSent = false;
+  writableEnded = false;
+  destroyed = false;
+  statusCode = 0;
+  readonly headers = new Map<string, unknown>();
+
+  constructor(
+    private readonly event: (event: string) => void,
+    private readonly headerFailure?: Error,
+  ) {
+    super();
+  }
+
+  setHeader(name: string, value: unknown): void {
+    if (this.headerFailure) throw this.headerFailure;
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  writeHead(status: number, headers: Readonly<Record<string, string>> = {}): this {
+    this.headersSent = true;
+    this.statusCode = status;
+    for (const [name, value] of Object.entries(headers)) this.setHeader(name, value);
+    this.event('response-started');
+    return this;
+  }
+
+  write(): boolean {
+    return true;
+  }
+
+  end(): this {
+    this.writableEnded = true;
+    this.event('response-ended');
+    this.emit('finish');
+    this.emit('close');
+    return this;
+  }
+
+  destroy(): this {
+    this.destroyed = true;
+    this.emit('close');
+    return this;
+  }
+}
+
+/** Real preparation and dispatch, with an explicit post-EOF settlement barrier and no sockets or database. */
+function lifecycleComposition(options: { close?: () => Promise<void> } = {}) {
+  const events: string[] = [];
+  const executor: SqlExecutor = { query: async () => ({ rows: [], rowCount: 0 }) };
+  const evidence = new Map<string, PreparedRequestEvidenceRecord>();
+  const attempts = new Map<string, AttemptRecord>();
+  const calls = new Map<
+    string,
+    {
+      entered: ReturnType<typeof lifecycleDeferred>;
+      release: ReturnType<typeof lifecycleDeferred>;
+      response: LifecycleResponse;
+      handlerSettled: boolean;
+      settlementFinished: boolean;
+      leaseReleased: boolean;
+    }
+  >();
+  const handling: Promise<boolean>[] = [];
+  let requestIds = 0;
+  let attemptIds = 0;
+  let evidenceIds = 0;
+  let closeCalls = 0;
+  const readEvidence = (evidenceId: string) => {
+    const record = evidence.get(evidenceId);
+    assert.ok(record);
+    return record;
+  };
+  const readAttempt = (attemptId: string) => {
+    const record = attempts.get(attemptId);
+    assert.ok(record);
+    return record;
+  };
+  const composition = createManagedSaasGatewayComposition({
+    authenticator: { authenticate: async () => authenticatedCaller() },
+    preparation: {
+      transaction: { transaction: async (work) => work(executor) },
+      caller: { validate: async () => allowRequestPreparation(caller()) },
+      entitlement: { resolve: async () => allowRequestPreparation(entitlement()) },
+      authority: { resolve: async () => allowRequestPreparation(authority()) },
+      payload: payloadCompiler(),
+      admission: { authorizeAndReserve: async (input) => allowRequestPreparation(admission(input)) },
+      attempt: { persist: async (input) => allowRequestPreparation(attemptRecord(input)) },
+      compensation: {
+        releasePreDispatch: async () => {
+          throw new Error('lifecycle fixture must not compensate a delivered response');
+        },
+      },
+      signer: { sign: async () => allowRequestPreparation({ signatureBase64: 'c2lnbmF0dXJl' }) },
+      registrar: {
+        async register(input) {
+          const record: PreparedRequestEvidenceRecord = {
+            ...evidenceRecord(input),
+            requestedModel: input.modelResolution?.requestedModel,
+            mappedModel: input.modelResolution?.mappedModel,
+            resolvedModel: input.modelResolution?.resolvedModel,
+            accountOwnerKind: 'tenant',
+          };
+          evidence.set(record.evidenceId, record);
+          attempts.set(record.attemptId, dispatchAttemptRecord(record));
+          return record;
+        },
+      },
+    },
+    preparationOptions: {
+      evidenceVerifierKeyId: 'lifecycle-verifier',
+      idFactory: {
+        requestId: () => `lifecycle-request-${++requestIds}`,
+        attemptId: () => `lifecycle-attempt-${++attemptIds}`,
+        evidenceId: () => `lifecycle-evidence-${++evidenceIds}`,
+      },
+    },
+    dispatch: {
+      evidence: {
+        preflightForDispatch: async (evidenceId) => readEvidence(evidenceId),
+        async claimForDispatch(evidenceId) {
+          const record = readEvidence(evidenceId);
+          attempts.set(record.attemptId, claimedDispatchAttempt(readAttempt(record.attemptId), record));
+          const claimed: PreparedRequestEvidenceRecord = {
+            ...record,
+            status: 'claimed',
+            claimedAt: NOW,
+            claimedAttemptId: record.attemptId,
+          };
+          evidence.set(evidenceId, claimed);
+          return claimed;
+        },
+      },
+      metering: {
+        async getAttempt(tenantId, requestId, attemptId) {
+          const record = readAttempt(attemptId);
+          assert.equal(record.tenantId, tenantId);
+          assert.equal(record.requestId, requestId);
+          return record;
+        },
+        async transitionAttempt(input) {
+          const record = transitionedDispatchAttempt(readAttempt(input.attemptId), input);
+          attempts.set(record.id, record);
+          events.push(`attempt-${record.dispatchState}:${record.requestId}`);
+          return record;
+        },
+        async recordKnownNonSuccessHttpResponse() {
+          throw new Error('lifecycle fixture only delivers successful responses');
+        },
+      },
+      leaseProvider: {
+        async acquire(input) {
+          const state = calls.get(input.evidence.requestId);
+          assert.ok(state);
+          return {
+            fencingToken: 'lifecycle-fixture-fence',
+            renewIntervalMs: 1000,
+            async renew() {},
+            async release() {
+              state.leaseReleased = true;
+              events.push(`lease-released:${input.evidence.requestId}`);
+            },
+          };
+        },
+      },
+      transport: {
+        async send() {
+          return {
+            responseStarted: true,
+            resultHttpStatus: 200,
+            headers: { 'content-type': 'application/json' },
+            providerUsage: {
+              inputTotal: 1,
+              inputUncached: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              cacheWrite5m: 0,
+              cacheWrite1h: 0,
+              outputTotal: 1,
+              reasoningOutput: 0,
+              status: 'reported',
+              source: 'upstream',
+              semanticsVersion: 'v1',
+              billingMode: 'token',
+              units: null,
+              sizeTier: null,
+            },
+          };
+        },
+      },
+      normalSuccessSettlement: {
+        async complete(input) {
+          const state = calls.get(input.requestId);
+          assert.ok(state);
+          const record = readAttempt(input.attemptId);
+          assert.equal(record.requestId, input.requestId);
+          assert.equal(state.response.writableEnded, true);
+          assert.equal(record.dispatchState, 'sent');
+          events.push(`settlement-entered:${input.requestId}`);
+          state.entered.resolve();
+          await state.release.promise;
+          state.settlementFinished = true;
+          events.push(`settlement-finished:${input.requestId}`);
+          return { kind: 'settled', attempt: { ...record, resultState: 'succeeded' } };
+        },
+        async retainUnknown() {
+          throw new Error('lifecycle fixture must not produce uncertain settlement');
+        },
+      },
+    },
+    lifecycle: {
+      async close() {
+        closeCalls += 1;
+        events.push('lifecycle-closed');
+        await options.close?.();
+      },
+    },
+    maxBodyBytes: 1024,
+    entryPoint: 'lifecycle-test',
+  });
+  return {
+    composition,
+    events,
+    get closeCalls() {
+      return closeCalls;
+    },
+    start(options: { path?: string; headerFailure?: Error } = {}) {
+      const requestId = `lifecycle-request-${requestIds + 1}`;
+      const response = new LifecycleResponse((event) => events.push(`${event}:${requestId}`), options.headerFailure);
+      const state = {
+        entered: lifecycleDeferred(),
+        release: lifecycleDeferred(),
+        response,
+        handlerSettled: false,
+        settlementFinished: false,
+        leaseReleased: false,
+      };
+      calls.set(requestId, state);
+      const request = Object.assign(Readable.from([Buffer.from('{"model":"model-a","messages":[]}')]), {
+        method: 'POST',
+        url: options.path ?? '/v1/chat/completions',
+        complete: true,
+        aborted: false,
+        headers: { authorization: 'Bearer lifecycle-fixture-key', 'content-type': 'application/json' },
+        socket: { remoteAddress: '127.0.0.1' },
+      });
+      const pending = composition.handler(request as unknown as IncomingMessage, response as unknown as ServerResponse);
+      void pending.then(
+        () => {
+          state.handlerSettled = true;
+          events.push(`handler-fulfilled:${requestId}`);
+        },
+        () => {
+          state.handlerSettled = true;
+          events.push(`handler-rejected:${requestId}`);
+        },
+      );
+      handling.push(pending);
+      return {
+        requestId,
+        response,
+        state,
+        pending,
+        entered: Promise.race([
+          state.entered.promise,
+          pending.then(() => {
+            throw new Error('HTTP handler ended before the settlement barrier');
+          }),
+        ]),
+      };
+    },
+    async cleanup() {
+      for (const state of calls.values()) state.release.resolve();
+      await Promise.allSettled(handling);
+      await Promise.allSettled([composition.close()]);
+    },
+  };
+}
+
+test('managed gateway lifecycle waits for post-EOF HTTP settlement and lease release', async () => {
+  const graph = lifecycleComposition();
+  const call = graph.start();
+  try {
+    await call.entered;
+    assert.equal(call.response.writableEnded, true);
+    assert.equal(call.response.headers.get('x-request-id'), call.requestId);
+    assert.equal(call.state.handlerSettled, false);
+    assert.equal(call.state.settlementFinished, false);
+    assert.equal(call.state.leaseReleased, false);
+    assert.equal(graph.composition.handler.constructor.name, 'Function', 'the boundary preserves the original promise');
+    const closing = graph.composition.close();
+    assert.equal(graph.composition.close(), closing);
+    await lifecycleTurn();
+    assert.equal(graph.closeCalls, 0, 'ended HTTP responses can still own settlement and lease cleanup');
+    call.state.release.resolve();
+    assert.equal(await call.pending, true);
+    await closing;
+    assert.equal(graph.closeCalls, 1);
+    assert.equal(call.state.settlementFinished, true);
+    assert.equal(call.state.leaseReleased, true);
+    assert.ok(graph.events.indexOf(`lease-released:${call.requestId}`) < graph.events.indexOf('lifecycle-closed'));
+    assert.ok(graph.events.indexOf(`handler-fulfilled:${call.requestId}`) < graph.events.indexOf('lifecycle-closed'));
+    assert.equal(graph.composition.close(), closing);
+  } finally {
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway lifecycle drains both concurrent original HTTP handler promises', async () => {
+  const graph = lifecycleComposition();
+  const first = graph.start();
+  const second = graph.start();
+  try {
+    await Promise.all([first.entered, second.entered]);
+    assert.notEqual(first.requestId, second.requestId);
+    for (const call of [first, second]) assert.equal(call.response.headers.get('x-request-id'), call.requestId);
+    const closing = graph.composition.close();
+    let closed = false;
+    void closing.then(() => {
+      closed = true;
+    });
+    await lifecycleTurn();
+    assert.equal(graph.closeCalls, 0);
+    first.state.release.resolve();
+    assert.equal(await first.pending, true);
+    await lifecycleTurn();
+    assert.equal(closed, false, 'the second original HTTP promise still owns settlement');
+    assert.equal(graph.closeCalls, 0);
+    assert.equal(second.state.handlerSettled, false);
+    second.state.release.resolve();
+    assert.equal(await second.pending, true);
+    await closing;
+    assert.equal(graph.closeCalls, 1);
+  } finally {
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway lifecycle preserves the original HTTP rejection without an unhandled cleanup promise', async () => {
+  const graph = lifecycleComposition();
+  const failure = new Error('synthetic response header failure');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const call = graph.start({ headerFailure: failure });
+    // This test exercises the direct rejection rather than the settlement barrier.
+    void call.entered.catch(() => undefined);
+    await assert.rejects(call.pending, (error) => error === failure);
+    await graph.composition.close();
+    await lifecycleTurn();
+    assert.equal(graph.closeCalls, 1);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway lifecycle preserves the false result for an unmounted HTTP path', async () => {
+  const graph = lifecycleComposition();
+  try {
+    const call = graph.start({ path: '/unmounted' });
+    void call.entered.catch(() => undefined);
+    assert.equal(await call.pending, false);
+    assert.equal(call.response.headersSent, false);
+    await graph.composition.close();
+    assert.equal(graph.closeCalls, 1);
+  } finally {
+    await graph.cleanup();
+  }
+});
+
+test('managed gateway lifecycle retains the cached close rejection after draining HTTP work', async () => {
+  const failure = new Error('synthetic owned lifecycle close failure');
+  const graph = lifecycleComposition({ close: async () => Promise.reject(failure) });
+  const call = graph.start();
+  try {
+    await call.entered;
+    const closing = graph.composition.close();
+    const rejected = assert.rejects(closing, (error) => error === failure);
+    assert.equal(graph.composition.close(), closing);
+    await lifecycleTurn();
+    assert.equal(graph.closeCalls, 0);
+    call.state.release.resolve();
+    assert.equal(await call.pending, true);
+    await rejected;
+    assert.equal(graph.composition.close(), closing);
+    assert.equal(graph.closeCalls, 1);
+  } finally {
+    await graph.cleanup();
+  }
+});
+
 test('GET /v1/models intersects key scopes with the same caller, entitlement, and route authority ports', async () => {
   const scopes = ['allowed-model', 'entitlement-denied', 'unpublished-model', 'unsupported-model'];
   const baseKey = authenticatedCaller();
@@ -1130,6 +1569,7 @@ test('GET /v1/models intersects key scopes with the same caller, entitlement, an
   const entitlementChecks: string[] = [];
   const authorityChecks: string[] = [];
   const dependencies: ManagedSaasGatewayCompositionDependencies = {
+    capabilityReadiness: async () => advertisementReport(),
     authenticator: {
       authenticate: async (rawKey) => (rawKey === 'test-secret' ? scopedKey : null),
     },
@@ -1163,7 +1603,7 @@ test('GET /v1/models intersects key scopes with the same caller, entitlement, an
           }
           return allowRequestPreparation({
             ...authority(),
-            route: { ...authority().route, publicModel: input.publicModel },
+            route: { ...authority().route, publicModel: input.publicModel, endpoint: 'messages' },
           });
         },
       },
@@ -1231,6 +1671,213 @@ test('GET /v1/models intersects key scopes with the same caller, entitlement, an
   } finally {
     await server.close();
     await composition.close();
+  }
+});
+
+function advertisementReport(overrides: Partial<GatewayCapabilityProjection> = {}): GatewayCapabilityReadiness {
+  return {
+    configurationValid: true,
+    fatalReasonCodes: [],
+    capabilities: [
+      {
+        capability: 'provider-bundle:provider-a',
+        kind: 'provider-bundle',
+        label: 'Provider A',
+        providerId: 'provider-a',
+        productIds: ['product-a'],
+        endpointScopes: ['messages'],
+        unavailableEndpointScopes: [],
+        enabled: true,
+        assembled: true,
+        verified: true,
+        operational: true,
+        verificationLevel: 'live',
+        reasonCodes: [],
+        ...overrides,
+      },
+    ],
+  };
+}
+
+function advertisementComposition(
+  capabilityReadiness: ManagedSaasGatewayCompositionDependencies['capabilityReadiness'],
+  routes: ReadonlyMap<
+    string,
+    { readonly providerId: string; readonly productId: string; readonly endpoint: string }
+  > = new Map([['model-a', { providerId: 'provider-a', productId: 'product-a', endpoint: 'messages' }]]),
+) {
+  const scopes = [...routes.keys()];
+  const base = authenticatedCaller();
+  const key = {
+    metadata: { ...base.metadata, modelScopes: scopes },
+    authorization: { ...base.authorization, modelScopes: scopes },
+  };
+  const unused = async (): Promise<never> => {
+    throw new Error('discovery must not enter billable preparation');
+  };
+  return createManagedSaasGatewayComposition({
+    capabilityReadiness,
+    authenticator: { authenticate: async (raw) => (raw === 'test-secret' ? key : null) },
+    preparation: {
+      caller: { validate: async () => allowRequestPreparation({ ...caller(), modelScopes: scopes }) },
+      entitlement: {
+        resolve: async () =>
+          allowRequestPreparation({
+            ...entitlement(),
+            allowedModels: scopes,
+            allowedProviderIds: [...new Set([...routes.values()].map((route) => route.providerId))],
+          }),
+      },
+      authority: {
+        resolve: async ({ publicModel }) => {
+          const target = routes.get(publicModel);
+          assert.ok(target);
+          const baseAuthority = authority();
+          return allowRequestPreparation({
+            ...baseAuthority,
+            route: { ...baseAuthority.route, publicModel, endpoint: target.endpoint },
+            candidate: {
+              ...baseAuthority.candidate,
+              providerId: target.providerId,
+              productId: target.productId,
+              endpoint: target.endpoint,
+            },
+          });
+        },
+      },
+      payload: { compile: unused },
+      admission: { authorizeAndReserve: unused },
+      attempt: { persist: unused },
+      transaction: { transaction: unused },
+      compensation: { releasePreDispatch: unused },
+      signer: { sign: unused },
+      registrar: { register: unused },
+    },
+    preparationOptions: {
+      evidenceVerifierKeyId: 'discovery-key',
+      idFactory: {
+        requestId: () => 'discovery-request',
+        attemptId: () => 'discovery-attempt',
+        evidenceId: () => 'discovery-evidence',
+      },
+    },
+    dispatch: inertDispatchDependencies(),
+    lifecycle: { close: async () => {} },
+    maxBodyBytes: 4096,
+    entryPoint: 'advertisement-test',
+  });
+}
+
+test('customer model lists intersect exact resolved identities with one fresh sellability report per request', async () => {
+  const routes = new Map([
+    ['ready', { providerId: 'provider-a', productId: 'product-a', endpoint: 'messages' }],
+    ['cross-product', { providerId: 'provider-a', productId: 'product-b', endpoint: 'messages' }],
+    ['cross-endpoint', { providerId: 'provider-a', productId: 'product-a', endpoint: 'other' }],
+    ['alias-only', { providerId: 'ready', productId: 'product-a', endpoint: 'messages' }],
+    ['unbounded', { providerId: 'openai-codex', productId: 'codex-chatgpt', endpoint: 'codex-responses' }],
+  ]);
+  const codex = advertisementReport({
+    capability: 'provider-bundle:openai-codex',
+    providerId: 'openai-codex',
+    productIds: ['codex-chatgpt'],
+    endpointScopes: ['codex-responses'],
+    operational: false,
+    reasonCodes: ['USAGE_BOUNDS_UNAVAILABLE'],
+  }).capabilities[0];
+  assert.ok(codex);
+  let reads = 0;
+  let current: GatewayCapabilityReadiness = {
+    ...advertisementReport(),
+    capabilities: [...advertisementReport().capabilities, codex],
+  };
+  const composition = advertisementComposition(async () => {
+    reads += 1;
+    return current;
+  }, routes);
+  const server = await startHttpServer(composition.handler);
+  try {
+    for (const path of ['/v1/models', '/v1beta/models']) {
+      const response = await fetch(`${server.origin}${path}`, { headers: { authorization: 'Bearer test-secret' } });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { data?: { id: string }[]; models?: { name: string }[] };
+      assert.deepEqual(
+        path === '/v1/models' ? body.data?.map((model) => model.id) : body.models?.map((model) => model.name),
+        path === '/v1/models' ? ['ready'] : ['models/ready'],
+      );
+    }
+    assert.equal(reads, 2, 'one report, not one per scoped model');
+    for (const level of ['mock', 'unverified'] as const) {
+      current = advertisementReport({
+        verified: false,
+        verificationLevel: level,
+        reasonCodes: ['VERIFICATION_NOT_RECORDED'],
+      });
+      const response = await fetch(`${server.origin}/v1/models`, { headers: { authorization: 'Bearer test-secret' } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(((await response.json()) as { data: unknown[] }).data, []);
+    }
+    assert.equal(reads, 4, 'mock and newly expired/unverified observations replace earlier live facts');
+    const denied = await fetch(`${server.origin}/v1/models`);
+    assert.equal(denied.status, 401);
+    assert.equal(reads, 4, 'authentication remains before readiness collection');
+  } finally {
+    await server.close();
+    await composition.close();
+  }
+});
+
+test('absent, failed or invalid readiness closes advertisements while direct count_tokens keeps authorization', async () => {
+  for (const collect of [
+    undefined,
+    async () => {
+      throw new Error('private readiness failure');
+    },
+    async () => ({ ...advertisementReport(), configurationValid: false }),
+    async () => undefined as never,
+  ]) {
+    let reads = 0;
+    const composition = advertisementComposition(
+      collect
+        ? async () => {
+            reads += 1;
+            return collect();
+          }
+        : undefined,
+    );
+    const server = await startHttpServer(composition.handler);
+    try {
+      for (const path of ['/v1/models', '/v1beta/models']) {
+        const response = await fetch(`${server.origin}${path}`, { headers: { authorization: 'Bearer test-secret' } });
+        assert.equal(response.status, 503);
+        assert.equal((await response.text()).includes('private readiness failure'), false);
+      }
+      const readsBeforeCounting = reads;
+      const response = await fetch(`${server.origin}/v1/messages/count_tokens`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'model-a', messages: [{ role: 'user', content: 'verification' }] }),
+      });
+      assert.equal(
+        response.status,
+        200,
+        'authorized direct counting does not require a commercial verification record',
+      );
+      assert.equal(typeof ((await response.json()) as { input_tokens: unknown }).input_tokens, 'number');
+      assert.equal(
+        reads,
+        readsBeforeCounting,
+        'authorization discovery never calls the commercial advertisement authority',
+      );
+      const denied = await fetch(`${server.origin}/v1/messages/count_tokens`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer test-secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'out-of-scope', messages: [] }),
+      });
+      assert.equal(denied.status, 403);
+    } finally {
+      await server.close();
+      await composition.close();
+    }
   }
 });
 
@@ -1469,6 +2116,97 @@ test('streamed provider headers cannot replace the server request ID', async () 
   }
 });
 
+test('dispatch-only PostgreSQL lease adapter classifies only a known provider strict null', async () => {
+  const database: SaasDatabase = {
+    async query() {
+      throw new Error('this isolated adapter unit must not query PostgreSQL');
+    },
+    async transaction() {
+      throw new Error('this isolated adapter unit must not query PostgreSQL');
+    },
+    async migrate() {},
+    async verifySchema() {},
+    async ping() {},
+    async close() {},
+  };
+  const provider = new PostgresProviderAccountLeaseService({ database, maxConcurrency: 1, leaseTtlMs: 1000 });
+  const evidence: PreparedRequestEvidenceRecord = {
+    evidenceId: 'evidence-a',
+    tenantId: 'tenant-a',
+    projectId: 'project-a',
+    requestId: 'request-a',
+    attemptId: 'attempt-a',
+    attemptOrdinal: 1,
+    supplyMode: 'byok',
+    publicModel: 'model-a',
+    protocol: 'openai',
+    endpoint: '/v1/chat/completions',
+    upstreamId: 'upstream-a',
+    accountId: 'account-a',
+    credentialId: 'credential-a',
+    credentialVersion: '1',
+    routeTargetMode: 'tenant_account',
+    payloadSha256: 'a'.repeat(64),
+    statementSha256: 'b'.repeat(64),
+    status: 'registered',
+    claimedAt: null,
+    claimedAttemptId: null,
+    expiresAt: EXPIRES_AT,
+  };
+  const input = {
+    tenantId: evidence.tenantId,
+    accountId: evidence.accountId,
+    upstreamId: evidence.upstreamId,
+    attemptId: evidence.attemptId,
+    evidence,
+  };
+  let releases = 0;
+  const lease: PreparedEvidenceLease = {
+    fencingToken: '1',
+    renewIntervalMs: 10,
+    async renew() {},
+    async release() {
+      releases++;
+    },
+  };
+  let result: PreparedEvidenceLease | null | Error = null;
+  let calls = 0;
+  provider.acquire = async function (actual) {
+    assert.equal(this, provider, 'the raw provider receiver must be preserved');
+    assert.equal(actual, input, 'the evidence-bound request must be passed unchanged');
+    calls++;
+    if (result instanceof Error) throw result;
+    return result;
+  };
+  assert.throws(
+    () => Reflect.apply(createPostgresDispatchLeaseProvider, undefined, [{ acquire: async () => null }]),
+    (error: unknown) => error instanceof ManagedSaasGatewayCompositionError && error.code === 'INVALID_CONFIGURATION',
+  );
+  const dispatch = createPostgresDispatchLeaseProvider(provider);
+  assert.equal(await provider.acquire(input), null, 'the raw health-probe provider keeps its null contract');
+  assert.equal(calls, 1);
+  await assert.rejects(
+    dispatch.acquire(input),
+    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'LEASE_CAPACITY_EXHAUSTED',
+  );
+  assert.equal(calls, 2, 'the adapter performs exactly one acquire without a retry');
+  result = lease;
+  assert.equal(await dispatch.acquire(input), lease, 'an acquired lease and its methods are not rewrapped');
+  await lease.release();
+  assert.equal(releases, 1);
+  for (const error of [
+    new ProviderAccountLeaseError('ACCOUNT_UNAVAILABLE', 'revoked'),
+    new ProviderAccountLeaseError('STORAGE_ERROR', 'storage'),
+    new Error('ordinary failure'),
+  ]) {
+    result = error;
+    await assert.rejects(dispatch.acquire(input), (observed: unknown) => observed === error);
+  }
+  const malformed: PreparedEvidenceLease = { ...lease, fencingToken: '', renewIntervalMs: 0 };
+  result = malformed;
+  assert.equal(await dispatch.acquire(input), malformed, 'bad shape is left to the original dispatcher validation');
+});
+
 test('production builder binds the real database transaction and does not allocate IDs', async () => {
   const healthWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
   const database = {
@@ -1602,8 +2340,118 @@ test('production builder binds the real database transaction and does not alloca
   );
 
   const composition = createManagedSaasGatewayProductionComposition(database, options);
+  const providerProjection = {
+    configurationValid: true,
+    fatalReasonCodes: [],
+    capabilities: [
+      {
+        capability: 'provider-bundle:kimi',
+        kind: 'provider-bundle' as const,
+        label: 'Kimi',
+        enabled: true,
+        assembled: true,
+        verified: false,
+        operational: false,
+        verificationLevel: 'unverified' as const,
+        reasonCodes: ['VERIFICATION_NOT_RECORDED' as const],
+        providerId: 'kimi',
+        productIds: ['kimi-code'],
+        endpointScopes: ['kimi-messages'],
+        unavailableEndpointScopes: [],
+      },
+    ],
+  };
+  for (const scenario of [
+    { label: 'v1 absent', collect: undefined, status: 200, facts: undefined },
+    { label: 'assembled but unverified provider', collect: async () => providerProjection, status: 200, facts: 'ok' },
+    {
+      label: 'invalid assembly',
+      collect: async () => ({ ...providerProjection, configurationValid: false }),
+      status: 503,
+      facts: 'error',
+    },
+    {
+      label: 'unavailable provider facts',
+      collect: async () => {
+        throw new Error('private upstream detail');
+      },
+      status: 503,
+      facts: 'error',
+    },
+  ]) {
+    const readyComposition = createManagedSaasGatewayProductionComposition(database, {
+      ...options,
+      capabilityReadiness: scenario.collect,
+    });
+    const readyServer = await startHttpServer(readyComposition.handler);
+    try {
+      const response = await fetch(`${readyServer.origin}/readyz`);
+      const body = (await response.json()) as {
+        dependencies: Record<string, unknown>;
+        capabilities: Record<string, boolean>;
+        providerCapabilities?: unknown;
+      };
+      assert.equal(response.status, scenario.status, scenario.label);
+      assert.equal(body.dependencies['provider-capability-facts'], scenario.facts, scenario.label);
+      if (scenario.label === 'assembled but unverified provider')
+        assert.deepEqual(body.providerCapabilities, providerProjection);
+      if (scenario.collect === undefined) {
+        assert.equal(body.providerCapabilities, undefined);
+        assert.deepEqual(Object.keys(body.capabilities).sort(), ['images.async', 'model-plaza', 'videos.create']);
+      }
+      assert.equal(JSON.stringify(body).includes('private upstream detail'), false);
+    } finally {
+      await readyServer.close();
+      await readyComposition.close();
+    }
+  }
   const productionDispatchHealth = (composition.dispatch as unknown as { runtimeHealthWriter: unknown })
     .runtimeHealthWriter;
+  for (const scenario of [
+    { label: 'no runtime readiness', collect: undefined, status: 503 },
+    {
+      label: 'failed runtime readiness',
+      collect: async (): Promise<GatewayCapabilityReadiness> => {
+        throw new Error('private runtime failure');
+      },
+      status: 503,
+    },
+    {
+      label: 'invalid runtime readiness',
+      collect: async () => ({ ...advertisementReport(), configurationValid: false }),
+      status: 503,
+    },
+    {
+      label: 'empty runtime readiness',
+      collect: async () => ({ configurationValid: true, fatalReasonCodes: [], capabilities: [] }),
+      status: 200,
+    },
+  ]) {
+    let reads = 0;
+    const collect = scenario.collect;
+    const plazaComposition = createManagedSaasGatewayProductionComposition(database, {
+      ...options,
+      modelPlazaSettingsOverlay: async () => ({ 'saas.plaza.enabled': true, 'saas.plaza.require_auth': false }),
+      capabilityReadiness: collect
+        ? async () => {
+            reads += 1;
+            return collect();
+          }
+        : undefined,
+    });
+    const plazaServer = await startHttpServer(plazaComposition.handler);
+    try {
+      const response = await fetch(`${plazaServer.origin}/v1/model-plaza`);
+      assert.equal(response.status, scenario.status, scenario.label);
+      const text = await response.text();
+      assert.equal(text.includes('private runtime failure'), false);
+      if (scenario.status === 200) assert.deepEqual(JSON.parse(text).groups, []);
+      assert.equal(reads, collect ? 1 : 0, `${scenario.label}: one collection per enabled plaza list`);
+    } finally {
+      await plazaServer.close();
+      await plazaComposition.close();
+    }
+  }
   assert.ok(productionDispatchHealth instanceof PostgresProviderAccountRuntimeHealthStore);
   // F3: customerWebhooks.enabled wires the settlement/failure producer into the
   // dispatch metering service; the default composition leaves it unset.
@@ -1870,4 +2718,91 @@ test('production composition rejects missing affinity or storage before readines
       ),
     isMissingDependency,
   );
+});
+
+test('standard composition mounts its own WS executor and repeats proxy-key authentication before round admission', {
+  timeout: 5_000,
+}, async () => {
+  let authenticated = 0;
+  let admitted = 0;
+  let closed = 0;
+  const unused = async (): Promise<never> => {
+    throw new Error('this refused round must not reach dispatch');
+  };
+  const composition = createManagedSaasGatewayComposition({
+    authenticator: {
+      async authenticate() {
+        authenticated += 1;
+        return authenticatedCaller();
+      },
+    },
+    preparation: {
+      caller: {
+        async validate(input) {
+          admitted += 1;
+          assert.equal(input.protocol, 'responses');
+          return rejectRequestPreparation('quota_exceeded', 'the round quota is exhausted');
+        },
+      },
+      entitlement: { resolve: unused },
+      authority: { resolve: unused },
+      payload: { compile: unused },
+      admission: { authorizeAndReserve: unused },
+      attempt: { persist: unused },
+      transaction: { transaction: unused },
+      compensation: { releasePreDispatch: unused },
+      signer: { sign: unused },
+      registrar: { register: unused },
+    },
+    preparationOptions: {
+      evidenceVerifierKeyId: 'test-verifier',
+      idFactory: {
+        requestId: () => 'server-ws-round',
+        attemptId: () => 'server-ws-attempt',
+        evidenceId: () => 'server-ws-evidence',
+      },
+    },
+    dispatch: inertDispatchDependencies(),
+    lifecycle: {
+      async close() {
+        closed += 1;
+      },
+    },
+    maxBodyBytes: 1024,
+    entryPoint: 'standard-ws-test',
+  });
+  const server = createServer((_request, response) => {
+    response.writeHead(404);
+    response.end();
+  });
+  server.on('upgrade', (request, socket, head) => {
+    if (!composition.handleUpgrade(request, socket, head)) socket.destroy();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const ws = new WebSocket(`ws://127.0.0.1:${address.port}/v1/responses`, {
+    headers: { authorization: 'Bearer local-test-key' },
+  });
+  try {
+    await once(ws, 'open');
+    const terminal = once(ws, 'message');
+    const ended = once(ws, 'close');
+    ws.send(JSON.stringify({ type: 'response.create', model: 'model-a', input: 'hello' }));
+    const [frame] = await terminal;
+    const event = JSON.parse(String(frame)) as { type: string; response_id: string; error: { code: string } };
+    assert.equal(event.type, 'response.failed');
+    assert.equal(event.response_id, undefined, 'a gateway request id must not masquerade as a provider response id');
+    assert.equal(event.error.code, 'RATE_LIMITED');
+    assert.equal((await ended)[0], 4403);
+    assert.equal(authenticated, 2);
+    assert.equal(admitted, 1);
+  } finally {
+    ws.terminate();
+    await composition.close();
+    await composition.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  assert.equal(closed, 1);
 });

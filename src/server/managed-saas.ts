@@ -3,6 +3,7 @@ import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { createSaasBackupHttpHandler } from '../saas/backup/http.js';
 import { SaasCompositeModelRoutesService } from '../saas/billing/composite-routes/service.js';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
@@ -104,18 +105,23 @@ import {
   createUsageCorrectionPlatformHttpHandler,
   type UsageCorrectionPlatformHttpHandler,
 } from '../saas/metering/usage-correction-platform-http.js';
+import { createPreparedEvidenceDispatchMetricsObserver } from '../saas/observability/dispatch-metrics.js';
 import {
   type AlertEvaluatorWorkerHandle,
   type AlertSilencesHttpHandler,
   type ChannelStatusWorkerHandle,
   createAlertSilencesHttpHandler,
   createObservabilityHttpHandler,
+  createOperationsActionHttpHandler,
   createPostgresAlertSilencesAuditWriter,
   getChannelStatusPage,
   getMediaTaskOperationsPage,
+  getOperationsDiagnosticsPage,
+  getSchedulingHealthPage,
   ObservabilityAlertService,
   ObservabilityAlertSilenceService,
   type ObservabilityHttpHandler,
+  PostgresOperationsActionService,
   type ReportSchedulerWorkerHandle,
   refreshSaasRuntimeGauges,
   renderSaasMetrics,
@@ -123,6 +129,8 @@ import {
   startChannelStatusWorker,
   startReportSchedulerWorker,
 } from '../saas/observability/index.js';
+import { createPreparationFailureMetricsObserver } from '../saas/observability/preparation-failure-metrics.js';
+import { createPostgresPreparationMetricsObserver } from '../saas/observability/preparation-metrics.js';
 import type { PaymentProviderAdapter, PaymentProviderRefundAdapter } from '../saas/payments/adapter.js';
 import { SaasCustomerPaymentOrderQueryService } from '../saas/payments/customer-order-query.js';
 import {
@@ -205,6 +213,8 @@ import {
   type PlatformCredentialRewrapHttpHandler,
 } from '../saas/platform/credential-rewrap-http.js';
 import { createPlatformCredentialRewrapOperations } from '../saas/platform/credential-rewrap-operations.js';
+import { createPlatformCredentialValidationRequeueHttpHandler } from '../saas/platform/credential-validation-requeue-http.js';
+import { PlatformCredentialValidationRequeueService } from '../saas/platform/credential-validation-requeue-service.js';
 import {
   createEgressProxiesHttpHandler,
   createPostgresEgressProxyAdminStore,
@@ -271,6 +281,7 @@ import {
   assertCustomerPasskeyDeploymentConfiguration,
   createCustomerPasskeyForDeployment,
 } from '../saas/runtime/customer-passkey-capability.js';
+import { readGatewayCapabilityStatus } from '../saas/runtime/gateway-capability-status.js';
 import {
   type LoadedProviderCredentialUnsealingKms,
   loadGatewayProviderCredentialUnsealingKms,
@@ -977,6 +988,7 @@ function createPlatformHandler(
   marketingOpsAffiliateHandler: MarketingAffiliateHttpHandler,
   observabilityHandler: ObservabilityHttpHandler,
   alertSilencesHandler: AlertSilencesHttpHandler | undefined,
+  operationsHandlers: readonly ((req: IncomingMessage, res: ServerResponse) => Promise<boolean>)[],
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
   brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
@@ -990,6 +1002,7 @@ function createPlatformHandler(
       }
       if (await observabilityHandler(req, res)) return;
       if (alertSilencesHandler && (await alertSilencesHandler(req, res))) return;
+      for (const handler of operationsHandlers) if (await handler(req, res)) return;
       if (isApiPath(pathname, PLATFORM_API_PREFIX)) {
         if (pathname === PLATFORM_ADMIN_AUTH_PREFIX || pathname.startsWith(`${PLATFORM_ADMIN_AUTH_PREFIX}/`)) {
           if (await authHandler(req, res)) return;
@@ -1073,7 +1086,7 @@ export function createGatewayHandler(
         }
         return;
       }
-      if (isMountedPath(pathname, GATEWAY_MOUNT)) {
+      if (pathname === '/readyz' || isMountedPath(pathname, GATEWAY_MOUNT)) {
         if (gatewayHandler) {
           if (await gatewayHandler(req, res)) return;
           req.resume();
@@ -1089,8 +1102,11 @@ export function createGatewayHandler(
   };
 }
 
-function defaultCreateDatabase(options: { connectionString: string }): ManagedSaasDatabase {
-  return createSaasDatabase(options);
+function defaultCreateDatabase(
+  options: { connectionString: string },
+  environment: DeploymentEnvironment,
+): ManagedSaasDatabase {
+  return createSaasDatabase({ ...options, env: environment });
 }
 
 async function defaultVerifySchema(database: ManagedSaasDatabase): Promise<void> {
@@ -1457,7 +1473,7 @@ async function startCredentialValidationWorkerRuntime(
     throw new Error('Credential-validation worker KMS configuration is unavailable');
   }
 
-  const createDatabase = options.createDatabase ?? defaultCreateDatabase;
+  const createDatabase = options.createDatabase ?? ((input) => defaultCreateDatabase(input, environment));
   const pingDatabase = options.pingDatabase ?? ((database: ManagedSaasDatabase) => pingSaasDatabase(database));
   const closeDatabase = options.closeDatabase ?? ((database: ManagedSaasDatabase) => closeSaasDatabase(database));
   const loadKms =
@@ -1600,6 +1616,7 @@ async function startCredentialValidationWorkerRuntime(
       new PostgresCnProvidersQuotaStore(database, kms, {
         deployment: deployment.deploymentId,
         environment: deployment.environmentId,
+        ...providerEgressAllowlistOption,
       }),
       options.cnProvidersQuotaWorkerOptions,
     );
@@ -1865,7 +1882,7 @@ export async function startManagedSaasServer(
   ) {
     throw new Error('Managed SaaS gateway runtime configuration is unavailable');
   }
-  const createDatabase = options.createDatabase ?? defaultCreateDatabase;
+  const createDatabase = options.createDatabase ?? ((input) => defaultCreateDatabase(input, environment));
   const pingDatabase = options.pingDatabase ?? ((database: ManagedSaasDatabase) => pingSaasDatabase(database));
   const verifySchema = options.verifySchema ?? defaultVerifySchema;
   const verifyUnknownOutcomeSchema = options.verifyUnknownOutcomeSchema ?? defaultVerifyUnknownOutcomeSchema;
@@ -2050,13 +2067,16 @@ export async function startManagedSaasServer(
       const billingLedger = new PlatformWalletLedgerService();
       const capacityPort = createPostgresPreparationCapacityPort();
       const gatewayClock = () => new Date();
+      const observePreparation = createPostgresPreparationMetricsObserver();
+      const observeDispatch = createPreparedEvidenceDispatchMetricsObserver();
+      const observePreparationFailure = createPreparationFailureMetricsObserver();
       const keyBudgetResolution = createKeyBudgetResolution();
       const billingGroupSpendResolution = createBillingGroupSpendResolution();
       const preparationPorts = createPostgresPreparationPorts({
         database,
         metering,
         billing: billingLedger,
-        guard: new PostgresRequestAdmissionGuard(database),
+        guard: new PostgresRequestAdmissionGuard(database, { observe: observePreparation }),
         authorizationPrelock: new PostgresSaasRequestAdmissionAuthorizationPrelock(),
         entitlement: new PostgresRequestPreparationEntitlementAdapter(
           runtimeDependencies.entitlementResolver,
@@ -2067,6 +2087,7 @@ export async function startManagedSaasServer(
         billingGroupSpend: createPostgresBillingGroupSpendAdmission({ now: gatewayClock }),
         payloadCompilerVersion: providerPayload.compilerVersion,
         usageEstimatorVersion: providerPayload.estimator.version,
+        observe: observePreparation,
         now: gatewayClock,
       });
       // R9 §4 P1: the operator egress allowlist is parsed once at server
@@ -2121,9 +2142,14 @@ export async function startManagedSaasServer(
           return sender.send(message);
         },
       };
+      const capabilityReadiness = gatewayRuntimeModule.getCapabilityReadiness?.bind(gatewayRuntimeModule);
       gateway = createManagedSaasGatewayProductionComposition(database, {
         riskControl: { emailSender: riskControlEmailSender },
         ...runtimeGatewayOptions,
+        preparationObserver: observePreparation,
+        dispatchObserver: observeDispatch,
+        preparationFailureObserver: observePreparationFailure,
+        ...(capabilityReadiness === undefined ? {} : { capabilityReadiness }),
         // Batch-5 §5.1: the optional claude-exit plugin routing layer. Only
         // wired when the gateway deployment declares the plugin-host URL and
         // the shared internal token; otherwise the claude route stays on the
@@ -3049,6 +3075,15 @@ export async function startManagedSaasServer(
         // G-C2: the media-task operations projection (task-operations console
         // page; read-only, secret-free by construction).
         mediaTaskOperations: (query) => getMediaTaskOperationsPage(observabilityDatabase, query),
+        // G-C2: the scheduling-health projection (fault-handling console page).
+        schedulingHealth: (query) => getSchedulingHealthPage(observabilityDatabase, query),
+        diagnostics: async () => {
+          const [page, gatewayCapabilities] = await Promise.all([
+            getOperationsDiagnosticsPage(observabilityDatabase),
+            readGatewayCapabilityStatus(environment),
+          ]);
+          return { ...page, gatewayCapabilities };
+        },
         alertRules: () => observabilityAlertService.listRules(),
         alertEvents: (limit) => observabilityAlertService.listEvents(limit),
         refreshMetrics: () => refreshSaasRuntimeGauges(observabilityDatabase),
@@ -3134,6 +3169,21 @@ export async function startManagedSaasServer(
         marketingOpsAffiliateHandler,
         observabilityHandler,
         alertSilencesHandler,
+        [
+          createOperationsActionHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+            operations: new PostgresOperationsActionService(observabilityDatabase),
+          }),
+          createPlatformCredentialValidationRequeueHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+            operations: new PlatformCredentialValidationRequeueService(observabilityDatabase),
+          }),
+          createSaasBackupHttpHandler({ access: platformAccessService }),
+        ],
         platformReadHandler,
         webDistPath,
         brandSnapshotReader,
@@ -3153,7 +3203,18 @@ export async function startManagedSaasServer(
     for (const name of listenerNames) {
       const handler = handlers[name];
       if (!handler) throw new Error(`Managed SaaS ${name} handler is not configured for this workload`);
-      listeners.set(name, createListener(name, handler));
+      const listener = createListener(name, handler);
+      listeners.set(name, listener);
+      if (name === 'gateway' && gateway) {
+        const gatewayComposition = gateway;
+        listener.on('upgrade', (request, socket, head) => {
+          try {
+            if (!gatewayComposition.handleUpgrade(request, socket, head)) socket.destroy();
+          } catch {
+            socket.destroy();
+          }
+        });
+      }
     }
 
     for (const name of listenerNames) {

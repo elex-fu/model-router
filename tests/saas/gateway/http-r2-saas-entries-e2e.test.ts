@@ -460,15 +460,15 @@ const estimator: ProviderUsageUpperBoundEstimator = {
   }),
 };
 
-function payloadCompiler(state: PreparationState): RequestPreparationPayloadCompiler {
+function payloadCompiler(state: PreparationState, compact = false): RequestPreparationPayloadCompiler {
   const compiler = createProviderPayloadCompiler({
     estimator,
     modelResolution: MODEL_RESOLUTION,
     modelCompatibility: (input) =>
       input.providerId === 'provider-1' &&
       input.productId === 'product-1' &&
-      input.providerProtocol === 'gemini' &&
-      input.providerOperation === 'generateContent',
+      input.providerProtocol === (compact ? 'responses' : 'gemini') &&
+      input.providerOperation === (compact ? 'responses.compact' : 'generateContent'),
     maxPayloadBytes: 1024 * 1024,
     compilerVersion: 'gemini-e2e-payload-v1',
   });
@@ -484,7 +484,7 @@ function payloadCompiler(state: PreparationState): RequestPreparationPayloadComp
   };
 }
 
-function preparationService(state: PreparationState): SaasRequestPreparationService {
+function preparationService(state: PreparationState, compact = false): SaasRequestPreparationService {
   const dependencies: RequestPreparationDependencies = {
     caller: {
       async validate() {
@@ -501,10 +501,26 @@ function preparationService(state: PreparationState): SaasRequestPreparationServ
     authority: {
       async resolve() {
         state.calls.push('authority');
-        return allowRequestPreparation(authority());
+        const value = authority();
+        return allowRequestPreparation(
+          compact
+            ? {
+                ...value,
+                route: {
+                  ...value.route,
+                  protocol: 'responses',
+                  providerProtocol: 'responses',
+                  clientOperation: 'responses.compact',
+                  providerOperation: 'responses.compact',
+                  endpoint: 'native-responses',
+                },
+                candidate: { ...value.candidate, protocol: 'responses', endpoint: 'native-responses' },
+              }
+            : value,
+        );
       },
     },
-    payload: payloadCompiler(state),
+    payload: payloadCompiler(state, compact),
     transaction: {
       async transaction(work) {
         return work({} as never);
@@ -733,7 +749,7 @@ interface ProviderTrace {
   readonly payloads: unknown[];
 }
 
-function providerTransport(trace: ProviderTrace): ProviderHttpTransport {
+function providerTransport(trace: ProviderTrace, compactResponse?: string): ProviderHttpTransport {
   const fetch: ProviderHttpFetch = async (url, init) => {
     trace.urls.push(url);
     assert.equal(init.method, 'POST');
@@ -741,13 +757,15 @@ function providerTransport(trace: ProviderTrace): ProviderHttpTransport {
     const body = init.body;
     assert.ok(body instanceof Uint8Array);
     trace.payloads.push(JSON.parse(new TextDecoder().decode(body)));
-    return new Response(GEMINI_RESPONSE, {
+    return new Response(compactResponse ?? GEMINI_RESPONSE, {
       status: 200,
       headers: { 'content-type': 'application/json', 'x-request-id': 'fake-provider-request' },
     });
   };
   const resolveDispatchProfile: ProviderHttpDispatchProfileResolver = async () => ({
-    url: 'https://provider.example/v1beta/models/provider-model:generateContent',
+    url: compactResponse
+      ? 'https://provider.example/v1/responses/compact'
+      : 'https://provider.example/v1beta/models/provider-model:generateContent',
   });
   const resolveCredential: ProviderHttpCredentialResolver = async (_input, useCredential) =>
     useCredential({ headerName: 'authorization', value: 'Bearer fake-provider-credential' });
@@ -1118,8 +1136,8 @@ test('R2 §7.2: POST /v1/responses/compact fails closed without a declared nativ
   );
   assert.equal(outOfScope.writeHeadCalls[0]?.status, 403);
 
-  // A declared native-compact supply without an assembled transport also
-  // fails closed (501) — never an emulated compact.
+  // A declared supply now enters preparation; a missing preparation
+  // authority fails closed before dispatch.
   const declared = createSaasGatewayHandler({
     authenticator: authenticator(),
     preparation: strictPreparationGuard(),
@@ -1131,8 +1149,66 @@ test('R2 §7.2: POST /v1/responses/compact fails closed without a declared nativ
     declared,
     new FakeIncomingMessage({ url: '/v1/responses/compact', body: { model: PUBLIC_MODEL, input: [] } }),
   );
-  assert.equal(declaredResponse.writeHeadCalls[0]?.status, 501);
-  assert.equal(JSON.parse(declaredResponse.bodyText()).error.code, 'COMPACT_TRANSPORT_UNAVAILABLE');
+  assert.equal(declaredResponse.writeHeadCalls[0]?.status, 503);
+  assert.equal(JSON.parse(declaredResponse.bodyText()).error.code, 'PREPARATION_UNAVAILABLE');
+});
+
+test('native compact traverses admission/evidence/dispatch, preserves opaque items and settles reported usage', async () => {
+  const state: PreparationState = { calls: [], registered: [], payloads: [] };
+  const metering = new FakeMetering(state);
+  const lease = new FakeLeaseProvider();
+  const trace: ProviderTrace = { urls: [], payloads: [] };
+  const opaque = { type: 'compaction', id: 'compact-item', encrypted_content: 'opaque-provider-state' };
+  const providerBody = JSON.stringify({
+    id: 'compact-result',
+    object: 'response.compaction',
+    output: [opaque],
+    usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+  });
+  let settled = 0;
+  const dispatch = new SaasPreparedEvidenceDispatchService(
+    new FakeEvidenceStore(state, metering),
+    metering,
+    lease,
+    providerTransport(trace, providerBody),
+    {
+      async complete(input) {
+        settled += 1;
+        assert.equal(input.usage.inputTotal, 5);
+        assert.equal(input.usage.outputTotal, 2);
+        assert.ok(metering.current);
+        return { kind: 'settled', attempt: metering.current };
+      },
+      async retainUnknown() {
+        throw new Error('native compact usage must settle');
+      },
+    },
+  );
+  const response = await runHandler(
+    createSaasGatewayHandler({
+      authenticator: authenticator(),
+      preparation: preparationService(state, true),
+      dispatch,
+      responsesCompactNativeSupply: () => true,
+    }),
+    new FakeIncomingMessage({
+      url: '/v1/responses/compact',
+      body: {
+        model: PUBLIC_MODEL,
+        input: [{ role: 'user', content: 'a long conversation' }, opaque],
+        instructions: 'retain project decisions',
+      },
+    }),
+  );
+  assert.equal(response.writeHeadCalls[0]?.status, 200);
+  assert.equal(response.bodyText(), providerBody);
+  assert.equal(trace.urls[0], 'https://provider.example/v1/responses/compact');
+  assert.deepEqual((trace.payloads[0] as { input: unknown[] }).input[1], opaque);
+  assert.ok(state.calls.includes('admission'));
+  assert.equal(state.registered[0]?.clientOperation, 'responses.compact');
+  assert.equal(state.registered[0]?.providerOperation, 'responses.compact');
+  assert.equal(settled, 1);
+  assert.equal(lease.releaseCount, 1);
 });
 
 test('R2 §7.2: an unauthenticated count_tokens/compact caller never reaches admission', async () => {

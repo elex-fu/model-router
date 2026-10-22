@@ -349,6 +349,74 @@ test('reads the database proof and passes its ephemeral plaintext through provid
   assert.deepEqual(kms.decryptedOutputs[0], Buffer.alloc(32));
 });
 
+test('cross-protocol native identity matches the canonical proof before decrypt and rejects every mutated field', async (t) => {
+  const identity = {
+    providerId: ACCOUNT.providerId,
+    productId: ACCOUNT.productId,
+    endpoint: 'messages',
+    providerProtocol: 'anthropic',
+    providerOperation: 'messages',
+  } as const;
+  async function crossProtocolFixture() {
+    const result = await fixture({ protocol: 'openai' });
+    assert.ok(result.repository.proof);
+    result.repository.proof = {
+      ...result.repository.proof,
+      evidence: { ...result.repository.proof.evidence, ...identity },
+      attempt: { ...result.repository.proof.attempt, ...identity },
+    };
+    return result;
+  }
+  const valid = await crossProtocolFixture();
+  assert.equal(await valid.resolver.resolveCredential(input(identity), async () => RESPONSE), RESPONSE);
+  assert.equal(valid.kms.decryptedOutputs.length, 1);
+  for (const [field, value] of [
+    ['providerId', 'kimi'],
+    ['productId', 'kimi-code'],
+    ['endpoint', 'chat-completions'],
+    ['providerProtocol', 'openai'],
+    ['providerOperation', 'chat.completions'],
+  ] as const) {
+    await t.test(`mutated transport ${field}`, async () => {
+      const result = await crossProtocolFixture();
+      await assert.rejects(
+        result.resolver.resolveCredential(input({ ...identity, [field]: value }), async () => RESPONSE),
+        assertUnavailable,
+      );
+      assert.equal(result.kms.decryptedOutputs.length, 0);
+    });
+  }
+  for (const field of ['providerProtocol', 'providerOperation'] as const) {
+    await t.test(`attempt ${field} must equal evidence`, async () => {
+      const result = await crossProtocolFixture();
+      assert.ok(result.repository.proof);
+      result.repository.proof = {
+        ...result.repository.proof,
+        attempt: { ...result.repository.proof.attempt, [field]: 'tampered' },
+      };
+      await assert.rejects(
+        result.resolver.resolveCredential(input(identity), async () => RESPONSE),
+        assertUnavailable,
+      );
+      assert.equal(result.kms.decryptedOutputs.length, 0);
+    });
+    await t.test(`legacy proof without ${field} cannot authorize the new profile`, async () => {
+      const result = await crossProtocolFixture();
+      assert.ok(result.repository.proof);
+      const evidence = { ...result.repository.proof.evidence };
+      const attempt = { ...result.repository.proof.attempt };
+      delete evidence[field];
+      delete attempt[field];
+      result.repository.proof = { ...result.repository.proof, evidence, attempt };
+      await assert.rejects(
+        result.resolver.resolveCredential(input(identity), async () => RESPONSE),
+        assertUnavailable,
+      );
+      assert.equal(result.kms.decryptedOutputs.length, 0);
+    });
+  }
+});
+
 test('rejects another evidence id, account, and stale credential version before gateway KMS unsealing', async () => {
   const { repository, kms, resolver } = await fixture();
   let callbackCalls = 0;

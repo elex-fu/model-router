@@ -72,10 +72,28 @@ export interface PlatformRequestAdmissionHoldInput {
   readonly sizeTier?: string | null;
 }
 
-/** Hold evidence plus the caller's requested admission window. */
-export interface PlatformRequestAdmissionHoldEvidence extends PlatformRequestAdmissionHoldInput {
+/** Explicitly identifies independent verifier bounds, never a simultaneous usage allocation. */
+export const PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND = 'independent-upper-bounds-v1' as const;
+
+/** Legacy evidence describes one disjoint usage allocation. A tag cannot be present. */
+export interface PlatformRequestAdmissionAllocationEvidence extends PlatformRequestAdmissionHoldInput {
+  readonly evidenceKind?: never;
   readonly admissionExpiresAt: string | Date;
 }
+
+/**
+ * Server-owned final-payload bounds. Input/cache bounds are independent and
+ * may overlap; each is bounded by inputTotal. The PG guard must derive and
+ * validate a conservative realized witness from its frozen effective rates.
+ */
+export interface PlatformRequestAdmissionUpperBoundsEvidence extends PlatformRequestAdmissionHoldInput {
+  readonly evidenceKind: typeof PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND;
+  readonly admissionExpiresAt: string | Date;
+}
+
+export type PlatformRequestAdmissionHoldEvidence =
+  | PlatformRequestAdmissionAllocationEvidence
+  | PlatformRequestAdmissionUpperBoundsEvidence;
 
 /**
  * Authoritative platform terms are an output of the DB-backed guard, never a
@@ -323,7 +341,12 @@ function requireHoldInput(value: unknown, label: string): PlatformRequestAdmissi
 
 function requireHoldEvidence(value: unknown, label: string): PlatformRequestAdmissionHoldEvidence {
   const evidence = requireRecord(value, label);
-  const allowed = new Set<string>([...HOLD_INPUT_KEYS, ...OPTIONAL_HOLD_INPUT_KEYS, 'admissionExpiresAt']);
+  const allowed = new Set<string>([
+    ...HOLD_INPUT_KEYS,
+    ...OPTIONAL_HOLD_INPUT_KEYS,
+    'admissionExpiresAt',
+    'evidenceKind',
+  ]);
   for (const key of HOLD_INPUT_KEYS) {
     if (!(key in evidence)) throw new TypeError(`${label}.${key} is required`);
   }
@@ -337,9 +360,19 @@ function requireHoldEvidence(value: unknown, label: string): PlatformRequestAdmi
     ]),
     label,
   );
+  const admissionExpiresAt = normalizeAdmissionExpiry(evidence.admissionExpiresAt, `${label}.admissionExpiresAt`);
+  if ('evidenceKind' in evidence) {
+    if (
+      !Object.hasOwn(evidence, 'evidenceKind') ||
+      evidence.evidenceKind !== PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND
+    ) {
+      throw new TypeError(`${label}.evidenceKind is not accepted`);
+    }
+    return { ...holdInput, evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND, admissionExpiresAt };
+  }
   return {
     ...holdInput,
-    admissionExpiresAt: normalizeAdmissionExpiry(evidence.admissionExpiresAt, `${label}.admissionExpiresAt`),
+    admissionExpiresAt,
   };
 }
 

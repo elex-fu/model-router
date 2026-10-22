@@ -1,6 +1,11 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
+import { OpenAIToAnthBridge } from '../../protocol/openai-to-anth.js';
+import {
+  beginPreparedEvidenceDispatchStage,
+  type PreparedEvidenceDispatchObserver,
+} from './prepared-evidence-dispatch-observer.js';
 import type {
   PreparedEvidenceTransport,
   PreparedEvidenceTransportRequest,
@@ -27,6 +32,7 @@ import {
 } from './provider-http-tls-fingerprint-connector.js';
 import { observeProviderJsonUsage, type ProviderMediaUsageExtractor } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
+import { providerUsageObserverVersion, providerUsageProfile } from './provider-usage-profile.js';
 import {
   createUsageEvidence,
   type NormalizedUsageEvidence,
@@ -49,6 +55,7 @@ function parsePayloadJson(payloadBytes: Uint8Array): unknown {
 
 const MAX_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_BRIDGED_RESPONSE_BYTES = 1024 * 1024;
 const MAX_CREDENTIAL_VALUE_BYTES = 16 * 1024;
 const DEFAULT_CREDENTIAL_HEADER_NAMES = Object.freeze(['authorization', 'api-key', 'x-api-key', 'x-goog-api-key']);
 const RESPONSE_HEADER_ALLOWLIST = Object.freeze([
@@ -149,6 +156,12 @@ export interface ProviderHttpCredentialResolveInput {
   readonly upstreamId: string;
   readonly credentialId: string;
   readonly credentialVersion: string;
+  /** Optional legacy projection; present facts must match the canonical dispatch proof. */
+  readonly providerId?: string;
+  readonly productId?: string;
+  readonly endpoint?: string;
+  readonly providerProtocol?: string;
+  readonly providerOperation?: string;
   readonly signal: AbortSignal;
 }
 
@@ -200,6 +213,8 @@ export type ProviderHttpFixedRequestHeadersResolver = (
   | PromiseLike<Readonly<Record<string, string>> | null | undefined>;
 
 export interface ProviderHttpTransportOptions {
+  /** Fixed, bounded diagnostic phases; never receives dispatch or credential data. */
+  readonly observe?: PreparedEvidenceDispatchObserver;
   /** Undici-compatible adapter that forwards the required dispatcher unchanged. */
   readonly fetch: ProviderHttpFetch;
   /** Required server-side resolver for the complete dispatch target. */
@@ -222,6 +237,8 @@ export interface ProviderHttpTransportOptions {
   readonly createConnector?: ProviderHttpPinnedConnectorFactory;
   readonly timeoutMs: number;
   readonly maxPayloadBytes?: number;
+  /** Bounds JSON buffering and native history retained while bridging SSE. */
+  readonly maxBridgedResponseBytes?: number;
   /** Defaults to a small provider-authentication allowlist. */
   readonly allowedCredentialHeaderNames?: readonly string[];
   /**
@@ -291,6 +308,7 @@ interface NormalizedEndpointPolicy {
 }
 
 interface NormalizedOptions {
+  readonly observe?: PreparedEvidenceDispatchObserver;
   readonly fetch: ProviderHttpFetch;
   readonly resolveDispatchProfile: ProviderHttpDispatchProfileResolver;
   readonly resolveCredential: ProviderHttpCredentialResolver;
@@ -301,6 +319,7 @@ interface NormalizedOptions {
   readonly createConnector: ProviderHttpPinnedConnectorFactory;
   readonly timeoutMs: number;
   readonly maxPayloadBytes: number;
+  readonly maxBridgedResponseBytes: number;
   readonly allowedCredentialHeaderNames: ReadonlySet<string>;
   readonly resolveFixedRequestHeaders?: ProviderHttpFixedRequestHeadersResolver;
   readonly mediaUsagePlan?: ProviderMediaUsagePlanFactory;
@@ -308,6 +327,11 @@ interface NormalizedOptions {
 
 interface RequestContext {
   readonly request: PreparedEvidenceTransportRequest;
+  readonly responseBridge: OpenAIToAnthBridge | null;
+  readonly dispatchIdentity: Pick<
+    ProviderHttpCredentialResolveInput,
+    'providerId' | 'productId' | 'endpoint' | 'providerProtocol' | 'providerOperation'
+  >;
   readonly signal: AbortSignal;
   readonly timedOut: () => boolean;
   readonly cleanup: () => void;
@@ -480,6 +504,9 @@ function normalizeFixedRequestHeaders(
 
 function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOptions {
   if (!options || typeof options.fetch !== 'function') fail('INVALID_INPUT', 'an injected fetch adapter is required');
+  if (options.observe !== undefined && typeof options.observe !== 'function') {
+    fail('INVALID_INPUT', 'a transport observer must be callable');
+  }
   if (typeof options.resolveDispatchProfile !== 'function') {
     fail('INVALID_INPUT', 'a dispatch-profile resolver is required');
   }
@@ -518,6 +545,11 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     'maxPayloadBytes',
     DEFAULT_MAX_PAYLOAD_BYTES,
   );
+  const maxBridgedResponseBytes = boundedPositiveInteger(
+    options.maxBridgedResponseBytes ?? DEFAULT_MAX_BRIDGED_RESPONSE_BYTES,
+    'maxBridgedResponseBytes',
+    DEFAULT_MAX_PAYLOAD_BYTES,
+  );
   const rawCredentialHeaders = options.allowedCredentialHeaderNames ?? DEFAULT_CREDENTIAL_HEADER_NAMES;
   if (!Array.isArray(rawCredentialHeaders) || rawCredentialHeaders.length === 0) {
     fail('INVALID_INPUT', 'an exact credential header policy is required');
@@ -530,6 +562,7 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     }),
   );
   return {
+    ...(options.observe === undefined ? {} : { observe: options.observe }),
     fetch: options.fetch,
     resolveDispatchProfile: options.resolveDispatchProfile,
     resolveCredential: options.resolveCredential,
@@ -544,6 +577,7 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
         : createPinnedProviderHttpTestConnectorFactory(options.testAddressCapability)),
     timeoutMs,
     maxPayloadBytes,
+    maxBridgedResponseBytes,
     allowedCredentialHeaderNames,
     ...(options.resolveFixedRequestHeaders === undefined
       ? {}
@@ -586,6 +620,10 @@ function assertRequestBinding(input: PreparedEvidenceTransportRequest, maxPayloa
     evidence.tenantId !== input.tenantId ||
     evidence.projectId !== input.projectId ||
     evidence.requestId !== input.requestId ||
+    (evidence.clientProtocol !== undefined && evidence.clientProtocol !== evidence.protocol) ||
+    (input.clientOperation !== undefined &&
+      evidence.clientOperation !== undefined &&
+      input.clientOperation !== evidence.clientOperation) ||
     typeof evidence.accountId !== 'string' ||
     evidence.accountId.trim() === '' ||
     typeof evidence.upstreamId !== 'string' ||
@@ -727,6 +765,133 @@ function responseHeaders(response: Response): Readonly<Record<string, string>> {
   return Object.freeze(headers);
 }
 
+function clientResponseBridge(request: PreparedEvidenceTransportRequest): OpenAIToAnthBridge | null {
+  const evidence = request.evidence;
+  // Native compact items are opaque and must never pass through a chat bridge.
+  if (evidence.providerOperation === 'responses.compact') return null;
+  if (
+    evidence.protocol === 'openai' &&
+    evidence.providerProtocol === 'anthropic' &&
+    evidence.clientOperation === 'chat.completions' &&
+    evidence.providerOperation === 'messages'
+  ) {
+    const native = parsePayloadJson(request.payloadBytes) as {
+      tool_choice?: { type?: unknown; name?: unknown };
+      tools?: Array<{ name?: unknown }>;
+    } | null;
+    const choice = native?.tool_choice;
+    const onlyTool = native?.tools?.length === 1 ? native.tools[0] : undefined;
+    return new OpenAIToAnthBridge({
+      model: evidence.resolvedModel,
+      expectedToolName:
+        choice?.type === 'tool' && typeof choice.name === 'string'
+          ? choice.name
+          : choice?.type === 'any' && typeof onlyTool?.name === 'string'
+            ? onlyTool.name
+            : undefined,
+    });
+  }
+  return null;
+}
+
+function bridgedResponseHeaders(headers: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  const output = { ...headers };
+  // These describe the original representation and cannot survive conversion.
+  delete output['content-length'];
+  delete output['content-encoding'];
+  delete output.etag;
+  return Object.freeze(output);
+}
+
+function boundedBridgeBody(body: ReadableStream<Uint8Array>, maximumBytes: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let total = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const next = await reader.read();
+          if (next.done) {
+            reader.releaseLock();
+            controller.close();
+            return;
+          }
+          total += next.value.byteLength;
+          if (total > maximumBytes) {
+            throw new ProviderHttpTransportError(
+              'INVALID_RESPONSE',
+              'bridged provider response exceeds its byte limit',
+            );
+          }
+          controller.enqueue(next.value);
+        } catch (error) {
+          await reader.cancel(error).catch(() => undefined);
+          reader.releaseLock();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason).catch(() => undefined);
+        reader.releaseLock();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
+function bridgeJsonBody(
+  body: ReadableStream<Uint8Array>,
+  bridge: OpenAIToAnthBridge,
+  maximumBytes: number,
+): ReadableStream<Uint8Array> {
+  const reader = boundedBridgeBody(body, maximumBytes).getReader();
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          for (;;) {
+            const next = await reader.read();
+            if (next.done) break;
+            chunks.push(next.value);
+            total += next.value.byteLength;
+          }
+          const raw = Buffer.concat(chunks, total);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
+          } catch {
+            throw new ProviderHttpTransportError('INVALID_RESPONSE', 'provider returned an invalid JSON message');
+          }
+          if (
+            parsed === null ||
+            typeof parsed !== 'object' ||
+            !Array.isArray((parsed as { content?: unknown }).content)
+          ) {
+            throw new ProviderHttpTransportError('INVALID_RESPONSE', 'provider returned an invalid Anthropic message');
+          }
+          const output = new TextEncoder().encode(JSON.stringify(bridge.transformResponse(parsed)));
+          if (output.byteLength > maximumBytes) {
+            throw new ProviderHttpTransportError('INVALID_RESPONSE', 'bridged client response exceeds its byte limit');
+          }
+          controller.enqueue(output);
+          controller.close();
+          reader.releaseLock();
+        } catch (error) {
+          await reader.cancel(error).catch(() => undefined);
+          reader.releaseLock();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason).catch(() => undefined);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
 function isEventStreamContentType(value: string | null): boolean {
   if (value === null) return false;
   const separator = value.indexOf(';');
@@ -841,8 +1006,10 @@ function profileInput(
 function credentialInput(
   request: PreparedEvidenceTransportRequest,
   signal: AbortSignal,
+  dispatchIdentity: RequestContext['dispatchIdentity'],
 ): ProviderHttpCredentialResolveInput {
-  return {
+  return Object.freeze({
+    ...dispatchIdentity,
     tenantId: request.tenantId,
     projectId: request.projectId,
     requestId: request.requestId,
@@ -853,7 +1020,7 @@ function credentialInput(
     credentialId: request.evidence.credentialId,
     credentialVersion: request.evidence.credentialVersion,
     signal,
-  };
+  });
 }
 
 async function cancelResponseBody(response: Response): Promise<void> {
@@ -874,6 +1041,18 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
 
   async send(input: PreparedEvidenceTransportRequest): Promise<PreparedEvidenceTransportResponse> {
     const body = assertRequestBinding(input, this.options.maxPayloadBytes);
+    // `protocol` is the canonical signed client fact. Its optional alias is
+    // not persisted separately. Capture rendering before asynchronous I/O.
+    const responseBridge = clientResponseBridge(input);
+    // Use exactly the same immutable identity for the credential proof check
+    // and the response profile, even while asynchronous provider I/O is in flight.
+    const dispatchIdentity = Object.freeze({
+      providerId: input.evidence.providerId,
+      productId: input.evidence.productId,
+      endpoint: input.evidence.endpoint,
+      providerProtocol: input.evidence.providerProtocol,
+      providerOperation: input.evidence.providerOperation,
+    });
     const controller = new AbortController();
     let timedOut = false;
     let cleanupTransferred = false;
@@ -919,6 +1098,8 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     controller.signal.addEventListener('abort', abortConnector, { once: true });
     const context: RequestContext = {
       request: input,
+      responseBridge,
+      dispatchIdentity,
       signal: controller.signal,
       timedOut: () => timedOut,
       cleanup,
@@ -933,22 +1114,30 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     try {
       assertActive(context);
       let profile: ProviderHttpDispatchProfile | null;
+      const finishProfile = beginPreparedEvidenceDispatchStage('transport-profile-resolve', this.options.observe);
       try {
         profile = await this.options.resolveDispatchProfile(profileInput(input, controller.signal));
+        finishProfile('ok');
       } catch (error) {
         assertActive(context);
         if (error instanceof ProviderHttpTransportError) throw error;
         fail('PROFILE_UNAVAILABLE', 'dispatch profile resolution failed');
+      } finally {
+        finishProfile('error');
       }
       assertActive(context);
       const target = validateTargetUrl(targetUrlFromProfile(profile), this.options.endpointPolicy);
       let resolvedAddresses: readonly ProviderHttpResolvedAddress[] = [];
       if (isIP(target.connectionHostname) === 0) {
+        const finishDns = beginPreparedEvidenceDispatchStage('transport-provider-dns', this.options.observe);
         try {
           resolvedAddresses = await this.options.resolveAddresses(target.connectionHostname, controller.signal);
+          finishDns('ok');
         } catch {
           assertActive(context);
           fail('ENDPOINT_POLICY_VIOLATION', 'dispatch profile host could not be resolved safely');
+        } finally {
+          finishDns('error');
         }
       }
       assertActive(context);
@@ -970,6 +1159,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
       let egressProxy: ProviderHttpEgressProxyTarget | undefined;
       const proxyDescriptor = egressProxyFromProfile(profile);
       if (proxyDescriptor !== null) {
+        const finishProxy = beginPreparedEvidenceDispatchStage('transport-proxy-prepare', this.options.observe);
         try {
           egressProxy = await resolveEgressProxyTarget(proxyDescriptor, {
             resolveAddresses: this.options.resolveAddresses,
@@ -979,10 +1169,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
             ...(this.options.egressAllowlist === undefined ? {} : { egressAllowlist: this.options.egressAllowlist }),
             signal: context.signal,
           });
+          finishProxy('ok');
         } catch (error) {
           assertActive(context);
           if (error instanceof ProviderHttpTransportError) throw error;
           fail('EGRESS_PROXY_INVALID', 'dispatch profile egress proxy is invalid');
+        } finally {
+          finishProxy('error');
         }
       }
       assertActive(context);
@@ -998,6 +1191,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
       // before any credential material exists.
       let fixedRequestHeaders: Readonly<Record<string, string>> = {};
       if (this.options.resolveFixedRequestHeaders) {
+        const finishHeaders = beginPreparedEvidenceDispatchStage('transport-fixed-headers', this.options.observe);
         try {
           fixedRequestHeaders = normalizeFixedRequestHeaders(
             await this.options.resolveFixedRequestHeaders({
@@ -1008,42 +1202,54 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
             }),
             this.options.allowedCredentialHeaderNames,
           );
+          finishHeaders('ok');
         } catch (error) {
           assertActive(context);
           if (error instanceof ProviderHttpTransportError) throw error;
           fail('FIXED_REQUEST_HEADERS_INVALID', 'fixed request header resolution failed');
+        } finally {
+          finishHeaders('error');
         }
       }
       let callbackUsed = false;
       let result: PreparedEvidenceTransportResponse | undefined;
+      const finishCredential = beginPreparedEvidenceDispatchStage('transport-credential-prepare', this.options.observe);
       try {
-        await this.options.resolveCredential(credentialInput(input, controller.signal), async (credential) => {
-          if (callbackUsed) fail('CREDENTIAL_INVALID', 'credential resolver injected more than one credential');
-          callbackUsed = true;
-          assertActive(context);
-          const headerName = normalizeHeaderName(credential?.headerName, this.options.allowedCredentialHeaderNames);
-          const headerValue = normalizeHeaderValue(credential?.value);
-          try {
-            result = await this.sendFetch(
-              context,
-              target,
-              pinnedAddress,
-              body,
-              headerName,
-              headerValue.value,
-              fixedRequestHeaders,
-              egressProxy,
-              tlsFingerprint ?? undefined,
-            );
-            return result;
-          } finally {
-            headerValue.clear?.fill(0);
-          }
-        });
+        await this.options.resolveCredential(
+          credentialInput(input, controller.signal, dispatchIdentity),
+          async (credential) => {
+            if (callbackUsed) fail('CREDENTIAL_INVALID', 'credential resolver injected more than one credential');
+            callbackUsed = true;
+            assertActive(context);
+            const headerName = normalizeHeaderName(credential?.headerName, this.options.allowedCredentialHeaderNames);
+            const headerValue = normalizeHeaderValue(credential?.value);
+            try {
+              // The resolver awaits this callback too. Stop before provider I/O,
+              // excluding sendFetch and subsequent credential cleanup from preparation.
+              finishCredential('ok');
+              result = await this.sendFetch(
+                context,
+                target,
+                pinnedAddress,
+                body,
+                headerName,
+                headerValue.value,
+                fixedRequestHeaders,
+                egressProxy,
+                tlsFingerprint ?? undefined,
+              );
+              return result;
+            } finally {
+              headerValue.clear?.fill(0);
+            }
+          },
+        );
       } catch (error) {
         assertActive(context);
         if (error instanceof ProviderHttpTransportError) throw error;
         fail('CREDENTIAL_UNAVAILABLE', 'credential resolution failed');
+      } finally {
+        finishCredential('error');
       }
       try {
         assertActive(context);
@@ -1081,6 +1287,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     }
     headers.set(credentialHeaderName, credentialHeaderValue);
     let connector: ProviderHttpPinnedConnector;
+    const finishConnector = beginPreparedEvidenceDispatchStage('transport-connector-create', this.options.observe);
     try {
       connector = this.options.createConnector({
         hostname: target.connectionHostname,
@@ -1099,12 +1306,16 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         fail('NETWORK_ERROR', 'provider HTTP connector could not be created');
       }
       context.attachConnector(connector);
+      finishConnector('ok');
     } catch (error) {
       if (error instanceof ProviderHttpTransportError) throw error;
       fail('NETWORK_ERROR', 'provider HTTP connector could not be created');
+    } finally {
+      finishConnector('error');
     }
     assertActive(context);
     let response: Response;
+    const finishFetch = beginPreparedEvidenceDispatchStage('transport-fetch-headers', this.options.observe);
     try {
       response = await this.options.fetch(target.url, {
         method: 'POST',
@@ -1116,10 +1327,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
         signal: context.signal,
         dispatcher: connector.dispatcher,
       });
+      finishFetch('ok');
     } catch (error) {
       assertActive(context);
       if (error instanceof ProviderHttpTransportError) throw error;
       fail('NETWORK_ERROR', 'provider HTTP request failed');
+    } finally {
+      finishFetch('error');
     }
     assertActive(context);
     if (!response || typeof response.status !== 'number' || !Number.isInteger(response.status)) {
@@ -1142,6 +1356,11 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
      * regular text, SSE, and the media/dedicated operations alike.
      */
     const outboundServiceTier = outboundServiceTierFromPayload(context.request.payloadBytes);
+    const usageProfileEvidence = {
+      ...context.dispatchIdentity,
+      providerTargetUrl: target.url,
+    };
+    const usageProfile = providerUsageProfile(usageProfileEvidence);
 
     /*
      * §4.3 (task #17): the search emulation operations adapt the upstream
@@ -1179,15 +1398,17 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     }
 
     if (responseBody && isEventStreamContentType(response.headers.get('content-type'))) {
-      const observed = observeProviderSseUsage(responseBody, {
-        providerProtocol: context.request.evidence.providerProtocol,
-        providerOperation: context.request.evidence.providerOperation,
-      });
+      const observed = observeProviderSseUsage(responseBody, usageProfileEvidence);
+      const bridge = response.status >= 200 && response.status < 300 ? context.responseBridge : null;
+      const converted = bridge?.transformStream(boundedBridgeBody(observed.body, this.options.maxBridgedResponseBytes));
+      // Metering is read from the raw observer below. Observe bridge failures
+      // here too so an interrupted client stream never leaves a rejected usage promise.
+      if (converted) void converted.usage.catch(() => undefined);
       const result = {
         responseStarted: false,
         resultHttpStatus: response.status,
-        headers: safeResponseHeaders,
-        body: observed.body,
+        headers: bridge ? bridgedResponseHeaders(safeResponseHeaders) : safeResponseHeaders,
+        body: converted?.clientStream ?? observed.body,
         // R3 §8.2/§8.3: the SSE branch carries tier evidence too — the
         // frozen outbound tier plus the stream's declared (merged) tier. The
         // lazy getter resolves at body EOF, the same contract as providerUsage.
@@ -1206,7 +1427,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
           const usage = observation?.state === 'reported' ? observation.usage : null;
           return createUsageEvidence({
             meteringSource: 'provider-sse-usage-observer',
-            observerVersion: PROVIDER_SSE_USAGE_OBSERVER_VERSION,
+            observerVersion: providerUsageObserverVersion(PROVIDER_SSE_USAGE_OBSERVER_VERSION, usageProfile),
             outboundServiceTier,
             serviceTier: {
               requested: outboundServiceTier,
@@ -1250,19 +1471,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
           mediaPlan = null;
         }
       }
-      const observed = observeProviderJsonUsage(
-        responseBody,
-        {
-          providerProtocol: context.request.evidence.providerProtocol,
-          providerOperation: context.request.evidence.providerOperation,
-        },
-        mediaPlan?.extractor ?? null,
-      );
+      const observed = observeProviderJsonUsage(responseBody, usageProfileEvidence, mediaPlan?.extractor ?? null);
+      const bridge = context.responseBridge;
       const result = {
         responseStarted: false,
         resultHttpStatus: response.status,
-        headers: safeResponseHeaders,
-        body: observed.body,
+        headers: bridge ? bridgedResponseHeaders(safeResponseHeaders) : safeResponseHeaders,
+        body: bridge ? bridgeJsonBody(observed.body, bridge, this.options.maxBridgedResponseBytes) : observed.body,
         // R3 §8.2/§8.3 (B05): tier evidence no longer rides the media plan
         // alone — every JSON observation pairs the frozen outbound tier with
         // the response's declared tier (images included), resolved lazily at
@@ -1276,8 +1491,9 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
           const tier: TransportServiceTierEvidence = {
             requested,
             observed: observation?.observedServiceTier ?? null,
+            ...(observation?.observedServiceTierConflict === true ? { observedConflict: true } : {}),
           };
-          return tier.requested === null && tier.observed === null ? null : tier;
+          return tier.requested === null && tier.observed === null && tier.observedConflict !== true ? null : tier;
         },
         // R3 §8.2: the bounded usage-evidence object — same lazy contract.
         get usageEvidence(): NormalizedUsageEvidence | null {
@@ -1286,9 +1502,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
           const requested = outboundServiceTier ?? mediaPlan?.serviceTier?.requested ?? null;
           return createUsageEvidence({
             meteringSource: 'provider-json-usage-observer',
-            observerVersion: PROVIDER_JSON_USAGE_OBSERVER_VERSION,
+            observerVersion: providerUsageObserverVersion(PROVIDER_JSON_USAGE_OBSERVER_VERSION, usageProfile),
             outboundServiceTier: requested,
-            serviceTier: { requested, observed: observation?.observedServiceTier ?? null },
+            serviceTier: {
+              requested,
+              observed: observation?.observedServiceTier ?? null,
+              ...(observation?.observedServiceTierConflict === true ? { observedConflict: true } : {}),
+            },
             billingMode: usage?.billingMode ?? null,
             units: usage?.units === null || usage?.units === undefined ? null : String(usage.units),
             sizeTier: usage?.sizeTier ?? null,

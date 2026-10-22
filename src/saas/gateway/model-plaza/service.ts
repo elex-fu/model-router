@@ -2,6 +2,11 @@ import { resolveModelPricingOverride } from '../../billing/groups/override.js';
 import type { BillingGroupRecord, RationalMultiplier } from '../../billing/groups/types.js';
 import type { CustomerPriceVersionRecord, PerUnitTier, RateSet, RationalRate } from '../../pricing/types.js';
 import { PER_UNIT_TIERS } from '../../pricing/types.js';
+import {
+  createGatewayCapabilityAdvertisementPolicy,
+  type GatewayCapabilityAdvertisementPolicy,
+} from '../../runtime/gateway-capability-advertisement.js';
+import type { GatewayCapabilityReadiness } from '../../runtime/gateway-capability-readiness.js';
 import { ModelsDevOfficialPricingRegistry, type OfficialModelEntry } from './official-pricing.js';
 import type { ModelPlazaSettings } from './settings.js';
 import { capabilityKey } from './store.js';
@@ -229,6 +234,8 @@ interface AggregateEntry {
 
 export interface SaasModelPlazaServiceOptions {
   readonly facts: ModelPlazaFactsPort;
+  /** Production always supplies this authority; omitted only for standalone legacy projections. */
+  readonly capabilityReadiness?: () => Promise<GatewayCapabilityReadiness>;
   /** Official reference registry; defaults to the models.dev registry. */
   readonly officialPricing?: ModelsDevOfficialPricingRegistry;
   readonly now?: () => Date;
@@ -236,6 +243,7 @@ export interface SaasModelPlazaServiceOptions {
 
 export class SaasModelPlazaService {
   private readonly facts: ModelPlazaFactsPort;
+  private readonly capabilityReadiness: SaasModelPlazaServiceOptions['capabilityReadiness'];
   private readonly officialPricing: ModelsDevOfficialPricingRegistry;
   private readonly now: () => Date;
 
@@ -244,6 +252,7 @@ export class SaasModelPlazaService {
       throw new TypeError('SaasModelPlazaService requires a facts port');
     }
     this.facts = options.facts;
+    this.capabilityReadiness = options.capabilityReadiness;
     this.officialPricing = options.officialPricing ?? new ModelsDevOfficialPricingRegistry();
     this.now = options.now ?? (() => new Date());
   }
@@ -253,8 +262,19 @@ export class SaasModelPlazaService {
     readonly settings: ModelPlazaSettings;
   }): Promise<ModelPlazaResponse> {
     const at = this.now();
+    const canAdvertise = this.capabilityReadiness
+      ? createGatewayCapabilityAdvertisementPolicy(await this.capabilityReadiness())
+      : undefined;
     const aggregated = await this.facts.withSnapshot(at, async (snapshot) => {
-      const facts = snapshot.facts;
+      // Composite remapped identities must be filtered before resolving prices.
+      // Nominal targets are filtered in aggregation while retaining their alias
+      // metadata for an independently sellable composite target platform.
+      const facts = canAdvertise
+        ? {
+            ...snapshot.facts,
+            priceIdentities: snapshot.facts.priceIdentities.filter(canAdvertise),
+          }
+        : snapshot.facts;
       const authorized = await authorizedGroupIds(snapshot, input.access);
 
       // Resolve prices for the bounded set of effective identities. When a
@@ -274,7 +294,7 @@ export class SaasModelPlazaService {
       const groups: Array<{ readonly record: BillingGroupRecord; readonly entries: readonly AggregateEntry[] }> = [];
       for (const group of facts.groups) {
         if (!visible(group, input.settings, authorized)) continue;
-        const entries = aggregateGroup(group, facts, prices);
+        const entries = aggregateGroup(group, facts, prices, canAdvertise);
         if (entries.length === 0) continue;
         groups.push({ record: group, entries });
       }
@@ -336,6 +356,7 @@ function aggregateGroup(
   group: BillingGroupRecord,
   facts: ModelPlazaFacts,
   prices: ReadonlyMap<string, CustomerPriceVersionRecord>,
+  canAdvertise?: GatewayCapabilityAdvertisementPolicy,
 ): readonly AggregateEntry[] {
   const unrestricted = facts.unrestrictedGroupIds.has(group.id);
   const groupCapabilities = unrestricted
@@ -387,6 +408,7 @@ function aggregateGroup(
   };
 
   for (const target of targets) {
+    if (canAdvertise && !canAdvertise(target)) continue;
     const servable = group.composite
       ? groupPlatforms.has(target.providerId)
       : groupCapabilities.has(capabilityKey(target.providerId, target.productId, target.model, target.endpoint));

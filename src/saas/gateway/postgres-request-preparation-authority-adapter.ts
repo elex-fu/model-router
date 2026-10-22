@@ -1,6 +1,7 @@
 import type { SaasCatalogService } from '../catalog/service.js';
-import type { ProviderEligibilityRequest } from '../catalog/types.js';
-import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import type { ProviderEligibilityRequest, ProviderEligibilityResult } from '../catalog/types.js';
+import type { PreparedSqlStatement, SaasDatabase, SqlExecutor } from '../db/index.js';
+import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { ByokPlanEntitlementResolver, EffectiveByokEntitlement } from '../plans/types.js';
 import type { SaasPricingService } from '../pricing/index.js';
 import { SaasPricingError } from '../pricing/index.js';
@@ -24,6 +25,11 @@ import {
 } from './composite-route-store.js';
 import type { ModelMappingSource, ModelResolutionProvenance } from './contracts.js';
 import {
+  observePreparationExecutor,
+  observePreparationPhase,
+  type PostgresPreparationObserver,
+} from './postgres-preparation-observer.js';
+import {
   blockRequestPreparation,
   type RequestPreparationAuthority,
   type RequestPreparationAuthorityPort,
@@ -43,6 +49,114 @@ type PlanEntitlementReader = Pick<ByokPlanEntitlementResolver, 'resolveBoundForR
 type PricingReader = Pick<SaasPricingService, 'resolveSupplierCostVersion'>;
 type Row = Record<string, unknown>;
 
+const BYOK_SUPPLY_QUERY = createPreparedSqlStatement(
+  'prep-byok',
+  `/* preparation-authority:byok */
+       SELECT m.tenant_id AS mapping_tenant_id, m.supply_profile_id AS mapping_profile_id,
+              m.supply_mode AS mapping_supply_mode, m.account_id AS account_id,
+              m.provider_id AS mapping_provider_id, m.product_id AS mapping_product_id,
+              m.account_authz_version AS mapping_account_authz_version,
+              m.status AS mapping_status, m.effective_at AS mapping_effective_at,
+              m.expires_at AS mapping_expires_at, m.authz_version AS mapping_authz_version,
+              m.evidence_ref AS mapping_evidence_ref, m.evidence_sha256 AS mapping_evidence_sha256,
+              a.owner_kind AS account_owner_kind, a.supply_mode AS account_supply_mode,
+              a.provider_id AS account_provider_id, a.product_id AS account_product_id,
+              a.credential_type AS credential_type, a.region AS region, a.purpose AS purpose,
+              a.rights_id AS account_rights_id, a.rights_version AS account_rights_version,
+              a.status AS account_status, a.validation_state AS account_validation_state,
+              a.authz_version AS account_authz_version,
+              c.owner_kind AS credential_owner_kind, c.supply_mode AS credential_supply_mode,
+              c.id AS credential_id, c.account_id AS credential_account_id,
+              c.provider_id AS credential_provider_id, c.product_id AS credential_product_id,
+              c.status AS credential_status, c.validation_state AS credential_validation_state,
+              c.current_version AS credential_current_version, c.expires_at AS credential_expires_at,
+              c.authz_version AS credential_authz_version,
+              v.owner_kind AS version_owner_kind, v.supply_mode AS version_supply_mode,
+              v.credential_id AS version_credential_id, v.version AS credential_version,
+              v.status AS version_status, v.expires_at AS version_expires_at
+       FROM saas_tenant_provider_supply_profile_accounts m
+       JOIN saas_tenant_provider_accounts a
+         ON a.tenant_id = m.tenant_id AND a.id = m.account_id
+       JOIN saas_tenant_provider_credentials c
+         ON c.tenant_id = a.tenant_id AND c.account_id = a.id
+        AND c.provider_id = a.provider_id AND c.product_id = a.product_id
+       JOIN saas_tenant_provider_credential_versions v
+         ON v.tenant_id = c.tenant_id AND v.account_id = c.account_id
+        AND v.credential_id = c.id AND v.version = c.current_version
+       WHERE m.tenant_id = $1 AND m.supply_profile_id = $2 AND m.supply_mode = 'byok'
+         AND m.status = 'active' AND m.effective_at <= $3::timestamptz
+         AND (m.expires_at IS NULL OR m.expires_at > $3::timestamptz)
+         AND a.status = 'active' AND a.validation_state = 'verified'
+         AND m.account_authz_version = a.authz_version
+         AND m.provider_id = a.provider_id AND m.product_id = a.product_id
+         AND a.provider_id = $4 AND a.product_id = $5
+         AND c.status = 'active' AND c.validation_state = 'verified'
+         AND c.current_version IS NOT NULL
+         AND (c.expires_at IS NULL OR c.expires_at > $3::timestamptz)
+         AND v.owner_kind = 'tenant' AND v.supply_mode = 'byok' AND v.status = 'active'
+         AND (v.expires_at IS NULL OR v.expires_at > $3::timestamptz)
+       ORDER BY m.account_id ASC, c.id ASC`,
+);
+
+const PLATFORM_SUPPLY_QUERY = createPreparedSqlStatement(
+  'prep-platform',
+  `/* preparation-authority:platform */
+       SELECT g.tenant_id AS grant_tenant_id, g.supply_profile_id AS grant_profile_id,
+              g.supply_mode AS grant_supply_mode, g.status AS grant_status,
+              g.effective_at AS grant_effective_at, g.expires_at AS grant_expires_at,
+              g.authz_version AS grant_authz_version,
+              g.profile_authz_version AS grant_profile_authz_version,
+              g.pool_authz_version AS grant_pool_authz_version,
+              g.evidence_ref AS grant_evidence_ref, g.evidence_sha256 AS grant_evidence_sha256,
+              p.id AS pool_id, p.provider_id AS pool_provider_id, p.product_id AS pool_product_id,
+              p.status AS pool_status, p.validation_state AS pool_validation_state,
+              p.authz_version AS pool_authz_version, p.credential_type AS pool_credential_type,
+              p.region AS pool_region, p.purpose AS pool_purpose,
+              p.rights_id AS pool_rights_id, p.rights_version AS pool_rights_version,
+              m.account_id AS account_id, m.provider_id AS member_provider_id,
+              m.product_id AS member_product_id, m.status AS member_status,
+              m.authz_version AS member_authz_version,
+              m.account_authz_version AS member_account_authz_version,
+              a.owner_kind AS account_owner_kind, a.supply_mode AS account_supply_mode,
+              a.provider_id AS account_provider_id, a.product_id AS account_product_id,
+              a.credential_type AS credential_type, a.region AS region, a.purpose AS purpose,
+              a.rights_id AS account_rights_id, a.rights_version AS account_rights_version,
+              a.status AS account_status, a.validation_state AS account_validation_state,
+              a.authz_version AS account_authz_version,
+              c.owner_kind AS credential_owner_kind, c.supply_mode AS credential_supply_mode,
+              c.id AS credential_id, c.account_id AS credential_account_id,
+              c.provider_id AS credential_provider_id, c.product_id AS credential_product_id,
+              c.status AS credential_status, c.validation_state AS credential_validation_state,
+              c.current_version AS credential_current_version, c.expires_at AS credential_expires_at,
+              c.authz_version AS credential_authz_version,
+              v.owner_kind AS version_owner_kind, v.supply_mode AS version_supply_mode,
+              v.credential_id AS version_credential_id, v.version AS credential_version,
+              v.status AS version_status, v.expires_at AS version_expires_at
+       FROM saas_platform_provider_pool_grants g
+       JOIN saas_platform_provider_pools p ON p.id = g.pool_id
+       JOIN saas_platform_provider_pool_members m ON m.pool_id = p.id
+       JOIN saas_platform_provider_accounts a ON a.id = m.account_id
+       JOIN saas_platform_provider_credentials c
+         ON c.account_id = a.id AND c.provider_id = a.provider_id AND c.product_id = a.product_id
+       JOIN saas_platform_provider_credential_versions v
+         ON v.account_id = c.account_id AND v.credential_id = c.id AND v.version = c.current_version
+       WHERE g.tenant_id = $1 AND g.supply_profile_id = $2 AND g.supply_mode = 'platform'
+         AND g.status = 'active' AND g.effective_at <= $3::timestamptz
+         AND (g.expires_at IS NULL OR g.expires_at > $3::timestamptz)
+         AND g.profile_authz_version = $4 AND p.authz_version = g.pool_authz_version
+         AND p.provider_id = $5 AND p.product_id = $6
+         AND p.status = 'active' AND p.validation_state = 'verified'
+         AND m.status = 'active' AND m.account_authz_version = a.authz_version
+         AND m.provider_id = a.provider_id AND m.product_id = a.product_id
+         AND a.status = 'active' AND a.validation_state = 'verified'
+         AND c.status = 'active' AND c.validation_state = 'verified'
+         AND c.current_version IS NOT NULL
+         AND (c.expires_at IS NULL OR c.expires_at > $3::timestamptz)
+         AND v.owner_kind = 'platform' AND v.supply_mode = 'platform' AND v.status = 'active'
+         AND (v.expires_at IS NULL OR v.expires_at > $3::timestamptz)
+       ORDER BY m.account_id ASC, p.id ASC, c.id ASC`,
+);
+
 export interface PostgresRequestPreparationAuthorityAdapterDependencies {
   readonly database: Database;
   readonly routes: RouteReader;
@@ -57,6 +171,14 @@ export interface PostgresRequestPreparationAuthorityAdapterDependencies {
    * composite requests fail-closed.
    */
   readonly pricing?: PricingReader;
+  readonly observe?: PostgresPreparationObserver;
+  /** Trusted provider registry mapping; never inferred from client payload. */
+  readonly providerNativeProtocol?: (
+    providerId: string,
+    productId: string,
+    model: string,
+    clientProtocol: RequestPreparationAuthority['route']['protocol'],
+  ) => RequestPreparationAuthority['route']['protocol'];
 }
 
 type SafeFailureStage = 'route' | 'account' | 'capability';
@@ -210,6 +332,9 @@ function routeOperations(
   if (protocol === 'openai' && clientOperation === 'embeddings') {
     return { clientOperation: 'embeddings', providerOperation: 'embeddings' };
   }
+  if (protocol === 'responses' && clientOperation === 'responses.compact') {
+    return { clientOperation: 'responses.compact', providerOperation: 'responses.compact' };
+  }
   fail('route');
 }
 
@@ -267,8 +392,15 @@ function compareCandidates(
   return 0;
 }
 
-async function queryRows(executor: SqlExecutor, sql: string, values: readonly unknown[] = []): Promise<Row[]> {
-  const result = await executor.query<Row>(sql, values);
+async function queryRows(
+  executor: SqlExecutor,
+  sql: string | PreparedSqlStatement,
+  values: readonly unknown[] = [],
+): Promise<Row[]> {
+  const result =
+    typeof sql === 'string'
+      ? await executor.query<Row>(sql, values)
+      : await queryPreparedOrAnonymous<Row>(executor, sql, values);
   if (!result || !Array.isArray(result.rows)) throw new Error('invalid SQL result');
   return result.rows;
 }
@@ -442,6 +574,14 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
     readonly protocol: RequestPreparationAuthority['route']['protocol'];
     readonly clientOperation?: string;
   }): Promise<RequestPreparationDecision<RequestPreparationAuthority>> {
+    return observePreparationPhase('authority', 'resolve', this.dependencies.observe, () =>
+      this.resolveAuthority(input),
+    );
+  }
+
+  private async resolveAuthority(
+    input: Parameters<RequestPreparationAuthorityPort['resolve']>[0],
+  ): Promise<RequestPreparationDecision<RequestPreparationAuthority>> {
     if (
       !matchesInput(input.caller, input.entitlement) ||
       !input.publicModel ||
@@ -452,7 +592,8 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
     }
 
     try {
-      const authority = await this.dependencies.database.transaction(async (executor) => {
+      const authority = await this.dependencies.database.transaction(async (rawExecutor) => {
+        const executor = observePreparationExecutor(rawExecutor, 'authority', this.dependencies.observe);
         await queryRows(executor, 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
         const clockRows = await queryRows(executor, 'SELECT clock_timestamp() AS authority_now');
         const clockRow = exactOne(clockRows);
@@ -702,10 +843,33 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
           fail('route');
         }
 
+        const providerProtocol =
+          this.dependencies.providerNativeProtocol?.(
+            effectiveProviderId,
+            effectiveProductId,
+            effectiveModel,
+            route.protocol,
+          ) ?? route.protocol;
+        if (!['openai', 'anthropic', 'gemini', 'responses'].includes(providerProtocol)) fail('route');
+        const operations = routeOperations(route.protocol, input.clientOperation);
+        if (
+          providerProtocol !== route.protocol &&
+          operations.clientOperation !== operationForProtocol(route.protocol)
+        ) {
+          // Compact/embeddings and other native operations cannot be bridged.
+          fail('route');
+        }
+        const providerOperation =
+          providerProtocol === route.protocol ? operations.providerOperation : operationForProtocol(providerProtocol);
         const verified = [] as Array<{
           readonly candidate: RequestPreparationAuthority['candidate'];
           readonly poolMemberAuthzVersion: number | null;
         }>;
+        // One repeatable-read snapshot and one authorityAt cover every candidate.
+        // Reuse only within this request: revocation, capability heads and rights
+        // are still read from PostgreSQL again on the next request/admission.
+        const eligibilityByBoundary = new Map<string, ProviderEligibilityResult>();
+        const capabilitiesByVersion = new Map<number, Map<string, Row[]>>();
         for (const supply of supplies) {
           try {
             const eligibilityInput: ProviderEligibilityRequest = {
@@ -718,33 +882,44 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
               region: supply.region,
               purpose: supply.purpose,
             };
-            const eligibility = await this.dependencies.catalog.evaluateProviderEligibility(
-              eligibilityInput,
-              authorityAt,
-              executor,
-            );
+            const boundary = JSON.stringify(eligibilityInput);
+            let eligibility = eligibilityByBoundary.get(boundary);
+            if (!eligibility) {
+              eligibility = await this.dependencies.catalog.evaluateProviderEligibility(
+                eligibilityInput,
+                authorityAt,
+                executor,
+              );
+              eligibilityByBoundary.set(boundary, eligibility);
+            }
             if (
               eligibility.decision !== 'allow' ||
               eligibility.providerId !== effectiveProviderId ||
               eligibility.productId !== effectiveProductId ||
               eligibility.model !== effectiveModel ||
               eligibility.endpoint !== effectiveEndpoint ||
-              eligibility.capability.protocol !== input.protocol ||
+              eligibility.capability.protocol !== providerProtocol ||
               String(eligibility.rights.rightsId) !== supply.accountRightsId ||
               !sameVersion(eligibility.rights.version, supply.accountRightsVersion)
             ) {
               continue;
             }
-            await this.assertAccountCapability(
-              executor,
-              supply.accountId,
-              input.caller,
-              effectiveProviderId,
-              effectiveProductId,
-              effectiveModel,
-              effectiveEndpoint,
-              eligibility.capability.version,
-            );
+            let accountCapabilities = capabilitiesByVersion.get(eligibility.capability.version);
+            if (!accountCapabilities) {
+              accountCapabilities = await this.loadAccountCapabilities(
+                executor,
+                [...new Set(supplies.map((candidate) => candidate.accountId))],
+                input.caller,
+                effectiveProviderId,
+                effectiveProductId,
+                effectiveModel,
+                effectiveEndpoint,
+                eligibility.capability.version,
+              );
+              capabilitiesByVersion.set(eligibility.capability.version, accountCapabilities);
+            }
+            const accountCapability = exactOne(accountCapabilities.get(supply.accountId) ?? []);
+            if (!sameVersion(accountCapability.capability_version, eligibility.capability.version)) fail('account');
             if (supply.poolRights) {
               validateRightsRow(
                 supply.poolRights,
@@ -800,8 +975,9 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
             routeConfigId: route.routeId,
             routeConfigVersion: version(route.version),
             protocol: route.protocol,
-            providerProtocol: route.protocol,
-            ...routeOperations(route.protocol, input.clientOperation),
+            providerProtocol,
+            clientOperation: operations.clientOperation,
+            providerOperation,
             targetMode: route.targetMode,
             upstreamId: route.upstreamId,
             endpoint: effectiveEndpoint,
@@ -823,7 +999,7 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
                   providerId: effectiveProviderId,
                   productId: effectiveProductId,
                   upstreamModel: effectiveModel,
-                  providerOperation: routeOperations(route.protocol, input.clientOperation).providerOperation,
+                  providerOperation,
                   supplierCostVersion,
                   meteringPolicyVersion: version(commercial.providerPolicyVersion),
                 },
@@ -935,55 +1111,13 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
     providerId: string,
     productId: string,
   ): Promise<SupplyResolution[]> {
-    const rows = await queryRows(
-      executor,
-      `/* preparation-authority:byok */
-       SELECT m.tenant_id AS mapping_tenant_id, m.supply_profile_id AS mapping_profile_id,
-              m.supply_mode AS mapping_supply_mode, m.account_id AS account_id,
-              m.provider_id AS mapping_provider_id, m.product_id AS mapping_product_id,
-              m.account_authz_version AS mapping_account_authz_version,
-              m.status AS mapping_status, m.effective_at AS mapping_effective_at,
-              m.expires_at AS mapping_expires_at, m.authz_version AS mapping_authz_version,
-              m.evidence_ref AS mapping_evidence_ref, m.evidence_sha256 AS mapping_evidence_sha256,
-              a.owner_kind AS account_owner_kind, a.supply_mode AS account_supply_mode,
-              a.provider_id AS account_provider_id, a.product_id AS account_product_id,
-              a.credential_type AS credential_type, a.region AS region, a.purpose AS purpose,
-              a.rights_id AS account_rights_id, a.rights_version AS account_rights_version,
-              a.status AS account_status, a.validation_state AS account_validation_state,
-              a.authz_version AS account_authz_version,
-              c.owner_kind AS credential_owner_kind, c.supply_mode AS credential_supply_mode,
-              c.id AS credential_id, c.account_id AS credential_account_id,
-              c.provider_id AS credential_provider_id, c.product_id AS credential_product_id,
-              c.status AS credential_status, c.validation_state AS credential_validation_state,
-              c.current_version AS credential_current_version, c.expires_at AS credential_expires_at,
-              c.authz_version AS credential_authz_version,
-              v.owner_kind AS version_owner_kind, v.supply_mode AS version_supply_mode,
-              v.credential_id AS version_credential_id, v.version AS credential_version,
-              v.status AS version_status, v.expires_at AS version_expires_at
-       FROM saas_tenant_provider_supply_profile_accounts m
-       JOIN saas_tenant_provider_accounts a
-         ON a.tenant_id = m.tenant_id AND a.id = m.account_id
-       JOIN saas_tenant_provider_credentials c
-         ON c.tenant_id = a.tenant_id AND c.account_id = a.id
-        AND c.provider_id = a.provider_id AND c.product_id = a.product_id
-       JOIN saas_tenant_provider_credential_versions v
-         ON v.tenant_id = c.tenant_id AND v.account_id = c.account_id
-        AND v.credential_id = c.id AND v.version = c.current_version
-       WHERE m.tenant_id = $1 AND m.supply_profile_id = $2 AND m.supply_mode = 'byok'
-         AND m.status = 'active' AND m.effective_at <= $3::timestamptz
-         AND (m.expires_at IS NULL OR m.expires_at > $3::timestamptz)
-         AND a.status = 'active' AND a.validation_state = 'verified'
-         AND m.account_authz_version = a.authz_version
-         AND m.provider_id = a.provider_id AND m.product_id = a.product_id
-         AND a.provider_id = $4 AND a.product_id = $5
-         AND c.status = 'active' AND c.validation_state = 'verified'
-         AND c.current_version IS NOT NULL
-         AND (c.expires_at IS NULL OR c.expires_at > $3::timestamptz)
-         AND v.owner_kind = 'tenant' AND v.supply_mode = 'byok' AND v.status = 'active'
-         AND (v.expires_at IS NULL OR v.expires_at > $3::timestamptz)
-       ORDER BY m.account_id ASC, c.id ASC`,
-      [caller.tenantId, entitlement.supplyProfileId, now, providerId, productId],
-    );
+    const rows = await queryRows(executor, BYOK_SUPPLY_QUERY, [
+      caller.tenantId,
+      entitlement.supplyProfileId,
+      now,
+      providerId,
+      productId,
+    ]);
     const resolutions: SupplyResolution[] = [];
     for (const row of rows) {
       try {
@@ -1070,66 +1204,18 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
     providerId: string,
     productId: string,
   ): Promise<SupplyResolution[]> {
-    const rows = await queryRows(
-      executor,
-      `/* preparation-authority:platform */
-       SELECT g.tenant_id AS grant_tenant_id, g.supply_profile_id AS grant_profile_id,
-              g.supply_mode AS grant_supply_mode, g.status AS grant_status,
-              g.effective_at AS grant_effective_at, g.expires_at AS grant_expires_at,
-              g.authz_version AS grant_authz_version,
-              g.profile_authz_version AS grant_profile_authz_version,
-              g.pool_authz_version AS grant_pool_authz_version,
-              g.evidence_ref AS grant_evidence_ref, g.evidence_sha256 AS grant_evidence_sha256,
-              p.id AS pool_id, p.provider_id AS pool_provider_id, p.product_id AS pool_product_id,
-              p.status AS pool_status, p.validation_state AS pool_validation_state,
-              p.authz_version AS pool_authz_version, p.credential_type AS pool_credential_type,
-              p.region AS pool_region, p.purpose AS pool_purpose,
-              p.rights_id AS pool_rights_id, p.rights_version AS pool_rights_version,
-              m.account_id AS account_id, m.provider_id AS member_provider_id,
-              m.product_id AS member_product_id, m.status AS member_status,
-              m.authz_version AS member_authz_version,
-              m.account_authz_version AS member_account_authz_version,
-              a.owner_kind AS account_owner_kind, a.supply_mode AS account_supply_mode,
-              a.provider_id AS account_provider_id, a.product_id AS account_product_id,
-              a.credential_type AS credential_type, a.region AS region, a.purpose AS purpose,
-              a.rights_id AS account_rights_id, a.rights_version AS account_rights_version,
-              a.status AS account_status, a.validation_state AS account_validation_state,
-              a.authz_version AS account_authz_version,
-              c.owner_kind AS credential_owner_kind, c.supply_mode AS credential_supply_mode,
-              c.id AS credential_id, c.account_id AS credential_account_id,
-              c.provider_id AS credential_provider_id, c.product_id AS credential_product_id,
-              c.status AS credential_status, c.validation_state AS credential_validation_state,
-              c.current_version AS credential_current_version, c.expires_at AS credential_expires_at,
-              c.authz_version AS credential_authz_version,
-              v.owner_kind AS version_owner_kind, v.supply_mode AS version_supply_mode,
-              v.credential_id AS version_credential_id, v.version AS credential_version,
-              v.status AS version_status, v.expires_at AS version_expires_at
-       FROM saas_platform_provider_pool_grants g
-       JOIN saas_platform_provider_pools p ON p.id = g.pool_id
-       JOIN saas_platform_provider_pool_members m ON m.pool_id = p.id
-       JOIN saas_platform_provider_accounts a ON a.id = m.account_id
-       JOIN saas_platform_provider_credentials c
-         ON c.account_id = a.id AND c.provider_id = a.provider_id AND c.product_id = a.product_id
-       JOIN saas_platform_provider_credential_versions v
-         ON v.account_id = c.account_id AND v.credential_id = c.id AND v.version = c.current_version
-       WHERE g.tenant_id = $1 AND g.supply_profile_id = $2 AND g.supply_mode = 'platform'
-         AND g.status = 'active' AND g.effective_at <= $3::timestamptz
-         AND (g.expires_at IS NULL OR g.expires_at > $3::timestamptz)
-         AND g.profile_authz_version = $4 AND p.authz_version = g.pool_authz_version
-         AND p.provider_id = $5 AND p.product_id = $6
-         AND p.status = 'active' AND p.validation_state = 'verified'
-         AND m.status = 'active' AND m.account_authz_version = a.authz_version
-         AND m.provider_id = a.provider_id AND m.product_id = a.product_id
-         AND a.status = 'active' AND a.validation_state = 'verified'
-         AND c.status = 'active' AND c.validation_state = 'verified'
-         AND c.current_version IS NOT NULL
-         AND (c.expires_at IS NULL OR c.expires_at > $3::timestamptz)
-         AND v.owner_kind = 'platform' AND v.supply_mode = 'platform' AND v.status = 'active'
-         AND (v.expires_at IS NULL OR v.expires_at > $3::timestamptz)
-       ORDER BY m.account_id ASC, p.id ASC, c.id ASC`,
-      [caller.tenantId, entitlement.supplyProfileId, now, caller.supplyProfileVersion, providerId, productId],
-    );
+    const rows = await queryRows(executor, PLATFORM_SUPPLY_QUERY, [
+      caller.tenantId,
+      entitlement.supplyProfileId,
+      now,
+      caller.supplyProfileVersion,
+      providerId,
+      productId,
+    ]);
     const resolutions: SupplyResolution[] = [];
+    // This repeatable-read resolution performs no rights writes between reads.
+    // Reuse successful rows only here, keyed by the exact original SQL bindings.
+    const poolRightsById = new Map<unknown, Map<unknown, Row>>();
     for (const row of rows) {
       try {
         if (
@@ -1162,17 +1248,28 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
         ) {
           fail('account');
         }
-        const poolRightRows = await queryRows(
-          executor,
-          `SELECT rights_id, version, provider_id, product_id, credential_type, supply_mode,
+        const rightsId = row.pool_rights_id;
+        const rightsVersion = row.pool_rights_version;
+        let rightsByVersion = poolRightsById.get(rightsId);
+        let poolRights = rightsByVersion?.get(rightsVersion);
+        if (poolRights === undefined) {
+          const poolRightRows = await queryRows(
+            executor,
+            `SELECT rights_id, version, provider_id, product_id, credential_type, supply_mode,
                   region, purpose, model_scope, endpoint_scope, effective_at, expires_at,
                   approval_ref, evidence_ref, evidence_sha256, status
            FROM saas_provider_rights
            WHERE rights_id = $1 AND version = $2
            LIMIT 2`,
-          [row.pool_rights_id, row.pool_rights_version],
-        );
-        const poolRights = exactOne(poolRightRows);
+            [rightsId, rightsVersion],
+          );
+          poolRights = exactOne(poolRightRows);
+          if (rightsByVersion === undefined) {
+            rightsByVersion = new Map<unknown, Row>();
+            poolRightsById.set(rightsId, rightsByVersion);
+          }
+          rightsByVersion.set(rightsVersion, poolRights);
+        }
         const poolId = text(row, 'pool_id');
         const accountId = text(row, 'account_id');
         const credentialId = text(row, 'credential_id');
@@ -1240,36 +1337,44 @@ export class PostgresRequestPreparationAuthorityAdapter implements RequestPrepar
     return resolutions;
   }
 
-  private async assertAccountCapability(
+  private async loadAccountCapabilities(
     executor: SqlExecutor,
-    accountId: string,
+    accountIds: readonly string[],
     caller: RequestPreparationCaller,
     providerId: string,
     productId: string,
     model: string,
     endpoint: string,
     capabilityVersion: number,
-  ): Promise<void> {
+  ): Promise<Map<string, Row[]>> {
     const table =
       caller.supplyMode === 'byok'
         ? 'saas_tenant_provider_account_capabilities'
         : 'saas_platform_provider_account_capabilities';
     const values =
       caller.supplyMode === 'byok'
-        ? [caller.tenantId, accountId, providerId, productId, model, endpoint, capabilityVersion]
-        : [accountId, providerId, productId, model, endpoint, capabilityVersion];
+        ? [caller.tenantId, accountIds, providerId, productId, model, endpoint, capabilityVersion]
+        : [accountIds, providerId, productId, model, endpoint, capabilityVersion];
     const predicate =
       caller.supplyMode === 'byok'
-        ? 'tenant_id = $1 AND account_id = $2 AND provider_id = $3 AND product_id = $4 AND model = $5 AND endpoint = $6 AND capability_version = $7'
-        : 'account_id = $1 AND provider_id = $2 AND product_id = $3 AND model = $4 AND endpoint = $5 AND capability_version = $6';
+        ? 'tenant_id = $1 AND account_id = ANY($2::text[]) AND provider_id = $3 AND product_id = $4 AND model = $5 AND endpoint = $6 AND capability_version = $7'
+        : 'account_id = ANY($1::text[]) AND provider_id = $2 AND product_id = $3 AND model = $4 AND endpoint = $5 AND capability_version = $6';
     const rows = await queryRows(
       executor,
       `/* preparation-authority:account-capability */
-       SELECT capability_version FROM ${table} WHERE ${predicate} LIMIT 2`,
+       SELECT account_id, capability_version FROM ${table} WHERE ${predicate}`,
       values,
     );
-    const row = exactOne(rows);
-    if (!sameVersion(row.capability_version, capabilityVersion)) fail('account');
+    const byAccount = new Map<string, Row[]>();
+    const requestedAccounts = new Set(accountIds);
+    for (const row of rows) {
+      const accountId = text(row, 'account_id');
+      if (!requestedAccounts.has(accountId)) fail('account');
+      const accountRows = byAccount.get(accountId) ?? [];
+      accountRows.push(row);
+      byAccount.set(accountId, accountRows);
+    }
+    return byAccount;
   }
 }
 

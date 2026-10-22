@@ -231,6 +231,85 @@ test('platform coordinator calculates from the server-selected price and passes 
   assert.match(committed?.settlementKey ?? '', /^saas-normal-success:[0-9a-f]{64}$/);
 });
 
+test('a bridged customer quote settles native cached usage against the customer protocol', async () => {
+  let committed: NormalSuccessTransactionInput | undefined;
+  const coordinator = new DispatchUsageSettlementCoordinator(
+    {
+      async getCustomerPriceVersion() {
+        return customerPrice;
+      },
+      async getCustomerPriceSnapshot() {
+        return priceSnapshotRecord;
+      },
+    },
+    transactionSpy((input) => {
+      committed = input;
+    }),
+  );
+
+  await coordinator.complete({
+    tenantId: 'tenant-1',
+    requestId: 'request-1',
+    attemptId: 'attempt-1',
+    snapshot: { ...snapshot, customerProtocol: 'openai', providerProtocol: 'anthropic' },
+    usage: {
+      ...observedUsage,
+      inputTotal: 186,
+      inputUncached: 0,
+      cacheRead: 186,
+      outputTotal: 62,
+      source: 'upstream',
+      billingMode: 'token',
+      units: null,
+      sizeTier: null,
+    },
+  });
+
+  assert.equal(committed?.chargeAmountMinorUnits, '248');
+  assert.equal(committed?.usage.inputTotal, 186n);
+  assert.equal(committed?.usage.inputUncached, 0n);
+  assert.equal(committed?.usage.cacheRead, 186n);
+  assert.equal(committed?.usage.outputTotal, 62n);
+  assert.equal(committed?.usage.source, 'upstream');
+});
+
+test('present invalid or inherited customer protocols fail closed before settlement', async () => {
+  let writes = 0;
+  const coordinator = new DispatchUsageSettlementCoordinator(
+    {
+      async getCustomerPriceVersion() {
+        return customerPrice;
+      },
+      async getCustomerPriceSnapshot() {
+        return priceSnapshotRecord;
+      },
+    },
+    transactionSpy(() => {
+      writes += 1;
+    }),
+  );
+  const invalidSnapshots = [
+    ...['anthropic', undefined, null, 'unknown', ''].map((customerProtocol) => ({
+      ...snapshot,
+      customerProtocol,
+    })),
+    Object.assign(Object.create({ customerProtocol: 'openai' }), snapshot),
+  ];
+  for (const invalidSnapshot of invalidSnapshots) {
+    await assert.rejects(
+      coordinator.complete({
+        tenantId: 'tenant-1',
+        requestId: 'request-1',
+        attemptId: 'attempt-1',
+        snapshot: invalidSnapshot as NormalSuccessSettlementSnapshot,
+        usage: { ...observedUsage, source: 'upstream' },
+      }),
+      { message: 'selected customer price does not match the prepared quote' },
+    );
+  }
+  assert.equal(writes, 0);
+});
+
 test('BYOK coordinator records upstream usage without resolving a price or creating a wallet charge', async () => {
   let committed: NormalSuccessTransactionInput | undefined;
   const coordinator = new DispatchUsageSettlementCoordinator(

@@ -1123,7 +1123,7 @@ function claudeAuthority(): RequestPreparationAuthority {
   };
 }
 
-/** Answers only the F2 billing-group read; every other authority fails closed. */
+/** Only F2 billing-group authority exists; root route reads return empty and transactions are forbidden. */
 function claudeOnlyGroupDatabase(statements: Array<{ sql: string; values: readonly unknown[] }>): SaasDatabase {
   return {
     async query(sql: string, values: readonly unknown[]) {
@@ -1224,15 +1224,25 @@ test('a claude_code_only group admits genuine Claude Code clients past the group
   });
 
   assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
-  // The genuine client passes the group gate; this fixture's database has no
-  // eligibility authority, so the selection blocks (503) instead of rejecting
-  // at the gate (403) — proving the evidence carried all the way through.
+  // The genuine client passes the group gate; the root route read then finds
+  // no persisted route authority, so selection blocks before eligibility.
   assert.equal(setup.response.writeHeadCalls[0]?.status, 503);
   assert.equal(JSON.parse(setup.response.bodyText()).error.code, 'REQUEST_BLOCKED');
-  // R-dormant (115): the scheduling-threshold candidate read runs between
-  // the group resolution and the eligibility authority — a scheduling-signal
-  // side read that never gates the group decision.
-  assert.equal(setup.statements.length, 2);
+  // R-dormant (115): the threshold signal read precedes the fresh route read;
+  // missing route authority blocks before any candidate eligibility query.
+  assert.equal(setup.statements.length, 3);
   assert.match(setup.statements[0]?.sql ?? '', /postgres-provider-account-scheduler:billing-group/);
   assert.match(setup.statements[1]?.sql ?? '', /postgres-provider-account-scheduler:threshold-candidates/);
+  assert.deepEqual(
+    setup.statements.map(({ sql }) => sql.match(/postgres-provider-account-scheduler:([a-z-]+)/)?.[1]),
+    ['billing-group', 'threshold-candidates', 'route'],
+  );
+  assert.deepEqual(setup.statements[2]?.values, [
+    'tenant-1',
+    'project-1',
+    'public-model',
+    'anthropic',
+    'platform',
+  ]);
+  assert.equal(setup.statements.some(({ sql }) => sql.includes('-eligibility')), false);
 });

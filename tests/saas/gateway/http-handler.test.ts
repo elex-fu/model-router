@@ -17,12 +17,15 @@ import {
   type SaasGatewayReadinessProvider,
 } from '../../../src/saas/gateway/http-handler.js';
 import type { GatewayPreDispatchCompensationPort } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
-import type {
-  PreparedEvidenceDispatchInput,
-  PreparedEvidenceDispatchResult,
+import {
+  type PreparedEvidenceDispatchInput,
+  type PreparedEvidenceDispatchResult,
+  SaasPreparedEvidenceDispatchError,
 } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type {
+  RequestPreparationCompensationResult,
   RequestPreparationInput,
+  RequestPreparationPreparedResult,
   RequestPreparationResult,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
@@ -842,6 +845,157 @@ test('HTTP cleanup failure cannot retry dispatch or expose storage details', asy
   assert.equal(setup.dispatchInputs.length, 1);
   assert.equal(setup.response.writeHeadCalls[0]?.status, 502);
   assert.equal(String(setup.response.endBody).includes('private storage'), false);
+});
+
+function capacityPrepared(mode: 'byok' | 'platform'): RequestPreparationPreparedResult {
+  const value = prepared();
+  assert.ok(value.outcome === 'prepared');
+  return { ...value, caller: { ...value.caller, supplyMode: mode } };
+}
+
+function releasedCapacity(value: RequestPreparationPreparedResult): RequestPreparationCompensationResult {
+  return {
+    requestId: value.requestId,
+    attemptId: value.attemptId,
+    disposition: 'released',
+    quotaReservation: 'released',
+    rateReservation: 'released',
+    holdReservation: value.caller.supplyMode === 'byok' ? 'not_applicable' : 'released',
+    manualReconciliationRequired: false,
+  };
+}
+
+for (const mode of ['byok', 'platform'] as const) {
+  test(`${mode}: known account capacity is 429 only after complete same-identity compensation`, async () => {
+    const value = capacityPrepared(mode);
+    const calls: Parameters<GatewayPreDispatchCompensationPort['compensate']>[0][] = [];
+    const setup = harness({
+      preparationResult: value,
+      async dispatch() {
+        throw new SaasPreparedEvidenceDispatchError('LEASE_CAPACITY_EXHAUSTED', 'private slot detail');
+      },
+      preDispatchCompensation: {
+        async compensate(input) {
+          calls.push(input);
+          return releasedCapacity(value);
+        },
+      },
+    });
+    await setup.handler(asRequest(setup.request), asResponse(setup.response));
+    assert.equal(setup.preparationInputs.length, 1);
+    assert.equal(setup.dispatchInputs.length, 1, 'no second dispatch attempt is made');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.prepared, value);
+    assert.equal(calls[0]?.cause, 'dispatch_failed');
+    assert.equal(calls[0]?.responseMayHaveStarted, false);
+    assert.equal(setup.response.writeHeadCalls[0]?.status, 429);
+    assert.equal(setup.response.writeHeadCalls[0]?.headers['retry-after'], undefined);
+    assert.equal(JSON.parse(String(setup.response.endBody)).error.code, 'RATE_LIMITED');
+    assert.equal(String(setup.response.endBody).includes('private slot'), false);
+  });
+}
+
+test('capacity cleanup must confirm every reservation and identity before returning 429', async () => {
+  const patches: Array<readonly [string, Partial<RequestPreparationCompensationResult>]> = [
+    ['request identity', { requestId: 'another-request' }],
+    ['attempt identity', { attemptId: 'another-attempt' }],
+    ['retained disposition', { disposition: 'retained_for_reconciliation' }],
+    ['quota retained', { quotaReservation: 'retained_for_reconciliation' }],
+    ['rate retained', { rateReservation: 'retained_for_reconciliation' }],
+    ['hold retained', { holdReservation: 'retained_for_reconciliation' }],
+    ['wrong hold mode', { holdReservation: 'not_applicable' }],
+    ['manual reconciliation', { manualReconciliationRequired: true }],
+  ];
+  for (const [label, patch] of patches) {
+    const value = capacityPrepared('platform');
+    let cleanups = 0;
+    const setup = harness({
+      preparationResult: value,
+      async dispatch() {
+        throw new SaasPreparedEvidenceDispatchError('LEASE_CAPACITY_EXHAUSTED', 'fixed capacity denial');
+      },
+      preDispatchCompensation: {
+        async compensate() {
+          cleanups++;
+          return { ...releasedCapacity(value), ...patch };
+        },
+      },
+    });
+    await setup.handler(asRequest(setup.request), asResponse(setup.response));
+    assert.equal(cleanups, 1, label);
+    assert.equal(setup.dispatchInputs.length, 1, label);
+    assert.equal(setup.response.writeHeadCalls[0]?.status, 502, label);
+    assert.equal(JSON.parse(String(setup.response.endBody)).error.code, 'DISPATCH_FAILED', label);
+  }
+});
+
+test('missing or failed cleanup and generic lease errors never become capacity 429', async () => {
+  for (const scenario of ['missing', 'throws', 'malformed', 'unavailable', 'lookalike'] as const) {
+    const value = capacityPrepared('byok');
+    let cleanups = 0;
+    const setup = harness({
+      preparationResult: value,
+      async dispatch() {
+        if (scenario === 'unavailable') throw new SaasPreparedEvidenceDispatchError('LEASE_UNAVAILABLE', 'bad lease');
+        if (scenario === 'lookalike') throw { code: 'LEASE_CAPACITY_EXHAUSTED' };
+        throw new SaasPreparedEvidenceDispatchError('LEASE_CAPACITY_EXHAUSTED', 'fixed capacity denial');
+      },
+      ...(scenario === 'missing'
+        ? {}
+        : {
+            preDispatchCompensation: {
+              async compensate() {
+                cleanups++;
+                if (scenario === 'throws') throw new Error('private cleanup error');
+                if (scenario === 'malformed') return {} as never;
+                return releasedCapacity(value);
+              },
+            },
+          }),
+    });
+    await setup.handler(asRequest(setup.request), asResponse(setup.response));
+    assert.equal(cleanups, scenario === 'missing' ? 0 : 1, scenario);
+    assert.equal(setup.dispatchInputs.length, 1, scenario);
+    assert.equal(setup.response.writeHeadCalls[0]?.status, 502, scenario);
+    assert.equal(String(setup.response.endBody).includes('private'), false, scenario);
+  }
+});
+
+test('capacity rejection cannot replace a started response or a cancelled client', async () => {
+  for (const scenario of ['started', 'cancelled', 'cancelled-during-cleanup'] as const) {
+    const value = capacityPrepared('byok');
+    const calls: Parameters<GatewayPreDispatchCompensationPort['compensate']>[0][] = [];
+    const setup = harness({
+      preparationResult: value,
+      async dispatch(input, _response, request) {
+        if (scenario === 'started') await input.client?.start(200, {});
+        if (scenario === 'cancelled') {
+          request.aborted = true;
+          request.emit('aborted');
+        }
+        throw new SaasPreparedEvidenceDispatchError('LEASE_CAPACITY_EXHAUSTED', 'fixed capacity denial');
+      },
+      preDispatchCompensation: {
+        async compensate(input) {
+          calls.push(input);
+          if (scenario === 'cancelled-during-cleanup') {
+            setup.request.aborted = true;
+            setup.request.emit('aborted');
+          }
+          return releasedCapacity(value);
+        },
+      },
+    });
+    await setup.handler(asRequest(setup.request), asResponse(setup.response));
+    assert.equal(calls.length, 1, scenario);
+    assert.equal(calls[0]?.cause, scenario === 'cancelled' ? 'client_cancelled' : 'dispatch_failed', scenario);
+    assert.equal(calls[0]?.responseMayHaveStarted, scenario === 'started', scenario);
+    assert.equal(setup.dispatchInputs.length, 1, scenario);
+    assert.ok(
+      setup.response.writeHeadCalls.every(({ status }) => status !== 429),
+      scenario,
+    );
+  }
 });
 
 test('handles a dispatcher response with no client body through start/end', async () => {

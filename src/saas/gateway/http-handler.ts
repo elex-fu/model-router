@@ -8,6 +8,7 @@ import {
   recordGatewayAttemptOutcome,
   recordGatewayRequestEnd,
 } from '../observability/metrics.js';
+import type { GatewayCapabilityReadiness } from '../runtime/gateway-capability-readiness.js';
 import { resolveClientAddress } from './client-address.js';
 import type { GatewayProtocol } from './contracts.js';
 import {
@@ -26,10 +27,11 @@ import { RecordingClientStream } from './images/recording-client-stream.js';
 import type { SaasModelPlazaPort } from './model-plaza/endpoint.js';
 import { type GatewayMultipartEnvelope, GatewayMultipartParseError, parseMultipartBody } from './multipart-envelope.js';
 import type { GatewayPreDispatchCompensationPort } from './pre-dispatch-compensation-service.js';
-import type {
-  PreparedEvidenceClientStream,
-  PreparedEvidenceDispatchInput,
-  PreparedEvidenceDispatchResult,
+import {
+  type PreparedEvidenceClientStream,
+  type PreparedEvidenceDispatchInput,
+  type PreparedEvidenceDispatchResult,
+  SaasPreparedEvidenceDispatchError,
 } from './prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceAudit } from './prepared-request-evidence-service.js';
 import type { ProviderAccountSchedulerClientEvidence } from './provider-account-scheduler.js';
@@ -215,6 +217,7 @@ const CLAUDE_CLIENT_EVIDENCE_HEADER_PREFIX = 'x-stainless-';
 const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   ['/v1/chat/completions', 'openai'],
   ['/v1/responses', 'responses'],
+  ['/v1/responses/compact', 'responses'],
   ['/v1/messages', 'anthropic'],
   // R2: the OpenAI embeddings operation rides the OpenAI inbound protocol
   // family; the per-route client operation below distinguishes it from chat.
@@ -263,6 +266,7 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
  * body; only this trusted HTTP boundary may set them.
  */
 const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
+  ['/v1/responses/compact', 'responses.compact'],
   ['/v1/embeddings', 'embeddings'],
   // §4.3 (task #17): search operations (server-owned, path-derived).
   ['/v1/web_search', 'web_search'],
@@ -373,9 +377,16 @@ export interface PreparedEvidenceDispatchPort {
   dispatch(input: PreparedEvidenceDispatchInput): Promise<PreparedEvidenceDispatchResult>;
 }
 
-/** Resolves model IDs through the same key, entitlement, and route authority as request preparation. */
+/**
+ * Resolves model IDs through the same key, entitlement and route authority as
+ * preparation. Customer advertisements additionally require live sellability;
+ * auxiliary authorization can still support direct authenticated verification.
+ */
 export interface ModelDiscoveryPort {
-  list(authenticatedCaller: AuthenticatedApiKey): Promise<readonly string[]>;
+  list(
+    authenticatedCaller: AuthenticatedApiKey,
+    purpose: 'advertisement' | 'authorization',
+  ): Promise<readonly string[]>;
 }
 
 /**
@@ -469,6 +480,8 @@ export interface SaasGatewayReadinessReport {
   readonly dependencies: Readonly<Record<string, 'ok' | 'error' | 'unknown'>>;
   /** Per-capability assembled flags (present only for registered capabilities). */
   readonly capabilities: Readonly<Record<string, boolean>>;
+  /** Sanitized v2 projection; absent on the original v1 runtime contract. */
+  readonly providerCapabilities?: GatewayCapabilityReadiness;
 }
 
 export interface SaasGatewayReadinessProvider {
@@ -1446,6 +1459,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     // G-B2: set when a multipart media request was normalized at the
     // boundary; the JSON body read then consumes this instead of the wire.
     let multipartNormalizedBody: { body: string; contentType: string; contentLength: number } | undefined;
+    let nativeCompactRequest: { authenticatedCaller: AuthenticatedApiKey; body: Record<string, unknown> } | undefined;
     const path = requestPath(req);
     if (path === undefined) {
       drainRequest(req);
@@ -1488,6 +1502,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         migrationHead: report.migrationHead,
         dependencies: report.dependencies,
         capabilities: report.capabilities,
+        ...(report.providerCapabilities === undefined ? {} : { providerCapabilities: report.providerCapabilities }),
       });
       res.writeHead(ready ? 200 : 503, {
         'Content-Type': 'application/json',
@@ -1540,7 +1555,10 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
       let models: readonly string[] | null;
       try {
-        models = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
+        models = validatedDiscoveredModels(
+          authenticatedCaller,
+          await modelDiscovery.list(authenticatedCaller, 'advertisement'),
+        );
       } catch {
         models = null;
       }
@@ -1597,8 +1615,8 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
      * R2 §7.2 (docs/core-capability-alignment-technical-plan-2026-10-18.md):
      * GET /v1beta/models — the native Gemini ListModels surface. Like
      * GET /v1/models it reads state instead of creating billable work, but
-     * the list is strictly the CURRENT caller's key permissions ∩ assembled
-     * capabilities (§6.3): the scope-validated modelDiscovery port output,
+     * the list is strictly the CURRENT caller's key permissions ∩ sellable
+     * capabilities (§6.3): the advertisement modelDiscovery port output,
      * never the raw provider list.
      */
     if (path === '/v1beta/models') {
@@ -1625,7 +1643,10 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       }
       let models: readonly string[] | null;
       try {
-        models = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
+        models = validatedDiscoveredModels(
+          authenticatedCaller,
+          await modelDiscovery.list(authenticatedCaller, 'advertisement'),
+        );
       } catch {
         models = null;
       }
@@ -1705,17 +1726,20 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         );
         return true;
       }
-      // Model-scope enforcement: the same PG-authoritative scope surface as
-      // GET /v1/models — the caller's key permissions ∩ assembled
-      // capabilities. Out-of-scope fails closed with 403, exactly like a
-      // preparation-stage account_denied.
+      // Keep the PG-authoritative caller/entitlement/route intersection for
+      // direct counting. Commercial advertisement verification is separate,
+      // so an operator can verify an authorized route before publishing it.
+      // Out-of-scope fails closed like preparation-stage account_denied.
       if (!modelDiscovery) {
         sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
         return true;
       }
       let discovered: readonly string[] | null;
       try {
-        discovered = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
+        discovered = validatedDiscoveredModels(
+          authenticatedCaller,
+          await modelDiscovery.list(authenticatedCaller, 'authorization'),
+        );
       } catch {
         discovered = null;
       }
@@ -1774,9 +1798,8 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
      * explicitly declare NATIVE compact support. Opaque compact items are
      * never forged through the Chat bridge: a supply without the declared
      * capability is a missing capability (404 CAPABILITY_UNSUPPORTED, the
-     * embeddings precedent), not an outage, and a declared supply without
-     * an assembled native compact transport fails closed with 501 rather
-     * than degrading to an emulated compact.
+     * embeddings precedent). A declared supply enters the normal signed
+     * preparation and dispatch lifecycle using its native compact target.
      */
     if (path === '/v1/responses/compact') {
       const endpointMatch = matchSaasEndpointEntry(req.method ?? '', path);
@@ -1834,17 +1857,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         );
         return true;
       }
-      if (!modelDiscovery) {
-        sendHttpError(res, new GatewayHttpError(503, 'GATEWAY_UNAVAILABLE'), requestId);
-        return true;
-      }
-      let discovered: readonly string[] | null;
-      try {
-        discovered = validatedDiscoveredModels(authenticatedCaller, await modelDiscovery.list(authenticatedCaller));
-      } catch {
-        discovered = null;
-      }
-      if (!discovered?.includes(model)) {
+      if (!authenticatedModelScopes(authenticatedCaller)?.includes(model)) {
         sendHttpError(
           res,
           new GatewayHttpError(403, 'REQUEST_REJECTED'),
@@ -1862,13 +1875,18 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         );
         return true;
       }
-      sendHttpError(
-        res,
-        new GatewayHttpError(501, 'COMPACT_TRANSPORT_UNAVAILABLE'),
-        requestId,
-        'the resolved supply declares native compact support but no native compact transport is assembled in this deployment',
-      );
-      return true;
+      if (body.stream === true) {
+        sendHttpError(
+          res,
+          new GatewayHttpError(400, 'INVALID_BODY'),
+          requestId,
+          'responses.compact is not a streaming operation',
+        );
+        return true;
+      }
+      // Native compact continues through the same preparation, admission,
+      // evidence, dispatch and settlement path as every billable request.
+      nativeCompactRequest = { authenticatedCaller, body };
     }
 
     /*
@@ -2162,7 +2180,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
     let authenticatedCaller: AuthenticatedApiKey | null;
     try {
-      authenticatedCaller = await authenticateCaller(req, authenticator);
+      authenticatedCaller = nativeCompactRequest?.authenticatedCaller ?? (await authenticateCaller(req, authenticator));
     } catch (error) {
       drainRequest(req);
       sendHttpError(
@@ -2175,7 +2193,9 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
 
     let body: Record<string, unknown>;
     try {
-      if (multipartNormalizedBody !== undefined) {
+      if (nativeCompactRequest !== undefined) {
+        body = nativeCompactRequest.body;
+      } else if (multipartNormalizedBody !== undefined) {
         if (multipartNormalizedBody.contentLength > pathBodyLimit) {
           throw new GatewayHttpError(413, 'BODY_TOO_LARGE');
         }
@@ -2505,7 +2525,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         : innerClient;
     const compensate = async (cause: 'client_cancelled' | 'dispatch_failed') => {
       try {
-        await options.preDispatchCompensation?.compensate({
+        return await options.preDispatchCompensation?.compensate({
           prepared: preparedRequest,
           cause,
           responseMayHaveStarted: res.headersSent,
@@ -2558,16 +2578,42 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         ok: dispatched.kind === 'sent' && attemptStatus !== null && attemptStatus >= 200 && attemptStatus < 300,
         durationMs: Date.now() - dispatchStartedAtMs,
       });
-    } catch {
+    } catch (error) {
       recordGatewayAttemptOutcome({
         route: dispatchRoute,
         ok: false,
         durationMs: Date.now() - dispatchStartedAtMs,
       });
-      const cause = client.signal.aborted ? 'client_cancelled' : 'dispatch_failed';
+      const clientWasAborted = client.signal.aborted;
+      const responseWasStarted = res.headersSent;
+      const cause = clientWasAborted ? 'client_cancelled' : 'dispatch_failed';
       client.abort();
-      await compensate(cause);
-      sendHttpError(res, new GatewayHttpError(502, 'DISPATCH_FAILED'), requestId);
+      const compensation = await compensate(cause);
+      // A known full PostgreSQL account is a concurrency rejection only after
+      // the already committed preparation resources are authoritatively released.
+      const capacityReleased =
+        error instanceof SaasPreparedEvidenceDispatchError &&
+        error.code === 'LEASE_CAPACITY_EXHAUSTED' &&
+        !clientWasAborted &&
+        !responseWasStarted &&
+        !req.aborted &&
+        (req.complete || !req.destroyed) &&
+        !res.headersSent &&
+        !res.destroyed &&
+        !res.writableEnded &&
+        compensation?.requestId === preparedRequest.requestId &&
+        compensation.attemptId === preparedRequest.attemptId &&
+        compensation.disposition === 'released' &&
+        compensation.quotaReservation === 'released' &&
+        compensation.rateReservation === 'released' &&
+        compensation.manualReconciliationRequired === false &&
+        ((preparedRequest.caller.supplyMode === 'byok' && compensation.holdReservation === 'not_applicable') ||
+          (preparedRequest.caller.supplyMode === 'platform' && compensation.holdReservation === 'released'));
+      sendHttpError(
+        res,
+        capacityReleased ? new GatewayHttpError(429, 'RATE_LIMITED') : new GatewayHttpError(502, 'DISPATCH_FAILED'),
+        requestId,
+      );
       client.dispose();
       return true;
     }

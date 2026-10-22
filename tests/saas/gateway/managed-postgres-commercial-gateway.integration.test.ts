@@ -45,6 +45,8 @@ import { PostgresProviderAccountScheduler } from '../../../src/saas/gateway/post
 import { PostgresRequestPreparationAuthorityAdapter } from '../../../src/saas/gateway/postgres-request-preparation-authority-adapter.js';
 import {
   type PreparedEvidenceDispatchErrorCode,
+  type PreparedEvidenceLeaseProvider,
+  type PreparedEvidenceTransport,
   SaasPreparedEvidenceDispatchError,
 } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import {
@@ -62,6 +64,7 @@ import {
 import {
   ProviderAccountScheduler,
   type ProviderAccountSchedulerHealthDecision,
+  type ProviderAccountSchedulerHealthPort,
 } from '../../../src/saas/gateway/provider-account-scheduler.js';
 import { createProviderHttpTestAddressCapability } from '../../../src/saas/gateway/provider-http-address.js';
 import {
@@ -71,11 +74,14 @@ import {
 } from '../../../src/saas/gateway/provider-http-transport.js';
 import {
   allowRequestPreparation,
+  type RequestPreparationAuthorityPort,
   type RequestPreparationDecision,
   type RequestPreparationEntitlementPort,
   type RequestPreparationFailureCode,
+  type RequestPreparationInput,
   type RequestPreparationStage,
   rejectRequestPreparation,
+  SaasRequestPreparationService,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 import { SaasRouteConfigService } from '../../../src/saas/gateway/route-config-service.js';
 import { SaasIdentityService } from '../../../src/saas/identity/service.js';
@@ -188,11 +194,22 @@ interface SafeUpstreamMatches {
   readonly rawPlatformSecretMatches: boolean;
 }
 
+function assertDispatchLeaseAdapter(value: unknown): asserts value is PreparedEvidenceLeaseProvider {
+  assert.ok(value !== null && typeof value === 'object');
+  assert.equal(Object.getPrototypeOf(value), Object.prototype);
+  assert.deepEqual(Reflect.ownKeys(value), ['acquire']);
+  const acquire = Object.getOwnPropertyDescriptor(value, 'acquire');
+  assert.ok(acquire && Object.hasOwn(acquire, 'value') && typeof acquire.value === 'function');
+}
+
 function observePreparationFailures(
   runtime: ManagedSaasRuntime,
   report: (diagnostic: SafePreparationDiagnostic) => void,
+  registerCleanup: (cleanup: () => void) => void,
+  observeNativeLeaseProvider: (provider: PostgresProviderAccountLeaseService) => void,
 ): () => SafePreparationDiagnostic | null {
-  assert.ok(runtime.gateway, 'the real managed gateway composition must be present');
+  const gateway = runtime.gateway;
+  assert.ok(gateway, 'the real managed gateway composition must be present');
   const stages = new Set<RequestPreparationStage>([
     'caller',
     'entitlement',
@@ -265,171 +282,240 @@ function observePreparationFailures(
       throw error;
     }
   };
-  const preparation = runtime.gateway.preparation;
-  const dependenciesDescriptor = Object.getOwnPropertyDescriptor(preparation, 'dependencies');
-  assert.ok(dependenciesDescriptor && Object.hasOwn(dependenciesDescriptor, 'value'));
-  const dependencies: unknown = dependenciesDescriptor.value;
-  assert.ok(dependencies !== null && typeof dependencies === 'object');
-  const dependency = (name: 'authority' | 'scheduler'): unknown => {
-    const descriptor = Object.getOwnPropertyDescriptor(dependencies, name);
-    assert.ok(descriptor && Object.hasOwn(descriptor, 'value'));
-    return descriptor.value;
-  };
-  const authority = dependency('authority');
-  const scheduler = dependency('scheduler');
-  // R5b-2 composition transparency: the production authority may carry one
-  // optional OpenCode Go protocol-routing decorator. Unwrap exactly one such
-  // layer before asserting the concrete adapter; a deeper chain is a
-  // composition bug this gate must catch.
-  const authorityUnderlyingDescriptor = Object.getOwnPropertyDescriptor(authority, 'underlyingAuthority');
-  const concreteAuthority: unknown = authorityUnderlyingDescriptor?.value ?? authority;
-  assert.ok(concreteAuthority instanceof PostgresRequestPreparationAuthorityAdapter);
-  assert.ok(scheduler instanceof PostgresProviderAccountScheduler);
-  const nativeSchedulerDescriptor = Object.getOwnPropertyDescriptor(scheduler, 'scheduler');
-  assert.ok(nativeSchedulerDescriptor && Object.hasOwn(nativeSchedulerDescriptor, 'value'));
-  const nativeScheduler: unknown = nativeSchedulerDescriptor.value;
-  assert.ok(nativeScheduler instanceof ProviderAccountScheduler);
-  const schedulerDependenciesDescriptor = Object.getOwnPropertyDescriptor(nativeScheduler, 'dependencies');
-  assert.ok(schedulerDependenciesDescriptor && Object.hasOwn(schedulerDependenciesDescriptor, 'value'));
-  const schedulerDependencies: unknown = schedulerDependenciesDescriptor.value;
-  assert.ok(schedulerDependencies !== null && typeof schedulerDependencies === 'object');
-  const healthDescriptor = Object.getOwnPropertyDescriptor(schedulerDependencies, 'health');
-  assert.ok(healthDescriptor && Object.hasOwn(healthDescriptor, 'value'));
-  const nativeHealth: unknown = healthDescriptor.value;
-  assert.ok(nativeHealth instanceof PostgresProviderAccountRuntimeHealthStore);
-  const recordBoundary = (
-    port: SafePreparationBoundary['port'],
-    result: RequestPreparationDecision<unknown> | 'threw',
-  ): void => {
-    try {
-      const context = observations.getStore();
-      if (!context || context.boundaries.length >= 4) return;
-      let reason: SafePreparationBoundary['reason'] = 'unknown';
-      if (
-        port === 'scheduler' &&
-        result !== 'threw' &&
-        result.decision === 'block' &&
-        result.code === 'capability_unavailable'
-      ) {
-        // Compare only exact native block literals; never forward the message.
-        const message = result.message;
-        if (message === 'PostgreSQL provider eligibility authority is unavailable') {
-          reason = 'eligibility_unavailable';
-        } else if (message === 'provider eligibility authority returned an invalid candidate') {
-          reason = 'eligibility_invalid_candidate';
-        } else if (
-          message === 'provider account health authority is unavailable' ||
-          message ===
-            'runtime health authority is missing: the SaaS schema has no account health/cooldown observation contract; validation_state is not runtime health'
-        ) {
-          reason = 'health_unavailable';
-        } else if (
-          message === 'provider account lease concurrency snapshot is unavailable' ||
-          message === 'provider account lease concurrency authority is unavailable' ||
-          message ===
-            'provider account lease concurrency limit is missing; configure the same maxConcurrency as the lease service'
-        ) {
-          reason = 'concurrency_unavailable';
-        } else if (
-          message === 'provider account concurrency authority returned an invalid decision' ||
-          message === 'provider account concurrency authority is invalid' ||
-          message === 'provider account lease concurrency snapshot is malformed'
-        ) {
-          reason = 'concurrency_invalid';
-        }
-      }
-      context.boundaries.push({
-        port,
-        decision:
-          result === 'threw'
-            ? 'threw'
-            : result.decision === 'allow' || result.decision === 'reject' || result.decision === 'block'
-              ? result.decision
-              : 'unrecognized_decision',
-        code:
-          result === 'threw'
-            ? 'unrecognized_code'
-            : result.decision === 'allow'
-              ? null
-              : codes.has(result.code)
-                ? result.code
-                : 'unrecognized_code',
-        reason,
-      });
-    } catch {
-      /* Enum-only observation cannot change a native decision or exception. */
+  const preparation = gateway.preparation;
+  // The production telemetry wrapper owns exactly its one delegating method.
+  // Observe its actual native call rather than bypassing metrics or searching
+  // an arbitrary decorator chain for a private dependencies field.
+  assert.equal(Object.getPrototypeOf(preparation), Object.prototype);
+  assert.deepEqual(Reflect.ownKeys(preparation), ['prepare']);
+  const prepareDescriptor = Object.getOwnPropertyDescriptor(preparation, 'prepare');
+  assert.ok(prepareDescriptor && Object.hasOwn(prepareDescriptor, 'value'));
+  assert.equal(typeof prepareDescriptor.value, 'function');
+  let observedCore: SaasRequestPreparationService | undefined;
+  const observeNativeCore = (core: SaasRequestPreparationService): void => {
+    const dependenciesDescriptor = Object.getOwnPropertyDescriptor(core, 'dependencies');
+    assert.ok(dependenciesDescriptor && Object.hasOwn(dependenciesDescriptor, 'value'));
+    const dependencies: unknown = dependenciesDescriptor.value;
+    assert.ok(dependencies !== null && typeof dependencies === 'object');
+    const dependency = (name: 'authority' | 'scheduler'): unknown => {
+      const descriptor = Object.getOwnPropertyDescriptor(dependencies, name);
+      assert.ok(descriptor && Object.hasOwn(descriptor, 'value'));
+      return descriptor.value;
+    };
+    const authority = dependency('authority');
+    const scheduler = dependency('scheduler');
+    // Production always composes OpenCode Go -> CN protocol routing -> the
+    // PostgreSQL authority. Require exactly those two transparent decorator
+    // shapes, then the real adapter; never search through an arbitrary chain.
+    function assertProtocolAuthority(
+      value: unknown,
+      label: string,
+    ): asserts value is RequestPreparationAuthorityPort & { readonly underlyingAuthority: unknown } {
+      assert.ok(value !== null && typeof value === 'object', `${label} must be present`);
+      assert.deepEqual(Reflect.ownKeys(value).sort(), ['resolve', 'underlyingAuthority']);
+      const resolve = Object.getOwnPropertyDescriptor(value, 'resolve');
+      assert.ok(resolve && Object.hasOwn(resolve, 'value') && typeof resolve.value === 'function');
+      const underlying = Object.getOwnPropertyDescriptor(value, 'underlyingAuthority');
+      assert.ok(underlying && Object.hasOwn(underlying, 'value'));
     }
-  };
-  const recordHealthBoundary = (result: ProviderAccountSchedulerHealthDecision | 'threw'): void => {
-    try {
-      const context = observations.getStore();
-      if (!context || context.boundaries.length >= 4) return;
-      let reason: SafePreparationBoundary['reason'] = 'unknown';
-      if (result !== 'threw' && result.decision === 'block') {
-        // Only fixed native reasons; never inspect an allowed value or timestamp.
-        if (result.reason === 'provider account runtime health is unknown') {
-          reason = 'health_unknown';
-        } else if (result.reason === 'provider account runtime health is stale or malformed') {
-          reason = 'health_stale_or_malformed';
-        } else if (result.reason === 'provider account runtime health input is invalid') {
-          reason = 'health_input_invalid';
-        } else if (result.reason === 'provider account runtime health authority is unavailable') {
-          const descriptor = Object.getOwnPropertyDescriptor(nativeHealth, 'writeFailed');
-          const writeFailed: unknown = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
-          if (typeof writeFailed === 'boolean') {
-            reason = writeFailed === true ? 'health_prior_write_failure' : 'health_authority_unavailable';
+    assertProtocolAuthority(authority, 'OpenCode Go protocol authority');
+    const cnAuthority = authority.underlyingAuthority;
+    assertProtocolAuthority(cnAuthority, 'CN protocol authority');
+    const concreteAuthority: unknown = cnAuthority.underlyingAuthority;
+    assert.ok(concreteAuthority instanceof PostgresRequestPreparationAuthorityAdapter);
+    assert.equal(Object.getOwnPropertyDescriptor(concreteAuthority, 'underlyingAuthority'), undefined);
+    assert.ok(scheduler instanceof PostgresProviderAccountScheduler);
+    const nativeSchedulerDescriptor = Object.getOwnPropertyDescriptor(scheduler, 'scheduler');
+    assert.ok(nativeSchedulerDescriptor && Object.hasOwn(nativeSchedulerDescriptor, 'value'));
+    const nativeScheduler: unknown = nativeSchedulerDescriptor.value;
+    assert.ok(nativeScheduler instanceof ProviderAccountScheduler);
+    const schedulerDependenciesDescriptor = Object.getOwnPropertyDescriptor(nativeScheduler, 'dependencies');
+    assert.ok(schedulerDependenciesDescriptor && Object.hasOwn(schedulerDependenciesDescriptor, 'value'));
+    const schedulerDependencies: unknown = schedulerDependenciesDescriptor.value;
+    assert.ok(schedulerDependencies !== null && typeof schedulerDependencies === 'object');
+    const healthDescriptor = Object.getOwnPropertyDescriptor(schedulerDependencies, 'health');
+    assert.ok(healthDescriptor && Object.hasOwn(healthDescriptor, 'value'));
+    const schedulerHealth: unknown = healthDescriptor.value;
+    assert.ok(schedulerHealth !== null && typeof schedulerHealth === 'object');
+    // The scheduler-facing health port performs the production half-open
+    // probe. Observe its returned decision, and prove its one store and lease
+    // authority are the exact objects used by real dispatch.
+    assert.equal(Object.getPrototypeOf(schedulerHealth)?.constructor.name, 'HalfOpenProbeHealthPort');
+    assert.deepEqual(Reflect.ownKeys(schedulerHealth).sort(), ['leaseProvider', 'maxHealthAgeMs', 'store']);
+    const healthGetDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(schedulerHealth), 'get');
+    assert.ok(healthGetDescriptor && typeof healthGetDescriptor.value === 'function');
+    const healthStoreDescriptor = Object.getOwnPropertyDescriptor(schedulerHealth, 'store');
+    assert.ok(healthStoreDescriptor && Object.hasOwn(healthStoreDescriptor, 'value'));
+    const nativeHealth: unknown = healthStoreDescriptor.value;
+    assert.ok(nativeHealth instanceof PostgresProviderAccountRuntimeHealthStore);
+    const dispatchHealthDescriptor = Object.getOwnPropertyDescriptor(gateway.dispatch, 'runtimeHealthWriter');
+    assert.ok(dispatchHealthDescriptor && Object.hasOwn(dispatchHealthDescriptor, 'value'));
+    assert.equal(nativeHealth, dispatchHealthDescriptor.value);
+    const healthLeaseDescriptor = Object.getOwnPropertyDescriptor(schedulerHealth, 'leaseProvider');
+    const dispatchLeaseDescriptor = Object.getOwnPropertyDescriptor(gateway.dispatch, 'leaseProvider');
+    assert.ok(healthLeaseDescriptor && Object.hasOwn(healthLeaseDescriptor, 'value'));
+    assert.ok(dispatchLeaseDescriptor && Object.hasOwn(dispatchLeaseDescriptor, 'value'));
+    assert.ok(healthLeaseDescriptor.value instanceof PostgresProviderAccountLeaseService);
+    assertDispatchLeaseAdapter(dispatchLeaseDescriptor.value);
+    observeNativeLeaseProvider(healthLeaseDescriptor.value);
+    const health = schedulerHealth as ProviderAccountSchedulerHealthPort;
+    const recordBoundary = (
+      port: SafePreparationBoundary['port'],
+      result: RequestPreparationDecision<unknown> | 'threw',
+    ): void => {
+      try {
+        const context = observations.getStore();
+        if (!context || context.boundaries.length >= 4) return;
+        let reason: SafePreparationBoundary['reason'] = 'unknown';
+        if (
+          port === 'scheduler' &&
+          result !== 'threw' &&
+          result.decision === 'block' &&
+          result.code === 'capability_unavailable'
+        ) {
+          // Compare only exact native block literals; never forward the message.
+          const message = result.message;
+          if (message === 'PostgreSQL provider eligibility authority is unavailable') {
+            reason = 'eligibility_unavailable';
+          } else if (message === 'provider eligibility authority returned an invalid candidate') {
+            reason = 'eligibility_invalid_candidate';
+          } else if (
+            message === 'provider account health authority is unavailable' ||
+            message ===
+              'runtime health authority is missing: the SaaS schema has no account health/cooldown observation contract; validation_state is not runtime health'
+          ) {
+            reason = 'health_unavailable';
+          } else if (
+            message === 'provider account lease concurrency snapshot is unavailable' ||
+            message === 'provider account lease concurrency authority is unavailable' ||
+            message ===
+              'provider account lease concurrency limit is missing; configure the same maxConcurrency as the lease service'
+          ) {
+            reason = 'concurrency_unavailable';
+          } else if (
+            message === 'provider account concurrency authority returned an invalid decision' ||
+            message === 'provider account concurrency authority is invalid' ||
+            message === 'provider account lease concurrency snapshot is malformed'
+          ) {
+            reason = 'concurrency_invalid';
           }
         }
+        context.boundaries.push({
+          port,
+          decision:
+            result === 'threw'
+              ? 'threw'
+              : result.decision === 'allow' || result.decision === 'reject' || result.decision === 'block'
+                ? result.decision
+                : 'unrecognized_decision',
+          code:
+            result === 'threw'
+              ? 'unrecognized_code'
+              : result.decision === 'allow'
+                ? null
+                : codes.has(result.code)
+                  ? result.code
+                  : 'unrecognized_code',
+          reason,
+        });
+      } catch {
+        /* Enum-only observation cannot change a native decision or exception. */
       }
-      context.boundaries.push({
-        port: 'health',
-        decision:
-          result === 'threw'
-            ? 'threw'
-            : result.decision === 'allow' || result.decision === 'deny' || result.decision === 'block'
-              ? result.decision
-              : 'unrecognized_decision',
-        code: result === 'threw' ? 'unrecognized_code' : null,
-        reason,
-      });
-    } catch {
-      /* Enum-only observation cannot change native health results or exceptions. */
-    }
+    };
+    const recordHealthBoundary = (result: ProviderAccountSchedulerHealthDecision | 'threw'): void => {
+      try {
+        const context = observations.getStore();
+        if (!context || context.boundaries.length >= 4) return;
+        let reason: SafePreparationBoundary['reason'] = 'unknown';
+        if (result !== 'threw' && result.decision === 'block') {
+          // Only fixed native reasons; never inspect an allowed value or timestamp.
+          if (result.reason === 'provider account runtime health is unknown') {
+            reason = 'health_unknown';
+          } else if (result.reason === 'provider account runtime health is stale or malformed') {
+            reason = 'health_stale_or_malformed';
+          } else if (result.reason === 'provider account runtime health input is invalid') {
+            reason = 'health_input_invalid';
+          } else if (result.reason === 'provider account runtime health authority is unavailable') {
+            const descriptor = Object.getOwnPropertyDescriptor(nativeHealth, 'writeFailed');
+            const writeFailed: unknown =
+              descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+            if (typeof writeFailed === 'boolean') {
+              reason = writeFailed === true ? 'health_prior_write_failure' : 'health_authority_unavailable';
+            }
+          }
+        }
+        context.boundaries.push({
+          port: 'health',
+          decision:
+            result === 'threw'
+              ? 'threw'
+              : result.decision === 'allow' || result.decision === 'deny' || result.decision === 'block'
+                ? result.decision
+                : 'unrecognized_decision',
+          code: result === 'threw' ? 'unrecognized_code' : null,
+          reason,
+        });
+      } catch {
+        /* Enum-only observation cannot change native health results or exceptions. */
+      }
+    };
+    const observeBoundary = async <T>(
+      port: SafePreparationBoundary['port'],
+      work: () => Promise<RequestPreparationDecision<T>>,
+    ): Promise<RequestPreparationDecision<T>> => {
+      try {
+        const result = await work();
+        recordBoundary(port, result);
+        return result;
+      } catch (error) {
+        recordBoundary(port, 'threw');
+        throw error;
+      }
+    };
+    const realResolve = authority.resolve.bind(authority);
+    const realSelect = scheduler.select.bind(scheduler);
+    authority.resolve = (...args) => observeBoundary('authority', () => realResolve(...args));
+    scheduler.select = (...args) => observeBoundary('scheduler', () => realSelect(...args));
+    const realHealthGet = health.get.bind(health);
+    health.get = async (...args) => {
+      try {
+        const result = await realHealthGet(...args);
+        recordHealthBoundary(result);
+        return result;
+      } catch (error) {
+        recordHealthBoundary('threw');
+        throw error;
+      }
+    };
   };
-  const observeBoundary = async <T>(
-    port: SafePreparationBoundary['port'],
-    work: () => Promise<RequestPreparationDecision<T>>,
-  ): Promise<RequestPreparationDecision<T>> => {
-    try {
-      const result = await work();
-      recordBoundary(port, result);
-      return result;
-    } catch (error) {
-      recordBoundary(port, 'threw');
-      throw error;
+  const nativePrepare = SaasRequestPreparationService.prototype.prepare;
+  const observeNativePrepare = function (this: SaasRequestPreparationService, input: RequestPreparationInput) {
+    if (observations.getStore()) {
+      try {
+        assert.ok(this instanceof SaasRequestPreparationService);
+        observeNativeCore(this);
+        observedCore = this;
+      } finally {
+        if (SaasRequestPreparationService.prototype.prepare === observeNativePrepare) {
+          SaasRequestPreparationService.prototype.prepare = nativePrepare;
+        }
+      }
     }
+    return nativePrepare.call(this, input);
   };
-  const realResolve = authority.resolve.bind(authority);
-  const realSelect = scheduler.select.bind(scheduler);
-  authority.resolve = (...args) => observeBoundary('authority', () => realResolve(...args));
-  scheduler.select = (...args) => observeBoundary('scheduler', () => realSelect(...args));
-  const realHealthGet = nativeHealth.get.bind(nativeHealth);
-  nativeHealth.get = async (...args) => {
-    try {
-      const result = await realHealthGet(...args);
-      recordHealthBoundary(result);
-      return result;
-    } catch (error) {
-      recordHealthBoundary('threw');
-      throw error;
+  SaasRequestPreparationService.prototype.prepare = observeNativePrepare;
+  registerCleanup(() => {
+    if (SaasRequestPreparationService.prototype.prepare === observeNativePrepare) {
+      SaasRequestPreparationService.prototype.prepare = nativePrepare;
     }
-  };
+  });
   const realPrepare = preparation.prepare.bind(preparation);
-  // The HTTP handler retains this exact core-owned instance. Delegate to its
-  // real coordinator and unchanged ports, then project only allowlisted enums.
+  // The HTTP handler retains this exact production telemetry wrapper. Delegate
+  // to its real coordinator and unchanged ports, then project only fixed enums.
   preparation.prepare = (input) =>
     observations.run({ sqlStates: new Set<string>(), boundaries: [] }, async () => {
       const result = await realPrepare(input);
+      assert.ok(observedCore, 'the telemetry wrapper must delegate to the real preparation service');
       if (result.outcome === 'blocked' || result.outcome === 'rejected') {
         lastFailure = {
           outcome: result.outcome,
@@ -484,6 +570,7 @@ function observeDispatchFailures(
   runtime: ManagedSaasRuntime,
   completions: DispatchCompletionTracker,
   report: (diagnostic: SafeDispatchDiagnostic) => void,
+  nativeLeaseProvider: () => PostgresProviderAccountLeaseService | undefined,
 ): () => SafeDispatchDiagnostic | null {
   assert.ok(runtime.gateway, 'dispatch diagnostics require the real core-owned gateway composition');
   const dispatchCodes = new Set<PreparedEvidenceDispatchErrorCode>([
@@ -491,6 +578,7 @@ function observeDispatchFailures(
     'ATTEMPT_NOT_FOUND',
     'ATTEMPT_NOT_READY',
     'EVIDENCE_BINDING_MISMATCH',
+    'LEASE_CAPACITY_EXHAUSTED',
     'LEASE_UNAVAILABLE',
     'LEASE_RELEASE_FAILED',
     'CLIENT_STREAM_FAILED',
@@ -668,12 +756,25 @@ function observeDispatchFailures(
   const evidence = dependency('evidence');
   const metering = dependency('metering');
   const leases = dependency('leaseProvider');
-  const transport = dependency('transport');
+  const transport: unknown = dependency('transport');
   const settlement = dependency('normalSuccessSettlement');
   assert.ok(evidence instanceof SaasPreparedRequestEvidenceService);
   assert.ok(metering instanceof SaasMeteringService);
-  assert.ok(leases instanceof PostgresProviderAccountLeaseService);
-  assert.ok(transport instanceof ProviderHttpTransport);
+  assertDispatchLeaseAdapter(leases);
+  assert.ok(transport !== null && typeof transport === 'object');
+  // The one compact-operation router is an explicit production composition
+  // layer. This fixture mounts no dedicated provider transport, so both
+  // operations must retain the same real native HTTP transport beneath it.
+  assert.deepEqual(Reflect.ownKeys(transport).sort(), ['generationTransport', 'nativeTransport', 'send']);
+  const nativeTransportDescriptor = Object.getOwnPropertyDescriptor(transport, 'nativeTransport');
+  const generationTransportDescriptor = Object.getOwnPropertyDescriptor(transport, 'generationTransport');
+  const sendDescriptor = Object.getOwnPropertyDescriptor(transport, 'send');
+  assert.ok(nativeTransportDescriptor && Object.hasOwn(nativeTransportDescriptor, 'value'));
+  assert.ok(generationTransportDescriptor && Object.hasOwn(generationTransportDescriptor, 'value'));
+  assert.ok(sendDescriptor && Object.hasOwn(sendDescriptor, 'value') && typeof sendDescriptor.value === 'function');
+  assert.ok(nativeTransportDescriptor.value instanceof ProviderHttpTransport);
+  assert.equal(nativeTransportDescriptor.value, generationTransportDescriptor.value);
+  const dispatchTransport = transport as PreparedEvidenceTransport;
   assert.ok(settlement instanceof DispatchUsageSettlementCoordinator);
   const preflight = evidence.preflightForDispatch.bind(evidence);
   const claim = evidence.claimForDispatch.bind(evidence);
@@ -681,7 +782,53 @@ function observeDispatchFailures(
   const transition = metering.transitionAttempt.bind(metering);
   const knownHttp = metering.recordKnownNonSuccessHttpResponse.bind(metering);
   const acquire = leases.acquire.bind(leases);
-  const send = transport.send.bind(transport);
+  type LeaseDelegation = {
+    readonly input: Parameters<PostgresProviderAccountLeaseService['acquire']>[0];
+    calls: number;
+    outcome: 'pending' | 'returned' | 'threw';
+    result?: Awaited<ReturnType<PostgresProviderAccountLeaseService['acquire']>>;
+    error?: unknown;
+  };
+  const leaseDelegations = new AsyncLocalStorage<LeaseDelegation>();
+  let observedNativeLeases: PostgresProviderAccountLeaseService | undefined;
+  const observeNativeLeases = (provider: PostgresProviderAccountLeaseService): void => {
+    assert.ok(provider instanceof PostgresProviderAccountLeaseService);
+    if (observedNativeLeases) {
+      assert.equal(provider, observedNativeLeases, 'dispatch must retain the same health-probe lease authority');
+      return;
+    }
+    observedNativeLeases = provider;
+    const nativeAcquire = provider.acquire.bind(provider);
+    provider.acquire = async function (input) {
+      assert.equal(this, provider);
+      const delegation = leaseDelegations.getStore();
+      if (delegation) {
+        delegation.calls++;
+        assert.equal(input, delegation.input, 'the dispatch adapter must delegate its unchanged evidence-bound input');
+      }
+      try {
+        const lease = await nativeAcquire(input);
+        if (delegation) {
+          delegation.outcome = 'returned';
+          delegation.result = lease;
+        }
+        if (lease) {
+          const renew = lease.renew.bind(lease);
+          const release = lease.release.bind(lease);
+          lease.renew = () => phase('lease_renew', renew);
+          lease.release = () => phase('lease_release', release);
+        }
+        return lease;
+      } catch (error) {
+        if (delegation) {
+          delegation.outcome = 'threw';
+          delegation.error = error;
+        }
+        throw error;
+      }
+    };
+  };
+  const send = dispatchTransport.send.bind(dispatchTransport);
   const complete = settlement.complete.bind(settlement);
   const retainUnknown = settlement.retainUnknown.bind(settlement);
   evidence.preflightForDispatch = (...args) => phase('evidence_preflight', () => preflight(...args));
@@ -691,16 +838,31 @@ function observeDispatchFailures(
   metering.recordKnownNonSuccessHttpResponse = (...args) => phase('known_http_transition', () => knownHttp(...args));
   leases.acquire = (...args) =>
     phase('lease_acquire', async () => {
-      const lease = await acquire(...args);
-      if (lease) {
-        const renew = lease.renew.bind(lease);
-        const release = lease.release.bind(lease);
-        lease.renew = () => phase('lease_renew', renew);
-        lease.release = () => phase('lease_release', release);
-      }
-      return lease; // Exact real lease object; fencing/cadence/identity are unchanged.
+      const provider = nativeLeaseProvider();
+      assert.ok(provider instanceof PostgresProviderAccountLeaseService);
+      observeNativeLeases(provider);
+      const delegation: LeaseDelegation = { input: args[0], calls: 0, outcome: 'pending' };
+      return leaseDelegations.run(delegation, async () => {
+        const lease = await acquire(...args).catch((error: unknown) => {
+          assert.equal(delegation.calls, 1, 'the production adapter must acquire once without a retry');
+          if (delegation.outcome === 'threw') {
+            assert.equal(error, delegation.error, 'the real acquisition error must be preserved');
+          } else {
+            assert.equal(delegation.outcome, 'returned');
+            assert.equal(delegation.result, null);
+            assert.ok(error instanceof SaasPreparedEvidenceDispatchError);
+            assert.equal(error.code, 'LEASE_CAPACITY_EXHAUSTED');
+          }
+          throw error;
+        });
+        assert.equal(delegation.calls, 1, 'the production adapter must acquire once without a retry');
+        assert.equal(delegation.outcome, 'returned');
+        assert.notEqual(delegation.result, null, 'a real full account must retain its typed rejection');
+        assert.equal(lease, delegation.result, 'the exact real lease object must reach dispatch');
+        return lease;
+      });
     });
-  transport.send = (...args) => phase('transport_send', () => send(...args));
+  dispatchTransport.send = (...args) => phase('transport_send', () => send(...args));
   settlement.complete = (...args) => phase('settlement_complete', () => complete(...args));
   settlement.retainUnknown = (...args) => phase('settlement_retain_unknown', () => retainUnknown(...args));
 
@@ -2444,6 +2606,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       },
       platformAuthRateLimiter: { take: async () => undefined },
       customerAuthRateLimiter: { take: async () => undefined },
+      customerAuthCodeSendRateLimiter: { take: async () => undefined },
       redisReady: async () => {},
       credentialKeyReady: async () => {},
       close: async () => {},
@@ -2723,17 +2886,35 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
     const gatewayUser = await gatewayRuntime.database.query<{ current_user: string }>('SELECT current_user');
     assert.equal(gatewayUser.rows[0]?.current_user, 'model_router_saas_gateway');
     assert.deepEqual(Object.keys(gatewayRuntime.listeners), ['gateway']);
-    const preparationDiagnostic = observePreparationFailures(gatewayRuntime, (diagnostic) => {
-      t.diagnostic(`gateway_preparation ${JSON.stringify(diagnostic)}`);
-    });
-    const dispatchDiagnostic = observeDispatchFailures(gatewayRuntime, dispatchCompletions, (diagnostic) => {
-      t.diagnostic(
-        `gateway_dispatch ${JSON.stringify({
-          ...diagnostic,
-          boundary: dispatchCompletions.closeStarted ? 'after_close_started' : 'before_close_started',
-        })}`,
-      );
-    });
+    let nativeLeaseProvider: PostgresProviderAccountLeaseService | undefined;
+    const preparationDiagnostic = observePreparationFailures(
+      gatewayRuntime,
+      (diagnostic) => {
+        t.diagnostic(`gateway_preparation ${JSON.stringify(diagnostic)}`);
+      },
+      (cleanup) => t.after(cleanup),
+      (provider) => {
+        assert.equal(
+          nativeLeaseProvider,
+          undefined,
+          'the one native preparation core must expose its lease authority once',
+        );
+        nativeLeaseProvider = provider;
+      },
+    );
+    const dispatchDiagnostic = observeDispatchFailures(
+      gatewayRuntime,
+      dispatchCompletions,
+      (diagnostic) => {
+        t.diagnostic(
+          `gateway_dispatch ${JSON.stringify({
+            ...diagnostic,
+            boundary: dispatchCompletions.closeStarted ? 'after_close_started' : 'before_close_started',
+          })}`,
+        );
+      },
+      () => nativeLeaseProvider,
+    );
     const reportHttpResponseDiagnostic = (
       supplyMode: 'byok' | 'platform',
       status: number,

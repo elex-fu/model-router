@@ -80,9 +80,10 @@ function bundle(bundleId: string, enabled = true): ProviderBundleConfiguration {
   return { bundle: bundleId, enabled };
 }
 
-test('registry exposes the ten implemented provider categories with stable ids', () => {
-  assert.equal(PROVIDER_BUNDLE_MANIFESTS.length, 10);
+test('registry exposes Kimi Code and the ten category providers with stable ids', () => {
+  assert.equal(PROVIDER_BUNDLE_MANIFESTS.length, 11);
   assert.deepEqual(PROVIDER_BUNDLE_IDS, [
+    'kimi',
     'anthropic-claude',
     'openai-codex',
     'google-gemini',

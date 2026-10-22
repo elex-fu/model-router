@@ -152,6 +152,29 @@ test('gateway runtime keeps v1 handles free of the extensions key', async () => 
   await runtime.close();
 });
 
+test('version 2 accepts typed transport and WebSocket dependencies while version 1 stays exact', async () => {
+  const codexEvidenceTransport = {
+    async send() {
+      return { responseStarted: false };
+    },
+  };
+  const responsesWsRoundExecutor = {
+    async executeRound() {
+      return { events: [] };
+    },
+  };
+  const runtime = await loadHandle(
+    v2Handle({ dependencies: dependencies({ codexEvidenceTransport, responsesWsRoundExecutor }) }),
+  );
+  assert.equal(runtime.dependencies.codexEvidenceTransport, codexEvidenceTransport);
+  assert.ok(runtime.deploymentFacts?.dispatch.routedEndpointScopes.includes('codex-responses'));
+  await runtime.close();
+  await assertContractInvalid({ dependencies: dependencies({ codexEvidenceTransport }), checkReady() {}, close() {} });
+  await assertContractInvalid(v2Handle({ dependencies: dependencies({ codexEvidenceTransport: { send: false } }) }));
+  await assertContractInvalid(v2Handle({ dependencies: dependencies({ responsesWsRoundExecutor: () => undefined }) }));
+  await assertContractInvalid(v2Handle({ dependencies: dependencies({ providerCredentialUnsealingKms: {} }) }));
+});
+
 test('gateway runtime reads the outer version marker before trusting a v2 handle', async (t) => {
   await t.test('rejects unsupported revisions', async () => {
     for (const apiVersion of [1, 3, '2', null]) {

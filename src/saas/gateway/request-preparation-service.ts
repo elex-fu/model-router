@@ -12,6 +12,7 @@ import type {
 } from './contracts.js';
 import { createModelResolutionProvenance } from './contracts.js';
 import type { NormalSuccessSettlementSnapshot } from './dispatch-usage-settlement.js';
+import { observePreparationPhase, type PostgresPreparationObserver } from './postgres-preparation-observer.js';
 import {
   canonicalPreparedRequestEvidencePayload,
   type PreparedRequestEvidenceAudit,
@@ -617,6 +618,8 @@ export interface RequestPreparationServiceOptions {
   /** Server configuration; never caller supplied. */
   readonly evidenceVerifierKeyId?: string;
   readonly canonicalizer?: RequestPreparationCanonicalizer;
+  /** Fixed preparation timings only; never request or authority identities. */
+  readonly observe?: PostgresPreparationObserver;
 }
 
 export interface RequestPreparationFailureResult {
@@ -719,7 +722,10 @@ function operationAllowedForProtocol(protocol: GatewayProtocol, operation: strin
     // payload compiler constructs the outbound body server-side) and the
     // TTS audio passthrough (the xAI Voice /tts surface).
     (protocol === 'responses' &&
-      (operation === 'web_search' || operation === 'x_search' || operation === 'audio.tts')) ||
+      (operation === 'responses.compact' ||
+        operation === 'web_search' ||
+        operation === 'x_search' ||
+        operation === 'audio.tts')) ||
     (protocol === 'openai' &&
       (operation === 'embeddings' ||
         operation === 'images.generations' ||
@@ -1983,6 +1989,7 @@ export class SaasRequestPreparationService {
   private readonly ids: RequestPreparationIdFactory;
   private readonly canonicalizer: RequestPreparationCanonicalizer;
   private readonly evidenceVerifierKeyId: string | null;
+  private readonly observer: PostgresPreparationObserver | undefined;
 
   constructor(
     private readonly dependencies: RequestPreparationDependencies,
@@ -1992,9 +1999,20 @@ export class SaasRequestPreparationService {
     this.ids = options.idFactory ?? defaultIds;
     this.canonicalizer = options.canonicalizer ?? defaultCanonicalizer;
     this.evidenceVerifierKeyId = nonEmpty(options.evidenceVerifierKeyId, 'evidenceVerifierKeyId');
+    this.observer = options.observe;
   }
 
   async prepare(input: RequestPreparationInput): Promise<RequestPreparationResult> {
+    return observePreparationPhase(
+      'preparation',
+      'preparation-total',
+      this.observer,
+      () => this.prepareUnobserved(input),
+      (result) => result.outcome === 'prepared',
+    );
+  }
+
+  private async prepareUnobserved(input: RequestPreparationInput): Promise<RequestPreparationResult> {
     const now = this.now();
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
       return failure('blocked', 'caller', 'capability_unavailable', 'request preparation clock is unavailable');
@@ -2061,24 +2079,38 @@ export class SaasRequestPreparationService {
     const scheduler = this.dependencies.scheduler;
     if (scheduler !== undefined) {
       const candidates = authority.candidates ?? [authority.candidate];
-      const schedulerDecision = await this.invokeDecision('authority', () =>
-        scheduler.select({
-          requestId: ids.requestId,
-          attemptId: ids.attemptId,
-          caller,
-          entitlement,
-          candidates,
-          publicModel: input.publicModel,
-          protocol: input.protocol,
-          route: authority.route,
-          scheduling: input.scheduling,
-          // G1 (task #41): trusted-boundary client evidence, forwarded
-          // verbatim; absent stays absent (fail-closed downstream).
-          ...(input.claudeCodeClient !== undefined ? { claudeCodeClient: input.claudeCodeClient } : {}),
-          // §4.4 composite: the resolved decision narrows revalidation to the
-          // target platform (trusted server data from the authority adapter).
-          ...(authority.composite !== undefined ? { composite: authority.composite } : {}),
-        }),
+      const selectAndBind = scheduler.selectAndBind;
+      const combinedSelection = selectAndBind !== undefined;
+      const schedulerDecision = await observePreparationPhase(
+        'preparation',
+        'scheduler-select',
+        this.observer,
+        () =>
+          this.invokeDecision('authority', () =>
+            (combinedSelection
+              ? typeof selectAndBind === 'function'
+                ? selectAndBind.bind(scheduler)
+                : async () =>
+                    blockRequestPreparation('capability_unavailable', 'combined account selection is unavailable')
+              : scheduler.select.bind(scheduler))({
+              requestId: ids.requestId,
+              attemptId: ids.attemptId,
+              caller,
+              entitlement,
+              candidates,
+              publicModel: input.publicModel,
+              protocol: input.protocol,
+              route: authority.route,
+              scheduling: input.scheduling,
+              // G1 (task #41): trusted-boundary client evidence, forwarded
+              // verbatim; absent stays absent (fail-closed downstream).
+              ...(input.claudeCodeClient !== undefined ? { claudeCodeClient: input.claudeCodeClient } : {}),
+              // §4.4 composite: the resolved decision narrows revalidation to the
+              // target platform (trusted server data from the authority adapter).
+              ...(authority.composite !== undefined ? { composite: authority.composite } : {}),
+            }),
+          ),
+        (decision) => decision.decision === 'allow',
       );
       if (schedulerDecision.decision !== 'allow') return decisionFailure('authority', schedulerDecision, ids);
       if (!candidateSelectionMatchesSource(candidates, schedulerDecision.value)) {
@@ -2099,8 +2131,10 @@ export class SaasRequestPreparationService {
           ids,
         );
       }
-      if (input.scheduling?.previousResponseId !== undefined || input.scheduling?.sessionId !== undefined) {
-        if (!scheduler.bindAffinity) {
+      const scheduling = input.scheduling;
+      if (!combinedSelection && (scheduling?.previousResponseId !== undefined || scheduling?.sessionId !== undefined)) {
+        const bindAffinity = scheduler.bindAffinity;
+        if (!bindAffinity) {
           return failure(
             'blocked',
             'authority',
@@ -2111,15 +2145,22 @@ export class SaasRequestPreparationService {
         }
         let affinityBinding: unknown;
         try {
-          affinityBinding = await scheduler.bindAffinity({
-            caller,
-            entitlement,
-            publicModel: input.publicModel,
-            protocol: input.protocol,
-            context: input.scheduling,
-            route: authority.route,
-            candidate: schedulerDecision.value,
-          });
+          affinityBinding = await observePreparationPhase(
+            'preparation',
+            'affinity-bind',
+            this.observer,
+            () =>
+              bindAffinity.call(scheduler, {
+                caller,
+                entitlement,
+                publicModel: input.publicModel,
+                protocol: input.protocol,
+                context: scheduling,
+                route: authority.route,
+                candidate: schedulerDecision.value,
+              }),
+            (decision) => isRecord(decision) && decision.decision === 'allow',
+          );
         } catch {
           return failure(
             'blocked',
@@ -2485,15 +2526,22 @@ export class SaasRequestPreparationService {
         signatureBase64: signature.signatureBase64,
       };
 
-      const registeredDecision = await this.invokeDecision(
-        'evidence',
-        async () => {
-          const registered = await registrar.register(signedEvidence, { executor });
-          return isDecision<PreparedRequestEvidenceRecord>(registered)
-            ? registered
-            : allowRequestPreparation(registered);
-        },
-        'evidence_registration_failed',
+      const registeredDecision = await observePreparationPhase(
+        'preparation',
+        'evidence-register',
+        this.observer,
+        () =>
+          this.invokeDecision(
+            'evidence',
+            async () => {
+              const registered = await registrar.register(signedEvidence, { executor });
+              return isDecision<PreparedRequestEvidenceRecord>(registered)
+                ? registered
+                : allowRequestPreparation(registered);
+            },
+            'evidence_registration_failed',
+          ),
+        (decision) => decision.decision === 'allow',
       );
       if (registeredDecision.decision !== 'allow') {
         return compensateAndFail(
@@ -2547,6 +2595,7 @@ export class SaasRequestPreparationService {
         normalSuccessSnapshot: {
           supplyMode: authority.candidate.supplyMode,
           providerProtocol: preparationRoute.providerProtocol,
+          customerProtocol: authority.route.protocol,
           customerPriceVersion: authority.commercial.customerPriceVersion,
           reservationId: admission.holdReservation?.reservationId ?? null,
           priceSnapshotRef: admission.holdReservation?.priceSnapshotRef ?? null,

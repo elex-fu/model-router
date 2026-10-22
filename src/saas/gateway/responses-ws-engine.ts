@@ -35,7 +35,7 @@ export type ResponsesWsEventType =
   | 'error';
 
 export interface ResponsesWsEvent {
-  readonly type: ResponsesWsEventType;
+  readonly type: ResponsesWsEventType | (string & {});
   readonly event_id?: string;
   readonly response_id?: string;
   readonly delta?: string;
@@ -60,6 +60,8 @@ export interface ResponsesWsRoundExecutor {
     readonly body: Record<string, unknown>;
     readonly pinned: ResponsesWsPinnedIdentity | null;
     readonly cancelSignal: AbortSignal;
+    /** Nonterminal provider events; awaiting this sink backpressures dispatch. */
+    readonly emit?: (event: ResponsesWsEvent) => Promise<void>;
   }): Promise<{ readonly terminal: ResponsesWsEvent; readonly pinned: ResponsesWsPinnedIdentity }>;
 }
 
@@ -70,6 +72,7 @@ export interface ResponsesWsPinnedIdentity {
   readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModel: string;
+  readonly publicModel?: string;
   /** The opaque upstream session/response id chain, when the upstream has one. */
   readonly upstreamSessionId: string | null;
 }
@@ -77,7 +80,7 @@ export interface ResponsesWsPinnedIdentity {
 export interface ResponsesWsEngineOptions {
   readonly executor: ResponsesWsRoundExecutor;
   /** Outbound frame sink (the ws send). */
-  readonly send: (event: ResponsesWsEvent) => void;
+  readonly send: (event: ResponsesWsEvent) => void | Promise<void>;
   /** Connection close (code + short UTF-8-safe reason). */
   readonly close: (code: number, reason: string) => void;
   /** The round budget: how long one round may run before the engine cancels. */
@@ -98,6 +101,17 @@ const DEFAULT_ROUND_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_QUEUED_CREATES = 16;
 const CLOSE_REASON_MAX_BYTES = 123;
 
+export class ResponsesWsRoundError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ResponsesWsRoundError';
+  }
+}
+
 function truncateCloseReason(reason: string): string {
   const encoded = Buffer.from(reason, 'utf8');
   if (encoded.length <= CLOSE_REASON_MAX_BYTES) return reason;
@@ -116,7 +130,7 @@ export interface ResponsesWsInboundEvent {
  */
 export class ResponsesWsEngine {
   private readonly executor: ResponsesWsRoundExecutor;
-  private readonly baseSend: (event: ResponsesWsEvent) => void;
+  private readonly baseSend: (event: ResponsesWsEvent) => void | Promise<void>;
   private readonly baseClose: (code: number, reason: string) => void;
   private readonly roundTimeoutMs: number;
   private readonly maxQueuedCreates: number;
@@ -124,7 +138,7 @@ export class ResponsesWsEngine {
   private readonly idFactory: () => string;
 
   /** G-B4 connection binding: the connection layer swaps the frame sink in after the socket attaches. */
-  private sendDelegate: ((event: ResponsesWsEvent) => void) | null = null;
+  private sendDelegate: ((event: ResponsesWsEvent) => void | Promise<void>) | null = null;
   private closeDelegate: ((code: number, reason: string) => void) | null = null;
   private pinned: ResponsesWsPinnedIdentity | null = null;
   private activeRound: {
@@ -136,6 +150,7 @@ export class ResponsesWsEngine {
   /** event_id → fingerprint of the ALREADY-EXECUTED logical request. */
   private readonly executedEventIds = new Map<string, string>();
   private closed = false;
+  private activeWork: Promise<void> | null = null;
 
   constructor(options: ResponsesWsEngineOptions) {
     if (!options?.executor) throw new Error('the responses WS engine requires a round executor');
@@ -155,7 +170,7 @@ export class ResponsesWsEngine {
     return this.closed;
   }
 
-  private get send(): (event: ResponsesWsEvent) => void {
+  private get send(): (event: ResponsesWsEvent) => void | Promise<void> {
     return (event) => (this.sendDelegate ?? this.baseSend)(event);
   }
 
@@ -172,7 +187,14 @@ export class ResponsesWsEngine {
     if (this.closed || event === null || typeof event !== 'object') return;
     const type = event.type;
     if (type === 'response.create') {
-      await this.handleCreate(event);
+      const wasIdle = this.activeRound === null;
+      const work = this.handleCreate(event);
+      if (wasIdle) this.activeWork = work;
+      try {
+        await work;
+      } finally {
+        if (this.activeWork === work) this.activeWork = null;
+      }
       return;
     }
     if (type === 'response.interrupt') {
@@ -193,12 +215,23 @@ export class ResponsesWsEngine {
   }
 
   private async handleCreate(event: ResponsesWsInboundEvent): Promise<void> {
-    const body = (event.response ?? {}) as Record<string, unknown>;
+    // Responses WS uses top-level create fields. Retain the nested shape
+    // accepted by earlier deployments while rejecting scalar envelopes.
+    const { type: _type, event_id: _eventId, ...topLevel } = event;
+    const candidate = Object.hasOwn(event, 'response') ? event.response : topLevel;
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      await this.send({
+        type: 'error',
+        error: { code: 'INVALID_BODY', message: 'response.create must contain an object' },
+      });
+      return;
+    }
+    const body = candidate as Record<string, unknown>;
     const eventId = typeof event.event_id === 'string' && event.event_id !== '' ? event.event_id : null;
 
     // One active round per connection — a concurrent create answers in-band.
     if (this.activeRound !== null) {
-      this.send({
+      await this.send({
         type: 'error',
         error: {
           code: 'response_create_conflict',
@@ -214,7 +247,7 @@ export class ResponsesWsEngine {
     if (eventId !== null && this.executedEventIds.has(eventId)) {
       const recorded = this.executedEventIds.get(eventId);
       if (recorded === fingerprint) {
-        this.send({
+        await this.send({
           type: 'error',
           error: {
             code: 'response_already_completed',
@@ -228,7 +261,7 @@ export class ResponsesWsEngine {
     }
     if (this.executedEventIds.size >= this.maxQueuedCreates) {
       // The bounded event-id memory: refuse the new create in-band.
-      this.send({
+      await this.send({
         type: 'error',
         error: { code: 'too_many_events', message: 'the connection event budget is exhausted — reconnect' },
       });
@@ -251,24 +284,37 @@ export class ResponsesWsEngine {
         body,
         pinned: this.pinned,
         cancelSignal: abort.signal,
+        emit: async (outbound) => {
+          if (!this.closed) await this.send(outbound);
+        },
       });
       this.pinned = pinned;
       if (eventId !== null) this.executedEventIds.set(eventId, fingerprint);
       // The terminal event reaches the client; settlement already happened
       // inside the executor (cancellation included — the terminal carries
       // the accumulated usage).
-      this.send(terminal);
+      if (!this.closed) await this.send(terminal);
     } catch (error) {
-      // The executor failed the round (its own failed path refunds inside);
+      // The executor durably classified the failed or uncertain round;
       // the engine surfaces the failed terminal and closes ONLY on
       // credential/quota/transport classes (CLIProxyAPI silent-close rule).
       const message = error instanceof Error ? error.message : String(error);
-      const credentialClass = /credential|unauthorized|quota/i.test(message);
-      this.send({
-        type: 'response.failed',
-        response_id: requestId,
-        error: { code: 'round_failed', message: 'the response round failed' },
-      });
+      const credentialClass =
+        error instanceof ResponsesWsRoundError
+          ? [401, 402, 403, 429].includes(error.status) || error.code === 'SESSION_BINDING_CHANGED'
+          : /credential|unauthorized|quota/i.test(message);
+      if (!this.closed)
+        await this.send({
+          type: 'response.failed',
+          error: {
+            code: error instanceof ResponsesWsRoundError ? error.code : 'round_failed',
+            message: error instanceof ResponsesWsRoundError ? error.message : 'the response round failed',
+          },
+        });
+      if (error instanceof ResponsesWsRoundError && error.status === 413) {
+        this.closeConnection(RESPONSES_WS_CLOSE_MESSAGE_TOO_BIG, 'request too large');
+        return;
+      }
       if (credentialClass) {
         this.closeConnection(RESPONSES_WS_CLOSE_POLICY_VIOLATION, '');
         return;
@@ -283,7 +329,10 @@ export class ResponsesWsEngine {
    * The connection layer binds the real frame sink AFTER the socket
    * attaches (the engine is constructed before the ws object exists).
    */
-  bindTransport(send: (event: ResponsesWsEvent) => void, close: (code: number, reason: string) => void): void {
+  bindTransport(
+    send: (event: ResponsesWsEvent) => void | Promise<void>,
+    close: (code: number, reason: string) => void,
+  ): void {
     this.sendDelegate = send;
     this.closeDelegate = close;
   }
@@ -295,9 +344,15 @@ export class ResponsesWsEngine {
     this.activeRound?.abort.abort(new Error('client_disconnected'));
   }
 
+  /** Shutdown waits for the cancelled round's durable classification. */
+  whenIdle(): Promise<void> {
+    return this.activeWork?.catch(() => undefined) ?? Promise.resolve();
+  }
+
   private closeConnection(code: number, reason: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.activeRound?.abort.abort(new Error('connection_closed'));
     this.close(code, truncateCloseReason(reason));
   }
 }

@@ -23,7 +23,10 @@ import type { TransportServiceTierEvidence } from './usage-evidence.js';
 /** Server-selected commercial and reservation facts carried from preparation to dispatch. */
 export interface NormalSuccessSettlementSnapshot {
   readonly supplyMode: SupplyMode;
+  /** The native protocol used for the provider request and usage observation. */
   readonly providerProtocol: GatewayProtocol;
+  /** The customer quote's route protocol. Absent only on legacy snapshots. */
+  readonly customerProtocol?: GatewayProtocol;
   readonly customerPriceVersion: string | null;
   readonly reservationId: string | null;
   readonly priceSnapshotRef: string | null;
@@ -207,14 +210,17 @@ function assertPriceIdentity(
    * the check is unchanged for composite; the supplier side is verified
    * separately against the resolved supply identity.
    */
+  const hasCustomerProtocol = Object.hasOwn(snapshot, 'customerProtocol');
+  const customerProtocol = hasCustomerProtocol ? snapshot.customerProtocol : snapshot.providerProtocol;
   if (
+    (!hasCustomerProtocol && 'customerProtocol' in snapshot) ||
     price.id !== snapshot.customerPriceVersion ||
     price.kind !== 'customer' ||
     price.publicModelId !== snapshot.publicModelId ||
     String(price.publicModelVersion) !== snapshot.publicModelVersion ||
     price.providerId !== snapshot.providerId ||
     price.productId !== snapshot.productId ||
-    price.protocol !== snapshot.providerProtocol ||
+    price.protocol !== customerProtocol ||
     price.endpoint !== snapshot.endpoint ||
     price.currency !== snapshot.currency
   ) {

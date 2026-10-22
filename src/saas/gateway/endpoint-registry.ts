@@ -15,10 +15,10 @@
  * provenance-shape CHECK on `saas_attempts` / `saas_prepared_request_evidence`
  * (the pairs (anthropic,'messages'), (openai,'chat.completions'|'embeddings'),
  * (gemini,'generateContent'), (responses,'responses')). For the Gemini native
- * entries the true identity is already CHECK-legal. For count_tokens and
- * responses.compact a follow-up migration (131+) must widen the CHECK before
- * their true identities can be signed into evidence; until then they ride
- * their family-canonical provenance, and this registry is the authoritative
+ * entries the true identity is already CHECK-legal. For count_tokens a
+ * follow-up migration must widen the CHECK before its true
+ * identity can be signed into evidence. Compact uses its native operation
+ * under migration134. This registry is the authoritative
  * record of what the endpoint actually is.
  */
 
@@ -79,7 +79,7 @@ export const SAAS_ENDPOINT_REGISTRY: readonly SaasEndpointRegistration[] = [
     path: '/v1/responses/compact',
     protocol: 'responses',
     operation: 'responses.compact',
-    provenanceOperation: 'responses',
+    provenanceOperation: 'responses.compact',
     inputShape: 'json',
     transformVersion: 'responses-compact-boundary/v1',
     supportedFeatures: [RESPONSES_COMPACT_FEATURE_NATIVE],

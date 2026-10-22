@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { type Bridge, type Protocol, pickBridge } from '../../protocol/bridge.js';
+import { BridgeToolChoiceSelectionError } from '../../protocol/openai-to-anth.js';
 import { ttsBillingRunes } from './audio/tts.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from './contracts.js';
 import type { PreparedRequestUsageEnvelope } from './prepared-request-evidence-service.js';
@@ -38,6 +39,7 @@ export type ProviderPayloadOperation =
   | 'chat.completions'
   | 'messages'
   | 'responses'
+  | 'responses.compact'
   | 'generateContent'
   | 'embeddings'
   | 'images.generations'
@@ -81,6 +83,7 @@ const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
  */
 const RESPONSES_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
   'responses',
+  'responses.compact',
   'web_search',
   'x_search',
   'audio.tts',
@@ -145,6 +148,8 @@ export interface ProviderNormalizedRequest {
 
 export interface ProviderUsageUpperBoundEstimatorInput {
   readonly normalizedRequest: ProviderNormalizedRequest;
+  /** Exact canonical provider bytes after bridges/category transforms; read-only estimator input. */
+  readonly compiledPayloadBytes?: Uint8Array;
   /** Compatibility alias for estimator implementations that use `request`. */
   readonly request: ProviderNormalizedRequest;
   readonly providerId: string;
@@ -416,6 +421,7 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'chat.completions' || value === 'chat/completions') return 'chat.completions';
   if (value === 'messages') return 'messages';
   if (value === 'responses') return 'responses';
+  if (value === 'responses.compact') return 'responses.compact';
   if (value === 'generateContent') return 'generateContent';
   if (value === 'embeddings') return 'embeddings';
   if (value === 'images.generations') return 'images.generations';
@@ -564,6 +570,17 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   const normalizedClientOperation = normalizeOperation(
     clientOperation ?? canonicalOperationForProtocol(resolvedClientProtocol),
   );
+  // Compaction items are provider-owned encrypted state. They only cross
+  // a native Responses compact route, with no protocol conversion.
+  if (
+    (normalizedClientOperation === 'responses.compact' || normalizedProviderOperation === 'responses.compact') &&
+    (resolvedClientProtocol !== 'responses' ||
+      resolvedProviderProtocol !== 'responses' ||
+      normalizedClientOperation !== 'responses.compact' ||
+      normalizedProviderOperation !== 'responses.compact')
+  ) {
+    compilerFailure('CAPABILITY_UNSUPPORTED');
+  }
   // R2 capability matrix: embeddings is open only to OpenAI-protocol-family
   // providers. A provider that can never serve the operation is reported as
   // an unsupported capability, not as a transient outage. Checked before the
@@ -987,6 +1004,7 @@ function validateUsage(value: unknown): PreparedRequestUsageEnvelope {
 async function estimateUsage(
   estimator: ProviderUsageUpperBoundEstimator | null,
   normalizedRequest: ProviderNormalizedRequest,
+  compiledPayloadBytes: Uint8Array,
 ): Promise<{ readonly usage: PreparedRequestUsageEnvelope; readonly version: string }> {
   if (
     estimator === null ||
@@ -1002,6 +1020,7 @@ async function estimateUsage(
   try {
     result = await estimator.estimate({
       normalizedRequest,
+      compiledPayloadBytes: Uint8Array.from(compiledPayloadBytes),
       request: normalizedRequest,
       providerId: normalizedRequest.providerId,
       productId: normalizedRequest.productId,
@@ -1077,6 +1096,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       if (!isRecord(candidate)) compilerFailure('INVALID_INPUT');
       const route = normalizeRoute(input, this.options);
       embeddingsOperation =
+        route.providerOperation === 'responses.compact' ||
         route.providerOperation === 'embeddings' ||
         route.providerOperation === 'images.generations' ||
         route.providerOperation === 'videos.generations' ||
@@ -1151,13 +1171,17 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
        */
       const searchOperation = route.clientOperation === 'web_search' || route.clientOperation === 'x_search';
       const audioTtsOperation = route.clientOperation === 'audio.tts';
+      const compactOperation = route.clientOperation === 'responses.compact';
 
       let bridge: Bridge | null;
       try {
         bridge =
-          searchOperation || audioTtsOperation
+          searchOperation || audioTtsOperation || compactOperation
             ? null
-            : pickBridge(route.clientProtocol as Protocol, route.providerProtocol as Protocol);
+            : pickBridge(route.clientProtocol as Protocol, route.providerProtocol as Protocol, {
+                provider: providerId,
+                model: resolvedModel,
+              });
       } catch {
         compilerFailure('UNSUPPORTED_OPERATION');
       }
@@ -1182,7 +1206,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
             searchRequest,
             resolvedModel,
           );
-        } else if (audioTtsOperation) {
+        } else if (audioTtsOperation || compactOperation) {
           // §4.3 (task #17): the TTS passthrough — the validated client body
           // (with the catalog-resolved model) rides upstream verbatim.
           transformed = normalizedRequest.body;
@@ -1192,7 +1216,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         // P1c provider-layer hook (codex compile step): applied to the
         // bridge-transformed body; an unset hook keeps the exact previous
         // payload bytes.
-        if (this.options.providerRequestTransform !== null) {
+        if (!compactOperation && this.options.providerRequestTransform !== null) {
           if (!isRecord(transformed)) compilerFailure('TRANSFORM_FAILED');
           transformed = this.options.providerRequestTransform({
             providerId,
@@ -1205,6 +1229,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         }
       } catch (error) {
         if (error instanceof ProviderPayloadCompilerError) throw error;
+        if (error instanceof BridgeToolChoiceSelectionError) compilerFailure('INVALID_INPUT');
         compilerFailure('TRANSFORM_FAILED');
       }
       const providerBody = validateTransformedPayload(transformed, resolvedModel);
@@ -1213,7 +1238,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         compilerFailure('PAYLOAD_TOO_LARGE');
       }
 
-      const estimated = await estimateUsage(this.options.estimator, normalizedRequest);
+      const estimated = await estimateUsage(this.options.estimator, normalizedRequest, payloadBytes);
       const requestFingerprint = createHash('sha256').update(payloadBytes).digest('hex');
       if (!SHA256.test(requestFingerprint)) compilerFailure('SERIALIZATION_FAILED');
       return allowRequestPreparation({

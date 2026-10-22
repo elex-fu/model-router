@@ -93,6 +93,8 @@ const DISPATCH_BINDING_KEYS = [
   'providerId',
   'productId',
   'protocol',
+  'providerProtocol',
+  'providerOperation',
   'endpoint',
   'routeConfigId',
   'routeConfigVersion',
@@ -244,7 +246,8 @@ function ownerMatches(
   );
 }
 
-function assertAuthorizedProof(
+/** Shared by core-owned category transports before unsealing structured credential material. */
+export function assertAuthorizedProviderCredentialDispatchProof(
   proof: ProviderCredentialDispatchProof,
   input: ProviderHttpCredentialResolveInput,
   expectedEvidenceId: string,
@@ -266,6 +269,11 @@ function assertAuthorizedProof(
 
   const { evidence, attempt, account, credential, version, profile, profileAccount, pool, poolMember, poolGrant } =
     proof;
+  // These optional legacy fields are copied once by the transport from its
+  // claimed record. Present identity can never override the canonical proof.
+  for (const field of ['providerId', 'productId', 'endpoint', 'providerProtocol', 'providerOperation'] as const) {
+    if (input[field] !== undefined && input[field] !== evidence[field]) fail('CREDENTIAL_UNAVAILABLE');
+  }
   if (
     evidence.evidenceId !== expectedEvidenceId ||
     evidence.tenantId !== input.tenantId ||
@@ -452,7 +460,7 @@ export class ProviderSupplyHttpCredentialResolver {
       if (!proof) fail('CREDENTIAL_UNAVAILABLE');
       const now = this.now();
       if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail('CREDENTIAL_UNAVAILABLE');
-      assertAuthorizedProof(proof, input, evidenceId, credentialVersion, now);
+      assertAuthorizedProviderCredentialDispatchProof(proof, input, evidenceId, credentialVersion, now);
 
       let injectionCount = 0;
       let response: PreparedEvidenceTransportResponse | undefined;

@@ -67,6 +67,7 @@ import {
 } from '../saas/gateway/opencode-go/protocol-rules.js';
 import { openCodeGoFixedRequestHeaders } from '../saas/gateway/opencode-go/transport-headers.js';
 import { createOpenRouterFixedRequestHeaders } from '../saas/gateway/openrouter/transport-headers.js';
+import type { PostgresPreparationObserver } from '../saas/gateway/postgres-preparation-observer.js';
 import { PostgresProviderAccountModelCooldownRegistry } from '../saas/gateway/postgres-provider-account-model-cooldowns.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
@@ -86,9 +87,15 @@ import { PostgresRequestPreparationEntitlementAdapter } from '../saas/gateway/po
 import { PostgresProviderTlsFingerprintResolver } from '../saas/gateway/postgres-tls-fingerprint-profile-resolver.js';
 import { GatewayPreDispatchCompensationService } from '../saas/gateway/pre-dispatch-compensation-service.js';
 import {
+  type PreparationFailureObserver,
+  withPreparationFailureObserver,
+} from '../saas/gateway/preparation-failure-observer.js';
+import type { PreparedEvidenceDispatchObserver } from '../saas/gateway/prepared-evidence-dispatch-observer.js';
+import {
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
   type PreparedEvidenceTransport,
+  SaasPreparedEvidenceDispatchError,
   SaasPreparedEvidenceDispatchService,
 } from '../saas/gateway/prepared-evidence-dispatch-service.js';
 import {
@@ -156,8 +163,10 @@ import {
   rejectRequestPreparation,
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
+import { createNativeResponsesCompactRoutingTransport } from '../saas/gateway/responses-compact-transport.js';
 import { createResponsesWsServer } from '../saas/gateway/responses-ws-connection.js';
 import { ResponsesWsEngine } from '../saas/gateway/responses-ws-engine.js';
+import { createResponsesWsRoundExecutor, responsesWsProxyKey } from '../saas/gateway/responses-ws-executor.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
 import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
@@ -189,6 +198,9 @@ import {
 import { SaasPricingService } from '../saas/pricing/service.js';
 import { type ModerationEmailSender, SaasContentModerationService } from '../saas/risk/moderation.js';
 import { PostgresContentModerationStore } from '../saas/risk/postgres-store.js';
+import type { GatewayProviderEvidenceTransportFactory } from '../saas/runtime/builtin-provider-transports.js';
+import { createGatewayCapabilityAdvertisementPolicy } from '../saas/runtime/gateway-capability-advertisement.js';
+import type { GatewayCapabilityReadiness } from '../saas/runtime/gateway-capability-readiness.js';
 import type { ProviderCredentialUnsealingKms } from '../saas/runtime/gateway-provider-credential-kms.js';
 import {
   GatewayProviderCredentialUnsealer,
@@ -243,6 +255,7 @@ export type ManagedSaasGatewayPreparationDependencies = Omit<
 };
 
 export interface ManagedSaasGatewayDispatchDependencies {
+  readonly observer?: PreparedEvidenceDispatchObserver;
   readonly evidence: PreparedRequestEvidenceDispatchPort;
   readonly metering: PreparedEvidenceMeteringPort;
   readonly leaseProvider: PreparedEvidenceLeaseProvider;
@@ -306,25 +319,28 @@ export interface SaasGatewayImageMediaOptions {
 
 export interface ManagedSaasGatewayCompositionDependencies {
   /**
-   * G-B4: the Responses WebSocket round executor — every response.create
-   * replays the FULL preparation/admission/dispatch/settlement chain (the
-   * engine owns pin/idempotency/cancel semantics). When present, the
-   * composition mounts the WS surface on GET /v1/responses (upgrade auth
-   * rides the composition's key authenticator); absent keeps the 501.
+   * Override the built-in per-connection Responses round executor. The
+   * default refreshes authentication and runs preparation, admission,
+   * dispatch and settlement for every response.create.
    */
   readonly responsesWsRoundExecutor?: import('../saas/gateway/responses-ws-engine.js').ResponsesWsRoundExecutor;
   readonly responsesWsLimits?: import('../saas/gateway/responses-ws-connection.js').ResponsesWsConnectionLimits;
+  readonly responsesCompactNativeSupply?: (model: string) => boolean;
   /**
    * G-C1: the readiness authority for GET /readyz. The production
    * composition builds a PG-backed provider when unset; absent entirely
    * answers the process-only payload.
    */
   readonly readiness?: SaasGatewayReadinessProvider;
+  /** Fresh commercial advertisement authority; absent closes customer model lists with 503. */
+  readonly capabilityReadiness?: () => Promise<GatewayCapabilityReadiness>;
   readonly authenticator: ProxyKeyAuthenticator;
   readonly preparation: ManagedSaasGatewayPreparationDependencies;
+  readonly preparationFailureObserver?: PreparationFailureObserver;
   readonly preparationOptions: {
     readonly evidenceVerifierKeyId: string;
     readonly idFactory: RequestPreparationIdFactory;
+    readonly observe?: PostgresPreparationObserver;
   };
   readonly dispatch: ManagedSaasGatewayDispatchDependencies;
   readonly lifecycle: ManagedSaasGatewayLifecycle;
@@ -374,7 +390,13 @@ export interface ManagedSaasGatewayCompositionDependencies {
 
 export interface ManagedSaasGatewayComposition {
   readonly handler: SaasGatewayHttpHandler;
-  readonly preparation: SaasRequestPreparationService;
+  /** Node's upgrade listener must forward the original head bytes here. */
+  readonly handleUpgrade: (
+    req: import('node:http').IncomingMessage,
+    socket: import('node:stream').Duplex,
+    head: Buffer,
+  ) => boolean;
+  readonly preparation: RequestPreparationPort;
   readonly dispatch: SaasPreparedEvidenceDispatchService;
   close(): Promise<void>;
 }
@@ -553,9 +575,17 @@ function authorityMatchesRequest(
   );
 }
 
-function createModelDiscoveryPort(preparation: ManagedSaasGatewayPreparationDependencies): ModelDiscoveryPort {
+function createModelDiscoveryPort(
+  preparation: ManagedSaasGatewayPreparationDependencies,
+  capabilityReadiness: ManagedSaasGatewayCompositionDependencies['capabilityReadiness'],
+): ModelDiscoveryPort {
   return {
-    async list(authenticatedCaller) {
+    async list(authenticatedCaller, purpose) {
+      let canAdvertise: ReturnType<typeof createGatewayCapabilityAdvertisementPolicy> | undefined;
+      if (purpose === 'advertisement') {
+        if (!capabilityReadiness) throw new ManagedSaasGatewayCompositionError('UNAVAILABLE');
+        canAdvertise = createGatewayCapabilityAdvertisementPolicy(await capabilityReadiness());
+      }
       const models: string[] = [];
       for (const publicModel of authenticatedKeyModelScopes(authenticatedCaller)) {
         const caller = decisionValue<RequestPreparationCaller>(
@@ -581,6 +611,15 @@ function createModelDiscoveryPort(preparation: ManagedSaasGatewayPreparationDepe
         if (!authorityMatchesRequest(caller, entitlement, authority, publicModel)) {
           throw new ManagedSaasGatewayCompositionError('UNAVAILABLE');
         }
+        if (
+          canAdvertise &&
+          !canAdvertise({
+            providerId: authority.candidate.providerId,
+            productId: authority.candidate.productId,
+            endpoint: authority.route.endpoint,
+          })
+        )
+          continue;
         models.push(publicModel);
       }
       return models;
@@ -652,6 +691,10 @@ function validateCompositionDependencies(dependencies: ManagedSaasGatewayComposi
   }
   requirePositiveInteger(dependencies.maxBodyBytes);
   requireText(dependencies.entryPoint);
+  if (dependencies.responsesWsRoundExecutor !== undefined)
+    requireDependency(dependencies.responsesWsRoundExecutor, 'executeRound');
+  if (dependencies.responsesCompactNativeSupply !== undefined)
+    requireCallable(dependencies.responsesCompactNativeSupply);
   requireDependency(dependencies.lifecycle, 'close');
   if (dependencies.videoMedia !== undefined) {
     requireDependency(dependencies.videoMedia.queryEndpoints, 'serve');
@@ -693,10 +736,14 @@ export function createManagedSaasGatewayComposition(
     attemptId: () => configuredIdFactory.attemptId(),
     evidenceId: () => configuredIdFactory.evidenceId(),
   };
-  const preparation = new SaasRequestPreparationService(dependencies.preparation, {
-    evidenceVerifierKeyId: dependencies.preparationOptions.evidenceVerifierKeyId,
-    idFactory: requestScopedIdFactory,
-  });
+  const preparation = withPreparationFailureObserver(
+    new SaasRequestPreparationService(dependencies.preparation, {
+      evidenceVerifierKeyId: dependencies.preparationOptions.evidenceVerifierKeyId,
+      idFactory: requestScopedIdFactory,
+      ...(dependencies.preparationOptions.observe ? { observe: dependencies.preparationOptions.observe } : {}),
+    }),
+    dependencies.preparationFailureObserver,
+  );
   const dispatch = new SaasPreparedEvidenceDispatchService(
     dependencies.dispatch.evidence,
     dependencies.dispatch.metering,
@@ -706,54 +753,67 @@ export function createManagedSaasGatewayComposition(
     dependencies.dispatch.runtimeHealthWriter,
     dependencies.dispatch.dispatchFailureFeedback,
     dependencies.dispatch.modelRateLimit,
+    dependencies.dispatch.observer,
   );
   /*
    * G-B4: the Responses WebSocket surface. The connection layer's upgrade
    * auth rides the composition's key authenticator (Authorization: Bearer
    * / x-api-key on the upgrade request); every round then replays the
-   * full gateway chain through the executor. Absent keeps the 501.
+   * full gateway chain through the default request-bound executor.
    */
-  const responsesWs = dependencies.responsesWsRoundExecutor
-    ? createResponsesWsServer({
-        authenticate: async (upgradeRequest: import('node:http').IncomingMessage) => {
-          // The same key extraction the HTTP boundary uses: Authorization
-          // Bearer or x-api-key on the upgrade request itself.
-          const authorization = String(upgradeRequest.headers.authorization ?? '');
-          const apiKeyHeader = String(upgradeRequest.headers['x-api-key'] ?? '');
-          const rawKey = authorization.startsWith('Bearer ')
-            ? authorization.slice('Bearer '.length).trim()
-            : apiKeyHeader.trim();
-          if (rawKey === '') return { ok: false, reason: 'unauthenticated' };
-          try {
-            const caller = await dependencies.authenticator.authenticate(rawKey);
-            return caller !== null ? { ok: true } : { ok: false, reason: 'unauthenticated' };
-          } catch {
-            return { ok: false, reason: 'unavailable' };
-          }
-        },
-        createEngine: () =>
-          new ResponsesWsEngine({
-            executor: dependencies.responsesWsRoundExecutor as never,
-            send: () => {},
-            close: () => {},
+  const preDispatchCompensation = new GatewayPreDispatchCompensationService(
+    dependencies.preparation.transaction,
+    dependencies.preparation.compensation,
+  );
+  const responsesWs = createResponsesWsServer({
+    authenticate: async (upgradeRequest: import('node:http').IncomingMessage) => {
+      // The same key extraction the HTTP boundary uses: Authorization
+      // Bearer or x-api-key on the upgrade request itself.
+      const rawKey = responsesWsProxyKey(upgradeRequest);
+      if (rawKey === null) return { ok: false, reason: 'unauthenticated' };
+      try {
+        const caller = await dependencies.authenticator.authenticate(rawKey);
+        return caller !== null ? { ok: true } : { ok: false, reason: 'unauthenticated' };
+      } catch {
+        return { ok: false, reason: 'unavailable' };
+      }
+    },
+    createEngine: (upgradeRequest) =>
+      new ResponsesWsEngine({
+        executor:
+          dependencies.responsesWsRoundExecutor ??
+          createResponsesWsRoundExecutor({
+            request: upgradeRequest,
+            authenticator: dependencies.authenticator,
+            preparation,
+            dispatch,
+            compensation: preDispatchCompensation,
+            entryPoint: dependencies.entryPoint,
+            maxBodyBytes: dependencies.maxBodyBytes,
+            trustedProxyCidrs: dependencies.trustedProxyCidrs,
+            contentModeration: dependencies.contentModeration,
+            runWithRequestId: (roundRequestId, work) => requestIdContext.run(roundRequestId, work),
           }),
-        ...(dependencies.responsesWsLimits ? { limits: dependencies.responsesWsLimits } : {}),
-      })
-    : undefined;
+        send: () => {},
+        close: () => {},
+        idFactory: requestId,
+      }),
+    ...(dependencies.responsesWsLimits ? { limits: dependencies.responsesWsLimits } : {}),
+  });
   const httpHandler = createSaasGatewayHandler({
     authenticator: dependencies.authenticator,
     preparation,
     dispatch,
-    preDispatchCompensation: new GatewayPreDispatchCompensationService(
-      dependencies.preparation.transaction,
-      dependencies.preparation.compensation,
-    ),
-    modelDiscovery: createModelDiscoveryPort(dependencies.preparation),
+    preDispatchCompensation,
+    modelDiscovery: createModelDiscoveryPort(dependencies.preparation, dependencies.capabilityReadiness),
     maxBodyBytes: dependencies.maxBodyBytes,
     entryPoint: dependencies.entryPoint,
     trustedProxyCidrs: dependencies.trustedProxyCidrs,
     ...(dependencies.readiness ? { readiness: dependencies.readiness } : {}),
     ...(responsesWs !== undefined ? { responsesWs } : {}),
+    ...(dependencies.responsesCompactNativeSupply
+      ? { responsesCompactNativeSupply: dependencies.responsesCompactNativeSupply }
+      : {}),
     ...(dependencies.stickyScheduling ? { stickyScheduling: true } : {}),
     ...(dependencies.modelPlaza ? { modelPlaza: dependencies.modelPlaza } : {}),
     ...(dependencies.contentModeration ? { contentModeration: dependencies.contentModeration } : {}),
@@ -788,12 +848,35 @@ export function createManagedSaasGatewayComposition(
       : {}),
     ...(dependencies.videoMedia ? { videoCreate: dependencies.videoMedia.videoCreate } : {}),
   });
+  const pendingHttpHandlers = new Set<Promise<boolean>>();
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
-    return requestIdContext.run(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId }));
+    const pending = requestIdContext.run(currentRequestId, () =>
+      httpHandler(req, res, { requestId: currentRequestId }),
+    );
+    pendingHttpHandlers.add(pending);
+    void pending.then(
+      () => {
+        pendingHttpHandlers.delete(pending);
+      },
+      () => {
+        pendingHttpHandlers.delete(pending);
+      },
+    );
+    return pending;
   };
-  const close = closeOnce(dependencies.lifecycle);
-  return Object.freeze({ handler, preparation, dispatch, close });
+  const close = closeOnce({
+    close: async () => {
+      await responsesWs.close();
+      // The listener owner stops new requests before closing this composition.
+      // HTTP EOF can precede settlement and fenced lease cleanup.
+      while (pendingHttpHandlers.size > 0) {
+        await Promise.allSettled([...pendingHttpHandlers]);
+      }
+      await dependencies.lifecycle.close();
+    },
+  });
+  return Object.freeze({ handler, handleUpgrade: responsesWs.handleUpgrade, preparation, dispatch, close });
 }
 
 export interface ManagedSaasProviderPreparationRoute {
@@ -827,9 +910,25 @@ export interface ManagedSaasProviderPayloadOptions {
   readonly modelCompatibility: ProviderModelCompatibilityChecker;
   readonly maxPayloadBytes: number;
   readonly compilerVersion: string;
+  readonly providerRequestTransform?: import('../saas/gateway/provider-payload-compiler.js').ProviderRequestTransform;
 }
 
 export interface ManagedSaasGatewayProductionOptions {
+  readonly preparationObserver?: PostgresPreparationObserver;
+  readonly preparationFailureObserver?: PreparationFailureObserver;
+  readonly dispatchObserver?: PreparedEvidenceDispatchObserver;
+  readonly capabilityReadiness?: () => Promise<GatewayCapabilityReadiness>;
+  /** Native compact target with the same evidence-bound credential proof. */
+  readonly responsesCompactEvidenceTransport?: PreparedEvidenceTransport;
+  readonly providerEvidenceTransports?: GatewayProviderEvidenceTransportFactory;
+  readonly providerNativeProtocol?: (
+    providerId: string,
+    productId: string,
+    model: string,
+    clientProtocol: GatewayProtocol,
+  ) => GatewayProtocol;
+  readonly responsesCompactNativeSupply?: (model: string) => boolean;
+  readonly responsesWsLimits?: import('../saas/gateway/responses-ws-connection.js').ResponsesWsConnectionLimits;
   /** These preparation ports remain required until their real runtime adapters land. */
   readonly caller: RequestPreparationCallerPort;
   readonly entitlement: RequestPreparationEntitlementPort;
@@ -1550,7 +1649,12 @@ export function createProviderPayloadCompiler(
     // passback for glm-/minimax-m-) — the dormant providerRequestTransform
     // seam's first consumer. Copy-on-write and provider-scoped: every other
     // provider's payload bytes are unchanged.
-    providerRequestTransform: cnProvidersProviderRequestTransform,
+    providerRequestTransform: (input) => {
+      const transformed = cnProvidersProviderRequestTransform(input);
+      return payloadOptions.providerRequestTransform && record(transformed)
+        ? payloadOptions.providerRequestTransform({ ...input, body: transformed })
+        : transformed;
+    },
   });
 
   return {
@@ -1586,6 +1690,17 @@ export function createProviderPayloadCompiler(
           code: 'capability_unavailable',
           message: 'provider preparation route is incomplete',
         };
+      }
+      if (input.clientOperation === 'responses.compact') {
+        if (route.clientProtocol !== 'responses' || route.providerProtocol !== 'responses') {
+          return {
+            decision: 'block',
+            code: 'capability_unsupported',
+            message: 'compact requires native Responses supply',
+          };
+        }
+        route = { ...route, clientOperation: 'responses.compact', providerOperation: 'responses.compact' };
+        return compiler.compile({ ...input, ...route, operation: 'responses.compact' });
       }
       // R5b-2: OpenCode Go candidates re-derive the provider protocol from
       // the post-modelMap resolved model id. The override stays within the
@@ -1662,6 +1777,12 @@ function createProviderDispatchProfileResolver(
     requireText(route.productId);
     requireText(route.providerProtocol);
     requireText(route.providerOperation);
+    if (
+      input.providerOperation === 'responses.compact' &&
+      (route.providerProtocol !== 'responses' || route.providerOperation !== 'responses.compact')
+    ) {
+      return null;
+    }
     const target: ProviderTarget = options.providerTargetResolver.resolve({
       upstreamId: input.upstreamId,
       productId: route.productId,
@@ -1703,6 +1824,27 @@ function createProviderDispatchProfileResolver(
       ...(egressProxy === null ? {} : { egressProxy }),
       ...(tlsFingerprint === null ? {} : { tlsFingerprint }),
     };
+  };
+}
+
+/** Only the owned PostgreSQL provider defines null as an authoritative full account. */
+export function createPostgresDispatchLeaseProvider(
+  provider: PostgresProviderAccountLeaseService,
+): PreparedEvidenceLeaseProvider {
+  if (!(provider instanceof PostgresProviderAccountLeaseService)) {
+    throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
+  }
+  return {
+    async acquire(input) {
+      const lease = await provider.acquire(input);
+      if (lease === null) {
+        throw new SaasPreparedEvidenceDispatchError(
+          'LEASE_CAPACITY_EXHAUSTED',
+          'Provider account concurrency capacity is occupied.',
+        );
+      }
+      return lease;
+    },
   };
 }
 
@@ -1806,7 +1948,7 @@ export function createManagedSaasGatewayProductionComposition(
     // (policy columns + exact supplier-cost window aggregation) feeding the
     // pure three-state judgment. Fail-open on any read failure.
     windowCost: {
-      resolveWindowCostSchedulability: async ({ candidate, now, isSticky }) => {
+      resolveWindowCostSchedulability: async ({ candidate, now }) => {
         try {
           const facts = await getAccountWindowCostFactsBatch(database, [candidate.accountId], now.getTime());
           const fact = facts.get(candidate.accountId);
@@ -1819,7 +1961,6 @@ export function createManagedSaasGatewayProductionComposition(
         } catch {
           return 'admit'; // fail-open: a failed read never removes capacity
         }
-        void isSticky; // the core scheduler owns the sticky/pass-through split
       },
     },
     affinity: schedulerAffinityPort,
@@ -1837,6 +1978,8 @@ export function createManagedSaasGatewayProductionComposition(
   const byokEntitlements = new ByokServicePlanService(database);
   const authorityDependencies: PostgresRequestPreparationAuthorityAdapterDependencies = {
     database,
+    ...(options.preparationObserver ? { observe: options.preparationObserver } : {}),
+    ...(options.providerNativeProtocol ? { providerNativeProtocol: options.providerNativeProtocol } : {}),
     routes,
     commercial,
     catalog,
@@ -1930,6 +2073,7 @@ export function createManagedSaasGatewayProductionComposition(
   // happens at composition time, not per request).
   const openRouterFixedRequestHeaders = createOpenRouterFixedRequestHeaders(options.openRouterAttribution);
   const transport = new ProviderHttpTransport({
+    ...(options.dispatchObserver ? { observe: options.dispatchObserver } : {}),
     fetch: options.fetch,
     resolveDispatchProfile: createProviderDispatchProfileResolver(
       options,
@@ -1965,6 +2109,32 @@ export function createManagedSaasGatewayProductionComposition(
     // branch; other operations get no plan and stay byte-identical.
     mediaUsagePlan: createImagesMediaUsagePlan,
   });
+  const transportOptions = {
+    ...options,
+    ...options.providerEvidenceTransports?.({
+      genericTransport: transport,
+      proofReader,
+      unsealer,
+      resolveEgressProfile: async (input) => {
+        const identity = {
+          tenantId: input.tenantId,
+          supplyMode: input.supplyMode,
+          accountOwnerKind: input.accountOwnerKind,
+          accountId: input.accountId,
+        };
+        const [egressProxy, tlsFingerprint] = await Promise.all([
+          egressProxyResolver?.resolveEgressProxy(identity) ?? null,
+          tlsFingerprintResolver?.resolveTlsFingerprint(identity) ?? null,
+        ]);
+        return { ...(egressProxy ? { egressProxy } : {}), ...(tlsFingerprint ? { tlsFingerprint } : {}) };
+      },
+      ...(tlsFingerprintConnectorFactory ? { createConnector: tlsFingerprintConnectorFactory } : {}),
+      ...(options.providerHttpEgressAllowlist ? { egressAllowlist: options.providerHttpEgressAllowlist } : {}),
+    }),
+  };
+  if (transportOptions.responsesCompactEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.responsesCompactEvidenceTransport, 'send');
+  }
   // P1c codex dispatch split: the codex transport takes over exactly the
   // signed `codex-responses` endpoint scope (provider protocol `responses`);
   // every other provider keeps the generic transport path unchanged.
@@ -1973,39 +2143,39 @@ export function createManagedSaasGatewayProductionComposition(
   // Batch-3 dispatch seams: claude (`claude-messages` + `anthropic`) and
   // gemini (`gemini-generate-content` + `gemini`) transports, when mounted,
   // take over their single native provider protocol the same way.
-  if (options.codexEvidenceTransport !== undefined) {
-    requireDependency(options.codexEvidenceTransport, 'send');
+  if (transportOptions.codexEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.codexEvidenceTransport, 'send');
   }
-  if (options.claudeEvidenceTransport !== undefined) {
-    requireDependency(options.claudeEvidenceTransport, 'send');
+  if (transportOptions.claudeEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.claudeEvidenceTransport, 'send');
   }
-  if (options.geminiEvidenceTransport !== undefined) {
-    requireDependency(options.geminiEvidenceTransport, 'send');
+  if (transportOptions.geminiEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.geminiEvidenceTransport, 'send');
   }
-  if (options.opencodeGoEvidenceTransport !== undefined) {
-    requireDependency(options.opencodeGoEvidenceTransport, 'send');
+  if (transportOptions.opencodeGoEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.opencodeGoEvidenceTransport, 'send');
   }
-  if (options.cnProvidersEvidenceTransport !== undefined) {
-    requireDependency(options.cnProvidersEvidenceTransport, 'send');
+  if (transportOptions.cnProvidersEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.cnProvidersEvidenceTransport, 'send');
   }
-  if (options.grokEvidenceTransport !== undefined) {
-    requireDependency(options.grokEvidenceTransport, 'send');
+  if (transportOptions.grokEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.grokEvidenceTransport, 'send');
   }
-  if (options.bedrockEvidenceTransport !== undefined) {
-    requireDependency(options.bedrockEvidenceTransport, 'send');
+  if (transportOptions.bedrockEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.bedrockEvidenceTransport, 'send');
   }
-  if (options.vertexEvidenceTransport !== undefined) {
-    requireDependency(options.vertexEvidenceTransport, 'send');
+  if (transportOptions.vertexEvidenceTransport !== undefined) {
+    requireDependency(transportOptions.vertexEvidenceTransport, 'send');
   }
   const endpointRoutingRoutes: EndpointRoutingRoute[] = [];
-  if (options.codexEvidenceTransport !== undefined) {
+  if (transportOptions.codexEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: CODEX_ENDPOINT,
       providerProtocol: 'responses',
-      transport: options.codexEvidenceTransport,
+      transport: transportOptions.codexEvidenceTransport,
     });
   }
-  if (options.claudeEvidenceTransport !== undefined) {
+  if (transportOptions.claudeEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: CLAUDE_ENDPOINT,
       providerProtocol: 'anthropic',
@@ -2015,9 +2185,9 @@ export function createManagedSaasGatewayProductionComposition(
       // plugin cannot serve fail closed (see gateway-plugin-router.ts).
       transport:
         options.pluginRouting === undefined
-          ? options.claudeEvidenceTransport
+          ? transportOptions.claudeEvidenceTransport
           : new PluginRoutingClaudeTransport({
-              inner: options.claudeEvidenceTransport,
+              inner: transportOptions.claudeEvidenceTransport,
               capability: 'claude.oauth.outbound_transport.v1',
               routeReader: options.pluginRouting.routeReader,
               pluginHostClient: options.pluginRouting.pluginHostClient,
@@ -2025,40 +2195,46 @@ export function createManagedSaasGatewayProductionComposition(
             }),
     });
   }
-  if (options.geminiEvidenceTransport !== undefined) {
+  if (transportOptions.geminiEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: GEMINI_ENDPOINT,
       providerProtocol: 'gemini',
-      transport: options.geminiEvidenceTransport,
+      transport: transportOptions.geminiEvidenceTransport,
     });
   }
-  if (options.opencodeGoEvidenceTransport !== undefined) {
-    endpointRoutingRoutes.push({ endpoint: OPENCODE_GO_ENDPOINT, transport: options.opencodeGoEvidenceTransport });
+  if (transportOptions.opencodeGoEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({
+      endpoint: OPENCODE_GO_ENDPOINT,
+      transport: transportOptions.opencodeGoEvidenceTransport,
+    });
   }
   // Batch-3: the CN-provider adapter takes over all three endpoint scopes
   // with no providerProtocol narrowing (the opencode-go whole-scope
   // precedent) — the adapter itself delegates to the generic transport and
   // only adds the error-body classification.
-  if (options.cnProvidersEvidenceTransport !== undefined) {
-    endpointRoutingRoutes.push({ endpoint: ZHIPU_ENDPOINT, transport: options.cnProvidersEvidenceTransport });
+  if (transportOptions.cnProvidersEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: ZHIPU_ENDPOINT, transport: transportOptions.cnProvidersEvidenceTransport });
     endpointRoutingRoutes.push({
       endpoint: ZHIPU_CODING_ENDPOINT,
-      transport: options.cnProvidersEvidenceTransport,
+      transport: transportOptions.cnProvidersEvidenceTransport,
     });
-    endpointRoutingRoutes.push({ endpoint: MINIMAX_ENDPOINT, transport: options.cnProvidersEvidenceTransport });
+    endpointRoutingRoutes.push({
+      endpoint: MINIMAX_ENDPOINT,
+      transport: transportOptions.cnProvidersEvidenceTransport,
+    });
   }
-  if (options.grokEvidenceTransport !== undefined) {
+  if (transportOptions.grokEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: GROK_ENDPOINT,
       providerProtocol: 'responses',
-      transport: options.grokEvidenceTransport,
+      transport: transportOptions.grokEvidenceTransport,
     });
   }
-  if (options.bedrockEvidenceTransport !== undefined) {
+  if (transportOptions.bedrockEvidenceTransport !== undefined) {
     endpointRoutingRoutes.push({
       endpoint: BEDROCK_ENDPOINT,
       providerProtocol: 'anthropic',
-      transport: options.bedrockEvidenceTransport,
+      transport: transportOptions.bedrockEvidenceTransport,
     });
   }
   // The Vertex route takes over the whole `vertex-raw-predict` endpoint
@@ -2067,11 +2243,13 @@ export function createManagedSaasGatewayProductionComposition(
   // generateContent family) and the transport selects the endpoint family
   // from the signed provider protocol on the evidence (the opencode-go
   // whole-scope precedent).
-  if (options.vertexEvidenceTransport !== undefined) {
-    endpointRoutingRoutes.push({ endpoint: VERTEX_ENDPOINT, transport: options.vertexEvidenceTransport });
+  if (transportOptions.vertexEvidenceTransport !== undefined) {
+    endpointRoutingRoutes.push({ endpoint: VERTEX_ENDPOINT, transport: transportOptions.vertexEvidenceTransport });
   }
-  const dispatchTransport =
-    endpointRoutingRoutes.length === 0 ? transport : createEndpointRoutingTransport(transport, endpointRoutingRoutes);
+  const dispatchTransport = createNativeResponsesCompactRoutingTransport(
+    transportOptions.responsesCompactEvidenceTransport ?? transport,
+    endpointRoutingRoutes.length === 0 ? transport : createEndpointRoutingTransport(transport, endpointRoutingRoutes),
+  );
   // §4.2 (task #16): the async image media binding — the zero-dep S3
   // client, the offloader, the PG-backed task service and the two boundary
   // ports (async submit + task-status query). Absent keeps the endpoints closed.
@@ -2199,8 +2377,16 @@ export function createManagedSaasGatewayProductionComposition(
   // deployment supplies an overlay reader, env-only otherwise; the session
   // tier is wired by the deployment when a console-session authority is in
   // scope (the split-gateway role holds no saas_sessions grant).
+  // Always install an enforcing policy in production, including custom/v1
+  // runtimes without readiness. Missing facts close advertisements while
+  // authenticated preparation remains available for direct verification.
+  const capabilityReadiness = async (): Promise<GatewayCapabilityReadiness> => {
+    if (!options.capabilityReadiness) throw new ManagedSaasGatewayCompositionError('UNAVAILABLE');
+    return options.capabilityReadiness();
+  };
   const modelPlaza = createSaasModelPlazaEndpoint({
     service: new SaasModelPlazaService({
+      capabilityReadiness,
       facts: new PostgresModelPlazaFacts({
         database,
         pricing: new SaasPricingService(database),
@@ -2216,6 +2402,8 @@ export function createManagedSaasGatewayProductionComposition(
 
   return createManagedSaasGatewayComposition({
     authenticator: keyService,
+    capabilityReadiness,
+    ...(options.preparationFailureObserver ? { preparationFailureObserver: options.preparationFailureObserver } : {}),
     preparation: {
       caller: options.caller,
       entitlement: new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
@@ -2232,16 +2420,18 @@ export function createManagedSaasGatewayProductionComposition(
     preparationOptions: {
       evidenceVerifierKeyId: options.evidenceVerifierKeyId,
       idFactory: options.idFactory,
+      ...(options.preparationObserver ? { observe: options.preparationObserver } : {}),
     },
     dispatch: {
       evidence: evidence as PreparedRequestEvidenceDispatchPort,
       metering,
-      leaseProvider,
+      leaseProvider: createPostgresDispatchLeaseProvider(leaseProvider),
       transport: dispatchTransport,
       normalSuccessSettlement,
       runtimeHealthWriter: runtimeHealthStore,
       dispatchFailureFeedback,
       modelRateLimit: modelCooldownRegistry,
+      ...(options.dispatchObserver ? { observer: options.dispatchObserver } : {}),
     },
     lifecycle: {
       close: async () => {
@@ -2254,6 +2444,10 @@ export function createManagedSaasGatewayProductionComposition(
     },
     maxBodyBytes: options.maxBodyBytes,
     entryPoint: options.entryPoint,
+    ...(options.responsesWsLimits ? { responsesWsLimits: options.responsesWsLimits } : {}),
+    ...(options.responsesCompactNativeSupply
+      ? { responsesCompactNativeSupply: options.responsesCompactNativeSupply }
+      : {}),
     trustedProxyCidrs: options.trustedProxyCidrs,
     // G-C1: PG-backed readiness — database + migration head from the
     // ledger, the KMS as the required dependency, and the media binding
@@ -2278,14 +2472,34 @@ export function createManagedSaasGatewayProductionComposition(
         } catch {
           kmsReady = 'error';
         }
+        let providerCapabilities: GatewayCapabilityReadiness | undefined;
+        let capabilityFactsReady: 'ok' | 'error' | undefined;
+        if (options.capabilityReadiness) {
+          try {
+            providerCapabilities = await options.capabilityReadiness();
+            capabilityFactsReady = providerCapabilities.configurationValid ? 'ok' : 'error';
+          } catch {
+            capabilityFactsReady = 'error';
+          }
+        }
         return {
           database: databaseState,
           migrationHead,
-          dependencies: { 'provider-credential-kms': kmsReady },
+          dependencies: {
+            'provider-credential-kms': kmsReady,
+            ...(capabilityFactsReady ? { 'provider-capability-facts': capabilityFactsReady } : {}),
+          },
+          ...(providerCapabilities ? { providerCapabilities } : {}),
           capabilities: {
             'images.async': imageMedia !== undefined,
             'videos.create': videoMedia !== undefined,
             'model-plaza': modelPlaza !== undefined,
+            ...(options.capabilityReadiness
+              ? {
+                  'responses.ws': true,
+                  'responses.compact': options.responsesCompactNativeSupply !== undefined,
+                }
+              : {}),
           },
         };
       },

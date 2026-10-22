@@ -49,6 +49,7 @@ export const GATEWAY_CAPABILITY_READINESS_REASON_CODES = Object.freeze([
   'SUPPLIER_PRICE_MISSING',
   'CREDENTIALS_NOT_PROVISIONED',
   'VERIFICATION_NOT_RECORDED',
+  'USAGE_BOUNDS_UNAVAILABLE',
 ] as const);
 
 export type GatewayCapabilityFatalReasonCode = (typeof GATEWAY_CAPABILITY_FATAL_REASON_CODES)[number];
@@ -97,6 +98,8 @@ export interface GatewayCapabilityFacts {
    * reported as `unverified` (fail closed).
    */
   readonly verification: Readonly<Record<string, GatewayCapabilityVerificationLevel>>;
+  /** Provider faces with no proven admission usage bound for this standard runtime. */
+  readonly unavailableUsageBoundProviderIds?: readonly string[];
 }
 
 export interface GatewayCapabilityProjection {
@@ -224,13 +227,16 @@ function projectBundle(
   if (config.enabled && !priced) pushReason(reasonCodes, 'SUPPLIER_PRICE_MISSING');
   const credentials = config.enabled && includes(facts.bundles.credentialProviderIds, manifest.providerId);
   if (config.enabled && !credentials) pushReason(reasonCodes, 'CREDENTIALS_NOT_PROVISIONED');
+  const usageBoundAvailable = !(facts.unavailableUsageBoundProviderIds ?? []).includes(manifest.providerId);
+  if (config.enabled && !usageBoundAvailable) pushReason(reasonCodes, 'USAGE_BOUNDS_UNAVAILABLE');
 
   const verified = level === 'live';
   if (config.enabled && !verified) pushReason(reasonCodes, 'VERIFICATION_NOT_RECORDED');
 
   // A disabled bundle is intentionally not assessed: its transport is not
   // expected to be mounted, and it must never be reported as serving.
-  const operational = config.enabled && assembled && catalogProvider && catalogScopes && priced && credentials;
+  const operational =
+    config.enabled && assembled && catalogProvider && catalogScopes && priced && credentials && usageBoundAvailable;
 
   return Object.freeze({
     capability,

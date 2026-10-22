@@ -52,6 +52,7 @@ function customerVersion(options: { rates?: RateSet; roundingMode?: RoundingMode
     roundingMode: options.roundingMode ?? 'half_up',
     roundingBoundary: 'total',
     rates: options.rates ?? rates(),
+    tokenMultipliers: null,
     effectiveAt: '2026-09-01T00:00:00.000Z',
     expiresAt: null,
     idempotencyKey: 'customer-version-1',
