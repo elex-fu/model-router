@@ -233,13 +233,14 @@ class RelationDatabase implements SaasDatabase {
     }
     if (normalized.startsWith('UPDATE saas_platform_provider_pool_grants')) {
       const rebinding = normalized.includes("status = 'revoked'");
+      const databaseClock = normalized.includes('rebind_clock.observed_at');
       const first = rebinding ? undefined : values[0];
       const disabledAt = rebinding ? null : values[1];
-      const revokedAt = rebinding ? values[0] : values[2];
-      const at = rebinding ? values[0] : values[3];
-      const poolId = rebinding ? values[1] : values[4];
-      const profileId = rebinding ? values[3] : values[6];
-      const expected = rebinding ? values[4] : values[7];
+      const revokedAt = databaseClock ? NOW : rebinding ? values[0] : values[2];
+      const at = databaseClock ? NOW : rebinding ? values[0] : values[3];
+      const poolId = databaseClock ? values[0] : rebinding ? values[1] : values[4];
+      const profileId = databaseClock ? values[2] : rebinding ? values[3] : values[6];
+      const expected = databaseClock ? values[3] : rebinding ? values[4] : values[7];
       const key = `${String(poolId)}/${String(profileId)}`;
       const current = this.grants.get(key);
       if (!current || Number(current.authz_version) !== Number(expected)) return this.result([]) as SqlResult<RowType>;
@@ -248,10 +249,13 @@ class RelationDatabase implements SaasDatabase {
       current.revoked_at = revokedAt;
       current.updated_at = at;
       current.authz_version = Number(current.authz_version) + 1;
-      return this.result([current]) as SqlResult<RowType>;
+      return this.result([databaseClock ? { ...current, rebound_at: NOW } : current]) as SqlResult<RowType>;
     }
     if (normalized.startsWith('INSERT INTO saas_platform_provider_pool_grants')) {
-      const [poolId, tenantId, profileId, profileEpoch, poolEpoch, at, expiresAt, evidenceRef, evidenceSha] = values;
+      const [poolId, tenantId, profileId, profileEpoch, poolEpoch] = values;
+      const immediate = normalized.includes('grant_clock.observed_at');
+      const at = immediate ? NOW : values[5];
+      const [expiresAt, evidenceRef, evidenceSha] = values.slice(immediate ? 5 : 6);
       const row = grant(String(poolId), String(profileId), 1, 'active');
       Object.assign(row, {
         tenant_id: tenantId,
@@ -426,6 +430,38 @@ test('pool grants fence pool and profile policy reads before inserting the relat
   const grantInsert = statements.findIndex((sql) => sql.startsWith('insert into saas_platform_provider_pool_grants'));
   assert.ok(poolFence >= 0 && poolFence < poolRead);
   assert.ok(poolRead < profileFence && profileFence < profileRead && profileRead < grantInsert);
+  assert.doesNotMatch(statements[poolRead] ?? '', /for (?:update|no key update|share|key share)/i);
+  assert.doesNotMatch(statements[profileRead] ?? '', /for (?:update|no key update|share|key share)/i);
+  assert.ok(
+    statements.some((sql) => sql.includes('from saas_platform_provider_pool_grants') && sql.includes('for update')),
+  );
+});
+
+test('adding a pool member reads pool authority under its fence without requesting pool UPDATE privilege', async () => {
+  const database = new RelationDatabase();
+  await service(database).addPlatformPoolMember({
+    poolId: 'pool-b',
+    accountId: 'platform-account-b',
+    expectedAccountAuthzVersion: 7,
+  });
+  const fenceIndex = database.statements.findIndex(
+    ({ sql, values }) =>
+      sql.includes('pg_advisory_xact_lock(') &&
+      !sql.includes('_shared') &&
+      values[0] === saasAdvisoryKey.platformPool('pool-b'),
+  );
+  const poolReadIndex = database.statements.findIndex(({ sql }) => sql.includes('FROM saas_platform_provider_pools'));
+  const insertIndex = database.statements.findIndex(({ sql }) =>
+    sql.startsWith('INSERT INTO saas_platform_provider_pool_members'),
+  );
+  assert.ok(fenceIndex >= 0 && fenceIndex < poolReadIndex && poolReadIndex < insertIndex);
+  assert.doesNotMatch(database.statements[poolReadIndex]?.sql ?? '', /FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)/i);
+  assert.ok(
+    database.statements.some(
+      ({ sql, tx }) => tx > 0 && sql.includes('FROM saas_platform_provider_accounts') && sql.includes('FOR UPDATE'),
+    ),
+  );
+  assert.equal(database.members.get('pool-b/platform-account-b')?.account_authz_version, 7);
 });
 
 test('pool member rebind revokes old identity and captures the replacement account epoch', async () => {
@@ -459,8 +495,14 @@ test('pool member rebind revokes old identity and captures the replacement accou
   const poolReadIndex = database.statements.findIndex(({ sql }) => sql.includes('FROM saas_platform_provider_pools'));
   const accountRead = database.statements.find(({ sql }) => sql.includes('FROM saas_platform_provider_accounts'));
   assert.ok(poolFenceIndex >= 0 && poolFenceIndex < poolReadIndex);
-  assert.match(database.statements[poolReadIndex]?.sql ?? '', /FOR UPDATE/i);
+  assert.doesNotMatch(database.statements[poolReadIndex]?.sql ?? '', /FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)/i);
   assert.match(accountRead?.sql ?? '', /FOR UPDATE/i);
+  assert.ok(
+    database.statements
+      .filter(({ sql }) => sql.includes('FROM saas_platform_provider_pool_members'))
+      .every(({ sql }) => sql.includes('FOR UPDATE')),
+  );
+  assert.ok(database.statements.some(({ sql }) => sql.includes('AND authz_version = $4')));
 });
 
 test('BYOK mapping lifecycle and rebind use the existing relationship epoch with explicit CAS', async () => {
@@ -584,8 +626,17 @@ test('platform grant lifecycle and rebind use explicit CAS and do not refresh ol
   );
   assert.ok(poolFenceIndex >= 0 && poolFenceIndex < poolReadIndex);
   assert.ok(profileFenceIndex >= 0 && profileFenceIndex < profileReadIndex);
-  assert.match(rebindDb.statements[poolReadIndex]?.sql ?? '', /FOR UPDATE/i);
-  assert.match(rebindDb.statements[profileReadIndex]?.sql ?? '', /FOR UPDATE/i);
+  assert.doesNotMatch(rebindDb.statements[poolReadIndex]?.sql ?? '', /FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)/i);
+  assert.doesNotMatch(
+    rebindDb.statements[profileReadIndex]?.sql ?? '',
+    /FOR (?:UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)/i,
+  );
+  assert.ok(
+    rebindDb.statements
+      .filter(({ sql }) => sql.includes('FROM saas_platform_provider_pool_grants'))
+      .every(({ sql }) => sql.includes('FOR UPDATE')),
+  );
+  assert.ok(rebindDb.statements.some(({ sql }) => sql.includes('AND authz_version = $4')));
 });
 
 test('pool member storage failures fail closed', async () => {

@@ -811,6 +811,8 @@ export class ProviderSupplyService {
   }
 
   private async lockPlatformPoolForWrite(executor: SqlExecutor, poolId: string): Promise<void> {
+    // Pool creation and relationship writers share this fence. Pool authority
+    // reads need no row lock or UPDATE privilege; this service never rewrites it.
     await this.lockPlatformPool(executor, poolId, 'exclusive');
   }
 
@@ -828,6 +830,8 @@ export class ProviderSupplyService {
     tenantId: string,
     supplyProfileId: string,
   ): Promise<void> {
+    // Profiles are read-only authority here. Relationship writers serialize
+    // through this fence without requiring UPDATE privileges on the profile.
     await this.lockSupplyProfile(executor, tenantId, supplyProfileId, 'exclusive');
   }
 
@@ -2245,8 +2249,7 @@ export class ProviderSupplyService {
         `SELECT ${POOL_COLUMNS}
              FROM saas_platform_provider_pools
             WHERE id = $1
-            LIMIT 1
-            FOR UPDATE`,
+            LIMIT 1`,
         [poolId],
       );
       const pool = result.rows[0];
@@ -2425,8 +2428,7 @@ export class ProviderSupplyService {
         `SELECT ${POOL_COLUMNS}
           FROM saas_platform_provider_pools
           WHERE id = $1
-          LIMIT 1
-          FOR UPDATE`,
+          LIMIT 1`,
         [poolId],
       );
       const pool = poolResult.rows[0];
@@ -2504,7 +2506,6 @@ export class ProviderSupplyService {
     const evidenceSha256 = text(input.evidenceSha256, 'INVALID_INPUT', 64).trim();
     if (!/^[0-9a-f]{64}$/.test(evidenceSha256)) fail('INVALID_INPUT');
     const now = currentDate(this.now);
-    const nowText = now.toISOString();
     const expiresAt = timestamp(input.expiresAt, now, true);
     return this.sqlTransaction(async (tx) => {
       await this.lockPlatformPoolForWrite(tx, poolId);
@@ -2513,8 +2514,7 @@ export class ProviderSupplyService {
         `SELECT ${POOL_COLUMNS}
              FROM saas_platform_provider_pools
             WHERE id = $1
-            LIMIT 1
-            FOR UPDATE`,
+            LIMIT 1`,
         [poolId],
       );
       const pool = poolResult.rows[0];
@@ -2526,8 +2526,7 @@ export class ProviderSupplyService {
         `SELECT tenant_id, id, supply_mode, status, authz_version
              FROM saas_supply_profiles
             WHERE tenant_id = $1 AND id = $2 AND supply_mode = 'platform'
-            LIMIT 1
-            FOR UPDATE`,
+            LIMIT 1`,
         [tenantId, supplyProfileId],
       );
       const profile = profileResult.rows[0];
@@ -2542,13 +2541,18 @@ export class ProviderSupplyService {
         [poolId, tenantId, supplyProfileId],
       );
       if (existing.rows[0]) fail('CREDENTIAL_STATE_CONFLICT');
+      // This API creates an immediately effective grant. Its authorization
+      // readers use PostgreSQL time, so an ahead application clock must not
+      // postpone activation; retain one database time for all creation facts.
       const result = await this.query<PoolGrantRow>(
         tx,
         `INSERT INTO saas_platform_provider_pool_grants
              (pool_id, tenant_id, supply_profile_id, supply_mode, profile_authz_version,
               pool_authz_version, status, effective_at, expires_at, authz_version,
               evidence_ref, evidence_sha256, created_at, updated_at)
-           VALUES ($1, $2, $3, 'platform', $4, $5, 'active', $6, $7, 1, $8, $9, $6, $6)
+           SELECT $1, $2, $3, 'platform', $4, $5, 'active', grant_clock.observed_at, $6, 1, $7, $8,
+                  grant_clock.observed_at, grant_clock.observed_at
+             FROM (SELECT clock_timestamp() AS observed_at) AS grant_clock
            RETURNING ${POOL_GRANT_COLUMNS}`,
         [
           poolId,
@@ -2556,7 +2560,6 @@ export class ProviderSupplyService {
           supplyProfileId,
           positiveInteger(profile.authz_version, 'SUPPLY_STORAGE_ERROR'),
           positiveInteger(pool.authz_version, 'SUPPLY_STORAGE_ERROR'),
-          nowText,
           expiresAt,
           evidenceReference,
           evidenceSha256,
@@ -2669,7 +2672,6 @@ export class ProviderSupplyService {
     const expectedAuthzVersion = positiveInteger(input.expectedAuthzVersion);
     const audit = input.audit === undefined ? undefined : normalizeAuditContext(input.audit);
     const now = currentDate(this.now);
-    const nowText = now.toISOString();
 
     return this.sqlTransaction(async (tx) => {
       await lockAdvisoryLayers(
@@ -2693,8 +2695,7 @@ export class ProviderSupplyService {
         `SELECT ${POOL_COLUMNS}
            FROM saas_platform_provider_pools
           WHERE id = $1
-          LIMIT 1
-          FOR UPDATE`,
+          LIMIT 1`,
         [nextPoolId],
       );
       const pool = poolResult.rows[0];
@@ -2706,8 +2707,7 @@ export class ProviderSupplyService {
         `SELECT tenant_id, id, supply_mode, status, authz_version
            FROM saas_supply_profiles
           WHERE tenant_id = $1 AND id = $2 AND supply_mode = 'platform'
-          LIMIT 1
-          FOR UPDATE`,
+          LIMIT 1`,
         [tenantId, nextSupplyProfileId],
       );
       const profile = profileResult.rows[0];
@@ -2739,17 +2739,24 @@ export class ProviderSupplyService {
           ? timestamp(current.expires_at, now, true)
           : timestamp(input.expiresAt, now, true);
 
-      const revoked = await this.query<PoolGrantRow>(
+      const revoked = await this.query<PoolGrantRow & { rebound_at: string }>(
         tx,
         `UPDATE saas_platform_provider_pool_grants
-            SET status = 'revoked', revoked_at = $1, disabled_at = NULL,
-                authz_version = authz_version + 1, updated_at = $1
-          WHERE pool_id = $2 AND tenant_id = $3 AND supply_profile_id = $4
-            AND authz_version = $5
-          RETURNING ${POOL_GRANT_COLUMNS}`,
-        [nowText, poolId, tenantId, supplyProfileId, expectedAuthzVersion],
+            SET status = 'revoked', revoked_at = GREATEST(updated_at, rebind_clock.observed_at), disabled_at = NULL,
+                authz_version = authz_version + 1, updated_at = GREATEST(updated_at, rebind_clock.observed_at)
+           FROM (SELECT clock_timestamp() AS observed_at) AS rebind_clock
+          WHERE pool_id = $1 AND tenant_id = $2 AND supply_profile_id = $3
+            AND authz_version = $4
+          RETURNING ${POOL_GRANT_COLUMNS}, rebind_clock.observed_at::text AS rebound_at`,
+        [poolId, tenantId, supplyProfileId, expectedAuthzVersion],
       );
       if (!revoked.rows[0]) fail('CREDENTIAL_STATE_CONFLICT');
+      // Reuse the exact database observation for the new relationship and
+      // audit, retaining the original grant's immutable effective/evidence
+      // facts and its monotonic update floor.
+      const reboundAt = revoked.rows[0].rebound_at;
+      if (typeof reboundAt !== 'string' || !Number.isFinite(new Date(reboundAt).getTime()))
+        fail('SUPPLY_STORAGE_ERROR');
 
       const inserted = await this.query<PoolGrantRow>(
         tx,
@@ -2765,7 +2772,7 @@ export class ProviderSupplyService {
           nextSupplyProfileId,
           positiveInteger(profile.authz_version, 'SUPPLY_STORAGE_ERROR'),
           positiveInteger(pool.authz_version, 'SUPPLY_STORAGE_ERROR'),
-          nowText,
+          reboundAt,
           expiresAt,
           evidenceReference,
           evidenceSha256,
@@ -2780,7 +2787,7 @@ export class ProviderSupplyService {
           'provider_pool_grant.rebound',
           `${poolId}:${tenantId}:${supplyProfileId}->${nextPoolId}:${tenantId}:${nextSupplyProfileId}`,
           audit,
-          nowText,
+          reboundAt,
         );
       }
       return mapPoolGrant(row);

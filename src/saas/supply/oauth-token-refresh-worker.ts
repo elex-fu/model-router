@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import type { Dispatcher } from 'undici';
+import { type Dispatcher, type RequestInit as UndiciRequestInit, fetch as undiciFetch } from 'undici';
 import {
   createProviderCredentialContext,
   PROVIDER_CREDENTIAL_CONTEXT_VERSION,
@@ -1389,7 +1389,9 @@ export class PostgresOauthTokenRefreshWorkerStore {
     // resolved or established fails this attempt (retryable backoff) — never
     // a silent direct-egress fallback.
     let egressConnection: ProviderHttpPinnedConnector | null = null;
-    const baseFetch: OauthTokenRefreshFetch = this.options.fetch ?? ((url, init) => fetch(url, init));
+    const baseFetch: OauthTokenRefreshFetch =
+      this.options.fetch ??
+      (async (url, init) => (await undiciFetch(url, init as UndiciRequestInit)) as unknown as Response);
     let fetcher: OauthTokenRefreshFetch = baseFetch;
     try {
       const proxyRecord = await readEgressProxyForAccount(tx, {

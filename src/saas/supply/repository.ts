@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderCredentialEnvelope } from '../credentials/provider-crypto.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type {
   ProviderAccountListFilter,
   ProviderAccountRecord,
@@ -572,6 +573,12 @@ function dispatchBinding(row: DispatchRow, prefix: string) {
     providerId: dispatchText(row, `${prefix}_provider_id`),
     productId: dispatchText(row, `${prefix}_product_id`),
     protocol: dispatchProtocol(row[`${prefix}_protocol`]),
+    ...(row[`${prefix}_provider_protocol`] == null
+      ? {}
+      : { providerProtocol: dispatchProtocol(row[`${prefix}_provider_protocol`]) }),
+    ...(row[`${prefix}_provider_operation`] == null
+      ? {}
+      : { providerOperation: dispatchText(row, `${prefix}_provider_operation`) }),
     endpoint: dispatchText(row, `${prefix}_endpoint`),
     routeConfigId: dispatchText(row, `${prefix}_route_config_id`),
     routeConfigVersion: dispatchInteger(row, `${prefix}_route_config_version`),
@@ -893,6 +900,19 @@ function wrapperRevisionMatchesRequest(
   );
 }
 
+// Reuse the ordered scalar-lock shape already used by prepared evidence.
+// Keep the original layer order and per-layer sort/deduplication, including
+// repeated keys across different layers. The volatile lock target is not a
+// sort/group/distinct expression, so PostgreSQL evaluates it after ORDER BY.
+// No LIMIT or target-list SRF may be added. The next core/authority statements
+// retain their fresh READ COMMITTED snapshots after every lock has completed.
+// https://www.postgresql.org/docs/18/sql-select.html#SQL-SELECT-LIST
+const DISPATCH_READ_FENCE_BATCH_SQL = `
+  /* provider-supply:dispatch-read-fence-batch */
+  SELECT pg_advisory_xact_lock_shared(hashtextextended(fence.fence_key, 0))
+    FROM unnest($1::text[]) WITH ORDINALITY AS fence(fence_key, input_ordinal)
+   ORDER BY fence.input_ordinal`;
+
 /*
  * Planner pinning for the dispatch core read (R9 bench §4 P2).
  *
@@ -937,6 +957,8 @@ const DISPATCH_CORE_SQL = `
     e.product_id AS evidence_product_id,
     e.public_model AS evidence_public_model,
     e.protocol AS evidence_protocol,
+    e.provider_protocol AS evidence_provider_protocol,
+    e.provider_operation AS evidence_provider_operation,
     e.endpoint AS evidence_endpoint,
     e.route_config_id AS evidence_route_config_id,
     e.route_config_version AS evidence_route_config_version,
@@ -977,6 +999,8 @@ const DISPATCH_CORE_SQL = `
     a.provider_id AS attempt_provider_id,
     a.product_id AS attempt_product_id,
     a.protocol AS attempt_protocol,
+    a.provider_protocol AS attempt_provider_protocol,
+    a.provider_operation AS attempt_provider_operation,
     a.endpoint AS attempt_endpoint,
     a.route_config_id AS attempt_route_config_id,
     a.route_config_version AS attempt_route_config_version,
@@ -1404,6 +1428,10 @@ const PLATFORM_DISPATCH_AUTHORITY_SQL = `
     AND grant_record.effective_at <= clock_timestamp()
     AND (grant_record.expires_at IS NULL OR grant_record.expires_at > clock_timestamp())
 `;
+
+const DISPATCH_CORE_QUERY = createPreparedSqlStatement('proof-core', DISPATCH_CORE_SQL);
+const TENANT_DISPATCH_AUTHORITY_QUERY = createPreparedSqlStatement('proof-tenant', TENANT_DISPATCH_AUTHORITY_SQL);
+const PLATFORM_DISPATCH_AUTHORITY_QUERY = createPreparedSqlStatement('proof-platform', PLATFORM_DISPATCH_AUTHORITY_SQL);
 
 function repositoryError(code: string): Error & { readonly code: string } {
   return Object.assign(new Error(code), { code });
@@ -1874,7 +1902,8 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       const identityResult = await tx.query<DispatchIdentityRow>(DISPATCH_IDENTITY_SQL, [evidenceId]);
       const identity = identityResult.rows[0];
       if (!identity) return null;
-      await lockAdvisoryLayers(tx, dispatchReadLockLayers(identity), 'shared');
+      const fenceKeys = dispatchReadLockLayers(identity).flatMap((layer) => sortAndDedupeAdvisoryKeys(layer));
+      await tx.query(DISPATCH_READ_FENCE_BATCH_SQL, [fenceKeys]);
 
       // Pin the core read's join order for this statement only (see the
       // constants above): plan in milliseconds instead of seconds, then
@@ -1882,7 +1911,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       // exactly as it does today. If the core read throws, the transaction
       // rolls back and SET LOCAL reverts on its own.
       await tx.query(DISPATCH_CORE_JOIN_ORDER_PINNED_SQL);
-      const coreResult = await tx.query<DispatchRow>(DISPATCH_CORE_SQL, [evidenceId]);
+      const coreResult = await queryPreparedOrAnonymous<DispatchRow>(tx, DISPATCH_CORE_QUERY, [evidenceId]);
       await tx.query(DISPATCH_CORE_JOIN_ORDER_RESET_SQL);
       if (coreResult.rows.length !== 1) return null;
       const core = coreResult.rows[0];
@@ -1942,8 +1971,9 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
             })();
       if (authorityValues === null) return null;
 
-      const authorityResult = await tx.query<DispatchRow>(
-        evidence.accountOwnerKind === 'tenant' ? TENANT_DISPATCH_AUTHORITY_SQL : PLATFORM_DISPATCH_AUTHORITY_SQL,
+      const authorityResult = await queryPreparedOrAnonymous<DispatchRow>(
+        tx,
+        evidence.accountOwnerKind === 'tenant' ? TENANT_DISPATCH_AUTHORITY_QUERY : PLATFORM_DISPATCH_AUTHORITY_QUERY,
         authorityValues,
       );
       if (authorityResult.rows.length !== 1) return null;
@@ -2093,21 +2123,14 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
               capability.model,
               capability.endpoint,
               capability.version,
-              input.createdAt,
             ]
-          : [
-              input.id,
-              input.providerId,
-              input.productId,
-              capability.model,
-              capability.endpoint,
-              capability.version,
-              input.createdAt,
-            ];
+          : [input.id, input.providerId, input.productId, capability.model, capability.endpoint, capability.version];
+      // Both capability tables own created_at through their database default.
+      // The control-plane role may insert identity/version facts, not that clock.
       const capabilityColumns =
         input.owner.ownerKind === 'tenant'
-          ? '(tenant_id, account_id, provider_id, product_id, model, endpoint, capability_version, created_at)'
-          : '(account_id, provider_id, product_id, model, endpoint, capability_version, created_at)';
+          ? '(tenant_id, account_id, provider_id, product_id, model, endpoint, capability_version)'
+          : '(account_id, provider_id, product_id, model, endpoint, capability_version)';
       const capabilityPlaceholders = capabilityValues.map((_, index) => `$${index + 1}`).join(', ');
       await this.query(
         `INSERT INTO ${capabilityTable} ${capabilityColumns}

@@ -519,8 +519,8 @@ export class PostgresProviderQuotaSnapshotStore {
     await this.updateAccount(
       account,
       (start) => {
-        const reset = `$${start + 1}::timestamptz`;
-        const observed = `$${start + 2}::timestamptz`;
+        const reset = `$${start}::timestamptz`;
+        const observed = `$${start + 1}::timestamptz`;
         const condition = `${reset} IS NOT NULL
                 AND (claude_session_window_end IS NULL
                      OR claude_session_window_end <> ${reset}

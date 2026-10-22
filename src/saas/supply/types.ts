@@ -541,6 +541,9 @@ export interface ProviderCredentialDispatchBinding {
   readonly providerId: string;
   readonly productId: string;
   readonly protocol: ProviderCredentialDispatchProtocol;
+  /** Native route provenance from existing 029 columns; absent on legacy evidence. */
+  readonly providerProtocol?: ProviderCredentialDispatchProtocol;
+  readonly providerOperation?: string;
   readonly endpoint: string;
   readonly routeConfigId: string;
   readonly routeConfigVersion: number;

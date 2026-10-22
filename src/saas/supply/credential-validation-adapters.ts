@@ -43,10 +43,21 @@ import type { ProviderCredentialValidationJobRecord } from './types.js';
 
 export const PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS = 5_000;
 export const PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 4_096;
+/** Fixed model dispatches need room for their JSON envelope as well as output tokens. */
+export const PROVIDER_INFERENCE_VALIDATION_TIMEOUT_MS = 15_000;
+export const PROVIDER_INFERENCE_VALIDATION_MAX_RESPONSE_BYTES = 16_384;
+/**
+ * Kimi Code attaches a thinking signature even to an eight-token response.
+ * A real valid probe carried 13,385 decoded bytes, including a 12,946-character
+ * signature. Keep a finite envelope allowance independent of max_tokens.
+ * The 20s deadline leaves completion-write time inside the default 30s lease.
+ */
+export const KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS = 20_000;
+export const KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
 /**
  * OAuth onboarding probes are real model dispatches, not metadata reads.
  * They keep the same bounded posture but need a longer deadline and a larger
- * envelope budget than the API-key probes; the challenge must survive a
+ * envelope budget than metadata probes; the challenge must survive a
  * normal Responses envelope with usage accounting.
  *
  * Keep this below the worker's 30s default lease TTL: the completion write
@@ -136,6 +147,10 @@ interface FixedProviderValidationAdapter {
   readonly url: string;
   readonly probe: CredentialValidationProbeKind;
   readonly oauthProvider?: OAuthValidationProvider;
+  readonly limits?: {
+    readonly timeoutMs: number;
+    readonly maxResponseBytes: number;
+  };
 }
 
 /*
@@ -271,6 +286,10 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
     adapterId: 'kimi-code-messages-v1',
     url: 'https://api.kimi.com/coding/v1/messages',
     probe: 'messages',
+    limits: Object.freeze({
+      timeoutMs: KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS,
+      maxResponseBytes: KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
+    }),
   }),
   Object.freeze({
     providerId: 'kimi',
@@ -281,6 +300,10 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
     adapterId: 'kimi-code-global-messages-v1',
     url: 'https://api.kimi.ai/coding/v1/messages',
     probe: 'messages',
+    limits: Object.freeze({
+      timeoutMs: KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS,
+      maxResponseBytes: KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
+    }),
   }),
   Object.freeze({
     providerId: 'deepseek',
@@ -787,6 +810,24 @@ export async function validateProviderCredential(
   const url = canonicalAdapterUrl(adapter.url);
   if (!url) return failed('adapter_unsupported', false, adapter.adapterId, null, 0);
   const oauth = adapter.probe === 'oauth-responses';
+  // Only protocol-owned fixed adapters select an expanded budget. Custom
+  // targets retain the default bounds in their separately pinned transport.
+  const limits =
+    adapter.limits ??
+    (oauth
+      ? {
+          timeoutMs: PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
+          maxResponseBytes: PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES,
+        }
+      : adapter.probe === 'messages' || adapter.probe === 'chat'
+        ? {
+            timeoutMs: PROVIDER_INFERENCE_VALIDATION_TIMEOUT_MS,
+            maxResponseBytes: PROVIDER_INFERENCE_VALIDATION_MAX_RESPONSE_BYTES,
+          }
+        : {
+            timeoutMs: PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS,
+            maxResponseBytes: PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
+          });
   const probe: CredentialValidationProbe = {
     adapterId: adapter.adapterId,
     kind: adapter.probe,
@@ -797,12 +838,7 @@ export async function validateProviderCredential(
     // account/credential are only marked verified when the upstream answer
     // matches; a cached or fixed "OK" body cannot satisfy it.
     ...(oauth ? { challenge: randomInt(100_000, 1_000_000).toString() } : {}),
-    ...(oauth
-      ? {
-          timeoutMs: PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
-          maxResponseBytes: PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES,
-        }
-      : {}),
+    ...limits,
   };
   const init = createCredentialValidationProbeRequest(probe, secret);
   if (!init) return failed('credential_format_invalid', false, adapter.adapterId, null, 0);

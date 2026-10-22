@@ -170,6 +170,8 @@ interface FakeWorkerState {
 
 class FakeValidationDatabase implements SaasDatabase {
   readonly state: FakeWorkerState;
+  egressProxyRow: Record<string, unknown> | null = null;
+  egressLookups = 0;
   decryptCalls = 0;
   /** Owner queue polled per claim cycle, in worker poll order (tenant first). */
   readonly candidateQueries: string[] = [];
@@ -225,8 +227,25 @@ class FakeValidationDatabase implements SaasDatabase {
 
   private execute(sql: string, values: readonly unknown[]): unknown[] {
     const statement = sql.replace(/\s+/g, ' ').trim();
+    if (statement.includes('JOIN saas_egress_proxies AS proxy')) {
+      this.egressLookups += 1;
+      assert.ok(
+        statement.includes(this.owner === 'tenant' ? 'account.tenant_id = $1 AND account.id = $2' : 'account.id = $1'),
+      );
+      return this.egressProxyRow === null ? [] : [this.egressProxyRow];
+    }
     if (statement === 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE') return [];
     if (statement.startsWith('SELECT pg_advisory_xact_lock')) return [];
+    if (
+      /^UPDATE saas_(tenant|platform)_provider_credential_validation_jobs SET status = 'queued', lease_until = NULL/.test(
+        statement,
+      )
+    ) {
+      if (this.state.jobStatus !== 'leased' || this.state.leaseGeneration !== Number(values[3])) return [];
+      this.state.jobStatus = 'queued';
+      this.state.leaseGeneration += 1;
+      return [{ id: 'job-a' }];
+    }
     if (
       statement.startsWith('SELECT id, tenant_id, account_id, credential_id, credential_version, provider_id') &&
       statement.includes('WHERE id = $1')
@@ -310,21 +329,22 @@ class FakeValidationDatabase implements SaasDatabase {
       return this.state.rightsCurrent ? [{ rights_id: 'rights-a' }] : [];
     }
     if (statement.includes('JOIN saas_tenant_provider_account_capabilities AS binding')) {
-      assert.match(statement, /capability\.protocol = \$8/);
+      assert.match(statement, /capability\.protocol = ANY\(\$8::text\[\]\)/);
       assert.match(statement, /capability\.support_level = 'supported'/);
       assert.match(statement, /capability\.validation_state = 'verified'/);
       assert.match(statement, /newer\.version > capability\.version/);
       assert.equal(values[4], this.target.model);
       assert.equal(values[5], this.target.endpoint);
       assert.equal(values[6], 1);
-      assert.ok(typeof values[7] === 'string');
-      this.state.requestedCapabilityProtocols.push(values[7]);
+      const protocols = values[7];
+      assert.ok(Array.isArray(protocols) && protocols.every((protocol) => typeof protocol === 'string'));
+      this.state.requestedCapabilityProtocols.push(protocols[0]);
       const digestMatches = values.length === 8 || values[8] === this.state.capabilityEvidenceSha256;
       if (values.length > 8) {
         assert.match(statement, /capability\.evidence_sha256 = \$9/);
         assert.match(statement, /\$10::timestamptz > clock_timestamp\(\)/);
       }
-      return this.state.capabilityCurrent && this.state.capabilityProtocol === values[7] && digestMatches
+      return this.state.capabilityCurrent && protocols.includes(this.state.capabilityProtocol) && digestMatches
         ? [{ version: 1 }]
         : [];
     }
@@ -483,7 +503,7 @@ class FakeValidationDatabase implements SaasDatabase {
     }
     if (statement.includes('JOIN saas_platform_provider_account_capabilities AS binding')) {
       assert.match(statement, /binding\.account_id = \$3/);
-      assert.match(statement, /capability\.protocol = \$7/);
+      assert.match(statement, /capability\.protocol = ANY\(\$7::text\[\]\)/);
       assert.match(statement, /capability\.support_level = 'supported'/);
       assert.match(statement, /capability\.validation_state = 'verified'/);
       assert.match(statement, /newer\.version > capability\.version/);
@@ -491,14 +511,15 @@ class FakeValidationDatabase implements SaasDatabase {
       assert.equal(values[3], this.target.model);
       assert.equal(values[4], this.target.endpoint);
       assert.equal(values[5], 1);
-      assert.ok(typeof values[6] === 'string');
-      this.state.requestedCapabilityProtocols.push(values[6]);
+      const protocols = values[6];
+      assert.ok(Array.isArray(protocols) && protocols.every((protocol) => typeof protocol === 'string'));
+      this.state.requestedCapabilityProtocols.push(protocols[0]);
       const digestMatches = values.length === 7 || values[7] === this.state.capabilityEvidenceSha256;
       if (values.length > 7) {
         assert.match(statement, /capability\.evidence_sha256 = \$8/);
         assert.match(statement, /\$9::timestamptz > clock_timestamp\(\)/);
       }
-      return this.state.capabilityCurrent && this.state.capabilityProtocol === values[6] && digestMatches
+      return this.state.capabilityCurrent && protocols.includes(this.state.capabilityProtocol) && digestMatches
         ? [{ version: 1 }]
         : [];
     }
@@ -769,6 +790,60 @@ async function setupWorker(
   return { database, worker };
 }
 
+test('fixed Kimi validation uses its account proxy and refuses a direct fallback when the proxy fails', async (t) => {
+  for (const failProxy of [false, true]) {
+    await t.test(failProxy ? 'failed proxy' : 'bound proxy', async () => {
+      const dispatcher = { test: 'validation proxy' } as never;
+      let fetches = 0;
+      let destroys = 0;
+      const target = messagesTargets[0];
+      const { database, worker } = await setupWorker(
+        async (_url, init) => {
+          fetches += 1;
+          assert.equal((init as unknown as { dispatcher: unknown }).dispatcher, dispatcher);
+          return messagesResponse(target.model);
+        },
+        undefined,
+        target,
+        {
+          createEgressConnection: async () => {
+            if (failProxy) throw new Error('account proxy unavailable');
+            return {
+              dispatcher,
+              close: async () => {},
+              destroy: async () => {
+                destroys += 1;
+              },
+            };
+          },
+        },
+      );
+      database.egressProxyRow = {
+        id: 'proxy-a',
+        name: 'fixture proxy',
+        protocol: 'http',
+        host: 'proxy.example',
+        port: 8080,
+        auth_sealed_envelope: null,
+        status: 'active',
+        expires_at: null,
+        fallback_mode: 'none',
+        backup_proxy_id: null,
+        last_probe_at: null,
+        last_probe_latency_ms: null,
+        last_probe_ip: null,
+        last_probe_quality: null,
+      };
+      assert.equal(await worker.runOnce(), 'processed');
+      assert.equal(database.egressLookups, 1);
+      assert.equal(fetches, failProxy ? 0 : 1);
+      assert.equal(destroys, failProxy ? 0 : 1);
+      assert.equal(database.state.accountValidationState, failProxy ? 'unverified' : 'verified');
+      await worker.close();
+    });
+  }
+});
+
 test('opens a persistence-sealed tenant BYOK envelope in both validation worker and gateway', async () => {
   const repository = new FakeProviderSupplyRepository();
   const kms = new ContextBoundTestKms();
@@ -977,6 +1052,73 @@ test('Messages credential worker preserves KMS identity and selects only current
       // FakeValidationDatabase rejects unexpected SQL, including any writes to
       // the catalog capability or rights tables. Only credential health changes.
     });
+  }
+});
+
+test('fixed worker accepts native and legacy wire-family names in both owner queues', async (t) => {
+  for (const owner of ['tenant', 'platform'] as const) {
+    for (const target of [chatTarget, ...messagesTargets]) {
+      const nativeProtocol = target.endpoint === 'messages' ? 'anthropic' : 'openai';
+      for (const protocol of [nativeProtocol, `${nativeProtocol}-compatible`]) {
+        await t.test(`${owner}: ${target.productId}: ${protocol}`, async () => {
+          let fetches = 0;
+          const { database, worker } = await setupWorker(
+            async () => {
+              fetches += 1;
+              return target.endpoint === 'messages'
+                ? messagesResponse(target.model)
+                : new Response(null, { status: 200 });
+            },
+            undefined,
+            target,
+            {},
+            Buffer.from('provider-test-token'),
+            owner,
+          );
+          t.after(() => worker.close());
+          database.state.capabilityProtocol = protocol;
+          assert.equal(await worker.runOnce(), 'processed');
+          assert.equal(fetches, 1);
+          assert.equal(database.decryptCalls, 1);
+          assert.equal(database.state.jobStatus, 'verified');
+          assert.equal(database.state.requestedCapabilityProtocols.length, 3);
+          assert.equal(database.state.capabilityProtocol, protocol, 'catalog metadata is never rewritten');
+        });
+      }
+    }
+  }
+});
+
+test('native aliases retain wire-family fencing before dispatch and completion', async (t) => {
+  for (const owner of ['tenant', 'platform'] as const) {
+    for (const stage of ['before KMS', 'after KMS', 'during probe'] as const) {
+      await t.test(`${owner}: ${stage}`, async () => {
+        let fetches = 0;
+        const { database, worker } = await setupWorker(
+          async () => {
+            fetches += 1;
+            database.state.capabilityProtocol = 'openai';
+            return messagesResponse(messagesTargets[0].model);
+          },
+          stage === 'after KMS'
+            ? (current) => {
+                current.state.capabilityProtocol = 'openai';
+              }
+            : undefined,
+          messagesTargets[0],
+          {},
+          Buffer.from('provider-test-token'),
+          owner,
+        );
+        t.after(() => worker.close());
+        database.state.capabilityProtocol = stage === 'before KMS' ? 'openai' : 'anthropic';
+        assert.equal(await worker.runOnce(), 'stale');
+        assert.equal(fetches, stage === 'during probe' ? 1 : 0);
+        assert.equal(database.decryptCalls, stage === 'before KMS' ? 0 : 1);
+        assert.equal(database.state.jobStatus, 'cancelled');
+        assert.deepEqual(database.state.healthWrites, []);
+      });
+    }
   }
 });
 

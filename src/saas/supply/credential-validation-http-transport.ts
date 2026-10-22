@@ -9,8 +9,10 @@ import {
   ProviderHttpAddressPolicyError,
   type ProviderHttpAddressResolver,
   type ProviderHttpEgressAllowlist,
+  type ProviderHttpEgressProxyDescriptor,
   type ProviderHttpPinnedConnector,
   type ProviderHttpTestAddressCapability,
+  resolveEgressProxyTarget,
   resolveProviderHttpAddresses,
   selectPinnedProviderAddress,
 } from '../gateway/provider-http-address.js';
@@ -94,8 +96,8 @@ function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 
 /**
  * Custom validation always uses the local Undici implementation with a private
- * per-probe pinned Agent. There is deliberately no fetch/dispatcher/proxy/header
- * injection seam in production and no redirects or ambient client identity.
+ * per-probe pinned Agent, carrying the same account proxy as fixed probes
+ * and dispatch. No redirects or ambient client identity are forwarded.
  */
 export class CredentialValidationHttpTransport {
   private readonly halt = new AbortController();
@@ -161,6 +163,7 @@ export class CredentialValidationHttpTransport {
   async prepare(
     binding: Readonly<ApprovedCredentialValidationTarget>,
     signal?: AbortSignal,
+    proxy?: ProviderHttpEgressProxyDescriptor,
   ): Promise<PreparedCredentialValidationProbe> {
     this.checkOpen(signal);
     if (
@@ -205,7 +208,21 @@ export class CredentialValidationHttpTransport {
         this.testOptions && isLoopbackProviderAddress(hostname)
           ? createPinnedProviderHttpTestConnectorFactory(this.testOptions.addressCapability)
           : createPinnedProviderHttpConnector;
-      state.connector = connectorFactory({ hostname, port: Number(url.port || 443), ...address });
+      const proxyTarget =
+        proxy === undefined
+          ? undefined
+          : await resolveEgressProxyTarget(proxy, {
+              resolveAddresses: this.resolver,
+              signal: controller.signal,
+              ...(this.testOptions === undefined ? {} : { testCapability: this.testOptions.addressCapability }),
+              ...(this.egressAllowlist === undefined ? {} : { egressAllowlist: this.egressAllowlist }),
+            });
+      state.connector = connectorFactory({
+        hostname,
+        port: Number(url.port || 443),
+        ...address,
+        ...(proxyTarget === undefined ? {} : { proxy: proxyTarget }),
+      });
       this.stopDeadline(state);
       const plan = Object.freeze(Object.create(null)) as PreparedCredentialValidationProbe;
       this.plans.set(plan, state);

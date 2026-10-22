@@ -7,9 +7,8 @@
  * (owner-scoped account tables, SKIP LOCKED claim whose attempt stamp is the
  * lease, verified-current credential resolution, KMS decrypt-only unsealing).
  *
- * Differences from the opencode-go store, all forced by the two-provider
- * category shape:
- * - the due scan covers BOTH providers (zhipu, minimax) in one claim round,
+ * The existing account snapshot authority is shared by all three providers:
+ * - the due scan covers zhipu, minimax, and Kimi Coding in one claim round,
  *   filtered on provider_id + credential_type 'api-key' + the provider's
  *   account_mode column = 'coding' (payg accounts have no rolling-window
  *   quota endpoint and are never claimed);
@@ -17,11 +16,13 @@
  *   the SQL is composed from a whitelisted column prefix, never from
  *   caller-supplied strings;
  * - no fixed product binding: zhipu has two products (payg + coding), and
- *   the account's product choice carries the inference-host distinction.
+ *   the account's product choice carries the inference-host distinction. Kimi
+ *   Coding is selected by the catalog products, without a redundant mode flag.
  *
  * The snapshot is a scheduling signal only; it never enters the billing path
  * (093/099/108 quota-snapshot precedent). A failed attempt advances the
- * horizon but deliberately leaves the last observed windows in place: a
+ * horizon and attempt stamp while preserving the successful observation stamp
+ * and last observed windows: a
  * transient upstream failure must not erase real scheduling state.
  */
 
@@ -37,7 +38,20 @@ import {
 } from '../credentials/provider-crypto.js';
 import type { SaasDatabase } from '../db/index.js';
 import { MINIMAX_PROVIDER_ID, ZHIPU_PROVIDER_ID } from '../gateway/cn-providers/catalog-identity.js';
-import type { CnQuotaAccountRef, CnQuotaFailure, CnQuotaSnapshot, CnQuotaStore } from './cn-providers-quota-worker.js';
+import { KIMI_CODING_PRODUCT_IDS, KIMI_CODING_PROVIDER_ID } from '../gateway/cn-providers/quota.js';
+import type { ProviderHttpEgressAllowlist } from '../gateway/provider-http-address.js';
+import {
+  type AccountOutboundConnectionFactory,
+  type AccountOutboundFetch,
+  withAccountOutbound,
+} from './account-outbound.js';
+import type {
+  CnQuotaAccountRef,
+  CnQuotaFailure,
+  CnQuotaFetch,
+  CnQuotaSnapshot,
+  CnQuotaStore,
+} from './cn-providers-quota-worker.js';
 
 export class CnProvidersQuotaStoreError extends Error {
   readonly code = 'CN_QUOTA_STORE_UNAVAILABLE' as const;
@@ -110,8 +124,12 @@ const PLATFORM_OWNER_SCOPE: CnQuotaOwnerScope = Object.freeze({
 });
 const CN_QUOTA_OWNER_SCOPES: readonly CnQuotaOwnerScope[] = Object.freeze([TENANT_OWNER_SCOPE, PLATFORM_OWNER_SCOPE]);
 
-/** The two provider ids the due scan claims for (compile-time constant). */
-const CN_QUOTA_PROVIDER_IDS_COLUMN: readonly string[] = Object.freeze([ZHIPU_PROVIDER_ID, MINIMAX_PROVIDER_ID]);
+/** Provider ids the due scan claims for (compile-time constant). */
+const CN_QUOTA_PROVIDER_IDS_COLUMN: readonly string[] = Object.freeze([
+  ZHIPU_PROVIDER_ID,
+  MINIMAX_PROVIDER_ID,
+  KIMI_CODING_PROVIDER_ID,
+]);
 
 function scopeFor(ownerKind: string): CnQuotaOwnerScope {
   if (ownerKind === 'tenant') return TENANT_OWNER_SCOPE;
@@ -119,11 +137,20 @@ function scopeFor(ownerKind: string): CnQuotaOwnerScope {
   storeUnavailable();
 }
 
-/** The whitelisted per-provider column prefix ('zhipu_' | 'minimax_'). */
-function columnPrefixFor(providerId: string): 'zhipu_' | 'minimax_' {
+/** Compile-time whitelist; no caller text enters a SQL identifier. */
+function columnPrefixFor(providerId: string): 'zhipu_' | 'minimax_' | 'kimi_' {
   if (providerId === ZHIPU_PROVIDER_ID) return 'zhipu_';
   if (providerId === MINIMAX_PROVIDER_ID) return 'minimax_';
+  if (providerId === KIMI_CODING_PROVIDER_ID) return 'kimi_';
   storeUnavailable();
+}
+
+/** Kimi's catalog product fixes the subscription plan; no redundant mode flag. */
+function codingAccountPredicate(providerId: string, alias: string): string {
+  if (providerId === KIMI_CODING_PROVIDER_ID) {
+    return `${alias}.product_id IN ('kimi-code', 'kimi-code-global')`;
+  }
+  return `${alias}.${columnPrefixFor(providerId)}account_mode = 'coding'`;
 }
 
 function accountPredicate(account: CnQuotaAccountRef, next: number): { sql: string; values: unknown[] } {
@@ -139,6 +166,8 @@ interface ClaimedAccountRow {
   tenant_id?: string;
   id: string;
   provider_id: string;
+  product_id?: string;
+  usage_failure_count?: number | string | null;
 }
 
 interface AccountBindingRow {
@@ -171,6 +200,8 @@ interface LockedVersionRow {
 export interface PostgresCnProvidersQuotaStoreOptions {
   readonly deployment: string;
   readonly environment: string;
+  readonly egressAllowlist?: ProviderHttpEgressAllowlist;
+  readonly createEgressConnection?: AccountOutboundConnectionFactory;
 }
 
 /**
@@ -223,22 +254,22 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
         const duePredicate = `
             AND claim.status = 'active' AND claim.validation_state = 'verified'
             AND claim.provider_id = $1 AND claim.credential_type = 'api-key'
-            AND claim.${prefix}account_mode = 'coding'
+            AND ${codingAccountPredicate(providerId, 'claim')}
             AND (claim.${prefix}usage_next_due_at IS NULL
               OR claim.${prefix}usage_next_due_at <= $2::timestamptz)
-            AND (claim.${prefix}usage_updated_at IS NULL
-              OR claim.${prefix}usage_updated_at <= $3::timestamptz)
+            AND (claim.${prefix}usage_attempted_at IS NULL
+              OR claim.${prefix}usage_attempted_at <= $3::timestamptz)
             AND (claim.${prefix}rate_limited_until IS NULL
               OR claim.${prefix}rate_limited_until <= $2::timestamptz)`;
         const claimTarget = scope.ownerKind === 'tenant' ? '(account.tenant_id, account.id)' : 'account.id';
         const claimSource = scope.ownerKind === 'tenant' ? 'claim.tenant_id, claim.id' : 'claim.id';
         const returning =
           scope.ownerKind === 'tenant'
-            ? 'account.tenant_id, account.id, account.provider_id'
-            : 'account.id, account.provider_id';
+            ? 'account.tenant_id, account.id, account.provider_id, account.product_id'
+            : 'account.id, account.provider_id, account.product_id';
         const rows = await this.query<ClaimedAccountRow>(
           `UPDATE ${scope.accounts} AS account
-             SET ${prefix}usage_updated_at = $2::timestamptz, updated_at = clock_timestamp()
+             SET ${prefix}usage_attempted_at = $2::timestamptz, updated_at = clock_timestamp()
            WHERE ${claimTarget} IN (
                  SELECT ${claimSource}
                    FROM ${scope.accounts} AS claim
@@ -246,7 +277,7 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
                   ORDER BY claim.${prefix}usage_next_due_at ASC NULLS FIRST, claim.id
                   LIMIT $4::int
                   FOR UPDATE SKIP LOCKED)
-           RETURNING ${returning}`,
+           RETURNING ${returning}, account.${prefix}usage_failure_count AS usage_failure_count`,
           [providerId, now, debounceCutoff, remaining],
         );
         for (const row of rows) {
@@ -256,6 +287,10 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
               tenantId: scope.ownerKind === 'tenant' ? safeText(row.tenant_id) : null,
               accountId: safeText(row.id),
               providerId: safeText(row.provider_id),
+              ...(row.provider_id === KIMI_CODING_PROVIDER_ID ? { productId: safeText(row.product_id) } : {}),
+              ...(row.usage_failure_count === undefined
+                ? {}
+                : { failureCount: nonNegativeInteger(row.usage_failure_count ?? 0) }),
             }),
           );
         }
@@ -272,10 +307,14 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
    * null when no verified credential is available; the callback's result
    * (and errors) pass through unchanged.
    */
-  async withUnsealedApiKey<T>(account: CnQuotaAccountRef, callback: (secret: Buffer) => Promise<T>): Promise<T | null> {
+  async withUnsealedApiKey<T>(
+    account: CnQuotaAccountRef,
+    callback: (secret: Buffer, fetcher?: CnQuotaFetch) => Promise<T>,
+    fetcher?: CnQuotaFetch,
+  ): Promise<T | null> {
     if (!account || typeof account !== 'object' || typeof callback !== 'function') storeUnavailable();
     const scope = scopeFor(account.ownerKind);
-    const prefix = columnPrefixFor(account.providerId);
+    columnPrefixFor(account.providerId);
     const predicate = accountPredicate(account, 1);
     const tenantColumn = scope.ownerKind === 'tenant' ? 'account.tenant_id, ' : '';
     const rows = await this.query<AccountBindingRow>(
@@ -285,7 +324,7 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
         WHERE account.status = 'active' AND account.validation_state = 'verified'
           AND account.provider_id = $${predicate.values.length + 1}
           AND account.credential_type = 'api-key'
-          AND account.${prefix}account_mode = 'coding'
+          AND ${codingAccountPredicate(account.providerId, 'account')}
           AND ${predicate.sql}
         LIMIT 1`,
       [...predicate.values, account.providerId],
@@ -294,6 +333,7 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
     if (!row) return null;
     const providerId = safeText(row.provider_id);
     const productId = safeText(row.product_id);
+    if (providerId === KIMI_CODING_PROVIDER_ID && !KIMI_CODING_PRODUCT_IDS.includes(productId)) return null;
     const credentialType = safeText(row.credential_type);
     const purpose = safeText(row.purpose);
     const accountId = safeText(row.id);
@@ -429,10 +469,23 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
     let result: T | undefined;
     let invoked = false;
     try {
-      await withUnsealedProviderCredential(envelope, context, this.kms, async (secret) => {
-        invoked = true;
-        result = await callback(secret);
-      });
+      await withAccountOutbound(
+        this.database,
+        this.kms,
+        account,
+        {
+          ...this.options,
+          ...(fetcher === undefined
+            ? {}
+            : { fetch: ((url, init) => fetcher(new URL(url), init)) as AccountOutboundFetch }),
+        },
+        async (outbound) => {
+          await withUnsealedProviderCredential(envelope, context, this.kms, async (secret) => {
+            invoked = true;
+            result = await callback(secret, outbound.fetch);
+          });
+        },
+      );
     } catch (error) {
       if (!invoked) return null;
       throw error;
@@ -455,6 +508,18 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
               ${prefix}usage_next_due_at = $${predicate.values.length + 6},
               ${prefix}usage_failure_count = 0,
               ${prefix}rate_limited_until = NULL,
+              ${
+                account.providerId === KIMI_CODING_PROVIDER_ID
+                  ? `scheduling_threshold_pause_until = CASE
+                WHEN scheduling_threshold_pause_reason->>'source' = 'account_scheduling_threshold'
+                 AND scheduling_threshold_pause_reason->>'platform' = 'kimi' THEN NULL
+                ELSE scheduling_threshold_pause_until END,
+              scheduling_threshold_pause_reason = CASE
+                WHEN scheduling_threshold_pause_reason->>'source' = 'account_scheduling_threshold'
+                 AND scheduling_threshold_pause_reason->>'platform' = 'kimi' THEN NULL
+                ELSE scheduling_threshold_pause_reason END,`
+                  : ''
+              }
               updated_at = clock_timestamp()
         WHERE ${predicate.sql}`,
       [
@@ -476,7 +541,7 @@ export class PostgresCnProvidersQuotaStore implements CnQuotaStore {
     const predicate = accountPredicate(account, 1);
     await this.query(
       `UPDATE ${scope.accounts}
-          SET ${prefix}usage_updated_at = $${predicate.values.length + 1},
+          SET ${prefix}usage_attempted_at = $${predicate.values.length + 1},
               ${prefix}usage_next_due_at = $${predicate.values.length + 2},
               ${prefix}usage_failure_count = $${predicate.values.length + 3},
               updated_at = clock_timestamp()

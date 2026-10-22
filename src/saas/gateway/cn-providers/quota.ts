@@ -37,6 +37,12 @@
 
 import { MINIMAX_QUOTA_URL, MINIMAX_QUOTA_URL_INTL, ZHIPU_QUOTA_URL, ZHIPU_QUOTA_URL_INTL } from './constants.js';
 
+export const KIMI_CODING_PROVIDER_ID = 'kimi';
+export const KIMI_CODING_PRODUCT_IDS: readonly string[] = Object.freeze(['kimi-code', 'kimi-code-global']);
+/** Coding and Anthropic inference bases share this quota endpoint. */
+export const KIMI_CODING_QUOTA_URL = 'https://api.kimi.com/coding/v1/usages';
+export const KIMI_CODING_QUOTA_URL_GLOBAL = 'https://api.kimi.ai/coding/v1/usages';
+
 export type CnQuotaWindow = '5h' | 'weekly';
 
 /** One upstream-observed rolling-window tier; NULL fields were absent upstream, never guessed. */
@@ -96,7 +102,46 @@ function msToRfc3339(epoch: number): string {
   if (epoch <= 0) return '';
   // Seconds (< 1e12) vs milliseconds, the sub2api heuristic.
   const ms = epoch < 1_000_000_000_000 ? epoch * 1000 : epoch;
-  return new Date(ms).toISOString();
+  return Number.isFinite(new Date(ms).getTime()) ? new Date(ms).toISOString() : '';
+}
+
+/**
+ * Kimi Coding /usages: the first usable limits[].detail is the rolling 5h
+ * window; top-level usage is weekly. A missing/invalid count is unknown,
+ * never zero usage. Numeric strings are used by the upstream as well.
+ */
+export function parseKimiQuotaResponseBody(bytes: Uint8Array): CnQuotaParse {
+  let body: unknown;
+  try {
+    body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return { state: 'error', errorCode: 'response_invalid', message: 'body is not valid JSON' };
+  }
+  if (!isRecord(body)) return { state: 'error', errorCode: 'response_invalid', message: 'body is not an object' };
+  const tier = (raw: unknown, window: CnQuotaWindow): CnQuotaTierSnapshot | null => {
+    if (!isRecord(raw)) return null;
+    const count = (value: unknown): number | null =>
+      typeof value === 'string' && value.trim() === '' ? null : parseF64(value);
+    const limit = count(raw.limit);
+    const remaining = count(raw.remaining);
+    if (limit === null || limit <= 0 || remaining === null || remaining < 0) return null;
+    const usedPercent = Math.max(0, ((limit - remaining) / limit) * 100);
+    if (!Number.isFinite(usedPercent)) return null;
+    return { window, usedPercent, resetAt: cnNormalizeResetTime(raw.resetTime) };
+  };
+  const tiers: CnQuotaTierSnapshot[] = [];
+  if (Array.isArray(body.limits)) {
+    for (const raw of body.limits) {
+      const fiveHour = tier(isRecord(raw) ? raw.detail : null, '5h');
+      if (fiveHour !== null) {
+        tiers.push(fiveHour);
+        break;
+      }
+    }
+  }
+  const weekly = tier(body.usage, 'weekly');
+  if (weekly !== null) tiers.push(weekly);
+  return { state: 'ok', result: { tiers, planLevel: '' } };
 }
 
 /** Zhipu unit classifier: 3 = 5h rolling window, 6 = weekly (sub2api issue #3036). */

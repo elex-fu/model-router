@@ -96,7 +96,7 @@ test('readDueAccounts claims due coding accounts per provider with the SKIP LOCK
   // The claim loop scans tenant scope first, then platform.
   assert.deepEqual(refs, [MINIMAX_ACCOUNT, ZHIPU_ACCOUNT]);
   // One claim statement per (owner scope × provider).
-  assert.equal(state.updates.length, 4);
+  assert.equal(state.updates.length, 6);
   for (const claim of state.updates) {
     assert.match(claim.sql, /FOR UPDATE SKIP LOCKED/);
     assert.match(claim.sql, /claim\.credential_type = 'api-key'/);
@@ -105,15 +105,42 @@ test('readDueAccounts claims due coding accounts per provider with the SKIP LOCK
     // zhipu and minimax claims each carry their own columns.
     if (claim.values[0] === 'zhipu') {
       assert.match(claim.sql, /claim\.zhipu_account_mode = 'coding'/);
-      assert.match(claim.sql, /SET zhipu_usage_updated_at = \$2::timestamptz/);
+      assert.match(claim.sql, /SET zhipu_usage_attempted_at = \$2::timestamptz/);
       assert.doesNotMatch(claim.sql, /minimax_/);
-    } else {
+    } else if (claim.values[0] === 'minimax') {
       assert.equal(claim.values[0], 'minimax');
       assert.match(claim.sql, /claim\.minimax_account_mode = 'coding'/);
-      assert.match(claim.sql, /SET minimax_usage_updated_at = \$2::timestamptz/);
+      assert.match(claim.sql, /SET minimax_usage_attempted_at = \$2::timestamptz/);
       assert.doesNotMatch(claim.sql, /zhipu_/);
+    } else {
+      assert.equal(claim.values[0], 'kimi');
+      assert.match(claim.sql, /claim\.product_id IN \('kimi-code', 'kimi-code-global'\)/);
+      assert.match(claim.sql, /SET kimi_usage_attempted_at = \$2::timestamptz/);
+      assert.doesNotMatch(claim.sql, /kimi_account_mode|zhipu_|minimax_/);
     }
+    assert.doesNotMatch(claim.sql, /SET \w+_usage_updated_at/);
   }
+});
+
+test('Kimi claims retain the catalog product so the global Coding host can be selected', async () => {
+  const state = fakeState({
+    claimRows: [{ owner: 'platform', id: 'account-kimi', provider_id: 'kimi', product_id: 'kimi-code-global' }],
+  });
+  const accounts = await quotaStore(new FakeDatabase(state)).readDueAccounts({
+    nowMs: 1_000_000,
+    debounceMs: 60_000,
+    intervalMs: 900_000,
+    limit: 5,
+  });
+  assert.deepEqual(accounts, [
+    {
+      ownerKind: 'platform',
+      tenantId: null,
+      accountId: 'account-kimi',
+      providerId: 'kimi',
+      productId: 'kimi-code-global',
+    },
+  ]);
 });
 
 test('writeQuotaSnapshot/writeQuotaFailure/markRateLimited target the per-provider columns', async () => {
@@ -144,12 +171,37 @@ test('writeQuotaSnapshot/writeQuotaFailure/markRateLimited target the per-provid
   assert.doesNotMatch(snapshot, /minimax_/);
 
   const failure = state.updates[1]?.sql ?? '';
-  assert.match(failure, /SET minimax_usage_updated_at = \$3,/);
+  assert.match(failure, /SET minimax_usage_attempted_at = \$3,/);
   assert.match(failure, /minimax_usage_failure_count = \$5,/);
-  assert.doesNotMatch(failure, /zhipu_/);
+  assert.doesNotMatch(failure, /zhipu_|usage_updated_at|5h_used_percent|weekly_used_percent/);
 
   const rateLimited = state.updates[2]?.sql ?? '';
   assert.match(rateLimited, /SET minimax_rate_limited_until = \$3/);
+});
+
+test('Kimi snapshots clear only a Kimi threshold pause so a fresh reset can recover the account', async () => {
+  const state = fakeState();
+  await quotaStore(new FakeDatabase(state)).writeQuotaSnapshot(
+    {
+      ownerKind: 'platform',
+      tenantId: null,
+      accountId: 'kimi-account',
+      providerId: 'kimi',
+    },
+    {
+      fiveHour: { window: '5h', usedPercent: 0, resetAt: '2026-10-22T12:00:00.000Z' },
+      weekly: null,
+      fetchedAtMs: 1_000_000,
+      nextDueAtMs: 1_900_000,
+    },
+  );
+  const snapshot = state.updates[0];
+  assert.ok(snapshot);
+  assert.match(snapshot.sql, /kimi_usage_updated_at = \$6/);
+  assert.match(snapshot.sql, /scheduling_threshold_pause_reason->>'source' = 'account_scheduling_threshold'/);
+  assert.match(snapshot.sql, /scheduling_threshold_pause_reason->>'platform' = 'kimi' THEN NULL/);
+  assert.match(snapshot.sql, /ELSE scheduling_threshold_pause_until END/);
+  assert.deepEqual(snapshot.values.slice(1, 5), [0, '2026-10-22T12:00:00.000Z', null, null]);
 });
 
 test('an unknown provider id fails closed at the store boundary', async () => {

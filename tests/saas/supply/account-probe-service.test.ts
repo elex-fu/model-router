@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { test } from 'node:test';
 import {
   createProviderCredentialContext,
@@ -161,6 +162,7 @@ async function harness(input: {
   readonly proxy?: Row | null;
   readonly secret: string;
   readonly response?: Response | Error;
+  readonly responses?: readonly Response[];
   readonly egressAllowlist?: ProviderHttpEgressAllowlist;
 }): Harness {
   const state: FakeDatabaseState = {
@@ -193,7 +195,7 @@ async function harness(input: {
     fetch: async (url, init) => {
       requests.push({ url, init });
       if (response instanceof Error) throw response;
-      return response;
+      return input.responses?.[requests.length - 1] ?? response;
     },
     createConnection: async (proxy, init) => {
       connections.push(proxy.url);
@@ -697,4 +699,45 @@ test('vertex probe exchanges a fresh JWT when the envelope token is stale or abs
   assert.equal(invalidMaterial.category, 'error');
   assert.equal(invalidMaterial.reason, 'credential_invalid');
   assert.equal(notSa.requests.length, 0);
+});
+
+test('a cold Vertex token exchange and inference probe share the bound account dispatcher', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const h = await harness({
+    account: tenantAccountRow({
+      provider_id: 'google-vertex',
+      product_id: 'vertex-ai',
+      credential_type: 'service_account',
+    }),
+    proxy: { bound: true },
+    secret: JSON.stringify({
+      type: 'service_account',
+      client_email: 'vertex-sa@test.iam.gserviceaccount.com',
+      private_key: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+      project_id: 'project-1',
+      token_uri: 'https://oauth2.googleapis.com/token',
+    }),
+    responses: [
+      new Response(JSON.stringify({ access_token: 'vertex-inline-access', expires_in: 3600, token_type: 'Bearer' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+      new Response(
+        JSON.stringify({
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-haiku-4-5',
+          content: [{ type: 'text', text: '17' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 9, output_tokens: 2 },
+        }),
+        { headers: { 'content-type': 'application/json' } },
+      ),
+    ],
+  });
+  assert.equal((await h.probe('tenant', 'vertex')).category, 'ok');
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests[0]?.url, 'https://oauth2.googleapis.com/token');
+  assert.match(h.requests[1]?.url ?? '', /aiplatform.googleapis.com/);
+  assert.equal(h.connections.length, 1);
+  for (const request of h.requests) assert.equal(request.init.dispatcher, FAKE_CONNECTION.dispatcher);
 });

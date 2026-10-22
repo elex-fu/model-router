@@ -78,6 +78,59 @@ test('fetchCnProviderQuota authenticates zhipu with the RAW key (no Bearer) and 
   assert.equal(seen[1]?.headers.authorization, 'Bearer cn-test-key-0123456789');
 });
 
+test('Kimi uses the fixed Coding /v1/usages Bearer endpoint and parses both windows', async () => {
+  const seen: string[] = [];
+  const result = await fetchCnProviderQuota('kimi', apiKey(), async (url, init) => {
+    seen.push(url.toString());
+    assert.equal((init.headers as Record<string, string>).authorization, `Bearer ${apiKey().toString()}`);
+    assert.equal(init.redirect, 'manual');
+    return jsonResponse({
+      limits: [{ detail: { limit: 100, remaining: 0, resetTime: RESET_ISO } }],
+      usage: { limit: 1000, remaining: 750, resetTime: RESET_MS + 86_400_000 },
+    });
+  });
+  assert.deepEqual(seen, ['https://api.kimi.com/coding/v1/usages']);
+  assert.equal(result.state, 'ok');
+  if (result.state === 'ok') {
+    assert.equal(result.fiveHour?.usedPercent, 100);
+    assert.equal(result.weekly?.usedPercent, 25);
+  }
+});
+
+test('the worker uses the store account-bound fetch and never falls back to its direct fetch', async () => {
+  const store = new MemoryCnQuotaStore();
+  store.due.push(store.add('kimi'));
+  store.scopedFetch = async () => jsonResponse({ usage: { limit: 10, remaining: 4, resetTime: RESET_ISO } });
+  let directCalls = 0;
+  const worker = new CnProvidersQuotaWorker(store, {
+    fetch: async () => {
+      directCalls += 1;
+      throw new Error('direct outbound forbidden');
+    },
+  });
+  assert.equal(await worker.runOnce(), 1);
+  assert.equal(directCalls, 0);
+  assert.equal(store.snapshots[0]?.snapshot.weekly?.usedPercent, 60);
+  assert.equal(store.snapshots[0]?.snapshot.fiveHour, null);
+  await worker.close();
+});
+
+test('Kimi global Coding quota follows the catalog inference host without an account-provided URL', async () => {
+  const store = new MemoryCnQuotaStore();
+  store.due.push({ ...store.add('kimi'), productId: 'kimi-code-global' });
+  const urls: string[] = [];
+  const worker = new CnProvidersQuotaWorker(store, {
+    fetch: async (url) => {
+      urls.push(url.toString());
+      return jsonResponse({ usage: { limit: 10, remaining: 9, resetTime: RESET_ISO } });
+    },
+  });
+  await worker.runOnce();
+  assert.deepEqual(urls, ['https://api.kimi.ai/coding/v1/usages']);
+  assert.equal(store.snapshots.length, 1);
+  await worker.close();
+});
+
 test('fetchCnProviderQuota applies the team-plan URL and organization headers', async () => {
   const seen: { url: string; headers: Record<string, string> }[] = [];
   const fetcher: CnQuotaFetch = async (url, init) => {
@@ -271,6 +324,20 @@ test('the worker skips accounts whose credential cannot be unsealed', async () =
   assert.equal(store.failures[0]?.errorCode, 'credential_unavailable');
 });
 
+test('failure backoff resumes the persisted streak after a worker restart', async () => {
+  const store = new MemoryCnQuotaStore();
+  store.due.push({ ...store.add('kimi'), failureCount: 3 });
+  const worker = new CnProvidersQuotaWorker(store, {
+    fetch: async () => new Response(null, { status: 503 }),
+    now: () => NOW,
+    random: () => 0.5,
+  });
+  await worker.runOnce();
+  assert.equal(store.failures[0]?.failureCount, 4);
+  assert.equal(store.failures[0]?.nextDueAtMs, NOW + 8 * 15 * 60_000);
+  await worker.close();
+});
+
 test('clamp + backoff helpers mirror the opencode-go worker bounds', () => {
   assert.equal(clampCnQuotaIntervalMs(undefined), 15 * 60_000);
   assert.equal(clampCnQuotaIntervalMs(1_000), 5 * 60_000);
@@ -314,6 +381,7 @@ class MemoryCnQuotaStore implements CnQuotaStore {
   readonly rateLimited: { account: CnQuotaAccountRef; untilMs: number }[] = [];
   private nextId = 1;
   unsealed = true;
+  scopedFetch?: CnQuotaFetch;
 
   add(providerId: string): CnQuotaAccountRef {
     return {
@@ -330,10 +398,10 @@ class MemoryCnQuotaStore implements CnQuotaStore {
 
   async withUnsealedApiKey<T>(
     _account: CnQuotaAccountRef,
-    callback: (secret: Buffer) => Promise<T>,
+    callback: (secret: Buffer, fetcher?: CnQuotaFetch) => Promise<T>,
   ): Promise<T | null> {
     if (!this.unsealed) return null;
-    return callback(apiKey());
+    return callback(apiKey(), this.scopedFetch);
   }
 
   async writeQuotaSnapshot(account: CnQuotaAccountRef, snapshot: CnQuotaSnapshot): Promise<void> {

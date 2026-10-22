@@ -3,8 +3,8 @@
  * docs/capability-parity-roadmap-2026-10-16.md 批次三; sub2api reference:
  * backend/internal/service/cn_provider_quota_service.go). Periodically
  * probes the rolling-window quota endpoints for `zhipu` / `minimax`
- * platform-pool accounts whose account_mode is `coding` and overwrites the
- * account row's migration-120 quota-window snapshot columns. The snapshot is
+ * coding-mode accounts and the Kimi Coding catalog products (both owners),
+ * overwriting the existing account quota-window snapshot column families. The snapshot is
  * a scheduling signal only: it never enters the billing path and never
  * authorizes a profit/cost failover decision (093/099/108 quota-snapshot
  * precedent). payg accounts have no rolling-window quota endpoint and are
@@ -14,6 +14,8 @@
  * - zhipu: GET /api/monitor/usage/quota/limit with the Authorization header
  *   carrying the raw API key WITHOUT the Bearer prefix; team plans add
  *   ?type=2 plus the bigmodel-organization / bigmodel-project headers;
+ * - kimi: GET /coding/v1/usages with a Bearer key; limits[].detail is
+ *   rolling 5h and top-level usage is weekly;
  * - minimax: GET /v1/api/openplatform/coding_plan/remains with a Bearer key;
  *   only the model_remains "general" entry applies (video skipped).
  *
@@ -37,14 +39,22 @@
 import { MINIMAX_PROVIDER_ID, ZHIPU_PROVIDER_ID } from '../gateway/cn-providers/catalog-identity.js';
 import {
   type CnQuotaTierSnapshot,
+  KIMI_CODING_PROVIDER_ID,
+  KIMI_CODING_QUOTA_URL,
+  KIMI_CODING_QUOTA_URL_GLOBAL,
   minimaxQuotaUrl,
+  parseKimiQuotaResponseBody,
   parseMinimaxQuotaResponseBody,
   parseZhipuQuotaResponseBody,
   zhipuQuotaUrl,
 } from '../gateway/cn-providers/quota.js';
 
 /** Compile-time fixed provider ids the due scan filters on. */
-export const CN_QUOTA_PROVIDER_IDS: readonly string[] = Object.freeze([ZHIPU_PROVIDER_ID, MINIMAX_PROVIDER_ID]);
+export const CN_QUOTA_PROVIDER_IDS: readonly string[] = Object.freeze([
+  ZHIPU_PROVIDER_ID,
+  MINIMAX_PROVIDER_ID,
+  KIMI_CODING_PROVIDER_ID,
+]);
 
 export const CN_QUOTA_DEFAULT_INTERVAL_MS = 15 * 60_000;
 export const CN_QUOTA_MIN_INTERVAL_MS = 5 * 60_000;
@@ -66,6 +76,8 @@ export interface CnQuotaAccountRef {
   readonly tenantId: string | null;
   readonly accountId: string;
   readonly providerId: string;
+  readonly productId?: string;
+  readonly failureCount?: number;
 }
 
 /** Upstream-observed quota snapshot (windows absent upstream stay null). */
@@ -110,7 +122,11 @@ export interface CnQuotaStore {
     readonly intervalMs: number;
     readonly limit: number;
   }): Promise<readonly CnQuotaAccountRef[]>;
-  withUnsealedApiKey<T>(account: CnQuotaAccountRef, callback: (secret: Buffer) => Promise<T>): Promise<T | null>;
+  withUnsealedApiKey<T>(
+    account: CnQuotaAccountRef,
+    callback: (secret: Buffer, fetcher?: CnQuotaFetch) => Promise<T>,
+    fetcher?: CnQuotaFetch,
+  ): Promise<T | null>;
   writeQuotaSnapshot(account: CnQuotaAccountRef, snapshot: CnQuotaSnapshot): Promise<void>;
   writeQuotaFailure(account: CnQuotaAccountRef, failure: CnQuotaFailure): Promise<void>;
   markRateLimited(account: CnQuotaAccountRef, untilMs: number): Promise<void>;
@@ -211,6 +227,12 @@ function buildProbeRequest(
       }
     }
     return { url: new URL(url), headers };
+  }
+  if (providerId === KIMI_CODING_PROVIDER_ID) {
+    return {
+      url: new URL(options.international === true ? KIMI_CODING_QUOTA_URL_GLOBAL : KIMI_CODING_QUOTA_URL),
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'user-agent': 'model-router' },
+    };
   }
   if (providerId === MINIMAX_PROVIDER_ID) {
     const url = minimaxQuotaUrl({ international: options.international });
@@ -373,9 +395,11 @@ export async function fetchCnProviderQuota(
     };
   }
   const parsed =
-    providerId === ZHIPU_PROVIDER_ID
-      ? parseZhipuQuotaResponseBody(bodyResult.bytes)
-      : parseMinimaxQuotaResponseBody(bodyResult.bytes);
+    providerId === KIMI_CODING_PROVIDER_ID
+      ? parseKimiQuotaResponseBody(bodyResult.bytes)
+      : providerId === ZHIPU_PROVIDER_ID
+        ? parseZhipuQuotaResponseBody(bodyResult.bytes)
+        : parseMinimaxQuotaResponseBody(bodyResult.bytes);
   if (parsed.state === 'error') {
     return {
       state: 'failed',
@@ -578,14 +602,19 @@ export class CnProvidersQuotaWorker {
     const attemptedAtMs = this.nowMs();
     let result: CnQuotaFetchResult | null;
     try {
-      result = await this.store.withUnsealedApiKey(account, (secret) =>
-        fetchCnProviderQuota(
-          account.providerId,
-          secret,
-          this.options.fetch,
-          this.halt.signal,
-          this.options.resolveProbeOptions?.(account) ?? {},
-        ),
+      result = await this.store.withUnsealedApiKey(
+        account,
+        (secret, scopedFetch) =>
+          fetchCnProviderQuota(
+            account.providerId,
+            secret,
+            scopedFetch ?? this.options.fetch,
+            this.halt.signal,
+            this.options.resolveProbeOptions?.(account) ?? {
+              international: account.providerId === KIMI_CODING_PROVIDER_ID && account.productId === 'kimi-code-global',
+            },
+          ),
+        this.options.fetch,
       );
     } catch {
       result = { state: 'failed', errorCode: 'credential_unavailable', httpStatus: null, retryAfterMs: null };
@@ -622,7 +651,9 @@ export class CnProvidersQuotaWorker {
     httpStatus: number | null,
     retryAfterMs: number | null,
   ): Promise<void> {
-    const failureCount = (this.failureStreaks.get(key) ?? 0) + 1;
+    const persistedFailures =
+      Number.isSafeInteger(account.failureCount) && (account.failureCount ?? -1) >= 0 ? (account.failureCount ?? 0) : 0;
+    const failureCount = Math.max(this.failureStreaks.get(key) ?? 0, persistedFailures) + 1;
     this.failureStreaks.set(key, failureCount);
     const nextDueAtMs =
       attemptedAtMs + cnQuotaFailureBackoffMs(this.intervalMs, failureCount, retryAfterMs, this.options.random);

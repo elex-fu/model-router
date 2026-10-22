@@ -5,8 +5,12 @@ import { grokCliIdentityHeaders } from '../../../src/saas/gateway/grok/constants
 import {
   credentialValidationCapabilityProtocol,
   isSupportedCredentialValidationTarget,
+  KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
+  KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS,
   PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
   PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS,
+  PROVIDER_INFERENCE_VALIDATION_MAX_RESPONSE_BYTES,
+  PROVIDER_INFERENCE_VALIDATION_TIMEOUT_MS,
   PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES,
   PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
   validateProviderCredential,
@@ -17,6 +21,7 @@ import { waitForValidationFixtureSignal } from './credential-validation-test-fix
 function job(overrides: Partial<ProviderCredentialValidationJobRecord> = {}): ProviderCredentialValidationJobRecord {
   return {
     id: 'job-a',
+    ownerKind: 'tenant',
     tenantId: 'tenant-a',
     accountId: 'account-a',
     credentialId: 'credential-a',
@@ -47,6 +52,8 @@ const messagesTargets = [
     model: 'kimi-for-coding',
     url: 'https://api.kimi.com/coding/v1/messages',
     adapterId: 'kimi-code-messages-v1',
+    maxResponseBytes: KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
+    timeoutMs: KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS,
   },
   {
     providerId: 'kimi',
@@ -54,6 +61,8 @@ const messagesTargets = [
     model: 'kimi-for-coding',
     url: 'https://api.kimi.ai/coding/v1/messages',
     adapterId: 'kimi-code-global-messages-v1',
+    maxResponseBytes: KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
+    timeoutMs: KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS,
   },
   {
     providerId: 'deepseek',
@@ -61,6 +70,8 @@ const messagesTargets = [
     model: 'deepseek-flash',
     url: 'https://api.deepseek.com/anthropic/v1/messages',
     adapterId: 'deepseek-anthropic-messages-v1',
+    maxResponseBytes: PROVIDER_INFERENCE_VALIDATION_MAX_RESPONSE_BYTES,
+    timeoutMs: PROVIDER_INFERENCE_VALIDATION_TIMEOUT_MS,
   },
 ] as const;
 
@@ -90,6 +101,18 @@ function message(model = 'kimi-for-coding') {
 
 function jsonResponse(value: unknown = message()): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+function signedKimiMessage() {
+  // Synthetic values reproduce the observed envelope/signature lengths only.
+  const envelope = {
+    ...message(),
+    content: [{ type: 'thinking', thinking: '', signature: 'fixture-signature:'.padEnd(12_946, 's') }],
+    stop_reason: 'max_tokens',
+    usage: { input_tokens: 5, output_tokens: 8 },
+  };
+  envelope.content[0].thinking = 't'.repeat(13_385 - Buffer.byteLength(JSON.stringify(envelope)));
+  return envelope;
 }
 
 test('fixed adapter targets server-owned HTTPS origin and emits only health metadata', async () => {
@@ -571,6 +594,55 @@ test('bounded Messages envelopes accept max-token completion and canonical model
   }
 });
 
+test('Kimi Code CN/global accept a bounded signed envelope larger than the metadata limit', async () => {
+  const envelope = signedKimiMessage();
+  assert.equal(envelope.content[0].signature.length, 12_946);
+  assert.equal(Buffer.byteLength(JSON.stringify(envelope)), 13_385);
+  assert.ok(Buffer.byteLength(JSON.stringify(envelope)) > PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES);
+  for (const fixture of messagesTargets.slice(0, 2)) {
+    const result = await validateProviderCredential(messagesJob(fixture), Buffer.from('unit-test-api-key'), async () =>
+      jsonResponse(envelope),
+    );
+    assert.deepEqual(result, {
+      state: 'verified',
+      adapterId: fixture.adapterId,
+      httpStatus: 200,
+      durationMs: result.durationMs,
+    });
+    const output = JSON.stringify(result);
+    assert.equal(output.includes('fixture-signature:'), false);
+    assert.equal(output.includes('unit-test-api-key'), false);
+    assert.equal(output.includes('thinking'), false);
+  }
+});
+
+test('the larger Kimi Code allowance still rejects malformed signed envelopes and trailing data', async () => {
+  const envelope = signedKimiMessage();
+  const wire = JSON.stringify(envelope);
+  const invalid = [
+    JSON.stringify({ ...envelope, usage: { input_tokens: 5, output_tokens: -1 } }),
+    JSON.stringify({ ...envelope, content: [{ ...envelope.content[0], signature: 123 }] }),
+    wire.slice(0, -1),
+    `${wire} trailing garbage`,
+  ];
+  for (const value of invalid) {
+    const result = await validateProviderCredential(
+      messagesJob(),
+      Buffer.from('unit-test-api-key'),
+      async () => new Response(value, { headers: { 'content-type': 'application/json' } }),
+    );
+    assert.deepEqual(result, {
+      state: 'failed',
+      errorCode: 'provider_response_invalid',
+      retryable: false,
+      adapterId: messagesTargets[0].adapterId,
+      httpStatus: 200,
+      durationMs: result.durationMs,
+    });
+    assert.equal(JSON.stringify(result).includes('fixture-signature:'), false);
+  }
+});
+
 test('Messages waits for EOF even after a full JSON prefix and supports split UTF-8 chunks', async (t) => {
   const lifetime = new AbortController();
   let sourceController!: ReadableStreamDefaultController<Uint8Array>;
@@ -578,7 +650,10 @@ test('Messages waits for EOF even after a full JSON prefix and supports split UT
   const waiting = new Promise<void>((resolve) => {
     announceWait = resolve;
   });
-  const bytes = new TextEncoder().encode(JSON.stringify({ ...message(), content: [{ type: 'text', text: '你好' }] }));
+  const envelope = signedKimiMessage();
+  const bytes = new TextEncoder().encode(
+    JSON.stringify({ ...envelope, content: [...envelope.content, { type: 'text', text: '你好' }] }),
+  );
   let index = 0;
   const body = new ReadableStream<Uint8Array>(
     {
@@ -615,58 +690,63 @@ test('Messages waits for EOF even after a full JSON prefix and supports split UT
   assert.equal((await pending).state, 'verified');
 });
 
-test('Messages response cap applies to declared, absent and dishonest Content-Length and cancels oversize bodies', async () => {
+test('Messages provider caps apply to declared, absent and dishonest Content-Length and cancel oversize bodies', async (t) => {
   const encoder = new TextEncoder();
   const template = message();
-  const bytes = encoder.encode(
-    JSON.stringify({
-      ...template,
-      content: [
-        {
-          type: 'text',
-          text: 'x'.repeat(
-            PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES -
-              encoder.encode(JSON.stringify({ ...template, content: [{ type: 'text', text: '' }] })).byteLength,
-          ),
-        },
-      ],
-    }),
-  );
-  assert.equal(bytes.byteLength, PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES);
-  const atCap = await validateProviderCredential(
-    messagesJob(),
-    Buffer.from('unit-test-api-key'),
-    async () => new Response(bytes, { headers: { 'content-type': 'application/json' } }),
-  );
-  assert.equal(atCap.state, 'verified');
-  for (const length of [undefined, '1', '4097']) {
-    let cancelled = false;
-    let index = 0;
-    const chunks = [bytes, encoder.encode(' ')];
-    const body = new ReadableStream<Uint8Array>(
-      {
-        pull(controller) {
-          const chunk = chunks[index++];
-          if (chunk) controller.enqueue(chunk);
-          else controller.close();
-        },
-        cancel() {
-          cancelled = true;
-        },
-      },
-      { highWaterMark: 0 },
-    );
-    const headers = new Headers({ 'content-type': 'application/json' });
-    if (length) headers.set('content-length', length);
-    const result = await validateProviderCredential(
-      messagesJob(),
-      Buffer.from('unit-test-api-key'),
-      async () => new Response(body, { headers }),
-    );
-    assert.equal(result.state, 'failed');
-    if (result.state !== 'failed') throw new Error('expected capped response failure');
-    assert.equal(result.errorCode, 'provider_response_too_large');
-    assert.equal(cancelled, true);
+  for (const fixture of messagesTargets) {
+    await t.test(fixture.productId, async () => {
+      const bytes = encoder.encode(
+        JSON.stringify({
+          ...template,
+          content: [
+            {
+              type: 'text',
+              text: 'x'.repeat(
+                fixture.maxResponseBytes -
+                  encoder.encode(JSON.stringify({ ...template, content: [{ type: 'text', text: '' }] })).byteLength,
+              ),
+            },
+          ],
+        }),
+      );
+      assert.equal(bytes.byteLength, fixture.maxResponseBytes);
+      const atCap = await validateProviderCredential(
+        messagesJob(fixture),
+        Buffer.from('unit-test-api-key'),
+        async () => new Response(bytes, { headers: { 'content-type': 'application/json' } }),
+      );
+      assert.equal(atCap.state, 'verified');
+      for (const length of [undefined, '1', String(fixture.maxResponseBytes + 1)]) {
+        let cancelled = false;
+        let index = 0;
+        const chunks = [bytes, encoder.encode(' ')];
+        const body = new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              const chunk = chunks[index++];
+              if (chunk) controller.enqueue(chunk);
+              else controller.close();
+            },
+            cancel() {
+              cancelled = true;
+            },
+          },
+          { highWaterMark: 0 },
+        );
+        const headers = new Headers({ 'content-type': 'application/json' });
+        if (length) headers.set('content-length', length);
+        const result = await validateProviderCredential(
+          messagesJob(fixture),
+          Buffer.from('unit-test-api-key'),
+          async () => new Response(body, { headers }),
+        );
+        assert.equal(result.state, 'failed');
+        if (result.state !== 'failed') throw new Error('expected capped response failure');
+        assert.equal(result.errorCode, 'provider_response_too_large');
+        assert.equal(result.retryable, false);
+        assert.equal(cancelled, true);
+      }
+    });
   }
 });
 
@@ -700,10 +780,10 @@ test('Messages transport/read errors surface only stable health codes, never pro
   }
 });
 
-test('Messages uses the unchanged five-second deadline and cannot verify a body cancelled at pending EOF', async (t) => {
+test('Kimi Code cannot verify a body cancelled at pending EOF by its bounded model deadline', async (t) => {
   const controller = new AbortController();
   t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
-    assert.equal(milliseconds, PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS);
+    assert.equal(milliseconds, KIMI_CODE_CREDENTIAL_VALIDATION_TIMEOUT_MS);
     return controller.signal;
   });
   let cancelled = false;
@@ -1081,6 +1161,48 @@ test('OAuth onboarding probes classify upstream rejection and use the larger bou
   if (oversized.state !== 'failed') throw new Error('expected oversize failure');
   assert.equal(oversized.errorCode, 'provider_response_too_large');
   assert.equal(oversizedCancelled, true);
+});
+
+test('fixed probe deadlines follow metadata, inference, Kimi Code and OAuth budgets', async (t) => {
+  const fixtures = [
+    {
+      candidate: job(),
+      secret: Buffer.from('unit-test-api-key'),
+      timeoutMs: PROVIDER_CREDENTIAL_VALIDATION_TIMEOUT_MS,
+    },
+    ...messagesTargets.map((target) => ({
+      candidate: messagesJob(target),
+      secret: Buffer.from('unit-test-api-key'),
+      timeoutMs: target.timeoutMs,
+    })),
+    {
+      candidate: opencodeGoJob(),
+      secret: Buffer.from('unit-test-api-key'),
+      timeoutMs: PROVIDER_INFERENCE_VALIDATION_TIMEOUT_MS,
+    },
+    ...oauthTargets.map((target) => ({
+      candidate: oauthJob(target),
+      secret: oauthSecret(target.provider),
+      timeoutMs: PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
+    })),
+  ];
+  for (const fixture of fixtures) {
+    await t.test(fixture.candidate.productId, async (t) => {
+      const deadline = new AbortController();
+      t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+        assert.equal(milliseconds, fixture.timeoutMs);
+        return deadline.signal;
+      });
+      const result = await validateProviderCredential(fixture.candidate, fixture.secret, async () => {
+        deadline.abort();
+        throw deadline.signal.reason;
+      });
+      assert.equal(result.state, 'failed');
+      if (result.state !== 'failed') throw new Error('expected deadline failure');
+      assert.equal(result.errorCode, 'provider_timeout');
+      assert.equal(result.retryable, true);
+    });
+  }
 });
 
 test('unmounted Claude/Gemini OAuth categories remain fail-closed', async () => {

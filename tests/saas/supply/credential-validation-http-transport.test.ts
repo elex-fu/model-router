@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
+import http from 'node:http';
+import net from 'node:net';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -31,6 +33,52 @@ function binding(target: ApprovedCredentialValidationTarget) {
   assert.ok(resolved);
   return resolved;
 }
+
+test('custom pinned validation traverses its bound proxy for real HTTPS', async (t) => {
+  let targetCalls = 0;
+  let connects = 0;
+  const local = await validationHttpsFixture(t, (request, response) => {
+    request.resume();
+    targetCalls += 1;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(probeEnvelope('chat')));
+  });
+  const sockets = new Set<net.Socket>();
+  const proxy = http.createServer();
+  proxy.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  proxy.on('connect', (request, client, head) => {
+    connects += 1;
+    assert.equal(request.url, new URL(local.baseUrl).host);
+    const upstream = net.connect({ host: '127.0.0.1', port: Number(new URL(local.baseUrl).port) }, () => {
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    sockets.add(upstream);
+    upstream.on('close', () => sockets.delete(upstream));
+    upstream.on('error', () => client.destroy());
+    client.on('error', () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+  });
+  const address = proxy.address();
+  assert.ok(address && typeof address !== 'string');
+  const transport = new CredentialValidationHttpTransport(local.testOptions);
+  t.after(() => transport.close());
+  const plan = await transport.prepare(binding(approvedTarget({ baseUrl: local.baseUrl })), undefined, {
+    url: `http://127.0.0.1:${address.port}`,
+  });
+  assert.equal((await transport.probe(plan, Buffer.from('fixture-api-key'), async () => {})).state, 'verified');
+  assert.equal(connects, 1);
+  assert.equal(targetCalls, 1);
+});
 
 test('custom Chat and Messages use real pinned HTTPS, exact auth/profile, truthful identity and body-only slash models', async (t) => {
   const requests: Array<{ url?: string; method?: string; headers: IncomingHttpHeaders; body: unknown }> = [];

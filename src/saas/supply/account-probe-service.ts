@@ -42,10 +42,9 @@ import {
 } from '../gateway/vertex/transform.js';
 import { vertexServiceAccountKeyFromEnvelopeMaterial } from '../platform/vertex-sa/service-account.js';
 import { exchangeVertexSaToken } from '../platform/vertex-sa/token-service.js';
+import { type AccountOutboundFetch, withAccountOutbound } from './account-outbound.js';
 import { resolveFixedCredentialProbeEndpoint } from './credential-validation-adapters.js';
-import { type EgressProxyOwnerKind, type EgressProxyRecord, readEgressProxyForAccount } from './egress-proxy-lookup.js';
-import { assembleEgressProxyUrl } from './egress-proxy-record.js';
-import { withUnsealedEgressProxyCredentials } from './egress-proxy-seal.js';
+import type { EgressProxyOwnerKind } from './egress-proxy-lookup.js';
 import {
   buildCodexOAuthProbeRequest,
   buildGrokOAuthProbeRequest,
@@ -426,8 +425,8 @@ export function createAccountProbeService(
   const grokProbeModel = options.grokProbeModel ?? DEFAULT_GROK_PROBE_MODEL;
   const bedrockProbeModel = options.bedrockProbeModel ?? DEFAULT_BEDROCK_PROBE_MODEL;
   const vertexProbeModel = options.vertexProbeModel ?? DEFAULT_VERTEX_PROBE_MODEL;
-  const fetcher = options.fetch ?? ((url, init) => fetch(url, init));
   const connectionFactory = options.createConnection ?? createProviderEgressProxyConnection;
+  const customFetch = options.fetch;
   const now = options.now ?? Date.now;
 
   const executor = (): SqlExecutor => database;
@@ -912,44 +911,18 @@ export function createAccountProbeService(
   async function probeThrough(
     built: BuiltProbeRequest,
     request: AccountProbeRequest,
-    proxy: EgressProxyRecord | null,
+    fetcher: AccountOutboundFetch,
   ): Promise<AccountProbeOutcome> {
     const started = now();
     const deadline = AbortSignal.timeout(requestTimeoutMs);
     const signal = options.signal === undefined ? deadline : AbortSignal.any([deadline, options.signal]);
-    let dispatcher: unknown;
-    let connection: Awaited<ReturnType<AccountProbeConnectionFactory>> | null = null;
     try {
-      if (proxy !== null) {
-        const proxyUrl = await withUnsealedEgressProxyCredentials(
-          proxy.authSealedEnvelope,
-          { deployment: options.deployment, environment: options.environment, proxyId: proxy.id },
-          kms,
-          (credentials) =>
-            assembleEgressProxyUrl({
-              protocol: proxy.protocol,
-              host: proxy.host,
-              port: proxy.port,
-              ...(credentials.username === undefined ? {} : { username: credentials.username }),
-              ...(credentials.password === undefined ? {} : { password: credentials.password }),
-            }).url,
-        );
-        connection = await connectionFactory(
-          { url: proxyUrl },
-          {
-            signal,
-            ...(options.egressAllowlist === undefined ? {} : { egressAllowlist: options.egressAllowlist }),
-          },
-        );
-        dispatcher = connection.dispatcher;
-      }
       const response = await fetcher(built.url, {
         method: built.method,
         headers: { ...built.headers },
         ...(built.body === null ? {} : { body: built.body }),
         redirect: 'manual',
         signal,
-        ...(dispatcher === undefined ? {} : { dispatcher }),
       });
       const latencyMs = Math.max(0, Math.round(now() - started));
       const resetAt = (() => {
@@ -1048,11 +1021,6 @@ export function createAccountProbeService(
       const latencyMs = Math.max(0, Math.round(now() - started));
       const reason = error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : 'network';
       return { category: 'error', httpStatus: null, latencyMs, resetAt: null, usage: null, reason };
-    } finally {
-      if (connection !== null) {
-        const captured = connection;
-        void captured.close().catch(() => undefined);
-      }
     }
   }
 
@@ -1082,170 +1050,206 @@ export function createAccountProbeService(
       if (binding === null) {
         return probeError('account_unavailable');
       }
-      const proxy = await readEgressProxyForAccount(executor(), {
-        ownerKind: request.ownerKind,
-        ...(request.ownerKind === 'tenant' ? { tenantId: request.tenantId ?? undefined } : {}),
-        accountId: request.accountId,
-      });
-
-      return withUnsealedAccountCredential(binding, async (secret) => {
-        let built: BuiltProbeRequest | null = null;
-        if (request.category === 'gemini') {
-          let material: Record<string, unknown>;
-          try {
-            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
-          } catch {
-            return probeError('credential_invalid');
-          }
-          const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
-          const projectId = typeof material.project_id === 'string' ? material.project_id : null;
-          if (accessToken === null || accessToken === '' || projectId === null || projectId === '') {
-            return probeError('credential_invalid');
-          }
-          built = buildGeminiProbe(
-            request,
-            accessToken,
-            projectId,
-            typeof material.tier_id === 'string' ? normalizeGeminiTierId(material.tier_id) : null,
-          );
-        } else if (request.category === 'grok') {
-          let material: Record<string, unknown>;
-          try {
-            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
-          } catch {
-            return probeError('credential_invalid');
-          }
-          const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
-          if (accessToken === null || accessToken === '') {
-            return probeError('credential_invalid');
-          }
-          built = buildGrokProbe(request, accessToken);
-        } else if (request.category === 'bedrock') {
-          let material: Record<string, unknown>;
-          try {
-            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
-          } catch {
-            return probeError('credential_invalid');
-          }
-          const credential = parseBedrockCredentialMaterial(material);
-          if (credential === null || credential.accessKeyId === undefined) {
-            return probeError('credential_invalid');
-          }
-          built = buildBedrockProbe(request, credential);
-          if (built === null) return probeError('probe_endpoint_unsupported');
-        } else if (request.category === 'vertex') {
-          let material: Record<string, unknown>;
-          try {
-            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
-          } catch {
-            return probeError('credential_invalid');
-          }
-          let key: ReturnType<typeof vertexServiceAccountKeyFromEnvelopeMaterial>;
-          try {
-            key = vertexServiceAccountKeyFromEnvelopeMaterial(material);
-          } catch {
-            return probeError('credential_invalid');
-          }
-          const projectId = typeof material.project_id === 'string' ? material.project_id.trim() : '';
-          if (projectId === '') return probeError('credential_invalid');
-          const location =
-            typeof material.location === 'string' && material.location.trim() !== '' ? material.location : null;
-          // Use the envelope's access token while it is fresh (the token
-          // refresher keeps it warm); otherwise exchange the SA JWT inline —
-          // the probe works even on a cold credential.
-          const expiresAtMs =
-            typeof material.expires_at === 'string' && material.expires_at !== ''
-              ? Date.parse(material.expires_at)
-              : Number.NaN;
-          let accessToken =
-            typeof material.access_token === 'string' && material.access_token !== '' ? material.access_token : null;
-          if (
-            accessToken !== null &&
-            (!Number.isFinite(expiresAtMs) || expiresAtMs - VERTEX_TOKEN_CACHE_SKEW_MS <= now())
-          ) {
-            accessToken = null;
-          }
-          if (accessToken === null) {
-            try {
-              const exchanged = await exchangeVertexSaToken({ key, fetch: fetcher });
-              accessToken = exchanged.accessToken;
-            } catch {
-              return probeError('credential_invalid');
+      return withAccountOutbound(
+        executor(),
+        kms,
+        {
+          ownerKind: request.ownerKind,
+          tenantId: request.tenantId ?? null,
+          accountId: request.accountId,
+        },
+        {
+          deployment: options.deployment,
+          environment: options.environment,
+          egressAllowlist: options.egressAllowlist,
+          signal: options.signal,
+          createEgressConnection: connectionFactory,
+          ...(customFetch === undefined
+            ? {}
+            : {
+                fetch: (url, init) => customFetch(url.toString(), init),
+              }),
+        },
+        async (outbound) =>
+          withUnsealedAccountCredential(binding, async (secret) => {
+            let built: BuiltProbeRequest | null = null;
+            if (request.category === 'gemini') {
+              let material: Record<string, unknown>;
+              try {
+                material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+              } catch {
+                return probeError('credential_invalid');
+              }
+              const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
+              const projectId = typeof material.project_id === 'string' ? material.project_id : null;
+              if (accessToken === null || accessToken === '' || projectId === null || projectId === '') {
+                return probeError('credential_invalid');
+              }
+              built = buildGeminiProbe(
+                request,
+                accessToken,
+                projectId,
+                typeof material.tier_id === 'string' ? normalizeGeminiTierId(material.tier_id) : null,
+              );
+            } else if (request.category === 'grok') {
+              let material: Record<string, unknown>;
+              try {
+                material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+              } catch {
+                return probeError('credential_invalid');
+              }
+              const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
+              if (accessToken === null || accessToken === '') {
+                return probeError('credential_invalid');
+              }
+              built = buildGrokProbe(request, accessToken);
+            } else if (request.category === 'bedrock') {
+              let material: Record<string, unknown>;
+              try {
+                material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+              } catch {
+                return probeError('credential_invalid');
+              }
+              const credential = parseBedrockCredentialMaterial(material);
+              if (credential === null || credential.accessKeyId === undefined) {
+                return probeError('credential_invalid');
+              }
+              built = buildBedrockProbe(request, credential);
+              if (built === null) return probeError('probe_endpoint_unsupported');
+            } else if (request.category === 'vertex') {
+              let material: Record<string, unknown>;
+              try {
+                material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+              } catch {
+                return probeError('credential_invalid');
+              }
+              let key: ReturnType<typeof vertexServiceAccountKeyFromEnvelopeMaterial>;
+              try {
+                key = vertexServiceAccountKeyFromEnvelopeMaterial(material);
+              } catch {
+                return probeError('credential_invalid');
+              }
+              const projectId = typeof material.project_id === 'string' ? material.project_id.trim() : '';
+              if (projectId === '') return probeError('credential_invalid');
+              const location =
+                typeof material.location === 'string' && material.location.trim() !== '' ? material.location : null;
+              // Use the envelope's access token while it is fresh (the token
+              // refresher keeps it warm); otherwise exchange the SA JWT inline —
+              // the probe works even on a cold credential.
+              const expiresAtMs =
+                typeof material.expires_at === 'string' && material.expires_at !== ''
+                  ? Date.parse(material.expires_at)
+                  : Number.NaN;
+              let accessToken =
+                typeof material.access_token === 'string' && material.access_token !== ''
+                  ? material.access_token
+                  : null;
+              if (
+                accessToken !== null &&
+                (!Number.isFinite(expiresAtMs) || expiresAtMs - VERTEX_TOKEN_CACHE_SKEW_MS <= now())
+              ) {
+                accessToken = null;
+              }
+              if (accessToken === null) {
+                try {
+                  const exchanged = await exchangeVertexSaToken({
+                    key,
+                    fetch: (url, init) =>
+                      outbound.fetch(url, {
+                        ...init,
+                        signal:
+                          options.signal === undefined
+                            ? AbortSignal.timeout(requestTimeoutMs)
+                            : AbortSignal.any([AbortSignal.timeout(requestTimeoutMs), options.signal]),
+                      }),
+                  });
+                  accessToken = exchanged.accessToken;
+                } catch {
+                  return probeError('credential_invalid');
+                }
+              }
+              built = buildVertexProbe(request, accessToken, projectId, location);
+            } else if (request.category === 'claude' || request.category === 'codex') {
+              let material: Record<string, unknown>;
+              try {
+                material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
+              } catch {
+                return probeError('credential_invalid');
+              }
+              const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
+              if (accessToken === null || accessToken === '') {
+                return probeError('credential_invalid');
+              }
+              built =
+                request.category === 'claude'
+                  ? buildClaudeProbe(
+                      request,
+                      accessToken,
+                      typeof material.account_uuid === 'string' ? material.account_uuid : null,
+                    )
+                  : buildCodexProbe(
+                      request,
+                      accessToken,
+                      typeof material.chatgpt_account_id === 'string' ? material.chatgpt_account_id : null,
+                    );
+            } else if (request.category === 'opencode-go') {
+              const token = secret.toString('utf8').trim();
+              if (token === '') {
+                return probeError('credential_invalid');
+              }
+              built = buildChatCompletionsProbe(
+                request,
+                OPENCODE_GO_CHAT_COMPLETIONS_URL,
+                OPENCODE_GO_TEST_MODEL,
+                token,
+              );
+            } else {
+              const token = secret.toString('utf8').trim();
+              if (token === '') {
+                return probeError('credential_invalid');
+              }
+              const endpoint =
+                binding.capabilityEndpoint === null
+                  ? null
+                  : resolveFixedCredentialProbeEndpoint({
+                      providerId: binding.providerId,
+                      productId: binding.productId,
+                      credentialType: binding.credentialType,
+                      capabilityEndpoint: binding.capabilityEndpoint,
+                    });
+              if (endpoint === null) {
+                return probeError('probe_endpoint_unsupported');
+              }
+              const model = binding.capabilityModel;
+              if (endpoint.probe === 'models') {
+                built = buildModelsProbe(endpoint.url, token);
+              } else if (endpoint.probe === 'key') {
+                built = buildKeyProbe(token);
+              } else if (model === null) {
+                return probeError('capability_model_missing');
+              } else if (endpoint.probe === 'messages') {
+                built = buildAnthropicMessagesProbe(request, endpoint.url, model, token);
+              } else {
+                built = buildChatCompletionsProbe(request, endpoint.url, model, token);
+              }
             }
-          }
-          built = buildVertexProbe(request, accessToken, projectId, location);
-        } else if (request.category === 'claude' || request.category === 'codex') {
-          let material: Record<string, unknown>;
-          try {
-            material = JSON.parse(secret.toString('utf8')) as Record<string, unknown>;
-          } catch {
-            return probeError('credential_invalid');
-          }
-          const accessToken = typeof material.access_token === 'string' ? material.access_token : null;
-          if (accessToken === null || accessToken === '') {
-            return probeError('credential_invalid');
-          }
-          built =
-            request.category === 'claude'
-              ? buildClaudeProbe(
-                  request,
-                  accessToken,
-                  typeof material.account_uuid === 'string' ? material.account_uuid : null,
-                )
-              : buildCodexProbe(
-                  request,
-                  accessToken,
-                  typeof material.chatgpt_account_id === 'string' ? material.chatgpt_account_id : null,
-                );
-        } else if (request.category === 'opencode-go') {
-          const token = secret.toString('utf8').trim();
-          if (token === '') {
-            return probeError('credential_invalid');
-          }
-          built = buildChatCompletionsProbe(request, OPENCODE_GO_CHAT_COMPLETIONS_URL, OPENCODE_GO_TEST_MODEL, token);
-        } else {
-          const token = secret.toString('utf8').trim();
-          if (token === '') {
-            return probeError('credential_invalid');
-          }
-          const endpoint =
-            binding.capabilityEndpoint === null
-              ? null
-              : resolveFixedCredentialProbeEndpoint({
-                  providerId: binding.providerId,
-                  productId: binding.productId,
-                  credentialType: binding.credentialType,
-                  capabilityEndpoint: binding.capabilityEndpoint,
-                });
-          if (endpoint === null) {
-            return probeError('probe_endpoint_unsupported');
-          }
-          const model = binding.capabilityModel;
-          if (endpoint.probe === 'models') {
-            built = buildModelsProbe(endpoint.url, token);
-          } else if (endpoint.probe === 'key') {
-            built = buildKeyProbe(token);
-          } else if (model === null) {
-            return probeError('capability_model_missing');
-          } else if (endpoint.probe === 'messages') {
-            built = buildAnthropicMessagesProbe(request, endpoint.url, model, token);
-          } else {
-            built = buildChatCompletionsProbe(request, endpoint.url, model, token);
-          }
-        }
-        return probeThrough(built, request, proxy);
-      }).then((outcome) =>
-        outcome === null
-          ? {
-              category: 'error',
-              httpStatus: null,
-              latencyMs: 0,
-              resetAt: null,
-              usage: null,
-              reason: 'credential_unavailable',
-            }
-          : outcome,
-      );
+            return probeThrough(built, request, outbound.fetch);
+          }),
+      )
+        .then(
+          (outcome): AccountProbeOutcome =>
+            outcome === null
+              ? {
+                  category: 'error',
+                  httpStatus: null,
+                  latencyMs: 0,
+                  resetAt: null,
+                  usage: null,
+                  reason: 'credential_unavailable',
+                }
+              : outcome,
+        )
+        .catch(() => probeError('network'));
     },
   };
 }

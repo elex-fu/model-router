@@ -4,6 +4,7 @@ import {
   classifyZhipuWindowUnit,
   cnNormalizeResetTime,
   minimaxQuotaUrl,
+  parseKimiQuotaResponseBody,
   parseMinimaxQuotaResponseBody,
   parseZhipuQuotaData,
   parseZhipuQuotaResponseBody,
@@ -17,6 +18,49 @@ function encode(value: unknown): Uint8Array {
 function tier(tiers: readonly { window: string }[], window: string) {
   return tiers.find((candidate) => candidate.window === window) ?? null;
 }
+
+test('Kimi parses rolling detail and top-level weekly usage without relabeling reset order', () => {
+  const result = parseKimiQuotaResponseBody(
+    encode({
+      limits: [
+        { metadata: 'skip' },
+        { detail: { limit: '100', remaining: '25', resetTime: '2026-10-22T12:00:00Z' } },
+        { detail: { limit: 100, remaining: 0, resetTime: '2026-10-23T12:00:00Z' } },
+      ],
+      usage: { limit: 200, remaining: 40, resetTime: '2026-10-21T12:00:00Z' },
+    }),
+  );
+  assert.deepEqual(result, {
+    state: 'ok',
+    result: {
+      planLevel: '',
+      tiers: [
+        { window: '5h', usedPercent: 75, resetAt: '2026-10-22T12:00:00.000Z' },
+        { window: 'weekly', usedPercent: 80, resetAt: '2026-10-21T12:00:00.000Z' },
+      ],
+    },
+  });
+});
+
+test('Kimi keeps absent or invalid windows unknown, including zero capacity and missing remaining', () => {
+  for (const detail of [
+    undefined,
+    {},
+    { limit: 10 },
+    { limit: 0, remaining: 0 },
+    { limit: '', remaining: 0 },
+    { limit: 10, remaining: -1 },
+    { limit: false, remaining: 0 },
+  ]) {
+    const parsed = parseKimiQuotaResponseBody(encode({ limits: [{ detail }] }));
+    assert.deepEqual(parsed, { state: 'ok', result: { tiers: [], planLevel: '' } });
+  }
+  const parsed = parseKimiQuotaResponseBody(encode({ usage: { limit: 10, remaining: 11 } }));
+  assert.equal(parsed.state, 'ok');
+  if (parsed.state === 'ok') assert.deepEqual(parsed.result.tiers, [{ window: 'weekly', usedPercent: 0, resetAt: '' }]);
+  assert.equal(parseKimiQuotaResponseBody(new TextEncoder().encode('{broken')).state, 'error');
+  assert.equal(cnNormalizeResetTime(Number.MAX_VALUE), '');
+});
 
 test('zhipu unit classification: 3 = 5h rolling, 6 = weekly', () => {
   assert.equal(classifyZhipuWindowUnit(3), '5h');

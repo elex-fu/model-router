@@ -13,6 +13,11 @@ import { verifyCredentialValidationWorkerSchemaReadiness } from '../db/credentia
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import type { ProviderHttpEgressAllowlist } from '../gateway/provider-http-address.js';
 import {
+  type AccountOutboundConnectionFactory,
+  AccountOutboundError,
+  withAccountOutbound,
+} from './account-outbound.js';
+import {
   credentialValidationCapabilityProtocol,
   isSupportedCredentialValidationTarget,
   type ProviderCredentialValidationErrorCode,
@@ -726,8 +731,13 @@ export class PostgresCredentialValidationWorkerStore {
     const customTarget = this.options.approvedTargets
       ? resolveApprovedCredentialValidationTarget(this.options.approvedTargets, job)
       : null;
-    const expectedProtocol = credentialValidationCapabilityProtocol(job) ?? customTarget?.protocol ?? null;
-    if (requireSupportedCapability && expectedProtocol === null) return null;
+    const fixedProtocol = credentialValidationCapabilityProtocol(job);
+    const expectedProtocols = fixedProtocol
+      ? fixedAdapterCapabilityProtocols(fixedProtocol)
+      : customTarget
+        ? [customTarget.protocol]
+        : null;
+    if (requireSupportedCapability && expectedProtocols === null) return null;
     // A branded canonical target cannot be used on the old 035 no-slash schema.
     // Same restricted worker/executor, before secret access, dispatch and completion.
     if (customTarget?.schemaVersion === 2) {
@@ -829,7 +839,7 @@ export class PostgresCredentialValidationWorkerStore {
     );
     if (rights.rows.length !== 1) return null;
 
-    if (expectedProtocol !== null) {
+    if (expectedProtocols !== null) {
       const capabilities = await queryRows<{ version: number | string }>(
         tx,
         scope.ownerKind === 'tenant'
@@ -850,7 +860,7 @@ export class PostgresCredentialValidationWorkerStore {
             AND binding.provider_id = $1 AND binding.product_id = $2
             AND binding.model = $5 AND binding.endpoint = $6
             AND binding.capability_version = $7
-            AND capability.protocol = $8
+            AND capability.protocol = ANY($8::text[])
             AND capability.support_level = 'supported'
             AND capability.validation_state = 'verified'
             ${
@@ -885,7 +895,7 @@ export class PostgresCredentialValidationWorkerStore {
             AND binding.provider_id = $1 AND binding.product_id = $2
             AND binding.model = $4 AND binding.endpoint = $5
             AND binding.capability_version = $6
-            AND capability.protocol = $7
+            AND capability.protocol = ANY($7::text[])
             AND capability.support_level = 'supported'
             AND capability.validation_state = 'verified'
             ${
@@ -912,7 +922,7 @@ export class PostgresCredentialValidationWorkerStore {
               job.target.model,
               job.target.endpoint,
               job.target.version,
-              expectedProtocol,
+              expectedProtocols,
               ...(customTarget ? [customTarget.evidenceSha256, customTarget.expiresAt] : []),
             ]
           : [
@@ -922,7 +932,7 @@ export class PostgresCredentialValidationWorkerStore {
               job.target.model,
               job.target.endpoint,
               job.target.version,
-              expectedProtocol,
+              expectedProtocols,
               ...(customTarget ? [customTarget.evidenceSha256, customTarget.expiresAt] : []),
             ],
       );
@@ -1424,6 +1434,7 @@ export interface CredentialValidationWorkerOptions {
   /** Legacy fixed-adapter seam only. Custom validation never reads or calls it. */
   readonly fetch?: ProviderCredentialValidationFetch;
   readonly approvedTargets?: ApprovedCredentialValidationTargets;
+  readonly createEgressConnection?: AccountOutboundConnectionFactory;
   readonly transportTestOptions?: CredentialValidationTransportTestOptions;
   /**
    * R9 §4 P1: operator-configured egress allowlist shared with the gateway
@@ -1476,8 +1487,8 @@ export class CredentialValidationWorker {
   private closePromise?: Promise<void>;
 
   constructor(
-    database: SaasDatabase,
-    kms: ProviderCredentialUnsealingKms,
+    private readonly database: SaasDatabase,
+    private readonly kms: ProviderCredentialUnsealingKms,
     private readonly options: CredentialValidationWorkerOptions,
   ) {
     this.options = Object.freeze({ ...options });
@@ -1527,23 +1538,44 @@ export class CredentialValidationWorker {
     } else {
       let plan: PreparedCredentialValidationProbe | undefined;
       try {
-        if (customTarget) {
-          // URL/public DNS policy is resolved before decrypting any credential;
-          // withCredential independently repeats all authority checks after DNS.
-          await this.store.recheckBeforeProviderRequest(lease);
-          plan = await this.transport.prepare(customTarget, this.halt.signal);
-        }
-        result = await this.store.withCredential(lease, async (secret) => {
-          if (this.halt.signal.aborted) leaseLost();
-          if (plan) return this.transport.probe(plan, secret, () => this.store.recheckBeforeProviderRequest(lease));
-          await this.store.recheckBeforeProviderRequest(lease);
-          if (this.halt.signal.aborted) leaseLost();
-          return validateProviderCredential(lease.job, secret, this.options.fetch, this.halt.signal);
-        });
+        const customFetch = this.options.fetch;
+        result = await withAccountOutbound(
+          this.database,
+          this.kms,
+          lease.job,
+          {
+            deployment: this.options.deployment,
+            environment: this.options.environment,
+            signal: this.halt.signal,
+            egressAllowlist: this.options.egressAllowlist,
+            createEgressConnection: this.options.createEgressConnection,
+            ...(customFetch === undefined
+              ? {}
+              : {
+                  fetch: (url, init) => customFetch(new URL(url), init),
+                }),
+          },
+          async (outbound) => {
+            if (customTarget) {
+              // Resolve target and proxy policy before decrypting the provider
+              // credential; repeat authority checks immediately before dispatch.
+              await this.store.recheckBeforeProviderRequest(lease);
+              plan = await this.transport.prepare(customTarget, this.halt.signal, outbound.proxy);
+            }
+            return this.store.withCredential(lease, async (secret) => {
+              if (this.halt.signal.aborted) leaseLost();
+              if (plan) return this.transport.probe(plan, secret, () => this.store.recheckBeforeProviderRequest(lease));
+              await this.store.recheckBeforeProviderRequest(lease);
+              if (this.halt.signal.aborted) leaseLost();
+              return validateProviderCredential(lease.job, secret, outbound.fetch, this.halt.signal);
+            });
+          },
+        );
       } catch (error) {
         if (this.halt.signal.aborted) return 'stale';
         if (error instanceof CredentialValidationWorkerError && error.code === 'LEASE_LOST') return 'stale';
-        let code: ProviderCredentialValidationErrorCode = 'credential_unavailable';
+        let code: ProviderCredentialValidationErrorCode =
+          error instanceof AccountOutboundError ? 'provider_network_error' : 'credential_unavailable';
         if (error instanceof CredentialValidationTransportError) {
           if (error.code === 'validation_transport_closed') return 'stale';
           code = error.code;
@@ -1622,6 +1654,20 @@ export class CredentialValidationWorker {
       () => undefined,
     );
     return this.closePromise;
+  }
+}
+
+/** Only fixed adapters can equate native catalog names with their legacy wire-family aliases. */
+function fixedAdapterCapabilityProtocols(protocol: string): readonly string[] {
+  switch (protocol) {
+    case 'anthropic':
+    case 'anthropic-compatible':
+      return [protocol, protocol === 'anthropic' ? 'anthropic-compatible' : 'anthropic'];
+    case 'openai':
+    case 'openai-compatible':
+      return [protocol, protocol === 'openai' ? 'openai-compatible' : 'openai'];
+    default:
+      return [protocol];
   }
 }
 

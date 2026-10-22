@@ -80,8 +80,12 @@ class TransactionalAccountDatabase implements SaasDatabase {
       return { rows: [], rowCount: 1 };
     }
 
-    if (normalized.startsWith('INSERT INTO saas_tenant_provider_accounts')) {
+    if (
+      normalized.startsWith('INSERT INTO saas_tenant_provider_accounts') ||
+      normalized.startsWith('INSERT INTO saas_platform_provider_accounts')
+    ) {
       if (this.accountFailure) throw this.accountFailure;
+      const tenant = normalized.startsWith('INSERT INTO saas_tenant_provider_accounts');
       const [
         tenantId,
         id,
@@ -100,11 +104,11 @@ class TransactionalAccountDatabase implements SaasDatabase {
         revalidationIntervalSeconds,
         createdAt,
         updatedAt,
-      ] = values;
+      ] = tenant ? values : [null, ...values];
       state.accounts.push({
-        owner_kind: 'tenant',
+        owner_kind: tenant ? 'tenant' : 'platform',
         tenant_id: tenantId,
-        supply_mode: 'byok',
+        supply_mode: tenant ? 'byok' : 'platform',
         id,
         display_name: displayName,
         provider_id: providerId,
@@ -130,10 +134,16 @@ class TransactionalAccountDatabase implements SaasDatabase {
       return { rows: [], rowCount: 1 };
     }
 
-    if (normalized.startsWith('INSERT INTO saas_tenant_provider_account_capabilities')) {
+    if (
+      normalized.startsWith('INSERT INTO saas_tenant_provider_account_capabilities') ||
+      normalized.startsWith('INSERT INTO saas_platform_provider_account_capabilities')
+    ) {
       this.capabilityInsertCount += 1;
       if (this.capabilityFailure?.attempt === this.capabilityInsertCount) throw this.capabilityFailure.error;
-      const [tenantId, accountId, providerId, productId, model, endpoint, capabilityVersion, createdAt] = values;
+      const tenant = normalized.startsWith('INSERT INTO saas_tenant_provider_account_capabilities');
+      const [tenantId, accountId, providerId, productId, model, endpoint, capabilityVersion] = tenant
+        ? values
+        : [null, ...values];
       state.capabilities.push({
         tenant_id: tenantId,
         account_id: accountId,
@@ -142,13 +152,14 @@ class TransactionalAccountDatabase implements SaasDatabase {
         model,
         endpoint,
         capability_version: capabilityVersion,
-        created_at: createdAt,
+        created_at: new Date().toISOString(),
       });
       return { rows: [], rowCount: 1 };
     }
 
     if (normalized.startsWith('SELECT model, endpoint, capability_version')) {
-      const [tenantId, accountId, providerId, productId] = values;
+      const tenant = normalized.includes('FROM saas_tenant_provider_account_capabilities');
+      const [tenantId, accountId, providerId, productId] = tenant ? values : [null, ...values];
       const rows = state.capabilities
         .filter(
           (row) =>
@@ -165,8 +176,12 @@ class TransactionalAccountDatabase implements SaasDatabase {
       return { rows: rows as Row[], rowCount: rows.length };
     }
 
-    if (normalized.startsWith('SELECT owner_kind, tenant_id, supply_mode, id, display_name')) {
-      const [tenantId, accountId] = values;
+    if (
+      normalized.startsWith('SELECT owner_kind, tenant_id, supply_mode, id, display_name') ||
+      normalized.startsWith('SELECT owner_kind, NULL::uuid AS tenant_id, supply_mode, id, display_name')
+    ) {
+      const tenant = normalized.includes('FROM saas_tenant_provider_accounts');
+      const [tenantId, accountId] = tenant ? values : [null, ...values];
       const row = state.accounts.find((candidate) => candidate.tenant_id === tenantId && candidate.id === accountId);
       return { rows: row ? ([row] as Row[]) : [], rowCount: row ? 1 : 0 };
     }
@@ -226,6 +241,37 @@ test('creates an account and all capabilities through one Postgres transaction e
   assert.equal(database.committedState.capabilities.length, 2);
   assert.equal(new Set(database.queries.map((query) => query.transactionId)).size, 1);
   assert.equal(database.queries[0]?.transactionId, 1);
+});
+
+test('both account owners insert capability identity and version while PostgreSQL supplies created_at', async (t) => {
+  for (const ownerKind of ['tenant', 'platform'] as const) {
+    await t.test(ownerKind, async () => {
+      const database = new TransactionalAccountDatabase();
+      const input: CreateProviderAccountInput =
+        ownerKind === 'tenant'
+          ? tenantAccount(twoCapabilities)
+          : { ...tenantAccount(twoCapabilities), ownerKind, tenantId: null, supplyMode: 'platform' };
+      await serviceFor(database).createProviderAccount(input);
+      const inserts = database.queries.filter(
+        ({ sql }) => sql.includes('provider_account_capabilities') && sql.startsWith('INSERT'),
+      );
+      assert.equal(inserts.length, 2);
+      for (const [index, insert] of inserts.entries()) {
+        const capability = twoCapabilities[index];
+        assert.ok(capability);
+        assert.doesNotMatch(insert.sql, /\bcreated_at\b/);
+        assert.deepEqual(insert.values, [
+          ...(ownerKind === 'tenant' ? ['tenant-a'] : []),
+          'account-a',
+          'provider-a',
+          'product-a',
+          capability.model,
+          capability.endpoint,
+          capability.version,
+        ]);
+      }
+    });
+  }
 });
 
 test('reuses a caller-owned Postgres transaction without opening a nested transaction', async () => {
