@@ -1,0 +1,435 @@
+{
+  "schema": 2,
+  "classification": "local-captured-build-real-provider-acceptance",
+  "proposedPublicProjectionOnly": true,
+  "formalRequiredCiEvidence": false,
+  "releaseGoClaim": false,
+  "r9PerformanceEvidence": false,
+  "allProviderCoverageClaim": false,
+  "startedAt": "2026-10-22T09:34:57.971Z",
+  "finishedAt": "2026-10-22T09:35:13.850Z",
+  "baseCommit": "bb9756c7b73a7f1a793aee761bb71f8ffb31956e",
+  "evidenceRun": "model-router-commercial-postgres-3cAH6f",
+  "inputReceipts": {
+    "gateSummarySha256": "7e5fbde0bc719156325f54cca65958661ddbf7ad8bc32d9828f53f35bb2ee649",
+    "kimiSummarySha256": "6b22b38478a0d705e567a083c782f71cdb999165b7af83c77da8a563d8e3254c",
+    "guardSha256": "7217e7c44bad68f90d7dda67e02c0f7a2a1286cb308344836dd73d61c2033851",
+    "testLogSha256": "1dfef63dac75aefd2f9bb2208abd185b9d386f496843dcb694efc6b556c87a90"
+  },
+  "wrapper": {
+    "sha256": "85e815cedd449c5c8cd254d50635fc94d9cd9d273c2e7d93c9299390bdf27f48",
+    "guardDirectory": "model-router-kimi-wallet-summary-native-20261022-ADd0yb",
+    "mode": "native",
+    "rootReportedSession": 79637,
+    "rootReportedExitCode": 0
+  },
+  "sourceGuard": {
+    "scope": "complete src tree: SHA-256 of every regular file before and after the run",
+    "filesChecked": 749,
+    "hashSetSha256": "92d82f018965e2d972887d1c910aa178d1c4b8a05665aae2277e99eea64855ad",
+    "beforeAfterDrift": false
+  },
+  "distGuard": {
+    "scope": "complete dist tree: SHA-256 of every regular file before and after the run",
+    "filesChecked": 2992,
+    "hashSetSha256": "a6592a53a3d9426c75ca6aebea13f3556dd955a59425128f9198e612f0dd44a8",
+    "beforeAfterDrift": false
+  },
+  "importedClosure": {
+    "scope": "literal relative import closure, runner, role manifest, package-lock.json",
+    "filesChecked": 708,
+    "hashSetSha256": "6fdb98de878c619867fce72650c18c4d3e77d498c9636727b548cbba47e69135",
+    "beforeAfterDrift": false
+  },
+  "currentAtArtifactCreation": {
+    "matchingStartedAt": "2026-10-22T09:49:17.061586Z",
+    "matchingFinishedAt": "2026-10-22T09:49:17.084576Z",
+    "globalSourceDistClosureMatchClaimed": false,
+    "walletOwnedFilesChecked": 4,
+    "walletOwnedFilesMatchFinalImplementation": true,
+    "observerAndLiveTestSourcesMatchCapturedHashes": true,
+    "walletSummaryBatchAppliedInCapturedBuild": true,
+    "wrapperMatchesExpectedSha256": true
+  },
+  "earlierVerifiedMatchingWindow": {
+    "recordedAt": "2026-10-22T09:42:42.845Z",
+    "walletProjectionQaSha256": "b75303f470dcf4d21bcc825e85b8699ea63e5850dc50d159c273b345a6c6e92a",
+    "rootIndependentVerificationSha256": "6cae5f5964067a6251f7d9decd498c2018ad6bae29c7575e8127cb5b504c6821",
+    "completedBuildSummarySha256": "e303a3e12d637c9d804ddcc6945568e93a8d64738e0c0db47901dc112a60f4d0",
+    "regressionMapSha256": "d34acc8d1a88f53916f09113392884b719c0b587a4e6e48357127167547eb982",
+    "scopeEntriesRecheckedByEarlierQa": 8179,
+    "thenCurrentDifferences": 0,
+    "capturedGuardMapsEqualThenVerifiedMaps": true,
+    "boundary": "Captured before/after guards and the confirmed 09:42 read interval apply. Root began a later commercial-reader change; no complete current source/build freeze is asserted at this projection time."
+  },
+  "futureGlobalFreeze": {
+    "establishedByThisArtifact": false,
+    "boundary": "This completed run and artifact-creation match do not establish a later repository-wide freeze or release decision."
+  },
+  "verifiedWalletOwnedHashes": {
+    "src/saas/billing/service.ts": "4f982209db17bc7101e3e4db47cb1f6b6343a83ba3171d6487d8cc8258f688fb",
+    "tests/saas/billing/fake-sql.ts": "a70baf021c7e530d240a800b1dea30d7cd1ec4d79c51e33ac02b5b3671ed579a",
+    "tests/saas/billing/billing.test.ts": "bb17373e0a81a55a5a49a83611ff07cdf7635b8dcbbb6a051661ed509d43fcd4",
+    "tests/saas/billing/customer-query.test.ts": "6418b7126644d836f3d63bae9028065c9040f2dfa0dff77caed5aa13f79bed36"
+  },
+  "observerSourceHashesMatchedToCapturedClosure": {
+    "scripts/ops/verify-commercial-kimi.ts": "46d18801c65146fa7e4f9a059a0c7420b7b33c0e04b46eca364d57924f8bce8d",
+    "tests/integration/kimi-commercial-live.test.ts": "a9858954f4a36de087f6b8dab30d0e733f9ba304adf9fd34c6f46bf68f209d7f"
+  },
+  "counts": {
+    "tests": 7,
+    "suites": 0,
+    "pass": 7,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+  "postgresPreparedStatements": "native",
+  "runtime": "current-dist-cli-builtin",
+  "kms": "local-test-pilot-software-kms",
+  "scope": "full-commercial-matrix",
+  "roles": [
+    "model_router_saas_migrator",
+    "model_router_saas_control_plane",
+    "model_router_saas_gateway",
+    "model_router_saas_validation_worker"
+  ],
+  "inventorySeedRole": "disposable-test-migrator",
+  "supplyLifecycleRole": "model_router_saas_control_plane",
+  "customerKeyRole": "model_router_saas_control_plane",
+  "providerScope": {
+    "provider": "kimi",
+    "product": "kimi-code",
+    "model": "kimi-for-coding",
+    "actualCredentialCount": 1,
+    "credentialCountProvenance": "Single-credential live run; safe terminal receipts do not store an independent credential inventory."
+  },
+  "callBudget": {
+    "declaredProviderInferenceCallsExpected": 8,
+    "observedCommercialRequests": 7,
+    "automaticOnboardingProbeAttempts": 1,
+    "representedCommercialAndProbeInteractions": 8,
+    "independentProviderHttpCounterAvailable": false
+  },
+  "fixturePrices": {
+    "independentFixtureTariffRowStored": false,
+    "sourceFixtureFormulaRecomputed": {
+      "inputMinorUnitsPerToken": "2",
+      "outputMinorUnitsPerToken": "3",
+      "sourceVerifiedAgainstFrozenObserver": true
+    },
+    "boundary": "Disposable fixture prices and signed local rights. The receipts omit a standalone tariff row; the formula is verified against the frozen live observer source, not an independently stored production tariff or resale approval."
+  },
+  "onboarding": {
+    "accountState": "active",
+    "credentialState": "active",
+    "validationState": "verified",
+    "validationAttempts": 1
+  },
+  "completedRequests": 6,
+  "totalSettledMinorUnits": "2772",
+  "totalCompletedInputTokens": "1134",
+  "totalCompletedOutputTokens": "168",
+  "usageAndSettlement": [
+    {
+      "scene": "native-nonstreaming",
+      "usageCapturePoint": "native-provider-passthrough",
+      "capturedUsage": [
+        {
+          "input_tokens": 25,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "25",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "83",
+        "ledger_amount": "83",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "83",
+        "ledger_debit": "83",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": true
+    },
+    {
+      "scene": "native-sse",
+      "usageCapturePoint": "native-provider-passthrough",
+      "capturedUsage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        },
+        {
+          "input_tokens": 0,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "25",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "83",
+        "ledger_amount": "83",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "83",
+        "ledger_debit": "83",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": true
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-first",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 186,
+          "completion_tokens": 62,
+          "total_tokens": 248,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "186",
+        "output_total": "62",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "558",
+        "ledger_amount": "558",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "558",
+        "ledger_debit": "558",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": true
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-second",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "338",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "709",
+        "ledger_amount": "709",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "709",
+        "ledger_debit": "709",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": true
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-first",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 222,
+          "completion_tokens": 62,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "222",
+        "output_total": "62",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "630",
+        "ledger_amount": "630",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "630",
+        "ledger_debit": "630",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": true
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-second",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 338
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "338",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "709",
+        "ledger_amount": "709",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "709",
+        "ledger_debit": "709",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": true
+    }
+  ],
+  "priceIdentityProvenance": "The passing captured live observer asserts customer and supplier price versions, and each completed scene records those identifiers. Safe terminal rows omit them; no independent terminal-receipt version comparison is claimed.",
+  "financialAggregateReceipts": {
+    "usageEvents": "6",
+    "settlementEvents": "6",
+    "attempts": "6",
+    "ledgerEntries": "12",
+    "ledgerCreditMinorUnits": "2772",
+    "ledgerDebitMinorUnits": "2772",
+    "balancedWithSettlements": true,
+    "standaloneAuditEventRowsStored": false,
+    "boundary": "Fresh sums of this run's six distinct completed-request terminal receipts, including per-scene token formula recomputation. No prior run's total is used. Separate audit-event rows/counts are not saved."
+  },
+  "completedReplay": {
+    "httpStatus": 200,
+    "conflictHttpStatus": 409,
+    "unchangedFinancialSnapshot": true,
+    "provenance": "Saved scene boolean backed by the passing live snapshot equality assertions; standalone before/after financial snapshot rows are not stored."
+  },
+  "extraEnvelopeDiagnostic": {
+    "count": 1,
+    "terminalStatesStored": 0,
+    "numericUsageStored": 0,
+    "includedInSettlementAggregates": false
+  },
+  "abort": {
+    "state": "unknown",
+    "usageEvents": "0",
+    "settlementEvents": "0",
+    "replayHttpStatus": 202,
+    "retainedHoldMinorUnits": "263680",
+    "walletAndLedgerUnchangedAssertedByPassingLiveTest": true,
+    "replayHasNoNewEffectsAssertedByPassingLiveTest": true,
+    "finalHeldLeasesZeroAssertedByPassingLiveTest": true,
+    "standaloneAbortTerminalReceiptStored": false,
+    "independentAbortTerminalRowVerified": false
+  },
+  "leaseCleanup": {
+    "settledTerminalReceiptsChecked": 6,
+    "settledReceiptsAllZeroHeldLeases": true,
+    "settledRequestsWithIntermediateHeldLeaseObserved": 6,
+    "abortZeroHeldLeasesProvenance": "Passing captured live test explicitly waits for zero held leases. The saved abort scene has no standalone terminal row; it was not independently re-read during this projection."
+  },
+  "cleanup": {
+    "clusterStopped": true,
+    "clusterRemoved": true,
+    "clusterDirectoryAbsentAtArtifactCreation": true,
+    "cliProcessesStopped": true,
+    "cliExitDiagnosticsChecked": 2,
+    "cliProcessProvenance": "Saved fixture processesStopped flag and both closed CLI startup diagnostics have exitCode0/signal null. No independent CLI PID inventory is present."
+  },
+  "limits": [
+    "One actual Kimi credential; no independent-account capacity, failover or all-provider claim.",
+    "Local fixture prices, signed local commercial rights and pilot software KMS; no production tariff/resale/cloud-KMS claim.",
+    "OpenAI numeric usage is captured after the response bridge; native passthrough numeric usage is provider-native. Repeated native SSE cumulative counters are merged last-wins, not summed.",
+    "The declared eight-call budget and seven commercial request scenes plus one onboarding attempt are not an independent provider HTTP call counter.",
+    "Six unique terminal receipts are summed. The extra envelope-only diagnostic and abort scene are excluded from completed-settlement totals.",
+    "Abort intentionally retains an uncertain financial hold. Its terminal state, no-new-effects and zero lease assertions passed live; no standalone abort terminal row or complete before/after wallet snapshot is saved.",
+    "Separate audit-event and standalone fixture tariff rows are not stored in these receipts.",
+    "Functional captured-build live-provider acceptance does not isolate wallet-summary optimization causality or establish latency, throughput, full R9, formal CI or GO.",
+    "Source/dist/imported-closure equality applies to captured before/after guards and the earlier confirmed 09:42 interval. Later commercial-reader work means no complete current freeze is claimed. Transitive dependencies beyond recorded scopes are not completely frozen."
+  ],
+  "passed": true
+}

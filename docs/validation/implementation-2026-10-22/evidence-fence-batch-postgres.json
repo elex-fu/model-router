@@ -1,0 +1,224 @@
+{
+  "classification": "local-smoke",
+  "formalRequiredCiEvidence": false,
+  "scope": "Local native PostgreSQL correctness and SQL-command-count comparison for the ordered evidence advisory-fence batch. This is not a latency benchmark, an R9 pass, a PG15 result, or formal required-CI evidence.",
+  "localDate": "2026-10-22",
+  "testFile": "tests/saas/gateway/prepared-evidence-authority-batch.postgres.integration.test.ts",
+  "testSha256": "cf73b5a87b8dedf2f718a20e4f0f1c404c94041e5283813b48e621d5db48e2dc",
+  "postgres": {
+    "version": "18.6",
+    "distribution": "Homebrew native aarch64-apple-darwin",
+    "connection": "self-owned disposable loopback cluster on a nondefault randomly allocated port",
+    "preparedStatements": "off",
+    "preparedStatementsDefaultChanged": false,
+    "gatewayRole": "model_router_saas_gateway",
+    "gatewaySuperuser": false,
+    "setup": "Current migrations with the existing role SQL replayed before and after migration; provisioned through migrator role and exercised through restricted gateway role.",
+    "grantsChangedForThisTest": false,
+    "schemaChangedForThisOptimization": false,
+    "durabilityOverrides": false,
+    "providerCalls": 0
+  },
+  "currentRun": {
+    "id": "model-router-evidence-fence-batch-pg18-R9tLIc",
+    "localEvidenceDirectory": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-evidence-fence-batch-pg18-R9tLIc",
+    "summarySha256": "bc1e07d2efd20bd5bf512b43ba4308099a06c0d5be0b51fc644c84abf8496adb",
+    "tapSha256": "b6328c9a9715d991e57646c933df142e6fbac9ae986039961140b66701e0f279",
+    "exitCode": 0,
+    "ok": true,
+    "nativeCounts": {
+      "tests": 14,
+      "pass": 14,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "countComposition": "One invalid-TTL test, twelve live-PG subtests (six for each supply mode), and their containing live-PG test. The fourteen native test count is not fourteen independent supply scenarios.",
+    "supplyModes": ["byok", "platform"],
+    "perModeActualCoverage": [
+      {
+        "test": "exact restricted grants, one post-fence batch, read-only preflight and versioned claim",
+        "assertions": [
+          "Real int8 authority revisions remain decimal strings under the existing restricted column grants.",
+          "The original individual-lock baseline and the ordered batch return identical scoped evidence facts, excluding their independently observed claim timestamp.",
+          "Preflight and claim each issue one separate authority batch after all advisory fences, retain two database-clock queries, and retain their original row-lock modes.",
+          "Isolated claim observations really roll back; committed preflight is read-only.",
+          "A committed claim increments the attempt version once, binds the evidence, and writes one claim audit; a repeated claim refuses ALREADY_CLAIMED and changes nothing further.",
+          "Request, capacity, holds, wallet and ledger snapshots are unchanged by the observation, read-only preflight, and evidence claim. Snapshot bodies are not retained in this projection."
+        ]
+      },
+      {
+        "test": "ordinal fence acquisition stops at the blocked middle key",
+        "assertions": [
+          "A separate writer holds the actual captured middle key exclusively; pg_blocking_pids identifies that writer as the reader blocker.",
+          "At that observed blocking point pg_locks shows the first key shared and granted, the middle key shared and waiting, and the later key absent.",
+          "A separate transaction can acquire the later key exclusively with pg_try_advisory_xact_lock.",
+          "No authority batch has run at the observation point; releasing the writer allows read-only preflight to complete without resource effects."
+        ]
+      },
+      {
+        "test": "a partial fence batch failure rolls back before authority reads or claim effects",
+        "assertions": [
+          "The same ordered-prefix state is observed before the restricted gateway role cancels its own blocked backend.",
+          "The service refuses STORAGE_ERROR after only its lock hint and failed fence statement; it never executes authority reads, a clock read, claim writes or a claim audit.",
+          "Transaction rollback releases the acquired prefix, verified through pg_locks and a successful separate exclusive try-lock.",
+          "Attempt, evidence, request, funds and capacity snapshots remain unchanged."
+        ]
+      },
+      {
+        "test": "signed dispatch deadline expires while waiting and the fresh database clock refuses claim",
+        "assertions": [
+          "A ten-second deadline is produced by the existing Ed25519 signing and production evidence registration flow; persisted evidence, epochs and clocks are not rewritten.",
+          "After the actual middle-key wait is observed, PostgreSQL clock_timestamp must still precede the signed deadline; arriving already expired fails the test.",
+          "The test waits until the same database clock crosses that unchanged deadline, then releases the writer.",
+          "Post-wait claim and subsequent preflight refuse EXPIRED; no claim write occurs, and all resource snapshots remain unchanged."
+        ]
+      },
+      {
+        "test": "an acquired reader fence blocks the real key writer, then claim sees the committed revoke",
+        "assertions": [
+          "An actual key-revocation UPDATE waits behind the reader's shared fence, as observed through pg_blocking_pids.",
+          "After reader completion and writer commit, claim refuses AUTHORITY_MISMATCH and leaves evidence, attempt and resources unchanged."
+        ]
+      },
+      {
+        "test": "a reader waiting behind the key writer reads the committed revoke in a new batch snapshot",
+        "assertions": [
+          "The real revocation writer holds its transaction open while the reader is observed waiting.",
+          "After writer commit, preflight and claim refuse AUTHORITY_MISMATCH from fresh post-fence authority reads; no claim or resource effect occurs."
+        ]
+      }
+    ],
+    "invalidTtlCoverage": "Zero, negative, fractional, NaN, infinite and out-of-Date-range positive-safe-integer TTLs refuse before any fixture database call; the omitted option retains the existing five-minute default.",
+    "cleanup": {
+      "stopExitCode": 0,
+      "stoppedStatusExitCode": 3,
+      "stopped": true,
+      "pgdataRemoved": true
+    }
+  },
+  "statementComparison": {
+    "measurement": "Actual SqlExecutor statement counts from the same current service, data, restricted role and rollback transaction. BEGIN/COMMIT/ROLLBACK and test observation SQL are excluded; this is not elapsed-time measurement.",
+    "baseline": "Current authority-batch service with only its fence statement expanded by the test into the original sequential shared-lock calls, preserving every bound key and hash seed.",
+    "perMode": {
+      "byok": {
+        "preflight": { "individualFenceBaseline": 19, "orderedFenceBatch": 8 },
+        "claim": { "individualFenceBaseline": 22, "orderedFenceBatch": 11 }
+      },
+      "platform": {
+        "preflight": { "individualFenceBaseline": 19, "orderedFenceBatch": 8 },
+        "claim": { "individualFenceBaseline": 22, "orderedFenceBatch": 11 }
+      }
+    },
+    "individualFenceCallsPerFixtureMethod": 12,
+    "orderedFenceCallsPerFixtureMethod": 1,
+    "authorityBatchCallsPerMethodUnchanged": 1,
+    "databaseClockQueriesPerMethodUnchanged": 2,
+    "registrationTotalStatementCountMeasured": false,
+    "delayOrEndToEndBenefitClaimed": false
+  },
+  "orderingContract": {
+    "keyMaterialIncluded": false,
+    "keySequenceEvidence": "The test compares every original individual-lock bound key against the actual target registration's captured key array in exact order. Only counts and layer ordinals are projected here.",
+    "evidenceConstruction": "flatMap the original layers, applying the unchanged JavaScript sortAndDedupeAdvisoryKeys inside each layer; retain duplicates across layer boundaries; no global sort or deduplication.",
+    "sortContract": "The existing helper uses Set followed by JavaScript default string sort. SQL orders only by the resulting input ordinal, never by key collation or lock-function output.",
+    "layerOrder": ["tenant", "project", "identity-commercial", "pools", "profiles", "provider-accounts", "credentials", "versions", "mappings", "members", "grants"],
+    "observedFixtureLayerCountsInThatOrder": {
+      "byok": [1, 1, 5, 0, 1, 1, 1, 1, 1, 0, 0],
+      "platform": [1, 1, 5, 1, 1, 1, 1, 1, 0, 0, 0]
+    },
+    "observedFixtureOrdinalRangesInThatOrder": {
+      "byok": [[1, 1], [2, 2], [3, 7], [], [8, 8], [9, 9], [10, 10], [11, 11], [12, 12], [], []],
+      "platform": [[1, 1], [2, 2], [3, 7], [8, 8], [9, 9], [10, 10], [11, 11], [12, 12], [], [], []]
+    },
+    "sql": {
+      "fixedMarker": "prepared-evidence:fence-batch",
+      "boundParameterCount": 1,
+      "parameterType": "text[]",
+      "withOrdinality": true,
+      "outerOrderBy": "input_ordinal",
+      "lockFunction": "pg_advisory_xact_lock_shared",
+      "keyHashFunction": "hashtextextended",
+      "keyHashSeed": 0,
+      "lockExpressionOnlyInScalarTargetList": true,
+      "lockExpressionReferencedBySortDistinctOrGroup": false,
+      "limitAggregateOrTargetListSetReturningFunction": false,
+      "postgresEvaluationContract": "The scalar volatile output expression is evaluated after ordinal sorting under the documented SELECT output-expression rule.",
+      "documentation": "https://www.postgresql.org/docs/18/sql-select.html#SQL-SELECT-LIST"
+    },
+    "unitOnlyAdditionalCoverage": "Exact flattened order and per-layer dedupe, a deliberately repeated key across layers retained twice, and register/preflight/claim batch failures rolling back before authority reads or writes.",
+    "admissionGuard": "Only the existing guard batch gained explicit WITH ORDINALITY/ORDER BY. Its existing keys.includes first-occurrence global dedupe is unchanged. No historical production ordering failure is asserted."
+  },
+  "authorityAndWriteBoundaries": {
+    "isolationChanged": false,
+    "isolation": "Existing READ COMMITTED transactions and their independent preflight/claim boundaries are retained.",
+    "authorityReads": "All authority reads remain separate statements after the awaited fence batch, so a lock wait is followed by a fresh authority snapshot. No authority result cache is introduced.",
+    "clock": "Existing fresh database clock observations, signed deadlines and SQL expiry predicates remain in place.",
+    "writes": "Request/attempt/evidence row-lock order, attempt CAS, evidence CAS, audit insertion, wallet/funds and capacity rules remain unchanged.",
+    "grantsTimeoutsOrDenialConditionsRelaxed": false
+  },
+  "fixtureCaptureCorrection": {
+    "firstRedRun": "model-router-evidence-fence-batch-pg18-GEb2qa",
+    "firstRedLocalEvidenceDirectory": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-evidence-fence-batch-pg18-GEb2qa",
+    "originalRedPreserved": true,
+    "nativeCounts": { "tests": 14, "pass": 5, "fail": 9, "cancelled": 0, "skipped": 0 },
+    "firstFailure": "ERR_ASSERTION in the test capture helper: four captured fence batches versus one expected. The wrapper covered seed register/preflight/claim plus the target register.",
+    "classification": "Test fixture capture scope; no SQLSTATE or production SQL rejection caused this first failure. Both modes' original real-writer revocation-direction tests already passed in the red run.",
+    "correction": "Within each real transaction record only fixed fence SQL and keys; associate them with the id returned by the actual evidence INSERT. Publish after successful transaction completion, then select exactly fixture.evidenceId and still require exactly one target registration transaction and one target batch.",
+    "takeFirstOrLastOrWeakenCountAssertion": false,
+    "productionGrantTtlTimeoutOrDenialChangeForCorrection": false,
+    "runnerCorrection": "Extract native TAP counts for exit zero or one before requiring exit zero plus all fourteen tests passing with zero skips. The original runner is retained separately; no retry or fallback was added.",
+    "firstRedCleanup": { "stopped": true, "stoppedStatusExitCode": 3, "pgdataRemoved": true, "sourceChanges": 0 }
+  },
+  "baselineProvenance": {
+    "thisRound": {
+      "path": "/private/tmp/model-router-prepared-evidence-before-fence-batch-20261022.ts",
+      "sha256": "895b88112d53007a10990c6b5bb5b742df5a6563550a60712ff864cc07ecee30",
+      "kind": "Reconstructed current-source reference: only acquireEvidenceAdvisoryFences is replaced with the exact unchanged original individual-lock helper. This is not a captured full-file pre-edit snapshot; the live comparison uses the narrow test wire shim, not this module.",
+      "preservesCurrentAuthorityBatch": true,
+      "preflightBaselineStatements": 19,
+      "claimBaselineStatements": 22
+    },
+    "previousRound": {
+      "path": "/private/tmp/model-router-prepared-evidence-before-batch-20261022.ts",
+      "sha256": "6b79e0d239fcb03e2695cabb5aebe3fa0e5ce3cd1f1887c8d037681eb3b9e2ae",
+      "kind": "Historical source before the earlier authority-read batch, with individual locks and individual authority reads. It was not loaded or measured by this gate.",
+      "historicalPreflightStatements": 37,
+      "historicalClaimStatements": 40,
+      "usedAsThisRoundBaseline": false
+    },
+    "roundsCombinedIntoOneImprovementClaim": false
+  },
+  "sourceVerification": {
+    "recordedBeforeAfterMatch": true,
+    "changedFiles": [],
+    "filesCheckedPerRun": 1358,
+    "scope": "All .ts files recursively under src (746) and tests/saas (608), plus existing role SQL, package.json, package-lock.json and the private runner. Excludes dist, other repository files and deployment/runtime acceptance.",
+    "snapshotDigestEncoding": "SHA-256 of UTF-8 JSON.stringify of the saved source hash table in its recorded insertion order.",
+    "beforeDigest": "67f37a63c95055f22d57e2d55324489f2c209ccd9def65d347766e8cebf5087c",
+    "afterDigest": "67f37a63c95055f22d57e2d55324489f2c209ccd9def65d347766e8cebf5087c",
+    "wholeCurrentTreeRescannedAtProjection": false,
+    "keyRecordedSourceHashes": {
+      "src/saas/gateway/prepared-request-evidence-service.ts": "dcea76ba8f0386019720ff1b4eaaf7e0173a2d6345eae2c6e1d3d089f8e29c4a",
+      "src/saas/gateway/postgres-request-admission-guard.ts": "cee1da1793ed8306a9c5f0df979f07a02f4b2c853b7a561c7c33b348cf4f98f3",
+      "tests/saas/gateway/prepared-request-evidence-service.test.ts": "3705c82fb52decb65dd9c348478986ab26d34403e94d7e22c191694fe901efa3",
+      "tests/saas/gateway/postgres-request-admission-guard.test.ts": "d0aef1bda015e7780718027fd5f5a2080a5cbe1512cbc037959775484ce559db",
+      "tests/saas/gateway/prepared-evidence-authority-batch.postgres.integration.test.ts": "cf73b5a87b8dedf2f718a20e4f0f1c404c94041e5283813b48e621d5db48e2dc",
+      "tests/saas/gateway/prepared-evidence-authority-postgres-fixture.ts": "cf187bd86d9960119a1ed309d5009a2e2a2f236ac73bba45fe03bf902b1a0a7a",
+      "deploy/managed-saas-postgres-roles.sql": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+      "owned-runner": "543cf9bf3d3cff180a651161cae97040e5f92848cab08e83422ae985f77ee3e1"
+    }
+  },
+  "supportingStaticChecks": {
+    "unitCounts": { "tests": 60, "pass": 58, "fail": 0, "skipped": 2 },
+    "unitSkipMeaning": "The live-PG root and the older concurrent-PG placeholder were explicitly skipped in the no-DB unit invocation; those skips are not real-PG passes.",
+    "canonicalSourceNoEmitExitCode": 0,
+    "focusedFourFileStrictNoEmitExitCode": 0,
+    "biomeExitCode": 0,
+    "existingBiomeWarningCount": 1,
+    "existingBiomeWarning": "Existing non-null assertion in the evidence unit test; no warning suppression or unsafe fix.",
+    "diffCheckExitCode": 0,
+    "runnerNodeCheckExitCode": 0
+  },
+  "projectionPolicy": "Fixed outcomes, test coverage, counts, source/diagnostic hashes and local artifact references only. No credentials, business row values, SQL parameters, arbitrary key text, wallet amounts or raw resource snapshots are projected."
+}

@@ -1,0 +1,1008 @@
+{
+  "schemaVersion": 1,
+  "classification": "local-smoke",
+  "formalRequiredCiEvidence": false,
+  "createdAt": "2026-10-21T23:00:35.415Z",
+  "purpose": "Restricted-role PostgreSQL regression for runtime health outcome clock sampling after a contested conflict row lock.",
+  "executionScope": {
+    "sourceTestRoot": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+    "sourceHelper": "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts",
+    "actualPostgresSourceExecution": true,
+    "builtCliExecuted": false,
+    "distAuditedForThisArtifact": false,
+    "performanceBenchmark": false,
+    "liveProviderEvidence": false,
+    "releaseDecision": false,
+    "typedLocalKmsUsed": false,
+    "healthApiOnly": true,
+    "financialTablesWrittenByThisGate": false
+  },
+  "environmentPolicy": {
+    "cleanChildEnvironment": true,
+    "providerLiveKmsPgOverridesInherited": false,
+    "preparedStatementsOverride": false,
+    "defaultPreparedStatementsMode": "off",
+    "environmentValuesSaved": false,
+    "databaseTargetsSaved": false
+  },
+  "evidenceSeparation": {
+    "fixedPostgresTotal": {
+      "tests": 14,
+      "pass": 14,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "historicalRedCounts": {
+      "tests": 7,
+      "suites": 0,
+      "pass": 4,
+      "fail": 3,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "focusedUnitCountsParsedFromPreservedTap": {
+      "tests": 312,
+      "suites": 0,
+      "pass": 312,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "offlineCiWiringCountsObservedInTask": {
+      "tests": 14,
+      "pass": 14,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "countsAreSeparateAndNotAdded": true
+  },
+  "historicalRed": {
+    "summary": {
+      "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/evidence/summary.json",
+      "bytes": 163378,
+      "sha256": "9fa8b2b97c883c89cd647becfbc22de40283d4dad2d2797f584b1cf37d5f862a"
+    },
+    "manifest": {
+      "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/inputs/manifest.json",
+      "bytes": 1113,
+      "sha256": "86fcaf9a9559715fe2c381696736361a16f208ca1cba3e1f7239299a4873b7ce"
+    },
+    "postgresMajor": 18,
+    "postgresVersion": "18.6",
+    "startedAt": "2026-10-21T22:27:42.633Z",
+    "finishedAt": "2026-10-21T22:27:47.497Z",
+    "exitCode": 1,
+    "counts": {
+      "tests": 7,
+      "suites": 0,
+      "pass": 4,
+      "fail": 3,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "tap": {
+      "log": {
+        "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/evidence/custom-test.log",
+        "bytes": 5289,
+        "sha256": "5d9d365cd2506d0750fccb1900b039ef8e4f85361302584148f0800ff0133926"
+      },
+      "counts": {
+        "tests": 7,
+        "suites": 0,
+        "pass": 4,
+        "fail": 3,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "cases": [
+        {
+          "name": "success F2 waits for H/F1 then applies using a fresh microsecond DB clock; F1 replay is unchanged",
+          "passed": false
+        },
+        {
+          "name": "failure F2 waits then applies exactly one EMA vote and an exact shared-clock cooldown",
+          "passed": false
+        },
+        {
+          "name": "a genuinely future stored observation still rejects a legitimate newer lease with 55000",
+          "passed": true
+        },
+        {
+          "name": "040 still rejects a real one-microsecond backward write and rolls it back",
+          "passed": true
+        },
+        {
+          "name": "040 still rejects equal and older source fencing tokens without changing any field",
+          "passed": true
+        },
+        {
+          "name": "040 still rejects a revision jump without changing any field",
+          "passed": true
+        },
+        {
+          "name": "runtime health writes sample the database clock after the actual conflict row lock under restricted roles",
+          "passed": false
+        }
+      ]
+    },
+    "safePositiveDiagnostics": [
+      {
+        "result": null,
+        "publicCode": "STORAGE_ERROR",
+        "sqlStates": [
+          "55000"
+        ]
+      },
+      {
+        "result": null,
+        "publicCode": "STORAGE_ERROR",
+        "sqlStates": [
+          "55000"
+        ]
+      }
+    ],
+    "allStoredManifestInputHashesVerified": true,
+    "causalSequenceAssertedBeforeFailure": [
+      "H obtains the real restricted-gateway health row lock.",
+      "W publishes its actual transaction backend PID and submits the exact source statement with all ten original bindings.",
+      "A third observer verifies H is in pg_blocking_pids(W).",
+      "H writes F1 through the actual public API in the same holding transaction and commits.",
+      "W/F2 returns public STORAGE_ERROR with raw SQLSTATE 55000 captured before wrapping."
+    ],
+    "positiveCasesFailWithoutChangingExpectedSuccess": true,
+    "fourNegativeChildCasesPassed": true,
+    "postgresLog": {
+      "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/evidence/postgres.log",
+      "bytes": 15245,
+      "sha256": "e24307617c4cc32728715f5260876f22603236555f1a9f64f970b3fb4820c4a6"
+    },
+    "cleanup": {
+      "clusterStopped": true,
+      "clusterRemoved": true
+    },
+    "ownedClusterAbsentAtCreation": true,
+    "ownedPgDataAbsentAtCreation": true
+  },
+  "fixedMatrix": {
+    "summary": {
+      "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/summary.json",
+      "bytes": 178562,
+      "sha256": "4c100dd5c33210d83c0cb3b60ab7df6d4fe9314bff95e27279ff2f241d386bdb"
+    },
+    "startedAt": "2026-10-21T22:51:47.428Z",
+    "finishedAt": "2026-10-21T22:51:58.828Z",
+    "ok": true,
+    "runs": [
+      {
+        "postgresMajor": 18,
+        "postgresVersion": "18.6",
+        "backend": "disposable-initdb-cluster",
+        "summary": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg18/summary.json",
+          "bytes": 163384,
+          "sha256": "59e0d6db54ddf9ee8bb3acb45b5be14108e1d38169da6a8b50efddbb88f300a0"
+        },
+        "startedAt": "2026-10-21T22:51:47.475Z",
+        "finishedAt": "2026-10-21T22:51:51.698Z",
+        "exitCode": 0,
+        "testFile": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+        "counts": {
+          "tests": 7,
+          "suites": 0,
+          "pass": 7,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "tap": {
+          "log": {
+            "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg18/custom-test.log",
+            "bytes": 1951,
+            "sha256": "5dd3300152f59164d456ebe27cb9726375e5f21bf01f4f5feefda6cd9e2a08e5"
+          },
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "cases": [
+            {
+              "name": "success F2 waits for H/F1 then applies using a fresh microsecond DB clock; F1 replay is unchanged",
+              "passed": true
+            },
+            {
+              "name": "failure F2 waits then applies exactly one EMA vote and an exact shared-clock cooldown",
+              "passed": true
+            },
+            {
+              "name": "a genuinely future stored observation still rejects a legitimate newer lease with 55000",
+              "passed": true
+            },
+            {
+              "name": "040 still rejects a real one-microsecond backward write and rolls it back",
+              "passed": true
+            },
+            {
+              "name": "040 still rejects equal and older source fencing tokens without changing any field",
+              "passed": true
+            },
+            {
+              "name": "040 still rejects a revision jump without changing any field",
+              "passed": true
+            },
+            {
+              "name": "runtime health writes sample the database clock after the actual conflict row lock under restricted roles",
+              "passed": true
+            }
+          ]
+        },
+        "postgresLog": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg18/postgres.log",
+          "bytes": 8612,
+          "sha256": "c67e30e99a3f28679650fbe213473b7e4b5adc68f398971fdc1cbb1ab5ef721e"
+        },
+        "stages": [
+          {
+            "stage": "initdb",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:47.661Z",
+            "finishedAt": "2026-10-21T22:51:48.374Z"
+          },
+          {
+            "stage": "start-cluster",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:48.374Z",
+            "finishedAt": "2026-10-21T22:51:48.504Z"
+          },
+          {
+            "stage": "custom-create-db",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:48.505Z",
+            "finishedAt": "2026-10-21T22:51:48.702Z"
+          },
+          {
+            "stage": "custom-roles-before",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:48.702Z",
+            "finishedAt": "2026-10-21T22:51:48.763Z"
+          },
+          {
+            "stage": "custom-migrate",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:48.763Z",
+            "finishedAt": "2026-10-21T22:51:50.614Z"
+          },
+          {
+            "stage": "custom-roles-after",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:50.614Z",
+            "finishedAt": "2026-10-21T22:51:50.748Z"
+          },
+          {
+            "stage": "custom-test",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:50.770Z",
+            "finishedAt": "2026-10-21T22:51:51.392Z"
+          },
+          {
+            "stage": "stop-cluster",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:51.393Z",
+            "finishedAt": "2026-10-21T22:51:51.499Z"
+          }
+        ],
+        "cleanup": {
+          "clusterStopped": true,
+          "clusterRemoved": true
+        },
+        "ownedClusterPath": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg18/cluster",
+        "ownedClusterAbsentAtCreation": true,
+        "ownedPgDataPath": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg18/cluster/data",
+        "ownedPgDataAbsentAtCreation": true
+      },
+      {
+        "postgresMajor": 15,
+        "postgresVersion": "15.19",
+        "backend": "disposable-docker-container",
+        "summary": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/summary.json",
+          "bytes": 164739,
+          "sha256": "5cfdab4eb8e77b9a004fa3d473571d7ef927ea80b22d83a053861aeba609a1b2"
+        },
+        "startedAt": "2026-10-21T22:51:51.769Z",
+        "finishedAt": "2026-10-21T22:51:58.768Z",
+        "exitCode": 0,
+        "testFile": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+        "counts": {
+          "tests": 7,
+          "suites": 0,
+          "pass": 7,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "tap": {
+          "log": {
+            "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/custom-test.log",
+            "bytes": 1947,
+            "sha256": "1926fc316eb2a604e794412158d7972b077b9aa5be9d249e272efd08dfc0abd4"
+          },
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "cases": [
+            {
+              "name": "success F2 waits for H/F1 then applies using a fresh microsecond DB clock; F1 replay is unchanged",
+              "passed": true
+            },
+            {
+              "name": "failure F2 waits then applies exactly one EMA vote and an exact shared-clock cooldown",
+              "passed": true
+            },
+            {
+              "name": "a genuinely future stored observation still rejects a legitimate newer lease with 55000",
+              "passed": true
+            },
+            {
+              "name": "040 still rejects a real one-microsecond backward write and rolls it back",
+              "passed": true
+            },
+            {
+              "name": "040 still rejects equal and older source fencing tokens without changing any field",
+              "passed": true
+            },
+            {
+              "name": "040 still rejects a revision jump without changing any field",
+              "passed": true
+            },
+            {
+              "name": "runtime health writes sample the database clock after the actual conflict row lock under restricted roles",
+              "passed": true
+            }
+          ]
+        },
+        "postgresLog": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/cleanup-postgres-log.log",
+          "bytes": 9868,
+          "sha256": "5ff8550c792789c0d521fa79e47860def6f57925a55780fb17ce010897ab2936"
+        },
+        "stages": [
+          {
+            "stage": "create-container",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:51.903Z",
+            "finishedAt": "2026-10-21T22:51:52.188Z"
+          },
+          {
+            "stage": "container-image",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:52.188Z",
+            "finishedAt": "2026-10-21T22:51:52.212Z"
+          },
+          {
+            "stage": "start-cluster",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:52.212Z",
+            "finishedAt": "2026-10-21T22:51:52.506Z"
+          },
+          {
+            "stage": "copy-roles",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:53.813Z",
+            "finishedAt": "2026-10-21T22:51:53.861Z"
+          },
+          {
+            "stage": "custom-create-db",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:53.861Z",
+            "finishedAt": "2026-10-21T22:51:53.981Z"
+          },
+          {
+            "stage": "custom-roles-before",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:53.981Z",
+            "finishedAt": "2026-10-21T22:51:54.112Z"
+          },
+          {
+            "stage": "custom-migrate",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:54.112Z",
+            "finishedAt": "2026-10-21T22:51:56.955Z"
+          },
+          {
+            "stage": "custom-roles-after",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:56.956Z",
+            "finishedAt": "2026-10-21T22:51:57.446Z"
+          },
+          {
+            "stage": "custom-test",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:57.456Z",
+            "finishedAt": "2026-10-21T22:51:58.265Z"
+          },
+          {
+            "stage": "cleanup-postgres-log",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:58.266Z",
+            "finishedAt": "2026-10-21T22:51:58.297Z"
+          },
+          {
+            "stage": "stop-cluster",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:58.298Z",
+            "finishedAt": "2026-10-21T22:51:58.535Z"
+          },
+          {
+            "stage": "cleanup-container",
+            "exitCode": 0,
+            "startedAt": "2026-10-21T22:51:58.536Z",
+            "finishedAt": "2026-10-21T22:51:58.633Z"
+          }
+        ],
+        "cleanup": {
+          "clusterStopped": true,
+          "clusterRemoved": true
+        },
+        "ownedClusterPath": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/cluster",
+        "ownedClusterAbsentAtCreation": true,
+        "ownedPgDataPath": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/cluster/data",
+        "ownedPgDataAbsentAtCreation": true
+      }
+    ],
+    "immutableInputs": [
+      {
+        "path": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+        "sha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+        "oldStoredInput": {
+          "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/inputs/runtime-health-clock.postgres.integration.test.ts",
+          "bytes": 2217,
+          "sha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3"
+        },
+        "fixedStoredInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/tests__saas__gateway__runtime-health-clock.postgres.integration.test.ts",
+          "bytes": 2217,
+          "sha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3"
+        },
+        "oldFixedCurrentMatch": true
+      },
+      {
+        "path": "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts",
+        "sha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+        "oldStoredInput": {
+          "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/inputs/runtime-health-clock-postgres-fixture.ts",
+          "bytes": 25176,
+          "sha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a"
+        },
+        "fixedStoredInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/tests__saas__gateway__runtime-health-clock-postgres-fixture.ts",
+          "bytes": 25176,
+          "sha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a"
+        },
+        "oldFixedCurrentMatch": true
+      },
+      {
+        "path": "src/saas/db/migrations/040_gateway_provider_account_runtime_health.ts",
+        "sha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25",
+        "oldStoredInput": {
+          "path": "/private/tmp/model-router-health-clock-old-pg18-XyO3wW/inputs/040_gateway_provider_account_runtime_health.ts",
+          "bytes": 3957,
+          "sha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25"
+        },
+        "fixedStoredInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/src__saas__db__migrations__040_gateway_provider_account_runtime_health.ts",
+          "bytes": 3957,
+          "sha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25"
+        },
+        "oldFixedCurrentMatch": true
+      }
+    ],
+    "fixedStoredInputs": [
+      {
+        "path": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/tests__saas__gateway__runtime-health-clock.postgres.integration.test.ts",
+          "bytes": 2217,
+          "sha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3"
+        },
+        "currentSha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+        "matchesAtCreation": true
+      },
+      {
+        "path": "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/tests__saas__gateway__runtime-health-clock-postgres-fixture.ts",
+          "bytes": 25176,
+          "sha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a"
+        },
+        "currentSha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+        "matchesAtCreation": true
+      },
+      {
+        "path": "src/saas/db/migrations/040_gateway_provider_account_runtime_health.ts",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/src__saas__db__migrations__040_gateway_provider_account_runtime_health.ts",
+          "bytes": 3957,
+          "sha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25"
+        },
+        "currentSha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25",
+        "matchesAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/postgres-provider-account-runtime-health-store.ts",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/src__saas__gateway__postgres-provider-account-runtime-health-store.ts",
+          "bytes": 53902,
+          "sha256": "6f19124ffa6d120002a97e5357d66fdcc27aaa4f686e000e03e0d0d2b8949407"
+        },
+        "currentSha256": "6f19124ffa6d120002a97e5357d66fdcc27aaa4f686e000e03e0d0d2b8949407",
+        "matchesAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/postgres-provider-account-scheduler.ts",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/src__saas__gateway__postgres-provider-account-scheduler.ts",
+          "bytes": 124357,
+          "sha256": "53f9ee4d6dc76e0b4018ce0ea78f0395c02dbf1fd0bca1724b603c61a641d967"
+        },
+        "currentSha256": "53f9ee4d6dc76e0b4018ce0ea78f0395c02dbf1fd0bca1724b603c61a641d967",
+        "matchesAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/provider-account-scheduler.ts",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/src__saas__gateway__provider-account-scheduler.ts",
+          "bytes": 95269,
+          "sha256": "11013b37f4f9187f46f7516f4db6788aa2b77f386bee5fb4de27c35ac166866a"
+        },
+        "currentSha256": "11013b37f4f9187f46f7516f4db6788aa2b77f386bee5fb4de27c35ac166866a",
+        "matchesAtCreation": true
+      },
+      {
+        "path": "scripts/run-commercial-postgres-gate.mjs",
+        "storedInput": {
+          "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/inputs/scripts__run-commercial-postgres-gate.mjs",
+          "bytes": 18531,
+          "sha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180"
+        },
+        "currentSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "matchesAtCreation": true
+      }
+    ]
+  },
+  "passingTestAssertions": {
+    "evidenceKind": "Assertions in the exact immutable source tests completed by native TAP; no raw persisted row export.",
+    "waiterBlockedOnActualHolderConfirmed": true,
+    "holderPublicApiWriteCommitted": true,
+    "higherTokenWaiterApplied": true,
+    "finalFenceF2AndRevisionAdvancedByTwo": true,
+    "microsecondTextAndBigIntClockBracketAfterHolderWrite": true,
+    "success": {
+      "state": "healthy",
+      "failureCount": 0,
+      "healthScore": "1.000",
+      "cooldownUntil": null
+    },
+    "networkFailure": {
+      "state": "cooldown",
+      "failureCount": 2,
+      "healthScore": "0.640",
+      "acceptedOutcomeVotes": 2,
+      "holderCooldownMicroseconds": 1000000,
+      "waiterCooldownMicroseconds": 2000000,
+      "cooldownAndObservationShareExactSample": true
+    },
+    "olderF1ApiReplayReturnsStaleAndWholeRowDigestUnchanged": true,
+    "negativeCases": [
+      "Genuinely future stored observation plus a legitimate newer lease still raises raw 55000/public STORAGE_ERROR and preserves the row.",
+      "Direct one-microsecond backward update still raises 55000 and rolls back.",
+      "Equal and older source fencing tokens still raise 55000 and roll back.",
+      "A revision jump still raises 55000 and rolls back."
+    ],
+    "rawPersistedSnapshotsSaved": false,
+    "rawBlockingRowsSaved": false,
+    "rowSnapshotHashesExportedByTap": false
+  },
+  "sqlChangeReview": {
+    "oldStatementBytes": 3170,
+    "oldStatementSha256": "ee23ac98ff1c0d887a0118bd98aaf7c85fe67cae69c49e1c68382f4eb34b387e",
+    "fixedStatementBytes": 3651,
+    "fixedStatementSha256": "b1836ada3fd4460b73606d5051fd2daca649c5539514bab177c9c4c1a2fd4177",
+    "sourceSelectedByFrozenHelper": true,
+    "exactTenBindingsPreserved": true,
+    "conflictTimeColumnsShareOneVolatileSample": true,
+    "lockedRowPriorFailureCountActuallyUsedByCorrelatedSubquery": true,
+    "prefixAndSuffixOutsideTwoColumnAssignmentByteIdentical": true,
+    "originalCooldownCaseIdenticalAfterOnlyClockAndPriorCountSymbolSubstitution": true,
+    "insertLeaseAuthorizationFenceWhereRevisionFailureCountAndEmaPreserved": true,
+    "migration040ByteIdentical": true,
+    "noTimeClampAdded": true,
+    "scope": "Conflict UPDATE time columns sample after the row lock and fence WHERE; INSERT retains its original CTE. Cooldown durations/caps and one EMA vote per accepted outcome remain unchanged. Genuine future time and stale-token guards remain enforced.",
+    "broaderContext": "Six production module hashes differ between the historical red and fixed captures; this is not an all-source single-variable A/B claim."
+  },
+  "sourceAudit": {
+    "currentCheckedAt": "2026-10-21T23:00:35.415Z",
+    "digestAlgorithm": "SHA256 over localeCompare-sorted entries serialized as relativePath + NUL + sha256 + newline.",
+    "scopes": [
+      {
+        "name": "fixed-full-src-and-explicit-inputs",
+        "filesChecked": 757,
+        "srcFilesChecked": 749,
+        "beforeDigest": "b86d65bf0c1b003f32b4a6860d6d9b31bd691a1fa1a0c12609629ead0fb729c5",
+        "afterDigest": "b86d65bf0c1b003f32b4a6860d6d9b31bd691a1fa1a0c12609629ead0fb729c5",
+        "currentDigest": "b86d65bf0c1b003f32b4a6860d6d9b31bd691a1fa1a0c12609629ead0fb729c5",
+        "changedDuringRun": [],
+        "currentHashMatchesAll": true,
+        "currentDifferences": [],
+        "commercialHttpTestIncluded": false
+      },
+      {
+        "name": "fixed-pg18-literal-import-closure",
+        "filesChecked": 683,
+        "srcFilesChecked": 678,
+        "beforeDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "afterDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "currentDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "changedDuringRun": [],
+        "currentHashMatchesAll": true,
+        "currentDifferences": [],
+        "commercialHttpTestIncluded": false
+      },
+      {
+        "name": "fixed-pg15-literal-import-closure",
+        "filesChecked": 683,
+        "srcFilesChecked": 678,
+        "beforeDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "afterDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "currentDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "changedDuringRun": [],
+        "currentHashMatchesAll": true,
+        "currentDifferences": [],
+        "commercialHttpTestIncluded": false
+      },
+      {
+        "name": "historical-old-pg18-literal-import-closure",
+        "filesChecked": 683,
+        "srcFilesChecked": 678,
+        "beforeDigest": "f2bf99585400bd2dba44c19dff98e6f647a8994d854b83d88b776b3ee4b6efbb",
+        "afterDigest": "f2bf99585400bd2dba44c19dff98e6f647a8994d854b83d88b776b3ee4b6efbb",
+        "currentDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+        "changedDuringRun": [],
+        "currentHashMatchesAll": false,
+        "currentDifferences": [
+          {
+            "path": "src/saas/gateway/http-handler.ts",
+            "capturedSha256": "1684c0e97937df9e8a1f28d05ce19a833602ef7c19edbab8ce5994cd0399e3cb",
+            "currentSha256": "395c08bd4a2082ef3c81eededd01e695f0427ab8934cee5227a8f379b9fad1b9"
+          },
+          {
+            "path": "src/saas/gateway/postgres-provider-account-runtime-health-store.ts",
+            "capturedSha256": "38cff57588cfcd62ed40ccb4aff2842552c1b16e093dce8636e2a3d7670a6a3a",
+            "currentSha256": "6f19124ffa6d120002a97e5357d66fdcc27aaa4f686e000e03e0d0d2b8949407"
+          },
+          {
+            "path": "src/saas/gateway/postgres-provider-account-scheduler.ts",
+            "capturedSha256": "beab8494145f9ad73c66ee9ff48b23309d277a10085f327755e044384de0ebe2",
+            "currentSha256": "53f9ee4d6dc76e0b4018ce0ea78f0395c02dbf1fd0bca1724b603c61a641d967"
+          },
+          {
+            "path": "src/saas/gateway/prepared-evidence-dispatch-service.ts",
+            "capturedSha256": "b062dad0daf32b237ac21747233a86c83a880f0ead0fe723d3b8f28fc948f129",
+            "currentSha256": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776"
+          },
+          {
+            "path": "src/saas/gateway/provider-account-scheduler.ts",
+            "capturedSha256": "6e617b8985381d0db1d556e23625cc7dfdd21156fce8fb2ab996e8b0610d7395",
+            "currentSha256": "11013b37f4f9187f46f7516f4db6788aa2b77f386bee5fb4de27c35ac166866a"
+          },
+          {
+            "path": "src/server/managed-saas-gateway.ts",
+            "capturedSha256": "5a3d17693824b9ec4ca8dfcd054d98beb51bff6281cfb7e3c91bfcace1580147",
+            "currentSha256": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d"
+          }
+        ],
+        "commercialHttpTestIncluded": false
+      }
+    ],
+    "fullSrcInventory": {
+      "filesChecked": 749,
+      "currentInventoryMatchesCapture": true,
+      "beforeDigest": "844b86ab8c9064dcd825ff40bbd3475a713e4017bbff7ef7bc98117a8826da1e",
+      "afterDigest": "844b86ab8c9064dcd825ff40bbd3475a713e4017bbff7ef7bc98117a8826da1e",
+      "currentDigest": "844b86ab8c9064dcd825ff40bbd3475a713e4017bbff7ef7bc98117a8826da1e",
+      "allHashesMatchAtCreation": true
+    },
+    "pairedFixedLiteralClosures": {
+      "filesPerVersion": 683,
+      "pairingDigest": "ba90d401c12f6398cfd1e98d2469dc793fef3ca222589f69a7d5298e9b8d03a8",
+      "pg18Pg15Match": true
+    },
+    "explicitOuterNonSrcPaths": [
+      ".github/workflows/ci.yml",
+      "deploy/managed-saas-postgres-roles.sql",
+      "package-lock.json",
+      "scripts/run-commercial-postgres-gate.mjs",
+      "tests/ci/managed-saas-isolated-required-gates.ts",
+      "tests/ci/managed-saas-required-gates.test.ts",
+      "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts",
+      "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts"
+    ],
+    "keyHashes": [
+      {
+        "path": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+        "oldCapturedSha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+        "fixedCapturedSha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+        "currentSha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts",
+        "oldCapturedSha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+        "fixedCapturedSha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+        "currentSha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/db/migrations/040_gateway_provider_account_runtime_health.ts",
+        "oldCapturedSha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25",
+        "fixedCapturedSha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25",
+        "currentSha256": "5830f78ed2562585779a65d4cfce677d4958adbcb5c7b2035c694fd9880dbd25",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/postgres-provider-account-runtime-health-store.ts",
+        "oldCapturedSha256": "38cff57588cfcd62ed40ccb4aff2842552c1b16e093dce8636e2a3d7670a6a3a",
+        "fixedCapturedSha256": "6f19124ffa6d120002a97e5357d66fdcc27aaa4f686e000e03e0d0d2b8949407",
+        "currentSha256": "6f19124ffa6d120002a97e5357d66fdcc27aaa4f686e000e03e0d0d2b8949407",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/postgres-provider-account-scheduler.ts",
+        "oldCapturedSha256": "beab8494145f9ad73c66ee9ff48b23309d277a10085f327755e044384de0ebe2",
+        "fixedCapturedSha256": "53f9ee4d6dc76e0b4018ce0ea78f0395c02dbf1fd0bca1724b603c61a641d967",
+        "currentSha256": "53f9ee4d6dc76e0b4018ce0ea78f0395c02dbf1fd0bca1724b603c61a641d967",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/provider-account-scheduler.ts",
+        "oldCapturedSha256": "6e617b8985381d0db1d556e23625cc7dfdd21156fce8fb2ab996e8b0610d7395",
+        "fixedCapturedSha256": "11013b37f4f9187f46f7516f4db6788aa2b77f386bee5fb4de27c35ac166866a",
+        "currentSha256": "11013b37f4f9187f46f7516f4db6788aa2b77f386bee5fb4de27c35ac166866a",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "scripts/run-commercial-postgres-gate.mjs",
+        "oldCapturedSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "fixedCapturedSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "currentSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/http-handler.ts",
+        "oldCapturedSha256": "1684c0e97937df9e8a1f28d05ce19a833602ef7c19edbab8ce5994cd0399e3cb",
+        "fixedCapturedSha256": "395c08bd4a2082ef3c81eededd01e695f0427ab8934cee5227a8f379b9fad1b9",
+        "currentSha256": "395c08bd4a2082ef3c81eededd01e695f0427ab8934cee5227a8f379b9fad1b9",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/prepared-evidence-dispatch-service.ts",
+        "oldCapturedSha256": "b062dad0daf32b237ac21747233a86c83a880f0ead0fe723d3b8f28fc948f129",
+        "fixedCapturedSha256": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776",
+        "currentSha256": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/server/managed-saas-gateway.ts",
+        "oldCapturedSha256": "5a3d17693824b9ec4ca8dfcd054d98beb51bff6281cfb7e3c91bfcace1580147",
+        "fixedCapturedSha256": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d",
+        "currentSha256": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/gateway/provider-account-lease-service.ts",
+        "oldCapturedSha256": "3fcd445ac5383c4489d913205477e5ca148670fcd425bd9aab3fe68bf1ab494a",
+        "fixedCapturedSha256": "3fcd445ac5383c4489d913205477e5ca148670fcd425bd9aab3fe68bf1ab494a",
+        "currentSha256": "3fcd445ac5383c4489d913205477e5ca148670fcd425bd9aab3fe68bf1ab494a",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "deploy/managed-saas-postgres-roles.sql",
+        "oldCapturedSha256": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "fixedCapturedSha256": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "currentSha256": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "src/saas/db/privileges-manifest.ts",
+        "oldCapturedSha256": null,
+        "fixedCapturedSha256": "22428948260de9c7163a33264af0af9b9a613eba45de1045e0c421d6d87f0933",
+        "currentSha256": "22428948260de9c7163a33264af0af9b9a613eba45de1045e0c421d6d87f0933",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "package-lock.json",
+        "oldCapturedSha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "fixedCapturedSha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "currentSha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "tests/ci/managed-saas-isolated-required-gates.ts",
+        "oldCapturedSha256": null,
+        "fixedCapturedSha256": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e",
+        "currentSha256": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": "tests/ci/managed-saas-required-gates.test.ts",
+        "oldCapturedSha256": null,
+        "fixedCapturedSha256": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7",
+        "currentSha256": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7",
+        "matchesFixedAtCreation": true
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "oldCapturedSha256": null,
+        "fixedCapturedSha256": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3",
+        "currentSha256": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3",
+        "matchesFixedAtCreation": true
+      }
+    ],
+    "exclusions": [
+      "dist was not executed or audited.",
+      "The commercial HTTP test is outside the health literal closures and outer explicit inputs.",
+      "Other tests, ops harnesses, docs and future worktree changes are outside this captured scope."
+    ],
+    "futureGlobalFreezeClaim": false
+  },
+  "launcherReferences": {
+    "canonicalRunner": {
+      "path": "scripts/run-commercial-postgres-gate.mjs",
+      "sha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+      "oldFixedCurrentMatch": true
+    },
+    "matrixLauncher": {
+      "path": "/private/tmp/model-router-health-clock-fixed-pg-matrix-20261022.mjs",
+      "bytes": 5195,
+      "sha256": "9886d0f8632ab43daa31d94a1c32af94d910a0ecc7f6fe183068e91f287fbdd4",
+      "hashCheckedAtArtifactCreation": true,
+      "executionTimeHashCapturedInSummary": false,
+      "rootReportedReviewAndSyntaxCheckPassed": true
+    }
+  },
+  "cleanupAtCreation": {
+    "checkedAt": "2026-10-21T23:00:35.415Z",
+    "oldAndFixedNativeClusterDirectoriesAbsent": true,
+    "fixedDocker": {
+      "dockerContext": "colima",
+      "containerId": "8cd60cca9aeac212daffb53c60678679d1e603ff4361783347a1275ebf41b677",
+      "canonicalCreationLabel": "model-router.disposable-commercial-gate=true",
+      "creationLogIdMatchesSummary": true,
+      "removalLogIdMatchesSummary": true,
+      "creationLog": {
+        "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/create-container.log",
+        "bytes": 65,
+        "sha256": "5202636be9d4852ea30906cfdf1d3ad88f2aa8c8d990a7a2d0361d0edc4a7079"
+      },
+      "removalLog": {
+        "path": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/pg15/cleanup-container.log",
+        "bytes": 65,
+        "sha256": "5202636be9d4852ea30906cfdf1d3ad88f2aa8c8d990a7a2d0361d0edc4a7079"
+      },
+      "exactContainerAbsent": true,
+      "inspectExitCode": 1,
+      "noSuchContainerVerified": true,
+      "inspectStdoutSha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "inspectStderrSha256": "89b24310ff35c36909518f96a627508e986b33c8a96212f4ff288bdf82bfddbe"
+    }
+  },
+  "separateStaticChecks": {
+    "focusedUnits": {
+      "provenance": "Read-only parsing of the preserved native TAP from the completed focused run; no tests were re-executed during this projection correction.",
+      "counts": {
+        "tests": 312,
+        "suites": 0,
+        "pass": 312,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "rawLogPath": "/private/tmp/model-router-health-clock-callback-unit-20261022.tap",
+      "rawLogHash": "339b0b7e472c3952fe027c572d59ede3207ab94c9478296255c4834fc9bd516b",
+      "rawLogBytes": 55140,
+      "durationMs": 792.43425
+    },
+    "offlineCiWiring": {
+      "provenance": "Directly observed by this task before artifact projection; no rerun during projection.",
+      "commandPreviouslyExecuted": "rtk proxy node --import tsx --test tests/ci/managed-saas-required-gates.test.ts",
+      "counts": {
+        "tests": 14,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "rawLogHash": null,
+      "formalGithubCiExecution": false
+    },
+    "workflowStrictChecks": [
+      {
+        "step": "Strictly typecheck critical PostgreSQL test sources",
+        "exactCommandPreviouslyExecuted": "./node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/saas/gateway/authorization-prelock-postgres.integration.test.ts tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts tests/cli/managed-saas-validation-worker-postgres.integration.test.ts tests/saas/supply/managed-postgres-credential-validation.integration.test.ts src/saas/db/credential-validation-worker-schema-readiness.ts src/saas/db/credential-validation-worker-privileges.ts src/saas/runtime/credential-validation-targets-module.ts tests/saas/db/credential-validation-worker-schema-readiness.test.ts tests/saas/db/credential-validation-worker-privileges.test.ts tests/ci/managed-saas-required-gates.test.ts",
+        "exitCodeObservedInTask": 0,
+        "rawLogPersisted": false,
+        "timing": "Completed before the later commercial HTTP observer change; exact command and result describe the earlier then-current files only."
+      },
+      {
+        "step": "Strictly typecheck isolated required roots and their fixtures",
+        "exactCommandPreviouslyExecuted": "./node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts tests/saas/metering/usage-correction.postgres.integration.test.ts tests/saas/keys/ip-policy.postgres.integration.test.ts tests/saas/keys/budget-policy.postgres.integration.test.ts tests/drills/settlement-sigkill-crash.postgres.integration.test.ts tests/saas/identity/tenant-member-directory.postgres.integration.test.ts tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts tests/drills/dual-instance-failover.postgres.integration.test.ts tests/saas/marketing/redeem-codes.postgres.integration.test.ts tests/saas/marketing/promo-codes.postgres.integration.test.ts tests/saas/marketing/affiliate.postgres.integration.test.ts tests/saas/marketing/announcements.postgres.integration.test.ts tests/saas/supply/quota-sync-worker.postgres.integration.test.ts tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts tests/saas/supply/account-quarantine.postgres.integration.test.ts tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts tests/saas/gateway/health-score.postgres.integration.test.ts tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts tests/integration/kimi-commercial-preparation-diagnostic.test.ts tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts tests/saas/gateway/prepared-statements.postgres.integration.test.ts tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts tests/saas/gateway/runtime-health-clock-postgres-fixture.ts tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts scripts/ops/verify-commercial-kimi.ts tests/saas/gateway/pre-dispatch-postgres-fixture.ts tests/saas/metering/normal-success-postgres-fixture.ts tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts tests/ci/managed-saas-isolated-required-gates.ts tests/ci/managed-saas-required-gates.test.ts",
+        "exitCodeObservedInTask": 0,
+        "rawLogPersisted": false,
+        "timing": "Completed before the later commercial HTTP observer change; exact command and result describe the earlier then-current files only."
+      }
+    ],
+    "biome": {
+      "exitCodeObservedInTask": 0,
+      "errors": 0,
+      "existingWarnings": 17,
+      "existingInfos": 5
+    },
+    "yamlAndDiffChecks": {
+      "exitCodesObservedInTask": [
+        0,
+        0
+      ]
+    },
+    "workflowStrictCheckTiming": {
+      "provenance": "The two workflow strict commands were executed previously against then-current files and CI hashes; they were not re-executed for this projection correction.",
+      "ciFileHashesAtPriorCheckCapture": [
+        {
+          "path": "tests/ci/managed-saas-isolated-required-gates.ts",
+          "sha256AtPriorCheckCapture": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e"
+        },
+        {
+          "path": "tests/ci/managed-saas-required-gates.test.ts",
+          "sha256AtPriorCheckCapture": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "sha256AtPriorCheckCapture": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3"
+        }
+      ],
+      "completedBeforeLaterCommercialObserverChange": true,
+      "laterCommercialObserverChangeReportedSha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+      "laterCommercialObserverChangeCoveredByTheseStrictResults": false,
+      "laterCommercialObserverValidationAddedHere": false,
+      "scope": "The prior strict results do not assert coverage of subsequent commercial-test observer edits or any future file changes. The gateway owner separately checked the later observer; that result is outside this artifact."
+    }
+  },
+  "limitations": [
+    "Local source PostgreSQL correctness evidence only; not formal required CI, R9, live-provider, built-CLI or release acceptance.",
+    "Disposable runner uses fsync=off and synchronous_commit=off; this gate establishes neither crash durability nor performance.",
+    "Native TAP and executed source assertions prove their predicates; complete persisted row snapshots and blocking-observer rows were not saved.",
+    "Current hashes and cleanup absence were checked only at artifact creation and do not claim future global worktree freeze.",
+    "Focused units, offline CI wiring, historical red and fixed PostgreSQL counts are distinct evidence categories and are not summed."
+  ],
+  "projectionUpdatedAt": "2026-10-21T23:02:57.678Z"
+}

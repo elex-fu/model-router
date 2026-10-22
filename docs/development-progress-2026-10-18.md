@@ -1,5 +1,7 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
+> **最新更新：2026-10-23。** 最新任务状态、问题处理和后续顺序见 **§16.4**；前文保留各次历史事实。商业主链与新增背压实现已落地，最新整套 unit 为 **6823 pass / 1 fail / 23 skip**，发布仍为 **NO-GO**。本次按要求仅整理文档及分任务提交推送，不继续测试或验证。
+
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
 > 并按方案 14.3/G3 精神完成了可执行范围内的真实模型验证。
@@ -282,3 +284,281 @@
 - **限制**：本机没有 Codex/Grok OAuth 凭据，未做真实上游 smoke；本次以密封 envelope + 固定请求构造 + 响应边界用例证明链路。OAuth onboarding 探针与既有 API-key 固定适配器一样走 worker 的固定 fetch，不使用账号级 egress proxy；强制代理部署需在 worker 传输层另行接线。Claude/Gemini OAuth sink 尚未挂载到标准部署，也不在本轮覆盖范围；它们接入前必须在同一构造器中补齐请求/响应面，不能复用本次的 Codex/Grok 适配器冒充覆盖。
 
 **下一步**：有真实 Codex/Grok OAuth 凭据时跑一次“导入 → 自动验证 → 调度可用” smoke；随后继续 T02 其余生命周期面（Claude/Gemini OAuth 在 sink 挂载时补齐、quota/刷新接线）与 T01-b readiness 投影接线。
+
+## 15. 商业服务对标 Sub2API：源码复核与真实验证（2026-10-21）
+
+**本轮性质**：分析、测试与文档记录，未修改实现。model-router 基线为 `bb9756c7b73a7f1a793aee761bb71f8ffb31956e`；工作树已有未提交的调度健康、媒体运营与客户端拆分改动。Sub2API 使用本地干净副本 `a3eb7ef302961cba716dc78b39b93b60c467db0e`，不将该副本称为上游最新版本。
+
+**判断**：商业服务的主要剩余工作集中在有效凭据接入、协议语义、标准部署装配、当前发布门禁和运行证据。多租户、钱包账本、支付/退款、订阅、计费组、粘性调度、窗口门、媒体恢复、告警报表等已有实现，不能继续按旧清单重复建设。Sub2API 的参考价值主要在内置装配、账户生命周期、缓存快照与运营工作流；本轮未做两个网关的对称实机吞吐测试，不据源码判断性能倍数。
+
+### 15.1 新发现一：有效 Kimi Code 凭据被验证适配器误拒绝
+
+- 调用生产函数 `validateProviderCredential`，目标为已有固定适配器 `kimi / kimi-code / api-key / messages`，使用现有配置对应的真实凭据。
+- 两次均收到上游 HTTP 200，适配器却返回 `failed / provider_response_too_large / retryable=false`。
+- 第二次在同一次真实请求旁路观察响应结构：请求 `max_tokens=8, stream=false`；解压后的 JSON 为 **13,385 字节**，其中 thinking 签名长度为 **12,946 字符**，实际 `output_tokens=8`，`stop_reason=max_tokens`。未保存 thinking 内容或签名，仅记录类型、长度和用量。
+- 源因：`src/saas/supply/credential-validation-adapters.ts:45,714` 对 API-key 探针统一使用 4,096 字节上限；OAuth 探针另有 65,536 字节边界。限制输出 token 数不能限制附带签名的大小。
+- 业务后果由 worker 源码确认：非重试失败进入终态失败；账号保持 `pending`，不能因这次验证进入 `active + verified`（`credential-validation-worker.ts:1188,1218,1306`）。本轮没有向真实商业库导入凭据，持久状态后果属于代码路径核验。
+- **建议 P0**：按探针类别/供应商选择有界响应上限与超时，允许合法的消息签名；保留 EOF、形状校验、密钥脱敏和总字节上限。修复后通过既有审计重排机制重新验证受影响凭据，验收“导入 → 自动验证 → 可调度”。
+
+### 15.2 新发现二：OpenAI → Anthropic 的指定工具与 thinking 控制不闭合
+
+- 当前 TypeScript V2 代理、真实 Kimi：Anthropic 原生两轮工具调用通过，工具名和参数为 `add({a:2,b:3})`，工具结果回传后输出答案，结束原因 `end_turn`。
+- 同一上游的 OpenAI `chat/completions` 指定 function 请求返回 **400**：`tool_choice 'specified' is incompatible with thinking enabled`。请求已显式携带 `thinking.type=disabled`。
+- 使用独立本地回显上游捕获代理实际发出的请求：无论输入 `thinking.type=disabled` 还是 `reasoning_effort=none`，发往 `/v1/messages` 的 body 均保留 `{type:tool,name:add}`，丢失两种思考控制字段。该回显是转换诊断，不是真实上游成功证据。
+- 源码对应 `src/protocol/openai-to-anth.ts:25,139`；SaaS 的 `provider-payload-compiler.ts:2` 也复用 `pickBridge`，因此需要在商业链补同类验收。本轮真实 400 来自本地 V2 路径，不记作一次真实收费 SaaS 请求失败。
+- G-B6 的 structured thinking 处理位于 `src/server/preprocess.ts`，依赖上游 opt-in；它不能证明桥接前已丢失的客户端控制字段能够恢复。
+- **建议 P0（若销售 Kimi 的 OpenAI 工具接口）**：形成按供应商/模型声明的 thinking 与 tool_choice 兼容策略，贯通请求控制、响应 reasoning、工具结果和思考历史回传；同时验证自动工具和指定工具的完整多轮过程。不能用一次普通问答或一次工具响应宣称整条链路已验证。
+
+### 15.3 标准部署装配仍是商业服务的主要缺口
+
+| 能力 | 当前源码事实 | 商业服务需要的交付 |
+|---|---|---|
+| Provider bundle | v2 能解析 `extensions.providerBundles/media/tlsFingerprint`，但 `managed-saas.ts` 仅使用 module 的 `dependencies`；未找到消费扩展并构造对应 transport 的生产调用 | 提供内置生产 factory，由配置选择已知 bundle，覆盖注册、凭据、transport、探针、quota、定价与关闭回收 |
+| 新 transport / WS | `gateway-runtime-module.ts:192` 的精确 dependency 白名单不含专用 transport 和 `responsesWsRoundExecutor`；v2 继续复用同一白名单 | 在明确的版本合同与内置装配中暴露必要能力；用标准 CLI/发布包启动，不依靠 programmatic 注入或 bench module 证明可用 |
+| 就绪事实 | `collectGatewayCapabilityFacts` / `assertGatewayCapabilityAssembly` 尚无生产调用方；现有 `/readyz` 只检查数据库、KMS 与少量媒体挂载标志 | 将 per-provider 事实接入启动、doctor、管理面和可售能力投影；明确“启用、装配、验证、运营就绪”各状态 |
+| Codex compact | SaaS `/v1/responses/compact` 未声明能力时 404；声明能力后仍无实际执行分支，固定返回 501 `COMPACT_TRANSPORT_UNAVAILABLE` | 补原生 compact 派发及其权限、费用/配额、超时与错误处理；验收真实长会话压缩，明确供应商支持范围 |
+| Responses WS | engine/connection 及挂载缝已实现，仍依赖外部 executor | 将逐轮准入、取消、背压、原账号绑定和结算接入标准运行时，再以真实连接验收 |
+
+源码锚点：`src/server/managed-saas.ts:1992,2025`、`src/server/managed-saas-gateway.ts:315,716,2258`、`src/saas/gateway/http-handler.ts:1773,1856`。
+
+本轮已补一个原记录缺少的真库 smoke：在新建 PG18 空库存数据库、正式 control-plane 和 gateway 角色下执行 readiness 四条采集查询，两者均成功。该结果只证明当前 schema/授权下空库存查询可执行；非空事实正确性、标准组合根接线和生产可售状态仍未因此通过。
+
+### 15.4 已补齐的账务能力与仍需完成的发布验证
+
+- **Composite 实际供给成本归属已通过真实 PG18 测试**：`tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts` 原文件执行，1 test / 1 pass / 0 fail / 0 skipped。当前会冻结解析后的实际供给身份，客户身份仍绑定名义路由。旧方案 B04 不应继续登记为未实现。
+- `service-tier-trust` 的定向测试通过，覆盖已验证公共 API 的降档计费、不可信观察值不抬高账单、OAuth 的非权威观察和冲突处理。它属于本轮 55 个定向测试的一部分，不等于所有真实供应商的 tier 计费已经验收。
+- 新 PG18 的迁移与迁移后授权重放通过；正式角色检查通过，control-plane 和 gateway 均能启动。
+- **原始商业网关 E2E 当前仍失败**：`managed-postgres-commercial-gateway.integration.test.ts:278` 的夹具只解一层 authority decorator；生产组合在 `managed-saas-gateway.ts:1858` 已有 OpenCode Go 和 CN 两层。失败在第一笔商业推理 HTTP 验证之前，不能据此称网关业务请求失败，也不能称门禁通过。
+- 仅在临时测试副本中按源码解两层继续诊断，随后又停在旧 `nativeHealth instanceof PostgresProviderAccountRuntimeHealthStore` 断言。该临时诊断没有修改仓库测试，也没有产生商业全链路通过结论。
+- **建议 P0**：将门禁的装配观察合同更新到当前实现，保留真实角色、权限、撤权、资金围栏和故障断言，再重跑当前发布包的完整商业链。避免删除断言或增加超时来制造全绿。
+
+### 15.5 从 Sub2API 借鉴的优化顺序
+
+| 优先级 | 工作 | 对标依据及本项目落点 |
+|---|---|---|
+| P0 | 修复 Kimi 有效凭据误拒绝与核心工具语义 | 上述真实失败；先让现有可用上游完成商业入口和多轮调用 |
+| P0 | 完成内置运行时、native compact 与按能力就绪接线 | Sub2API `backend/cmd/server/wire_gen.go` 内置构造 provider/token/quota/gateway；本项目 v2 当前主要停留在合同与元数据 |
+| P0 | 修复并重跑商业发布门禁，重建当前产物后测性能 | 本轮当前门禁被过期夹具阻断；最近 R9 仍为旧镜像/旧基线的 FAIL，不将其数字当作当前源码实测 |
+| P0/P1 | 缩短 preparation/admission SQL 热路径 | 参考 Sub2API 的 scheduler snapshot + outbox、billing cache + 有界工作池。当前 `postgres-request-admission-guard.ts:753` 起仍有大量串行查询；先做阶段计时、批量查询和按不可变版本缓存，再评估锁与派生计数器。钱包、撤权、额度、最终租约与派发围栏继续由 PG 约束 |
+| P1 | 补 Kimi Coding quota 与统一账户出站路径 | Sub2API `cn_provider_quota_service.go:132,326,364` 已有 `/usages`、5h/周窗口及账号代理。真实 Kimi `/coding/v1/usages` 本轮 200，返回 rolling 与 weekly 数据；本项目 quota-sync 的固定适配器仅 DeepSeek，CN worker 为 Zhipu/MiniMax，缺 Kimi Coding 对应链路 |
+| P1 | 将现有调度/媒体/账务故障数据接成运营闭环 | 复用已有 metrics、alerts、reports、unknown-outcome 和任务恢复；完成在途调度健康/媒体页面并验收异常定位、重试/重排、审计、数据新鲜度。Sub2API 的 Ops dashboard 组合系统池上限、job 心跳、错误与延迟分布可作参考 |
+| P1 | SaaS 备份与恢复的运营交付 | Sub2API 有定时 S3 备份/恢复管理；本项目 `saas:upgrade` 仅在配置 PG 备份机制时实际备份，未配置可记录 anchor 后继续，`backup:create` 仅覆盖本地 V2。生产流程需接入明确的 PG 备份/PITR、异地保留、KMS 恢复材料与恢复演练回执 |
+| 后续 | 更多 provider、图片/视频/语音与生态界面 | 在首条可售链和发布门禁通过后按客户需求扩展；rerank 保留入口或 Realtime 边界不计作本次对标 Sub2API 的首批商业阻断 |
+
+Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.go:210,374`、`billing_cache_service.go:62`、`backend/internal/repository/usage_billing_repo.go:24`。其缓存/后计费设计与本项目派发前资金预留、证据和权限围栏的合同不同，采用快照与失效机制时需要保留本项目既有正确性约束；本轮没有数据证明直接替换能获得某个吞吐倍数。
+
+### 15.6 本轮验证清单与后续可验收里程碑
+
+| 验证 | 本轮结果 | 范围 |
+|---|---|---|
+| `tsc --noEmit` | exit 0 | 当前工作树 |
+| runtime v2/readiness/facts、R2 HTTP entries、service-tier trust | 55 tests / 55 pass / 0 fail / 0 skipped | 定向单测与隔离 HTTP 夹具 |
+| 当前源码 Kimi live smoke | 2 tests / 2 pass / 0 fail / 0 skipped | 原生非流式/SSE、OpenAI 普通桥接 |
+| Kimi 原生两轮工具 | 通过 | 真实模型、`thinking=disabled`、工具结果回传 |
+| Kimi OpenAI 指定工具 | HTTP 400 | 参数丢失由本地回显确认；尚无整条收费 SaaS 请求通过结论 |
+| SaaS Kimi 固定凭据验证适配器 | 两次均误拒绝有效 200 响应 | `provider_response_too_large`；第二次记录签名/响应长度 |
+| PG18 readiness facts | 两个正式角色均可执行空库存查询 | SQL/授权 smoke，未接标准运行时 |
+| PG18 Composite 实际成本归属 | 1 test / 1 pass / 0 fail / 0 skipped | 原测试、隔离真库 |
+| PG18 商业网关 E2E | 1 test / 0 pass / 1 fail | 旧装配 introspection 断言；未到首笔业务验证 |
+| Sub2API Kimi quota/阈值子集 | 4 个命名测试均 PASS | Go 1.27.1，必须带 `-tags=unit`；未做 Sub2API 真实网关吞吐对照 |
+
+定向 Node 测试根为 `gateway-runtime-module-v2-contract`、`provider-bundle-readiness`、`provider-bundle-readiness-facts`、`http-r2-saas-entries-e2e`、`service-tier-trust`。Kimi live 根为 `tests/integration/kimi-code-live.test.ts`。Sub2API 命令为：`go test -tags=unit ./internal/service -run '^(TestParseKimiUsageTiers|TestParseKimiUsageTiers_LimitZero|TestKimiQuotaURL|TestEvaluateAccountSchedulingThreshold_KimiCodingPlan)$' -count=1 -v`。
+
+建议依次验收：① Kimi 自动接入与一个真实收费 SaaS 非流式请求；② 同一标准部署下的 SSE、多轮工具、账单、取消/重复结算和故障恢复；③ 当前构建产物的 R9、稳定运行、升级/备份恢复与运营页面；④ 再扩大 provider 和客户范围。
+
+本机现有 Kimi 配置的两个 credential 条目引用同一个 `KIMI_CODE_API_KEY`，本轮用一个条目验证协议。这不能证明两个独立账户的容量或真实故障切换。所有本轮自建 PG 集群均已停止并删除 pgdata，临时代理已关闭；既有主服务与 Compose 栈未改动。
+
+脱敏观测、原始测试输出节选与源码摘要见 [本轮验证目录](validation/commercial-sub2api-2026-10-21/manifest.json)。该目录是本地分析快照，不冒充 `docs/evidence` 约定的 required CI 发布门禁证据。
+
+## 16. 商业服务对标修复与验收（2026-10-21—23，开发已落地、发布验收未完成）
+
+本轮按 §15 实施。标准 CLI/builtin 的 Kimi 自动接入、JSON/SSE、自动与强制工具的完整两轮收费请求、取消及重复提交已多次通过。二次绑定争用与满载分类修复后，定向 c200 验证零 403/5xx/传输错误、关闭后零 pending/open holds；原失败记录保留。后续完成 dispatch reader 有序锁批量、钱包聚合合并、commercial reader 围栏批量及八条固定查询的可选 native 计划复用。八查询构建曾通过完整离线回归、PG15/18 功能门禁和真实 Kimi 主链，但其完整 R9 的性能与零 5xx 门槛失败。之后的池权限复用、纯读调度事务精简和入口背压已落地并通过各自定向检查；最新整套回归在 unit 阶段仍有 1 项失败，未重建或重跑真实 Kimi、同构建性能对照。按 2026-10-23 本次指令停止后续测试与验证，转为整理任务文档并分任务提交。最新状态以 §16.4 为准，历史记录按各自源码与测量范围保留，发布结论仍为 **NO-GO**。
+
+### 16.1 已落地的实现
+
+| 工作 | 实现与边界 |
+|---|---|
+| Kimi 凭据接入 | 固定供应商按探针类别使用有界超时和响应上限；Kimi 允许合法签名大小。修复固定适配器原生/旧协议别名在 worker 完成围栏中的不一致；自定义目标仍精确匹配。新增 137 平台凭据审计重排入口。 |
+| thinking 与工具 | 保留 OpenAI 请求的 thinking/reasoning 控制、响应 reasoning 与签名历史。Kimi 原生指定工具名实际可能被忽略，已用 `any` 加仅包含被指定工具的集合表达强制语义；上游返回错误工具时拒绝错误结果，保留已发生的供应商用量和结算证据。 |
+| 原生用量证据 | 修复 Kimi Coding 返回的 `service_tier=standard`、`inference_geo=not_available` 被严格解析器拒绝；兼容规则绑定已验证 provider/product/native operation/固定目标，四个原生计数及未知字段检查继续保留。桥接给 OpenAI 的总输入包含新输入、缓存读取和缓存创建，TTL 明细不重复相加。 |
+| 标准运行时 | 发布包提供 `builtin` factory，按配置装配已知 bundle、专用 transport、凭据证明、S3/TLS 扩展和关闭生命周期。启动、`/readyz`、doctor、管理面消费能力事实。详见 [内置运行时](managed-saas-builtin-gateway-runtime.md)。 |
+| 可售投影 | `/v1/models`、`/v1beta/models` 和模型广场按精确 provider/product/endpoint 消费新鲜就绪报告；复合路由的解析价格身份也经过过滤。缺少回调、错误或无效报告返回 503。经过认证的直接验证与 count_tokens 保留既有授权流程。 |
+| compact / Responses WS | 新增 native compact 派发与 134 操作迁移；WS 默认 executor 接入逐轮准入、取消、背压、原账号绑定与结算。取消关联供应商 response ID，创建响应前不泄漏网关内部 UUID。Codex 的完整输入/输出计费上限尚无可信证明，内置运行时保持不可售；不记作真实长会话验收通过。 |
+| quota 与出站 | 新增 135 Kimi Coding 五小时/周窗口快照、阈值和新鲜度链路；验证、探针、刷新与派发复用账号绑定出站路径。补齐 Claude/Gemini 既有窗口读取的受限角色授权与真库回归。 |
+| 桥接调度 | 修复调度器用客户端 OpenAI 协议匹配 Anthropic 原生 capability 的误拒绝；复用已有服务端 `route.providerProtocol`，客户端路由、rights、价格与 epoch 校验仍使用各自的既有身份。新增原生能力限定的 BYOK/平台池真库回归及 required CI selector。 |
+| 协议与计价身份 | HTTP 响应桥接使用已持久化、签名的规范客户端 `protocol`，不依赖缺省的冗余别名；异步网络操作前固定转换器。准备快照分别保存客户计价协议和原生上游协议，客户价格核验使用前者；旧快照仅在新字段确实缺失时回退，非法值、继承值和错误身份继续拒绝。 |
+| 运营闭环 | 完成调度健康、媒体故障、诊断、新鲜度展示及授权审计重排/恢复动作；136 保存媒体重排请求。实际浏览器验收另修复 SPA 挂载返回空页面、运营摘要聚合查询的 `42803` 错误；界面消费实际服务及权限合同。 |
+| SaaS 备份恢复 | 新增 PG dump/PITR 策略、异地保留、KMS 恢复要求、定时任务、恢复回执及管理面；升级要求有效备份策略。原生 PG dump/restore 演练已通过，S3/KMS 使用协议替身的部分仍单独标记。详见 [备份运行手册](../deploy/managed-saas-backup-runbook.md)。 |
+| 商业门禁与时钟 | 更新装配观察合同，保留权限、资金、撤权、故障断言。attempt 状态时间、池成员/授权生效时间使用数据库时钟；准备 authority SQL 返回其实际采样时刻，JS 授权窗口使用同一时刻并拒绝非法时钟。另修复只读池/档案误用行锁、账号 capability INSERT 显式写入未授权默认时间列的问题。 |
+| 钱包补偿锁序 | 首次 c200 真实负载发现补偿的 wallet 行锁→wallet advisory 与结算的 advisory→ledger FK/余额行锁反序。现 `assertHold` 先取得既有 canonical wallet fence，再执行原 wallet/reservation `FOR UPDATE`；金额、身份、replay、审计及失败回滚保持。11/11 定向单测、类型检查、独立只读审查和重建完成；PG15/18 HTTP 与补偿根各 41/41，含真实并发正金额结算、补偿等待、重放、回滚与两个显式测试变体的死锁反例。新 c200 未复现死锁，其他 5xx 仍在定位。 |
+| 健康读写时钟 | 健康读取在 store、HalfOpen、core 各自 await 完成后用同一可注入主机 clock 复核，严格缺省才兼容旧 Date，250ms、maxAge 和 cooldown 不变。probe 成功及释放 lease 后仅一次真实重读；健康写入的冲突更新改用锁后单次 DB 采时，两列共享原冷却曲线，token/revision/EMA、040 与失败 latch 保留。 |
+| 最终派发容量 | 仅已知 PG dispatch adapter 将严格 null 分类为独立容量错误；原 PG API、health probe 及自定义 null 合同不变。HTTP 只有在响应未开始、请求未取消、同 request/attempt 的 quota/rate/hold 全部确认释放且无人工对账时返回 429；补偿不确定、存储或坏租约仍按原失败路径处理，不猜测 Retry-After，不增加租约重试。 |
+| 并发绑定竞争 | PG 标准路径组合选择与绑定，最终结果后才保留/释放 Redis slot。落败 bind 只在有效 active references 指向单一账号时返回类型化 winner，写入前返回且不刷新胜者；组合操作检查原候选集、scope、attempted 和新鲜 eligibility/health/capacity/window，最多对该 winner 再做一次原 fenced bind。二次严格 typed hint 若指向原域内唯一、同 scope、未 attempted 的另一账号则准入前 429，不再复查或绑定；坏 hint、不同 references、存储/CAS 错误仍 block。合法容量 deny/严格数值满载返回 429；畸形数值先 block，健康拒绝保持 503 优先。Redis release 保留 advisory best-effort/TTL，显式抛错仍覆盖待返回结果。 |
+| HTTP 关闭等待 | composition 跟踪并原样返回 HTTP promise，保留 AsyncLocalStorage 和非 async handler。关闭按 WS → 等待返回的 HTTP 工作（含结算与 lease finally）→ lifecycle 顺序执行；不改定时、取消、资金或 HTTP 状态。脱离该 promise 的视频后台登记不在这项证明内。 |
+| SQL 热路径 | 合并准入读取；价格读取改用共享 lineage fence，写入继续独占；首次商用身份查找改用不可变提示，最终完整围栏视图保留。preflight/claim 在同一组有序围栏后批量读取固定 authority 列，保留独立事务、行锁、数据库时钟、签名、CAS 与审计。新增有界 preparation/dispatch 阶段计时及准备失败计数。固定 SQL wire 计划复用由三条扩展到八条，默认 `off`、显式 `native`；SQL、参数与每次真实数据库读取保持，关闭时隐藏能力，错误不重放，不缓存授权数据。日志与指标不记录密钥、请求正文或错误原文。 |
+| 调度读取与池权限 | 同一 RR 解析只复用成功且精确匹配 ID/version 的池权限行，不缓存拒绝或跨请求数据。scheduler 的无锁 READ COMMITTED 纯 SELECT 去除事务外壳，SQL、顺序、候选路由重读和时钟检查保持；每条剩余 SELECT 各取连接，池等待取舍尚待实测。 |
+| HTTP 入口背压 | 核心监听器增加可选 `maxHttpInFlight` 与环境转发，默认关闭。独立计数只覆盖 HTTP 推理 handler；满载在认证/数据库工作前返回固定容量 429，原 Promise 完成后释放名额，关闭等待顺序不变。非法环境值仍先拒绝启动；typed 配置仅覆盖有效 env。异步图片 202 后后台派发与 WS 不计入该 HTTP 名额。 |
+| 发布包边界 | 新增 `deploy/.npmignore` 排除本机操作环境、恢复密钥及本地凭据注册文件；真实 `npm pack --dry-run --ignore-scripts` 文件清单确认排除本机 `remote-server.env`，保留部署与备份示例。没有生成或发布 npm 包。 |
+
+内置用量边界还会在准备前拒绝服务端工具、未知工具类型和根层 MCP 服务配置；本地函数的 schema、参数与结果数据不按远程工具声明处理。该检查没有改变已签名的 token 上限和价格。
+
+### 16.2 分次执行证据与历史阻断
+
+- 真实 Kimi V2 工具矩阵：5 tests / 5 pass / 0 fail / 0 skipped，覆盖 JSON/SSE 各自的自动与强制两轮工具，共 8 次推理调用；使用只有工具结果才能给出答案的 opaque lookup，未保存思考正文或签名。
+- 标准发布包 `dist/cli/index.js`、`builtin`、独立受限 PG18 角色：真实 CP 导入后，凭据 worker 一次探针达到账号/凭据 `active/verified`；首笔真实非流式请求、重复提交与内容冲突最小验收 3 tests / 3 pass / 0 skipped。请求达到 `succeeded/settled`，原始新输入 0、缓存读取 25、缓存创建 0、输出 11，持久总输入 25，扣款及平衡账本均为夹具价格的 83 个最小货币单位；租约为零，重复提交及 409 内容冲突均无新增资金或派发效果。
+- 此前 HTTP 200 后 `unknown / usage_missing` 的实际原因是额外的两个基线元数据字段触发了拒绝，四个原生计数并未缺失。直接原生对照确认相同字段和值，未保存正文或思考签名；限定兼容规则的定向合同验证 316 tests / 315 pass / 0 fail / 1 既有可选 PG skip。隔离 PG18 缓存用量证明另为 9/9；真实收费请求现已完成上行用量、账单、钱包与账本闭环。
+- 计划复用前的完整真实 Kimi 商业矩阵 **7 tests / 7 pass / 0 fail / 0 skipped**：一次探针完成自动验证，原生 JSON/SSE、OpenAI 自动/强制各两轮共 6 笔完成请求均达到 `succeeded/settled`，用量、价格版本、钱包扣款及平衡账本逐笔一致，合计为夹具价格的 2772 个最小货币单位。取消发生在收到实际 SSE 帧之后，结果为 `unknown/reconciliation_pending`、零用量/结算事件、保留原始 hold；重复请求返回 202 且无新增派发或资金效果。共预期 8 次供应商调用（探针 1、完成业务 6、中断业务 1）；707 个作用域文件零漂移，全部自建 CLI/PG 进程已清理。见 [脱敏真实验收记录](validation/implementation-2026-10-22/kimi-commercial-full.json)。
+- 上述计划复用前的重跑为 `j1v42R`。此前一次观察停在已结算但 finally 尚未释放租约的合法间隙；已修正验收观察器：先逐项校验身份、用量、账务和账本，只有合法正整数 held lease 在原有期限内等待，最终必须为零。unknown、账务错误和非法计数仍立即失败。7/7 观察器回归通过，未修改生产释放顺序、超时或供应商重试。
+- 三条固定计划接入后的标准 CLI/builtin 真实 Kimi 重跑 `AT7u1L` 显式使用 `native`：**7/7、零跳过**，自动接入及上述 JSON/SSE、自动/强制两轮工具、取消/重复提交矩阵再次通过。6 笔完成请求合计 2772 个夹具最小货币单位，最终租约为零；中断请求保留 263680 的 hold、用量及结算事件为零，重放仍为 202。708 个作用域文件及独立校验的全部 2992 个 dist 文件在运行前后与记录创建时一致；自建 CLI/PG 全部停止并清理。仍只有一个真实凭据、局部签署 rights、夹具价格及 pilot 软件 KMS。见 [native 真实收费链记录](validation/implementation-2026-10-22/kimi-commercial-native-prepared.json)。
+- 围栏批量化与七处 transport 测点进入当前构建后，真实 Kimi `saqACI / native` 再次 **7/7、零跳过**：自动接入、JSON/SSE、自动/强制工具两轮及取消/重复提交全部通过，6 笔完成请求仍合计 2772 个夹具最小货币单位、最终租约零；中断请求的 263680 hold、零用量/结算事件和 202 重放保持。708 个运行作用域文件与全部 2992 个 dist 文件前后及记录创建时一致；前一轮 R9 的 749 个完整生产源码摘要也独立匹配。全部自建 CLI/PG 已清理。这是钱包锁序修复前该构建的真实业务验收，不代替 R9；一个凭据、夹具价格、局部 rights 和 pilot 软件 KMS 的限制继续保留。见 [当前真实商业链](validation/implementation-2026-10-22/kimi-commercial-current.json)。
+- 钱包锁序修复并重建后的标准 CLI/builtin 真实 Kimi `EsQe2K / native` **7/7、零跳过**：自动接入、JSON/SSE、自动及强制工具完整两轮、取消与重复提交再次通过。6 笔完成请求合计 2772 个夹具最小货币单位、最终租约零；中断请求保持 unknown、263680 hold、零用量/结算事件及 202 重放。此轮独立捕获全部 **749 个 src 与 2992 个 dist**，前后及记录创建时均无漂移，另有 708 文件导入作用域捕获；自建 CLI/PG 全部清理。一个真实凭据、局部 rights、夹具价格及 pilot 软件 KMS 的限制保留，不替代压力或生产验收。见 [钱包修复后的真实收费链](validation/implementation-2026-10-22/kimi-commercial-wallet-order.json)。
+- 健康时钟与最终容量分类进入重建产物后，标准 CLI/builtin 真实 Kimi `hr5WLq / native` **7/7、零跳过**：自动接入、JSON/SSE、自动及强制工具两轮、取消与重放再次通过。6 笔完成请求按实际 receipt 求和为 **2772** 个夹具最小货币单位，六笔 terminal receipt 的 lease 均为零；中断保留 **263680** hold、零用量/结算事件及 202 重放，其中 abort lease 归零来自通过的现场断言，不伪造独立 terminal receipt。完整 **src 749 / dist 2992** 及导入闭包前后和记录创建时一致，全部自建资源已清理；仍是单一真实凭据、局部 rights、夹具价格与 pilot 软件 KMS，不代表全供应商、R9 或正式 CI。见 [健康与容量修复后的真实收费链](validation/implementation-2026-10-22/kimi-commercial-health-capacity.json)。
+- 真实 Kimi quota worker：标准构建 CLI 从持久化加密凭据自动验证，随后真实 GET `/coding/v1/usages`，初始空快照变为有效五小时 9%、周 71% 窗口；受限控制面读取验证 failure/rate-limit 均为零，首次成功后关闭自有 worker。**1/1、零跳过、685 个作用域文件零漂移**。该 custom runner 未捕获全部 dist 文件哈希，记录明确保留此限制。见 [quota worker 记录](validation/implementation-2026-10-22/kimi-quota-worker.json)。
+- OpenAI 工具商业链先后暴露并修复三个真实问题：原生 capability 被当作客户端协议匹配、HTTP bridge 依赖未持久化别名、客户价格协议被拿去与原生协议比较。调度修复通过 193/193 定向检查及受限 PG18 3/3；计价修复通过 37/37 定向检查及新增 PG18 11/11。后一真库证明经过实际 HTTP transport 的原生观察器，输入缓存 186、输出 62 结算 558；显式错误客户协议在写账前拒绝，完整资金快照不变。真实工具矩阵现已在修复后的标准 CLI 上通过。
+- 原准备失败由内部计数定位为 `admission / storage_failure`，隔离 PG18 已证明是独立缓存上限被误作实际分配相加。现已显式区分证据类型，并修正容量层的同类 TTL 校验，保留全部上限和旧分配校验。实际 PG18 9 tests / 9 pass / 0 skipped：预留 262240、模拟上游用量 5/1 结算 13、重复结算无额外效果，以及 7 个非法边界的完整回滚。该证明没有真实供应商调用，不能替代前述真实 Kimi 的结算验收。
+- 可售投影、模型列表/广场、count_tokens 与相关运行时定向验证：114 tests / 114 pass / 0 fail / 0 skipped。
+- 价格共享围栏、不可变提示、dispatch 及组合根：75 个定向测试和 17 个 PG18 检查通过。计划复用前的 PG15.19/PG18.6 本地矩阵 **104/104、零跳过**，各版本 52：commercial 27、composite 1、Kimi 诊断 11、原生调度 6、attempt clock 3、CP clock 4。10 份摘要均零源码漂移，配对源摘要一致，自有数据库/容器清理完成。CI wiring 11/11 及两条 workflow 原样 strict TSC 命令在本地通过；不作为 GitHub required CI capture。见 [双版本矩阵](validation/implementation-2026-10-22/postgres-matrix.json)。
+- 钱包锁序修复前的 production 与测试闭包执行 PG18.6 → PG15.19 的八根顺序矩阵：各版本 **76/76**、总计 **152/152**，零失败、零跳过、零取消；在原 52 项之外加入 prepared 10 项及 fence root 的 14 项原生 TAP 计数（1 个纯 TTL、12 个 PG 子项及父项）。每根均清理后才启动下一根；8 个自建 PG 集群与 8 个独占容器及其目录/精确 ID 已确认不存在。3762 个去重文件的 before/after/current 摘要相同，包含 src 749、dist 2992 与 697 个 literal closure 文件；dist 在此仅作摘要审计，测试运行源码，不称 built CLI 验收。runner 清理环境并默认 off；prepared 根内部的 native-auto 与测试专用事务局部 forced-generic 另列，三个 SQL 名称、实际 Bind/Execute、新鲜时钟、撤权/窗口/策略拒绝与资金不变均通过。后来仅改的三个样本 harness/test 路径不在该 PG 导入闭包。旧 104 项记录保留，本轮仍为本地门禁，不冒充正式 CI 或全仓冻结。见 [当前双版本矩阵](validation/implementation-2026-10-22/postgres-current-matrix.json)。
+- 钱包锁序修复后的 PG18.6 → PG15.19 真库验证，各版本 HTTP 商业根 **27/27**、补偿根 **14/14**，总计 **82/82、零跳过**；691 文件的导入闭包 before/after/current 与双版本摘要一致，自建集群、pgdata 和精确容器 ID 均已清理。真实 A 结算 12（钱包 100→88、两条 ledger、一次 usage/settlement），B 的新补偿事务被第三连接证实等待 canonical wallet fence，随后双方完成且重放无额外效果；两个仅测试的 missing-first-fence + FU/NOKU 变体分别触发实际 40P01，不能称旧整份生产源码重跑。真实第一笔 ledger INSERT 后注入故障，完整资金/状态回滚及 55000/42501 禁写断言通过。新增夹具的 UUID/text、中性 media 签名及公开 CAS/账务错误 matcher 首红均保留，精确修正未修改生产授权、超时、拒绝或回滚条件。此为源码根功能验证，沿用原 functional gate 的 fsync/synchronous_commit off，不作性能或崩溃持久性证明。见 [钱包锁序真库证明](validation/implementation-2026-10-22/wallet-compensation-lock-order-postgres.json)。
+- 三条固定 SQL 的独立 PG18.6/PG15.19 检查各 **10/10、零跳过**：默认关闭无 prepared 能力，native-auto 真实 wire Bind/Execute 与匿名结果一致、数据库时钟新鲜；单独的事务局部 forced-generic 检查证明暖计划后的撤权、epoch、授权窗口与策略写入围栏仍拒绝失效身份，资金摘要不变，始终只有三个固定名称。首次失败来自新夹具误用 control-plane 写商业 policy 的 42501，仅将两条测试 writer 恢复既有 migrator/service 方式，未修改生产权限或拒绝断言。新增 root 已接入 PG15/18 required selector/matrix 与 strict roots，离线 wiring **12/12**、两条 workflow strict 命令通过；尚无正式 CI 执行。两次真库运行的 686 文件前后摘要一致，后续 transport 计时改动另行记录，不称当前全闭包未变。见 [prepared 真库记录](validation/implementation-2026-10-22/prepared-statements-postgres.json)。
+- 运营真实浏览器：标准控制面 CLI、当前 web-dist、真实密码/TOTP 登录、headless Chrome 执行 React，**1/1、零跳过、686 个作用域文件零漂移**。summary/diagnostics/backups 实际 200；媒体重排有 PG 审计与 epoch 回执，陈旧 epoch 409，只读用户 403，attempted-only 保持 stale、成功观测显示 fresh，凭据重新验证真实排队。此次止于排队，backup 显示未配置，无实际备份或供应商调用。见 [浏览器记录](validation/implementation-2026-10-22/operations-browser.json)。
+- 原生 PG18 备份/恢复 **1/1**、相关定向 **49/49**；118 个迁移、147 张表，实际 dump/restore、指纹相等、损坏拒绝与清理均通过。12 个备份相关源码/dist 关键模块在保存记录时与该运行一致；1596 文件的零漂移只属于原运行作用域。S3/KMS 为协议替身，生产云 PITR/异地/密钥恢复未验收。见 [备份恢复记录](validation/implementation-2026-10-22/backup-restore.json)。
+- 样本/scaling harness 与钱包锁序增量之前，固定计划、transport 测点与围栏批量化后的完整单元回归：**6600 tests / 6577 pass / 0 fail / 23 skipped**；完整集成回归：**340 tests / 255 pass / 0 fail / 85 skipped**。1643 个声明范围的源码/测试/配置文件在运行前后及记录创建时一致。源码 TSC、231 文件作用域 Biome（零错误、147 warnings、27 infos）、四份生成权限镜像和 diff 检查通过；既有生成文件格式差异单列排除，未计作全仓 lint 通过。实际 `npm pack --dry-run --ignore-scripts --json` 的 3163 个文件确认排除 `deploy/ops/remote-server.env` 及规则列出的部署环境/密钥文件，部署示例与 Compose 保留，未生成或发布包。未配置独立数据库或真实服务的可选项保留 skip，另行执行的正式角色真库门禁与真实 Kimi 不计作这些 skip 的通过。见 [回归记录](validation/implementation-2026-10-22/regression.json)。
+- 样本/scaling harness 与钱包锁序修复后的完整回归：单元 **6631 tests / 6608 pass / 0 fail / 23 skipped**，集成 **341 tests / 255 pass / 0 fail / 86 skipped**；1646 个声明范围文件前后及记录创建时零漂移。源码 TSC、238 文件作用域 Biome（零错误、165 warnings、27 infos）、四份权限镜像与 diff 检查通过；同一既有生成格式差异单列排除，不称全仓 lint。实际 pack dry-run 为 3168 文件，部署环境/密钥模式及已知本地 remote env 均排除，未生成或发布包。可选原生服务跳过保持；另行完成的真库与真实 Kimi 不加进聚合总数，旧 6600/340 记录保留。见 [钱包修复后完整回归](validation/implementation-2026-10-22/regression-wallet-order.json)。
+- 健康时钟与最终容量分类修复后的完整回归：单元 **6707 tests / 6684 pass / 0 fail / 23 skipped**，集成 **343 tests / 255 pass / 0 fail / 88 skipped**；1649 个声明范围文件前后及记录创建时一致。源码 TSC、四份权限镜像、diff 检查与 244 文件作用域 Biome（257 selected、零错误、165 warnings、27 infos）通过；唯一既有生成格式差异仍单列排除，不称全仓 lint。实际 pack dry-run 为 **3174** 文件，规则列出的本地环境/密钥材料与已知 remote env 均排除、示例及 Compose 保留；比前次多出的六项均为脱敏 validation JSON。该数字只属于本次清单捕获，后续记录新增不视作未来包冻结；未生成或发布包。旧聚合、定向、真库与真实模型计数继续分开。见 [健康与容量修复后完整回归](validation/implementation-2026-10-22/regression-health-capacity.json)。
+- 固定 authority 批量读取的独立 PG18 验证 7/7，覆盖两个撤权围栏方向、已提交撤权拒绝、CAS 审计一次及资金/容量不变。60 组交错样本中，平台 preflight SQL 37→19、claim 40→22，中位数分别 4.94→3.68 ms、6.25→5.01 ms；claim p99 有噪声，不据此宣称 R9 尾延迟通过。
+- 后续只合并 shared advisory fence 往返、保留原层序/层内排序及跨层重复：当前 PG18 `R9tLIc` **14/14、零跳过**，preflight **19→8**、claim **22→11** 条 SQL，与上一轮 authority 合并的 37/40 基线分开。真库确认中间锁阻塞时只取得前缀、取消后回滚且不读 authority、签名 deadline 在等锁期间到期后被真实 DB 时钟拒绝，以及双向撤权、一次 claim/audit 与资金/容量不变；1358 个范围文件前后一致，停止确认后删除自建 pgdata。首轮 5 pass / 9 fail 的红例来自夹具捕获了 seed 的三个事务及目标注册，已按实际 INSERT 返回的 evidence ID 精确关联目标事务，仍要求恰好一批锁，未修改生产、权限或拒绝条件。此记录不声明延迟收益。见 [有序围栏真库记录](validation/implementation-2026-10-22/evidence-fence-batch-postgres.json)。
+- 包含批量读取与授权时钟修复的当前构建 R9 短诊断 `pyXyYD`：并发 4、125 个 HTTP 200、零错误、24.41 rps；p99 网关开销 124.92 ms、TTFB 开销 166.96 ms，**FAIL**。latency/TTFB 各 10 个完整样本，不据小样本前后差值宣称优化幅度。见 [短诊断](validation/implementation-2026-10-22/r9-postbatch-short.json)。
+- 为拆分热点，新增显式 `--diagnostic --serial-profile`，保留完整 R9 默认行为和 30/10 ms 门槛。计划复用前的 `fuRdFJ` 使用三份标准 CLI、各 100 个 latency/TTFB 完整样本、预热并发 1、无并发场景；普通响应 direct/gateway p99 8.15/201.26 ms，开销 **193.11 ms**；TTFB direct/gateway p99 16.15/150.11 ms，开销 **133.96 ms**，零错误，仍为 **FAIL**。748 个 src、2988 个 dist 和 5 个 harness 文件均无漂移，三份 metrics 为 200，自建资源已清理。此次只有计时改动，不将它与此前 `RB46dx` 的 201.39/202.20 ms 差值称为性能改进。客户端串行不保证响应后的结算绝不与下次请求重叠。见 [串行诊断](validation/implementation-2026-10-22/r9-current-serial-profile.json)。
+- 新增 `scheduler-select`、`affinity-bind`、`evidence-register`、`preparation-total` 四个固定标签测点；定向 60/60、源码与四测试 strict TSC、8 文件 Biome 通过。该轮累计 242 次观测（含预热和 smoke）中完整 preparation 均值 **101.22 ms**，scheduler-select **52.26 ms**，evidence-register **6.33 ms**，affinity-bind **1.99 ms**；原 authority/admission/capacity 子段分别 17.65/16.28/2.08 ms，dispatch **42.61 ms**。total 已包含各子段，不能再次相加，也不能用阶段均值减请求 p99 来归因。scheduler 每次 OpenAI 请求检查 4 个候选，实际逐查询耗时仍待拆分。
+- 先前两类 authority SQL 的命名计划微实验中位数仅约 1.24→0.42 ms，claim 某组 p99 反而变慢。最终 dispatchable 视图另做 60 组交错实际 SELECT：原 SQL/四参数/每次返回行摘要完全一致，unnamed 均值 **8.202 ms**，named **0.290 ms**；服务器 wire prepared statement 的 generic plan 计数增加 60、custom 增加 0，未设置 planner 参数或缓存业务行。该微实验先于三条固定 SQL 实现，不作为完整 R9 通过。见 [wire 计划实验](validation/implementation-2026-10-22/dispatchable-wire-plans.json)。
+- 最终视图的独立真 PG18 EXPLAIN 已完成：同一受限 gateway session、原共享围栏、RR READ ONLY，8 次预热后 30 次原 SELECT，wall 均值 **8.613 ms**，其中 planning **7.635 ms**、execution **0.083 ms**；其余 0.895 ms 未归因。该 fixture 下规划占主导，仍不能直接外推到全量目录或完整 R9。原 SQL、参数身份、schema/GUC 与 748 个源码摘要均已保存，前后无漂移，最终 ROLLBACK，自建 PG 已删除。见 [规划与执行诊断](validation/implementation-2026-10-22/dispatchable-explain.json)。
+- 调度器原查询的独立真 PG18 诊断进一步定位到平台 eligibility：经实际公开 `select` 捕获 14,331 字节 SQL 与 22 个绑定值，30 次 EXPLAIN 均值 wall **11.738 ms**、planning **9.336 ms**、execution **0.280 ms**；60 组交错实际 SELECT 中 unnamed/named 均值 **10.762/0.514 ms**，两种模式的 non-clock 事实逐次一致，真实 `authority_now` 原样交回服务并通过同 session DB-clock 前后界检查。4 表 route 查询仅 **0.520/0.187 ms**。两个 wire 名称各增加 60 次 generic、0 次 custom；879 个 READ COMMITTED READ ONLY 事务全部 ROLLBACK，零 advisory 语句，源码前后无漂移，自建 PG 已删除。见 [调度 SQL 诊断](validation/implementation-2026-10-22/scheduler-query-planning.json)。据此实施默认关闭、显式 native 开启的三个固定 SQL 计划复用；尚未记作端到端性能通过。
+- 三条固定 SQL 的同构建串行对照：`off / 1u9Cfz` 与 `native / 5bjmUe` 各完成 100 个 latency、100 个 TTFB 样本、零错误，749 个 src、2992 个 dist、5 个 harness 的前后摘要和两组之间摘要均一致，metrics 均为 200，清理完成。观测到 preparation 均值 **110.43→51.08 ms**、scheduler **53.66→11.34 ms**、authority **18.46→10.16 ms**；阶段均值包含不同数量的预热与 smoke，不能用来扣减请求 p99。延迟开销 **264.34→129.83 ms**，TTFB 开销 **197.51→114.06 ms**，两组均未通过原 30/10 ms 门槛。其余 native preparation 热点为 admission 15.16 ms、evidence-register 6.17 ms；transport-send 为 10.12 ms。该对照尚不覆盖 c200、扩容或十分钟 SSE，也不代表默认关闭模式已有改善。见 [off 记录](validation/implementation-2026-10-22/r9-prepared-off-serial.json)、[native 记录](validation/implementation-2026-10-22/r9-prepared-native-serial.json)。
+- 重建围栏批量化与七处 transport 测点后的 `qZYFoG / native` 仍为 **FAIL**：100 个 latency 与 100 个 TTFB 完整样本、零错误；延迟 direct/gateway p99 **7.05/128.44 ms**、开销 **121.39 ms**，TTFB **7.89/267.99 ms**、开销 **260.10 ms**。749 个 src、2992 个 dist、5 个 harness 前后无漂移，metrics 均 200，清理完成。253 次观测（含 warmup/smoke）中，preparation 55.14 ms、evidence-register 5.29 ms，preflight/claim 3.78/5.63 ms；这些均值不能归因客户端尾部变化。transport-send 10.88 ms，其中凭据准备 **6.29 ms**、fetch 到响应头 **3.67 ms**、profile **0.41 ms**、connector **0.03 ms**、固定 headers **0.01 ms**，未细分部分 **0.48 ms**。条件分支未发生不发零样本，所有子段按同一 send count 归一且不重复加进 dispatch；fetch 包含连接、发送和等待上游响应头，不能称作 TLS 耗时。该记录使用通用 mock runtime，不能外推到 Kimi 专用 transport。见 [分段诊断](validation/implementation-2026-10-22/r9-fence-batch-transport-serial.json)。
+- 新增默认关闭的 `--request-samples`，仅允许原 `--diagnostic --serial-profile` 的 100/100、预热并发 1、三份 CLI 和原阈值配置，参数在创建资源前校验。13/13 不连数据库的定向测试、严格 TSC、Biome 与两份脚本语法检查通过，独立只读审查修复了前后 UUID predicate 不一致。完整 6600/340 回归发生于此纯 harness 增量之前，新增 13 项不加进旧聚合总数。实际 `dMPmPT / native` 采集四腿各 100、共 400 条 measured 样本，网关 200 个唯一有效 UUID 精确对应 200 行状态，零缺失/非法/重复/截断/待完成或多 attempt/evidence；全部达到 `succeeded/settled`。样本只含脱敏白名单、非法 header 不落盘；数据库读取在所有计时及 metrics 结束后执行固定参数化只读查询，201 sentinel 明示上限，新文件 wx/0600。延迟 direct/gateway p99 **6.00/118.58 ms**、开销 **112.58 ms**，TTFB **6.26/90.16 ms**、开销 **83.90 ms**，零错误，原 **30/10 ms** 门槛仍 **FAIL**；n=100 的既有 floor(n×p) 算法令 p99 等于最大样本，direct/gateway 是独立样本集合。749 个 src、2992 个 dist、5 个 harness 前后无漂移，三份 metrics 200、自建资源全部清理；本次启用观测有开销，不能将与旧轮次的差值称为优化收益。268 次累计观测（含预热/smoke）中 preparation 48.53 ms、scheduler 11.14 ms、authority 9.85 ms、admission 14.77 ms（包含 guard 7.85 ms），dispatch 38.94 ms；仍不能把这些均值归因到单一慢请求。
+- 关联核查同时确认现有七个状态时间不是阶段 trace：`evidence_created_at=DEFAULT now()` 是共享准备事务的开始时间，显式应用 Date 写入的 request/attempt created 可更晚；`evidence_claimed_at` 是 claim UPDATE 的 PG 钟采样且尚未 audit/COMMIT；正常 `response_started_at` 在完整 delivery 后才写入并受旧值 clamp，**不是 first byte/TTFB**；request updated 又是最后覆盖的应用钟。记录保留选中的 p50/p90/p99 请求与上述来源，未把混合钟负差值、client 与 DB 残差当成 CPU、网络、DB 等独立阶段。未捕获创建前区段或 COMMIT，累计 metrics 也不能关联单请求尾部；下一步继续定位串行 SQL，保持当前阈值、资金和撤权围栏。见 [请求样本与状态关联](validation/implementation-2026-10-22/r9-request-samples-serial.json)。
+- 首次完整工作负载尝试 `J7tbUH / native` 在第一份单 CLI、c200、120 秒扩容基线即出现实际失败：121.6 秒收到 899 次 200、5200 次 429、365 次 502、4600 次 503，成功吞吐 **7.39 rps**；仅成功响应的 p99 为 13842.88 ms，不能拿它代表全部请求。该轮 PG 日志共 **104 次 deadlock detected**，首环明确 wallet `FOR UPDATE`→wallet advisory 与持 advisory 的 ledger INSERT/FK→wallet 行锁反序；这些日志与 HTTP 计数没有逐请求对应关系，清理前未采集失败请求的资金状态，连 HTTP 200 也不能替代持久结算证明。确认自有 supervisor PID/命令/cwd 后主动停止后续负载，src 749、dist 2992、harness 5 前后零漂移，自建 CLI/PG/runtime 均已清理；该次为**中止的完整工作负载尝试**，不称完整 R9、扩容或十分钟 SSE 通过。见 [c200 首个失败](validation/implementation-2026-10-22/r9-c200-first-failure.json)。
+- 首红还暴露 scaling 门禁漏报：基线有 4965 次 5xx，旧 driver 仍是 exit 0 / 零 violations，supervisor 仅见正成功流量便接受。现 scaling 复用既有 concurrency 的 transport/5xx 预算（默认均零），保留 429/其他 4xx 计数及原策略，不另造失败率阈值；双方 scaling 证据失败或畸形时 ratio 为 null、带固定原因与违例，原 **2.7×**、30/10 ms、百分位算法与计时不变。supervisor 另行复核计数，失败 baseline 不启动后续 all，失败 all 不启动下一协议，但继续收集 stats/metrics 并清理。**27/27** 不连数据库的定向测试（14 个新增门禁、原 13 个样本）、严格 TSC、Biome、语法和 diff 检查通过；修复后的真实 c200 重跑已被正确判为失败并停止后续负载，见下一条记录。
+
+- 钱包锁序修复后的完整工作负载尝试 `ybVPfY / native` 在首个单 CLI、c200 扩容基线被新门禁正确拒绝：**124.3 秒、2437 次 200、2167 次 502、4417 次 503，19.60 rps**；成功响应的 p99 为 **5730.84 ms**。此轮 PG **零 deadlock**，仅 3 条 runtime-health stale 更新错误，不能将它们直接解释为全部 6584 次 5xx。累计 preparation error 4417（scheduler-select 4266、affinity-bind 151）；preflight/lease-acquire 各 4606、claim 2439，阶段差额尚不是逐请求原因证明。driver exit 1，supervisor 独立计数校验失败后未启动三 CLI/其他协议/十分钟 SSE，仍收集三份 200 metrics 并清理全部资源；src 749、dist 2992、harness 5 前后及记录创建时无漂移。未采失败请求最终资金行，HTTP 200 也不等于已持久结算；此轮不作完整 R9、有效扩容或性能收益声明。见 [钱包修复后 c200 首阻断](validation/implementation-2026-10-22/r9-wallet-order-c200-failure.json)。
+- 同一旧构建的私有 c200 原因诊断仅执行第一协议的 30 秒单 CLI 基线：实际 **32.6 秒、641 次 200、505 次 502、948 次 503，19.65 rps**，门禁仍失败。闭集观测将 505 个 502 对应到最终派发租约的严格 null；948 个 503 分为 852 次 health malformed 的 select block 和 96 次原因尚未细分的 affinity bind block。852 次均读取唯一健康行且日期有效，`observed_at` 超过旧 selection 起点 250ms，却不超过查询返回后的主机时钟 250ms，确认请求起点参与了错误的新鲜度判断。runtime 在 flush 时仍有 12 个活动调用，因此该部分是明确的部分计数，**全局 observationOk=false**，不能把 631 次 sent 当作最终总数。停止 CLI 后独立只读资金快照则完整确认 505 笔 failed/released/not_sent、643 笔 succeeded/settled（含两笔 smoke），钱包/账本及夹具注资一致、hold 和 pending 均为零。完整 src/dist、canonical harness 与十个私有文件前后无漂移，自建资源已清理；观测有开销，此轮不是 R9 或性能收益证明。见 [原因诊断](validation/implementation-2026-10-22/r9-c200-cause-diagnostic.json)。
+- 新的健康写入锁序回归先对旧实现执行 PG18：**7 tests / 4 pass / 3 fail / 0 skipped**（两条正例及父项失败）。第三连接均确认较高 token 的 writer 正在等待健康行锁；较低 token 的 writer 写入并提交后，等待者实际返回 `STORAGE_ERROR / 55000`，而正例要求 `applied`。四条未来持久时间、时间倒退、旧 token 和 revision 负例通过。随后仅将冲突更新的 observed/cooldown 两列改为相关 SET 子查询、共享一次锁后 DB 采时，保留 INSERT、原冷却曲线、token/revision/EMA、040 和失败 latch。冻结的同组测试在 **PG18.6 与 PG15.19 各 7/7，总计 14/14、零跳过**；两条正例恢复 applied，四条负例继续拒绝。两个测试文件及 040 逐字节未变；757 个声明输入（完整 src 749 加 8 个显式文件）和各 683 文件的导入闭包前后及记录创建时一致，全部自建集群、pgdata 与精确容器 ID 均已清理。原始首红保留，不称全仓单变量 A/B 或 built/R9 证明。另有 health callback 的独立 **312/312** 单测：store、HalfOpen、core 在各自异步健康读取后重新取同一主机时钟，严格缺省才兼容旧 Date，保留 250ms、maxAge、cooldown；probe applied 并释放 lease 后真实重读一次，不合成 healthy。两条 workflow strict 的检查时点与后续测试观察器变动分开记录。见 [健康时钟真库与定向证明](validation/implementation-2026-10-22/runtime-health-clock-postgres.json)。
+- 最终容量分类在 PG18.6 与 PG15.19 均通过同库完整 HTTP bootstrap **27/27** 后，再通过新增 capacity **3/3**（BYOK、平台两个子项及父项），总计 **60/60、零跳过**，其中新增容量项为 6、前置 socket HTTP 为 54。新容量项使用真实受限 PG 和生产 handler，请求/响应为 Readable/CapacityResponse doubles，不称新增 socket 429 验收。真实 A 占满 max1 后，B 恰好 preflight/acquire 各一次、claim/send 为零、补偿一次并返回 429；B 的 quota/rate/hold、wallet/ledger、幂等重放及迟到 claim/CAS 拒绝通过，A 的既有 lease/token 不变直至 finally 释放，不声称补偿了 A 的原预留。首次 bootstrap 首红是旧 raw-service introspection 合同；改为精确 adapter 形状、真实 raw PG 类和单次委托 input/lease/error 同一性断言后恢复。第二次首红是新夹具误将 lease 的 text attempt ID 绑定为 uuid，仅改一个参数 cast，反向替换可逐字节恢复旧 root SHA，资金/拒绝断言未变。689 文件的闭包 before/after/current 及双版本摘要一致，自建数据库、目录与精确容器 ID 均已清理；功能门禁使用原 fsync/synchronous_commit off，不作性能或崩溃持久性证明。见 [容量分类与补偿真库证明](validation/implementation-2026-10-22/dispatch-capacity-postgres.json)。
+
+
+- 健康与容量修复后的当前构建完整工作负载尝试 `W3cVkr / native` 已执行第一协议 OpenAI 的全部场景。单 CLI c200 扩容基线 **121.6 秒、1664 次 200、3536 次 429、零 5xx/transport error，13.69 rps**，门禁通过。三 CLI 的 latency 各 300、TTFB 各 100 个样本齐全，开销仍为 **160.71/229.72 ms**，超过原 30/10 ms 门槛。十分钟 SSE 以并发 20 重复完成 **13260 条短流、848640 个数据块，损坏均为零**；这不等于单个连接持续十分钟。随后 c200 普通并发出现 **783 次 200、659 次 429、14 次 503**，精度场景 **720/805/9**，未发现账号超发；扩容场景实际 **127 秒、1608/1019/77、12.66 rps**。三场景共 100 个 503、未出现 502；扩容报告按错误预算返回 `ratio=null / current_report_failed`，不能用成功吞吐相除声称扩容达标。全部五条 violation 保留，supervisor 未继续第二协议的完整负载，该协议仅 smoke 通过。PG 日志中 ERROR 与 deadlock 均为零，不排除等锁或客户端存储失败。749 个 src、2992 个 dist、5 个 harness 前后无漂移，三份 metrics 均 200，自建进程、PG 和 runtime 已清理。本轮没有负载请求的最终资金/状态快照，HTTP 200 不能替代结算证明；这是本地 mock 组合的失败尝试，不是真实供应商或完整 R9 通过。见 [健康与容量修复后的完整负载尝试](validation/implementation-2026-10-22/r9-health-capacity-full-attempt.json)。
+
+- 当前 commercial observer 与 capacity 夹具修正后，重新执行两条 workflow 中原样 strict TSC 命令，均 exit 0；同一 CI wiring 根实际 **14/14、零失败/跳过/取消**。55 个声明 workflow、测试和配置输入前后摘要一致。此次没有数据库、构建、供应商或性能负载；不冒充 GitHub required CI 或全仓冻结。见 [当前 CI 接线与 strict 记录](validation/implementation-2026-10-22/ci-wiring-health-capacity.json)。
+
+三份 metrics 的 `affinity-bind/error` 与 `preparation-total/error` 累计均为 101，负载报告的 503 则为 100；两者没有逐请求关联，保留群体差异，不将累计计数相等或相近当成单次失败原因。只读输入追踪另确认：标准装配启用 sticky scheduling，固定 key、客户端 IP/UA、模型及首条用户内容会导出同一 fallback reference，驱动未显式提供独立会话；这构成并发 resolve→bind 竞争机会，尚不是本轮失败的原因证明。
+
+- 后续独立 PG18 准入查询观测 **1/1、零跳过**：沿用实际公共 guard、受限 gateway 角色、原 READ COMMITTED 读写事务及围栏，在新 request/attempt 插入后捕获原 **10570 字节、59 个绑定、25 个 stage** 的 authority SQL。两次原 SELECT 预热、一次 EXPLAIN、最后一次原 SELECT 的完整事实摘要一致，最后一份结果交回 guard，完整 admission 创建后用 sentinel 回滚；15 张相关表的 20 条记录总摘要前后相同。单次 planning/execution 为 **1.063/0.475 ms**，最后一次原查询 wall **2.816 ms**；EXPLAIN 不传输 SELECT 结果行，不能据此解释 R9 p99 或新增第四个计划复用描述符。1384 个声明输入（完整 src 749、tests/saas 617、私有输入 8 及显式配置）前后及记录创建时一致，自建 PG 已删除。两次测试前的依赖解析/ESM loader 首红单独保留，只修私有工具装载；没有修改生产 SQL、断言、权限或超时。此功能夹具沿用 fsync/synchronous_commit off，不作持久性或端到端性能证明。见 [准入 SQL 规划与执行观测](validation/implementation-2026-10-22/admission-authority-query-plan.json)。
+- 同一修复前构建的三 CLI、c200、30 秒私有 affinity 诊断实际 **38.5 秒、289 次 200、304 次 429、15 次 503、零 transport error**，原零 5xx 门禁继续失败。三个实际 affinity port 均精确匹配 Redis decorator，原 PG 事务的固定 SQL 合同确认 15 次 bind 拒绝均为 **active_other_account**：每次候选对象都与较早的一次 PG resolve 精确关联，该 resolve 返回 null 且未清除 stale，bind 则在原锁下读到另一个有效账号，尚未执行 bind-update。另有 3 次成功 stale invalidation，不能将它们逐次归因到这些 bind。三进程 wrapped 调用在 close/flush 时均为零，观测完整；完整 src/dist、canonical 5、private 13 和两份依赖文件前后及记录创建时一致，资源全部清理。HTTP 与 runtime 仍是独立群体，没有请求级关联。停止 CLI 后的完整只读资金聚合确认钱包与账本、夹具注资相符，但保留 **7 笔 pending、7 笔 reserved hold，合计 143360** 个夹具最小货币单位；不称全部已结算或已补偿。此轮有观测开销，不作 R9 或吞吐收益证明。见 [绑定竞争原因观测](validation/implementation-2026-10-22/affinity-bind-cause.json)。
+
+- 绑定竞争修复的 12 个离线根 **436/436、零跳过**；两个真实 PG 竞态在 PG18.6、PG15.19 **各 2/2**，分别强制两个已提交 null resolve 后竞争，以及真实容量占满导致 stale 清除后再竞争。实际受限 gateway 完成原查询与围栏，落败写入的完整 timestamps/TTL/revision/fence 不变，唯一 winner 经过新鲜 eligibility/health/concurrency 后重绑一次；原 request/funds 聚合不变。Redis slot 仅为记账 double，不称真实 Redis、HTTP、admission 或供应商验收。首次 PG18 两项均因夹具使用 gateway 观察未授权的 created_at/updated_at 而返回 42501；只将完整观察快照改为现有 migrator，生产仍走两个独立受限 gateway 池，全部断言与原首红保留。新根已注册 PG15/18 隔离 CI 和 strict 目标；本地接线不冒充远端 CI。组合路径的 scheduler-select 包含绑定耗时，不能拿旧 affinity-bind 阶段缺席证明零错误。见 [绑定修复与双版本真库验证](validation/implementation-2026-10-22/affinity-binding-repair.json)。
+- HTTP 关闭的独立离线真实 preparation/dispatch 红例确认：response.end 后 sent CAS 已完成，normal settlement 被 deferred 时，旧 close 已 fulfilled 并关闭 lifecycle，而 handler、结算和 lease release 仍 pending。新增仓库用例在旧源码为 **2 pass / 3 fail**；修复后新增 5 项及两项既有链合计 **7/7**，覆盖双并发、原 promise/error identity、false 返回及 close 错误缓存。仅两个文件变动，原首红与夹具装载首红保留；不据此逐条归因此前的 7 个 pending，也不声称 socket 或真库资金闭环已通过。见 [HTTP 关闭等待证明](validation/implementation-2026-10-22/http-shutdown-drain.json)。
+- 两项修复合并后的完整离线回归：unit **6756 / 6733 pass / 23 skip**，integration **345 / 255 pass / 90 skip**，均零失败/取消；两个新增 PG 用例在此显式跳过，其实际双版本结果单列。源码 TSC、两条原 workflow strict 命令、CI wiring **14/14**、四份权限镜像、scoped Biome（249 文件，165 warnings / 27 infos / 0 errors）及 diff 检查通过。仅为一个既有 DOM 全局类型补上 Node stream/web 的 type-only import，保留 ES2023 strict 配置；随后 `build:server` 成功，真实供应商和负载结果另记。此次 source/config 声明输入前后及记录创建时一致，不将 docs/dist/忽略环境或未来改动纳入冻结。见 [合并后完整回归](validation/implementation-2026-10-22/regression-affinity-shutdown.json)。
+
+- 当前组合绑定及 HTTP 关闭修复后的源码商业 HTTP 根在 PG18.6/PG15.19 **各 27/27、零跳过**，原根、资金/撤权断言、权限清单与超时均未修改。两份声明导入闭包前后及记录创建时相符，自建资源全部清理；功能夹具使用原 fsync/synchronous_commit off，与 native CLI、性能和供应商结果单列。见 [修复后双版本商业 HTTP 根](validation/implementation-2026-10-22/commercial-postgres-affinity-shutdown.json)。
+- 相同修复进入重建产物后，标准 CLI/builtin 真实 Kimi `OSS208 / native` **7/7、零跳过**。六笔新 terminal receipt 的实际金额为 **83/83/558/709/630/709**，合计 **2772** 个夹具最小货币单位，12 笔 ledger entries 的 credit/debit 各 2772；六笔都观察到中间 lease=1、终态=0。完成重放 200、冲突 409、中断 unknown/零用量/零结算/263680 hold/202 重放保持；abort lease=0 仍来自现场通过的断言，没有独立 abort terminal receipt。完整 src 749、dist 2992、closure 708 在运行前后、投影创建区间及主代理复核时匹配，全部自建资源清理。一个实际凭据、局部 rights、夹具价格与 pilot 软件 KMS 的边界保留，没有独立 provider HTTP 总计数、audit-event 行或 tariff 行，不冒充正式 CI、性能或 GO。见 [修复后当前真实收费链](validation/implementation-2026-10-22/kimi-commercial-affinity-shutdown.json)。
+
+- 当前重建产物的三 CLI OpenAI、c200、30 秒私有观测按原零 5xx/transport 预算通过：实际 33.5 秒，HTTP **200=686 / 429=794**，无 403、5xx 或传输错误。1481 个完整组合调用中 1457 个正常绑定一次，**24 个 typed contention 都只对原域内唯一 winner 新鲜复核并重绑一次**；最终返回账号等于最后成功绑定账号，flush 时 active=0、own-core wrapper 已恢复。独立关闭后资金快照为 **687 settled（含 smoke）/794 failed-released/0 pending/0 open holds**；settled、wallet debit、ledger 均 **76944** 个夹具最小货币单位，与原资金和余额相符。749 src、2992 dist、5 canonical、32 private 及 2 dependency 输入在本次前后相符，自建资源全部清理。运行时调用序列没有逐请求关联 HTTP，authority 子调用也没有分别 trace；有观测开销，不把旧新轮次差值称为吞吐或延迟收益，不称完整 R9 已通过。见 [修复后竞争与关闭资金验收](validation/implementation-2026-10-22/affinity-shutdown-c200-acceptance.json)。
+
+- 修复后原规范完整 R9 在 2026-10-22T06:20:57Z 至 06:37:59Z 完成并清理，native、PG18 fsync/synchronous_commit on，749 src/2992 dist/5 harness 在运行前后及记录创建时匹配。单 CLI c200/120 秒基线 **200=2048 / 429=4352，零 5xx/传输错误，16.52 rps**；三 CLI 首个协议全部场景已执行。延迟/TTFB 开销 **102.16/87.52 ms**，超原 **30/10 ms**；十分钟重复短流 **17440 streams /1116160 chunks，零损坏**。并发、精度、扩容分别 **200=804/957/2099，429=1024/756/1025，503=1/1/10**，共 **12 个 503、零 502**；精度场景的一个 503 虽不在原 driver 的 precision violation 检查内，仍完整报告。扩容 ratio 保持 null/current_report_failed，不计算吞吐商来替代；Anthropic 只完成原 settled smoke，未运行第二个协议完整场景。三份 metrics 均 200，独立累计 authority/capability_unavailable 为 12，未与每个 HTTP 503 关联；PG ERROR/deadlock 均 0。完整负载没有最终资金快照，不将 200 当成结算证据；短负载的独立资金闭环另列。见 [修复后完整 R9 尝试](validation/implementation-2026-10-22/r9-affinity-shutdown-full-attempt.json)。
+- readDispatchProof 的独立 PG18 public-method 单次观测 **1/1、零跳过**。原 identity、11 个实际有序 shared fences、join pin、core、reset、authority 共 16 个调用保持；只在 core 内做两次原 SELECT、一次 EXPLAIN、最后一次原 SELECT，并原样返回最后结果。三个 94 字段的完整 typed 摘要一致，单次 planning **1.663 ms**、execution **0.177 ms**、最后原查询 wall **2.800 ms**；19 个 plan 节点、根 shared hit 18/read 0。17 表/33 行读前后摘要一致，同一真实 lease 在两侧有效且 finally 按原 token 释放。1385 输入前后及记录时一致，自建 PG 清理；准备阶段 hold 留至自有库删除，不称回滚或全结算。完整 public wall 18.162 ms 包含额外 warmup/EXPLAIN/摘要，不能当未插桩耗时；此单样本没有证明它是 R9 尾部原因或需要新增 prepared descriptor。见 [派发凭证核心查询计划](validation/implementation-2026-10-22/dispatch-proof-core-query-plan.json)。
+
+- 同一当前构建的原规范 serial profile（native、warmup inflight=1、每腿 100 样本）再次测得延迟开销 **105.23 ms**、TTFB 开销 **65.74 ms**，两项仍超原门槛，流错误为 0，自建资源全部清理。原累计 metrics 含 smoke/预热在内共 278 个 preparation/dispatch；均值分别为 preparation-total **42.260 ms**、authority resolve **9.095 ms**、combined scheduler-select **11.044 ms**、metering-guard-wallet **12.664 ms**（包含 guard **6.686 ms**）、capacity **1.697 ms**、evidence-register **4.114 ms**；transport-credential-prepare **5.182 ms** 属于 transport-send **8.761 ms**。保留 operation 标签和嵌套关系，不将这些均值相加后分配给某个尾请求；attempt-read/transition 各 556 次反映原链每次两调。749 src/2992 dist/5 harness 前后及记录创建时相符。原 floor(n×p) 算法在 n=100 时 p99 等于最大值，direct/gateway 样本独立；此轮不是完整 R9，也不证明某次优化收益。见 [当前原规范串行阶段观测](validation/implementation-2026-10-22/r9-affinity-shutdown-serial.json)。
+
+- 原 c200/60 秒的当前构建定向观测实际 63.2 秒，**200=974 /403=2 /429=878 /503=1**，传输错误为 0，原零 5xx 门槛失败；三份 runtime observationOk 均真，active=0、方法描述符恢复、自建资源清理。1856 个 preparation（含 smoke）中，唯一 authority/capability_unavailable 的同进程调用已定位为 **scheduler 的 provider account affinity binding conflict**；initial authority allow、最后 collect collected、同操作未见 health deny、最后 core/store 健康和原时钟事实有效。它尚不能区分首次 bind 无有效 hint、第二次 bind 冲突或 PG 内部五类冲突，也不能追溯归因此前完整 R9 的 12 个 503。同轮还记录两次 account_denied 和两个 eligible=0/busy=1 collect，尚未逐操作连接这两组事实。独立关闭后快照为 **975 settled（含 smoke）/878 released/0 pending/0 open holds**，settlement、wallet debit、ledger 均 **109200** 个夹具最小货币单位。749 src/2992 dist/5 canonical/110 private/2 dependency 在前后及记录时匹配。首次私有执行因 copied driver 仍限定 30 秒而在负载前 exit 2，仅完成已结算 smoke；原 53 输入/旧 freeze 完整保留，实际修正仅私有 guard 和固定文案 30→60，再执行本轮。两条另外的离线最小红例确认：合法容量满的初选和 typed winner 新鲜复查当前都返回 account_denied，预期应为 rate_limited；生产未修改，不将这两个组件红例称为上述两次 HTTP 403 的逐项原因。见 [剩余绑定冲突与容量拒绝观测](validation/implementation-2026-10-22/affinity-residual-cause.json)。
+
+- 进一步的同操作绑定观测按原 c200/60 秒执行，实际 65.1 秒，**200=1016 /429=1210 /503=5**，传输错误为 0；三份 observationOk 均真、原描述符恢复、资源清理。2232 个初选（含 smoke）中，2199 个一次绑定成功；33 个首次 typed active_binding 都重验了唯一 winner，28 个最终绑定成功，**5 个在第二次真实 PG bind 又遇 active_binding winner 变化**。五个 hint 都在原 input.candidates 内且未 attempted，均不同于第一次 winner；其中 1 个回到初选账号，4 个指向第三个原候选。原 callback 的六类 AffinityConflict 异常和 SQL/storage throw 均为 0，实际七条 SQL 全部原样委派，五个操作的健康/原时钟检查均有效。这只证明本次 5 个具体分支，不追溯旧完整 R9 的 12 个 503；本轮未再出现 account_denied，旧两次 403 仍不能逐项归因。独立资金快照 **1017 settled（含 smoke）/1210 released/0 pending/0 open holds**，wallet debit、settlement、ledger 均 **113904**。749 src/2992 dist/5 canonical/132 private/2 dependency 在运行前后和投影创建时一致。Redis release 仍是原 advisory best-effort/TTL 合同，这些观测没有证明每次释放获得网络 ACK；资金闭环与自有 Redis 停止分别记录。见 [剩余二次绑定竞争实证](validation/implementation-2026-10-22/affinity-residual-bind-proof.json)。
+
+- 严格二次 typed 争用与满载分类已修复。先在未修改生产代码时固定首红 **292 tests /276 pass /16 fail**，最终两单元根 **295/295、零跳过**；字符串、零/负/小数/NaN/无限/不安全整数或空容量快照继续 block。健康拒绝保持优先，权限/window 排空不因限流而重新放行；任一显式 release 异常覆盖待返回的 429，且继续尝试其余 slot。新增三条真实 PG 容量/第三 actor 竞争用例，原两例与全部断言逐字节保留；PG18.6/15.19 **各 5/5**，686 项声明闭包前后及投影创建时匹配。全部生产容量来自实际 PG leases；Redis 为 bookkeeping double，migrator 仅 seed/完整状态观察；九表的准入前请求/资金断言保持。见 [分类修复与双版本竞争验收](validation/implementation-2026-10-22/contention-backpressure-repair.json)。
+- 同一修复全量离线回归：unit **6780 /6757 pass /23 skip**，integration **348 /255 pass /93 skip**，零失败/取消；源码、两条原 ES2023 workflow strict、CI wiring **14/14**、权限镜像、scoped Biome 与 diff 检查通过。新增五项 PG 在 aggregate 显式跳过，真库结果单列；独立记录的 `build:server` exit 0，完整 src/config 构建前后未变。随后原商业 HTTP 根 PG18/15 **各 27/27、零跳过**，原角色/权限/资金/撤权断言和超时未改，资源全部清理。见 [完整回归与构建](validation/implementation-2026-10-22/regression-contention-backpressure.json)、[双版本商业 HTTP 根](validation/implementation-2026-10-22/commercial-postgres-contention-backpressure.json)。
+- 修复进入当前产物后，标准 CLI/builtin 真实 Kimi `PBCBOU / native` **7/7、零跳过**。六份本轮 receipt 重新核算为 **83/83/558/709/630/709**，合计 **2772**，input/output **1134/168**；12 笔 ledger 的借贷各 2772，六笔 lease 均观察中间 1→终态 0。完成重放 200/冲突 409、中断 unknown/hold 263680/零用量和结算/202 重放保持；abort lease=0 仍只由现场断言证明。完整 src749/dist2992/closure708 在运行前后、投影区间及主代理复核时一致，资源清理；一个凭据、局部 rights、夹具价格、pilot 软件 KMS 边界不变。见 [当前真实收费链](validation/implementation-2026-10-22/kimi-commercial-contention-backpressure.json)。
+- 最新三 CLI OpenAI c200/原 60 秒诊断实际 **64 秒**，HTTP **200=1225 /429=990**，零 403/5xx/传输错误，原零错误预算通过。2216 次初选中 2165 次一次绑定成功；51 次首次 typed hint 后，40 次最终成功，**9 次 winner 满载、2 次第二 typed winner 再变**均在同操作 scheduler/prepare 返回 429，无第三 bind。两次新 hint 均为原域第三账号，未 attempted；本次 initial all-busy 分支未发生，已由真库组件覆盖。三份观察完整、active=0、原描述符恢复、callback/SQL throw=0；存在其他候选的健康拒绝，不称全链所有健康均 allow。独立关闭后 **1226 settled（含 smoke）/979 released/0 pending/open holds**，settlement、wallet debit、ledger 均 **137312**，余额 **99999862688**。完整 src749/dist2992/canonical5/private29/deps2 前后及记录时一致，自建资源全部清理；无逐 HTTP join，不声称 Redis 网络 ACK、性能收益或追溯旧 12 个 503/两次 403。见 [当前争用与关闭资金验收](validation/implementation-2026-10-22/affinity-contention-backpressure-c200-acceptance.json)。
+- 同一重建版本的原 serial profile 加有界 request sampling，四腿各 100 样本完整，延迟/TTFB 开销 **164.76/148.32 ms** 仍超原 **30/10 ms**，零流错误。400 个样本中 200 个 gateway request ID 与独立只读 PG 状态逐项连接，全部 succeeded/settled，无缺失、重复、多 attempt/evidence 或 pending；未取钱包总账聚合。最大样本的 `evidence.created_at → claimed_at` 数据库差分是 preparation 事务起点至 claim 写入的区间：`created_at=DEFAULT now()`，不是 INSERT 实际采时，不能称某方法的耗时或归因。现已复核 dispatch reader 的 11 个有序 shared fence 可批量为一次查询、完整方法 16→6 次往返；候选尚未在该捕获版本实施，同请求此读取位于 claim 之后，不能称解决上述区间。见 [最新原规范串行失败记录](validation/implementation-2026-10-22/r9-contention-backpressure-serial.json)。
+
+
+- dispatch proof reader 已只在 `readDispatchProof` 将原 11 个 shared advisory lock 调用批量到一次有序 `unnest` 查询；层序、层内排序去重和跨层重复保持，完整方法 **16→6 次 SQL 往返**，五个其他 SQL、writer/helper、事务和时钟不变。受限 PG18/PG15 新根各 **9/9、零跳过**：完整 typed proof 与原逐条锁基线一致，覆盖首/中/末锁的前缀阻塞、取消回滚、正常控制面账号/凭据撤权及 reader 先占锁后 writer 等待。17 表摘要不变、原 lease token finally 释放；准备 hold 保留到自有库删除，不称全结算或回滚。功能 runner 的 durability off 保持，不作为性能结果。新根已加入双版本隔离 CI 与 strict 目标，未运行远端 required CI。见 [reader 有序锁批量真库记录](validation/implementation-2026-10-22/dispatch-proof-fence-batch.json)。
+- 该变动后的完整离线回归：unit **6784 / 6761 pass / 23 skip**，integration **349 / 255 pass / 94 skip**，均零失败/取消；source TSC、两条原 workflow strict、CI wiring **14/14**、权限镜像、scoped Biome 与 diff 检查通过。声明源码/配置在前后及投影创建时相符；服务器重新构建成功。新的 PG 根在聚合中显式 skip，上述真库结果单列。见 [当前完整回归](validation/implementation-2026-10-22/regression-dispatch-fence-batch.json)。
+- 同一重建产物的标准 CLI/builtin 真实 Kimi `IuxVRo / native` 再次 **7/7、零跳过**。独立重算六张新 terminal receipt：输入 **1134**、输出 **168** tokens，金额 **83/83/558/709/630/709**、合计 **2772** 个夹具最小单位，12 笔 ledger 借贷各 2772，六笔 lease 从 1 到终态 0。中断保留 unknown、263680 hold、零用量/结算及 202 重放，abort 租约归零仍仅来自通过的现场断言。完整 src749/dist2992/closure708 前后及投影时匹配，自有资源清理；一个凭据、局部 rights、夹具价格和 pilot 软件 KMS 的边界保持，不作为性能、全供应商或 GO。见 [当前真实 Kimi 收费链](validation/implementation-2026-10-22/kimi-commercial-dispatch-fence-batch.json)。
+- 此构建的原 serial profile/native 四腿各 **100** 样本、warmup1，延迟开销 **106.36 ms**、TTFB 开销 **103.58 ms**，仍失败于原 **30/10 ms**，流错误为零。400 客户端样本中 200 gateway UUID 与只读 PG 终态逐项相连，全部 succeeded/settled，无缺失/重复/多 attempt/evidence/pending；没有钱包总账聚合。749src/2992dist/5harness 前后及记录时相符，自有资源清理。不同轮次差值不能隔离该 batch 的收益；当前继续通过有界逐请求阶段关联定位实际尾部。见 [reader batch 后原规范串行诊断](validation/implementation-2026-10-22/r9-dispatch-fence-batch-serial.json)。
+
+
+### 16.3 钱包、围栏与八条固定查询的历史构建检查点（2026-10-22）
+
+| 变动或验收 | 结果与范围 |
+|---|---|
+| 钱包摘要 | hold 与 refund freeze 的两个独立聚合合为一个 SELECT，单次摘要 2→1、全新 reserve 4→2；保留前后两次观察、原围栏和 BigInt 计算。PG15/18 财务根各 6/6、商业根各 27/27。见 [钱包聚合](validation/implementation-2026-10-22/wallet-summary-batch.json)。 |
+| Commercial reader | 保留五个原 shared lock 调用和两个观察边界，SQL 8→5；PG15/18 各 13/13。初始供给的两条 SQL 字节、绑定和事务设置保持。见 [围栏和初始供给查询](validation/implementation-2026-10-22/commercial-reader-initial-authority-native.json)。 |
+| 八条固定 native 查询 | 默认关闭；在此前 commercial 与 scheduler 三条基础上加入 initial supply 两条、dispatch proof 三条，不缓存业务行或在 native 错误后重放。PG15/18 dispatch proof 各 10/10；现场断言同一后端存在三个真实 wire prepared statements，重复执行后撤权仍拒绝。商业 HTTP 原根各 27/27。见 [当前双版本与回归记录](validation/implementation-2026-10-22/fixed-read-plans.json)。 |
+| 该构建完整离线回归 | unit **6814 / 6791 pass / 23 skip**，integration **349 / 255 pass / 94 skip**，零失败/取消；source TSC、两条原 workflow strict、CI wiring 14/14、权限镜像、Biome 和 diff 检查通过。保留旧 sticky 用例的真实定时竞态首红及旧 CI 夹具形式首红；仅测试同步和夹具检查更新，未放宽业务预算。 |
+| 该构建真实 Kimi | 重建的标准 CLI/builtin、native **7/7、零跳过**。六笔本轮 receipt 重新核算 input/output **1134/168**、金额 **2772** 个夹具最小单位，ledger 借贷匹配，六终态 lease 为零；单凭据、夹具价格及 pilot 软件 KMS 的边界保持。见 [本轮真实收费链](validation/implementation-2026-10-22/kimi-commercial-fixed-read-plans.json)。 |
+| 原规范串行采样 | 四腿各 100、warmup1，延迟/TTFB 开销 **550.21/266.98 ms**，零流错误，仍 **FAIL**。完整 src749/dist2992/harness5 前后匹配，400 客户端样本中的 200 gateway UUID 均有成功终态观察；非钱包总账聚合。见 [当前串行记录](validation/implementation-2026-10-22/r9-fixed-read-plans-serial.json)。 |
+| 有界逐请求阶段观测 | 200 个 measured gateway request 完整关联，三进程关闭后 active=0、描述符恢复、失败计数全零。原性能预算仍失败；同请求耗时分散于准备、调度、准入及派发。采样期间观察到其他编译负载，不能证明某请求的延迟原因。嵌套计时不相加，EOF 后 settlement 不归入 TTFB。见 [逐请求阶段](validation/implementation-2026-10-22/r9-request-stages-fixed-read-plans.json)。 |
+
+以上是各次捕获的局部验证，不是全局源码冻结、远端 required CI 或发布 GO。该构建原完整 R9 已结束并清理：单 CLI 基线 1668 次 200、3529 次 429、零 5xx；三 CLI 延迟/TTFB 开销 **551.21/401.23 ms**，十分钟重复短流 **8400 条 / 537600 块、零损坏**。并发、精度、扩容三场景分别 **60/29/40 个 5xx**，共 **129 个（502=30、503=99）**；扩容保持 `ratio=null/current_report_failed`，未运行第二协议完整负载，也没有全负载最终资金快照。见 [完整失败记录](validation/implementation-2026-10-22/r9-fixed-read-plans-full-attempt.json)。
+
+后续改动已由 Astra 设计、6.1 Sol 修改、Luna 执行验证：同一 RR 解析内的成功池权限行复用已通过 **60/60**；调度器纯 SELECT 去除事务外壳已通过 **205/205**。两者源码与严格类型检查通过，PG15.19、PG18.6 的 supplier native-protocol、prepared-statements、commercial 原根分别各 **6/6、10/10、27/27**，均无跳过，自建数据库已清理；真实 wire prepared 断言与 supplier protocol 测试分别记录。见 [调度读取与池权限记录](validation/implementation-2026-10-22/scheduler-reads-pool-rights.json)。
+
+入口 HTTP 背压保持默认关闭，仅显式配置正整数时启用；组合、启动、runtime v1/v2 四个测试根已分别 **23/23、60/60、11/11、16/16**，部署配置转发已 **10/10**，池默认仍为 16/5000 ms。permit 在原 handler Promise 完成后释放；异步图片 202 后的后台派发与 WS 有各自边界。额外严格类型检查与八文件作用域 Biome 已通过；最新整套回归停在 unit 的 1 项失败，见 §16.4。私有诊断与同构建对照尚未执行。新增启动测试最初缺 JSON 请求头而先返回 415，修正后才覆盖有效 env、typed 优先和禁用分支，不能把该条夹具失败当作 env 接线缺陷证据。这些后续改动没有继承上表旧构建的完整回归或真实 Kimi 结论。
+
+初始权限事务的 SQL 设置为 `REPEATABLE READ`，没有额外设置 `READ ONLY`；池权限行仅在本次无 rights 写入的循环内复用，下一请求重新读取。Scheduler 去除的事务原为 READ COMMITTED、无锁纯读取；保留各候选路由重新读取与 SQL/时钟顺序，连接获取次数增加的取舍待实测。
+
+生产云 KMS、真实异地存储、Codex 完整计费边界与真实 compact/WS 的验证状态继续单独列出。Codex generation 当前保留输出 cap 字段，但尚无实际 backend 对该 cap 的强制语义及完整续接输入硬上限证明；字段保留本身不使它可售。见 [验收记录总览](validation/implementation-2026-10-22/manifest.json)；该目录保存本地验收记录，不冒充 required CI 发布证据。
+
+### 16.4 最新任务状态与处理顺序（2026-10-23）
+
+**本次收尾范围**：更新技术文档，将已有实现按任务分别提交并推送远程。依本次指令，不再启动测试、类型检查、格式检查、构建、真实供应商调用或性能验证。以下计数只引用此前已经结束的执行；“实现完成”和“发布验收通过”分别记录。
+
+| 任务 | 最新状态 | 已完成与剩余边界 |
+|---|---|---|
+| Kimi 自动接入、工具及原生用量 | 实现完成，历史真实主链通过 | 标准 CLI/builtin 的 7/7、资金和重放证据保留。最新调度/背压改动后尚未重新构建或重跑，不将旧产物结果平移到新源码。 |
+| 内置 runtime、就绪投影、compact/WS | 实现完成，Codex 真实验收开放 | 标准装配与 Kimi 主链已有实际运行记录；Codex 的完整输入/输出计费边界、实际 compact 和 WS 尚未验收，保持不可售。 |
+| Kimi quota 与统一账号出站 | 实现完成，局部真实验证通过 | 真实 quota worker 1/1；单凭据与局部供应商覆盖限制保留。 |
+| 运营、媒体及凭据审计重排 | 实现完成，历史浏览器通过 | 实际 React/控制面/PG 记录保留；备份界面显示未配置不能当作云备份成功。 |
+| SaaS 备份、恢复与升级约束 | 本地交付完成，云验收开放 | 原生 PG dump/restore 已通过；生产 KMS、真实异地存储、PITR 与恢复材料演练尚未完成。 |
+| 钱包锁序、健康时钟、绑定竞争及 HTTP drain | 已修复，历史定向验收通过 | 旧故障、修复后 c200 与关闭后资金记录分开；Redis release 仍是原 best-effort/TTL 合同，不声明逐次网络 ACK。 |
+| SQL 批量读取与八条 native 计划 | 实现完成，旧构建功能通过、性能失败 | 保留原 SQL、权限围栏和每次执行的新鲜事实；默认 off。历史全 R9 有 129 个 5xx，30/10 ms 门槛未达到。 |
+| 本次池权限复用与 scheduler 纯读去事务 | 实现及定向/双版本功能完成 | 单测 60/60、205/205；PG15/18 三根各 6/10/27。不是跨请求缓存，也没有证明吞吐或尾延迟收益。 |
+| HTTP 背压与部署接线 | 实现及定向检查完成，同构建负载待处理 | 四根 23/60/11/16、部署 10/10、额外 strict 与八文件 Biome 已通过。默认关闭；8 只是未证实的对照值，池默认 16/5000 ms。 |
+| 最新完整离线回归 | **未通过：unit 1 项失败** | 6847 项、6823 pass、1 fail、23 skip；失败后未进入 integration 和后续完整检查。新构建及真实 Kimi、serial/c200 对照均未执行。 |
+| 正式 required CI 与发布 | **NO-GO** | 本地记录不等于远端 required CI；性能、云恢复和 Codex 边界仍开放。本次提交推送不代表部署或发布完成。 |
+
+最新回归在北京时间 **2026-10-23 01:08:26—01:11:03** 已结束：source typecheck、两条原 workflow strict、CI wiring **14/14** 和 initial-authority strict 均通过，1701 个声明输入前后相同。unit 唯一失败为 `tests/server/timeout-budgets.test.ts:191` 的 `5xx failover attempts share one total deadline and backoff stays bounded`：HTTP 504 与总耗时断言先通过，随后 `secondSeen` 为 false，预期为 true。**根因未定位，不能宣称是环境抖动，也不能据此认定重试实现已正确。** 原 summary 保留 `countsValid:false`；这里照录原 native-spec 计数，不把失败汇总改成通过。已有记录见 [最新开发状态](validation/implementation-2026-10-22/latest-development-status-2026-10-23.json)。
+
+#### 16.4.1 过程中发现的问题及解决方式
+
+| 问题 | 处理方式与当前结论 |
+|---|---|
+| Kimi 合法 200 响应含大签名，被统一 4096 字节限制误拒绝 | 按固定供应商/探针类别使用有界响应上限和超时，保留 EOF、结构校验与脱敏；自动接入的历史真实收费链已通过。 |
+| thinking 控制丢失、指定工具与上游实际语义不一致 | 桥接保留控制和历史；用限定工具集合加 `any` 实现强制语义，错误工具拒绝但保留真实用量。真实自动/强制两轮工具已分别留证。 |
+| 上游协议、客户端计价协议与冗余别名混用 | 固定规范客户端协议和原生上游协议，各自用于桥接、capability 和计价，旧字段仅在确实缺失时回退；非法身份仍拒绝。 |
+| 钱包补偿与结算锁序反转产生真实死锁 | 补偿先取既有 canonical wallet fence，再取原行锁；保留金额、重放、回滚与权限断言。PG15/18 并发与故障回滚记录已保存。 |
+| 等待后使用陈旧主机时钟、容量满与内部错误混为一类 | 各 await 后重新采时，健康写入锁后使用单次 DB 采时；仅严格已知容量拒绝、且补偿确认完成时返回 429，畸形值与存储错误继续 block。 |
+| affinity 第二次 winner 又变化导致内部拒绝 | 只复核原候选域中的唯一合法 winner；严格第二次竞争在准入前 429，不增加第三次 bind。旧 HTTP 错误不作逐项追溯归因。 |
+| 满载时多处错误接近 5 秒，与池获取超时相符 | 保存阶段耗时与错误群体，增加默认关闭的 HTTP 入口背压。尚无应用池逐请求关联，不能把所有 502/503 都归因为连接池；不提高超时掩盖问题。 |
+| 同一解析重复池权限读取、无锁纯读 scheduler 多余事务往返 | 本地成功行复用和纯读去事务分别实现；保留新鲜读取边界与双版本撤权/时钟测试。连接获取次数增多的取舍留待同构建测量。 |
+| scheduler 去事务后 HTTP fake 仍期待两次查询 | 更新夹具为 billing group → candidates → route 的真实三次顺序，校验 route 绑定且无 eligibility 查询；原状态码、禁止 dispatch/事务断言保留，整个 HTTP 根 5/5。 |
+| 新增启动夹具漏 JSON header，先触发 415 | 仅补正确请求头再覆盖 env/typed/禁用路径；这条首红只登记为夹具问题，不当作生产 env 接线失败证据。 |
+| 额外 strict 暴露旧 OAuth fixture 多余元数据字段，新增代码格式不符 | 删除 rotator 当前不接收的 fixture 字段，保留全部断言；只修新增 import/换行，strict 与作用域 Biome 后续通过。 |
+| 最新整套 unit 的总 deadline 用例未到第二上游 | **尚未解决**。保留原 130 ms 总预算、80 ms backoff、700 ms 耗时断言和第二上游断言；后续需区分真实 deadline/重试缺陷与测试同步问题，本次不修改或重跑。 |
+
+#### 16.4.2 后续任务及处理方式
+
+本表记录后续恢复开发时的顺序，本次不执行其中的验证步骤。复杂定位/方案由 Astra 负责，代码调整由 6.1 Sol 负责，测试执行由 Luna 负责；共享工作树按文件归属处理，性能测量期间不并行构建或运行其他自建负载。
+
+| 顺序 | 待处理任务 | 处理方式与完成条件 |
+|---|---|---|
+| R1 | 定位最新 deadline unit 失败 | 先读既有失败和重试时序，确认首个真实问题；窄修实现或夹具同步，保留原预算与全部业务断言。恢复验证后先跑该最小用例，再决定整套回归。 |
+| R2 | 新源码完整回归与构建 | R1 处理后补完整 unit/integration、原 workflow strict 和既有检查，再重建标准 CLI；保存实际 src/dist/config 关联。当前 dist 属于旧八查询构建，不能作新源码构建证明。 |
+| R3 | 新构建真实 Kimi 主链 | 用标准 CLI/builtin 重跑原七项；逐笔对账 usage、receipt、wallet、ledger 与终态 lease，保留取消 unknown/hold/202 重放语义及单凭据限制。 |
+| R4 | 新构建串行性能与 HTTP 背压对照 | 先 cap off 的原 100 样本串行测量，再同一二进制仅切换 off/8 做三 CLI c200/60s。保留 30/10 ms、零意外 5xx/transport、持久化设置及原负载；8 不升为默认值。 |
+| R5 | 剩余 5xx 与尾延迟归因 | 固定错误码与真实 UUID 能关联时查请求终态；PG wait 只作总体佐证，不能推断应用池等待。对同请求拆分无重叠阶段，残差不直接叫 COMMIT/WAL，EOF 后结算不算 TTFB。 |
+| R6 | 完整 R9 与扩容 | 在最小路径处理后执行原完整场景；保留全部协议、十分钟 SSE、零意外错误与 scaling ≥2.7。失败时 ratio 保持 null，不用吞吐商替换正式结果。 |
+| R7 | 正式 CI 与云恢复交付 | 获取实际 required CI；使用生产 KMS、异地存储、PITR 和恢复材料演练。协议替身或本地 dump/restore 不能关闭云任务。 |
+| R8 | Codex 可售能力 | 取得精确 backend/model/operation 的可信完整计费边界和 cap 强制语义，再做实际 compact/WS；此前保持不可售，不能只凭字段存在或 transport 装配关闭任务。 |
+
+当前不再扩展未经证据支持的优化：snapshot 的 SELECT/INSERT 不是重复读取；affinity.resolve 会加锁并可能 CAS；preflight/价格解析持有授权或价格围栏，不能照搬 scheduler 去事务。连接器池和新增 native 描述符也没有本轮足量证据支持。先处理首个明确失败，再按 R1—R8 收敛。

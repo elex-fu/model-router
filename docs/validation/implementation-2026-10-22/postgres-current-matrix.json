@@ -1,0 +1,1240 @@
+{
+  "classification": "local-smoke",
+  "formalRequiredCiEvidence": false,
+  "status": "complete",
+  "startedAt": "2026-10-21T20:49:50.548Z",
+  "finishedAt": "2026-10-21T20:52:53.619Z",
+  "wrapperFile": "/private/tmp/model-router-postgres-current-matrix-20261022-74ffcbf8-3ce0-48ab-8ad7-a990df435901.mjs",
+  "wrapperSha256": "3b7a8d6e0b0dbc0edbb22c2c29136f68c4b90169ac32c650261a72fb90197f05",
+  "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l",
+  "environmentPolicy": {
+    "retainedHostVariableNames": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "LC_CTYPE",
+      "DOCKER_CONTEXT",
+      "DOCKER_HOST",
+      "DOCKER_CONFIG",
+      "DOCKER_TLS_VERIFY",
+      "DOCKER_CERT_PATH"
+    ],
+    "inheritedProviderLiveKmsPgOverrides": false,
+    "preparedStatementsOverridePresent": false,
+    "matrixDefaultPreparedStatements": "off"
+  },
+  "docker": {
+    "existingContext": "colima",
+    "existingContextEndpointLocal": true,
+    "contextChanged": false,
+    "ownershipLabel": "model-router.disposable-commercial-gate=true",
+    "contextUnchangedAtFinalCheck": true
+  },
+  "executionOrder": [
+    "18.6",
+    "15.19"
+  ],
+  "roots": [
+    {
+      "id": "commercial",
+      "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+      "priorExpectedNativeTests": 27,
+      "workerRole": false
+    },
+    {
+      "id": "composite",
+      "testFile": "tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 1,
+      "workerRole": false
+    },
+    {
+      "id": "kimi-source-diagnostic",
+      "testFile": "tests/integration/kimi-commercial-preparation-diagnostic.test.ts",
+      "priorExpectedNativeTests": 11,
+      "workerRole": true
+    },
+    {
+      "id": "native-scheduler-clock",
+      "testFile": "tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 6,
+      "workerRole": false
+    },
+    {
+      "id": "attempt-clock",
+      "testFile": "tests/saas/metering/attempt-transition-clock.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 3,
+      "workerRole": false
+    },
+    {
+      "id": "control-plane-pool-clock",
+      "testFile": "tests/saas/supply/platform-pool-grant-clock.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 4,
+      "workerRole": false
+    },
+    {
+      "id": "prepared-statements",
+      "testFile": "tests/saas/gateway/prepared-statements.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 10,
+      "workerRole": false
+    },
+    {
+      "id": "evidence-fence-batch",
+      "testFile": "tests/saas/gateway/prepared-evidence-authority-batch.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 14,
+      "workerRole": false
+    }
+  ],
+  "scope": {
+    "sourceRootsRegularFiles": "all src and dist regular files plus eight roots/CLI/runner literal relative import closure and role manifests/package manifests",
+    "srcFiles": 749,
+    "distFiles": 2992,
+    "literalClosureFiles": 697,
+    "checkedFiles": 3762,
+    "opsIncluded": [
+      "scripts/ops/verify-commercial-kimi.ts"
+    ],
+    "explicitlyExcludedProtocolWip": [
+      "scripts/ops/bench-gateway.mjs",
+      "scripts/ops/run-current-r9.mjs",
+      "tests/ops/r9-request-samples.test.ts"
+    ],
+    "skippedSymlinks": [],
+    "distImportedFiles": 0,
+    "distIsHashAuditOnly": true,
+    "wholeRepositoryFreezeClaim": false,
+    "performanceBenchmark": false,
+    "gitHubRequiredCiExecution": false
+  },
+  "source": {
+    "beforeDigest": "ea7f8cc87f453cdc014f76462cb16baf8e462e4790db12207827a3d7c052b3ae",
+    "afterDigest": "ea7f8cc87f453cdc014f76462cb16baf8e462e4790db12207827a3d7c052b3ae",
+    "currentDigest": "ea7f8cc87f453cdc014f76462cb16baf8e462e4790db12207827a3d7c052b3ae",
+    "changedPaths": [],
+    "currentChangedPaths": [],
+    "hashAlgorithm": "sha256",
+    "snapshotDigestEncoding": "SHA-256 of UTF-8 JSON.stringify(relative-path to SHA-256 map with keys sorted ascending).",
+    "finalScanStartedAt": "2026-10-21T20:55:00.478Z",
+    "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z",
+    "beforeAfterCurrentHashMatch": true,
+    "fullHashTables": {
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l",
+      "before": "source-before.json",
+      "after": "source-after.json",
+      "current": "source-current.json"
+    },
+    "pairedRootDigests": [
+      {
+        "id": "commercial",
+        "sameAcrossVersions": true,
+        "pairingDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48"
+      },
+      {
+        "id": "composite",
+        "sameAcrossVersions": true,
+        "pairingDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4"
+      },
+      {
+        "id": "kimi-source-diagnostic",
+        "sameAcrossVersions": true,
+        "pairingDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7"
+      },
+      {
+        "id": "native-scheduler-clock",
+        "sameAcrossVersions": true,
+        "pairingDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08"
+      },
+      {
+        "id": "attempt-clock",
+        "sameAcrossVersions": true,
+        "pairingDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069"
+      },
+      {
+        "id": "control-plane-pool-clock",
+        "sameAcrossVersions": true,
+        "pairingDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478"
+      },
+      {
+        "id": "prepared-statements",
+        "sameAcrossVersions": true,
+        "pairingDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59"
+      },
+      {
+        "id": "evidence-fence-batch",
+        "sameAcrossVersions": true,
+        "pairingDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0"
+      }
+    ]
+  },
+  "preparedScope": {
+    "defaultOffRunnerEnvironment": true,
+    "rootInternallyCoversDefaultOffAndExplicitNativeAuto": true,
+    "testOnlyTransactionLocalForcedGeneric": true,
+    "wholeMatrixDescribedAsOffOnly": false
+  },
+  "fenceNativeCountComposition": "One invalid-TTL pure test, twelve actual-PG subtests (six per supply mode), and their containing actual-PG parent test; prior total fourteen.",
+  "nativeCounts": {
+    "tests": 152,
+    "suites": 0,
+    "pass": 152,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "perPostgresVersion": [
+    {
+      "postgresMajor": 15,
+      "nativeCounts": {
+        "tests": 76,
+        "suites": 0,
+        "pass": 76,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "nativeCounts": {
+        "tests": 76,
+        "suites": 0,
+        "pass": 76,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    }
+  ],
+  "runs": [
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "commercial",
+      "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+      "priorExpectedNativeTests": 27,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-01-commercial",
+      "summarySha256": "d8ae763623f300e746fff063e7144efdada3c6647b43cf7e2b6bc3660c956f48",
+      "startedAt": "2026-10-21T20:49:51.507Z",
+      "finishedAt": "2026-10-21T20:50:03.157Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 685,
+        "beforeDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48",
+        "afterDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48",
+        "currentDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "composite",
+      "testFile": "tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 1,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-02-composite",
+      "summarySha256": "e3973de9c2d11048c5b7a8189d5fe7b7caeb407afaf5811c78c815f515ec0584",
+      "startedAt": "2026-10-21T20:50:03.864Z",
+      "finishedAt": "2026-10-21T20:50:08.105Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 1,
+        "suites": 0,
+        "pass": 1,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 685,
+        "beforeDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4",
+        "afterDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4",
+        "currentDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "kimi-source-diagnostic",
+      "testFile": "tests/integration/kimi-commercial-preparation-diagnostic.test.ts",
+      "priorExpectedNativeTests": 11,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-03-kimi-source-diagnostic",
+      "summarySha256": "d61108636d9f434b8c7b276806a0ad7458d29033aca313590456d08cea618a98",
+      "startedAt": "2026-10-21T20:50:08.546Z",
+      "finishedAt": "2026-10-21T20:50:14.406Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 11,
+        "suites": 0,
+        "pass": 11,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 687,
+        "beforeDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7",
+        "afterDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7",
+        "currentDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      },
+      "kimiScope": "Existing mocked onboarding/inference source diagnostic with actual PostgreSQL; not live-provider verification."
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "native-scheduler-clock",
+      "testFile": "tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 6,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-04-native-scheduler-clock",
+      "summarySha256": "78f7d43bf162fdf433b823ab2a656873d8f513daee87b9d47bb4e379b64d34b6",
+      "startedAt": "2026-10-21T20:50:14.826Z",
+      "finishedAt": "2026-10-21T20:50:19.638Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 6,
+        "suites": 0,
+        "pass": 6,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 686,
+        "beforeDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08",
+        "afterDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08",
+        "currentDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "attempt-clock",
+      "testFile": "tests/saas/metering/attempt-transition-clock.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 3,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-05-attempt-clock",
+      "summarySha256": "f332449fb07b963abdc03e9d6e80bbb7fec6c633631773fe6ef5256b0ead3a4c",
+      "startedAt": "2026-10-21T20:50:20.074Z",
+      "finishedAt": "2026-10-21T20:50:24.098Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 3,
+        "suites": 0,
+        "pass": 3,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 684,
+        "beforeDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069",
+        "afterDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069",
+        "currentDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "control-plane-pool-clock",
+      "testFile": "tests/saas/supply/platform-pool-grant-clock.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 4,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-06-control-plane-pool-clock",
+      "summarySha256": "655d0daabd7d4e97b3874a4b37647f1f67b9e2f18711156195448aeded3dc9ca",
+      "startedAt": "2026-10-21T20:50:24.714Z",
+      "finishedAt": "2026-10-21T20:50:28.928Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 4,
+        "suites": 0,
+        "pass": 4,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 684,
+        "beforeDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478",
+        "afterDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478",
+        "currentDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "prepared-statements",
+      "testFile": "tests/saas/gateway/prepared-statements.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 10,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-07-prepared-statements",
+      "summarySha256": "efdd69c0cdfa6ddf75badd97834024e2357d700937d877788da29c4f9bcd19b7",
+      "startedAt": "2026-10-21T20:50:29.356Z",
+      "finishedAt": "2026-10-21T20:50:34.614Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 10,
+        "suites": 0,
+        "pass": 10,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 686,
+        "beforeDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59",
+        "afterDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59",
+        "currentDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      },
+      "preparedModes": {
+        "defaultOff": {
+          "passed": true,
+          "anonymousSourcePaths": 3,
+          "retainedPreparedStatementCount": 0
+        },
+        "nativeAuto": {
+          "passed": true,
+          "mode": "auto",
+          "observedStatements": [
+            {
+              "label": "cm-final",
+              "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+              "fromSql": false,
+              "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+              "parameterCount": 4,
+              "genericPlans": "7",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-byok",
+              "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+              "fromSql": false,
+              "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+              "parameterCount": 15,
+              "genericPlans": "1",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-platform",
+              "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+              "fromSql": false,
+              "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+              "parameterCount": 22,
+              "genericPlans": "1",
+              "customPlans": "5"
+            }
+          ],
+          "automaticGenericAlwaysRequired": false
+        },
+        "testOnlyForcedGeneric": {
+          "passed": true,
+          "mode": "force_generic_plan",
+          "scope": "TESTONLY SET LOCAL within each real READ COMMITTED transaction; auto restored afterward",
+          "warmStatements": [
+            {
+              "label": "cm-final",
+              "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+              "fromSql": false,
+              "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+              "parameterCount": 4,
+              "genericPlans": "19",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-byok",
+              "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+              "fromSql": false,
+              "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+              "parameterCount": 15,
+              "genericPlans": "7",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-platform",
+              "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+              "fromSql": false,
+              "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+              "parameterCount": 22,
+              "genericPlans": "7",
+              "customPlans": "5"
+            }
+          ],
+          "afterNegativeStatements": [
+            {
+              "label": "cm-final",
+              "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+              "fromSql": false,
+              "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+              "parameterCount": 4,
+              "genericPlans": "23",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-byok",
+              "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+              "fromSql": false,
+              "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+              "parameterCount": 15,
+              "genericPlans": "11",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-platform",
+              "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+              "fromSql": false,
+              "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+              "parameterCount": 22,
+              "genericPlans": "13",
+              "customPlans": "5"
+            }
+          ],
+          "negativeProofs": [
+            "committed-credential-epoch",
+            "credential-revocation",
+            "future-and-expired-rights",
+            "post-fence-committed-policy-revocation",
+            "financial-digest-invariance"
+          ]
+        },
+        "realSourceApiAndOwnedPgDriver": true,
+        "sourceClockBoundsAndNonClockRowHashesAsserted": true,
+        "performanceClaim": false
+      }
+    },
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "id": "evidence-fence-batch",
+      "testFile": "tests/saas/gateway/prepared-evidence-authority-batch.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 14,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg18-08-evidence-fence-batch",
+      "summarySha256": "bdda8eeef39d54169d3a94c6c1087e830a72ed61779181a39ec9ce284660f7ea",
+      "startedAt": "2026-10-21T20:50:35.040Z",
+      "finishedAt": "2026-10-21T20:51:02.003Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 14,
+        "suites": 0,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 686,
+        "beforeDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0",
+        "afterDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0",
+        "currentDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": null,
+        "ownedContainerIdSha256": null
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      },
+      "fenceNativeCountComposition": {
+        "pureInvalidTtlTest": 1,
+        "actualPgSubtests": 12,
+        "actualPgContainingParent": 1,
+        "nativeTotal": 14,
+        "independentSupplyScenariosClaim": false
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "commercial",
+      "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+      "priorExpectedNativeTests": 27,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-01-commercial",
+      "summarySha256": "48e39138c55cc8a873b8a30bf65a02e01245d62ff78dc1a68eaa5375729e1d8d",
+      "startedAt": "2026-10-21T20:51:02.875Z",
+      "finishedAt": "2026-10-21T20:51:27.653Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 685,
+        "beforeDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48",
+        "afterDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48",
+        "currentDigest": "d5c58c0e43326ae7702864d783e700fd6520b1c1b3229f78140d30728b199c48",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "9d2dc24f814bdc08cf46c646449ef4b77d2bc3b98a94c2afa11d71f956839077",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "composite",
+      "testFile": "tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 1,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-02-composite",
+      "summarySha256": "de579c67efeafea658e6e65698f8856325e650bebda71189ef0d5b3f2819b228",
+      "startedAt": "2026-10-21T20:51:28.570Z",
+      "finishedAt": "2026-10-21T20:51:34.992Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 1,
+        "suites": 0,
+        "pass": 1,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 685,
+        "beforeDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4",
+        "afterDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4",
+        "currentDigest": "83bac5feb018d8854ef43ba78f42e999dff773eff98626502216cc09ea49b3c4",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "c30592d3429e4e6fa236414e72e7fce39106faaa9ec33d6cbbbfd9d70967c4dc",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "kimi-source-diagnostic",
+      "testFile": "tests/integration/kimi-commercial-preparation-diagnostic.test.ts",
+      "priorExpectedNativeTests": 11,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-03-kimi-source-diagnostic",
+      "summarySha256": "14aae183934a3e6c7a18c8cf7f887597db58034bda22f8c355efac0b19c0d257",
+      "startedAt": "2026-10-21T20:51:35.537Z",
+      "finishedAt": "2026-10-21T20:51:45.331Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 11,
+        "suites": 0,
+        "pass": 11,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 687,
+        "beforeDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7",
+        "afterDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7",
+        "currentDigest": "dfe16fb3ecee9f5f25e2ce5468ef1ad8a060611f1447dd513986ea17f1ee72b7",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "aa6a75e74de53b08557ad3281508be30063577cdb9715b6b280e5ab45ce778aa",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      },
+      "kimiScope": "Existing mocked onboarding/inference source diagnostic with actual PostgreSQL; not live-provider verification."
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "native-scheduler-clock",
+      "testFile": "tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 6,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-04-native-scheduler-clock",
+      "summarySha256": "900378829c455b481c6bd9b65bf49a27092b388d0b0a2abd84e58b38664fe040",
+      "startedAt": "2026-10-21T20:51:46.423Z",
+      "finishedAt": "2026-10-21T20:51:55.074Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 6,
+        "suites": 0,
+        "pass": 6,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 686,
+        "beforeDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08",
+        "afterDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08",
+        "currentDigest": "1a1497ac8d72593192fbe35848f8145b9dcdfe79c88f235267c25ce784f0af08",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "be6b4b975071ec8b10c32f1ea0b71601b7d65fe4593e2476ee0772484d6c0d79",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "attempt-clock",
+      "testFile": "tests/saas/metering/attempt-transition-clock.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 3,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-05-attempt-clock",
+      "summarySha256": "74f1fceb3919b1739d760e3154d402a23442319a290719936b5b9fa2e3e87df5",
+      "startedAt": "2026-10-21T20:51:55.671Z",
+      "finishedAt": "2026-10-21T20:52:02.130Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 3,
+        "suites": 0,
+        "pass": 3,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 684,
+        "beforeDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069",
+        "afterDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069",
+        "currentDigest": "c3bccd429139ba92e4e28b358f9fb353825d9a7fe2167b1c9351be7f4ab41069",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "6c073834f74c4a9bb63ba211ae8c911b05b7c75a39f9e2404dee61fb80f2c3a2",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "control-plane-pool-clock",
+      "testFile": "tests/saas/supply/platform-pool-grant-clock.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 4,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-06-control-plane-pool-clock",
+      "summarySha256": "7311b4b0446b200037d0d7c2da046abd5d39a904a1bee2dcba6af4e22ccdf3c9",
+      "startedAt": "2026-10-21T20:52:02.637Z",
+      "finishedAt": "2026-10-21T20:52:09.162Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 4,
+        "suites": 0,
+        "pass": 4,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 684,
+        "beforeDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478",
+        "afterDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478",
+        "currentDigest": "d1dd710a11746dfce44a5c7c6c09bfe9461631dc49de70d5d12fe239447c5478",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "2029be2805511bb9fecda36942ffa8323ed813bda01a852f4ff4a982e93436ec",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "prepared-statements",
+      "testFile": "tests/saas/gateway/prepared-statements.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 10,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-07-prepared-statements",
+      "summarySha256": "86d2cf56f3228f7678d9b4ccba774006eb80dff24eca68caf55f090fa37658f1",
+      "startedAt": "2026-10-21T20:52:09.776Z",
+      "finishedAt": "2026-10-21T20:52:20.083Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 10,
+        "suites": 0,
+        "pass": 10,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 686,
+        "beforeDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59",
+        "afterDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59",
+        "currentDigest": "ec629e9b0d0f4addb3b58a668a4cb2db69a1274c3948fc1b2154cf6a5b23dc59",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "b1d2adab187e500d5026288025db3155dae588b16f3057ad77f47ca715101f64",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      },
+      "preparedModes": {
+        "defaultOff": {
+          "passed": true,
+          "anonymousSourcePaths": 3,
+          "retainedPreparedStatementCount": 0
+        },
+        "nativeAuto": {
+          "passed": true,
+          "mode": "auto",
+          "observedStatements": [
+            {
+              "label": "cm-final",
+              "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+              "fromSql": false,
+              "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+              "parameterCount": 4,
+              "genericPlans": "7",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-byok",
+              "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+              "fromSql": false,
+              "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+              "parameterCount": 15,
+              "genericPlans": "1",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-platform",
+              "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+              "fromSql": false,
+              "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+              "parameterCount": 22,
+              "genericPlans": "1",
+              "customPlans": "5"
+            }
+          ],
+          "automaticGenericAlwaysRequired": false
+        },
+        "testOnlyForcedGeneric": {
+          "passed": true,
+          "mode": "force_generic_plan",
+          "scope": "TESTONLY SET LOCAL within each real READ COMMITTED transaction; auto restored afterward",
+          "warmStatements": [
+            {
+              "label": "cm-final",
+              "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+              "fromSql": false,
+              "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+              "parameterCount": 4,
+              "genericPlans": "19",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-byok",
+              "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+              "fromSql": false,
+              "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+              "parameterCount": 15,
+              "genericPlans": "7",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-platform",
+              "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+              "fromSql": false,
+              "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+              "parameterCount": 22,
+              "genericPlans": "7",
+              "customPlans": "5"
+            }
+          ],
+          "afterNegativeStatements": [
+            {
+              "label": "cm-final",
+              "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+              "fromSql": false,
+              "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+              "parameterCount": 4,
+              "genericPlans": "23",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-byok",
+              "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+              "fromSql": false,
+              "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+              "parameterCount": 15,
+              "genericPlans": "11",
+              "customPlans": "5"
+            },
+            {
+              "label": "sched-platform",
+              "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+              "fromSql": false,
+              "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+              "parameterCount": 22,
+              "genericPlans": "13",
+              "customPlans": "5"
+            }
+          ],
+          "negativeProofs": [
+            "committed-credential-epoch",
+            "credential-revocation",
+            "future-and-expired-rights",
+            "post-fence-committed-policy-revocation",
+            "financial-digest-invariance"
+          ]
+        },
+        "realSourceApiAndOwnedPgDriver": true,
+        "sourceClockBoundsAndNonClockRowHashesAsserted": true,
+        "performanceClaim": false
+      }
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "id": "evidence-fence-batch",
+      "testFile": "tests/saas/gateway/prepared-evidence-authority-batch.postgres.integration.test.ts",
+      "priorExpectedNativeTests": 14,
+      "nativeCountMatchesPriorExpectation": true,
+      "evidenceDirectory": "/private/tmp/model-router-postgres-current-matrix-bScZ5l/pg15-08-evidence-fence-batch",
+      "summarySha256": "cef3d2ff07e385d239dd2a3aa7cee71b2e73e7469d3990e89a5474edf080d0a6",
+      "startedAt": "2026-10-21T20:52:20.924Z",
+      "finishedAt": "2026-10-21T20:52:52.785Z",
+      "exitCode": 0,
+      "signal": null,
+      "nativeCounts": {
+        "tests": 14,
+        "suites": 0,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerOk": true,
+      "source": {
+        "filesChecked": 686,
+        "beforeDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0",
+        "afterDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0",
+        "currentDigest": "7bf801eae403bd07967bd9f21357dd11c3a13d0c59d1b30a2a136a9ec17a41f0",
+        "beforeAfterChangedPaths": [],
+        "currentChangedPaths": [],
+        "globalChangedPaths": [],
+        "finalCurrentCheckedAt": "2026-10-21T20:55:01.116Z"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "ownedContainerAbsent": true,
+        "ownedContainerIdSha256": "af2b8539c532f9aaaae0db23893ec3aead1a859011574ed3e7b5c1dfe9eff28d",
+        "ownedContainerAbsentAtFinalCheck": true
+      },
+      "provisioning": {
+        "rolesBeforeExitCode": 0,
+        "fullMigrationsExitCode": 0,
+        "rolesAfterExitCode": 0
+      },
+      "fenceNativeCountComposition": {
+        "pureInvalidTtlTest": 1,
+        "actualPgSubtests": 12,
+        "actualPgContainingParent": 1,
+        "nativeTotal": 14,
+        "independentSupplyScenariosClaim": false
+      }
+    }
+  ],
+  "firstFailure": null,
+  "builtArtifactExecutionClaim": false,
+  "formalCiExecutionClaim": false,
+  "statementDefinitions": [
+    {
+      "label": "cm-final",
+      "name": "mr_cm-final_NYzSln1LDMsRkrMs8XeeFdHVNBKv9dGILN0KZTATbxY",
+      "sqlSha256": "358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16",
+      "sqlMd5": "16233bc1de4ed80dfdd8a910ab8ece9c",
+      "sqlBytes": 468,
+      "parameterCount": 4
+    },
+    {
+      "label": "sched-byok",
+      "name": "mr_sched-byok_mzTElYR8K1QlYXTFwtHGBj7Wh34CNwjf_0WJ_gl3GZM",
+      "sqlSha256": "9b34c495847c2b54256174c5c2d1c6063ed6877e023708dfff4589fe09771993",
+      "sqlMd5": "06c7fdfc5f1d185ab5f86520d8240a17",
+      "sqlBytes": 10787,
+      "parameterCount": 15
+    },
+    {
+      "label": "sched-platform",
+      "name": "mr_sched-platform_vIOAnG0E-cUqyFcv5LHtZVRorYhhuvAMuxdA0qfPC2A",
+      "sqlSha256": "bc83809c6d04f9c52ac8572fe4b1ed655468ad8861baf00cbb1740d2a7cf0b60",
+      "sqlMd5": "df8b77e3d2c370574214072895bacb88",
+      "sqlBytes": 14331,
+      "parameterCount": 22
+    }
+  ],
+  "cleanup": {
+    "ownedNativeClustersStoppedAndRemoved": 8,
+    "ownedDockerContainersStoppedAndRemoved": 8,
+    "all16ClusterDirectoriesAbsent": true,
+    "all8OwnedContainerIdsAbsentAtFinalCheck": true,
+    "priorStacksModified": false
+  },
+  "noRealProviderCalls": true,
+  "finalizedAt": "2026-10-21T20:55:01.642Z"
+}

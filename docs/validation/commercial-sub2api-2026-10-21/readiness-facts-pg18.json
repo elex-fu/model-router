@@ -1,0 +1,16 @@
+{
+  "inventory": "empty freshly migrated database",
+  "results": [
+    {
+      "role": "CONTROL_PLANE",
+      "result": "ok",
+      "providers": 0
+    },
+    {
+      "role": "GATEWAY",
+      "result": "ok",
+      "providers": 0
+    }
+  ],
+  "scope": "SQL/role smoke only; standard runtime assembly is not exercised"
+}

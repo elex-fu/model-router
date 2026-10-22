@@ -1,0 +1,330 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T06:07:08.926953+00:00",
+  "status": "implemented-and-focused-offline-passed",
+  "productionChange": {
+    "path": "/Users/lex/play/model-router/src/server/managed-saas-gateway.ts",
+    "preeditCopy": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/repository-preedit/managed-saas-gateway.ts",
+    "before": {
+      "bytes": 119401,
+      "sha256": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d"
+    },
+    "after": {
+      "bytes": 119965,
+      "sha256": "86f946f6cfbf74a2b3ce782503d1873a597871d7563edbb5ee40797c9a0ce154"
+    },
+    "lineDelta": {
+      "added": 19,
+      "removed": 1
+    }
+  },
+  "testChange": {
+    "path": "/Users/lex/play/model-router/tests/server/managed-saas-gateway-composition.test.ts",
+    "preeditCopy": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/repository-preedit/managed-saas-gateway-composition.test.ts",
+    "before": {
+      "bytes": 88859,
+      "sha256": "f514111bbe5589e0ed43b2978060ff3d9e305eda8b2fc93cc2c76ecba561cb72"
+    },
+    "after": {
+      "bytes": 103363,
+      "sha256": "7aa4defd6915b786c2d82e23ad8b9652a1549ccd586641b2a91b92ed89fbd20f"
+    },
+    "lineDelta": {
+      "added": 406,
+      "removed": 0
+    }
+  },
+  "behaviorRed": {
+    "observation": {
+      "scope": "offline real composition preparation and dispatch with in-memory ports; no socket, PostgreSQL or provider",
+      "closeState": "closed",
+      "responseEndedBeforeClose": true,
+      "handlerPendingBeforeRelease": true,
+      "settlementPendingBeforeRelease": true,
+      "leasePendingBeforeRelease": true,
+      "lifecycleClosedBeforeRelease": true,
+      "closeCallsBeforeRelease": 1,
+      "eventsBeforeRelease": [
+        "attempt-dispatching",
+        "response-started",
+        "response-ended",
+        "attempt-sent",
+        "settlement-entered",
+        "close-called",
+        "lifecycle-closed"
+      ],
+      "final": {
+        "lifecycleClosed": true,
+        "closeCalls": 1,
+        "handlerSettled": true,
+        "settlementFinished": true,
+        "leaseReleased": true,
+        "handlerCompletion": "fulfilled",
+        "handlerReturned": true,
+        "closeCompletion": "fulfilled"
+      },
+      "events": [
+        "attempt-dispatching",
+        "response-started",
+        "response-ended",
+        "attempt-sent",
+        "settlement-entered",
+        "close-called",
+        "lifecycle-closed",
+        "settlement-finished",
+        "lease-released",
+        "handler-fulfilled"
+      ]
+    },
+    "log": {
+      "file": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/lifecycle-red.log",
+      "bytes": 1203,
+      "sha256": "160e5148b036c047df0b51360524e60bde93d2685815fcca202756204e24bb5a"
+    },
+    "nativeBehaviorCounts": {
+      "tests": 1,
+      "pass": 0,
+      "fail": 1
+    },
+    "repositoryNewTestRed": {
+      "file": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/repository-new-tests-red.tap",
+      "bytes": 3339,
+      "sha256": "7b7889ab188f7cb412d5e483840849bb28eb915dad6c1075967caa6f77ba909c"
+    },
+    "repositoryNewTestRedCounts": {
+      "tests": 5,
+      "pass": 2,
+      "fail": 3
+    }
+  },
+  "implementation": {
+    "productionChange": "track original returned HTTP promises; WS close first, HTTP allSettled drain, owned lifecycle close once",
+    "testsAdded": 5,
+    "focusedOfflineTestsPassed": 7,
+    "focusedOfflineSkipped": 0,
+    "selectedTestStrictTypecheck": true,
+    "sourceNoEmitTypecheck": true,
+    "twoFileBiome": true,
+    "ownedFileDiffCheck": true,
+    "serverOrSocketStarted": false,
+    "databaseStarted": false,
+    "providerCalled": false,
+    "buildRun": false,
+    "benchRun": false,
+    "fullImportClosureFreezeClaim": false,
+    "actualSevenPendingRowsCausalityProven": false,
+    "r9OrFinancialAcceptanceClaim": false
+  },
+  "focusedOffline": {
+    "startedAt": "2026-10-22T02:13:26.929Z",
+    "finishedAt": "2026-10-22T02:13:33.514Z",
+    "scope": "seven focused offline units, strict selected test file with the existing busboy declaration, source no-emit typecheck, two-file Biome and diff check; no database/server/provider/build/bench",
+    "declaredInputCount": 7,
+    "declaredInputDrift": [],
+    "fullImportClosureFreezeClaim": false,
+    "before": [
+      {
+        "path": "/Users/lex/play/model-router/src/server/managed-saas-gateway.ts",
+        "bytes": 119965,
+        "sha256": "86f946f6cfbf74a2b3ce782503d1873a597871d7563edbb5ee40797c9a0ce154"
+      },
+      {
+        "path": "/Users/lex/play/model-router/tests/server/managed-saas-gateway-composition.test.ts",
+        "bytes": 103363,
+        "sha256": "7aa4defd6915b786c2d82e23ad8b9652a1549ccd586641b2a91b92ed89fbd20f"
+      },
+      {
+        "path": "/Users/lex/play/model-router/src/types/busboy.d.ts",
+        "bytes": 2283,
+        "sha256": "49969f2ec5e0c6713260016cf5806c49f9b09571a12153b83c583412ebc561c5"
+      },
+      {
+        "path": "/Users/lex/play/model-router/tsconfig.json",
+        "bytes": 481,
+        "sha256": "baa3be6eb87a99437ac7d909496be2c00f22943bc5be28c09545efcc12c343d7"
+      },
+      {
+        "path": "/Users/lex/play/model-router/biome.json",
+        "bytes": 839,
+        "sha256": "57624325bc6e809fd350bb3ece2355755e5d117d2796cff7692725c34911bd21"
+      },
+      {
+        "path": "/Users/lex/play/model-router/package.json",
+        "bytes": 2116,
+        "sha256": "0ff87b5b06116146412e44ecbc066a0ca2a992c4c9b551942beec4561582979a"
+      },
+      {
+        "path": "/Users/lex/play/model-router/package-lock.json",
+        "bytes": 128467,
+        "sha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab"
+      }
+    ],
+    "after": [
+      {
+        "path": "/Users/lex/play/model-router/src/server/managed-saas-gateway.ts",
+        "bytes": 119965,
+        "sha256": "86f946f6cfbf74a2b3ce782503d1873a597871d7563edbb5ee40797c9a0ce154"
+      },
+      {
+        "path": "/Users/lex/play/model-router/tests/server/managed-saas-gateway-composition.test.ts",
+        "bytes": 103363,
+        "sha256": "7aa4defd6915b786c2d82e23ad8b9652a1549ccd586641b2a91b92ed89fbd20f"
+      },
+      {
+        "path": "/Users/lex/play/model-router/src/types/busboy.d.ts",
+        "bytes": 2283,
+        "sha256": "49969f2ec5e0c6713260016cf5806c49f9b09571a12153b83c583412ebc561c5"
+      },
+      {
+        "path": "/Users/lex/play/model-router/tsconfig.json",
+        "bytes": 481,
+        "sha256": "baa3be6eb87a99437ac7d909496be2c00f22943bc5be28c09545efcc12c343d7"
+      },
+      {
+        "path": "/Users/lex/play/model-router/biome.json",
+        "bytes": 839,
+        "sha256": "57624325bc6e809fd350bb3ece2355755e5d117d2796cff7692725c34911bd21"
+      },
+      {
+        "path": "/Users/lex/play/model-router/package.json",
+        "bytes": 2116,
+        "sha256": "0ff87b5b06116146412e44ecbc066a0ca2a992c4c9b551942beec4561582979a"
+      },
+      {
+        "path": "/Users/lex/play/model-router/package-lock.json",
+        "bytes": 128467,
+        "sha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab"
+      }
+    ],
+    "checks": [
+      {
+        "name": "offline-focused-final",
+        "command": [
+          "/Users/lex/.local/node/bin/node",
+          "--test",
+          "--import",
+          "tsx",
+          "--test-reporter=tap",
+          "--test-name-pattern=^(managed gateway lifecycle|managed gateway composition wires success and retryable failure through the fenced health writer$|complete test-mode graph uses gateway-owned IDs and one executor through evidence registration$)",
+          "tests/server/managed-saas-gateway-composition.test.ts"
+        ],
+        "exitCode": 0,
+        "signal": null,
+        "spawnError": false,
+        "log": {
+          "path": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/offline-focused-final.log",
+          "bytes": 1832,
+          "sha256": "e9605a214749dd56cdc16f43dffe4ddaf26fd8c88a8a485e70eb5825deb12dfd"
+        },
+        "counts": {
+          "tests": 7,
+          "pass": 7,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "name": "strict-composition-final",
+        "command": [
+          "/Users/lex/.local/node/bin/node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--pretty",
+          "false",
+          "--target",
+          "ES2022",
+          "--module",
+          "NodeNext",
+          "--moduleResolution",
+          "NodeNext",
+          "--lib",
+          "ES2023",
+          "--strict",
+          "--esModuleInterop",
+          "--skipLibCheck",
+          "src/types/busboy.d.ts",
+          "tests/server/managed-saas-gateway-composition.test.ts"
+        ],
+        "exitCode": 0,
+        "signal": null,
+        "spawnError": false,
+        "log": {
+          "path": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/strict-composition-final.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "source-typecheck-final",
+        "command": [
+          "/Users/lex/.local/node/bin/node",
+          "node_modules/typescript/bin/tsc",
+          "--noEmit",
+          "--pretty",
+          "false"
+        ],
+        "exitCode": 0,
+        "signal": null,
+        "spawnError": false,
+        "log": {
+          "path": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/source-typecheck-final.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "biome-owned-final",
+        "command": [
+          "/Users/lex/.local/node/bin/node",
+          "node_modules/@biomejs/biome/bin/biome",
+          "check",
+          "src/server/managed-saas-gateway.ts",
+          "tests/server/managed-saas-gateway-composition.test.ts"
+        ],
+        "exitCode": 0,
+        "signal": null,
+        "spawnError": false,
+        "log": {
+          "path": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/biome-owned-final.log",
+          "bytes": 43,
+          "sha256": "8d952fe7b9e9b3b0c9f6f38af3e0dbd9b00c1e46fb08f88406f19ba542c88ef4"
+        }
+      },
+      {
+        "name": "diff-check-owned-final",
+        "command": [
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "src/server/managed-saas-gateway.ts",
+          "tests/server/managed-saas-gateway-composition.test.ts"
+        ],
+        "exitCode": 0,
+        "signal": null,
+        "spawnError": false,
+        "log": {
+          "path": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/diff-check-owned-final.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    ]
+  },
+  "preeditAndDelta": {
+    "file": "/private/tmp/model-router-shutdown-pending-20261022-101fab0f-a237-45db-8b69-2159d620a512/implementation-result.json",
+    "bytes": 2794,
+    "sha256": "c25abc9ea2b3eda23f027fb4a37d69ea5ed1864a12af00452705f91d6002725c"
+  },
+  "currentOwnedFilesMatch": true,
+  "limits": [
+    "Offline real preparation/dispatch composition with in-memory ports; no socket, database or real provider.",
+    "Preserves nonasync handler, original returned promise/rejection identity and AsyncLocalStorage; WS closes first, returned HTTP work drains, lifecycle closes once.",
+    "No timeout/retry/cancel/financial transition/status change; detached video registration is outside returned HTTP work.",
+    "Actual seven pending rows in the earlier diagnostic are not individually attributed by this unit reproduction.",
+    "Current built financial, live-provider and R9 acceptance are recorded separately."
+  ]
+}

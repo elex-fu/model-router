@@ -1,0 +1,613 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "recordedAt": "2026-10-22T17:22:03Z",
+  "formalRequiredCiEvidence": false,
+  "currentRepositoryFreezeClaim": false,
+  "releaseDecision": "NO-GO",
+  "implementationStatus": "in-progress",
+  "scope": "Implementation of development-progress-2026-10-18.md section 15; independent evidence scopes and capture times remain explicit. Latest status as of 2026-10-23 Asia/Shanghai is recorded in latest-development-status-2026-10-23.json; prior artifacts retain capture-time scopes.",
+  "artifacts": [
+    {
+      "file": "admission-authority-query-plan.json",
+      "bytes": 86004,
+      "sha256": "3516188333dfaac0b064e8fcebe569d8621e94ddc5555fd9da719452d78b3e61"
+    },
+    {
+      "file": "affinity-bind-cause.json",
+      "bytes": 17704,
+      "sha256": "47d27338bbb7dce649bf49529c285f4a3a051641d1d872373488542b18435a75"
+    },
+    {
+      "file": "affinity-binding-repair.json",
+      "bytes": 12127,
+      "sha256": "546c674489b9e1a1d5b90d804f75201811bfe5604638f1e2f664d21cfcfe2e01"
+    },
+    {
+      "file": "affinity-contention-backpressure-c200-acceptance.json",
+      "bytes": 29080,
+      "sha256": "b102e561c0f610393b0d8e5d385c7c68662d90fb65f604811a72b1d0090e94cd"
+    },
+    {
+      "file": "affinity-residual-bind-proof.json",
+      "bytes": 19808,
+      "sha256": "7794e4b8176e31013b0d475a0ce1977bf95a24c8df2b363a3086fd8595f538bd"
+    },
+    {
+      "file": "affinity-residual-cause.json",
+      "bytes": 17508,
+      "sha256": "cf76219795ad85541ab8333710929a0b9b74f3bbf098cadd730fca8466f97568"
+    },
+    {
+      "file": "affinity-shutdown-c200-acceptance.json",
+      "bytes": 17806,
+      "sha256": "e20635a50f28140a9cacfd33957853373ad163d85fb89874dcdf148c1d70319a"
+    },
+    {
+      "file": "backup-restore.json",
+      "bytes": 7744,
+      "sha256": "6ec65f57b18820442707704ed8a60c5a2e01f9584700d2eaf1a305c9de302ec3"
+    },
+    {
+      "file": "ci-wiring-health-capacity.json",
+      "bytes": 31384,
+      "sha256": "c5b86171dfa366dca4694a051c5a7dffbab6d032f75bb5c2a1fe447d5827e9c5"
+    },
+    {
+      "file": "commercial-postgres-affinity-shutdown.json",
+      "bytes": 3258,
+      "sha256": "17d3f8a3a0e51e2bcd8a36f03ab1d030279fe9aa02d73beae6cb528ae09798fe"
+    },
+    {
+      "file": "commercial-postgres-contention-backpressure.json",
+      "bytes": 3891,
+      "sha256": "64b91b1359aa7fca4edd14a65a5639868dde096a2d12b6a8af15976128f607be"
+    },
+    {
+      "file": "commercial-reader-initial-authority-native.json",
+      "bytes": 10931,
+      "sha256": "f2a8399b2eb002503bfff4495e28ada8723ac1e557367f81550422fbc5383832"
+    },
+    {
+      "file": "contention-backpressure-repair.json",
+      "bytes": 15388,
+      "sha256": "71de4b98b20c8547dd80ba32956b35d672c41df49352a7fa4c9ce075b2f1adc4"
+    },
+    {
+      "file": "dispatch-capacity-postgres.json",
+      "bytes": 23799,
+      "sha256": "90b1817e361444dcc7b936608cd66b8ab8bc09e721d8f2caf2a5a6aca3a14d6f"
+    },
+    {
+      "file": "dispatch-proof-core-query-plan.json",
+      "bytes": 20976,
+      "sha256": "6a91e893455956fe16a3cee1ca350c7d646c0939d2d69e1507a73a927150698c"
+    },
+    {
+      "file": "dispatch-proof-fence-batch.json",
+      "bytes": 20870,
+      "sha256": "679a7b095859457e99b2ecf85aaff3d6b3b63be08e9b4c305271a0ec8f52018e"
+    },
+    {
+      "file": "dispatchable-explain.json",
+      "bytes": 30645,
+      "sha256": "3d2345e5df8977076a6a86740ab84def8435650fe18a3684bff425b00c5975a2"
+    },
+    {
+      "file": "dispatchable-wire-plans.json",
+      "bytes": 15857,
+      "sha256": "f34125e646c6da2adf79c93c2c8c3ad057f91124277f84ee97097f11e1b2544c"
+    },
+    {
+      "file": "evidence-fence-batch-postgres.json",
+      "bytes": 16166,
+      "sha256": "3ddf61b8211432b572450048a424f081947b12046e54c9688c0371b17df584e1"
+    },
+    {
+      "file": "fixed-read-plans.json",
+      "bytes": 13110,
+      "sha256": "094981d833cbbcda9ea003d6286e53926d41d157b40ae441be65a77cffdfc11f"
+    },
+    {
+      "file": "http-shutdown-drain.json",
+      "bytes": 12128,
+      "sha256": "a693ef3f50f020965c1e7015696274591ac6759cff97139b6b268f0c65876a9e"
+    },
+    {
+      "file": "kimi-commercial-affinity-shutdown.json",
+      "bytes": 15326,
+      "sha256": "24ad9bfdc39c191bbebd7a61f738423406b8ab3ddf46ebda30606c32a87792ea"
+    },
+    {
+      "file": "kimi-commercial-contention-backpressure.json",
+      "bytes": 15591,
+      "sha256": "b3358575f1cd7118b09d7ca5f331cf81f85f6205e7092792dede2f7ff29ffc3a"
+    },
+    {
+      "file": "kimi-commercial-current.json",
+      "bytes": 18943,
+      "sha256": "1197102a2f0e4734a6e860fa6ad44e8a19926b2e693acd3e4c1124bf296a5415"
+    },
+    {
+      "file": "kimi-commercial-dispatch-fence-batch.json",
+      "bytes": 17793,
+      "sha256": "0887378826c47ef27c10a9d2bbab8621679cd54775e432e2dadbb1c1ee5657ea"
+    },
+    {
+      "file": "kimi-commercial-fixed-read-plans.json",
+      "bytes": 7218,
+      "sha256": "d20d995a2747072cd4a1da2a339799d548e5158f5aa0eeaf0a0d4617bc1a5614"
+    },
+    {
+      "file": "kimi-commercial-full.json",
+      "bytes": 16752,
+      "sha256": "bee4b4f1e8e762b84777f2e46873c084432cbee703f7855be5ee31016f6563f8"
+    },
+    {
+      "file": "kimi-commercial-health-capacity.json",
+      "bytes": 14172,
+      "sha256": "4fc05de018fa26f244575f8505bd186068e76bf747b715d72eb30e51746c5daa"
+    },
+    {
+      "file": "kimi-commercial-native-prepared.json",
+      "bytes": 17340,
+      "sha256": "cd403dac38ece429434d9ad84c13f08ea694a3767803a0f7384abb07bab9f398"
+    },
+    {
+      "file": "kimi-commercial-wallet-order.json",
+      "bytes": 19578,
+      "sha256": "fbcc4e5879ccdb1828f18d5e8d27315d1926047fa08855cf79e9406b9aecec06"
+    },
+    {
+      "file": "kimi-commercial-wallet-summary.json",
+      "bytes": 17552,
+      "sha256": "d7a3a549f06308582c941468dbbd01273f78b33125c237307adf808a941a2254"
+    },
+    {
+      "file": "kimi-quota-worker.json",
+      "bytes": 5521,
+      "sha256": "75ca82d77562ede6bf7e4f4fc77fe0c3807fa83cc0f179038ca896744800ccab"
+    },
+    {
+      "file": "operations-browser.json",
+      "bytes": 9657,
+      "sha256": "716e377f9a7be81ac457d3ce1edafd7273e3b09771161ab7c5b79f4d3000e15d"
+    },
+    {
+      "file": "postgres-current-matrix.json",
+      "bytes": 45168,
+      "sha256": "5b52356f38cc5c2e7385233b215c4432bab5d69764624d125cd5ddf27c83c1ca"
+    },
+    {
+      "file": "postgres-matrix.json",
+      "bytes": 108612,
+      "sha256": "6d452730dac835217df38f3817ce2770948977625088cfe6f922148e5fd2f1fd"
+    },
+    {
+      "file": "prepared-statements-postgres.json",
+      "bytes": 24040,
+      "sha256": "7efbe1bb1e76e673452310e70ddd14ce0667a8b4c3e6f9148180cd85ca2217f7"
+    },
+    {
+      "file": "r9-affinity-shutdown-full-attempt.json",
+      "bytes": 8132,
+      "sha256": "8bae0af30627c45656aafdf09a9e1a21a038ff360a50c1a599b02355ab043e7d"
+    },
+    {
+      "file": "r9-affinity-shutdown-serial.json",
+      "bytes": 26432,
+      "sha256": "4581e39505d0b73f0fde9fca6a19da5cc13079048c0bd9abf5915fa216e4651c"
+    },
+    {
+      "file": "r9-c200-cause-diagnostic.json",
+      "bytes": 18473,
+      "sha256": "951c9c1e02f593cd305cc279d30d13ffd967b0498e563345259741486315147d"
+    },
+    {
+      "file": "r9-c200-first-failure.json",
+      "bytes": 6430,
+      "sha256": "ee1482e7ae5dc56f88f1594bdbbb00ed803e4fa614ee3766cd698cdadb929299"
+    },
+    {
+      "file": "r9-contention-backpressure-serial.json",
+      "bytes": 9189,
+      "sha256": "03c753cc183c18e65dceca73374795e90de0f72ebd2ec5d20f3a79cc87a8f211"
+    },
+    {
+      "file": "r9-current-serial-profile.json",
+      "bytes": 17568,
+      "sha256": "45e523807298b18247b27b84262640359489b1ea655f269e7c126e6857b78061"
+    },
+    {
+      "file": "r9-dispatch-fence-batch-serial.json",
+      "bytes": 9146,
+      "sha256": "543e7ed0e15e616533320a6c5775adcfd8f37013b0971e203a5f0d188a92912b"
+    },
+    {
+      "file": "r9-fence-batch-transport-serial.json",
+      "bytes": 20528,
+      "sha256": "d450ba1e1391529b90ca35be6caece1d8c83e637824c29ab5475526fb1cdb806"
+    },
+    {
+      "file": "r9-fixed-read-plans-full-attempt.json",
+      "bytes": 4565,
+      "sha256": "746626e41b70f4226415d074bf26727ab37d183051a4bd6e3e1f5675681bea70"
+    },
+    {
+      "file": "r9-fixed-read-plans-serial.json",
+      "bytes": 3331,
+      "sha256": "d3ecf85be4d09aa29706632d527332ec09de876fc743ff3f61357934ff0bc4e8"
+    },
+    {
+      "file": "r9-health-capacity-full-attempt.json",
+      "bytes": 17348,
+      "sha256": "460900de2ed209095bbe911c5f6c32fad74d8a26c177d1f07f94bf634aa32023"
+    },
+    {
+      "file": "r9-postbatch-short.json",
+      "bytes": 16228,
+      "sha256": "2e2a07b290d48868080377d9c5f509a1ed90288730982ecbb18ecb25d76e57d6"
+    },
+    {
+      "file": "r9-prepared-native-serial.json",
+      "bytes": 17602,
+      "sha256": "7b2654f80b9b3711fda8553cd86d5479d113b7dd4a822c62835b52a6d6ddebc4"
+    },
+    {
+      "file": "r9-prepared-off-serial.json",
+      "bytes": 17600,
+      "sha256": "50e1e816646e90dc07e0e97798c065c1f60837b19ea51fdae8e75ccd1f95f794"
+    },
+    {
+      "file": "r9-request-samples-serial.json",
+      "bytes": 27361,
+      "sha256": "71e521253f071346e8f3ce2a484b4f2ae2061bf6631c18841464886438888cdf"
+    },
+    {
+      "file": "r9-request-stages-dispatch-fence-batch.json",
+      "bytes": 46007,
+      "sha256": "d38864c573e5b9c7ee9b2bd4b22ba4a1bcd80ca856aa9fa7915248dce7007b05"
+    },
+    {
+      "file": "r9-request-stages-fixed-read-plans.json",
+      "bytes": 19241,
+      "sha256": "fc6cb4b9c4248ecee459930785551db2be63b19fbac5470695d3b98bb13abf39"
+    },
+    {
+      "file": "r9-wallet-order-c200-failure.json",
+      "bytes": 7634,
+      "sha256": "c25dd5d2c2bc9639ca469e1f1e1c38aec60900b64316ae4cd9d71408f976b5e6"
+    },
+    {
+      "file": "r9-wallet-summary-serial.json",
+      "bytes": 8717,
+      "sha256": "593f79d784304cd892bfd3e25a48a617b99dc8493a8b72780e91f457b6d1a5aa"
+    },
+    {
+      "file": "regression-affinity-shutdown.json",
+      "bytes": 29693,
+      "sha256": "011f5debb6232e8aab7a85355f533ebe2d72cb15d6249c30dbf13b30fa249538"
+    },
+    {
+      "file": "regression-contention-backpressure.json",
+      "bytes": 6937,
+      "sha256": "0ee59b128ac1c1bbfd2d98d40c1e2d75a9cbb35317036c739ab6d8dffcd0f981"
+    },
+    {
+      "file": "regression-dispatch-fence-batch.json",
+      "bytes": 6913,
+      "sha256": "d484488fadb36152f3158e323775e868331ec9b734efe2be0c2929510da83651"
+    },
+    {
+      "file": "regression-health-capacity.json",
+      "bytes": 12912,
+      "sha256": "ebd5bf550767e09fa1a49ada3fb5b21a6cf5d15c6eecf2e541244b3712b61bef"
+    },
+    {
+      "file": "regression-wallet-order.json",
+      "bytes": 23255,
+      "sha256": "fd68ea7a3a5d5d86df47f7457af35e0bc52f8700c0a72cd311dff924a175fa79"
+    },
+    {
+      "file": "regression.json",
+      "bytes": 23494,
+      "sha256": "e93f03dcd7adfd5fac8d46d1c834dae3efb01e2f47d9ee912c0e652582b4fc5a"
+    },
+    {
+      "file": "runtime-health-clock-postgres.json",
+      "bytes": 47287,
+      "sha256": "18ef9272e8b57d721d3df4a8f298c9a2cf134a25c4ce1e11132765efd5915ac2"
+    },
+    {
+      "file": "scheduler-query-planning.json",
+      "bytes": 273747,
+      "sha256": "76425429aa373cca2ec37980f15952f75b114c9608b25fe7c980184fcb6db6ff"
+    },
+    {
+      "file": "scheduler-reads-pool-rights.json",
+      "bytes": 8337,
+      "sha256": "ba470796399a11495ed7db560d784cda760639c967e738ef7067e566f0223e38"
+    },
+    {
+      "file": "wallet-compensation-lock-order-postgres.json",
+      "bytes": 38134,
+      "sha256": "de37a492b2245cc74ca25455b800524c6d1b0acb0b575fc84af0603eeb0b7058"
+    },
+    {
+      "file": "wallet-summary-batch.json",
+      "bytes": 20817,
+      "sha256": "5ac0eeb43fd41e0db66964bf493b64b7cad2890965d1a054fc57624fb1105b57"
+    },
+    {
+      "file": "latest-development-status-2026-10-23.json",
+      "bytes": 14774,
+      "sha256": "c03d215c5e33c265ab4baba67086d52fa7b9fff41b1192095a6640841eb7abf5"
+    }
+  ],
+  "requirements": [
+    {
+      "requirement": "Kimi credential import and automatic validation",
+      "status": "passed-local-real-provider",
+      "evidence": [
+        "kimi-commercial-fixed-read-plans.json",
+        "kimi-commercial-wallet-summary.json",
+        "kimi-commercial-dispatch-fence-batch.json",
+        "kimi-commercial-contention-backpressure.json",
+        "kimi-commercial-affinity-shutdown.json",
+        "kimi-commercial-health-capacity.json",
+        "kimi-commercial-wallet-order.json",
+        "kimi-commercial-current.json",
+        "kimi-commercial-full.json",
+        "kimi-commercial-native-prepared.json",
+        "kimi-quota-worker.json"
+      ]
+    },
+    {
+      "requirement": "Real Kimi JSON/SSE, automatic/forced two-turn tools and financial invariants",
+      "status": "passed-local-real-provider",
+      "evidence": [
+        "kimi-commercial-fixed-read-plans.json",
+        "kimi-commercial-wallet-summary.json",
+        "kimi-commercial-dispatch-fence-batch.json",
+        "kimi-commercial-contention-backpressure.json",
+        "kimi-commercial-affinity-shutdown.json",
+        "kimi-commercial-health-capacity.json",
+        "kimi-commercial-wallet-order.json",
+        "kimi-commercial-current.json",
+        "kimi-commercial-full.json",
+        "kimi-commercial-native-prepared.json"
+      ],
+      "scope": "Eight-fixed-query built CLI wJad4G/native passed7/7, no skips. Six new completed receipts recomputed input1134/output168, fixture amount2772, balanced ledger debit/credit2772 and six terminal lease0. Abort unknown/hold263680/zero usage and settlement/replay202 retained; abort final lease/wallet invariants are passing live assertions without separately saved terminal rows. Captured src749/dist2992/closure708 match before/after and build; no future global freeze, all-provider, production tariff or cloud KMS claim."
+    },
+    {
+      "requirement": "Built-in standard CLI runtime and capability readiness",
+      "status": "implemented-and-kimi-live-verified",
+      "evidence": [
+        "kimi-commercial-fixed-read-plans.json",
+        "kimi-commercial-wallet-summary.json",
+        "kimi-commercial-dispatch-fence-batch.json",
+        "kimi-commercial-contention-backpressure.json",
+        "kimi-commercial-affinity-shutdown.json",
+        "kimi-commercial-health-capacity.json",
+        "kimi-commercial-wallet-order.json",
+        "kimi-commercial-current.json",
+        "kimi-commercial-full.json",
+        "kimi-commercial-native-prepared.json"
+      ],
+      "scope": "No claim that every configured provider has live acceptance"
+    },
+    {
+      "requirement": "Native compact and Responses WS",
+      "status": "implemented-with-live-acceptance-open",
+      "evidence": [],
+      "remaining": "Codex backend full billable input/output bounds and actual compact/WS acceptance remain unverified; unavailable remains enforced"
+    },
+    {
+      "requirement": "Restricted-role PostgreSQL commercial gates",
+      "status": "passed-local-scoped-gates",
+      "evidence": [
+        "fixed-read-plans.json",
+        "commercial-reader-initial-authority-native.json",
+        "wallet-summary-batch.json",
+        "dispatch-proof-fence-batch.json",
+        "commercial-postgres-contention-backpressure.json",
+        "contention-backpressure-repair.json",
+        "commercial-postgres-affinity-shutdown.json",
+        "affinity-binding-repair.json",
+        "runtime-health-clock-postgres.json",
+        "dispatch-capacity-postgres.json",
+        "wallet-compensation-lock-order-postgres.json",
+        "postgres-current-matrix.json",
+        "postgres-matrix.json",
+        "prepared-statements-postgres.json",
+        "evidence-fence-batch-postgres.json"
+      ],
+      "scope": "Current eight-fixed-query source: dispatch-proof root PG18/15 each10/10, original commercial HTTP root each27/27, zero skips/failures and owned clusters cleaned. Three proof names and current authority on repeated execution/revocation are actual same-backend assertions; exact plan-counter rows were not separately saved. Prior commercial-reader root13/13 each and wallet financial6/6 each remain separate historical captures. Functional runner durability is unchanged/off and does not prove R9 performance; required CI is still open.",
+      "remaining": "Formal required CI capture remains outstanding"
+    },
+    {
+      "requirement": "Kimi five-hour and weekly quota worker",
+      "status": "passed-local-real-provider",
+      "evidence": [
+        "kimi-quota-worker.json"
+      ]
+    },
+    {
+      "requirement": "Operations React workflows, audit, conflict and authorization",
+      "status": "passed-local-real-browser",
+      "evidence": [
+        "operations-browser.json"
+      ]
+    },
+    {
+      "requirement": "PostgreSQL backup and restore delivery",
+      "status": "native-local-passed-cloud-acceptance-open",
+      "evidence": [
+        "backup-restore.json"
+      ],
+      "remaining": "Production cloud KMS, PITR, offsite storage and recovery validation"
+    },
+    {
+      "requirement": "Current build R9 and sustained operation",
+      "status": "failed-current-build-full-workload-attempt",
+      "evidence": [
+        "latest-development-status-2026-10-23.json",
+        "r9-fixed-read-plans-full-attempt.json",
+        "r9-fixed-read-plans-serial.json",
+        "r9-request-stages-fixed-read-plans.json",
+        "r9-request-stages-dispatch-fence-batch.json",
+        "r9-wallet-summary-serial.json",
+        "r9-dispatch-fence-batch-serial.json",
+        "r9-contention-backpressure-serial.json",
+        "affinity-contention-backpressure-c200-acceptance.json",
+        "affinity-residual-bind-proof.json",
+        "affinity-residual-cause.json",
+        "r9-affinity-shutdown-serial.json",
+        "r9-affinity-shutdown-full-attempt.json",
+        "affinity-shutdown-c200-acceptance.json",
+        "r9-health-capacity-full-attempt.json",
+        "r9-c200-cause-diagnostic.json",
+        "r9-wallet-order-c200-failure.json",
+        "r9-c200-first-failure.json",
+        "r9-request-samples-serial.json",
+        "r9-postbatch-short.json",
+        "r9-current-serial-profile.json",
+        "r9-prepared-off-serial.json",
+        "r9-prepared-native-serial.json",
+        "r9-fence-batch-transport-serial.json",
+        "dispatchable-explain.json",
+        "scheduler-query-planning.json"
+      ],
+      "scope": "Historical R9 capture: Current-build full-workload R9 attempt (2026-10-22T14:33:08Z–14:50:47Z): three mock gateway instances on PostgreSQL 18 with durability enabled and zero real-provider calls. Latency p99 overhead was 551.21 ms against 30 ms and TTFB overhead was 401.23 ms against 10 ms. SSE completed 8,400 streams / 537,600 chunks with zero corruption. Concurrency, precision and scaling reports contain 129 HTTP 5xx (502=30, 503=99); scaling ratio is null because the current report failed. No second-protocol full-load run and no final full-load financial/settled aggregate were captured. Source/dist/harness captured before/after maps match, but a selected authority adapter currently differs from its captured hash; this is capture-time evidence only and does not claim a global source freeze. Latest scheduler/pool-rights/HTTP-capacity changes have no new build, real Kimi, serial R9 or c200 A/B result. Prior R9/c200 captures do not establish performance for those later changes.",
+      "remaining": "Original thresholds remain unmet: p99 overhead <=30 ms, TTFB overhead <=10 ms, zero unexpected 5xx, scaling ratio >=2.7. Root cause of the latest unit timeout-budget failure remains unknown. New build/provider/performance acceptance was not executed; validation stopped at the user request."
+    },
+    {
+      "requirement": "Admission authority planning and execution observation",
+      "status": "passed-single-local-plan-observation",
+      "evidence": [
+        "admission-authority-query-plan.json"
+      ],
+      "scope": "One PG18 restricted-role public-guard admission passed1/1. The unchanged10570-byte/59-binding/25-stage SELECT was warmed twice, explained once and read last; all three complete fact digests match. Full read-write admission completed then rolled back with identical15-table/20-record aggregate. Planning1.063ms, execution0.475ms and last client wall2.816ms are distinct single samples, not R9 p99 attribution or a prepared-plan comparison. All1384 declared inputs matched before/after/record creation, owned PG cleaned; two loader/setup first failures are retained. The canonical functional gate keeps fsync/synchronous_commit off."
+    },
+    {
+      "requirement": "Affinity bind contention diagnosis and repair",
+      "status": "passed-focused-and-built-c200-contention-backpressure",
+      "evidence": [
+        "affinity-contention-backpressure-c200-acceptance.json",
+        "contention-backpressure-repair.json",
+        "affinity-residual-bind-proof.json",
+        "affinity-residual-cause.json",
+        "affinity-shutdown-c200-acceptance.json",
+        "affinity-binding-repair.json",
+        "affinity-bind-cause.json"
+      ],
+      "scope": "Strict same-source/scope/unattempted second typed winner changes now reject rate_limited before admission without a third check/bind. Valid full numeric snapshots or typed capacity deny rate limit; malformed numeric snapshots still block and durable health denial keeps503 priority. Two offline unit roots went276/292pass with16fail to295/295, real PG15/18 components5/5 each. Current built OpenAI3CLI c200/60s actual64s passed HTTP2001225/429990, zero403/5xx/transport. Same-operation51first typed winners produced40final allows,9winner-capacity429 and2second-typed429;2165regular one-bind allows. Complete observers restore descriptors/active0, no callback/SQL throw. Independent final1226settled including smoke/979released/0pending/open holds, settlement-wallet-ledger137312 match. Src749/dist2992/canonical5/private29/deps2 stayed matched, owned resources cleaned. No per-HTTP join, network release ACK or performance benefit comparison.",
+      "remaining": "The observed binding/capacity defects passed this bounded acceptance. Complete R9 with unchanged latency/TTFB/scaling budgets is still required; neither earlier12HTTP503 nor earlier2HTTP403 are retroactively attributed."
+    },
+    {
+      "requirement": "Current workflow strict type checks and fixed PostgreSQL CI wiring",
+      "status": "passed-local-not-formal-required-ci",
+      "evidence": [
+        "fixed-read-plans.json",
+        "regression-dispatch-fence-batch.json",
+        "regression-contention-backpressure.json",
+        "regression-affinity-shutdown.json",
+        "ci-wiring-health-capacity.json"
+      ],
+      "scope": "The affinity-bind-race and new dispatch-proof-fence-batch roots are registered in PG15/18 isolated gate inventory and workflow strict targets. The new fixture-chain CI guard preserves all existing-root checks. Both current workflow commands ran with original ES2023 library setting and passed; one type-only Node stream/web import fixed the exposed existing global-type dependency. CI wiring14/14 passed locally. This is not a GitHub required-CI execution or future freeze."
+    },
+    {
+      "requirement": "Aggregate regression and generated privileges",
+      "status": "failed-latest-local-unit-regression",
+      "evidence": [
+        "latest-development-status-2026-10-23.json",
+        "fixed-read-plans.json",
+        "wallet-summary-batch.json",
+        "regression-dispatch-fence-batch.json",
+        "regression-contention-backpressure.json",
+        "regression-affinity-shutdown.json",
+        "regression-health-capacity.json",
+        "regression-wallet-order.json",
+        "regression.json",
+        "r9-request-samples-serial.json"
+      ],
+      "scope": "Historical passed capture only: Eight-fixed-query local capture: unit6814/6791pass/23skip, integration349/255pass/94skip, no failures/cancellations; source TSC, both original workflow strict commands, CI14/14, focused unit strict, privilege mirrors, scoped Biome and diff check pass. Source input1701 before/after matches; separate server build749src/2992dist succeeds. Sticky test wall-time race and hardcoded-platform CI matcher first reds retained, fixed only test synchronization/source checks without relaxing business budgets. Captures have explicit scopes and do not cover later edits or formal required CI. Latest saved regression finished 2026-10-22T17:11:03Z with unit6847/6823pass/1fail/23skip: timeout-budgets.test.ts:191 secondSeen=false; preceding 504 and elapsed assertions passed, root cause unknown. Source TSC, both workflow strict commands, CI14/14 and focused unit strict exited0 before unit failed. Integration, generated privileges and aggregate Biome were not executed in this latest attempt. User stopped further validation; no full-regression-green claim.",
+      "historicalStatus": "passed-local-with-explicit-skips"
+    },
+    {
+      "requirement": "HTTP shutdown drains active commercial request work",
+      "status": "passed-focused-and-built-c200",
+      "evidence": [
+        "affinity-contention-backpressure-c200-acceptance.json",
+        "http-shutdown-drain.json",
+        "affinity-shutdown-c200-acceptance.json"
+      ],
+      "scope": "Original returned HTTP promises and AsyncLocalStorage retained; WS close precedes HTTP drain and lifecycle close. New offline tests went2pass/3fail on old source to5/5, focused7/7. Latest built c200 independent final1226settled/979released/0pending/open holds and137312wallet/ledger settlement match. This does not individually attribute seven older pending rows, cover detached video registration, change timeouts, prove release network ACKs or all future shutdowns. This shutdown/c200 evidence is historical. Later HTTP-capacity focused roots are documented separately and do not refresh the built c200 shutdown result; no new build or c200 A/B run was executed."
+    },
+    {
+      "requirement": "Dispatch proof core planning and state-preserving query observation",
+      "status": "passed-single-local-plan-observation",
+      "evidence": [
+        "dispatch-proof-core-query-plan.json"
+      ],
+      "scope": "One original restricted PG18 public read passed1/1 with16original statement calls and11exact ordered shared fences. Two original warmups, one EXPLAIN and final original return preserve all94fields and full typed digests. Planning1.663ms/execution0.177ms/last client wall2.800ms are separate single samples. The instrumented18.162ms public wall includes extra queries/digest work and is not an uninstrumented duration or R9 tail attribution. A17-table/33-row snapshot matches, real held lease remains valid then is released through its original token; setup hold is retained until owned database deletion, not rolled back or settled. All1385 inputs matched and resources cleaned. No prepared descriptor or production SQL change is justified by this sample alone."
+    },
+    {
+      "requirement": "Dispatch proof reader ordered shared-fence batch",
+      "status": "passed-local-pg15-pg18-and-regression",
+      "evidence": [
+        "dispatch-proof-fence-batch.json",
+        "regression-dispatch-fence-batch.json",
+        "kimi-commercial-dispatch-fence-batch.json",
+        "r9-dispatch-fence-batch-serial.json"
+      ],
+      "scope": "Only the reader batches11existing shared advisory lock calls into one ordered unnest query; original layer order, per-layer deduplication and cross-layer repeated pool/profile calls remain. Method wire statements16to6, all five other SQL identities and writer helpers unchanged. PG18/15 each9/9 cover complete typed-proof equality to former single-statement sequence, first/middle/last blocking prefixes, cancellation rollback, normal control-plane account/credential revocation and reader-first writer blocking.17-table state digests match; original lease token finally released. Setup holds remain until owned database deletion, not all-settled or rollback. Functional runner durability remains unchanged/off; no performance claim. Local focused/unit/CI/regression and current built Kimi results are separate captures; original30/10ms serial budgets still fail."
+    },
+    {
+      "requirement": "Wallet summary aggregate round trips",
+      "status": "implemented-and-pg15-pg18-validated",
+      "evidence": [
+        "wallet-summary-batch.json",
+        "kimi-commercial-wallet-summary.json",
+        "r9-wallet-summary-serial.json"
+      ],
+      "scope": "Two independent scalar sums become one SELECT; summary2to1 and new reserve4to2, preserving the two separate before/after reserve observations, original fences and BigInt arithmetic. Financial PG18/15 each6/6 and commercial each27/27. No causal R9 benefit claim."
+    },
+    {
+      "requirement": "Commercial reader shared-fence batching and initial/proof native reads",
+      "status": "implemented-and-local-correctness-validated",
+      "evidence": [
+        "commercial-reader-initial-authority-native.json",
+        "fixed-read-plans.json",
+        "kimi-commercial-fixed-read-plans.json"
+      ],
+      "scope": "Commercial reader keeps five original scalar shared-lock calls at two boundaries, SQL8to5. Eight opt-in fixed native queries preserve exact SQL/binds, fresh execution, default-off fallback and no error replay; no business-row cache. Initial authority uses RR, not SQL READ ONLY. Real PG/current build/Kimi correctness captures are distinct from failed R9 and future edits."
+    },
+    {
+      "requirement": "Scheduler reads and pool rights snapshot validation",
+      "status": "targeted-unit-and-pg15-pg18-passed",
+      "evidence": [
+        "scheduler-reads-pool-rights.json",
+        "latest-development-status-2026-10-23.json"
+      ],
+      "scope": "Targeted pool-rights snapshot, scheduler-read, and deployment-environment unit roots show their captured first-red counts and post-format green counts; complete disposable-cluster PG15.19 and PG18.6 native-protocol, prepared-statements, and commercial roots each pass 6/10/27 with equal declared source closures and successful cleanup. Earlier PG18 direct node --test skips are setup attempts and excluded from these runner-root counts. Current owned source hashes are recorded; no global repository freeze is asserted. Later HTTP-capacity composition/startup/runtime-contract roots passed23/60/11/16 and deployment forwarding10/10; focused strict exited0, eight-file Biome exited0 with3warnings. These are separate local captures; the latest aggregate unit run failed6847/6823pass/1fail/23skip with unknown root cause.",
+      "remaining": "Latest aggregate integration, generated privilege checks and aggregate Biome were not executed after unit failed. No new build, Kimi, serial or c200 A/B acceptance was run; user stopped validation. Request-local rights reuse and scheduler wrapper removal have no measured performance-benefit claim."
+    },
+    {
+      "requirement": "HTTP capacity admission boundary and startup wiring",
+      "status": "targeted-local-unit-and-strict-passed",
+      "evidence": [
+        "latest-development-status-2026-10-23.json"
+      ],
+      "scope": "Saved composition23/23, SaaS startup60/60, runtime v1 contract11/11, runtime v2 contract16/16 and deployment environment10/10 roots pass without skips; focused strict exit0 and eight-file Biome exit0 with3warnings. Startup60/60 uses the content-type-green rerun, not the earlier415-failing attempt. These scoped results do not establish full regression, built HTTP acceptance or R9 performance.",
+      "remaining": "Latest aggregate unit regression fails at timeout-budgets.test.ts:191 with root cause unknown. Aggregate integration/privileges/Biome and new build/Kimi/serial/c200 A/B acceptance were not executed. Validation is stopped by user request."
+    }
+  ],
+  "limits": [
+    "Artifacts capture local results at different times and source scopes; no single final immutable repository or release-artifact snapshot is claimed.",
+    "Mock gateway performance, real-provider acceptance, restricted-role database gates and rendered browser workflows are separate evidence.",
+    "Neither a production rollout nor a public multi-tenant commercial release has occurred.",
+    "Latest local aggregate unit regression failed; user stopped further validation. Documentation-only status updates and manifest content-address metadata are not new validation evidence."
+  ],
+  "latestDevelopmentStatus": "latest-development-status-2026-10-23.json"
+}

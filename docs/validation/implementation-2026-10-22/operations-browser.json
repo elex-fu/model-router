@@ -1,0 +1,294 @@
+{
+  "format": "model-router-operations-browser-acceptance-v1",
+  "status": "passed",
+  "evidenceClass": "actual-local-browser-acceptance",
+  "formalCi": false,
+  "recordedAt": "2026-10-21T18:57:31.038Z",
+  "run": {
+    "startedAt": "2026-10-21T18:40:15.716Z",
+    "finishedAt": "2026-10-21T18:40:30.171Z",
+    "testFile": "tests/integration/platform-operations-browser.integration.test.ts",
+    "nativeCounts": {
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "todo": 0
+    },
+    "scenariosCountedAsSeparateTests": false,
+    "standardCli": "node dist/cli/index.js start --role control-plane",
+    "ui": "Real React pages from current web/dist",
+    "browser": "Actual headless Chrome via Playwright with an isolated temporary profile",
+    "authentication": "real-password-and-totp-from-dynamic-fixture-seed",
+    "apiHandlers": "Actual control-plane HTTP handlers and PostgreSQL business services",
+    "apiMocking": false,
+    "database": {
+      "backend": "disposable-initdb-cluster",
+      "version": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "isolated": true,
+      "roles": [
+        "migrator",
+        "control-plane",
+        "gateway",
+        "validation-worker"
+      ]
+    }
+  },
+  "artifactIntegrity": {
+    "algorithm": "SHA256 of each absolute file path followed by file bytes; recursive localeCompare name order; dist then web/dist; excludes .map and .d.ts",
+    "distWebDigestAtRun": "aae77a802936c898082de7744486d01775c308c94df973d68c9ed5201ba7a0de",
+    "currentDistWebDigest": "aae77a802936c898082de7744486d01775c308c94df973d68c9ed5201ba7a0de",
+    "unchangedDuringRun": true,
+    "matchesCurrent": true
+  },
+  "sourceIntegrity": {
+    "scope": "literal relative import closure, runner, role manifest, package-lock.json",
+    "fileCount": 686,
+    "algorithm": "SHA256 of compact JSON for the relative-path-to-file-SHA256 map with keys in default JavaScript lexical sort order",
+    "beforeSha256": "a0fae5739510fea4448ebf82820dc0be6fd0fb73330f1db2a83876a556b70e37",
+    "afterSha256": "a0fae5739510fea4448ebf82820dc0be6fd0fb73330f1db2a83876a556b70e37",
+    "currentSha256": "a0fae5739510fea4448ebf82820dc0be6fd0fb73330f1db2a83876a556b70e37",
+    "sameBeforeAfter": true,
+    "matchesCurrent": true,
+    "changesDuringRun": [],
+    "ownedFileSha256": {
+      "tests/integration/platform-operations-browser-harness.ts": "dd101ab76baf7c7f486ec0f6aec2e66f4f6a77b35ccb39b8f59329002bdcd00f",
+      "tests/integration/platform-operations-browser.integration.test.ts": "6dbc436727c6c1910adcb6c4330e5c5ac11aa6f4145d17c4c1d1132e07afb50c",
+      "src/saas/platform/operations/summary-service.ts": "bc1d77111533244c37c963a3b3e83c5d8aa447db8dd6e8539d7b9089b2b39ea1",
+      "tests/saas/platform/operations/summary-service.test.ts": "7f252e448c2f7fad20f8dcecdf03543ffa30c81299dc2534ecfc60b1ce0caac7"
+    }
+  },
+  "observations": {
+    "summary": {
+      "path": "/admin/api/v1/ops/summary",
+      "httpStatus": 200,
+      "rendered": true,
+      "knownErrorPanelAbsent": true,
+      "actualEmptyPaymentInbox": {
+        "pending": "0",
+        "processing": "0",
+        "oldestUnprocessedAgeMs": null
+      }
+    },
+    "diagnostics": {
+      "path": "/admin/api/v1/ops/diagnostics",
+      "httpStatus": 200,
+      "rendered": true
+    },
+    "backups": {
+      "path": "/admin/api/v1/ops/backups",
+      "httpStatus": 200,
+      "rendered": true,
+      "configured": false,
+      "displayedMessage": "尚未配置 PostgreSQL 备份或 PITR 策略",
+      "restoreVerified": false
+    },
+    "mediaRequeue": {
+      "httpStatus": 200,
+      "realBrowserClick": true,
+      "csrfAndIdempotencyPresent": true,
+      "reasonAndConfirmationRequired": true,
+      "postgresProof": {
+        "lease_epoch": "1",
+        "billing_state": "pending",
+        "poll_failures": 5,
+        "audit_event_id": "3c2b59df-f329-4ccb-b8e5-44b632545897",
+        "reason": "Browser fixture verified original task recovery",
+        "actor_id": "a8cd3bff-ab28-4691-a6a9-c6e68b985d7f",
+        "receipts": "1"
+      }
+    },
+    "staleEpoch": {
+      "httpStatus": 409,
+      "epoch": "2",
+      "receipts": "1"
+    },
+    "readonly": {
+      "httpStatus": 403,
+      "epoch": "2",
+      "receipts": "1",
+      "role": "support-readonly",
+      "uiMutationControlsDisabled": true,
+      "forbiddenMutationTransport": "Authenticated browser-context API request"
+    },
+    "freshness": {
+      "attemptedOnly": "stale",
+      "successfulObservation": "fresh",
+      "httpStatus": 200
+    },
+    "validationQueue": {
+      "httpStatus": 200,
+      "status": "queued",
+      "attempt_count": 0,
+      "lease_generation": "3",
+      "audit_event_id": "d058bc94-d22e-42f6-9b20-9316c554b02e",
+      "prior_attempt_count": "1",
+      "actor_id": "a8cd3bff-ab28-4691-a6a9-c6e68b985d7f",
+      "workerStarted": false,
+      "realProbeExecuted": false
+    }
+  },
+  "responseLedger": [
+    {
+      "path": "/admin/api/v1/auth/session",
+      "method": "GET",
+      "status": 401
+    },
+    {
+      "path": "/admin/api/v1/auth/session",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/me",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/backups",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/diagnostics",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/summary",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/media-tasks",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/media-tasks/video/browser-video-9767f536-2536-498d-8568-6e7204c99ebe/requeue",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/media-tasks",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/media-tasks/video/browser-video-9767f536-2536-498d-8568-6e7204c99ebe/requeue",
+      "method": "POST",
+      "status": 409
+    },
+    {
+      "path": "/admin/api/v1/ops/media-tasks",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/scheduling-health",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/supply/accounts/browser-retry-account-dcd7b289-db4c-40ee-bdfe-d05e894cff87/credentials/browser-retry-credential-d96ba201-45ca-42b2-b8e2-1245d453b76f/validation-requeue",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/scheduling-health",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/scheduling-health",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/supply/accounts/browser-retry-account-dcd7b289-db4c-40ee-bdfe-d05e894cff87/credentials/browser-retry-credential-d96ba201-45ca-42b2-b8e2-1245d453b76f/validation-requeue",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/supply/accounts/browser-retry-account-dcd7b289-db4c-40ee-bdfe-d05e894cff87/credentials/browser-retry-credential-d96ba201-45ca-42b2-b8e2-1245d453b76f/validation-requeue",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/scheduling-health",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/auth/session",
+      "method": "DELETE",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/auth/session",
+      "method": "GET",
+      "status": 401
+    },
+    {
+      "path": "/admin/api/v1/auth/session",
+      "method": "POST",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/me",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/summary",
+      "method": "GET",
+      "status": 403
+    },
+    {
+      "path": "/admin/api/v1/ops/diagnostics",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/backups",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/media-tasks",
+      "method": "GET",
+      "status": 200
+    },
+    {
+      "path": "/admin/api/v1/ops/scheduling-health",
+      "method": "GET",
+      "status": 200
+    }
+  ],
+  "cleanup": {
+    "browserCliRedisCleanupCompleted": true,
+    "privateHarnessDirectoryRemoved": true,
+    "postgresClusterStopped": true,
+    "postgresClusterRemoved": true
+  },
+  "originalLocalEvidence": {
+    "locationClass": "Temporary local evidence outside the repository",
+    "runnerDirectoryBasename": "model-router-commercial-postgres-xVmAtm",
+    "browserDirectoryBasename": "model-router-platform-browser-evidence-VMi1To",
+    "runnerSummarySha256": "669a755730a6ad09c67d4072777d4dc1ff2c4e202bb8f10b8de151e5b46c8c70",
+    "browserResultSha256": "9f2a708e502888a2b6d98d93dd3ad6d1255f85e6d0486db0b955fcef5676628c",
+    "screenshotNames": [
+      "operations-overview.png",
+      "media-requeue-receipt.png",
+      "scheduling-validation-queued.png"
+    ]
+  },
+  "limitations": [
+    "This is a local headless-browser acceptance run, not formal CI.",
+    "Dynamic fixture credentials exercised actual password and TOTP authentication; no production authentication bypass was added.",
+    "Validation was queued only. No validation worker or real probe/provider execution was started.",
+    "Media recovery verified status-poll requeue, PostgreSQL receipt, audit and epoch behavior; it did not execute a provider task.",
+    "Backup policy was unconfigured. This covers the actual status API and its UI notice, not backup/restore or production cloud KMS acceptance."
+  ]
+}

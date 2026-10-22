@@ -1,0 +1,33 @@
+{
+  "stages": [
+    {
+      "name": "initdb",
+      "code": 0
+    },
+    {
+      "name": "pg-start",
+      "code": 0
+    },
+    {
+      "name": "create-test-db",
+      "code": 0
+    },
+    {
+      "name": "roles-before",
+      "code": 0
+    },
+    {
+      "name": "migrate-current-source",
+      "code": 0
+    },
+    {
+      "name": "roles-after",
+      "code": 0
+    },
+    {
+      "name": "composite-supply-billing-unmodified",
+      "code": 0
+    }
+  ],
+  "pgStopped": true
+}

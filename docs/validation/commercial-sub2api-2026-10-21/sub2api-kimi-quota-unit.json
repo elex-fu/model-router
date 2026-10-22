@@ -1,0 +1,27 @@
+{
+  "repository": "sub2api",
+  "head": "a3eb7ef302961cba716dc78b39b93b60c467db0e",
+  "goVersion": "go1.27.1 darwin/arm64",
+  "command": "go test -tags=unit ./internal/service -run '^(TestParseKimiUsageTiers|TestParseKimiUsageTiers_LimitZero|TestKimiQuotaURL|TestEvaluateAccountSchedulingThreshold_KimiCodingPlan)$' -count=1 -v",
+  "exitCode": 0,
+  "tests": [
+    {
+      "name": "TestParseKimiUsageTiers",
+      "result": "PASS"
+    },
+    {
+      "name": "TestParseKimiUsageTiers_LimitZero",
+      "result": "PASS"
+    },
+    {
+      "name": "TestKimiQuotaURL",
+      "result": "PASS"
+    },
+    {
+      "name": "TestEvaluateAccountSchedulingThreshold_KimiCodingPlan",
+      "result": "PASS"
+    }
+  ],
+  "scope": "unit quota parsing, URL normalization and scheduling threshold; not a live Sub2API gateway test",
+  "setupNote": "Initial invocation omitted the unit build tag and reported no tests to run; only this corrected tagged invocation counts as executed tests."
+}

@@ -1,0 +1,250 @@
+{
+  "schema": 1,
+  "classification": "latest-local-development-status-from-existing-evidence",
+  "recordedAt": "2026-10-22T17:22:03Z",
+  "statusDateAsiaShanghai": "2026-10-23",
+  "formalRequiredCiEvidence": false,
+  "currentRepositoryFreezeClaim": false,
+  "releaseDecision": "NO-GO",
+  "implementationStatus": "in-progress",
+  "documentationOnlyUpdate": true,
+  "evidencePolicy": "This document reads previously saved summaries, logs and checksum records. No new tests, checks, formatting, builds, database runs, provider calls or performance runs were executed for this update. The new artifact SHA in manifest.json is content-address metadata only.",
+  "latestAggregateRegression": {
+    "status": "failed-at-unit-stage",
+    "summary": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/summary.json",
+    "startedAt": "2026-10-22T17:08:26.001819+00:00",
+    "finishedAt": "2026-10-22T17:11:03.854087+00:00",
+    "sourceScopeFromSavedSummary": "All tracked and nonignored src/tests/scripts/deploy/workflow code plus selected root config; docs/dist/ignoredlocal excluded",
+    "beforeFileCount": 1701,
+    "beforeHashSetSha256FromSavedSummary": "f98172f22ad02ed8cfb97e11b572aea99d4fe7f947c3c3650173822c72e0ca10",
+    "afterHashSetSha256FromSavedSummary": "f98172f22ad02ed8cfb97e11b572aea99d4fe7f947c3c3650173822c72e0ca10",
+    "sourceChangesFromSavedSummary": [],
+    "completedStagesBeforeUnit": [
+      {
+        "name": "source-typecheck",
+        "startedAt": "2026-10-22T17:08:26.002738+00:00",
+        "finishedAt": "2026-10-22T17:08:46.039964+00:00",
+        "exitCode": 0,
+        "log": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/source-typecheck.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "workflow-strict-1",
+        "startedAt": "2026-10-22T17:08:46.052728+00:00",
+        "finishedAt": "2026-10-22T17:08:59.834144+00:00",
+        "exitCode": 0,
+        "log": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/workflow-strict-1.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "workflow-strict-2",
+        "startedAt": "2026-10-22T17:08:59.834638+00:00",
+        "finishedAt": "2026-10-22T17:09:09.296580+00:00",
+        "exitCode": 0,
+        "log": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/workflow-strict-2.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "ci-wiring",
+        "startedAt": "2026-10-22T17:09:09.296890+00:00",
+        "finishedAt": "2026-10-22T17:09:09.770133+00:00",
+        "exitCode": 0,
+        "log": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/ci-wiring.log",
+        "sha256": "2bd9ea2524f0cb001f5ff180c596bae4e3a6940d0cd37d9cb355e9e7ffc9859a"
+      },
+      {
+        "name": "initial-authority-unit-strict",
+        "startedAt": "2026-10-22T17:09:09.774655+00:00",
+        "finishedAt": "2026-10-22T17:09:11.931002+00:00",
+        "exitCode": 0,
+        "log": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/initial-authority-unit-strict.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "unit": {
+      "exitCode": 1,
+      "log": "/private/tmp/model-router-regression-fixed-authority-proof-plans-9xl0ivqm/unit.log",
+      "logSha256FromSavedSummary": "7aa5ad7c3473bc1204f96a7556b50e7694e90a68de623894b3590eed7e50ef51",
+      "countsFromSavedSummary": {
+        "tests": 6847,
+        "suites": 37,
+        "pass": 6823,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 23,
+        "todo": 0
+      },
+      "countFormat": "native-spec",
+      "countsValidFromSavedSummary": false,
+      "countCaveat": "The saved summary marks countsValid=false. The native-spec log reports 6847 tests, 6823 pass, 1 fail and 23 skipped; this is not a green result.",
+      "failure": {
+        "test": "tests/server/timeout-budgets.test.ts",
+        "line": 191,
+        "name": "5xx failover attempts share one total deadline and backoff stays bounded",
+        "assertion": "secondSeen must equal true",
+        "actual": false,
+        "expected": true,
+        "precedingAssertions": "The preceding expected HTTP 504 and elapsed-budget assertions passed before the secondSeen assertion failed.",
+        "rootCause": "unknown; no focused rerun or diagnosis was completed for this failure."
+      }
+    },
+    "notExecutedAfterFailure": [
+      "aggregate integration tests",
+      "generated privilege checks",
+      "aggregate scoped Biome"
+    ],
+    "acceptanceBoundary": "The saved source typecheck, two workflow strict commands, CI wiring and initial-authority unit strict stages exited 0 before the failing aggregate unit stage. Earlier aggregate-green artifacts retain their capture-time scope and do not make this latest regression green."
+  },
+  "focusedHttpCapacityAndDeployment": {
+    "status": "saved-focused-roots-passed",
+    "unitRoots": [
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-composition-first-green/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-composition-first-green/root.tap.log",
+        "logSha256FromSavedChecksums": "5f46d7594a0834c6b6554b77d2f022092806689d421146e9fb1640e202c6dd29",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-composition-first-green/checksums.sha256",
+        "startedAt": "2026-10-22T16:27:36Z",
+        "finishedAt": "2026-10-22T16:27:37Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node --import tsx --test --test-reporter=tap tests/server/managed-saas-gateway-composition.test.ts",
+        "test": "tests/server/managed-saas-gateway-composition.test.ts",
+        "countsFromSavedTap": {
+          "tests": 23,
+          "pass": 23,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-saas-startup-content-type-green/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-saas-startup-content-type-green/root.tap.log",
+        "logSha256FromSavedChecksums": "6a16a5ccc51d99e129b707ca1bba071f0d0885d8447cbc54f81eefc78d76c3c8",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-saas-startup-content-type-green/checksums.sha256",
+        "startedAt": "2026-10-22T16:30:57Z",
+        "finishedAt": "2026-10-22T16:31:07Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node --import tsx --test --test-reporter=tap tests/server/saas-startup.test.ts",
+        "test": "tests/server/saas-startup.test.ts",
+        "countsFromSavedTap": {
+          "tests": 60,
+          "pass": 60,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-runtime-v1-first-green/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-runtime-v1-first-green/root.tap.log",
+        "logSha256FromSavedChecksums": "2ebc70fd721fab4d66175bedc166483e942ade391cddce345b71c38deec4692c",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-runtime-v1-first-green/checksums.sha256",
+        "startedAt": "2026-10-22T16:31:25Z",
+        "finishedAt": "2026-10-22T16:31:26Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node --import tsx --test --test-reporter=tap tests/saas/runtime/gateway-runtime-module-contract.test.ts",
+        "test": "tests/saas/runtime/gateway-runtime-module-contract.test.ts",
+        "countsFromSavedTap": {
+          "tests": 11,
+          "pass": 11,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-runtime-v2-first-green/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-runtime-v2-first-green/root.tap.log",
+        "logSha256FromSavedChecksums": "0617905783448bd22439281b72298e57f89d3bdea38b96e45119cd3b531dffcf",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-runtime-v2-first-green/checksums.sha256",
+        "startedAt": "2026-10-22T16:31:44Z",
+        "finishedAt": "2026-10-22T16:31:44Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node --import tsx --test --test-reporter=tap tests/saas/runtime/gateway-runtime-module-v2-contract.test.ts",
+        "test": "tests/saas/runtime/gateway-runtime-module-v2-contract.test.ts",
+        "countsFromSavedTap": {
+          "tests": 16,
+          "pass": 16,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-deployment-env-first-green/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-deployment-env-first-green/root.tap.log",
+        "logSha256FromSavedChecksums": "2af88ccb6e4b74b217d44a554d9cbee208ddb3fcc752593b416acab955a000a3",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-deployment-env-first-green/checksums.sha256",
+        "startedAt": "2026-10-22T16:38:09Z",
+        "finishedAt": "2026-10-22T16:38:11Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node --import tsx --test --test-reporter=tap tests/server/managed-saas-database-environment.test.ts",
+        "test": "tests/server/managed-saas-database-environment.test.ts",
+        "countsFromSavedTap": {
+          "tests": 10,
+          "pass": 10,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0
+        }
+      }
+    ],
+    "savedStaticResults": [
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-types-strict-final/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-types-strict-final/tsc.log",
+        "logSha256FromSavedChecksums": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-types-strict-final/checksums.sha256",
+        "startedAt": "2026-10-22T17:00:38Z",
+        "finishedAt": "2026-10-22T17:00:46Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/server/managed-saas-gateway-composition.test.ts tests/server/saas-startup.test.ts tests/saas/runtime/gateway-runtime-module-contract.test.ts tests/saas/runtime/gateway-runtime-module-v2-contract.test.ts",
+        "name": "http-cap-focused-strict"
+      },
+      {
+        "receipt": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-biome-final/receipt.txt",
+        "log": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-biome-final/biome.log",
+        "logSha256FromSavedChecksums": "6ea41a8daca58c1a55151d2717506b242edfeebfaf3fd9a52eadd96fbc3d8777",
+        "checksums": "/private/tmp/model-router-pool-rights-snapshot-validation-20261023-http-cap-biome-final/checksums.sha256",
+        "startedAt": "2026-10-22T16:58:50Z",
+        "finishedAt": "2026-10-22T16:58:50Z",
+        "exitCode": 0,
+        "commandFromSavedReceipt": "rtk proxy node_modules/.bin/biome check src/saas/gateway/http-handler.ts src/server/managed-saas-gateway.ts src/server/managed-saas.ts src/saas/runtime/gateway-runtime-module.ts tests/server/managed-saas-gateway-composition.test.ts tests/server/saas-startup.test.ts tests/saas/runtime/gateway-runtime-module-contract.test.ts tests/saas/runtime/gateway-runtime-module-v2-contract.test.ts",
+        "name": "http-cap-eight-file-biome",
+        "files": 8,
+        "warnings": 3,
+        "fixesApplied": false
+      }
+    ],
+    "startupAttemptBoundary": "The earlier http-cap-saas-startup-first-green directory contains a 415 failure. The 60/60 count is taken only from http-cap-saas-startup-content-type-green.",
+    "acceptanceBoundary": "Composition/startup/runtime-contract/deployment roots and focused static checks are scoped correctness evidence. They do not establish complete integration, current-build HTTP behavior, release acceptance or R9 improvement."
+  },
+  "schedulerAndPoolRights": {
+    "historicalTargetedArtifact": "scheduler-reads-pool-rights.json",
+    "scope": "The saved pool-rights and scheduler unit/PG15/PG18 captures remain scoped evidence. A same-pair rights lookup falls theoretically from 4 to 1 only inside one request-local snapshot map; scheduler pure-read transaction wrapper removal leaves a pool checkout for each remaining SELECT. Neither result measures a performance gain.",
+    "latestAcceptanceBoundary": "The latest full unit regression failed elsewhere with root cause unknown. Focused HTTP/deployment results do not close full regression or provider/performance acceptance."
+  },
+  "notExecutedForLatestChanges": [
+    "new server build",
+    "new real Kimi acceptance",
+    "new serial R9",
+    "new c200 A/B R9"
+  ],
+  "r9": {
+    "historicalFailureArtifact": "r9-fixed-read-plans-full-attempt.json",
+    "status": "original-latency-and-full-workload-requirements-still-unmet",
+    "thresholds": {
+      "p99OverheadMsMax": 30,
+      "ttfbOverheadMsMax": 10,
+      "unexpectedHttp5xxMax": 0,
+      "scalingRatioMin": 2.7
+    },
+    "scope": "Retained R9 and c200 artifacts describe their original build/source captures. No new build, Kimi, serial or c200 A/B run establishes the effect of later scheduler, pool-rights or HTTP-capacity changes."
+  },
+  "validationStop": {
+    "requestedByUser": true,
+    "state": "stopped",
+    "scope": "No additional tests or validation are authorized by this documentation and commit task. No failure attribution is inferred from the stop."
+  },
+  "historicalArtifacts": "All existing artifacts are retained. Their original counts, captures, skips and limitations remain intact; latest status is linked through this artifact and manifest requirement scopes."
+}

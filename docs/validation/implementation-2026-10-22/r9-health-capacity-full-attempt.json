@@ -1,0 +1,465 @@
+{
+  "schemaVersion": 1,
+  "classification": "local-canonical-current-r9-full-workload-attempt",
+  "formalRequiredCiEvidence": false,
+  "GO": false,
+  "passed": false,
+  "recordedAtUtc": "2026-10-21T23:30:49.194569Z",
+  "capture": {
+    "evidenceRun": "model-router-current-r9-W3cVkr",
+    "actualDirectory": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr",
+    "startedAtUtc": "2026-10-21T23:09:03.181Z",
+    "finishedAtUtc": "2026-10-21T23:26:12.032Z",
+    "rootToolSession": 33368,
+    "rootToolExitCode": 1,
+    "exitCodeProvenance": "Root terminal tool execution reported exit 1; the first full protocol child report also records exit 1",
+    "summary": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/summary.json",
+      "bytes": 907065,
+      "sha256": "417bff3bf6bf005ec9f1bfb45a10c0950e92b956a679c325c0ff875d83916c41"
+    },
+    "baselineReport": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/openai-scaling-1cli.json",
+      "bytes": 1432,
+      "sha256": "2e703beb851dc4daac7125b08540ba2a437fc002111a5d55e51661834e1ee602"
+    },
+    "threeGatewayReport": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/openai-r9-3cli.json",
+      "bytes": 4787,
+      "sha256": "4d2255f2b11c50dbcc424be47e2f3287e455f4d628a94852df34e5a681a6e828"
+    },
+    "nodeVersion": "v24.18.0",
+    "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "redisVersion": "Redis server v=8.10.2 sha=00000000:1 malloc=libc bits=64 build=764b3e45065a66fb",
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "diagnosticMode": false,
+    "serialProfile": false,
+    "postgresPreparedStatements": "native",
+    "buildRequested": false,
+    "realProviderCalls": 0,
+    "builtinAcceptance": false,
+    "productionKmsVerified": false,
+    "supervisorOk": false,
+    "firstFaultStage": "openai-r9-3cli",
+    "interrupted": false
+  },
+  "workloadCoverage": {
+    "gatewaysLaunched": 3,
+    "firstProtocol": "openai",
+    "singleGatewayBaselineExecuted": true,
+    "singleGatewayBaselinePassed": true,
+    "firstProtocolThreeGatewayScenesExecuted": [
+      "latency",
+      "ttfb",
+      "sse-integrity",
+      "concurrency",
+      "precision",
+      "scaling"
+    ],
+    "firstProtocolFullWorkloadPassed": false,
+    "anthropicFullWorkloadExecuted": false,
+    "anthropicCoverage": "Only its original settled smoke; no Anthropic baseline or full workload was run after OpenAI full-child failure",
+    "allProtocolsCompleted": false,
+    "twoProtocolSmoke": [
+      {
+        "protocol": "openai",
+        "httpStatus": 200,
+        "settled": true
+      },
+      {
+        "protocol": "anthropic",
+        "httpStatus": 200,
+        "settled": true
+      }
+    ],
+    "controlFlow": "The canonical runner stopped subsequent protocols after the first protocol full child failed, then retained stats/metrics collection and cleanup"
+  },
+  "configuration": {
+    "protocol": "openai",
+    "instanceCount": 3,
+    "requests": 300,
+    "streamSamples": 100,
+    "warmupInflight": 4,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "inflight": 200,
+    "concurrencySeconds": 60,
+    "accountLimit": 64,
+    "precisionInflight": 200,
+    "scalingSeconds": 120,
+    "scalingInflight": 200,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "noFail": false
+  },
+  "baseline": {
+    "protocol": "openai",
+    "instanceCount": 1,
+    "requestedInflight": 200,
+    "requestedSeconds": 120,
+    "observedSeconds": 121.6,
+    "statuses": {
+      "200": 1664,
+      "429": 3536
+    },
+    "observedTransportErrorStatusCount": 0,
+    "observedHttp5xxCount": 0,
+    "successfulThroughputRps": 13.69,
+    "successfulLatencyMs": {
+      "n": 1664,
+      "p50": 5023.03,
+      "p90": 5633.88,
+      "p99": 6860.37,
+      "max": 6968.64
+    },
+    "driverExitCode": 0,
+    "violations": [],
+    "passed": true,
+    "scope": "Baseline passed the existing zero transport/5xx budgets; its 3536 HTTP 429 responses remain reported under the existing 429 policy"
+  },
+  "firstProtocolThreeGateway": {
+    "protocol": "openai",
+    "driverExitCode": 1,
+    "passed": false,
+    "validLatencySampleCounts": true,
+    "observedTraffic": true,
+    "validObservedLoadCounters": false,
+    "validScalingComparison": false,
+    "scenarios": {
+      "latency": {
+        "direct": {
+          "n": 300,
+          "p50": 1.78,
+          "p90": 2.03,
+          "p99": 3.32,
+          "max": 9.78
+        },
+        "gateway": {
+          "n": 300,
+          "p50": 74.27,
+          "p90": 93.32,
+          "p99": 164.03,
+          "max": 196.24
+        },
+        "p99OverheadMs": 160.71,
+        "thresholdMs": 30
+      },
+      "firstStreamChunk": {
+        "direct": {
+          "n": 100,
+          "p50": 3.28,
+          "p90": 4.99,
+          "p99": 11.39,
+          "max": 11.39
+        },
+        "gateway": {
+          "n": 100,
+          "p50": 74.49,
+          "p90": 93.21,
+          "p99": 241.11,
+          "max": 241.11
+        },
+        "gatewayErrors": 0,
+        "ttfbOverheadMs": 229.72,
+        "thresholdMs": 10
+      },
+      "sseIntegrity": {
+        "requestedMinutes": 10,
+        "concurrency": 20,
+        "completedStreams": 13260,
+        "chunks": 848640,
+        "corruptStreams": 0,
+        "corruptChunks": 0,
+        "reportedReasons": {},
+        "chunksPerConfiguredShortStream": 64,
+        "longLivedSingleConnectionTenMinuteEvidence": false,
+        "semantics": "Repeated completed short streams over the requested ten-minute integrity interval; not one connection held for ten minutes"
+      },
+      "concurrency": {
+        "requestedInflight": 200,
+        "requestedSeconds": 60,
+        "observedSeconds": 67.3,
+        "statuses": {
+          "200": 783,
+          "429": 659,
+          "503": 14
+        },
+        "transportErrors": 0,
+        "successfulLatencyMs": {
+          "n": 783,
+          "p50": 9219.49,
+          "p90": 13690.6,
+          "p99": 15176.23,
+          "max": 17396.83
+        },
+        "successfulThroughputRps": 11.64
+      },
+      "precision": {
+        "accountLimit": 64,
+        "saturationInflight": 200,
+        "clientStatuses": {
+          "200": 720,
+          "429": 805,
+          "503": 9
+        },
+        "overIssueAccounts": 0,
+        "observedAccountCount": 4,
+        "accountIdentifiersProjected": false
+      },
+      "scaling": {
+        "instanceCount": 3,
+        "requestedInflight": 200,
+        "requestedSeconds": 120,
+        "observedSeconds": 127,
+        "statuses": {
+          "200": 1608,
+          "429": 1019,
+          "503": 77
+        },
+        "successfulThroughputRps": 12.66,
+        "successfulLatencyMs": {
+          "n": 1608,
+          "p50": 10207.2,
+          "p90": 13150.2,
+          "p99": 15219.62,
+          "max": 18291.36
+        },
+        "ratio": null,
+        "invalidComparisonReason": "current_report_failed",
+        "validScalingComparison": false,
+        "computedDivisionIsValidScalingEvidence": false
+      }
+    },
+    "violations": [
+      {
+        "scenario": "latency",
+        "metric": "p99 overhead",
+        "value": 160.71,
+        "threshold": 30,
+        "unit": "ms"
+      },
+      {
+        "scenario": "ttfb",
+        "metric": "ttfb overhead",
+        "value": 229.72,
+        "threshold": 10,
+        "unit": "ms"
+      },
+      {
+        "scenario": "concurrency",
+        "metric": "unexpected 5xx",
+        "value": 14,
+        "threshold": 0,
+        "unit": ""
+      },
+      {
+        "scenario": "scaling",
+        "metric": "unexpected 5xx",
+        "value": 77,
+        "threshold": 0,
+        "unit": ""
+      },
+      {
+        "scenario": "scaling",
+        "metric": "valid scaling comparison",
+        "value": 0,
+        "threshold": 1,
+        "unit": ""
+      }
+    ],
+    "totalReportedLoadHttp503": 100,
+    "load503Breakdown": {
+      "concurrency": 14,
+      "precision": 9,
+      "scaling": 77
+    },
+    "scalingLimit": "12.66 RPS is the failed current leg and 13.69 RPS is the valid baseline; their division is not a valid expansion comparison. Ratio remains null with current_report_failed."
+  },
+  "preparationMetrics": {
+    "metricName": "saas_gateway_preparation_stage_duration_seconds_count",
+    "filter": "Only present series with outcome=error and phase=preparation; fixed operation labels affinity-bind and preparation-total",
+    "gateways": [
+      {
+        "gatewayIndex": 1,
+        "httpStatus": 200,
+        "input": {
+          "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/gateway-1-metrics.prom",
+          "bytes": 214821,
+          "sha256": "71e0b8a359813a84382270167de1362211697d87c6cc2050ad4e05fc6157d9a8"
+        },
+        "observedPreparationErrorSeries": [
+          {
+            "phase": "preparation",
+            "operation": "affinity-bind",
+            "outcome": "error",
+            "count": 48
+          },
+          {
+            "phase": "preparation",
+            "operation": "preparation-total",
+            "outcome": "error",
+            "count": 48
+          }
+        ]
+      },
+      {
+        "gatewayIndex": 2,
+        "httpStatus": 200,
+        "input": {
+          "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/gateway-2-metrics.prom",
+          "bytes": 212852,
+          "sha256": "ee3d37cbda634da02184d3143debc194cbe615abb35b64b809819962e2a17e41"
+        },
+        "observedPreparationErrorSeries": [
+          {
+            "phase": "preparation",
+            "operation": "affinity-bind",
+            "outcome": "error",
+            "count": 24
+          },
+          {
+            "phase": "preparation",
+            "operation": "preparation-total",
+            "outcome": "error",
+            "count": 24
+          }
+        ]
+      },
+      {
+        "gatewayIndex": 3,
+        "httpStatus": 200,
+        "input": {
+          "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/gateway-3-metrics.prom",
+          "bytes": 212856,
+          "sha256": "d3fb2bc82199c132c421c922d0a0815e29fb98d242d42e023ad40f8346c2d650"
+        },
+        "observedPreparationErrorSeries": [
+          {
+            "phase": "preparation",
+            "operation": "affinity-bind",
+            "outcome": "error",
+            "count": 29
+          },
+          {
+            "phase": "preparation",
+            "operation": "preparation-total",
+            "outcome": "error",
+            "count": 29
+          }
+        ]
+      }
+    ],
+    "summedObservedErrorCounts": {
+      "affinity-bind": 101,
+      "preparation-total": 101
+    },
+    "otherPreparationStageErrorSeries": "None observed in this extracted metric; no synthetic zero series are created",
+    "reportedLoadHttp503Count": 100,
+    "counterTotalsEqualEachOther": true,
+    "counterTotalsEqualReportedLoad503": false,
+    "populationLimits": [
+      "Metrics are cumulative snapshots from the three gateways across the whole attempted run; the three load scenario HTTP status populations are separate",
+      "Observed affinity-bind/error and preparation-total/error each total 101, while the load reports contain 100 HTTP 503 responses; the difference is retained without assigning a specific source",
+      "There is no request-correlated evidence tying these counters to individual HTTP responses or separating an internal bind conflict/CAS/storage cause",
+      "No phase means are presented as serial latency or single-request p99, and aggregate stage counts do not prove a sole cause"
+    ]
+  },
+  "postgresLogObservation": {
+    "input": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-W3cVkr/postgres.log",
+      "bytes": 2473,
+      "sha256": "ef6743e7ef721e899a6d085366c2f7945d29b560a61bed4dcbdcb555020fb761"
+    },
+    "lineCount": 17,
+    "errorSeverityLines": 0,
+    "deadlockDetectedLines": 0,
+    "projection": "Closed line counters only; no raw log content or messages are included",
+    "limits": "No PostgreSQL ERROR or deadlock text was observed in this captured log. This does not exclude database waits, lock contention, client-side storage failures or errors outside the captured log."
+  },
+  "financialEvidence": {
+    "underLoadFinalMoneyOrRequestStateSnapshotCaptured": false,
+    "finalUnderLoadSettlementKnown": false,
+    "finalUnderLoadRefundOrReleaseKnown": false,
+    "finalUnderLoadHoldsOrPendingKnown": false,
+    "onlySettledEvidenceInThisCapture": "The two original protocol smoke rows recorded settled=true; no under-load final financial snapshot exists",
+    "http200ImpliesSettled": false,
+    "httpFailureImpliesRefundOrRelease": false,
+    "scope": "HTTP status totals, SSE integrity and metrics cannot replace durable under-load wallet/ledger/reservation/request state evidence"
+  },
+  "sourceVerification": {
+    "status": "historical_capture_with_independent_current_match_at_artifact_creation",
+    "hashSetEncoding": "SHA256 of ASCII JSON with sorted keys and comma/colon separators",
+    "scopes": {
+      "source": {
+        "filesBefore": 749,
+        "filesAfter": 749,
+        "beforeHashSetSha256": "7053e0630ff23514320f4aef95ebde8314798efbfbbb45faee692d5f79030a3a",
+        "afterHashSetSha256": "7053e0630ff23514320f4aef95ebde8314798efbfbbb45faee692d5f79030a3a",
+        "currentHashSetSha256": "7053e0630ff23514320f4aef95ebde8314798efbfbbb45faee692d5f79030a3a",
+        "beforeAfterCurrentMatchAtArtifactCreation": true,
+        "currentVerifiedAt": "2026-10-21T23:30:48.664051Z",
+        "changedPaths": []
+      },
+      "dist": {
+        "filesBefore": 2992,
+        "filesAfter": 2992,
+        "beforeHashSetSha256": "51a6f515a249ba7b2b331b91f3204c3b0e901ac45392e7d11957ce5ed222ef5c",
+        "afterHashSetSha256": "51a6f515a249ba7b2b331b91f3204c3b0e901ac45392e7d11957ce5ed222ef5c",
+        "currentHashSetSha256": "51a6f515a249ba7b2b331b91f3204c3b0e901ac45392e7d11957ce5ed222ef5c",
+        "beforeAfterCurrentMatchAtArtifactCreation": true,
+        "currentVerifiedAt": "2026-10-21T23:30:49.186227Z",
+        "changedPaths": []
+      },
+      "canonicalHarness": {
+        "filesBefore": 5,
+        "filesAfter": 5,
+        "beforeHashSetSha256": "55edcfe6ae4263064f2bc041054d6a4487abafc330d0724657c581aff2beb302",
+        "afterHashSetSha256": "55edcfe6ae4263064f2bc041054d6a4487abafc330d0724657c581aff2beb302",
+        "currentHashSetSha256": "55edcfe6ae4263064f2bc041054d6a4487abafc330d0724657c581aff2beb302",
+        "beforeAfterCurrentMatchAtArtifactCreation": true,
+        "currentVerifiedAt": "2026-10-21T23:30:49.188841Z",
+        "changedPaths": [],
+        "fileHashes": {
+          "scripts/ops/run-current-r9.mjs": "54a23eb1bcb6b9ab7a41e659f57da2b5215ec3d3c0899142fc571f3424fa8d7a",
+          "scripts/ops/bench-gateway.mjs": "2e2f3508eeca9b5824470f09926558f5b8d01f7484e32ec01d67f5c6bedc047b",
+          "deploy/compose/mock-upstream.mjs": "5b64e9c2c9c7f48dbe457be101e6b1f0fa8d9d636dd91ed238667cf8b51853bf",
+          "deploy/managed-saas-postgres-roles.sql": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+          "package-lock.json": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab"
+        }
+      }
+    },
+    "recordedBeforeAfterDrift": {
+      "sourceChanged": false,
+      "distChanged": false,
+      "harnessChanged": false
+    },
+    "currentGlobalFreeze": false,
+    "futureChangesCovered": false,
+    "limits": "Only the recorded 749 source, 2992 dist and five canonical harness file paths are verified; this is not a repository-wide or future global freeze"
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true,
+    "runtimeDirectoryAbsentAtArtifactCreation": true,
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    }
+  },
+  "captureLimits": [
+    "This is a terminal failed full-workload attempt for the first protocol, not a completed two-protocol R9 pass, a provider acceptance run, or formal required CI evidence",
+    "The original 30 ms latency and 10 ms TTFB overhead thresholds, zero transport/5xx budgets and 429 handling are preserved; all five reported violations remain failures",
+    "Percentiles use the original floor(n*p) order statistic on independent direct/gateway successful-sample sets; their difference is the reported aggregate overhead, not a request-correlated phase duration",
+    "Original timer boundaries, successful sample inclusion, body drain/cancel behavior and cleanup are retained; no performance threshold or quantile was redefined",
+    "No under-load final financial/state snapshot was captured; statuses and cumulative error counters do not establish settlement/refund or per-request causation",
+    "No raw UUIDs, local service URLs, account/tenant identifiers, keys, config payloads, request/response bodies, environment values, SQL parameters or raw messages are projected",
+    "Projection worker performed only evidence reads, closed counters and file hashing; no DB, build, test, provider or benchmark was run"
+  ]
+}

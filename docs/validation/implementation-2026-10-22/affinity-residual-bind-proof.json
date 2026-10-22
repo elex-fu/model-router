@@ -1,0 +1,427 @@
+{
+  "schemaVersion": 1,
+  "classification": "local-current-build-residual-binding-interleaving-proof",
+  "formalRequiredCiEvidence": false,
+  "GO": false,
+  "gatePassed": false,
+  "observationComplete": true,
+  "recordedAtUtc": "2026-10-22T07:43:13.344429Z",
+  "capture": {
+    "directory": "/private/tmp/model-router-affinity-residual-actual-20261022-f6acd822-root",
+    "rootToolSession": 6969,
+    "rootToolExitCode": 1,
+    "startedAt": "2026-10-22T07:38:08.892Z",
+    "finishedAt": "2026-10-22T07:39:21.452Z",
+    "summary": {
+      "path": "/private/tmp/model-router-affinity-residual-actual-20261022-f6acd822-root/summary.json",
+      "bytes": 942180,
+      "sha256": "dc17cb08a5a4aa264b5d1af4c0d1c2a47ae2b5ca620e69581c247d73c348e6d7"
+    },
+    "report": {
+      "path": "/private/tmp/model-router-affinity-residual-actual-20261022-f6acd822-root/residual-openai-3cli-c200.json",
+      "bytes": 1833,
+      "sha256": "e245c0ad2542669fdcfab22941b229ee625ae206416f33f8d0f477a4d9f79f91"
+    },
+    "freeze": {
+      "path": "/private/tmp/model-router-affinity-residual-cause-20261022-a12fd666-d717-478e-b67f-8bb795f1134b/freeze.json",
+      "bytes": 475166,
+      "sha256": "f6acd822915829f87379781a3f1871d4772cf11fd9b1c934e2efd5a095565bed"
+    },
+    "runtime": {
+      "path": "/private/tmp/model-router-affinity-residual-cause-20261022-a12fd666-d717-478e-b67f-8bb795f1134b/runtime-diagnostics.mjs",
+      "bytes": 41299,
+      "sha256": "8a2916bbae75e104a5b01beab7006e2d766c82f5b7eb250462ca309425d67577"
+    },
+    "supervisorDiff": {
+      "path": "/private/tmp/model-router-affinity-residual-cause-20261022-a12fd666-d717-478e-b67f-8bb795f1134b/supervisor-residual.diff",
+      "bytes": 5287,
+      "sha256": "aae9aa0261ef9740114112d7e8e927dd82f5d14d6f3bc3b0180064125120faf0"
+    },
+    "driver": {
+      "path": "/private/tmp/model-router-affinity-residual-cause-20261022-a12fd666-d717-478e-b67f-8bb795f1134b/bench-private-c200.mjs",
+      "bytes": 47838,
+      "sha256": "974341a31fb93b1c719d67dab1a3f153a89e172d39ac2fb8ff7cef400e313651"
+    },
+    "preparedStatements": "native",
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    },
+    "realProviderCalls": 0
+  },
+  "workload": {
+    "protocol": "openai",
+    "threeCli": true,
+    "inflight": 200,
+    "configuredSeconds": 60,
+    "bodyStickySeedCapacityHealthBoundsTimeoutsUnchanged": true,
+    "zeroUnexpected5xxBudget": true,
+    "allOtherR9ScenesExecuted": false
+  },
+  "measuredReport": {
+    "concurrency": {
+      "inflight": 200,
+      "seconds": 65.1,
+      "statuses": {
+        "200": 1016,
+        "429": 1210,
+        "503": 5
+      },
+      "transportErrors": 0,
+      "errors": {},
+      "latency": {
+        "n": 1016,
+        "p50": 6129.73,
+        "p90": 8418.65,
+        "p99": 9357.18,
+        "max": 11507.44
+      },
+      "throughputRps": 15.6
+    },
+    "violations": [
+      {
+        "scenario": "concurrency",
+        "metric": "unexpected 5xx",
+        "value": 5,
+        "threshold": 0,
+        "unit": ""
+      }
+    ]
+  },
+  "independentHttpAggregate": {
+    "schema": 1,
+    "observationOk": true,
+    "scope": "Measured concurrency errors only; after original body drain; independent aggregate",
+    "maxErrorBytes": 8192,
+    "codes": {
+      "429:RATE_LIMITED": 1210,
+      "503:REQUEST_BLOCKED": 5
+    },
+    "rawBodyHeadersMessageOrRequestIdsPersisted": false
+  },
+  "runtimeFiles": [
+    {
+      "file": {
+        "path": "/private/tmp/model-router-affinity-residual-actual-20261022-f6acd822-root/gateway-safe-30660.json",
+        "bytes": 16274,
+        "sha256": "afb5bee44a5cf957f392fde68d036cc715037073441f7f67af22893e8b789085"
+      },
+      "observationOk": true,
+      "activeCallsAtFlush": 0,
+      "descriptorsRestored": true,
+      "quiescence": {
+        "maximumMs": 1500,
+        "pollMs": 25,
+        "observedMs": 0,
+        "activeAtClose": 0,
+        "activeAtEnd": 0
+      }
+    },
+    {
+      "file": {
+        "path": "/private/tmp/model-router-affinity-residual-actual-20261022-f6acd822-root/gateway-safe-30662.json",
+        "bytes": 13064,
+        "sha256": "cba99718857f52046aa4c4b03fa3c9ee327bcfd9f236004c4c2c8108ca4ff04b"
+      },
+      "observationOk": true,
+      "activeCallsAtFlush": 0,
+      "descriptorsRestored": true,
+      "quiescence": {
+        "maximumMs": 1500,
+        "pollMs": 25,
+        "observedMs": 0,
+        "activeAtClose": 0,
+        "activeAtEnd": 0
+      }
+    },
+    {
+      "file": {
+        "path": "/private/tmp/model-router-affinity-residual-actual-20261022-f6acd822-root/gateway-safe-30664.json",
+        "bytes": 11700,
+        "sha256": "72332ee2f49d848049b934ae90d15c6dc076b7e41cbe14c20bea616138606577"
+      },
+      "observationOk": true,
+      "activeCallsAtFlush": 0,
+      "descriptorsRestored": true,
+      "quiescence": {
+        "maximumMs": 1500,
+        "pollMs": 25,
+        "observedMs": 0,
+        "activeAtClose": 0,
+        "activeAtEnd": 0
+      }
+    }
+  ],
+  "sameOperationAggregates": {
+    "operations": {
+      "prepare:called": 2232,
+      "authority:called": 2232,
+      "authority:allow": 2232,
+      "scheduler:called": 2232,
+      "initial_select:called": 2232,
+      "collect:called": 2265,
+      "health:called": 8961,
+      "health_store:called": 8966,
+      "health_store:block": 13,
+      "health_store:allow": 8953,
+      "health:allow": 8953,
+      "collect:collected": 2265,
+      "initial_select:allow": 2232,
+      "affinity_bind:called": 2265,
+      "scheduler:allow": 2227,
+      "prepare:prepared": 2227,
+      "health:deny": 8,
+      "scheduler:block": 5,
+      "prepare:blocked": 5
+    },
+    "finalAuthorityFailures": {
+      "reason=r081;source=scheduler;causeResolved=true;authority=allow;scheduler=block;schedulerReason=r081;collect=collected;collectReason=none;healthDeniedSeen=false;bindCount=two;firstHint=active_binding;firstBranch=active_binding_return;secondBranch=active_binding_return;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=true;lastHintEqualsInitialAccount=true;lastHintEqualsFirstKnownWinner=false;lastHintInOriginalCandidates=true;lastHintInOriginalAttemptedAccounts=false;collections=initial,collected,eligible=many,busy=one,healthDenied=false|winner_revalidation,collected,eligible=one,busy=zero,healthDenied=false;health=allow;healthReason=unknown;store=allow;storeCode=none;lastThrow=none;coreFacts=decision=allow;valueRecord=true;statusValid=true;observedValid=true;clockValid=true;futureTooFar=false;tooOld=false;latencyValid=true;cooldownValid=true;storeFacts=queryOne=true;rows=one;clockObserved=true;clockValid=true;stateValid=true;observedValid=true;cooldownValid=true;probeDateValid=true;failureCountValid=true;scoreValid=true;futureTooFar=false;tooOld=false": 1,
+      "reason=r081;source=scheduler;causeResolved=true;authority=allow;scheduler=block;schedulerReason=r081;collect=collected;collectReason=none;healthDeniedSeen=false;bindCount=two;firstHint=active_binding;firstBranch=active_binding_return;secondBranch=active_binding_return;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=true;lastHintEqualsInitialAccount=false;lastHintEqualsFirstKnownWinner=false;lastHintInOriginalCandidates=true;lastHintInOriginalAttemptedAccounts=false;collections=initial,collected,eligible=many,busy=one,healthDenied=false|winner_revalidation,collected,eligible=one,busy=zero,healthDenied=false;health=allow;healthReason=unknown;store=allow;storeCode=none;lastThrow=none;coreFacts=decision=allow;valueRecord=true;statusValid=true;observedValid=true;clockValid=true;futureTooFar=false;tooOld=false;latencyValid=true;cooldownValid=true;storeFacts=queryOne=true;rows=one;clockObserved=true;clockValid=true;stateValid=true;observedValid=true;cooldownValid=true;probeDateValid=true;failureCountValid=true;scoreValid=true;futureTooFar=false;tooOld=false": 4
+    },
+    "accountDenied": {},
+    "bindResults": {
+      "ordinal=first;decision=allow;backend=exact_redis_decorator;typedHint=none;branch=allow;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown;hintEqualsInitialAccount=unknown;hintEqualsFirstKnownWinner=unknown;hintInOriginalCandidates=unknown;hintInOriginalAttemptedAccounts=unknown;pgBindContract=true;activeAccounts=zero;activeEqual=false;activeDifferent=false;activeUnknown=false;sqlState=none": 16,
+      "ordinal=first;decision=allow;backend=exact_redis_decorator;typedHint=none;branch=allow;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown;hintEqualsInitialAccount=unknown;hintEqualsFirstKnownWinner=unknown;hintInOriginalCandidates=unknown;hintInOriginalAttemptedAccounts=unknown;pgBindContract=true;activeAccounts=one;activeEqual=true;activeDifferent=false;activeUnknown=false;sqlState=none": 2183,
+      "ordinal=first;decision=block;backend=exact_redis_decorator;typedHint=active_binding;branch=active_binding_return;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown;hintEqualsInitialAccount=false;hintEqualsFirstKnownWinner=true;hintInOriginalCandidates=true;hintInOriginalAttemptedAccounts=false;pgBindContract=true;activeAccounts=one;activeEqual=false;activeDifferent=true;activeUnknown=false;sqlState=none": 33,
+      "ordinal=second;decision=allow;backend=exact_redis_decorator;typedHint=none;branch=allow;firstBindMatchesInitialCandidate=unknown;finalBindMatchesKnownWinner=true;hintEqualsInitialAccount=unknown;hintEqualsFirstKnownWinner=unknown;hintInOriginalCandidates=unknown;hintInOriginalAttemptedAccounts=unknown;pgBindContract=true;activeAccounts=one;activeEqual=true;activeDifferent=false;activeUnknown=false;sqlState=none": 28,
+      "ordinal=second;decision=block;backend=exact_redis_decorator;typedHint=active_binding;branch=active_binding_return;firstBindMatchesInitialCandidate=unknown;finalBindMatchesKnownWinner=true;hintEqualsInitialAccount=true;hintEqualsFirstKnownWinner=false;hintInOriginalCandidates=true;hintInOriginalAttemptedAccounts=false;pgBindContract=true;activeAccounts=one;activeEqual=false;activeDifferent=true;activeUnknown=false;sqlState=none": 1,
+      "ordinal=second;decision=block;backend=exact_redis_decorator;typedHint=active_binding;branch=active_binding_return;firstBindMatchesInitialCandidate=unknown;finalBindMatchesKnownWinner=true;hintEqualsInitialAccount=false;hintEqualsFirstKnownWinner=false;hintInOriginalCandidates=true;hintInOriginalAttemptedAccounts=false;pgBindContract=true;activeAccounts=one;activeEqual=false;activeDifferent=true;activeUnknown=false;sqlState=none": 4
+    },
+    "bindingSequences": {
+      "sequence=one_bind_allow;scheduler=allow;reason=unknown;bindCount=one;firstHint=none;firstBranch=allow;secondBranch=none;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown;returnedFinalCandidateEqualsLastSuccessfullyBoundAccount=true;secondHintEqualsInitialAccount=unknown;secondHintEqualsFirstKnownWinner=unknown;secondHintInOriginalCandidates=unknown;secondHintInOriginalAttemptedAccounts=unknown": 2199,
+      "sequence=second_bind_allow;scheduler=allow;reason=unknown;bindCount=two;firstHint=active_binding;firstBranch=active_binding_return;secondBranch=allow;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=true;returnedFinalCandidateEqualsLastSuccessfullyBoundAccount=true;secondHintEqualsInitialAccount=unknown;secondHintEqualsFirstKnownWinner=unknown;secondHintInOriginalCandidates=unknown;secondHintInOriginalAttemptedAccounts=unknown": 28,
+      "sequence=second_bind_block;scheduler=block;reason=r081;bindCount=two;firstHint=active_binding;firstBranch=active_binding_return;secondBranch=active_binding_return;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=true;returnedFinalCandidateEqualsLastSuccessfullyBoundAccount=unknown;secondHintEqualsInitialAccount=true;secondHintEqualsFirstKnownWinner=false;secondHintInOriginalCandidates=true;secondHintInOriginalAttemptedAccounts=false": 1,
+      "sequence=second_bind_block;scheduler=block;reason=r081;bindCount=two;firstHint=active_binding;firstBranch=active_binding_return;secondBranch=active_binding_return;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=true;returnedFinalCandidateEqualsLastSuccessfullyBoundAccount=unknown;secondHintEqualsInitialAccount=false;secondHintEqualsFirstKnownWinner=false;secondHintInOriginalCandidates=true;secondHintInOriginalAttemptedAccounts=false": 4
+    },
+    "affinityCallbackThrows": {},
+    "affinityQueryResults": {
+      "lock:rows=one": 2265,
+      "key-versions:rows=zero": 1,
+      "resolve:rows=zero": 1,
+      "insert:rows=one": 1,
+      "key-versions:rows=one": 2264,
+      "resolve:rows=one": 2264,
+      "bind-update:rows=one": 2226
+    },
+    "failures": {},
+    "throws": {}
+  },
+  "actualBoundedFinding": {
+    "initialSelectCalls": 2232,
+    "oneBindAllows": 2199,
+    "firstTypedContentions": 33,
+    "firstWinnerFreshRevalidations": 33,
+    "secondBindAllows": 28,
+    "secondBindTypedBlocks": 5,
+    "secondHintEqualsInitialAccount": 1,
+    "secondHintNamesThirdOriginalSourceAccount": 4,
+    "allSecondHintsInOriginalDomainAndNotAttempted": true,
+    "allFirstBindRequestsMatchInitialSelection": true,
+    "allSecondBindRequestsMatchFirstKnownWinner": true,
+    "allFinalAllowsMatchLastBoundAccount": true,
+    "allFiveFailuresHaveSuccessfulFreshWinnerHealthAndNoHealthDeny": true,
+    "actualPgQueriesDelegatedUnchanged": true,
+    "callbackLogicalOrStorageThrows": 0,
+    "individualHttpRequestJoin": false,
+    "retroactivelyAttributesPriorFullR9Twelve503": false,
+    "accountDeniedObservedThisRun": 0,
+    "priorTwo403LiveOriginStillUnjoined": true
+  },
+  "financialSnapshot": {
+    "schema": 1,
+    "scope": "Disposable fixture tenant only; after client timing/metrics and owned child stop, before PG deletion",
+    "observationOk": true,
+    "failure": null,
+    "readOnly": true,
+    "isolation": "repeatable read",
+    "rollbackConfirmed": true,
+    "fixtureOpeningFunding": {
+      "currency": "USD",
+      "amountMinorUnits": "100000000000",
+      "source": "Unmodified seed postVerifiedFunding"
+    },
+    "aggregates": {
+      "requests": {
+        "rowCap": 64,
+        "sentinelLimit": 65,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "execution_state": "failed",
+            "financial_status": "released",
+            "reconciliation_state": "none",
+            "count": "1210"
+          },
+          {
+            "execution_state": "succeeded",
+            "financial_status": "settled",
+            "reconciliation_state": "resolved",
+            "count": "1017"
+          }
+        ]
+      },
+      "attempts": {
+        "rowCap": 256,
+        "sentinelLimit": 257,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "dispatch_state": "not_sent",
+            "result_state": "failed",
+            "http_class": "none",
+            "response_started": false,
+            "count": "1210"
+          },
+          {
+            "dispatch_state": "sent",
+            "result_state": "succeeded",
+            "http_class": "2xx",
+            "response_started": true,
+            "count": "1017"
+          }
+        ]
+      },
+      "reservations": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "state": "released",
+            "count": "1210",
+            "amount_minor_units": "24780800",
+            "settlement_amount_minor_units": "0"
+          },
+          {
+            "state": "settled",
+            "count": "1017",
+            "amount_minor_units": "20828160",
+            "settlement_amount_minor_units": "113904"
+          }
+        ]
+      },
+      "wallets": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "posted_balance_minor_units": "99999886096"
+          }
+        ]
+      },
+      "ledger_sources": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "source_type": "billing_settlement",
+            "count": "1017",
+            "amount_minor_units": "113904"
+          },
+          {
+            "source_type": "wallet_funding",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          }
+        ]
+      },
+      "ledger_entries": {
+        "rowCap": 4,
+        "sentinelLimit": 5,
+        "observedRows": 4,
+        "truncated": false,
+        "rows": [
+          {
+            "account_scope": "non_wallet",
+            "direction": "credit",
+            "count": "1017",
+            "amount_minor_units": "113904"
+          },
+          {
+            "account_scope": "non_wallet",
+            "direction": "debit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "credit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "debit",
+            "count": "1017",
+            "amount_minor_units": "113904"
+          }
+        ]
+      },
+      "currency_scope": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "other_wallets": "0",
+            "other_reservations": "0",
+            "other_transactions": "0",
+            "other_entries": "0"
+          }
+        ]
+      }
+    },
+    "checks": {
+      "walletRowCount": 1,
+      "walletCreditMinorUnits": "100000000000",
+      "walletDebitMinorUnits": "113904",
+      "ledgerWalletNetMinorUnits": "99999886096",
+      "walletMatchesLedger": true,
+      "fixtureFundingMatches": true,
+      "openReservationCount": "0",
+      "openReservationAmountMinorUnits": "0",
+      "pendingRequestCount": "0",
+      "spendableAfterOpenHoldsMinorUnits": "99999886096",
+      "unknownLedgerSourceCount": "0",
+      "otherCurrencyPresent": false
+    },
+    "limitations": [
+      "Includes one OpenAI smoke, original driver warmup and measured concurrency work",
+      "Snapshot is after owned child stop, not at HTTP receipt",
+      "HTTP success/failure does not prove settlement/refund; pending/unknown/open holds are retained as facts",
+      "Money uses integer text and BigInt only; unknown ledger source is not dropped"
+    ]
+  },
+  "sourceAndBuildGuard": {
+    "counts": {
+      "source": 749,
+      "dist": 2992,
+      "harness": 5
+    },
+    "privateFiles": 132,
+    "dependencyFiles": 2,
+    "allBeforeAfterAndCurrentMatchAtRecordCreation": true,
+    "futureWholeRepositoryFreezeClaim": false
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "limits": [
+    "The observer joins same-process owned core selection, fresh winner check, exact decorator bind and original PG callback queries. HTTP counters remain independent aggregates.",
+    "These five are normal active_binding returned conflicts in the second bind, not any of the six caught AffinityConflict exceptions.",
+    "This is a60-second instrumented mock diagnostic, not complete R9, a latency/scaling benefit comparison or real-provider acceptance.",
+    "Temporary Redis release is the original best-effort advisory contract; this does not prove per-release network acknowledgement. Owned Redis stop and zero fund holds are separate facts.",
+    "No new retry, waiting, source change, threshold, timeout or production error classification was introduced by this capture.",
+    "Prior scopes and captures remain unchanged; original fullR9 twelve503 are not individually attributed."
+  ]
+}

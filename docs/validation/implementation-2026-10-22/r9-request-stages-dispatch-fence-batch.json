@@ -1,0 +1,1537 @@
+{
+  "schema": 1,
+  "classification": "private-request-stage-diagnostic-sanitized-projection",
+  "formalRequiredCiEvidence": false,
+  "releaseGoClaim": false,
+  "r9AcceptanceClaim": false,
+  "allProviderCoverageClaim": false,
+  "evidenceRun": "model-router-request-stage-actual-20261022-0918-root",
+  "startedAt": "2026-10-22T09:16:30.965Z",
+  "finishedAt": "2026-10-22T09:17:00.749Z",
+  "assembly": "current-dist-cli-mock-test-assembly",
+  "runtime": {
+    "gatewayInstances": 3,
+    "preparedStatements": "native",
+    "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "realProviderCalls": 0,
+    "productionKmsVerified": false,
+    "builtinAcceptance": false,
+    "warmupInflight": 1,
+    "newBuildRequested": false
+  },
+  "inputReceipts": {
+    "summary.json": {
+      "sha256": "2282f10482ae84d89b96c402285ba188108d2d86c12594f933ac7dc0a1371cbf",
+      "bytes": 907930
+    },
+    "gateway-1-request-stages.json": {
+      "sha256": "e0d6cbf02274df3d55dc593e535034de89bfc9cb5a85752e0a575e972a4ce361",
+      "bytes": 1862481
+    },
+    "gateway-2-request-stages.json": {
+      "sha256": "2f5008afc98ba06e1c42c1ffd2d01f83e380bda6ba6cd679303c5ae4f9b4a17e",
+      "bytes": 1821984
+    },
+    "gateway-3-request-stages.json": {
+      "sha256": "1fa7766cb63abcc4ada37e175f9c406bab37a26bc9a3f1d91e4a3952f8676c28",
+      "bytes": 1801891
+    },
+    "serial-profile-request-stage-join.json": {
+      "sha256": "ca2440ef2d3e8f3fd88d0d9ce90391d36743ad4bb8e861b70752bf85b2ce68ca",
+      "bytes": 4059094
+    },
+    "serial-profile-request-samples.json": {
+      "sha256": "c72a3236d2bfbbda7da3665939061adc04c414d8e3aef82d1c919687a27a3335",
+      "bytes": 162716
+    },
+    "serial-profile-request-states.json": {
+      "sha256": "1d8984d681c6cf01e00fd4b6525b2aef54a9054eb2c8469a12f7f73471b0c570",
+      "bytes": 199386
+    },
+    "serial-profile-current-3cli.json": {
+      "sha256": "e1c94f72d3ef30ce53862fe92377f45af4a058b817952779cd678a4f3a9957c6",
+      "bytes": 2086
+    },
+    "final-mock-stats.json": {
+      "sha256": "e31d4f788b4fb811e8ebe44818917f7eca30aa8161d8b7afb24c7c7f093d2bde",
+      "bytes": 1107
+    }
+  },
+  "capturedInputGuards": {
+    "source": {
+      "files": 749,
+      "beforeAfterIdentical": true,
+      "matchesFrozenContractAndBuildAfter": true,
+      "mapSha256": "70595f5ce81192e2aa2c29f17f7be88e590dc480581b483baab80e4fc4ac2d45"
+    },
+    "dist": {
+      "files": 2992,
+      "beforeAfterIdentical": true,
+      "matchesFrozenContractAndBuildAfter": true,
+      "mapSha256": "e00797cb2888d739e2c9d3243204985157e095acc05478682119cbc0080a7a77"
+    },
+    "canonical": {
+      "files": 5,
+      "beforeAfterIdentical": true,
+      "matchesReviewedFrozenContract": true,
+      "hashes": {
+        "scripts/ops/run-current-r9.mjs": "54a23eb1bcb6b9ab7a41e659f57da2b5215ec3d3c0899142fc571f3424fa8d7a",
+        "scripts/ops/bench-gateway.mjs": "2e2f3508eeca9b5824470f09926558f5b8d01f7484e32ec01d67f5c6bedc047b",
+        "deploy/compose/mock-upstream.mjs": "5b64e9c2c9c7f48dbe457be101e6b1f0fa8d9d636dd91ed238667cf8b51853bf",
+        "deploy/managed-saas-postgres-roles.sql": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "package-lock.json": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab"
+      }
+    },
+    "private": {
+      "files": 4,
+      "frozenContractSha256": "37ff0f859a6deb2315487f68c4b3087ce03573493c9330100c17a864edbcb0cf",
+      "allThreeProfilesReferenceContract": true,
+      "supervisorFullContractMatchedAfter": true,
+      "privateFilesStillMatchCapturedContractAtProjection": true,
+      "hashes": {
+        "stage-labels.mjs": "c6c0beab2edf9b4e416672e72c0977696d00ff9234666b3ee1810cb564377e29",
+        "profiler-contracts.mjs": "db5cf84fa23491b55c7922f49d593b053eff8a28dac485608aeefced36d26355",
+        "bounded-stage-profiler.mjs": "9a100217a8c6e90fb5a6bf4c508aaa700f45b78dbd1178480476dae908590201",
+        "run-serial-profile-candidate.mjs": "63c2405e21ac514e64b45aa2fcb264bcabe8a69451fe026af40ee7da0f1ab496"
+      }
+    },
+    "config": {
+      "files": 3,
+      "frozenMapMatchesBuildBeforeAndAfter": true,
+      "hashes": {
+        "package.json": "0ff87b5b06116146412e44ecbc066a0ca2a992c4c9b551942beec4561582979a",
+        "package-lock.json": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "tsconfig.json": "baa3be6eb87a99437ac7d909496be2c00f22943bc5be28c09545efcc12c343d7"
+      },
+      "runtimeEvidence": "Supervisor pre-resource and post-close full-contract gates; no separate runtime config hash maps were saved."
+    },
+    "mapDigestEncoding": "SHA256 of compact sorted-key UTF-8 JSON",
+    "currentRepositoryVerificationPerformed": false,
+    "futureGlobalFreezeClaim": false
+  },
+  "counts": {
+    "observedRequestRecords": 271,
+    "gatewayClientSamples": 200,
+    "gatewaySamplesJoined": 200,
+    "missingGatewayJoins": 0,
+    "duplicateIdentities": 0,
+    "additionalObservedRecordsOutsideClientGatewaySampleSet": 71,
+    "copiedObservationItems": 28455,
+    "perRequestItemCount": 105,
+    "requestCap": 400,
+    "perRequestItemCap": 300,
+    "observedBudgetPolicyQueryItems": 271
+  },
+  "instances": [
+    {
+      "instance": 1,
+      "records": 92,
+      "requestBudget": 134,
+      "observationOk": true,
+      "active": {
+        "prepare": 0,
+        "dispatch": 0
+      },
+      "descriptors": {
+        "factoryRestored": true,
+        "ownedRestored": true
+      },
+      "runtimeCloseOutcome": "ok",
+      "failureCount": 0,
+      "itemsPerRequest": 105,
+      "observed": {
+        "preparationFactory": 1,
+        "dispatchFactory": 1,
+        "ownedComposition": 1,
+        "prepareCalls": 92,
+        "dispatchCalls": 92,
+        "forwardedCallbacks": 9660,
+        "copiedItems": 9660,
+        "unjoinedRecords": 0
+      }
+    },
+    {
+      "instance": 2,
+      "records": 90,
+      "requestBudget": 133,
+      "observationOk": true,
+      "active": {
+        "prepare": 0,
+        "dispatch": 0
+      },
+      "descriptors": {
+        "factoryRestored": true,
+        "ownedRestored": true
+      },
+      "runtimeCloseOutcome": "ok",
+      "failureCount": 0,
+      "itemsPerRequest": 105,
+      "observed": {
+        "preparationFactory": 1,
+        "dispatchFactory": 1,
+        "ownedComposition": 1,
+        "prepareCalls": 90,
+        "dispatchCalls": 90,
+        "forwardedCallbacks": 9450,
+        "copiedItems": 9450,
+        "unjoinedRecords": 0
+      }
+    },
+    {
+      "instance": 3,
+      "records": 89,
+      "requestBudget": 133,
+      "observationOk": true,
+      "active": {
+        "prepare": 0,
+        "dispatch": 0
+      },
+      "descriptors": {
+        "factoryRestored": true,
+        "ownedRestored": true
+      },
+      "runtimeCloseOutcome": "ok",
+      "failureCount": 0,
+      "itemsPerRequest": 105,
+      "observed": {
+        "preparationFactory": 1,
+        "dispatchFactory": 1,
+        "ownedComposition": 1,
+        "prepareCalls": 89,
+        "dispatchCalls": 89,
+        "forwardedCallbacks": 9345,
+        "copiedItems": 9345,
+        "unjoinedRecords": 0
+      }
+    }
+  ],
+  "clientSamples": {
+    "observationOk": true,
+    "total": 400,
+    "scenarioLegCounts": {
+      "latency:direct": 100,
+      "latency:gateway": 100,
+      "ttfb:direct": 100,
+      "ttfb:gateway": 100
+    },
+    "allIncluded": true,
+    "allHttp200": true,
+    "allOutcomesOk": true,
+    "gatewayIdsCorrelatedPrivately": 200,
+    "missingOrInvalidOrDuplicateGatewayIds": 0
+  },
+  "gatewaySampleDatabaseStates": {
+    "observationOk": true,
+    "readOnly": true,
+    "observedRows": 200,
+    "matchedDistinctGatewayRequests": 200,
+    "missingRequests": 0,
+    "pendingRequests": 0,
+    "multipleAttemptRequests": 0,
+    "multipleEvidenceRequests": 0,
+    "executionStates": {
+      "succeeded": 200
+    },
+    "financialStates": {
+      "settled": 200
+    },
+    "reconciliationStates": {
+      "resolved": 200
+    },
+    "dispatchStates": {
+      "sent": 200
+    },
+    "resultStates": {
+      "succeeded": 200
+    },
+    "httpStatuses": {
+      "200": 200
+    },
+    "responseStarted": 200,
+    "evidenceStatuses": {
+      "claimed": 200
+    },
+    "scope": "Saved rows cover the 200 gateway client samples; individual financial state of all 271 observed records is not asserted."
+  },
+  "performance": {
+    "observationHookEnabled": true,
+    "driverExitCode": 1,
+    "supervisorOk": false,
+    "originalThresholdsMs": {
+      "latencyP99Overhead": 30,
+      "ttfbOverhead": 10
+    },
+    "scenarios": {
+      "latency": {
+        "direct": {
+          "n": 100,
+          "p50": 1.79,
+          "p90": 1.99,
+          "p99": 7.88,
+          "max": 7.88
+        },
+        "gateway": {
+          "n": 100,
+          "p50": 65.49,
+          "p90": 100.71,
+          "p99": 120.63,
+          "max": 120.63
+        },
+        "p99OverheadMs": 112.75
+      },
+      "ttfb": {
+        "direct": {
+          "n": 100,
+          "p50": 2.65,
+          "p90": 3.12,
+          "p99": 4.9,
+          "max": 4.9
+        },
+        "gateway": {
+          "n": 100,
+          "p50": 67.65,
+          "p90": 83.85,
+          "p99": 167.94,
+          "max": 167.94
+        },
+        "gatewayErrors": 0,
+        "ttfbOverheadMs": 163.04
+      }
+    },
+    "violations": [
+      {
+        "scenario": "latency",
+        "metric": "p99 overhead",
+        "value": 112.75,
+        "threshold": 30,
+        "unit": "ms"
+      },
+      {
+        "scenario": "ttfb",
+        "metric": "ttfb overhead",
+        "value": 163.04,
+        "threshold": 10,
+        "unit": "ms"
+      }
+    ],
+    "thresholdsPassed": false,
+    "ttfbGatewayStreamErrors": 0,
+    "ttfbGatewayStreamErrorSource": "driver.scenarios.ttfb.gatewayErrors",
+    "clientSampleFailures": 0,
+    "mockAbortedStreams": 0
+  },
+  "tailSelection": {
+    "method": "Top three descending client metricMs among 100 gateway samples per scenario, joined privately by generated request UUID and emitted as scenario-local anonymous ranks.",
+    "durationUnit": "ms",
+    "projectedDurationDecimalPlaces": 6,
+    "querySelection": "Five largest individual existing query observations per selected request; repeated labels are not grouped or summed.",
+    "scenarios": {
+      "latency": [
+        {
+          "rank": 1,
+          "clientMs": 120.627875,
+          "phases": [
+            {
+              "kind": "phase",
+              "phase": "authority",
+              "operation": "resolve",
+              "durationMs": 16.235041,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "scheduler-select",
+              "durationMs": 18.133417,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission-guard",
+              "operation": "revalidate",
+              "durationMs": 14.087,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "metering-guard-wallet",
+              "durationMs": 25.2675,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "capacity",
+              "durationMs": 1.971083,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "evidence-register",
+              "durationMs": 8.252041,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "preparation-total",
+              "durationMs": 78.928334,
+              "outcome": "ok"
+            }
+          ],
+          "dispatchStages": [
+            {
+              "sequence": 1,
+              "stage": "preflight",
+              "durationMs": 5.67475,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 2,
+              "stage": "attempt-read",
+              "durationMs": 2.280083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 3,
+              "stage": "lease-acquire",
+              "durationMs": 1.822667,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 4,
+              "stage": "claim",
+              "durationMs": 8.656833,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 5,
+              "stage": "attempt-read",
+              "durationMs": 0.445042,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 6,
+              "stage": "attempt-transition",
+              "durationMs": 1.723042,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 7,
+              "stage": "transport-profile-resolve",
+              "durationMs": 0.4005,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 8,
+              "stage": "transport-fixed-headers",
+              "durationMs": 0.005167,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 9,
+              "stage": "transport-credential-prepare",
+              "durationMs": 5.47625,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 10,
+              "stage": "transport-connector-create",
+              "durationMs": 0.018875,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 11,
+              "stage": "transport-fetch-headers",
+              "durationMs": 3.692541,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 12,
+              "stage": "transport-send",
+              "durationMs": 9.900125,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 13,
+              "stage": "response-delivery",
+              "durationMs": 0.442417,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 14,
+              "stage": "attempt-transition",
+              "durationMs": 1.496792,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 15,
+              "stage": "settlement",
+              "durationMs": 14.388959,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 16,
+              "stage": "runtime-health",
+              "durationMs": 2.03975,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 17,
+              "stage": "lease-release",
+              "durationMs": 1.226875,
+              "outcome": "ok"
+            }
+          ],
+          "top5QueryObservations": [
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:platform",
+              "durationMs": 8.723959,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:authority-batch",
+              "durationMs": 5.830334,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_attempts",
+              "durationMs": 2.410167,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_billing_reservations",
+              "durationMs": 1.910209,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:account-capability",
+              "durationMs": 1.773125,
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "rank": 2,
+          "clientMs": 113.368916,
+          "phases": [
+            {
+              "kind": "phase",
+              "phase": "authority",
+              "operation": "resolve",
+              "durationMs": 18.483542,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "scheduler-select",
+              "durationMs": 12.628041,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission-guard",
+              "operation": "revalidate",
+              "durationMs": 9.217667,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "metering-guard-wallet",
+              "durationMs": 20.879958,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "capacity",
+              "durationMs": 2.406042,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "evidence-register",
+              "durationMs": 7.518583,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "preparation-total",
+              "durationMs": 67.12225,
+              "outcome": "ok"
+            }
+          ],
+          "dispatchStages": [
+            {
+              "sequence": 1,
+              "stage": "preflight",
+              "durationMs": 4.227417,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 2,
+              "stage": "attempt-read",
+              "durationMs": 0.449792,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 3,
+              "stage": "lease-acquire",
+              "durationMs": 1.490458,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 4,
+              "stage": "claim",
+              "durationMs": 7.518375,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 5,
+              "stage": "attempt-read",
+              "durationMs": 1.582708,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 6,
+              "stage": "attempt-transition",
+              "durationMs": 17.59925,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 7,
+              "stage": "transport-profile-resolve",
+              "durationMs": 0.529875,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 8,
+              "stage": "transport-fixed-headers",
+              "durationMs": 0.005792,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 9,
+              "stage": "transport-credential-prepare",
+              "durationMs": 4.944041,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 10,
+              "stage": "transport-connector-create",
+              "durationMs": 0.021083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 11,
+              "stage": "transport-fetch-headers",
+              "durationMs": 3.008125,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 12,
+              "stage": "transport-send",
+              "durationMs": 8.849667,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 13,
+              "stage": "response-delivery",
+              "durationMs": 0.449625,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 14,
+              "stage": "attempt-transition",
+              "durationMs": 1.414084,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 15,
+              "stage": "settlement",
+              "durationMs": 9.597083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 16,
+              "stage": "runtime-health",
+              "durationMs": 0.870583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 17,
+              "stage": "lease-release",
+              "durationMs": 0.674916,
+              "outcome": "ok"
+            }
+          ],
+          "top5QueryObservations": [
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "saas_route_config_dispatchable",
+              "durationMs": 7.968583,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:platform",
+              "durationMs": 4.347417,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_billing_reservations",
+              "durationMs": 2.65025,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:authority-batch",
+              "durationMs": 2.48,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_attempts",
+              "durationMs": 2.259625,
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "rank": 3,
+          "clientMs": 110.568666,
+          "phases": [
+            {
+              "kind": "phase",
+              "phase": "authority",
+              "operation": "resolve",
+              "durationMs": 22.503417,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "scheduler-select",
+              "durationMs": 12.350791,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission-guard",
+              "operation": "revalidate",
+              "durationMs": 13.611167,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "metering-guard-wallet",
+              "durationMs": 21.350834,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "capacity",
+              "durationMs": 1.907792,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "evidence-register",
+              "durationMs": 6.206459,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "preparation-total",
+              "durationMs": 69.224708,
+              "outcome": "ok"
+            }
+          ],
+          "dispatchStages": [
+            {
+              "sequence": 1,
+              "stage": "preflight",
+              "durationMs": 3.016667,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 2,
+              "stage": "attempt-read",
+              "durationMs": 0.334833,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 3,
+              "stage": "lease-acquire",
+              "durationMs": 1.111709,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 4,
+              "stage": "claim",
+              "durationMs": 4.448292,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 5,
+              "stage": "attempt-read",
+              "durationMs": 0.324958,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 6,
+              "stage": "attempt-transition",
+              "durationMs": 18.022084,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 7,
+              "stage": "transport-profile-resolve",
+              "durationMs": 0.505792,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 8,
+              "stage": "transport-fixed-headers",
+              "durationMs": 0.012125,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 9,
+              "stage": "transport-credential-prepare",
+              "durationMs": 5.005792,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 10,
+              "stage": "transport-connector-create",
+              "durationMs": 0.033083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 11,
+              "stage": "transport-fetch-headers",
+              "durationMs": 2.863625,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 12,
+              "stage": "transport-send",
+              "durationMs": 8.771042,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 13,
+              "stage": "response-delivery",
+              "durationMs": 0.431792,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 14,
+              "stage": "attempt-transition",
+              "durationMs": 1.5435,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 15,
+              "stage": "settlement",
+              "durationMs": 10.29325,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 16,
+              "stage": "runtime-health",
+              "durationMs": 0.955916,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 17,
+              "stage": "lease-release",
+              "durationMs": 1.029166,
+              "outcome": "ok"
+            }
+          ],
+          "top5QueryObservations": [
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "saas_route_config_dispatchable",
+              "durationMs": 10.154042,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:platform",
+              "durationMs": 4.134667,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:request",
+              "durationMs": 3.279042,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:authority-batch",
+              "durationMs": 2.446333,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_attempts",
+              "durationMs": 1.890084,
+              "outcome": "ok"
+            }
+          ]
+        }
+      ],
+      "ttfb": [
+        {
+          "rank": 1,
+          "clientMs": 167.936875,
+          "phases": [
+            {
+              "kind": "phase",
+              "phase": "authority",
+              "operation": "resolve",
+              "durationMs": 11.389916,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "scheduler-select",
+              "durationMs": 12.391584,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission-guard",
+              "operation": "revalidate",
+              "durationMs": 9.738334,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "metering-guard-wallet",
+              "durationMs": 28.750375,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "capacity",
+              "durationMs": 2.399584,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "evidence-register",
+              "durationMs": 9.218833,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "preparation-total",
+              "durationMs": 69.483,
+              "outcome": "ok"
+            }
+          ],
+          "dispatchStages": [
+            {
+              "sequence": 1,
+              "stage": "preflight",
+              "durationMs": 11.663333,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 2,
+              "stage": "attempt-read",
+              "durationMs": 0.535375,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 3,
+              "stage": "lease-acquire",
+              "durationMs": 4.185417,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 4,
+              "stage": "claim",
+              "durationMs": 35.505416,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 5,
+              "stage": "attempt-read",
+              "durationMs": 3.233125,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 6,
+              "stage": "attempt-transition",
+              "durationMs": 2.381625,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 7,
+              "stage": "transport-profile-resolve",
+              "durationMs": 0.471291,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 8,
+              "stage": "transport-fixed-headers",
+              "durationMs": 0.022333,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 9,
+              "stage": "transport-credential-prepare",
+              "durationMs": 18.350208,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 10,
+              "stage": "transport-connector-create",
+              "durationMs": 0.055875,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 11,
+              "stage": "transport-fetch-headers",
+              "durationMs": 14.209875,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 12,
+              "stage": "transport-send",
+              "durationMs": 33.73625,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 13,
+              "stage": "response-delivery",
+              "durationMs": 5.109166,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 14,
+              "stage": "attempt-transition",
+              "durationMs": 9.2855,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 15,
+              "stage": "settlement",
+              "durationMs": 58.786583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 16,
+              "stage": "runtime-health",
+              "durationMs": 0.93475,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 17,
+              "stage": "lease-release",
+              "durationMs": 0.861375,
+              "outcome": "ok"
+            }
+          ],
+          "top5QueryObservations": [
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:platform",
+              "durationMs": 3.43575,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_billing_reservations",
+              "durationMs": 3.200292,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:authority-batch",
+              "durationMs": 3.063,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_audit_events",
+              "durationMs": 2.911083,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_refund_wallet_freezes",
+              "durationMs": 1.859666,
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "rank": 2,
+          "clientMs": 153.578,
+          "phases": [
+            {
+              "kind": "phase",
+              "phase": "authority",
+              "operation": "resolve",
+              "durationMs": 11.431167,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "scheduler-select",
+              "durationMs": 12.306875,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission-guard",
+              "operation": "revalidate",
+              "durationMs": 12.728917,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "metering-guard-wallet",
+              "durationMs": 24.448875,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "capacity",
+              "durationMs": 3.646917,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "evidence-register",
+              "durationMs": 15.404917,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "preparation-total",
+              "durationMs": 74.327958,
+              "outcome": "ok"
+            }
+          ],
+          "dispatchStages": [
+            {
+              "sequence": 1,
+              "stage": "preflight",
+              "durationMs": 5.526375,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 2,
+              "stage": "attempt-read",
+              "durationMs": 0.463042,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 3,
+              "stage": "lease-acquire",
+              "durationMs": 3.39575,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 4,
+              "stage": "claim",
+              "durationMs": 30.276083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 5,
+              "stage": "attempt-read",
+              "durationMs": 0.497583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 6,
+              "stage": "attempt-transition",
+              "durationMs": 11.653167,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 7,
+              "stage": "transport-profile-resolve",
+              "durationMs": 2.455417,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 8,
+              "stage": "transport-fixed-headers",
+              "durationMs": 0.005292,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 9,
+              "stage": "transport-credential-prepare",
+              "durationMs": 13.56675,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 10,
+              "stage": "transport-connector-create",
+              "durationMs": 0.0215,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 11,
+              "stage": "transport-fetch-headers",
+              "durationMs": 4.640583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 12,
+              "stage": "transport-send",
+              "durationMs": 21.852375,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 13,
+              "stage": "response-delivery",
+              "durationMs": 6.077083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 14,
+              "stage": "attempt-transition",
+              "durationMs": 4.133583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 15,
+              "stage": "settlement",
+              "durationMs": 25.61975,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 16,
+              "stage": "runtime-health",
+              "durationMs": 1.050291,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 17,
+              "stage": "lease-release",
+              "durationMs": 1.853625,
+              "outcome": "ok"
+            }
+          ],
+          "top5QueryObservations": [
+            {
+              "kind": "query",
+              "phase": "admission",
+              "operation": "saas_attempts",
+              "durationMs": 5.1255,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:platform",
+              "durationMs": 4.646916,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:authority-batch",
+              "durationMs": 3.995083,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "saas_supplier_cost_versions",
+              "durationMs": 1.630709,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "saas_request_customer_price_snapshots",
+              "durationMs": 1.462666,
+              "outcome": "ok"
+            }
+          ]
+        },
+        {
+          "rank": 3,
+          "clientMs": 126.937667,
+          "phases": [
+            {
+              "kind": "phase",
+              "phase": "authority",
+              "operation": "resolve",
+              "durationMs": 47.951834,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "scheduler-select",
+              "durationMs": 12.308625,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission-guard",
+              "operation": "revalidate",
+              "durationMs": 8.129334,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "metering-guard-wallet",
+              "durationMs": 16.173875,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "admission",
+              "operation": "capacity",
+              "durationMs": 2.166541,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "evidence-register",
+              "durationMs": 4.719125,
+              "outcome": "ok"
+            },
+            {
+              "kind": "phase",
+              "phase": "preparation",
+              "operation": "preparation-total",
+              "durationMs": 94.298,
+              "outcome": "ok"
+            }
+          ],
+          "dispatchStages": [
+            {
+              "sequence": 1,
+              "stage": "preflight",
+              "durationMs": 3.379125,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 2,
+              "stage": "attempt-read",
+              "durationMs": 0.481083,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 3,
+              "stage": "lease-acquire",
+              "durationMs": 1.375583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 4,
+              "stage": "claim",
+              "durationMs": 5.025875,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 5,
+              "stage": "attempt-read",
+              "durationMs": 0.35075,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 6,
+              "stage": "attempt-transition",
+              "durationMs": 1.374166,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 7,
+              "stage": "transport-profile-resolve",
+              "durationMs": 0.313583,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 8,
+              "stage": "transport-fixed-headers",
+              "durationMs": 0.004875,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 9,
+              "stage": "transport-credential-prepare",
+              "durationMs": 4.798458,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 10,
+              "stage": "transport-connector-create",
+              "durationMs": 0.016917,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 11,
+              "stage": "transport-fetch-headers",
+              "durationMs": 3.118042,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 12,
+              "stage": "transport-send",
+              "durationMs": 8.527666,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 13,
+              "stage": "response-delivery",
+              "durationMs": 1.3765,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 14,
+              "stage": "attempt-transition",
+              "durationMs": 1.731458,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 15,
+              "stage": "settlement",
+              "durationMs": 9.508625,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 16,
+              "stage": "runtime-health",
+              "durationMs": 0.871416,
+              "outcome": "ok"
+            },
+            {
+              "sequence": 17,
+              "stage": "lease-release",
+              "durationMs": 0.86375,
+              "outcome": "ok"
+            }
+          ],
+          "top5QueryObservations": [
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "preparation-authority:platform",
+              "durationMs": 9.07325,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "saas_supply_profiles",
+              "durationMs": 6.587041,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "saas_provider_metering_policy_versions",
+              "durationMs": 3.271042,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "admission-guard",
+              "operation": "postgres-request-admission:authority-batch",
+              "durationMs": 2.861542,
+              "outcome": "ok"
+            },
+            {
+              "kind": "query",
+              "phase": "authority",
+              "operation": "saas_route_config_heads",
+              "durationMs": 2.690708,
+              "outcome": "ok"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "cleanup": {
+    "captured": {
+      "processesStopped": true,
+      "postgresStopped": true,
+      "runtimeRemoved": true
+    },
+    "ownedRuntimeDirectoryAbsentAtProjection": true,
+    "allThreeRuntimeCloseOutcomesOk": true,
+    "allThreeActivePrepareAndDispatchZero": true,
+    "allThreeFactoryAndOwnedDescriptorsRestored": true,
+    "allThreeObservationFailureCountsZero": true,
+    "capturedMockInflightZero": true
+  },
+  "limits": [
+    "This private instrumented mock diagnostic has nonzero ALS, map and callback overhead; it does not replace uninstrumented canonical R9 acceptance.",
+    "Existing phase, query and dispatch durations are inclusive and nested. They overlap and must not be added as exclusive elapsed time.",
+    "Client response EOF precedes settlement and cleanup. Same-request post-EOF settlement duration is not allocated to latency or TTFB.",
+    "Durations do not supply stage start/end alignment across requests. These observations show correlation, not causal attribution.",
+    "The metering-guard-wallet label covers a composite phase. These receipts do not isolate or prove wallet-lock waiting.",
+    "Evidence created_at uses transaction BEGIN now(); it is not an INSERT sampling timestamp.",
+    "Source/dist/canonical equality describes the captured before/after maps and recorded contract only; current or future repository freeze is not claimed.",
+    "Request/evidence/account/key identifiers, raw SQL, SQL values, headers, bodies, credentials, raw errors and raw config are omitted."
+  ],
+  "observationPassed": true,
+  "performancePassed": false,
+  "passed": false
+}

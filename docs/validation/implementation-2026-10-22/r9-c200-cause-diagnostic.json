@@ -1,0 +1,513 @@
+{
+  "schemaVersion": 1,
+  "artifactKind": "local-c200-cause-diagnostic",
+  "recordedAtUtc": "2026-10-21T22:39:42.059243Z",
+  "classification": {
+    "scope": "First bounded 30-second c200 cause diagnostic on the captured old build, with observational overhead",
+    "localDiagnostic": true,
+    "nativeDistCliMockTestAssembly": true,
+    "fullR9": false,
+    "providerAcceptance": false,
+    "formalRequiredCiEvidence": false,
+    "GO": false,
+    "gatePassed": false,
+    "observationOk": false,
+    "performanceBenefitComparison": false
+  },
+  "capture": {
+    "startedAtUtc": "2026-10-21T22:34:02.991Z",
+    "finishedAtUtc": "2026-10-21T22:34:43.709Z",
+    "benchStartedAtUtc": "2026-10-21T22:34:09.664Z",
+    "benchmarkReportFinishedAtPresent": false,
+    "actualRunDirectory": "/private/tmp/model-router-c200-reasons-actual-20261022-53785f3374ef",
+    "summaryPath": "/private/tmp/model-router-c200-reasons-actual-20261022-53785f3374ef/summary.json",
+    "inputSourceHashes": {
+      "actualSummary": {
+        "sha256": "c16921963648cd35c674015a3a34f23aaae23a195ea263d800dbe982e8c88564",
+        "bytes": 909103
+      },
+      "actualScalingReport": {
+        "sha256": "a2422709f162883f2bab2d698518ae70da2efee8d329705d3ec2d8991f4d55fd",
+        "bytes": 1578
+      },
+      "safeHttpCodes": {
+        "sha256": "66e1a0bd5e54cd2ec3cec8ef529babfb962bd3e93a1379f5b3d6e3648191e5be",
+        "bytes": 274
+      },
+      "finalFinancialSnapshot": {
+        "sha256": "60b68f0d1e241bcee1bf314ac398e15ef94343c3182b872646e4ea32f1f1bdbd",
+        "bytes": 4495
+      },
+      "privateToolFreezeV2": {
+        "sha256": "c57dd7d0f492850d8ad445fa6b71a12db348118263c189681f947effd66825ce",
+        "bytes": 8915
+      },
+      "runtimeGateways": [
+        {
+          "gatewayIndex": 1,
+          "sha256": "0beb7479134e29da5d2bd4fba87f760e1324c17ff7d15697cee6dc7ffb4a8c8a",
+          "bytes": 2654
+        },
+        {
+          "gatewayIndex": 2,
+          "sha256": "51bf0d6989d5f9b991cbb898bbcf99492fcbbdfe2687f0e298a12cc45f967437",
+          "bytes": 944
+        },
+        {
+          "gatewayIndex": 3,
+          "sha256": "51bf0d6989d5f9b991cbb898bbcf99492fcbbdfe2687f0e298a12cc45f967437",
+          "bytes": 944
+        }
+      ]
+    },
+    "nodeVersion": "v24.18.0",
+    "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "redisVersion": "Redis server v=8.10.2 sha=00000000:1 malloc=libc bits=64 build=764b3e45065a66fb",
+    "postgresPreparedStatements": "native",
+    "buildRequested": false,
+    "realProviderCalls": 0,
+    "productionKmsVerified": false,
+    "builtinAcceptance": false
+  },
+  "fullClosureAudit": {
+    "status": "historical_currentAtCapture",
+    "basis": "Complete before/after hash maps recorded by this actual supervisor for its source tree, dist tree, five canonical harness inputs and ten tracked private files",
+    "hashMapDigestEncoding": "SHA256 over JSON with lexically sorted keys, ASCII escaping and comma/colon separators",
+    "maps": {
+      "source": {
+        "fileCountBefore": 749,
+        "fileCountAfter": 749,
+        "beforeSha256": "b515d2327aaf2f62dfb88ea2a45e931af524442cc9d15563aa3cbf3b7324c256",
+        "afterSha256": "b515d2327aaf2f62dfb88ea2a45e931af524442cc9d15563aa3cbf3b7324c256",
+        "changed": false
+      },
+      "dist": {
+        "fileCountBefore": 2992,
+        "fileCountAfter": 2992,
+        "beforeSha256": "6e0ad6eab7387a5babe9c405a2062593de951f67a170ae6861c38b2ccdee3839",
+        "afterSha256": "6e0ad6eab7387a5babe9c405a2062593de951f67a170ae6861c38b2ccdee3839",
+        "changed": false
+      },
+      "canonicalHarness": {
+        "fileCountBefore": 5,
+        "fileCountAfter": 5,
+        "beforeSha256": "55edcfe6ae4263064f2bc041054d6a4487abafc330d0724657c581aff2beb302",
+        "afterSha256": "55edcfe6ae4263064f2bc041054d6a4487abafc330d0724657c581aff2beb302",
+        "changed": false,
+        "hashes": {
+          "scripts/ops/run-current-r9.mjs": "54a23eb1bcb6b9ab7a41e659f57da2b5215ec3d3c0899142fc571f3424fa8d7a",
+          "scripts/ops/bench-gateway.mjs": "2e2f3508eeca9b5824470f09926558f5b8d01f7484e32ec01d67f5c6bedc047b",
+          "deploy/compose/mock-upstream.mjs": "5b64e9c2c9c7f48dbe457be101e6b1f0fa8d9d636dd91ed238667cf8b51853bf",
+          "deploy/managed-saas-postgres-roles.sql": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+          "package-lock.json": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab"
+        }
+      },
+      "privateTrackedFiles": {
+        "fileCountBefore": 10,
+        "fileCountAfter": 10,
+        "beforeSha256": "f08e71e842601f077db4a2b6f54ff505c749cc13ebca5fa6a563db55db62a497",
+        "afterSha256": "f08e71e842601f077db4a2b6f54ff505c749cc13ebca5fa6a563db55db62a497",
+        "changed": false,
+        "hashes": {
+          "run-private-c200.mjs": "e794daf061ddb0b75c332f21e4e6b1de2b722c1d1263d62edb2ff69ae39a67c5",
+          "bench-private-c200.mjs": "9ca85f876f194d91de6ec930aa6aa9d10e0ec108ca0fabe57f9c8a030094b510",
+          "runtime-diagnostics.mjs": "81bd9b1d7900219fbc911fa4895dca7af5fc9d4ad7f64d0a70bdb5466808703b",
+          "financial-snapshot.mjs": "0886684ce32198862c5c40099fc401d44b512302fe5189d16a43df8b46557fa3",
+          "offline-check.mjs": "88867563d7c8ce7e4744edf7992da571d781fc5466d65688c5e7d01d75e82ec2",
+          "canonical-manifest.json": "1bfee8a5262ad8c78f3bed6c5f912e30f21158fd247efdf5f4ed35d0bbfd8e8a",
+          "run-current-r9.diff": "b943eb4995481310815e8959d7d008060c806c9e5097409da7ef2c7e3f1ca8fd",
+          "bench-gateway.diff": "ed41823d14c9209dbeb1bd3b4a7186b28ac765245f293a632c52838e108d6baf",
+          "canonical/run-current-r9.mjs": "54a23eb1bcb6b9ab7a41e659f57da2b5215ec3d3c0899142fc571f3424fa8d7a",
+          "canonical/bench-gateway.mjs": "2e2f3508eeca9b5824470f09926558f5b8d01f7484e32ec01d67f5c6bedc047b"
+        }
+      }
+    },
+    "privateFreeze": {
+      "sha256": "c57dd7d0f492850d8ad445fa6b71a12db348118263c189681f947effd66825ce",
+      "summaryExplicitlyReferencesFreezeSha256": false,
+      "allTenRecordedPrivateFileHashesMatchFreezeV2": true,
+      "basis": "Association is verified from the ten actual-run file hashes; no unrecorded explicit freeze reference is claimed"
+    },
+    "additionalGuardFile": null,
+    "futureCurrentSourceOrDistAudit": false,
+    "laterSourceChangesCovered": false,
+    "limitation": "This historical capture does not freeze subsequent production edits, future builds, all node_modules contents or future validation inputs"
+  },
+  "measurement": {
+    "protocol": "openai",
+    "gatewaysLaunched": 3,
+    "gatewaysMeasured": 1,
+    "requestedInflight": 200,
+    "requestedSeconds": 30,
+    "observedSeconds": 32.6,
+    "throughputRps": 19.65,
+    "statuses": {
+      "200": 641,
+      "502": 505,
+      "503": 948
+    },
+    "successfulLatencyMs": {
+      "n": 641,
+      "p50": 3655.49,
+      "p90": 5666.67,
+      "p99": 6102.69,
+      "max": 6165.95
+    },
+    "successfulLatencyPopulation": "641 measured HTTP 200 responses; error responses are not included in this latency summary",
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "noFail": false,
+    "baselineReport": null,
+    "ratio": null,
+    "violations": [
+      {
+        "scenario": "scaling",
+        "metric": "unexpected 5xx",
+        "value": 1453,
+        "threshold": 0,
+        "unit": ""
+      }
+    ],
+    "driverExitCode": 1,
+    "supervisorOk": false,
+    "firstFaultStage": "c200-openai-1cli-reasons",
+    "validObservedLoadCounters": false,
+    "unchangedSemantics": [
+      "Original timing boundaries, percentile algorithm, rounding, successful-sample inclusion, body drain and cleanup order are retained",
+      "Existing zero transport/5xx budgets and 429 policy are retained",
+      "The requested load interval is 30 seconds; observed elapsed time also contains original closed-loop completion/drain behavior",
+      "Runtime wrappers and post-drain HTTP code parsing add observation overhead; this is not an uninstrumented equivalence or performance improvement claim"
+    ]
+  },
+  "safeHttpObservation": {
+    "observationOk": true,
+    "measuredOnly": true,
+    "afterOriginalBodyDrain": true,
+    "maxErrorBytes": 8192,
+    "codes": {
+      "502:DISPATCH_FAILED": 505,
+      "503:REQUEST_BLOCKED": 948
+    },
+    "rawBodyMessageHeadersRequestIdsPersisted": false,
+    "bodyDrainFailureBoundary": "Only successfully drained error bodies are parsed; original transport/body-read exceptions remain driver transport errors"
+  },
+  "runtimeObservation": {
+    "observationOk": false,
+    "completeAtFlush": false,
+    "population": "Original two settled protocol smoke requests plus measured traffic and scheduler health work; counters were written while wrapped calls were active",
+    "gateways": [
+      {
+        "gatewayIndex": 1,
+        "observationOk": false,
+        "activeCallsAtFlush": 12,
+        "failures": {
+          "active_calls_at_flush": 1
+        },
+        "hasOperationCounters": true
+      },
+      {
+        "gatewayIndex": 2,
+        "observationOk": true,
+        "activeCallsAtFlush": 0,
+        "failures": {},
+        "hasOperationCounters": false
+      },
+      {
+        "gatewayIndex": 3,
+        "observationOk": true,
+        "activeCallsAtFlush": 0,
+        "failures": {},
+        "hasOperationCounters": false
+      }
+    ],
+    "gateway1": {
+      "schedulerSelect": {
+        "called": 2096,
+        "allow": 1244,
+        "blockCapabilityUnavailable": 852
+      },
+      "schedulerBind": {
+        "called": 1244,
+        "allow": 1148,
+        "block": 96,
+        "blockSubtype": "unknown; original implementation exposes no closed conflict/CAS/storage subtype and reason text was not inspected"
+      },
+      "dispatchLeaseAcquire": {
+        "called": 1148,
+        "resolvedNonNull": 643,
+        "resolvedNull": 505
+      },
+      "schedulerHealthLeaseAcquire": {
+        "called": 8,
+        "resolvedNonNull": 8
+      },
+      "dispatch": {
+        "called": 1148,
+        "sentAtFlush": 631,
+        "escapedLeaseUnavailable": 505,
+        "sentAtFlushIsFinalCount": false
+      },
+      "health": {
+        "unknown": 8,
+        "allow": 6449,
+        "malformed": 852
+      },
+      "clockNotApplicable": {
+        "zero_rows:unknown": 8
+      },
+      "healthClockWitness": {
+        "malformedCount": 852,
+        "matchedQueryExactlyOne": 852,
+        "returnedRowExactlyOne": 852,
+        "inputObservedAndFreshDatesValid": 852,
+        "observedMinusInputNowGreaterThan250Ms": 852,
+        "observedMinusFreshAfterQueryAtMost250Ms": 852,
+        "exactClosedCrossCount": 852,
+        "sqlSha256": "1f0e71d0dfaf9bc45870249fc50be8ff9290710ecd5c5d5102e73f7c93e9ada1",
+        "sqlBytes": 268,
+        "extraQueries": 0,
+        "paramsRetained": false,
+        "witnessProvesSoleMalformedCondition": false
+      },
+      "relativeDeltaAggregates": {
+        "observed_minus_input_now": {
+          "buckets": {
+            "lt_minus_1000": 5205,
+            "250_to_1000": 682,
+            "zero_to_250": 426,
+            "gt_1000": 170,
+            "minus_250_to_zero": 445,
+            "minus_1000_to_minus_250": 373
+          },
+          "minMs": -24675,
+          "maxMs": 2244,
+          "capped": 0
+        },
+        "observed_minus_fresh_after_query": {
+          "buckets": {
+            "lt_minus_1000": 5612,
+            "minus_250_to_zero": 1094,
+            "minus_1000_to_minus_250": 595
+          },
+          "minMs": -24912,
+          "maxMs": 0,
+          "capped": 0
+        }
+      }
+    },
+    "limits": [
+      "Global observationOk remains false because gateway1 had 12 active wrapped calls at flush",
+      "631 sent is a partial runtime tally and cannot replace the final financial snapshot",
+      "The 852 health clock witnesses and 96 bind blocks are distinct observed aggregates; all 948 HTTP 503 responses are not assigned one cause",
+      "No per-request identifier join or internal bind reason was captured; equality of aggregate counts is not a new per-request trace",
+      "No absolute health dates, rows, SQL parameters, keys, body text, messages, headers or request IDs are included"
+    ]
+  },
+  "finalFinancialObservation": {
+    "observationOk": true,
+    "failure": null,
+    "population": "Stopped-child disposable tenant state after measured traffic plus the original two settled protocol smoke requests; not the partial runtime-flush population",
+    "timingBoundary": "After timed work and stats/metrics, after owned child stop, before PostgreSQL deletion",
+    "readOnly": true,
+    "isolation": "repeatable read",
+    "rollbackConfirmed": true,
+    "currency": "USD",
+    "moneyRepresentation": "Integer decimal text with exact integer/BigInt arithmetic; no floating point money conversion",
+    "fixtureOpeningFunding": {
+      "currency": "USD",
+      "amountMinorUnits": "100000000000"
+    },
+    "aggregates": {
+      "requests": {
+        "rowCap": 64,
+        "sentinelLimit": 65,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "execution_state": "failed",
+            "financial_status": "released",
+            "reconciliation_state": "none",
+            "count": "505"
+          },
+          {
+            "execution_state": "succeeded",
+            "financial_status": "settled",
+            "reconciliation_state": "resolved",
+            "count": "643"
+          }
+        ]
+      },
+      "attempts": {
+        "rowCap": 256,
+        "sentinelLimit": 257,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "dispatch_state": "not_sent",
+            "result_state": "failed",
+            "response_started": false,
+            "http_class": "none",
+            "count": "505"
+          },
+          {
+            "dispatch_state": "sent",
+            "result_state": "succeeded",
+            "response_started": true,
+            "http_class": "2xx",
+            "count": "643"
+          }
+        ]
+      },
+      "reservations": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "state": "released",
+            "count": "505",
+            "amount_minor_units": "10342400",
+            "settlement_amount_minor_units": "0"
+          },
+          {
+            "state": "settled",
+            "count": "643",
+            "amount_minor_units": "13168640",
+            "settlement_amount_minor_units": "72016"
+          }
+        ]
+      },
+      "wallets": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "posted_balance_minor_units": "99999927984"
+          }
+        ]
+      },
+      "ledger_sources": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "source_type": "billing_settlement",
+            "count": "643",
+            "amount_minor_units": "72016"
+          },
+          {
+            "source_type": "wallet_funding",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          }
+        ]
+      },
+      "ledger_entries": {
+        "rowCap": 4,
+        "sentinelLimit": 5,
+        "observedRows": 4,
+        "truncated": false,
+        "rows": [
+          {
+            "account_scope": "non_wallet",
+            "direction": "credit",
+            "count": "643",
+            "amount_minor_units": "72016"
+          },
+          {
+            "account_scope": "non_wallet",
+            "direction": "debit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "credit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "debit",
+            "count": "643",
+            "amount_minor_units": "72016"
+          }
+        ]
+      },
+      "currency_scope": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "other_wallets": "0",
+            "other_reservations": "0",
+            "other_transactions": "0",
+            "other_entries": "0"
+          }
+        ]
+      }
+    },
+    "checks": {
+      "walletRowCount": 1,
+      "walletCreditMinorUnits": "100000000000",
+      "walletDebitMinorUnits": "72016",
+      "ledgerWalletNetMinorUnits": "99999927984",
+      "walletMatchesLedger": true,
+      "fixtureFundingMatches": true,
+      "openReservationCount": "0",
+      "openReservationAmountMinorUnits": "0",
+      "pendingRequestCount": "0",
+      "spendableAfterOpenHoldsMinorUnits": "99999927984",
+      "unknownLedgerSourceCount": "0",
+      "otherCurrencyPresent": false
+    },
+    "interpretationLimits": [
+      "Final durable requests: 505 failed/released and 643 succeeded/settled, with 643 including the two original smoke requests",
+      "Final attempts: 505 not_sent/failed and 643 sent/succeeded; these are persisted states, not wire milestones",
+      "Open holds and pending request counts are zero in this bounded final snapshot; this does not infer settlement or refund from HTTP status alone",
+      "Ledger source projection recognizes wallet_funding, billing_settlement, wallet_refund and usage_correction, retains unknown values as failure, and checks other currencies",
+      "No request, attempt, tenant, account, transaction or reservation identifiers are projected"
+    ]
+  },
+  "metricsAndCleanup": {
+    "metricsSnapshots": [
+      {
+        "gatewayIndex": 1,
+        "httpStatus": 200
+      },
+      {
+        "gatewayIndex": 2,
+        "httpStatus": 200
+      },
+      {
+        "gatewayIndex": 3,
+        "httpStatus": 200
+      }
+    ],
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    },
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true,
+    "interrupted": false
+  },
+  "validationBoundary": {
+    "workerExecutedDatabaseBuildProviderOrBenchmark": false,
+    "artifactCreatedBySafeJsonProjectionOnly": true,
+    "rawPostgresLogsErrorBodiesCredentialsReadForArtifact": false,
+    "publicProjectionContainsIdentifiersOrRawMessages": false,
+    "productionFixOrPostFixAcceptanceClaim": false,
+    "fullR9OrFormalCiClaim": false
+  }
+}

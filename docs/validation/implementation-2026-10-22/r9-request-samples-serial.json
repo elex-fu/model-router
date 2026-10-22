@@ -1,0 +1,717 @@
+{
+  "schema": 1,
+  "scope": {
+    "runId": "dMPmPT",
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "localDiagnostic": true,
+    "serialProfile": true,
+    "protocol": "openai",
+    "nativeClientAndProviderProtocol": true,
+    "postgresPreparedStatements": "native",
+    "fullR9": false,
+    "providerAcceptance": false,
+    "formalCI": false,
+    "realProviderCalls": 0,
+    "builtinAcceptance": false,
+    "performanceThresholdsPassed": false
+  },
+  "inputs": {
+    "summary.json": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-dMPmPT/summary.json",
+      "sha256": "3e70bd11e10ba31a776de9136690ad982f08cd578b39f89e822aad3df5b62e0f",
+      "bytes": 906415,
+      "observedMode": "0600"
+    },
+    "serial-profile-current-3cli.json": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-dMPmPT/serial-profile-current-3cli.json",
+      "sha256": "cd1931222a7b7aacfd6086d2c7d5c7ee5ae98db2429378d585f613645080cd3e",
+      "bytes": 2090,
+      "observedMode": "0644"
+    },
+    "serial-profile-request-samples.json": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-dMPmPT/serial-profile-request-samples.json",
+      "sha256": "f16d3d9c36541621fee91c9d420da1bbd2961e5594bb52744d8e08a8d2f323d3",
+      "bytes": 162718,
+      "observedMode": "0600"
+    },
+    "serial-profile-request-states.json": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-dMPmPT/serial-profile-request-states.json",
+      "sha256": "243adb16fcd7cef9ca7e32ce53b800e6f1d2bbd3254a09c0b000952af808e978",
+      "bytes": 199372,
+      "observedMode": "0600"
+    },
+    "preparation-profile.json": {
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-dMPmPT/preparation-profile.json",
+      "sha256": "f7c37349dff519598238c3bae55874206bf05077600e7cfd5ee4a63473d1ac7b",
+      "bytes": 27509,
+      "observedMode": "0644"
+    }
+  },
+  "configuration": {
+    "protocol": "openai",
+    "requests": 100,
+    "streamSamples": 100,
+    "warmupInflight": 1,
+    "instanceCount": 3,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "noFail": false
+  },
+  "performance": {
+    "status": "threshold_failed",
+    "requestErrors": 0,
+    "latency": {
+      "direct": {
+        "n": 100,
+        "p50": 1.86,
+        "p90": 2.16,
+        "p99": 6,
+        "max": 6
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 68.96,
+        "p90": 107.94,
+        "p99": 118.58,
+        "max": 118.58
+      },
+      "p99OverheadMs": 112.58,
+      "thresholdMs": 30,
+      "passed": false
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 2.78,
+        "p90": 3.59,
+        "p99": 6.26,
+        "max": 6.26
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 65.73,
+        "p90": 74.29,
+        "p99": 90.16,
+        "max": 90.16
+      },
+      "p99OverheadMs": 83.9,
+      "thresholdMs": 10,
+      "gatewayErrors": 0,
+      "passed": false
+    }
+  },
+  "observation": {
+    "observationOk": true,
+    "sampleCap": 400,
+    "sampleCount": 400,
+    "complete": true,
+    "legCounts": {
+      "latency:direct": 100,
+      "latency:gateway": 100,
+      "ttfb:direct": 100,
+      "ttfb:gateway": 100
+    },
+    "gatewayUniqueValidRequestIds": 200,
+    "missingRequestIds": 0,
+    "invalidRequestIds": 0,
+    "duplicateRequestIds": 0,
+    "database": {
+      "queryAttempted": true,
+      "queryCompleted": true,
+      "role": "model_router_saas_migrator",
+      "readOnly": true,
+      "afterAllMeasuredLegsAndMetrics": true,
+      "beforeOwnedCleanup": true,
+      "rowCap": 200,
+      "sentinelLimit": 201,
+      "observedRows": 200,
+      "truncated": false,
+      "missingRows": 0,
+      "pendingRequests": 0,
+      "multipleAttemptRequests": 0,
+      "multipleEvidenceRequests": 0,
+      "allRowsTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "reconciliation_state": "resolved",
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "evidence_status": "claimed",
+        "count": 200,
+        "response_started": true,
+        "result_http_status": 200,
+        "ordinal": 1
+      }
+    },
+    "newInputArtifactCreationContract": {
+      "source": "Frozen reviewed harness implementation",
+      "flag": "wx",
+      "requestedMode": "0600",
+      "observedClientMode": "0600",
+      "observedStateMode": "0600",
+      "filesystemModeDoesNotIndependentlyProveExclusiveOpen": true
+    },
+    "selectedGatewayQuantilesOnly": [
+      {
+        "scenario": "latency",
+        "leg": "gateway",
+        "quantile": "p50",
+        "sortedIndex": 50,
+        "sampleIndex": 97,
+        "metricMs": 68.95587499999965,
+        "reportedMs": 68.96,
+        "actualGatewayIndex": 1,
+        "requestId": "baed3980-f54f-4a00-9267-123473fc7fae",
+        "markerRow": {
+          "request_id": "baed3980-f54f-4a00-9267-123473fc7fae",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "reconciliation_state": "resolved",
+          "request_created_at": "2026-10-22 04:57:14.839+08",
+          "request_updated_at": "2026-10-22 04:57:14.892+08",
+          "attempt_id": "942cca59-1bfb-4872-83b6-83878b55749b",
+          "ordinal": 1,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "result_http_status": 200,
+          "attempt_created_at": "2026-10-22 04:57:14.841+08",
+          "attempt_updated_at": "2026-10-22 04:57:14.891439+08",
+          "response_started_at": "2026-10-22 04:57:14.881401+08",
+          "evidence_status": "claimed",
+          "evidence_created_at": "2026-10-22 04:57:14.838687+08",
+          "evidence_claimed_at": "2026-10-22 04:57:14.868137+08"
+        }
+      },
+      {
+        "scenario": "latency",
+        "leg": "gateway",
+        "quantile": "p90",
+        "sortedIndex": 90,
+        "sampleIndex": 16,
+        "metricMs": 107.9364999999998,
+        "reportedMs": 107.94,
+        "actualGatewayIndex": 1,
+        "requestId": "de548600-8e36-457c-a6e7-a0c628c8bb50",
+        "markerRow": {
+          "request_id": "de548600-8e36-457c-a6e7-a0c628c8bb50",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "reconciliation_state": "resolved",
+          "request_created_at": "2026-10-22 04:57:09.252+08",
+          "request_updated_at": "2026-10-22 04:57:09.335+08",
+          "attempt_id": "362993bd-d669-45b5-9eb3-3a8d41dcecfb",
+          "ordinal": 1,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "result_http_status": 200,
+          "attempt_created_at": "2026-10-22 04:57:09.254+08",
+          "attempt_updated_at": "2026-10-22 04:57:09.334424+08",
+          "response_started_at": "2026-10-22 04:57:09.321846+08",
+          "evidence_status": "claimed",
+          "evidence_created_at": "2026-10-22 04:57:09.250169+08",
+          "evidence_claimed_at": "2026-10-22 04:57:09.289902+08"
+        }
+      },
+      {
+        "scenario": "latency",
+        "leg": "gateway",
+        "quantile": "p99",
+        "sortedIndex": 99,
+        "sampleIndex": 2,
+        "metricMs": 118.57612500000005,
+        "reportedMs": 118.58,
+        "actualGatewayIndex": 2,
+        "requestId": "cbcfdaf6-e9b4-4706-93aa-d0c93a250c61",
+        "markerRow": {
+          "request_id": "cbcfdaf6-e9b4-4706-93aa-d0c93a250c61",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "reconciliation_state": "resolved",
+          "request_created_at": "2026-10-22 04:57:07.894+08",
+          "request_updated_at": "2026-10-22 04:57:07.97+08",
+          "attempt_id": "5696cffb-042d-4ccb-909c-044cfaa06653",
+          "ordinal": 1,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "result_http_status": 200,
+          "attempt_created_at": "2026-10-22 04:57:07.897+08",
+          "attempt_updated_at": "2026-10-22 04:57:07.969065+08",
+          "response_started_at": "2026-10-22 04:57:07.960205+08",
+          "evidence_status": "claimed",
+          "evidence_created_at": "2026-10-22 04:57:07.893473+08",
+          "evidence_claimed_at": "2026-10-22 04:57:07.930563+08"
+        }
+      },
+      {
+        "scenario": "ttfb",
+        "leg": "gateway",
+        "quantile": "p50",
+        "sortedIndex": 50,
+        "sampleIndex": 25,
+        "metricMs": 65.73250000000007,
+        "reportedMs": 65.73,
+        "actualGatewayIndex": 2,
+        "requestId": "773383f8-88a3-41ba-80d4-8d6c3e62e3ab",
+        "markerRow": {
+          "request_id": "773383f8-88a3-41ba-80d4-8d6c3e62e3ab",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "reconciliation_state": "resolved",
+          "request_created_at": "2026-10-22 04:57:20.083+08",
+          "request_updated_at": "2026-10-22 04:57:20.136+08",
+          "attempt_id": "d9a75220-6501-4180-bb7f-0e93fb0c64db",
+          "ordinal": 1,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "result_http_status": 200,
+          "attempt_created_at": "2026-10-22 04:57:20.085+08",
+          "attempt_updated_at": "2026-10-22 04:57:20.135343+08",
+          "response_started_at": "2026-10-22 04:57:20.127713+08",
+          "evidence_status": "claimed",
+          "evidence_created_at": "2026-10-22 04:57:20.082643+08",
+          "evidence_claimed_at": "2026-10-22 04:57:20.114415+08"
+        }
+      },
+      {
+        "scenario": "ttfb",
+        "leg": "gateway",
+        "quantile": "p90",
+        "sortedIndex": 90,
+        "sampleIndex": 88,
+        "metricMs": 74.29433400000198,
+        "reportedMs": 74.29,
+        "actualGatewayIndex": 2,
+        "requestId": "a9b509d6-cfdd-4d32-8130-c5944255b7aa",
+        "markerRow": {
+          "request_id": "a9b509d6-cfdd-4d32-8130-c5944255b7aa",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "reconciliation_state": "resolved",
+          "request_created_at": "2026-10-22 04:57:24.332+08",
+          "request_updated_at": "2026-10-22 04:57:24.394+08",
+          "attempt_id": "0f1a363d-98c4-4ce8-9a45-bac6b833733b",
+          "ordinal": 1,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "result_http_status": 200,
+          "attempt_created_at": "2026-10-22 04:57:24.334+08",
+          "attempt_updated_at": "2026-10-22 04:57:24.392464+08",
+          "response_started_at": "2026-10-22 04:57:24.383725+08",
+          "evidence_status": "claimed",
+          "evidence_created_at": "2026-10-22 04:57:24.331458+08",
+          "evidence_claimed_at": "2026-10-22 04:57:24.368528+08"
+        }
+      },
+      {
+        "scenario": "ttfb",
+        "leg": "gateway",
+        "quantile": "p99",
+        "sortedIndex": 99,
+        "sampleIndex": 20,
+        "metricMs": 90.1597499999989,
+        "reportedMs": 90.16,
+        "actualGatewayIndex": 0,
+        "requestId": "aaa47292-43cd-4147-b640-e9a83268a7db",
+        "markerRow": {
+          "request_id": "aaa47292-43cd-4147-b640-e9a83268a7db",
+          "execution_state": "succeeded",
+          "financial_status": "settled",
+          "reconciliation_state": "resolved",
+          "request_created_at": "2026-10-22 04:57:19.764+08",
+          "request_updated_at": "2026-10-22 04:57:19.817+08",
+          "attempt_id": "3b9d00a9-7419-4bf5-a15e-d0a112f4d313",
+          "ordinal": 1,
+          "dispatch_state": "sent",
+          "result_state": "succeeded",
+          "response_started": true,
+          "result_http_status": 200,
+          "attempt_created_at": "2026-10-22 04:57:19.766+08",
+          "attempt_updated_at": "2026-10-22 04:57:19.816231+08",
+          "response_started_at": "2026-10-22 04:57:19.808831+08",
+          "evidence_status": "claimed",
+          "evidence_created_at": "2026-10-22 04:57:19.763084+08",
+          "evidence_claimed_at": "2026-10-22 04:57:19.795582+08"
+        }
+      }
+    ]
+  },
+  "measurementSemantics": {
+    "quantile": "sorted[min(n-1, floor(n*p))], zero-based; stable numeric sort; at n=100 p99 selects index 99 and equals max",
+    "rounding": "Existing report rounds percentile values to two decimal places; selected metricMs retains the original duration",
+    "comparisonSets": "Direct and gateway samples are independent sets, not paired requests; overhead is gateway p99 minus independent direct p99",
+    "latency": "Original performance.now start before fetch to response headers; existing body text drain then HTTP-200 inclusion rule is preserved",
+    "ttfb": "Original performance.now start before request to first body reader.read completion; metric ends before await reader.cancel; original nonempty-chunk/success inclusion follows cancellation",
+    "observation": "Client sample/header collection occurs after existing body drain or stream cancellation; no warmup or smoke samples are copied",
+    "wallClockNotes": "startedAt is client wall clock before original metric start; recordedAt is after drain/cancel and is not a wire-completion timestamp",
+    "enabledObservationCost": "Diagnostic mode adds work around original timing windows and can affect scheduling/allocation. This run does not prove equivalence to observation-disabled runs or causal benefit relative to qZYFoG"
+  },
+  "timestampSemantics": {
+    "request_created_at": {
+      "clock": "Application wall clock, JavaScript Date millisecond precision",
+      "write": "admitPreparedRequest samples normalizeNow(this.now) before request INSERT; INSERT explicitly writes created_at and initial updated_at. Schema DEFAULT now() is not used on this path.",
+      "source": [
+        "src/saas/metering/service.ts:2024",
+        "src/saas/metering/service.ts:1690",
+        "src/saas/metering/service.ts:1637"
+      ]
+    },
+    "attempt_created_at": {
+      "clock": "Application wall clock, separately sampled JavaScript Date",
+      "write": "insertAttempt samples after preceding request/binding/ordinal checks and explicitly writes created_at and initial updated_at; not the PG schema default.",
+      "source": [
+        "src/saas/metering/service.ts:1820",
+        "src/saas/metering/service.ts:1843"
+      ]
+    },
+    "evidence_created_at": {
+      "clock": "PostgreSQL now(), equivalent to transaction_timestamp(), fixed at transaction start",
+      "write": "Evidence INSERT omits created_at and uses DEFAULT now(). Admission and evidence registration share the caller-owned preparation transaction; this timestamp can precede request_created_at even though the evidence INSERT occurs later.",
+      "source": [
+        "src/saas/db/migrations/024_prepared_request_evidence.ts:111",
+        "src/saas/gateway/prepared-request-evidence-service.ts:1021",
+        "src/saas/gateway/prepared-request-evidence-service.ts:1836",
+        "src/saas/gateway/request-preparation-service.ts:2530",
+        "src/saas/gateway/request-preparation-service.ts:2629"
+      ]
+    },
+    "evidence_claimed_at": {
+      "clock": "PostgreSQL clock_timestamp() during the evidence claim UPDATE",
+      "write": "After claim locks, authority/window checks and attempt-claim CAS; audit and transaction COMMIT still follow. Not claim-function return or commit time.",
+      "source": [
+        "src/saas/gateway/prepared-request-evidence-service.ts:1999"
+      ]
+    },
+    "response_started_at": {
+      "clock": "First response_started=true state transition: GREATEST(previous attempt.updated_at, one PG clock_timestamp() observation); then immutable",
+      "write": "Normal dispatch awaits full response delivery before persisting sent state. First client.start only updates delivery memory. Errors/cancellation may persist the marker later through uncertainty handling. This is a state marker, not upstream/client headers, first byte, TTFB or a socket timestamp.",
+      "source": [
+        "src/saas/metering/service.ts:2326",
+        "src/saas/gateway/prepared-evidence-dispatch-service.ts:731",
+        "src/saas/gateway/prepared-evidence-dispatch-service.ts:949",
+        "src/saas/gateway/prepared-evidence-dispatch-service.ts:1045"
+      ]
+    },
+    "attempt_updated_at": {
+      "clock": "Initially application Date; claim and later attempt transitions use PG clock_timestamp() clamped to the previous row value",
+      "write": "Overwritten by the latest claim/attempt-state transition; normal success later writes succeeded. Not response completion or COMMIT time.",
+      "source": [
+        "src/saas/gateway/prepared-request-evidence-service.ts:1980",
+        "src/saas/metering/service.ts:2333",
+        "src/saas/metering/conditional-settlement-port.ts:1260"
+      ]
+    },
+    "request_updated_at": {
+      "clock": "Application wall clock, normalizeNow(this.now), sampled before each request/financial UPDATE",
+      "write": "Latest transition overwrites it. Normal platform success performs reconciliation/request-success transitions then a financial transition; later SQL, webhook work and COMMIT are not represented.",
+      "source": [
+        "src/saas/metering/service.ts:2564",
+        "src/saas/metering/service.ts:2611",
+        "src/saas/metering/conditional-settlement-port.ts:1274",
+        "src/saas/metering/conditional-settlement-port.ts:1295"
+      ]
+    }
+  },
+  "attributionLimits": [
+    "No mixed application/PG wall-clock differences are calculated in this summary; negative request_created_at to evidence_created_at gaps are not phase durations",
+    "evidence_created_at to evidence_claimed_at describes preparation-transaction-start to claim-UPDATE wall-clock marker spacing, not one isolated phase",
+    "evidence_claimed_at to response_started_at describes claim-state to response-state persistence spacing, subject to clamping; it spans claim tail/commit, later reads/CAS, credential/transport, full response delivery and state persistence",
+    "response_started_at to request_updated_at mixes clocks and a latest-overwritten state marker; it is not complete settlement, COMMIT or client completion duration",
+    "No field records durable COMMIT time; application Date has millisecond precision while raw PG text can retain microseconds, which Date.parse discards",
+    "Ingress/authentication/authority/scheduler/payload work before request creation is not covered by these marker rows",
+    "Client-minus-DB residual cannot be attributed to network, CPU or DB waiting; aggregate event-loop/GC and stage metrics do not correlate individual requests",
+    "Selected rows provide correlation only; aggregate stage means are not subtracted from a client p99 and do not explain the selected slow request"
+  ],
+  "aggregateProfile": {
+    "source": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-dMPmPT/preparation-profile.json",
+    "observedDispatches": 268,
+    "scope": "Three gateway metrics snapshots; includes measured gateway requests, warmups and protocol smoke; post-response settlement may overlap the next request",
+    "dispatchMeanMs": 38.936567164179095,
+    "preparationStages": [
+      {
+        "phase": "preparation",
+        "operation": "preparation-total",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 48.53360443656715
+      },
+      {
+        "phase": "admission",
+        "operation": "metering-guard-wallet",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 14.77183769029847
+      },
+      {
+        "phase": "preparation",
+        "operation": "scheduler-select",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 11.136388354477589
+      },
+      {
+        "phase": "authority",
+        "operation": "resolve",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 9.851396320895537
+      },
+      {
+        "phase": "admission-guard",
+        "operation": "revalidate",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 7.855074764925357
+      },
+      {
+        "phase": "preparation",
+        "operation": "evidence-register",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 4.790780190298496
+      },
+      {
+        "phase": "admission",
+        "operation": "capacity",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 2.062172093283573
+      },
+      {
+        "phase": "preparation",
+        "operation": "affinity-bind",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 1.56616217164182
+      }
+    ],
+    "dispatchStages": [
+      {
+        "phase": "dispatch",
+        "operation": "settlement",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 10.046902623134391
+      },
+      {
+        "phase": "dispatch",
+        "operation": "transport-send",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 9.870588014925447
+      },
+      {
+        "phase": "dispatch",
+        "operation": "attempt-transition",
+        "outcome": "ok",
+        "count": 536,
+        "meanMs": 2.7151051847014545
+      },
+      {
+        "phase": "dispatch",
+        "operation": "claim",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 5.332915589552303
+      },
+      {
+        "phase": "dispatch",
+        "operation": "preflight",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 3.5218028544776376
+      },
+      {
+        "phase": "dispatch",
+        "operation": "lease-acquire",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 1.3623375447761792
+      },
+      {
+        "phase": "dispatch",
+        "operation": "runtime-health",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 0.8520223843282793
+      },
+      {
+        "phase": "dispatch",
+        "operation": "attempt-read",
+        "outcome": "ok",
+        "count": 536,
+        "meanMs": 0.4091830597014509
+      },
+      {
+        "phase": "dispatch",
+        "operation": "lease-release",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 0.8075718097014386
+      },
+      {
+        "phase": "dispatch",
+        "operation": "response-delivery",
+        "outcome": "ok",
+        "count": 268,
+        "meanMs": 0.6407325634328439
+      }
+    ],
+    "transport": {
+      "sendCount": 268,
+      "observedFixedSubstages": [
+        {
+          "phase": "dispatch",
+          "operation": "transport-credential-prepare",
+          "outcome": "ok",
+          "count": 268,
+          "meanMs": 5.8203022499999575,
+          "meanPerTransportSendMs": 5.8203022499999575
+        },
+        {
+          "phase": "dispatch",
+          "operation": "transport-fetch-headers",
+          "outcome": "ok",
+          "count": 268,
+          "meanMs": 3.2750999440298854,
+          "meanPerTransportSendMs": 3.2750999440298854
+        },
+        {
+          "phase": "dispatch",
+          "operation": "transport-profile-resolve",
+          "outcome": "ok",
+          "count": 268,
+          "meanMs": 0.36694795149264536,
+          "meanPerTransportSendMs": 0.36694795149264536
+        },
+        {
+          "phase": "dispatch",
+          "operation": "transport-connector-create",
+          "outcome": "ok",
+          "count": 268,
+          "meanMs": 0.02247298880596655,
+          "meanPerTransportSendMs": 0.02247298880596655
+        },
+        {
+          "phase": "dispatch",
+          "operation": "transport-fixed-headers",
+          "outcome": "ok",
+          "count": 268,
+          "meanMs": 0.008206940298441453,
+          "meanPerTransportSendMs": 0.008206940298441453
+        }
+      ],
+      "unobservedMeanPerSendMs": 0.3775579402985515
+    },
+    "aggregationRules": [
+      "Preparation stages are inclusive/nested and must not be summed",
+      "Stage meanMs is per stage event; attempt-read/attempt-transition each have 536 events rather than 268",
+      "Transport substages are nested inside transport-send and are excluded from top-level dispatch sums",
+      "Unobserved transport mean is an accounting residual, not network or TLS attribution",
+      "These are aggregate means including warmup/smoke, not selected-request p99 phase measurements"
+    ]
+  },
+  "artifactIntegrity": {
+    "runBeforeAfter": {
+      "source": {
+        "beforeFiles": 749,
+        "afterFiles": 749,
+        "beforeAfterChangeCount": 0,
+        "beforeAfterEqual": true,
+        "snapshotMapSha256": "22819eb45e9a10dbf5f1e42a4b3c03aee5c0d2618f0353efc0bdfe7534dee39c"
+      },
+      "dist": {
+        "beforeFiles": 2992,
+        "afterFiles": 2992,
+        "beforeAfterChangeCount": 0,
+        "beforeAfterEqual": true,
+        "snapshotMapSha256": "6cafd672adbfcb11b794c6bacf5dffca9271b879cc214c58a621d9575de10cdf"
+      },
+      "harness": {
+        "beforeFiles": 5,
+        "afterFiles": 5,
+        "beforeAfterChangeCount": 0,
+        "beforeAfterEqual": true,
+        "snapshotMapSha256": "43134df099501c525641ae6f327428a05ccb4ca633600c4ba1fab74c63380606"
+      }
+    },
+    "snapshotMapHashEncoding": "SHA256 of JSON with sorted keys and compact separators",
+    "metrics": [
+      {
+        "instance": 1,
+        "httpStatus": 200
+      },
+      {
+        "instance": 2,
+        "httpStatus": 200
+      },
+      {
+        "instance": 3,
+        "httpStatus": 200
+      }
+    ],
+    "cleanup": {
+      "processesStopped": true,
+      "postgresStopped": true,
+      "runtimeRemoved": true
+    },
+    "atArtifactCreation": {
+      "checkedAt": "2026-10-21T21:07:58.609386+00:00",
+      "scope": "Current full src tree compared to saved sourceAfter; not a new runtime acceptance run",
+      "referenceSourceFiles": 749,
+      "currentSourceFiles": 749,
+      "changeCount": 0,
+      "changedPaths": [],
+      "addedPaths": [],
+      "removedPaths": [],
+      "currentSourceMapSha256": "22819eb45e9a10dbf5f1e42a4b3c03aee5c0d2618f0353efc0bdfe7534dee39c"
+    },
+    "frozenFocusedHarnessAndTest": [
+      {
+        "path": "scripts/ops/bench-gateway.mjs",
+        "sha256": "9f73d64bfee88916a63748f943a03898d25aa836caba7fd95a5ccc02bbd6efff"
+      },
+      {
+        "path": "scripts/ops/run-current-r9.mjs",
+        "sha256": "96bbfc5d3da025f6e13cb1202e26d39bf1c750124f98d16191c0b6ee05767ae4"
+      },
+      {
+        "path": "tests/ops/r9-request-samples.test.ts",
+        "sha256": "6d2b4a2bab4a0525ce74fff741e5ea104882892dee8ece9b61360f8990d76e0e"
+      }
+    ]
+  },
+  "workerValidation": {
+    "scope": "Earlier focused worker validation in this session; not the aggregate full regression suite or formal CI",
+    "executedDuringArtifactCreation": false,
+    "focusedTest": {
+      "path": "tests/ops/r9-request-samples.test.ts",
+      "tests": 13,
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "command": "rtk proxy node --import tsx --test tests/ops/r9-request-samples.test.ts"
+    },
+    "strictTypeScript": "passed",
+    "biome": "passed",
+    "syntax": [
+      {
+        "path": "scripts/ops/bench-gateway.mjs",
+        "status": "passed"
+      },
+      {
+        "path": "scripts/ops/run-current-r9.mjs",
+        "status": "passed"
+      }
+    ],
+    "noDatabaseBuildProviderOrBenchmarkRunDuringArtifactCreation": true
+  },
+  "outputCreation": {
+    "policy": "new file only, exclusive create equivalent to wx",
+    "requestedMode": "0600"
+  }
+}

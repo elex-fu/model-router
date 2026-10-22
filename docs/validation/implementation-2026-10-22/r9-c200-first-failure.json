@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "classification": "local-current-build-c200-first-failure",
+  "formalRequiredCiEvidence": false,
+  "releaseDecision": "NO-GO",
+  "recordedAt": "2026-10-21T21:17:35.237Z",
+  "evidenceRun": "model-router-current-r9-J7tbUH",
+  "startedAt": "2026-10-21T21:10:08.613Z",
+  "finishedAt": "2026-10-21T21:13:06.090Z",
+  "runtime": {
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "postgresPreparedStatements": "native",
+    "realProviderCalls": 0,
+    "builtinProviderAcceptance": false,
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    }
+  },
+  "completion": {
+    "fullR9Completed": false,
+    "operatorStopped": true,
+    "interrupted": true,
+    "reason": "Stopped after the first c200 baseline produced 5xx and PostgreSQL deadlocks; later three-CLI driver was terminated before its report completed.",
+    "remaining": [
+      "three-CLI concurrency and scaling completion",
+      "Anthropic workload",
+      "ten-minute closed-loop SSE stability"
+    ],
+    "supervisorFirstFaultStage": "openai-r9-3cli",
+    "supervisorFirstFaultIsStopConsequence": true
+  },
+  "baseline": {
+    "protocol": "openai",
+    "instanceCount": 1,
+    "inflight": 200,
+    "requestedSeconds": 120,
+    "observedSeconds": 121.6,
+    "statuses": {
+      "200": 899,
+      "429": 5200,
+      "502": 365,
+      "503": 4600
+    },
+    "totalResponses": 11064,
+    "successfulResponses": 899,
+    "serverErrorResponses": 4965,
+    "non200Responses": 10165,
+    "throughputRps": 7.39,
+    "latencyOfSuccessfulResponsesMs": {
+      "n": 899,
+      "p50": 2731.57,
+      "p90": 5326.02,
+      "p99": 13842.88,
+      "max": 15999.04
+    }
+  },
+  "gateGap": {
+    "driverExitCode": 0,
+    "driverViolationCount": 0,
+    "supervisorMarkedBaselineOk": true,
+    "acceptableReleaseEvidence": false,
+    "explanation": "The existing scaling-only driver checks throughput comparison when a baseline is supplied; it did not constrain this baseline failure rate. Nonzero successful traffic alone is insufficient."
+  },
+  "postgres": {
+    "observedAcrossEntireAttempt": {
+      "deadlockDetectedErrors": 104,
+      "totalErrorLines": 104,
+      "permissionDeniedLines": 0,
+      "statementTimeoutLines": 0
+    },
+    "firstDeadlockServerLogTime": "2026-10-22 05:10:28.105 CST",
+    "firstCycle": {
+      "walletRelation": "saas_wallets",
+      "ledgerRelation": "saas_ledger_entries",
+      "statementClasses": [
+        "wallet SELECT FOR UPDATE",
+        "exclusive transaction advisory lock",
+        "ledger INSERT with wallet foreign key"
+      ],
+      "reportedWaits": [
+        "wallet tuple AccessExclusiveLock",
+        "transaction ShareLock",
+        "advisory ExclusiveLock",
+        "wallet tuple AccessShareLock"
+      ],
+      "rootCauseStatus": "under-source-and-deterministic-PG-investigation",
+      "candidatePath": "pre-dispatch compensation wallet-row lock followed by wallet advisory versus ledger advisory followed by wallet FK row access"
+    },
+    "notAnHttpErrorMapping": "Counts of database deadlocks and HTTP errors are not paired; failed-request financial states were not captured before the controlled cleanup."
+  },
+  "sourceVerification": {
+    "source": {
+      "filesChecked": 749,
+      "beforeAfterAndCurrentMatchAtArtifactCreation": true,
+      "hashSetSha256": "6832be06a289b82506595828c9ce8ca1ebc274457ac6397b7213c151bb9218ea",
+      "changes": []
+    },
+    "dist": {
+      "filesChecked": 2992,
+      "beforeAfterAndCurrentMatchAtArtifactCreation": true,
+      "hashSetSha256": "970c800fce0bb45deb67bb635fb27dbb12ccd9b9c9a67bcc830deb29dfb4f0b4",
+      "changes": []
+    },
+    "harness": {
+      "filesChecked": 5,
+      "beforeAfterAndCurrentMatchAtArtifactCreation": true,
+      "hashSetSha256": "8cb3d4391933476985bc5d2c0eab08ec1fa2afd4f9aaab55ed6cf23140b4c5a4",
+      "changes": []
+    }
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true,
+    "ownedSupervisorPid": 91470,
+    "ownershipVerifiedBeforeSignal": {
+      "command": "node scripts/ops/run-current-r9.mjs --pg-bin /opt/homebrew/opt/postgresql@18/bin --no-build",
+      "cwd": "/Users/lex/play/model-router"
+    },
+    "signal": "SIGINT",
+    "laterDriverSignal": "SIGTERM"
+  },
+  "inputs": [
+    {
+      "file": "summary.json",
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-J7tbUH/summary.json",
+      "bytes": 905543,
+      "sha256": "d63e47bef98f9c7b70954ac59a1f22427320217c85509fcfd85e00714ea819fa"
+    },
+    {
+      "file": "openai-scaling-1cli.json",
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-J7tbUH/openai-scaling-1cli.json",
+      "bytes": 1472,
+      "sha256": "d23f46758a0be19d4cee9cb73690bf476601647b2a805671c90594128e72644c"
+    },
+    {
+      "file": "openai-scaling-1cli.log",
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-J7tbUH/openai-scaling-1cli.log",
+      "bytes": 438,
+      "sha256": "b70e22981b5136021c3360a58d59ddef86bd16d1a4b1e41b2729064fa4b03595"
+    },
+    {
+      "file": "openai-r9-3cli.log",
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-J7tbUH/openai-r9-3cli.log",
+      "bytes": 669,
+      "sha256": "59c436339579af9e7dffd626ea82e7af60c7dfd3f170b8a5be7b601a1c9d0584"
+    },
+    {
+      "file": "postgres.log",
+      "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-J7tbUH/postgres.log",
+      "bytes": 134647,
+      "sha256": "199a36a0852783de902e80627ae2b594e7e7f86db8bb601ade52f490bceb9800"
+    }
+  ],
+  "limits": [
+    "The partial full-workload attempt is not a full R9 result or stability pass.",
+    "The c200 baseline used a local fixed mock target, local signed rights, fixture prices and pilot software KMS; there were no real provider calls.",
+    "Successful-response latency excludes rejected and failed responses, whose counts are retained explicitly.",
+    "No assertion is made that all 429, 502 or 503 responses have the same cause, or that their holds and usage states can be reconstructed after database removal.",
+    "No thresholds, retries, timeouts, grants, wallet rules or source code were changed to obtain this first failure.",
+    "Production lock-order repair and a deterministic PostgreSQL regression are pending; no causal fix or rerun claim is made."
+  ],
+  "passed": false
+}

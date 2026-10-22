@@ -1,0 +1,555 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T09:41:32.761Z",
+  "status": "wallet-summary-batched-offline-PG15-PG18-regression-and-build-passed",
+  "currentFiles": {
+    "src/saas/billing/service.ts": {
+      "bytes": 61701,
+      "sha256": "4f982209db17bc7101e3e4db47cb1f6b6343a83ba3171d6487d8cc8258f688fb"
+    },
+    "tests/saas/billing/fake-sql.ts": {
+      "bytes": 14571,
+      "sha256": "a70baf021c7e530d240a800b1dea30d7cd1ec4d79c51e33ac02b5b3671ed579a"
+    },
+    "tests/saas/billing/billing.test.ts": {
+      "bytes": 34221,
+      "sha256": "bb17373e0a81a55a5a49a83611ff07cdf7635b8dcbbb6a051661ed509d43fcd4"
+    },
+    "tests/saas/billing/customer-query.test.ts": {
+      "bytes": 15256,
+      "sha256": "6418b7126644d836f3d63bae9028065c9040f2dfa0dff77caed5aa13f79bed36"
+    }
+  },
+  "implementation": {
+    "productionFile": "src/saas/billing/service.ts",
+    "method": "walletSummary",
+    "productionHunks": 1,
+    "allOtherServiceBytesPreserved": true,
+    "sourceReferences": {
+      "summary": {
+        "path": "src/saas/billing/service.ts",
+        "line": 1047
+      },
+      "reserveBefore": {
+        "path": "src/saas/billing/service.ts",
+        "line": 362
+      },
+      "reserveAfter": {
+        "path": "src/saas/billing/service.ts",
+        "line": 381
+      },
+      "fence": {
+        "path": "src/saas/billing/service.ts",
+        "line": 1015
+      },
+      "errors": {
+        "path": "src/saas/billing/service.ts",
+        "line": 853
+      },
+      "unfencedRead": {
+        "path": "src/saas/billing/service.ts",
+        "line": 807
+      },
+      "tests": {
+        "path": "tests/saas/billing/billing.test.ts",
+        "line": 596
+      }
+    },
+    "originalSha256": "7926acf60ac37b68c1c2fb07233808a1b2b33dcea870ba3984786f1c7609ed3c",
+    "currentSha256": "4f982209db17bc7101e3e4db47cb1f6b6343a83ba3171d6487d8cc8258f688fb",
+    "currentServiceEqualsReviewedCandidate": true,
+    "sql": "Two independent scalar COALESCE(SUM(amount_minor_units),0)::text subqueries in one SELECT; no join and no multiplication of hold/refund rows.",
+    "preservedRules": [
+      "Hold sum retains tenant/currency and exactly states reserved/reconciliation_pending; no expiry/TTL predicate.",
+      "Refund sum retains tenant/currency, strict excludeRefundOrderId===undefined branching and target-only refund_order_id<>$3 exclusion with original bound values.",
+      "Original BigInt parser, per-total default zero, combined-totals-versus-posted guard and exact subtraction remain.",
+      "Exclusive wallet advisory fence remains before wallet row/freeze reads. Caller transaction ownership, reservation INSERT/result re-read, all writers and safe error wrapper remain outside the changed method and byte-preserved."
+    ],
+    "sqlVariants": [
+      {
+        "excludeRefundOrder": false,
+        "normalizedSqlSha256": "9e403a709405bc67ea703414488dfc5b51d09996b7c03c86763f7499fd1e98e1",
+        "originalScalarSemanticsPreserved": true,
+        "parameters": [
+          "tenantId",
+          "currency"
+        ]
+      },
+      {
+        "excludeRefundOrder": true,
+        "normalizedSqlSha256": "94bc39bed5dbb758c50a0658907a49cb4765c6ab402895b176eeadc4bdd6f428",
+        "originalScalarSemanticsPreserved": true,
+        "parameters": [
+          "tenantId",
+          "currency",
+          "excludeRefundOrderId"
+        ]
+      }
+    ],
+    "aggregateQueryCount": {
+      "perSummary": {
+        "before": 2,
+        "after": 1
+      },
+      "freshReserve": {
+        "before": 4,
+        "after": 2
+      }
+    },
+    "observationPoints": "Funds check still reads before reservation INSERT; result() still reads again after INSERT. Post-insert totals are not inferred from the first observation.",
+    "snapshots": "Both aggregate fields now share one statement snapshot. Unfenced getWallet still reads the wallet row and later spending-freeze separately, so its complete result is not atomic.",
+    "errors": "Existing SaasBillingError object identity and safe wrapping of unknown errors remain. Appended offline cases inject both kinds at both reserve observation points and assert rollback/no later queries.",
+    "performanceBoundary": "SQL-call reduction is established; latency, TTFB, throughput and R9 benefit are not established here."
+  },
+  "focusedOffline": {
+    "firstRed": {
+      "sourceState": "old production/fake/customer mock; only appended new billing test cases applied",
+      "exitCode": 1,
+      "counts": {
+        "tests": 37,
+        "suites": 0,
+        "pass": 30,
+        "fail": 7,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "log": {
+        "name": "first-red.log",
+        "bytes": 10394,
+        "sha256": "55205ce597533d0640b1d78b9d4d6a1d1eb6ca91d58a7d21786f4330959e3a14"
+      },
+      "failedNames": [
+        "wallet summary combines both exact sums at the original reserve observation points",
+        "combined wallet sums exclude only the fulfilled refund from the post-debit observation",
+        "billing error at summary 1",
+        "storage error at summary 1",
+        "billing error at summary 2",
+        "storage error at summary 2",
+        "combined wallet sum failures preserve safe billing errors and roll back either observation point"
+      ],
+      "boundary": "Seven native failures comprise three top-level failures plus four children; original service/fake/customer mocks were unchanged."
+    },
+    "final": {
+      "exitCode": 0,
+      "counts": {
+        "tests": 37,
+        "suites": 0,
+        "pass": 37,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "log": {
+        "name": "focused-formatted.log",
+        "bytes": 8004,
+        "sha256": "928f8edbaccd093388c83cec9cb53383be46cd321f3a326edff31dc5324d7a37"
+      }
+    },
+    "sourceTypes": {
+      "exitCode": 0,
+      "log": {
+        "name": "source-types.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "formatting": {
+      "firstExitCode": 1,
+      "firstLog": {
+        "name": "scoped-biome.log",
+        "bytes": 8075,
+        "sha256": "e768cb1785f42e7349db5c36b203dba704875cb3435659a46577a5fdb4384b5a"
+      },
+      "finalExitCode": 0,
+      "finalLog": {
+        "name": "scoped-biome-formatted.log",
+        "bytes": 43,
+        "sha256": "7316929f3be23fdf35141f3bd29419f8db9163cae05fc31bed9d4bd33ea6b885"
+      },
+      "cause": "Initial formatting failure in appended billing tests; final formatted file is pinned by the broad regression capture."
+    },
+    "appendedTopLevelTests": [
+      "wallet summary combines both exact sums at the original reserve observation points",
+      "combined wallet sums retain tenant, currency, and active reservation state filters",
+      "combined wallet sums preserve zero values and integers beyond the JavaScript safe range",
+      "combined wallet sums exclude only the fulfilled refund from the post-debit observation",
+      "combined wallet sum failures preserve safe billing errors and roll back either observation point"
+    ],
+    "originalBillingBytesPreservedAsExactPrefix": true,
+    "versionBoundary": "Three applied files equal the private candidate. Final billing.test.ts was formatted and is pinned by implementation final hashes and the completed broad regression scope."
+  },
+  "realPostgres": [
+    {
+      "kind": "FIN-01",
+      "capture": "model-router-wallet-summary-financial-pg18-20261022-0923",
+      "version": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "backend": "disposable-initdb-cluster",
+      "startedAt": "2026-10-22T09:22:14.037Z",
+      "finishedAt": "2026-10-22T09:22:17.867Z",
+      "root": "tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts",
+      "counts": {
+        "tests": 6,
+        "suites": 0,
+        "pass": 6,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "summary": {
+        "name": "summary.json",
+        "bytes": 163187,
+        "sha256": "047f4744df05cb24522028ab99917e8f0bb5a25ca338444277e6516779674478"
+      },
+      "tap": {
+        "name": "custom-test.log",
+        "bytes": 1619,
+        "sha256": "ce31e16da757ad81453a122c41756de10a5717b436735cb73fd443bd54529675"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "files": 682,
+      "beforeAfterCurrentMapSha256": "425df9b9782546da191b1375a0fbf1ec1072ec21047fadc5ba1195ef5a9edeed",
+      "sourceDifferences": 0,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "currentClusterDirectoryAbsent": true,
+        "savedContainerCleanupPassed": null
+      }
+    },
+    {
+      "kind": "FIN-01",
+      "capture": "model-router-wallet-summary-financial-pg15-20261022-0924",
+      "version": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "backend": "disposable-docker-container",
+      "startedAt": "2026-10-22T09:22:54.094Z",
+      "finishedAt": "2026-10-22T09:23:00.437Z",
+      "root": "tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts",
+      "counts": {
+        "tests": 6,
+        "suites": 0,
+        "pass": 6,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "summary": {
+        "name": "summary.json",
+        "bytes": 164561,
+        "sha256": "872808bd2a5ba151216b26e707ff5010e2b5492a71e1463e4bfbd3ca2ca95e48"
+      },
+      "tap": {
+        "name": "custom-test.log",
+        "bytes": 1621,
+        "sha256": "f77e8bd4578ed0b5d64e6157395e97d7d981d32b25459bfc880536bc1ccc0c8d"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "files": 682,
+      "beforeAfterCurrentMapSha256": "425df9b9782546da191b1375a0fbf1ec1072ec21047fadc5ba1195ef5a9edeed",
+      "sourceDifferences": 0,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "currentClusterDirectoryAbsent": true,
+        "savedContainerCleanupPassed": true
+      }
+    },
+    {
+      "kind": "commercial",
+      "capture": "model-router-wallet-summary-commercial-pg18-20261022-0927",
+      "version": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "backend": "disposable-initdb-cluster",
+      "startedAt": "2026-10-22T09:26:43.785Z",
+      "finishedAt": "2026-10-22T09:26:54.102Z",
+      "root": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "summary": {
+        "name": "summary.json",
+        "bytes": 164009,
+        "sha256": "7bd7717dacaa6e1b8315d47955c46833405389db2e39ee965eea738ce6602fd8"
+      },
+      "tap": {
+        "name": "commercial-test.log",
+        "bytes": 19782,
+        "sha256": "2300f9764bf694beb341b469d3943dea6b48aff67ea7ef0f34544ca9eede651a"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "files": 685,
+      "beforeAfterCurrentMapSha256": "ba983666543d6d670585a8087d13aed085ae49b9b459bb2ada324a2ade5d0275",
+      "sourceDifferences": 0,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "currentClusterDirectoryAbsent": true,
+        "savedContainerCleanupPassed": null
+      }
+    },
+    {
+      "kind": "commercial",
+      "capture": "model-router-wallet-summary-commercial-pg15-20261022-0928",
+      "version": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "backend": "disposable-docker-container",
+      "startedAt": "2026-10-22T09:27:29.276Z",
+      "finishedAt": "2026-10-22T09:27:52.058Z",
+      "root": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "summary": {
+        "name": "summary.json",
+        "bytes": 165395,
+        "sha256": "c956bdb2819da996640a6ef094272a1979bd5274cb80a68e7cb19c688c6a1520"
+      },
+      "tap": {
+        "name": "commercial-test.log",
+        "bytes": 20073,
+        "sha256": "b76992587a1340a8426808eb8c0c5606e34277a43e64eceb3edd37030d0a3b28"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "files": 685,
+      "beforeAfterCurrentMapSha256": "ba983666543d6d670585a8087d13aed085ae49b9b459bb2ada324a2ade5d0275",
+      "sourceDifferences": 0,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "currentClusterDirectoryAbsent": true,
+        "savedContainerCleanupPassed": true
+      }
+    }
+  ],
+  "postgresScope": {
+    "FIN01": "Existing restricted-role root, one parent and five children: concurrent spend exclusion, unresolved refund freeze, reserve/settlement replay, caller rollback and expired uncertain hold retention.",
+    "commercial": "Existing managed control-plane/gateway HTTP E2E, 27 native tests per version against a pinned local HTTPS fixture; not a live external-provider/Kimi result.",
+    "unchangedRoots": [
+      "tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts",
+      "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts"
+    ],
+    "cleanup": "All saved stages exit zero; runner records stopped/removed clusters and successful PG15 container cleanup. Local cluster directories are currently absent. No PID/process scan or live resource operation was performed for this projection."
+  },
+  "broadRegression": {
+    "capture": "model-router-regression-wallet-summary-s01s2jmf",
+    "summary": {
+      "name": "summary.json",
+      "bytes": 27316,
+      "sha256": "2310a3fb016a49a4ac5422c3299e2b6abc6a52ae08a9222992166bfa397d8a25"
+    },
+    "sourceScope": "All tracked and nonignored src/tests/scripts/deploy/workflow code plus selected root config; docs/dist/ignoredlocal excluded",
+    "files": 1701,
+    "beforeMapFileSha256": "d34acc8d1a88f53916f09113392884b719c0b587a4e6e48357127167547eb982",
+    "afterMapFileSha256": "d34acc8d1a88f53916f09113392884b719c0b587a4e6e48357127167547eb982",
+    "beforeAfterCurrentMapSha256": "c66ed6a444695161e7f447f168060ca09608dfdf6f1ddafdb7a79f62d3646d3b",
+    "sourceDifferences": 0,
+    "stages": [
+      {
+        "name": "source-typecheck",
+        "exitCode": 0,
+        "counts": null,
+        "log": {
+          "name": "source-typecheck.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "workflow-strict-1",
+        "exitCode": 0,
+        "counts": null,
+        "log": {
+          "name": "workflow-strict-1.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "workflow-strict-2",
+        "exitCode": 0,
+        "counts": null,
+        "log": {
+          "name": "workflow-strict-2.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "ci-wiring",
+        "exitCode": 0,
+        "counts": {
+          "tests": 14,
+          "suites": 0,
+          "pass": 14,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "log": {
+          "name": "ci-wiring.log",
+          "bytes": 3897,
+          "sha256": "a9e9024d600981c03599edf595aac3b8d43ee7557268ccec0abfed9d1730aa43"
+        }
+      },
+      {
+        "name": "unit",
+        "exitCode": 0,
+        "counts": {
+          "tests": 6793,
+          "suites": 37,
+          "pass": 6770,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 23,
+          "todo": 0
+        },
+        "log": {
+          "name": "unit.log",
+          "bytes": 627370,
+          "sha256": "e876296d02abfdb0ef51d7c8b36beac497bd68ef1012442bf5dd3bc3f8de2569"
+        }
+      },
+      {
+        "name": "integration",
+        "exitCode": 0,
+        "counts": {
+          "tests": 349,
+          "suites": 0,
+          "pass": 255,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 94,
+          "todo": 0
+        },
+        "log": {
+          "name": "integration.log",
+          "bytes": 42756,
+          "sha256": "45a90c839c1a13e7bcc5a329f2301a7a48aa6888dd68356163feee408624a221"
+        }
+      },
+      {
+        "name": "privilege-mirrors",
+        "exitCode": 0,
+        "counts": null,
+        "log": {
+          "name": "privilege-mirrors.log",
+          "bytes": 230,
+          "sha256": "e2b889e724606fd074924f2d9e70cd09dcfc3439e0c31bab3c0f36773a47bcff"
+        }
+      },
+      {
+        "name": "scoped-biome",
+        "exitCode": 0,
+        "counts": null,
+        "log": {
+          "name": "scoped-biome.log",
+          "bytes": 11691,
+          "sha256": "0119b70ecfd23a13138c3c85581f1f94c936402f88ebd272ec70f5703bed181d"
+        }
+      },
+      {
+        "name": "diff-check",
+        "exitCode": 0,
+        "counts": null,
+        "log": {
+          "name": "diff-check.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    ],
+    "biomeScope": {
+      "selected": 264,
+      "existingGeneratedExclusion": "src/saas/db/runtime-privileges.ts",
+      "noWrite": true
+    },
+    "skippedBoundary": "Unit 6770 pass/23 skipped of 6793; integration 255 pass/94 skipped of 349. Skips remain recorded and are not real PG coverage."
+  },
+  "currentBuild": {
+    "capture": "model-router-build-wallet-summary-abn2on19",
+    "summary": {
+      "name": "summary.json",
+      "bytes": 899025,
+      "sha256": "e303a3e12d637c9d804ddcc6945568e93a8d64738e0c0db47901dc112a60f4d0"
+    },
+    "command": [
+      "rtk",
+      "proxy",
+      "npm",
+      "run",
+      "build:server"
+    ],
+    "exitCode": 0,
+    "log": {
+      "name": "build.log",
+      "bytes": 42,
+      "sha256": "40f2378766342a1afd6e997fce563702bf1adb8294c9aaab4552ef57008176a2"
+    },
+    "startedAt": "2026-10-22T09:28:17.571520+00:00",
+    "finishedAt": "2026-10-22T09:28:27.871804+00:00",
+    "scopes": [
+      {
+        "name": "source",
+        "files": 749,
+        "beforeMapSha256": "92d82f018965e2d972887d1c910aa178d1c4b8a05665aae2277e99eea64855ad",
+        "afterMapSha256": "92d82f018965e2d972887d1c910aa178d1c4b8a05665aae2277e99eea64855ad",
+        "currentMapSha256": "92d82f018965e2d972887d1c910aa178d1c4b8a05665aae2277e99eea64855ad",
+        "differences": 0
+      },
+      {
+        "name": "config",
+        "files": 3,
+        "beforeMapSha256": "b3aa2577a04d63e16709369a70fd8b7c8fbb776e09dd9fb8218120570d54dba9",
+        "afterMapSha256": "b3aa2577a04d63e16709369a70fd8b7c8fbb776e09dd9fb8218120570d54dba9",
+        "currentMapSha256": "b3aa2577a04d63e16709369a70fd8b7c8fbb776e09dd9fb8218120570d54dba9",
+        "differences": 0
+      },
+      {
+        "name": "dist",
+        "files": 2992,
+        "beforeMapSha256": "6b98c4c2b9459461b51a0383c4f8ff3dfb711fef74b3891411e5a58dbd9b62cb",
+        "afterMapSha256": "a6592a53a3d9426c75ca6aebea13f3556dd955a59425128f9198e612f0dd44a8",
+        "currentMapSha256": "a6592a53a3d9426c75ca6aebea13f3556dd955a59425128f9198e612f0dd44a8",
+        "afterCurrentDifferences": 0,
+        "changedByBuild": [
+          "dist/saas/billing/service.d.ts.map",
+          "dist/saas/billing/service.js",
+          "dist/saas/billing/service.js.map"
+        ]
+      }
+    ],
+    "boundary": "Produced files match current hashes; no live-provider or performance conclusion follows."
+  },
+  "sourcePreservation": {
+    "privateManifest": {
+      "name": "candidate-manifest.json",
+      "bytes": 4458,
+      "sha256": "2ea3728c07e2d85e3c080390abc30160edd33913de7eb8929e1cecea5e3f8502"
+    },
+    "fourRootBeforeArchivesMatchOriginal": true,
+    "unchangedContextFiles": 19,
+    "originalFreezeScope": 23,
+    "boundary": "Historical private-candidate flags describe preparation time. Applied changes are intentional; outside captured scopes no shared-tree no-change claim is made."
+  },
+  "exclusions": [
+    "In-progress serial wallet-summary capture was not read or incorporated.",
+    "No perf, Kimi, external-provider, formal required CI, release or deployment conclusion is made.",
+    "This task did not edit shared repository/old evidence, execute tests/SQL/builds, read credential files/PIDs or operate live resources."
+  ]
+}

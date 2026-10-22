@@ -1,0 +1,254 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T10:07:42.429Z",
+  "status": "commercial-reader-and-initial-authority-native-requested-local-checks-passed",
+  "capturedFiles": {
+    "src/saas/gateway/commercial-metering-policy-service.ts": {
+      "bytes": 74908,
+      "sha256": "d6e4e961893be0dbf84fc8a5a8308e5fbc06a46c23100b6cbd812afffe55c84e"
+    },
+    "tests/saas/gateway/commercial-metering-policy-service.test.ts": {
+      "bytes": 38598,
+      "sha256": "af57dca01b0eb495ec65f31b4fb38e2a45829dcc35253dd515168977a76d5106"
+    },
+    "tests/saas/gateway/commercial-dispatch-hint.postgres.integration.test.ts": {
+      "bytes": 11656,
+      "sha256": "8facf77af8dd6c9bce70f26c43b190466c2c63ccda3e8f52a53887c250e43944"
+    },
+    "src/saas/gateway/postgres-request-preparation-authority-adapter.ts": {
+      "bytes": 59714,
+      "sha256": "11980c772dd533b34b5d4bacbcc774fe3dbd5777981af9f1c7a8bef94a8c83bf"
+    },
+    "src/saas/db/prepared-statements.ts": {
+      "bytes": 954,
+      "sha256": "e6b8462ef56814bec2804dcede9bcbdb7aeef2d22b4fe5b614a8a24272dab3a3"
+    },
+    "tests/saas/gateway/postgres-request-preparation-authority-adapter.test.ts": {
+      "bytes": 49743,
+      "sha256": "056e2d37de76bf0c2c2f4a5b704e5098b7968078b7b378712e6b996419e2dc2f"
+    }
+  },
+  "currentReadBoundary": "Five other owned files still match captured hashes. Shared prepared-statements helper changed in subsequent root proof work; captured helper and all complete PG closures are historical here, not a current global freeze.",
+  "commercialReader": {
+    "preservation": "Removing only the new SQL/helper and restoring two fence calls exactly reproduces the original production file. All existing reader hint/policy/final SQL, binds, mapper, writer/mixed-mode helpers and transactions remain byte-preserved.",
+    "counts": "Five original scalar shared-lock invocations remain at two boundaries; batches reduce successful method SQL calls 8 to 5. Counts exclude transaction/observer SQL and protocol-message/ACK claims.",
+    "order": "Per-layer sort/dedupe then ordered scalar unnest WITH ORDINALITY; no global dedupe, new key, lock mode or seed change.",
+    "pgRegression": "Deleting only the new per-mode cancellation subcase and error-class import restores the original PG root byte-for-byte, retaining its original 18 assertions and cases.",
+    "cancellation": "Both modes observe an actual writer wait, then same-role gateway cancellation 57014, STORAGE_ERROR, rollback advisory-lock count zero, one first batch and no final authority view; writer rollback preserves dispatchability.",
+    "writerBoundary": "The writer remains the existing migrator-backed service, not a new CP-role proof. Cancellation covers the first tenant/project batch; the second boundary has offline injected-error coverage.",
+    "timeoutBoundary": "Configuration is unchanged; batched locks share one statement timeout/cancellation window."
+  },
+  "initialAuthority": {
+    "sqlContracts": [
+      {
+        "mode": "byok",
+        "bytes": 3325,
+        "sha256": "544cae2ff6fdee89a3915c80e9861ec47b860a58ef631ed8065e75b829b05c7a",
+        "binds": 5,
+        "originalByteExact": true
+      },
+      {
+        "mode": "platform",
+        "bytes": 4181,
+        "sha256": "326b6c68db2b29e77e275bc4ebbaf1b5f228778ac68ee691c7d0558f4a061ba2",
+        "binds": 6,
+        "originalByteExact": true
+      }
+    ],
+    "preservation": "Only two initial supply reads use fixed immutable prepared descriptors. Original values/order, REPEATABLE READ, authority_now clock, observer forwarding, row validation and decisions remain; the main resolveAuthority body is byte-identical.",
+    "behavior": "Native capability is opt-in; absence uses the original anonymous query. The captured factory/helper differs only by two labels and its comment. No result cache or anonymous replay after native error is introduced.",
+    "offlineContract": "Each mode tests native/off, original SQL SHA, 5/6 current binds, two fresh clocks/reads, revocation on the second call, rowCount/observer forwarding and original transaction error identity/no retry."
+  },
+  "focusedOffline": [
+    {
+      "component": "commercial-reader",
+      "capture": "model-router-commercial-reader-fence-implementation-d3l4vuoj",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 4325,
+        "sha256": "338776da3e3acec3b0f0ac6de4e9b27e919d6433541dc2b5841494e90f43c5f9"
+      },
+      "firstRed": {
+        "counts": {
+          "tests": 18,
+          "suites": 0,
+          "pass": 11,
+          "fail": 7,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "log": {
+          "name": "first-red.log",
+          "bytes": 15656,
+          "sha256": "4b90f5fa4f63c9923e6401444db1ae1ad40593579996f90cc2e3dbcf80b7ddc5"
+        }
+      },
+      "final": {
+        "tests": 18,
+        "suites": 0,
+        "pass": 18,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "finalLogSha256": "3cfeca09b3a342c057f93e48f75d1a07f93f168fed33deb14dd894e325332cb2",
+      "sourceTypesExit": 0,
+      "focusedStrictExit": null,
+      "finalBiomeExit": 0
+    },
+    {
+      "component": "initial-authority",
+      "capture": "model-router-initial-authority-native-implementation-zu5ishn1",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 5491,
+        "sha256": "2778bc7cd971286da06ff429d7b018a03730d0bbb866d7e9ebfffc303f730268"
+      },
+      "firstRed": {
+        "counts": {
+          "tests": 44,
+          "suites": 0,
+          "pass": 40,
+          "fail": 4,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "log": {
+          "name": "first-red.log",
+          "bytes": 13289,
+          "sha256": "076a683b065633dbc8ad609676496a07f65f44f1c6cd3a4b17a9ebc9acf1cda8"
+        }
+      },
+      "final": {
+        "tests": 47,
+        "suites": 0,
+        "pass": 47,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "finalLogSha256": "aac3f3ba4d31ee370e085362d7c0e4c8049068fdf261f392e33dd4e87a11536a",
+      "sourceTypesExit": 0,
+      "focusedStrictExit": 0,
+      "finalBiomeExit": 0
+    }
+  ],
+  "offlineCountBoundary": "CM 11/18 -> 18/18. Initial 40/44 -> 44/44 plus factory 3 = combined 47/47; do not add overlapping counts. Initial import-order Biome failure is retained and final Biome/strict/source types exit zero.",
+  "postgres": [
+    {
+      "capture": "model-router-commercial-reader-fence-pg18-20261022-0947",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 163658,
+        "sha256": "b068cca6712e123a25e2a28c17158d9454d2c37d1182a455c5ffbc20fc7bc855"
+      },
+      "tap": {
+        "name": "custom-test.log",
+        "bytes": 3305,
+        "sha256": "4e4be6b867ac8117a979b160659af266d04dc946b4704a73b491aade20b20c94"
+      },
+      "tests": 13,
+      "pass": 13,
+      "skip": 0,
+      "sourceFiles": 684,
+      "beforeAfterMapSha256": "388bc6126de66acc078ebdc6dc3b41b58cf1b75b486f239b92dbfa9cd15de92b",
+      "currentChecked": false,
+      "currentDifferences": null,
+      "allStagesExitZero": true,
+      "cleanupRecorded": true,
+      "clusterDirectoryAbsent": true
+    },
+    {
+      "capture": "model-router-commercial-reader-fence-pg15-20261022-0948",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 165039,
+        "sha256": "98f4a940a1073c38109b27cab9a4f4cf03677e019ea7d0e694acf8edfed8f707"
+      },
+      "tap": {
+        "name": "custom-test.log",
+        "bytes": 3306,
+        "sha256": "ea39303b80d94e614aacf26b5cca6e72f2772a2182f83348916563930edfab79"
+      },
+      "tests": 13,
+      "pass": 13,
+      "skip": 0,
+      "sourceFiles": 684,
+      "beforeAfterMapSha256": "388bc6126de66acc078ebdc6dc3b41b58cf1b75b486f239b92dbfa9cd15de92b",
+      "currentChecked": false,
+      "currentDifferences": null,
+      "allStagesExitZero": true,
+      "cleanupRecorded": true,
+      "clusterDirectoryAbsent": true
+    },
+    {
+      "capture": "model-router-commercial-reader-initial-native-pg18-20261022-0953",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 164069,
+        "sha256": "74eefe89bfecaa2c9163defe07666c333f4b2b58a33e44117c7431ec2569d818"
+      },
+      "tap": {
+        "name": "commercial-test.log",
+        "bytes": 19789,
+        "sha256": "d26e2d0c8cd4ae878dc6551228824d644afce2ae3975ae752935cfb8d97e5e7f"
+      },
+      "tests": 27,
+      "pass": 27,
+      "skip": 0,
+      "sourceFiles": 685,
+      "beforeAfterMapSha256": "5de11a94009e530affde18aeed2b05362a7cd1c2bde9cf0b90204b393422d27d",
+      "currentChecked": false,
+      "currentDifferences": null,
+      "allStagesExitZero": true,
+      "cleanupRecorded": true,
+      "clusterDirectoryAbsent": true
+    },
+    {
+      "capture": "model-router-commercial-reader-initial-native-pg15-20261022-0955",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 165473,
+        "sha256": "c33e273718f29fa8da734cba206adb84ee8982fbc41d681f02cab01e16b646b7"
+      },
+      "tap": {
+        "name": "commercial-test.log",
+        "bytes": 19928,
+        "sha256": "7bcc08dbb51d13429736d9a7660130409f49233659a7ede13f9986f3817e4422"
+      },
+      "tests": 27,
+      "pass": 27,
+      "skip": 0,
+      "sourceFiles": 685,
+      "beforeAfterMapSha256": "5de11a94009e530affde18aeed2b05362a7cd1c2bde9cf0b90204b393422d27d",
+      "currentChecked": false,
+      "currentDifferences": null,
+      "allStagesExitZero": true,
+      "cleanupRecorded": true,
+      "clusterDirectoryAbsent": true
+    }
+  ],
+  "nativeRequested": {
+    "receipt": {
+      "name": "model-router-commercial-reader-initial-native-invocations-20261022.json",
+      "bytes": 1668,
+      "sha256": "7f35aeb68f89c4020720e68da7db623b98d74ff3f7c5a581b00c10d0e945d46f"
+    },
+    "assignment": "MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS=native",
+    "source": "Root actual exec arguments and sessions 94595/86251, exit zero; not child-emitted resolved-mode evidence.",
+    "independentChildResolvedModeSaved": false,
+    "independentPgPreparedStatementCountersSaved": false
+  },
+  "limits": [
+    "PG13 predates initial/helper changes; PG27 predates later proof source/helper changes. All complete closure equality here is captured before/after only; current complete closure equality is not claimed.",
+    "PG27 runs the source commercial HTTP root against its local HTTPS fixture; it is not built-CLI, Kimi, external-provider, latency/performance, generic-plan or independent wire-count evidence.",
+    "Cleanup uses saved successful stages and current local directory absence; no process/PID/container inspection or resource operation was performed.",
+    "Full regression and unrelated sticky/proof work are excluded. No formal required CI, release or GO conclusion is made."
+  ]
+}

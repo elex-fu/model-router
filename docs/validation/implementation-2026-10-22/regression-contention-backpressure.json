@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "classification": "local-offline-contention-backpressure-regression",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T08:05:47.583426+00:00",
+  "status": "passed-local-with-explicit-skips",
+  "summary": {
+    "file": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/summary.json",
+    "bytes": 27065,
+    "sha256": "55acb047e61333465bd2c20f245023de2d6fe80c72a61f305e7862286b384bd7"
+  },
+  "sourceScope": "All tracked and nonignored src/tests/scripts/deploy/workflow code plus selected root config; docs/dist/ignoredlocal excluded",
+  "sourceFilesChecked": 1700,
+  "beforeAfterCurrentMatchAtArtifactCreation": true,
+  "beforeHashSetSha256": "41a0579fcc332f78e6f8d6ea89ac91bb7a9ba950f9257245cea3cb156f223c4a",
+  "afterHashSetSha256": "41a0579fcc332f78e6f8d6ea89ac91bb7a9ba950f9257245cea3cb156f223c4a",
+  "changes": [],
+  "stages": [
+    {
+      "name": "source-typecheck",
+      "startedAt": "2026-10-22T07:59:02.922415+00:00",
+      "finishedAt": "2026-10-22T07:59:10.071040+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/source-typecheck.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "workflow-strict-1",
+      "startedAt": "2026-10-22T07:59:10.075822+00:00",
+      "finishedAt": "2026-10-22T07:59:15.389271+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/workflow-strict-1.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "workflow-strict-2",
+      "startedAt": "2026-10-22T07:59:15.389442+00:00",
+      "finishedAt": "2026-10-22T07:59:21.199514+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/workflow-strict-2.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "ci-wiring",
+      "startedAt": "2026-10-22T07:59:21.199731+00:00",
+      "finishedAt": "2026-10-22T07:59:21.477327+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/ci-wiring.log",
+      "bytes": 3899,
+      "sha256": "a867dca9214eb5a718df6b76e9585625495560e8a2a53e9ce1df379d462c1df7",
+      "counts": {
+        "tests": 14,
+        "suites": 0,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "countFormat": "tap",
+      "countsValid": true
+    },
+    {
+      "name": "unit",
+      "startedAt": "2026-10-22T07:59:21.478677+00:00",
+      "finishedAt": "2026-10-22T07:59:57.627627+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/unit.log",
+      "bytes": 626165,
+      "sha256": "ca90dcc2c7bdd8ba187a0edcd3d9a449748108a9f781c9910fddd6d0a98d0fea",
+      "counts": {
+        "tests": 6780,
+        "suites": 37,
+        "pass": 6757,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 23,
+        "todo": 0
+      },
+      "countFormat": "native-spec",
+      "countsValid": true
+    },
+    {
+      "name": "integration",
+      "startedAt": "2026-10-22T07:59:57.679999+00:00",
+      "finishedAt": "2026-10-22T08:00:12.560189+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/integration.log",
+      "bytes": 42618,
+      "sha256": "9105e85282887c4a62be5d6509c8cc3e819c0ab81eb4ed6a60aa7bb8cb63de3d",
+      "counts": {
+        "tests": 348,
+        "suites": 0,
+        "pass": 255,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 93,
+        "todo": 0
+      },
+      "countFormat": "native-spec",
+      "countsValid": true
+    },
+    {
+      "name": "privilege-mirrors",
+      "startedAt": "2026-10-22T08:00:12.564892+00:00",
+      "finishedAt": "2026-10-22T08:00:12.808235+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/privilege-mirrors.log",
+      "bytes": 230,
+      "sha256": "e2b889e724606fd074924f2d9e70cd09dcfc3439e0c31bab3c0f36773a47bcff"
+    },
+    {
+      "name": "scoped-biome",
+      "startedAt": "2026-10-22T08:00:12.929151+00:00",
+      "finishedAt": "2026-10-22T08:00:13.407448+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/scoped-biome.log",
+      "bytes": 11691,
+      "sha256": "d0d3a2fe141b29a8a0739b3c7259fa062d43e395fdd25e30989da2758bc3475a"
+    },
+    {
+      "name": "diff-check",
+      "startedAt": "2026-10-22T08:00:13.407563+00:00",
+      "finishedAt": "2026-10-22T08:00:13.506385+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-contention-backpressure-egjdwxho/diff-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "biomeScope": {
+    "selected": 259,
+    "existingGeneratedExclusion": "src/saas/db/runtime-privileges.ts",
+    "noWrite": true
+  },
+  "serverBuild": {
+    "summary": {
+      "file": "/private/tmp/model-router-build-contention-backpressure-uky694em/summary.json",
+      "bytes": 899034,
+      "sha256": "64f408284e30ccb0bfb0c391fe86f5c67e6636488fc5b267e9462260e1bc470a"
+    },
+    "log": {
+      "file": "/private/tmp/model-router-build-contention-backpressure-uky694em/build.log",
+      "bytes": 42,
+      "sha256": "40f2378766342a1afd6e997fce563702bf1adb8294c9aaab4552ef57008176a2"
+    },
+    "wrapper": {
+      "file": "/private/tmp/model-router-build-contention-backpressure-20261022.py",
+      "bytes": 2451,
+      "sha256": "b40e6bb02f5c45380434a543100b7f5d40e57bae5504d1abd4057cf139b93304"
+    },
+    "exitCode": 0,
+    "sourceFiles": 749,
+    "distFiles": 2992,
+    "sourceAndConfigBeforeAfterMatch": true,
+    "currentBuildMatchesAtArtifactCreation": true
+  },
+  "limits": [
+    "The aggregate integration run explicitly skipped unconfigured external and database roots; the five affinity/capacity PostgreSQL cases and original commercial root were run separately on PG15 and PG18.",
+    "The original two workflow strict commands retained ES2023 and all original flags. Four generated privilege mirrors matched. The existing generated runtime-privileges formatting exception was retained; no checks wrote source.",
+    "The parser accepts one unambiguous native spec or TAP summary and verifies every counter; no null counters or inferred zero results.",
+    "Docs, dist and ignored local files are outside the aggregate regression source scope. The server build has its own explicit source/config guard and expected dist mutation.",
+    "No formal required GitHub CI, package dry-run, real-provider, performance, release GO or future repository freeze is claimed by this record."
+  ]
+}

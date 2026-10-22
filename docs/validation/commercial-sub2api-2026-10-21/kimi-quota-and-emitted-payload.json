@@ -1,0 +1,62 @@
+{
+  "results": [
+    {
+      "name": "saas-fixed-kimi-code-validation-adapter",
+      "state": "failed",
+      "errorCode": "provider_response_too_large",
+      "retryable": false,
+      "adapterId": "kimi-code-messages-v1",
+      "httpStatus": 200,
+      "durationMs": 1033
+    },
+    {
+      "name": "kimi-coding-quota-direct",
+      "status": 200,
+      "topLevelFields": [
+        "usage",
+        "limits",
+        "booster_wallet",
+        "usages"
+      ],
+      "rollingWindows": 1,
+      "weeklyUsagePresent": true
+    },
+    {
+      "name": "local-echo-emitted-payload-diagnostic",
+      "captures": [
+        {
+          "path": "/v1/messages",
+          "keys": [
+            "model",
+            "messages",
+            "max_tokens",
+            "tools",
+            "tool_choice"
+          ],
+          "thinking": null,
+          "reasoning_effort": null,
+          "tool_choice": {
+            "type": "tool",
+            "name": "add"
+          }
+        },
+        {
+          "path": "/v1/messages",
+          "keys": [
+            "model",
+            "messages",
+            "max_tokens",
+            "tools",
+            "tool_choice"
+          ],
+          "thinking": null,
+          "reasoning_effort": null,
+          "tool_choice": {
+            "type": "tool",
+            "name": "add"
+          }
+        }
+      ]
+    }
+  ]
+}

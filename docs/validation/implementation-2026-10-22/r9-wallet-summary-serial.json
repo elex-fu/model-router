@@ -1,0 +1,254 @@
+{
+  "schema": 1,
+  "classification": "current-build-original-serial-r9-after-wallet-summary",
+  "formalRequiredCiEvidence": false,
+  "passed": false,
+  "GO": false,
+  "recordedAtUtc": "2026-10-22T09:31:35.469987+00:00",
+  "capture": {
+    "directory": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root",
+    "startedAt": "2026-10-22T09:28:51.716Z",
+    "finishedAt": "2026-10-22T09:29:18.623Z",
+    "summary": {
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/summary.json",
+      "bytes": 906208,
+      "sha256": "f8d4306125c61d44b68d5e734be2bc62ae974a1c4b5b4680496c9b098c45883c"
+    },
+    "report": {
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/serial-profile-current-3cli.json",
+      "bytes": 2082,
+      "sha256": "183c0c99f58a4521dd7c7395570a28e834d10b625603c6085f35257a295f730f"
+    }
+  },
+  "configuration": {
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "preparedStatements": "native",
+    "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    },
+    "warmupInflight": 1,
+    "samplesPerLeg": 100,
+    "instanceCount": 3,
+    "requestSamples": true,
+    "unchangedBudgets": {
+      "p99OverheadMs": 30,
+      "ttfbOverheadMs": 10
+    }
+  },
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 100,
+        "p50": 1.8,
+        "p90": 1.98,
+        "p99": 6.36,
+        "max": 6.36
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 64.84,
+        "p90": 93.1,
+        "p99": 121.62,
+        "max": 121.62
+      },
+      "p99OverheadMs": 115.26
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 2.63,
+        "p90": 3.23,
+        "p99": 7.26,
+        "max": 7.26
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 61.73,
+        "p90": 68.99,
+        "p99": 82.41,
+        "max": 82.41
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 75.15
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 115.26,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 75.15,
+      "threshold": 10,
+      "unit": "ms"
+    }
+  ],
+  "firstFault": {
+    "stage": "serial-profile-current-3cli",
+    "message": "R9 driver exit=1, violations=2"
+  },
+  "requestObservation": {
+    "clientJournal": {
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/serial-profile-request-samples.json",
+      "bytes": 162729,
+      "sha256": "2040da1df1da863c34e787dee158e1dc280459c44f43c0d197fab7e388768bea"
+    },
+    "databaseStates": {
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/serial-profile-request-states.json",
+      "bytes": 199367,
+      "sha256": "51a0188c663eb848a0d6b93acad18a66cdd4e566957f3d1c8d1d84363c4f2d82"
+    },
+    "observationOk": true,
+    "sampleCount": 400,
+    "counts": {
+      "latency:direct": 100,
+      "latency:gateway": 100,
+      "ttfb:direct": 100,
+      "ttfb:gateway": 100
+    },
+    "gatewayRequestIds": 200,
+    "missingInvalidOrDuplicateRequestIds": 0,
+    "matchedRows": 200,
+    "allMatchedRequestsSucceededAndSettled": true,
+    "pendingMatchedRequests": 0,
+    "multipleAttemptOrEvidenceIds": 0,
+    "truncated": false,
+    "databaseObservation": {
+      "role": "model_router_saas_migrator",
+      "readOnly": true,
+      "rowCap": 200,
+      "sentinelLimit": 201
+    },
+    "largestThreeSamplesPerGatewayLeg": [
+      {
+        "scenario": "latency",
+        "index": 83,
+        "gatewayIndex": 1,
+        "metricMs": 121.61533300000156,
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 44.734,
+          "claimedToResponseStarted": 14.4,
+          "responseStartedToRequestUpdated": 11.726
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "latency",
+        "index": 0,
+        "gatewayIndex": 2,
+        "metricMs": 111.0588329999996,
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 37.867,
+          "claimedToResponseStarted": 28.405,
+          "responseStartedToRequestUpdated": 10.356
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "latency",
+        "index": 1,
+        "gatewayIndex": 0,
+        "metricMs": 103.9087499999996,
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 39.915,
+          "claimedToResponseStarted": 29.877,
+          "responseStartedToRequestUpdated": 10.154
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "ttfb",
+        "index": 51,
+        "gatewayIndex": 2,
+        "metricMs": 82.41062500000044,
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 42.548,
+          "claimedToResponseStarted": 14.114,
+          "responseStartedToRequestUpdated": 8.585
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "ttfb",
+        "index": 85,
+        "gatewayIndex": 0,
+        "metricMs": 82.0212500000016,
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 33.558,
+          "claimedToResponseStarted": 11.818,
+          "responseStartedToRequestUpdated": 8.061
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "ttfb",
+        "index": 11,
+        "gatewayIndex": 1,
+        "metricMs": 80.46129099999962,
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 37.684,
+          "claimedToResponseStarted": 16.279,
+          "responseStartedToRequestUpdated": 9.19
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      }
+    ]
+  },
+  "cumulativeMetrics": [
+    {
+      "instance": 1,
+      "httpStatus": 200,
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/gateway-1-metrics.prom",
+      "bytes": 200047,
+      "sha256": "d3cfb8e2d35ad21bc3c506d1beb45eae3a865d8e47fa65872b5d4215e090943b"
+    },
+    {
+      "instance": 2,
+      "httpStatus": 200,
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/gateway-2-metrics.prom",
+      "bytes": 198828,
+      "sha256": "ce06d5c0696175e4644c54b342ef3291ca8f90b6360b7fc7526c58aad71a5d20"
+    },
+    {
+      "instance": 3,
+      "httpStatus": 200,
+      "file": "/private/tmp/model-router-serial-wallet-summary-20261022-0931-root/gateway-3-metrics.prom",
+      "bytes": 198829,
+      "sha256": "0c8285b41288af564a3d0a37ec4a960872d484dc99fda883e7209dcf59ff64c0"
+    }
+  ],
+  "sourceGuard": {
+    "counts": {
+      "source": 749,
+      "dist": 2992,
+      "harness": 5
+    },
+    "beforeAfterAndCurrentMatchAtArtifactCreation": true,
+    "futureRepositoryFreezeClaim": false
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "limits": [
+    "This is the original canonical serial diagnostic with optional bounded request sampling. It is not the full R9 workload and makes no real-provider or builtin acceptance claim.",
+    "The original floor(n*p) percentile at n100 selects the maximum for p99; direct and gateway sets contain independent requests. The record does not claim an optimization benefit from changes across runs.",
+    "Database intervals use the same PostgreSQL clock and exact response request ID. Evidence created_at is DEFAULT now(), the preparation transaction start time, not its actual INSERT time. The created-to-claimed interval includes admission, attempt persistence, signing/registration and commit plus subsequent preflight, attempt read, lease acquire and claim until the clock_timestamp UPDATE; it is not a per-method timer or cause attribution. Same-request dispatch proof runs after claim, outside this interval.",
+    "The200 matched requests are terminal settled observations. No independent wallet/reservation/ledger aggregate was taken for this run; no broader financial closure or zero funds invariant is inferred.",
+    "Cumulative metrics include smoke and warmup work; per-request stage timing is not captured by these metrics. No full-load scaling, complete R9, formal CI, production deployment or GO is claimed."
+  ]
+}

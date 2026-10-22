@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "classification": "local-mock-current-build-performance-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T14:28:19.071120+00:00",
+  "capture": "model-router-serial-fixed-read-plans-20261022-1412-root",
+  "startedAt": "2026-10-22T14:12:01.909Z",
+  "finishedAt": "2026-10-22T14:12:47.858Z",
+  "status": "FAIL",
+  "budgetsMs": {
+    "latency": 30,
+    "ttfb": 10
+  },
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 100,
+        "p50": 2.1,
+        "p90": 2.58,
+        "p99": 35.18,
+        "max": 35.18
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 116.56,
+        "p90": 245.68,
+        "p99": 585.39,
+        "max": 585.39
+      },
+      "p99OverheadMs": 550.21
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 3.69,
+        "p90": 4.86,
+        "p99": 10.33,
+        "max": 10.33
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 110.63,
+        "p90": 218.45,
+        "p99": 277.31,
+        "max": 277.31
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 266.98
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 550.21,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 266.98,
+      "threshold": 10,
+      "unit": "ms"
+    }
+  ],
+  "sourceCapture": {
+    "sourceFiles": 749,
+    "distFiles": 2992,
+    "harnessFiles": 5,
+    "capturedBeforeAfterEqual": true,
+    "matchedAtProjection": {
+      "source": true,
+      "dist": true,
+      "harness": true
+    },
+    "futureFreezeClaim": false
+  },
+  "requestJoin": {
+    "clientSamples": 400,
+    "uniqueGatewayRequestIds": 200,
+    "savedStateObservationOk": true,
+    "boundary": "Exact request-to-state observations, not an independent wallet aggregate or the additional warmup/smoke population."
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "receipts": [
+    {
+      "capture": "model-router-serial-fixed-read-plans-20261022-1412-root",
+      "file": "summary.json",
+      "bytes": 906241,
+      "sha256": "5b1604cb1c66520c4f7254210cdae6af242b04191db2b9b7b22d52fa6676029b"
+    },
+    {
+      "capture": "model-router-serial-fixed-read-plans-20261022-1412-root",
+      "file": "serial-profile-current-3cli.json",
+      "bytes": 2097,
+      "sha256": "f182bdb015ae83f89adf141b47f0b6a44b829c423f06015ff59451a7dfeff9ed"
+    },
+    {
+      "capture": "model-router-serial-fixed-read-plans-20261022-1412-root",
+      "file": "serial-profile-request-samples.json",
+      "bytes": 162753,
+      "sha256": "e2fbabc47e2a861fa0ba0e9c17083729ff064f06ce69226b87a4739db1ec1b71"
+    },
+    {
+      "capture": "model-router-serial-fixed-read-plans-20261022-1412-root",
+      "file": "serial-profile-request-states.json",
+      "bytes": 199385,
+      "sha256": "c4eb252188205e02520ea89d07cfdb85e297f396d4489e21fce5955eb1a9176d"
+    }
+  ],
+  "limits": [
+    "Three built CLI gateways with local HTTPS mock and fixture rights; no real supplier or production KMS acceptance.",
+    "Direct/gateway samples are independent; n100 existing floor percentile selects the maximum at p99.",
+    "No latency benefit is inferred from differences across independent runs."
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "projection": "saved-evidence-only",
+  "source": "/private/tmp/model-router-r9-fixed-read-plans-full-20261022-1431-root",
+  "window_utc": {
+    "started": "2026-10-22T14:33:08.121Z",
+    "finished": "2026-10-22T14:50:47.105Z"
+  },
+  "execution": {
+    "postgres": "PostgreSQL 18.6",
+    "durability": {"fsync": "on", "synchronous_commit": "on"},
+    "production_kms_verified": false,
+    "real_provider_calls": 0,
+    "builtin_acceptance": false,
+    "mock_instances": 3,
+    "stages": {"passed": 10, "failed": [{"name": "openai-r9-3cli", "code": 1}]},
+    "cleanup": {"processes_stopped": true, "postgres_stopped": true, "runtime_removed": true}
+  },
+  "captured_scope": {
+    "source_files_before_after": [749, 749],
+    "dist_files_before_after": [2992, 2992],
+    "harness_files_before_after": [5, 5],
+    "changed_during_run": {"source": false, "dist": false, "harness": false},
+    "note": "Capture-time before/after only; this does not establish a current global freeze."
+  },
+  "baseline_1cli": {
+    "report": "openai-scaling-1cli.json",
+    "statuses": {"200": 1668, "429": 3529},
+    "violations": []
+  },
+  "r9_3cli": {
+    "report": "openai-r9-3cli.json",
+    "latency_p99_overhead_ms": {"value": 551.21, "limit": 30},
+    "ttfb_overhead_ms": {"value": 401.23, "limit": 10},
+    "sse": {"minutes": 10, "streams": 8400, "chunks": 537600, "corrupt_streams": 0, "corrupt_chunks": 0},
+    "concurrency": {"seconds": 71, "inflight": 200, "statuses": {"200": 342, "429": 227, "502": 25, "503": 35}, "transport_errors": 0},
+    "precision": {"statuses": {"200": 464, "429": 387, "502": 4, "503": 25}, "over_issue_accounts": 0, "driver_reported_5xx_violation": false},
+    "scaling": {"seconds": 131.9, "inflight": 200, "statuses": {"200": 1548, "429": 695, "502": 1, "503": 39}, "ratio": null, "comparison_invalid_reason": "current_report_failed"},
+    "aggregate_http_5xx": {"count": 129, "502": 30, "503": 99, "note": "Sum across concurrency, precision, and scaling reports; independent from preparation metrics."},
+    "violations": ["latency p99 overhead", "TTFB overhead", "concurrency 5xx", "scaling 5xx", "invalid scaling comparison"]
+  },
+  "preparation_metrics": {
+    "scrapes": 3,
+    "http_status_each": 200,
+    "blocked": {"admission_storage": 58, "entitlement_storage": 6, "authority_capability_unavailable": 29, "sum": 93},
+    "relationship": "Independent telemetry group; 6 of the 99 HTTP 503s are not numerically explained by these blocked counts. No one-to-one request attribution was established.",
+    "postgres_error_or_deadlock_matches": 0,
+    "gateway_risk_control_pool_connect_timeout_log_matches": 1,
+    "risk_control_log": "runtime_snapshot_refresh_failed: timeout exceeded when trying to connect",
+    "protocol_business_evidence": "Only settled current CLI smoke evidence exists for OpenAI and Anthropic (summary records HTTP 200); no complete full-load financial/settled aggregate was captured."
+  },
+  "current_selected_source_comparison": {
+    "basis": "Compare current files to hashes captured before/after this run; limited to six owned files.",
+    "matches": 5,
+    "differs": ["src/saas/gateway/postgres-request-preparation-authority-adapter.ts"],
+    "current_hash_for_differing_file": "64953c9716d0e0bf5d831c7411be45612182d810ae59f35507606c0f20268af2",
+    "note": "The run's captured before/after source maps match; this one selected file has since diverged from the run capture."
+  },
+  "sha256": {
+    "summary.json": "ca026511e8407289b91f7a1e332ea88a1403629c1c901f8105f4de38578cd0dc",
+    "openai-scaling-1cli.json": "191a555d478b4d820316df5a189016ccf0b52c0d38cc0c7e54245716d0b2e03f",
+    "openai-r9-3cli.json": "1eeb1746b91ef4447cd623f2be376d10cf8b5d11503c9e181ad8fae49a508b61",
+    "openai-r9-3cli.log": "d16fd8c18b56762b99f70fe48e86f680f2b8ad41e6855ad2eccfbdb346d2a1f8",
+    "gateway_logs": {
+      "gateway-1.log": "b37c7b1136e715e02c819d3abc8168744f64041d8b6daea4c98b92261f6410b4",
+      "gateway-2.log": "c0cad80a52ad0d20f06adbdafcfb595df39dc0f210bcbda7a1db289847b0d155",
+      "gateway-3.log": "be1510ef6d8c40bf21681e080fe2adc087a4440620e84110e8162b99577cb914",
+      "postgres.log": "1485707d6fc71b47ac300fcec3c7486351e4af2ec78d238584eefd796d616e8c"
+    },
+    "metrics": {
+      "gateway-1-metrics.prom": "db47502220a895951dc243638dc9bc6f9755b8c42222a586f05709ea3f8950a2",
+      "gateway-2-metrics.prom": "1217b5482cc24f5e17da8ee9be404d58494b4a3cdb4bb849af77e60b29854800",
+      "gateway-3-metrics.prom": "16851e4a9f975ef32f2bbfc5d40897e211f3d61c65dacc0834f72255231b17bc"
+    }
+  }
+}

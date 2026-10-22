@@ -1,0 +1,519 @@
+{
+  "schema": 1,
+  "classification": "local-current-build-real-provider-acceptance",
+  "formalRequiredCiEvidence": false,
+  "startedAt": "2026-10-21T21:03:09.984Z",
+  "finishedAt": "2026-10-21T21:03:25.596Z",
+  "baseCommit": "bb9756c7b73a7f1a793aee761bb71f8ffb31956e",
+  "evidenceRun": "model-router-commercial-postgres-saqACI",
+  "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+  "sourceFilesChecked": 708,
+  "sourceChanges": [],
+  "sourceHashSetSha256": "788b158aff245a5c7dfa1d2fee1e7999b3acd5db2210910c9d28c6c17222ace9",
+  "sourceBeforeAfterCurrentMatch": true,
+  "precedingR9SourceAnchor": {
+    "evidenceRun": "model-router-current-r9-dMPmPT",
+    "capturedBeforeLiveAt": "2026-10-21T20:57:26.232Z",
+    "filesChecked": 749,
+    "hashSetSha256": "6832be06a289b82506595828c9ce8ca1ebc274457ac6397b7213c151bb9218ea",
+    "precedingR9BeforeAfterAndCurrentMatch": true,
+    "precedingDistMatchesLiveBuildGuard": true,
+    "changes": [],
+    "selectedSourceHashes": {
+      "src/saas/gateway/prepared-request-evidence-service.ts": "dcea76ba8f0386019720ff1b4eaaf7e0173a2d6345eae2c6e1d3d089f8e29c4a",
+      "src/saas/gateway/postgres-request-admission-guard.ts": "cee1da1793ed8306a9c5f0df979f07a02f4b2c853b7a561c7c33b348cf4f98f3",
+      "src/saas/gateway/provider-http-transport.ts": "77355a2f0590e501cd21dd1b846fa67fa6d393537532b76ea46fad03524d7030",
+      "src/saas/gateway/prepared-evidence-dispatch-observer.ts": "7c9173a326b6176ee5679f09f206307be67bb6f2e95925294a8398129604c65a",
+      "src/server/managed-saas-gateway.ts": "5a3d17693824b9ec4ca8dfcd054d98beb51bff6281cfb7e3c91bfcace1580147"
+    },
+    "boundary": "Full production source was captured by the immediately preceding R9 run and independently matches at this artifact creation; the live gate imported-source closure and all-dist wrapper have their own before/after captures."
+  },
+  "verifiedSourceHashes": {
+    "scripts/run-commercial-postgres-gate.mjs": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+    "scripts/ops/verify-commercial-kimi.ts": "46d18801c65146fa7e4f9a059a0c7420b7b33c0e04b46eca364d57924f8bce8d",
+    "tests/integration/kimi-commercial-live.test.ts": "a9858954f4a36de087f6b8dab30d0e733f9ba304adf9fd34c6f46bf68f209d7f",
+    "src/saas/gateway/request-preparation-service.ts": "0fcde10b1cfcb2301cf689ca6eddf1b00bca85a31caf250f436caaf4fd627b0f",
+    "src/saas/gateway/dispatch-usage-settlement.ts": "afdaa168549bfda9d538225a268e5c42d7610774b6561ebaa891095bf09b1975",
+    "src/saas/gateway/provider-http-transport.ts": "77355a2f0590e501cd21dd1b846fa67fa6d393537532b76ea46fad03524d7030",
+    "src/saas/gateway/provider-json-usage-observer.ts": "7a131ba3bdf1e1df4b0ef99177b14544dcf868bf415c35dc4498f8ff17d43d00",
+    "src/saas/gateway/provider-sse-usage-observer.ts": "59e9022aa793979f1f91325f20e5d4ee9247042882b4b2e81450360c4e955eab",
+    "src/saas/gateway/provider-usage-profile.ts": "7a3bf92555899fa18f42dc2f754dceac945cb87eb5c0f28e16110541da2ac1aa",
+    "src/saas/gateway/provider-account-scheduler.ts": "6e617b8985381d0db1d556e23625cc7dfdd21156fce8fb2ab996e8b0610d7395",
+    "src/saas/gateway/postgres-provider-account-scheduler.ts": "beab8494145f9ad73c66ee9ff48b23309d277a10085f327755e044384de0ebe2",
+    "src/saas/runtime/builtin-gateway-runtime.ts": "22514d3cd6185515923c07b80b71ed1362fd9200f7587ae8a14214d8e704a8e3",
+    "src/saas/runtime/builtin-usage-bounds.ts": "2b9c1bb176c2ce2afc79fb19e011c93bf5d4f1a062327325a2b862d5fed0358b",
+    "src/saas/db/database.ts": "591dd7ff8619df5ce3bb48f451f9042e747fae3afba84937d05927ef05e1c263",
+    "src/saas/db/prepared-statements.ts": "d5178a1569bca4741f1b1118370ee89c196e60a151ff869b380d9d119e487428",
+    "src/server/managed-saas.ts": "66b165d028801be44930bc71de0a497fbf02a090b37f5dc4d6ab5e9efd727441",
+    "src/server/managed-saas-gateway.ts": "5a3d17693824b9ec4ca8dfcd054d98beb51bff6281cfb7e3c91bfcace1580147",
+    "dist/cli/index.js": "ab6c6d1c663749368cb4446beeb0d75d14b9bdb782aa98f183f6c8c67086f015",
+    "dist/server/managed-saas.js": "671cd40fba0e0b2cd3e2cf7238541725ae0a771554dd30e367d744ce3ce20cc4"
+  },
+  "postgresPreparedStatements": "native",
+  "build": {
+    "filesChecked": 2992,
+    "fullDistBeforeAfterCurrentMatch": true,
+    "hashSetSha256": "970c800fce0bb45deb67bb635fb27dbb12ccd9b9c9a67bcc830deb29dfb4f0b4",
+    "wrapperSha256": "84101fe4cfa39f3aaedc96d79e66d2968ccbae37211eba1b6d2694d3319a2764",
+    "changedFiles": []
+  },
+  "counts": {
+    "tests": 7,
+    "suites": 0,
+    "pass": 7,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+  "runtime": "current-dist-cli-builtin",
+  "kms": "local-test-pilot-software-kms",
+  "scope": "full-commercial-matrix",
+  "providerInferenceCallsExpected": 8,
+  "roles": [
+    "model_router_saas_migrator",
+    "model_router_saas_control_plane",
+    "model_router_saas_gateway",
+    "model_router_saas_validation_worker"
+  ],
+  "scenes": [
+    {
+      "scene": "automatic-credential-onboarding",
+      "accountState": "active",
+      "credentialState": "active",
+      "validationState": "verified",
+      "validationAttempts": 1
+    },
+    {
+      "scene": "native-nonstreaming",
+      "requestId": "12afe6fa-58f8-4861-87ce-c40fec282ad8",
+      "state": "succeeded",
+      "inputTokens": "25",
+      "outputTokens": "11",
+      "amountMinorUnits": "83",
+      "priceVersion": "6a4d586d-26bf-4786-87df-2d083fb7f08a",
+      "supplierCostVersion": "2c5b70d1-93bd-4fa2-ad0f-2d2cd23f434c"
+    },
+    {
+      "scene": "duplicate-and-conflict",
+      "completedReplayStatus": 200,
+      "conflictStatus": 409,
+      "unchangedFinancialSnapshot": true
+    },
+    {
+      "scene": "native-sse",
+      "requestId": "13848e69-4e2c-4c74-b6e1-25be11f68f71",
+      "state": "succeeded",
+      "inputTokens": "25",
+      "outputTokens": "11",
+      "amountMinorUnits": "83",
+      "priceVersion": "6a4d586d-26bf-4786-87df-2d083fb7f08a",
+      "supplierCostVersion": "2c5b70d1-93bd-4fa2-ad0f-2d2cd23f434c"
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-first",
+      "requestId": "d4ed2f23-f87c-402c-9e70-ef798c24e545",
+      "state": "succeeded",
+      "inputTokens": "186",
+      "outputTokens": "62",
+      "amountMinorUnits": "558",
+      "priceVersion": "a5bbf788-05dd-419a-80cc-ff4506feca8f",
+      "supplierCostVersion": "20edf10d-dfd6-4a3a-a053-6e3a17243c56"
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-second",
+      "requestId": "129828ac-eb3c-48c6-8ed0-71dfb9a38833",
+      "state": "succeeded",
+      "inputTokens": "338",
+      "outputTokens": "11",
+      "amountMinorUnits": "709",
+      "priceVersion": "a5bbf788-05dd-419a-80cc-ff4506feca8f",
+      "supplierCostVersion": "20edf10d-dfd6-4a3a-a053-6e3a17243c56"
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-first",
+      "requestId": "39a35239-acd2-4d0b-8d57-c8d923ac0a24",
+      "state": "succeeded",
+      "inputTokens": "222",
+      "outputTokens": "62",
+      "amountMinorUnits": "630",
+      "priceVersion": "a5bbf788-05dd-419a-80cc-ff4506feca8f",
+      "supplierCostVersion": "20edf10d-dfd6-4a3a-a053-6e3a17243c56"
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-second",
+      "requestId": "dc2ef954-f71b-421a-854a-d75652ee1a38",
+      "state": "succeeded",
+      "inputTokens": "338",
+      "outputTokens": "11",
+      "amountMinorUnits": "709",
+      "priceVersion": "a5bbf788-05dd-419a-80cc-ff4506feca8f",
+      "supplierCostVersion": "20edf10d-dfd6-4a3a-a053-6e3a17243c56"
+    },
+    {
+      "scene": "native-sse-abort",
+      "requestId": "16b8bce9-0c67-4f37-9691-ff2f7bce182f",
+      "state": "unknown",
+      "usageEvents": "0",
+      "settlementEvents": "0",
+      "replayStatus": 202,
+      "retainedHoldMinorUnits": "263680"
+    }
+  ],
+  "settledRequests": 6,
+  "totalSettledMinorUnits": "2772",
+  "usageAndSettlement": [
+    {
+      "requestId": "12afe6fa-58f8-4861-87ce-c40fec282ad8",
+      "capturePoint": "native-provider-passthrough",
+      "capturedUsage": [
+        {
+          "input_tokens": 25,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": true,
+          "type": "string",
+          "value": "standard",
+          "unknownEnum": false,
+          "stringLength": 8
+        },
+        "inference_geo": {
+          "present": true,
+          "type": "string",
+          "value": "not_available",
+          "unknownEnum": false,
+          "stringLength": 13
+        }
+      },
+      "durableTerminal": {
+        "found": true,
+        "request_id": "12afe6fa-58f8-4861-87ce-c40fec282ad8",
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "25",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "83",
+        "ledger_amount": "83",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "83",
+        "ledger_debit": "83",
+        "canonical_request_id": "12afe6fa-58f8-4861-87ce-c40fec282ad8",
+        "held_leases": "0"
+      }
+    },
+    {
+      "requestId": "13848e69-4e2c-4c74-b6e1-25be11f68f71",
+      "capturePoint": "native-provider-passthrough",
+      "capturedUsage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        },
+        {
+          "input_tokens": 0,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "durableTerminal": {
+        "found": true,
+        "request_id": "13848e69-4e2c-4c74-b6e1-25be11f68f71",
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "25",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "83",
+        "ledger_amount": "83",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "83",
+        "ledger_debit": "83",
+        "canonical_request_id": "13848e69-4e2c-4c74-b6e1-25be11f68f71",
+        "held_leases": "0"
+      }
+    },
+    {
+      "requestId": "d4ed2f23-f87c-402c-9e70-ef798c24e545",
+      "capturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 186,
+          "completion_tokens": 62,
+          "total_tokens": 248,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "durableTerminal": {
+        "found": true,
+        "request_id": "d4ed2f23-f87c-402c-9e70-ef798c24e545",
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "186",
+        "output_total": "62",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "558",
+        "ledger_amount": "558",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "558",
+        "ledger_debit": "558",
+        "canonical_request_id": "d4ed2f23-f87c-402c-9e70-ef798c24e545",
+        "held_leases": "0"
+      }
+    },
+    {
+      "requestId": "129828ac-eb3c-48c6-8ed0-71dfb9a38833",
+      "capturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "durableTerminal": {
+        "found": true,
+        "request_id": "129828ac-eb3c-48c6-8ed0-71dfb9a38833",
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "338",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "709",
+        "ledger_amount": "709",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "709",
+        "ledger_debit": "709",
+        "canonical_request_id": "129828ac-eb3c-48c6-8ed0-71dfb9a38833",
+        "held_leases": "0"
+      }
+    },
+    {
+      "requestId": "39a35239-acd2-4d0b-8d57-c8d923ac0a24",
+      "capturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 222,
+          "completion_tokens": 62,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "durableTerminal": {
+        "found": true,
+        "request_id": "39a35239-acd2-4d0b-8d57-c8d923ac0a24",
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "222",
+        "output_total": "62",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "630",
+        "ledger_amount": "630",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "630",
+        "ledger_debit": "630",
+        "canonical_request_id": "39a35239-acd2-4d0b-8d57-c8d923ac0a24",
+        "held_leases": "0"
+      }
+    },
+    {
+      "requestId": "dc2ef954-f71b-421a-854a-d75652ee1a38",
+      "capturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 338
+          }
+        }
+      ],
+      "knownUsageMetadata": {
+        "service_tier": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        },
+        "inference_geo": {
+          "present": false,
+          "type": "missing",
+          "value": null,
+          "unknownEnum": false,
+          "stringLength": null
+        }
+      },
+      "durableTerminal": {
+        "found": true,
+        "request_id": "dc2ef954-f71b-421a-854a-d75652ee1a38",
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "338",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "709",
+        "ledger_amount": "709",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "709",
+        "ledger_debit": "709",
+        "canonical_request_id": "dc2ef954-f71b-421a-854a-d75652ee1a38",
+        "held_leases": "0"
+      }
+    }
+  ],
+  "observer": {
+    "rule": "Validate identity, financial, native usage and ledger facts before waiting within the original deadline for zero held leases.",
+    "regressionTests": 7,
+    "productionTimeoutOrRetryChanged": false
+  },
+  "cleanup": {
+    "clusterStopped": true,
+    "clusterRemoved": true,
+    "cliProcessesStopped": true
+  },
+  "limits": [
+    "Local test prices, signed local commercial rights and pilot software KMS; no production resale or cloud KMS claim.",
+    "OpenAI usage is captured after the protocol bridge; native passthrough captures retain upstream numeric counter authority.",
+    "One actual Kimi credential; no independent-account capacity or failover claim.",
+    "The gate captures its imported source/built CLI closure; an independent wrapper verifies all dist files before, after and at artifact creation.",
+    "This run includes ordered evidence-fence batching and the seven transport timers. It is functional real-provider acceptance, not R9 throughput or latency evidence.",
+    "The preceding all-source R9 snapshot is an additional consistency anchor, not a claim that every source file was imported by the live processes."
+  ],
+  "passed": true
+}

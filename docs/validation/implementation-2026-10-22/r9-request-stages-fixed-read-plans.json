@@ -1,0 +1,671 @@
+{
+  "schema": 1,
+  "classification": "local-mock-current-build-performance-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T14:28:19.359113+00:00",
+  "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+  "startedAt": "2026-10-22T14:17:23.913Z",
+  "finishedAt": "2026-10-22T14:18:14.249Z",
+  "status": "FAIL",
+  "budgetsMs": {
+    "latency": 30,
+    "ttfb": 10
+  },
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 100,
+        "p50": 1.97,
+        "p90": 2.53,
+        "p99": 24.1,
+        "max": 24.1
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 142.61,
+        "p90": 303.89,
+        "p99": 394.08,
+        "max": 394.08
+      },
+      "p99OverheadMs": 369.98
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 3.44,
+        "p90": 4.75,
+        "p99": 13.29,
+        "max": 13.29
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 112.21,
+        "p90": 202.07,
+        "p99": 814.81,
+        "max": 814.81
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 801.52
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 369.98,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 801.52,
+      "threshold": 10,
+      "unit": "ms"
+    }
+  ],
+  "sourceCapture": {
+    "sourceFiles": 749,
+    "distFiles": 2992,
+    "harnessFiles": 5,
+    "capturedBeforeAfterEqual": true,
+    "matchedAtProjection": {
+      "source": true,
+      "dist": true,
+      "harness": true
+    },
+    "futureFreezeClaim": false
+  },
+  "requestJoin": {
+    "clientSamples": 400,
+    "uniqueGatewayRequestIds": 200,
+    "savedStateObservationOk": true,
+    "boundary": "Exact request-to-state observations, not an independent wallet aggregate or the additional warmup/smoke population."
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "receipts": [
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "summary.json",
+      "bytes": 908130,
+      "sha256": "6b292f1a98d86b57ca39c356cc02abb75e9e3fecb263b9e3572791dc84c80706"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "serial-profile-current-3cli.json",
+      "bytes": 2103,
+      "sha256": "296b44c24d0759829aec8c3e766e3c6d81bc48243e9478c48590d7872a5026c7"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "serial-profile-request-samples.json",
+      "bytes": 162778,
+      "sha256": "153bb1e1a9712b8955cdf045af41f478e24419b8a321efd052bd3607c89320ee"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "serial-profile-request-states.json",
+      "bytes": 199389,
+      "sha256": "90646f90a34ff1f2e88abdb060f5abcd8c6b0560da5b485bb811b7292d0cd295"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "gateway-1-request-stages.json",
+      "bytes": 1557527,
+      "sha256": "3de0a877217b7395c3d61f18d6e8321e1ae013aae041aba4267828b11b7af7bb"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "gateway-2-request-stages.json",
+      "bytes": 1519114,
+      "sha256": "45ff463c61f6c31a5f81ffa90024f6056839481debef3dcd785d9a91656a28fe"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "gateway-3-request-stages.json",
+      "bytes": 1499633,
+      "sha256": "7291f066de9bd5acf24bf8097af5e05823e0dac2ccd9b94498d93ab2cd7d5253"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "serial-profile-request-stage-join.json",
+      "bytes": 3855102,
+      "sha256": "84de312ca384f6dac5feaac47971155d7b8c43e52ddeece9d77cb584d97d5cd5"
+    },
+    {
+      "capture": "model-router-request-stage-fixed-read-plans-20261022-1416-root",
+      "file": "host-load-observation.json",
+      "bytes": 3757,
+      "sha256": "ef2c55ef9b86af1785fe2fd9e103b7cda2317cfc2d880bd988bae6d20010afaf"
+    }
+  ],
+  "limits": [
+    "Three built CLI gateways with local HTTPS mock and fixture rights; no real supplier or production KMS acceptance.",
+    "Direct/gateway samples are independent; n100 existing floor percentile selects the maximum at p99.",
+    "No latency benefit is inferred from differences across independent runs.",
+    "Passive hooks and the one host process snapshot add observation overhead.",
+    "Inclusive timers overlap and do not fully explain client timing; settlement after EOF is not assigned to TTFB.",
+    "The host snapshot records concurrent compilation but does not prove request-specific delay causality.",
+    "Evidence created_at DEFAULT now() samples transaction BEGIN, not the evidence INSERT."
+  ],
+  "observation": {
+    "children": [
+      {
+        "instance": 1,
+        "requests": 81,
+        "copiedItems": 8100,
+        "active": {
+          "prepare": 0,
+          "dispatch": 0
+        },
+        "descriptors": {
+          "factoryRestored": true,
+          "ownedRestored": true
+        },
+        "allFailureCountersZero": true
+      },
+      {
+        "instance": 2,
+        "requests": 79,
+        "copiedItems": 7900,
+        "active": {
+          "prepare": 0,
+          "dispatch": 0
+        },
+        "descriptors": {
+          "factoryRestored": true,
+          "ownedRestored": true
+        },
+        "allFailureCountersZero": true
+      },
+      {
+        "instance": 3,
+        "requests": 78,
+        "copiedItems": 7800,
+        "active": {
+          "prepare": 0,
+          "dispatch": 0
+        },
+        "descriptors": {
+          "factoryRestored": true,
+          "ownedRestored": true
+        },
+        "allFailureCountersZero": true
+      }
+    ],
+    "totalRecords": 238,
+    "totalItems": 23800,
+    "measuredGatewayJoin": 200,
+    "queryCountPerMeasuredRequest": {
+      "authority": [
+        22
+      ],
+      "admission": [
+        30
+      ],
+      "admission-guard": [
+        22
+      ],
+      "attempt": [
+        2
+      ]
+    },
+    "tailRequests": [
+      {
+        "scenario": "latency",
+        "clientMetricMs": 394.08287500000006,
+        "inclusivePhases": [
+          {
+            "kind": "phase",
+            "phase": "authority",
+            "operation": "resolve",
+            "durationMs": 38.557042000000365,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "preparation",
+            "operation": "scheduler-select",
+            "durationMs": 108.76029199999903,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "admission-guard",
+            "operation": "revalidate",
+            "durationMs": 25.650125000000116,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "admission",
+            "operation": "metering-guard-wallet",
+            "durationMs": 70.18220799999835,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "admission",
+            "operation": "capacity",
+            "durationMs": 11.848500000000058,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "preparation",
+            "operation": "evidence-register",
+            "durationMs": 20.01416699999936,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "preparation",
+            "operation": "preparation-total",
+            "durationMs": 280.1557499999999,
+            "outcome": "ok"
+          },
+          {
+            "stage": "preflight",
+            "durationMs": 4.888750000000073,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-read",
+            "durationMs": 1.0740000000005239,
+            "outcome": "ok"
+          },
+          {
+            "stage": "lease-acquire",
+            "durationMs": 3.9366660000014235,
+            "outcome": "ok"
+          },
+          {
+            "stage": "claim",
+            "durationMs": 16.06041699999878,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-read",
+            "durationMs": 2.537916999999652,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-transition",
+            "durationMs": 33.22191700000076,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-profile-resolve",
+            "durationMs": 1.7721249999995052,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-fixed-headers",
+            "durationMs": 0.25675000000046566,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-credential-prepare",
+            "durationMs": 10.34729200000038,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-connector-create",
+            "durationMs": 0.4341660000009142,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-fetch-headers",
+            "durationMs": 12.266250000000582,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-send",
+            "durationMs": 27.177207999999155,
+            "outcome": "ok"
+          },
+          {
+            "stage": "response-delivery",
+            "durationMs": 1.7530839999999444,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-transition",
+            "durationMs": 2.201666999999361,
+            "outcome": "ok"
+          },
+          {
+            "stage": "settlement",
+            "durationMs": 21.162916999999652,
+            "outcome": "ok"
+          },
+          {
+            "stage": "runtime-health",
+            "durationMs": 2.1256670000002487,
+            "outcome": "ok"
+          },
+          {
+            "stage": "lease-release",
+            "durationMs": 1.5483750000003056,
+            "outcome": "ok"
+          }
+        ],
+        "topQueries": [
+          {
+            "kind": "query",
+            "phase": "authority",
+            "operation": "saas_route_config_dispatchable",
+            "durationMs": 13.281541000000288,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "admission",
+            "operation": "saas_attempts",
+            "durationMs": 9.11554200000137,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "admission-guard",
+            "operation": "postgres-request-admission:authority-batch",
+            "durationMs": 8.13945799999965,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "authority",
+            "operation": "preparation-authority:platform",
+            "durationMs": 7.575875000000451,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "admission",
+            "operation": "database-clock",
+            "durationMs": 5.730249999998705,
+            "outcome": "ok"
+          }
+        ]
+      },
+      {
+        "scenario": "ttfb",
+        "clientMetricMs": 814.8078329999989,
+        "inclusivePhases": [
+          {
+            "kind": "phase",
+            "phase": "authority",
+            "operation": "resolve",
+            "durationMs": 132.82154099999752,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "preparation",
+            "operation": "scheduler-select",
+            "durationMs": 62.07733300000109,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "admission-guard",
+            "operation": "revalidate",
+            "durationMs": 63.98937499999738,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "admission",
+            "operation": "metering-guard-wallet",
+            "durationMs": 129.4021670000002,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "admission",
+            "operation": "capacity",
+            "durationMs": 22.99629200000345,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "preparation",
+            "operation": "evidence-register",
+            "durationMs": 33.51587499999732,
+            "outcome": "ok"
+          },
+          {
+            "kind": "phase",
+            "phase": "preparation",
+            "operation": "preparation-total",
+            "durationMs": 449.8882090000043,
+            "outcome": "ok"
+          },
+          {
+            "stage": "preflight",
+            "durationMs": 10.34004200000345,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-read",
+            "durationMs": 1.1468750000058208,
+            "outcome": "ok"
+          },
+          {
+            "stage": "lease-acquire",
+            "durationMs": 6.715708999996423,
+            "outcome": "ok"
+          },
+          {
+            "stage": "claim",
+            "durationMs": 31.920333000001847,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-read",
+            "durationMs": 1.9317920000030426,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-transition",
+            "durationMs": 7.74708400000236,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-profile-resolve",
+            "durationMs": 1.4727920000004815,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-fixed-headers",
+            "durationMs": 0.05812500000320142,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-credential-prepare",
+            "durationMs": 8.447667000000365,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-connector-create",
+            "durationMs": 0.7662909999999101,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-fetch-headers",
+            "durationMs": 38.454084000004514,
+            "outcome": "ok"
+          },
+          {
+            "stage": "transport-send",
+            "durationMs": 54.440207999999984,
+            "outcome": "ok"
+          },
+          {
+            "stage": "response-delivery",
+            "durationMs": 4.966125000006286,
+            "outcome": "ok"
+          },
+          {
+            "stage": "attempt-transition",
+            "durationMs": 3.6327089999977034,
+            "outcome": "ok"
+          },
+          {
+            "stage": "settlement",
+            "durationMs": 50.5817920000045,
+            "outcome": "ok"
+          },
+          {
+            "stage": "runtime-health",
+            "durationMs": 3.022957999994105,
+            "outcome": "ok"
+          },
+          {
+            "stage": "lease-release",
+            "durationMs": 2.4980409999989206,
+            "outcome": "ok"
+          }
+        ],
+        "topQueries": [
+          {
+            "kind": "query",
+            "phase": "admission-guard",
+            "operation": "postgres-request-admission:authority-batch",
+            "durationMs": 29.09833400000207,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "authority",
+            "operation": "composite-route-store:billing-group",
+            "durationMs": 21.52400000000489,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "admission",
+            "operation": "saas_attempts",
+            "durationMs": 19.316124999997555,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "authority",
+            "operation": "saas_public_model_versions",
+            "durationMs": 17.260290999998688,
+            "outcome": "ok"
+          },
+          {
+            "kind": "query",
+            "phase": "authority",
+            "operation": "saas_route_config_heads",
+            "durationMs": 12.038249999997788,
+            "outcome": "ok"
+          }
+        ]
+      }
+    ],
+    "queryClasses": [
+      {
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:authority-batch",
+        "count": 200,
+        "meanMs": 6.959220194999907,
+        "maxMs": 37.67516700000124
+      },
+      {
+        "phase": "authority",
+        "operation": "saas_route_config_dispatchable",
+        "count": 200,
+        "meanMs": 3.7968176799999083,
+        "maxMs": 36.71637499999997
+      },
+      {
+        "phase": "authority",
+        "operation": "preparation-authority:platform",
+        "count": 200,
+        "meanMs": 2.1646058549999316,
+        "maxMs": 53.540750000000116
+      },
+      {
+        "phase": "attempt",
+        "operation": "saas_attempts",
+        "count": 200,
+        "meanMs": 1.6105920399999014,
+        "maxMs": 61.15229099999851
+      },
+      {
+        "phase": "authority",
+        "operation": "saas_route_config_heads",
+        "count": 200,
+        "meanMs": 1.5589458650001553,
+        "maxMs": 12.038249999997788
+      },
+      {
+        "phase": "admission",
+        "operation": "saas_attempts",
+        "count": 600,
+        "meanMs": 1.413773203333579,
+        "maxMs": 19.86895899999945
+      },
+      {
+        "phase": "attempt",
+        "operation": "saas_requests",
+        "count": 200,
+        "meanMs": 1.1341410500001803,
+        "maxMs": 60.51600000000144
+      },
+      {
+        "phase": "admission",
+        "operation": "saas_requests",
+        "count": 600,
+        "meanMs": 0.9733039616665853,
+        "maxMs": 13.071416999999201
+      },
+      {
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:request",
+        "count": 200,
+        "meanMs": 0.8454306150000411,
+        "maxMs": 19.575333000000683
+      },
+      {
+        "phase": "admission-guard",
+        "operation": "saas_request_customer_price_snapshots",
+        "count": 400,
+        "meanMs": 0.8396569699999327,
+        "maxMs": 13.674041999998735
+      },
+      {
+        "phase": "authority",
+        "operation": "composite-route-store:billing-group",
+        "count": 200,
+        "meanMs": 0.8050878949998332,
+        "maxMs": 21.52400000000489
+      },
+      {
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:attempt",
+        "count": 200,
+        "meanMs": 0.7262264499998219,
+        "maxMs": 7.172999999998865
+      }
+    ]
+  },
+  "hostObservation": {
+    "observedAt": "2026-10-22T14:17:46.211313+00:00",
+    "loadAverage": [
+      14.56982421875,
+      14.16845703125,
+      12.3134765625
+    ],
+    "cpuCount": 10,
+    "otherCompilationObserved": true,
+    "boundary": "One host observation during profiler execution; process CPU is a ps sample, not per-request causality or isolated performance evidence."
+  }
+}

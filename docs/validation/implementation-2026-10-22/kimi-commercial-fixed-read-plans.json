@@ -1,0 +1,202 @@
+{
+  "schema": 1,
+  "classification": "local-built-kimi-fixed-read-plans-validation",
+  "proposedProjection": true,
+  "formalRequiredCiEvidence": false,
+  "releaseGoClaim": false,
+  "r9PerformanceEvidence": false,
+  "gateSummary": {
+    "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-commercial-postgres-wJad4G/summary.json",
+    "bytes": 168958,
+    "sha256": "538573eda26f433e03d52aa802410944470ed03494e91c8f632ea73441e7a586"
+  },
+  "testLog": {
+    "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-commercial-postgres-wJad4G/kimi-test.log",
+    "bytes": 3573,
+    "sha256": "5a0002cb6fb6ed508dc12d6c0cbf405b71bb8e64649dd5273d8920d6d5af452a"
+  },
+  "receiptFile": {
+    "path": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-commercial-postgres-wJad4G/kimi-evidence/kimi-commercial-summary.json",
+    "bytes": 25770,
+    "sha256": "900210ca06abc1f528dde89e2f73158790ca8eb9a2db60cdfe54118e27cd0668"
+  },
+  "buildGuard": {
+    "path": "/private/tmp/model-router-kimi-fixed-read-plans-native-20261022-6icbpC/build-guard.json",
+    "bytes": 898639,
+    "sha256": "93b0b0a580a6d39132520c1962a0ce52fdeb2c0216f680a9d8cb56e9fda5a5a9"
+  },
+  "wrapper": {
+    "path": "/private/tmp/model-router-kimi-fixed-read-plans-native-20261022.mjs",
+    "bytes": 5145,
+    "sha256": "166149c604c34f44b03758394bf8e856c6ba421177fe7986d5cab3aed7b10f97"
+  },
+  "counts": {
+    "tests": 7,
+    "suites": 0,
+    "pass": 7,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "runtime": "current-dist-cli-builtin",
+  "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+  "preparedMode": "native",
+  "kms": "local-test-pilot-software-kms",
+  "providerScope": {
+    "provider": "kimi",
+    "product": "kimi-code",
+    "singleCredentialFixture": true,
+    "allProvidersClaim": false,
+    "productionTariffClaim": false
+  },
+  "captureGuards": {
+    "source": {
+      "files": 749,
+      "beforeSha256": "7ffe28759b7f719cfbcc31a14cbd223e4303011aaf82398cabb4d0843855d161",
+      "afterSha256": "7ffe28759b7f719cfbcc31a14cbd223e4303011aaf82398cabb4d0843855d161",
+      "beforeAfterEqual": true
+    },
+    "dist": {
+      "files": 2992,
+      "beforeSha256": "9bb91cb71078ea7512a82e92236eb87289a5febba2f88f11460ac0c79457cc26",
+      "afterSha256": "9bb91cb71078ea7512a82e92236eb87289a5febba2f88f11460ac0c79457cc26",
+      "beforeAfterEqual": true
+    },
+    "literalClosure": {
+      "files": 708,
+      "beforeSha256": "c31d17be06b9e81ef052ab2d2b2102b0077d97789fa53524f68b76ea2ea6e86a",
+      "afterSha256": "c31d17be06b9e81ef052ab2d2b2102b0077d97789fa53524f68b76ea2ea6e86a",
+      "beforeAfterEqual": true
+    },
+    "buildAfterEqualsLiveGuardBefore": true,
+    "currentGlobalFreezeClaim": false
+  },
+  "completedReceipts": [
+    {
+      "scene": "native-nonstreaming",
+      "inputTokens": "25",
+      "outputTokens": "11",
+      "fixtureAmountMinorUnits": "83",
+      "identityJoinedInHeap": true,
+      "savedStateObservations": 2,
+      "rawUsageObservations": 1,
+      "settledFinancialObservationsAgree": true,
+      "ledgerCreditDebitEqual": true,
+      "terminalHeldLeases": "0"
+    },
+    {
+      "scene": "native-sse",
+      "inputTokens": "25",
+      "outputTokens": "11",
+      "fixtureAmountMinorUnits": "83",
+      "identityJoinedInHeap": true,
+      "savedStateObservations": 2,
+      "rawUsageObservations": 2,
+      "settledFinancialObservationsAgree": true,
+      "ledgerCreditDebitEqual": true,
+      "terminalHeldLeases": "0"
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-first",
+      "inputTokens": "186",
+      "outputTokens": "62",
+      "fixtureAmountMinorUnits": "558",
+      "identityJoinedInHeap": true,
+      "savedStateObservations": 2,
+      "rawUsageObservations": 1,
+      "settledFinancialObservationsAgree": true,
+      "ledgerCreditDebitEqual": true,
+      "terminalHeldLeases": "0"
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-second",
+      "inputTokens": "338",
+      "outputTokens": "11",
+      "fixtureAmountMinorUnits": "709",
+      "identityJoinedInHeap": true,
+      "savedStateObservations": 2,
+      "rawUsageObservations": 1,
+      "settledFinancialObservationsAgree": true,
+      "ledgerCreditDebitEqual": true,
+      "terminalHeldLeases": "0"
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-first",
+      "inputTokens": "222",
+      "outputTokens": "62",
+      "fixtureAmountMinorUnits": "630",
+      "identityJoinedInHeap": true,
+      "savedStateObservations": 3,
+      "rawUsageObservations": 1,
+      "settledFinancialObservationsAgree": true,
+      "ledgerCreditDebitEqual": true,
+      "terminalHeldLeases": "0"
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-second",
+      "inputTokens": "338",
+      "outputTokens": "11",
+      "fixtureAmountMinorUnits": "709",
+      "identityJoinedInHeap": true,
+      "savedStateObservations": 2,
+      "rawUsageObservations": 1,
+      "settledFinancialObservationsAgree": true,
+      "ledgerCreditDebitEqual": true,
+      "terminalHeldLeases": "0"
+    }
+  ],
+  "independentlyRecomputedTotals": {
+    "inputTokens": "1134",
+    "outputTokens": "168",
+    "settledMinorUnits": "2772",
+    "ledgerCreditMinorUnits": "2772",
+    "ledgerDebitMinorUnits": "2772",
+    "usageEvents": "6",
+    "attempts": "6",
+    "settlementEvents": "6",
+    "ledgerEntries": "12"
+  },
+  "calculation": "Last cumulative counter wins; native input/cache buckets counted once; fixture amount=input*2+output*3; integer arithmetic from this capture only.",
+  "priceIdentityBoundary": "Passing live classifier checks fixture price/supplier identity; safe terminal receipts omit those durable identity fields, so no independent saved-row price identity reconstruction.",
+  "completedReplay": {
+    "status": 200,
+    "conflictStatus": 409,
+    "savedUnchangedFinancialSnapshotBoolean": true,
+    "independentBeforeAfterSnapshotsSaved": false
+  },
+  "abort": {
+    "savedSceneState": "unknown",
+    "savedUsageEvents": "0",
+    "savedSettlementEvents": "0",
+    "replayStatus": 202,
+    "retainedHoldMinorUnits": "263680",
+    "standaloneTerminalRowSaved": false,
+    "passingLiveAssertions": [
+      "held lease reaches zero",
+      "unknown/reconciliation_pending attempt and hold",
+      "no guessed usage or settlement",
+      "wallet and ledger unchanged",
+      "replay creates no dispatch or financial effect"
+    ],
+    "boundary": "Terminal lease/wallet/ledger facts are passing live assertions, not independently saved abort rows or full before/after snapshots."
+  },
+  "extraDiagnostic": {
+    "count": 1,
+    "emptyUsageAndStates": true,
+    "excludedFromCompletedAndAbort": true
+  },
+  "cleanup": {
+    "capturedProcessesStopped": true,
+    "twoOwnedCliExitCodeZero": true,
+    "postgresClusterStopped": true,
+    "postgresClusterRemoved": true,
+    "clusterDirectoryAbsentAtProjection": true,
+    "independentPidInventoryRefreshed": false
+  },
+  "limits": [
+    "One credential, fixture prices and pilot software KMS; not formal CI, production KMS, all-provider acceptance, or release GO.",
+    "No current global freeze or performance evidence.",
+    "Declared provider call budget is not an independently saved HTTP call counter."
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "source": "current TypeScript V2 proxy",
+  "billing": "not managed SaaS",
+  "results": [
+    {
+      "name": "anthropic-two-turn-tool",
+      "result": "pass",
+      "milliseconds": [
+        4585,
+        1682
+      ],
+      "usage": [
+        {
+          "input_tokens": 120,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 60,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        {
+          "input_tokens": 207,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 11,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        }
+      ]
+    }
+  ],
+  "error": "{\"path\":\"/v1/chat/completions\",\"status\":400,\"error\":{\"message\":\"tool_choice 'specified' is incompatible with thinking enabled\",\"type\":\"api_error\",\"code\":null}}"
+}

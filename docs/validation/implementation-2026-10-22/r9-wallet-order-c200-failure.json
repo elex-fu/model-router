@@ -1,0 +1,225 @@
+{
+  "schema": 1,
+  "classification": "local-current-build-r9-attempt-failed-at-first-baseline",
+  "formalRequiredCiEvidence": false,
+  "evidenceRun": "model-router-current-r9-ybVPfY",
+  "startedAt": "2026-10-21T22:00:30.354Z",
+  "finishedAt": "2026-10-21T22:02:42.887Z",
+  "currentRepositoryFreezeClaim": false,
+  "realProviderCalls": 0,
+  "builtinAcceptance": false,
+  "assembly": {
+    "kind": "three standard built CLI processes with explicit mock test runtime and local pilot KMS",
+    "preparedStatements": "native",
+    "buildReused": true,
+    "postgresDurableWritesRequired": true
+  },
+  "sourceCaptures": {
+    "source": {
+      "filesChecked": 749,
+      "hashSetSha256": "7759595d8d4843e3a755c6642c34157df511b9c2dec64ebdfa5ea29f788c5a76",
+      "beforeAfterCurrentMatchAtArtifactCreation": true
+    },
+    "dist": {
+      "filesChecked": 2992,
+      "hashSetSha256": "b5647e2f7dd07185789eb0069cae319d07848f697656173a57cf75f050c8a5a3",
+      "beforeAfterCurrentMatchAtArtifactCreation": true
+    },
+    "harness": {
+      "filesChecked": 5,
+      "hashSetSha256": "de15334f07585d4526669d36c2c8eedb3bed3c4f9079850eb1128a3f33c4f06d",
+      "beforeAfterCurrentMatchAtArtifactCreation": true
+    }
+  },
+  "selectedSourceHashes": {
+    "src/saas/gateway/postgres-pre-dispatch-compensation.ts": "a65e1f605e4f4ad7896fe8cce2f6bb5b728a38880be7cf826e1372860019da26",
+    "src/saas/gateway/prepared-request-evidence-service.ts": "dcea76ba8f0386019720ff1b4eaaf7e0173a2d6345eae2c6e1d3d089f8e29c4a",
+    "src/saas/gateway/postgres-provider-account-scheduler.ts": "beab8494145f9ad73c66ee9ff48b23309d277a10085f327755e044384de0ebe2",
+    "src/saas/gateway/provider-http-transport.ts": "77355a2f0590e501cd21dd1b846fa67fa6d393537532b76ea46fad03524d7030",
+    "src/server/managed-saas-gateway.ts": "5a3d17693824b9ec4ca8dfcd054d98beb51bff6281cfb7e3c91bfcace1580147"
+  },
+  "configuration": {
+    "protocol": "openai",
+    "model": "r9-openai-model",
+    "maxTokens": 64,
+    "requests": 300,
+    "streamSamples": 100,
+    "warmupInflight": 4,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "sseChunkDelayMs": 0,
+    "inflight": 200,
+    "concurrencySeconds": 60,
+    "accountLimit": 64,
+    "precisionAccounts": "r9-openai-account-1,r9-openai-account-2,r9-openai-account-3,r9-openai-account-4",
+    "precisionInflight": 200,
+    "scalingSeconds": 120,
+    "scalingInflight": 200,
+    "baselineReport": null,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "out": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-ybVPfY/openai-scaling-1cli.json",
+    "noFail": false,
+    "gatewayUrls": [
+      "http://127.0.0.1:64700"
+    ],
+    "instanceCount": 1
+  },
+  "baseline": {
+    "instanceCount": 1,
+    "inflight": 200,
+    "seconds": 124.3,
+    "throughputRps": 19.6,
+    "statuses": {
+      "200": 2437,
+      "502": 2167,
+      "503": 4417
+    },
+    "latency": {
+      "n": 2437,
+      "p50": 3798.33,
+      "p90": 4943.64,
+      "p99": 5730.84,
+      "max": 5919.24
+    }
+  },
+  "violations": [
+    {
+      "scenario": "scaling",
+      "metric": "unexpected 5xx",
+      "value": 6584,
+      "threshold": 0,
+      "unit": ""
+    }
+  ],
+  "supervisor": {
+    "firstFault": {
+      "stage": "openai-scaling-1cli",
+      "message": "Scaling/concurrency observed counters are invalid or exceed the chosen zero transport/5xx budgets"
+    },
+    "scene": {
+      "scene": "openai-scaling-1cli",
+      "code": 1,
+      "signal": null,
+      "ok": false,
+      "observedTraffic": true,
+      "validObservedLoadCounters": false
+    },
+    "interrupted": false,
+    "laterLoadScenesStarted": false,
+    "failedBaselineStopsLaterLoad": true
+  },
+  "aggregateObservations": {
+    "preparationErrors": {
+      "scheduler-select": 4266,
+      "affinity-bind": 151,
+      "preparation-total": 4417
+    },
+    "preparationBlockedAuthorityCapabilityUnavailable": 4417,
+    "dispatchSuccessStageCounts": {
+      "preflight": 4606,
+      "lease-acquire": 4606,
+      "claim": 2439,
+      "transport-send": 2439,
+      "settlement": 2403,
+      "runtime-health": 2395,
+      "lease-release": 2391
+    },
+    "runtimeHealthErrors": 3,
+    "scope": "Cumulative metrics include the two initial smoke requests. Counts and differences do not associate an individual failure with an internal cause or durable financial state."
+  },
+  "postgres": {
+    "errorCount": 3,
+    "deadlockCount": 0,
+    "staleRuntimeHealthErrors": 3,
+    "rawErrorBodiesPublished": false
+  },
+  "mockUpstream": {
+    "totalRequestsIncludingSmoke": 2439,
+    "allReportedStatuses": {
+      "200": 2439
+    },
+    "currentInFlightAtFinalCapture": 0
+  },
+  "initialSmoke": [
+    {
+      "protocol": "openai",
+      "httpStatus": 200,
+      "settled": true
+    },
+    {
+      "protocol": "anthropic",
+      "httpStatus": 200,
+      "settled": true
+    }
+  ],
+  "metrics": [
+    {
+      "instance": 1,
+      "status": 200,
+      "log": "gateway-1-metrics.prom",
+      "sha256": "49146e4cda91257cfc01b31d1513a4c2d97c70baa125068117bd269dbaf5db05"
+    },
+    {
+      "instance": 2,
+      "status": 200,
+      "log": "gateway-2-metrics.prom",
+      "sha256": "66261776acbca5055516510d85341d8ce78fe82d75c5d55fd29c289fd6f20dad"
+    },
+    {
+      "instance": 3,
+      "status": 200,
+      "log": "gateway-3-metrics.prom",
+      "sha256": "f96146c575361a547489b59c72c3a44229c4f02cfd784326836d078a1de82774"
+    }
+  ],
+  "rawArtifacts": [
+    {
+      "file": "summary.json",
+      "bytes": 905718,
+      "sha256": "ddfd3e6cafa3659b934bb72c1a10ba501c149ecdd18e47a51c3c041a29858cd0"
+    },
+    {
+      "file": "openai-scaling-1cli.json",
+      "bytes": 1590,
+      "sha256": "b2c9d2720510fe7120543590d60e0d03b77ed7ad188a0a8313bcb138230170f9"
+    },
+    {
+      "file": "openai-scaling-1cli.log",
+      "bytes": 484,
+      "sha256": "60fbc19130419ceea7e099888048e91fd4f4d462184361d6db9e5ec37fdeb729"
+    },
+    {
+      "file": "postgres.log",
+      "bytes": 11750,
+      "sha256": "e4fa3d731df918333a15b0d2b9bdff1b19a83b3988303dd3481311a5afe020cd"
+    },
+    {
+      "file": "final-mock-stats.json",
+      "bytes": 1638,
+      "sha256": "8b046e3fd0f77a63a1c7fa37ef791ae8451d578e4c5794463a049339b69c4e32"
+    }
+  ],
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "limits": [
+    "This is the first single-CLI c200 scaling baseline, not a completed full R9 run. The three-CLI comparison, latency/TTFB phases and ten-minute SSE were not started.",
+    "All latencies in this scaling report describe successful HTTP 200 responses only; failed requests are excluded by the original driver algorithm.",
+    "No per-failure request IDs, internal errors, or final financial rows were captured before cleanup. HTTP 200 does not prove that asynchronous settlement completed.",
+    "Zero deadlocks in this attempt does not establish a causal throughput improvement or prove that every wallet contention pattern is eliminated.",
+    "The three stale runtime-health errors do not explain all 6584 HTTP 5xx responses. Aggregate stage counts narrow the next investigation but do not prove a per-request cause.",
+    "The existing zero transport/5xx budgets are now enforced by the scaling driver and independently rechecked by the supervisor; no threshold or 429 policy was loosened.",
+    "Local mock providers, signed fixture rights and pilot software KMS; no production or real-provider capacity claim."
+  ],
+  "passed": false,
+  "releaseDecision": "NO-GO"
+}

@@ -1,0 +1,270 @@
+{
+  "schema": 1,
+  "classification": "local-regression-health-capacity-source-capture",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-21T23:09:38.234257Z",
+  "evidenceRun": "model-router-regression-current-O0dgdr",
+  "summary": {
+    "path": "/private/tmp/model-router-regression-current-O0dgdr/summary.json",
+    "sha256": "10779d1096319ebb6fd7c9dbdb21043be7c8044b85bec4a060150c80b93bf9df",
+    "ok": true
+  },
+  "startedAt": "2026-10-21T23:04:38.109Z",
+  "finishedAt": "2026-10-21T23:06:15.362Z",
+  "nodeVersion": "v24.18.0",
+  "sourceVerification": {
+    "scope": "Git tracked and nonignored new source/test/script/deploy/workflow code and selected root package/TypeScript/Biome config; no docs, dist or ignored local deployment files.",
+    "filesChecked": 1649,
+    "beforeHashSetSha256": "669e0e32090167a582d08f4da73d0846588cc2a4ba0c6c6eab919fd864c57dbf",
+    "afterHashSetSha256": "669e0e32090167a582d08f4da73d0846588cc2a4ba0c6c6eab919fd864c57dbf",
+    "currentHashSetSha256": "669e0e32090167a582d08f4da73d0846588cc2a4ba0c6c6eab919fd864c57dbf",
+    "hashSetEncoding": "SHA256 of ASCII JSON with sorted keys and comma/colon separators",
+    "beforeAfterCurrentMatchAtArtifactCreation": true,
+    "currentVerifiedAt": "2026-10-21T23:09:38.145144Z",
+    "changes": [],
+    "selectedSourceHashes": {
+      "src/saas/gateway/postgres-provider-account-runtime-health-store.ts": "6f19124ffa6d120002a97e5357d66fdcc27aaa4f686e000e03e0d0d2b8949407",
+      "src/saas/gateway/postgres-provider-account-scheduler.ts": "53f9ee4d6dc76e0b4018ce0ea78f0395c02dbf1fd0bca1724b603c61a641d967",
+      "src/saas/gateway/provider-account-lease-service.ts": "3fcd445ac5383c4489d913205477e5ca148670fcd425bd9aab3fe68bf1ab494a",
+      "src/saas/gateway/prepared-evidence-dispatch-service.ts": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776",
+      "src/saas/gateway/http-handler.ts": "395c08bd4a2082ef3c81eededd01e695f0427ab8934cee5227a8f379b9fad1b9",
+      "tests/saas/gateway/postgres-provider-account-runtime-health-store.test.ts": "4eda520d563b593eea439e6050e08b43a4a9cf4a81136ff5eb6af0d284f9e3f8",
+      "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+      "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+      "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145",
+      "tests/saas/gateway/prepared-evidence-dispatch-service.test.ts": "54b503d303d6589e84ae467951a1bec8e5138956fd6b59195627e23652b4f406",
+      "tests/saas/gateway/http-handler.test.ts": "7e390a2ea0f75a79eb4a9029b48cc81903de98ecbec56065a9ee0e48df3c1075",
+      "scripts/ops/bench-gateway.mjs": "2e2f3508eeca9b5824470f09926558f5b8d01f7484e32ec01d67f5c6bedc047b",
+      "scripts/ops/run-current-r9.mjs": "54a23eb1bcb6b9ab7a41e659f57da2b5215ec3d3c0899142fc571f3424fa8d7a",
+      "tests/ops/r9-request-samples.test.ts": "6d2b4a2bab4a0525ce74fff741e5ea104882892dee8ece9b61360f8990d76e0e",
+      "tests/ops/r9-scaling-gates.test.ts": "9b5b920895ed31dc9b185bf2dd82cc56019ce1c067df67b4e92fe6165ed6b6b0",
+      "src/saas/db/runtime-privileges.ts": "d940171d704a658b3b648c1d31d3effbbc0637bd5c4cb97b3d6f7e507ba5f104"
+    },
+    "excludedFromScope": [
+      "docs",
+      "dist",
+      "ignored local deployment/environment files"
+    ],
+    "repositoryWideFreeze": false,
+    "futureChangesCovered": false,
+    "limitation": "Only the 1649 recorded source/test/script/deploy/workflow/config paths were checked; this does not assert that unlisted or ignored files are unchanged"
+  },
+  "unit": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:04:38.596Z",
+    "finishedAt": "2026-10-21T23:05:41.334Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/unit.log",
+    "logSha256": "5dac84c9c8cdd50c88f0ec38042630b517cf2e17f22ebcd4dc147d784cc01e2e",
+    "command": [
+      "/Users/lex/.local/node/bin/node",
+      "scripts/run-tests.mjs",
+      "unit"
+    ],
+    "counts": {
+      "tests": 6707,
+      "suites": 37,
+      "pass": 6684,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 23,
+      "todo": 0,
+      "duration_ms": 62624.194125
+    }
+  },
+  "integration": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:05:41.336Z",
+    "finishedAt": "2026-10-21T23:06:03.164Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/integration.log",
+    "logSha256": "007ffbf257ce268216d964589e90fdb7e52d4c3c20ff92a557549b56993105ae",
+    "command": [
+      "/Users/lex/.local/node/bin/node",
+      "scripts/run-tests.mjs",
+      "integration"
+    ],
+    "counts": {
+      "tests": 343,
+      "suites": 0,
+      "pass": 255,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 88,
+      "todo": 0,
+      "duration_ms": 21727.188375
+    }
+  },
+  "sourceTypecheck": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:06:03.166Z",
+    "finishedAt": "2026-10-21T23:06:10.960Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/source-typecheck.log",
+    "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "command": [
+      "/Users/lex/.local/node/bin/node",
+      "node_modules/typescript/bin/tsc",
+      "--noEmit"
+    ],
+    "scope": "Recorded source TypeScript configuration, --noEmit"
+  },
+  "scopedBiome": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:06:11.056Z",
+    "finishedAt": "2026-10-21T23:06:11.519Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/scoped-biome.log",
+    "logSha256": "1b77cf05900a842fa8ec492b88b4ff2186ec3107de3c974e37fb124993ca8c74",
+    "selectedPaths": 257,
+    "selectedPathSetSha256": "6bc31c7892cf12c97efc58c5698615e83ed2f2c0a5cb8a6e11afa228058458e2",
+    "processedFiles": 244,
+    "warnings": 165,
+    "infos": 27,
+    "errors": 0,
+    "fixesApplied": false,
+    "excludedExistingGeneratedFormatterDiscrepancy": [
+      "src/saas/db/runtime-privileges.ts"
+    ],
+    "scope": "257 selected changed/new paths and supported file formats; not repository-wide lint. The sole excluded runtime-privileges generated formatter discrepancy is preexisting, and its mirror freshness is checked separately."
+  },
+  "privilegeMirrors": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:06:11.520Z",
+    "finishedAt": "2026-10-21T23:06:11.754Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/privilege-mirrors.log",
+    "logSha256": "e2b889e724606fd074924f2d9e70cd09dcfc3439e0c31bab3c0f36773a47bcff",
+    "command": [
+      "/Users/lex/.local/node/bin/node",
+      "--import",
+      "tsx",
+      "scripts/generate-privileges.ts",
+      "--check"
+    ],
+    "upToDateFiles": [
+      "src/saas/db/runtime-privileges.ts",
+      "deploy/managed-saas-postgres-roles.sql",
+      "src/saas/db/credential-validation-worker-privileges.ts",
+      "deploy/managed-saas-validation-worker-role-grants.sql"
+    ],
+    "count": 4
+  },
+  "diffCheck": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:06:11.756Z",
+    "finishedAt": "2026-10-21T23:06:11.848Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/diff-check.log",
+    "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ]
+  },
+  "packageBoundary": {
+    "exitCode": 0,
+    "signal": null,
+    "startedAt": "2026-10-21T23:06:11.849Z",
+    "finishedAt": "2026-10-21T23:06:15.024Z",
+    "log": "/private/tmp/model-router-regression-current-O0dgdr/package-boundary.log",
+    "logSha256": "a9f6fe1e65db152b00f28dc0258ecf9ebe25eefb3433e60a97bdb4016729affb",
+    "command": [
+      "npm",
+      "pack",
+      "--dry-run",
+      "--ignore-scripts",
+      "--json"
+    ],
+    "stderrLog": "/private/tmp/model-router-regression-current-O0dgdr/package-boundary.stderr.log",
+    "stderrLogSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "files": 3174,
+    "forbiddenLocalMaterial": [],
+    "remoteOperatorEnvExcluded": true,
+    "gatewayExampleIncluded": true,
+    "composeIncluded": true,
+    "dryRun": true,
+    "ignoreScripts": true,
+    "packageCreatedOrPublished": false,
+    "completeSecretScan": false,
+    "capturedBeforeThisArtifactCreation": true,
+    "pathDeltaFromWalletOrderCapture": {
+      "previousFiles": 3168,
+      "currentFiles": 3174,
+      "previousPackLogSha256": "a63948aa41466df0b94c759bc1508482f4c7831c0cd775c548c70426f282748d",
+      "addedPaths": [
+        "docs/validation/implementation-2026-10-22/kimi-commercial-wallet-order.json",
+        "docs/validation/implementation-2026-10-22/r9-c200-cause-diagnostic.json",
+        "docs/validation/implementation-2026-10-22/r9-wallet-order-c200-failure.json",
+        "docs/validation/implementation-2026-10-22/regression-wallet-order.json",
+        "docs/validation/implementation-2026-10-22/runtime-health-clock-postgres.json",
+        "docs/validation/implementation-2026-10-22/wallet-compensation-lock-order-postgres.json"
+      ],
+      "removedPaths": [],
+      "observedDelta": 6,
+      "attribution": "All six added package paths are validation JSON documents; this is a file-list comparison, not a claim that source code caused package growth"
+    },
+    "limit": "These are the recorded dry-run package contents and specific local-material/environment boundary checks, not a complete secret scan or a future package-content guarantee"
+  },
+  "serverBuild": {
+    "command": [
+      "rtk",
+      "npm",
+      "run",
+      "build:server"
+    ],
+    "rootToolSession": 14731,
+    "exitCode": 0,
+    "exitCodeProvenance": "Root actual tool session reported terminal exit 0; the artifact worker did not rerun the build",
+    "log": "/private/tmp/model-router-implementation-20261021/build-server-health-capacity.log",
+    "logSha256": "81e60c95c656080721559b7590995ef0fc7ffaa850b5441c9055d001528da8a2",
+    "logSha256VerifiedAtArtifactCreation": true,
+    "currentDistFileCount": 2992,
+    "distCountScope": "Current filesystem count only; no build-boundary dist-before/dist-after hash capture is claimed",
+    "crossStageSourceVerification": {
+      "guard": "/private/tmp/model-router-health-clock-fixed-matrix-Yd2ppu/summary.json",
+      "guardSha256": "4c100dd5c33210d83c0cb3b60ab7df6d4fe9314bff95e27279ff2f241d386bdb",
+      "guardStartedAt": "2026-10-21T22:51:47.428Z",
+      "guardFinishedAt": "2026-10-21T22:51:58.828Z",
+      "filesChecked": 757,
+      "composition": "749 source files plus 8 explicit additional inputs from the earlier health PG-stage guard",
+      "beforeHashSetSha256": "1cf10bf60076040ee8ec20649a0c7c02d1150fcb686250ae0e90aab7ec260fdc",
+      "afterHashSetSha256": "1cf10bf60076040ee8ec20649a0c7c02d1150fcb686250ae0e90aab7ec260fdc",
+      "currentHashSetSha256": "1cf10bf60076040ee8ec20649a0c7c02d1150fcb686250ae0e90aab7ec260fdc",
+      "beforeAfterCurrentMatchAtArtifactCreation": true,
+      "currentVerifiedAt": "2026-10-21T23:09:38.183930Z",
+      "changes": [],
+      "dedicatedBuildBoundaryGuard": false,
+      "limitation": "This 757-file capture belongs to the earlier PG stage and agrees with current files after the build; it was not sampled at build entry/exit and contains no build dist hash pair"
+    }
+  },
+  "priorAggregates": [
+    {
+      "artifact": "regression.json",
+      "sha256": "e93f03dcd7adfd5fac8d46d1c834dae3efb01e2f47d9ee912c0e652582b4fc5a",
+      "evidenceRun": "model-router-regression-current-T7ez7O",
+      "unitTests": 6600,
+      "integrationTests": 340,
+      "preservedSeparately": true,
+      "addedToThisAggregate": false
+    },
+    {
+      "artifact": "regression-wallet-order.json",
+      "sha256": "fd68ea7a3a5d5d86df47f7457af35e0bc52f8700c0a72cd311dff924a175fa79",
+      "evidenceRun": "model-router-regression-current-c46cBs",
+      "unitTests": 6631,
+      "integrationTests": 341,
+      "preservedSeparately": true,
+      "addedToThisAggregate": false
+    }
+  ],
+  "limits": [
+    "This is the actual local health/capacity aggregate regression and limited source capture; it is not formal required CI evidence or a global repository freeze",
+    "Focused unit checks, deterministic PostgreSQL gates, live-provider acceptance and R9 performance measurements are separate evidence populations and are not added to these totals",
+    "The 6631-test wallet-order and 6600-test earlier aggregate records remain unchanged and are not summed with this 6707-test aggregate",
+    "No success or completion claim is made for the separate real Kimi run that was still active when this projection was requested",
+    "No DB, build, test, provider or benchmark was executed by the projection worker; only recorded evidence and current file hashes were read"
+  ],
+  "passed": true
+}

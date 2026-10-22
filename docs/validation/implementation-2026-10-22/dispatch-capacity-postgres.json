@@ -1,0 +1,460 @@
+{
+  "classification": "local-functional-smoke",
+  "formalRequiredCiEvidence": false,
+  "releaseVerdict": "NO-GO",
+  "scope": "Local source-based restricted-role PG18/PG15 correctness evidence for exact dispatch capacity classification. The successful gate does not establish current-dist R9, latency, durability, live-provider or release acceptance.",
+  "localDate": "2026-10-22",
+  "projectedAtUtc": "2026-10-21T23:08:21.043395+00:00",
+  "totals": {
+    "allNativeTests": 60,
+    "pass": 60,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "newCapacityNativeTests": 6,
+    "prerequisiteSocketHttpNativeTests": 54,
+    "composition": "Each major has 27 native HTTP bootstrap items (26 children and parent) followed on the same database by 3 capacity items (BYOK child, platform child and parent). The six new capacity items are four supply-mode scenarios plus two parents, not six independent scenarios."
+  },
+  "executionBoundary": {
+    "newCapacityCase": "Production HTTP handler invoked with Readable request and CapacityResponse response doubles, backed by the actual restricted PostgreSQL lease/evidence/metering/compensation/billing services. Authentication and already signed/prepared result are fixture ports; send is a test sentinel which must never run. This is not a new socket end-to-end 429 test.",
+    "prerequisiteHttp": "Existing managed control-plane/gateway listeners and local pinned HTTPS upstream provide the separate real socket HTTP bootstrap before each capacity root. No external live-provider calls are claimed.",
+    "dataPreparation": "Existing cancellationFixture clones the successful HTTP fixture through its original signed registration/hold/idempotency flow. No raw-null stub, alternate business algorithm, new schema or added grants.",
+    "defaultPreparedStatements": "off",
+    "preparedStatementOverrideInherited": false,
+    "durability": {
+      "fsync": "off",
+      "synchronous_commit": "off",
+      "source": "Unchanged canonical functional-runner configuration on both disposable backends.",
+      "crashDurabilityOrPerformanceClaim": false
+    },
+    "roles": [
+      "model_router_saas_migrator",
+      "model_router_saas_control_plane",
+      "model_router_saas_gateway"
+    ],
+    "businessServicesRole": "model_router_saas_gateway",
+    "setupAndSnapshotsRole": "model_router_saas_migrator",
+    "schemaPrivilegesVerifiedByExistingFixture": true
+  },
+  "currentRuns": [
+    {
+      "major": 18,
+      "startedAtUtc": "2026-10-21T23:03:00.785Z",
+      "finishedAtUtc": "2026-10-21T23:03:13.749Z",
+      "recordedCommit": "bb9756c7b73a7f1a793aee761bb71f8ffb31956e",
+      "backend": "disposable-initdb-cluster",
+      "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "dockerImage": null,
+      "dockerImageId": null,
+      "summary": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/evidence-pg18/summary.json",
+        "sha256": "343debad56bc78f6efefebdf19a8b75d8cfa2529d9bfddae220b491b101bf605"
+      },
+      "sameDatabasePhaseOrder": [
+        "http-bootstrap",
+        "capacity"
+      ],
+      "phases": [
+        {
+          "phase": "http-bootstrap",
+          "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "exitCode": 0,
+          "signal": null,
+          "nativeCounts": {
+            "tests": 27,
+            "suites": 0,
+            "pass": 27,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tap": {
+            "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/evidence-pg18/custom-http-bootstrap-test.log",
+            "sha256": "83af6adb4bdda6360cf65f39ea1f93347d8bced00494d40bf8c39939e92b9940"
+          }
+        },
+        {
+          "phase": "capacity",
+          "testFile": "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts",
+          "exitCode": 0,
+          "signal": null,
+          "nativeCounts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tap": {
+            "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/evidence-pg18/custom-capacity-test.log",
+            "sha256": "0422e0b92529bdb14fc3bd3b98913ef6ff73cfef322b61991e4e1624c626b6ba"
+          }
+        }
+      ],
+      "ok": true,
+      "cleanup": {
+        "recorded": {
+          "clusterStopped": true,
+          "clusterRemoved": true
+        },
+        "allRecordedStageExitCodesZero": true,
+        "currentOwnedClusterDirectoryAbsent": true
+      },
+      "sourceVerification": {
+        "scope": "literal relative import closure, runner, role manifest, package-lock.json",
+        "files": 689,
+        "bucketCounts": {
+          "src": 679,
+          "tests": 5,
+          "canonicalRunner": 1,
+          "privateLauncherAndRunner": 2,
+          "roleManifestAndPackageLock": 2
+        },
+        "recordedChangedFiles": [],
+        "currentChangedOrMissingFiles": [],
+        "beforeMapJsonSha256": "24827c53bc00004e36af3d04a14a65f636f118d7f30876a83dff9074600e667c",
+        "afterMapJsonSha256": "24827c53bc00004e36af3d04a14a65f636f118d7f30876a83dff9074600e667c",
+        "beforeCanonicalPairsSha256": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7",
+        "afterCanonicalPairsSha256": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7",
+        "currentCanonicalPairsSha256": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7"
+      }
+    },
+    {
+      "major": 15,
+      "startedAtUtc": "2026-10-21T23:03:47.887Z",
+      "finishedAtUtc": "2026-10-21T23:04:13.109Z",
+      "recordedCommit": "bb9756c7b73a7f1a793aee761bb71f8ffb31956e",
+      "backend": "disposable-docker-container",
+      "postgresVersion": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "dockerImage": "postgres:15-alpine",
+      "dockerImageId": "sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81",
+      "summary": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/evidence-pg15/summary.json",
+        "sha256": "5143f4d6a1c1c09e71177fc715c0dcb68be59cc3bf165ebaefc7671668ebd885"
+      },
+      "sameDatabasePhaseOrder": [
+        "http-bootstrap",
+        "capacity"
+      ],
+      "phases": [
+        {
+          "phase": "http-bootstrap",
+          "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "exitCode": 0,
+          "signal": null,
+          "nativeCounts": {
+            "tests": 27,
+            "suites": 0,
+            "pass": 27,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tap": {
+            "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/evidence-pg15/custom-http-bootstrap-test.log",
+            "sha256": "8639c21d180c17d10df8e49f02da4e67a283cf3bf315b3adbb0294079ab109e5"
+          }
+        },
+        {
+          "phase": "capacity",
+          "testFile": "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts",
+          "exitCode": 0,
+          "signal": null,
+          "nativeCounts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tap": {
+            "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/evidence-pg15/custom-capacity-test.log",
+            "sha256": "67f1e4670c4d54df0f53de7997e81c2120c8bdf55511cc4530427252bd34e45f"
+          }
+        }
+      ],
+      "ok": true,
+      "cleanup": {
+        "recorded": {
+          "clusterStopped": true,
+          "clusterRemoved": true
+        },
+        "allRecordedStageExitCodesZero": true,
+        "currentOwnedClusterDirectoryAbsent": true,
+        "exactOwnedContainerReadOnlyCheck": {
+          "source": "full containerId in this run summary",
+          "containerIdSha256": "124b99a471c326820fd340a275a3e383fce173881dd922922db04fb9dc6920a4",
+          "command": "docker ps -a --no-trunc --filter id=<exact summary.containerId> --format {{.ID}}",
+          "exitCode": 0,
+          "returnedIds": 0,
+          "absent": true,
+          "scope": "Only the exact owned disposable container; no other container inspected or changed."
+        }
+      },
+      "sourceVerification": {
+        "scope": "literal relative import closure, runner, role manifest, package-lock.json",
+        "files": 689,
+        "bucketCounts": {
+          "src": 679,
+          "tests": 5,
+          "canonicalRunner": 1,
+          "privateLauncherAndRunner": 2,
+          "roleManifestAndPackageLock": 2
+        },
+        "recordedChangedFiles": [],
+        "currentChangedOrMissingFiles": [],
+        "beforeMapJsonSha256": "24827c53bc00004e36af3d04a14a65f636f118d7f30876a83dff9074600e667c",
+        "afterMapJsonSha256": "24827c53bc00004e36af3d04a14a65f636f118d7f30876a83dff9074600e667c",
+        "beforeCanonicalPairsSha256": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7",
+        "afterCanonicalPairsSha256": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7",
+        "currentCanonicalPairsSha256": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7"
+      }
+    }
+  ],
+  "actualPassedPredicates": {
+    "evidenceKind": "The raw TAP records test success and native counts. The following predicates are read from the exact hashed test input that passed; raw business-row snapshots and money values were not retained in this projection.",
+    "perMode": [
+      "A and B have the same tenant/account and different attempts. A really acquires the sole configured PostgreSQL account slot (fixture maxConcurrency=1, leaseTtlMs=90000).",
+      "B completes one real preflight, attempts one real acquire, never claims evidence or sends upstream, observes exactly one typed LEASE_CAPACITY_EXHAUSTED, and invokes one handler cleanup.",
+      "HTTP handler returns 429 RATE_LIMITED without Retry-After only after real same-request/same-attempt compensation reports released quota/rate and platform hold (BYOK hold not_applicable), no manual reconciliation, and no response/client-cancellation condition.",
+      "B request and attempt end failed/not_sent with no response; B capacity is released, platform hold released or BYOK absent, durable idempotency completed and one release audit.",
+      "B has zero usage and usage settlement, zero claim audit and null prepared-evidence binding; its evidence remains registered. Tenant wallet/ledger/transaction/entry snapshots remain unchanged and the wallet projection equals its ledger; transactions remain balanced.",
+      "An additional direct compensation replay after the HTTP cleanup returns released. Idempotency replay returns existing/completed and B canonical request identity; no new acquire occurs.",
+      "Late real evidence claim refuses exact SaasPreparedRequestEvidenceError STORAGE_ERROR with the existing fixed unexpected-row-count message and undefined cause; a stale attempt CAS refuses SaasMeteringError ATTEMPT_TRANSITION_INVALID. All B financial/resource snapshots remain unchanged afterwards.",
+      "A original held lease identity, fencing token, slot and expiry remain unchanged throughout B rejection/replay/late-claim checks. The original A lease.release is awaited in finally."
+    ],
+    "observedCountersPerMode": {
+      "Bpreflight": 1,
+      "Bacquire": 1,
+      "Bclaim": 0,
+      "Bsend": 0,
+      "BhandlerCleanup": 1,
+      "typedCapacityError": 1,
+      "additionalDirectCompensationReplay": 1
+    },
+    "resourceScopeLimit": "Only B is compensated by this case. No assertion that A preparation reservations were compensated, that all database holds are zero, or that a post-finally A lease row snapshot was retained.",
+    "snapshotBodiesPersisted": false
+  },
+  "productionContract": {
+    "files": {
+      "src/server/managed-saas-gateway.ts": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d",
+      "src/saas/gateway/prepared-evidence-dispatch-service.ts": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776",
+      "src/saas/gateway/http-handler.ts": "395c08bd4a2082ef3c81eededd01e695f0427ab8934cee5227a8f379b9fad1b9"
+    },
+    "knownPostgresOnly": "Dispatch-only factory requires instanceof PostgresProviderAccountLeaseService at construction; only that service strict null becomes typed LEASE_CAPACITY_EXHAUSTED. Raw PG/half-open health/custom providers retain their original semantics.",
+    "http429Fence": "Exact dispatch error class and code plus not-started/not-cancelled response and same-identity complete compensation are all required. Missing, throwing, retained or malformed compensation, generic null/bad lease/storage/revocation errors remain non-capacity failures.",
+    "preserved": [
+      "one acquire; no fallback or retry",
+      "raw service clock, account revocation/credential fences, lease identity/fencing/cadence",
+      "independent preflight and claim transactions, authority rechecks, signature and CAS/audit rules",
+      "capacity limits, TTL, wallet/ledger/hold, quota/rate and compensation semantics",
+      "existing roles/grants, timeouts and all rejection predicates"
+    ],
+    "threeProductionHashesIdenticalInBothFirstRedsAndBothPassingRuns": true
+  },
+  "directInputHashes": {
+    "src/server/managed-saas-gateway.ts": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d",
+    "src/saas/gateway/prepared-evidence-dispatch-service.ts": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776",
+    "src/saas/gateway/http-handler.ts": "395c08bd4a2082ef3c81eededd01e695f0427ab8934cee5227a8f379b9fad1b9",
+    "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145",
+    "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+    "tests/saas/gateway/pre-dispatch-postgres-fixture.ts": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217"
+  },
+  "firstReds": [
+    {
+      "id": "model-router-capacity-http-chain-ijuc5bju",
+      "summary": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-ijuc5bju/evidence-pg18/summary.json",
+        "sha256": "72c52e761ccc424f75c4ecac449bb201a7ef9993e634f06622d6cb86d8b8aaf2"
+      },
+      "tap": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-ijuc5bju/evidence-pg18/custom-http-bootstrap-test.log",
+        "sha256": "1a1900260e96c85dcdf6c5e29ede12d0b6ec6376d67a22434ee8d61f2401c095"
+      },
+      "nativeCounts": {
+        "tests": 1,
+        "suites": 0,
+        "pass": 0,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "capacityRootStarted": false,
+      "pg15Started": false,
+      "failure": "ERR_ASSERTION in observeDispatchFailures line750: obsolete observer expected the dispatch lease adapter itself to be PostgresProviderAccountLeaseService. It stopped before the HTTP subtests/capacity root, not at the new capacity business branch.",
+      "correction": "Only the existing HTTP integration test observation contract changed: exact adapter own-key/data-property shape; real raw PG class obtained from the fixed HalfOpenProbeHealthPort.leaseProvider data property; per-call one delegation, unchanged input, original lease and raw error identity; strict null requires exact typed capacity code. lease_acquire remains one adapter phase.",
+      "beforeCommercialTestSha256": "5a85036aa2178eaa18d518c088bf45d3e6154c273313781f7c0bc8d73f286401",
+      "afterCommercialTestSha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+      "productionRolesTimeoutsFinancialOrFencingAssertionsRelaxed": false,
+      "recordedSourceChanges": [],
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      },
+      "preserved": true
+    },
+    {
+      "id": "model-router-capacity-http-chain-v2-8smt8n44",
+      "summary": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-v2-8smt8n44/evidence-pg18/summary.json",
+        "sha256": "a46c765c965a51d2fdf6f69e5194521e700c4c0e88a975bf3f63dfc1ab87a0f2"
+      },
+      "httpTap": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-v2-8smt8n44/evidence-pg18/custom-http-bootstrap-test.log",
+        "sha256": "57817dbe6c868330a9c27c128279247b5eddd01b990eaaf2e78d554d88944022"
+      },
+      "httpNativeCounts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "capacityTap": {
+        "localPath": "/private/tmp/model-router-capacity-http-chain-v2-8smt8n44/evidence-pg18/custom-capacity-test.log",
+        "sha256": "470e7d4c9a6009840ba121be90447cb976752a32b157c889f8feae8703f5801c"
+      },
+      "capacityNativeCounts": {
+        "tests": 3,
+        "suites": 0,
+        "pass": 0,
+        "fail": 3,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "pg15Started": false,
+      "failure": "Both mode children stopped at heldLeaseSnapshot before B dispatch/financialSnapshot: SQLSTATE42883, text = uuid. saas_provider_account_leases.attempt_id is text in migration025; its test parameter was incorrectly cast uuid. Parent failure is the two failed children.",
+      "correction": "Exactly one parameter cast changed from $2::uuid to $2::text in the lease attempt-id predicate. No database column was cast, no value/snapshot scope/assertion changed.",
+      "preservedInputs": {
+        "manifest": {
+          "localPath": "/private/tmp/model-router-capacity-first-red-inputs-i68i_3wj/manifest.json",
+          "sha256": "5ecaf09a5d8dda8fb8eef843b5164e45fe41e9ac19e9abc03ecf8d72adf14948"
+        },
+        "capacityRoot": {
+          "localPath": "/private/tmp/model-router-capacity-first-red-inputs-i68i_3wj/dispatch-capacity.postgres.integration.test.ts",
+          "sha256": "54cb79e89f665452ec84a5dc65d8f3c7dd9fb332cfd0f765c7f444258d7d33f5"
+        },
+        "commercialRoot": {
+          "localPath": "/private/tmp/model-router-capacity-first-red-inputs-i68i_3wj/managed-postgres-commercial-gateway.integration.test.ts",
+          "sha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5"
+        }
+      },
+      "reverseOneLiteralFixReproducesEntirePriorCapacityRootSha256": "54cb79e89f665452ec84a5dc65d8f3c7dd9fb332cfd0f765c7f444258d7d33f5",
+      "currentCapacityRootSha256": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145",
+      "productionRolesTimeoutsFinancialAssertionsChanged": false,
+      "recordedSourceChanges": [],
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      },
+      "preserved": true
+    }
+  ],
+  "offlineEvidence": {
+    "privateFreeze": {
+      "localPath": "/private/tmp/model-router-dispatch-capacity-freeze-20261022.json",
+      "sha256": "9dd4eab593553629de03ce173950aeed06da8129fb7e73eb6a929eab11284c8e"
+    },
+    "nativeUnitTests": 114,
+    "unitRuns": [
+      {
+        "roots": [
+          "tests/saas/gateway/prepared-evidence-dispatch-service.test.ts",
+          "tests/saas/gateway/http-handler.test.ts"
+        ],
+        "rawTap": {
+          "localPath": "/private/tmp/model-router-dispatch-capacity-unit-first-20261022.tap",
+          "sha256": "ba750c49a86b47cefa7d622ef8bdd2f1a3fb22d4b836afc1efcfa7519857d60d"
+        },
+        "nativeCounts": {
+          "tests": 101,
+          "suites": 0,
+          "pass": 101,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        }
+      },
+      {
+        "roots": [
+          "tests/server/managed-saas-gateway-composition.test.ts"
+        ],
+        "rawTap": {
+          "localPath": "/private/tmp/model-router-dispatch-capacity-composition-first-20261022.tap",
+          "sha256": "5d58620dde18f9632454dfb9bb9aa7ac27700fe506af6cc1f1c50b0f7f682e59"
+        },
+        "nativeCounts": {
+          "tests": 13,
+          "suites": 0,
+          "pass": 13,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        }
+      }
+    ],
+    "unitScope": "Owner focused runs only; raw TAP files now read and hashed, not a new execution or formal full-regression result.",
+    "reportedStaticChecks": {
+      "scopedStrictFourRoots": "exit0 reported by owner; stdout was not separately persisted",
+      "finalCapacityRootStrict": "exit0 reported by owner after the one-line cast change",
+      "biomeCapacityRoot": "exit0 and zero warnings reported by owner",
+      "commercialRootBiome": "exit0 with three pre-existing non-null warnings; no unsafe fix",
+      "diffCheck": "exit0 reported by owner"
+    },
+    "freshFullRegressionIncluded": false
+  },
+  "sourceGuard": {
+    "boundedScope": "Literal relative-import closure, CLI entry, canonical/private runner, role manifest and dependency lock. Not the whole repository; dist, other tests/config/documents, external code and dynamic import targets are outside the recorded closure.",
+    "perRunFiles": 689,
+    "bothPassingRunsSameCanonicalPairsDigest": "a5b658dbc783f6333f70560f19b2db6479efc2174e05e363109765bafc81cae7",
+    "mapDigestEncoding": "SHA256 of UTF-8 JSON.stringify(saved hash table) in recorded insertion order; equivalent compact JSON is used for readback.",
+    "canonicalPairsDigestEncoding": "SHA256 of compact UTF-8 JSON of [relativePath, SHA256] pairs sorted lexicographically by relativePath.",
+    "beforeAfterAndCurrentReadbackAllMatch": true,
+    "privateRunner": {
+      "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/runner.mjs",
+      "sha256": "a2840a89c9464ff71813e3d2b206efbd89883c3893776d924bbe2e44e43d54f8"
+    },
+    "privateLauncher": {
+      "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/launch.mjs",
+      "sha256": "fdbd6b519b1b148b46b96f9450653dc0a70c92d35de6224aa1add404c11d483a"
+    },
+    "privateFreeze": {
+      "localPath": "/private/tmp/model-router-capacity-http-chain-v3-cw1dykpx/freeze.json",
+      "sha256": "1dc27f422739eda9dd416a302ab46d63a8e3b30b29d7098a835dac487cd858f3"
+    },
+    "privateFreezeDatabaseExecutedFieldIsPreparationTimeOnly": "The private freeze databaseExecuted=false describes launcher preparation; actual terminal summaries/TAP above are the executed outcomes.",
+    "cleanWorkingTreeOrCommitOnlyClaim": false,
+    "currentDistOrRuntimeDeploymentClaim": false
+  },
+  "remainingScope": {
+    "formalRequiredCiEvidence": false,
+    "noGoRetained": true,
+    "r9OrThroughputOrLatencyPassClaim": false,
+    "durabilityPassClaim": false,
+    "currentBuiltArtifactClaim": false,
+    "liveProviderPassClaim": false,
+    "historicalScope": "Immutable local correctness runs completed at the recorded timestamps with the recorded bounded sources. They do not replace required-CI, full regression, current-built high-concurrency R9 or deployment acceptance; those are separately owned by root."
+  },
+  "projectionSafety": {
+    "persisted": "Fixed outcome/counts/types, test/source/evidence hashes, scoped predicates, cleanup and local evidence references only.",
+    "excluded": [
+      "raw business rows or financial balances",
+      "request/account/key/evidence identifiers and payloads",
+      "credentials/role URLs/provider secrets",
+      "SQL parameters/error detail/context/raw stack"
+    ],
+    "newRunsOrSourceTestCiChangesDuringProjection": false
+  }
+}

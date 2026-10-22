@@ -1,0 +1,296 @@
+{
+  "schemaVersion": 1,
+  "classification": "local-smoke",
+  "formalRequiredCiEvidence": false,
+  "createdAt": "2026-10-21T23:32:27.717Z",
+  "purpose": "Fresh offline CI wiring and exact current workflow strict TypeScript checks after the commercial dispatch observer and capacity root cast corrections.",
+  "startedAt": "2026-10-21T23:32:05.683Z",
+  "finishedAt": "2026-10-21T23:32:27.714Z",
+  "executionScope": {
+    "offlineOnly": true,
+    "typescriptBuildEmitted": false,
+    "databasesStarted": false,
+    "databaseConnectionsMade": false,
+    "builtCliExecuted": false,
+    "providerCallsMade": false,
+    "benchmarksRun": false,
+    "sourceTestsOrCiModified": false,
+    "previousArtifactsModified": false
+  },
+  "rawCapture": {
+    "path": "/private/tmp/model-router-ci-wiring-health-capacity-ZX5G0w/capture.json",
+    "bytes": 30557,
+    "sha256": "b7a360c9af03fca336f89c9c02062feb3f34dcca26e3ec23546ce14dad0fda61"
+  },
+  "environmentPolicy": {
+    "cleanChildEnvironment": true,
+    "retainedEnvironmentNames": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "LANG",
+      "LC_ALL",
+      "LC_CTYPE",
+      "USER",
+      "LOGNAME",
+      "TZ"
+    ],
+    "providerLiveKmsPgAndNodeOptionsInherited": false,
+    "environmentValuesSaved": false
+  },
+  "toolVersions": {
+    "node": "v24.18.0",
+    "typescript": "5.9.3",
+    "tsx": "4.21.0"
+  },
+  "steps": [
+    {
+      "id": "strict-critical",
+      "kind": "typescript-strict",
+      "step": "Strictly typecheck critical PostgreSQL test sources",
+      "exactWorkflowCommand": "./node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/saas/gateway/authorization-prelock-postgres.integration.test.ts tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts tests/cli/managed-saas-validation-worker-postgres.integration.test.ts tests/saas/supply/managed-postgres-credential-validation.integration.test.ts src/saas/db/credential-validation-worker-schema-readiness.ts src/saas/db/credential-validation-worker-privileges.ts src/saas/runtime/credential-validation-targets-module.ts tests/saas/db/credential-validation-worker-schema-readiness.test.ts tests/saas/db/credential-validation-worker-privileges.test.ts tests/ci/managed-saas-required-gates.test.ts",
+      "actualCommand": "./node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/saas/gateway/authorization-prelock-postgres.integration.test.ts tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts tests/cli/managed-saas-validation-worker-postgres.integration.test.ts tests/saas/supply/managed-postgres-credential-validation.integration.test.ts src/saas/db/credential-validation-worker-schema-readiness.ts src/saas/db/credential-validation-worker-privileges.ts src/saas/runtime/credential-validation-targets-module.ts tests/saas/db/credential-validation-worker-schema-readiness.test.ts tests/saas/db/credential-validation-worker-privileges.test.ts tests/ci/managed-saas-required-gates.test.ts",
+      "launchedWithShell": false,
+      "startedAt": "2026-10-21T23:32:05.694Z",
+      "finishedAt": "2026-10-21T23:32:16.877Z",
+      "exitCode": 0,
+      "signal": null,
+      "log": {
+        "path": "/private/tmp/model-router-ci-wiring-health-capacity-ZX5G0w/strict-critical.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "nativeTapCounts": null
+    },
+    {
+      "id": "strict-isolated",
+      "kind": "typescript-strict",
+      "step": "Strictly typecheck isolated required roots and their fixtures",
+      "exactWorkflowCommand": "./node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts tests/saas/metering/usage-correction.postgres.integration.test.ts tests/saas/keys/ip-policy.postgres.integration.test.ts tests/saas/keys/budget-policy.postgres.integration.test.ts tests/drills/settlement-sigkill-crash.postgres.integration.test.ts tests/saas/identity/tenant-member-directory.postgres.integration.test.ts tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts tests/drills/dual-instance-failover.postgres.integration.test.ts tests/saas/marketing/redeem-codes.postgres.integration.test.ts tests/saas/marketing/promo-codes.postgres.integration.test.ts tests/saas/marketing/affiliate.postgres.integration.test.ts tests/saas/marketing/announcements.postgres.integration.test.ts tests/saas/supply/quota-sync-worker.postgres.integration.test.ts tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts tests/saas/supply/account-quarantine.postgres.integration.test.ts tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts tests/saas/gateway/health-score.postgres.integration.test.ts tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts tests/integration/kimi-commercial-preparation-diagnostic.test.ts tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts tests/saas/gateway/prepared-statements.postgres.integration.test.ts tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts tests/saas/gateway/runtime-health-clock-postgres-fixture.ts tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts scripts/ops/verify-commercial-kimi.ts tests/saas/gateway/pre-dispatch-postgres-fixture.ts tests/saas/metering/normal-success-postgres-fixture.ts tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts tests/ci/managed-saas-isolated-required-gates.ts tests/ci/managed-saas-required-gates.test.ts",
+      "actualCommand": "./node_modules/.bin/tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node src/types/busboy.d.ts tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts tests/saas/metering/usage-correction.postgres.integration.test.ts tests/saas/keys/ip-policy.postgres.integration.test.ts tests/saas/keys/budget-policy.postgres.integration.test.ts tests/drills/settlement-sigkill-crash.postgres.integration.test.ts tests/saas/identity/tenant-member-directory.postgres.integration.test.ts tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts tests/drills/dual-instance-failover.postgres.integration.test.ts tests/saas/marketing/redeem-codes.postgres.integration.test.ts tests/saas/marketing/promo-codes.postgres.integration.test.ts tests/saas/marketing/affiliate.postgres.integration.test.ts tests/saas/marketing/announcements.postgres.integration.test.ts tests/saas/supply/quota-sync-worker.postgres.integration.test.ts tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts tests/saas/supply/account-quarantine.postgres.integration.test.ts tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts tests/saas/gateway/health-score.postgres.integration.test.ts tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts tests/integration/kimi-commercial-preparation-diagnostic.test.ts tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts tests/saas/gateway/prepared-statements.postgres.integration.test.ts tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts tests/saas/gateway/runtime-health-clock-postgres-fixture.ts tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts scripts/ops/verify-commercial-kimi.ts tests/saas/gateway/pre-dispatch-postgres-fixture.ts tests/saas/metering/normal-success-postgres-fixture.ts tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts tests/ci/managed-saas-isolated-required-gates.ts tests/ci/managed-saas-required-gates.test.ts",
+      "launchedWithShell": false,
+      "startedAt": "2026-10-21T23:32:16.893Z",
+      "finishedAt": "2026-10-21T23:32:27.262Z",
+      "exitCode": 0,
+      "signal": null,
+      "log": {
+        "path": "/private/tmp/model-router-ci-wiring-health-capacity-ZX5G0w/strict-isolated.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "nativeTapCounts": null
+    },
+    {
+      "id": "ci-wiring",
+      "kind": "offline-native-test",
+      "step": "Existing managed SaaS CI wiring regression",
+      "exactWorkflowCommand": "node --import tsx --test tests/ci/managed-saas-required-gates.test.ts",
+      "actualCommand": "node --import tsx --test --test-reporter=tap tests/ci/managed-saas-required-gates.test.ts",
+      "launchedWithShell": false,
+      "startedAt": "2026-10-21T23:32:27.292Z",
+      "finishedAt": "2026-10-21T23:32:27.705Z",
+      "exitCode": 0,
+      "signal": null,
+      "log": {
+        "path": "/private/tmp/model-router-ci-wiring-health-capacity-ZX5G0w/ci-wiring.log",
+        "bytes": 3899,
+        "sha256": "4302ebc06822df0d380f4262d6edf0e8e0fc82565d438687febf2b07a2bab659"
+      },
+      "nativeTapCounts": {
+        "tests": 14,
+        "suites": 0,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    }
+  ],
+  "sourceFingerprint": {
+    "scope": "Explicit TypeScript roots named by the two current workflow commands, the workflow and CI selector/wiring files, package.json and package-lock.json. Transitive imports and installed dependency bytes are not fingerprinted.",
+    "filesChecked": 55,
+    "checkedAtBefore": "2026-10-21T23:32:05.683Z",
+    "checkedAtAfter": "2026-10-21T23:32:27.714Z",
+    "digestAlgorithm": "SHA256 over localeCompare-sorted relativePath + NUL + sha256 + newline entries.",
+    "sourceBefore": {
+      ".github/workflows/ci.yml": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3",
+      "package-lock.json": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+      "package.json": "0ff87b5b06116146412e44ecbc066a0ca2a992c4c9b551942beec4561582979a",
+      "scripts/ops/verify-commercial-kimi.ts": "46d18801c65146fa7e4f9a059a0c7420b7b33c0e04b46eca364d57924f8bce8d",
+      "src/saas/db/credential-validation-worker-privileges.ts": "b48bf4a8d4d93a0fb0f8f45dd4cac3ddb2ac440018d7f63c10b14fd2606442fa",
+      "src/saas/db/credential-validation-worker-schema-readiness.ts": "925c54bc6ce54c3c5e96035e4ea83fc6501d9bb7ea34bf98fd1a3484f68cbe6d",
+      "src/saas/runtime/credential-validation-targets-module.ts": "346c8eea58edd6d582094c11535a13cd6c1fcf27206f04602b4c3920bf3df0e3",
+      "src/types/busboy.d.ts": "49969f2ec5e0c6713260016cf5806c49f9b09571a12153b83c583412ebc561c5",
+      "tests/ci/managed-saas-isolated-required-gates.ts": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e",
+      "tests/ci/managed-saas-required-gates.test.ts": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7",
+      "tests/cli/managed-saas-validation-worker-postgres.integration.test.ts": "719de32978b36da4357d42c6f04f73443cade71b85aa4f311ff61a1304b09f44",
+      "tests/drills/dual-instance-failover.postgres.integration.test.ts": "a004234d3ac450752b321e76bc0586ca0e75ea8a336d3f898fcb12e270a7bb22",
+      "tests/drills/settlement-sigkill-crash.postgres.integration.test.ts": "feab201a460e015ebeeb6bfdec26b5275caf68ab2eec3eb244bc22328f37e1e7",
+      "tests/integration/kimi-commercial-preparation-diagnostic.test.ts": "02af071274d1a5930b8798d06152c28ff1688a38d9f09ef4dd48dc86233ad9df",
+      "tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts": "20bab6df32e346676f1f86ff8e4556b0bdf023d67d1a2d625e6e0db1f3fdf1ef",
+      "tests/saas/db/credential-validation-worker-privileges.test.ts": "d17f9b0f95fc2ce4d7c9c0e80ca8eb2e028918468904d943fb964f666fe36e65",
+      "tests/saas/db/credential-validation-worker-schema-readiness.test.ts": "6b95bb913ba0c0522e57d568b6cbeb6d2c74f6e9c3ee7625e9354b8964076e18",
+      "tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts": "1525a6fdf4534b475e75c1f9fbdb28b73672e120762169a680c9b757df32103e",
+      "tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts": "3af01104168d72c87c4424a2e80444b9398c55835f6dfd2516db33eb7646e4f5",
+      "tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts": "02355a088813c12dd8dde77de14d395626c6304543020043d96941ded8f4035e",
+      "tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts": "7173ee6c67ca1ef472a494ad997b2b74cc7df0ff26c1411115eaed42f1b493d9",
+      "tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts": "e80d5d1b1e9f03c4aee5185cdc6d7e2ac77cb5e1386ed50372f0264eee7b6e2a",
+      "tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts": "d82fef30caea3e0d4d11fdc98f09c5146b9493518c43af769d1ef4da61e19ddd",
+      "tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts": "007515f0f36c1441e276f4d0dc2d94daf625fc22fc934f01806b92cc84c794ed",
+      "tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts": "337c1db50edd3d405e6200c6ca0781581e5e61f661af7d78c9cc27077da2905d",
+      "tests/saas/gateway/authorization-prelock-postgres.integration.test.ts": "7674c6298e3ccf8f8166be1d2d7ec59ba38f5be3cabce9894d3eaff76acd3700",
+      "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145",
+      "tests/saas/gateway/health-score.postgres.integration.test.ts": "5ffc6de782bc5046ce7a8027d63554b535ab2cb821f9c033b9b15774da9471ab",
+      "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+      "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+      "tests/saas/gateway/pre-dispatch-postgres-fixture.ts": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+      "tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts": "8fb9388ca36f5dcd0bcb49e88aee1f6696e370c502d7d9d9201b7faec2586ca9",
+      "tests/saas/gateway/prepared-statements.postgres.integration.test.ts": "9f75f0b34d891ac649b6d56a474da6fd7f0af1b215cb6885c381f539f9495e24",
+      "tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts": "9a766a5bda70eca69d84785a29bac2c841a802afbab5a170adc3c9ab3ffbafd6",
+      "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+      "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+      "tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts": "36c49d030182dcc9d71c3738a7fe1ef8e4c2463f8dcb0a07fc8bd8f6a91e4bef",
+      "tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts": "137d89c1c5686db5bb99386db8d0d8aa35e03b2b061b65155d1115d38b071694",
+      "tests/saas/identity/tenant-member-directory.postgres.integration.test.ts": "82ae96b8d6186cb443389cff9c63442afa246769c5a615c72617fd307ed05ffb",
+      "tests/saas/keys/budget-policy.postgres.integration.test.ts": "bc0ce956677fdcc5e8bd786b06ce251c068e6e83f97f650f61caa18e15b50619",
+      "tests/saas/keys/ip-policy.postgres.integration.test.ts": "16cfca0a21785a236f6b9c29a27ae925762a54a8a694b9c38bc4d394c779f468",
+      "tests/saas/marketing/affiliate.postgres.integration.test.ts": "4d93b775e556685281b4b3274a571f452d3a705bf7663ff1fa0e083dd419a2f1",
+      "tests/saas/marketing/announcements.postgres.integration.test.ts": "de4474d57fb5b3c7d5d76dba811452d3e1b703eb24d08dc5a5469d9d9b803adf",
+      "tests/saas/marketing/promo-codes.postgres.integration.test.ts": "5120e8162dfbe71c0b506f2934f877302b66c7b66e928fc0705d7beba047096b",
+      "tests/saas/marketing/redeem-codes.postgres.integration.test.ts": "443388c6ef1106e16fb0581e2f8e917d89349a51b73bec9b22a7c290b55b894e",
+      "tests/saas/metering/normal-success-postgres-fixture.ts": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+      "tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts": "56f49557c7affa2ba3e73ce9a4e3d6346fe1b2d334b575ca5cb5318dec6c56e8",
+      "tests/saas/metering/usage-correction.postgres.integration.test.ts": "79378433c44686d1e2a07f6ebfc17dc21f35958d7b94f28eb55da31830f34e86",
+      "tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts": "8276f417f15aab7247daf9d2b0ce03e274e63aadf72ce8d97f3a890d1444d2fa",
+      "tests/saas/supply/account-quarantine.postgres.integration.test.ts": "6fa84bbcc123feacb64a0e31c2cab615da13d3fa89b350e23fd243df0478e6ab",
+      "tests/saas/supply/managed-postgres-credential-validation.integration.test.ts": "7ea1aacd0f2c82eee18928c91160354fb8f26a73288f2955ede885b1d9251385",
+      "tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts": "4bedf153cd415164bcce038ddc96ff7d55ed392d138be6799ce0103a9e08ee32",
+      "tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts": "9366c97d3293ea3ab029741aaa0c10bf99c447baa223bcc441b65c46feea534e",
+      "tests/saas/supply/quota-sync-worker.postgres.integration.test.ts": "ae7216f6d2b5b7c174ab3fe763f1a06c21afda9998004494ee4190d06c357b53",
+      "tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts": "6d10afc3c6261c27d9b8c53deb4050f6aff619b43c46408d04fe6fa078611ffa"
+    },
+    "sourceAfter": {
+      ".github/workflows/ci.yml": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3",
+      "package-lock.json": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+      "package.json": "0ff87b5b06116146412e44ecbc066a0ca2a992c4c9b551942beec4561582979a",
+      "scripts/ops/verify-commercial-kimi.ts": "46d18801c65146fa7e4f9a059a0c7420b7b33c0e04b46eca364d57924f8bce8d",
+      "src/saas/db/credential-validation-worker-privileges.ts": "b48bf4a8d4d93a0fb0f8f45dd4cac3ddb2ac440018d7f63c10b14fd2606442fa",
+      "src/saas/db/credential-validation-worker-schema-readiness.ts": "925c54bc6ce54c3c5e96035e4ea83fc6501d9bb7ea34bf98fd1a3484f68cbe6d",
+      "src/saas/runtime/credential-validation-targets-module.ts": "346c8eea58edd6d582094c11535a13cd6c1fcf27206f04602b4c3920bf3df0e3",
+      "src/types/busboy.d.ts": "49969f2ec5e0c6713260016cf5806c49f9b09571a12153b83c583412ebc561c5",
+      "tests/ci/managed-saas-isolated-required-gates.ts": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e",
+      "tests/ci/managed-saas-required-gates.test.ts": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7",
+      "tests/cli/managed-saas-validation-worker-postgres.integration.test.ts": "719de32978b36da4357d42c6f04f73443cade71b85aa4f311ff61a1304b09f44",
+      "tests/drills/dual-instance-failover.postgres.integration.test.ts": "a004234d3ac450752b321e76bc0586ca0e75ea8a336d3f898fcb12e270a7bb22",
+      "tests/drills/settlement-sigkill-crash.postgres.integration.test.ts": "feab201a460e015ebeeb6bfdec26b5275caf68ab2eec3eb244bc22328f37e1e7",
+      "tests/integration/kimi-commercial-preparation-diagnostic.test.ts": "02af071274d1a5930b8798d06152c28ff1688a38d9f09ef4dd48dc86233ad9df",
+      "tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts": "20bab6df32e346676f1f86ff8e4556b0bdf023d67d1a2d625e6e0db1f3fdf1ef",
+      "tests/saas/db/credential-validation-worker-privileges.test.ts": "d17f9b0f95fc2ce4d7c9c0e80ca8eb2e028918468904d943fb964f666fe36e65",
+      "tests/saas/db/credential-validation-worker-schema-readiness.test.ts": "6b95bb913ba0c0522e57d568b6cbeb6d2c74f6e9c3ee7625e9354b8964076e18",
+      "tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts": "1525a6fdf4534b475e75c1f9fbdb28b73672e120762169a680c9b757df32103e",
+      "tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts": "3af01104168d72c87c4424a2e80444b9398c55835f6dfd2516db33eb7646e4f5",
+      "tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts": "02355a088813c12dd8dde77de14d395626c6304543020043d96941ded8f4035e",
+      "tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts": "7173ee6c67ca1ef472a494ad997b2b74cc7df0ff26c1411115eaed42f1b493d9",
+      "tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts": "e80d5d1b1e9f03c4aee5185cdc6d7e2ac77cb5e1386ed50372f0264eee7b6e2a",
+      "tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts": "d82fef30caea3e0d4d11fdc98f09c5146b9493518c43af769d1ef4da61e19ddd",
+      "tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts": "007515f0f36c1441e276f4d0dc2d94daf625fc22fc934f01806b92cc84c794ed",
+      "tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts": "337c1db50edd3d405e6200c6ca0781581e5e61f661af7d78c9cc27077da2905d",
+      "tests/saas/gateway/authorization-prelock-postgres.integration.test.ts": "7674c6298e3ccf8f8166be1d2d7ec59ba38f5be3cabce9894d3eaff76acd3700",
+      "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145",
+      "tests/saas/gateway/health-score.postgres.integration.test.ts": "5ffc6de782bc5046ce7a8027d63554b535ab2cb821f9c033b9b15774da9471ab",
+      "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+      "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+      "tests/saas/gateway/pre-dispatch-postgres-fixture.ts": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+      "tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts": "8fb9388ca36f5dcd0bcb49e88aee1f6696e370c502d7d9d9201b7faec2586ca9",
+      "tests/saas/gateway/prepared-statements.postgres.integration.test.ts": "9f75f0b34d891ac649b6d56a474da6fd7f0af1b215cb6885c381f539f9495e24",
+      "tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts": "9a766a5bda70eca69d84785a29bac2c841a802afbab5a170adc3c9ab3ffbafd6",
+      "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+      "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+      "tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts": "36c49d030182dcc9d71c3738a7fe1ef8e4c2463f8dcb0a07fc8bd8f6a91e4bef",
+      "tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts": "137d89c1c5686db5bb99386db8d0d8aa35e03b2b061b65155d1115d38b071694",
+      "tests/saas/identity/tenant-member-directory.postgres.integration.test.ts": "82ae96b8d6186cb443389cff9c63442afa246769c5a615c72617fd307ed05ffb",
+      "tests/saas/keys/budget-policy.postgres.integration.test.ts": "bc0ce956677fdcc5e8bd786b06ce251c068e6e83f97f650f61caa18e15b50619",
+      "tests/saas/keys/ip-policy.postgres.integration.test.ts": "16cfca0a21785a236f6b9c29a27ae925762a54a8a694b9c38bc4d394c779f468",
+      "tests/saas/marketing/affiliate.postgres.integration.test.ts": "4d93b775e556685281b4b3274a571f452d3a705bf7663ff1fa0e083dd419a2f1",
+      "tests/saas/marketing/announcements.postgres.integration.test.ts": "de4474d57fb5b3c7d5d76dba811452d3e1b703eb24d08dc5a5469d9d9b803adf",
+      "tests/saas/marketing/promo-codes.postgres.integration.test.ts": "5120e8162dfbe71c0b506f2934f877302b66c7b66e928fc0705d7beba047096b",
+      "tests/saas/marketing/redeem-codes.postgres.integration.test.ts": "443388c6ef1106e16fb0581e2f8e917d89349a51b73bec9b22a7c290b55b894e",
+      "tests/saas/metering/normal-success-postgres-fixture.ts": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+      "tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts": "56f49557c7affa2ba3e73ce9a4e3d6346fe1b2d334b575ca5cb5318dec6c56e8",
+      "tests/saas/metering/usage-correction.postgres.integration.test.ts": "79378433c44686d1e2a07f6ebfc17dc21f35958d7b94f28eb55da31830f34e86",
+      "tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts": "8276f417f15aab7247daf9d2b0ce03e274e63aadf72ce8d97f3a890d1444d2fa",
+      "tests/saas/supply/account-quarantine.postgres.integration.test.ts": "6fa84bbcc123feacb64a0e31c2cab615da13d3fa89b350e23fd243df0478e6ab",
+      "tests/saas/supply/managed-postgres-credential-validation.integration.test.ts": "7ea1aacd0f2c82eee18928c91160354fb8f26a73288f2955ede885b1d9251385",
+      "tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts": "4bedf153cd415164bcce038ddc96ff7d55ed392d138be6799ce0103a9e08ee32",
+      "tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts": "9366c97d3293ea3ab029741aaa0c10bf99c447baa223bcc441b65c46feea534e",
+      "tests/saas/supply/quota-sync-worker.postgres.integration.test.ts": "ae7216f6d2b5b7c174ab3fe763f1a06c21afda9998004494ee4190d06c357b53",
+      "tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts": "6d10afc3c6261c27d9b8c53deb4050f6aff619b43c46408d04fe6fa078611ffa"
+    },
+    "beforeDigest": "b7babdaf7a08a28221de98df69ff0584cb528084f00fe6bc2cf1524150e7b111",
+    "afterDigest": "b7babdaf7a08a28221de98df69ff0584cb528084f00fe6bc2cf1524150e7b111",
+    "changedFiles": [],
+    "allDeclaredFilesUnchanged": true,
+    "relevantCurrentInputs": [
+      {
+        "path": ".github/workflows/ci.yml",
+        "beforeSha256": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3",
+        "afterSha256": "21bb8c49ad42aec66b272823fcffedcb21fd32629fc3fabc910d3a6d747e8cf3"
+      },
+      {
+        "path": "tests/ci/managed-saas-isolated-required-gates.ts",
+        "beforeSha256": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e",
+        "afterSha256": "3df8c11f5e4221fbc4122dffcdb526c6e87739f7065ed83d44259c42e391077e"
+      },
+      {
+        "path": "tests/ci/managed-saas-required-gates.test.ts",
+        "beforeSha256": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7",
+        "afterSha256": "b1755f488cea5e3a6e55677b5f4a231dcc2d038d5760b9550fd1dccac037aab7"
+      },
+      {
+        "path": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+        "beforeSha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+        "afterSha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5"
+      },
+      {
+        "path": "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts",
+        "beforeSha256": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145",
+        "afterSha256": "01b96d4a3e22ccc489c8f7728add983f94e9752625f179050302dddcf6adc145"
+      },
+      {
+        "path": "tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts",
+        "beforeSha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3",
+        "afterSha256": "a1ac3eac9a75e4565ff37cf4fcb86fa70ea67c82dddf311d3d91f571505a0cb3"
+      },
+      {
+        "path": "tests/saas/gateway/runtime-health-clock-postgres-fixture.ts",
+        "beforeSha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a",
+        "afterSha256": "8663eadcb1043ad09fc4e21d0f30da6e1ddadda69c6769ffebabb353e4cec67a"
+      }
+    ]
+  },
+  "results": {
+    "strictCommandExitCodes": [
+      0,
+      0
+    ],
+    "offlineCiWiringNativeTapCounts": {
+      "tests": 14,
+      "suites": 0,
+      "pass": 14,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "ok": true
+  },
+  "boundaries": [
+    "The two strict commands are the current workflow folded run commands with no arguments added or removed.",
+    "The existing CI wiring root ran once with only --test-reporter=tap added to preserve native TAP; its selected test root is unchanged.",
+    "These are new local offline results for the fingerprinted current files, including the later commercial HTTP observer and capacity cast correction. Prior artifacts retain their historical capture boundaries.",
+    "TypeScript checks transitive imports, but this fingerprint covers only the explicitly declared roots and configuration/manifests listed here. No full repository, dependency-byte or future-global-freeze claim is made.",
+    "This artifact is not GitHub required-CI execution, PostgreSQL functional evidence, a build, provider acceptance, performance evidence or a release decision."
+  ],
+  "currentGlobalFreezeClaim": false
+}

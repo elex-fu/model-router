@@ -1,0 +1,1027 @@
+{
+  "schema": 1,
+  "classification": "local-restricted-postgres-query-diagnostic",
+  "formalRequiredCiEvidence": false,
+  "evidenceRun": "model-router-dispatchable-explain-bTzRXw",
+  "recordedAt": "2026-10-21T19:04:25.914Z",
+  "fixture": {
+    "source": "tests/saas/metering/normal-success-postgres-fixture.ts#seedFixture",
+    "supplyMode": "platform",
+    "nativeProtocol": "openai",
+    "setupWrites": true,
+    "setupWriteScope": "fresh owned database roles/migrations plus synthetic commercial fixture; excluded from observations"
+  },
+  "measurement": {
+    "warmupCount": 8,
+    "sampleCount": 30,
+    "unnamedQuery": true,
+    "identicalSqlAndBindings": true,
+    "readOnly": true,
+    "isolation": "repeatable read",
+    "onePhysicalSessionAndSnapshot": true,
+    "originalSharedFencesHeld": true,
+    "authorizationDecisionsFromExplain": false,
+    "rollbackObserved": true,
+    "plannerGucChanges": false
+  },
+  "exactStatement": {
+    "sourceFile": "src/saas/gateway/commercial-metering-policy-service.ts",
+    "sqlSha256": "358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16",
+    "sqlBytes": 468,
+    "columns": [
+      "tenant_id",
+      "project_id",
+      "route_id",
+      "version",
+      "customer_policy_id",
+      "customer_policy_version",
+      "provider_policy_id",
+      "provider_policy_version",
+      "contract_attestation_id",
+      "customer_price_version",
+      "supplier_cost_version"
+    ],
+    "explainSqlSha256": "408aaa8f57451d54cb358a123ec3b7709986ea6860ab833a9d33521175761674",
+    "explainOptions": [
+      "ANALYZE",
+      "BUFFERS",
+      "TIMING OFF",
+      "FORMAT JSON"
+    ],
+    "bindingsSha256": "36e68cb829313b9812ccae9ffecf893976e6fd2ec1f986df84f6af4f76a54f05",
+    "bindingIdentity": [
+      {
+        "position": 1,
+        "type": "string",
+        "sha256": "8116bc51222d63c2ec563b20cb49ea71756463620351c24df685d9e7bbe51b13"
+      },
+      {
+        "position": 2,
+        "type": "string",
+        "sha256": "bf48095a50a690e321bddea01e3709bf0fac17debfec14521f2f5f58604e84cc"
+      },
+      {
+        "position": 3,
+        "type": "string",
+        "sha256": "aa3d33404e669364d184a578ef6a0cba2b74462097b7a512d51cb0d32d246713"
+      },
+      {
+        "position": 4,
+        "type": "string",
+        "sha256": "cc11310c456c3690d5a74c23aa31cc25b4e74cdae146c71e54ad9dbc1d109fde"
+      }
+    ]
+  },
+  "schemaRegistry": {
+    "count": 118,
+    "latestVersion": 137,
+    "sha256": "bd410b68c121fb3eb54caa179040c99e4e0860d313df30f1fabfc2226a8f440a",
+    "canonicalVerificationPassed": true
+  },
+  "session": {
+    "role": "model_router_saas_gateway",
+    "session": "model_router_saas_gateway",
+    "schema": "model_router_saas",
+    "superuser": false,
+    "named_prepared_count": "0",
+    "settings": {
+      "server_version": "18.6 (Homebrew)",
+      "server_version_num": "180006",
+      "search_path": "model_router_saas",
+      "transaction_isolation": "repeatable read",
+      "transaction_read_only": "on",
+      "plan_cache_mode": "auto",
+      "join_collapse_limit": "8",
+      "from_collapse_limit": "8",
+      "geqo": "on",
+      "geqo_threshold": "12",
+      "jit": "on",
+      "enable_nestloop": "on",
+      "enable_hashjoin": "on",
+      "enable_mergejoin": "on",
+      "work_mem": "4MB",
+      "effective_cache_size": "4GB",
+      "random_page_cost": "4",
+      "seq_page_cost": "1",
+      "cpu_tuple_cost": "0.01",
+      "cpu_index_tuple_cost": "0.005",
+      "cpu_operator_cost": "0.0025",
+      "max_parallel_workers_per_gather": "2",
+      "track_io_timing": "off",
+      "statement_timeout": "0",
+      "lock_timeout": "0"
+    }
+  },
+  "finalSession": {
+    "read_only": "on",
+    "isolation": "repeatable read",
+    "search_path": "model_router_saas",
+    "named_prepared_count": "0"
+  },
+  "viewDefinitionSha256": "568a290adeb3b5916c849a3515bbc03d9caf8b69fef99c3b2f48667d9f21f11d",
+  "originalFences": {
+    "count": 5,
+    "sha256": "1c89b2021cfc36e223af223fb36eda5002347c22a581ca8aca85241ca14af601"
+  },
+  "summary": {
+    "wallMs": {
+      "n": 30,
+      "meanMs": 8.613011133333332,
+      "p50Ms": 8.412124999999946,
+      "p95Ms": 9.503124999999955,
+      "minMs": 7.9826249999999845,
+      "maxMs": 11.499874999999975
+    },
+    "planningMs": {
+      "n": 30,
+      "meanMs": 7.635033333333333,
+      "p50Ms": 7.592,
+      "p95Ms": 8.183,
+      "minMs": 7.255,
+      "maxMs": 8.305
+    },
+    "executionMs": {
+      "n": 30,
+      "meanMs": 0.08250000000000002,
+      "p50Ms": 0.078,
+      "p95Ms": 0.11,
+      "minMs": 0.053,
+      "maxMs": 0.12
+    },
+    "unattributedWallMs": {
+      "n": 30,
+      "meanMs": 0.895477799999998,
+      "p50Ms": 0.7656249999998965,
+      "p95Ms": 1.2757499999998603,
+      "minMs": 0.5583329999999534,
+      "maxMs": 4.004874999999974
+    }
+  },
+  "samples": [
+    {
+      "index": 0,
+      "wallMs": 8.31879200000003,
+      "planningMs": 7.619,
+      "executionMs": 0.066,
+      "unattributedWallMs": 0.6337920000000306,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 1,
+      "wallMs": 7.9826249999999845,
+      "planningMs": 7.255,
+      "executionMs": 0.068,
+      "unattributedWallMs": 0.6596249999999846,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 2,
+      "wallMs": 8.214375000000018,
+      "planningMs": 7.459,
+      "executionMs": 0.063,
+      "unattributedWallMs": 0.6923750000000186,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 3,
+      "wallMs": 8.323957999999948,
+      "planningMs": 7.414,
+      "executionMs": 0.079,
+      "unattributedWallMs": 0.8309579999999481,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 4,
+      "wallMs": 8.204375000000027,
+      "planningMs": 7.469,
+      "executionMs": 0.074,
+      "unattributedWallMs": 0.661375000000027,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 5,
+      "wallMs": 8.393875000000094,
+      "planningMs": 7.737,
+      "executionMs": 0.067,
+      "unattributedWallMs": 0.5898750000000936,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 6,
+      "wallMs": 8.342624999999998,
+      "planningMs": 7.592,
+      "executionMs": 0.053,
+      "unattributedWallMs": 0.6976249999999985,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 7,
+      "wallMs": 11.499874999999975,
+      "planningMs": 7.43,
+      "executionMs": 0.065,
+      "unattributedWallMs": 4.004874999999974,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 8,
+      "wallMs": 8.16620899999998,
+      "planningMs": 7.265,
+      "executionMs": 0.075,
+      "unattributedWallMs": 0.8262089999999811,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 9,
+      "wallMs": 8.327332999999953,
+      "planningMs": 7.691,
+      "executionMs": 0.078,
+      "unattributedWallMs": 0.5583329999999534,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 10,
+      "wallMs": 8.706542000000013,
+      "planningMs": 7.884,
+      "executionMs": 0.103,
+      "unattributedWallMs": 0.7195420000000128,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 11,
+      "wallMs": 8.31233300000008,
+      "planningMs": 7.405,
+      "executionMs": 0.071,
+      "unattributedWallMs": 0.8363330000000804,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 12,
+      "wallMs": 8.609916999999996,
+      "planningMs": 7.745,
+      "executionMs": 0.104,
+      "unattributedWallMs": 0.7609169999999957,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 13,
+      "wallMs": 8.412124999999946,
+      "planningMs": 7.479,
+      "executionMs": 0.072,
+      "unattributedWallMs": 0.8611249999999463,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 14,
+      "wallMs": 8.639999999999873,
+      "planningMs": 7.773,
+      "executionMs": 0.064,
+      "unattributedWallMs": 0.8029999999998729,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 15,
+      "wallMs": 8.30600000000004,
+      "planningMs": 7.453,
+      "executionMs": 0.098,
+      "unattributedWallMs": 0.7550000000000398,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 16,
+      "wallMs": 8.160292000000027,
+      "planningMs": 7.441,
+      "executionMs": 0.079,
+      "unattributedWallMs": 0.640292000000027,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 17,
+      "wallMs": 8.779624999999896,
+      "planningMs": 7.917,
+      "executionMs": 0.097,
+      "unattributedWallMs": 0.7656249999998965,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 18,
+      "wallMs": 8.78170799999998,
+      "planningMs": 7.775,
+      "executionMs": 0.1,
+      "unattributedWallMs": 0.9067079999999802,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 19,
+      "wallMs": 8.71137500000009,
+      "planningMs": 7.676,
+      "executionMs": 0.106,
+      "unattributedWallMs": 0.929375000000089,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 20,
+      "wallMs": 8.528874999999971,
+      "planningMs": 7.596,
+      "executionMs": 0.095,
+      "unattributedWallMs": 0.8378749999999708,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 21,
+      "wallMs": 8.785499999999956,
+      "planningMs": 7.939,
+      "executionMs": 0.068,
+      "unattributedWallMs": 0.7784999999999562,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 22,
+      "wallMs": 8.435917000000018,
+      "planningMs": 7.545,
+      "executionMs": 0.065,
+      "unattributedWallMs": 0.8259170000000178,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 23,
+      "wallMs": 8.351042000000007,
+      "planningMs": 7.448,
+      "executionMs": 0.085,
+      "unattributedWallMs": 0.8180420000000064,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 24,
+      "wallMs": 8.559041000000207,
+      "planningMs": 7.74,
+      "executionMs": 0.062,
+      "unattributedWallMs": 0.7570410000002064,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 25,
+      "wallMs": 9.043750000000045,
+      "planningMs": 8.183,
+      "executionMs": 0.102,
+      "unattributedWallMs": 0.7587500000000457,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 26,
+      "wallMs": 8.507125000000087,
+      "planningMs": 7.544,
+      "executionMs": 0.12,
+      "unattributedWallMs": 0.8431250000000877,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 27,
+      "wallMs": 8.334249999999884,
+      "planningMs": 7.51,
+      "executionMs": 0.087,
+      "unattributedWallMs": 0.7372499999998838,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 28,
+      "wallMs": 9.503124999999955,
+      "planningMs": 8.305,
+      "executionMs": 0.099,
+      "unattributedWallMs": 1.0991249999999548,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    },
+    {
+      "index": 29,
+      "wallMs": 9.14774999999986,
+      "planningMs": 7.762,
+      "executionMs": 0.11,
+      "unattributedWallMs": 1.2757499999998603,
+      "planning": {
+        "Shared Hit Blocks": 0,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      }
+    }
+  ],
+  "samplePlanNodes": [
+    {
+      "nodePath": "0",
+      "Node Type": "Limit",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 20,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 20,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 18,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Join Filter": 0,
+      "Shared Hit Blocks": 16,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Join Filter": 0,
+      "Shared Hit Blocks": 14,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Join Filter": 0,
+      "Shared Hit Blocks": 12,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.0",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_provider_metering_policy_versions",
+      "Index Name": "saas_provider_metering_policy_versions_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 1,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Join Filter": 0,
+      "Shared Hit Blocks": 10,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Join Filter": 0,
+      "Shared Hit Blocks": 8,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.0",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_customer_metering_policy_versions",
+      "Index Name": "saas_customer_metering_policy_versions_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 1,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 6,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 6,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1.0.0",
+      "Node Type": "Nested Loop",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 4,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1.0.0.0",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_route_config_versions",
+      "Index Name": "saas_route_config_versions_lookup_idx",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1.0.0.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_route_config_heads",
+      "Index Name": "saas_route_config_heads_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1.0.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_route_config_commercial_authorities",
+      "Index Name": "saas_route_config_commercial_authorities_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.0.1.1",
+      "Node Type": "Result",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 0,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.0.1.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_customer_metering_policy_heads",
+      "Index Name": "saas_customer_metering_policy_heads_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.0.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_provider_metering_policy_heads",
+      "Index Name": "saas_provider_metering_policy_heads_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.0.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_contract_test_attestations",
+      "Index Name": "saas_contract_test_attestations_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Rows Removed by Filter": 0,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.0.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_customer_price_versions",
+      "Index Name": "saas_customer_price_versions_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    },
+    {
+      "nodePath": "0.0.1",
+      "Node Type": "Index Scan",
+      "Relation Name": "saas_supplier_cost_versions",
+      "Index Name": "saas_supplier_cost_versions_pkey",
+      "Actual Rows": 1,
+      "Actual Loops": 1,
+      "Shared Hit Blocks": 2,
+      "Shared Read Blocks": 0,
+      "Temp Read Blocks": 0,
+      "Temp Written Blocks": 0
+    }
+  ],
+  "originalFullPlan": {
+    "file": "safe-explain-sample-0.json",
+    "sha256": "e93d0da368ecdeae1f189d0172d4cf4f7be8e5824da32137e09f2e84fb05f129",
+    "containsReturnedBusinessRows": false
+  },
+  "source": {
+    "sourceTreeSha256": "ff8ad2c7a3892bd268610e7d55f8653f2476d6dab134785cabeae72e1993fe3c",
+    "sourceFileCount": 748,
+    "tracked": {
+      "src/saas/gateway/commercial-metering-policy-service.ts": "625a833630257baff777d2dd11e0ec7a2d9e84f4617234678fba6a410cb3de23",
+      "src/saas/gateway/postgres-request-preparation-authority-adapter.ts": "635d8dd659b22320a16e1fcf71ad465576f8b423b2509c5da1a9a1f62f3d5de6",
+      "src/saas/gateway/postgres-preparation-observer.ts": "982de4180a07b2260d45efc4ca58c5acaa8e3d57bacfe1a73708b93c5108c34d",
+      "src/saas/db/database.ts": "cfdfe745390d6b2d709b440e30bfb17bd7edb503b5f6f7f50d5b3c0e38832a2a",
+      "src/saas/db/migrations/023_commercial_metering_policy_authority.ts": "1360db0b32b977ef4922b7f8492f725e2489832181c6d86f6d586fd6477090d0",
+      "tests/saas/metering/normal-success-postgres-fixture.ts": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+      "tests/saas/gateway/commercial-dispatch-hint.postgres.integration.test.ts": "0564ca95f7963417c1e34f98a0f4982bccfc91ab0f7860699e72114729b1d10e",
+      "deploy/managed-saas-postgres-roles.sql": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+      "node_modules/pg/package.json": "e42dd36cba6e9dd8dbb6f773a2f7be8a8c3c273e18b155e42e75961a4cb8bc28",
+      "node_modules/pg/lib/query.js": "a13377272ad4f842f6f6616d187ef3123cfed90e764cae9a663058ab41a769a0"
+    },
+    "helpers": {
+      "model-router-dispatchable-explain-experiment-20261022.mjs": "4acec8bbb04827ecae9de0f10964e5ba37d8067b38a6b218004220931c0f079c",
+      "model-router-dispatchable-explain-pg18-20261022.mjs": "6ad3f9e9ce01d49518aef7bdcf67d53a8f130a5399dfef42947272bd72054c24"
+    },
+    "changed": false
+  },
+  "rawDiagnosticSha256": "a26388181d18bf47b69204298060c5e083dda27e19fb05639c3ddcde8f48deb8",
+  "cleanup": {
+    "postgresStopped": true,
+    "pgdataRemoved": true
+  },
+  "limits": [
+    "The setup created roles, migrations and synthetic inventory; only the measured SELECT was read only.",
+    "EXPLAIN adds diagnostic work and does not replace a production authorization read.",
+    "Wall minus planning and execution is unattributed, not a measurement of network time.",
+    "One warm synthetic platform fixture and one snapshot; no catalog-scale or R9 performance claim.",
+    "The prepared-statement count remained zero; no production plan cache, planner setting or query was changed."
+  ],
+  "completed": true
+}

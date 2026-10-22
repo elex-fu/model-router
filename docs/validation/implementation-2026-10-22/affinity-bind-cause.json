@@ -1,0 +1,498 @@
+{
+  "schema": 1,
+  "classification": "local-current-build-affinity-bind-cause-diagnostic",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T01:46:33.996700+00:00",
+  "status": "failed-workload-complete-cause-observation",
+  "evidenceDirectory": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root",
+  "privateToolDirectory": "/private/tmp/model-router-affinity-bind-cause-20261022-301706a0-bae4-4d6e-bb5f-839814ce2ad9",
+  "startedAt": "2026-10-22T01:28:02.676Z",
+  "finishedAt": "2026-10-22T01:28:48.836Z",
+  "workload": {
+    "protocol": "openai",
+    "gatewayCount": 3,
+    "inflight": 200,
+    "configuredSeconds": 30,
+    "actualSeconds": 38.5,
+    "statuses": {
+      "200": 289,
+      "429": 304,
+      "503": 15
+    },
+    "transportErrors": 0,
+    "successfulResponseLatency": {
+      "n": 289,
+      "p50": 12124.12,
+      "p90": 14854.65,
+      "p99": 18539.65,
+      "max": 18616.56
+    },
+    "throughputRps": 7.5,
+    "violations": [
+      {
+        "scenario": "concurrency",
+        "metric": "unexpected 5xx",
+        "value": 15,
+        "threshold": 0,
+        "unit": ""
+      }
+    ],
+    "sameCanonicalRequestBodyStickySeedAccountLimitTimeoutsAndBudgets": true,
+    "accountLimit": 64,
+    "realProviderCalls": 0,
+    "fullR9": false,
+    "overheadPresent": true,
+    "latencyThroughputBenefitClaimed": false
+  },
+  "observation": {
+    "complete": true,
+    "runtimeActiveAtFlush": [
+      0,
+      0,
+      0
+    ],
+    "quiescence": [
+      {
+        "maximumMs": 1500,
+        "pollMs": 25,
+        "observedMs": 0,
+        "activeAtClose": 0,
+        "activeAtEnd": 0
+      },
+      {
+        "maximumMs": 1500,
+        "pollMs": 25,
+        "observedMs": 0,
+        "activeAtClose": 0,
+        "activeAtEnd": 0
+      },
+      {
+        "maximumMs": 1500,
+        "pollMs": 25,
+        "observedMs": 0,
+        "activeAtClose": 0,
+        "activeAtEnd": 0
+      }
+    ],
+    "aggregates": {
+      "operations": {
+        "scheduler_select:called": 609,
+        "affinity_resolve:called": 609,
+        "affinity_resolve:allow": 606,
+        "scheduler_select:allow": 609,
+        "scheduler_bindAffinity:called": 609,
+        "affinity_bind:called": 609,
+        "affinity_bind:allow": 594,
+        "scheduler_bindAffinity:allow": 594,
+        "affinity_resolve:stale": 3,
+        "affinity_bind:block": 15,
+        "scheduler_bindAffinity:block": 15
+      },
+      "backends": {
+        "exact_redis_decorator": 3
+      },
+      "conflicts": {
+        "active_other_account": 15
+      },
+      "publicReasons": {
+        "bind:binding_conflict": 15,
+        "scheduler_bind:binding_conflict": 15
+      },
+      "queryResults": {
+        "resolve:lock:rowCount=one": 42,
+        "resolve:key-versions:rowCount=zero": 1,
+        "resolve:resolve:rowCount=zero": 1,
+        "bind:lock:rowCount=one": 609,
+        "bind:key-versions:rowCount=zero": 1,
+        "bind:resolve:rowCount=zero": 1,
+        "bind:insert:rowCount=one": 1,
+        "bind:key-versions:rowCount=one": 608,
+        "bind:resolve:rowCount=one": 608,
+        "bind:bind-update:rowCount=one": 593,
+        "resolve:key-versions:rowCount=one": 41,
+        "resolve:resolve:rowCount=one": 41,
+        "resolve:invalidate:rowCount=one": 3
+      },
+      "transactionOutcomes": {
+        "bind:callback_throw:active_other_account:unknown": 15
+      },
+      "bindWitnesses": {
+        "decision=allow;backend=exact_redis_decorator;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=false;activeDifferent=false;activeUnknown=false;conflict=none;sqlState=none": 1,
+        "decision=allow;backend=exact_redis_decorator;candidateJoin=true;resolveOne=true;resolveAccountNonNull=true;selectedEqualsResolved=true;resolvePgRead=false;resolveStaleClear=false;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;conflict=none;sqlState=none": 567,
+        "decision=allow;backend=exact_redis_decorator;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;conflict=none;sqlState=none": 6,
+        "decision=allow;backend=exact_redis_decorator;candidateJoin=true;resolveOne=true;resolveAccountNonNull=true;selectedEqualsResolved=true;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;conflict=none;sqlState=none": 17,
+        "decision=allow;backend=exact_redis_decorator;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=true;pgBindContract=true;activeEqual=false;activeDifferent=false;activeUnknown=false;conflict=none;sqlState=none": 3,
+        "decision=block;backend=exact_redis_decorator;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=false;activeDifferent=true;activeUnknown=false;conflict=active_other_account;sqlState=unknown": 15
+      },
+      "resolveWitnesses": {
+        "decision=allow;accountNonNull=false;pgQuery=true;pgRead=true;staleClear=false": 22,
+        "decision=allow;accountNonNull=true;pgQuery=false;pgRead=false;staleClear=false": 567,
+        "decision=allow;accountNonNull=true;pgQuery=true;pgRead=true;staleClear=false": 17,
+        "decision=stale;accountNonNull=false;pgQuery=true;pgRead=true;staleClear=true": 3
+      }
+    },
+    "httpErrorAggregates": {
+      "schema": 1,
+      "observationOk": true,
+      "scope": "Measured concurrency errors only; after original body drain; independent aggregate",
+      "maxErrorBytes": 8192,
+      "codes": {
+        "429:RATE_LIMITED": 304,
+        "503:REQUEST_BLOCKED": 15
+      },
+      "rawBodyHeadersMessageOrRequestIdsPersisted": false
+    },
+    "httpToRuntimeRequestJoin": false,
+    "witnessMeaning": "Every one of the 15 observed bind blocks had an exact candidate identity join, one earlier PG resolve returning null without stale-clear, an exact PG bind query reading an active other account, and an exact active_other_account callback conflict rethrown unchanged. Runtime calls are not joined to individual HTTP responses.",
+    "redisInnerDelegateDirectlyInstrumented": false,
+    "pgDelegateEvidence": "Exact fixed PG SQL contracts in original bind transactions, not a directly patched Redis closure delegate."
+  },
+  "financial": {
+    "schema": 1,
+    "scope": "Disposable fixture tenant only; after client timing/metrics and owned child stop, before PG deletion",
+    "observationOk": true,
+    "failure": null,
+    "readOnly": true,
+    "isolation": "repeatable read",
+    "rollbackConfirmed": true,
+    "fixtureOpeningFunding": {
+      "currency": "USD",
+      "amountMinorUnits": "100000000000",
+      "source": "Unmodified seed postVerifiedFunding"
+    },
+    "aggregates": {
+      "requests": {
+        "rowCap": 64,
+        "sentinelLimit": 65,
+        "observedRows": 3,
+        "truncated": false,
+        "rows": [
+          {
+            "execution_state": "failed",
+            "financial_status": "released",
+            "reconciliation_state": "none",
+            "count": "304"
+          },
+          {
+            "execution_state": "pending",
+            "financial_status": "pending",
+            "reconciliation_state": "none",
+            "count": "7"
+          },
+          {
+            "execution_state": "succeeded",
+            "financial_status": "settled",
+            "reconciliation_state": "resolved",
+            "count": "283"
+          }
+        ]
+      },
+      "attempts": {
+        "rowCap": 256,
+        "sentinelLimit": 257,
+        "observedRows": 4,
+        "truncated": false,
+        "rows": [
+          {
+            "dispatch_state": "dispatching",
+            "result_state": "pending",
+            "http_class": "none",
+            "response_started": false,
+            "count": "3"
+          },
+          {
+            "dispatch_state": "not_sent",
+            "result_state": "failed",
+            "http_class": "none",
+            "response_started": false,
+            "count": "304"
+          },
+          {
+            "dispatch_state": "sent",
+            "result_state": "pending",
+            "http_class": "2xx",
+            "response_started": true,
+            "count": "4"
+          },
+          {
+            "dispatch_state": "sent",
+            "result_state": "succeeded",
+            "http_class": "2xx",
+            "response_started": true,
+            "count": "283"
+          }
+        ]
+      },
+      "reservations": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 3,
+        "truncated": false,
+        "rows": [
+          {
+            "state": "released",
+            "count": "304",
+            "amount_minor_units": "6225920",
+            "settlement_amount_minor_units": "0"
+          },
+          {
+            "state": "reserved",
+            "count": "7",
+            "amount_minor_units": "143360",
+            "settlement_amount_minor_units": "0"
+          },
+          {
+            "state": "settled",
+            "count": "283",
+            "amount_minor_units": "5795840",
+            "settlement_amount_minor_units": "31696"
+          }
+        ]
+      },
+      "wallets": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "posted_balance_minor_units": "99999968304"
+          }
+        ]
+      },
+      "ledger_sources": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "source_type": "billing_settlement",
+            "count": "283",
+            "amount_minor_units": "31696"
+          },
+          {
+            "source_type": "wallet_funding",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          }
+        ]
+      },
+      "ledger_entries": {
+        "rowCap": 4,
+        "sentinelLimit": 5,
+        "observedRows": 4,
+        "truncated": false,
+        "rows": [
+          {
+            "account_scope": "non_wallet",
+            "direction": "credit",
+            "count": "283",
+            "amount_minor_units": "31696"
+          },
+          {
+            "account_scope": "non_wallet",
+            "direction": "debit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "credit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "debit",
+            "count": "283",
+            "amount_minor_units": "31696"
+          }
+        ]
+      },
+      "currency_scope": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "other_wallets": "0",
+            "other_reservations": "0",
+            "other_transactions": "0",
+            "other_entries": "0"
+          }
+        ]
+      }
+    },
+    "checks": {
+      "walletRowCount": 1,
+      "walletCreditMinorUnits": "100000000000",
+      "walletDebitMinorUnits": "31696",
+      "ledgerWalletNetMinorUnits": "99999968304",
+      "walletMatchesLedger": true,
+      "fixtureFundingMatches": true,
+      "openReservationCount": "7",
+      "openReservationAmountMinorUnits": "143360",
+      "pendingRequestCount": "7",
+      "spendableAfterOpenHoldsMinorUnits": "99999824944",
+      "unknownLedgerSourceCount": "0",
+      "otherCurrencyPresent": false
+    },
+    "limitations": [
+      "Includes one OpenAI smoke, original driver warmup and measured concurrency work",
+      "Snapshot is after owned child stop, not at HTTP receipt",
+      "HTTP success/failure does not prove settlement/refund; pending/unknown/open holds are retained as facts",
+      "Money uses integer text and BigInt only; unknown ledger source is not dropped"
+    ]
+  },
+  "finalMock": {
+    "schema": 1,
+    "accountCount": 2,
+    "accountIdsPersisted": false,
+    "requests": 290,
+    "currentInFlight": 0,
+    "maxAccountInFlight": 6,
+    "streams": 0,
+    "sseChunks": 0,
+    "abortedStreams": 0,
+    "byStatus": {
+      "200": 290
+    }
+  },
+  "freeze": {
+    "file": "/private/tmp/model-router-affinity-bind-cause-20261022-301706a0-bae4-4d6e-bb5f-839814ce2ad9/freeze.json",
+    "sha256": "4db2e7ffb7f194de3632a84349e428df84bec580ac17d18f7f5afb9e3b34bf52",
+    "sourceFileCount": 749,
+    "distFileCount": 2992,
+    "canonicalFileCount": 5,
+    "privateInputCount": 13,
+    "dependencyFileCount": 2,
+    "beforeAfterMatches": true,
+    "independentRecordCreationMatches": true,
+    "allChanges": []
+  },
+  "postgres": {
+    "version": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "fsync": "on",
+    "synchronousCommit": "on",
+    "rawServerLogPersisted": false
+  },
+  "redisVersion": "8.10.2",
+  "preparedStatements": "native",
+  "metrics": [
+    {
+      "instance": 1,
+      "status": 200,
+      "bytes": 206444,
+      "sha256": "417b12efd0ded0b54c2a0400d8df3e26445bfb0171e137290df3490fec84647c",
+      "rawMetricsPersisted": false
+    },
+    {
+      "instance": 2,
+      "status": 200,
+      "bytes": 211014,
+      "sha256": "49c5687c6a1ad41dd3ebed3a0e8c8d6c3a530e308712883c18b1dcfd159f6c38",
+      "rawMetricsPersisted": false
+    },
+    {
+      "instance": 3,
+      "status": 200,
+      "bytes": 210969,
+      "sha256": "15cc9c284e31a560392b9a798efccb0637070672f33012020a4eac151c1a0ca8",
+      "rawMetricsPersisted": false
+    }
+  ],
+  "artifacts": {
+    "summary.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/summary.json",
+      "bytes": 910735,
+      "sha256": "b24c515499a4418d1a454d05ded23eb3c39fd8db4b84280037c855379fc49a4e"
+    },
+    "affinity-openai-3cli-c200.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/affinity-openai-3cli-c200.json",
+      "bytes": 1826,
+      "sha256": "a38a18af4ca73e89bd8e2fb1dd2c6f0c0f93c717351f8e5cbea48c33e515d057"
+    },
+    "affinity-openai-3cli-c200.json.safe-http.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/affinity-openai-3cli-c200.json.safe-http.json",
+      "bytes": 297,
+      "sha256": "7b7c19a5928801529dbb570e5c715fe50d16f210087852c045ac7806fcf6a2e3"
+    },
+    "financial-snapshot.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/financial-snapshot.json",
+      "bytes": 5237,
+      "sha256": "37979a0eca5144069004752f52e2357c416752042e8a1bf87bf27269fbdcff7a"
+    },
+    "final-mock-stats.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/final-mock-stats.json",
+      "bytes": 234,
+      "sha256": "f183d291936b7426741b356cd4baa7fd5cf4aef39fd685e1e57d38871f869ad1"
+    },
+    "gateway-safe-49384.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/gateway-safe-49384.json",
+      "bytes": 4738,
+      "sha256": "a56452f7233f33a25380fc0434df66498a36615ed8c75751c29551f10d57db79"
+    },
+    "gateway-safe-49388.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/gateway-safe-49388.json",
+      "bytes": 5270,
+      "sha256": "b9449b16e1778669233c79e5f23ef8ab47ee584ac2beabfa5e9c255e1ccf14ed"
+    },
+    "gateway-safe-49394.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-20261022-0126-root/gateway-safe-49394.json",
+      "bytes": 4576,
+      "sha256": "7627138f3e64a2262b641282d27e953be78ee393dfa01c03fe678ccaedbf13f6"
+    }
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "ownedChildren": [
+      {
+        "stage": "redis",
+        "pid": 49369,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "mock",
+        "pid": 49378,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "gateway-1",
+        "pid": 49384,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "gateway-2",
+        "pid": 49388,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "gateway-3",
+        "pid": 49394,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      }
+    ],
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "limits": [
+    "One 30-second OpenAI concurrency workload; no baseline, latency/TTFB leg, SSE, precision, scaling comparison, Anthropic workload or real provider acceptance.",
+    "The 15 runtime bind blocks and 15 measured HTTP 503s are separate aggregates; exact bind witnesses prove the active-other-account race for those runtime calls without an HTTP request join.",
+    "Three successful stale invalidations are distinct calls, with no assertion that a particular invalidation caused a particular later bind block.",
+    "The complete bounded financial aggregate retains seven pending requests and seven reserved holds totaling 143360 fixture minor units. All-settled, refund and reconciliation completion are not claimed.",
+    "Zero-active runtime flush covers wrapped scheduler/affinity operations only, not background settlement work.",
+    "The workload gate failed. No error budget, capacity, timeout, SQL, privilege, funds or revocation rule was relaxed."
+  ]
+}

@@ -1,0 +1,439 @@
+{
+  "schema": 1,
+  "classification": "local-current-build-combined-affinity-and-shutdown-c200-acceptance",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T06:24:47.736086+00:00",
+  "status": "passed-bounded-workload-and-complete-financial-observation",
+  "evidenceDirectory": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root",
+  "privateToolDirectory": "/private/tmp/model-router-affinity-bind-cause-v2-20261022-5df37457-d9f9-496f-9c3f-7edf9a2eb795",
+  "startedAt": "2026-10-22T06:19:10.049Z",
+  "finishedAt": "2026-10-22T06:19:50.050Z",
+  "workload": {
+    "protocol": "openai",
+    "gatewayCount": 3,
+    "inflight": 200,
+    "configuredSeconds": 30,
+    "actualSeconds": 33.5,
+    "statuses": {
+      "200": 686,
+      "429": 794
+    },
+    "transportErrors": 0,
+    "successfulResponseLatency": {
+      "n": 686,
+      "p50": 4361.51,
+      "p90": 6705.68,
+      "p99": 7074.39,
+      "max": 7275.79
+    },
+    "throughputRps": 20.46,
+    "violations": [],
+    "sameCanonicalRequestBodyStickySeedAccountLimitTimeoutsAndBudgets": true,
+    "accountLimit": 64,
+    "realProviderCalls": 0,
+    "fullR9": false,
+    "instrumentationOverheadPresent": true,
+    "latencyThroughputImprovementClaimed": false
+  },
+  "observation": {
+    "complete": true,
+    "runtimeActiveAtFlush": [
+      0,
+      0,
+      0
+    ],
+    "coreSelectRestored": [
+      true,
+      true,
+      true
+    ],
+    "aggregates": {
+      "operations": {
+        "scheduler_selectAndBind:called": 1481,
+        "core_initial_select:called": 1481,
+        "affinity_resolve:called": 1481,
+        "affinity_resolve:allow": 1473,
+        "core_initial_select:allow": 1481,
+        "affinity_bind:called": 1505,
+        "affinity_bind:allow": 1481,
+        "scheduler_selectAndBind:allow": 1481,
+        "affinity_resolve:stale": 8,
+        "affinity_bind:block": 24
+      },
+      "backends": {
+        "exact_redis_decorator": 3
+      },
+      "conflicts": {},
+      "publicReasons": {
+        "bind:binding_conflict": 24
+      },
+      "queryResults": {
+        "resolve:lock:rowCount=one": 68,
+        "resolve:key-versions:rowCount=zero": 1,
+        "resolve:resolve:rowCount=zero": 1,
+        "bind:lock:rowCount=one": 1505,
+        "bind:key-versions:rowCount=zero": 1,
+        "bind:resolve:rowCount=zero": 1,
+        "bind:insert:rowCount=one": 1,
+        "bind:key-versions:rowCount=one": 1504,
+        "bind:resolve:rowCount=one": 1504,
+        "bind:bind-update:rowCount=one": 1480,
+        "resolve:key-versions:rowCount=one": 67,
+        "resolve:resolve:rowCount=one": 67,
+        "resolve:invalidate:rowCount=one": 8
+      },
+      "transactionOutcomes": {},
+      "typedContentions": {
+        "decision=allow;tag=none": 1481,
+        "decision=block;tag=active_binding": 24
+      },
+      "combinedOperations": {
+        "category=single_bind_allow;decision=allow;initialSelectOne=true;bindCount=one;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown;returnedFinalCandidateEqualsLastSuccessfullyBoundAccount=true": 1457,
+        "category=typed_winner_final_allow;decision=allow;initialSelectOne=true;bindCount=two;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=true;returnedFinalCandidateEqualsLastSuccessfullyBoundAccount=true": 24
+      },
+      "combinedBindWitnesses": {
+        "ordinal=first;decision=allow;typedContention=none;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown": 1457,
+        "ordinal=first;decision=block;typedContention=active_binding;firstBindMatchesInitialCandidate=true;finalBindMatchesKnownWinner=unknown": 24,
+        "ordinal=second;decision=allow;typedContention=none;firstBindMatchesInitialCandidate=unknown;finalBindMatchesKnownWinner=true": 24
+      },
+      "bindWitnesses": {
+        "decision=allow;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=false;activeDifferent=false;activeUnknown=false;typedContention=none;conflict=none;sqlState=none": 3,
+        "decision=allow;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=true;selectedEqualsResolved=true;resolvePgRead=false;resolveStaleClear=false;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;typedContention=none;conflict=none;sqlState=none": 1413,
+        "decision=allow;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=true;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;typedContention=none;conflict=none;sqlState=none": 2,
+        "decision=block;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=false;activeDifferent=true;activeUnknown=false;typedContention=active_binding;conflict=none;sqlState=none": 23,
+        "decision=allow;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=true;selectedEqualsResolved=true;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;typedContention=none;conflict=none;sqlState=none": 23,
+        "decision=allow;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=false;pgBindContract=true;activeEqual=true;activeDifferent=false;activeUnknown=false;typedContention=none;conflict=none;sqlState=none": 34,
+        "decision=allow;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=true;pgBindContract=true;activeEqual=false;activeDifferent=false;activeUnknown=false;typedContention=none;conflict=none;sqlState=none": 6,
+        "decision=block;backend=exact_redis_decorator;join=combined;candidateJoin=true;resolveOne=true;resolveAccountNonNull=false;selectedEqualsResolved=unknown;resolvePgRead=true;resolveStaleClear=true;pgBindContract=true;activeEqual=false;activeDifferent=true;activeUnknown=false;typedContention=active_binding;conflict=none;sqlState=none": 1
+      },
+      "resolveWitnesses": {
+        "decision=allow;accountNonNull=false;pgQuery=true;pgRead=true;staleClear=false": 37,
+        "decision=allow;accountNonNull=true;pgQuery=false;pgRead=false;staleClear=false": 1413,
+        "decision=stale;accountNonNull=false;pgQuery=true;pgRead=true;staleClear=true": 8,
+        "decision=allow;accountNonNull=true;pgQuery=true;pgRead=true;staleClear=false": 23
+      }
+    },
+    "httpErrorAggregates": {
+      "schema": 1,
+      "observationOk": true,
+      "scope": "Measured concurrency errors only; after original body drain; independent aggregate",
+      "maxErrorBytes": 8192,
+      "codes": {
+        "429:RATE_LIMITED": 794
+      },
+      "rawBodyHeadersMessageOrRequestIdsPersisted": false
+    },
+    "combinedRuntimeWitnesses": {
+      "singleBindAllow": 1457,
+      "typedWinnerFinalAllow": 24,
+      "allFirstBindsMatchInitialSelection": true,
+      "allSecondBindsMatchKnownWinner": true,
+      "allReturnedCandidatesMatchLastSuccessfullyBoundAccount": true,
+      "authorityCallsIndividuallyInstrumented": false,
+      "sameFrozenCoreValidationPathCheckedBySourceAndPgComponents": true
+    },
+    "httpToRuntimeRequestJoin": false,
+    "redisInnerDelegateDirectlyInstrumented": false,
+    "pgDelegateEvidence": "Exact fixed PG SQL contracts in original bind transactions, not a patched Redis closure delegate."
+  },
+  "financial": {
+    "schema": 1,
+    "scope": "Disposable fixture tenant only; after client timing/metrics and owned child stop, before PG deletion",
+    "observationOk": true,
+    "failure": null,
+    "readOnly": true,
+    "isolation": "repeatable read",
+    "rollbackConfirmed": true,
+    "fixtureOpeningFunding": {
+      "currency": "USD",
+      "amountMinorUnits": "100000000000",
+      "source": "Unmodified seed postVerifiedFunding"
+    },
+    "aggregates": {
+      "requests": {
+        "rowCap": 64,
+        "sentinelLimit": 65,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "execution_state": "failed",
+            "financial_status": "released",
+            "reconciliation_state": "none",
+            "count": "794"
+          },
+          {
+            "execution_state": "succeeded",
+            "financial_status": "settled",
+            "reconciliation_state": "resolved",
+            "count": "687"
+          }
+        ]
+      },
+      "attempts": {
+        "rowCap": 256,
+        "sentinelLimit": 257,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "dispatch_state": "not_sent",
+            "result_state": "failed",
+            "http_class": "none",
+            "response_started": false,
+            "count": "794"
+          },
+          {
+            "dispatch_state": "sent",
+            "result_state": "succeeded",
+            "http_class": "2xx",
+            "response_started": true,
+            "count": "687"
+          }
+        ]
+      },
+      "reservations": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "state": "released",
+            "count": "794",
+            "amount_minor_units": "16261120",
+            "settlement_amount_minor_units": "0"
+          },
+          {
+            "state": "settled",
+            "count": "687",
+            "amount_minor_units": "14069760",
+            "settlement_amount_minor_units": "76944"
+          }
+        ]
+      },
+      "wallets": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "posted_balance_minor_units": "99999923056"
+          }
+        ]
+      },
+      "ledger_sources": {
+        "rowCap": 5,
+        "sentinelLimit": 6,
+        "observedRows": 2,
+        "truncated": false,
+        "rows": [
+          {
+            "source_type": "billing_settlement",
+            "count": "687",
+            "amount_minor_units": "76944"
+          },
+          {
+            "source_type": "wallet_funding",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          }
+        ]
+      },
+      "ledger_entries": {
+        "rowCap": 4,
+        "sentinelLimit": 5,
+        "observedRows": 4,
+        "truncated": false,
+        "rows": [
+          {
+            "account_scope": "non_wallet",
+            "direction": "credit",
+            "count": "687",
+            "amount_minor_units": "76944"
+          },
+          {
+            "account_scope": "non_wallet",
+            "direction": "debit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "credit",
+            "count": "1",
+            "amount_minor_units": "100000000000"
+          },
+          {
+            "account_scope": "wallet",
+            "direction": "debit",
+            "count": "687",
+            "amount_minor_units": "76944"
+          }
+        ]
+      },
+      "currency_scope": {
+        "rowCap": 1,
+        "sentinelLimit": 2,
+        "observedRows": 1,
+        "truncated": false,
+        "rows": [
+          {
+            "other_wallets": "0",
+            "other_reservations": "0",
+            "other_transactions": "0",
+            "other_entries": "0"
+          }
+        ]
+      }
+    },
+    "checks": {
+      "walletRowCount": 1,
+      "walletCreditMinorUnits": "100000000000",
+      "walletDebitMinorUnits": "76944",
+      "ledgerWalletNetMinorUnits": "99999923056",
+      "walletMatchesLedger": true,
+      "fixtureFundingMatches": true,
+      "openReservationCount": "0",
+      "openReservationAmountMinorUnits": "0",
+      "pendingRequestCount": "0",
+      "spendableAfterOpenHoldsMinorUnits": "99999923056",
+      "unknownLedgerSourceCount": "0",
+      "otherCurrencyPresent": false
+    },
+    "limitations": [
+      "Includes one OpenAI smoke, original driver warmup and measured concurrency work",
+      "Snapshot is after owned child stop, not at HTTP receipt",
+      "HTTP success/failure does not prove settlement/refund; pending/unknown/open holds are retained as facts",
+      "Money uses integer text and BigInt only; unknown ledger source is not dropped"
+    ]
+  },
+  "finalMock": {
+    "schema": 1,
+    "accountCount": 4,
+    "accountIdsPersisted": false,
+    "requests": 687,
+    "currentInFlight": 0,
+    "maxAccountInFlight": 7,
+    "streams": 0,
+    "sseChunks": 0,
+    "abortedStreams": 0,
+    "byStatus": {
+      "200": 687
+    }
+  },
+  "freeze": {
+    "file": "/private/tmp/model-router-affinity-bind-cause-v2-20261022-5df37457-d9f9-496f-9c3f-7edf9a2eb795/freeze.json",
+    "sha256": "c687d768b492b276942b5fce93561a207608d4c4574fb5a7bf4459f87dce553f",
+    "sourceFileCount": 749,
+    "distFileCount": 2992,
+    "canonicalFileCount": 5,
+    "privateInputCount": 32,
+    "dependencyFileCount": 2,
+    "beforeAfterMatches": true,
+    "independentCurrentFileReadDuringActiveR9": false,
+    "scope": "Complete content-hash input snapshots at this diagnostic before and after; no future repository freeze. The current R9 runs separately.",
+    "changes": []
+  },
+  "postgres": {
+    "version": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "fsync": "on",
+    "synchronousCommit": "on",
+    "rawServerLogPersisted": false
+  },
+  "redisVersion": "8.10.2",
+  "preparedStatements": "native",
+  "artifacts": {
+    "summary.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/summary.json",
+      "bytes": 914472,
+      "sha256": "cfd1a05b2fb11cf061e64ae0babb38e8ccb07069f79692cc967d025baa8cfc0f"
+    },
+    "affinity-openai-3cli-c200.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/affinity-openai-3cli-c200.json",
+      "bytes": 1668,
+      "sha256": "b59441f50be1637c73730eb6517ddf39b180c0c6624dd5604866d4951889b036"
+    },
+    "affinity-openai-3cli-c200.json.safe-http.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/affinity-openai-3cli-c200.json.safe-http.json",
+      "bytes": 266,
+      "sha256": "44d3ae6f109559239f9788cd5cff3a01a85457e2def23fc62982da88dd429d58"
+    },
+    "financial-snapshot.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/financial-snapshot.json",
+      "bytes": 4525,
+      "sha256": "f63701471387ae6a5851da54e0e1942e50dcdd919547fcf7aa7374fbf629b511"
+    },
+    "final-mock-stats.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/final-mock-stats.json",
+      "bytes": 234,
+      "sha256": "3a42ba1634482c6ff383857381675d38bf424f3361202c75cf4693cd7f1128b2"
+    },
+    "gateway-safe-12202.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/gateway-safe-12202.json",
+      "bytes": 7813,
+      "sha256": "794e9768ed12c5f0ac5bccc4107c638f7b4a3d9c23091896eef9b72bf784d8c8"
+    },
+    "gateway-safe-12204.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/gateway-safe-12204.json",
+      "bytes": 7266,
+      "sha256": "7c653bc85ae2fb2f7344094b0f179f5ada8aae13a63b9e8946cd6828d78c2efd"
+    },
+    "gateway-safe-12206.json": {
+      "file": "/private/tmp/model-router-affinity-bind-actual-v2-20261022-0617-root/gateway-safe-12206.json",
+      "bytes": 7283,
+      "sha256": "2f50593cee45c450c4948849543771f4f0afebbe26914ab30cdec3f50a2f134a"
+    }
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "ownedChildren": [
+      {
+        "stage": "redis",
+        "pid": 12188,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "mock",
+        "pid": 12199,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "gateway-1",
+        "pid": 12202,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "gateway-2",
+        "pid": 12204,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      },
+      {
+        "stage": "gateway-3",
+        "pid": 12206,
+        "exitCode": 0,
+        "signalCode": null,
+        "stopped": true
+      }
+    ],
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "limits": [
+    "Only one OpenAI30-second c200 workload; no latency/TTFB leg, ten-minute SSE, precision, scaling, Anthropic or real provider acceptance.",
+    "The24 recoveries are exact same-operation ALS bind sequences; individual authority calls are not traced and runtime counters are not joined to individual HTTP responses.",
+    "687 settled and794 released requests are independent owned-tenant financial aggregates after all CLI children stopped; one settled OpenAI smoke is included.",
+    "This snapshot has zero pending requests and zero open holds, and wallet/ledger/funding match. The earlier seven pending rows are a different capture and are not individually attributed.",
+    "No before/after latency or throughput benefit is claimed across differing diagnostic implementations, sample populations or host conditions.",
+    "The complete canonical R9 under original30ms/10ms/2.7 scaling and zero5xx budgets is separate and still pending."
+  ]
+}

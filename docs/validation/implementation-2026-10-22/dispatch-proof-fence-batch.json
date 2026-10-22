@@ -1,0 +1,479 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T09:15:22.245Z",
+  "status": "ordered-fence-batch-implemented-local-PG15-PG18-passed",
+  "productionFiles": {
+    "src/saas/supply/repository.ts": {
+      "bytes": 134292,
+      "sha256": "fae571a5eced5a297cd388422c77ff9505e0e60c83a41cad0da826b7d42c2911"
+    }
+  },
+  "postgresTestRoot": {
+    "path": "tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts",
+    "bytes": 34810,
+    "sha256": "579fd53279be368d87fb67d2705451b2a56a065e77b1154bfa29acbbc370f3ee",
+    "name": "restricted PG dispatch proof batches preserve ordered shared fences and normal CP revocation",
+    "topLevelRoots": 1,
+    "subtests": 8,
+    "nativeTestsIncludingRoot": 9,
+    "subtestNames": [
+      "one real six-statement proof equals the original per-key baseline including the sealed envelope",
+      "first-unique: actual blocking stops before each subsequent unique lock",
+      "middle-unique: actual blocking stops before each subsequent unique lock",
+      "last-unique: actual blocking stops before each subsequent unique lock",
+      "cancelling an actual middle-key wait rolls back its acquired prefix without reading authority",
+      "normal CP account revoke commits during the wait and the fresh proof refuses",
+      "normal CP credential revoke commits during the wait and the fresh proof refuses",
+      "held reader shared fences block the normal CP writer until the complete public read commits"
+    ],
+    "candidateDelta": "The reviewed private PG candidate is preserved exactly except one added assertion pinning the complete batch SQL SHA256."
+  },
+  "implementation": [
+    "readDispatchProof flattens the original layers after each original per-layer sort/dedupe and submits one ordered scalar shared-lock statement before the original pinned core and authority reads.",
+    "The shared lock helper, writer methods, transaction boundary, original SQL values/binds/mapping, schema, roles and existing fixture files remain byte-preserved within the checked comparison scope.",
+    "No global key sorting or deduplication, writer batching, prepared-query conversion, retry, timeout extension or wallet change is part of this candidate."
+  ],
+  "preservation": {
+    "currentEqualsReviewedProductionCandidate": true,
+    "original": {
+      "bytes": 133381,
+      "sha256": "a8a41f0456d86c6d0844eca3d314c43ba1f51f9e7dba0c6bf0644f1f9d813f24"
+    },
+    "current": {
+      "bytes": 134292,
+      "sha256": "fae571a5eced5a297cd388422c77ff9505e0e60c83a41cad0da826b7d42c2911"
+    },
+    "restoringOnlyNewBatchConstantAndSingleReadCallReproducesOriginalExactly": true,
+    "originalSqlLiteralHashes": [
+      {
+        "constant": "DISPATCH_IDENTITY_SQL",
+        "bytes": 260,
+        "sha256": "79ded5fbd696c58d2fff96a8d53245f41e87d3f85e6a3cc17fc515e6de0d0d86",
+        "originalByteIdentical": true
+      },
+      {
+        "constant": "DISPATCH_CORE_JOIN_ORDER_PINNED_SQL",
+        "bytes": 35,
+        "sha256": "ffec43c87347de54d0d81bd31bbfd4772da54b3f3da258db8e48eb42dbed85d7",
+        "originalByteIdentical": true
+      },
+      {
+        "constant": "DISPATCH_CORE_SQL",
+        "bytes": 11057,
+        "sha256": "244e911ca85c3dcc71d374649f358938bf0ece4149fba4d7f986c48fe4f424f0",
+        "originalByteIdentical": true
+      },
+      {
+        "constant": "DISPATCH_CORE_JOIN_ORDER_RESET_SQL",
+        "bytes": 39,
+        "sha256": "d96f8b458a00f20fa51dc36e912b91260f11b0778e38b82859425f77b7b1dbfe",
+        "originalByteIdentical": true
+      },
+      {
+        "constant": "TENANT_DISPATCH_AUTHORITY_SQL",
+        "bytes": 4372,
+        "sha256": "fba39ec87efd00b27785c6ca08a2413370b352ff3f106e00ac15e6c4325db5d0",
+        "originalByteIdentical": true
+      },
+      {
+        "constant": "PLATFORM_DISPATCH_AUTHORITY_SQL",
+        "bytes": 5441,
+        "sha256": "0374a2b4286ea98c47fa9afffef614dad3c77339b085f815f617cf1162b4a534",
+        "originalByteIdentical": true
+      }
+    ],
+    "newBatchSqlLiteral": {
+      "constant": "DISPATCH_READ_FENCE_BATCH_SQL",
+      "bytes": 237,
+      "sha256": "8d56f265e1f7ef261d5f5dc1ee2c79922f3a58db339bf8e21383c53bf06ead53"
+    },
+    "unchangedByExactRestoration": [
+      "shared lockAdvisoryLayers helper and per-layer sortAndDedupeAdvisoryKeys",
+      "dispatchReadLockLayers key identities, layer order and duplicate cross-layer calls",
+      "readDispatchProof transaction boundary, business SQL, bind values and proof mapping",
+      "all repository write methods and their exclusive fences"
+    ],
+    "additionalFrozenProductionAndFixtureInputsMatch": 14,
+    "sourceReferences": {
+      "sharedHelper": {
+        "path": "src/saas/supply/repository.ts",
+        "line": 45
+      },
+      "newSql": {
+        "path": "src/saas/supply/repository.ts",
+        "line": 909
+      },
+      "lockLayers": {
+        "path": "src/saas/supply/repository.ts",
+        "line": 1831
+      },
+      "readCall": {
+        "path": "src/saas/supply/repository.ts",
+        "line": 1900
+      }
+    }
+  },
+  "statementAccounting": {
+    "successfulLiveFixture": "platform supply, member principal, real persisted prepared evidence and acquired account lease",
+    "methodSqlCalls": 6,
+    "orderedMethodTags": [
+      "identity",
+      "fences",
+      "pin",
+      "core",
+      "reset",
+      "authority"
+    ],
+    "batchBoundKeyEntries": 11,
+    "uniqueKeys": 9,
+    "duplicateEntryIndexesZeroBased": [
+      [
+        4,
+        9
+      ],
+      [
+        5,
+        10
+      ]
+    ],
+    "scalarServerLockInvocations": 11,
+    "batchReturnedRows": 11,
+    "originalPerKeyBaselineMethodSqlCalls": 16,
+    "baselineMechanism": "Only the new batch statement is expanded into eleven original real scalar shared-lock queries through the same real transaction executor; business reads/results are not replaced.",
+    "limits": [
+      "Six counts the method SQL calls through the actual SqlExecutor, excluding BEGIN/COMMIT, observer pg_backend_pid and fixture/coordination SQL; it is not a total protocol-message or network-ACK measurement.",
+      "Eleven invocations is supported by the fixed scalar SQL SHA, bound eleven-entry array and eleven returned rows. pg_locks observes unique held/waited keys; it cannot separately count repeated reentrant calls.",
+      "The expanded baseline is a focused real per-key-lock baseline, not an execution of an old complete build."
+    ]
+  },
+  "liveAssertions": {
+    "proofEquivalence": "A passing live assertion compares SHA256 of complete type-preserving canonical proof objects, including the sealed encrypted envelope. Proofs, envelope bytes and their comparison digests remain only in heap; no raw proof/envelope or proof digest was exported for independent offline equivalence.",
+    "orderedBlocking": {
+      "zeroBasedUniqueOrdinals": [
+        0,
+        6,
+        8
+      ],
+      "observation": "Restricted CP coordination-only exclusive locks, actual pg_blocking_pids and pg_locks prove the acquired shared prefix and waiting target; a subsequent unique key remains unheld and independently acquirable when one exists.",
+      "finalUniqueBoundary": "Ordinal 8 is the last unique version key; the two tail entries repeat earlier pool/profile keys."
+    },
+    "cancellation": "Actual same-role pg_cancel_backend yields SQLSTATE 57014 while the middle account fence waits. The transaction rolls back the acquired prefix; no pinned core or authority read occurs; the original held lease survives until finally.",
+    "normalControlPlaneWriters": [
+      "Normal ProviderSupplyService account and credential revoke APIs use their real CAS, epochs, audit writes and exclusive locks. A seam pauses only the final real commit; business SQL/results remain real.",
+      "A committed account/credential revoke while the reader waits makes the fresh authority read empty and the public proof null after a real core row.",
+      "A reader holding shared fences blocks the normal account revoke writer until the complete public read commits; the later fresh public read then refuses."
+    ],
+    "restrictedRoles": [
+      "model_router_saas_migrator",
+      "model_router_saas_control_plane",
+      "model_router_saas_gateway"
+    ],
+    "roleBoundary": "The root asserts each session role is nonsuperuser and verifies original CP/gateway runtime privileges. Production reads use gateway; lifecycle writes use CP; migrator is limited to fixture setup and independent SELECT observations.",
+    "fixtureChain": "evidenceAuthorityFixture(migrator,gateway,platform) -> existing normal-success seedFixture(migrator,gateway,mode); no HTTP bootstrap or provider call."
+  },
+  "stateAndLeaseScope": {
+    "comparedTables": [
+      {
+        "scope": "requests",
+        "table": "saas_requests",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "attempts",
+        "table": "saas_attempts",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "preparedEvidence",
+        "table": "saas_prepared_request_evidence",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "leases",
+        "table": "saas_provider_account_leases",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "idempotency",
+        "table": "saas_idempotency_records",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "outbox",
+        "table": "saas_request_admission_outbox",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "audit",
+        "table": "saas_audit_events",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "customerSnapshots",
+        "table": "saas_request_customer_price_snapshots",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "supplierSnapshots",
+        "table": "saas_attempt_supplier_cost_snapshots",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "holds",
+        "table": "saas_billing_reservations",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "wallets",
+        "table": "saas_wallets",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "ledgerTransactions",
+        "table": "saas_ledger_transactions",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "ledgerEntries",
+        "table": "saas_ledger_entries",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "usage",
+        "table": "saas_usage_events",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "settlements",
+        "table": "saas_usage_settlements",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "capacity",
+        "table": "saas_gateway_capacity_reservations",
+        "filter": "tenant_id = fixture.tenantId"
+      },
+      {
+        "scope": "rateCounters",
+        "table": "saas_provider_account_rate_counters",
+        "filter": "account_id = fixture.accountId"
+      }
+    ],
+    "tableScopes": 17,
+    "comparison": "Actual row counts and MD5 of ordered complete row JSON are reduced through type-preserving canonical SHA256 only in heap. Each read/coordination scenario asserts equality before the finally release while its original lease remains held.",
+    "intendedLifecycleChanges": "Platform account, credential and version revocation plus tenant-null CP lifecycle audit rows are separately asserted and are outside the tenant-scoped 17-table digest; this is not a whole-database no-write claim.",
+    "lease": "Each fixture acquires a real maxConcurrency=2, TTL=30000ms lease. finally releases that same original lease object/token and observes the exact tenant/account/upstream/attempt/fencing-token row in released state.",
+    "fundsBoundary": "The fixture commits an actual preparation hold and retains it until owned disposable database teardown. This root does not prove zero open holds, refunds or settlement and does not claim the lease remains held after finally."
+  },
+  "realPostgres": [
+    {
+      "version": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "backend": "disposable-initdb-cluster",
+      "startedAt": "2026-10-22T08:45:25.360Z",
+      "finishedAt": "2026-10-22T08:45:31.254Z",
+      "capture": "model-router-dispatch-fence-pg18-20261022-0845",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 164114,
+        "sha256": "9559957cebfce407ca98b0d30a85325f6c80c22fa22f569866ed39a384402b76"
+      },
+      "tap": {
+        "name": "custom-test.log",
+        "bytes": 2451,
+        "sha256": "5a1a12f1193ff8dbb42f360beeb763cedb81ff916a5172e5b1dd10df25abc526"
+      },
+      "counts": {
+        "tests": 9,
+        "suites": 0,
+        "pass": 9,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerExitCode": 0,
+      "stageCount": 8,
+      "allStageExitCodesZero": true,
+      "sourceCount": 686,
+      "sourceBeforeAfterCurrentMapSha256": "0312c959b5c450740de620db81fadcf7fd9b661dc185da774a328eedaf2e57ce",
+      "sourceChanges": 0,
+      "currentDifferences": 0,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "currentClusterDirectoryAbsent": true
+      }
+    },
+    {
+      "version": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "backend": "disposable-docker-container",
+      "startedAt": "2026-10-22T08:46:04.875Z",
+      "finishedAt": "2026-10-22T08:46:15.325Z",
+      "capture": "model-router-dispatch-fence-pg15-20261022-0847",
+      "summary": {
+        "name": "summary.json",
+        "bytes": 165444,
+        "sha256": "d84194ca4e1244c58b81ae7adff36f5c4c97b389b13ca43142dde18a3e7f4518"
+      },
+      "tap": {
+        "name": "custom-test.log",
+        "bytes": 2448,
+        "sha256": "4b99d5c5da207e18317381c1f99c0dd89807dc0609832f8d4c87f5e1592dd3b9"
+      },
+      "counts": {
+        "tests": 9,
+        "suites": 0,
+        "pass": 9,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "runnerExitCode": 0,
+      "stageCount": 12,
+      "allStageExitCodesZero": true,
+      "sourceCount": 686,
+      "sourceBeforeAfterCurrentMapSha256": "0312c959b5c450740de620db81fadcf7fd9b661dc185da774a328eedaf2e57ce",
+      "sourceChanges": 0,
+      "currentDifferences": 0,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "currentClusterDirectoryAbsent": true
+      },
+      "dockerImage": "postgres:15-alpine",
+      "dockerImageId": "sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81"
+    }
+  ],
+  "cleanupVerification": {
+    "runnerStagesPassed": true,
+    "currentLocalClusterDirectoriesAbsent": true,
+    "pg15ExactRunnerContainerAbsent": true,
+    "independentMetadataInspectionAt": "2026-10-22T08:58:30.035Z",
+    "inspectionReceipt": {
+      "name": "cleanup-inspection.json",
+      "bytes": 756,
+      "sha256": "93df0c064faaef62832c6b8e662669f5d237363898b1a637950d2b84154c18cd"
+    },
+    "boundary": "Exact saved runner container metadata inspection only; no database connection, startup or rerun was performed by this evidence projection."
+  },
+  "focusedOffline": {
+    "initialUnit": {
+      "recordedAt": "2026-10-22T08:32:32.218700+00:00",
+      "log": {
+        "name": "focused-unit.log",
+        "bytes": 2879,
+        "sha256": "f0c8ff251ce1da61b097cae6560738d17c0b33bed262f74fc1bc39a90119b91e"
+      },
+      "counts": {
+        "tests": 11,
+        "suites": 0,
+        "pass": 11,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exitCode": 0,
+      "repositorySha256": "fae571a5eced5a297cd388422c77ff9505e0e60c83a41cad0da826b7d42c2911",
+      "unitInputSha256": "5de527e3f4a1d07fbea57bd8372e87b782cc4b642d815109c584f650c6960ed4"
+    },
+    "firstCombinedCiWiring": {
+      "recordedAt": "2026-10-22T08:41:21.749460+00:00",
+      "receipt": {
+        "name": "focused-final-unit-ci.json",
+        "bytes": 517,
+        "sha256": "f29cf71d259589782b9ea366961a0256c31ef984d2efe7f07386cc6fb2c8ab98"
+      },
+      "log": {
+        "name": "focused-final-unit-ci.log",
+        "bytes": 58508,
+        "sha256": "7b610765b147063beccc215a35d243edd8bc29527866442a5820d0978d07d81c"
+      },
+      "exitCode": 1,
+      "counts": {
+        "tests": 25,
+        "suites": 0,
+        "pass": 24,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "failedTest": "actual source prerequisites preserve successful-HTTP dependencies and each isolated root own fixture",
+      "cause": "The generic own-seed regex expected a direct seed[A-Z] call in the new root and did not recognize its existing evidenceAuthorityFixture -> normal-success seedFixture chain."
+    },
+    "correctedCombinedCiWiring": {
+      "recordedAt": "2026-10-22T08:42:18.797626+00:00",
+      "receipt": {
+        "name": "focused-final-unit-ci-v2.json",
+        "bytes": 519,
+        "sha256": "8852212d3445e6a5566aa67e62660ac5d70615874d39879cbaad7faebb06c55e"
+      },
+      "log": {
+        "name": "focused-final-unit-ci-v2.log",
+        "bytes": 6672,
+        "sha256": "9565c8aea87088d9241f9f184450d02d54d4964b1f67c539316e59abddb3ab79"
+      },
+      "exitCode": 0,
+      "counts": {
+        "tests": 25,
+        "suites": 0,
+        "pass": 25,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "repair": "A dedicated strict selector branch pins the root import/call and the helper import/call to the original seedFixture chain, while retaining bootstrap/cancellation prohibitions."
+    },
+    "countingBoundary": "The final combined 25 includes the eleven focused unit tests; these are not 36 independent tests.",
+    "versionBoundary": {
+      "appliedUnitSha256": "5de527e3f4a1d07fbea57bd8372e87b782cc4b642d815109c584f650c6960ed4",
+      "currentUnitSha256": "d0f3f6488dd0f42ff3f0ea2e2a3d7703c4d4db6d4930a9985fe8ccc98717219c",
+      "currentDiff": "Import ordering, whitespace/formatting and fenceBatchMatch[1]! -> asserted safe fallback; independent source comparison finds no other token changes.",
+      "coverage": "The initial eleven-test receipt records the applied candidate unit hash. Combined receipts save commands/logs but no complete input hash map, so they are not claimed as an independently hashed validation of the current unit/CI source closure."
+    },
+    "sourceTypesAndPgStrict": "Reported separately by root, but no saved type-check receipt was present in the implementation capture read for this projection; no type-check result is certified here."
+  },
+  "ciWiring": {
+    "currentFiles": {
+      ".github/workflows/ci.yml": {
+        "bytes": 24542,
+        "sha256": "d9a3fb0baf88bc2f6c5a18c5630cd78c331dd041fd70b8ad6bb695bf941aacc8"
+      },
+      "tests/ci/managed-saas-isolated-required-gates.ts": {
+        "bytes": 10622,
+        "sha256": "c89b54284f98fbdfa4be58ec770cdf28ae943638f6ba8d37f81d424f69af0d7d"
+      },
+      "tests/ci/managed-saas-required-gates.test.ts": {
+        "bytes": 45813,
+        "sha256": "7a83657123921cc9654100441252103f9c4b06e9ad4034624a6ecd1793e2da15"
+      }
+    },
+    "selector": "dispatch-proof-fence-batch",
+    "root": "tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts",
+    "configuredPostgresVersions": [
+      "15",
+      "18"
+    ],
+    "normalFixtureChainPinned": true,
+    "formalGitHubCiExecutionClaimed": false,
+    "boundary": "These are current source wiring plus saved local wiring-test receipts, not a formal required CI run."
+  },
+  "sourceClosure": {
+    "scope": "2 completed captures; literal relative import closure, runner, role manifest and package-lock.json",
+    "filesPerCapture": 686,
+    "beforeAfterCurrentDifferencesPerCapture": 0,
+    "mapSha256": "0312c959b5c450740de620db81fadcf7fd9b661dc185da774a328eedaf2e57ce",
+    "boundary": "This is the runner-captured closure, not a whole-repository/no-other-WIP-change claim. Historical preparation freeze flags describe their preparation time only."
+  },
+  "limits": [
+    "No full regression, rebuilt artifact, provider smoke, performance/R9, production traffic, public HTTP or end-to-end dispatch claim is made by this projection.",
+    "BYOK/project_service key ordering and missing-core behavior are offline unit contracts; the new real-PG root exercises platform/member only.",
+    "All PG results above were read from completed root-owned captures; this projection did not execute tests or SQL.",
+    "The existing prepared-evidence PG root is byte-preserved at its frozen SHA; this new root does not replace it."
+  ]
+}

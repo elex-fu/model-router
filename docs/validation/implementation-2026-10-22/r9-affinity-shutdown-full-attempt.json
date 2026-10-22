@@ -1,0 +1,304 @@
+{
+  "schemaVersion": 1,
+  "classification": "local-canonical-repaired-build-r9-full-workload-attempt",
+  "formalRequiredCiEvidence": false,
+  "GO": false,
+  "passed": false,
+  "recordedAtUtc": "2026-10-22T06:41:01.816366Z",
+  "capture": {
+    "actualDirectory": "/private/tmp/model-router-r9-affinity-shutdown-20261022-0622-root",
+    "rootToolSession": 95421,
+    "rootToolExitCode": 1,
+    "startedAtUtc": "2026-10-22T06:20:57.336Z",
+    "finishedAtUtc": "2026-10-22T06:37:59.790Z",
+    "summary": {
+      "path": "/private/tmp/model-router-r9-affinity-shutdown-20261022-0622-root/summary.json",
+      "bytes": 906839,
+      "sha256": "d5fb7801bdef421009d432b5d29463203683b860ed3997c792a2732ce324547c"
+    },
+    "baseline": {
+      "path": "/private/tmp/model-router-r9-affinity-shutdown-20261022-0622-root/openai-scaling-1cli.json",
+      "bytes": 1418,
+      "sha256": "b25981067225dfedd4e1fcca7feab4138ff7018ff5244e7339c4438faa33f816"
+    },
+    "threeGatewayReport": {
+      "path": "/private/tmp/model-router-r9-affinity-shutdown-20261022-0622-root/openai-r9-3cli.json",
+      "bytes": 4753,
+      "sha256": "1fba78015e5456a03515834e08b8426827c14319c0bcfecb4cd62abf8e800a48"
+    },
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "nodeVersion": "v24.18.0",
+    "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "redisVersion": "Redis server v=8.10.2 sha=00000000:1 malloc=libc bits=64 build=764b3e45065a66fb",
+    "preparedStatements": "native",
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    },
+    "interrupted": false,
+    "buildRequested": false,
+    "realProviderCalls": 0,
+    "builtinAcceptance": false,
+    "productionKmsVerified": false
+  },
+  "workloadCoverage": {
+    "singleGatewayBaselinePassed": true,
+    "firstProtocol": "openai",
+    "firstProtocolScenesExecuted": [
+      "latency",
+      "ttfb",
+      "sse-integrity",
+      "concurrency",
+      "precision",
+      "scaling"
+    ],
+    "firstProtocolFullWorkloadPassed": false,
+    "anthropicFullWorkloadExecuted": false,
+    "twoProtocolSmoke": [
+      {
+        "protocol": "openai",
+        "httpStatus": 200,
+        "settled": true
+      },
+      {
+        "protocol": "anthropic",
+        "httpStatus": 200,
+        "settled": true
+      }
+    ],
+    "allProtocolsCompleted": false,
+    "controlFlow": "Original runner finishes the first failed protocol workload, collects stats/metrics, then cleans up; no second protocol full workload follows."
+  },
+  "configuration": {
+    "protocol": "openai",
+    "maxTokens": 64,
+    "requests": 300,
+    "streamSamples": 100,
+    "warmupInflight": 4,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "sseChunkDelayMs": 0,
+    "inflight": 200,
+    "concurrencySeconds": 60,
+    "accountLimit": 64,
+    "precisionInflight": 200,
+    "scalingSeconds": 120,
+    "scalingInflight": 200,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "noFail": false,
+    "instanceCount": 3
+  },
+  "singleGatewayBaseline": {
+    "instanceCount": 1,
+    "inflight": 200,
+    "seconds": 123.9,
+    "throughputRps": 16.52,
+    "statuses": {
+      "200": 2048,
+      "429": 4352
+    },
+    "latency": {
+      "n": 2048,
+      "p50": 4246.36,
+      "p90": 4460.15,
+      "p99": 4635.33,
+      "max": 4741.41
+    }
+  },
+  "threeGateway": {
+    "latency": {
+      "direct": {
+        "n": 300,
+        "p50": 1.76,
+        "p90": 2.18,
+        "p99": 5.14,
+        "max": 5.27
+      },
+      "gateway": {
+        "n": 300,
+        "p50": 65.04,
+        "p90": 81.22,
+        "p99": 107.3,
+        "max": 146.53
+      },
+      "p99OverheadMs": 102.16
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 2.36,
+        "p90": 3.02,
+        "p99": 4.65,
+        "max": 4.65
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 63.62,
+        "p90": 71.48,
+        "p99": 92.17,
+        "max": 92.17
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 87.52
+    },
+    "sseIntegrity": {
+      "minutes": 10,
+      "concurrency": 20,
+      "streams": 17440,
+      "corruptStreams": 0,
+      "chunks": 1116160,
+      "corruptChunks": 0,
+      "reasons": {}
+    },
+    "concurrency": {
+      "inflight": 200,
+      "seconds": 65.3,
+      "statuses": {
+        "200": 804,
+        "429": 1024,
+        "503": 1
+      },
+      "transportErrors": 0,
+      "errors": {},
+      "latency": {
+        "n": 804,
+        "p50": 7298.88,
+        "p90": 11219.53,
+        "p99": 12339.63,
+        "max": 13582.58
+      },
+      "throughputRps": 12.31
+    },
+    "precision": {
+      "accountLimit": 64,
+      "saturationInflight": 200,
+      "clientStatuses": {
+        "200": 957,
+        "429": 756,
+        "503": 1
+      },
+      "overIssueAccounts": 0
+    },
+    "scaling": {
+      "instanceCount": 3,
+      "inflight": 200,
+      "seconds": 124.8,
+      "throughputRps": 16.82,
+      "statuses": {
+        "200": 2099,
+        "429": 1025,
+        "503": 10
+      },
+      "latency": {
+        "n": 2099,
+        "p50": 8283.04,
+        "p90": 10630.44,
+        "p99": 13176.32,
+        "max": 13985.05
+      },
+      "ratio": null,
+      "invalidComparisonReason": "current_report_failed"
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 102.16,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 87.52,
+      "threshold": 10,
+      "unit": "ms"
+    },
+    {
+      "scenario": "concurrency",
+      "metric": "unexpected 5xx",
+      "value": 1,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "scaling",
+      "metric": "unexpected 5xx",
+      "value": 10,
+      "threshold": 0,
+      "unit": ""
+    },
+    {
+      "scenario": "scaling",
+      "metric": "valid scaling comparison",
+      "value": 0,
+      "threshold": 1,
+      "unit": ""
+    }
+  ],
+  "httpAggregate": {
+    "threeGatewayLoad503Total": 12,
+    "threeGatewayLoad502Total": 0,
+    "scopes": [
+      "concurrency",
+      "precision",
+      "scaling"
+    ],
+    "threeGatewayLoadTransportErrors": 0,
+    "allHttp200FinanciallySettledClaim": false
+  },
+  "independentCumulativeMetrics": {
+    "successfulSnapshots": 3,
+    "preparationFailures": [
+      {
+        "stage": "authority",
+        "code": "capability_unavailable",
+        "outcome": "blocked",
+        "count": 12
+      }
+    ],
+    "individualHttpFailureCorrelation": false,
+    "includesWarmupSmokeAndAllWorkloads": true,
+    "combinedSchedulerStageIncludesBinding": true
+  },
+  "postgresLogs": {
+    "errorCount": 0,
+    "deadlockCount": 0
+  },
+  "sourceAndBuildGuard": {
+    "fullSourceFiles": 749,
+    "fullDistFiles": 2992,
+    "canonicalHarnessFiles": 5,
+    "allBeforeAfterEqual": true,
+    "allCurrentFilesMatchAtRecordCreation": true,
+    "currentRepositoryFreezeClaim": false,
+    "docsAndIgnoredLocalEnvironmentOutsideScope": true
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "financialEvidence": {
+    "twoSmokeSettlementsObserved": true,
+    "loadRequestFinalSnapshotTaken": false,
+    "http200IsSettlementProof": false,
+    "separateShortDiagnosticFinalFinancialSnapshot": "affinity-shutdown-c200-acceptance.json"
+  },
+  "limits": [
+    "Ten minutes of SSE means repeated short streams, not a single ten-minute connection.",
+    "Precision also observed one503 even though the original driver precision violation checks do not include a zero5xx violation. All twelve503 remain reported.",
+    "The cumulative authority count and HTTP total are separate aggregates without a request join.",
+    "Single-CLI and three-CLI throughput division is invalid: original ratio=null/current_report_failed is retained.",
+    "No before/after throughput or latency benefit is inferred from separate runs.",
+    "This result does not cover production KMS, real providers, formal required CI or public release."
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "classification": "local-source-commercial-postgres-after-contention-backpressure-repair",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T08:05:47.583426+00:00",
+  "status": "passed-two-version-local-http-root",
+  "root": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+  "rootSha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+  "requestedPreparedStatements": "native",
+  "runs": [
+    {
+      "directory": "/private/tmp/model-router-commercial-contention-backpressure-pg18-20261022-0805",
+      "summary": {
+        "file": "/private/tmp/model-router-commercial-contention-backpressure-pg18-20261022-0805/summary.json",
+        "bytes": 164074,
+        "sha256": "228516d9c913e8b95e915b48a5e866143aca0dba76563c6d56a9e949e73fa5e6"
+      },
+      "tap": {
+        "file": "/private/tmp/model-router-commercial-contention-backpressure-pg18-20261022-0805/commercial-test.log",
+        "bytes": 19790,
+        "sha256": "7e909b1e92651ba6d96ef0b6070953574ccd5823b95ffd2505d5a754eadd982f"
+      },
+      "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "backend": "disposable-initdb-cluster",
+      "dockerImageId": null,
+      "containerId": null,
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "roles": [
+        "model_router_saas_migrator",
+        "model_router_saas_control_plane",
+        "model_router_saas_gateway"
+      ],
+      "sourceClosureFileCount": 685,
+      "sourceBeforeAfterCurrentMatchAtArtifactCreation": true,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    },
+    {
+      "directory": "/private/tmp/model-router-commercial-contention-backpressure-pg15-20261022-0807",
+      "summary": {
+        "file": "/private/tmp/model-router-commercial-contention-backpressure-pg15-20261022-0807/summary.json",
+        "bytes": 165509,
+        "sha256": "a8a5d697cac0be7a07fa6abce937fbae960fbb73c76a8f1b40a13b5c5d495b69"
+      },
+      "tap": {
+        "file": "/private/tmp/model-router-commercial-contention-backpressure-pg15-20261022-0807/commercial-test.log",
+        "bytes": 20065,
+        "sha256": "e993800df4cc7491b78984f52d5e2dd8b3206094aca12d5465925938a41277ff"
+      },
+      "postgresVersion": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "backend": "disposable-docker-container",
+      "dockerImageId": "sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81",
+      "containerId": "30a0551cf4c89a0e12f825e716683bb17a6f08b99a8887d533db251b9fdb66fb",
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "roles": [
+        "model_router_saas_migrator",
+        "model_router_saas_control_plane",
+        "model_router_saas_gateway"
+      ],
+      "sourceClosureFileCount": 685,
+      "sourceBeforeAfterCurrentMatchAtArtifactCreation": true,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    }
+  ],
+  "limits": [
+    "The original commercial HTTP root ran27 tests on each disposable PostgreSQL version with no failures, cancellation or skips. The two runs are the same scenarios on two database versions.",
+    "Restricted runtime roles, original root, role manifests, permission/revocation and financial assertions and timeouts were preserved.",
+    "Canonical functional fixtures use fsync/synchronous_commit off; this is not durability or performance acceptance.",
+    "Current built real Kimi, five-case race/capacity components, formal required CI and full R9 remain separate evidence. No deployment, GO or future freeze claim."
+  ]
+}

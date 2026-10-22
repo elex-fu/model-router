@@ -1,0 +1,44 @@
+{
+  "kind": "local-analysis-validation-snapshot; not a CI release gate",
+  "date": "2026-10-21",
+  "timezone": "Asia/Shanghai",
+  "modelRouterHead": "bb9756c7b73a7f1a793aee761bb71f8ffb31956e",
+  "sub2apiHead": "a3eb7ef302961cba716dc78b39b93b60c467db0e",
+  "modelRouterWorktree": "pre-existing uncommitted SaaS operations/UI changes present",
+  "environment": {
+    "node": "v24.18.0",
+    "postgresMajor": 18
+  },
+  "sourceHashes": {
+    "src/saas/supply/credential-validation-adapters.ts": "5733d29af7b3e3d0bce907de1deef5f7e10cc29a13ceb1bb2fb25e252d5a94bc",
+    "src/saas/supply/credential-validation-worker.ts": "a9c0352f5e682160438b2271f6a14c65a5f645f064137c3001f5204cf8ab8d29",
+    "src/protocol/openai-to-anth.ts": "be3252f3289287e2788b96895636cd4516c1403865acfefd5764e96a6314a268",
+    "src/saas/runtime/gateway-runtime-module.ts": "95d37cf322bc1ceb27e60ee03f86c3709f324615f637d115856cfcc90ae30eee",
+    "src/server/managed-saas.ts": "ef7d5dd71ef3872795b8a4f199df51e9611c4ee244e48540310082ea0908d00a",
+    "src/server/managed-saas-gateway.ts": "5c725594e436875000c03a9f1a054183a06e90b62ee5fd4269e258c7b817e74c",
+    "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts": "bc1fe542bf2e7feac339e30f369f5c23960bf7b342ccab0d132c021ea8ff2936"
+  },
+  "scope": {
+    "realKimi": "source V2 proxy and production fixed credential validation adapter; no full paid SaaS request/settlement success claim",
+    "postgres": "isolated temporary clusters and designated migrator/control-plane/gateway roles; stopped and pgdata removed",
+    "sub2api": "source comparison; not a symmetric live gateway throughput comparison"
+  },
+  "additionalObservedChecks": {
+    "typescript": "tsc --noEmit exit 0",
+    "targetedModelRouterTests": "55 tests, 55 pass, 0 fail, 0 skipped",
+    "sourceKimiLiveSmoke": "2 tests, 2 pass, 0 fail, 0 skipped",
+    "sub2apiKimiQuotaUnit": "4 named tests PASS with -tags=unit; exit 0"
+  },
+  "files": [
+    "kimi-onboarding.json",
+    "kimi-quota-and-emitted-payload.json",
+    "kimi-tools.json",
+    "manifest.json",
+    "postgres-commercial-e2e-summary.json",
+    "postgres-commercial-e2e.log",
+    "postgres-composite-summary.json",
+    "postgres-composite.log",
+    "readiness-facts-pg18.json",
+    "sub2api-kimi-quota-unit.json"
+  ]
+}

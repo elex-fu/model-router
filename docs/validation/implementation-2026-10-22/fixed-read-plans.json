@@ -1,0 +1,383 @@
+{
+  "schema": 1,
+  "classification": "local-fixed-read-plans-validation",
+  "proposedProjection": true,
+  "formalRequiredCiEvidence": false,
+  "releaseGoClaim": false,
+  "r9PassClaim": false,
+  "fixedQueryCount": 8,
+  "fixedQueryContracts": [
+    {
+      "label": "cm-final",
+      "sqlBytes": 468,
+      "sqlSha256": "358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16",
+      "bindCount": 4,
+      "nameBytes": 55
+    },
+    {
+      "label": "prep-byok",
+      "sqlBytes": 3325,
+      "sqlSha256": "544cae2ff6fdee89a3915c80e9861ec47b860a58ef631ed8065e75b829b05c7a",
+      "bindCount": 5,
+      "nameBytes": 56
+    },
+    {
+      "label": "prep-platform",
+      "sqlBytes": 4181,
+      "sqlSha256": "326b6c68db2b29e77e275bc4ebbaf1b5f228778ac68ee691c7d0558f4a061ba2",
+      "bindCount": 6,
+      "nameBytes": 60
+    },
+    {
+      "label": "proof-core",
+      "sqlBytes": 11057,
+      "sqlSha256": "244e911ca85c3dcc71d374649f358938bf0ece4149fba4d7f986c48fe4f424f0",
+      "bindCount": 1,
+      "nameBytes": 57
+    },
+    {
+      "label": "proof-platform",
+      "sqlBytes": 5441,
+      "sqlSha256": "0374a2b4286ea98c47fa9afffef614dad3c77339b085f815f617cf1162b4a534",
+      "bindCount": 16,
+      "nameBytes": 61
+    },
+    {
+      "label": "proof-tenant",
+      "sqlBytes": 4372,
+      "sqlSha256": "fba39ec87efd00b27785c6ca08a2413370b352ff3f106e00ac15e6c4325db5d0",
+      "bindCount": 10,
+      "nameBytes": 59
+    },
+    {
+      "label": "sched-byok",
+      "sqlBytes": 10787,
+      "sqlSha256": "9b34c495847c2b54256174c5c2d1c6063ed6877e023708dfff4589fe09771993",
+      "bindCount": 15,
+      "nameBytes": 57
+    },
+    {
+      "label": "sched-platform",
+      "sqlBytes": 14331,
+      "sqlSha256": "bc83809c6d04f9c52ac8572fe4b1ed655468ad8861baf00cbb1740d2a7cf0b60",
+      "bindCount": 22,
+      "nameBytes": 61
+    }
+  ],
+  "boundary": "Optional native statements retain SQL, values, fresh reads, fences, pin/reset, transactions and default-off behavior; no execution-error replay or row/authorization cache.",
+  "postgresGates": {
+    "proof18": {
+      "summary": {
+        "path": "/private/tmp/model-router-proof-native-wire-pg18-20261022-1015/summary.json",
+        "bytes": 164137,
+        "sha256": "667461f9d980c5e59b3af10f4d5908a74d75da99ad4cf78c43c08968ae450d1d"
+      },
+      "testLog": {
+        "path": "/private/tmp/model-router-proof-native-wire-pg18-20261022-1015/custom-test.log",
+        "bytes": 2745,
+        "sha256": "b632a8ec7908f046d32d0bfbdc15422ad7a0647e1a7e7d51e2d44c70ed775399"
+      },
+      "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "counts": {
+        "tests": 10,
+        "suites": 0,
+        "pass": 10,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "allStagesExitZero": true,
+      "capturedClosure": {
+        "files": 686,
+        "beforeSha256": "5e85b998c7258d80561f246317174295d4f847ccccc7fd8385991a1644656124",
+        "afterSha256": "5e85b998c7258d80561f246317174295d4f847ccccc7fd8385991a1644656124",
+        "beforeAfterEqual": true
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      },
+      "clusterDirectoryAbsentAtProjection": true
+    },
+    "proof15": {
+      "summary": {
+        "path": "/private/tmp/model-router-proof-native-wire-pg15-20261022-1017/summary.json",
+        "bytes": 164143,
+        "sha256": "083ebd16b94a3ea5dfc6602d0c1a706d86ec16720e081c1073c895776763d48d"
+      },
+      "testLog": {
+        "path": "/private/tmp/model-router-proof-native-wire-pg15-20261022-1017/custom-test.log",
+        "bytes": 2739,
+        "sha256": "895d854c93a0990155cba7b6de78d3c2327b3d19b54dbc1c972882f500510a2e"
+      },
+      "postgres": "postgres (PostgreSQL) 15.19 (Homebrew)",
+      "counts": {
+        "tests": 10,
+        "suites": 0,
+        "pass": 10,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "allStagesExitZero": true,
+      "capturedClosure": {
+        "files": 686,
+        "beforeSha256": "5e85b998c7258d80561f246317174295d4f847ccccc7fd8385991a1644656124",
+        "afterSha256": "5e85b998c7258d80561f246317174295d4f847ccccc7fd8385991a1644656124",
+        "beforeAfterEqual": true
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      },
+      "clusterDirectoryAbsentAtProjection": true
+    },
+    "commercial18": {
+      "summary": {
+        "path": "/private/tmp/model-router-fixed-read-plans-commercial-pg18-20261022-1008/summary.json",
+        "bytes": 164024,
+        "sha256": "2f75219591a93fc679bb4c63936a5791e85e9585acf09039a6350d88466ab686"
+      },
+      "testLog": {
+        "path": "/private/tmp/model-router-fixed-read-plans-commercial-pg18-20261022-1008/commercial-test.log",
+        "bytes": 19786,
+        "sha256": "c5bc5379852e964e66744a78b845d7b2c18ff379c8e55fbe5cbef54c62bb1159"
+      },
+      "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "allStagesExitZero": true,
+      "capturedClosure": {
+        "files": 685,
+        "beforeSha256": "274e1625bf6f2bac454f1d828a8f3ca2890bb08249734a0bf484df271fc6bbba",
+        "afterSha256": "274e1625bf6f2bac454f1d828a8f3ca2890bb08249734a0bf484df271fc6bbba",
+        "beforeAfterEqual": true
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      },
+      "clusterDirectoryAbsentAtProjection": true
+    },
+    "commercial15": {
+      "summary": {
+        "path": "/private/tmp/model-router-fixed-read-plans-commercial-pg15-20261022-1019/summary.json",
+        "bytes": 164023,
+        "sha256": "582dce6d645abde3d6e11beb43a5d211f674a6ea90fe644d695657d44ed53dd0"
+      },
+      "testLog": {
+        "path": "/private/tmp/model-router-fixed-read-plans-commercial-pg15-20261022-1019/commercial-test.log",
+        "bytes": 19782,
+        "sha256": "167d7bd9d5d26cea0badacdfd05dedff8c673b762da723ac6848493a6a00fcfe"
+      },
+      "postgres": "postgres (PostgreSQL) 15.19 (Homebrew)",
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "allStagesExitZero": true,
+      "capturedClosure": {
+        "files": 685,
+        "beforeSha256": "274e1625bf6f2bac454f1d828a8f3ca2890bb08249734a0bf484df271fc6bbba",
+        "afterSha256": "274e1625bf6f2bac454f1d828a8f3ca2890bb08249734a0bf484df271fc6bbba",
+        "beforeAfterEqual": true
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      },
+      "clusterDirectoryAbsentAtProjection": true
+    }
+  },
+  "proofNativeWire": {
+    "evidenceKind": "passing live assertions, not persisted counter rows",
+    "sameOwnedBackend": true,
+    "fixedNamesAsserted": 3,
+    "fromSqlAsserted": false,
+    "executionsFromPassingLoopAndCounterAssertions": {
+      "proof-core": 8,
+      "proof-tenant": 4,
+      "proof-platform": 4
+    },
+    "perCounterDatabaseRowsSaved": false,
+    "originalAnonymousLockRevocationCancellationCasesRetained": true
+  },
+  "offlineRegression": {
+    "summary": {
+      "path": "/private/tmp/model-router-regression-fixed-authority-proof-plans-zbapu3_c/summary.json",
+      "bytes": 28504,
+      "sha256": "27ad43d2e71d8157fa950e6790de35e6aff1b9207f8cf86a80de01291947cd94"
+    },
+    "scope": "All tracked and nonignored src/tests/scripts/deploy/workflow code plus selected root config; docs/dist/ignoredlocal excluded",
+    "capturedInputs": {
+      "files": 1701,
+      "beforeSha256": "422bf2501ceae666384739a2783f17bb14f2857a87c88c4f1c1005d41c1aef83",
+      "afterSha256": "422bf2501ceae666384739a2783f17bb14f2857a87c88c4f1c1005d41c1aef83",
+      "beforeAfterEqual": true
+    },
+    "stages": [
+      {
+        "name": "source-typecheck",
+        "exitCode": 0,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "workflow-strict-1",
+        "exitCode": 0,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "workflow-strict-2",
+        "exitCode": 0,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "ci-wiring",
+        "exitCode": 0,
+        "logSha256": "eacda86d6877864f62d659967516041a9c335c8f3ad99b775d1f0c29cbcc79d6",
+        "counts": {
+          "tests": 14,
+          "suites": 0,
+          "pass": 14,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        }
+      },
+      {
+        "name": "initial-authority-unit-strict",
+        "exitCode": 0,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "unit",
+        "exitCode": 0,
+        "logSha256": "f455e60e05f56a82ac1dd1be89afc7f361cf13b1e67894b998842899e242b0ed",
+        "counts": {
+          "tests": 6814,
+          "suites": 37,
+          "pass": 6791,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 23,
+          "todo": 0
+        }
+      },
+      {
+        "name": "integration",
+        "exitCode": 0,
+        "logSha256": "c610a241591a80780aea93fb1f2622904b46d22933f781953386bcb983d9d743",
+        "counts": {
+          "tests": 349,
+          "suites": 0,
+          "pass": 255,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 94,
+          "todo": 0
+        }
+      },
+      {
+        "name": "privilege-mirrors",
+        "exitCode": 0,
+        "logSha256": "e2b889e724606fd074924f2d9e70cd09dcfc3439e0c31bab3c0f36773a47bcff"
+      },
+      {
+        "name": "scoped-biome",
+        "exitCode": 0,
+        "logSha256": "67c290594c8b5cfc92ace4ae77b5896ee97d8fceee633b658d0410269ab5fec9"
+      },
+      {
+        "name": "diff-check",
+        "exitCode": 0,
+        "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "firstRedPreserved": {
+    "summary": {
+      "path": "/private/tmp/model-router-regression-fixed-authority-proof-plans-jfbnupyu/summary.json",
+      "bytes": 8149,
+      "sha256": "4815a2a22212cd831a55eb82806b642b4db4d284ede5f1f570d6293111056e82"
+    },
+    "log": {
+      "path": "/private/tmp/model-router-regression-fixed-authority-proof-plans-jfbnupyu/ci-wiring.log",
+      "bytes": 63740,
+      "sha256": "af968f5b4c97bc716a86792467cab0720f57324e4ea3fca3986269899e206330"
+    },
+    "stage": "ci-wiring",
+    "counts": {
+      "tests": 14,
+      "suites": 0,
+      "pass": 13,
+      "fail": 1,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "cause": "old source-contract matcher required hardcoded platform; corrected matcher checks default platform, mode forwarding and both-mode loop",
+    "onlyChangedPathToFinalSnapshot": "tests/ci/managed-saas-required-gates.test.ts",
+    "includedInFinalAggregate": false
+  },
+  "earlierStickyRaceRepair": {
+    "summary": {
+      "path": "/private/tmp/model-router-regression-commercial-initial-native-njg8ca2x/summary.json",
+      "bytes": 9839,
+      "sha256": "9f8132a70436765fbe467f8e43109798947bdba287be7ea9e18ccc5c80e37637"
+    },
+    "receipt": {
+      "path": "/private/tmp/model-router-regression-commercial-initial-native-njg8ca2x/sticky-queue-repair.json",
+      "bytes": 1193,
+      "sha256": "86174e4cee828f5b4ebf7ad651cb70b35bf1f79f253225ad3e1201adb3a9564e"
+    },
+    "includedInFinalAggregate": false
+  },
+  "build": {
+    "summary": {
+      "path": "/private/tmp/model-router-build-fixed-authority-proof-plans-qtxx6mir/summary.json",
+      "bytes": 899038,
+      "sha256": "e1b0a10f566cad4cc883b88d275c643df65e20af48f82500d66761c56e6a08fd"
+    },
+    "log": {
+      "path": "/private/tmp/model-router-build-fixed-authority-proof-plans-qtxx6mir/build.log",
+      "bytes": 42,
+      "sha256": "40f2378766342a1afd6e997fce563702bf1adb8294c9aaab4552ef57008176a2"
+    },
+    "exitCode": 0,
+    "capturedSource": {
+      "files": 749,
+      "beforeSha256": "7ffe28759b7f719cfbcc31a14cbd223e4303011aaf82398cabb4d0843855d161",
+      "afterSha256": "7ffe28759b7f719cfbcc31a14cbd223e4303011aaf82398cabb4d0843855d161",
+      "beforeAfterEqual": true
+    },
+    "capturedConfig": {
+      "files": 3,
+      "beforeSha256": "b3aa2577a04d63e16709369a70fd8b7c8fbb776e09dd9fb8218120570d54dba9",
+      "afterSha256": "b3aa2577a04d63e16709369a70fd8b7c8fbb776e09dd9fb8218120570d54dba9",
+      "beforeAfterEqual": true
+    },
+    "distAfterFiles": 2992,
+    "distAfterSha256": "9bb91cb71078ea7512a82e92236eb87289a5febba2f88f11460ac0c79457cc26",
+    "distBeforeAfterEqualityRequired": false
+  },
+  "limits": [
+    "Before/after capture equality only; current source matching is limited to 10 explicitly listed files in verification. No global source/dist freeze.",
+    "Initial-authority native evidence is separate from proof three-name wire assertions.",
+    "No performance results, R9 pass, or causal latency claim."
+  ]
+}

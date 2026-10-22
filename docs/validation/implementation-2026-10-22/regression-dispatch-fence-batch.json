@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "classification": "local-offline-dispatch-fence-batch-regression",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T08:56:19.092511+00:00",
+  "status": "passed-local-with-explicit-skips",
+  "summary": {
+    "file": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/summary.json",
+    "bytes": 27202,
+    "sha256": "16b9306221a55ed5662763a06a0c2e9f4452ed0585dca43183e0f2fb56e28a1d"
+  },
+  "sourceScope": "All tracked and nonignored src/tests/scripts/deploy/workflow code plus selected root config; docs/dist/ignoredlocal excluded",
+  "sourceFilesChecked": 1701,
+  "beforeAfterCurrentMatchAtArtifactCreation": true,
+  "beforeHashSetSha256": "cd0d18e0ffa67d43ad7e05a6e4475a7a3bea5969e46436f6fc5efd7fb89befc7",
+  "afterHashSetSha256": "cd0d18e0ffa67d43ad7e05a6e4475a7a3bea5969e46436f6fc5efd7fb89befc7",
+  "changes": [],
+  "stages": [
+    {
+      "name": "source-typecheck",
+      "startedAt": "2026-10-22T08:48:30.445850+00:00",
+      "finishedAt": "2026-10-22T08:48:37.739881+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/source-typecheck.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "workflow-strict-1",
+      "startedAt": "2026-10-22T08:48:37.744806+00:00",
+      "finishedAt": "2026-10-22T08:48:42.886976+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/workflow-strict-1.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "workflow-strict-2",
+      "startedAt": "2026-10-22T08:48:42.887102+00:00",
+      "finishedAt": "2026-10-22T08:48:48.575243+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/workflow-strict-2.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "ci-wiring",
+      "startedAt": "2026-10-22T08:48:48.575509+00:00",
+      "finishedAt": "2026-10-22T08:48:48.931060+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/ci-wiring.log",
+      "bytes": 3896,
+      "sha256": "24b6a8d3a68738f6b5faf6524a256204a04b277a4c86715e7ed893ef7a732e66",
+      "counts": {
+        "tests": 14,
+        "suites": 0,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "countFormat": "tap",
+      "countsValid": true
+    },
+    {
+      "name": "unit",
+      "startedAt": "2026-10-22T08:48:48.932535+00:00",
+      "finishedAt": "2026-10-22T08:49:20.650659+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/unit.log",
+      "bytes": 626536,
+      "sha256": "608dcff57acf08972e66f2be64d29daedcb83c3278f8c3ade22c24ed449b3157",
+      "counts": {
+        "tests": 6784,
+        "suites": 37,
+        "pass": 6761,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 23,
+        "todo": 0
+      },
+      "countFormat": "native-spec",
+      "countsValid": true
+    },
+    {
+      "name": "integration",
+      "startedAt": "2026-10-22T08:49:20.702510+00:00",
+      "finishedAt": "2026-10-22T08:49:35.634661+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/integration.log",
+      "bytes": 42785,
+      "sha256": "fd2b4ec680362a4f46cdb49712bc8ba9c27acf2c01b1fb1e7dce0f4e37d3efbb",
+      "counts": {
+        "tests": 349,
+        "suites": 0,
+        "pass": 255,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 94,
+        "todo": 0
+      },
+      "countFormat": "native-spec",
+      "countsValid": true
+    },
+    {
+      "name": "privilege-mirrors",
+      "startedAt": "2026-10-22T08:49:35.638876+00:00",
+      "finishedAt": "2026-10-22T08:49:35.850093+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/privilege-mirrors.log",
+      "bytes": 230,
+      "sha256": "e2b889e724606fd074924f2d9e70cd09dcfc3439e0c31bab3c0f36773a47bcff"
+    },
+    {
+      "name": "scoped-biome",
+      "startedAt": "2026-10-22T08:49:35.981965+00:00",
+      "finishedAt": "2026-10-22T08:49:36.497973+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/scoped-biome.log",
+      "bytes": 11691,
+      "sha256": "68af282e9c3eaf496c76a5661415b6775d3fad9e862860207527ccfae2bd832b"
+    },
+    {
+      "name": "diff-check",
+      "startedAt": "2026-10-22T08:49:36.498163+00:00",
+      "finishedAt": "2026-10-22T08:49:36.609264+00:00",
+      "exitCode": 0,
+      "log": "/private/tmp/model-router-regression-dispatch-fence-batch-e30ftat7/diff-check.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "biomeScope": {
+    "selected": 260,
+    "existingGeneratedExclusion": "src/saas/db/runtime-privileges.ts",
+    "noWrite": true
+  },
+  "serverBuild": {
+    "summary": {
+      "file": "/private/tmp/model-router-build-dispatch-fence-batch-dvs9nb92/summary.json",
+      "bytes": 899031,
+      "sha256": "ef9d5d19a88dae1e2134ad254a5839578a5989a86fef54a1c3c15b9f85ae2b80"
+    },
+    "log": {
+      "file": "/private/tmp/model-router-build-dispatch-fence-batch-dvs9nb92/build.log",
+      "bytes": 42,
+      "sha256": "40f2378766342a1afd6e997fce563702bf1adb8294c9aaab4552ef57008176a2"
+    },
+    "wrapper": {
+      "file": "/private/tmp/model-router-build-dispatch-fence-batch-20261022.py",
+      "bytes": 2448,
+      "sha256": "95fc6b8a02ed389cb3021d5d14e1b3f990ba1f58d8551d8059cb4a0a3223a948"
+    },
+    "exitCode": 0,
+    "sourceFiles": 749,
+    "distFiles": 2992,
+    "sourceAndConfigBeforeAfterMatch": true,
+    "currentBuildMatchesAtArtifactCreation": true
+  },
+  "limits": [
+    "The aggregate integration run explicitly skipped unconfigured external and database roots; the new dispatch-proof PostgreSQL root ran separately on PG15 and PG18 with nine tests including eight subcases on each version.",
+    "The original two workflow strict commands retained ES2023 and all original flags. Four generated privilege mirrors matched. The existing generated runtime-privileges formatting exception was retained; no checks wrote source.",
+    "The parser accepts one unambiguous native spec or TAP summary and verifies every counter; no null counters or inferred zero results.",
+    "Docs, dist and ignored local files are outside the aggregate regression source scope. The server build has its own explicit source/config guard and expected dist mutation.",
+    "No formal required GitHub CI, package dry-run, real-provider, performance, release GO or future repository freeze is claimed by this record."
+  ]
+}

@@ -1,0 +1,923 @@
+{
+  "schemaVersion": 1,
+  "classification": "local-functional-smoke",
+  "formalRequiredCiEvidence": false,
+  "r9Evidence": false,
+  "releaseApproval": false,
+  "performanceEvidence": false,
+  "crashDurabilityProof": false,
+  "status": "complete",
+  "artifactCreatedAt": "2026-10-21T22:01:49.650Z",
+  "evidenceBasis": "Existing original native TAP plus exact captured passing source assertions; this projector performed read-only file hashing and exact owned-container metadata checks only",
+  "executionOrder": [
+    "18.6",
+    "15.19"
+  ],
+  "nativeCounts": {
+    "tests": 82,
+    "suites": 0,
+    "pass": 82,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "nativeCountCompositionPerVersion": {
+    "httpBootstrap": 27,
+    "existingCompensationChildren": 8,
+    "existingCompensationParent": 1,
+    "newWalletLockOrderChildren": 4,
+    "newWalletLockOrderParent": 1,
+    "total": 41
+  },
+  "source": {
+    "scope": "Two actual source test roots and their literal relative import closure, source CLI closure, role manifest, package lock, canonical runner and private launcher files",
+    "checkedFilesPerRun": 691,
+    "sourceFiles": 679,
+    "testFiles": 7,
+    "privateLauncherFiles": 2,
+    "beforeAfterCurrentAllMatch": true,
+    "pairedVersionsSourceMapsIdentical": true,
+    "pairingDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+    "beforeDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+    "afterDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+    "currentDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+    "digestAlgorithm": "SHA256 of UTF8 JSON.stringify(relative-path-to-SHA256 map with keys sorted by JavaScript ascending string order)",
+    "currentCheckedAt": "2026-10-21T22:01:49.337Z",
+    "changedPaths": [],
+    "currentChangedPaths": [],
+    "components": [
+      {
+        "file": "scripts/run-commercial-postgres-gate.mjs",
+        "beforeSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "afterSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "currentSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/db/advisory-lock-keys.ts",
+        "beforeSha256": "6f2dd87c522131fd34280fdd39dd4efd1cee35ec21c7c7ca220185de7085f311",
+        "afterSha256": "6f2dd87c522131fd34280fdd39dd4efd1cee35ec21c7c7ca220185de7085f311",
+        "currentSha256": "6f2dd87c522131fd34280fdd39dd4efd1cee35ec21c7c7ca220185de7085f311",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/db/database.ts",
+        "beforeSha256": "591dd7ff8619df5ce3bb48f451f9042e747fae3afba84937d05927ef05e1c263",
+        "afterSha256": "591dd7ff8619df5ce3bb48f451f9042e747fae3afba84937d05927ef05e1c263",
+        "currentSha256": "591dd7ff8619df5ce3bb48f451f9042e747fae3afba84937d05927ef05e1c263",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/db/runtime-privileges.ts",
+        "beforeSha256": "d940171d704a658b3b648c1d31d3effbbc0637bd5c4cb97b3d6f7e507ba5f104",
+        "afterSha256": "d940171d704a658b3b648c1d31d3effbbc0637bd5c4cb97b3d6f7e507ba5f104",
+        "currentSha256": "d940171d704a658b3b648c1d31d3effbbc0637bd5c4cb97b3d6f7e507ba5f104",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/db/migrations/011_platform_wallet_ledger.ts",
+        "beforeSha256": "7ed7354f43b98463e21c16beb34c8f074b51e18148c4bf09996acc165d4a1ed2",
+        "afterSha256": "7ed7354f43b98463e21c16beb34c8f074b51e18148c4bf09996acc165d4a1ed2",
+        "currentSha256": "7ed7354f43b98463e21c16beb34c8f074b51e18148c4bf09996acc165d4a1ed2",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/db/migrations/037_payment_refunds.ts",
+        "beforeSha256": "3d3a5508ef6c0f1bcf86b7ee808ac6bc787ff1024f5b9e3a93e12845d26dccc8",
+        "afterSha256": "3d3a5508ef6c0f1bcf86b7ee808ac6bc787ff1024f5b9e3a93e12845d26dccc8",
+        "currentSha256": "3d3a5508ef6c0f1bcf86b7ee808ac6bc787ff1024f5b9e3a93e12845d26dccc8",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/db/migrations/054_trigger_only_trusted_execution.ts",
+        "beforeSha256": "f0491dcb5faade8b3f5424fbbe00c1c21ba63f32a66bc59c5550725e1642142e",
+        "afterSha256": "f0491dcb5faade8b3f5424fbbe00c1c21ba63f32a66bc59c5550725e1642142e",
+        "currentSha256": "f0491dcb5faade8b3f5424fbbe00c1c21ba63f32a66bc59c5550725e1642142e",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/billing/service.ts",
+        "beforeSha256": "7926acf60ac37b68c1c2fb07233808a1b2b33dcea870ba3984786f1c7609ed3c",
+        "afterSha256": "7926acf60ac37b68c1c2fb07233808a1b2b33dcea870ba3984786f1c7609ed3c",
+        "currentSha256": "7926acf60ac37b68c1c2fb07233808a1b2b33dcea870ba3984786f1c7609ed3c",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/gateway/postgres-pre-dispatch-compensation.ts",
+        "beforeSha256": "a65e1f605e4f4ad7896fe8cce2f6bb5b728a38880be7cf826e1372860019da26",
+        "afterSha256": "a65e1f605e4f4ad7896fe8cce2f6bb5b728a38880be7cf826e1372860019da26",
+        "currentSha256": "a65e1f605e4f4ad7896fe8cce2f6bb5b728a38880be7cf826e1372860019da26",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/gateway/pre-dispatch-compensation-service.ts",
+        "beforeSha256": "0e4715a734ee783d67e571d5d2f840b52bb3116adeec9c4a6b4411f1e446dfe6",
+        "afterSha256": "0e4715a734ee783d67e571d5d2f840b52bb3116adeec9c4a6b4411f1e446dfe6",
+        "currentSha256": "0e4715a734ee783d67e571d5d2f840b52bb3116adeec9c4a6b4411f1e446dfe6",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/gateway/postgres-preparation-capacity.ts",
+        "beforeSha256": "0d964da2c993cadd33dd167052e5f9a57afc5370123beb5f8ca9bbb357c830bb",
+        "afterSha256": "0d964da2c993cadd33dd167052e5f9a57afc5370123beb5f8ca9bbb357c830bb",
+        "currentSha256": "0d964da2c993cadd33dd167052e5f9a57afc5370123beb5f8ca9bbb357c830bb",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/gateway/prepared-request-evidence-service.ts",
+        "beforeSha256": "dcea76ba8f0386019720ff1b4eaaf7e0173a2d6345eae2c6e1d3d089f8e29c4a",
+        "afterSha256": "dcea76ba8f0386019720ff1b4eaaf7e0173a2d6345eae2c6e1d3d089f8e29c4a",
+        "currentSha256": "dcea76ba8f0386019720ff1b4eaaf7e0173a2d6345eae2c6e1d3d089f8e29c4a",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/metering/conditional-settlement-port.ts",
+        "beforeSha256": "fb1fb921407412c746aebf121c78ecca2e929cb05b84102f7c3fbbf554b5610a",
+        "afterSha256": "fb1fb921407412c746aebf121c78ecca2e929cb05b84102f7c3fbbf554b5610a",
+        "currentSha256": "fb1fb921407412c746aebf121c78ecca2e929cb05b84102f7c3fbbf554b5610a",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "src/saas/metering/service.ts",
+        "beforeSha256": "1eddc28bce1859ef07c4dd9bdbf3abbd4d07f0646669110c9aa6503b22aca7f5",
+        "afterSha256": "1eddc28bce1859ef07c4dd9bdbf3abbd4d07f0646669110c9aa6503b22aca7f5",
+        "currentSha256": "1eddc28bce1859ef07c4dd9bdbf3abbd4d07f0646669110c9aa6503b22aca7f5",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "deploy/managed-saas-postgres-roles.sql",
+        "beforeSha256": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "afterSha256": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "currentSha256": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "package-lock.json",
+        "beforeSha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "afterSha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "currentSha256": "8a59886eb85e241bc0ec1e9df87b2240b2d79936b3b3f1bcd0e879f3c64ed6ab",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+        "beforeSha256": "5a85036aa2178eaa18d518c088bf45d3e6154c273313781f7c0bc8d73f286401",
+        "afterSha256": "5a85036aa2178eaa18d518c088bf45d3e6154c273313781f7c0bc8d73f286401",
+        "currentSha256": "5a85036aa2178eaa18d518c088bf45d3e6154c273313781f7c0bc8d73f286401",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+        "beforeSha256": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+        "afterSha256": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+        "currentSha256": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "tests/saas/gateway/pre-dispatch-postgres-fixture.ts",
+        "beforeSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+        "afterSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+        "currentSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "tests/saas/gateway/wallet-compensation-lock-order-fixture.ts",
+        "beforeSha256": "6d64fb590eef857073f3904ecf80f412d887b80e2d7a5fbdd74cd63752a12030",
+        "afterSha256": "6d64fb590eef857073f3904ecf80f412d887b80e2d7a5fbdd74cd63752a12030",
+        "currentSha256": "6d64fb590eef857073f3904ecf80f412d887b80e2d7a5fbdd74cd63752a12030",
+        "allMatchAtCurrentCheck": true
+      },
+      {
+        "file": "tests/saas/metering/normal-success-postgres-fixture.ts",
+        "beforeSha256": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+        "afterSha256": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+        "currentSha256": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+        "allMatchAtCurrentCheck": true
+      }
+    ],
+    "distImportedFiles": 0,
+    "builtCliExecutionClaim": false,
+    "wholeRepositoryFreezeClaim": false
+  },
+  "privateLauncher": {
+    "directory": "/private/tmp/model-router-compensation-http-chain-v4-LgiT9Y",
+    "canonicalFile": "scripts/run-commercial-postgres-gate.mjs",
+    "canonicalSha256": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+    "runnerFile": "runner.mjs",
+    "privateRunnerSha256": "47311c827b248aeb20797fd89e8c78a87b6b758c07b30cc80dfe9c41328e70f5",
+    "launcherFile": "launch.mjs",
+    "privateLauncherSha256": "9e75d5b3b1c52f402bd7d5658d54ba22650ecc6a6ef9d7c753fafc85d5f8f325",
+    "exactDiffSha256": "a2658739734f76155bcb5c74aca4ef55cc34e86c7459ed9a2ffbea903e06b450",
+    "exactFourBlockReconstructionMatches": true,
+    "changes": [
+      "Resolve private runner against the exact repository",
+      "Explicitly capture both HTTP bootstrap and compensation roots and their relative imports, plus canonical/private launchers",
+      "Run actual HTTP bootstrap then actual compensation root in the same database with the identical environment object, stopping on the first failed native TAP child",
+      "Require both test children to pass before overall success"
+    ],
+    "provisioningAndRoleGrantsUnchanged": true,
+    "originalTimeoutsAndNoRetryUnchanged": true,
+    "firstFailureStops": true,
+    "cleanupImplementationUnchanged": true,
+    "inheritedProviderLiveKmsPgPreparedAndDockerOverrides": false,
+    "runnerDefaultPreparedStatements": "off",
+    "functionalFsync": "off",
+    "functionalSynchronousCommit": "off",
+    "durabilitySettingsExplanation": "Original disposable functional gate settings retained; these runs do not establish performance or crash durability"
+  },
+  "proofs": {
+    "observationBasis": "All values below are explicit assertions in the exact captured source and their named original native TAP cases passed independently on both PostgreSQL versions; no raw rows or provider response bodies are copied",
+    "canonicalPositive": {
+      "testTitle": "canonical wallet fence permits the actual debit and fresh compensation; both replays are idempotent",
+      "settlementApi": "DurableNormalSuccessSettlementPort.complete",
+      "compensationApi": "GatewayPreDispatchCompensationService.compensate",
+      "distinctFreshTransactionsAndRequestsShareOneWallet": true,
+      "actualWalletAdvisoryObservedByThirdBackend": true,
+      "waitPredicate": "pg_blocking_pids plus exact wallet advisory lock identity in pg_locks",
+      "compensationWalletRowLocksBeforeFenceAcquisition": 0,
+      "walletBalanceBeforeMinorUnits": "100",
+      "actualChargeMinorUnits": "12",
+      "walletBalanceAfterMinorUnits": "88",
+      "ledgerEntriesAdded": 2,
+      "walletProjectionWrites": 1,
+      "usageRecords": 1,
+      "settlementRecords": 1,
+      "billingTransactions": 1,
+      "activeHoldsAfterMinorUnits": "0",
+      "settlementSucceededAndSettled": true,
+      "compensationReleasedWithOneAudit": true,
+      "walletProjectionMatchesLedgerAndLedgerBalanced": true,
+      "bothReplaysHaveNoAdditionalFinancialOrStateEffects": true
+    },
+    "testOnlyMutationControls": [
+      {
+        "testTitle": "test-only missing-first-fence + FOR UPDATE mutation recreates the ledger FK deadlock",
+        "scope": "TESTONLY omit only the newly added first wallet fence; retain actual wallet FOR UPDATE",
+        "actualSqlState": "40P01",
+        "blockedAt": "actual ledger-entry wallet FK",
+        "exactlyOneRealTransactionWinsWithoutRetry": true,
+        "losingTransactionFinancialEffectsRolledBack": true
+      },
+      {
+        "testTitle": "test-only missing-first-fence + NO KEY UPDATE mutation still deadlocks the actual wallet debit",
+        "scope": "TESTONLY omit only the newly added first wallet fence and replace the exact compensation wallet row lock with FOR NO KEY UPDATE",
+        "actualSqlState": "40P01",
+        "blockedAt": "actual non-key wallet balance UPDATE after both real ledger entries were inserted",
+        "exactlyOneRealTransactionWinsWithoutRetry": true,
+        "losingTransactionFinancialEffectsRolledBack": true
+      }
+    ],
+    "mutationScopeLimitations": {
+      "entireOldProductionRevisionRerun": false,
+      "productionLocksRelaxed": false,
+      "performanceDeadlockMeasurement": false,
+      "automaticRetryOrTimeoutAcceptedAsProof": false
+    },
+    "settlementFaultRollback": {
+      "testTitle": "an actual ledger-entry fault rolls back settlement; forbidden gateway writers remain rejected",
+      "successfulActualLedgerEntriesBeforeInjectedFault": 1,
+      "publicCode": "BILLING_STORAGE_ERROR",
+      "publicCauseUndefined": true,
+      "beforeAfterFullFinancialAndCompensationSnapshotsEqual": true,
+      "subsequentFreshCompensationReleasesExactlyOnce": true,
+      "walletBalanceAfterRollbackMinorUnits": "100"
+    },
+    "forbiddenGatewayWriters": [
+      {
+        "operation": "unbacked wallet balance UPDATE",
+        "actualSqlState": "55000"
+      },
+      {
+        "operation": "terminal released billing reservation returned to reserved",
+        "actualSqlState": "55000"
+      },
+      {
+        "operation": "DELETE immutable ledger entries",
+        "actualSqlState": "42501"
+      }
+    ],
+    "forbiddenWriterAttemptsLeaveFinancialAndCompensationSnapshotsUnchanged": true,
+    "existingClaimCasNegative": {
+      "actualPreflightSucceededBeforeCommittedCancellation": true,
+      "actualClaimAttemptCount": 1,
+      "publicCode": "STORAGE_ERROR",
+      "fixedMessage": "prepared evidence attempt claim affected an unexpected number of rows",
+      "publicCauseUndefined": true,
+      "sends": 0,
+      "staleAttemptCasAlsoRejected": true
+    }
+  },
+  "runs": [
+    {
+      "postgresMajor": 18,
+      "postgresVersion": "18.6",
+      "backend": "disposable-initdb-cluster",
+      "startedAt": "2026-10-21T21:54:07.634Z",
+      "finishedAt": "2026-10-21T21:54:23.374Z",
+      "evidenceDirectory": "/private/tmp/model-router-compensation-http-chain-v4-LgiT9Y/evidence-pg18",
+      "summaryFile": {
+        "file": "summary.json",
+        "bytes": 166971,
+        "sha256": "0b58699998742f9d5aaa9ff294a28c2dc0560ee1b3411bcbc889251b94e2533a"
+      },
+      "nativeCounts": {
+        "tests": 41,
+        "suites": 0,
+        "pass": 41,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "tests": [
+        {
+          "phase": "http-bootstrap",
+          "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "nativeCounts": {
+            "tests": 27,
+            "suites": 0,
+            "pass": 27,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "exitCode": 0,
+          "signal": null,
+          "ok": true,
+          "tapLog": {
+            "file": "custom-http-bootstrap-test.log",
+            "bytes": 21632,
+            "sha256": "ffc357bc0009c626042613af7a0a2b11a64ebf98b157ece3b5ba57c5de2fd2b0"
+          }
+        },
+        {
+          "phase": "compensation",
+          "testFile": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "nativeCounts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "exitCode": 0,
+          "signal": null,
+          "ok": true,
+          "tapLog": {
+            "file": "custom-compensation-test.log",
+            "bytes": 3937,
+            "sha256": "e99f9eca1d4fe07987efbed7bb64657e700c66a3cab42f5a9e2a437164f73136"
+          }
+        }
+      ],
+      "stages": [
+        {
+          "phase": "initdb",
+          "startedAt": "2026-10-21T21:54:07.927Z",
+          "finishedAt": "2026-10-21T21:54:08.616Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "start-cluster",
+          "startedAt": "2026-10-21T21:54:08.616Z",
+          "finishedAt": "2026-10-21T21:54:08.751Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-create-db",
+          "startedAt": "2026-10-21T21:54:08.752Z",
+          "finishedAt": "2026-10-21T21:54:08.857Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-roles-before",
+          "startedAt": "2026-10-21T21:54:08.857Z",
+          "finishedAt": "2026-10-21T21:54:08.917Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-migrate",
+          "startedAt": "2026-10-21T21:54:08.918Z",
+          "finishedAt": "2026-10-21T21:54:10.691Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-roles-after",
+          "startedAt": "2026-10-21T21:54:10.692Z",
+          "finishedAt": "2026-10-21T21:54:10.830Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-http-bootstrap-test",
+          "startedAt": "2026-10-21T21:54:10.852Z",
+          "finishedAt": "2026-10-21T21:54:18.799Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-compensation-test",
+          "startedAt": "2026-10-21T21:54:18.801Z",
+          "finishedAt": "2026-10-21T21:54:22.999Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "stop-cluster",
+          "startedAt": "2026-10-21T21:54:23.000Z",
+          "finishedAt": "2026-10-21T21:54:23.117Z",
+          "exitCode": 0,
+          "signal": null
+        }
+      ],
+      "sameDisposableDatabaseAndEnvironment": true,
+      "source": {
+        "checkedFiles": 691,
+        "beforeDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+        "afterDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+        "currentDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+        "changedPaths": [],
+        "currentChangedPaths": [],
+        "currentCheckedAt": "2026-10-21T22:01:49.337Z",
+        "currentMatch": true
+      },
+      "postgresLog": {
+        "file": "postgres.log",
+        "bytes": 5274,
+        "sha256": "ae5be13a37454a0a06ea48f0b659e19fb373a3fbf2ddda85c1f8de9afb51c88b",
+        "deadlockDetectedErrors": 2,
+        "errorContentsIncluded": false
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "postgresDataDirectoryAbsent": true
+      },
+      "ok": true
+    },
+    {
+      "postgresMajor": 15,
+      "postgresVersion": "15.19",
+      "backend": "disposable-docker-container",
+      "startedAt": "2026-10-21T21:54:33.724Z",
+      "finishedAt": "2026-10-21T21:55:04.739Z",
+      "evidenceDirectory": "/private/tmp/model-router-compensation-http-chain-v4-LgiT9Y/evidence-pg15",
+      "summaryFile": {
+        "file": "summary.json",
+        "bytes": 168347,
+        "sha256": "55872f71108438f277d9603096bab5cc3918ca80bae5df78bff519edee524a38"
+      },
+      "nativeCounts": {
+        "tests": 41,
+        "suites": 0,
+        "pass": 41,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "tests": [
+        {
+          "phase": "http-bootstrap",
+          "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "nativeCounts": {
+            "tests": 27,
+            "suites": 0,
+            "pass": 27,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "exitCode": 0,
+          "signal": null,
+          "ok": true,
+          "tapLog": {
+            "file": "custom-http-bootstrap-test.log",
+            "bytes": 21913,
+            "sha256": "ace6035f69d36f6d44cf290360ed470ef2fd1fd1275a39f636a6ede672c2d900"
+          }
+        },
+        {
+          "phase": "compensation",
+          "testFile": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "nativeCounts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "exitCode": 0,
+          "signal": null,
+          "ok": true,
+          "tapLog": {
+            "file": "custom-compensation-test.log",
+            "bytes": 3939,
+            "sha256": "87056260fded9dca8aa769842a6bd1edfda0192dd1c2596dbe5c124f524371e9"
+          }
+        }
+      ],
+      "stages": [
+        {
+          "phase": "create-container",
+          "startedAt": "2026-10-21T21:54:33.957Z",
+          "finishedAt": "2026-10-21T21:54:34.186Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "container-image",
+          "startedAt": "2026-10-21T21:54:34.186Z",
+          "finishedAt": "2026-10-21T21:54:34.216Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "start-cluster",
+          "startedAt": "2026-10-21T21:54:34.216Z",
+          "finishedAt": "2026-10-21T21:54:34.463Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "copy-roles",
+          "startedAt": "2026-10-21T21:54:36.031Z",
+          "finishedAt": "2026-10-21T21:54:36.080Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-create-db",
+          "startedAt": "2026-10-21T21:54:36.081Z",
+          "finishedAt": "2026-10-21T21:54:36.177Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-roles-before",
+          "startedAt": "2026-10-21T21:54:36.177Z",
+          "finishedAt": "2026-10-21T21:54:36.325Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-migrate",
+          "startedAt": "2026-10-21T21:54:36.325Z",
+          "finishedAt": "2026-10-21T21:54:39.114Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-roles-after",
+          "startedAt": "2026-10-21T21:54:39.114Z",
+          "finishedAt": "2026-10-21T21:54:39.488Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-http-bootstrap-test",
+          "startedAt": "2026-10-21T21:54:39.500Z",
+          "finishedAt": "2026-10-21T21:54:57.764Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "custom-compensation-test",
+          "startedAt": "2026-10-21T21:54:57.766Z",
+          "finishedAt": "2026-10-21T21:55:04.113Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "cleanup-postgres-log",
+          "startedAt": "2026-10-21T21:55:04.114Z",
+          "finishedAt": "2026-10-21T21:55:04.193Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "stop-cluster",
+          "startedAt": "2026-10-21T21:55:04.194Z",
+          "finishedAt": "2026-10-21T21:55:04.451Z",
+          "exitCode": 0,
+          "signal": null
+        },
+        {
+          "phase": "cleanup-container",
+          "startedAt": "2026-10-21T21:55:04.451Z",
+          "finishedAt": "2026-10-21T21:55:04.539Z",
+          "exitCode": 0,
+          "signal": null
+        }
+      ],
+      "sameDisposableDatabaseAndEnvironment": true,
+      "source": {
+        "checkedFiles": 691,
+        "beforeDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+        "afterDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+        "currentDigest": "a002bb2a1a7baf01aa0dfbdd7ada38dac66ee792a6e605b271121a54c13bc034",
+        "changedPaths": [],
+        "currentChangedPaths": [],
+        "currentCheckedAt": "2026-10-21T22:01:49.337Z",
+        "currentMatch": true
+      },
+      "postgresLog": {
+        "file": "cleanup-postgres-log.log",
+        "bytes": 6522,
+        "sha256": "fab41eacd2c0aa850de8a708ee2b5d05c2c0ac1f6c1cd86b15cd7fb6dd7b9496",
+        "deadlockDetectedErrors": 2,
+        "errorContentsIncluded": false
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true,
+        "postgresDataDirectoryAbsent": true,
+        "ownedContainerIdSha256": "9ed840b9a866822246d835907254cb7bb0e18084090e0767589156b4cbd6ea06",
+        "exactOwnedContainerAbsent": true,
+        "containerMetadataCheckExitCode": 0,
+        "checkedAt": "2026-10-21T22:01:49.638Z"
+      },
+      "ok": true
+    }
+  ],
+  "preservedFailureHistory": [
+    {
+      "id": "first-functional-pg18",
+      "evidenceDirectory": "/private/tmp/model-router-compensation-http-chain-XEIY5i/evidence-pg18",
+      "startedAt": "2026-10-21T21:36:22.495Z",
+      "finishedAt": "2026-10-21T21:36:37.429Z",
+      "summaryFile": {
+        "file": "summary.json",
+        "bytes": 166933,
+        "sha256": "2ed1dc18040eba7e58a2da597451ecaa6f87dec9ecd15c9eb4ecad067835531b"
+      },
+      "outcome": "failed-preserved",
+      "tests": [
+        {
+          "phase": "http-bootstrap",
+          "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "nativeCounts": {
+            "tests": 27,
+            "suites": 0,
+            "pass": 27,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tapLog": {
+            "file": "custom-http-bootstrap-test.log",
+            "bytes": 21636,
+            "sha256": "9407d58ca5ed64d5ec5ce13f63eb39ddf15782cee8063e72562da8915633aebc"
+          }
+        },
+        {
+          "phase": "compensation",
+          "testFile": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "nativeCounts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 6,
+            "fail": 8,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tapLog": {
+            "file": "custom-compensation-test.log",
+            "bytes": 11039,
+            "sha256": "64204e1d9a778e369c9ddc255b34b0e078180c2d6a6af656bd2927e97fc9a0f4"
+          }
+        }
+      ],
+      "enteredTestChildren": 2,
+      "originalFailureEvidenceOverwritten": false,
+      "sourceReportedChangedPaths": [],
+      "preservedInputs": [
+        {
+          "file": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "preservedInputSha256": "2378e17a9604f6bb175d4228aed2065f4653e9370f6b80da70eb0185269d01c1",
+          "reportedBeforeSha256": "2378e17a9604f6bb175d4228aed2065f4653e9370f6b80da70eb0185269d01c1",
+          "preservedInputMatchesRun": true,
+          "currentSha256": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+          "differsFromFinalCurrent": true
+        },
+        {
+          "file": "tests/saas/gateway/pre-dispatch-postgres-fixture.ts",
+          "preservedInputSha256": "179945f76e8250151aaff6e85fcd948476c41f0d29f6a95c2b7aa274beee35cd",
+          "reportedBeforeSha256": "179945f76e8250151aaff6e85fcd948476c41f0d29f6a95c2b7aa274beee35cd",
+          "preservedInputMatchesRun": true,
+          "currentSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+          "differsFromFinalCurrent": true
+        },
+        {
+          "file": "tests/saas/gateway/wallet-compensation-lock-order-fixture.ts",
+          "preservedInputSha256": "be7226ddf9643192df09de6431216eb787cfa2d48042482625350ac6c8aa2606",
+          "reportedBeforeSha256": "be7226ddf9643192df09de6431216eb787cfa2d48042482625350ac6c8aa2606",
+          "preservedInputMatchesRun": true,
+          "currentSha256": "6d64fb590eef857073f3904ecf80f412d887b80e2d7a5fbdd74cd63752a12030",
+          "differsFromFinalCurrent": true
+        }
+      ],
+      "postgresLog": {
+        "file": "postgres.log",
+        "bytes": 12837,
+        "sha256": "1168c8ba7779c50b4118cac075abc05080221deaa9770b0278f427a47f6a01e3",
+        "sqlStates": [
+          "42883"
+        ],
+        "deadlockDetectedErrors": 0,
+        "errorContentsIncluded": false
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true
+      },
+      "failureClassification": "fixture-request-id-uuid-text-operator-and-neutral-media-signing",
+      "classificationBasis": {
+        "uuidTextOperatorFailureObserved": true,
+        "sqlState": "42883",
+        "capturedFixtureLackedCurrentNeutralMediaSigningNormalization": true,
+        "rootOwnerReportedBothFixtureCauses": true,
+        "productionLockOrderFixChangedForGreen": false
+      }
+    },
+    {
+      "id": "private-launcher-dependency-retry",
+      "evidenceDirectory": "/private/tmp/model-router-compensation-http-chain-retry-VnZYJ3/evidence-pg18",
+      "startedAt": "2026-10-21T21:47:58.382Z",
+      "finishedAt": "2026-10-21T21:48:02.253Z",
+      "summaryFile": {
+        "file": "summary.json",
+        "bytes": 164707,
+        "sha256": "aa1433330c437e48aef9c8631c4b60097875357f35ead819c8135d27a9ef6693"
+      },
+      "outcome": "failed-preserved",
+      "tests": [],
+      "enteredTestChildren": 0,
+      "originalFailureEvidenceOverwritten": false,
+      "sourceReportedChangedPaths": [],
+      "preservedInputs": [],
+      "postgresLog": {
+        "file": "postgres.log",
+        "bytes": 2233,
+        "sha256": "fcbf10f9bdcd346733daa81eaa92202a358860862197027193eda29a856cf486",
+        "sqlStates": [],
+        "deadlockDetectedErrors": 0,
+        "errorContentsIncluded": false
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true
+      },
+      "failureClassification": "private-copy-dependency-symlink-missing-before-tests",
+      "classificationBasis": {
+        "dependencyResolutionFailureObserved": true,
+        "privateDependencySymlinkAbsentAtCheck": true,
+        "enteredTestChildren": 0
+      }
+    },
+    {
+      "id": "strict-matcher-pg18",
+      "evidenceDirectory": "/private/tmp/model-router-compensation-http-chain-v3-wC5Vem/evidence-pg18",
+      "startedAt": "2026-10-21T21:48:50.024Z",
+      "finishedAt": "2026-10-21T21:49:06.077Z",
+      "summaryFile": {
+        "file": "summary.json",
+        "bytes": 166968,
+        "sha256": "e7911d98ff0d512a2a09190005002dd557ffc03ba3fd7a8eeb7ed363f12442a5"
+      },
+      "outcome": "failed-preserved",
+      "tests": [
+        {
+          "phase": "http-bootstrap",
+          "testFile": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "nativeCounts": {
+            "tests": 27,
+            "suites": 0,
+            "pass": 27,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tapLog": {
+            "file": "custom-http-bootstrap-test.log",
+            "bytes": 21634,
+            "sha256": "d4d0a9cb550dd56ce378d6ddfbb608c0e28b67a088a882bf784bc0456fe210b4"
+          }
+        },
+        {
+          "phase": "compensation",
+          "testFile": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "nativeCounts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 9,
+            "fail": 5,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "tapLog": {
+            "file": "custom-compensation-test.log",
+            "bytes": 8171,
+            "sha256": "acc4aefcada4072cf6f0b9fee10e602b7e817daa0ce51ea296bd378787354c25"
+          }
+        }
+      ],
+      "enteredTestChildren": 2,
+      "originalFailureEvidenceOverwritten": false,
+      "sourceReportedChangedPaths": [],
+      "preservedInputs": [
+        {
+          "file": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "preservedInputSha256": "c9b026d85a7e6476aaf9cead3ae1c47c5f77d55d79972d00ae75c893f3677fae",
+          "reportedBeforeSha256": "c9b026d85a7e6476aaf9cead3ae1c47c5f77d55d79972d00ae75c893f3677fae",
+          "preservedInputMatchesRun": true,
+          "currentSha256": "4f7a725b7cf61663e5320b895265c7d29bd55697b524fd10bd17eea5c3b809c3",
+          "differsFromFinalCurrent": true
+        },
+        {
+          "file": "tests/saas/gateway/pre-dispatch-postgres-fixture.ts",
+          "preservedInputSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+          "reportedBeforeSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+          "preservedInputMatchesRun": true,
+          "currentSha256": "f227f1126d17ee7aab4a807eea7db39293b071e036bc755dce5b73f3ea871217",
+          "differsFromFinalCurrent": false
+        },
+        {
+          "file": "tests/saas/gateway/wallet-compensation-lock-order-fixture.ts",
+          "preservedInputSha256": "265885ec1175c92c96e6f87bba2a74e04cd9e1a4b356c4c0b45f6de4e3e63771",
+          "reportedBeforeSha256": "265885ec1175c92c96e6f87bba2a74e04cd9e1a4b356c4c0b45f6de4e3e63771",
+          "preservedInputMatchesRun": true,
+          "currentSha256": "6d64fb590eef857073f3904ecf80f412d887b80e2d7a5fbdd74cd63752a12030",
+          "differsFromFinalCurrent": true
+        }
+      ],
+      "postgresLog": {
+        "file": "postgres.log",
+        "bytes": 4089,
+        "sha256": "f7ce194066ff6644bdb9f03e229f9eb1fefaebb22cb2a8f142232097bc9f8ac1",
+        "sqlStates": [
+          "40P01"
+        ],
+        "deadlockDetectedErrors": 2,
+        "errorContentsIncluded": false
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "clusterDirectoryAbsent": true
+      },
+      "failureClassification": "fixture-error-matchers-did-not-match-existing-claim-cas-and-billing-public-wrapper-contracts",
+      "classificationBasis": {
+        "canonicalPositiveAndBothDeadlockControlsAlreadyPassed": true,
+        "preservedThreeSourceInputsMatchReportedRun": true,
+        "finalStrictClaimAndBillingContractsVerifiedInPassingSource": true,
+        "currentClaimFixedMessage": "prepared evidence attempt claim affected an unexpected number of rows",
+        "currentClaimPublicCode": "STORAGE_ERROR",
+        "currentClaimCauseUndefined": true,
+        "billingPublicCode": "BILLING_STORAGE_ERROR",
+        "billingCauseUndefined": true,
+        "assertionsRemovedOrMadePermissive": false
+      }
+    }
+  ],
+  "cleanup": {
+    "nativeClusterStoppedAndRemoved": true,
+    "dockerContainerStoppedAndRemoved": true,
+    "bothClusterAndPostgresDataDirectoriesAbsent": true,
+    "exactOwnedContainerAbsentAtCurrentCheck": true,
+    "exactOwnedContainerIdSha256": "9ed840b9a866822246d835907254cb7bb0e18084090e0767589156b4cbd6ea06",
+    "metadataCheckExitCode": 0,
+    "checkedAt": "2026-10-21T22:01:49.652Z",
+    "existingDockerContext": "colima",
+    "existingDockerEndpointLocal": true,
+    "dockerContextChanged": false,
+    "existingStacksModified": false
+  },
+  "limitations": [
+    "Local source-root functional PostgreSQL proof only; no formal GitHub required-CI capture, R9, release approval, built-CLI execution, performance or crash-durability claim",
+    "HTTP bootstrap uses the repository local upstream fixture, not an actual provider call",
+    "Only the 691-file recorded import closure was compared before, after and at this artifact check; no whole-repository freeze claim",
+    "Two intentional TESTONLY controls cause real PostgreSQL deadlocks and are successful negative tests, not failures of the canonical positive case",
+    "Historical failing logs and captured inputs remain in their original private directories and are not overwritten or copied verbatim"
+  ],
+  "noDatabaseTestBuildProviderOrBenchmarkExecutionByProjector": true
+}

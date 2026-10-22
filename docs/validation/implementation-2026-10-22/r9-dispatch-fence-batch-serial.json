@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "classification": "current-build-original-serial-r9-after-dispatch-fence-batch",
+  "formalRequiredCiEvidence": false,
+  "passed": false,
+  "GO": false,
+  "recordedAtUtc": "2026-10-22T08:56:20.382951+00:00",
+  "capture": {
+    "directory": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root",
+    "startedAt": "2026-10-22T08:52:12.662Z",
+    "finishedAt": "2026-10-22T08:52:40.178Z",
+    "summary": {
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/summary.json",
+      "bytes": 906305,
+      "sha256": "66e5f02a5ff2d8f3c94e0ab328204d7953783d69427267dfeab253fea113390f"
+    },
+    "report": {
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/serial-profile-current-3cli.json",
+      "bytes": 2093,
+      "sha256": "8ca4e715dc7ea77e6a3027bacd5f8d9352094d273cd2607e2c073a853761c162"
+    }
+  },
+  "configuration": {
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "preparedStatements": "native",
+    "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    },
+    "warmupInflight": 1,
+    "samplesPerLeg": 100,
+    "instanceCount": 3,
+    "requestSamples": true,
+    "unchangedBudgets": {
+      "p99OverheadMs": 30,
+      "ttfbOverheadMs": 10
+    }
+  },
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 100,
+        "p50": 1.77,
+        "p90": 1.94,
+        "p99": 9.82,
+        "max": 9.82
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 65.42,
+        "p90": 96.61,
+        "p99": 116.18,
+        "max": 116.18
+      },
+      "p99OverheadMs": 106.36
+    },
+    "ttfb": {
+      "direct": {
+        "n": 100,
+        "p50": 2.8,
+        "p90": 3.46,
+        "p99": 4.93,
+        "max": 4.93
+      },
+      "gateway": {
+        "n": 100,
+        "p50": 66.64,
+        "p90": 74.93,
+        "p99": 108.51,
+        "max": 108.51
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 103.58
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 106.36,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 103.58,
+      "threshold": 10,
+      "unit": "ms"
+    }
+  ],
+  "firstFault": {
+    "stage": "serial-profile-current-3cli",
+    "message": "R9 driver exit=1, violations=2"
+  },
+  "requestObservation": {
+    "clientJournal": {
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/serial-profile-request-samples.json",
+      "bytes": 162693,
+      "sha256": "eeee97c7952c10c3aeb770f9ec0576cef55fc691611125349d39c5bbe355cacc"
+    },
+    "databaseStates": {
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/serial-profile-request-states.json",
+      "bytes": 199395,
+      "sha256": "edd4cece5dc663d20812ba748178cf706f9473ecd43ad7c6c813465d0abd3c6d"
+    },
+    "observationOk": true,
+    "sampleCount": 400,
+    "counts": {
+      "latency:direct": 100,
+      "latency:gateway": 100,
+      "ttfb:direct": 100,
+      "ttfb:gateway": 100
+    },
+    "gatewayRequestIds": 200,
+    "missingInvalidOrDuplicateRequestIds": 0,
+    "matchedRows": 200,
+    "allMatchedRequestsSucceededAndSettled": true,
+    "pendingMatchedRequests": 0,
+    "multipleAttemptOrEvidenceIds": 0,
+    "truncated": false,
+    "databaseObservation": {
+      "role": "model_router_saas_migrator",
+      "readOnly": true,
+      "rowCap": 200,
+      "sentinelLimit": 201
+    },
+    "largestThreeSamplesPerGatewayLeg": [
+      {
+        "scenario": "latency",
+        "index": 1,
+        "gatewayIndex": 0,
+        "metricMs": 116.18129200000021,
+        "requestId": "dbf68c2b-6e85-4bf2-94fe-3d5da0d55604",
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 48.924,
+          "claimedToResponseStarted": 29.118,
+          "responseStartedToRequestUpdated": 12.007
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "latency",
+        "index": 2,
+        "gatewayIndex": 1,
+        "metricMs": 108.73583300000018,
+        "requestId": "e8aaa181-fe76-4fb1-8988-99730624c695",
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 40.939,
+          "claimedToResponseStarted": 29.39,
+          "responseStartedToRequestUpdated": 10.128
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "latency",
+        "index": 0,
+        "gatewayIndex": 2,
+        "metricMs": 106.24233300000014,
+        "requestId": "48633e95-a594-44aa-a948-41b4174974fb",
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 37.803,
+          "claimedToResponseStarted": 30.759,
+          "responseStartedToRequestUpdated": 14.246
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "ttfb",
+        "index": 64,
+        "gatewayIndex": 1,
+        "metricMs": 108.51129199999923,
+        "requestId": "8fb2677a-e645-4bfd-83bc-ce9b115ce6d4",
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 56.488,
+          "claimedToResponseStarted": 14.626,
+          "responseStartedToRequestUpdated": 10.57
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "ttfb",
+        "index": 63,
+        "gatewayIndex": 0,
+        "metricMs": 90.09608300000036,
+        "requestId": "58242143-43ec-455c-b5f0-a30db1e8cf61",
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 45.58,
+          "claimedToResponseStarted": 18.838,
+          "responseStartedToRequestUpdated": 15.354
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      },
+      {
+        "scenario": "ttfb",
+        "index": 99,
+        "gatewayIndex": 0,
+        "metricMs": 87.9065840000003,
+        "requestId": "303cdfdd-baf1-4f59-b8e4-a0d492b3475d",
+        "sameDatabaseClockEventIntervalsMs": {
+          "evidenceCreatedToClaimed": 30.99,
+          "claimedToResponseStarted": 11.853,
+          "responseStartedToRequestUpdated": 10.156
+        },
+        "observedRequestState": "succeeded/settled",
+        "observedAttemptState": "sent/succeeded"
+      }
+    ]
+  },
+  "cumulativeMetrics": [
+    {
+      "instance": 1,
+      "httpStatus": 200,
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/gateway-1-metrics.prom",
+      "bytes": 202710,
+      "sha256": "f98041f9aac86d49a9bc85b4c463acb7c60a7fa9dd9372adf0d54704929a6ac6"
+    },
+    {
+      "instance": 2,
+      "httpStatus": 200,
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/gateway-2-metrics.prom",
+      "bytes": 201497,
+      "sha256": "2a599d8c94dee6fda7a9d42306274a8813d527b6dacf25afb53d51cd632efc36"
+    },
+    {
+      "instance": 3,
+      "httpStatus": 200,
+      "file": "/private/tmp/model-router-serial-dispatch-fence-batch-20261022-0855-root/gateway-3-metrics.prom",
+      "bytes": 201480,
+      "sha256": "8d5944bcd6aedfd369e30e642ec2dd5a676a0095add6ec4b81f1ca9188b28a71"
+    }
+  ],
+  "sourceGuard": {
+    "counts": {
+      "source": 749,
+      "dist": 2992,
+      "harness": 5
+    },
+    "beforeAfterAndCurrentMatchAtArtifactCreation": true,
+    "futureRepositoryFreezeClaim": false
+  },
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "limits": [
+    "This is the original canonical serial diagnostic with optional bounded request sampling. It is not the full R9 workload and makes no real-provider or builtin acceptance claim.",
+    "The original floor(n*p) percentile at n100 selects the maximum for p99; direct and gateway sets contain independent requests. The record does not claim an optimization benefit from changes across runs.",
+    "Database intervals use the same PostgreSQL clock and exact response request ID. Evidence created_at is DEFAULT now(), the preparation transaction start time, not its actual INSERT time. The created-to-claimed interval includes admission, attempt persistence, signing/registration and commit plus subsequent preflight, attempt read, lease acquire and claim until the clock_timestamp UPDATE; it is not a per-method timer or cause attribution. Same-request dispatch proof runs after claim, outside this interval.",
+    "The200 matched requests are terminal settled observations. No independent wallet/reservation/ledger aggregate was taken for this run; no broader financial closure or zero funds invariant is inferred.",
+    "Cumulative metrics include smoke and warmup work; per-request stage timing is not captured by these metrics. No full-load scaling, complete R9, formal CI, production deployment or GO is claimed."
+  ]
+}

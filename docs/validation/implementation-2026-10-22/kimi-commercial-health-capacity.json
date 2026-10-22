@@ -1,0 +1,386 @@
+{
+  "schema": 2,
+  "classification": "local-current-build-real-provider-acceptance",
+  "formalRequiredCiEvidence": false,
+  "releaseGoClaim": false,
+  "r9PerformanceEvidence": false,
+  "allProviderCoverageClaim": false,
+  "startedAt": "2026-10-21T23:06:43.084Z",
+  "finishedAt": "2026-10-21T23:06:58.793Z",
+  "baseCommit": "bb9756c7b73a7f1a793aee761bb71f8ffb31956e",
+  "evidenceRun": "model-router-commercial-postgres-hr5WLq",
+  "inputReceipts": {
+    "gateSummarySha256": "2e2ab8e3c142be7770dee511f91fd7080ee7bfbbb6c28973bb064b6f1a06f768",
+    "kimiSummarySha256": "56083703bba0f12059c65daa9968a0e6dffc864e45bbaf1c0c5171146c618da6",
+    "guardSha256": "90f672cbe221a294b8e8354d189c16555c2d72a4e87726386e290be51d720e54"
+  },
+  "wrapper": {
+    "sha256": "b8ed63a8219d5bd2c5b7420187fa8080b9f3175a0ad5ee645676ee83d226d68b",
+    "guardDirectory": "model-router-kimi-health-capacity-native-20261022-NSlybK",
+    "mode": "native"
+  },
+  "sourceGuard": {
+    "scope": "complete src tree: SHA-256 of every regular file before and after the run",
+    "filesChecked": 749,
+    "hashSetSha256": "e526c7194d7ed95a16afdb4d9ed79936291b1fa71386bdcdb83907dfdd0a8684",
+    "beforeAfterDrift": false
+  },
+  "distGuard": {
+    "scope": "complete dist tree: SHA-256 of every regular file before and after the run",
+    "filesChecked": 2992,
+    "hashSetSha256": "1584f742c586544c47641d9b05a375b09d34d6266dcec2ec712eda9654801aad",
+    "beforeAfterDrift": false
+  },
+  "importedClosure": {
+    "scope": "literal relative import closure, runner, role manifest, package-lock.json",
+    "filesChecked": 708,
+    "hashSetSha256": "0d7df8ace1ceb84e482b7c15801bd7cd5c62a2c8c3e25f56cdbaf3f8dc627052",
+    "beforeAfterDrift": false
+  },
+  "currentAtArtifactCreation": {
+    "matchingStartedAt": "2026-10-21T23:16:14.903Z",
+    "matchingFinishedAt": "2026-10-21T23:16:16.322Z",
+    "completeSourceMatchesLiveGuard": true,
+    "completeDistMatchesLiveGuard": true,
+    "importedClosureMatches": true,
+    "wrapperMatchesExpectedSha256": true
+  },
+  "futureGlobalFreeze": {
+    "establishedByThisArtifact": false,
+    "boundary": "This completed run and artifact-creation match do not establish a later repository-wide freeze or release decision."
+  },
+  "verifiedSourceHashes": {
+    "scripts/run-commercial-postgres-gate.mjs": "ff0aa14fd578f2e63de3bac2c988d8d065cfcc5425727cbf944ffd4c45023180",
+    "scripts/ops/verify-commercial-kimi.ts": "46d18801c65146fa7e4f9a059a0c7420b7b33c0e04b46eca364d57924f8bce8d",
+    "tests/integration/kimi-commercial-live.test.ts": "a9858954f4a36de087f6b8dab30d0e733f9ba304adf9fd34c6f46bf68f209d7f",
+    "src/saas/gateway/prepared-evidence-dispatch-service.ts": "ac179ce750f1b285d706ddbbbcb86b1b0571dcd0e94b63d19dc786e09d48d776",
+    "src/saas/gateway/postgres-pre-dispatch-compensation.ts": "a65e1f605e4f4ad7896fe8cce2f6bb5b728a38880be7cf826e1372860019da26",
+    "src/saas/db/database.ts": "591dd7ff8619df5ce3bb48f451f9042e747fae3afba84937d05927ef05e1c263",
+    "src/server/managed-saas-gateway.ts": "9abd2f5b7feadd1817637d9c9d253f40c6304822c3a809d16e7d297599d6b19d",
+    "dist/cli/index.js": "ab6c6d1c663749368cb4446beeb0d75d14b9bdb782aa98f183f6c8c67086f015"
+  },
+  "counts": {
+    "tests": 7,
+    "suites": 0,
+    "pass": 7,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+  "postgresPreparedStatements": "native",
+  "runtime": "current-dist-cli-builtin",
+  "kms": "local-test-pilot-software-kms",
+  "scope": "full-commercial-matrix",
+  "roles": [
+    "model_router_saas_migrator",
+    "model_router_saas_control_plane",
+    "model_router_saas_gateway",
+    "model_router_saas_validation_worker"
+  ],
+  "inventorySeedRole": "disposable-test-migrator",
+  "supplyLifecycleRole": "model_router_saas_control_plane",
+  "customerKeyRole": "model_router_saas_control_plane",
+  "providerScope": {
+    "provider": "kimi",
+    "product": "kimi-code",
+    "model": "kimi-for-coding",
+    "actualCredentialCount": 1
+  },
+  "callBudget": {
+    "declaredProviderInferenceCallsExpected": 8,
+    "observedCommercialRequests": 7,
+    "automaticOnboardingProbeAttempts": 1,
+    "representedCommercialAndProbeInteractions": 8,
+    "independentProviderHttpCounterAvailable": false
+  },
+  "fixturePrices": {
+    "inputAndCacheMinorUnitsPerToken": "2",
+    "outputMinorUnitsPerToken": "3",
+    "boundary": "Disposable fixture prices and signed local rights; no production tariff or resale approval."
+  },
+  "onboarding": {
+    "accountState": "active",
+    "credentialState": "active",
+    "validationState": "verified",
+    "validationAttempts": 1
+  },
+  "completedRequests": 6,
+  "totalSettledMinorUnits": "2772",
+  "usageAndSettlement": [
+    {
+      "scene": "native-nonstreaming",
+      "usageCapturePoint": "native-provider-passthrough",
+      "capturedUsage": [
+        {
+          "input_tokens": 25,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "25",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "83",
+        "ledger_amount": "83",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "83",
+        "ledger_debit": "83",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": false
+    },
+    {
+      "scene": "native-sse",
+      "usageCapturePoint": "native-provider-passthrough",
+      "capturedUsage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        },
+        {
+          "input_tokens": 0,
+          "output_tokens": 11,
+          "cache_read_input_tokens": 25,
+          "cache_creation_input_tokens": 0
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "25",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "83",
+        "ledger_amount": "83",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "83",
+        "ledger_debit": "83",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": false
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-first",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 186,
+          "completion_tokens": 62,
+          "total_tokens": 248,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "186",
+        "output_total": "62",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "558",
+        "ledger_amount": "558",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "558",
+        "ledger_debit": "558",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": false
+    },
+    {
+      "scene": "openai-automatic-tool-two-turn-second",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "338",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "709",
+        "ledger_amount": "709",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "709",
+        "ledger_debit": "709",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": false
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-first",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 222,
+          "completion_tokens": 62,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "222",
+        "output_total": "62",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "630",
+        "ledger_amount": "630",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "630",
+        "ledger_debit": "630",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": false
+    },
+    {
+      "scene": "openai-forced-tool-two-turn-second",
+      "usageCapturePoint": "client-after-protocol-bridge",
+      "capturedUsage": [
+        {
+          "prompt_tokens": 338,
+          "completion_tokens": 11,
+          "total_tokens": 349,
+          "prompt_tokens_details": {
+            "cached_tokens": 338
+          }
+        }
+      ],
+      "durableTerminal": {
+        "execution_state": "succeeded",
+        "financial_status": "settled",
+        "unknown_reason": null,
+        "dispatch_state": "sent",
+        "result_state": "succeeded",
+        "response_started": true,
+        "usage_source": "upstream",
+        "input_total": "338",
+        "output_total": "11",
+        "usage_count": "1",
+        "attempt_count": "1",
+        "settlement_count": "1",
+        "reservation_state": "settled",
+        "settlement_amount": "709",
+        "ledger_amount": "709",
+        "ledger_source": "billing_settlement",
+        "ledger_entries": "2",
+        "ledger_credit": "709",
+        "ledger_debit": "709",
+        "held_leases": "0"
+      },
+      "requestIdentityMatched": true,
+      "customerAndSupplierPriceIdentityValidatedByPassingLiveTest": true,
+      "intermediateHeldLeaseObserved": false
+    }
+  ],
+  "priceIdentityProvenance": "The passing captured live observer asserts customer and supplier price versions. Its safe terminal receipt deliberately omits those identifiers; this projection does not claim an independent receipt-level version comparison.",
+  "completedReplay": {
+    "httpStatus": 200,
+    "conflictHttpStatus": 409,
+    "unchangedFinancialSnapshot": true
+  },
+  "abort": {
+    "state": "unknown",
+    "usageEvents": "0",
+    "settlementEvents": "0",
+    "replayHttpStatus": 202,
+    "retainedHoldMinorUnits": "263680",
+    "walletAndLedgerUnchangedAssertedByPassingLiveTest": true,
+    "replayHasNoNewEffectsAssertedByPassingLiveTest": true,
+    "finalHeldLeasesZeroAssertedByPassingLiveTest": true,
+    "standaloneAbortTerminalReceiptStored": false
+  },
+  "leaseCleanup": {
+    "settledTerminalReceiptsChecked": 6,
+    "settledReceiptsAllZeroHeldLeases": true,
+    "settledRequestsWithIntermediateHeldLeaseObserved": 0,
+    "abortZeroHeldLeasesProvenance": "Passing captured live test explicitly waits for zero held leases; the summary stores the abort outcome but no standalone terminal row."
+  },
+  "cleanup": {
+    "clusterStopped": true,
+    "clusterRemoved": true,
+    "cliProcessesStopped": true
+  },
+  "limits": [
+    "One actual Kimi credential; no independent-account capacity, failover or all-provider claim.",
+    "Local fixture prices, signed local commercial rights and pilot software KMS; no production resale or cloud KMS claim.",
+    "OpenAI numeric usage is captured after the response bridge; native passthrough numeric usage is provider-native.",
+    "The declared eight-call budget and seven commercial request receipts plus one onboarding attempt are not an independent provider HTTP call counter.",
+    "Functional live-provider acceptance does not isolate health/capacity fix causality or establish R9 latency, throughput, formal CI or GO.",
+    "Source, dist and imported-closure matches apply to this run and artifact creation only; future global freeze remains separate."
+  ],
+  "passed": true
+}

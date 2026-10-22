@@ -1,0 +1,903 @@
+{
+  "schema": 1,
+  "classification": "local-short-diagnostic-historical-candidate",
+  "requiredCiCapture": false,
+  "assembly": "current-dist-cli-mock-test-assembly",
+  "diagnostic": true,
+  "realProviderCalls": 0,
+  "startedAt": "2026-10-21T17:16:11.235Z",
+  "finishedAt": "2026-10-21T17:16:33.145Z",
+  "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+  "postgresDurability": {
+    "fsync": "on",
+    "synchronousCommit": "on"
+  },
+  "nodeVersion": "v24.18.0",
+  "sourceDigest": "65f374815e53649274a2944e76dfaa2f2123b47bacc50e54726c639f611cb0d6",
+  "distDigest": "710e814a09de801df9eb4ed27c1738285914b3c02bc367b90c593adb625ad9bf",
+  "sourceChanged": false,
+  "distChanged": false,
+  "harnessChanged": false,
+  "cleanup": {
+    "processesStopped": true,
+    "postgresStopped": true,
+    "runtimeRemoved": true
+  },
+  "firstFault": {
+    "stage": "diagnostic-current-3cli",
+    "message": "R9 driver exit=1, violations=2"
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 264.81,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 190.56,
+      "threshold": 10,
+      "unit": "ms"
+    }
+  ],
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 10,
+        "p50": 3.52,
+        "p90": 24.37,
+        "p99": 24.37,
+        "max": 24.37
+      },
+      "gateway": {
+        "n": 10,
+        "p50": 151.47,
+        "p90": 289.18,
+        "p99": 289.18,
+        "max": 289.18
+      },
+      "p99OverheadMs": 264.81
+    },
+    "ttfb": {
+      "direct": {
+        "n": 10,
+        "p50": 3.54,
+        "p90": 10.24,
+        "p99": 10.24,
+        "max": 10.24
+      },
+      "gateway": {
+        "n": 10,
+        "p50": 127.07,
+        "p90": 200.8,
+        "p99": 200.8,
+        "max": 200.8
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 190.56
+    },
+    "concurrency": {
+      "inflight": 4,
+      "seconds": 5,
+      "statuses": {
+        "200": 108
+      },
+      "transportErrors": 0,
+      "errors": {},
+      "perUrl": [
+        {
+          "url": "http://127.0.0.1:57121",
+          "requests": 36
+        },
+        {
+          "url": "http://127.0.0.1:57122",
+          "requests": 36
+        },
+        {
+          "url": "http://127.0.0.1:57123",
+          "requests": 36
+        }
+      ],
+      "latency": {
+        "n": 108,
+        "p50": 174.44,
+        "p90": 274.25,
+        "p99": 298.37,
+        "max": 303.97
+      },
+      "throughputRps": 21.41
+    }
+  },
+  "preparationProfile": {
+    "scope": "Aggregate of three gateway Prometheus snapshots after mixed diagnostic workload; stages are inclusive, histogram quantiles are bucket upper bounds, concurrent workloads may affect timing.",
+    "files": [
+      "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-lkzQDs/gateway-1-metrics.prom",
+      "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-lkzQDs/gateway-2-metrics.prom",
+      "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-current-r9-lkzQDs/gateway-3-metrics.prom"
+    ],
+    "accountedMeanMs": 55.235964933054376,
+    "exclusiveInt8": {
+      "count": 0,
+      "totalMs": 0,
+      "fractionOfObservedQueryTime": 0
+    },
+    "sharedInt8": {
+      "count": 478,
+      "totalMs": 66.12130599999523
+    },
+    "dispatch": {
+      "count": 239,
+      "totalMs": 21462,
+      "meanMs": 89.79916317991632
+    },
+    "dispatchStages": [
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "settlement",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 4531.981753000002,
+        "meanMs": 18.962266748953983,
+        "p95BucketUpperMs": 50,
+        "p99BucketUpperMs": 100
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "preflight",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 3780.184420999983,
+        "meanMs": 15.816671217573152,
+        "p95BucketUpperMs": 50,
+        "p99BucketUpperMs": 100
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "lease-acquire",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 3518.2334160000037,
+        "meanMs": 14.720641907949807,
+        "p95BucketUpperMs": 50,
+        "p99BucketUpperMs": 100
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "transport-send",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 3438.705368999998,
+        "meanMs": 14.38788857322175,
+        "p95BucketUpperMs": 50,
+        "p99BucketUpperMs": 100
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "claim",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 2664.801246,
+        "meanMs": 11.1497960083682,
+        "p95BucketUpperMs": 25,
+        "p99BucketUpperMs": 50
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "attempt-transition",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 2359.7419630000063,
+        "meanMs": 4.93669866736403,
+        "p95BucketUpperMs": 25,
+        "p99BucketUpperMs": 50
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "runtime-health",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 319.0896289999874,
+        "meanMs": 1.3351030502091523,
+        "p95BucketUpperMs": 5,
+        "p99BucketUpperMs": 10
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "lease-release",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 291.5216679999988,
+        "meanMs": 1.2197559330543881,
+        "p95BucketUpperMs": 5,
+        "p99BucketUpperMs": 5
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "attempt-read",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 258.3963640000005,
+        "meanMs": 0.5405781673640179,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 5
+      },
+      {
+        "family": "saas_gateway_dispatch_stage_duration_seconds",
+        "phase": "dispatch",
+        "operation": "response-delivery",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 204.07838100001075,
+        "meanMs": 0.8538844393305889,
+        "p95BucketUpperMs": 5,
+        "p99BucketUpperMs": 5
+      }
+    ],
+    "dispatchStagesMeanMs": 89.40056154811712,
+    "stages": [
+      {
+        "family": "saas_gateway_preparation_stage_duration_seconds",
+        "phase": "admission",
+        "operation": "metering-guard-wallet",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 7214.948748000008,
+        "meanMs": 30.188070075313842,
+        "p95BucketUpperMs": 100,
+        "p99BucketUpperMs": 150
+      },
+      {
+        "family": "saas_gateway_preparation_stage_duration_seconds",
+        "phase": "authority",
+        "operation": "resolve",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 5463.3144990000055,
+        "meanMs": 22.85905648117157,
+        "p95BucketUpperMs": 50,
+        "p99BucketUpperMs": 100
+      },
+      {
+        "family": "saas_gateway_preparation_stage_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "revalidate",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 2601.5217790000006,
+        "meanMs": 10.885028364016739,
+        "p95BucketUpperMs": 25,
+        "p99BucketUpperMs": 50
+      },
+      {
+        "family": "saas_gateway_preparation_stage_duration_seconds",
+        "phase": "admission",
+        "operation": "capacity",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 523.1323719999828,
+        "meanMs": 2.1888383765689654,
+        "p95BucketUpperMs": 5,
+        "p99BucketUpperMs": 10
+      }
+    ],
+    "phaseQueries": [
+      {
+        "phase": "authority",
+        "count": 5975,
+        "totalMs": 5171.342279000018
+      },
+      {
+        "phase": "admission",
+        "count": 7648,
+        "totalMs": 5153.891139000025
+      },
+      {
+        "phase": "admission-guard",
+        "count": 5258,
+        "totalMs": 2312.2198879999323
+      },
+      {
+        "phase": "attempt",
+        "count": 478,
+        "totalMs": 265.68782599999577
+      }
+    ],
+    "queries": [
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_route_config_dispatchable",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 2621.286881000004,
+        "meanMs": 10.96772753556487,
+        "p95BucketUpperMs": 25,
+        "p99BucketUpperMs": 50
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_provider_account_rate_counters",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 2375.223918999993,
+        "meanMs": 9.93817539330541,
+        "p95BucketUpperMs": 50,
+        "p99BucketUpperMs": 100
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "preparation-authority:platform",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 1043.581171999998,
+        "meanMs": 4.366448418410034,
+        "p95BucketUpperMs": 10,
+        "p99BucketUpperMs": 25
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:authority-batch",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 767.8796709999938,
+        "meanMs": 3.212885652719639,
+        "p95BucketUpperMs": 10,
+        "p99BucketUpperMs": 10
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_attempts",
+        "outcome": "ok",
+        "count": 717,
+        "totalMs": 625.4258719999833,
+        "meanMs": 0.8722815509065318,
+        "p95BucketUpperMs": 5,
+        "p99BucketUpperMs": 10
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_requests",
+        "outcome": "ok",
+        "count": 717,
+        "totalMs": 500.49728699997667,
+        "meanMs": 0.698043635983231,
+        "p95BucketUpperMs": 2.5,
+        "p99BucketUpperMs": 5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "database-clock",
+        "outcome": "ok",
+        "count": 956,
+        "totalMs": 453.2405069999884,
+        "meanMs": 0.4741009487447577,
+        "p95BucketUpperMs": 2.5,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_provider_rights",
+        "outcome": "ok",
+        "count": 1195,
+        "totalMs": 335.47735200002825,
+        "meanMs": 0.2807341857740822,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "advisory-lock-shared",
+        "outcome": "ok",
+        "count": 1673,
+        "totalMs": 319.30557999998217,
+        "meanMs": 0.1908580872683695,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:fence-batch",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 310.3871689999882,
+        "meanMs": 1.298691083681959,
+        "p95BucketUpperMs": 10,
+        "p99BucketUpperMs": 50
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_billing_reservations",
+        "outcome": "ok",
+        "count": 1195,
+        "totalMs": 297.45589100002144,
+        "meanMs": 0.2489170635983443,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_request_customer_price_snapshots",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 258.3557439999938,
+        "meanMs": 0.5404931882845059,
+        "p95BucketUpperMs": 2.5,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_route_config_heads",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 206.49417099998578,
+        "meanMs": 0.8639923472802753,
+        "p95BucketUpperMs": 2.5,
+        "p99BucketUpperMs": 5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "attempt",
+        "operation": "saas_attempts",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 167.53933399999505,
+        "meanMs": 0.7010013974895191,
+        "p95BucketUpperMs": 2.5,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_customer_price_versions",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 150.80746799999153,
+        "meanMs": 0.3154967949790618,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_gateway_capacity_reservations",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 136.01228600001832,
+        "meanMs": 0.28454453138079144,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_request_admission_outbox",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 113.27946200000156,
+        "meanMs": 0.47397264435147096,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "composite-route-store:billing-group",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 104.64433299999382,
+        "meanMs": 0.4378423974895139,
+        "p95BucketUpperMs": 2.5,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_tenants",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 102.70999999999935,
+        "meanMs": 0.4297489539748927,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "attempt",
+        "operation": "saas_requests",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 98.14849200000073,
+        "meanMs": 0.4106631464435177,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:request",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 97.58493499999848,
+        "meanMs": 0.4083051673640104,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:attempt",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 96.73078899998062,
+        "meanMs": 0.40473133472795236,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "advisory-lock-exclusive",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 86.07299500002067,
+        "meanMs": 0.18006902719669596,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_supply_profiles",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 77.45433399999933,
+        "meanMs": 0.32407671129706833,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_supplier_cost_versions",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 77.4177519999837,
+        "meanMs": 0.3239236485354966,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_refund_wallet_freezes",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 77.15412500001503,
+        "meanMs": 0.16141030334731177,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_public_model_versions",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 74.31915700001015,
+        "meanMs": 0.31095881589962404,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_requests",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 71.69524600000318,
+        "meanMs": 0.2999801087866242,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_provider_metering_policy_versions",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 71.32742099999541,
+        "meanMs": 0.29844109205019,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_api_key_budget_reservations",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 68.24179099998562,
+        "meanMs": 0.2855305062760905,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "preparation-authority:account-capability",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 68.09855200000084,
+        "meanMs": 0.2849311799163215,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "advisory-lock-shared-int8",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 66.12130599999523,
+        "meanMs": 0.13832909205019922,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_audit_events",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 65.71904800000084,
+        "meanMs": 0.27497509623431315,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_route_config_commercial_authorities",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 57.786616000011016,
+        "meanMs": 0.2417850041841465,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:clock",
+        "outcome": "ok",
+        "count": 478,
+        "totalMs": 57.6141559999985,
+        "meanMs": 0.12053170711296758,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 0.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:billing-group",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 54.874208999990735,
+        "meanMs": 0.22959920083678131,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_provider_rights",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 54.003457000010485,
+        "meanMs": 0.22595588702933259,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_provider_capabilities",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 53.08691099999009,
+        "meanMs": 0.22212096652715518,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "saas_provider_products",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 51.5499210000064,
+        "meanMs": 0.21569004602513137,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:capability",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 48.36305100002232,
+        "meanMs": 0.20235586192477956,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_wallets",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 46.477917000000616,
+        "meanMs": 0.19446827196652977,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "postgres-request-admission:account-capability",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 45.16345300000534,
+        "meanMs": 0.1889684225941646,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_request_customer_price_snapshots",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 44.93067099999802,
+        "meanMs": 0.18799443933053567,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "database-clock",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 44.08504300000527,
+        "meanMs": 0.18445624686194675,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 2.5
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "advisory-lock-shared",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 43.80528699999446,
+        "meanMs": 0.1832857196652488,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "other",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 42.97238000000175,
+        "meanMs": 0.17980075313808264,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "authority",
+        "operation": "set",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 42.84483500000807,
+        "meanMs": 0.17926709205024297,
+        "p95BucketUpperMs": 1,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "postgres-preparation-capacity:billing-group-terms",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 42.70928900000672,
+        "meanMs": 0.17869995397492353,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_provider_capabilities",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 41.90487599999892,
+        "meanMs": 0.1753342092050164,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "saas_provider_products",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 40.31617199999597,
+        "meanMs": 0.16868691213387435,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "advisory-lock-exclusive",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 37.243364999993894,
+        "meanMs": 0.15582997907947235,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission-guard",
+        "operation": "advisory-lock-shared",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 35.757068999987496,
+        "meanMs": 0.14961116736396443,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      },
+      {
+        "family": "saas_gateway_preparation_query_duration_seconds",
+        "phase": "admission",
+        "operation": "saas_billing_spending_freezes",
+        "outcome": "ok",
+        "count": 239,
+        "totalMs": 31.962412000019867,
+        "meanMs": 0.13373394142267728,
+        "p95BucketUpperMs": 0.5,
+        "p99BucketUpperMs": 1
+      }
+    ]
+  }
+}

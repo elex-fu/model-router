@@ -1,0 +1,198 @@
+{
+  "format": "saas-backup-restore-local-validation-v1",
+  "formalRequiredCiEvidence": false,
+  "evidenceKind": "local_current_dist_native_postgresql_with_cloud_protocol_doubles",
+  "recordedRun": {
+    "productionModules": "dist_at_recorded_run",
+    "postgres": {
+      "major": 18,
+      "minor": 6,
+      "distribution": "homebrew"
+    },
+    "native": {
+      "tests": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "durationMs": 5702.145459
+    },
+    "focused": {
+      "tests": 49,
+      "passed": 49,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "durationMs": 1234.86125
+    },
+    "migrationCount": 118,
+    "tableCount": 147,
+    "representativeFixtureRowCount": 1,
+    "ownedDisposableResourcesOnly": true,
+    "existingDatabasesMutated": false,
+    "existingServicesMutated": false
+  },
+  "receiptEvidence": {
+    "backup": {
+      "format": "saas-backup-receipt-v1",
+      "receiptSha256": "4a0ee04a7b468514473006a85f111c76b5d71d029c7364aa45287a9479c495cd",
+      "mode": "pg-dump",
+      "startedAt": "2026-10-21T17:11:25.899Z",
+      "completedAt": "2026-10-21T17:11:26.352Z",
+      "archiveBytes": 1446140,
+      "archiveSha256": "8a6823d4ec568eab11438d6c158f432a5a4527ef2c80aef06f88de01234d0436",
+      "fingerprintSha256": "8fe88067739f617e05005cc4a3f5bcde52561c2bf3ff727229bc905b52e42ed8",
+      "migrationLedgerSha256": "bd410b68c121fb3eb54caa179040c99e4e0860d313df30f1fabfc2226a8f440a",
+      "migrationCount": 118,
+      "tableCount": 147,
+      "recoveryKeyCountInProtocolDouble": 1
+    },
+    "restore": {
+      "format": "saas-restore-receipt-v1",
+      "receiptSha256": "e6e872cdf2988d8f65e75110830294f42985d5639884e450e9ceb080eb3f36c5",
+      "startedAt": "2026-10-21T17:11:26.436Z",
+      "completedAt": "2026-10-21T17:11:27.855Z",
+      "durationMs": 1418,
+      "archiveSha256": "8a6823d4ec568eab11438d6c158f432a5a4527ef2c80aef06f88de01234d0436",
+      "fingerprintSha256": "8fe88067739f617e05005cc4a3f5bcde52561c2bf3ff727229bc905b52e42ed8",
+      "recoveryKeyCountInProtocolDouble": 1,
+      "cleanup": "dropped-owned-database",
+      "productionAdmissionApproved": false
+    },
+    "linkage": {
+      "backupIdMatched": true,
+      "sourceIdentityMatched": true,
+      "policyMatched": true,
+      "archiveSha256Matched": true,
+      "fingerprintSha256Matched": true
+    }
+  },
+  "verifiedLocalChecks": {
+    "nativePgDumpExecuted": true,
+    "nativePgRestoreExecuted": true,
+    "nativeArchiveListValidated": true,
+    "restoredDataAndMigrationLedgerFingerprintMatched": true,
+    "nonemptyFixtureDataVerified": true,
+    "corruptArchiveProbe": "checksum_mismatch_rejected_before_target_creation",
+    "corruptProbeCreatedNoPassingRestoreReceipt": true,
+    "sourceDatabasePreservedUntilOwnedFixtureTeardown": true
+  },
+  "cloudEvidence": {
+    "s3": "protocol_double",
+    "kms": "protocol_double",
+    "productionCloudPitrAccepted": false,
+    "productionCloudOffsiteAccepted": false,
+    "productionCloudKmsRecoveryAccepted": false
+  },
+  "cleanupProof": {
+    "scope": "recorded_run",
+    "ownedRestoreDatabaseDropped": true,
+    "ownedClusterStopped": true,
+    "ownedScratchRemoved": true,
+    "remainingOwnedProcesses": 0,
+    "remainingOwnedListeners": 0
+  },
+  "recordedRegistryParity": {
+    "sourceCount": 118,
+    "distCount": 118,
+    "sourceSha256": "bd410b68c121fb3eb54caa179040c99e4e0860d313df30f1fabfc2226a8f440a",
+    "distSha256": "bd410b68c121fb3eb54caa179040c99e4e0860d313df30f1fabfc2226a8f440a",
+    "same": true
+  },
+  "historicalHashAudit": {
+    "scope": "recorded_run_start_to_end_only",
+    "checkedFiles": 1596,
+    "changedFiles": 0,
+    "addedFiles": 0,
+    "removedFiles": 0,
+    "currentRepositoryFreezeClaim": false
+  },
+  "currentBackupModuleComparison": {
+    "scope": "listed_backup_components_only",
+    "checkedAt": "2026-10-21T19:03:59.816Z",
+    "checkedModules": 12,
+    "sameModules": 12,
+    "changedModules": 0,
+    "missingModules": 0,
+    "modules": [
+      {
+        "module": "src/cli/saas-backup.ts",
+        "acceptedRunSha256": "7215b0b8204bd071be072a13dccc1cf0f2335939d7f3eccf2f9ba555d0be925a",
+        "currentSha256": "7215b0b8204bd071be072a13dccc1cf0f2335939d7f3eccf2f9ba555d0be925a",
+        "status": "same"
+      },
+      {
+        "module": "src/cli/saas-upgrade.ts",
+        "acceptedRunSha256": "b0c82695f108394932072e8b7b7649d599dfd6c73fd21a04b13c8c20de73601a",
+        "currentSha256": "b0c82695f108394932072e8b7b7649d599dfd6c73fd21a04b13c8c20de73601a",
+        "status": "same"
+      },
+      {
+        "module": "src/cli/saas-deploy-shared.ts",
+        "acceptedRunSha256": "8a6ea03b664fb34b4aa161b3e6bde2cfc82c7860bcee59be3f8055df2149f086",
+        "currentSha256": "8a6ea03b664fb34b4aa161b3e6bde2cfc82c7860bcee59be3f8055df2149f086",
+        "status": "same"
+      },
+      {
+        "module": "src/saas/backup/service.ts",
+        "acceptedRunSha256": "5bdab0fd13c79926bd627b6fd88875264693f794b3aea0152896e95f52f7e676",
+        "currentSha256": "5bdab0fd13c79926bd627b6fd88875264693f794b3aea0152896e95f52f7e676",
+        "status": "same"
+      },
+      {
+        "module": "src/saas/backup/types.ts",
+        "acceptedRunSha256": "c8b41ce02cd3baa5b49f61b19128f35c36d571e2185fcb3841fb3d130e54e8cf",
+        "currentSha256": "c8b41ce02cd3baa5b49f61b19128f35c36d571e2185fcb3841fb3d130e54e8cf",
+        "status": "same"
+      },
+      {
+        "module": "src/saas/backup/http.ts",
+        "acceptedRunSha256": "dce99c4a6bfa3ef3d567ec2a3089df2fcd672887bd9ed48c373bad6948cb0664",
+        "currentSha256": "dce99c4a6bfa3ef3d567ec2a3089df2fcd672887bd9ed48c373bad6948cb0664",
+        "status": "same"
+      },
+      {
+        "module": "dist/cli/saas-backup.js",
+        "acceptedRunSha256": "999f5deaf84fd91a90595c6a52ad3c1571569509ec26ecdd1f78e91506734db9",
+        "currentSha256": "999f5deaf84fd91a90595c6a52ad3c1571569509ec26ecdd1f78e91506734db9",
+        "status": "same"
+      },
+      {
+        "module": "dist/cli/saas-upgrade.js",
+        "acceptedRunSha256": "ec9fb2882b3af76ba98f9bc4ebed9b6653a194ddbc03b6ef58ead57a85ac04ed",
+        "currentSha256": "ec9fb2882b3af76ba98f9bc4ebed9b6653a194ddbc03b6ef58ead57a85ac04ed",
+        "status": "same"
+      },
+      {
+        "module": "dist/cli/saas-deploy-shared.js",
+        "acceptedRunSha256": "b9f996eeb2c3d58cd284f92ec5daa89a06ce1fd68d4495fb0dab63f778ce6ee3",
+        "currentSha256": "b9f996eeb2c3d58cd284f92ec5daa89a06ce1fd68d4495fb0dab63f778ce6ee3",
+        "status": "same"
+      },
+      {
+        "module": "dist/saas/backup/service.js",
+        "acceptedRunSha256": "f2e724a10d950741b4b2bcd44556ebc2eaa09f0e396fdaf89dfd250a0e6feec3",
+        "currentSha256": "f2e724a10d950741b4b2bcd44556ebc2eaa09f0e396fdaf89dfd250a0e6feec3",
+        "status": "same"
+      },
+      {
+        "module": "dist/saas/backup/types.js",
+        "acceptedRunSha256": "df487c46bb10486b39da201b861debaaba0fb32786bbe9218b9894dd467ffb52",
+        "currentSha256": "df487c46bb10486b39da201b861debaaba0fb32786bbe9218b9894dd467ffb52",
+        "status": "same"
+      },
+      {
+        "module": "dist/saas/backup/http.js",
+        "acceptedRunSha256": "ed40cdb91037e587639824bff2eea93e2ea9354ceb36439fc136c17de04cb2bd",
+        "currentSha256": "ed40cdb91037e587639824bff2eea93e2ea9354ceb36439fc136c17de04cb2bd",
+        "status": "same"
+      }
+    ]
+  },
+  "provenanceHashes": {
+    "summarySha256": "1cf91c6823b05599007350fd12b6093eb2e087d23367ed52b4062b7a91d7bc74",
+    "scopeSha256": "5b5e90280acff09f5f79f2ad5a53f8c5e41f9661356fac86f93e400de7cd440a",
+    "cleanupSha256": "077e24adfbb1034a3d36c90eb093ef8bee0d9576a011291540cab22620e37f35",
+    "recordedRunnerSha256": "2b7f5c0f9a2ac886a4441fd053f5250c547d2b4277280714621628d068737f89"
+  }
+}

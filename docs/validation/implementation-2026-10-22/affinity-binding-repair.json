@@ -1,0 +1,291 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T06:07:08.922765+00:00",
+  "status": "implemented-offline-and-two-version-postgres-passed",
+  "productionFiles": {
+    "src/saas/gateway/provider-account-scheduler.ts": {
+      "bytes": 104058,
+      "sha256": "abf6aaa27763dad63463a0bb836b6242cf11c70e24b3d8cd7615277bb395161f"
+    },
+    "src/saas/gateway/postgres-provider-account-scheduler.ts": {
+      "bytes": 126636,
+      "sha256": "fc6ce30f66fe21079a60a94e6be81c93141feec71d974aad2c7580bc51fcc404"
+    },
+    "src/saas/gateway/postgres-provider-account-affinity.ts": {
+      "bytes": 23567,
+      "sha256": "bc96baa7d17a0555344172e44a3d97c6fd911c6df7ab5debf9ec6bbfbe5ddb5d"
+    },
+    "src/saas/gateway/redis-sticky-provider-account-affinity.ts": {
+      "bytes": 8659,
+      "sha256": "2bc3ac1b98164b65247321afe83692391f4b28f359fd90b45b043f55671697cd"
+    },
+    "src/saas/gateway/request-preparation-service.ts": {
+      "bytes": 112982,
+      "sha256": "2d7bb6305705c1fb4e2afdd71eeb2917468bfd081ff3a8b10fd14e362b95de0f"
+    }
+  },
+  "implementation": [
+    "Optional PG selectAndBind completes binding before final Redis slot settlement; legacy custom scheduler explicit binding path remains.",
+    "A raw PG losing proposal returns a typed single locked active winner before mutation; inconsistent references, malformed rows, key compatibility, CAS and storage errors retain fail-closed blocks.",
+    "Only exact own data hint fields are consumed; inherited/accessor/extra-key hints do not trigger recovery.",
+    "The original source/scope/attempted filters and fresh eligibility/health/concurrency/window checks constrain one known winner; one final ordinary fenced bind, no weighted redraw or loop.",
+    "All temporary nonwinner slots release after the combined operation; terminal failure releases all tracked slots, and release errors prevent allow.",
+    "Preparation validates the final candidate and refreshes account/credential/member facts before original admission/funds guards."
+  ],
+  "focusedOffline": {
+    "nativeCounts": [
+      "# tests 436",
+      "# pass 436",
+      "# fail 0",
+      "# cancelled 0",
+      "# skipped 0",
+      "# todo 0"
+    ],
+    "checks": [
+      {
+        "name": "final-v2-unit.tap",
+        "command": [
+          "rtk",
+          "proxy",
+          "node",
+          "--import",
+          "tsx",
+          "--test",
+          "--test-reporter=tap",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts",
+          "tests/saas/gateway/request-preparation-service.test.ts",
+          "tests/saas/gateway/postgres-provider-account-affinity.test.ts",
+          "tests/saas/gateway/redis-sticky-provider-account-affinity.test.ts",
+          "tests/saas/gateway/sticky-affinity-gate.test.ts",
+          "tests/saas/gateway/provider-account-scheduler-window-cost.test.ts",
+          "tests/saas/gateway/provider-account-scheduler-strategies.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler-strategies.test.ts",
+          "tests/saas/gateway/provider-account-scheduler-billing-groups.test.ts",
+          "tests/saas/gateway/provider-account-scheduler-composite.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler-consumption.test.ts"
+        ],
+        "exitCode": 0,
+        "bytes": 83344,
+        "sha256": "6bf5178414ddd2c064fdf05ff724b5a4394fd7b77878e3440f826e2f2684dfcd",
+        "counters": [
+          "# tests 436",
+          "# pass 436",
+          "# fail 0",
+          "# cancelled 0",
+          "# skipped 0",
+          "# todo 0"
+        ]
+      },
+      {
+        "name": "final-v2-source-types.log",
+        "command": [
+          "rtk",
+          "proxy",
+          "node_modules/.bin/tsc",
+          "--noEmit"
+        ],
+        "exitCode": 0,
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "final-v2-focused-types.log",
+        "command": [
+          "rtk",
+          "proxy",
+          "node_modules/.bin/tsc",
+          "--noEmit",
+          "--strict",
+          "--skipLibCheck",
+          "--target",
+          "ES2022",
+          "--lib",
+          "ES2023",
+          "--module",
+          "NodeNext",
+          "--moduleResolution",
+          "NodeNext",
+          "--esModuleInterop",
+          "--resolveJsonModule",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts",
+          "tests/saas/gateway/request-preparation-service.test.ts",
+          "tests/saas/gateway/postgres-provider-account-affinity.test.ts",
+          "tests/saas/gateway/redis-sticky-provider-account-affinity.test.ts"
+        ],
+        "exitCode": 0,
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "final-v2-biome.log",
+        "command": [
+          "rtk",
+          "proxy",
+          "node_modules/.bin/biome",
+          "check",
+          "src/saas/gateway/provider-account-scheduler.ts",
+          "src/saas/gateway/postgres-provider-account-scheduler.ts",
+          "src/saas/gateway/postgres-provider-account-affinity.ts",
+          "src/saas/gateway/redis-sticky-provider-account-affinity.ts",
+          "src/saas/gateway/request-preparation-service.ts",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts",
+          "tests/saas/gateway/request-preparation-service.test.ts",
+          "tests/saas/gateway/postgres-provider-account-affinity.test.ts",
+          "tests/saas/gateway/redis-sticky-provider-account-affinity.test.ts"
+        ],
+        "exitCode": 0,
+        "bytes": 44,
+        "sha256": "88c37ebcb663a48634a019a95b24ef6878c88d2dc5a64636db8eb747dd7f2967"
+      },
+      {
+        "name": "final-v2-diff-check.log",
+        "command": [
+          "rtk",
+          "proxy",
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "src/saas/gateway/provider-account-scheduler.ts",
+          "src/saas/gateway/postgres-provider-account-scheduler.ts",
+          "src/saas/gateway/postgres-provider-account-affinity.ts",
+          "src/saas/gateway/redis-sticky-provider-account-affinity.ts",
+          "src/saas/gateway/request-preparation-service.ts",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts",
+          "tests/saas/gateway/request-preparation-service.test.ts",
+          "tests/saas/gateway/postgres-provider-account-affinity.test.ts",
+          "tests/saas/gateway/redis-sticky-provider-account-affinity.test.ts"
+        ],
+        "exitCode": 0,
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "originalSourceScopeInputCount": 764,
+    "captureDrift": [],
+    "ownedFilesMatchAtRecordCreation": true,
+    "entireHistoricalCaptureClaimedCurrent": false,
+    "record": {
+      "file": "/private/tmp/model-router-affinity-combined-before-20261022-59a0d0f9-ec68-4164-829f-549149c55400/final-validation-v2.json",
+      "bytes": 186103,
+      "sha256": "e61b783b75692b9693ab60ebdec3a3845ad0ca86263c10b23470fd96e0cecf2a"
+    }
+  },
+  "postgres": [
+    {
+      "directory": "/private/tmp/model-router-affinity-race-pg18-20261022-0610",
+      "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "dockerImageId": null,
+      "containerId": null,
+      "counts": {
+        "tests": 2,
+        "suites": 0,
+        "pass": 2,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "sourceClosureFileCount": 686,
+      "beforeAfterAndRecordCreationMatch": true,
+      "summary": {
+        "file": "/private/tmp/model-router-affinity-race-pg18-20261022-0610/summary.json",
+        "bytes": 164060,
+        "sha256": "0f0536f40408618c2b5d23b0cfa0941f935e1d115809cafc48b0e8cf025d8a4b"
+      },
+      "tap": {
+        "file": "/private/tmp/model-router-affinity-race-pg18-20261022-0610/custom-test.log",
+        "bytes": 646,
+        "sha256": "dbbaf07fc1f10e581a0a43bcb6033fc767fa525b816e68f468412edad752e4d2"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    },
+    {
+      "directory": "/private/tmp/model-router-affinity-race-pg15-20261022-0612",
+      "postgresVersion": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "dockerImageId": "sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81",
+      "containerId": "57f2f4fedeaf50a8001c842a1d58e6b8a85a1f2f02748187d536ef77126bd718",
+      "counts": {
+        "tests": 2,
+        "suites": 0,
+        "pass": 2,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "sourceClosureFileCount": 686,
+      "beforeAfterAndRecordCreationMatch": true,
+      "summary": {
+        "file": "/private/tmp/model-router-affinity-race-pg15-20261022-0612/summary.json",
+        "bytes": 165395,
+        "sha256": "dea03f183ebcef0c493a5f00204b5c2dba59e15e1d7a1352d575db2ce0203bfe"
+      },
+      "tap": {
+        "file": "/private/tmp/model-router-affinity-race-pg15-20261022-0612/custom-test.log",
+        "bytes": 647,
+        "sha256": "0c2819ab59eb4fe1104cb51cad2a7d0172f4ccb9eda20cfc82c43a34252dc36d"
+      },
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    }
+  ],
+  "test": {
+    "file": "/Users/lex/play/model-router/tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts",
+    "bytes": 33213,
+    "sha256": "b14b54dfc747fec5989966c0ecefa611516932b1d46b12e4bb16471d8de0e0be"
+  },
+  "testScope": [
+    "Two real independently connected restricted gateway pools; actual eligibility/health/concurrency/affinity SQL.",
+    "Two committed null resolves interleaved before bind, and a second case following real capacity-driven stale invalidation.",
+    "One initial bind wins; losing proposal does not change aliases/timestamps/TTL/revision/fence, exact winner is revalidated and bound once.",
+    "Real request/funds snapshots remain unchanged; Redis slot bookkeeping is a double, not real Redis.",
+    "Full timestamp observation uses existing migrator only; all production calls remain restricted gateway."
+  ],
+  "firstRed": {
+    "summary": {
+      "file": "/private/tmp/model-router-affinity-race-pg18-20261022-0600/summary.json",
+      "bytes": 164060,
+      "sha256": "d8887295d1baef6d3fa1e02f6f2a48c81ccc178809db1d43527e8b147146fed4"
+    },
+    "counts": {
+      "tests": 2,
+      "suites": 0,
+      "pass": 0,
+      "fail": 2,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "sqlState": "42501",
+    "cause": "New fixture observer selected created_at/updated_at outside gateway SELECT grants.",
+    "observerCorrection": "Read the same full immutable timestamp snapshot using existing migrator; no assertion, production SQL, role, schema, grant or timeout changed.",
+    "correctionRecord": {
+      "file": "/private/tmp/model-router-affinity-race-observer-fix-before-20261022-d6b6809a-7c83-4677-b473-7c89a00b2a01/validation.json",
+      "bytes": 225584,
+      "sha256": "8f43e0cc6cc5333297834a9b33f564119f50c7aaebd9d3a619ed18eaee3cfa4d"
+    },
+    "cleanup": {
+      "clusterStopped": true,
+      "clusterRemoved": true
+    }
+  },
+  "ci": "Registered isolated PG15/18 root, strict workflow target and fixed gate inventory; local CI wiring checked separately, not a GitHub run.",
+  "metricsLimit": "Combined path scheduler-select duration includes binding/reconciliation; absence of legacy affinity-bind observations is not proof of zero binding errors.",
+  "acceptanceRemaining": [
+    "Current built real Kimi",
+    "Current three-CLI contention/financial observation",
+    "Full R9 under original budgets"
+  ]
+}

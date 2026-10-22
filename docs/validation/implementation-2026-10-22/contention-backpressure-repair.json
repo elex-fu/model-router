@@ -1,0 +1,337 @@
+{
+  "schema": 1,
+  "classification": "local-implementation-progress-evidence",
+  "formalRequiredCiEvidence": false,
+  "GO": false,
+  "fullR9Passed": false,
+  "recordedAt": "2026-10-22T08:14:00.022Z",
+  "status": "implemented-offline-and-two-version-postgres-components-passed",
+  "productionFiles": {
+    "src/saas/gateway/provider-account-scheduler.ts": {
+      "bytes": 105370,
+      "sha256": "298693e2a74935fbe8d35c88778e318307ecebfcfdf9210b160c4f8b93089b8f"
+    }
+  },
+  "implementation": [
+    "A second exact own-data plain active_binding hint becomes pre-admission rate_limited only when it names a different, unique original, same-scope, unattempted account. The operation ends without a third bind, redraw, wait or another winner revalidation.",
+    "Known concurrency denial or a strictly validated numeric full snapshot becomes rate_limited during initial selection or the one fresh winner check. Capacity remains advisory until the original fenced lease/admission authority.",
+    "Malformed/untyped hints, ambiguous or disallowed scope, CAS/expiry/storage errors, invalid capacity snapshots and unavailable/malformed runtime health remain fail-closed blocks under the existing HTTP 503 mapping. Durable health denial retains precedence; eligibility/window-only exclusion remains account_denied.",
+    "New immediate rate limits do not invent Retry-After. Existing optional sticky-wait/degrade behavior, SQL/parameters, roles/grants/schema, funds guards and timeout bounds are unchanged by this repair.",
+    "No PG wrapper or Redis release implementation changed. The throwing-release unit case proves behavior for a rejected promise and every attempted temporary release; it does not prove real Redis delivery or network acknowledgement."
+  ],
+  "preservedComposition": {
+    "baseline": {
+      "file": "/Users/lex/play/model-router/docs/validation/implementation-2026-10-22/affinity-binding-repair.json",
+      "bytes": 12127,
+      "sha256": "546c674489b9e1a1d5b90d804f75201811bfe5604638f1e2f664d21cfcfe2e01"
+    },
+    "files": [
+      {
+        "path": "src/saas/gateway/postgres-provider-account-scheduler.ts",
+        "bytes": 126636,
+        "sha256": "fc6ce30f66fe21079a60a94e6be81c93141feec71d974aad2c7580bc51fcc404"
+      },
+      {
+        "path": "src/saas/gateway/postgres-provider-account-affinity.ts",
+        "bytes": 23567,
+        "sha256": "bc96baa7d17a0555344172e44a3d97c6fd911c6df7ab5debf9ec6bbfbe5ddb5d"
+      },
+      {
+        "path": "src/saas/gateway/redis-sticky-provider-account-affinity.ts",
+        "bytes": 8659,
+        "sha256": "2bc3ac1b98164b65247321afe83692391f4b28f359fd90b45b043f55671697cd"
+      },
+      {
+        "path": "src/saas/gateway/request-preparation-service.ts",
+        "bytes": 112982,
+        "sha256": "2d7bb6305705c1fb4e2afdd71eeb2917468bfd081ff3a8b10fd14e362b95de0f"
+      }
+    ],
+    "matchesPriorAffinityRepairAtProjectionCreation": true
+  },
+  "causeContext": {
+    "record": {
+      "file": "/Users/lex/play/model-router/docs/validation/implementation-2026-10-22/affinity-residual-bind-proof.json",
+      "bytes": 19808,
+      "sha256": "7794e4b8176e31013b0d475a0ce1977bf95a24c8df2b363a3086fd8595f538bd"
+    },
+    "use": "Prior bounded same-operation evidence motivated the terminal second-contention case. This projection adds no per-request HTTP attribution and makes no causal claim about earlier HTTP 403 observations."
+  },
+  "focusedOffline": {
+    "roots": [
+      "tests/saas/gateway/provider-account-scheduler.test.ts",
+      "tests/saas/gateway/postgres-provider-account-scheduler.test.ts"
+    ],
+    "counts": {
+      "tests": 295,
+      "suites": 0,
+      "pass": 295,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "checks": [
+      {
+        "name": "unit-final",
+        "command": [
+          "rtk",
+          "proxy",
+          "node",
+          "--test",
+          "--import",
+          "tsx",
+          "--test-reporter=spec",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts"
+        ],
+        "exitCode": 0,
+        "log": {
+          "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/unit-final.log",
+          "bytes": 23035,
+          "sha256": "9dc4c6de04e7a47f17c180796e86c7fca1742923e8d091a00cdd3da584dee936"
+        }
+      },
+      {
+        "name": "source-tsc-final",
+        "command": [
+          "rtk",
+          "proxy",
+          "node_modules/.bin/tsc",
+          "--noEmit"
+        ],
+        "exitCode": 0,
+        "log": {
+          "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/source-tsc-final.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "focused-strict-final",
+        "command": [
+          "rtk",
+          "proxy",
+          "node_modules/.bin/tsc",
+          "--noEmit",
+          "--strict",
+          "--skipLibCheck",
+          "--target",
+          "ES2022",
+          "--lib",
+          "ES2023",
+          "--module",
+          "NodeNext",
+          "--moduleResolution",
+          "NodeNext",
+          "--esModuleInterop",
+          "--resolveJsonModule",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts"
+        ],
+        "exitCode": 0,
+        "log": {
+          "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/focused-strict-final.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "biome-final",
+        "command": [
+          "rtk",
+          "proxy",
+          "node_modules/.bin/biome",
+          "check",
+          "src/saas/gateway/provider-account-scheduler.ts",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts"
+        ],
+        "exitCode": 0,
+        "log": {
+          "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/biome-final.log",
+          "bytes": 44,
+          "sha256": "374aea2528b698526e6ba33553c5b6934856679920bf0c3946a29c1871698a08"
+        }
+      },
+      {
+        "name": "diff-check-final",
+        "command": [
+          "rtk",
+          "proxy",
+          "git",
+          "diff",
+          "--check",
+          "--",
+          "src/saas/gateway/provider-account-scheduler.ts",
+          "tests/saas/gateway/provider-account-scheduler.test.ts",
+          "tests/saas/gateway/postgres-provider-account-scheduler.test.ts"
+        ],
+        "exitCode": 0,
+        "log": {
+          "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/diff-check-final.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    ],
+    "record": {
+      "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/validation-summary.json",
+      "bytes": 6781,
+      "sha256": "1089835d73b3a8ccd03bc02a4a25127d1a3ace02950aaa88ec7999c5f51227c1"
+    },
+    "ownedFiles": [
+      {
+        "path": "src/saas/gateway/provider-account-scheduler.ts",
+        "bytes": 105370,
+        "sha256": "298693e2a74935fbe8d35c88778e318307ecebfcfdf9210b160c4f8b93089b8f"
+      },
+      {
+        "path": "tests/saas/gateway/provider-account-scheduler.test.ts",
+        "bytes": 72244,
+        "sha256": "04d256874a25b866857a3e4fee18c4b723c9f4eedc53a376c27a15e6a8e93ab4"
+      },
+      {
+        "path": "tests/saas/gateway/postgres-provider-account-scheduler.test.ts",
+        "bytes": 94416,
+        "sha256": "384e36e3621af8722f9537ad031335b998694b7eb64bcedb2e28a0eabd8e0b35"
+      }
+    ],
+    "ownedFilesMatchAtProjectionCreation": true,
+    "fullTransitiveBeforeAfterUnitClosureCaptured": false,
+    "scopeLimit": "The unit archive records the three owned file hashes and log receipts, not a complete transitive before/after unit input closure.",
+    "firstRed": {
+      "counts": {
+        "tests": 292,
+        "suites": 0,
+        "pass": 276,
+        "fail": 16,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "exitCode": 1,
+      "log": {
+        "file": "/private/tmp/model-router-affinity-residual-repair-before-20261022-99093e26-f3e2-4bc1-ab28-75dc4e535483/unit-first-red.log",
+        "bytes": 34469,
+        "sha256": "4f5e0981a5fa7bf2bb7f991862ea09ff7abf5ba57eff49ea30b96e05fbee9692"
+      },
+      "productionSha256": "abf6aaa27763dad63463a0bb836b6242cf11c70e24b3d8cd7615277bb395161f",
+      "archivedProductionPreEditCopyMatches": true,
+      "note": "The final run has three additional unit cases. These test counts are not counts of HTTP incidents."
+    }
+  },
+  "postgres": [
+    {
+      "directory": "/private/tmp/model-router-contention-backpressure-pg18-20261022-0802",
+      "startedAt": "2026-10-22T08:00:33.910Z",
+      "finishedAt": "2026-10-22T08:00:40.603Z",
+      "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "backend": "disposable-initdb-cluster",
+      "dockerImage": null,
+      "dockerImageId": null,
+      "counts": {
+        "tests": 5,
+        "suites": 0,
+        "pass": 5,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "summary": {
+        "file": "/private/tmp/model-router-contention-backpressure-pg18-20261022-0802/summary.json",
+        "bytes": 164131,
+        "sha256": "df5f7884e809714d291e52a40fe4a3e6aec761cd0f7e53bbfd8cbc3f8da76646"
+      },
+      "tap": {
+        "file": "/private/tmp/model-router-contention-backpressure-pg18-20261022-0802/custom-test.log",
+        "bytes": 1408,
+        "sha256": "d1f11df1d3dbdc3815433b2759075d69104fba6ae88c6f97d68e640947e64f29"
+      },
+      "sourceClosureFileCount": 686,
+      "sourceClosureScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "beforeAfterAndProjectionCreationMatch": true,
+      "allRecordedStageExitCodesZero": true,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    },
+    {
+      "directory": "/private/tmp/model-router-contention-backpressure-pg15-20261022-0803",
+      "startedAt": "2026-10-22T08:01:11.731Z",
+      "finishedAt": "2026-10-22T08:01:23.840Z",
+      "postgresVersion": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "backend": "disposable-docker-container",
+      "dockerImage": "postgres:15-alpine",
+      "dockerImageId": "sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81",
+      "counts": {
+        "tests": 5,
+        "suites": 0,
+        "pass": 5,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "summary": {
+        "file": "/private/tmp/model-router-contention-backpressure-pg15-20261022-0803/summary.json",
+        "bytes": 165505,
+        "sha256": "50b4a31d3f8287e2d7b50bd25d6074393d40369f7e90f6bea2f39f9bd3303338"
+      },
+      "tap": {
+        "file": "/private/tmp/model-router-contention-backpressure-pg15-20261022-0803/custom-test.log",
+        "bytes": 1408,
+        "sha256": "b2f820e4beeada8511ce5abb3cf61eee88901836bdb3e415c5aa190bec917dcc"
+      },
+      "sourceClosureFileCount": 686,
+      "sourceClosureScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "beforeAfterAndProjectionCreationMatch": true,
+      "allRecordedStageExitCodesZero": true,
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    }
+  ],
+  "test": {
+    "file": "/Users/lex/play/model-router/tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts",
+    "bytes": 50882,
+    "sha256": "7defc7d6e65f95c090a2337565ebe41006617751ffa52f64f043d2a66d36a7f9"
+  },
+  "originalTwoCases": {
+    "archiveManifest": {
+      "file": "/private/tmp/model-router-affinity-residual-fixture-before-a1c73f0a-483f-47dd-a923-625484e3e460/manifest.json",
+      "bytes": 254,
+      "sha256": "71e7edf26244a0cb073c91473a73438925597e5263395bb614aadb7def76f89c"
+    },
+    "archivePreEditCopy": {
+      "file": "/private/tmp/model-router-affinity-residual-fixture-before-a1c73f0a-483f-47dd-a923-625484e3e460/affinity-bind-race.postgres.integration.test.ts",
+      "bytes": 33213,
+      "sha256": "b14b54dfc747fec5989966c0ecefa611516932b1d46b12e4bb16471d8de0e0be"
+    },
+    "originalFunctionsAssertionsOptionsAndTwoTestsByteExactPreserved": true
+  },
+  "newPostgresCases": [
+    {
+      "name": "restricted PostgreSQL terminal second affinity contention is rate limited without a third bind",
+      "proof": "Three independently connected restricted gateway actors: A commits an empty affinity read; B binds P; A receives the real typed P conflict. Actual PG leases fill P, C performs capacity-driven stale invalidation and binds Q, then leases release so A freshly revalidates P. A second real bind receives Q contention and returns rate_limited with two A binds, one fresh winner check and no third bind. Both losing proposals preserve full timestamps/TTL/revision/fence."
+    },
+    {
+      "name": "restricted PostgreSQL fresh affinity winner capacity is rate limited without a second bind",
+      "proof": "Actual restricted-role PG leases fill P after A receives its first typed hint. Fresh eligibility/health reads still succeed, the actual PG concurrency read reports two held leases, and A returns rate_limited with no second bind or affinity mutation."
+    },
+    {
+      "name": "restricted PostgreSQL initially full candidate capacity is rate limited without any bind",
+      "proof": "Actual PG leases fill both original accounts before selection. Real eligibility/health/concurrency reads yield a capacity rate limit without any affinity resolve or bind."
+    }
+  ],
+  "evidenceBoundaries": [
+    "Both versions ran the same five-case component root; each logged 5/5 with zero skips. Their 686-file literal-relative-import/runner/roles/package-lock closures match before, after and projection creation. This is not a whole-repository or future freeze.",
+    "Production operations use restricted gateway roles. Migrator access is fixture setup and observer-only full timestamp/financial reads; no new grants, superuser shortcuts, schema or timeout changes.",
+    "Passed assertions compare nine existing synthetic fixture financial/request table count-and-digest snapshots before/after. They prove these component operations leave fixture rows unchanged; no separate financial receipt or HTTP settlement/refund result is asserted.",
+    "Redis is an in-memory slot bookkeeping double in these component cases. Zero tracked slots and exact release calls do not prove real Redis network acknowledgement.",
+    "These are local functional component and offline checks, not HTTP/provider/admission end-to-end acceptance, durability/performance measurements, formal required CI, current rebuilt real-provider validation or a complete R9 pass."
+  ]
+}

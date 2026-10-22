@@ -1,0 +1,42 @@
+{
+  "postgres": "18",
+  "stages": [
+    {
+      "name": "initdb",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "pg-start",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "create-db",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "role-template-before",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "migrate-current-source",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "role-template-after",
+      "code": 0,
+      "signal": null
+    },
+    {
+      "name": "commercial-gateway-e2e-current-source",
+      "code": 1,
+      "signal": null
+    }
+  ],
+  "error": "commercial-gateway-e2e-current-source failed",
+  "pgStopped": true
+}

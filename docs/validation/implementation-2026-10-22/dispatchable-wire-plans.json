@@ -1,0 +1,703 @@
+{
+  "schema": 1,
+  "classification": "local-restricted-postgres-query-microdiagnostic",
+  "formalRequiredCiEvidence": false,
+  "evidenceRun": "model-router-dispatchable-wire-qsPtg9",
+  "recordedAt": "2026-10-21T19:16:26.735Z",
+  "fixture": {
+    "source": "tests/saas/metering/normal-success-postgres-fixture.ts#seedFixture",
+    "supplyMode": "platform",
+    "nativeProtocol": "openai",
+    "setupWrites": true,
+    "setupWriteScope": "fresh owned roles/migrations and synthetic fixture, excluded from samples"
+  },
+  "comparison": {
+    "variants": [
+      "unnamed",
+      "named"
+    ],
+    "warmupGroups": 8,
+    "measuredGroups": 60,
+    "queriesPerGroup": 2,
+    "alternatingOrder": true,
+    "identicalSqlAndBindingsAndRows": true,
+    "onePhysicalSessionAndSnapshot": true,
+    "transaction": "REPEATABLE READ READ ONLY",
+    "originalSharedFencesHeld": true,
+    "authorityRowsCached": false,
+    "namedStatementsMaximum": 1,
+    "fixedStatementName": "mr_dispatchable_final_select_v1",
+    "namesOnlyExactSelect": true,
+    "explainNamedOrExecuted": false,
+    "sqlPrepareOrSetOrPlannerChanges": false,
+    "artifactWritesInsideMeasuredLoop": false,
+    "rollbackObserved": true
+  },
+  "statement": {
+    "sourceFile": "src/saas/gateway/commercial-metering-policy-service.ts",
+    "sqlSha256": "358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16",
+    "sqlBytes": 468,
+    "columns": [
+      "tenant_id",
+      "project_id",
+      "route_id",
+      "version",
+      "customer_policy_id",
+      "customer_policy_version",
+      "provider_policy_id",
+      "provider_policy_version",
+      "contract_attestation_id",
+      "customer_price_version",
+      "supplier_cost_version"
+    ],
+    "preparedStatementTextIsSqlNotExecutionPlan": true,
+    "bindingsSha256": "c5fd34387c528b56ffd5440d5c598bd30a0a880c5db6cd5e5d00a6493de08521",
+    "bindingIdentity": [
+      {
+        "position": 1,
+        "type": "string",
+        "sha256": "d7d9a375661c136ea85ed4ff01c3eadb06c9e41725a21ed7c96a43d1a0523825"
+      },
+      {
+        "position": 2,
+        "type": "string",
+        "sha256": "19e233d4402cfabd4b00f33bef9e36f37fb1daa2c2bba15252c94143ca2fb966"
+      },
+      {
+        "position": 3,
+        "type": "string",
+        "sha256": "20ee0332982f20a2f2638f10e65f7d9e29b4b03633870ca0a1a8193cafbbda78"
+      },
+      {
+        "position": 4,
+        "type": "string",
+        "sha256": "cc11310c456c3690d5a74c23aa31cc25b4e74cdae146c71e54ad9dbc1d109fde"
+      }
+    ],
+    "normalizedCalibrationRowsSha256": "41cdacb8f0183292db72f30f027531072a3e1c0a82a4eb66bb321e32a255a44b"
+  },
+  "schemaRegistry": {
+    "count": 118,
+    "latestVersion": 137,
+    "sha256": "bd410b68c121fb3eb54caa179040c99e4e0860d313df30f1fabfc2226a8f440a",
+    "canonicalVerificationPassed": true
+  },
+  "session": {
+    "role": "model_router_saas_gateway",
+    "session": "model_router_saas_gateway",
+    "schema": "model_router_saas",
+    "superuser": false,
+    "settings": {
+      "server_version": "18.6 (Homebrew)",
+      "server_version_num": "180006",
+      "search_path": "model_router_saas",
+      "transaction_isolation": "repeatable read",
+      "transaction_read_only": "on",
+      "plan_cache_mode": "auto",
+      "join_collapse_limit": "8",
+      "from_collapse_limit": "8",
+      "geqo": "on",
+      "geqo_threshold": "12",
+      "jit": "on",
+      "enable_nestloop": "on",
+      "enable_hashjoin": "on",
+      "enable_mergejoin": "on",
+      "work_mem": "4MB",
+      "effective_cache_size": "4GB",
+      "random_page_cost": "4",
+      "seq_page_cost": "1",
+      "cpu_tuple_cost": "0.01",
+      "cpu_index_tuple_cost": "0.005",
+      "cpu_operator_cost": "0.0025",
+      "max_parallel_workers_per_gather": "2",
+      "track_io_timing": "off",
+      "statement_timeout": "0",
+      "lock_timeout": "0",
+      "fsync": "on",
+      "synchronous_commit": "on"
+    }
+  },
+  "viewDefinitionSha256": "568a290adeb3b5916c849a3515bbc03d9caf8b69fef99c3b2f48667d9f21f11d",
+  "originalFences": {
+    "count": 5,
+    "sha256": "15fb0a9f3e4be9f8cbc565048c29b846e9aab57e5574663e8115bbb874a3f9de"
+  },
+  "beforeMeasured": {
+    "prepared": [
+      {
+        "name": "mr_dispatchable_final_select_v1",
+        "statementTextSha256": "358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16",
+        "fromSql": false,
+        "parameterTypes": "{uuid,uuid,text,bigint}",
+        "genericPlans": "3",
+        "customPlans": "5"
+      }
+    ],
+    "settings": {
+      "server_version": "18.6 (Homebrew)",
+      "server_version_num": "180006",
+      "search_path": "model_router_saas",
+      "transaction_isolation": "repeatable read",
+      "transaction_read_only": "on",
+      "plan_cache_mode": "auto",
+      "join_collapse_limit": "8",
+      "from_collapse_limit": "8",
+      "geqo": "on",
+      "geqo_threshold": "12",
+      "jit": "on",
+      "enable_nestloop": "on",
+      "enable_hashjoin": "on",
+      "enable_mergejoin": "on",
+      "work_mem": "4MB",
+      "effective_cache_size": "4GB",
+      "random_page_cost": "4",
+      "seq_page_cost": "1",
+      "cpu_tuple_cost": "0.01",
+      "cpu_index_tuple_cost": "0.005",
+      "cpu_operator_cost": "0.0025",
+      "max_parallel_workers_per_gather": "2",
+      "track_io_timing": "off",
+      "statement_timeout": "0",
+      "lock_timeout": "0",
+      "fsync": "on",
+      "synchronous_commit": "on"
+    }
+  },
+  "afterMeasured": {
+    "prepared": [
+      {
+        "name": "mr_dispatchable_final_select_v1",
+        "statementTextSha256": "358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16",
+        "fromSql": false,
+        "parameterTypes": "{uuid,uuid,text,bigint}",
+        "genericPlans": "63",
+        "customPlans": "5"
+      }
+    ],
+    "settings": {
+      "server_version": "18.6 (Homebrew)",
+      "server_version_num": "180006",
+      "search_path": "model_router_saas",
+      "transaction_isolation": "repeatable read",
+      "transaction_read_only": "on",
+      "plan_cache_mode": "auto",
+      "join_collapse_limit": "8",
+      "from_collapse_limit": "8",
+      "geqo": "on",
+      "geqo_threshold": "12",
+      "jit": "on",
+      "enable_nestloop": "on",
+      "enable_hashjoin": "on",
+      "enable_mergejoin": "on",
+      "work_mem": "4MB",
+      "effective_cache_size": "4GB",
+      "random_page_cost": "4",
+      "seq_page_cost": "1",
+      "cpu_tuple_cost": "0.01",
+      "cpu_index_tuple_cost": "0.005",
+      "cpu_operator_cost": "0.0025",
+      "max_parallel_workers_per_gather": "2",
+      "track_io_timing": "off",
+      "statement_timeout": "0",
+      "lock_timeout": "0",
+      "fsync": "on",
+      "synchronous_commit": "on"
+    }
+  },
+  "measuredNamedPlanDelta": {
+    "genericPlans": "60",
+    "customPlans": "0"
+  },
+  "summary": [
+    {
+      "variant": "unnamed",
+      "wall": {
+        "n": 60,
+        "meanMs": 8.201768749999992,
+        "p50Ms": 8.141750000000002,
+        "p95Ms": 8.68266699999981,
+        "p99Ms": 8.986458000000084,
+        "minMs": 7.639208000000053,
+        "maxMs": 8.986458000000084
+      },
+      "firstInGroup": 30,
+      "secondInGroup": 30,
+      "normalizedRowsSha256": "41cdacb8f0183292db72f30f027531072a3e1c0a82a4eb66bb321e32a255a44b"
+    },
+    {
+      "variant": "named",
+      "wall": {
+        "n": 60,
+        "meanMs": 0.2904333500000102,
+        "p50Ms": 0.24991700000009587,
+        "p95Ms": 0.5014160000000629,
+        "p99Ms": 1.4350839999999607,
+        "minMs": 0.14979199999993398,
+        "maxMs": 1.4350839999999607
+      },
+      "firstInGroup": 30,
+      "secondInGroup": 30,
+      "normalizedRowsSha256": "41cdacb8f0183292db72f30f027531072a3e1c0a82a4eb66bb321e32a255a44b"
+    }
+  ],
+  "samples": [
+    {
+      "group": 0,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 1,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 2,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 3,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 4,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 5,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 6,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 7,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 8,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 9,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 10,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 11,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 12,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 13,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 14,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 15,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 16,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 17,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 18,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 19,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 20,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 21,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 22,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 23,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 24,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 25,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 26,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 27,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 28,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 29,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 30,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 31,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 32,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 33,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 34,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 35,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 36,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 37,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 38,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 39,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 40,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 41,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 42,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 43,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 44,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 45,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 46,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 47,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 48,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 49,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 50,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 51,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 52,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 53,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 54,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 55,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 56,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 57,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    },
+    {
+      "group": 58,
+      "order": [
+        "unnamed",
+        "named"
+      ]
+    },
+    {
+      "group": 59,
+      "order": [
+        "named",
+        "unnamed"
+      ]
+    }
+  ],
+  "source": {
+    "sourceTreeSha256": "711b9d5b562f14d5189e5933978c15c39a4ae7352fb1756e13e754792c0b31b4",
+    "sourceFileCount": 748,
+    "tracked": {
+      "src/saas/gateway/commercial-metering-policy-service.ts": "625a833630257baff777d2dd11e0ec7a2d9e84f4617234678fba6a410cb3de23",
+      "src/saas/gateway/postgres-request-preparation-authority-adapter.ts": "635d8dd659b22320a16e1fcf71ad465576f8b423b2509c5da1a9a1f62f3d5de6",
+      "src/saas/gateway/postgres-preparation-observer.ts": "5c399c128aa5e14d310f3565b6eac372fae7721dcf70f4c4215030826beec5ea",
+      "src/saas/db/database.ts": "cfdfe745390d6b2d709b440e30bfb17bd7edb503b5f6f7f50d5b3c0e38832a2a",
+      "src/saas/db/migrations/023_commercial_metering_policy_authority.ts": "1360db0b32b977ef4922b7f8492f725e2489832181c6d86f6d586fd6477090d0",
+      "tests/saas/metering/normal-success-postgres-fixture.ts": "4362fb68e8827f89498df16a90ea080aaf1c3200d78d50544e09d26885e6e98b",
+      "tests/saas/gateway/commercial-dispatch-hint.postgres.integration.test.ts": "0564ca95f7963417c1e34f98a0f4982bccfc91ab0f7860699e72114729b1d10e",
+      "deploy/managed-saas-postgres-roles.sql": "75f0239567949d05aa61eb252a8d9f4f33715d4b7972dde31a464f132b21902a",
+      "node_modules/pg/package.json": "e42dd36cba6e9dd8dbb6f773a2f7be8a8c3c273e18b155e42e75961a4cb8bc28",
+      "node_modules/pg/lib/query.js": "a13377272ad4f842f6f6616d187ef3123cfed90e764cae9a663058ab41a769a0",
+      "node_modules/pg/lib/client.js": "992c12d10cd42ece06b0b224601fa783a02ed08f3ace8bd8089cc441b6308abf"
+    },
+    "helpers": {
+      "model-router-dispatchable-wire-experiment-20261022.mjs": "46be15b445e5ec4618e25845615091ad974fca905fed88133187d6f10df7e748",
+      "model-router-dispatchable-wire-pg18-20261022.mjs": "1f91fbfee913882cfcac6eaf0bf56d146ccee5ba826d59f9bd973b6994983e51"
+    },
+    "changed": false
+  },
+  "rawDiagnosticSha256": "527cfe63b5f74e602bf6695bd4f9ffea5d8c1ba636358d4e8c4e02e4153da2d7",
+  "cleanup": {
+    "measurementClientReleased": true,
+    "fixturePoolsClosed": true,
+    "measurementPoolClosed": true,
+    "statementLifetime": "only its single physical backend; destroyed when measurement pool closes",
+    "postgresStopped": true,
+    "pgdataRemoved": true
+  },
+  "limits": [
+    "Native wire named statements were used only in this disposable experiment, not enabled in production code.",
+    "The returned authority rows were read and compared on every query; no authority facts were cached.",
+    "One warm synthetic platform fixture and snapshot; no catalog-scale, mixed-supply, revocation-race or full-R9 acceptance claim.",
+    "Prepared-statement text hashes identify SQL text, not the actual execution plan."
+  ],
+  "completed": true
+}

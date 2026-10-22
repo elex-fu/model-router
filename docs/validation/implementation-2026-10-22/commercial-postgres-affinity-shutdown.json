@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "classification": "local-source-commercial-postgres-after-affinity-and-shutdown-repair",
+  "formalRequiredCiEvidence": false,
+  "recordedAt": "2026-10-22T06:12:28.077561+00:00",
+  "status": "passed-two-version-local-http-root",
+  "root": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+  "rootSha256": "653b0a47b09a6acc94f7aa6288cb6ccfde64019e22864eee36aa31805d82cdb5",
+  "preparedStatements": "native",
+  "runs": [
+    {
+      "directory": "/private/tmp/model-router-commercial-affinity-shutdown-pg18-20261022-0620",
+      "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+      "backend": "disposable-initdb-cluster",
+      "dockerImageId": null,
+      "containerId": null,
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "roles": [
+        "model_router_saas_migrator",
+        "model_router_saas_control_plane",
+        "model_router_saas_gateway"
+      ],
+      "sourceClosureFileCount": 685,
+      "sourceBeforeAfterAndRecordCreationMatch": true,
+      "summarySha256": "05cb5006707e67b4136710dd9bbf8f89065f4a17ef778fd5cb1695b4401398f6",
+      "tapSha256": "73c3b6bded7be732dc44d0c9329dc5fe70dd00572f1b1b91f6174904f9cf137d",
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    },
+    {
+      "directory": "/private/tmp/model-router-commercial-affinity-shutdown-pg15-20261022-0621",
+      "postgresVersion": "PostgreSQL 15.19 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit",
+      "backend": "disposable-docker-container",
+      "dockerImageId": "sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81",
+      "containerId": "c9e79b23b25f0da2d290b9e06b506b5956de31bf64efa0a62703151d379bfb8b",
+      "counts": {
+        "tests": 27,
+        "suites": 0,
+        "pass": 27,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "roles": [
+        "model_router_saas_migrator",
+        "model_router_saas_control_plane",
+        "model_router_saas_gateway"
+      ],
+      "sourceClosureFileCount": 685,
+      "sourceBeforeAfterAndRecordCreationMatch": true,
+      "summarySha256": "0a0a382ea06cec2dc1192ffefc4a684c4aec7deac1daec028560ab0035e300f0",
+      "tapSha256": "e0b13133a7fb1b69087a0a9f58e6b5c7bc841164f7f471e0a793f9ecc5a89898",
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true
+      }
+    }
+  ],
+  "limits": [
+    "The existing full commercial HTTP root ran27 native tests on each disposable PostgreSQL version with no skips, failures or cancellation. Counts are per root, not54 independent business scenarios.",
+    "Runs execute source with restricted runtime roles; current built real-Kimi acceptance and component race tests are separate records.",
+    "The original root and role manifests, assertions, funds/revocation rules and timeouts were unchanged.",
+    "Canonical functional fsync/synchronous_commit off; no performance or crash-durability claim.",
+    "No real supplier calls, R9, formal required GitHub CI, production deployment or future repository freeze is claimed."
+  ]
+}
