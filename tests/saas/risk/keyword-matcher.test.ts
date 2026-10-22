@@ -137,8 +137,11 @@ describe('keyword matcher (Aho-Corasick direct translation)', () => {
     assert.equal(match(matcher, probe).hit, false);
 
     // Generous CI budgets: build is one-shot per config change; the
-    // per-request scan must stay far below typical upstream latency.
-    assert.ok(buildMs < 2000, `build of 10k keywords took ${buildMs.toFixed(1)}ms (budget 2000ms)`);
+    // per-request scan must stay far below typical upstream latency. The
+    // build bound keeps 4x headroom over an uncontended run so parallel
+    // test-suite CPU contention does not mask real algorithmic regressions
+    // (which would overshoot by orders of magnitude, not by contention).
+    assert.ok(buildMs < 8000, `build of 10k keywords took ${buildMs.toFixed(1)}ms (budget 8000ms)`);
     assert.ok(perCallMs < 5, `match over ${probeRunes} runes took ${perCallMs.toFixed(3)}ms (budget 5ms)`);
   });
 });

@@ -27,7 +27,10 @@ async function runCli(args: readonly string[], env: NodeJS.ProcessEnv): Promise<
     const result = await execFileAsync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', ...args], {
       cwd: process.cwd(),
       env,
-      timeout: 10_000,
+      // Bound is CLI boot under tsx plus the gated startup path, not a
+      // latency property: parallel test suites can slow subprocess boot well
+      // past 10s without changing any behavior under test.
+      timeout: 30_000,
     });
     return { stdout: result.stdout, stderr: result.stderr, code: 0 };
   } catch (error) {

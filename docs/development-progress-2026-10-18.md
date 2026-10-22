@@ -581,3 +581,16 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 **验证**：单文件 10/10 通过；修复后连续 20 次运行 0 失败；`tsc --noEmit` 干净；两文件 Biome 零错误（23 个既有警告与基线一致）。**残余风险（如实记录）**：≥43 ms 的进程停顿若发生在 attempt-1 与 deadline 之间，第二次派发仍会合法地不发生、`secondSeen` 断言仍可能失败——在保留原预算与断言的前提下该风险不可归零，仅能通过串行/低干扰执行降低概率；本轮未改 runner 并发策略。完整 unit 套件在修复前源码上已通过（见上），修复后按 R2 重跑。
 
 **R1→R2**：修复已按任务独立提交；R2 在此基础上补完整 unit/integration、两条 workflow strict 与重建标准 CLI。
+
+## 18. R2 完成：完整回归、并发 flake 窄修与重建（2026-10-23）
+
+**首轮完整回归暴露 5 个并发 flake**（unit 6848/6820 pass/5 fail；同一批文件隔离运行全部通过）。逐个定位后的窄修：
+
+1. **`refuseRunning` 探测 fail-open（真实安全语义修正，src/cli/v2-management.ts）**：离线写保护用 400 ms 探测配置端口，超时被当作"无服务器响应"放行写。端口有监听但响应慢（并行套件下常见）时误放行。改为 TimeoutError 同样拒绝（fail-closed）；仅明确连接拒绝才放行。新增用例：慢 800 ms 的 /healthz 仍拒绝离线写。
+2. **CLI spawn 启动超时（tests/cli/managed-saas-start.test.ts）**：`runCli` 10 s 超时在并行套件下被 tsx 启动整个 CLI 耗尽 → 空输出断言失败。该界是启动界不是行为界，放宽到 30 s；gate 顺序断言全部保留。
+3. **keyword matcher build 预算**：2000 ms 预算在 CPU 争用下实测 4183 ms（隔离 ~1 s）。放宽到 8000 ms（4× 余量）；真实算法回归会是数量级超标而非争用级退化，per-call 5 ms 预算保持不变。
+4. **cancellation 测试观测窗口（tests/server/timeout-budgets.test.ts）**：upstream socket close 晚于客户端 abort 解析的观测竞态，改为有界轮询（同 R1 secondSeen 模式）。
+
+**R2 门禁结果（修复后）**：unit **6849 / 6826 pass / 0 fail / 23 skipped（exit 0）**；integration **349 / 255 pass / 0 fail / 94 skipped（exit 0，与既往基线一致）**；`tsc --noEmit` 干净；两条 workflow strict 命令（056 组与 059 组原样命令）均通过；改动文件 Biome 零错误；`build:server` exit 0，`dist/cli/index.js` 为新构建产物。首轮回归中 tests/admin/phase2.test.ts 的一次 waitJob 失败未在重跑复现，按 flake 记录观察，不作为已修复声明。
+
+**限制**：并发 flake 的根因是套件满并行下的 CPU/子进程启动争用，本轮只窄修已观测的 5 处；未改 runner 并发策略。真实 Kimi 主链（R3）与性能对照（R4）基于本构建产物执行。

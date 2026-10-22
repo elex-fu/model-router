@@ -325,7 +325,12 @@ test('client cancellation ends upstream request and records cancellation', async
     const pending = proxy.post(false, controller.signal).catch(() => undefined);
     setTimeout(() => controller.abort(), 50);
     await pending;
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    // The upstream socket close can trail the client-side abort resolution by
+    // a few event-loop turns under scheduler/GC pressure; poll a bounded
+    // window instead of a single fixed settle.
+    for (let settles = 0; !closed && settles < 15; settles++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.equal(closed, true);
     assert.equal(proxy.attempts.at(-1)?.outcome, 'cancelled');
   } finally {

@@ -150,6 +150,16 @@ async function refuseRunning(raw: Json): Promise<void> {
       );
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('A server is responding')) throw error;
+      // A probe timeout means something may still be listening on the port (a
+      // slow or busy server). This guard protects offline config writes, so
+      // ambiguity must fail closed: treat it like a responding server instead
+      // of allowing the write. Only a definitive connection refusal clears
+      // the port for offline edits.
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        throw new Error(
+          'A server is responding on the configured port (probe timed out); use the admin API or stop it before offline changes',
+        );
+      }
     }
   }
 }

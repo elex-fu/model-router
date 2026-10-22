@@ -593,6 +593,38 @@ test('offline writes refuse responding server; upstream:update and upstream:test
   }
 });
 
+test('offline writes fail closed when the responding-server probe times out', async () => {
+  // A listener that answers /healthz slower than the CLI's 400ms probe must
+  // still block offline writes: the guard protects config mutation, so an
+  // ambiguous probe outcome (timeout) refuses instead of allowing the write.
+  const f = await fixture();
+  const server = createServer((request, response) => {
+    if (request.url === '/healthz') {
+      setTimeout(() => {
+        response.writeHead(200);
+        response.end();
+      }, 800);
+      return;
+    }
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+  });
+  try {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const current = f.read();
+    current.server.port = address.port;
+    writeFileSync(f.configPath, JSON.stringify(current));
+    const blocked = await cli(f.configPath, 'upstream:update', 'Local', '--disable');
+    assert.equal(blocked.code, 1);
+    assert.match(blocked.stderr, /server is responding/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    f.close();
+  }
+});
+
 test('backup:create reuses admin SQLite backup and requires telemetry', async () => {
   const f = await fixture();
   try {
