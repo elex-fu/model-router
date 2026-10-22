@@ -628,3 +628,13 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 推送 `7e862b3` 后远端 CI **conclusion: success**：build-and-test（含 browser E2E）、Managed SaaS PostgreSQL integration PG15/18、deploy smoke（PG16）与全部 **29 gate × 2 版本 = 58 个 isolated required gate** 首次全部通过——此前自 2026-10-20 起所有推送（354f214、bb9756c×2、ef9e3c9、c866719）均失败。§20 的五类修复在远端得到验证。
 
 **R7 剩余边界**：云恢复交付（生产 KMS、真实异地存储、PITR 与恢复材料演练）仍开放,属外部资源任务;CI 全绿不等于发布 GO（R4/R6 性能门槛与 R8 Codex 边界仍开放）。
+
+## 22. R4 现状:串行腿已执行但被机器负载污染,性能腿暂停（2026-10-23）
+
+**已执行**:cap off 的原规范串行测量(`run-current-r9.mjs --diagnostic --serial-profile --request-samples --no-build`,native,新构建)完整跑完四腿各 100 样本、零流错误,但结果**记录为环境无效**:测试期间机器负载 17-25(10 核),存在 xdown Java 构建、Chrome、WindowServer 等无关进程。观测:latency p99 开销 1251.95 ms、TTFB 700.95 ms;direct 腿 p99 仅 13.5 ms(mock 正常),gateway 各阶段均匀膨胀 3-5×(preparation-total 均值 201.6 ms vs 既往安静机 ~42 ms;scheduler 49.5 vs 11;authority 30.9 vs ~9)——均匀膨胀与 CPU 争用一致,不构成网关回归或优化结论。证据保留于 /tmp/r4-serial-cap-off(未归档入库)。
+
+**暂停原因**:R4 的 off/8 c200 对照与后续 R6 完整 R9 需要安静机器;本轮 40+ 分钟监控内负载持续 9-22,来源为用户活跃桌面进程,非短暂构建。按"性能测量期间不并行负载"的纪律,不在超订机器上执行。
+
+**已完成并可用**:HTTP 背压 cap 的 harness 透传(§18 前 commit 483b3f9,27/27 ops 测试)——负载窗口出现后可直接执行 `MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT=off/n` 的完整对照。
+
+**恢复条件**:机器 1 分钟负载 < ~8(核数一半)时,重跑串行腿(替换本轮无效记录)再执行 off/8 对照;8 仍不升为默认值,30/10 ms 门槛不变。
