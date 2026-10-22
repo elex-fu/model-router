@@ -51,13 +51,25 @@ const isolatedGates = [
   ['rate-limit-scheduling-098', 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts', false],
   ['health-score-098', 'tests/saas/gateway/health-score.postgres.integration.test.ts', false],
   ['oauth-refresh-onboarding', 'tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts', false],
+  ['kimi-commercial-preparation-diagnostic', 'tests/integration/kimi-commercial-preparation-diagnostic.test.ts', false],
+  ['scheduler-native-protocol', 'tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts', false],
+  ['prepared-statements', 'tests/saas/gateway/prepared-statements.postgres.integration.test.ts', false],
+  ['runtime-health-clock', 'tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts', false],
+  ['dispatch-capacity', 'tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts', true],
+  ['affinity-bind-race', 'tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts', false],
+  ['dispatch-proof-fence-batch', 'tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts', false],
 ] as const;
 const cancellationFixture = 'tests/saas/gateway/pre-dispatch-postgres-fixture.ts';
 const terminalReplayFixture = 'tests/saas/metering/normal-success-postgres-fixture.ts';
+const kimiCommercialFixture = 'scripts/ops/verify-commercial-kimi.ts';
+const runtimeHealthClockFixture = 'tests/saas/gateway/runtime-health-clock-postgres-fixture.ts';
 const isolatedStrictRoots = [
   ...isolatedGates.map(([, root]) => root),
+  'src/types/busboy.d.ts',
   cancellationFixture,
   terminalReplayFixture,
+  kimiCommercialFixture,
+  runtimeHealthClockFixture,
   HTTP,
   ISOLATED_RUNNER,
   GATE_TEST,
@@ -81,6 +93,7 @@ const standaloneRoots = [
 ] as const;
 const strictRoots = [
   ...gatewayRoots,
+  'src/types/busboy.d.ts',
   CLI,
   WORKER,
   'tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts',
@@ -730,17 +743,72 @@ test('real complete HTTP prerequisites and child failures cannot be skipped, fil
   }
 });
 
-test('actual source prerequisites distinguish three successful-HTTP dependencies from three independent fixtures', () => {
+function validateRuntimeHealthClockSource(source: string, fixture: string): void {
+  assert.match(source, /from '\.\/runtime-health-clock-postgres-fixture\.js'/);
+  assert.match(source, /await healthClockDatabases\(\)/);
+  assert.match(source, /proveRuntimeHealthWaitClock\(migrator, gateway, 'success'\)/);
+  assert.match(source, /proveRuntimeHealthWaitClock\(migrator, gateway, 'network-failure'\)/);
+  assert.match(source, /proveRuntimeHealthFutureRejected\(migrator, gateway\)/);
+  assert.match(source, /proveRuntimeHealthGuard\(migrator, gateway, 'backward-time'\)/);
+  assert.match(source, /proveRuntimeHealthGuard\(migrator, gateway, 'non-increasing-token'\)/);
+  assert.match(source, /proveRuntimeHealthGuard\(migrator, gateway, 'revision-jump'\)/);
+  assert.match(
+    fixture,
+    /from '\.\.\/\.\.\/\.\.\/src\/saas\/gateway\/postgres-provider-account-runtime-health-store\.js'/,
+  );
+  assert.match(fixture, /async function seedFixture\(migrator: SaasDatabase, gateway: SaasDatabase, future = false\)/);
+  assert.match(fixture, /await seedFixture\(migrator, gateway\)/);
+  assert.match(fixture, /await seedFixture\(migrator, gateway, true\)/);
+  assert.match(fixture, /INSERT INTO saas_tenants/);
+  assert.match(fixture, /INSERT INTO saas_provider_account_leases/);
+  assert.match(
+    fixture,
+    /new PostgresProviderAccountRuntimeHealthStore\(\{ database \}\)\.recordRuntimeOutcome\(waiterInput\)/,
+  );
+  assert.match(fixture, /assert\.equal\(hash\(sql\), HEALTH_CLOCK_WRITE_SQL_SHA256,/);
+  assert.match(
+    fixture,
+    /assert\.deepEqual\(values, expected, 'all ten original account, lease, scope and outcome bindings must match'\)/,
+  );
+  assert.match(fixture, /pg_blocking_pids\(\$2::integer\)/);
+  for (const input of [source, fixture]) {
+    assert.doesNotMatch(input, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+  }
+}
+
+test('actual source prerequisites preserve successful-HTTP dependencies and each isolated root own fixture', () => {
   const cancellation = read(cancellationFixture);
   assert.match(cancellation, /ci = host === 'postgres' && port === 5432 && database === 'model_router_saas_ci'/);
   assert.match(cancellation, /cancellation PG requires prior successful real HTTP fixture for each mode/);
   assert.doesNotMatch(cancellation, /\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
-  for (const [, root, needsHttp] of isolatedGates) {
+  for (const [selector, root, needsHttp] of isolatedGates) {
     const source = read(root);
     assert.ok(existsSync(resolve(repository, root)));
     if (needsHttp) {
       assert.match(source, /pre-dispatch-postgres-fixture\.js/);
       assert.match(source, /await cancellationFixture\(/);
+    } else if (selector === 'kimi-commercial-preparation-diagnostic') {
+      // This one root owns full provisioning in its virgin isolated service.
+      // It must use its fixed fixture, never consume the shared HTTP bootstrap.
+      assert.match(source, /from '\.\.\/\.\.\/scripts\/ops\/verify-commercial-kimi\.js'/);
+      assert.match(source, /await provisionKimiCommercialFixture\([^;]*\{\s*mode: 'source-diagnostic',?\s*\}\)/);
+      assert.doesNotMatch(source, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+      const fixture = read(kimiCommercialFixture);
+      assert.match(fixture, /await identity\.issueBootstrapToken\(/);
+      assert.match(fixture, /await identity\.bootstrapPlatformAdmin\(/);
+    } else if (selector === 'runtime-health-clock') {
+      validateRuntimeHealthClockSource(source, read(runtimeHealthClockFixture));
+    } else if (selector === 'dispatch-proof-fence-batch') {
+      assert.match(source, /from '\.\.\/gateway\/prepared-evidence-authority-postgres-fixture\.js'/);
+      assert.match(source, /mode: 'byok' \| 'platform' = 'platform'/);
+      assert.match(source, /await evidenceAuthorityFixture\(migrator, gateway, mode\)/);
+      assert.match(source, /for \(const mode of \['byok', 'platform'\] as const\)/);
+      const fixture = read('tests/saas/gateway/prepared-evidence-authority-postgres-fixture.ts');
+      assert.match(fixture, /from '\.\.\/metering\/normal-success-postgres-fixture\.js'/);
+      assert.match(fixture, /await seedFixture\(migrator, gateway, mode\)/);
+      for (const input of [source, fixture]) {
+        assert.doesNotMatch(input, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+      }
     } else {
       // Seed helpers are named per domain (seedIdentities/seedAccount/seedCredential/seedFixture/...);
       // the invariant is own-row seeding, never a shared HTTP bootstrap.
@@ -753,4 +821,94 @@ test('actual source prerequisites distinguish three successful-HTTP dependencies
   const terminal = read(terminalReplayFixture);
   assert.match(terminal, /export async function seedFixture\(/);
   assert.doesNotMatch(terminal, /\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+});
+
+test('runtime health clock gate retains its fixed own-row helper and real restricted health writer proof', () => {
+  const entry = isolatedGates.find(([selector]) => selector === 'runtime-health-clock');
+  assert.ok(entry);
+  assert.equal(entry[2], false);
+  const source = read(entry[1]);
+  const fixture = read(runtimeHealthClockFixture);
+  validateRuntimeHealthClockSource(source, fixture);
+  for (const marker of [
+    "from './runtime-health-clock-postgres-fixture.js'",
+    'await healthClockDatabases()',
+    "proveRuntimeHealthWaitClock(migrator, gateway, 'success')",
+    "proveRuntimeHealthWaitClock(migrator, gateway, 'network-failure')",
+    'proveRuntimeHealthFutureRejected(migrator, gateway)',
+    "proveRuntimeHealthGuard(migrator, gateway, 'backward-time')",
+    "proveRuntimeHealthGuard(migrator, gateway, 'non-increasing-token')",
+    "proveRuntimeHealthGuard(migrator, gateway, 'revision-jump')",
+  ]) {
+    assert.ok(source.includes(marker));
+    assert.throws(() => validateRuntimeHealthClockSource(source.replace(marker, 'removed-contract'), fixture));
+  }
+  for (const marker of [
+    'async function seedFixture(migrator: SaasDatabase, gateway: SaasDatabase, future = false)',
+    'await seedFixture(migrator, gateway)',
+    'await seedFixture(migrator, gateway, true)',
+    'INSERT INTO saas_tenants',
+    'INSERT INTO saas_provider_account_leases',
+    'new PostgresProviderAccountRuntimeHealthStore({ database }).recordRuntimeOutcome(waiterInput)',
+    'assert.equal(hash(sql), HEALTH_CLOCK_WRITE_SQL_SHA256,',
+    "assert.deepEqual(values, expected, 'all ten original account, lease, scope and outcome bindings must match')",
+    'pg_blocking_pids($2::integer)',
+  ]) {
+    assert.ok(fixture.includes(marker));
+    assert.throws(() => validateRuntimeHealthClockSource(source, fixture.replaceAll(marker, 'removed-contract')));
+  }
+  for (const forbidden of ['await cancellationFixture(', 'issueBootstrapToken(', 'bootstrapPlatformAdmin(']) {
+    assert.throws(() => validateRuntimeHealthClockSource(`${source}\n${forbidden}`, fixture));
+    assert.throws(() => validateRuntimeHealthClockSource(source, `${fixture}\n${forbidden}`));
+  }
+});
+
+test('dispatch capacity gate retains the HTTP prerequisite and real account lease exhaustion compensation', () => {
+  const entry = isolatedGates.find(([selector]) => selector === 'dispatch-capacity');
+  assert.ok(entry);
+  assert.equal(entry[2], true, 'this root must follow the complete successful same-database HTTP fixture');
+  const source = read(entry[1]);
+  assert.match(source, /from '\.\/pre-dispatch-postgres-fixture\.js'/);
+  assert.equal([...source.matchAll(/await cancellationFixture\(migrator, gateway, mode\)/g)].length, 2);
+  assert.match(source, /for \(const mode of \['byok', 'platform'\] as const\)/);
+  assert.match(source, /new PostgresProviderAccountLeaseService\(\{\s*database: gateway,\s*maxConcurrency: 1,/);
+  assert.match(source, /await raw\.acquire\(/);
+  assert.match(source, /createPostgresDispatchLeaseProvider\(raw\)/);
+  assert.match(source, /await dispatcher\.dispatch\(input\)/);
+  assert.match(source, /assert\.equal\(error\.code, 'LEASE_CAPACITY_EXHAUSTED'\)/);
+  assert.match(source, /new GatewayPreDispatchCompensationService\(/);
+  assert.match(source, /new PostgresPreDispatchCompensation\(/);
+  assert.match(source, /assert\.equal\(response\.status, 429\)/);
+  assert.match(source, /\{ preflights: 1, claims: 0, acquires: 1, sends: 0, cleanups: 1, capacityErrors: 1 \}/);
+  assert.match(source, /assert\.deepEqual\(await financialSnapshot\(migrator, b\), beforeFinancial\)/);
+  assert.match(source, /assert\.deepEqual\(await heldLeaseSnapshot\(migrator, a\), beforeA/);
+  assert.match(source, /await compensation\.compensate\(/);
+  assert.match(source, /error\.code === 'ATTEMPT_TRANSITION_INVALID'/);
+  assert.doesNotMatch(source, /\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+});
+
+test('prepared statement gate uses the real source APIs and the disposable commercial runner custom test entry', () => {
+  const entry = isolatedGates.find(([selector]) => selector === 'prepared-statements');
+  assert.ok(entry);
+  assert.equal(entry[2], false, 'this root owns its fixture and needs no shared HTTP bootstrap');
+  const source = read(entry[1]);
+  assert.match(source, /await seedFixture\(migrator, seedGateway, mode\)/);
+  assert.match(source, /new PostgresProviderAccountScheduler\(/);
+  assert.match(source, /new SaasCommercialMeteringPolicyService\(database\)\.resolveDispatchableRoute\(/);
+  assert.match(source, /observePreparationExecutor\(observeExecutor\(executor, calls\)/);
+  assert.match(source, /preparedStatements: 'native'/);
+  assert.match(source, /observedDatabase\(off, 'auto'/);
+  assert.match(source, /observedDatabase\(native, 'auto'/);
+  assert.match(source, /observedDatabase\(native, 'force_generic_plan'/);
+  assert.match(source, /SET LOCAL plan_cache_mode = force_generic_plan/);
+  assert.doesNotMatch(source, /(?:SET|set_config\()\s+plan_cache_mode\s*=/);
+  assert.match(source, /FROM pg_prepared_statements ORDER BY name/);
+  const runner = read('scripts/run-commercial-postgres-gate.mjs');
+  assert.match(runner, /if \(options\.testFile\) \{/);
+  assert.match(runner, /options\.suite = 'custom';\s+suites\.custom = testName;/);
+  assert.ok(
+    /\[\s*'--import', 'tsx', '--test', '--test-reporter=tap', suites\[suite\],?\s*\]/.test(runner),
+    'the custom suite must execute the complete chosen root with the native TAP reporter',
+  );
+  assert.match(runner, /counts\.tests > 0 && counts\.pass === counts\.tests/);
 });

@@ -86,6 +86,34 @@ const gates = {
     root: 'tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts',
     httpFixture: false,
   },
+  'kimi-commercial-preparation-diagnostic': {
+    root: 'tests/integration/kimi-commercial-preparation-diagnostic.test.ts',
+    httpFixture: false,
+  },
+  'scheduler-native-protocol': {
+    root: 'tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'prepared-statements': {
+    root: 'tests/saas/gateway/prepared-statements.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'runtime-health-clock': {
+    root: 'tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'dispatch-capacity': {
+    root: 'tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts',
+    httpFixture: true,
+  },
+  'affinity-bind-race': {
+    root: 'tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'dispatch-proof-fence-batch': {
+    root: 'tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts',
+    httpFixture: false,
+  },
 } as const;
 const databaseUrls = {
   migrator: 'postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci',

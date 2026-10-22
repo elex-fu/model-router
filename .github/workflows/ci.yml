@@ -70,6 +70,7 @@ jobs:
           ./node_modules/.bin/tsc --noEmit
           --target ES2022 --module NodeNext --moduleResolution NodeNext
           --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node
+          src/types/busboy.d.ts
           tests/saas/gateway/authorization-prelock-postgres.integration.test.ts
           tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
           tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts
@@ -204,7 +205,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
-        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
@@ -234,6 +235,7 @@ jobs:
           ./node_modules/.bin/tsc --noEmit
           --target ES2022 --module NodeNext --moduleResolution NodeNext
           --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node
+          src/types/busboy.d.ts
           tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts
           tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts
           tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts
@@ -256,6 +258,15 @@ jobs:
           tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts
           tests/saas/gateway/health-score.postgres.integration.test.ts
           tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts
+          tests/integration/kimi-commercial-preparation-diagnostic.test.ts
+          tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts
+          tests/saas/gateway/prepared-statements.postgres.integration.test.ts
+          tests/saas/gateway/runtime-health-clock.postgres.integration.test.ts
+          tests/saas/gateway/runtime-health-clock-postgres-fixture.ts
+          tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts
+          tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts
+          tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts
+          scripts/ops/verify-commercial-kimi.ts
           tests/saas/gateway/pre-dispatch-postgres-fixture.ts
           tests/saas/metering/normal-success-postgres-fixture.ts
           tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts

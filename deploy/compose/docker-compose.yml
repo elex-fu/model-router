@@ -156,6 +156,12 @@ services:
       MODEL_ROUTER_SAAS_DEPLOYMENT_ID: ${MODEL_ROUTER_SAAS_DEPLOYMENT_ID:?set MODEL_ROUTER_SAAS_DEPLOYMENT_ID in deploy/compose/.env}
       MODEL_ROUTER_SAAS_ENVIRONMENT_ID: ${MODEL_ROUTER_SAAS_ENVIRONMENT_ID:?set MODEL_ROUTER_SAAS_ENVIRONMENT_ID in deploy/compose/.env}
       MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: postgresql://model_router_saas_gateway:${POSTGRES_GATEWAY_PASSWORD}@postgres:5432/${POSTGRES_DB:-model_router_saas}
+      # Each gateway replica owns its own PostgreSQL connection pool.
+      MODEL_ROUTER_SAAS_DB_POOL_MAX: ${MODEL_ROUTER_SAAS_DB_POOL_MAX:-16}
+      MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS: ${MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS:-5000}
+      # Explicit opt-in for a direct/session-compatible PG connection or a
+      # verified pooler with native wire prepared-statement tracking enabled.
+      MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS: ${MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS:-off}
       SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE: ${SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE:-./dist/saas/runtime/software-provider-credential-kms.js}
       # Operator-supplied trusted module exporting createManagedSaasGatewayRuntime;
       # see deploy/README.md. Mount it under ./modules/.

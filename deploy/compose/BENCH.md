@@ -106,6 +106,19 @@ The mock publishes `https://<host>:18443` (provider, TLS) and
 `http://<host>:18080` (control) — override with `MOCK_HOST_PORT` /
 `MOCK_CONTROL_HOST_PORT`.
 
+### Gateway PostgreSQL pools
+
+Set `MODEL_ROUTER_SAAS_DB_POOL_MAX` and
+`MODEL_ROUTER_SAAS_DB_POOL_ACQUISITION_TIMEOUT_MILLIS` in
+`deploy/compose/.env`; the base Compose gateway environment forwards them to
+each replica, defaulting to 16 connections and a 5000 ms acquisition timeout.
+Recreate the gateways after changing these values.
+
+For direct CLI runs, export these variables into each CLI process environment.
+Every CLI process and gateway replica owns an independent pool, so include all
+processes when budgeting PostgreSQL connections. Provider-account
+`maxConcurrency` controls upstream request slots separately from this pool.
+
 ## Performance suite
 
 ```bash
@@ -143,6 +156,12 @@ node scripts/ops/bench-gateway.mjs --scenario precision --account-limit <K>
 | 429 precision (zero over-issue) | `precision` | mock is the oracle: per-account `maxInFlight` observed at the upstream vs the configured account limit | zero accounts with `maxInFlight > --account-limit` |
 | linear scaling 1→3 ≥ 2.7× | `scaling` | same fixed load on 1 vs 3 instances; ratio of `throughputRps` | `--scaling-min-ratio 2.7` |
 
+The existing `--max-transport-errors` and `--max-unexpected-5xx` budgets apply to
+both `concurrency` and `scaling`, with defaults of zero. Scaling counts failed
+fetches and body drains as transport errors. HTTP 429 and other non-5xx status
+counts remain visible; these budgets introduce no new allowance or failure-rate
+threshold for them.
+
 Exit codes: `0` pass / dry-run, `1` threshold violation, `2` bad arguments or
 missing config, `3` target unreachable. `--no-fail` keeps exit 0 with
 violations recorded in the report.
@@ -165,6 +184,15 @@ GATEWAY_URLS=http://127.0.0.1:15007,http://127.0.0.1:15008,http://127.0.0.1:1500
 ```
 
 The second run prints and records the 1→3 ratio and fails below 2.7×.
+Both reports must have no fatal error or recorded violations, valid positive
+scaling throughput and matching HTTP-200/sample counts. The baseline's observed
+transport/5xx counters are checked against the **current run's chosen budgets**;
+a baseline's own more permissive settings do not make it eligible. A nonexistent
+`--baseline-report` path remains an argument error (exit 2). Failed, missing or
+malformed evidence in a loaded comparison records `ratio: null`, a fixed invalid
+comparison reason, and a violation. The current-build supervisor also checks the
+observed counters independently and stops subsequent load after a failed
+baseline or full scene, while retaining final statistics, metrics and cleanup.
 
 ## Chaos suite
 

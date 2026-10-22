@@ -4,6 +4,11 @@ import { join, relative, resolve, sep } from 'node:path';
 
 const mode = process.argv[2];
 const provider = process.argv[3];
+const concurrency = process.env.MODEL_ROUTER_TEST_CONCURRENCY;
+if (concurrency !== undefined && (!/^[1-9][0-9]*$/.test(concurrency) || Number(concurrency) > 64)) {
+  console.error('MODEL_ROUTER_TEST_CONCURRENCY must be an integer from 1 to 64.');
+  process.exit(2);
+}
 const PROVIDERS = ['kimi', 'kimi-code', 'deepseek', 'ollama'];
 if (!['unit', 'integration', 'live'].includes(mode) || (provider && !PROVIDERS.includes(provider))) {
   console.error(`Usage: node scripts/run-tests.mjs <unit|integration|live> [${PROVIDERS.join('|')}]`);
@@ -43,8 +48,8 @@ if (!selected.length) {
 
 const env = { ...process.env };
 if (provider) env[`RUN_${provider.toUpperCase().replaceAll('-', '_')}_SMOKE`] = '1';
-console.log(`Running ${selected.length} ${mode} test files${provider ? ` (${provider})` : ''}.`);
-const result = spawnSync(process.execPath, ['--test', '--import', 'tsx', '--test-reporter=spec', ...selected], {
+console.log(`Running ${selected.length} ${mode} test files${provider ? ` (${provider})` : ''}${concurrency ? ` with concurrency ${concurrency}` : ''}.`);
+const result = spawnSync(process.execPath, ['--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), '--import', 'tsx', '--test-reporter=spec', ...selected], {
   cwd: root,
   env,
   stdio: 'inherit',

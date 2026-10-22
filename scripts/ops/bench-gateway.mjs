@@ -93,6 +93,7 @@ const config = {
   maxTokens: intArg('max-tokens', 64, { min: 1, max: 100_000 }),
   requests: intArg('requests', 300, { min: 10, max: 1_000_000 }),
   streamSamples: intArg('stream-samples', 100, { min: 10, max: 100_000 }),
+  warmupInflight: intArg('warmup-inflight', 4, { min: 1, max: 200 }),
   sseMinutes: intArg('sse-minutes', 10, { min: 1, max: 24 * 60 }),
   sseConcurrency: intArg('sse-concurrency', 20, { min: 1, max: 10_000 }),
   sseChunks: intArg('sse-chunks', 64, { min: 2, max: 100_000 }),
@@ -115,6 +116,8 @@ const config = {
   out: String(argValue('out', '')),
   noFail: hasFlag('no-fail'),
 };
+// Observation settings stay outside config so the default report shape is unchanged.
+const requestSamplesOut = String(argValue('request-samples-out', ''));
 if (!PROTOCOLS.includes(config.protocol)) {
   argError(`--protocol must be one of ${PROTOCOLS.join(', ')} (got ${config.protocol})`);
 }
@@ -145,6 +148,28 @@ const env = {
   mockUpstreamUrl: (process.env.MOCK_UPSTREAM_URL ?? '').replace(/\/+$/, ''),
 };
 
+function validRequestSamplesOptions(out, selectedScenarios, configuration, environment) {
+  return (
+    !out ||
+    (path.isAbsolute(out) &&
+      !existsSync(out) &&
+      out !== path.resolve(configuration.out || '.') &&
+      [...selectedScenarios].sort().join(',') === 'latency,ttfb' &&
+      configuration.requests === 100 &&
+      configuration.streamSamples === 100 &&
+      configuration.warmupInflight === 1 &&
+      configuration.noFail === false &&
+      configuration.p99OverheadMs === 30 &&
+      configuration.ttfbOverheadMs === 10 &&
+      environment.gatewayUrls.length === 3 &&
+      new Set(environment.gatewayUrls).size === 3 &&
+      environment.mockUpstreamUrl !== '')
+  );
+}
+if (!validRequestSamplesOptions(requestSamplesOut, scenarios, config, env)) {
+  argError('--request-samples-out requires an absolute new file and the unchanged diagnostic serial 100/100 latency,ttfb configuration');
+}
+
 const configProblems = [];
 if (env.gatewayUrls.length === 0) configProblems.push('GATEWAY_URLS (comma-separated gateway base URLs) is not set');
 if (!env.proxyKey) configProblems.push('BENCH_PROXY_KEY (bench proxy key) is not set');
@@ -173,6 +198,7 @@ if (dryRun) {
   console.log('bench-gateway dry-run: configuration validated, no network traffic performed.');
   console.log(`protocol: ${config.protocol}  model: ${config.model}  max_tokens: ${config.maxTokens}`);
   console.log(`scenarios: ${scenarios.join(', ')}`);
+  console.log(`warmup inflight: ${config.warmupInflight} (3000ms per latency/ttfb warmup)`);
   for (const s of scenarios) console.log(`  - ${s}: ${scenarioPlan[s]}`);
   console.log(`gateway URLs (${env.gatewayUrls.length}): ${env.gatewayUrls.join(', ') || '(none)'}`);
   console.log(`mock control URL: ${env.mockControlUrl || '(none)'}`);
@@ -212,6 +238,139 @@ const report = {
   scenarios: {},
   violations: [],
 };
+const REQUEST_SAMPLES_CAP = 400;
+const REQUEST_SAMPLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const requestSampleJournal = requestSamplesOut
+  ? { schema: 1, observationOk: true, failure: null, cap: REQUEST_SAMPLES_CAP, samples: [] }
+  : null;
+let requestSampleWriteAttempted = false;
+
+function requestSampleFailure(stage) {
+  if (!requestSampleJournal) return;
+  requestSampleJournal.observationOk = false;
+  requestSampleJournal.failure ??= { stage, sqlState: null };
+}
+
+function requestSampleContext(scenario, leg, index) {
+  if (!requestSampleJournal) return null;
+  return { scenario, leg, index, gatewayIndex: null, startedAt: new Date().toISOString() };
+}
+
+function requestSampleOutcome(error, response, metricMs) {
+  try {
+    if (response && response.status !== 200) return 'http_error';
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timeout';
+    if (error?.message === 'empty first chunk') return 'empty_chunk';
+    return metricMs === null ? 'network_error' : 'cancel_error';
+  } catch {
+    requestSampleFailure('sample_recording');
+    return 'network_error';
+  }
+}
+
+function recordRequestSample(context, response, metricMs, includedInSummary, outcome) {
+  if (!requestSampleJournal || !context) return;
+  try {
+    if (requestSampleJournal.samples.length >= REQUEST_SAMPLES_CAP) {
+      requestSampleFailure('sample_cap');
+      return;
+    }
+    let requestId = null;
+    let requestIdState = 'not_applicable';
+    if (context.leg === 'gateway') {
+      const header = response?.headers.get('x-request-id');
+      requestIdState = !header ? 'missing' : header.length === 36 && REQUEST_SAMPLE_UUID.test(header) ? 'valid' : 'invalid';
+      if (requestIdState === 'valid') requestId = header.toLowerCase();
+    }
+    requestSampleJournal.samples.push({
+      scenario: context.scenario,
+      leg: context.leg,
+      index: context.index,
+      gatewayIndex: context.gatewayIndex,
+      startedAt: context.startedAt,
+      recordedAt: new Date().toISOString(),
+      status: response?.status ?? null,
+      outcome,
+      includedInSummary,
+      metricMs: Number.isFinite(metricMs) ? metricMs : null,
+      requestId,
+      requestIdState,
+    });
+  } catch {
+    requestSampleFailure('sample_recording');
+  }
+}
+
+function requestSampleCompleteness(samples) {
+  const legs = ['latency:direct', 'latency:gateway', 'ttfb:direct', 'ttfb:gateway'];
+  const counts = Object.fromEntries(legs.map((leg) => [leg, 0]));
+  const indices = new Set();
+  let shapeValid = true;
+  for (const sample of samples) {
+    const leg = `${sample.scenario}:${sample.leg}`;
+    if (!Object.hasOwn(counts, leg) || !Number.isInteger(sample.index) || sample.index < 0 || sample.index >= 100) {
+      shapeValid = false;
+      continue;
+    }
+    counts[leg]++;
+    const key = `${leg}:${sample.index}`;
+    if (indices.has(key)) shapeValid = false;
+    indices.add(key);
+    if (sample.leg === 'gateway' && ![0, 1, 2].includes(sample.gatewayIndex)) shapeValid = false;
+  }
+  const gateway = samples.filter((sample) => sample.leg === 'gateway');
+  const validIds = gateway.filter((sample) => sample.requestIdState === 'valid').map((sample) => sample.requestId);
+  return {
+    complete: shapeValid && samples.length === REQUEST_SAMPLES_CAP && Object.values(counts).every((count) => count === 100),
+    counts,
+    correlationComplete: gateway.length === 200 && validIds.length === 200 && new Set(validIds).size === 200,
+    missingRequestIds: gateway.filter((sample) => sample.requestIdState === 'missing').length,
+    invalidRequestIds: gateway.filter((sample) => sample.requestIdState === 'invalid').length,
+    duplicateRequestIds: validIds.length - new Set(validIds).size,
+  };
+}
+
+function requestSampleSelections(samples) {
+  const selections = {};
+  for (const scenario of ['latency', 'ttfb']) {
+    for (const leg of ['direct', 'gateway']) {
+      const sorted = samples.filter((sample) => sample.scenario === scenario && sample.leg === leg && sample.includedInSummary)
+        .sort((left, right) => left.metricMs - right.metricMs);
+      selections[`${scenario}:${leg}`] = {
+        n: sorted.length,
+        metric: scenario === 'latency' ? 'response_headers_ms' : 'first_stream_chunk_ms',
+        selected: Object.fromEntries([['p50', 0.5], ['p90', 0.9], ['p99', 0.99], ['max', 1]].map(([name, percentile]) => {
+          const sortedIndex = sorted.length === 0 ? null : Math.min(sorted.length - 1, Math.floor(sorted.length * percentile));
+          const sample = sortedIndex === null ? null : sorted[sortedIndex];
+          return [name, { sortedIndex, sampleIndex: sample?.index ?? null, metricMs: sample?.metricMs ?? null,
+            reportedMs: sample ? Number(sample.metricMs.toFixed(2)) : 0 }];
+        })),
+      };
+    }
+  }
+  return selections;
+}
+
+function writeRequestSamples() {
+  if (!requestSampleJournal || requestSampleWriteAttempted) return;
+  requestSampleWriteAttempted = true;
+  try {
+    requestSampleJournal.completeness = requestSampleCompleteness(requestSampleJournal.samples);
+    requestSampleJournal.selections = requestSampleSelections(requestSampleJournal.samples);
+    requestSampleJournal.clockNotes = {
+      metric: 'Existing performance.now duration; original timing boundaries and success inclusion rules',
+      startedAt: 'Client wall clock before the original metric start',
+      recordedAt: 'Client wall clock after existing body drain or stream cancellation; not wire completion',
+      observation: 'Enabled diagnostics add work around the original measurements; this is not an unobserved equivalence or production performance proof',
+    };
+    if (!requestSampleJournal.completeness.complete) requestSampleFailure('sample_completeness');
+    if (!requestSampleJournal.completeness.correlationComplete) requestSampleFailure('request_id_validation');
+    writeFileSync(requestSamplesOut, `${JSON.stringify(requestSampleJournal, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  } catch {
+    requestSampleFailure('client_sample_write');
+    console.error(JSON.stringify({ observationOk: false, stage: 'client_sample_write', sqlState: null }));
+  }
+}
 
 function violation(scenario, metric, value, threshold, unit = '') {
   report.violations.push({ scenario, metric, value, threshold, unit });
@@ -284,7 +443,8 @@ async function postJson(url, pathName, body, headers = {}, timeoutMs = config.re
   return { response, elapsedMs: performance.now() - t0 };
 }
 
-async function gatewayRequest(stream, url = nextGatewayUrl()) {
+async function gatewayRequest(stream, url = nextGatewayUrl(), sample = null) {
+  if (sample) sample.gatewayIndex = env.gatewayUrls.indexOf(url);
   const spec = requestSpec(stream);
   return postJson(
     url,
@@ -340,6 +500,66 @@ function statusBump(buckets, status) {
   buckets[key] = (buckets[key] ?? 0) + 1;
 }
 
+function loadStatusCounts(statuses, explicitTransportErrors) {
+  if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) return null;
+  let total = 0;
+  let unexpected5xx = 0;
+  for (const [status, count] of Object.entries(statuses)) {
+    if (status !== 'transport-error' && !/^[1-5]\d\d$/.test(status)) return null;
+    if (!Number.isSafeInteger(count) || count < 0) return null;
+    total += count;
+    if (!Number.isSafeInteger(total)) return null;
+    if (Number(status) >= 500) unexpected5xx += count;
+  }
+  const bucketTransportErrors = Object.hasOwn(statuses, 'transport-error') ? statuses['transport-error'] : 0;
+  const transportErrors = explicitTransportErrors === undefined ? bucketTransportErrors : explicitTransportErrors;
+  if (!Number.isSafeInteger(transportErrors) || transportErrors < 0) return null;
+  if (Object.hasOwn(statuses, 'transport-error') && transportErrors !== bucketTransportErrors) return null;
+  return { successfulRequests: Object.hasOwn(statuses, '200') ? statuses['200'] : 0, transportErrors, unexpected5xx };
+}
+
+function loadCountsWithinBudget(counts, budget) {
+  return Boolean(counts) && Number.isSafeInteger(budget.maxTransportErrors) && budget.maxTransportErrors >= 0 &&
+    Number.isSafeInteger(budget.maxUnexpected5xx) && budget.maxUnexpected5xx >= 0 &&
+    counts.transportErrors <= budget.maxTransportErrors && counts.unexpected5xx <= budget.maxUnexpected5xx;
+}
+
+function applyLoadErrorBudgets(scenario, counts) {
+  if (!counts) {
+    violation(scenario, 'valid load counters', 0, 1);
+    return;
+  }
+  if (counts.transportErrors > config.maxTransportErrors) {
+    violation(scenario, 'transport errors', counts.transportErrors, config.maxTransportErrors);
+  }
+  if (counts.unexpected5xx > config.maxUnexpected5xx) {
+    violation(scenario, 'unexpected 5xx', counts.unexpected5xx, config.maxUnexpected5xx);
+  }
+}
+
+function scalingReportFailure(candidate, budget) {
+  if (!candidate || typeof candidate !== 'object' || candidate.tool !== 'bench-gateway' || Object.hasOwn(candidate, 'fatalError') ||
+      !Array.isArray(candidate.violations) || candidate.violations.length !== 0) return 'report_failed';
+  const scaling = candidate.scenarios?.scaling;
+  if (!scaling || typeof scaling !== 'object' || Array.isArray(scaling)) return 'missing_scaling';
+  if (Object.hasOwn(scaling, 'invalidComparisonReason')) return 'report_failed';
+  const counts = loadStatusCounts(scaling.statuses);
+  if (!counts || !Number.isSafeInteger(scaling.latency?.n) || scaling.latency.n <= 0 ||
+      scaling.latency.n !== counts.successfulRequests) return 'invalid_scaling_counts';
+  if (!Number.isFinite(scaling.throughputRps) || scaling.throughputRps <= 0 ||
+      !Number.isFinite(scaling.seconds) || scaling.seconds <= 0 ||
+      !Number.isSafeInteger(scaling.instanceCount) || scaling.instanceCount <= 0 ||
+      !Number.isSafeInteger(scaling.inflight) || scaling.inflight <= 0) return 'invalid_scaling_measurement';
+  if (!loadCountsWithinBudget(counts, budget)) return 'load_error_budget';
+  return null;
+}
+
+function rejectScalingComparison(result, reason) {
+  result.ratio = null;
+  result.invalidComparisonReason = reason;
+  violation('scaling', 'valid scaling comparison', 0, 1);
+}
+
 // ── Preflight: targets reachable ──────────────────────────────────────────────
 async function preflight() {
   const failures = [];
@@ -376,7 +596,7 @@ async function scenarioLatency() {
   const hasBaseline = env.mockUpstreamUrl !== '';
 
   // Warm the gateway (JIT, PG pools, KMS keyring) before measuring.
-  await closedLoop(4, 3_000, async () => {
+  await closedLoop(config.warmupInflight, 3_000, async () => {
     const { response } = await gatewayRequest(false);
     await response.text();
   });
@@ -384,16 +604,34 @@ async function scenarioLatency() {
   const direct = [];
   if (hasBaseline) {
     for (let i = 0; i < config.requests; i += 1) {
-      const { response, elapsedMs } = await mockRequest(false);
-      await response.text();
-      if (response.status === 200) direct.push(elapsedMs);
+      const sample = requestSampleContext('latency', 'direct', i);
+      let response, elapsedMs;
+      try {
+        ({ response, elapsedMs } = await mockRequest(false));
+        await response.text();
+        if (response.status === 200) direct.push(elapsedMs);
+        if (sample) recordRequestSample(sample, response, elapsedMs, response.status === 200, response.status === 200 ? 'ok' : 'http_error');
+      } catch (error) {
+        if (sample) recordRequestSample(sample, response, elapsedMs ?? null, false,
+          elapsedMs === undefined ? requestSampleOutcome(error, response, null) : 'body_drain_error');
+        throw error;
+      }
     }
   }
   const through = [];
   for (let i = 0; i < config.requests; i += 1) {
-    const { response, elapsedMs } = await gatewayRequest(false);
-    await response.text();
-    if (response.status === 200) through.push(elapsedMs);
+    const sample = requestSampleContext('latency', 'gateway', i);
+    let response, elapsedMs;
+    try {
+      ({ response, elapsedMs } = await gatewayRequest(false, undefined, sample));
+      await response.text();
+      if (response.status === 200) through.push(elapsedMs);
+      if (sample) recordRequestSample(sample, response, elapsedMs, response.status === 200, response.status === 200 ? 'ok' : 'http_error');
+    } catch (error) {
+      if (sample) recordRequestSample(sample, response, elapsedMs ?? null, false,
+        elapsedMs === undefined ? requestSampleOutcome(error, response, null) : 'body_drain_error');
+      throw error;
+    }
   }
   const directSummary = latencySummary(direct);
   const gatewaySummary = latencySummary(through);
@@ -408,19 +646,26 @@ async function scenarioLatency() {
 }
 
 // ── Scenario: ttfb ────────────────────────────────────────────────────────────
-async function measureTtfb(requestFn) {
+async function measureTtfb(requestFn, sample = null) {
   const t0 = performance.now();
-  const { response } = await requestFn();
-  if (response.status !== 200) {
-    await response.text();
-    throw new Error(`status ${response.status}`);
+  let response, ttfb = null;
+  try {
+    ({ response } = await requestFn());
+    if (response.status !== 200) {
+      await response.text();
+      throw new Error(`status ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    ttfb = performance.now() - t0;
+    await reader.cancel();
+    if (!value || value.length === 0) throw new Error('empty first chunk');
+    if (sample) recordRequestSample(sample, response, ttfb, true, 'ok');
+    return ttfb;
+  } catch (error) {
+    if (sample) recordRequestSample(sample, response, ttfb, false, requestSampleOutcome(error, response, ttfb));
+    throw error;
   }
-  const reader = response.body.getReader();
-  const { value } = await reader.read();
-  const ttfb = performance.now() - t0;
-  await reader.cancel();
-  if (!value || value.length === 0) throw new Error('empty first chunk');
-  return ttfb;
 }
 
 async function scenarioTtfb() {
@@ -431,7 +676,7 @@ async function scenarioTtfb() {
   }
   const hasBaseline = env.mockUpstreamUrl !== '';
 
-  await closedLoop(4, 3_000, async () => {
+  await closedLoop(config.warmupInflight, 3_000, async () => {
     const { response } = await gatewayRequest(true);
     await response.text();
   });
@@ -440,7 +685,8 @@ async function scenarioTtfb() {
   if (hasBaseline) {
     for (let i = 0; i < config.streamSamples; i += 1) {
       try {
-        direct.push(await measureTtfb(() => mockRequest(true)));
+        const sample = requestSampleContext('ttfb', 'direct', i);
+        direct.push(await measureTtfb(() => mockRequest(true), sample));
       } catch {
         // counted as failures below via missing samples
       }
@@ -450,7 +696,8 @@ async function scenarioTtfb() {
   let gatewayErrors = 0;
   for (let i = 0; i < config.streamSamples; i += 1) {
     try {
-      through.push(await measureTtfb(() => gatewayRequest(true)));
+      const sample = requestSampleContext('ttfb', 'gateway', i);
+      through.push(await measureTtfb(() => gatewayRequest(true, undefined, sample), sample));
     } catch {
       gatewayErrors += 1;
     }
@@ -622,9 +869,7 @@ async function scenarioConcurrency() {
     }
   });
   const durationS = (performance.now() - t0) / 1000;
-  const unexpected5xx = Object.entries(statuses)
-    .filter(([status]) => Number(status) >= 500)
-    .reduce((sum, [, count]) => sum + count, 0);
+  const loadCounts = loadStatusCounts(statuses, transportErrors);
   const summary = latencySummary(latencies);
   const rps = latencies.length / durationS;
   console.log(`  duration=${durationS.toFixed(1)}s ok=${latencies.length} rps=${rps.toFixed(2)}`);
@@ -641,12 +886,7 @@ async function scenarioConcurrency() {
     latency: summary,
     throughputRps: Number(rps.toFixed(2)),
   };
-  if (transportErrors > config.maxTransportErrors) {
-    violation('concurrency', 'transport errors', transportErrors, config.maxTransportErrors);
-  }
-  if (unexpected5xx > config.maxUnexpected5xx) {
-    violation('concurrency', 'unexpected 5xx', unexpected5xx, config.maxUnexpected5xx);
-  }
+  applyLoadErrorBudgets('concurrency', loadCounts);
 }
 
 // ── Scenario: precision (429 / account-slot over-issue) ───────────────────────
@@ -739,28 +979,44 @@ async function scenarioScaling() {
     statuses,
     latency: summary,
   };
+  report.scenarios.scaling = result;
+  const loadCounts = loadStatusCounts(statuses);
+  applyLoadErrorBudgets('scaling', loadCounts);
+  if (!loadCounts || loadCounts.successfulRequests === 0 || !Number.isFinite(rps) || rps <= 0) {
+    violation('scaling', 'valid scaling samples', 0, 1);
+  }
 
   if (config.baselineReport) {
-    const baseline = JSON.parse(readFileSync(config.baselineReport, 'utf8'));
-    const base = baseline?.scenarios?.scaling;
-    if (!base?.throughputRps) {
-      console.error(`warning: baseline report has no scenarios.scaling.throughputRps; ratio not computed.`);
-      result.ratio = null;
+    let baseline;
+    let baselineFailure;
+    try {
+      baseline = JSON.parse(readFileSync(config.baselineReport, 'utf8'));
+      baselineFailure = scalingReportFailure(baseline, config);
+    } catch {
+      baselineFailure = 'unreadable_report';
+    }
+    const currentFailure = scalingReportFailure(report, config);
+    if (baselineFailure || currentFailure) {
+      rejectScalingComparison(result, baselineFailure ? `baseline_${baselineFailure}` : `current_${currentFailure}`);
     } else {
+      const base = baseline.scenarios.scaling;
       const ratio = Number((rps / base.throughputRps).toFixed(3));
-      result.baseline = { file: config.baselineReport, instanceCount: base.instanceCount, throughputRps: base.throughputRps };
-      result.ratio = ratio;
-      console.log(`  scaling ratio: ${base.instanceCount} -> ${env.gatewayUrls.length} instances = ${ratio}x (min ${config.scalingMinRatio}x)`);
-      if (env.gatewayUrls.length <= base.instanceCount) {
-        console.error('warning: current run has no more instances than the baseline; ratio check skipped.');
-      } else if (ratio < config.scalingMinRatio) {
-        violation('scaling', 'throughput ratio', ratio, config.scalingMinRatio, 'x');
+      if (!Number.isFinite(ratio)) {
+        rejectScalingComparison(result, 'non_finite_ratio');
+      } else {
+        result.baseline = { file: config.baselineReport, instanceCount: base.instanceCount, throughputRps: base.throughputRps };
+        result.ratio = ratio;
+        console.log(`  scaling ratio: ${base.instanceCount} -> ${env.gatewayUrls.length} instances = ${ratio}x (min ${config.scalingMinRatio}x)`);
+        if (env.gatewayUrls.length <= base.instanceCount) {
+          console.error('warning: current run has no more instances than the baseline; ratio check skipped.');
+        } else if (ratio < config.scalingMinRatio) {
+          violation('scaling', 'throughput ratio', ratio, config.scalingMinRatio, 'x');
+        }
       }
     }
   } else {
     console.log('  (pass --baseline-report on the N-instance run to compute the 1→N ratio)');
   }
-  report.scenarios.scaling = result;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -791,6 +1047,7 @@ function writeReport() {
   mkdirSync(path.dirname(out), { recursive: true });
   writeFileSync(out, `${JSON.stringify(report, null, 2)}\n`);
   console.log(`\nreport written: ${out}`);
+  writeRequestSamples();
 }
 writeReport();
 violationsExit();
