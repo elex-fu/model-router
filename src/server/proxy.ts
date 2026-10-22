@@ -1178,6 +1178,7 @@ export async function proxyHandler(
     try {
       let totalAttempts = 0;
       let lastFailure: TryResult | undefined;
+      let lastAttemptRecord: AttemptRecord | undefined;
       const retryRandom = options.retryRandom ?? Math.random;
       const retryBaseDelayMs = options.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
       const retryMaxDelayMs = options.retryMaxDelayMs ?? RETRY_MAX_DELAY_MS;
@@ -1329,6 +1330,7 @@ export async function proxyHandler(
             currency: null,
           };
           await options.telemetryStore?.upsertAttempt(attemptRecord);
+          lastAttemptRecord = attemptRecord;
           const result = await trySingleUpstream({
             req,
             res,
@@ -1590,6 +1592,21 @@ export async function proxyHandler(
         }
         if (abortController.signal.aborted) {
           const cancelled = abortController.signal.reason === 'client_disconnect';
+          if (
+            !cancelled &&
+            lastAttemptRecord &&
+            lastAttemptRecord.outcome === 'failed' &&
+            lastAttemptRecord.retryReason !== 'total_request_timeout'
+          ) {
+            // The shared total deadline ended the retry chain outside an in-flight
+            // attempt (e.g. while waiting out the bounded backoff), so the last
+            // recorded attempt still carries its own retryable failure reason.
+            // Mark the chain's terminal cause so the attempt trail matches the
+            // 504 timeout the client actually receives; the attempt's own status
+            // (e.g. 503) is preserved on the same record.
+            lastAttemptRecord.retryReason = 'total_request_timeout';
+            await options.telemetryStore?.upsertAttempt(lastAttemptRecord);
+          }
           writeProtocolError(
             res,
             clientProto,

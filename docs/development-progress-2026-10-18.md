@@ -562,3 +562,22 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 | R8 | Codex 可售能力 | 取得精确 backend/model/operation 的可信完整计费边界和 cap 强制语义，再做实际 compact/WS；此前保持不可售，不能只凭字段存在或 transport 装配关闭任务。 |
 
 当前不再扩展未经证据支持的优化：snapshot 的 SELECT/INSERT 不是重复读取；affinity.resolve 会加锁并可能 CAS；preflight/价格解析持有授权或价格围栏，不能照搬 scheduler 去事务。连接器池和新增 native 描述符也没有本轮足量证据支持。先处理首个明确失败，再按 R1—R8 收敛。
+
+## 17. R1 完成：deadline 单测失败的定位与窄修（2026-10-23）
+
+**定位过程与证据**：
+
+1. 单文件复现：`tests/server/timeout-budgets.test.ts` 的「5xx failover attempts share one total deadline」用例在独立运行中 4 次出现 1 次失败（耗时 249.9 ms、`secondSeen=false`），随后 20+ 次连续通过；带 CPU 燃烧负载 12/12 通过。完整 unit 套件（6847 tests / 6824 pass / 0 fail / 23 skipped）在本次修复前的同一源码上通过——失败是间歇性、非确定性的。
+2. 时序拆解（进程内插桩复现）：warm 状态 attempt-1 到达第一上游 ~+3 ms、处理 ~+7 ms；固定 80 ms backoff 后第二上游命中 ~+86 ms，deadline 130 ms——非 backoff 余量仅 ~43 ms（冷启动首轮 ~4 ms）。失败时 249 ms ≈ 130 ms deadline + ~115 ms 停顿，与一次 major GC/调度停顿跨越 backoff 边界一致：deadline 在 backoff 期间到期 → `waitForRetry` 返回 false → 循环 break，第二上游从未被派发。
+3. **结论**：共享 deadline 语义（backoff 计入总预算、到期即中止重试链、504）是设计行为且实现正确；失败根因是该用例的时序前提（attempt-1 开销 < 50 ms）在进程停顿下不成立，属夹具时序边界问题，不是重试实现缺陷。原始预算（130/80/700 ms）与全部断言保持不变。
+4. 定位中发现一个**真实遥测缺口**：deadline 在 backoff 期间到期时，最后一条 attempt 记录的 `retryReason` 停留在 `retryable_upstream_error`，与客户端实际收到的 504 timeout 不一致；attempt 链路没有记录终态原因（对照：deadline 削减在途 attempt 时该字段已如实写为 `total_request_timeout`）。
+
+**窄修**（`src/server/proxy.ts` + `tests/server/timeout-budgets.test.ts`）：
+
+1. **实现**：追踪最后一条 attempt 记录；在共享 deadline 终止请求（abort reason 为 `total_request_timeout`）且最后一条失败记录尚未标记该原因时，改写其 `retryReason` 并重新 upsert。attempt 自身状态（如 503）保留在同一记录上；仅当未被 deadline 削减时才改写，已在途被削减的记录不受影响。
+2. **夹具同步**：504 返回后对 `secondSeen` 增加有界等待（15×10 ms），消除第二上游 request handler 晚于客户端 504 处理的观测竞态；从未发生的派发仍会失败断言。
+3. **新增用例**：`total deadline expiring during backoff records the terminal timeout cause on the attempt trail`——requestTimeoutMs=60、backoff=80，断言 504 且最后 attempt 的 `retryReason` 为 `total_request_timeout`，直接证明遥测改写在两种终止路径（在途削减/期间到期）下均成立。
+
+**验证**：单文件 10/10 通过；修复后连续 20 次运行 0 失败；`tsc --noEmit` 干净；两文件 Biome 零错误（23 个既有警告与基线一致）。**残余风险（如实记录）**：≥43 ms 的进程停顿若发生在 attempt-1 与 deadline 之间，第二次派发仍会合法地不发生、`secondSeen` 断言仍可能失败——在保留原预算与断言的前提下该风险不可归零，仅能通过串行/低干扰执行降低概率；本轮未改 runner 并发策略。完整 unit 套件在修复前源码上已通过（见上），修复后按 R2 重跑。
+
+**R1→R2**：修复已按任务独立提交；R2 在此基础上补完整 unit/integration、两条 workflow strict 与重建标准 CLI。

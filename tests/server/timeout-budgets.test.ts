@@ -186,10 +186,51 @@ test('5xx failover attempts share one total deadline and backoff stays bounded',
   try {
     const started = Date.now();
     const response = await proxy.post();
+    // The failover dispatch can reach the second upstream's request handler a
+    // few event-loop turns after the 504 reaches this client when the process
+    // is under scheduler or GC pressure. Give the observation a bounded settle
+    // window; a dispatch that never happened still fails the assertion below.
+    for (let settles = 0; !secondSeen && settles < 15; settles++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.equal(response.status, 504);
     assert.ok(Date.now() - started < 700);
     assert.equal(secondSeen, true);
     assert.equal(proxy.attempts.at(-1)?.retryReason, 'total_request_timeout');
+  } finally {
+    await proxy.close();
+    await first.close();
+    await second.close();
+  }
+});
+
+test('total deadline expiring during backoff records the terminal timeout cause on the attempt trail', async () => {
+  // The shared deadline can end the retry chain while the bounded backoff is
+  // still running, so no second attempt is ever dispatched. The client still
+  // receives a 504 timeout, and the last recorded attempt must say so instead
+  // of leaving its own retryable failure reason as the chain's final word.
+  const first = await listen((_req, res) => {
+    res.writeHead(503);
+    res.end('{"error":{"message":"busy"}}');
+  });
+  const second = await listen((_req, res) => {
+    res.writeHead(200);
+    res.end('{"choices":[{"message":{"content":"ok"}}]}');
+  });
+  const proxy = await harness([first.url, second.url], {
+    firstByteTimeoutMs: 1000,
+    requestTimeoutMs: 60,
+    retryRandom: () => 1,
+    retryBaseDelayMs: 80,
+    retryMaxDelayMs: 80,
+  });
+  try {
+    const response = await proxy.post();
+    assert.equal(response.status, 504);
+    const last = proxy.attempts.at(-1);
+    assert.ok(last);
+    assert.equal(last.outcome, 'failed');
+    assert.equal(last.retryReason, 'total_request_timeout');
   } finally {
     await proxy.close();
     await first.close();
