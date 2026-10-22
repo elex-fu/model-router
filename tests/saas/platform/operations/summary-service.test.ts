@@ -189,6 +189,53 @@ test('calculates rates with exact decimal arithmetic beyond JavaScript safe inte
   assert.equal(summary.metrics.requests.unknownPercent, '33.33');
 });
 
+test('an empty webhook backlog has null age and uses one legal aggregate snapshot', async () => {
+  const executor = new FakeExecutor();
+  executor.row = {
+    ...aggregateRow(),
+    webhook_pending_count: '0',
+    webhook_processing_count: '0',
+    webhook_oldest_unprocessed_age_ms: null,
+  };
+  const service = new PlatformOperationsSummaryService(executor);
+  const summary = await service.getSummary({ from: '2026-09-01', to: '2026-09-02' });
+  assert.deepEqual(summary.metrics.paymentWebhookBacklog, {
+    pending: '0',
+    processing: '0',
+    oldestUnprocessedAgeMs: null,
+  });
+  const sql = executor.calls[0]?.sql ?? '';
+  assert.match(
+    sql,
+    /WHEN MIN\(inbox\.received_at\) FILTER\s*\(\s*WHERE inbox\.processing_state IN \('pending', 'processing'\)\s*\) IS NULL THEN NULL/,
+  );
+  assert.match(sql, /MAX\(snapshot\.captured_at\) - MIN\(inbox\.received_at\)/);
+  assert.match(sql, /END\)::bigint\)::text AS webhook_oldest_unprocessed_age_ms/);
+  // The mapper still rejects an invented zero age for an empty queue.
+  executor.row = { ...executor.row, webhook_oldest_unprocessed_age_ms: '0' };
+  await assert.rejects(
+    service.getSummary({ from: '2026-09-01', to: '2026-09-02' }),
+    isOperationsError('OPERATIONS_STORAGE_ERROR'),
+  );
+});
+
+test('nonempty webhook backlog ages retain exact text values and reject missing age', async () => {
+  const executor = new FakeExecutor();
+  executor.row = { ...aggregateRow(), webhook_oldest_unprocessed_age_ms: '900719925474099312345' };
+  const service = new PlatformOperationsSummaryService(executor);
+  const summary = await service.getSummary({ from: '2026-09-01', to: '2026-09-02' });
+  assert.deepEqual(summary.metrics.paymentWebhookBacklog, {
+    pending: '2',
+    processing: '1',
+    oldestUnprocessedAgeMs: '900719925474099312345',
+  });
+  executor.row = { ...executor.row, webhook_oldest_unprocessed_age_ms: null };
+  await assert.rejects(
+    service.getSummary({ from: '2026-09-01', to: '2026-09-02' }),
+    isOperationsError('OPERATIONS_STORAGE_ERROR'),
+  );
+});
+
 test('represents absent persisted platform account observations as zero observations, never as healthy', async () => {
   const executor = new FakeExecutor();
   executor.row = {

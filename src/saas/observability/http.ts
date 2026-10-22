@@ -1,11 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-
+import { hasPlatformRole } from '../platform/access/authorization.js';
 import type { PlatformAdminAccessRequest, PlatformAdminActor } from '../platform/access/types.js';
 import type { AlertEventRecord, AlertRuleRecord } from './alerts.js';
 import type { ChannelStatusPage, ChannelStatusPageQuery } from './channel-status.js';
-import type { MediaTaskOperationsPage, MediaTaskKind } from './media-task-operations.js';
+import type { MediaTaskKind, MediaTaskOperationsPage } from './media-task-operations.js';
 import { renderSaasMetrics } from './metrics.js';
+import type { OperationsDiagnosticsPage } from './operations-diagnostics.js';
 import { type QpsSnapshot, qpsSnapshot } from './qps-feed.js';
+import type { SchedulingHealthPage } from './scheduling-health.js';
 
 /**
  * Phase 3 observability HTTP surface (design:
@@ -33,6 +35,12 @@ export interface ObservabilityHttpOptions {
     readonly limit?: number;
     readonly includeTerminal?: boolean;
   }) => Promise<MediaTaskOperationsPage>;
+  /** G-C2: the scheduling-health projection (fault-handling console page). */
+  readonly schedulingHealth?: (query: {
+    readonly limit?: number;
+    readonly onlyConstrained?: boolean;
+  }) => Promise<SchedulingHealthPage>;
+  readonly diagnostics?: () => Promise<OperationsDiagnosticsPage>;
   readonly alertRules?: () => Promise<readonly AlertRuleRecord[]>;
   readonly alertEvents?: (limit: number) => Promise<readonly AlertEventRecord[]>;
   /** Gauge refresh executed before each Prometheus scrape. */
@@ -54,6 +62,8 @@ const CHANNEL_STATUS_PATH = `${OPS_PREFIX}/channel-status`;
 const ALERT_RULES_PATH = `${OPS_PREFIX}/alert-rules`;
 const ALERT_EVENTS_PATH = `${OPS_PREFIX}/alert-events`;
 const MEDIA_TASKS_PATH = `${OPS_PREFIX}/media-tasks`;
+const SCHEDULING_HEALTH_PATH = `${OPS_PREFIX}/scheduling-health`;
+const DIAGNOSTICS_PATH = `${OPS_PREFIX}/diagnostics`;
 
 function requestPath(req: IncomingMessage): string | undefined {
   try {
@@ -80,10 +90,13 @@ function sendError(res: ServerResponse, status: number, code: string, message: s
   sendJson(res, status, { error: { code, message } });
 }
 
-async function authenticatedActor(options: ObservabilityHttpOptions, req: IncomingMessage): Promise<boolean> {
-  if (!options.access) return false;
+async function authenticatedActor(
+  options: ObservabilityHttpOptions,
+  req: IncomingMessage,
+): Promise<PlatformAdminActor | undefined> {
+  if (!options.access) return undefined;
   const actor = await options.access.authenticate(req);
-  return actor !== undefined && actor !== null && typeof actor.userId === 'string';
+  return actor !== undefined && actor !== null && typeof actor.userId === 'string' ? actor : undefined;
 }
 
 function drainRequest(req: IncomingMessage): void {
@@ -109,6 +122,8 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
       path !== QPS_STREAM_PATH &&
       path !== CHANNEL_STATUS_PATH &&
       path !== MEDIA_TASKS_PATH &&
+      path !== SCHEDULING_HEALTH_PATH &&
+      path !== DIAGNOSTICS_PATH &&
       path !== ALERT_RULES_PATH &&
       path !== ALERT_EVENTS_PATH
     ) {
@@ -137,9 +152,34 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
       return true;
     }
 
-    if (!(await authenticatedActor(options, req))) {
+    const actor = await authenticatedActor(options, req);
+    if (!actor) {
       drainRequest(req);
       sendError(res, 401, 'UNAUTHENTICATED', 'Authentication is required');
+      return true;
+    }
+
+    if (!hasPlatformRole(actor, ['operations', 'finance', 'support-readonly'])) {
+      drainRequest(req);
+      sendError(res, 403, 'FORBIDDEN', 'The operation is not permitted');
+      return true;
+    }
+
+    if (path === DIAGNOSTICS_PATH) {
+      drainRequest(req);
+      if (method !== 'GET') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', 'Only GET is supported');
+        return true;
+      }
+      if (!options.diagnostics) {
+        sendError(res, 503, 'DIAGNOSTICS_UNAVAILABLE', 'Operations diagnostics are unavailable');
+        return true;
+      }
+      try {
+        sendJson(res, 200, { data: await options.diagnostics() });
+      } catch {
+        sendError(res, 500, 'INTERNAL_ERROR', 'Operations diagnostics could not be read');
+      }
       return true;
     }
 
@@ -165,6 +205,38 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
         clearInterval(push);
         clearInterval(heartbeat);
       });
+      return true;
+    }
+
+    /*
+     * G-C2: the scheduling-health projection — the fault-handling console
+     * page's read model (G-B1 window verdicts + threshold pauses + durable
+     * health; secret-free by construction).
+     */
+    if (path === SCHEDULING_HEALTH_PATH) {
+      drainRequest(req);
+      if (method !== 'GET') {
+        sendError(res, 405, 'METHOD_NOT_ALLOWED', 'Only GET is supported for scheduling health');
+        return true;
+      }
+      if (!options.schedulingHealth) {
+        sendError(res, 503, 'SCHEDULING_HEALTH_UNAVAILABLE', 'The scheduling health projection is not available');
+        return true;
+      }
+      const url = new URL(req.url ?? '/', 'http://saas-observability.invalid');
+      const limitRaw = url.searchParams.get('limit');
+      const onlyConstrainedRaw = url.searchParams.get('onlyConstrained');
+      const limit = limitRaw === null ? undefined : Number.parseInt(limitRaw, 10);
+      const onlyConstrained = onlyConstrainedRaw === null ? undefined : onlyConstrainedRaw === 'true';
+      try {
+        const page = await options.schedulingHealth({
+          ...(limit === undefined || !Number.isInteger(limit) ? {} : { limit }),
+          ...(onlyConstrained === undefined ? {} : { onlyConstrained }),
+        });
+        sendJson(res, 200, { data: page });
+      } catch {
+        sendError(res, 500, 'INTERNAL_ERROR', 'The scheduling health page could not be read');
+      }
       return true;
     }
 
@@ -224,7 +296,6 @@ export function createObservabilityHttpHandler(options: ObservabilityHttpOptions
       }
       return true;
     }
-
 
     if (path === ALERT_RULES_PATH) {
       drainRequest(req);

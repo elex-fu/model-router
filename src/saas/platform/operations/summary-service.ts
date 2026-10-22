@@ -229,14 +229,19 @@ payment_webhook_stats AS (
   SELECT
     (COUNT(*) FILTER (WHERE inbox.processing_state = 'pending'))::text AS webhook_pending_count,
     (COUNT(*) FILTER (WHERE inbox.processing_state = 'processing'))::text AS webhook_processing_count,
-    (GREATEST(
-      0::numeric,
-      FLOOR(EXTRACT(EPOCH FROM (
-        snapshot.captured_at - MIN(inbox.received_at) FILTER (
-          WHERE inbox.processing_state IN ('pending', 'processing')
-        )
-      )) * 1000)
-    )::bigint)::text AS webhook_oldest_unprocessed_age_ms
+    ((CASE
+      WHEN MIN(inbox.received_at) FILTER (
+        WHERE inbox.processing_state IN ('pending', 'processing')
+      ) IS NULL THEN NULL
+      ELSE GREATEST(
+        0::numeric,
+        FLOOR(EXTRACT(EPOCH FROM (
+          MAX(snapshot.captured_at) - MIN(inbox.received_at) FILTER (
+            WHERE inbox.processing_state IN ('pending', 'processing')
+          )
+        )) * 1000)
+      )
+    END)::bigint)::text AS webhook_oldest_unprocessed_age_ms
   FROM saas_payment_inbox AS inbox
   CROSS JOIN snapshot
   WHERE inbox.processing_state IN ('pending', 'processing')
