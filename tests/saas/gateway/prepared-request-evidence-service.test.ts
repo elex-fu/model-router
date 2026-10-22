@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign, verify as verifyEd25519 } from 'node:crypto';
 import { test } from 'node:test';
 import { types as pgTypes } from 'pg';
+import type { Dispatcher } from 'undici';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import {
   canonicalPreparedRequestEvidencePayload,
@@ -9,6 +11,8 @@ import {
   SaasPreparedRequestEvidenceError,
   SaasPreparedRequestEvidenceService,
 } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
+import { ProviderHttpTransport } from '../../../src/saas/gateway/provider-http-transport.js';
+import { createBuiltinProviderEvidenceTransportFactory } from '../../../src/saas/runtime/builtin-provider-transports.js';
 
 const CLOCK = new Date('2026-09-28T00:00:00.000Z');
 const KEY_ID = 'prepared-verifier-1';
@@ -219,9 +223,14 @@ function rowFromInput(input: PreparedRequestEvidenceInput, statementSha256: stri
 
 class FakeExecutor implements SqlExecutor {
   readonly stages: string[] = [];
+  readonly batchStages: string[][] = [];
+  readonly statementValues: Array<readonly unknown[]> = [];
+  transformAuthorityBatch?: (rows: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
   readonly statements: string[] = [];
   readonly fenceKeys: string[] = [];
   transactionCalls = 0;
+  rollbackCalls = 0;
+  failFenceBatch = false;
   readonly rows: Record<string, unknown>;
   evidence: Record<string, unknown>;
   lockHintOverride: Record<string, unknown> | null = null;
@@ -327,10 +336,30 @@ class FakeExecutor implements SqlExecutor {
 
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     this.statements.push(sql);
+    this.statementValues.push([...values]);
     const match = sql.match(/\/\* prepared-evidence:([^ ]+) \*\//);
     const stage = match?.[1] ?? '';
     if (stage) this.stages.push(stage);
-    if (sql.includes('pg_advisory_xact_lock_shared')) this.fenceKeys.push(String(values[0]));
+    if (sql.includes('pg_advisory_xact_lock_shared')) {
+      const keys = Array.isArray(values[0]) ? values[0] : [values[0]];
+      this.fenceKeys.push(...keys.map(String));
+      if (stage === 'fence-batch' && this.failFenceBatch) throw new Error('synthetic fence batch failure');
+    }
+    if (stage === 'authority-batch') {
+      const stages = [...sql.matchAll(/\/\* prepared-evidence:([^ ]+) \*\//g)]
+        .map((match) => {
+          assert.ok(match[1]);
+          return match[1];
+        })
+        .filter((item) => item !== 'authority-batch');
+      this.batchStages.push(stages);
+      const facts = stages.map((item) => {
+        const row = this.rows[item];
+        return { stage: item, facts: structuredClone(Array.isArray(row) ? row : row ? [row] : []) };
+      });
+      const result = this.transformAuthorityBatch?.(facts) ?? facts;
+      return { rows: result as Row[], rowCount: result.length };
+    }
     if (sql.includes('SELECT clock_timestamp()')) {
       return { rows: [{ locked_at: CLOCK }] as Row[], rowCount: 1 };
     }
@@ -579,6 +608,7 @@ function makeDatabase(fake: FakeExecutor): SaasDatabase {
       try {
         return await work(fake);
       } catch (error) {
+        fake.rollbackCalls += 1;
         fake.evidence = evidence;
         fake.attemptEvidenceId = attemptEvidenceId;
         fake.rows.attempt = attempt;
@@ -791,6 +821,8 @@ test('register verifies a real Ed25519 statement and locks authorities before in
   const fake = new FakeExecutor(input);
   const result = await service(fake).register(input);
   assert.equal(result.status, 'registered');
+  assert.equal(result.providerId, input.providerId);
+  assert.equal(result.productId, input.productId);
   assert.deepEqual(result.modelResolution, input.modelResolution);
   assert.equal(result.providerProtocol, input.providerProtocol);
   assert.equal(result.clientOperation, input.clientOperation);
@@ -812,18 +844,10 @@ test('register verifies a real Ed25519 statement and locks authorities before in
     input.payloadCompilerVersion,
     input.usageEstimatorVersion,
   ]);
-  assert.ok(fake.stages.indexOf('clock') > fake.stages.indexOf('customer-price'));
+  assert.ok(fake.stages.indexOf('clock') > fake.stages.indexOf('authority-batch'));
+  assert.ok(fake.batchStages[0]?.includes('customer-price'));
   const authorityStages = fake.stages.filter((stage) => !stage.startsWith('fence-'));
-  assert.deepEqual(authorityStages.slice(0, 8), [
-    'tenant',
-    'project',
-    'project-policy',
-    'principal',
-    'tenant-membership',
-    'project-membership',
-    'key',
-    'request',
-  ]);
+  assert.deepEqual(authorityStages, ['authority-batch', 'request', 'attempt', 'clock', 'clock']);
   const firstAuthorityRead = fake.statements.findIndex((sql) => /FROM saas_tenants/i.test(sql));
   const lastFence = Math.max(...fake.statements.map((sql, index) => (sql.includes('pg_advisory') ? index : -1)));
   assert.ok(lastFence >= 0 && lastFence < firstAuthorityRead);
@@ -831,8 +855,239 @@ test('register verifies a real Ed25519 statement and locks authorities before in
   const policyVersionSql =
     fake.statements.find((sql) => /FROM saas_project_inference_policy_versions/i.test(sql)) ?? '';
   assert.doesNotMatch(projectHeadSql, /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
-  assert.match(policyVersionSql, /tenant_id = \$1 AND project_id = \$2 AND version = \$3/i);
+  assert.match(policyVersionSql, /tenant_id = \$[0-9]+ AND project_id = \$[0-9]+ AND version = \$[0-9]+/i);
   assert.doesNotMatch(policyVersionSql, /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
+});
+
+test('signed stored OpenAI evidence renders JSON/SSE tools through the builtin Kimi generic dispatch without a protocol alias', async (t) => {
+  for (const kind of ['json', 'sse'] as const) {
+    for (const forced of [false, true]) {
+      await t.test(`${kind} ${forced ? 'forced' : 'automatic'}`, async () => {
+        const nativePayload = {
+          model: 'kimi-for-coding',
+          max_tokens: 32,
+          stream: kind === 'sse',
+          messages: [{ role: 'user', content: 'Read the opaque fixture record.' }],
+          tools: [
+            {
+              name: 'lookup_fixture_value',
+              input_schema: { type: 'object', properties: { record_id: { type: 'string' } }, required: ['record_id'] },
+            },
+          ],
+          tool_choice: { type: forced ? 'any' : 'auto' },
+          thinking: { type: forced ? 'disabled' : 'enabled' },
+        };
+        const payloadBytes = Buffer.from(JSON.stringify(nativePayload));
+        const input = signedInput({
+          protocol: 'openai',
+          clientProtocol: 'openai',
+          routeProtocol: 'openai',
+          providerProtocol: 'anthropic',
+          clientOperation: 'chat.completions',
+          providerOperation: 'messages',
+          endpoint: 'messages',
+          providerId: 'kimi',
+          productId: 'kimi-code',
+          resolvedModel: 'kimi-for-coding',
+          modelResolution: {
+            ...(baseInput().modelResolution as NonNullable<PreparedRequestEvidenceInput['modelResolution']>),
+            mappedModel: 'kimi-for-coding',
+            resolvedModel: 'kimi-for-coding',
+          },
+          payloadSha256: createHash('sha256').update(payloadBytes).digest('hex'),
+        });
+        // The alias is redundant: the canonical signed statement binds `protocol`.
+        assert.equal(
+          canonicalPreparedRequestEvidencePayload(input),
+          canonicalPreparedRequestEvidencePayload({ ...input, clientProtocol: undefined }),
+        );
+        const fake = new FakeExecutor(input);
+        const evidenceService = service(fake);
+        const registered = await evidenceService.register(input);
+        fake.evidence.statement_sha256 = registered.statementSha256;
+        const preflight = await evidenceService.preflightForDispatch(String(input.evidenceId), input.audit);
+        const claimed = await evidenceService.claimForDispatch(String(input.evidenceId), input.audit);
+        for (const record of [preflight, claimed]) {
+          assert.equal(record.protocol, 'openai');
+          assert.equal(Object.hasOwn(record, 'clientProtocol'), false);
+          assert.equal(record.providerProtocol, 'anthropic');
+          assert.equal(record.clientOperation, 'chat.completions');
+          assert.equal(record.providerOperation, 'messages');
+          assert.equal(record.providerId, 'kimi');
+          assert.equal(record.productId, 'kimi-code');
+          assert.equal(record.statementSha256, registered.statementSha256);
+        }
+        const nativeUsage = {
+          input_tokens: 0,
+          output_tokens: 11,
+          cache_read_input_tokens: 25,
+          cache_creation_input_tokens: 0,
+          service_tier: 'standard',
+          inference_geo: 'not_available',
+        };
+        const tool = {
+          type: 'tool_use',
+          id: 'stored_tool_call',
+          name: 'lookup_fixture_value',
+          input: { record_id: 'stored-fixture' },
+        };
+        const content = forced
+          ? [tool]
+          : [
+              { type: 'thinking', thinking: 'Inspect the stored fixture.', signature: 'stored-fixture-signature' },
+              tool,
+            ];
+        const nativeMessage = {
+          id: 'stored_native_message',
+          type: 'message',
+          role: 'assistant',
+          model: 'kimi-for-coding',
+          content,
+          stop_reason: 'tool_use',
+          usage: nativeUsage,
+        };
+        const event = (type: string, value: Record<string, unknown>) =>
+          `event: ${type}\ndata: ${JSON.stringify({ type, ...value })}\n\n`;
+        const wire =
+          kind === 'json'
+            ? JSON.stringify(nativeMessage)
+            : event('message_start', {
+                message: {
+                  ...nativeMessage,
+                  content: [],
+                  stop_reason: null,
+                  usage: { ...nativeUsage, output_tokens: 0 },
+                },
+              }) +
+              content
+                .map(
+                  (block, index) =>
+                    event('content_block_start', { index, content_block: block }) +
+                    event('content_block_stop', { index }),
+                )
+                .join('') +
+              event('message_delta', { delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 11 } }) +
+              event('message_stop', {});
+        let fetches = 0;
+        const generic = new ProviderHttpTransport({
+          timeoutMs: 5_000,
+          endpointPolicy: { allowedHosts: ['api.kimi.com'], allowedPorts: [443] },
+          resolveAddresses: async () => [{ address: '8.8.8.8', family: 4 }],
+          createConnector: () => ({ dispatcher: {} as Dispatcher, close: async () => {}, destroy: async () => {} }),
+          resolveDispatchProfile: async () => ({ url: 'https://api.kimi.com/coding/v1/messages' }),
+          resolveCredential: async (identity, use) => {
+            for (const field of [
+              'providerId',
+              'productId',
+              'endpoint',
+              'providerProtocol',
+              'providerOperation',
+            ] as const) {
+              assert.equal(identity[field], input[field]);
+            }
+            assert.equal(Object.isFrozen(identity), true);
+            // Rendering must retain the binding captured before any resolver awaits.
+            Object.assign(claimed, { protocol: 'anthropic', clientProtocol: 'anthropic', clientOperation: 'messages' });
+            return use({ headerName: 'x-api-key', value: 'synthetic-stored-fixture' });
+          },
+          fetch: async (_url, init) => {
+            fetches++;
+            assert.deepEqual(JSON.parse(Buffer.from(init.body as Uint8Array).toString()), nativePayload);
+            return new Response(wire, {
+              headers: { 'content-type': kind === 'json' ? 'application/json' : 'text/event-stream' },
+            });
+          },
+        });
+        const builtin = createBuiltinProviderEvidenceTransportFactory({
+          database: makeDatabase(fake),
+          providerBundles: [{ bundle: 'kimi', enabled: true }],
+          timeoutMs: 5_000,
+          fetch: async () => {
+            throw new Error('Kimi must use the core generic HTTP transport');
+          },
+        });
+        try {
+          const mounted = builtin.factory({
+            genericTransport: generic,
+            proofReader: {
+              readDispatchProof: async () => {
+                throw new Error('no dedicated Kimi transport');
+              },
+            },
+            unsealer: {
+              withCredential: async () => {
+                throw new Error('no dedicated Kimi transport');
+              },
+            },
+          });
+          assert.equal(builtin.assembled, true);
+          assert.equal(mounted.cnProvidersEvidenceTransport, undefined);
+          // The actual Kimi builtin manifest selects the core generic fallback.
+          const transport = mounted.cnProvidersEvidenceTransport ?? generic;
+          const result = await transport.send({
+            tenantId: input.tenantId,
+            projectId: input.projectId,
+            requestId: input.requestId,
+            attemptId: input.attemptId,
+            fencingToken: 'stored-fixture-fence',
+            signal: new AbortController().signal,
+            payloadBytes,
+            evidence: claimed,
+          });
+          const initialProviderUsage = result.providerUsage;
+          assert.equal(initialProviderUsage, null);
+          assert.ok(result.body);
+          const clientText = await new Response(result.body).text();
+          if (kind === 'json') {
+            const client = JSON.parse(clientText);
+            assert.equal(client.object, 'chat.completion');
+            assert.equal(client.choices[0].finish_reason, 'tool_calls');
+            assert.deepEqual(client.choices[0].message.tool_calls[0], {
+              id: tool.id,
+              type: 'function',
+              function: { name: tool.name, arguments: JSON.stringify(tool.input) },
+            });
+            if (!forced) assert.deepEqual(client.choices[0].message.anthropic_content, content);
+            assert.deepEqual(client.usage, {
+              prompt_tokens: 25,
+              completion_tokens: 11,
+              total_tokens: 36,
+              prompt_tokens_details: { cached_tokens: 25 },
+            });
+          } else {
+            const frames = clientText
+              .split('\n')
+              .filter((line) => line.startsWith('data: {'))
+              .map((line) => JSON.parse(line.slice(6)));
+            assert.match(clientText, /data: \[DONE\]/);
+            assert.ok(frames.some((frame) => frame.choices[0]?.finish_reason === 'tool_calls'));
+            const calls = frames.flatMap((frame) => frame.choices[0]?.delta?.tool_calls ?? []);
+            assert.equal(calls.find((call) => call.id)?.id, tool.id);
+            assert.equal(calls.find((call) => call.function?.name)?.function.name, tool.name);
+            assert.deepEqual(JSON.parse(calls.map((call) => call.function?.arguments ?? '').join('')), tool.input);
+            if (!forced)
+              assert.deepEqual(
+                frames.find((frame) => frame.choices[0]?.delta?.anthropic_content)?.choices[0].delta.anthropic_content,
+                content,
+              );
+          }
+          assert.equal(fetches, 1);
+          assert.equal(result.providerUsage?.inputTotal, 25);
+          assert.equal(result.providerUsage?.inputUncached, 0);
+          assert.equal(result.providerUsage?.cacheRead, 25);
+          assert.equal(result.providerUsage?.cacheWrite, 0);
+          assert.equal(result.providerUsage?.outputTotal, 11);
+          assert.equal(result.usageEvidence?.completeness, 'complete');
+          assert.equal(
+            result.usageEvidence?.observerVersion,
+            `provider-${kind}-usage-observer/v2+kimi-coding-messages/v1`,
+          );
+        } finally {
+          builtin.close();
+        }
+      });
+    }
+  }
 });
 
 test('register joins a supplied outer executor without opening a nested transaction', async () => {
@@ -913,9 +1168,9 @@ test('member authority remains membership-bound while project-service evidence i
     (await projectServiceEvidence.claimForDispatch(projectService.evidenceId ?? '', projectService.audit)).status,
     'claimed',
   );
-  assert.equal(projectServiceFake.stages.includes('principal'), false);
-  assert.equal(projectServiceFake.stages.includes('tenant-membership'), false);
-  assert.equal(projectServiceFake.stages.includes('project-membership'), false);
+  assert.equal(projectServiceFake.batchStages.flat().includes('principal'), false);
+  assert.equal(projectServiceFake.batchStages.flat().includes('tenant-membership'), false);
+  assert.equal(projectServiceFake.batchStages.flat().includes('project-membership'), false);
   assert.ok(projectServiceFake.auditActorIds.length > 0);
   assert.ok(projectServiceFake.auditActorIds.every((actorUserId) => actorUserId === null));
 
@@ -962,6 +1217,8 @@ test('claim is atomic, audited and cannot be repeated; audit failure rolls back'
   assert.equal(fake.evidence.status, 'registered');
   const claimed = await service(fake).claimForDispatch(input.evidenceId ?? '', input.audit);
   assert.equal(claimed.status, 'claimed');
+  assert.equal(claimed.providerId, input.providerId);
+  assert.equal(claimed.productId, input.productId);
   const claimEvidenceIndex = fake.stages.lastIndexOf('evidence-claim');
   assert.ok(claimEvidenceIndex > fake.stages.lastIndexOf('attempt'));
   assert.equal(fake.attemptEvidenceId, input.evidenceId);
@@ -1181,6 +1438,335 @@ test('concurrent fake claims preserve attempt-before-evidence lock order', async
   assert.equal(secondClaim.status, 'claimed');
   assert.ok(first.stages.lastIndexOf('evidence-claim') > first.stages.lastIndexOf('attempt'));
   assert.ok(second.stages.lastIndexOf('evidence-claim') > second.stages.lastIndexOf('attempt'));
+});
+
+function modeInput(mode: 'byok' | 'platform'): PreparedRequestEvidenceInput {
+  return mode === 'byok'
+    ? signedInput()
+    : signedInput({
+        supplyMode: 'platform',
+        accountOwnerKind: 'platform',
+        routeTargetMode: 'platform_pool',
+        profileAccountAuthzVersion: null,
+        poolId: 'pool-1',
+        poolAuthzVersion: '1',
+        poolMemberAccountAuthzVersion: '1',
+        poolMemberAuthzVersion: '1',
+        poolGrantAuthzVersion: '1',
+        poolGrantProfileAuthzVersion: '1',
+        poolGrantPoolAuthzVersion: '1',
+        supplierCostVersion: 'cost-1',
+        maxHoldCurrency: 'USD',
+        maxHoldMinorUnits: '1000',
+      });
+}
+
+function modeFake(input: PreparedRequestEvidenceInput): FakeExecutor {
+  const fake = new FakeExecutor(input);
+  if (input.supplyMode === 'platform') {
+    fake.rows.pool = { status: 'active', authz_version: input.poolAuthzVersion };
+    fake.rows['pool-member'] = {
+      status: 'active',
+      authz_version: input.poolMemberAuthzVersion,
+      account_authz_version: input.poolMemberAccountAuthzVersion,
+    };
+    fake.rows['pool-grant'] = {
+      status: 'active',
+      authz_version: input.poolGrantAuthzVersion,
+      profile_authz_version: input.poolGrantProfileAuthzVersion,
+      pool_authz_version: input.poolGrantPoolAuthzVersion,
+    };
+    fake.rows['supplier-cost'] = { effective_at: '2026-01-01T00:00:00.000Z', expires_at: null };
+  }
+  return fake;
+}
+
+async function registeredMode(mode: 'byok' | 'platform') {
+  const input = modeInput(mode);
+  const fake = modeFake(input);
+  const evidenceService = service(fake);
+  const registered = await evidenceService.register(input);
+  fake.evidence.statement_sha256 = registered.statementSha256;
+  return { input, fake, evidenceService };
+}
+
+/** Independent expected layer sequence; sorting and deduplication stop at each layer boundary. */
+function expectedEvidenceFences(input: PreparedRequestEvidenceInput): string[] {
+  return [
+    saasAdvisoryKey.tenant(input.tenantId),
+    saasAdvisoryKey.project(input.tenantId, input.projectId),
+    ...[
+      ...(input.principalKind === 'member' ? [saasAdvisoryKey.user(input.principalId)] : []),
+      saasAdvisoryKey.apiKey(input.tenantId, input.projectId, input.proxyKeyId),
+      saasAdvisoryKey.commercialCustomer(input.tenantId, input.customerMeteringPolicyId),
+      saasAdvisoryKey.commercialProvider(input.providerId, input.providerMeteringPolicyId),
+      'saas-authz:provider-rights',
+    ].sort(),
+    ...(input.poolId === null ? [] : [saasAdvisoryKey.platformPool(input.poolId)]),
+    ...[
+      ...new Set([
+        saasAdvisoryKey.supplyProfile(input.tenantId, input.supplyProfileId),
+        saasAdvisoryKey.supplyProfile(input.tenantId, input.dispatchProfileId),
+      ]),
+    ].sort(),
+    input.accountOwnerKind === 'tenant'
+      ? saasAdvisoryKey.tenantProviderAccount(input.tenantId, input.accountId)
+      : saasAdvisoryKey.platformProviderAccount(input.accountId),
+    input.accountOwnerKind === 'tenant'
+      ? saasAdvisoryKey.tenantProviderCredential(input.tenantId, input.credentialId)
+      : saasAdvisoryKey.platformProviderCredential(input.credentialId),
+    saasAdvisoryKey.credentialVersion(
+      input.accountOwnerKind,
+      input.accountOwnerKind === 'tenant' ? input.tenantId : 'platform',
+      input.credentialId,
+      Number(input.credentialVersion),
+    ),
+    ...(input.supplyMode === 'byok'
+      ? [saasAdvisoryKey.supplyProfileAccount(input.tenantId, input.dispatchProfileId, input.accountId)]
+      : []),
+  ];
+}
+
+test('evidence fence batch preserves exact layer order, per-layer dedupe and cross-layer duplicate keys', async () => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const input = signedInput({ ...modeInput(mode), principalId: saasAdvisoryKey.tenant('tenant-1') });
+    const fake = modeFake(input);
+    await service(fake).register(input);
+    const expected = expectedEvidenceFences(input);
+    assert.deepEqual(fake.fenceKeys, expected);
+    assert.equal(expected.filter((key) => key === saasAdvisoryKey.tenant(input.tenantId)).length, 2);
+    assert.equal(
+      expected.filter((key) => key === saasAdvisoryKey.supplyProfile(input.tenantId, input.supplyProfileId)).length,
+      1,
+    );
+    assert.notDeepEqual(expected, [...expected].sort(), 'layer sequence is not a global key sort');
+    const index = fake.statements.findIndex((sql) => sql.includes('prepared-evidence:fence-batch'));
+    const sql = fake.statements[index];
+    assert.ok(sql);
+    assert.deepEqual(fake.statementValues[index], [expected]);
+    assert.equal(fake.statements.filter((statement) => statement.includes('pg_advisory_xact_lock_shared')).length, 1);
+    assert.match(sql, /SELECT pg_advisory_xact_lock_shared\(hashtextextended\(fence\.fence_key, 0\)\)/);
+    assert.match(sql, /WITH ORDINALITY AS fence\(fence_key, input_ordinal\)\s+ORDER BY fence\.input_ordinal\s*$/);
+    assert.doesNotMatch(sql, /\bLIMIT\b|\bDISTINCT\b|\bGROUP BY\b|ORDER BY\s+(?:1|fence\.fence_key)/i);
+  }
+});
+
+for (const method of ['register', 'preflightForDispatch', 'claimForDispatch'] as const) {
+  test(`${method}: a fence batch failure rolls back before authority reads or writes`, async () => {
+    const input = modeInput('platform');
+    const fake = modeFake(input);
+    const evidenceService = service(fake);
+    if (method !== 'register') {
+      const record = await evidenceService.register(input);
+      fake.evidence.statement_sha256 = record.statementSha256;
+    }
+    const before = {
+      evidence: structuredClone(fake.evidence),
+      attempt: structuredClone(fake.rows.attempt),
+      claim: fake.attemptEvidenceId,
+      audit: [...fake.auditActorIds],
+    };
+    const start = fake.statements.length;
+    fake.failFenceBatch = true;
+    await expectCode(
+      method === 'register'
+        ? evidenceService.register(input)
+        : evidenceService[method](String(input.evidenceId), input.audit),
+      'STORAGE_ERROR',
+    );
+    const trace = fake.statements.slice(start);
+    assert.equal(trace.filter((sql) => sql.includes('prepared-evidence:fence-batch')).length, 1);
+    assert.equal(
+      trace.some((sql) => /prepared-evidence:(?:authority-batch|clock|request |attempt )|^(?:INSERT|UPDATE)/.test(sql)),
+      false,
+    );
+    assert.equal(fake.rollbackCalls, 1);
+    assert.deepEqual(
+      { evidence: fake.evidence, attempt: fake.rows.attempt, claim: fake.attemptEvidenceId, audit: fake.auditActorIds },
+      before,
+    );
+  });
+}
+
+test('each registration, preflight and claim reads one fresh scoped authority batch after the same ordered fences', async () => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const { input, fake, evidenceService } = await registeredMode(mode);
+    const boundaries = [0, fake.statements.length];
+    await evidenceService.preflightForDispatch(String(input.evidenceId), input.audit);
+    boundaries.push(fake.statements.length);
+    await evidenceService.claimForDispatch(String(input.evidenceId), input.audit);
+    boundaries.push(fake.statements.length);
+    assert.equal(fake.transactionCalls, 3, 'preflight and claim keep independent transactions');
+    assert.equal(fake.batchStages.length, 3);
+    assert.equal(fake.batchStages[0]?.length, mode === 'byok' ? 16 : 19);
+    const expectedFences = expectedEvidenceFences(input);
+    assert.deepEqual(fake.fenceKeys, [...expectedFences, ...expectedFences, ...expectedFences]);
+    for (let method = 0; method < 3; method++) {
+      const sql = fake.statements.slice(boundaries[method], boundaries[method + 1]);
+      const batchIndex = sql.findIndex((statement) => statement.includes('prepared-evidence:authority-batch'));
+      const lastFence = sql.findLastIndex((statement) => statement.includes('pg_advisory_xact_lock_shared'));
+      assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:fence-batch')).length, 1);
+      assert.ok(batchIndex > lastFence && lastFence >= 0);
+      assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:authority-batch')).length, 1);
+      assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:clock')).length, 2);
+      const batch = sql[batchIndex];
+      assert.ok(batch);
+      assert.doesNotMatch(batch, /SELECT \*|FOR (?:UPDATE|SHARE)|key_digest|ciphertext|wrapped_dek/i);
+      assert.match(batch, /SELECT status, validation_state, authz_version::text, provider_id, product_id FROM saas_/);
+      assert.match(batch, /authz_version::text/);
+      assert.match(batch, /project-policy \*\/ SELECT version::text, status/);
+      if (method > 0) {
+        for (const stage of ['request', 'attempt', method === 1 ? 'evidence-preflight' : 'evidence-claim']) {
+          const statement = sql.find((query) => query.includes(`prepared-evidence:${stage} */`));
+          assert.ok(statement);
+          if (method === 1) assert.doesNotMatch(statement, /FOR UPDATE/);
+          else assert.match(statement, /FOR UPDATE$/);
+        }
+      }
+      // Every remapped parameter remains scoped to the original signed facts.
+      const start = boundaries[method];
+      assert.ok(start !== undefined);
+      const absoluteIndex = start + batchIndex;
+      const values = fake.statementValues[absoluteIndex];
+      assert.ok(values);
+      const projectPolicy =
+        /FROM saas_project_inference_policy_versions WHERE tenant_id = \$(\d+) AND project_id = \$(\d+) AND version = \$(\d+)/.exec(
+          batch,
+        );
+      assert.ok(projectPolicy);
+      assert.deepEqual(
+        projectPolicy.slice(1).map((index) => values[Number(index) - 1]),
+        [input.tenantId, input.projectId, input.projectPolicyVersion],
+      );
+      const account =
+        mode === 'byok'
+          ? /FROM saas_tenant_provider_accounts WHERE tenant_id = \$(\d+) AND id = \$(\d+)/.exec(batch)
+          : /FROM saas_platform_provider_accounts WHERE id = \$(\d+)/.exec(batch);
+      assert.ok(account);
+      assert.deepEqual(
+        account.slice(1).map((index) => values[Number(index) - 1]),
+        mode === 'byok' ? [input.tenantId, input.accountId] : [input.accountId],
+      );
+    }
+  }
+});
+
+test('batched int8 revisions retain decimal text beyond JavaScript safe integer precision', async () => {
+  const exactVersion = '9007199254740993';
+  const input = signedInput({ authzVersion: exactVersion, projectPolicyVersion: exactVersion });
+  const fake = new FakeExecutor(input);
+  const evidenceService = service(fake);
+  const registered = await evidenceService.register(input);
+  fake.evidence.statement_sha256 = registered.statementSha256;
+  await evidenceService.preflightForDispatch(String(input.evidenceId), input.audit);
+  await evidenceService.claimForDispatch(String(input.evidenceId), input.audit);
+  for (const statement of fake.statements.filter((sql) => sql.includes('authority-batch'))) {
+    assert.match(statement, /inference_policy_version::text/);
+    assert.match(statement, /version::text, status FROM saas_project_inference_policy_versions/);
+    assert.match(statement, /authz_version::text/);
+  }
+});
+
+test('missing or duplicate singular batch facts retain the prior domain/storage refusal and no claim effect', async () => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const batchStages = (await registeredMode(mode)).fake.batchStages[0];
+    assert.ok(batchStages);
+    const stages = batchStages.filter((stage) => !stage.endsWith('membership'));
+    for (const method of ['preflightForDispatch', 'claimForDispatch'] as const) {
+      for (const stage of stages) {
+        for (const duplicate of [false, true]) {
+          const { input, fake, evidenceService } = await registeredMode(mode);
+          const row = fake.rows[stage];
+          fake.rows[stage] = duplicate ? [row, structuredClone(row)] : [];
+          const before = structuredClone(fake.rows.attempt);
+          const auditCount = fake.auditActorIds.length;
+          await expectCode(
+            evidenceService[method](String(input.evidenceId), input.audit),
+            duplicate ? 'STORAGE_ERROR' : 'AUTHORITY_MISMATCH',
+          );
+          assert.deepEqual(fake.rows.attempt, before, `${method}/${stage}`);
+          assert.equal(fake.evidence.status, 'registered');
+          assert.equal(fake.attemptEvidenceId, null);
+          assert.equal(fake.auditActorIds.length, auditCount);
+        }
+      }
+    }
+  }
+});
+
+test('malformed, duplicate, unknown or incomplete authority batch stages fail closed before a claim write', async () => {
+  const corruptions: Array<NonNullable<FakeExecutor['transformAuthorityBatch']>> = [
+    () => [],
+    (rows) => rows.slice(1),
+    (rows) => {
+      assert.ok(rows[0]);
+      return [...rows, rows[0]];
+    },
+    (rows) => rows.map((row, index) => (index === 0 ? { ...row, stage: 'unknown' } : row)),
+    (rows) => rows.map((row, index) => (index === 0 ? { ...row, facts: null } : row)),
+    (rows) => rows.map((row, index) => (index === 0 ? { ...row, facts: [null] } : row)),
+    (rows) => rows.map((row, index) => (index === 0 ? { ...row, facts: [[]] } : row)),
+    (rows) => rows.map((row, index) => (index === 0 ? { ...row, facts: ['active'] } : row)),
+  ];
+  for (const method of ['preflightForDispatch', 'claimForDispatch'] as const) {
+    for (const corrupt of corruptions) {
+      const { input, fake, evidenceService } = await registeredMode('byok');
+      fake.transformAuthorityBatch = corrupt;
+      await expectCode(evidenceService[method](String(input.evidenceId), input.audit), 'STORAGE_ERROR');
+      assert.equal(fake.attemptClaimQueries.length, 0);
+      assert.equal(fake.attemptEvidenceId, null);
+      assert.equal(fake.evidence.status, 'registered');
+    }
+  }
+});
+
+test('claim reloads every mutable authority after preflight and retains expiry, identity and epoch denials', async () => {
+  const mutations: Array<[string, Record<string, unknown>]> = [
+    ['tenant', { status: 'suspended' }],
+    ['project', { inference_policy_version: '2' }],
+    ['project-policy', { status: 'suspended' }],
+    ['principal', { disabled_at: CLOCK }],
+    ['key', { authz_version: '2' }],
+    ['key', { expires_at: CLOCK.toISOString() }],
+    ['entitlement', { authz_version: '2' }],
+    ['entitlement', { effective_at: '2026-09-29T00:00:00.000Z' }],
+    ['profile', { status: 'disabled' }],
+    ['route', { version: '2' }],
+    ['commercial', { contract_attestation_id: 'different' }],
+    ['attestation', { verification_result: 'failed' }],
+    ['account', { provider_id: 'different' }],
+    ['account', { product_id: 'different' }],
+    ['account', { validation_state: 'failed' }],
+    ['credential', { authz_version: '2' }],
+    ['credential', { current_version: '2' }],
+    ['credential', { expires_at: CLOCK.toISOString() }],
+    ['customer-price', { expires_at: CLOCK.toISOString() }],
+  ];
+  for (const mode of ['byok', 'platform'] as const) {
+    const specific: typeof mutations =
+      mode === 'byok'
+        ? [
+            ['mapping', { status: 'disabled' }],
+            ['mapping', { account_authz_version: '2' }],
+          ]
+        : [
+            ['pool', { authz_version: '2' }],
+            ['pool-member', { account_authz_version: '2' }],
+            ['pool-grant', { profile_authz_version: '2' }],
+            ['pool-grant', { expires_at: CLOCK.toISOString() }],
+            ['supplier-cost', { expires_at: CLOCK.toISOString() }],
+          ];
+    for (const [stage, patch] of [...mutations, ...specific]) {
+      const { input, fake, evidenceService } = await registeredMode(mode);
+      await evidenceService.preflightForDispatch(String(input.evidenceId), input.audit);
+      Object.assign(fake.rows[stage] as Record<string, unknown>, patch);
+      await expectCode(evidenceService.claimForDispatch(String(input.evidenceId), input.audit), 'AUTHORITY_MISMATCH');
+      assert.equal(fake.batchStages.length, 3, 'registration/preflight facts are never cached for claim');
+      assert.equal(fake.attemptClaimQueries.length, 0);
+      assert.equal(fake.attemptEvidenceId, null);
+      assert.equal(fake.evidence.status, 'registered');
+    }
+  }
 });
 
 test('PostgreSQL concurrent claim integration is skipped without a live test harness', {

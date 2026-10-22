@@ -449,9 +449,28 @@ test('R-dormant scheduling-threshold pause drives selection eligibility on real 
             observedAt,
           ),
         );
+        const rateLimitResetAt = observedAt + 4 * 60 * 60 * 1000;
+        await phase('write-claude-rate-limit', () =>
+          store.writeClaudeRateLimit(
+            owner,
+            {
+              window: '5h',
+              resetAtMs: rateLimitResetAt,
+              fiveHourResetAtMs: rateLimitResetAt,
+              sessionWindowStartMs: rateLimitResetAt - 5 * 60 * 60 * 1000,
+              sessionWindowEndMs: rateLimitResetAt,
+            },
+            observedAt,
+          ),
+        );
+        await phase('claim-gemini', () => store.claimDueGeminiAccounts({ refreshMs: 900_000, limit: 1 }));
+        await phase('count-gemini-day', () =>
+          store.readGeminiWindowRequestCounts(owner, observedAt - 24 * 60 * 60 * 1000),
+        );
+        await phase('count-gemini-minute', () => store.readGeminiMinuteRequestCount(owner, observedAt));
         const row = (
           await phase('read-snapshot', () =>
-            worker.query<{
+            gateway.query<{
               codex_5h_used_percent: number;
               claude_5h_utilization: number;
               gemini_shared_daily_used: number;
@@ -471,6 +490,7 @@ test('R-dormant scheduling-threshold pause drives selection eligibility on real 
         assert.equal(row.gemini_shared_daily_used, 5);
         assert.equal(row.gemini_minute_limit, 10);
         assert.ok(row.claude_session_window_end !== null, 'the 5h session window anchored to [reset−5h, reset]');
+        assert.equal(row.claude_session_window_end.getTime(), rateLimitResetAt);
 
         // The gateway role holds no UPDATE on the worker-owned snapshot
         // columns (115 keeps them validation-worker-owned).

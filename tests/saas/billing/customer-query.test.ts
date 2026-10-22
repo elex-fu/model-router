@@ -94,11 +94,13 @@ class RecordingDatabase implements CustomerWalletQueryDatabase {
             } as RowType,
           ]);
         }
-        if (statement.includes('FROM saas_billing_reservations')) {
-          return result<RowType>([{ active_hold_minor_units: '200' } as RowType]);
-        }
-        if (statement.includes('FROM saas_refund_wallet_freezes')) {
-          return result<RowType>([{ active_refund_freeze_minor_units: '0' } as RowType]);
+        if (
+          statement.includes('FROM saas_billing_reservations') &&
+          statement.includes('FROM saas_refund_wallet_freezes')
+        ) {
+          return result<RowType>([
+            { active_hold_minor_units: '200', active_refund_freeze_minor_units: '0' } as RowType,
+          ]);
         }
         if (statement.includes('FROM saas_billing_spending_freezes')) {
           return result<RowType>([

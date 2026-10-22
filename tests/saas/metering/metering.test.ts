@@ -9,6 +9,7 @@ import {
   SaasMeteringService,
   sha256Hex,
 } from '../../../src/saas/metering/index.js';
+import type { RequestCompletedTransition } from '../../../src/saas/webhooks/producers.js';
 
 type Row = Record<string, unknown>;
 
@@ -359,7 +360,6 @@ class MemoryDatabase implements SaasDatabase {
       dispatchState,
       resultState,
       responseStarted,
-      updatedAt,
       hasHttpStatus,
       httpStatus,
       unknownReason,
@@ -379,6 +379,9 @@ class MemoryDatabase implements SaasDatabase {
         (expectedVersion === null || candidate.state_version === expectedVersion),
     );
     if (!row) return [];
+    // This executor supplies persistence time independently of the service's
+    // injected clock. Precision and clock-skew behavior are exercised on PG.
+    const updatedAt = new Date(Math.max(Date.now(), Date.parse(String(row.updated_at)))).toISOString();
     row.dispatch_state = dispatchState;
     row.result_state = resultState;
     row.response_started = Boolean(row.response_started) || Boolean(responseStarted);
@@ -1717,12 +1720,12 @@ test('new metering admission requires an exact route authority snapshot and neve
 
 test('F3: a terminally failed request emits request.completed inside the same transaction', async () => {
   const database = new MemoryDatabase();
-  const calls: Array<Record<string, unknown>> = [];
+  const calls: RequestCompletedTransition[] = [];
   const service = new SaasMeteringService(database, {
     now: fixedNow,
     webhookEvents: {
       requestCompleted: async (_tx, input) => {
-        calls.push(input as Record<string, unknown>);
+        calls.push(input);
       },
     },
   });

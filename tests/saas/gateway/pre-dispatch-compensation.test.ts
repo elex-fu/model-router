@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { PostgresPreDispatchCompensation } from '../../../src/saas/gateway/postgres-pre-dispatch-compensation.js';
 import type { PostgresPreparationCapacityPort } from '../../../src/saas/gateway/postgres-preparation-ports.js';
@@ -141,15 +142,27 @@ function setup(mode: 'byok' | 'platform' = 'platform') {
     status: 'registered',
   };
   const sqls: string[] = [];
+  const queries: { sql: string; values: readonly unknown[]; executor: SqlExecutor }[] = [];
   let capacityCalls = 0;
   let walletCalls = 0;
+  let billingCalls = 0;
+  let failWalletFence = false;
+  let walletFenceBarrier: { entered: () => void; wait: Promise<void> } | undefined;
   let failAudit = false;
   let commitUncertain = false;
   let zeroCas = false;
   let partialCapacity = false;
   const executor: SqlExecutor = {
-    async query<T>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<T>> {
+    async query<T>(this: SqlExecutor, sql: string, values: readonly unknown[] = []): Promise<SqlResult<T>> {
       sqls.push(sql);
+      queries.push({ sql, values: [...values], executor: this });
+      if (sql === WALLET_FENCE_SQL) {
+        if (failWalletFence) throw new Error('wallet fence unavailable');
+        if (walletFenceBarrier) {
+          walletFenceBarrier.entered();
+          await walletFenceBarrier.wait;
+        }
+      }
       let result: Row[] = [];
       if (sql.includes('FROM saas_gateway_request_idempotency_keys')) result = [state.idem];
       else if (sql.includes('FROM saas_requests WHERE')) result = [state.request];
@@ -203,6 +216,7 @@ function setup(mode: 'byok' | 'platform' = 'platform') {
     billing: {
       async release(tx, input) {
         assert.strictEqual(tx, executor);
+        billingCalls++;
         walletCalls++;
         Object.assign(state.hold, {
           state: 'released',
@@ -238,8 +252,24 @@ function setup(mode: 'byok' | 'platform' = 'platform') {
     executor,
     evidence,
     sqls,
+    queries,
     state: () => state,
-    calls: () => ({ capacityCalls, walletCalls }),
+    calls: () => ({ capacityCalls, walletCalls, billingCalls }),
+    failWalletFence: () => {
+      failWalletFence = true;
+    },
+    pauseWalletFence: () => {
+      let signalEntered = () => {};
+      let release = () => {};
+      const entered = new Promise<void>((resolve) => {
+        signalEntered = resolve;
+      });
+      const wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      walletFenceBarrier = { entered: signalEntered, wait };
+      return { entered, release };
+    },
     failAudit: () => {
       failAudit = true;
     },
@@ -256,6 +286,94 @@ function setup(mode: 'byok' | 'platform' = 'platform') {
 }
 const cleanup = (fixture: ReturnType<typeof setup>) =>
   fixture.service.compensate({ prepared: fixture.prepared, cause: 'client_cancelled', responseMayHaveStarted: false });
+
+function assertWalletFenceOrder(fixture: ReturnType<typeof setup>, queryOffset = 0) {
+  const queries = fixture.queries.slice(queryOffset);
+  const fences = queries.filter((query) => query.sql === WALLET_FENCE_SQL);
+  assert.equal(fences.length, 1);
+  const [fence] = fences;
+  assert.ok(fence);
+  assert.equal(fence.sql, 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))');
+  assert.equal(saasAdvisoryKey.walletFence('tenant', 'USD'), 'model-router:wallet-fence:74656e616e74:555344');
+  assert.deepEqual(fence.values, ['model-router:wallet-fence:74656e616e74:555344']);
+  const fenceIndex = queries.indexOf(fence);
+  const walletIndex = queries.findIndex(
+    (query) => query.sql === 'SELECT id FROM saas_wallets WHERE tenant_id = $1 AND currency = $2 FOR UPDATE',
+  );
+  const holdIndex = queries.findIndex(
+    (query) => query.sql.includes('FROM saas_billing_reservations') && query.sql.includes('FOR UPDATE'),
+  );
+  assert.ok(fenceIndex >= 0 && walletIndex > fenceIndex && holdIndex > walletIndex);
+  assert.ok(queries.every((query) => query.executor === fixture.executor));
+  assert.deepEqual(queries[walletIndex]?.values, ['tenant', 'USD']);
+}
+
+test('platform compensation takes the canonical wallet fence in the same transaction before either row lock', async () => {
+  const f = setup();
+  const barrier = f.pauseWalletFence();
+  const pending = cleanup(f);
+  await barrier.entered;
+  try {
+    assert.equal(f.calls().walletCalls, 0);
+    assert.equal(f.calls().billingCalls, 0);
+    assert.ok(f.sqls.every((sql) => !/saas_(?:wallets|billing_reservations|ledger)/.test(sql)));
+  } finally {
+    barrier.release();
+  }
+  assert.equal((await pending).disposition, 'released');
+  assertWalletFenceOrder(f);
+  assert.equal(f.calls().billingCalls, 1);
+  assert.equal(f.state().hold.state, 'released');
+});
+
+test('released replay takes the same wallet fence and row locks without repeating financial effects', async () => {
+  const f = setup();
+  assert.equal((await cleanup(f)).disposition, 'released');
+  const queryOffset = f.queries.length;
+  const before = structuredClone(f.state());
+  assert.equal((await cleanup(f)).disposition, 'released');
+  assertWalletFenceOrder(f, queryOffset);
+  assert.equal(f.calls().capacityCalls, 1);
+  assert.equal(f.calls().billingCalls, 1);
+  assert.deepEqual(f.state(), before);
+  assert.ok(f.queries.slice(queryOffset).every((query) => !/^(?:UPDATE|INSERT|DELETE)\b/.test(query.sql)));
+});
+
+test('wallet fence failure stops before wallet or hold row locks and rolls back compensation effects', async () => {
+  const f = setup();
+  const before = structuredClone(f.state());
+  f.failWalletFence();
+  const result = await cleanup(f);
+  assert.equal(result.disposition, 'retained_for_reconciliation');
+  assert.equal(result.manualReconciliationRequired, true);
+  assert.deepEqual(f.state(), before);
+  assert.equal(f.calls().capacityCalls, 1);
+  assert.equal(f.calls().billingCalls, 0);
+  assert.equal(f.calls().walletCalls, 0);
+  assert.equal(f.queries.filter((query) => query.sql === WALLET_FENCE_SQL).length, 1);
+  assert.equal(f.queries.at(-1)?.sql, WALLET_FENCE_SQL);
+  assert.ok(f.queries.every((query) => query.executor === f.executor));
+  assert.ok(f.sqls.every((sql) => !/saas_(?:wallets|billing_reservations|ledger)/.test(sql)));
+});
+
+test('released replay cannot skip a failed wallet fence or repeat a release', async () => {
+  const f = setup();
+  assert.equal((await cleanup(f)).disposition, 'released');
+  const queryOffset = f.queries.length;
+  const before = structuredClone(f.state());
+  const beforeCalls = f.calls();
+  f.failWalletFence();
+  const result = await cleanup(f);
+  assert.equal(result.disposition, 'retained_for_reconciliation');
+  assert.equal(result.manualReconciliationRequired, true);
+  assert.deepEqual(f.state(), before);
+  assert.deepEqual(f.calls(), beforeCalls);
+  const replayQueries = f.queries.slice(queryOffset);
+  assert.equal(replayQueries.filter((query) => query.sql === WALLET_FENCE_SQL).length, 1);
+  assert.equal(replayQueries.at(-1)?.sql, WALLET_FENCE_SQL);
+  assert.ok(replayQueries.every((query) => query.executor === f.executor));
+  assert.ok(replayQueries.every((query) => !/saas_(?:wallets|billing_reservations|ledger)/.test(query.sql)));
+});
 
 test('platform cancellation atomically closes request/attempt/idempotency and releases exactly once', async () => {
   const f = setup();
@@ -279,6 +397,7 @@ test('BYOK cancellation and replay never query or modify Token wallets', async (
   assert.equal((await cleanup(f)).disposition, 'released');
   assert.equal(f.calls().walletCalls, 0);
   assert.equal(f.state().request.financial_status, 'not_applicable');
+  assert.ok(f.queries.every((query) => query.sql !== WALLET_FENCE_SQL));
   assert.ok(f.sqls.every((sql) => !/saas_(?:wallets|billing|ledger)/.test(sql)));
 });
 

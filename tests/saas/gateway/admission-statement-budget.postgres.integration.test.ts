@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { createSaasDatabase } from '../../../src/saas/db/index.js';
-import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
+import type { SqlExecutor } from '../../../src/saas/db/types.js';
 import { PostgresPreparationCapacityAdapter } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
+import type { PostgresPreparationObservation } from '../../../src/saas/gateway/postgres-preparation-observer.js';
 import {
   anyRoleConfigured,
   observedDatabase,
@@ -85,8 +86,11 @@ test('admission statement budget: one fresh platform member admission stays with
 
   const fixture = await phase('seed', () => seedFixture(migrator.database, gateway, 'platform'));
   const pool = await phase('pool-align', () => alignPlatformPool(migrator.database, fixture));
+  const observations: PostgresPreparationObservation[] = [];
   const harness = await phase('harness', () =>
-    createAdmissionHarness(migrator.database, gateway, fixture, 'platform', pool),
+    createAdmissionHarness(migrator.database, gateway, fixture, 'platform', pool, {
+      observe: (observation) => observations.push(observation),
+    }),
   );
   const capacity = new PostgresPreparationCapacityAdapter();
 
@@ -106,7 +110,22 @@ test('admission statement budget: one fresh platform member admission stays with
       const tracing: SqlExecutor = {
         async query<Row>(sql: string, values?: readonly unknown[]) {
           sqlTrace.push(sql.replace(/\s+/g, ' ').trim());
-          return counting.executor.query<Row>(sql, values);
+          const result = await counting.executor.query<Row>(sql, values);
+          if (sql.includes('postgres-request-admission:authority-batch')) {
+            const key = (result.rows as Array<{ stage: string; facts: Array<Record<string, unknown>> }>).find(
+              (row) => row.stage === 'key',
+            )?.facts[0];
+            assert.ok(key, 'the live batch must retain the key authority fact');
+            for (const field of [
+              'authz_version',
+              'entitlement_authz_version',
+              'supply_profile_authz_version',
+              'model_scope_version',
+            ]) {
+              assert.equal(typeof key[field], 'string', `${field} must retain pg int8 decimal text`);
+            }
+          }
+          return result;
         },
       };
       const admitted = await harness.admit(tracing, requestId, attemptId, label);
@@ -139,6 +158,14 @@ test('admission statement budget: one fresh platform member admission stays with
       `(guard fences=${profile.guardFences}, guard reads=${profile.guardReads}, ` +
       `capacity=${profile.capacity}, prelock+metering+billing=${profile.other})`,
   );
+  const guardPhase = observations.find(
+    (observation) => observation.kind === 'phase' && observation.phase === 'admission-guard',
+  );
+  const batch = observations.find(
+    (observation) => observation.operation === 'postgres-request-admission:authority-batch',
+  );
+  assert.ok(guardPhase?.outcome === 'ok' && batch?.outcome === 'ok');
+  t.diagnostic(`guard phase=${guardPhase.durationMs.toFixed(2)}ms authority batch=${batch.durationMs.toFixed(2)}ms`);
 
   // Budget history:
   // - 2026-10-17 pre-step-2 baseline: total=93, admission phase=88
@@ -148,6 +175,9 @@ test('admission statement budget: one fresh platform member admission stays with
   // - Step 3 (P4, wallet advisory fence replaces the saas_wallets row FOR
   //   UPDATE): total=73, admission=67 — exactly one added statement, the
   //   pg_advisory_xact_lock acquisition inside billing.reserve.
+  // - 2026-10-21 section 15.5: fenced authority facts share one fresh PG
+  //   snapshot, without caching mutable state: total=49, admission=43,
+  //   guard reads=8 (the catalog/price service reads remain additional).
   // The counts are deterministic for this fixture (no key expiry, no group
   // RPM ceiling), so any increase is a real regression or a deliberate
   // statement-count change that must raise this budget consciously.
@@ -157,15 +187,15 @@ test('admission statement budget: one fresh platform member admission stays with
     `admission guard must batch its shared advisory fences into one statement (got ${profile.guardFences})`,
   );
   assert.ok(
-    profile.guardReads <= 32,
+    profile.guardReads <= 8,
     `admission guard authority reads must stay within the statement budget (got ${profile.guardReads})`,
   );
   assert.ok(
-    afterAdmission <= 67,
+    afterAdmission <= 43,
     `admission phase (prelock+metering+guard+billing) must stay within the statement budget (got ${afterAdmission})`,
   );
   assert.ok(
-    profile.total <= 73,
+    profile.total <= 49,
     `full admission transaction must stay within the statement budget (got ${profile.total})`,
   );
 });

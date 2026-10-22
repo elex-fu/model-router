@@ -297,6 +297,18 @@ export async function cancellationFixture(migrator: SaasDatabase, gateway: SaasD
         .filter(([name]) => name.startsWith('usage_'))
         .map(([name, value]) => [camel(name.slice(6)), value]),
     );
+    // The stored token-only envelope omits neutral media columns when its
+    // signature is verified. Preserve that same envelope before re-signing.
+    if (
+      (usage.perUnitUnitsUpperBound === null ||
+        usage.perUnitUnitsUpperBound === '0' ||
+        usage.perUnitUnitsUpperBound === 0 ||
+        usage.perUnitUnitsUpperBound === 0n) &&
+      usage.sizeTier === null
+    ) {
+      delete usage.perUnitUnitsUpperBound;
+      delete usage.sizeTier;
+    }
     const modelResolution = fixtureModelResolution(original);
     const evidence = await evidenceService.register(
       signer.sign({

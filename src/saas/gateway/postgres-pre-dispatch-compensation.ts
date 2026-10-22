@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { PlatformWalletLedgerService } from '../billing/service.js';
-import { saasAdvisoryKey } from '../db/advisory-lock-keys.js';
+import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor } from '../db/types.js';
 import { createRequestAdmissionReservationBusinessKey } from './admission.js';
 import type { PostgresPreparationCapacityPort } from './postgres-preparation-ports.js';
@@ -319,7 +319,11 @@ export class PostgresPreDispatchCompensation implements RequestPreparationCompen
   private async assertHold(tx: SqlExecutor, input: RequestPreparationCompensationInput, replay: boolean) {
     const hold = input.admission.holdReservation;
     if (!hold || hold.tenantId !== input.tenantId || hold.requestId !== input.requestId) throw new Error(SAFE_FAILURE);
-    // Lock wallet BEFORE reservation, matching the existing billing service.
+    // Join the billing service's wallet fence BEFORE either row lock. Holding
+    // a wallet row lock while waiting for this fence would block the fence
+    // owner's ledger FK checks or balance projection and form a deadlock.
+    await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(input.tenantId, hold.currency)]);
+    // Keep the existing wallet and reservation row-lock order and validation.
     await exactlyOne(tx, 'SELECT id FROM saas_wallets WHERE tenant_id = $1 AND currency = $2 FOR UPDATE', [
       input.tenantId,
       hold.currency,

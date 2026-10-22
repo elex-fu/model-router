@@ -180,6 +180,7 @@ function eligibilityRow(accountId: string, scheduling: Row = {}): Row {
     account_rights_effective_at: '2026-01-01T00:00:00.000Z',
     account_rights_expires_at: null,
     capability_version: 12,
+    authority_now: NOW,
     capability_protocol: 'openai',
     capability_support_level: 'supported',
     capability_validation_state: 'verified',

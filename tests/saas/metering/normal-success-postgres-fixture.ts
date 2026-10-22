@@ -93,6 +93,10 @@ export function roleUrls(): [string, string, string] {
 
 export type Phase =
   | 'readiness'
+  | 'seed'
+  | 'pool-align'
+  | 'harness'
+  | 'admission-transaction'
   | 'setup'
   | 'admission'
   | 'capacity_reserve'
@@ -254,6 +258,9 @@ export function observedUsage(): NormalizedUsageExact {
     semanticsVersion: 'provider-usage-v1',
     measurementKind: 'snapshot',
     billableBasis: 'exact',
+    billingMode: 'token',
+    units: null,
+    sizeTier: null,
   };
 }
 
@@ -262,6 +269,7 @@ export async function seedFixture(
   migrator: SaasDatabase,
   gateway: SaasDatabase,
   mode: 'byok' | 'platform',
+  options: { readonly nativeProtocol?: 'openai' | 'anthropic' } = {},
 ): Promise<Fixture> {
   const label = randomUUID();
   const tenantId = randomUUID(),
@@ -355,7 +363,7 @@ export async function seedFixture(
       productId,
       model,
       endpoint,
-      protocol: 'openai',
+      protocol: options.nativeProtocol ?? 'openai',
       supportLevel: 'supported',
       validationState: 'verified',
       evidenceVersion: 'fin057-fixture-v1',

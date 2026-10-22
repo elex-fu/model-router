@@ -348,7 +348,174 @@ test('concurrent different-account binds serialize and the loser fails closed', 
   assert.equal(results.filter(({ decision }) => decision === 'block').length, 1);
   assert.equal(state.rows.size, 1);
   const winner = [...state.rows.values()][0].accountId;
+  assert.deepEqual(
+    results.find(({ decision }) => decision === 'block'),
+    {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention: { kind: 'active_binding', accountId: winner },
+    },
+  );
+  assert.equal([...state.rows.values()][0].revision, 1);
+  assert.equal([...state.rows.values()][0].fence, 1);
   assert.deepEqual(await resolveInput(port, scope(), [winner], context), { decision: 'allow', accountId: winner });
+});
+
+test('a losing bind reports the one active account without refreshing or adding aliases', async () => {
+  const { port, state } = createHarness();
+  const context = { sessionId: 'bound-session', previousResponseId: 'new-response-alias' };
+  assert.deepEqual(
+    await port.bind({ context: { sessionId: context.sessionId }, scope: scope(), accountId: 'account-a' }),
+    { decision: 'allow' },
+  );
+  const before = [...state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+  state.nowMs += 2_000;
+  const statementStart = state.statements.length;
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), {
+    decision: 'block',
+    reason: 'provider account affinity binding conflict',
+    contention: { kind: 'active_binding', accountId: 'account-a' },
+  });
+  assert.deepEqual([...state.rows.entries()], before, 'the loser leaves TTL, revision, fence and aliases unchanged');
+  assert.equal(
+    state.statements.slice(statementStart).some(({ sql }) => /:(?:insert|expire|invalidate|bind-update)\b/.test(sql)),
+    false,
+    'the loser issues no mutation statements',
+  );
+
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
+  assert.equal(state.rows.size, 2, 'the successful winner bind may add the missing alias');
+  assert.ok([...state.rows.values()].every(({ accountId }) => accountId === 'account-a'));
+});
+
+test('matching active references report one contention account without refreshing either row', async () => {
+  const { port, state } = createHarness();
+  const context = { sessionId: 'same-winner-session', previousResponseId: 'same-winner-response' };
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
+  const before = [...state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+  state.nowMs += 2_000;
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), {
+    decision: 'block',
+    reason: 'provider account affinity binding conflict',
+    contention: { kind: 'active_binding', accountId: 'account-a' },
+  });
+  assert.deepEqual([...state.rows.entries()], before);
+});
+
+test('conflicting active references fail closed without a contention account', async () => {
+  const { port, state } = createHarness();
+  const context = { sessionId: 'different-session-winner', previousResponseId: 'different-response-winner' };
+  assert.deepEqual(
+    await port.bind({ context: { sessionId: context.sessionId }, scope: scope(), accountId: 'account-a' }),
+    { decision: 'allow' },
+  );
+  assert.deepEqual(
+    await port.bind({
+      context: { previousResponseId: context.previousResponseId },
+      scope: scope(),
+      accountId: 'account-b',
+    }),
+    { decision: 'allow' },
+  );
+  const before = [...state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+  for (const accountId of ['account-a', 'account-b', 'account-c']) {
+    assert.deepEqual(await port.bind({ context, scope: scope(), accountId }), {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+    });
+  }
+  assert.deepEqual([...state.rows.entries()], before);
+});
+
+test('multiple compatible digests fail closed without a contention account', async () => {
+  const keyV1 = Buffer.alloc(32, 0x6a);
+  const keyV2 = Buffer.alloc(32, 0x6b);
+  const { port, state } = createHarness({
+    keys: [
+      { version: 'v1', key: keyV1 },
+      { version: 'v2', key: keyV2 },
+    ],
+    activeKeyVersion: 'v1',
+  });
+  const context = { sessionId: 'duplicate-compatible-aliases' };
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
+  const [first] = [...state.rows.values()];
+  const digest = createHmac('sha256', keyV2)
+    .update(
+      JSON.stringify([
+        'model-router/provider-account-affinity',
+        1,
+        'v2',
+        JSON.parse(first.scope),
+        'session',
+        context.sessionId,
+      ]),
+    )
+    .digest('hex');
+  state.rows.set(keyOf(first.scope, 'session', 'v2', digest), { ...first, keyVersion: 'v2', digest });
+  const before = [...state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), {
+    decision: 'block',
+    reason: 'provider account affinity binding conflict',
+  });
+  assert.deepEqual([...state.rows.entries()], before);
+});
+
+test('a malformed reference prevents contention metadata from another active reference', async () => {
+  const { port, state } = createHarness();
+  const context = { sessionId: 'valid-reference', previousResponseId: 'malformed-reference' };
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
+  const malformed = [...state.rows.values()].find(({ kind }) => kind === 'session');
+  assert.ok(malformed);
+  malformed.revision = 0;
+  const before = [...state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+  assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), {
+    decision: 'block',
+    reason: 'provider account affinity binding conflict',
+  });
+  assert.deepEqual([...state.rows.entries()], before);
+});
+
+test('bind reuses expired and invalidated mappings without an active contention hint', async () => {
+  for (const priorState of ['expired', 'invalidated'] as const) {
+    const { port, state } = createHarness();
+    const context = { sessionId: `${priorState}-before-bind` };
+    assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
+    if (priorState === 'expired') {
+      state.nowMs += 60_001;
+    } else {
+      assert.deepEqual(await resolveInput(port, scope(), ['account-b'], context), { decision: 'stale' });
+    }
+    assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-b' }), { decision: 'allow' });
+    const [row] = [...state.rows.values()];
+    assert.equal(row.accountId, 'account-b');
+    assert.equal(row.state, 'active');
+    assert.equal(row.revision, 3);
+    assert.equal(row.fence, 3);
+  }
+});
+
+test('CAS and storage errors fail closed without an active contention hint', async () => {
+  for (const failure of ['cas', 'storage'] as const) {
+    const { port, state, database } = createHarness();
+    const context = { sessionId: `${failure}-binding-failure` };
+    assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), { decision: 'allow' });
+    const before = [...state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+    const query = database.query.bind(database);
+    database.query = async <Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> => {
+      if (failure === 'cas' && sql.includes(':bind-update')) return { rows: [], rowCount: 0 };
+      if (failure === 'storage' && sql.includes(':resolve')) throw new Error('private simulated storage failure');
+      return query<Row>(sql, values);
+    };
+    assert.deepEqual(await port.bind({ context, scope: scope(), accountId: 'account-a' }), {
+      decision: 'block',
+      reason:
+        failure === 'cas'
+          ? 'provider account affinity binding conflict'
+          : 'provider account affinity storage is unavailable',
+    });
+    assert.deepEqual([...state.rows.entries()], before);
+  }
 });
 
 test('expired mappings may be rebound, with a new revision and fence', async () => {
@@ -449,6 +616,12 @@ test('dropping a still-used HMAC version blocks instead of treating its mapping 
     decision: 'block',
     reason: 'provider account affinity key compatibility is incomplete',
   });
+  const before = [...oldHarness.state.rows.entries()].map(([key, row]) => [key, { ...row }]);
+  assert.deepEqual(await rotatedWithoutCompatibility.bind({ context, scope: scope(), accountId: 'account-b' }), {
+    decision: 'block',
+    reason: 'provider account affinity key compatibility is incomplete',
+  });
+  assert.deepEqual([...oldHarness.state.rows.entries()], before);
 });
 
 test('an expired old-key mapping no longer requires compatibility after its bounded TTL', async () => {

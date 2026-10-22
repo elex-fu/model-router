@@ -25,7 +25,15 @@
 /** A snapshot older than this no longer pauses (the codex 2h precedent). */
 export const SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
-export type SchedulingThresholdPlatform = 'codex' | 'claude' | 'gemini' | 'opencode-go' | 'zhipu' | 'minimax' | 'grok';
+export type SchedulingThresholdPlatform =
+  | 'codex'
+  | 'claude'
+  | 'gemini'
+  | 'opencode-go'
+  | 'zhipu'
+  | 'minimax'
+  | 'kimi'
+  | 'grok';
 
 /** One window candidate as persisted in the quota-snapshot column family. */
 export interface SchedulingThresholdWindowCandidate {
@@ -76,7 +84,10 @@ export function evaluateSchedulingThresholdPause(input: {
     if (!candidate || typeof candidate !== 'object') continue;
     if (!Number.isFinite(candidate.usedPercent) || !Number.isFinite(candidate.untilMs)) continue;
     if (!Number.isFinite(candidate.thresholdPercent) || candidate.thresholdPercent < 1) continue;
-    if (candidate.thresholdPercent >= 100) continue;
+    // Kimi's default 100% cutoff represents observed exhaustion, independent
+    // of the optional operator early-pause thresholds used by other families.
+    if (candidate.thresholdPercent >= 100 && !(candidate.platform === 'kimi' && candidate.thresholdPercent === 100))
+      continue;
     if (candidate.untilMs <= input.nowMs) continue;
     if (candidate.usedPercent < candidate.thresholdPercent) continue;
     if (winner === null) {
@@ -235,6 +246,11 @@ export interface SchedulingThresholdAccountRow {
   readonly minimax_weekly_used_percent: number | null;
   readonly minimax_weekly_reset_at: Date | string | null;
   readonly minimax_usage_updated_at: Date | string | null;
+  readonly kimi_5h_used_percent?: number | null;
+  readonly kimi_5h_reset_at?: Date | string | null;
+  readonly kimi_weekly_used_percent?: number | null;
+  readonly kimi_weekly_reset_at?: Date | string | null;
+  readonly kimi_usage_updated_at?: Date | string | null;
   /* Migration 119 (batch 3 grok): the quota-header-observed 5h token window. */
   readonly grok_5h_used_percent: number | null;
   readonly grok_5h_reset_at: Date | string | null;
@@ -418,6 +434,23 @@ export function schedulingThresholdCandidatesFromRow(
     if (familyFresh(row.grok_usage_updated_at, nowMs)) {
       push('grok', '5h', finiteNumber(row.grok_5h_used_percent), timestampMs(row.grok_5h_reset_at), threshold5h);
     }
+  }
+  const kimiObservedAt = timestampMs(row.kimi_usage_updated_at ?? null);
+  if (kimiObservedAt !== null && kimiObservedAt <= nowMs && familyFresh(row.kimi_usage_updated_at ?? null, nowMs)) {
+    // Persisted pauses must expire when the observation goes stale even if
+    // a weekly reset is days away. A later successful poll can extend them.
+    const until = (reset: Date | string | null | undefined): number | null => {
+      const resetMs = timestampMs(reset ?? null);
+      return resetMs === null ? null : Math.min(resetMs, kimiObservedAt + SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS);
+    };
+    push('kimi', '5h', finiteNumber(row.kimi_5h_used_percent ?? null), until(row.kimi_5h_reset_at), threshold5h ?? 100);
+    push(
+      'kimi',
+      'weekly',
+      finiteNumber(row.kimi_weekly_used_percent ?? null),
+      until(row.kimi_weekly_reset_at),
+      threshold7d ?? 100,
+    );
   }
   return candidates;
 }

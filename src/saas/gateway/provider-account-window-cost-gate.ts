@@ -134,15 +134,15 @@ export async function getAccountWindowCostFactsBatch(
             candidate.window_cost_sticky_reserve_minor_units AS reserve,
             candidate.claude_session_window_start AS window_start
        FROM (
-         SELECT account_id, window_cost_limit_minor_units, window_cost_sticky_reserve_minor_units,
+         SELECT id AS account_id, window_cost_limit_minor_units, window_cost_sticky_reserve_minor_units,
                 claude_session_window_start
            FROM saas_tenant_provider_accounts
-          WHERE account_id = ANY($1::text[])
+          WHERE id = ANY($1::text[])
           UNION ALL
-         SELECT account_id, window_cost_limit_minor_units, window_cost_sticky_reserve_minor_units,
+         SELECT id AS account_id, window_cost_limit_minor_units, window_cost_sticky_reserve_minor_units,
                 claude_session_window_start
            FROM saas_platform_provider_accounts
-          WHERE account_id = ANY($1::text[])
+          WHERE id = ANY($1::text[])
        ) candidate`,
     [idList],
   );

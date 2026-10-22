@@ -335,6 +335,9 @@ test('resolvers reuse a caller executor and use a standalone transaction otherwi
   assert.equal(callerRecordingExecutor, callerExecutor);
   assert.equal(database.rootStatements.length, 0);
   assert.equal(advisoryStatements(callerRecordingExecutor).length, 2);
+  for (const lock of advisoryStatements(callerRecordingExecutor)) {
+    assert.match(lock.sql, /^SELECT pg_advisory_xact_lock_shared\(\$1::bigint\)$/);
+  }
   for (const [index, table] of ['saas_customer_price_versions', 'saas_supplier_cost_versions'].entries()) {
     const readIndex = callerRecordingExecutor.statements.findIndex(({ sql }) => sql.includes(`FROM ${table}`));
     const lock = advisoryStatements(callerRecordingExecutor)[index];
@@ -372,8 +375,10 @@ test('append and resolve share lineage lock keys, while distinct identities stay
     commonPriceInput(customerIdentity, 'customer-append-2') as AppendCustomerPriceVersionInput,
   );
   const appendedCustomerLock = firstAdvisoryKey(executorAt(database, 0));
+  assert.match(advisoryStatements(executorAt(database, 0))[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock\(/);
   const resolvedCustomer = await service.resolveCustomerPriceVersion(customerIdentity);
   const resolvedCustomerLock = firstAdvisoryKey(executorAt(database, 1));
+  assert.match(advisoryStatements(executorAt(database, 1))[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock_shared\(/);
   assert.equal(resolvedCustomer.id, appendedCustomer.id);
   assert.equal(resolvedCustomerLock, appendedCustomerLock);
 
@@ -390,8 +395,10 @@ test('append and resolve share lineage lock keys, while distinct identities stay
     commonPriceInput(supplierIdentity, 'supplier-append-2') as AppendSupplierCostVersionInput,
   );
   const appendedSupplierLock = firstAdvisoryKey(executorAt(database, 3));
+  assert.match(advisoryStatements(executorAt(database, 3))[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock\(/);
   const resolvedSupplier = await service.resolveSupplierCostVersion(supplierIdentity);
   const resolvedSupplierLock = firstAdvisoryKey(executorAt(database, 4));
+  assert.match(advisoryStatements(executorAt(database, 4))[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock_shared\(/);
   assert.equal(resolvedSupplier.id, appendedSupplier.id);
   assert.equal(resolvedSupplierLock, appendedSupplierLock);
 
@@ -405,7 +412,7 @@ test('append and resolve share lineage lock keys, while distinct identities stay
   assert.notEqual(distinctSupplierLock, appendedSupplierLock);
 });
 
-test('both resolvers fail closed before reading prices when their lineage mutex fails', async () => {
+test('both resolvers fail closed before reading prices when their shared lineage fence fails', async () => {
   for (const kind of ['customer', 'supplier'] as const) {
     const database = new RecordingPricingDatabase();
     database.failAdvisoryLock = true;
@@ -418,7 +425,7 @@ test('both resolvers fail closed before reading prices when their lineage mutex 
     );
     const executor = executorAt(database, 0);
     assert.equal(executor.statements.length, 1);
-    assert.match(executor.statements[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock/);
+    assert.match(executor.statements[0]?.sql ?? '', /^SELECT pg_advisory_xact_lock_shared\(/);
     assert.equal(database.rootStatements.length, 0);
   }
 });

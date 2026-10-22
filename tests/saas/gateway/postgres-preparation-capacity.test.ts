@@ -262,6 +262,53 @@ test('reserve rejects a tenant/request replay bound to another key or request fi
   assert.equal(executor.insertCount, 1);
 });
 
+test('capacity reserves input plus output once for independent overlapping TTL bounds', async () => {
+  for (const genericWriteBound of ['131072', '0']) {
+    const executor = new CapacityFakeExecutor();
+    for (const scope of ['tenant', 'project', 'key']) executor.authority[`${scope}_tokens_per_minute`] = '1000000';
+    const payloadBounds = {
+      inputTotalUpperBound: '131072',
+      inputUncachedUpperBound: '131072',
+      cacheReadUpperBound: '131072',
+      cacheWriteUpperBound: genericWriteBound,
+      cacheWrite5mUpperBound: '131072',
+      cacheWrite1hUpperBound: '131072',
+      outputTotalUpperBound: '32',
+      reasoningOutputUpperBound: '32',
+      feasibleInputBuckets: ['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h'],
+    };
+    const reservation = allowed(await capacity.reserve(executor, { ...baseInput, payloadBounds }));
+    assert.equal(reservation.usageBudget?.amount, 131104);
+    assert.equal(String(executor.reservation?.token_units), '131104');
+    assert.equal(executor.insertCount, 1);
+    assert.equal(payloadBounds.cacheWrite5mUpperBound, '131072');
+    assert.equal(payloadBounds.cacheWrite1hUpperBound, '131072');
+  }
+});
+
+test('capacity rejects individual TTL overbounds and retains exact envelope validation before SQL', async () => {
+  for (const damaged of [
+    { cacheWrite5mUpperBound: '101' },
+    { cacheWrite1hUpperBound: '101' },
+    { cacheWrite5mUpperBound: '-1' },
+    { cacheWrite1hUpperBound: 1.5 },
+    { inputTotalUpperBound: '9223372036854775808' },
+    { outputTotalUpperBound: '9223372036854775807' },
+    { reasoningOutputUpperBound: '51' },
+    { feasibleInputBuckets: [] },
+    { feasibleInputBuckets: ['input', 'input'] },
+  ]) {
+    const executor = new CapacityFakeExecutor();
+    const result = await capacity.reserve(executor, {
+      ...baseInput,
+      payloadBounds: { ...baseInput.payloadBounds, ...damaged },
+    });
+    assert.equal(result.decision, 'reject');
+    if (result.decision === 'reject') assert.equal(result.code, 'payload_bounds_unavailable');
+    assert.equal(executor.statements.length, 0);
+  }
+});
+
 test('reserve enforces explicit request, token, and concurrency ceilings', async () => {
   const executor = new CapacityFakeExecutor();
   executor.counts.key_rate_count = '5';

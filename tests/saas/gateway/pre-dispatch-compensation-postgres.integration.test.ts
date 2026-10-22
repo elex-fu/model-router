@@ -9,6 +9,7 @@ import { PostgresPreDispatchCompensation } from '../../../src/saas/gateway/postg
 import { createPostgresPreparationCapacityPort } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
 import { GatewayPreDispatchCompensationService } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
 import { SaasPreparedEvidenceDispatchService } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
+import { SaasPreparedRequestEvidenceError } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
 import { SaasMeteringService } from '../../../src/saas/metering/service.js';
 import type { AttemptRecord } from '../../../src/saas/metering/types.js';
@@ -21,6 +22,10 @@ import {
   cancellationTransaction,
   safeCancellationFailure,
 } from './pre-dispatch-postgres-fixture.js';
+import {
+  proveWalletCompensationLockOrder,
+  proveWalletSettlementRollback,
+} from './wallet-compensation-lock-order-fixture.js';
 
 test('FIN pre-dispatch cancellation uses restricted gateway transactions on real PG15/18', {
   skip:
@@ -130,11 +135,23 @@ test('FIN pre-dispatch cancellation uses restricted gateway transactions on real
             port,
           );
           let observed: AttemptRecord | null = null;
+          let completedPreflights = 0;
+          let claimAttempts = 0;
           let leasesReleased = 0;
           let sends = 0;
           let cancelledSnapshot: Awaited<ReturnType<typeof cancellationSnapshot>> | undefined;
           const dispatcher = new SaasPreparedEvidenceDispatchService(
-            fixture.evidenceService,
+            {
+              async preflightForDispatch(...args) {
+                const evidence = await fixture.evidenceService.preflightForDispatch(...args);
+                completedPreflights++;
+                return evidence;
+              },
+              async claimForDispatch(...args) {
+                claimAttempts++;
+                return fixture.evidenceService.claimForDispatch(...args);
+              },
+            },
             {
               async getAttempt(tenant, request, attempt) {
                 observed = await metering.getAttempt(tenant, request, attempt);
@@ -186,7 +203,22 @@ test('FIN pre-dispatch cancellation uses restricted gateway transactions on real
               payloadBytes: fixture.prepared.payloadBytes,
               audit: { actorUserId: null, entryPoint: 'pre-dispatch-pg-race', requestId: fixture.requestId },
             }),
+            (error: unknown) => {
+              assert.equal(completedPreflights, 1, 'the real preflight must succeed before cancellation');
+              assert.equal(claimAttempts, 1, 'the actual claim must reject after committed cancellation');
+              assert.ok(error instanceof SaasPreparedRequestEvidenceError);
+              assert.equal(error.code, 'STORAGE_ERROR');
+              assert.equal(error.message, 'prepared evidence attempt claim affected an unexpected number of rows');
+              assert.equal(
+                error.cause,
+                undefined,
+                'the expected CAS refusal must not wrap an unrelated storage failure',
+              );
+              return true;
+            },
           );
+          assert.equal(completedPreflights, 1, 'the real preflight must succeed before cancellation');
+          assert.equal(claimAttempts, 1, 'the actual claim must reject after committed cancellation');
           assert.ok(observed);
           assert.ok(cancelledSnapshot);
           assert.equal(sends, 0);
@@ -297,5 +329,36 @@ test('FIN pre-dispatch cancellation uses restricted gateway transactions on real
     throw safeCancellationFailure(error);
   } finally {
     await Promise.all(databases.map((db) => db.close()));
+  }
+});
+
+// Self-seeded real services; no HTTP fixture or provider I/O is needed by this
+// root. The preceding eight cancellation cases retain their HTTP prerequisite.
+test('FIN wallet compensation lock order uses real settlement and fresh compensation transactions', {
+  skip:
+    process.env[CANCELLATION_PG_REQUIRED] !== '1' && !cancellationPgConfigured
+      ? `set ${CANCELLATION_PG_REQUIRED}=1 and all disposable E2E role URLs`
+      : false,
+  timeout: 120000,
+}, async (t) => {
+  const { databases, migrator, gateway } = await cancellationDatabases();
+  try {
+    await t.test(
+      'canonical wallet fence permits the actual debit and fresh compensation; both replays are idempotent',
+      () => proveWalletCompensationLockOrder(migrator, gateway, 'none'),
+    );
+    await t.test('test-only missing-first-fence + FOR UPDATE mutation recreates the ledger FK deadlock', () =>
+      proveWalletCompensationLockOrder(migrator, gateway, 'test-only-missing-fence-for-update'),
+    );
+    await t.test('test-only missing-first-fence + NO KEY UPDATE mutation still deadlocks the actual wallet debit', () =>
+      proveWalletCompensationLockOrder(migrator, gateway, 'test-only-missing-fence-no-key-update'),
+    );
+    await t.test('an actual ledger-entry fault rolls back settlement; forbidden gateway writers remain rejected', () =>
+      proveWalletSettlementRollback(migrator, gateway),
+    );
+  } catch (error) {
+    throw safeCancellationFailure(error);
+  } finally {
+    await Promise.all(databases.map((database) => database.close()));
   }
 });

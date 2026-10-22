@@ -8,6 +8,7 @@ import type { SaasMeteringService } from '../metering/service.js';
 import type { AttemptRecord, CreateRequestInput, RequestAdmission, RequestRecord } from '../metering/types.js';
 import {
   createRequestAdmissionReservationBusinessKey,
+  PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
   type PlatformRequestAdmissionHoldEvidence,
   type SaasMeteringAdmissionPort,
   type SaasRequestAdmissionCommand,
@@ -21,6 +22,11 @@ import {
 } from './postgres-billing-group-spend.js';
 import { PostgresPreDispatchCompensation } from './postgres-pre-dispatch-compensation.js';
 import type { KeyBudgetAdmissionPort } from './postgres-preparation-budget.js';
+import {
+  observePreparationExecutor,
+  observePreparationPhase,
+  type PostgresPreparationObserver,
+} from './postgres-preparation-observer.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   type GatewayRequestIdempotencyStore,
@@ -131,6 +137,7 @@ export interface PostgresPreparationPortsOptions {
   readonly retryBudget?: number;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
+  readonly observe?: PostgresPreparationObserver;
 }
 
 export interface PostgresPreparationPorts {
@@ -480,6 +487,7 @@ function admissionHoldEvidence(
       ? undefined
       : (perUnitBounds.sizeTier as string);
   return {
+    evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
     inputTotal: payloadBounds.inputTotalUpperBound,
     inputUncached: payloadBounds.inputUncachedUpperBound,
     cacheRead: payloadBounds.cacheReadUpperBound,
@@ -595,8 +603,8 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
 
   const admission: RequestPreparationAdmissionPort = {
     async authorizeAndReserve(input, sqlOptions?: RequestPreparationSqlOptions) {
-      const executor = sqlOptions?.executor;
-      if (!executor) return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
+      if (!sqlOptions?.executor) return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
+      const executor = observePreparationExecutor(sqlOptions.executor, 'admission', options.observe);
       const { caller: resolvedCaller, entitlement: resolvedEntitlement, authority } = input;
       if (
         !entitlementMatchesCaller(resolvedCaller, resolvedEntitlement, authority.route.publicModel) ||
@@ -773,7 +781,9 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           options.authorizationPrelock,
           { idFactory, now },
         );
-        const result = await service.admit(command, { executor });
+        const result = await observePreparationPhase('admission', 'metering-guard-wallet', options.observe, () =>
+          service.admit(command, { executor }),
+        );
         if (result.kind === 'tombstone') {
           return { decision: 'reject', code: 'binding_mismatch', message: SAFE_ADMISSION_FAILURE };
         }
@@ -913,18 +923,21 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
            cycle can form. */
         let capacityResult: RequestPreparationDecision<PostgresPreparationCapacityReservation>;
         try {
-          capacityResult = await options.capacity.reserve(executor, {
-            tenantId: resolvedCaller.tenantId,
-            projectId: resolvedCaller.projectId,
-            proxyKeyId: resolvedCaller.proxyKeyId,
-            requestId: canonicalRequestId,
-            attemptId: input.attemptId,
-            supplyMode: resolvedCaller.supplyMode,
-            payloadBounds: input.payloadBounds,
-            idempotencyScopeKey,
-            requestFingerprint,
-            requestFingerprintVersion,
-          });
+          const capacity = options.capacity;
+          capacityResult = await observePreparationPhase('admission', 'capacity', options.observe, () =>
+            capacity.reserve(executor, {
+              tenantId: resolvedCaller.tenantId,
+              projectId: resolvedCaller.projectId,
+              proxyKeyId: resolvedCaller.proxyKeyId,
+              requestId: canonicalRequestId,
+              attemptId: input.attemptId,
+              supplyMode: resolvedCaller.supplyMode,
+              payloadBounds: input.payloadBounds,
+              idempotencyScopeKey,
+              requestFingerprint,
+              requestFingerprintVersion,
+            }),
+          );
         } catch {
           return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
         }
@@ -1028,8 +1041,8 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
 
   const attempt: RequestPreparationAttemptPort = {
     async persist(input, sqlOptions?: RequestPreparationSqlOptions) {
-      const executor = sqlOptions?.executor;
-      if (!executor) return blockRequestPreparation('capability_unavailable', SAFE_ATTEMPT_FAILURE);
+      if (!sqlOptions?.executor) return blockRequestPreparation('capability_unavailable', SAFE_ATTEMPT_FAILURE);
+      const executor = observePreparationExecutor(sqlOptions.executor, 'attempt', options.observe);
       const expected = bindings.get(input.requestId);
       if (
         !expected ||

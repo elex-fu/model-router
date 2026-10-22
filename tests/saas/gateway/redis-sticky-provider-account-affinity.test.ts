@@ -314,6 +314,56 @@ test('bind forwards to PG and backfills the mapping; previousResponseId ranks be
   assert.ok(!responseKey.includes('resp-1'));
 });
 
+test('bind forwards contention unchanged without backfilling or clearing the losing proposal', async () => {
+  const entries = new Map<string, Buffer>();
+  const { cache, calls } = fakeCache(entries);
+  const input = {
+    context: { sessionId: 'contended-session', previousResponseId: 'contended-response' },
+    scope: { supplyProfileId: 'profile-1', accountOwnerKind: 'platform' },
+    accountId: 'account-1',
+  } as const;
+  const seed = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'allow', accountId: null };
+      },
+      async bind() {
+        return { decision: 'allow' };
+      },
+    },
+    { cache, keyPrefix: 'model-router:saas' },
+  );
+  assert.deepEqual(await seed.bind?.(input as never), { decision: 'allow' });
+  assert.equal(calls.filter(({ kind }) => kind === 'set').length, 1);
+  const before = [...entries.entries()].map(([key, value]) => [key, Buffer.from(value)]);
+  calls.length = 0;
+
+  const contention = Object.freeze({
+    decision: 'block',
+    reason: 'provider account affinity binding conflict',
+    contention: Object.freeze({ kind: 'active_binding', accountId: 'account-1' }),
+  } as const);
+  const losingInput = { ...input, accountId: 'account-2' };
+  let binds = 0;
+  const decorator = createRedisStickyProviderAccountAffinity(
+    {
+      async resolve() {
+        return { decision: 'allow', accountId: null };
+      },
+      async bind(actual) {
+        binds += 1;
+        assert.strictEqual(actual, losingInput);
+        return contention;
+      },
+    },
+    { cache, keyPrefix: 'model-router:saas' },
+  );
+  assert.strictEqual(await decorator.bind?.(losingInput as never), contention);
+  assert.equal(binds, 1);
+  assert.deepEqual(calls, [], 'a losing proposal performs no Redis reads, writes, TTL refreshes or deletes');
+  assert.deepEqual([...entries.entries()], before);
+});
+
 test('invalid construction fails closed', () => {
   const { cache } = fakeCache();
   assert.throws(() => createRedisStickyProviderAccountAffinity(null as never, { cache, keyPrefix: 'p' }));

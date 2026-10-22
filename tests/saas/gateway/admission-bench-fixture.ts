@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { SaasDatabase } from '../../../src/saas/db/index.js';
 import type { SqlExecutor } from '../../../src/saas/db/types.js';
 import {
-  type AdmissionCreateRequestInput,
   type SaasMeteringAdmissionPort,
+  type SaasRequestAdmissionCommand,
+  type SaasRequestAdmissionGuard,
   SaasRequestAdmissionService,
 } from '../../../src/saas/gateway/admission.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../../../src/saas/gateway/authorization-prelock.js';
+import type { PostgresPreparationObserver } from '../../../src/saas/gateway/postgres-preparation-observer.js';
 import { PostgresRequestAdmissionGuard } from '../../../src/saas/gateway/postgres-request-admission-guard.js';
 import { sha256Hex } from '../../../src/saas/metering/digest.js';
 import type { CreateRequestInput, RequestAdmission } from '../../../src/saas/metering/types.js';
@@ -403,6 +405,7 @@ export async function createAdmissionHarness(
   fixture: Fixture,
   mode: Mode,
   pool?: PlatformPoolFacts,
+  options: { readonly guard?: SaasRequestAdmissionGuard; readonly observe?: PostgresPreparationObserver } = {},
 ): Promise<AdmissionHarness> {
   // The FIN057 fixture leaves capacity limits unset; raise them (appending
   // one configured policy version) so the full admission path — including the
@@ -411,7 +414,7 @@ export async function createAdmissionHarness(
   const projectPolicyVersion = await raiseCapacityLimits(migrator, fixture);
   const plan = await buildAdmissionCommandPlan(gateway, fixture, mode, pool, projectPolicyVersion);
   const admit = async (executor: SqlExecutor, requestId: string, attemptId: string, label: string) => {
-    const guard = new PostgresRequestAdmissionGuard(gateway);
+    const guard = options.guard ?? new PostgresRequestAdmissionGuard(gateway, { observe: options.observe });
     const prelock = new PostgresSaasRequestAdmissionAuthorizationPrelock();
     // The metering port closure carries this admission's request/attempt ids
     // (the production preparation stage threads them the same way).
@@ -429,7 +432,7 @@ export async function createAdmissionHarness(
       idFactory: randomUUID,
     });
     const built = plan.command(requestId, attemptId, label);
-    return service.admit(built as unknown as AdmissionCreateRequestInput, { executor });
+    return service.admit(built as unknown as SaasRequestAdmissionCommand, { executor });
   };
   return { plan, admit };
 }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { ReadableStreamReadResult } from 'node:stream/web';
 import type { KnownNonSuccessHttpResponseInput } from '../metering/service.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../metering/types.js';
 import { serviceTierTrustCategory } from '../pricing/service-tier-trust.js';
@@ -16,6 +17,11 @@ import type {
   ProviderAccountRuntimeHealthWriter,
 } from './postgres-provider-account-runtime-health-store.js';
 import { providerDispatchFeedbackOutcome } from './postgres-provider-account-runtime-health-store.js';
+import {
+  observePreparedEvidenceDispatchStage,
+  type PreparedEvidenceDispatchObserver,
+  type PreparedEvidenceDispatchStage,
+} from './prepared-evidence-dispatch-observer.js';
 import type {
   PreparedRequestEvidenceAudit,
   PreparedRequestEvidenceClaimOptions,
@@ -154,6 +160,7 @@ export type PreparedEvidenceDispatchErrorCode =
   | 'ATTEMPT_NOT_FOUND'
   | 'ATTEMPT_NOT_READY'
   | 'EVIDENCE_BINDING_MISMATCH'
+  | 'LEASE_CAPACITY_EXHAUSTED'
   | 'LEASE_UNAVAILABLE'
   | 'LEASE_RELEASE_FAILED'
   | 'CLIENT_STREAM_FAILED'
@@ -487,9 +494,12 @@ function canReleaseLease(value: unknown): value is { release(): Promise<void> } 
   }
 }
 
-async function releaseBeforeDispatch(lease: PreparedEvidenceLease): Promise<void> {
+async function releaseBeforeDispatch(
+  lease: PreparedEvidenceLease,
+  observer?: PreparedEvidenceDispatchObserver,
+): Promise<void> {
   try {
-    await lease.release();
+    await observePreparedEvidenceDispatchStage('lease-release', observer, () => lease.release());
   } catch {
     // Preserve the pre-dispatch error; no transport may start after this cleanup failure.
   }
@@ -769,7 +779,12 @@ export class SaasPreparedEvidenceDispatchService {
         readonly model: string;
       }): void | Promise<void>;
     },
+    private readonly observer?: PreparedEvidenceDispatchObserver,
   ) {}
+
+  private observe<T>(stage: PreparedEvidenceDispatchStage, work: () => Promise<T>): Promise<T> {
+    return observePreparedEvidenceDispatchStage(stage, this.observer, work);
+  }
 
   async dispatch(input: PreparedEvidenceDispatchInput): Promise<PreparedEvidenceDispatchResult> {
     if (
@@ -787,11 +802,11 @@ export class SaasPreparedEvidenceDispatchService {
     const payloadBytes = new Uint8Array(input.payloadBytes);
     const digest = payloadDigest(payloadBytes);
     const claimOptions: PreparedRequestEvidenceClaimOptions = { payloadSha256: digest };
-    const preflightEvidence = await this.evidence.preflightForDispatch(input.evidenceId, input.audit, claimOptions);
-    const attempt = await this.metering.getAttempt(
-      preflightEvidence.tenantId,
-      preflightEvidence.requestId,
-      preflightEvidence.attemptId,
+    const preflightEvidence = await this.observe('preflight', () =>
+      this.evidence.preflightForDispatch(input.evidenceId, input.audit, claimOptions),
+    );
+    const attempt = await this.observe('attempt-read', () =>
+      this.metering.getAttempt(preflightEvidence.tenantId, preflightEvidence.requestId, preflightEvidence.attemptId),
     );
     if (!attempt) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
     if (
@@ -806,13 +821,15 @@ export class SaasPreparedEvidenceDispatchService {
     let lease: PreparedEvidenceLease;
     let acquiredLease: unknown;
     try {
-      acquiredLease = await this.leaseProvider.acquire({
-        tenantId: preflightEvidence.tenantId,
-        accountId: preflightEvidence.accountId,
-        upstreamId: preflightEvidence.upstreamId,
-        attemptId: preflightEvidence.attemptId,
-        evidence: preflightEvidence,
-      });
+      acquiredLease = await this.observe('lease-acquire', () =>
+        this.leaseProvider.acquire({
+          tenantId: preflightEvidence.tenantId,
+          accountId: preflightEvidence.accountId,
+          upstreamId: preflightEvidence.upstreamId,
+          attemptId: preflightEvidence.attemptId,
+          evidence: preflightEvidence,
+        }),
+      );
       if (
         !acquiredLease ||
         typeof acquiredLease !== 'object' ||
@@ -835,12 +852,17 @@ export class SaasPreparedEvidenceDispatchService {
     } catch (error) {
       if (canReleaseLease(acquiredLease)) {
         try {
-          await acquiredLease.release();
+          const acquired = acquiredLease;
+          await this.observe('lease-release', () => acquired.release());
         } catch {
           // Preserve the acquisition/contract error.
         }
       }
-      if (error instanceof SaasPreparedEvidenceDispatchError && error.code === 'LEASE_UNAVAILABLE') throw error;
+      if (
+        error instanceof SaasPreparedEvidenceDispatchError &&
+        (error.code === 'LEASE_UNAVAILABLE' || error.code === 'LEASE_CAPACITY_EXHAUSTED')
+      )
+        throw error;
       fail('LEASE_UNAVAILABLE', 'provider account lease could not be acquired', error);
     }
 
@@ -850,13 +872,13 @@ export class SaasPreparedEvidenceDispatchService {
       if (input.client?.signal.aborted) {
         fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled before evidence claim');
       }
-      evidence = await this.evidence.claimForDispatch(input.evidenceId, input.audit, claimOptions);
+      evidence = await this.observe('claim', () =>
+        this.evidence.claimForDispatch(input.evidenceId, input.audit, claimOptions),
+      );
       // Claim is itself a versioned attempt update. Never fence dispatch using
       // the preflight snapshot or an inferred version increment.
-      const current = await this.metering.getAttempt(
-        preflightEvidence.tenantId,
-        preflightEvidence.requestId,
-        preflightEvidence.attemptId,
+      const current = await this.observe('attempt-read', () =>
+        this.metering.getAttempt(preflightEvidence.tenantId, preflightEvidence.requestId, preflightEvidence.attemptId),
       );
       if (!current) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
       assertPostClaimAttempt(current, evidence, preflightEvidence);
@@ -865,17 +887,17 @@ export class SaasPreparedEvidenceDispatchService {
       }
       postClaimAttempt = current;
     } catch (error) {
-      await releaseBeforeDispatch(lease);
+      await releaseBeforeDispatch(lease, this.observer);
       throw error;
     }
 
     let dispatching: AttemptRecord;
     try {
-      dispatching = await this.metering.transitionAttempt(
-        transitionInput(postClaimAttempt, 'dispatching', 'pending', false),
+      dispatching = await this.observe('attempt-transition', () =>
+        this.metering.transitionAttempt(transitionInput(postClaimAttempt, 'dispatching', 'pending', false)),
       );
     } catch (error) {
-      await releaseBeforeDispatch(lease);
+      await releaseBeforeDispatch(lease, this.observer);
       fail('DISPATCH_STATE_CONFLICT', 'attempt could not be fenced for dispatch', error);
     }
 
@@ -904,45 +926,52 @@ export class SaasPreparedEvidenceDispatchService {
           }
           fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled before provider dispatch');
         }
+        const sendSignal = transportSignal.signal;
         transportResult = requireTransportResponse(
-          await this.transport.send({
-            tenantId: evidence.tenantId,
-            projectId: evidence.projectId,
-            requestId: evidence.requestId,
-            attemptId: evidence.attemptId,
-            fencingToken: lease.fencingToken,
-            signal: transportSignal.signal,
-            payloadBytes,
-            evidence,
-            // §4.3 (task #17): the client-side operation fact rides the
-            // transport request so per-operation transports (search
-            // adaptation) need no evidence-shape change.
-            clientOperation: evidence.clientOperation,
+          await this.observe('transport-send', () =>
+            this.transport.send({
+              tenantId: evidence.tenantId,
+              projectId: evidence.projectId,
+              requestId: evidence.requestId,
+              attemptId: evidence.attemptId,
+              fencingToken: lease.fencingToken,
+              signal: sendSignal,
+              payloadBytes,
+              evidence,
+              // §4.3 (task #17): the client-side operation fact rides the
+              // transport request so per-operation transports (search
+              // adaptation) need no evidence-shape change.
+              clientOperation: evidence.clientOperation,
+            }),
+          ),
+        );
+        const received = transportResult;
+        const bodySignal = heartbeat.signal;
+        await this.observe('response-delivery', () =>
+          deliverTransportResponse(received, input.client, bodySignal, delivery, async () => {
+            const completeResponse = transportResult;
+            const status = completeResponse?.resultHttpStatus;
+            if (
+              !completeResponse ||
+              typeof status !== 'number' ||
+              !Number.isInteger(status) ||
+              status < 300 ||
+              status > 599
+            ) {
+              return;
+            }
+
+            const knownHttpResponseStarted = status >= 200 && status <= 599;
+            const failedAttempt = await this.metering.recordKnownNonSuccessHttpResponse({
+              tenantId: evidence.tenantId,
+              requestId: evidence.requestId,
+              attemptId: evidence.attemptId,
+              resultHttpStatus: status,
+              responseStarted: dispatching.responseStarted || delivery.responseStarted || knownHttpResponseStarted,
+            });
+            outcome = { kind: 'sent', evidence, attempt: failedAttempt, transport: completeResponse };
           }),
         );
-        await deliverTransportResponse(transportResult, input.client, heartbeat.signal, delivery, async () => {
-          const completeResponse = transportResult;
-          const status = completeResponse?.resultHttpStatus;
-          if (
-            !completeResponse ||
-            typeof status !== 'number' ||
-            !Number.isInteger(status) ||
-            status < 300 ||
-            status > 599
-          ) {
-            return;
-          }
-
-          const knownHttpResponseStarted = status >= 200 && status <= 599;
-          const failedAttempt = await this.metering.recordKnownNonSuccessHttpResponse({
-            tenantId: evidence.tenantId,
-            requestId: evidence.requestId,
-            attemptId: evidence.attemptId,
-            resultHttpStatus: status,
-            responseStarted: dispatching.responseStarted || delivery.responseStarted || knownHttpResponseStarted,
-          });
-          outcome = { kind: 'sent', evidence, attempt: failedAttempt, transport: completeResponse };
-        });
       } catch (error) {
         if (!outcome) transportError = error;
         await heartbeat.stop();
@@ -984,6 +1013,7 @@ export class SaasPreparedEvidenceDispatchService {
       }
 
       if (transportResult && !outcome) {
+        const completedTransport = transportResult;
         await heartbeat.stop();
         const status = transportResult.resultHttpStatus;
         const knownHttpResponseStarted =
@@ -1016,14 +1046,16 @@ export class SaasPreparedEvidenceDispatchService {
         } else {
           let sentAttempt: AttemptRecord | undefined;
           try {
-            sentAttempt = await this.metering.transitionAttempt(
-              transitionInput(
-                dispatching,
-                'sent',
-                'pending',
-                responseStarted,
-                undefined,
-                transportResult.resultHttpStatus,
+            sentAttempt = await this.observe('attempt-transition', () =>
+              this.metering.transitionAttempt(
+                transitionInput(
+                  dispatching,
+                  'sent',
+                  'pending',
+                  responseStarted,
+                  undefined,
+                  completedTransport.resultHttpStatus,
+                ),
               ),
             );
           } catch (error) {
@@ -1067,17 +1099,22 @@ export class SaasPreparedEvidenceDispatchService {
             if (snapshot && successfulHttpResponse && this.normalSuccessSettlement) {
               try {
                 if (transportResult.providerUsage) {
-                  const completion = await this.normalSuccessSettlement.complete({
-                    tenantId: evidence.tenantId,
-                    requestId: evidence.requestId,
-                    attemptId: evidence.attemptId,
-                    snapshot,
-                    usage: transportResult.providerUsage,
-                    // §4.2 and R3 §8.3: the transport's service-tier terms
-                    // reach the settlement input here; the coordinator applies
-                    // the per-category trust rules before any pricing.
-                    serviceTier: transportResult.serviceTier ?? null,
-                  });
+                  const settlement = this.normalSuccessSettlement;
+                  const providerUsage = transportResult.providerUsage;
+                  const serviceTier = transportResult.serviceTier ?? null;
+                  const completion = await this.observe('settlement', () =>
+                    settlement.complete({
+                      tenantId: evidence.tenantId,
+                      requestId: evidence.requestId,
+                      attemptId: evidence.attemptId,
+                      snapshot,
+                      usage: providerUsage,
+                      // §4.2 and R3 §8.3: the transport's service-tier terms
+                      // reach the settlement input here; the coordinator applies
+                      // the per-category trust rules before any pricing.
+                      serviceTier,
+                    }),
+                  );
                   reconciliationPersisted = completion.kind === 'reconciliation_pending';
                   outcome = { kind: 'sent', evidence, attempt: completion.attempt, transport: transportResult };
                 } else {
@@ -1164,12 +1201,15 @@ export class SaasPreparedEvidenceDispatchService {
       const healthCandidate = runtimeHealthCandidate(evidence);
       if (healthEvidence && healthCandidate && this.runtimeHealthWriter) {
         try {
-          await this.runtimeHealthWriter.recordRuntimeOutcome({
-            candidate: healthCandidate,
-            attemptId: evidence.attemptId,
-            fencingToken: lease.fencingToken,
-            evidence: healthEvidence,
-          });
+          const healthWriter = this.runtimeHealthWriter;
+          await this.observe('runtime-health', () =>
+            healthWriter.recordRuntimeOutcome({
+              candidate: healthCandidate,
+              attemptId: evidence.attemptId,
+              fencingToken: lease.fencingToken,
+              evidence: healthEvidence,
+            }),
+          );
         } catch {
           // A failed observation write latches the health authority only for
           // a bounded window (H5b); the dispatch outcome stands regardless.
@@ -1218,7 +1258,7 @@ export class SaasPreparedEvidenceDispatchService {
         }
       }
       try {
-        await lease.release();
+        await this.observe('lease-release', () => lease.release());
       } catch (error) {
         const releaseFailure = leaseReleaseError(error);
         if (outcome) outcome = withLeaseReleaseError(outcome, releaseFailure);

@@ -2311,9 +2311,12 @@ export class SaasMeteringService {
     const tenantId = asIdentifier(input.tenantId);
     const requestId = asIdentifier(input.requestId);
     const attemptId = asIdentifier(input.attemptId);
-    const updatedAt = normalizeNow(this.now);
-
     return this.write(input.executor, async (tx) => {
+      // Evidence claim writes PostgreSQL microsecond timestamps. Derive this
+      // transition's time in the same authority and clamp it to the current
+      // row, so host clock skew or JS millisecond truncation cannot move the
+      // attempt backwards. One database observation also timestamps the first
+      // response; the original version and state predicates remain the CAS.
       const rows = await this.rows<Row>(
         tx,
         `UPDATE saas_attempts
@@ -2322,18 +2325,19 @@ export class SaasMeteringService {
              response_started = (response_started OR $6),
              response_started_at = CASE
                WHEN response_started THEN response_started_at
-               WHEN $6 THEN $7
+               WHEN $6 THEN GREATEST(updated_at, transition_clock.observed_at)
                ELSE response_started_at
              END,
-             result_http_status = CASE WHEN $8 THEN $9 ELSE result_http_status END,
-             unknown_reason = $10,
-             updated_at = $7,
+             result_http_status = CASE WHEN $7 THEN $8 ELSE result_http_status END,
+             unknown_reason = $9,
+             updated_at = GREATEST(updated_at, transition_clock.observed_at),
              state_version = state_version + 1
+         FROM (SELECT clock_timestamp() AS observed_at) AS transition_clock
          WHERE tenant_id = $1 AND request_id = $2 AND id = $3
-           AND dispatch_state = $11
-           AND result_state = $12
-           AND response_started = $13
-           AND ($14::bigint IS NULL OR state_version = $14)
+           AND dispatch_state = $10
+           AND result_state = $11
+           AND response_started = $12
+           AND ($13::bigint IS NULL OR state_version = $13)
          RETURNING ${attemptColumns}`,
         [
           tenantId,
@@ -2342,7 +2346,6 @@ export class SaasMeteringService {
           dispatchState,
           resultState,
           responseStarted,
-          updatedAt,
           hasHttpStatus,
           httpStatus,
           unknownReason,

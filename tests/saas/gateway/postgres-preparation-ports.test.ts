@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import { PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND } from '../../../src/saas/gateway/admission.js';
 import {
   KeyBudgetAdmissionDeniedError,
   type KeyBudgetAdmissionFacts,
@@ -243,6 +244,7 @@ function setup(
   const capacityReservations = new Map<string, true>();
   const capacityIdempotencyKeys: string[] = [];
   const calls = { meter: 0, reserve: 0, capacityReserve: 0, capacityRelease: 0, walletRelease: 0, guard: 0 };
+  const guardInputs: AnyRow[] = [];
   const executorEvents: { stage: string; executor: SqlExecutor }[] = [];
   const queryEvents: { sql: string; values: readonly unknown[]; executor: SqlExecutor }[] = [];
   let billingRow: AnyRow | null = null;
@@ -495,6 +497,7 @@ function setup(
   const guard = {
     async revalidate(input: AnyRow) {
       calls.guard += 1;
+      guardInputs.push(input.holdEvidence as AnyRow);
       const request = input.request as RequestRecord;
       const candidate = input.candidate as AttemptRecord;
       return {
@@ -597,6 +600,7 @@ function setup(
     executor,
     admissionInput,
     calls,
+    guardInputs,
     requests,
     attempts,
     database,
@@ -618,6 +622,31 @@ function setup(
 async function authorize(fixture: ReturnType<typeof setup>, input = fixture.admissionInput()) {
   return fixture.ports.admission.authorizeAndReserve(input as never, { executor: fixture.executor });
 }
+
+test('preparation tags independent payload bounds without shrinking any input or cache bound', async () => {
+  const fixture = setup();
+  const payloadBounds = {
+    ...BOUNDS,
+    inputTotalUpperBound: 131072,
+    inputUncachedUpperBound: 131072,
+    cacheReadUpperBound: 131072,
+    cacheWriteUpperBound: 131072,
+    cacheWrite5mUpperBound: 131072,
+    cacheWrite1hUpperBound: 131072,
+    outputTotalUpperBound: 32,
+    reasoningOutputUpperBound: 32,
+  };
+  const decision = await authorize(fixture, { ...fixture.admissionInput(), payloadBounds });
+  assert.equal(decision.decision, 'allow');
+  const holdEvidence = fixture.guardInputs[0];
+  assert.ok(holdEvidence);
+  assert.equal(holdEvidence.evidenceKind, PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND);
+  for (const field of ['inputTotal', 'inputUncached', 'cacheRead', 'cacheWrite', 'cacheWrite5m', 'cacheWrite1h']) {
+    assert.equal(holdEvidence[field], 131072);
+  }
+  assert.equal(holdEvidence.outputTotal, 32);
+  assert.equal(holdEvidence.reasoningOutput, 32);
+});
 
 test('caller port binds the authenticated key snapshot to metadata and requested model', async () => {
   const fixture = setup();

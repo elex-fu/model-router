@@ -1,6 +1,7 @@
 import { createPublicKey, type KeyObject, randomUUID, verify as verifySignature } from 'node:crypto';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { GatewayProtocol, SaasRouteTargetMode, SupplyMode } from './contracts.js';
 
 export type CommercialMeteringPolicyStatus = 'draft' | 'active' | 'disabled';
@@ -212,7 +213,18 @@ export class SaasCommercialMeteringPolicyError extends Error {
 
 type Row = Record<string, unknown>;
 const SHARED_ADVISORY_FENCE_SQL = 'SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))';
+const SHARED_ADVISORY_FENCE_BATCH_SQL = `SELECT pg_advisory_xact_lock_shared(hashtextextended(fence.fence_key, 0))
+FROM unnest($1::text[]) WITH ORDINALITY AS fence(fence_key, input_ordinal)
+ORDER BY fence.input_ordinal`;
 const EXCLUSIVE_ADVISORY_FENCE_SQL = 'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))';
+
+const DISPATCHABLE_ROUTE_FINAL_SQL = `SELECT tenant_id, project_id, route_id, version,
+                                customer_policy_id, customer_policy_version, provider_policy_id, provider_policy_version,
+                                contract_attestation_id, customer_price_version, supplier_cost_version
+                         FROM saas_route_config_dispatchable
+                         WHERE tenant_id = $1 AND project_id = $2 AND route_id = $3 AND version = $4
+                         LIMIT 2`;
+const DISPATCHABLE_ROUTE_FINAL_QUERY = createPreparedSqlStatement('cm-final', DISPATCHABLE_ROUTE_FINAL_SQL);
 const PROVIDER_RIGHTS_FENCE_KEY = 'saas-authz:provider-rights';
 
 type AdvisoryFenceMode = 'shared' | 'exclusive';
@@ -220,6 +232,11 @@ type AdvisoryFenceMode = 'shared' | 'exclusive';
 interface AdvisoryFenceRequest {
   readonly key: string;
   readonly mode: AdvisoryFenceMode;
+}
+
+async function lockDispatchableRouteReadFences(tx: SqlExecutor, layers: readonly (readonly string[])[]): Promise<void> {
+  const keys = layers.flatMap((layer) => sortAndDedupeAdvisoryKeys(layer));
+  await tx.query(SHARED_ADVISORY_FENCE_BATCH_SQL, [keys]);
 }
 
 async function lockAdvisoryFenceLayer(tx: SqlExecutor, requests: readonly AdvisoryFenceRequest[]): Promise<void> {
@@ -1193,16 +1210,21 @@ export class SaasCommercialMeteringPolicyService {
     const routeId = text(routeIdInput, 'routeId');
     const routeVersion = version(routeVersionInput, 'routeVersion');
     const run = async (tx: SqlExecutor): Promise<RouteCommercialAuthorityRecord | null> => {
-      await lockTenantProjectFences(tx, tenantId, projectId, 'shared');
-      const selectSql = `SELECT tenant_id, project_id, route_id, version,
-                                customer_policy_id, customer_policy_version, provider_policy_id, provider_policy_version,
-                                contract_attestation_id, customer_price_version, supplier_cost_version
-                         FROM saas_route_config_dispatchable
-                         WHERE tenant_id = $1 AND project_id = $2 AND route_id = $3 AND version = $4
-                         LIMIT 2`;
-      let result = await tx.query<Row>(selectSql, [tenantId, projectId, routeId, routeVersion]);
-      if (result.rows.length > 1) fail('STORAGE_ERROR', 'dispatchable route authority is ambiguous');
-      const hint = result.rows[0];
+      await lockDispatchableRouteReadFences(tx, [
+        [saasAdvisoryKey.tenant(tenantId)],
+        [saasAdvisoryKey.project(tenantId, projectId)],
+      ]);
+      // The immutable, scoped binding is only an identity hint for the policy
+      // fences. Dispatchability is established by the full view after them.
+      const hintResult = await tx.query<Row>(
+        `SELECT customer_policy_id, provider_policy_id, provider_policy_version
+         FROM saas_route_config_commercial_authorities
+         WHERE tenant_id = $1 AND project_id = $2 AND route_id = $3 AND route_version = $4
+         LIMIT 2`,
+        [tenantId, projectId, routeId, routeVersion],
+      );
+      if (hintResult.rows.length > 1) fail('STORAGE_ERROR', 'dispatchable route authority is ambiguous');
+      const hint = hintResult.rows[0];
       if (!hint) return null;
       const customerPolicyId = text(hint.customer_policy_id, 'customer_policy_id', 255);
       const providerPolicyId = text(hint.provider_policy_id, 'provider_policy_id', 255);
@@ -1217,16 +1239,19 @@ export class SaasCommercialMeteringPolicyService {
       );
       if (!providerPolicy) return null;
       const providerId = text(providerPolicy.provider_id, 'provider_id', 255);
-      await lockCommercialIdentityFences(
-        tx,
-        undefined,
+      await lockDispatchableRouteReadFences(tx, [
         [
           commercialPolicyKey('customer', tenantId, customerPolicyId),
           commercialPolicyKey('provider', tenantId, providerPolicyId, providerId),
+          PROVIDER_RIGHTS_FENCE_KEY,
         ],
-        'shared',
-      );
-      result = await tx.query<Row>(selectSql, [tenantId, projectId, routeId, routeVersion]);
+      ]);
+      const result = await queryPreparedOrAnonymous<Row>(tx, DISPATCHABLE_ROUTE_FINAL_QUERY, [
+        tenantId,
+        projectId,
+        routeId,
+        routeVersion,
+      ]);
       if (result.rows.length > 1) fail('STORAGE_ERROR', 'dispatchable route authority is ambiguous');
       const row = result.rows[0];
       if (!row) return null;

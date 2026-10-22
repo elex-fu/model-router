@@ -211,6 +211,7 @@ function eligibilityRow(mode: Mode, accountId = 'account-a', identity: ProviderI
     account_rights_effective_at: '2026-01-01T00:00:00.000Z',
     account_rights_expires_at: null,
     capability_version: 12,
+    authority_now: NOW,
     capability_protocol: identity.protocol,
     capability_support_level: 'supported',
     capability_validation_state: 'verified',
@@ -331,7 +332,7 @@ class FakeDatabase implements SaasDatabase {
       rows = this.state.eligibilityRows?.get(accountId) ?? [eligibilityRow('byok', accountId, identity)];
     } else if (sql.includes('postgres-provider-account-scheduler:platform-eligibility')) {
       const accountId = String(values[3]);
-      const groupId = String(values[22]);
+      const groupId = String(values[21]);
       const pool = this.state.pools?.get(groupId);
       if (pool !== undefined && !pool.has(accountId)) {
         // The SQL membership guard excludes non-members of a narrowed group.
@@ -401,33 +402,26 @@ function setup(
 /* ------------------------------------------------------------------ */
 
 test('both eligibility queries exclude accounts whose probe deadline is in the future', async (t) => {
-  await t.test('byok predicate binds the shared revalidation clock ($14)', async () => {
-    const { scheduler, state, input } = setup('byok');
-    const result = await scheduler.select(input([candidate('byok')]));
-    assert.equal(result.decision, 'allow');
-    const sql = state.statements.find(({ sql: text }) =>
-      text.includes('postgres-provider-account-scheduler:byok-eligibility'),
-    )?.sql;
-    assert.ok(sql);
-    assert.match(
-      sql,
-      /account\.probe_temp_unschedulable_until IS NULL\s+OR account\.probe_temp_unschedulable_until <= \$14::timestamptz/,
-    );
-  });
-
-  await t.test('platform predicate binds the shared revalidation clock ($20)', async () => {
-    const { scheduler, state, input } = setup('platform');
-    const result = await scheduler.select(input([candidate('platform')]));
-    assert.equal(result.decision, 'allow');
-    const sql = state.statements.find(({ sql: text }) =>
-      text.includes('postgres-provider-account-scheduler:platform-eligibility'),
-    )?.sql;
-    assert.ok(sql);
-    assert.match(
-      sql,
-      /account\.probe_temp_unschedulable_until IS NULL\s+OR account\.probe_temp_unschedulable_until <= \$20::timestamptz/,
-    );
-  });
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(`${mode} predicate uses the fixed database authority clock`, async () => {
+      const { scheduler, state, input } = setup(mode);
+      const result = await scheduler.select(input([candidate(mode)]));
+      assert.equal(result.decision, 'allow');
+      const query = state.statements.find(({ sql }) =>
+        sql.includes(`postgres-provider-account-scheduler:${mode}-eligibility`),
+      );
+      assert.ok(query);
+      assert.match(
+        query.sql,
+        /account\.probe_temp_unschedulable_until IS NULL\s+OR account\.probe_temp_unschedulable_until <= authority_clock\.authority_now/,
+      );
+      assert.match(query.sql, /WITH authority_clock AS MATERIALIZED \(SELECT clock_timestamp\(\) AS authority_now\)/);
+      assert.equal(
+        query.values.some((value) => value instanceof Date),
+        false,
+      );
+    });
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -453,7 +447,7 @@ test('the wrapper resolves the billing group once per platform selection', async
   const eligibility = state.statements.find(({ sql }) =>
     sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
   );
-  assert.equal(eligibility?.values[22], 'default');
+  assert.equal(eligibility?.values[21], 'default');
 });
 
 test('byok selections never resolve a billing group', async () => {
@@ -517,7 +511,7 @@ test('a group with pool rows narrows the platform candidate domain to its member
     const eligibility = state.statements.find(({ sql }) =>
       sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
     );
-    assert.equal(eligibility?.values[22], 'group-a');
+    assert.equal(eligibility?.values[21], 'group-a');
   });
 
   await t.test('every candidate excluded leaves no eligible account (reject, not block)', async () => {
@@ -543,11 +537,11 @@ test('a group with pool rows narrows the platform candidate domain to its member
     assert.ok(sql);
     assert.match(
       sql,
-      /LEFT JOIN saas_billing_group_account_pools group_pool\s+ON group_pool\.group_id = \$23 AND group_pool\.account_id = account\.id/,
+      /LEFT JOIN saas_billing_group_account_pools group_pool\s+ON group_pool\.group_id = \$22 AND group_pool\.account_id = account\.id/,
     );
     assert.match(
       sql,
-      /NOT EXISTS \(SELECT 1 FROM saas_billing_group_account_pools guard_pool\s+WHERE guard_pool\.group_id = \$23\)/,
+      /NOT EXISTS \(SELECT 1 FROM saas_billing_group_account_pools guard_pool\s+WHERE guard_pool\.group_id = \$22\)/,
     );
     assert.match(sql, /group_pool\.priority AS group_pool_priority/);
   });
@@ -650,7 +644,7 @@ test('claude_code_only admits a genuine Claude Code client under its own group',
   const eligibility = state.statements.find(({ sql }) =>
     sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
   );
-  assert.equal(eligibility?.values[22], 'group-cc');
+  assert.equal(eligibility?.values[21], 'group-cc');
 });
 
 test('claude_code_only rejects third-party clients when no fallback group is set', async () => {
@@ -701,7 +695,7 @@ test('claude_code_only reroutes a failed validation to the fallback group', asyn
     const eligibility = state.statements.find(({ sql }) =>
       sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
     );
-    assert.equal(eligibility?.values[22], 'group-fallback');
+    assert.equal(eligibility?.values[21], 'group-fallback');
   });
 
   await t.test('a fallback group that is itself claude_code_only rejects instead of looping', async () => {
@@ -770,7 +764,7 @@ test('supported_model_scopes admits an in-scope model under its own group', asyn
   const eligibility = state.statements.find(({ sql }) =>
     sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
   );
-  assert.equal(eligibility?.values[22], 'group-vip');
+  assert.equal(eligibility?.values[21], 'group-vip');
 });
 
 test('supported_model_scopes rejects an out-of-scope model when no fallback admits it', async () => {
@@ -820,7 +814,7 @@ test('supported_model_scopes reroutes to a multi-hop fallback chain that admits 
     const eligibility = state.statements.find(({ sql }) =>
       sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
     );
-    assert.equal(eligibility?.values[22], 'group-c');
+    assert.equal(eligibility?.values[21], 'group-c');
   });
 
   await t.test('a chain that exhausts without admitting the model rejects with route_denied', async () => {
@@ -877,7 +871,7 @@ test('a group without supported_model_scopes stays unrestricted', async () => {
   const eligibility = state.statements.find(({ sql }) =>
     sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
   );
-  assert.equal(eligibility?.values[22], 'default');
+  assert.equal(eligibility?.values[21], 'default');
 });
 
 test('claude_code_only never applies to non-claude providers', async () => {
@@ -892,7 +886,7 @@ test('claude_code_only never applies to non-claude providers', async () => {
   const eligibility = state.statements.find(({ sql }) =>
     sql.includes('postgres-provider-account-scheduler:platform-eligibility'),
   );
-  assert.equal(eligibility?.values[22], 'group-cc');
+  assert.equal(eligibility?.values[21], 'group-cc');
 });
 
 /* ------------------------------------------------------------------ */

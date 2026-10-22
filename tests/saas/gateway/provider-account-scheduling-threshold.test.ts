@@ -71,6 +71,55 @@ function baseRow(overrides: Partial<SchedulingThresholdAccountRow> = {}): Schedu
   };
 }
 
+test('Kimi exhaustion uses the existing pause gate without operator thresholds and expires with freshness/reset', () => {
+  const row = baseRow({
+    kimi_5h_used_percent: 100,
+    kimi_5h_reset_at: iso(IN_1H),
+    kimi_weekly_used_percent: 100,
+    kimi_weekly_reset_at: iso(IN_2D),
+    kimi_usage_updated_at: iso(NOW_MS),
+  });
+  const pause = evaluateSchedulingThresholdPause({
+    nowMs: NOW_MS,
+    candidates: schedulingThresholdCandidatesFromRow(row, NOW_MS),
+  });
+  assert.equal(pause?.platform, 'kimi');
+  assert.equal(pause?.window, 'weekly');
+  assert.equal(pause?.thresholdPercent, 100);
+  assert.equal(pause?.untilMs, NOW_MS + SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS);
+  assert.equal(
+    evaluateSchedulingThresholdPause({
+      nowMs: NOW_MS + SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS + 1,
+      candidates: schedulingThresholdCandidatesFromRow(row, NOW_MS + SCHEDULING_THRESHOLD_SNAPSHOT_MAX_AGE_MS + 1),
+    }),
+    null,
+  );
+  const reset = baseRow({ ...row, kimi_weekly_used_percent: null, kimi_5h_reset_at: iso(NOW_MS) });
+  assert.equal(
+    evaluateSchedulingThresholdPause({
+      nowMs: NOW_MS,
+      candidates: schedulingThresholdCandidatesFromRow(reset, NOW_MS),
+    }),
+    null,
+  );
+  assert.deepEqual(schedulingThresholdCandidatesFromRow(baseRow({ ...row, kimi_usage_updated_at: null }), NOW_MS), []);
+});
+
+test('Kimi honors an operator early-pause threshold and missing reset never guesses a horizon', () => {
+  const row = baseRow({ kimi_5h_used_percent: 85, kimi_5h_reset_at: iso(IN_1H), kimi_usage_updated_at: iso(NOW_MS) });
+  assert.equal(
+    evaluateSchedulingThresholdPause({ nowMs: NOW_MS, candidates: schedulingThresholdCandidatesFromRow(row, NOW_MS) }),
+    null,
+  );
+  const pause = evaluateSchedulingThresholdPause({
+    nowMs: NOW_MS,
+    candidates: schedulingThresholdCandidatesFromRow({ ...row, auto_pause_5h_threshold: 80 }, NOW_MS),
+  });
+  assert.equal(pause?.thresholdPercent, 80);
+  assert.equal(pause?.untilMs, IN_1H);
+  assert.deepEqual(schedulingThresholdCandidatesFromRow({ ...row, kimi_5h_reset_at: null }, NOW_MS), []);
+});
+
 test('a window at or above its threshold with a future reset pauses until that reset', () => {
   const pause = evaluateSchedulingThresholdPause({
     nowMs: NOW_MS,

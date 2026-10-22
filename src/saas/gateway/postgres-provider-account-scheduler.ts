@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { SaasDatabase } from '../db/index.js';
+import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.js';
 import { CLAUDE_PRODUCT_ID, CLAUDE_PROVIDER_ID } from './claude/catalog-identity.js';
 import { validateClaudeCodeClient } from './claude/claude-code-validator.js';
@@ -38,6 +39,7 @@ import {
   type ProviderAccountSchedulerSelectionTrace,
   type ProviderAccountSchedulerWindowCostPort,
   resolveMaxHealthAgeMs,
+  sameCandidateIdentity,
 } from './provider-account-scheduler.js';
 import {
   buildSchedulingThresholdPauseReason,
@@ -52,6 +54,7 @@ import type {
   RequestPreparationCandidateAuthority,
   RequestPreparationDecision,
   RequestPreparationEntitlement,
+  RequestPreparationRouteAuthority,
 } from './request-preparation-service.js';
 import { blockRequestPreparation, rejectRequestPreparation } from './request-preparation-service.js';
 
@@ -80,6 +83,7 @@ interface RouteRow extends Row {
 }
 
 interface EligibilityRow extends Row {
+  authority_now: unknown;
   product_status: unknown;
   profile_tenant_id: unknown;
   profile_id: unknown;
@@ -125,6 +129,7 @@ interface EligibilityRow extends Row {
   account_grok_5h_used_percent?: unknown;
   account_grok_usage_updated_at?: unknown;
   account_grok_rate_limited_until?: unknown;
+  account_kimi_rate_limited_until?: unknown;
   /* F2 (migration 105): billing-group account-pool priority signal. */
   group_pool_priority?: unknown;
   credential_owner_kind: unknown;
@@ -318,7 +323,8 @@ SELECT h.tenant_id, h.project_id, h.route_id, h.current_version,
 
 /* Values held by credentials are intentionally absent from both queries. */
 const BYOK_ELIGIBILITY_SQL = `/* postgres-provider-account-scheduler:byok-eligibility */
-SELECT product.status AS product_status,
+WITH authority_clock AS MATERIALIZED (SELECT clock_timestamp() AS authority_now)
+SELECT authority_clock.authority_now, product.status AS product_status,
        profile.tenant_id AS profile_tenant_id, profile.id AS profile_id,
        profile.supply_mode AS profile_supply_mode, profile.status AS profile_status,
        profile.authz_version AS profile_authz_version, profile.model_scopes AS profile_model_scopes,
@@ -353,6 +359,7 @@ SELECT product.status AS product_status,
        account.grok_5h_used_percent AS account_grok_5h_used_percent,
        account.grok_usage_updated_at AS account_grok_usage_updated_at,
        account.grok_rate_limited_until AS account_grok_rate_limited_until,
+       account.kimi_rate_limited_until AS account_kimi_rate_limited_until,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
        credential.provider_id AS credential_provider_id, credential.product_id AS credential_product_id,
@@ -387,7 +394,7 @@ SELECT product.status AS product_status,
        capability.support_level AS capability_support_level,
        capability.validation_state AS capability_validation_state,
        account_capability.capability_version AS account_capability_version
-  FROM saas_provider_products product
+  FROM authority_clock CROSS JOIN saas_provider_products product
   JOIN saas_supply_profiles profile
     ON profile.tenant_id = $1 AND profile.id = $2
   JOIN saas_tenant_provider_accounts account
@@ -406,7 +413,7 @@ SELECT product.status AS product_status,
    AND credential_version.version = credential.current_version
   JOIN LATERAL (
     SELECT r.* FROM saas_provider_rights r
-     WHERE r.rights_id = account.rights_id AND r.effective_at <= $14::timestamptz
+     WHERE r.rights_id = account.rights_id AND r.effective_at <= authority_clock.authority_now
      ORDER BY r.effective_at DESC, r.version DESC LIMIT 1
   ) rights ON TRUE
   JOIN LATERAL (
@@ -432,7 +439,7 @@ SELECT product.status AS product_status,
     ON egress_proxy.id = account.egress_proxy_id
  WHERE product.provider_id = $4 AND product.product_id = $5 AND product.status = 'active'
    AND profile.supply_mode = 'byok' AND profile.status = 'active'
-   AND profile.authz_version = $12 AND profile.model_scopes @> ARRAY[$15]::text[]
+   AND profile.authz_version = $12 AND profile.model_scopes @> ARRAY[$14]::text[]
    AND account.owner_kind = 'tenant' AND account.supply_mode = 'byok'
    AND account.provider_id = $4 AND account.product_id = $5
    AND account.status = 'active' AND account.validation_state = 'verified'
@@ -440,41 +447,42 @@ SELECT product.status AS product_status,
    /* R6a (migration 109): the probe worker's temporary-unschedulable signal
     * excludes the account while it is in the future; NULL (never probed or
     * recovered) and past deadlines keep the account eligible — exactly the
-    * pre-R6a behavior. $14 is the same revalidation clock as every other
-    * window predicate in this query. */
+    * pre-R6a behavior. The database clock is fixed once for every window
+    * predicate in this query and returned for the JS authority checks. */
    AND (account.probe_temp_unschedulable_until IS NULL
-        OR account.probe_temp_unschedulable_until <= $14::timestamptz)
+        OR account.probe_temp_unschedulable_until <= authority_clock.authority_now)
    /* R-dormant (migration 115): the scheduling-threshold lazy pause — same
     * NULL-or-elapsed shape as the 109 probe signal; NULL (never paused)
     * keeps the pre-115 behavior exactly. */
    AND (account.scheduling_threshold_pause_until IS NULL
-        OR account.scheduling_threshold_pause_until <= $14::timestamptz)
+        OR account.scheduling_threshold_pause_until <= authority_clock.authority_now)
    AND mapping.supply_mode = 'byok' AND mapping.provider_id = $4 AND mapping.product_id = $5
    AND mapping.account_authz_version = account.authz_version
    AND mapping.authz_version = $13 AND mapping.status = 'active'
-   AND mapping.effective_at <= $14::timestamptz
-   AND (mapping.expires_at IS NULL OR mapping.expires_at > $14::timestamptz)
+   AND mapping.effective_at <= authority_clock.authority_now
+   AND (mapping.expires_at IS NULL OR mapping.expires_at > authority_clock.authority_now)
    AND credential.owner_kind = 'tenant' AND credential.supply_mode = 'byok'
    AND credential.credential_type = account.credential_type
    AND credential.status = 'active' AND credential.validation_state = 'verified'
    AND credential.current_version = $9 AND credential.authz_version = $11
-   AND (credential.expires_at IS NULL OR credential.expires_at > $14::timestamptz)
+   AND (credential.expires_at IS NULL OR credential.expires_at > authority_clock.authority_now)
    AND credential_version.owner_kind = 'tenant' AND credential_version.supply_mode = 'byok'
    AND credential_version.status = 'active' AND credential_version.version = $9
-   AND (credential_version.expires_at IS NULL OR credential_version.expires_at > $14::timestamptz)
+   AND (credential_version.expires_at IS NULL OR credential_version.expires_at > authority_clock.authority_now)
    AND rights.version = account.rights_version
    AND rights.provider_id = account.provider_id AND rights.product_id = account.product_id
    AND rights.credential_type = account.credential_type AND rights.supply_mode = 'byok'
    AND rights.region = account.region AND rights.purpose = account.purpose
    AND rights.status = 'active' AND rights.model_scope @> ARRAY[$6]::text[]
    AND rights.endpoint_scope @> ARRAY[$7]::text[]
-   AND (rights.expires_at IS NULL OR rights.expires_at > $14::timestamptz)
-   AND capability.protocol = $16 AND capability.support_level = 'supported'
+   AND (rights.expires_at IS NULL OR rights.expires_at > authority_clock.authority_now)
+   AND capability.protocol = $15 AND capability.support_level = 'supported'
    AND capability.validation_state = 'verified'
  LIMIT 2`;
 
 const PLATFORM_ELIGIBILITY_SQL = `/* postgres-provider-account-scheduler:platform-eligibility */
-SELECT product.status AS product_status,
+WITH authority_clock AS MATERIALIZED (SELECT clock_timestamp() AS authority_now)
+SELECT authority_clock.authority_now, product.status AS product_status,
        profile.tenant_id AS profile_tenant_id, profile.id AS profile_id,
        profile.supply_mode AS profile_supply_mode, profile.status AS profile_status,
        profile.authz_version AS profile_authz_version, profile.model_scopes AS profile_model_scopes,
@@ -507,6 +515,7 @@ SELECT product.status AS product_status,
        account.grok_5h_used_percent AS account_grok_5h_used_percent,
        account.grok_usage_updated_at AS account_grok_usage_updated_at,
        account.grok_rate_limited_until AS account_grok_rate_limited_until,
+       account.kimi_rate_limited_until AS account_kimi_rate_limited_until,
        group_pool.priority AS group_pool_priority,
        credential.owner_kind AS credential_owner_kind, credential.supply_mode AS credential_supply_mode,
        credential.id AS credential_id, credential.account_id AS credential_account_id,
@@ -568,7 +577,7 @@ SELECT product.status AS product_status,
        pool_rights.effective_at AS pool_rights_effective_at,
        pool_rights.expires_at AS pool_rights_expires_at,
        pool_rights.status AS pool_rights_status
-  FROM saas_provider_products product
+  FROM authority_clock CROSS JOIN saas_provider_products product
   JOIN saas_supply_profiles profile
     ON profile.tenant_id = $1 AND profile.id = $2
   JOIN saas_platform_provider_accounts account ON account.id = $4
@@ -587,12 +596,12 @@ SELECT product.status AS product_status,
    AND credential_version.version = credential.current_version
   JOIN LATERAL (
     SELECT r.* FROM saas_provider_rights r
-     WHERE r.rights_id = account.rights_id AND r.effective_at <= $20::timestamptz
+     WHERE r.rights_id = account.rights_id AND r.effective_at <= authority_clock.authority_now
      ORDER BY r.effective_at DESC, r.version DESC LIMIT 1
   ) account_rights ON TRUE
   JOIN LATERAL (
     SELECT r.* FROM saas_provider_rights r
-     WHERE r.rights_id = pool.rights_id AND r.effective_at <= $20::timestamptz
+     WHERE r.rights_id = pool.rights_id AND r.effective_at <= authority_clock.authority_now
      ORDER BY r.effective_at DESC, r.version DESC LIMIT 1
   ) pool_rights ON TRUE
   JOIN LATERAL (
@@ -615,7 +624,7 @@ SELECT product.status AS product_status,
   LEFT JOIN saas_egress_proxies egress_proxy
     ON egress_proxy.id = account.egress_proxy_id
   /* F2 (migration 105): billing-group account pools narrow the platform
-   * candidate domain. $23 is the server-resolved group id (key binding, then
+   * candidate domain. $22 is the server-resolved group id (key binding, then
    * the tenant default). A group with NO pool rows is UNRESTRICTED — the
    * seeded 'default' group ships without rows and the NOT EXISTS guard keeps
    * every account eligible, byte-identical to pre-F2 — while any explicit
@@ -624,25 +633,25 @@ SELECT product.status AS product_status,
    * (the groups service), and this live read is what an in-flight selection
    * actually enforces. */
   LEFT JOIN saas_billing_group_account_pools group_pool
-    ON group_pool.group_id = $23 AND group_pool.account_id = account.id
+    ON group_pool.group_id = $22 AND group_pool.account_id = account.id
  WHERE product.provider_id = $5 AND product.product_id = $6 AND product.status = 'active'
    AND profile.supply_mode = 'platform' AND profile.status = 'active'
-   AND profile.authz_version = $13 AND profile.model_scopes @> ARRAY[$21]::text[]
+   AND profile.authz_version = $13 AND profile.model_scopes @> ARRAY[$20]::text[]
    AND account.owner_kind = 'platform' AND account.supply_mode = 'platform'
    AND account.provider_id = $5 AND account.product_id = $6
    AND account.status = 'active' AND account.validation_state = 'verified'
    AND account.authz_version = $12
-   /* R6a (migration 109): see the BYOK query above; $20 is the shared
-    * revalidation clock. */
+   /* R6a (migration 109): see the BYOK query above; the fixed database
+    * authority clock is shared with the JS authorization checks. */
    AND (account.probe_temp_unschedulable_until IS NULL
-        OR account.probe_temp_unschedulable_until <= $20::timestamptz)
+        OR account.probe_temp_unschedulable_until <= authority_clock.authority_now)
    /* R-dormant (migration 115): the scheduling-threshold lazy pause — same
     * NULL-or-elapsed shape as the 109 probe signal; NULL (never paused)
     * keeps the pre-115 behavior exactly. */
    AND (account.scheduling_threshold_pause_until IS NULL
-        OR account.scheduling_threshold_pause_until <= $20::timestamptz)
+        OR account.scheduling_threshold_pause_until <= authority_clock.authority_now)
    AND (NOT EXISTS (SELECT 1 FROM saas_billing_group_account_pools guard_pool
-                    WHERE guard_pool.group_id = $23)
+                    WHERE guard_pool.group_id = $22)
         OR group_pool.account_id IS NOT NULL)
    AND pool.owner_kind = 'platform' AND pool.supply_mode = 'platform'
    AND pool.provider_id = $5 AND pool.product_id = $6
@@ -657,16 +666,16 @@ SELECT product.status AS product_status,
    AND grant_row.supply_mode = 'platform' AND grant_row.status = 'active'
    AND grant_row.authz_version = $17 AND grant_row.profile_authz_version = $18
    AND grant_row.pool_authz_version = $19
-   AND grant_row.effective_at <= $20::timestamptz
-   AND (grant_row.expires_at IS NULL OR grant_row.expires_at > $20::timestamptz)
+   AND grant_row.effective_at <= authority_clock.authority_now
+   AND (grant_row.expires_at IS NULL OR grant_row.expires_at > authority_clock.authority_now)
    AND credential.owner_kind = 'platform' AND credential.supply_mode = 'platform'
    AND credential.credential_type = account.credential_type
    AND credential.status = 'active' AND credential.validation_state = 'verified'
    AND credential.current_version = $10 AND credential.authz_version = $11
-   AND (credential.expires_at IS NULL OR credential.expires_at > $20::timestamptz)
+   AND (credential.expires_at IS NULL OR credential.expires_at > authority_clock.authority_now)
    AND credential_version.owner_kind = 'platform' AND credential_version.supply_mode = 'platform'
    AND credential_version.status = 'active' AND credential_version.version = $10
-   AND (credential_version.expires_at IS NULL OR credential_version.expires_at > $20::timestamptz)
+   AND (credential_version.expires_at IS NULL OR credential_version.expires_at > authority_clock.authority_now)
    AND account_rights.version = account.rights_version
    AND account_rights.provider_id = account.provider_id
    AND account_rights.product_id = account.product_id
@@ -676,7 +685,7 @@ SELECT product.status AS product_status,
    AND account_rights.status = 'active'
    AND account_rights.model_scope @> ARRAY[$7]::text[]
    AND account_rights.endpoint_scope @> ARRAY[$8]::text[]
-   AND (account_rights.expires_at IS NULL OR account_rights.expires_at > $20::timestamptz)
+   AND (account_rights.expires_at IS NULL OR account_rights.expires_at > authority_clock.authority_now)
    AND pool_rights.version = pool.rights_version
    AND pool_rights.provider_id = pool.provider_id AND pool_rights.product_id = pool.product_id
    AND pool_rights.credential_type = pool.credential_type
@@ -685,10 +694,13 @@ SELECT product.status AS product_status,
    AND pool_rights.status = 'active'
    AND pool_rights.model_scope @> ARRAY[$7]::text[]
    AND pool_rights.endpoint_scope @> ARRAY[$8]::text[]
-   AND (pool_rights.expires_at IS NULL OR pool_rights.expires_at > $20::timestamptz)
-   AND capability.protocol = $22 AND capability.support_level = 'supported'
+   AND (pool_rights.expires_at IS NULL OR pool_rights.expires_at > authority_clock.authority_now)
+   AND capability.protocol = $21 AND capability.support_level = 'supported'
    AND capability.validation_state = 'verified'
  LIMIT 2`;
+
+const BYOK_ELIGIBILITY_QUERY = createPreparedSqlStatement('sched-byok', BYOK_ELIGIBILITY_SQL);
+const PLATFORM_ELIGIBILITY_QUERY = createPreparedSqlStatement('sched-platform', PLATFORM_ELIGIBILITY_SQL);
 
 const CONCURRENCY_SQL = `/* postgres-provider-account-scheduler:concurrency */
 SELECT count(*)::text AS in_flight
@@ -765,6 +777,9 @@ SELECT account.id AS account_id,
        account.minimax_5h_used_percent, account.minimax_5h_reset_at,
        account.minimax_weekly_used_percent, account.minimax_weekly_reset_at,
        account.minimax_usage_updated_at,
+       account.kimi_5h_used_percent, account.kimi_5h_reset_at,
+       account.kimi_weekly_used_percent, account.kimi_weekly_reset_at,
+       account.kimi_usage_updated_at,
        account.grok_5h_used_percent, account.grok_5h_reset_at,
        account.grok_usage_updated_at,
        account.auto_pause_5h_threshold, account.auto_pause_7d_threshold,
@@ -786,7 +801,13 @@ function schedulingThresholdPauseWriteSql(
   ownerKind: 'tenant' | 'platform',
 ): {
   sql: string;
-  values: (untilIso: string, reasonJson: string, accountId: string, tenantId: string | null) => unknown[];
+  values: (
+    untilIso: string,
+    reasonJson: string,
+    accountId: string,
+    tenantId: string | null,
+    observedAt: string | null,
+  ) => unknown[];
 } {
   const predicate = ownerKind === 'tenant' ? 'tenant_id = $1 AND id = $2' : 'id = $1';
   const untilParam = ownerKind === 'tenant' ? 3 : 2;
@@ -798,9 +819,15 @@ UPDATE ${accountsTable}
        scheduling_threshold_pause_reason = $${reasonParam}::jsonb
  WHERE ${predicate}
    AND (scheduling_threshold_pause_until IS NULL
-        OR scheduling_threshold_pause_until < $${untilParam}::timestamptz)`,
-    values: (untilIso, reasonJson, accountId, tenantId) =>
-      ownerKind === 'tenant' ? [tenantId, accountId, untilIso, reasonJson] : [accountId, untilIso, reasonJson],
+        OR scheduling_threshold_pause_until < $${untilParam}::timestamptz)
+   AND ($${reasonParam}::jsonb->>'platform' IS DISTINCT FROM 'kimi'
+        OR kimi_usage_updated_at = $${reasonParam + 1}::timestamptz)`,
+    // A fresh quota poll can clear a Kimi pause while this scheduler is
+    // enriching its old observation. Do not republish that stale pause.
+    values: (untilIso, reasonJson, accountId, tenantId, observedAt) =>
+      ownerKind === 'tenant'
+        ? [tenantId, accountId, untilIso, reasonJson, observedAt]
+        : [accountId, untilIso, reasonJson, observedAt],
   };
 }
 
@@ -1179,7 +1206,7 @@ function candidateMatchesRoute(
 function validateCommonEligibilityRow(
   row: EligibilityRow,
   candidate: RequestPreparationCandidateAuthority,
-  input: Pick<ProviderAccountSchedulerInput, 'caller' | 'publicModel' | 'protocol'>,
+  input: Pick<ProviderAccountSchedulerInput, 'caller' | 'publicModel' | 'protocol' | 'route'>,
   now: Date,
 ): boolean {
   const ownerKind = candidate.supplyMode === 'byok' ? 'tenant' : 'platform';
@@ -1234,7 +1261,7 @@ function validateCommonEligibilityRow(
     containsScope(row.account_rights_endpoint_scope, candidate.endpoint) &&
     currentWindow(row.account_rights_effective_at, row.account_rights_expires_at, now) &&
     sameVersion(row.capability_version, row.account_capability_version) &&
-    exactText(row.capability_protocol, input.protocol) &&
+    exactText(row.capability_protocol, input.route?.providerProtocol ?? input.protocol) &&
     row.capability_support_level === 'supported' &&
     row.capability_validation_state === 'verified'
   );
@@ -1370,6 +1397,7 @@ class PostgresEligibilityAuthority {
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
+    readonly route?: RequestPreparationRouteAuthority;
     readonly billingGroupId?: string;
     readonly composite?: ProviderAccountSchedulerCompositeContext;
     readonly now: Date;
@@ -1407,253 +1435,261 @@ class PostgresEligibilityAuthority {
         return { decision: 'block', reason: 'composite route context is outside the platform supply mode' };
       }
 
-      return await this.database.transaction(async (tx) => {
-        const routeResult = await tx.query<RouteRow>(ROUTE_SQL, [
-          input.caller.tenantId,
-          input.caller.projectId,
-          input.publicModel,
-          input.protocol,
-          input.caller.supplyMode,
-        ]);
-        if (routeResult.rows.length === 0) {
-          return { decision: 'block', reason: 'active persisted route authority is missing' };
-        }
-        if (routeResult.rows.length !== 1) {
-          return { decision: 'block', reason: 'active persisted route authority is ambiguous' };
-        }
-        const route = parseRoute(routeResult.rows[0], {
-          requestId: 'scheduler-revalidation',
-          caller: input.caller,
-          entitlement: input.entitlement,
-          candidates: [input.candidate],
-          publicModel: input.publicModel,
-          protocol: input.protocol,
-        });
-        if (!route) return { decision: 'block', reason: 'active persisted route authority is malformed' };
-        if (
-          !candidateMatchesRoute(
-            input.candidate,
-            route,
-            {
-              requestId: 'scheduler-revalidation',
-              caller: input.caller,
-              entitlement: input.entitlement,
-              candidates: [input.candidate],
-              publicModel: input.publicModel,
-              protocol: input.protocol,
-            },
-            input.composite,
-          )
-        ) {
-          return { decision: 'deny', reason: 'candidate is outside the exact persisted route provider/product' };
-        }
-
-        const rowResult = await tx.query<EligibilityRow>(
-          input.caller.supplyMode === 'byok' ? BYOK_ELIGIBILITY_SQL : PLATFORM_ELIGIBILITY_SQL,
-          input.caller.supplyMode === 'byok' ? byokValues(input, route) : platformValues(input, route),
-        );
-        if (rowResult.rows.length === 0) {
-          return {
-            decision: 'deny',
-            reason: 'account, rights, capability, credential, or active supply relation is unavailable',
-          };
-        }
-        if (rowResult.rows.length !== 1) {
-          return { decision: 'block', reason: 'persisted account eligibility authority is ambiguous' };
-        }
-        const row = rowResult.rows[0];
-        const relationIsValid =
-          input.caller.supplyMode === 'byok'
-            ? validateByokRelation(row, input.candidate, input.now)
-            : validatePlatformRelation(row, input.candidate, input.now);
-        if (!validateCommonEligibilityRow(row, input.candidate, input, input.now) || !relationIsValid) {
-          return { decision: 'deny', reason: 'persisted account eligibility facts no longer match the candidate' };
-        }
-        const priority = schedulingPriority(row.account_priority);
-        const weight = schedulingWeight(row.account_weight);
-        if (priority === null || weight === null) {
-          return { decision: 'block', reason: 'persisted account scheduling scalars are malformed' };
-        }
-        // F2 (migration 105): the billing-group pool priority is a scheduling
-        // signal only — it never grants or removes eligibility here (the SQL
-        // membership guard does that) and never enters the billing path. NULL
-        // (no pool rows / BYOK) is "no signal"; a present-but-malformed value
-        // is authority drift and blocks the whole selection, mirroring the
-        // scheduling-scalar fail-closed rule.
-        const groupPoolPriority =
-          row.group_pool_priority === null || row.group_pool_priority === undefined
-            ? null
-            : schedulingScalar(row.group_pool_priority, 0, 1000);
-        if (row.group_pool_priority != null && groupPoolPriority === null) {
-          return { decision: 'block', reason: 'persisted billing group pool priority is malformed' };
-        }
-        const quotaSignal = schedulingQuotaSignal(row.account_quota_state);
-        if (quotaSignal === 'malformed') {
-          return { decision: 'block', reason: 'persisted account quota signal is malformed' };
-        }
-        if (quotaSignal === 'exhausted') {
-          return { decision: 'deny', reason: 'persisted account quota snapshot is exhausted' };
-        }
-        // Migration 119 (batch 3 grok; core-plan 9.1 B06): the persisted Grok
-        // 429 cooldown deadline and the free-tier soft gate are consumed here.
-        // Both are fail-open on absent/malformed data: a quota-header write in
-        // flight (or a never-probed account) never removes availability —
-        // matching the free-tier gate's fail-open rule and the R3 egress
-        // precedent for jitters that must not block scheduling. A live 429
-        // cooldown is a DURABLE scheduling signal (the SQL 109/115 precedent),
-        // so an excluded candidate is denied for this attempt only, exactly
-        // like an exhausted quota snapshot — the durable authority stays the
-        // pause-write and the next request re-evaluates.
-        const grokRateLimitedUntilMs = timestampMs(row.account_grok_rate_limited_until);
-        const nowMs = input.now.getTime();
-        if (grokRateLimitedUntilMs !== null && Number.isFinite(nowMs) && grokRateLimitedUntilMs > nowMs) {
-          return { decision: 'deny', reason: 'persisted grok 429 cooldown is still active' };
-        }
-        const grokGateDecision = evaluateGrokFreeTierGateSnapshot({
-          subscriptionTier:
-            row.account_grok_subscription_tier === null || row.account_grok_subscription_tier === undefined
-              ? null
-              : typeof row.account_grok_subscription_tier === 'string'
-                ? row.account_grok_subscription_tier
-                : null,
-          observedUsedPercent:
-            typeof row.account_grok_5h_used_percent === 'number' ? row.account_grok_5h_used_percent : null,
-          observedAtMs: timestampMs(row.account_grok_usage_updated_at),
-          nowMs,
-        });
-        if (grokGateDecision === 'excluded') {
-          return {
-            decision: 'deny',
-            reason: 'grok free-tier soft gate: observed window at or above the 95% allowance floor',
-          };
-        }
-        // R6: account-level rpm/tpm ceilings deny only this candidate (the D4
-        // exhausted semantics); NULL limits skip the window read entirely.
-        const rpmLimit = schedulingRateLimit(row.account_rpm_limit);
-        const tpmLimit = schedulingRateLimit(row.account_tpm_limit);
-        if (rpmLimit === 'malformed' || tpmLimit === 'malformed') {
-          return { decision: 'block', reason: 'persisted account rate limits are malformed' };
-        }
-        if (rpmLimit !== null || tpmLimit !== null) {
-          const windowResult = await tx.query<{ requests: unknown; tokens: unknown }>(RATE_WINDOW_SQL, [
-            input.candidate.supplyMode === 'byok' ? 'tenant' : 'platform',
-            input.candidate.accountId,
-            input.now,
-          ]);
-          if (windowResult.rows.length !== 1) {
-            return { decision: 'block', reason: 'persisted account rate window is unavailable' };
-          }
-          const windowRequests = rateWindowSum(windowResult.rows[0]?.requests);
-          const windowTokens = rateWindowSum(windowResult.rows[0]?.tokens);
-          if (windowRequests === null || windowTokens === null) {
-            return { decision: 'block', reason: 'persisted account rate window is malformed' };
-          }
-          if (rpmLimit !== null && windowRequests >= BigInt(rpmLimit)) {
-            return { decision: 'deny', reason: 'persisted account rpm limit is exhausted' };
-          }
-          if (tpmLimit !== null && windowTokens >= BigInt(tpmLimit)) {
-            return { decision: 'deny', reason: 'persisted account tpm limit is exhausted' };
-          }
-        }
-        // R7: the continuous health score modulates the weighted draw only;
-        // it never grants or removes eligibility by itself. The shared
-        // health-score module (agent N's R7 formula) throws on any malformed
-        // persisted shape, which maps to the fail-closed scheduling block
-        // instead of a guess.
-        // R3 (migration 107): a 'dead' egress proxy demotes the account to
-        // the contract minimum weight — an eligibility signal only. Proxy
-        // jitter must never remove an account (that would migrate traffic
-        // across exit IPs and trip the provider risk control this feature
-        // exists to prevent); anything but a known quality is ignored so a
-        // probe write in flight cannot block scheduling.
-        const egressProxyQuality = row.account_egress_proxy_quality;
-        const deadEgressProxy = egressProxyQuality === 'dead';
-        let adjustedWeight: number;
-        try {
-          const healthScore = parseHealthScoreColumn(row.account_health_score);
-          // D4: a 'low' quota snapshot demotes to the contract minimum
-          // weight; the R7 health multiplier then applies on top of it.
-          adjustedWeight = effectiveWeight(quotaSignal === 'low' || deadEgressProxy ? 1 : weight, healthScore);
-        } catch {
-          return { decision: 'block', reason: 'persisted account health score is malformed' };
-        }
-        // R7 (plan §R7 items 1–2): scheduling-only signals — the soonest
-        // upcoming quota-window reset (099/100/108 columns, always surfaced;
-        // NULL = never observed = no signal) and, when the cost-priority
-        // strategy is enabled, the candidate's exact rational supplier rate
-        // read from saas_supplier_cost_versions. Neither ever enters the
-        // billing path (093 quota-snapshot precedent).
-        const quotaReset = soonestQuotaReset(row, input.now);
-        let supplierCostRate: {
-          numeratorMinorUnits: bigint | number | string;
-          denominatorUnits: bigint | number | string;
-        } | null = null;
-        if (this.options.supplierCostRates && nonEmpty(input.candidate.supplierCostVersion)) {
-          const rateResult = await tx.query<{
-            input_rate_numerator_minor_units: unknown;
-            input_rate_denominator_units: unknown;
-            output_rate_numerator_minor_units: unknown;
-            output_rate_denominator_units: unknown;
-          }>(SUPPLIER_COST_RATE_SQL, [input.candidate.supplierCostVersion]);
-          if (rateResult.rows.length > 1) {
-            return { decision: 'block', reason: 'persisted supplier cost version is ambiguous' };
-          }
-          if (rateResult.rows.length === 1) {
-            const rate = rateResult.rows[0];
-            const inputNumerator = exactNonNegativeBigInt(rate.input_rate_numerator_minor_units);
-            const inputDenominator = exactNonNegativeBigInt(rate.input_rate_denominator_units);
-            const outputNumerator = exactNonNegativeBigInt(rate.output_rate_numerator_minor_units);
-            const outputDenominator = exactNonNegativeBigInt(rate.output_rate_denominator_units);
-            if (
-              inputNumerator === null ||
-              inputDenominator === null ||
-              outputNumerator === null ||
-              outputDenominator === null ||
-              inputDenominator === 0n ||
-              outputDenominator === 0n
-            ) {
-              return { decision: 'block', reason: 'persisted supplier cost rate is malformed' };
-            }
-            // Blended input+output rate: inNum/outDen + outNum/inDen over the
-            // common denominator — pure bigint arithmetic, never floating point.
-            supplierCostRate = {
-              numeratorMinorUnits: inputNumerator * outputDenominator + outputNumerator * inputDenominator,
-              denominatorUnits: inputDenominator * outputDenominator,
-            };
-          }
-        }
-        return {
-          decision: 'allow',
-          candidate: input.candidate,
-          // §4.4 composite: the revalidated route identity carries the
-          // resolved target platform so downstream route checks compare the
-          // candidate against its actual serving provider.
-          route:
-            input.composite !== undefined
-              ? {
-                  ...route,
-                  providerId: input.composite.targetPlatform,
-                  productId: input.composite.productId,
-                }
-              : route,
-          status: 'active',
-          capability: {
-            protocol: input.protocol,
-            supportLevel: 'supported',
-            validationState: 'verified',
-          },
-          rights: toRights(row, input.candidate),
-          // Contract C-7: persisted scheduling scalars (082), never inferred.
-          priority,
-          weight: adjustedWeight,
-          scheduling: {
-            soonestResetAt: quotaReset === null ? null : quotaReset.resetAt,
-            soonestResetObservedAt: quotaReset === null ? null : quotaReset.observedAt,
-            supplierCostRate,
-            groupPoolPriority,
-          },
-        };
+      const routeResult = await this.database.query<RouteRow>(ROUTE_SQL, [
+        input.caller.tenantId,
+        input.caller.projectId,
+        input.publicModel,
+        input.protocol,
+        input.caller.supplyMode,
+      ]);
+      if (routeResult.rows.length === 0) {
+        return { decision: 'block', reason: 'active persisted route authority is missing' };
+      }
+      if (routeResult.rows.length !== 1) {
+        return { decision: 'block', reason: 'active persisted route authority is ambiguous' };
+      }
+      const route = parseRoute(routeResult.rows[0], {
+        requestId: 'scheduler-revalidation',
+        caller: input.caller,
+        entitlement: input.entitlement,
+        candidates: [input.candidate],
+        publicModel: input.publicModel,
+        protocol: input.protocol,
       });
+      if (!route) return { decision: 'block', reason: 'active persisted route authority is malformed' };
+      if (
+        !candidateMatchesRoute(
+          input.candidate,
+          route,
+          {
+            requestId: 'scheduler-revalidation',
+            caller: input.caller,
+            entitlement: input.entitlement,
+            candidates: [input.candidate],
+            publicModel: input.publicModel,
+            protocol: input.protocol,
+          },
+          input.composite,
+        )
+      ) {
+        return { decision: 'deny', reason: 'candidate is outside the exact persisted route provider/product' };
+      }
+
+      const rowResult = await queryPreparedOrAnonymous<EligibilityRow>(
+        this.database,
+        input.caller.supplyMode === 'byok' ? BYOK_ELIGIBILITY_QUERY : PLATFORM_ELIGIBILITY_QUERY,
+        input.caller.supplyMode === 'byok' ? byokValues(input, route) : platformValues(input, route),
+      );
+      if (rowResult.rows.length === 0) {
+        return {
+          decision: 'deny',
+          reason: 'account, rights, capability, credential, or active supply relation is unavailable',
+        };
+      }
+      if (rowResult.rows.length !== 1) {
+        return { decision: 'block', reason: 'persisted account eligibility authority is ambiguous' };
+      }
+      const row = rowResult.rows[0];
+      const authorityAt = Object.hasOwn(row, 'authority_now') ? timestamp(row.authority_now) : null;
+      if (authorityAt === null) {
+        return { decision: 'block', reason: 'database eligibility authority clock is unavailable' };
+      }
+      const relationIsValid =
+        input.caller.supplyMode === 'byok'
+          ? validateByokRelation(row, input.candidate, authorityAt)
+          : validatePlatformRelation(row, input.candidate, authorityAt);
+      if (!validateCommonEligibilityRow(row, input.candidate, input, authorityAt) || !relationIsValid) {
+        return { decision: 'deny', reason: 'persisted account eligibility facts no longer match the candidate' };
+      }
+      const priority = schedulingPriority(row.account_priority);
+      const weight = schedulingWeight(row.account_weight);
+      if (priority === null || weight === null) {
+        return { decision: 'block', reason: 'persisted account scheduling scalars are malformed' };
+      }
+      // F2 (migration 105): the billing-group pool priority is a scheduling
+      // signal only — it never grants or removes eligibility here (the SQL
+      // membership guard does that) and never enters the billing path. NULL
+      // (no pool rows / BYOK) is "no signal"; a present-but-malformed value
+      // is authority drift and blocks the whole selection, mirroring the
+      // scheduling-scalar fail-closed rule.
+      const groupPoolPriority =
+        row.group_pool_priority === null || row.group_pool_priority === undefined
+          ? null
+          : schedulingScalar(row.group_pool_priority, 0, 1000);
+      if (row.group_pool_priority != null && groupPoolPriority === null) {
+        return { decision: 'block', reason: 'persisted billing group pool priority is malformed' };
+      }
+      const quotaSignal = schedulingQuotaSignal(row.account_quota_state);
+      if (quotaSignal === 'malformed') {
+        return { decision: 'block', reason: 'persisted account quota signal is malformed' };
+      }
+      if (quotaSignal === 'exhausted') {
+        return { decision: 'deny', reason: 'persisted account quota snapshot is exhausted' };
+      }
+      // Migration 119 (batch 3 grok; core-plan 9.1 B06): the persisted Grok
+      // 429 cooldown deadline and the free-tier soft gate are consumed here.
+      // Both are fail-open on absent/malformed data: a quota-header write in
+      // flight (or a never-probed account) never removes availability —
+      // matching the free-tier gate's fail-open rule and the R3 egress
+      // precedent for jitters that must not block scheduling. A live 429
+      // cooldown is a DURABLE scheduling signal (the SQL 109/115 precedent),
+      // so an excluded candidate is denied for this attempt only, exactly
+      // like an exhausted quota snapshot — the durable authority stays the
+      // pause-write and the next request re-evaluates.
+      const grokRateLimitedUntilMs = timestampMs(row.account_grok_rate_limited_until);
+      const nowMs = authorityAt.getTime();
+      if (grokRateLimitedUntilMs !== null && Number.isFinite(nowMs) && grokRateLimitedUntilMs > nowMs) {
+        return { decision: 'deny', reason: 'persisted grok 429 cooldown is still active' };
+      }
+      const kimiRateLimitedUntilMs = timestampMs(row.account_kimi_rate_limited_until);
+      if (kimiRateLimitedUntilMs !== null && Number.isFinite(nowMs) && kimiRateLimitedUntilMs > nowMs) {
+        return { decision: 'deny', reason: 'persisted kimi 429 cooldown is still active' };
+      }
+      const grokGateDecision = evaluateGrokFreeTierGateSnapshot({
+        subscriptionTier:
+          row.account_grok_subscription_tier === null || row.account_grok_subscription_tier === undefined
+            ? null
+            : typeof row.account_grok_subscription_tier === 'string'
+              ? row.account_grok_subscription_tier
+              : null,
+        observedUsedPercent:
+          typeof row.account_grok_5h_used_percent === 'number' ? row.account_grok_5h_used_percent : null,
+        observedAtMs: timestampMs(row.account_grok_usage_updated_at),
+        nowMs,
+      });
+      if (grokGateDecision === 'excluded') {
+        return {
+          decision: 'deny',
+          reason: 'grok free-tier soft gate: observed window at or above the 95% allowance floor',
+        };
+      }
+      // R6: account-level rpm/tpm ceilings deny only this candidate (the D4
+      // exhausted semantics); NULL limits skip the window read entirely.
+      const rpmLimit = schedulingRateLimit(row.account_rpm_limit);
+      const tpmLimit = schedulingRateLimit(row.account_tpm_limit);
+      if (rpmLimit === 'malformed' || tpmLimit === 'malformed') {
+        return { decision: 'block', reason: 'persisted account rate limits are malformed' };
+      }
+      if (rpmLimit !== null || tpmLimit !== null) {
+        const windowResult = await this.database.query<{ requests: unknown; tokens: unknown }>(RATE_WINDOW_SQL, [
+          input.candidate.supplyMode === 'byok' ? 'tenant' : 'platform',
+          input.candidate.accountId,
+          authorityAt,
+        ]);
+        if (windowResult.rows.length !== 1) {
+          return { decision: 'block', reason: 'persisted account rate window is unavailable' };
+        }
+        const windowRequests = rateWindowSum(windowResult.rows[0]?.requests);
+        const windowTokens = rateWindowSum(windowResult.rows[0]?.tokens);
+        if (windowRequests === null || windowTokens === null) {
+          return { decision: 'block', reason: 'persisted account rate window is malformed' };
+        }
+        if (rpmLimit !== null && windowRequests >= BigInt(rpmLimit)) {
+          return { decision: 'deny', reason: 'persisted account rpm limit is exhausted' };
+        }
+        if (tpmLimit !== null && windowTokens >= BigInt(tpmLimit)) {
+          return { decision: 'deny', reason: 'persisted account tpm limit is exhausted' };
+        }
+      }
+      // R7: the continuous health score modulates the weighted draw only;
+      // it never grants or removes eligibility by itself. The shared
+      // health-score module (agent N's R7 formula) throws on any malformed
+      // persisted shape, which maps to the fail-closed scheduling block
+      // instead of a guess.
+      // R3 (migration 107): a 'dead' egress proxy demotes the account to
+      // the contract minimum weight — an eligibility signal only. Proxy
+      // jitter must never remove an account (that would migrate traffic
+      // across exit IPs and trip the provider risk control this feature
+      // exists to prevent); anything but a known quality is ignored so a
+      // probe write in flight cannot block scheduling.
+      const egressProxyQuality = row.account_egress_proxy_quality;
+      const deadEgressProxy = egressProxyQuality === 'dead';
+      let adjustedWeight: number;
+      try {
+        const healthScore = parseHealthScoreColumn(row.account_health_score);
+        // D4: a 'low' quota snapshot demotes to the contract minimum
+        // weight; the R7 health multiplier then applies on top of it.
+        adjustedWeight = effectiveWeight(quotaSignal === 'low' || deadEgressProxy ? 1 : weight, healthScore);
+      } catch {
+        return { decision: 'block', reason: 'persisted account health score is malformed' };
+      }
+      // R7 (plan §R7 items 1–2): scheduling-only signals — the soonest
+      // upcoming quota-window reset (099/100/108 columns, always surfaced;
+      // NULL = never observed = no signal) and, when the cost-priority
+      // strategy is enabled, the candidate's exact rational supplier rate
+      // read from saas_supplier_cost_versions. Neither ever enters the
+      // billing path (093 quota-snapshot precedent).
+      const quotaReset = soonestQuotaReset(row, input.now);
+      let supplierCostRate: {
+        numeratorMinorUnits: bigint | number | string;
+        denominatorUnits: bigint | number | string;
+      } | null = null;
+      if (this.options.supplierCostRates && nonEmpty(input.candidate.supplierCostVersion)) {
+        const rateResult = await this.database.query<{
+          input_rate_numerator_minor_units: unknown;
+          input_rate_denominator_units: unknown;
+          output_rate_numerator_minor_units: unknown;
+          output_rate_denominator_units: unknown;
+        }>(SUPPLIER_COST_RATE_SQL, [input.candidate.supplierCostVersion]);
+        if (rateResult.rows.length > 1) {
+          return { decision: 'block', reason: 'persisted supplier cost version is ambiguous' };
+        }
+        if (rateResult.rows.length === 1) {
+          const rate = rateResult.rows[0];
+          const inputNumerator = exactNonNegativeBigInt(rate.input_rate_numerator_minor_units);
+          const inputDenominator = exactNonNegativeBigInt(rate.input_rate_denominator_units);
+          const outputNumerator = exactNonNegativeBigInt(rate.output_rate_numerator_minor_units);
+          const outputDenominator = exactNonNegativeBigInt(rate.output_rate_denominator_units);
+          if (
+            inputNumerator === null ||
+            inputDenominator === null ||
+            outputNumerator === null ||
+            outputDenominator === null ||
+            inputDenominator === 0n ||
+            outputDenominator === 0n
+          ) {
+            return { decision: 'block', reason: 'persisted supplier cost rate is malformed' };
+          }
+          // Blended input+output rate: inNum/outDen + outNum/inDen over the
+          // common denominator — pure bigint arithmetic, never floating point.
+          supplierCostRate = {
+            numeratorMinorUnits: inputNumerator * outputDenominator + outputNumerator * inputDenominator,
+            denominatorUnits: inputDenominator * outputDenominator,
+          };
+        }
+      }
+      return {
+        decision: 'allow',
+        authorityAt,
+        candidate: input.candidate,
+        // §4.4 composite: the revalidated route identity carries the
+        // resolved target platform so downstream route checks compare the
+        // candidate against its actual serving provider.
+        route:
+          input.composite !== undefined
+            ? {
+                ...route,
+                providerId: input.composite.targetPlatform,
+                productId: input.composite.productId,
+              }
+            : route,
+        status: 'active',
+        capability: {
+          protocol: input.route?.providerProtocol ?? input.protocol,
+          supportLevel: 'supported',
+          validationState: 'verified',
+        },
+        rights: toRights(row, input.candidate),
+        // Contract C-7: persisted scheduling scalars (082), never inferred.
+        priority,
+        weight: adjustedWeight,
+        scheduling: {
+          soonestResetAt: quotaReset === null ? null : quotaReset.resetAt,
+          soonestResetObservedAt: quotaReset === null ? null : quotaReset.observedAt,
+          supplierCostRate,
+          groupPoolPriority,
+        },
+      };
     } catch {
       return { decision: 'block', reason: 'PostgreSQL provider eligibility authority is unavailable' };
     }
@@ -1665,7 +1701,7 @@ function byokValues(
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly publicModel: string;
-    readonly now: Date;
+    readonly route?: RequestPreparationRouteAuthority;
   },
   _route: PersistedRoute,
 ): readonly unknown[] {
@@ -1684,9 +1720,8 @@ function byokValues(
     candidate.credentialAuthzVersion,
     input.caller.supplyProfileVersion,
     candidate.profileAccountAuthzVersion,
-    input.now,
     input.publicModel,
-    candidate.protocol,
+    input.route?.providerProtocol ?? candidate.protocol,
   ];
 }
 
@@ -1695,9 +1730,9 @@ function platformValues(
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly publicModel: string;
+    readonly route?: RequestPreparationRouteAuthority;
     readonly billingGroupId?: string;
     readonly composite?: ProviderAccountSchedulerCompositeContext;
-    readonly now: Date;
   },
   route: PersistedRoute,
 ): readonly unknown[] {
@@ -1732,10 +1767,9 @@ function platformValues(
     candidate.poolGrantAuthzVersion,
     candidate.poolGrantProfileAuthzVersion,
     candidate.poolGrantPoolAuthzVersion,
-    input.now,
     input.publicModel,
-    candidate.protocol,
-    // F2: $23 — the server-resolved billing group narrowing the pool domain.
+    input.route?.providerProtocol ?? candidate.protocol,
+    // F2: $22 — the server-resolved billing group narrowing the pool domain.
     input.billingGroupId,
   ];
 }
@@ -1852,6 +1886,19 @@ const MISSING_AFFINITY: ProviderAccountSchedulerAffinityPort = {
  * failure feedback (H5c) cools it again within a couple of dispatches, and
  * a genuinely failing probe outcome re-enters the durable cooldown path.
  */
+function healthReadTime(input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0]): Date | null {
+  try {
+    if ('clock' in input) {
+      if (!Object.hasOwn(input, 'clock') || typeof input.clock !== 'function') return null;
+      const now = input.clock();
+      return now instanceof Date && Number.isFinite(now.getTime()) ? now : null;
+    }
+    return input.now instanceof Date && Number.isFinite(input.now.getTime()) ? input.now : null;
+  } catch {
+    return null;
+  }
+}
+
 class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
   constructor(
     private readonly store: ProviderAccountHealthSchedulingPort &
@@ -1861,23 +1908,25 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     private readonly maxHealthAgeMs: number,
   ) {}
 
-  async get(input: {
-    readonly caller: RequestPreparationCaller;
-    readonly candidate: RequestPreparationCandidateAuthority;
-    readonly now: Date;
-  }): Promise<ProviderAccountSchedulerHealthDecision> {
-    const view = await this.store.getSchedulingView({
-      caller: input.caller,
-      candidate: input.candidate,
-      now: input.now,
-    });
+  async get(
+    input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0],
+  ): Promise<ProviderAccountSchedulerHealthDecision> {
+    const view = await this.store.getSchedulingView(input);
+    const now = healthReadTime(input);
+    if (now === null) return { decision: 'block', reason: 'provider account health clock is unavailable' };
     if (view.decision === 'allow') {
       const observedAt = view.value.observedAt;
-      const skewMs = observedAt.getTime() - input.now.getTime();
-      const ageMs = input.now.getTime() - observedAt.getTime();
+      if (
+        !(observedAt instanceof Date) ||
+        !Number.isFinite(observedAt.getTime()) ||
+        observedAt.getTime() - now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS
+      ) {
+        return { decision: 'block', reason: 'provider account runtime health is stale or malformed' };
+      }
+      const ageMs = now.getTime() - observedAt.getTime();
       // Fresh per this scheduler's own bound: pass the exact decision the
       // plain port would have produced (the core scheduler re-validates).
-      if (skewMs <= MAX_HEALTH_OBSERVED_AT_SKEW_MS && ageMs <= this.maxHealthAgeMs) {
+      if (ageMs <= this.maxHealthAgeMs) {
         return {
           decision: 'allow',
           value: {
@@ -1889,7 +1938,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
       }
       // Stale per this scheduler's (possibly tighter) bound: fall through to
       // the half-open probe path below.
-      return this.probeCandidate(input.candidate, input.now, 'stale');
+      return this.probeCandidate(input, 'stale');
     }
     // Everything but staleness and the zero-row cold start keeps the
     // fail-closed block: malformed data (including genuinely future
@@ -1900,7 +1949,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     // P18: a missing row is the one-time built-in cold-start priming case —
     // the same single-winner CAS + lease + probe-outcome pattern, with the
     // store's prime INSERT creating the row the probe then refreshes.
-    return this.probeCandidate(input.candidate, input.now, view.code === 'unknown' ? 'unobserved' : 'stale');
+    return this.probeCandidate(input, view.code === 'unknown' ? 'unobserved' : 'stale');
   }
 
   /**
@@ -1911,10 +1960,10 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
    * block.
    */
   private async probeCandidate(
-    candidate: RequestPreparationCandidateAuthority,
-    now: Date,
+    input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0],
     cause: 'stale' | 'unobserved',
   ): Promise<ProviderAccountSchedulerHealthDecision> {
+    const { candidate } = input;
     let admitted: 'admitted' | 'closed';
     try {
       admitted = await this.store.tryAdmitHalfOpenProbe({ candidate, staleAfterMs: this.maxHealthAgeMs });
@@ -1969,9 +2018,30 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
           // has already been recorded.
         }
       }
-      // The probe outcome was just persisted with observed_at = the
-      // PostgreSQL clock, i.e. fresh as of this decision.
-      return { decision: 'allow', value: { status: 'healthy', observedAt: now, cooldownUntil: null } };
+      // A concurrent outcome may follow the probe. Read the real row once
+      // after release instead of manufacturing a successful observation.
+      const refreshed = await this.store.getSchedulingView(input);
+      const now = healthReadTime(input);
+      if (refreshed.decision !== 'allow' || now === null) {
+        return { decision: 'deny', reason: 'provider account runtime health probe refresh failed' };
+      }
+      const observedAt = refreshed.value.observedAt;
+      if (
+        !(observedAt instanceof Date) ||
+        !Number.isFinite(observedAt.getTime()) ||
+        observedAt.getTime() - now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS ||
+        now.getTime() - observedAt.getTime() > this.maxHealthAgeMs
+      ) {
+        return { decision: 'deny', reason: 'provider account runtime health probe refresh is stale or malformed' };
+      }
+      return {
+        decision: 'allow',
+        value: {
+          status: refreshed.value.status,
+          observedAt,
+          cooldownUntil: refreshed.value.cooldownUntil,
+        },
+      };
     } catch {
       return {
         decision: 'deny',
@@ -2098,49 +2168,91 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
   async select(
     input: ProviderAccountSchedulerInput,
   ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>> {
-    if (!this.healthAuthorityConfigured) {
-      return blockRequestPreparation(
-        'capability_unavailable',
-        'runtime health authority is missing: the SaaS schema has no account health/cooldown observation contract; validation_state is not runtime health',
-      );
+    return this.selectWithBinding(input, false);
+  }
+
+  async selectAndBind(
+    input: ProviderAccountSchedulerInput,
+  ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>> {
+    try {
+      return await this.selectWithBinding(input, true);
+    } catch {
+      return blockRequestPreparation('capability_unavailable', 'provider account scheduler failed closed');
     }
-    // F2: the empty-candidate shape is delegated to the core scheduler's
-    // existing rejection untouched (no group resolution, no side reads).
-    const hasCandidates = isRecord(input) && Array.isArray(input.candidates) && input.candidates.length > 0;
-    let schedulingInput = input;
-    if (
-      hasCandidates &&
-      isRecord(input?.caller) &&
-      (input.caller as { supplyMode?: unknown }).supplyMode === 'platform'
-    ) {
-      const resolution = await this.resolveBillingGroupForSelection(input);
-      if (resolution.decision !== 'allow') return resolution.decision;
-      schedulingInput = { ...input, billingGroupId: resolution.billingGroupId };
-    }
-    // R-dormant (batch 2.2, migration 115): lazy scheduling-threshold
-    // evaluation at candidate-collection time. Fail-open by design — a
-    // threshold read/write failure must never break selection (the accounts
-    // simply stay schedulable until the next evaluation).
-    if (hasCandidates) {
-      schedulingInput = await this.applySchedulingThresholdPause(schedulingInput);
-    }
-    const decision = await this.scheduler.select(schedulingInput).then((result) => {
-      // R7: record the chosen strategy dimensions on the attempt audit. The
-      // trace exists only when a strategy is enabled, so the default path
-      // performs no extra write.
-      if (result.decision === 'allow' && result.scheduling) {
-        void this.recordSelectionAudit(schedulingInput, result.scheduling);
+  }
+
+  private async selectWithBinding(
+    input: ProviderAccountSchedulerInput,
+    bindAffinity: boolean,
+  ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>> {
+    const requestId = isRecord(input) && typeof input.requestId === 'string' ? input.requestId : '';
+    let winnerAccountId: string | null = null;
+    try {
+      if (!this.healthAuthorityConfigured) {
+        return blockRequestPreparation(
+          'capability_unavailable',
+          'runtime health authority is missing: the SaaS schema has no account health/cooldown observation contract; validation_state is not runtime health',
+        );
       }
-      return result;
-    });
-    // F2/R6b: slots acquired for candidates that were checked but not chosen
-    // are released; the selected account keeps its slot (the PG lease remains
-    // the authority and the lazy-eviction window bounds a lost release).
-    await this.settleRedisSlots(
-      isRecord(schedulingInput) ? String((schedulingInput as { requestId?: unknown }).requestId ?? '') : '',
-      decision.decision === 'allow' ? decision.value.accountId : null,
-    );
-    return decision;
+      // F2: the empty-candidate shape is delegated to the core scheduler's
+      // existing rejection untouched (no group resolution, no side reads).
+      const hasCandidates = isRecord(input) && Array.isArray(input.candidates) && input.candidates.length > 0;
+      let schedulingInput = input;
+      if (
+        hasCandidates &&
+        isRecord(input?.caller) &&
+        (input.caller as { supplyMode?: unknown }).supplyMode === 'platform'
+      ) {
+        const resolution = await this.resolveBillingGroupForSelection(input);
+        if (resolution.decision !== 'allow') return resolution.decision;
+        schedulingInput = { ...input, billingGroupId: resolution.billingGroupId };
+      }
+      // R-dormant (batch 2.2, migration 115): lazy scheduling-threshold
+      // evaluation at candidate-collection time. Fail-open by design — a
+      // threshold read/write failure must never break selection (the accounts
+      // simply stay schedulable until the next evaluation).
+      if (hasCandidates) {
+        schedulingInput = await this.applySchedulingThresholdPause(schedulingInput);
+      }
+      const decision = await (bindAffinity
+        ? this.scheduler.selectAndBindCandidate(schedulingInput)
+        : this.scheduler.select(schedulingInput));
+      if (
+        !isRecord(decision) ||
+        !['allow', 'block', 'reject'].includes(decision.decision) ||
+        (decision.decision === 'allow' &&
+          (!isRecord(decision.value) ||
+            typeof decision.value.accountId !== 'string' ||
+            decision.value.accountId === ''))
+      ) {
+        return blockRequestPreparation(
+          'capability_unavailable',
+          'provider account scheduler returned an invalid decision',
+        );
+      }
+      if (
+        decision.decision === 'allow' &&
+        (!schedulingInput.candidates.some((source) => sameCandidateIdentity(source, decision.value)) ||
+          schedulingInput.scheduling?.attemptedAccountIds?.includes(decision.value.accountId))
+      ) {
+        return blockRequestPreparation(
+          'binding_mismatch',
+          'scheduler selected an account outside the authorized candidate set',
+        );
+      }
+      if (decision.decision === 'allow') {
+        winnerAccountId = decision.value.accountId;
+        // The combined operation audits only its final bound selection.
+        if (decision.scheduling) void this.recordSelectionAudit(schedulingInput, decision.scheduling).catch(() => {});
+      }
+      // F2/R6b: slots acquired for candidates that were checked but not chosen
+      // are released; the selected account keeps its slot (the PG lease remains
+      // the authority and the lazy-eviction window bounds a lost release).
+      return decision;
+    } finally {
+      // Keep every temporary acquisition tracked until binding/reconciliation ends.
+      await this.settleRedisSlots(requestId, winnerAccountId);
+    }
   }
 
   /**
@@ -2268,6 +2380,9 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
               JSON.stringify(reason),
               write.row.account_id,
               tenantId,
+              pause.platform === 'kimi' && write.row.kimi_usage_updated_at != null
+                ? new Date(write.row.kimi_usage_updated_at).toISOString()
+                : null,
             ),
           ]);
           if (pause.untilMs > nowMs) paused.add(write.row.account_id);
@@ -2475,9 +2590,28 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
     const tracked = this.redisSlotAcquisitions.get(requestId);
     if (!tracked) return;
     this.redisSlotAcquisitions.delete(requestId);
+    let releaseFailed = false;
     for (const accountId of tracked.accounts) {
       if (accountId === winnerAccountId) continue;
-      await this.redisSlots.release({ ownerScopeKey: tracked.ownerScopeKey, accountId, requestId });
+      try {
+        await this.redisSlots.release({ ownerScopeKey: tracked.ownerScopeKey, accountId, requestId });
+      } catch {
+        releaseFailed = true;
+      }
+    }
+    if (releaseFailed) {
+      if (winnerAccountId !== null && tracked.accounts.has(winnerAccountId)) {
+        try {
+          await this.redisSlots.release({
+            ownerScopeKey: tracked.ownerScopeKey,
+            accountId: winnerAccountId,
+            requestId,
+          });
+        } catch {
+          // Every tracked slot has now had a release attempt; never return an allow.
+        }
+      }
+      throw new Error('provider account Redis slot release is unavailable');
     }
   }
 

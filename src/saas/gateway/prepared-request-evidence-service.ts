@@ -157,6 +157,9 @@ export interface PreparedRequestEvidenceRecord {
   readonly usageEstimatorVersion?: string;
   readonly endpoint: string;
   readonly upstreamId: string;
+  /** Canonical supply identity from the verified signed statement. */
+  readonly providerId?: string;
+  readonly productId?: string;
   readonly accountId: string;
   readonly credentialId: string;
   readonly credentialVersion: string;
@@ -440,7 +443,11 @@ function operationForProtocol(protocol: PreparedEvidenceProtocol): string {
  * operation; no other protocol accepts a second operation.
  */
 function operationAllowedForProtocol(protocol: PreparedEvidenceProtocol, operation: string): boolean {
-  return operation === operationForProtocol(protocol) || (protocol === 'openai' && operation === 'embeddings');
+  return (
+    operation === operationForProtocol(protocol) ||
+    (protocol === 'openai' && operation === 'embeddings') ||
+    (protocol === 'responses' && operation === 'responses.compact')
+  );
 }
 
 function provenanceDigest(value: unknown, label: string): string {
@@ -1340,15 +1347,22 @@ function evidenceAdvisoryFenceLayers(input: EvidenceFenceInput): readonly (reado
 }
 
 async function acquireEvidenceAdvisoryFences(tx: SqlExecutor, input: EvidenceFenceInput): Promise<void> {
-  for (const [layer, keys] of evidenceAdvisoryFenceLayers(input)) {
-    for (const key of sortAndDedupeAdvisoryKeys(keys)) {
-      await queryRows<EvidenceRow>(
-        tx,
-        `/* prepared-evidence:fence-${layer} */ SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))`,
-        [key],
-      );
-    }
-  }
+  // Keep layer order and the original per-layer sort/deduplication, including
+  // repeated keys across layers. Only input ordinals determine SQL ordering.
+  // PostgreSQL evaluates this scalar volatile target after ORDER BY because
+  // the lock expression is not a sort/group/distinct expression. There is no
+  // LIMIT or target-list SRF; each lock completes before the next row's call.
+  // https://www.postgresql.org/docs/18/sql-select.html#SQL-SELECT-LIST
+  // All authority reads remain separate statements after this awaited batch.
+  const keys = evidenceAdvisoryFenceLayers(input).flatMap(([, layerKeys]) => sortAndDedupeAdvisoryKeys(layerKeys));
+  await queryRows<EvidenceRow>(
+    tx,
+    `/* prepared-evidence:fence-batch */
+     SELECT pg_advisory_xact_lock_shared(hashtextextended(fence.fence_key, 0))
+       FROM unnest($1::text[]) WITH ORDINALITY AS fence(fence_key, input_ordinal)
+      ORDER BY fence.input_ordinal`,
+    [keys],
+  );
 }
 
 function storedLockText(row: EvidenceRow, key: string, label: string): string {
@@ -1460,6 +1474,185 @@ async function lockOne<T extends EvidenceRow>(
     ),
     stage,
   );
+}
+
+// Project only dispatch authorization facts; credential ciphertext, API-key
+// digests and unrelated account telemetry never enter the batch. PostgreSQL
+// int8 revisions remain decimal strings, matching the ordinary pg driver.
+const EVIDENCE_AUTHORITY_COLUMNS: Readonly<Record<string, string>> = {
+  tenant: 'status',
+  project: 'inference_policy_version::text, inference_policy_status',
+  'project-policy': 'version::text, status',
+  principal: 'disabled_at, anonymized_at',
+  'tenant-membership': 'status, revoked_at, role',
+  'project-membership': 'status, revoked_at, role',
+  key: `execution_principal_type, execution_principal_id, principal_user_id,
+    entitlement_id, supply_profile_id, supply_mode, authz_version::text,
+    entitlement_authz_version::text, supply_profile_authz_version::text,
+    model_scope_version::text, status, revoked_at, model_scopes, expires_at`,
+  entitlement: `authz_version::text, supply_profile_id, supply_mode, status,
+    effective_at, expires_at, superseded_at`,
+  profile: 'status, authz_version::text',
+  route: `route_id, version::text, status, public_model_id, public_model_version,
+    protocol, target_mode, upstream_id, endpoint`,
+  commercial: `customer_policy_id, customer_policy_version::text, provider_policy_id,
+    provider_policy_version::text, contract_attestation_id, customer_price_version, supplier_cost_version`,
+  attestation: 'verification_result',
+  account: 'status, validation_state, authz_version::text, provider_id, product_id',
+  credential: 'status, validation_state, authz_version::text, current_version, expires_at',
+  mapping: 'status, authz_version::text, account_authz_version::text, effective_at, expires_at',
+  pool: 'status, authz_version::text',
+  'pool-member': 'status, authz_version::text, account_authz_version::text',
+  'pool-grant': `status, authz_version::text, profile_authz_version::text,
+    pool_authz_version::text, effective_at, expires_at`,
+  'customer-price': 'effective_at, expires_at',
+  'supplier-cost': `effective_at, expires_at, provider_id, product_id, resolved_model,
+    endpoint, protocol, public_model_id, public_model_version`,
+};
+
+/** Fresh, transaction-local authority facts, read after every ordered fence. */
+async function loadEvidenceAuthority(
+  tx: SqlExecutor,
+  input: NormalizedEvidence,
+): Promise<{ one: (stage: string) => EvidenceRow; many: (stage: string) => EvidenceRow[] }> {
+  const reads: Array<{ stage: string; sql: string; values: readonly unknown[] }> = [];
+  const select = (stage: string, table: string, where: string, values: readonly unknown[], many = false) => {
+    const columns = EVIDENCE_AUTHORITY_COLUMNS[stage];
+    if (!columns) fail('STORAGE_ERROR', 'unknown prepared evidence authority stage');
+    reads.push({
+      stage,
+      sql: `SELECT ${columns} FROM ${table} WHERE ${where}${many ? '' : ' LIMIT 2'}`,
+      values,
+    });
+  };
+  const tenantProject = [input.tenantId, input.projectId];
+  select('tenant', 'saas_tenants', 'id = $1', [input.tenantId]);
+  select('project', 'saas_projects', 'tenant_id = $1 AND id = $2', tenantProject);
+  select(
+    'project-policy',
+    'saas_project_inference_policy_versions',
+    'tenant_id = $1 AND project_id = $2 AND version = $3',
+    [...tenantProject, input.projectPolicyVersion],
+  );
+  if (input.principalKind === 'member') {
+    select('principal', 'saas_users', 'id = $1', [input.principalId]);
+    select(
+      'tenant-membership',
+      'saas_memberships',
+      'tenant_id = $1 AND user_id = $2',
+      [input.tenantId, input.principalId],
+      true,
+    );
+    select(
+      'project-membership',
+      'saas_project_memberships',
+      'tenant_id = $1 AND project_id = $2 AND user_id = $3',
+      [...tenantProject, input.principalId],
+      true,
+    );
+  }
+  select('key', 'saas_api_keys', 'tenant_id = $1 AND project_id = $2 AND id = $3', [
+    ...tenantProject,
+    input.proxyKeyId,
+  ]);
+  select('entitlement', 'saas_project_entitlements', 'tenant_id = $1 AND project_id = $2 AND id = $3', [
+    ...tenantProject,
+    input.entitlementId,
+  ]);
+  select('profile', 'saas_supply_profiles', 'tenant_id = $1 AND id = $2 AND supply_mode = $3', [
+    input.tenantId,
+    input.supplyProfileId,
+    input.supplyMode,
+  ]);
+  const routeValues = [...tenantProject, input.routeConfigId, input.routeConfigVersion];
+  select(
+    'route',
+    'saas_route_config_versions',
+    'tenant_id = $1 AND project_id = $2 AND route_id = $3 AND version = $4',
+    routeValues,
+  );
+  select(
+    'commercial',
+    'saas_route_config_commercial_authorities',
+    'tenant_id = $1 AND project_id = $2 AND route_id = $3 AND route_version = $4',
+    routeValues,
+  );
+  select('attestation', 'saas_contract_test_attestations', 'tenant_id = $1 AND project_id = $2 AND id = $3', [
+    ...tenantProject,
+    input.contractAttestationId,
+  ]);
+  if (input.accountOwnerKind === 'tenant') {
+    select('account', 'saas_tenant_provider_accounts', 'tenant_id = $1 AND id = $2', [input.tenantId, input.accountId]);
+    select('credential', 'saas_tenant_provider_credentials', 'tenant_id = $1 AND id = $2 AND account_id = $3', [
+      input.tenantId,
+      input.credentialId,
+      input.accountId,
+    ]);
+    select(
+      'mapping',
+      'saas_tenant_provider_supply_profile_accounts',
+      'tenant_id = $1 AND supply_profile_id = $2 AND account_id = $3',
+      [input.tenantId, input.dispatchProfileId, input.accountId],
+    );
+  } else {
+    select('account', 'saas_platform_provider_accounts', 'id = $1', [input.accountId]);
+    select('credential', 'saas_platform_provider_credentials', 'id = $1 AND account_id = $2', [
+      input.credentialId,
+      input.accountId,
+    ]);
+    select('pool', 'saas_platform_provider_pools', 'id = $1', [input.poolId]);
+    select('pool-member', 'saas_platform_provider_pool_members', 'pool_id = $1 AND account_id = $2', [
+      input.poolId,
+      input.accountId,
+    ]);
+    select(
+      'pool-grant',
+      'saas_platform_provider_pool_grants',
+      'pool_id = $1 AND tenant_id = $2 AND supply_profile_id = $3',
+      [input.poolId, input.tenantId, input.dispatchProfileId],
+    );
+  }
+  if (input.customerPriceVersion !== null) {
+    select('customer-price', 'saas_customer_price_versions', 'id = $1', [input.customerPriceVersion]);
+  }
+  if (input.supplierCostVersion !== null) {
+    select('supplier-cost', 'saas_supplier_cost_versions', 'id = $1', [input.supplierCostVersion]);
+  }
+
+  const values: unknown[] = [];
+  const parts = reads.map((read) => {
+    const offset = values.length;
+    values.push(...read.values);
+    const sql = read.sql.replace(/\$(\d+)/g, (_, index: string) => `$${offset + Number(index)}`);
+    return `SELECT '${read.stage}' AS stage, COALESCE(jsonb_agg(to_jsonb(fact)), '[]'::jsonb) AS facts
+      FROM (/* prepared-evidence:${read.stage} */ ${sql}) fact`;
+  });
+  // Fences are separate preceding statements: a waiter gets a fresh
+  // READ COMMITTED snapshot after the writer commits. Request/attempt/evidence
+  // row reads and locks, final DB clocks, CAS and audit remain separate too.
+  const result = await queryRows<EvidenceRow>(
+    tx,
+    `/* prepared-evidence:authority-batch */ ${parts.join('\nUNION ALL\n')}`,
+    values,
+  );
+  const facts = new Map<string, EvidenceRow[]>();
+  for (const row of result) {
+    if (
+      typeof row.stage !== 'string' ||
+      facts.has(row.stage) ||
+      !Array.isArray(row.facts) ||
+      row.facts.some((fact) => fact === null || typeof fact !== 'object' || Array.isArray(fact))
+    ) {
+      fail('STORAGE_ERROR', 'prepared evidence authority batch is malformed');
+    }
+    facts.set(row.stage, row.facts as EvidenceRow[]);
+  }
+  if (facts.size !== reads.length || reads.some(({ stage }) => !facts.has(stage))) {
+    fail('STORAGE_ERROR', 'prepared evidence authority batch is incomplete');
+  }
+  const many = (stage: string): EvidenceRow[] =>
+    facts.get(stage) ?? fail('STORAGE_ERROR', 'prepared evidence authority stage is missing');
+  return { many, one: (stage) => requiredRow(many(stage), stage) };
 }
 
 async function evidenceLockHint(executor: SqlExecutor, evidenceId: string): Promise<EvidenceLockContext> {
@@ -1861,25 +2054,16 @@ export class SaasPreparedRequestEvidenceService {
     } = {},
   ): Promise<void> {
     if (!options.fencesAlreadyHeld) await acquireEvidenceAdvisoryFences(tx, input);
-    const tenant = await lockOne<EvidenceRow>(tx, 'tenant', 'saas_tenants', 'id = $1', [input.tenantId]);
+    const authority = await loadEvidenceAuthority(tx, input);
+    const tenant = authority.one('tenant');
     if (tenant.status !== 'active') fail('AUTHORITY_MISMATCH', 'tenant is not active');
 
-    const project = await lockOne<EvidenceRow>(tx, 'project', 'saas_projects', 'tenant_id = $1 AND id = $2', [
-      input.tenantId,
-      input.projectId,
-    ]);
+    const project = authority.one('project');
     sameStored(project, 'inference_policy_version', input.projectPolicyVersion, 'project policy version');
     if (project.inference_policy_status !== 'active') {
       fail('AUTHORITY_MISMATCH', 'project inference policy is not active');
     }
-    const policy = await lockOne<EvidenceRow>(
-      tx,
-      'project-policy',
-      'saas_project_inference_policy_versions',
-      'tenant_id = $1 AND project_id = $2 AND version = $3',
-      [input.tenantId, input.projectId, input.projectPolicyVersion],
-      null,
-    );
+    const policy = authority.one('project-policy');
     if (String(policy.version) !== input.projectPolicyVersion || policy.status !== 'active') {
       fail('AUTHORITY_MISMATCH', 'project inference policy version is not active');
     }
@@ -1887,24 +2071,16 @@ export class SaasPreparedRequestEvidenceService {
     let tenantMemberships: readonly EvidenceRow[] | null = null;
     let projectMemberships: readonly EvidenceRow[] | null = null;
     if (input.principalKind === 'member') {
-      const principal = await lockOne<EvidenceRow>(tx, 'principal', 'saas_users', 'id = $1', [input.principalId]);
+      const principal = authority.one('principal');
       if (principal.disabled_at != null || principal.anonymized_at != null) {
         fail('AUTHORITY_MISMATCH', 'principal is disabled or anonymized');
       }
 
-      tenantMemberships = await queryRows<EvidenceRow>(
-        tx,
-        '/* prepared-evidence:tenant-membership */ SELECT * FROM saas_memberships WHERE tenant_id = $1 AND user_id = $2',
-        [input.tenantId, input.principalId],
-      );
+      tenantMemberships = authority.many('tenant-membership');
       if (!rolesContain(tenantMemberships, new Set(['owner', 'admin', 'developer']))) {
         fail('AUTHORITY_MISMATCH', 'tenant membership is not inference-capable');
       }
-      projectMemberships = await queryRows<EvidenceRow>(
-        tx,
-        '/* prepared-evidence:project-membership */ SELECT * FROM saas_project_memberships WHERE tenant_id = $1 AND project_id = $2 AND user_id = $3',
-        [input.tenantId, input.projectId, input.principalId],
-      );
+      projectMemberships = authority.many('project-membership');
       if (!rolesContain(projectMemberships, new Set(['owner', 'admin', 'developer']))) {
         fail('AUTHORITY_MISMATCH', 'project membership is not inference-capable');
       }
@@ -1912,13 +2088,7 @@ export class SaasPreparedRequestEvidenceService {
       fail('AUTHORITY_MISMATCH', 'project-service principal is not bound to the project');
     }
 
-    const key = await lockOne<EvidenceRow>(
-      tx,
-      'key',
-      'saas_api_keys',
-      'tenant_id = $1 AND project_id = $2 AND id = $3',
-      [input.tenantId, input.projectId, input.proxyKeyId],
-    );
+    const key = authority.one('key');
     if (
       (key.execution_principal_type ?? key.principal_kind) !== input.principalKind ||
       (key.execution_principal_id ?? key.principal_id) !== input.principalId ||
@@ -1961,34 +2131,16 @@ export class SaasPreparedRequestEvidenceService {
       ));
     compareAttempt(attempt, input);
 
-    const entitlement = await lockOne<EvidenceRow>(
-      tx,
-      'entitlement',
-      'saas_project_entitlements',
-      'tenant_id = $1 AND project_id = $2 AND id = $3',
-      [input.tenantId, input.projectId, input.entitlementId],
-    );
+    const entitlement = authority.one('entitlement');
     sameStored(entitlement, 'authz_version', input.entitlementVersion, 'entitlement version');
     sameStored(entitlement, 'supply_profile_id', input.supplyProfileId, 'entitlement profile');
     sameStored(entitlement, 'supply_mode', input.supplyMode, 'entitlement supply mode');
 
-    const profile = await lockOne<EvidenceRow>(
-      tx,
-      'profile',
-      'saas_supply_profiles',
-      'tenant_id = $1 AND id = $2 AND supply_mode = $3',
-      [input.tenantId, input.supplyProfileId, input.supplyMode],
-    );
+    const profile = authority.one('profile');
     if (profile.status !== 'active') fail('AUTHORITY_MISMATCH', 'supply profile is not active');
     sameStored(profile, 'authz_version', input.supplyProfileVersion, 'supply profile version');
 
-    const route = await lockOne<EvidenceRow>(
-      tx,
-      'route',
-      'saas_route_config_versions',
-      'tenant_id = $1 AND project_id = $2 AND route_id = $3 AND version = $4',
-      [input.tenantId, input.projectId, input.routeConfigId, input.routeConfigVersion],
-    );
+    const route = authority.one('route');
     sameStored(route, 'route_id', input.routeConfigId, 'route config');
     sameStored(route, 'version', input.routeConfigVersion, 'route config version');
     if (
@@ -2009,13 +2161,7 @@ export class SaasPreparedRequestEvidenceService {
       fail('AUTHORITY_MISMATCH', 'route authority does not match prepared evidence');
     }
 
-    const commercial = await lockOne<EvidenceRow>(
-      tx,
-      'commercial',
-      'saas_route_config_commercial_authorities',
-      'tenant_id = $1 AND project_id = $2 AND route_id = $3 AND route_version = $4',
-      [input.tenantId, input.projectId, input.routeConfigId, input.routeConfigVersion],
-    );
+    const commercial = authority.one('commercial');
     sameStored(commercial, 'customer_policy_id', input.customerMeteringPolicyId, 'customer policy');
     sameStored(commercial, 'customer_policy_version', input.customerMeteringPolicyVersion, 'customer policy version');
     sameStored(commercial, 'provider_policy_id', input.providerMeteringPolicyId, 'provider policy');
@@ -2046,13 +2192,7 @@ export class SaasPreparedRequestEvidenceService {
       fail('AUTHORITY_MISMATCH', 'composite prepared evidence is missing the resolved supplier cost version');
     }
 
-    const attestation = await lockOne<EvidenceRow>(
-      tx,
-      'attestation',
-      'saas_contract_test_attestations',
-      'tenant_id = $1 AND project_id = $2 AND id = $3',
-      [input.tenantId, input.projectId, input.contractAttestationId],
-    );
+    const attestation = authority.one('attestation');
     if (attestation.verification_result !== 'verified') {
       fail('AUTHORITY_MISMATCH', 'contract attestation is not verified');
     }
@@ -2067,29 +2207,11 @@ export class SaasPreparedRequestEvidenceService {
     let supplierCost: EvidenceRow | null = null;
 
     if (input.accountOwnerKind === 'tenant') {
-      account = await lockOne<EvidenceRow>(
-        tx,
-        'account',
-        'saas_tenant_provider_accounts',
-        'tenant_id = $1 AND id = $2',
-        [input.tenantId, input.accountId],
-      );
+      account = authority.one('account');
       this.assertAccount(account, input);
-      credential = await lockOne<EvidenceRow>(
-        tx,
-        'credential',
-        'saas_tenant_provider_credentials',
-        'tenant_id = $1 AND id = $2 AND account_id = $3',
-        [input.tenantId, input.credentialId, input.accountId],
-      );
+      credential = authority.one('credential');
       this.assertCredential(credential, input);
-      mapping = await lockOne<EvidenceRow>(
-        tx,
-        'mapping',
-        'saas_tenant_provider_supply_profile_accounts',
-        'tenant_id = $1 AND supply_profile_id = $2 AND account_id = $3',
-        [input.tenantId, input.dispatchProfileId, input.accountId],
-      );
+      mapping = authority.one('mapping');
       if (
         mapping.status !== 'active' ||
         String(mapping.authz_version) !== input.profileAccountAuthzVersion ||
@@ -2098,29 +2220,15 @@ export class SaasPreparedRequestEvidenceService {
         fail('AUTHORITY_MISMATCH', 'BYOK mapping authority does not match prepared evidence');
       }
     } else {
-      account = await lockOne<EvidenceRow>(tx, 'account', 'saas_platform_provider_accounts', 'id = $1', [
-        input.accountId,
-      ]);
+      account = authority.one('account');
       this.assertAccount(account, input);
-      credential = await lockOne<EvidenceRow>(
-        tx,
-        'credential',
-        'saas_platform_provider_credentials',
-        'id = $1 AND account_id = $2',
-        [input.credentialId, input.accountId],
-      );
+      credential = authority.one('credential');
       this.assertCredential(credential, input);
-      pool = await lockOne<EvidenceRow>(tx, 'pool', 'saas_platform_provider_pools', 'id = $1', [input.poolId]);
+      pool = authority.one('pool');
       if (pool.status !== 'active' || String(pool.authz_version) !== input.poolAuthzVersion) {
         fail('AUTHORITY_MISMATCH', 'platform pool authority does not match prepared evidence');
       }
-      member = await lockOne<EvidenceRow>(
-        tx,
-        'pool-member',
-        'saas_platform_provider_pool_members',
-        'pool_id = $1 AND account_id = $2',
-        [input.poolId, input.accountId],
-      );
+      member = authority.one('pool-member');
       if (
         member.status !== 'active' ||
         String(member.authz_version) !== input.poolMemberAuthzVersion ||
@@ -2128,13 +2236,7 @@ export class SaasPreparedRequestEvidenceService {
       ) {
         fail('AUTHORITY_MISMATCH', 'platform pool member authority does not match prepared evidence');
       }
-      grant = await lockOne<EvidenceRow>(
-        tx,
-        'pool-grant',
-        'saas_platform_provider_pool_grants',
-        'pool_id = $1 AND tenant_id = $2 AND supply_profile_id = $3',
-        [input.poolId, input.tenantId, input.dispatchProfileId],
-      );
+      grant = authority.one('pool-grant');
       if (
         grant.status !== 'active' ||
         String(grant.authz_version) !== input.poolGrantAuthzVersion ||
@@ -2146,14 +2248,10 @@ export class SaasPreparedRequestEvidenceService {
     }
 
     if (input.customerPriceVersion !== null) {
-      customerPrice = await lockOne<EvidenceRow>(tx, 'customer-price', 'saas_customer_price_versions', 'id = $1', [
-        input.customerPriceVersion,
-      ]);
+      customerPrice = authority.one('customer-price');
     }
     if (input.supplierCostVersion !== null) {
-      supplierCost = await lockOne<EvidenceRow>(tx, 'supplier-cost', 'saas_supplier_cost_versions', 'id = $1', [
-        input.supplierCostVersion,
-      ]);
+      supplierCost = authority.one('supplier-cost');
       /*
        * R3 §8.1: on composite dispatches the cost version was resolved on
        * the target-platform identity; the locked row must carry exactly that
@@ -2373,6 +2471,8 @@ export class SaasPreparedRequestEvidenceService {
       ...(input.usageEstimatorVersion === undefined ? {} : { usageEstimatorVersion: input.usageEstimatorVersion }),
       endpoint: input.endpoint,
       upstreamId: input.upstreamId,
+      providerId: input.providerId,
+      productId: input.productId,
       accountId: input.accountId,
       credentialId: input.credentialId,
       credentialVersion: input.credentialVersion,

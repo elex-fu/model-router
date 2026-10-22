@@ -185,8 +185,8 @@ export class FakeBillingDatabase {
       return result<Row>();
     }
 
-    if (statement.startsWith('select coalesce(sum(amount_minor_units), 0)::text as active_hold_minor_units')) {
-      const sum = this.state.reservations
+    if (statement.startsWith('select (select coalesce(sum(amount_minor_units), 0)::text')) {
+      const activeHolds = this.state.reservations
         .filter(
           (row) =>
             row.tenant_id === a &&
@@ -194,14 +194,15 @@ export class FakeBillingDatabase {
             (row.state === 'reserved' || row.state === 'reconciliation_pending'),
         )
         .reduce((total, row) => total + asBigInt(row.amount_minor_units), 0n);
-      return result<Row>([{ active_hold_minor_units: sum.toString() } as Row]);
-    }
-
-    if (statement.startsWith('select coalesce(sum(amount_minor_units), 0)::text as active_refund_freeze_minor_units')) {
-      const sum = this.state.refundWalletFreezes
+      const activeRefundFreezes = this.state.refundWalletFreezes
         .filter((row) => row.tenant_id === a && row.currency === b && row.refund_order_id !== c)
         .reduce((total, row) => total + asBigInt(row.amount_minor_units), 0n);
-      return result<Row>([{ active_refund_freeze_minor_units: sum.toString() } as Row]);
+      return result<Row>([
+        {
+          active_hold_minor_units: activeHolds.toString(),
+          active_refund_freeze_minor_units: activeRefundFreezes.toString(),
+        } as Row,
+      ]);
     }
 
     if (

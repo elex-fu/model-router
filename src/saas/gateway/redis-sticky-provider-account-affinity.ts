@@ -31,7 +31,8 @@ import type {
  *   an ineligible hit may extend a stale row's lifetime, which is harmless:
  *   eligibility is re-checked on every read and PG re-decides.)
  * - bind(): always forwards to the inner port (PG stays authoritative) and
- *   backfills the Redis mapping afterwards.
+ *   backfills the Redis mapping only after a successful bind. A block,
+ *   including an active-binding contention hint, is forwarded unchanged.
  * - The sessionHash priority is sub2api's — session-id → conversation_id →
  *   prompt_cache_key → content-hash fallback. The http-handler scheduling
  *   seam (sticky-session-reference.ts) derives that reference at the trusted
@@ -173,7 +174,8 @@ export function createRedisStickyProviderAccountAffinity(
     async bind(input): Promise<ProviderAccountSchedulerAffinityBindDecision> {
       const decision: ProviderAccountSchedulerAffinityBindDecision =
         inner.bind === undefined ? { decision: 'allow' } : await inner.bind(input);
-      if (decision.decision === 'allow' && typeof input.accountId === 'string') {
+      if (decision.decision !== 'allow') return decision;
+      if (typeof input.accountId === 'string') {
         backfill(
           stickyKey({
             context: input.context as {

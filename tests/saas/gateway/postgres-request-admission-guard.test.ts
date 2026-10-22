@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import {
+  PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
+  type PlatformRequestAdmissionHoldEvidence,
+} from '../../../src/saas/gateway/admission.js';
 import type { ClientAddressResolution } from '../../../src/saas/gateway/client-address.js';
 import {
   PostgresRequestAdmissionGuard,
@@ -595,6 +600,21 @@ class FakeExecutor implements SqlExecutor {
     this.fixture.statements.push(sql.trim());
     const lower = sql.toLowerCase();
     const stage = /postgres-request-admission:([a-z-]+)/.exec(sql)?.[1];
+    if (stage === 'authority-batch') {
+      const stages = [...sql.matchAll(/\/\* postgres-request-admission:([a-z-]+) \*\//g)]
+        .map((match) => match[1])
+        .filter((name) => name !== 'authority-batch');
+      const facts = stages.map((name) => {
+        const value =
+          name === 'customer-price-identity'
+            ? this.fixture.customerPrice
+            : name === 'supplier-cost-identity'
+              ? this.fixture.supplierCost
+              : this.fixture.rows[name];
+        return { stage: name, facts: clone(Array.isArray(value) ? value : value ? [value] : []) };
+      });
+      return { rows: facts as RowType[], rowCount: facts.length };
+    }
     if (lower.includes('select clock_timestamp')) return { rows: [{ locked_at: NOW }] as RowType[], rowCount: 1 };
     if (lower.includes('pg_advisory_xact_lock')) {
       // The fence batch passes the ordered key list as one text-array
@@ -771,6 +791,97 @@ test('platform admission revalidates authorities and writes only the customer pr
   assert.match(write.toLowerCase(), /^insert into saas_request_customer_price_snapshots/);
 });
 
+test('independent bounds preserve the full envelope and freeze one maximizing TTL allocation', async () => {
+  for (const multiplier of [1n, 2n]) {
+    const fixture = makeFixture('platform');
+    fixture.customerPrice.cache_read_rate_numerator_minor_units = 2;
+    fixture.customerPrice.cache_write_rate_numerator_minor_units = 3;
+    fixture.customerPrice.cache_write_5m_rate_numerator_minor_units = 4;
+    fixture.customerPrice.cache_write_1h_rate_numerator_minor_units = 5;
+    (fixture.rows['billing-group'] as Row).rate_multiplier_num = multiplier;
+    const database = new FakeDatabase(fixture);
+    const holdEvidence: PlatformRequestAdmissionHoldEvidence = {
+      ...evidence(),
+      evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
+      inputUncached: '10',
+      cacheRead: '10',
+      cacheWrite: '10',
+      cacheWrite5m: '10',
+      cacheWrite1h: '10',
+      reasoningOutput: '2',
+    };
+    const result = await new PostgresRequestAdmissionGuard(database, { now: () => NOW }).revalidate({
+      executor: database.executor,
+      request: fixture.request,
+      candidate: fixture.attempt,
+      holdEvidence,
+    });
+    assert.equal(result.platformPriceHold?.amountMinorUnits, 52n * multiplier);
+    assert.equal(holdEvidence.inputUncached, '10', 'source bounds must remain intact');
+    assert.equal(holdEvidence.cacheWrite, '10');
+    assert.equal(holdEvidence.cacheWrite1h, '10');
+    assert.equal(fixture.snapshot?.hold_input_total, 10n);
+    assert.equal(fixture.snapshot?.hold_input_uncached, 0n);
+    assert.equal(fixture.snapshot?.hold_input_cache_read, 0n);
+    assert.equal(fixture.snapshot?.hold_input_cache_write, 0n);
+    assert.equal(fixture.snapshot?.hold_input_cache_write_5m, 0n);
+    assert.equal(fixture.snapshot?.hold_input_cache_write_1h, 10n);
+    assert.equal(fixture.snapshot?.hold_input_output_total, 2n);
+    assert.equal(fixture.snapshot?.hold_input_reasoning_output, 0n);
+  }
+});
+
+test('untagged allocation evidence retains sum and generic-versus-TTL disjointness invariants', async () => {
+  for (const damaged of [
+    { ...evidence(), cacheRead: '10' },
+    { ...evidence(), inputTotal: '30', inputUncached: '0', cacheWrite: '10', cacheWrite5m: '10' },
+  ]) {
+    const fixture = makeFixture('platform');
+    const database = new FakeDatabase(fixture);
+    await assert.rejects(
+      new PostgresRequestAdmissionGuard(database, { now: () => NOW }).revalidate({
+        executor: database.executor,
+        request: fixture.request,
+        candidate: fixture.attempt,
+        holdEvidence: damaged,
+      }),
+      (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'AUTHORITY_MISMATCH',
+    );
+    assert.equal(fixture.snapshot, null);
+  }
+});
+
+test('tagged bounds reject any overbound, reasoning overflow, or invalid tag before price writes', async () => {
+  const base = { ...evidence(), evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND };
+  const damaged: unknown[] = [
+    ...['inputUncached', 'cacheRead', 'cacheWrite', 'cacheWrite5m', 'cacheWrite1h'].map((field) => ({
+      ...base,
+      [field]: '11',
+    })),
+    { ...base, reasoningOutput: '3' },
+    { ...base, evidenceKind: 'future-kind' },
+    { ...base, evidenceKind: undefined },
+    { ...base, evidenceKind: null },
+    Object.assign(Object.create({ evidenceKind: PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND }), evidence()),
+  ];
+  for (const holdEvidence of damaged) {
+    const fixture = makeFixture('platform');
+    const database = new FakeDatabase(fixture);
+    await assert.rejects(
+      new PostgresRequestAdmissionGuard(database, { now: () => NOW }).revalidate({
+        executor: database.executor,
+        request: fixture.request,
+        candidate: fixture.attempt,
+        holdEvidence: holdEvidence as PlatformRequestAdmissionHoldEvidence,
+      }),
+      (error: unknown) =>
+        error instanceof PostgresRequestAdmissionGuardError &&
+        ['AUTHORITY_MISMATCH', 'INVALID_INPUT'].includes(error.code),
+    );
+    assert.equal(fixture.snapshot, null);
+  }
+});
+
 test('platform admission multiplies the hold by the key billing group and freezes it on the snapshot', async () => {
   const fixture = makeFixture('platform');
   fixture.rows.key = { ...fixture.rows.key, billing_group_id: 'vip' };
@@ -880,6 +991,57 @@ test('fake-SQL admission takes ordered shared fences before authority reads', as
   );
   assert.ok(lastFenceStatement < firstAuthorityRead);
   assert.ok(fixture.fenceKeys.every((key) => typeof key === 'string' && key.length > 0));
+  const batch = sql.filter((statement) => statement.includes('postgres-request-admission:fence-batch'));
+  assert.equal(batch.length, 1);
+  assert.match(
+    batch[0] ?? '',
+    /WITH ORDINALITY AS fence\(fence_key, input_ordinal\)\s+ORDER BY fence\.input_ordinal\s*$/,
+  );
+  assert.doesNotMatch(batch[0] ?? '', /\bLIMIT\b|\bDISTINCT\b|\bGROUP BY\b|ORDER BY\s+(?:1|fence\.fence_key)/i);
+  const { request, attempt } = fixture;
+  assert.ok(
+    attempt.providerId &&
+      request.customerMeteringPolicyId &&
+      attempt.providerMeteringPolicyId &&
+      attempt.poolId &&
+      request.supplyProfileId &&
+      attempt.dispatchProfileId &&
+      attempt.accountId &&
+      attempt.credentialId,
+  );
+  const expected = [
+    ...new Set([
+      saasAdvisoryKey.tenant(request.tenantId),
+      saasAdvisoryKey.project(request.tenantId, request.projectId),
+      ...[
+        request.principalId,
+        saasAdvisoryKey.apiKey(request.tenantId, request.projectId, request.proxyKeyId),
+        saasAdvisoryKey.commercialCustomer(request.tenantId, request.customerMeteringPolicyId),
+        saasAdvisoryKey.commercialProvider(attempt.providerId, attempt.providerMeteringPolicyId),
+        'saas-authz:provider-rights',
+      ].sort(),
+      saasAdvisoryKey.platformPool(attempt.poolId),
+      ...[
+        ...new Set([
+          saasAdvisoryKey.supplyProfile(request.tenantId, request.supplyProfileId),
+          saasAdvisoryKey.supplyProfile(request.tenantId, attempt.dispatchProfileId),
+        ]),
+      ].sort(),
+      saasAdvisoryKey.platformProviderAccount(attempt.accountId),
+      saasAdvisoryKey.platformProviderCredential(attempt.credentialId),
+      saasAdvisoryKey.credentialVersion(
+        'platform',
+        'platform',
+        attempt.credentialId,
+        Number(attempt.credentialVersion),
+      ),
+    ]),
+  ];
+  assert.deepEqual(
+    fixture.fenceKeys.slice(0, expected.length),
+    expected,
+    'guard keeps its existing global first-occurrence dedupe',
+  );
   assert.equal(
     sql
       .filter((statement) => statement.includes('postgres-request-admission:fence-'))
@@ -935,6 +1097,104 @@ test('BYOK admission has no platform price or snapshot path', async () => {
   );
 });
 
+test('authority batches remain request-local and re-read revocation on the next admission', async () => {
+  const fixture = makeFixture('byok');
+  const database = new FakeDatabase(fixture);
+  const guard = new PostgresRequestAdmissionGuard(database, { now: () => NOW });
+  const input = {
+    executor: database.executor,
+    request: fixture.request,
+    candidate: fixture.attempt,
+    holdEvidence: null,
+  };
+  await guard.revalidate(input);
+  (fixture.rows.key as Row).status = 'revoked';
+  await assert.rejects(
+    guard.revalidate(input),
+    (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'AUTHORITY_MISMATCH',
+  );
+  assert.equal(
+    fixture.statements.filter((sql) => sql.startsWith('/* postgres-request-admission:authority-batch */')).length,
+    2,
+  );
+});
+
+test('missing, duplicate and malformed batch stages fail closed before price writes', async () => {
+  for (const damage of ['missing', 'duplicate', 'malformed'] as const) {
+    const fixture = makeFixture('platform');
+    const database = new FakeDatabase(fixture);
+    const executor: SqlExecutor = {
+      async query<RowType>(sql: string, values?: readonly unknown[]) {
+        const result = await database.executor.query<Row>(sql, values);
+        if (sql.startsWith('/* postgres-request-admission:authority-batch */')) {
+          if (damage === 'missing') result.rows.pop();
+          if (damage === 'duplicate') result.rows[1] = result.rows[0] as Row;
+          if (damage === 'malformed') result.rows[0] = { stage: 'tenant', facts: [null] };
+        }
+        return result as SqlResult<RowType>;
+      },
+    };
+    await assert.rejects(
+      new PostgresRequestAdmissionGuard(database, { now: () => NOW }).revalidate({
+        executor,
+        request: fixture.request,
+        candidate: fixture.attempt,
+        holdEvidence: evidence(),
+      }),
+      (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'STORAGE_ERROR',
+    );
+    assert.equal(fixture.snapshot, null);
+  }
+});
+
+test('the final database clock still rejects an authority that expires after the batch read', async () => {
+  const fixture = makeFixture('byok');
+  (fixture.rows['credential-version'] as Row).expires_at = new Date(NOW.getTime() + 500).toISOString();
+  const database = new FakeDatabase(fixture);
+  let clocks = 0;
+  const executor: SqlExecutor = {
+    async query<RowType>(sql: string, values?: readonly unknown[]) {
+      if (sql.includes('SELECT clock_timestamp()')) {
+        clocks += 1;
+        return { rows: [{ locked_at: new Date(NOW.getTime() + (clocks === 1 ? 0 : 1000)) }] as RowType[], rowCount: 1 };
+      }
+      return database.executor.query<RowType>(sql, values);
+    },
+  };
+  await assert.rejects(
+    new PostgresRequestAdmissionGuard(database, { now: () => NOW }).revalidate({
+      executor,
+      request: fixture.request,
+      candidate: fixture.attempt,
+      holdEvidence: null,
+    }),
+    (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'EXPIRED',
+  );
+  assert.equal(clocks, 2);
+});
+
+test('native capability checks require the exact persisted provider protocol', async () => {
+  const fixture = makeFixture('byok');
+  fixture.attempt = {
+    ...fixture.attempt,
+    providerProtocol: 'anthropic',
+    clientOperation: 'chat.completions',
+    providerOperation: 'messages',
+  };
+  Object.assign(fixture.rows.attempt as Row, {
+    provider_protocol: 'anthropic',
+    client_operation: 'chat.completions',
+    provider_operation: 'messages',
+  });
+  (fixture.rows.capability as Row).protocol = 'anthropic';
+  assert.equal((await run(fixture, 'byok')).platformPriceHold, null);
+  (fixture.rows.attempt as Row).provider_protocol = 'openai';
+  await assert.rejects(
+    run(fixture, 'byok'),
+    (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'AUTHORITY_MISMATCH',
+  );
+});
+
 test('project-service admission ignores creator membership and rechecks the project policy', async () => {
   const fixture = makeFixture('byok');
   fixture.request = { ...fixture.request, principalKind: 'project_service', principalId: 'project-a' };
@@ -960,9 +1220,9 @@ test('project-service admission ignores creator membership and rechecks the proj
   const projectHeadSql = fixture.statements.find((sql) => /from saas_projects/i.test(sql)) ?? '';
   const policyVersionSql =
     fixture.statements.find((sql) => /from saas_project_inference_policy_versions/i.test(sql)) ?? '';
-  assert.match(projectHeadSql, /tenant_id = \$1 AND id = \$2/i);
+  assert.match(projectHeadSql, /tenant_id = \$\d+ AND id = \$\d+/i);
   assert.doesNotMatch(projectHeadSql, /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
-  assert.match(policyVersionSql, /tenant_id = \$1 AND project_id = \$2 AND version = \$3/i);
+  assert.match(policyVersionSql, /tenant_id = \$\d+ AND project_id = \$\d+ AND version = \$\d+/i);
   assert.doesNotMatch(policyVersionSql, /FOR (?:KEY )?(?:NO KEY )?UPDATE|FOR SHARE/i);
 
   const suspended = makeFixture('byok');
@@ -1171,7 +1431,7 @@ test('an allowlist admits a resolved in-policy client address', async () => {
 test('an allowlist denies out-of-policy, unresolved and absent client address evidence', async () => {
   for (const clientAddress of [
     { status: 'resolved', address: '198.51.100.9', source: 'socket-peer' } as ClientAddressResolution,
-    { status: 'unresolved', reason: 'untrusted-forwarded-header' } as ClientAddressResolution,
+    { status: 'unresolved', reason: 'missing-forwarded-address' } as ClientAddressResolution,
     null,
     undefined,
   ]) {

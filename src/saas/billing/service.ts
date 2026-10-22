@@ -1051,24 +1051,27 @@ export class PlatformWalletLedgerService {
     freezeRow?: FreezeRow | null,
   ): Promise<WalletRecord> {
     const base = mapWalletRow(wallet);
-    const holds = await executor.query<{ active_hold_minor_units: StoredMinorUnits }>(
-      `SELECT COALESCE(SUM(amount_minor_units), 0)::text AS active_hold_minor_units
-       FROM saas_billing_reservations
-       WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending')`,
-      [wallet.tenant_id, wallet.currency],
-    );
-    const activeHoldsMinorUnits = parseStoredMinorUnits(holds.rows[0]?.active_hold_minor_units ?? '0');
-    const freezes = await executor.query<{ active_refund_freeze_minor_units: StoredMinorUnits }>(
-      `SELECT COALESCE(SUM(amount_minor_units), 0)::text AS active_refund_freeze_minor_units
-       FROM saas_refund_wallet_freezes
-       WHERE tenant_id = $1 AND currency = $2
-       ${excludeRefundOrderId === undefined ? '' : 'AND refund_order_id <> $3'}`,
+    const totals = await executor.query<{
+      active_hold_minor_units: StoredMinorUnits;
+      active_refund_freeze_minor_units: StoredMinorUnits;
+    }>(
+      `SELECT
+         (SELECT COALESCE(SUM(amount_minor_units), 0)::text
+          FROM saas_billing_reservations
+          WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending'))
+           AS active_hold_minor_units,
+         (SELECT COALESCE(SUM(amount_minor_units), 0)::text
+          FROM saas_refund_wallet_freezes
+          WHERE tenant_id = $1 AND currency = $2
+          ${excludeRefundOrderId === undefined ? '' : 'AND refund_order_id <> $3'})
+           AS active_refund_freeze_minor_units`,
       excludeRefundOrderId === undefined
         ? [wallet.tenant_id, wallet.currency]
         : [wallet.tenant_id, wallet.currency, excludeRefundOrderId],
     );
+    const activeHoldsMinorUnits = parseStoredMinorUnits(totals.rows[0]?.active_hold_minor_units ?? '0');
     const activeRefundFreezesMinorUnits = parseStoredMinorUnits(
-      freezes.rows[0]?.active_refund_freeze_minor_units ?? '0',
+      totals.rows[0]?.active_refund_freeze_minor_units ?? '0',
     );
     if (activeHoldsMinorUnits + activeRefundFreezesMinorUnits > base.postedBalanceMinorUnits) {
       throw new SaasBillingError('BILLING_STORAGE_ERROR');

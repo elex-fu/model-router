@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import type { PreparedSqlStatement, SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import { effectiveWeight } from '../../../src/saas/gateway/health-score.js';
 import type {
   ProviderAccountHalfOpenProbeAdmissionPort,
@@ -17,6 +18,7 @@ import type {
   RequestPreparationCaller,
   RequestPreparationCandidateAuthority,
   RequestPreparationEntitlement,
+  RequestPreparationRouteAuthority,
 } from '../../../src/saas/gateway/request-preparation-service.js';
 
 type Mode = 'byok' | 'platform';
@@ -188,6 +190,7 @@ function eligibilityRow(mode: Mode, accountId = 'account-a'): Row {
     account_rights_effective_at: '2026-01-01T00:00:00.000Z',
     account_rights_expires_at: null,
     capability_version: 12,
+    authority_now: NOW,
     capability_protocol: 'openai',
     capability_support_level: 'supported',
     capability_validation_state: 'verified',
@@ -262,10 +265,24 @@ interface FakeDatabaseState {
   /** F2: resolved billing-group rows; defaults to the seeded neutral group. */
   readonly groupRows?: Row[];
   readonly statements: Array<{ sql: string; values: readonly unknown[] }>;
+  readonly prepared?: Array<{ statement: PreparedSqlStatement; values: readonly unknown[] }>;
+  readonly preparedFailure?: Error;
 }
 
 class FakeDatabase implements SaasDatabase {
-  constructor(private readonly state: FakeDatabaseState) {}
+  queryPrepared?: SqlExecutor['queryPrepared'];
+  transactionCalls = 0;
+
+  constructor(private readonly state: FakeDatabaseState) {
+    const prepared = state.prepared;
+    if (prepared) {
+      this.queryPrepared = async <RowType>(statement: PreparedSqlStatement, values: readonly unknown[] = []) => {
+        prepared.push({ statement, values });
+        if (state.preparedFailure) throw state.preparedFailure;
+        return this.query<RowType>(statement.text, values);
+      };
+    }
+  }
 
   async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
     this.state.statements.push({ sql, values });
@@ -282,6 +299,8 @@ class FakeDatabase implements SaasDatabase {
       rows = this.state.eligibilityRows?.get(accountId) ?? [eligibilityRow('platform', accountId)];
     } else if (sql.includes('postgres-provider-account-scheduler:rate-window')) {
       rows = this.state.rateWindows?.get(String(values[1])) ?? [{ requests: '0', tokens: '0' }];
+    } else if (sql.includes('postgres-provider-account-scheduler:supplier-cost-rate')) {
+      rows = [];
     } else if (sql.includes('postgres-provider-account-scheduler:concurrency')) {
       rows = [{ in_flight: this.state.inFlight?.get(String(values[2])) ?? '0' }];
     } else {
@@ -291,6 +310,7 @@ class FakeDatabase implements SaasDatabase {
   }
 
   async transaction<T>(work: (executor: SqlExecutor) => Promise<T>): Promise<T> {
+    this.transactionCalls += 1;
     return work(this);
   }
 
@@ -335,6 +355,438 @@ function setup(
   return { scheduler, state, database, input };
 }
 
+function nativeRoute(mode: Mode): RequestPreparationRouteAuthority {
+  return {
+    tenantId: 'tenant-a',
+    projectId: 'project-a',
+    publicModel: 'public-model',
+    publicModelId: 'public-model-id',
+    publicModelVersion: 11,
+    routeConfigId: 'route-a',
+    routeConfigVersion: 8,
+    protocol: 'openai',
+    providerProtocol: 'anthropic',
+    clientOperation: 'chat.completions',
+    providerOperation: 'messages',
+    targetMode: mode === 'byok' ? 'tenant_account' : 'platform_pool',
+    upstreamId: mode === 'byok' ? 'tenant-route-a' : 'pool-a',
+    endpoint: 'https://catalog.example/v1',
+  };
+}
+
+test('combined PG selection retains only its bound winner after all binding calls complete', async () => {
+  const events: string[] = [];
+  const held = new Set<string>();
+  const binds: string[] = [];
+  const rows = new Map([
+    ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_priority: 1 }]],
+    ['account-b', [{ ...eligibilityRow('platform', 'account-b'), account_priority: 10 }]],
+  ]);
+  const { scheduler, input, state } = setup(
+    'platform',
+    { eligibilityRows: rows },
+    {
+      redisConcurrencySlots: {
+        enabled: true,
+        maxSlots: 2,
+        slots: {
+          async tryAcquire(value) {
+            events.push(`acquire:${value.accountId}`);
+            held.add(value.accountId);
+            return { state: 'acquired' };
+          },
+          async release(value) {
+            events.push(`release:${value.accountId}`);
+            held.delete(value.accountId);
+          },
+        },
+      },
+      affinity: {
+        async resolve() {
+          return { decision: 'allow', accountId: null };
+        },
+        async bind(value) {
+          binds.push(value.accountId);
+          events.push(`bind:${value.accountId}`);
+          assert.deepEqual(
+            [...held].sort(),
+            ['account-a', 'account-b'],
+            'no temporary slot is settled before binding finishes',
+          );
+          return binds.length === 1
+            ? {
+                decision: 'block',
+                reason: 'provider account affinity binding conflict',
+                contention: { kind: 'active_binding', accountId: 'account-a' },
+              }
+            : { decision: 'allow' };
+        },
+      },
+    },
+  );
+  const result = await scheduler.selectAndBind({
+    ...input([candidate('platform', 'account-a'), candidate('platform', 'account-b')], {
+      previousResponseId: 'combined-pg',
+    }),
+    route: { ...nativeRoute('platform'), providerProtocol: 'openai', providerOperation: 'chat.completions' },
+  });
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+  assert.deepEqual(binds, ['account-b', 'account-a']);
+  assert.deepEqual([...held], ['account-a']);
+  assert.deepEqual(
+    events.filter((event) => event.startsWith('release:')),
+    ['release:account-b'],
+  );
+  assert.equal(events.at(-1), 'release:account-b');
+  assert.equal(state.statements.filter(({ sql }) => sql.includes(':selection-audit')).length, 1);
+});
+
+for (const mode of [
+  'second-conflict',
+  'throw',
+  'bad-shape',
+  'bad-candidate',
+  'wrong-source',
+  'release-failure',
+] as const) {
+  test(`combined PG selection releases all temporary slots on ${mode}`, async () => {
+    const releases: string[] = [];
+    const held = new Set<string>();
+    let binds = 0;
+    const { scheduler, input } = setup(
+      'platform',
+      {
+        eligibilityRows: new Map([
+          ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_priority: 10 }]],
+          ['account-b', [{ ...eligibilityRow('platform', 'account-b'), account_priority: 1 }]],
+        ]),
+      },
+      {
+        redisConcurrencySlots: {
+          enabled: true,
+          maxSlots: 2,
+          slots: {
+            async tryAcquire(value) {
+              held.add(value.accountId);
+              return { state: 'acquired' };
+            },
+            async release(value) {
+              releases.push(value.accountId);
+              held.delete(value.accountId);
+              if (mode === 'release-failure' && value.accountId === 'account-b')
+                throw new Error('private release error');
+            },
+          },
+        },
+        affinity: {
+          async resolve() {
+            return { decision: 'allow', accountId: null };
+          },
+          async bind(value) {
+            binds++;
+            if (mode === 'second-conflict')
+              return {
+                decision: 'block',
+                reason: 'provider account affinity binding conflict',
+                contention: {
+                  kind: 'active_binding',
+                  accountId: value.accountId === 'account-a' ? 'account-b' : 'account-a',
+                },
+              };
+            return { decision: 'allow' };
+          },
+        },
+      },
+    );
+    const core = (
+      scheduler as unknown as { scheduler: { selectAndBindCandidate: (value: unknown) => Promise<unknown> } }
+    ).scheduler;
+    const original = core.selectAndBindCandidate.bind(core);
+    if (mode === 'throw' || mode === 'bad-shape' || mode === 'bad-candidate' || mode === 'wrong-source')
+      core.selectAndBindCandidate = async (value) => {
+        await original(value);
+        if (mode === 'throw') throw new Error('private combined failure');
+        if (mode === 'bad-candidate') return { decision: 'allow', value: { accountId: 'account-a' } };
+        if (mode === 'wrong-source')
+          return { decision: 'allow', value: { ...candidate('platform'), credentialId: 'foreign-credential' } };
+        return {};
+      };
+    // Force a stable account-a proposal so release-failure always concerns its non-winner.
+    const proposed = [candidate('platform', 'account-a'), candidate('platform', 'account-b')];
+    const result = await scheduler.selectAndBind({
+      ...input(proposed, { previousResponseId: 'combined-failure' }),
+      route: { ...nativeRoute('platform'), providerProtocol: 'openai', providerOperation: 'chat.completions' },
+    });
+    assert.equal(result.decision, mode === 'second-conflict' ? 'reject' : 'block');
+    if (result.decision === 'reject') {
+      assert.equal(result.code, 'rate_limited');
+      assert.equal(Object.hasOwn(result, 'retryAfterSeconds'), false);
+    }
+    assert.deepEqual([...held], []);
+    assert.deepEqual([...new Set(releases)].sort(), ['account-a', 'account-b']);
+    assert.equal(binds, mode === 'second-conflict' ? 2 : 1);
+  });
+}
+
+test('a thrown temporary-slot release overrides pending contention 429 and still attempts every release', async () => {
+  const releases: string[] = [];
+  const binds: string[] = [];
+  const { scheduler, input, state } = setup(
+    'platform',
+    {
+      eligibilityRows: new Map([
+        ['account-a', [{ ...eligibilityRow('platform', 'account-a'), account_priority: 10 }]],
+        ['account-b', [{ ...eligibilityRow('platform', 'account-b'), account_priority: 1 }]],
+      ]),
+    },
+    {
+      redisConcurrencySlots: {
+        enabled: true,
+        maxSlots: 2,
+        slots: {
+          async tryAcquire() {
+            return { state: 'acquired' };
+          },
+          async release(value) {
+            releases.push(value.accountId);
+            if (value.accountId === 'account-a') throw new Error('private release failure');
+          },
+        },
+      },
+      affinity: {
+        async resolve() {
+          return { decision: 'allow', accountId: null };
+        },
+        async bind(value) {
+          binds.push(value.accountId);
+          return {
+            decision: 'block',
+            reason: 'provider account affinity binding conflict',
+            contention: {
+              kind: 'active_binding',
+              accountId: value.accountId === 'account-a' ? 'account-b' : 'account-a',
+            },
+          };
+        },
+      },
+    },
+  );
+  const core = (
+    scheduler as unknown as {
+      scheduler: { selectAndBindCandidate: (value: unknown) => Promise<{ decision: string; code?: string }> };
+    }
+  ).scheduler;
+  const original = core.selectAndBindCandidate.bind(core);
+  let pendingDecision: unknown;
+  core.selectAndBindCandidate = async (value) => {
+    const result = await original(value);
+    pendingDecision = result;
+    return result;
+  };
+  const result = await scheduler.selectAndBind({
+    ...input([candidate('platform', 'account-a'), candidate('platform', 'account-b')], {
+      previousResponseId: 'combined-release-failure',
+    }),
+    route: { ...nativeRoute('platform'), providerProtocol: 'openai', providerOperation: 'chat.completions' },
+  });
+  assert.equal((pendingDecision as { decision: string }).decision, 'reject');
+  assert.equal((pendingDecision as { code: string }).code, 'rate_limited');
+  assert.equal(result.decision, 'block');
+  assert.deepEqual(binds, ['account-a', 'account-b']);
+  assert.deepEqual(releases, ['account-a', 'account-b']);
+  assert.equal(state.statements.filter(({ sql }) => sql.includes(':selection-audit')).length, 0);
+});
+
+test('BYOK and platform scheduling query and revalidate native capabilities without changing client scope', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const row = { ...eligibilityRow(mode), capability_protocol: 'anthropic' };
+      const { scheduler, input, state } = setup(mode, { eligibilityRows: new Map([['account-a', [row]]]) });
+      const result = await scheduler.select({ ...input([candidate(mode)]), route: nativeRoute(mode) });
+      assert.equal(result.decision, 'allow');
+      if (result.decision === 'allow') assert.equal(result.value.protocol, 'openai');
+      const route = state.statements.find(({ sql }) => sql.includes('postgres-provider-account-scheduler:route'));
+      assert.equal(route?.values[3], 'openai', 'the persisted client route is still selected by client protocol');
+      const eligibility = state.statements.find(({ sql }) => sql.includes(`${mode}-eligibility`));
+      assert.ok(eligibility);
+      assert.equal(eligibility.values[mode === 'byok' ? 14 : 20], 'anthropic');
+      assert.equal(eligibility.values[mode === 'byok' ? 6 : 7], 'https://catalog.example/v1');
+    });
+  }
+});
+
+test('native capability mismatches and undeclared protocol changes remain denied', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const wrong = setup(mode);
+      const denied = await wrong.scheduler.select({ ...wrong.input([candidate(mode)]), route: nativeRoute(mode) });
+      assert.equal(denied.decision, 'reject');
+      if (denied.decision === 'reject') assert.equal(denied.code, 'account_denied');
+      assert.equal(
+        wrong.state.statements.some(({ sql }) => sql.includes(':concurrency')),
+        false,
+      );
+
+      const row = { ...eligibilityRow(mode), capability_protocol: 'anthropic' };
+      const undeclared = setup(mode, { eligibilityRows: new Map([['account-a', [row]]]) });
+      const legacy = await undeclared.scheduler.select(undeclared.input([candidate(mode)]));
+      assert.equal(legacy.decision, 'reject', 'native protocol must come from explicit trusted route authority');
+      const eligibility = undeclared.state.statements.find(({ sql }) => sql.includes(`${mode}-eligibility`));
+      assert.equal(eligibility?.values[mode === 'byok' ? 14 : 20], 'openai');
+    });
+  }
+});
+
+test('eligibility reads use the root executor in order without a transaction wrapper', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    for (const nativePrepared of [false, true]) {
+      await t.test(`${mode}, prepared=${nativePrepared}`, async () => {
+        const prepared: NonNullable<FakeDatabaseState['prepared']> = [];
+        const row = { ...eligibilityRow(mode), account_rpm_limit: 100 };
+        const { scheduler, database, state, input } = setup(
+          mode,
+          {
+            ...(nativePrepared ? { prepared } : {}),
+            eligibilityRows: new Map([['account-a', [row]]]),
+          },
+          { strategies: { costPriority: { enabled: true } } },
+        );
+        const rootCalls: string[] = [];
+        const rootQuery = database.query.bind(database);
+        database.query = async <RowType>(sql: string, values: readonly unknown[] = []) => {
+          rootCalls.push(sql.match(/postgres-provider-account-scheduler:([^ ]+)/)?.[1] ?? 'other');
+          return rootQuery<RowType>(sql, values);
+        };
+        if (database.queryPrepared) {
+          const rootPrepared = database.queryPrepared.bind(database);
+          database.queryPrepared = async <RowType>(
+            statement: PreparedSqlStatement,
+            values: readonly unknown[] = [],
+          ) => {
+            rootCalls.push('prepared');
+            return rootPrepared<RowType>(statement, values);
+          };
+        }
+        assert.equal((await scheduler.select(input([candidate(mode)]))).decision, 'allow');
+        assert.equal(database.transactionCalls, 0, 'pure SELECT eligibility must use root autocommit queries');
+        const relevant = rootCalls.filter((call) =>
+          ['route', 'prepared', `${mode}-eligibility`, 'rate-window', 'supplier-cost-rate'].includes(call),
+        );
+        assert.deepEqual(relevant, [
+          'route',
+          ...(nativePrepared ? ['prepared'] : []),
+          `${mode}-eligibility`,
+          'rate-window',
+          ...(mode === 'platform' ? ['supplier-cost-rate'] : []),
+        ]);
+        assert.equal(prepared.length, nativePrepared ? 1 : 0);
+        assert.deepEqual(state.statements.find(({ sql }) => sql.includes(':route'))?.values, [
+          'tenant-a',
+          'project-a',
+          'public-model',
+          'openai',
+          mode,
+        ]);
+        assert.deepEqual(state.statements.find(({ sql }) => sql.includes(':rate-window'))?.values, [
+          mode === 'byok' ? 'tenant' : 'platform',
+          'account-a',
+          NOW,
+        ]);
+        if (mode === 'platform') {
+          assert.deepEqual(state.statements.find(({ sql }) => sql.includes(':supplier-cost-rate'))?.values, [
+            'cost-v2',
+          ]);
+        }
+      });
+    }
+  }
+});
+
+test('later candidates reread a changed route before reading eligibility', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const { scheduler, database, state, input } = setup(mode, {
+        eligibilityRows: new Map([['account-a', [{ ...eligibilityRow(mode), account_quota_state: 'exhausted' }]]]),
+      });
+      const rootQuery = database.query.bind(database);
+      database.query = async <RowType>(sql: string, values: readonly unknown[] = []) => {
+        const result = await rootQuery<RowType>(sql, values);
+        if (sql.includes(`${mode}-eligibility`)) state.routeRows = [routeRow(mode, 'provider-b')];
+        return result;
+      };
+      const result = await scheduler.select(input([candidate(mode), candidate(mode, 'account-b')]));
+      assert.notEqual(result.decision, 'allow');
+      assert.equal(database.transactionCalls, 0);
+      assert.equal(state.statements.filter(({ sql }) => sql.includes(':route')).length, 2);
+      const eligibility = state.statements.filter(({ sql }) => sql.includes(`${mode}-eligibility`));
+      assert.equal(eligibility.length, 1, 'the changed route denies candidate B before its eligibility read');
+      assert.equal(eligibility[0]?.values[mode === 'byok' ? 2 : 3], 'account-a');
+      assert.equal(
+        state.statements.some(({ sql }) => sql.includes(':rate-window') || sql.includes(':supplier-cost-rate')),
+        false,
+      );
+    });
+  }
+});
+
+test('only scheduler eligibility uses fixed prepared SQL with current values and authority clocks', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const prepared: NonNullable<FakeDatabaseState['prepared']> = [];
+      const eligibilityRows = new Map<string, Row[]>();
+      const { scheduler, input, state } = setup(mode, { prepared, eligibilityRows });
+      for (const accountId of ['account-a', 'account-b']) {
+        assert.equal((await scheduler.select(input([candidate(mode, accountId)]))).decision, 'allow');
+      }
+      eligibilityRows.set('account-a', [
+        { ...eligibilityRow(mode), authority_now: new Date(NOW.getTime() + 35), account_status: 'disabled' },
+      ]);
+      assert.equal((await scheduler.select(input([candidate(mode)]))).decision, 'reject');
+      assert.equal(prepared.length, 3);
+      assert.ok(prepared.every(({ statement }) => statement === prepared[0].statement && Object.isFrozen(statement)));
+      assert.equal(new Set(prepared.map(({ statement }) => statement.name)).size, 1);
+      const statement = prepared[0].statement;
+      assert.equal(
+        createHash('sha256').update(statement.text).digest('hex'),
+        mode === 'byok'
+          ? '9b34c495847c2b54256174c5c2d1c6063ed6877e023708dfff4589fe09771993'
+          : 'bc83809c6d04f9c52ac8572fe4b1ed655468ad8861baf00cbb1740d2a7cf0b60',
+      );
+      assert.equal(
+        statement.name,
+        `mr_sched-${mode}_${createHash('sha256').update(statement.text).digest('base64url')}`,
+      );
+      assert.deepEqual(
+        prepared.map(({ values }) => values[mode === 'byok' ? 2 : 3]),
+        ['account-a', 'account-b', 'account-a'],
+      );
+      assert.match(
+        statement.text,
+        /WITH authority_clock AS MATERIALIZED \(SELECT clock_timestamp\(\) AS authority_now\)/,
+      );
+      assert.equal(state.statements.filter(({ sql }) => sql.includes(':route')).length, 3);
+      assert.equal(state.statements.filter(({ sql }) => sql.includes(`${mode}-eligibility`)).length, 3);
+    });
+  }
+});
+
+test('scheduler native failures block without an anonymous eligibility replay', async () => {
+  const prepared: NonNullable<FakeDatabaseState['prepared']> = [];
+  const { scheduler, input, state, database } = setup('platform', {
+    prepared,
+    preparedFailure: new Error('expected native failure'),
+  });
+  assert.equal((await scheduler.select(input([candidate('platform')]))).decision, 'block');
+  assert.equal(prepared.length, 1);
+  assert.equal(database.transactionCalls, 0);
+  assert.equal(state.statements.filter(({ sql }) => sql.includes(':route')).length, 1);
+  assert.equal(
+    state.statements.some(({ sql }) => sql.includes('platform-eligibility')),
+    false,
+  );
+});
+
 test('PostgreSQL scheduler admits only persisted BYOK and platform account authority', async (t) => {
   for (const mode of ['byok', 'platform'] as const) {
     await t.test(mode, async () => {
@@ -373,7 +825,7 @@ test('PostgreSQL scheduler admits only persisted BYOK and platform account autho
   }
 });
 
-test('platform eligibility binds all 23 authority parameters including the member account epoch and the F2 group', async () => {
+test('platform eligibility binds all 22 non-clock authority parameters including the member account epoch and the F2 group', async () => {
   const { scheduler, state, input } = setup('platform');
   const platformCandidate = candidate('platform');
   const result = await scheduler.select(input([platformCandidate]));
@@ -388,14 +840,166 @@ test('platform eligibility binds all 23 authority parameters including the membe
   );
   assert.deepEqual(
     parameterSlots,
-    Array.from({ length: 23 }, (_, index) => index + 1),
+    Array.from({ length: 22 }, (_, index) => index + 1),
   );
-  assert.equal(query.values.length, 23);
+  assert.equal(query.values.length, 22);
   assert.equal(query.values[14], platformCandidate.poolMemberAccountAuthzVersion);
   assert.match(query.sql, /member\.account_authz_version\s*=\s*\$15\b/);
   assert.match(query.sql, /member\.account_authz_version\s*=\s*account\.authz_version\b/);
-  // F2: $23 is the server-resolved billing group narrowing the pool domain.
-  assert.equal(query.values[22], 'default');
+  // F2: $22 is the server-resolved billing group narrowing the pool domain.
+  assert.equal(query.values[21], 'default');
+});
+
+test('each eligibility statement fixes one database clock and never binds the process clock', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const { scheduler, state, input } = setup(mode);
+      assert.equal((await scheduler.select(input([candidate(mode)]))).decision, 'allow');
+      const query = state.statements.find(({ sql }) => sql.includes(`${mode}-eligibility`));
+      assert.ok(query);
+      assert.match(query.sql, /WITH authority_clock AS MATERIALIZED \(SELECT clock_timestamp\(\) AS authority_now\)/);
+      assert.match(query.sql, /SELECT authority_clock\.authority_now, product\.status/);
+      assert.equal([...query.sql.matchAll(/clock_timestamp\(\)/g)].length, 1);
+      assert.doesNotMatch(query.sql, /\$\d+::timestamptz/);
+      assert.equal(
+        query.values.some((value) => value instanceof Date),
+        false,
+      );
+      assert.equal(query.values.length, mode === 'byok' ? 15 : 22);
+      assert.match(query.sql, /credential\.expires_at > authority_clock\.authority_now/);
+      assert.match(query.sql, /credential_version\.expires_at > authority_clock\.authority_now/);
+      assert.match(
+        query.sql,
+        mode === 'byok'
+          ? /mapping\.effective_at <= authority_clock\.authority_now/
+          : /grant_row\.effective_at <= authority_clock\.authority_now/,
+      );
+      assert.match(
+        query.sql,
+        mode === 'byok'
+          ? /rights\.expires_at > authority_clock\.authority_now/
+          : /pool_rights\.expires_at > authority_clock\.authority_now/,
+      );
+    });
+  }
+});
+
+test('database authorization windows remain valid across positive and negative process clock skew', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    for (const offset of [-86_400_000, 86_400_000]) {
+      await t.test(`${mode}: authority offset ${offset}ms`, async () => {
+        const authorityAt = new Date(NOW.getTime() + offset);
+        const effectiveAt = new Date(authorityAt.getTime() - 1);
+        const expiresAt = new Date(authorityAt.getTime() + 1);
+        const row = {
+          ...eligibilityRow(mode),
+          authority_now: authorityAt,
+          credential_expires_at: expiresAt,
+          version_expires_at: expiresAt,
+          account_rights_effective_at: effectiveAt,
+          account_rights_expires_at: expiresAt,
+          ...(mode === 'byok'
+            ? { mapping_effective_at: effectiveAt, mapping_expires_at: expiresAt }
+            : {
+                grant_effective_at: effectiveAt,
+                grant_expires_at: expiresAt,
+                pool_rights_effective_at: effectiveAt,
+                pool_rights_expires_at: expiresAt,
+              }),
+        };
+        const { scheduler, input } = setup(mode, { eligibilityRows: new Map([['account-a', [row]]]) });
+        const result = await scheduler.select(input([candidate(mode)]));
+        assert.equal(result.decision, 'allow', 'JS rights and relation checks must use the returned DB clock');
+      });
+    }
+  }
+});
+
+test('future and expired database authorization windows cannot be waived by the process clock', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const windows = [
+      ['account rights', 'account_rights_effective_at', 'account_rights_expires_at'],
+      ...(mode === 'byok'
+        ? [['profile mapping', 'mapping_effective_at', 'mapping_expires_at']]
+        : [
+            ['pool grant', 'grant_effective_at', 'grant_expires_at'],
+            ['pool rights', 'pool_rights_effective_at', 'pool_rights_expires_at'],
+          ]),
+    ];
+    for (const [label, effectiveField, expiresField] of windows) {
+      for (const boundary of ['future', 'expired']) {
+        await t.test(`${mode}: ${label} ${boundary}`, async () => {
+          const row = {
+            ...eligibilityRow(mode),
+            authority_now: new Date(NOW.getTime() + (boundary === 'future' ? -100 : 100)),
+            [effectiveField]: new Date(NOW.getTime() - 50),
+            [expiresField]: new Date(NOW.getTime() + 50),
+          };
+          const { scheduler, state, input } = setup(mode, { eligibilityRows: new Map([['account-a', [row]]]) });
+          const result = await scheduler.select(input([candidate(mode)]));
+          assert.equal(result.decision, 'reject');
+          if (result.decision === 'reject') assert.equal(result.code, 'account_denied');
+          assert.equal(
+            state.statements.some(({ sql }) => sql.includes(':concurrency')),
+            false,
+          );
+        });
+      }
+    }
+    for (const field of ['credential_expires_at', 'version_expires_at']) {
+      await t.test(`${mode}: ${field} expired`, async () => {
+        const row = {
+          ...eligibilityRow(mode),
+          authority_now: new Date(NOW.getTime() + 100),
+          [field]: new Date(NOW.getTime() + 50),
+        };
+        const { scheduler, input } = setup(mode, { eligibilityRows: new Map([['account-a', [row]]]) });
+        assert.equal((await scheduler.select(input([candidate(mode)]))).decision, 'reject');
+      });
+    }
+  }
+});
+
+test('PostgreSQL eligibility never falls back when its authority clock is missing or malformed', async (t) => {
+  const cases = [
+    { label: 'missing', present: false, inherited: false, value: undefined },
+    { label: 'undefined', present: true, inherited: false, value: undefined },
+    { label: 'null', present: true, inherited: false, value: null },
+    { label: 'invalid string', present: true, inherited: false, value: 'not-a-date' },
+    { label: 'invalid Date', present: true, inherited: false, value: new Date(Number.NaN) },
+    { label: 'inherited valid time', present: false, inherited: true, value: NOW },
+  ];
+  for (const mode of ['byok', 'platform'] as const) {
+    for (const entry of cases) {
+      await t.test(`${mode}: ${entry.label}`, async () => {
+        const row = eligibilityRow(mode);
+        delete row.authority_now;
+        if (entry.present) row.authority_now = entry.value;
+        if (entry.inherited) Object.setPrototypeOf(row, { authority_now: entry.value });
+        let healthCalls = 0;
+        const { scheduler, state, input } = setup(
+          mode,
+          { eligibilityRows: new Map([['account-a', [row]]]) },
+          {
+            health: {
+              async get() {
+                healthCalls += 1;
+                return { decision: 'allow', value: { status: 'healthy', observedAt: NOW } };
+              },
+            },
+          },
+        );
+        const result = await scheduler.select(input([candidate(mode)]));
+        assert.equal(result.decision, 'block');
+        if (result.decision === 'block') assert.match(result.message, /database eligibility authority clock/);
+        assert.equal(healthCalls, 0);
+        assert.equal(
+          state.statements.some(({ sql }) => sql.includes(':concurrency')),
+          false,
+        );
+      });
+    }
+  }
 });
 
 test('stale platform member account epochs are rejected', async () => {
@@ -695,6 +1299,24 @@ test('null, unknown, and ok quota snapshots leave scheduling untouched', async (
   }
 });
 
+test('Kimi quota 429 cooldown denies a candidate only until its persisted deadline', async (t) => {
+  for (const mode of ['byok', 'platform'] as const) {
+    await t.test(mode, async () => {
+      const row = {
+        ...eligibilityRow(mode, 'account-a'),
+        account_kimi_rate_limited_until: new Date(NOW.getTime() + 60_000).toISOString(),
+      };
+      const rows = new Map([['account-a', [row]]]);
+      const { scheduler, input } = setup(mode, { eligibilityRows: rows });
+      const denied = await scheduler.select(input([candidate(mode, 'account-a')]));
+      assert.equal(denied.decision, 'reject');
+      row.account_kimi_rate_limited_until = NOW.toISOString();
+      const recovered = await scheduler.select(input([candidate(mode, 'account-a')]));
+      assert.equal(recovered.decision, 'allow');
+    });
+  }
+});
+
 test('a live grok 429 cooldown and the free-tier soft gate deny the candidate (migration 119, 9.1)', async (t) => {
   const now = NOW.getTime();
   const fresh = new Date(now - 60_000).toISOString();
@@ -975,8 +1597,11 @@ test('eligibility SQL reads the persisted R6 rate limits and R7 health score wit
   }
 });
 
-test('the rate window query is a bounded single-index trailing-minute read with the injected clock', async () => {
-  const rows = new Map([['account-a', [{ ...eligibilityRow('byok', 'account-a'), account_rpm_limit: 10 }]]]);
+test('the rate window query is a bounded single-index trailing-minute read with the database authority clock', async () => {
+  const authorityAt = new Date(NOW.getTime() + 35);
+  const rows = new Map([
+    ['account-a', [{ ...eligibilityRow('byok', 'account-a'), authority_now: authorityAt, account_rpm_limit: 10 }]],
+  ]);
   const { scheduler, state, input } = setup('byok', {
     eligibilityRows: rows,
     rateWindows: new Map([['account-a', [{ requests: '3', tokens: '42' }]]]),
@@ -985,7 +1610,7 @@ test('the rate window query is a bounded single-index trailing-minute read with 
   assert.equal(result.decision, 'allow');
   const query = state.statements.find(({ sql }) => sql.includes(':rate-window'));
   assert.ok(query);
-  assert.deepEqual(query.values, ['tenant', 'account-a', NOW]);
+  assert.deepEqual(query.values, ['tenant', 'account-a', authorityAt]);
   assert.match(query.sql, /window_start > \$3::timestamptz - interval '60 seconds'/);
   assert.match(query.sql, /coalesce\(sum\(requests\), 0\)::text AS requests/);
   assert.match(query.sql, /account_scope = \$1\s+AND account_id = \$2/);
@@ -1256,18 +1881,22 @@ function probeStore(
   viewFor: (accountId: string) => ProviderAccountHealthSchedulingView,
   admission: 'admitted' | 'closed',
   applied: 'applied' | 'stale' = 'applied',
+  refreshedViewFor: (accountId: string) => ProviderAccountHealthSchedulingView = () => allowView(),
 ): { store: ProbeStore; calls: ProbeStoreCalls } {
   const calls: {
     admissions: Array<{ accountId: string; staleAfterMs?: number }>;
     outcomes: Array<{ accountId: string; fencingToken: string; evidence: unknown }>;
     views: string[];
   } = { admissions: [], outcomes: [], views: [] };
+  const refreshed = new Set<string>();
   return {
     calls,
     store: {
       async getSchedulingView(input) {
         calls.views.push(input.candidate.accountId);
-        return viewFor(input.candidate.accountId);
+        return refreshed.has(input.candidate.accountId)
+          ? refreshedViewFor(input.candidate.accountId)
+          : viewFor(input.candidate.accountId);
       },
       async tryAdmitHalfOpenProbe(input) {
         calls.admissions.push({ accountId: input.candidate.accountId, staleAfterMs: input.staleAfterMs });
@@ -1279,19 +1908,24 @@ function probeStore(
           fencingToken: input.fencingToken,
           evidence: input.evidence,
         });
+        if (applied === 'applied') refreshed.add(input.candidate.accountId);
         return applied;
       },
     },
   };
 }
 
-function allowView(): ProviderAccountHealthSchedulingView {
+function allowView(
+  observedAt = NOW,
+  status: 'healthy' | 'degraded' | 'cooldown' | 'unhealthy' = 'healthy',
+  cooldownUntil: Date | null = null,
+): ProviderAccountHealthSchedulingView {
   return {
     decision: 'allow',
     value: {
-      status: 'healthy',
-      observedAt: NOW,
-      cooldownUntil: null,
+      status,
+      observedAt,
+      cooldownUntil,
       healthScore: null,
       halfOpenProbeAt: null,
       consecutiveFailures: 0,
@@ -1318,6 +1952,192 @@ test('a fresh scheduling view passes through the probe port without admitting a 
   assert.equal(result.decision, 'allow');
   assert.deepEqual(calls.admissions, []);
   assert.deepEqual(calls.outcomes, []);
+});
+
+test('the half-open wrapper forwards the clock and samples it after the view await', async () => {
+  let current = NOW.getTime();
+  const clock = () => new Date(current);
+  const { store, calls } = probeStore(() => {
+    current += 1_000;
+    return allowView(new Date(current));
+  }, 'admitted');
+  const get = store.getSchedulingView.bind(store);
+  store.getSchedulingView = async (input) => {
+    assert.equal(input.clock, clock);
+    assert.equal(input.now.getTime(), NOW.getTime());
+    await Promise.resolve();
+    return get(input);
+  };
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    {
+      now: clock,
+      healthProbe: { store, leaseProvider: { acquire: async () => null } },
+    },
+  );
+  assert.equal((await scheduler.select(input([candidate('byok')]))).decision, 'allow');
+  assert.deepEqual(calls.admissions, []);
+  assert.equal(calls.views.length, 1);
+});
+
+test('invalid half-open read clocks cannot start a probe or fall back', async (t) => {
+  for (const [name, clock] of [
+    ['undefined', undefined],
+    ['null', null],
+    ['non-function', 1],
+    [
+      'throw',
+      () => {
+        throw new Error('test-only clock failure');
+      },
+    ],
+    ['invalid Date', () => new Date(Number.NaN)],
+    ['non-Date result', () => NOW.toISOString()],
+    ['inherited', () => NOW],
+  ] as const) {
+    await t.test(name, async () => {
+      const { store, calls } = probeStore(() => staleView(), 'admitted');
+      const get = store.getSchedulingView.bind(store);
+      store.getSchedulingView = async (input) => {
+        if (name === 'inherited') {
+          Reflect.deleteProperty(input, 'clock');
+          Object.setPrototypeOf(input, { clock });
+        } else {
+          Reflect.set(input, 'clock', clock);
+        }
+        return get(input);
+      };
+      const { scheduler, input } = setup(
+        'byok',
+        {},
+        {
+          healthProbe: { store, leaseProvider: { acquire: async () => null } },
+        },
+      );
+      assert.equal((await scheduler.select(input([candidate('byok')]))).decision, 'block');
+      assert.deepEqual(calls.admissions, []);
+      assert.deepEqual(calls.outcomes, []);
+      assert.equal(calls.views.length, 1);
+    });
+  }
+});
+
+test('a successful probe releases its lease before one real fresh view read', async () => {
+  let current = NOW.getTime();
+  const clock = () => new Date(current);
+  const events: string[] = [];
+  const { store, calls } = probeStore(
+    () => staleView(),
+    'admitted',
+    'applied',
+    () => allowView(new Date(current), 'degraded'),
+  );
+  const get = store.getSchedulingView.bind(store);
+  store.getSchedulingView = async (input) => {
+    assert.equal(input.clock, clock);
+    events.push(calls.views.length === 0 ? 'initial-read' : 'refresh-read');
+    return get(input);
+  };
+  const record = store.recordRuntimeOutcome.bind(store);
+  store.recordRuntimeOutcome = async (input) => {
+    events.push('outcome');
+    current += 1_000;
+    return record(input);
+  };
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    {
+      now: clock,
+      healthProbe: {
+        store,
+        leaseProvider: {
+          async acquire() {
+            events.push('acquire');
+            return {
+              fencingToken: '9001',
+              async release() {
+                events.push('release');
+                current += 1_000;
+              },
+            };
+          },
+        },
+      },
+    },
+  );
+  assert.equal((await scheduler.select(input([candidate('byok')]))).decision, 'allow');
+  assert.deepEqual(events, ['initial-read', 'acquire', 'outcome', 'release', 'refresh-read']);
+  assert.equal(calls.views.length, 2);
+  assert.equal(calls.admissions.length, 1);
+  assert.equal(calls.outcomes.length, 1);
+});
+
+test('a probe refresh never fabricates success or recursively probes', async (t) => {
+  for (const failure of [
+    'stale',
+    'unknown',
+    'malformed',
+    'unavailable',
+    'future',
+    'expired',
+    'cooldown',
+    'unhealthy',
+    'invalid-observation',
+    'throw',
+    'invalid-clock',
+  ] as const) {
+    await t.test(failure, async () => {
+      const { store, calls } = probeStore(
+        () => staleView(),
+        'admitted',
+        'applied',
+        () => {
+          if (failure === 'throw') throw new Error('test-only refresh failure');
+          if (failure === 'stale' || failure === 'unknown' || failure === 'malformed' || failure === 'unavailable') {
+            return { decision: 'block', reason: 'test-only refresh refusal', code: failure };
+          }
+          if (failure === 'future') return allowView(new Date(NOW.getTime() + 251));
+          if (failure === 'expired') return allowView(new Date(NOW.getTime() - 60_001));
+          if (failure === 'invalid-observation') return allowView(new Date(Number.NaN));
+          if (failure === 'cooldown') return allowView(NOW, 'cooldown', new Date(NOW.getTime() + 1_000));
+          if (failure === 'unhealthy') return allowView(NOW, 'unhealthy');
+          return allowView();
+        },
+      );
+      const get = store.getSchedulingView.bind(store);
+      store.getSchedulingView = async (input) => {
+        if (failure === 'invalid-clock' && calls.views.length === 1) {
+          Reflect.set(input, 'clock', () => new Date(Number.NaN));
+        }
+        return get(input);
+      };
+      let releases = 0;
+      const { scheduler, input } = setup(
+        'byok',
+        {},
+        {
+          healthProbe: {
+            store,
+            leaseProvider: {
+              acquire: async () => ({
+                fencingToken: '9001',
+                release: async () => {
+                  releases++;
+                },
+              }),
+            },
+          },
+        },
+      );
+      assert.equal((await scheduler.select(input([candidate('byok')]))).decision, 'block');
+      assert.equal(calls.views.length, 2);
+      assert.equal(calls.admissions.length, 1);
+      assert.equal(calls.outcomes.length, 1);
+      assert.equal(releases, 1);
+    });
+  }
 });
 
 test('a stale scheduling view is self-healed by a half-open probe (H5a)', async () => {

@@ -466,6 +466,138 @@ test('a persisted successful runtime outcome is fresh and eligible', async () =>
   });
 });
 
+test('both health readers sample the supplied clock after the SQL await', async (t) => {
+  for (const scheduling of [false, true]) {
+    await t.test(scheduling ? 'scheduling view' : 'plain health', async () => {
+      const database = new FakeHealthDatabase();
+      const account = candidate();
+      const health = store(database);
+      seedLease(database, account, '10');
+      await record(health, account, '10', { source: 'gateway', result: 'success' });
+      const row = healthRow(database, account);
+      assert.ok(row);
+      let current = NOW.getTime();
+      const query = database.query.bind(database);
+      database.query = async <Row>(sql: string, values?: readonly unknown[]) => {
+        await Promise.resolve();
+        current += 1_000;
+        row.observedAt = new Date(current);
+        return query<Row>(sql, values);
+      };
+      const input = { caller: caller(), candidate: account, now: NOW };
+      const legacy = await (scheduling ? health.getSchedulingView(input) : health.get(input));
+      assert.equal(legacy.decision, 'block', 'Date-only callers retain their explicit reference');
+      const live = { ...input, clock: () => new Date(current) };
+      const decision = await (scheduling ? health.getSchedulingView(live) : health.get(live));
+      assert.equal(decision.decision, 'allow');
+      if (decision.decision === 'allow') {
+        assert.ok(decision.value.observedAt instanceof Date);
+        assert.equal(decision.value.observedAt.getTime(), current);
+      }
+    });
+  }
+});
+
+test('fresh read clocks preserve the exact future, age and cooldown boundaries', async (t) => {
+  for (const scheduling of [false, true]) {
+    for (const [name, observedOffset, cooldownOffset, expected] of [
+      ['future boundary', 250, null, 'allow'],
+      ['true future', 251, null, 'block'],
+      ['age boundary', -30_000, null, 'allow'],
+      ['expired', -30_001, null, 'block'],
+      ['live cooldown', 0, 1, 'cooldown'],
+      ['expired cooldown', 0, 0, 'degraded'],
+    ] as const) {
+      await t.test(`${scheduling ? 'scheduling' : 'plain'}: ${name}`, async () => {
+        const database = new FakeHealthDatabase();
+        const account = candidate();
+        const health = store(database);
+        seedLease(database, account, '10');
+        await record(health, account, '10', { source: 'gateway', result: 'success' });
+        const row = healthRow(database, account);
+        assert.ok(row);
+        const current = NOW.getTime() + 1_000;
+        row.observedAt = new Date(current + observedOffset);
+        row.state = cooldownOffset === null ? 'healthy' : 'cooldown';
+        row.cooldownUntil = cooldownOffset === null ? null : new Date(current + cooldownOffset);
+        const input = { caller: caller(), candidate: account, now: NOW, clock: () => new Date(current) };
+        const decision = await (scheduling ? health.getSchedulingView(input) : health.get(input));
+        assert.equal(decision.decision, expected === 'block' ? 'block' : 'allow');
+        if (decision.decision === 'allow') {
+          assert.equal(decision.value.status, expected === 'allow' ? 'healthy' : expected);
+        }
+      });
+    }
+  }
+});
+
+test('only an absent read clock falls back to the explicit Date', async (t) => {
+  for (const scheduling of [false, true]) {
+    for (const [name, clock] of [
+      ['undefined', undefined],
+      ['null', null],
+      ['non-function', 1],
+      [
+        'throw',
+        () => {
+          throw new Error('test-only clock failure');
+        },
+      ],
+      ['invalid Date', () => new Date(Number.NaN)],
+      ['non-Date result', () => NOW.toISOString()],
+      ['inherited', () => NOW],
+    ] as const) {
+      await t.test(`${scheduling ? 'scheduling' : 'plain'}: ${name}`, async () => {
+        const database = new FakeHealthDatabase();
+        const account = candidate();
+        const health = store(database);
+        seedLease(database, account, '10');
+        await record(health, account, '10', { source: 'gateway', result: 'success' });
+        const base = { caller: caller(), candidate: account, now: NOW };
+        const input = (
+          name === 'inherited' ? Object.assign(Object.create({ clock }), base) : { ...base, clock }
+        ) as Parameters<PostgresProviderAccountRuntimeHealthStore['get']>[0];
+        const decision = await (scheduling ? health.getSchedulingView(input) : health.get(input));
+        assert.equal(decision.decision, 'block');
+        if (scheduling && decision.decision === 'block' && 'code' in decision) assert.equal(decision.code, 'input');
+      });
+    }
+  }
+});
+
+test('conflict updates share one correlated post-lock clock without changing cooldown curves or fences', async () => {
+  const database = new FakeHealthDatabase();
+  const account = candidate();
+  const health = store(database);
+  seedLease(database, account, '10');
+  await record(health, account, '10', { source: 'gateway', result: 'success' });
+  const sql = database.calls.at(-1)?.sql;
+  assert.ok(sql);
+  const conflict = sql.slice(sql.indexOf('ON CONFLICT'));
+  const sample = conflict.slice(
+    conflict.indexOf('(observed_at, cooldown_until)'),
+    conflict.indexOf('last_outcome = EXCLUDED'),
+  );
+  assert.match(sample, /SELECT sampled\.clock_at, CASE/);
+  assert.match(
+    sample,
+    /FROM LATERAL \( SELECT clock_timestamp\(\) AS clock_at, current_health\.failure_count AS prior_failure_count \) AS sampled/,
+  );
+  assert.equal([...sample.matchAll(/clock_timestamp\(\)/g)].length, 1);
+  assert.match(sample, /sampled\.prior_failure_count \+ 1 < 2 THEN sampled\.clock_at/);
+  for (const curve of [
+    /5000::bigint \* \(1::bigint << LEAST\(sampled\.prior_failure_count, 2\)\)/,
+    /2000::bigint \* \(1::bigint << LEAST\(sampled\.prior_failure_count, 3\)\)/,
+    /1000::bigint \* \(1::bigint << LEAST\(sampled\.prior_failure_count, 8\)\)/,
+  ])
+    assert.match(sample, curve);
+  assert.equal([...sample.matchAll(/\b5000::bigint/g)].length, 2, 'access and stream abort retain the same curve');
+  assert.doesNotMatch(sample, /EXCLUDED\.observed_at|GREATEST/);
+  assert.match(conflict, /WHERE current_health\.source_fencing_token < EXCLUDED\.source_fencing_token/);
+  assert.match(conflict, /revision = current_health\.revision \+ 1/);
+  assert.match(sql, /WHERE EXISTS \(SELECT 1 FROM authorized_lease\)/);
+});
+
 test('retryable failures create bounded exponential cooldown and expire to degraded eligibility', async () => {
   const database = new FakeHealthDatabase();
   const account = candidate();
@@ -1114,7 +1246,7 @@ test('scheduling view block reasons carry a discriminating code (H5a)', async ()
 /* ------------------------------------------------------------------ */
 
 test('a failed health write latches only for a bounded window, then a read recovers it (H5b)', async (t) => {
-  t.mock.timers.enable({ now: NOW.getTime() });
+  t.mock.timers.enable({ apis: ['Date'], now: NOW.getTime() });
   const database = new FakeHealthDatabase();
   const account = candidate();
   const health = store(database);
@@ -1141,7 +1273,7 @@ test('a failed health write latches only for a bounded window, then a read recov
 });
 
 test('a successful health write clears the latch immediately without waiting out the window (H5b)', async (t) => {
-  t.mock.timers.enable({ now: NOW.getTime() });
+  t.mock.timers.enable({ apis: ['Date'], now: NOW.getTime() });
   const database = new FakeHealthDatabase();
   const account = candidate();
   const health = store(database);
@@ -1161,7 +1293,7 @@ test('a successful health write clears the latch immediately without waiting out
 });
 
 test('repeated write failures escalate the latch window instead of wedging forever (H5b)', async (t) => {
-  t.mock.timers.enable({ now: NOW.getTime() });
+  t.mock.timers.enable({ apis: ['Date'], now: NOW.getTime() });
   const database = new FakeHealthDatabase();
   const account = candidate();
   const health = store(database);

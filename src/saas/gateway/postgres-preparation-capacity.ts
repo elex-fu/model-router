@@ -205,7 +205,9 @@ function payloadTokenUnits(bounds: unknown): bigint | null {
     inputUncached > input ||
     cacheRead > input ||
     cacheWrite > input ||
-    cacheWrite5m + cacheWrite1h > cacheWrite ||
+    // These are independent verifier upper bounds, not realized TTL splits.
+    cacheWrite5m > input ||
+    cacheWrite1h > input ||
     reasoning > output ||
     !Array.isArray(buckets) ||
     buckets.length === 0 ||

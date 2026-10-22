@@ -144,6 +144,7 @@ export interface ProviderAccountHealthSchedulingPort {
     readonly caller: RequestPreparationCaller;
     readonly candidate: ProviderAccountHealthSchedulingCandidate;
     readonly now: Date;
+    readonly clock?: () => Date;
   }): Promise<ProviderAccountHealthSchedulingView>;
 }
 
@@ -308,21 +309,30 @@ const WRITE_HEALTH_SQL = `
     SET state = EXCLUDED.state,
         failure_count = CASE WHEN EXCLUDED.state = 'healthy' THEN 0
           ELSE LEAST(current_health.failure_count + 1, 8) END,
-        observed_at = EXCLUDED.observed_at,
-        cooldown_until = CASE
-          WHEN EXCLUDED.state = 'healthy' THEN NULL
-          WHEN EXCLUDED.last_outcome = 'gateway_rate_limited_failure'
-            AND current_health.failure_count + 1 < 2 THEN EXCLUDED.observed_at
-          ELSE EXCLUDED.observed_at +
-            CASE EXCLUDED.last_outcome
-              WHEN 'gateway_account_access_failure' THEN
-                LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(current_health.failure_count, 2)))
-              WHEN 'gateway_rate_limited_failure' THEN
-                LEAST(15000::bigint, 2000::bigint * (1::bigint << LEAST(current_health.failure_count, 3)))
-              WHEN 'gateway_stream_abort_failure' THEN
-                LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(current_health.failure_count, 2)))
-              ELSE LEAST(300000::bigint, 1000::bigint * (1::bigint << LEAST(current_health.failure_count, 8)))
-            END * interval '1 millisecond' END,
+        /* Sample once after the conflict row lock. The used prior count
+           keeps this volatile subquery correlated with the locked row. */
+        (observed_at, cooldown_until) = (
+          SELECT sampled.clock_at,
+                 CASE
+                   WHEN EXCLUDED.state = 'healthy' THEN NULL
+                   WHEN EXCLUDED.last_outcome = 'gateway_rate_limited_failure'
+                     AND sampled.prior_failure_count + 1 < 2 THEN sampled.clock_at
+                   ELSE sampled.clock_at +
+                     CASE EXCLUDED.last_outcome
+                       WHEN 'gateway_account_access_failure' THEN
+                         LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 2)))
+                       WHEN 'gateway_rate_limited_failure' THEN
+                         LEAST(15000::bigint, 2000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 3)))
+                       WHEN 'gateway_stream_abort_failure' THEN
+                         LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 2)))
+                       ELSE LEAST(300000::bigint, 1000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 8)))
+                     END * interval '1 millisecond'
+                 END
+            FROM LATERAL (
+              SELECT clock_timestamp() AS clock_at,
+                     current_health.failure_count AS prior_failure_count
+            ) AS sampled
+        ),
         last_outcome = EXCLUDED.last_outcome,
         source_fencing_token = EXCLUDED.source_fencing_token,
         revision = current_health.revision + 1,
@@ -437,6 +447,19 @@ function invalidInput(): never {
 
 function storageError(): ProviderAccountRuntimeHealthStoreError {
   return new ProviderAccountRuntimeHealthStoreError('STORAGE_ERROR');
+}
+
+function healthReadTime(input: { readonly now: Date; readonly clock?: () => Date }): Date | null {
+  try {
+    if ('clock' in input) {
+      if (!Object.hasOwn(input, 'clock') || typeof input.clock !== 'function') return null;
+      const now = input.clock();
+      return now instanceof Date && Number.isFinite(now.getTime()) ? now : null;
+    }
+    return input.now instanceof Date && Number.isFinite(input.now.getTime()) ? input.now : null;
+  } catch {
+    return null;
+  }
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -589,6 +612,7 @@ export class PostgresProviderAccountRuntimeHealthStore
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly now: Date;
+    readonly clock?: () => Date;
   }): Promise<ProviderAccountSchedulerHealthDecision> {
     if (Date.now() < this.writeFailedUntil) {
       return { decision: 'block', reason: 'provider account runtime health authority is unavailable' };
@@ -605,6 +629,8 @@ export class PostgresProviderAccountRuntimeHealthStore
         scope.ownerTenantId,
       ]);
       this.storageRecovered();
+      const now = healthReadTime(input);
+      if (now === null) return { decision: 'block', reason: 'provider account runtime health input is invalid' };
       if (result.rows.length !== 1) {
         return { decision: 'block', reason: 'provider account runtime health is unknown' };
       }
@@ -618,16 +644,14 @@ export class PostgresProviderAccountRuntimeHealthStore
         // gate compares against the gateway clock; small negative age from
         // cross-process clock dispersion is clamped, a genuinely future
         // timestamp beyond the tolerance stays malformed (fail-closed).
-        observedAt.getTime() - input.now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS ||
-        input.now.getTime() - observedAt.getTime() > this.maxHealthAgeMs ||
+        observedAt.getTime() - now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS ||
+        now.getTime() - observedAt.getTime() > this.maxHealthAgeMs ||
         (row.cooldown_until !== null && !cooldownUntil)
       ) {
         return { decision: 'block', reason: 'provider account runtime health is stale or malformed' };
       }
       const status =
-        row.state === 'cooldown' && cooldownUntil && cooldownUntil.getTime() <= input.now.getTime()
-          ? 'degraded'
-          : row.state;
+        row.state === 'cooldown' && cooldownUntil && cooldownUntil.getTime() <= now.getTime() ? 'degraded' : row.state;
       return {
         decision: 'allow',
         value: {
@@ -651,6 +675,7 @@ export class PostgresProviderAccountRuntimeHealthStore
     readonly caller: RequestPreparationCaller;
     readonly candidate: ProviderAccountHealthSchedulingCandidate;
     readonly now: Date;
+    readonly clock?: () => Date;
   }): Promise<ProviderAccountHealthSchedulingView> {
     if (Date.now() < this.writeFailedUntil) {
       return {
@@ -671,6 +696,10 @@ export class PostgresProviderAccountRuntimeHealthStore
         scope.ownerTenantId,
       ]);
       this.storageRecovered();
+      const now = healthReadTime(input);
+      if (now === null) {
+        return { decision: 'block', reason: 'provider account runtime health input is invalid', code: 'input' };
+      }
       if (result.rows.length !== 1) {
         return { decision: 'block', reason: 'provider account runtime health is unknown', code: 'unknown' };
       }
@@ -705,20 +734,18 @@ export class PostgresProviderAccountRuntimeHealthStore
       // H1 (P5b): a genuinely future timestamp beyond the dispersion
       // tolerance is malformed data, not staleness — it must never reach the
       // half-open probe path. Only a merely-old observation is 'stale'.
-      if (observedAt.getTime() - input.now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS) {
+      if (observedAt.getTime() - now.getTime() > MAX_HEALTH_OBSERVED_AT_SKEW_MS) {
         return {
           decision: 'block',
           reason: 'provider account runtime health is stale or malformed',
           code: 'malformed',
         };
       }
-      if (input.now.getTime() - observedAt.getTime() > this.maxHealthAgeMs) {
+      if (now.getTime() - observedAt.getTime() > this.maxHealthAgeMs) {
         return { decision: 'block', reason: 'provider account runtime health is stale or malformed', code: 'stale' };
       }
       const status =
-        row.state === 'cooldown' && cooldownUntil && cooldownUntil.getTime() <= input.now.getTime()
-          ? 'degraded'
-          : row.state;
+        row.state === 'cooldown' && cooldownUntil && cooldownUntil.getTime() <= now.getTime() ? 'degraded' : row.state;
       return {
         decision: 'allow',
         value: {

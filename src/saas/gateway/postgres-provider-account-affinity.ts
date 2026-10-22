@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import type {
+  ProviderAccountSchedulerAffinityBindDecision,
   ProviderAccountSchedulerAffinityDecision,
   ProviderAccountSchedulerAffinityPort,
   ProviderAccountSchedulerAffinityScope,
@@ -504,7 +505,7 @@ export class PostgresProviderAccountAffinity implements ProviderAccountScheduler
 
   async bind(
     input: NonNullable<ProviderAccountSchedulerAffinityPort['bind']> extends (arg: infer A) => unknown ? A : never,
-  ) {
+  ): Promise<ProviderAccountSchedulerAffinityBindDecision> {
     try {
       const refs = references(input.context);
       if (!refs || !scopeIsValid(input.scope) || !nonEmpty(input.accountId)) {
@@ -521,10 +522,23 @@ export class PostgresProviderAccountAffinity implements ProviderAccountScheduler
           if (rows.length === 1 && !validRow(rows[0])) throw new AffinityConflict('stored affinity row is malformed');
           snapshots.push({ kind: ref.kind, row: rows[0] ?? null });
         }
-        for (const { row } of snapshots) {
-          if (row && row.state === 'active' && !rowIsExpired(row) && row.account_id !== input.accountId) {
-            throw new AffinityConflict('affinity is already bound to another eligible account');
-          }
+        const activeAccounts = new Set(
+          snapshots.flatMap(({ row }) =>
+            row && row.state === 'active' && !rowIsExpired(row) ? [String(row.account_id)] : [],
+          ),
+        );
+        if (activeAccounts.size > 1) {
+          throw new AffinityConflict('affinity is already bound to another eligible account');
+        }
+        const [activeAccountId] = activeAccounts;
+        if (activeAccountId !== undefined && activeAccountId !== input.accountId) {
+          // No mutation has occurred: a losing proposal must not refresh the
+          // winner or create a missing reference alias before reconciliation.
+          return {
+            decision: 'block',
+            reason: 'provider account affinity binding conflict',
+            contention: { kind: 'active_binding', accountId: activeAccountId },
+          } as const;
         }
 
         for (const { kind, row } of snapshots) {

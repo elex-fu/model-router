@@ -63,6 +63,11 @@ export interface ProviderAccountSchedulerRights {
 
 export interface ProviderAccountSchedulerEligibilityAllowed {
   readonly decision: 'allow';
+  /**
+   * Trusted eligibility authority clock for rights windows. Only a truly absent
+   * field preserves the legacy scheduler clock; malformed or inherited values block.
+   */
+  readonly authorityAt?: string | Date;
   /** The same account identity, with freshly revalidated non-secret epochs. */
   readonly candidate: RequestPreparationCandidateAuthority;
   readonly status: 'active';
@@ -214,6 +219,8 @@ export interface ProviderAccountSchedulerHealthPort {
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
     readonly now: Date;
+    /** Server-owned clock sampled after asynchronous health reads. */
+    readonly clock?: () => Date;
   }): Promise<ProviderAccountSchedulerHealthDecision>;
 }
 
@@ -317,7 +324,12 @@ export interface ProviderAccountSchedulerAffinityPort {
 
 export type ProviderAccountSchedulerAffinityBindDecision =
   | { readonly decision: 'allow' }
-  | { readonly decision: 'block'; readonly reason: string };
+  | {
+      readonly decision: 'block';
+      readonly reason: string;
+      /** One locked active winner; a hint for combined selection, never authority to dispatch. */
+      readonly contention?: { readonly kind: 'active_binding'; readonly accountId: string };
+    };
 
 export interface ProviderAccountSchedulerAffinityBindingInput {
   readonly caller: RequestPreparationCaller;
@@ -516,6 +528,11 @@ export interface ProviderAccountSchedulerCompositeContext {
 
 export interface ProviderAccountSchedulerPort {
   select(
+    input: ProviderAccountSchedulerInput,
+  ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>>;
+
+  /** Selects and binds before returning, preserving temporary capacity observations until the final winner. */
+  selectAndBind?(
     input: ProviderAccountSchedulerInput,
   ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>>;
 
@@ -746,7 +763,7 @@ function notExpired(value: unknown, now: Date): boolean {
   return expiresAt === null || expiresAt.getTime() > now.getTime();
 }
 
-function sameCandidateIdentity(
+export function sameCandidateIdentity(
   original: RequestPreparationCandidateAuthority,
   refreshed: RequestPreparationCandidateAuthority,
 ): boolean {
@@ -766,6 +783,12 @@ function sameCandidateIdentity(
     refreshed.endpoint === original.endpoint &&
     refreshed.supplierCostVersion === original.supplierCostVersion
   );
+}
+
+function affinityDataValue(value: unknown, key: string): unknown {
+  if (!isRecord(value)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
 }
 
 function validAffinityContext(context: RequestPreparationSchedulingContext | undefined): boolean {
@@ -1038,13 +1061,17 @@ function validEligibility(
   }
   if (value.route !== undefined && !validRevalidatedRoute(value.route, input, refreshed)) return false;
   if (!candidateMatchesScope(input.caller, refreshed)) return false;
+  if (!Object.hasOwn(value, 'authorityAt') && 'authorityAt' in value) return false;
+  const authorityAt = Object.hasOwn(value, 'authorityAt') ? date(value.authorityAt) : now;
+  if (authorityAt === null) return false;
   if (
     value.status !== 'active' ||
     !isRecord(value.capability) ||
-    value.capability.protocol !== input.protocol ||
+    // The trusted route separates native capability from client route scope.
+    value.capability.protocol !== (input.route?.providerProtocol ?? input.protocol) ||
     value.capability.supportLevel !== 'supported' ||
     value.capability.validationState !== 'verified' ||
-    !validRights(value.rights, refreshed, input.protocol, now) ||
+    !validRights(value.rights, refreshed, input.protocol, authorityAt) ||
     !positiveInteger(value.weight) ||
     typeof value.priority !== 'number' ||
     !Number.isSafeInteger(value.priority) ||
@@ -1402,6 +1429,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       if (firstPass.outcome === 'blocked') return schedulerBlock(firstPass.reason);
       let eligible = firstPass.eligible;
       let durableHealthDenies = firstPass.healthDenied;
+      let capacityDenies = firstPass.busySkipped.length;
       /*
        * P17 (R9 re-run finding): fail-open passthrough when the in-process
        * failure-feedback cooldown would empty the entire viable candidate
@@ -1445,6 +1473,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         if (fallbackPass.outcome === 'blocked') return schedulerBlock(fallbackPass.reason);
         eligible = fallbackPass.eligible;
         durableHealthDenies += fallbackPass.healthDenied;
+        capacityDenies += fallbackPass.busySkipped.length;
       }
 
       /*
@@ -1531,6 +1560,9 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
          */
         if (durableHealthDenies > 0) {
           return blockRequestPreparation('capability_unavailable', 'no schedulable provider account is available');
+        }
+        if (capacityDenies > 0) {
+          return rejectRequestPreparation('rate_limited', 'provider account capacity is currently exhausted');
         }
         return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
       }
@@ -1673,6 +1705,207 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
   }
 
   /**
+   * Standard preparation keeps selection and affinity binding in one operation.
+   * Only a locked, typed winner may replace a proposal that lost its first bind;
+   * the replacement passes the full check chain and one final fenced bind.
+   */
+  async selectAndBindCandidate(
+    input: ProviderAccountSchedulerInput,
+  ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>> {
+    try {
+      const selected = await this.select(input);
+      if (selected.decision !== 'allow') return selected;
+      if (!this.selectionMatchesSource(input, selected.value)) {
+        return schedulerBlock('scheduler selected an account outside the authorized candidate set');
+      }
+      if (!hasAffinityReference(input.scheduling)) return selected;
+      const initial = await this.bindSelectedCandidate(input, selected.value);
+      if (initial.decision === 'allow') return selected;
+      const source = this.affinityWinnerFromBind(input, selected.value, initial);
+      if (source.decision !== 'allow') return source;
+      const winner = await this.revalidateAffinityWinner(input, source.value);
+      if (winner.decision !== 'allow') return winner;
+      if (!this.selectionMatchesSource(input, winner.value)) {
+        return schedulerBlock('provider account affinity winner is outside the authorized candidate set');
+      }
+      const finalBinding = await this.bindSelectedCandidate(input, winner.value);
+      if (finalBinding.decision !== 'allow') {
+        // A second known winner ends this operation. It grants no authority to
+        // dispatch and must not start another revalidation or bind attempt.
+        const changedWinner = this.affinityWinnerFromBind(input, winner.value, finalBinding);
+        if (changedWinner.decision === 'allow') {
+          return rejectRequestPreparation('rate_limited', 'provider account affinity binding is contended');
+        }
+        return schedulerBlock(finalBinding.reason);
+      }
+      return winner;
+    } catch {
+      return schedulerBlock('provider account scheduler failed closed');
+    }
+  }
+
+  private affinityWinnerFromBind(
+    input: ProviderAccountSchedulerInput,
+    selected: RequestPreparationCandidateAuthority,
+    binding: Extract<ProviderAccountSchedulerAffinityBindDecision, { readonly decision: 'block' }>,
+  ): RequestPreparationDecision<RequestPreparationCandidateAuthority> {
+    const contention = binding.contention;
+    if (
+      !Object.hasOwn(binding, 'contention') ||
+      !isRecord(contention) ||
+      !Object.hasOwn(contention, 'kind') ||
+      !Object.hasOwn(contention, 'accountId') ||
+      contention.kind !== 'active_binding' ||
+      !nonEmpty(contention.accountId) ||
+      contention.accountId === selected.accountId
+    ) {
+      return schedulerBlock(binding.reason);
+    }
+    const sources = input.candidates.filter((candidate) => candidate.accountId === contention.accountId);
+    const source = sources.length === 1 ? sources[0] : undefined;
+    if (!source || !this.selectionMatchesSource(input, source) || !input.route) {
+      return schedulerBlock('provider account affinity winner is outside the authorized candidate set');
+    }
+    const bindingInput = {
+      caller: input.caller,
+      entitlement: input.entitlement,
+      publicModel: input.publicModel,
+      protocol: input.protocol,
+      context: input.scheduling as RequestPreparationSchedulingContext,
+      route: input.route,
+    };
+    const selectedScope = affinityScopeFromBinding({ ...bindingInput, candidate: selected });
+    const winnerScope = affinityScopeFromBinding({ ...bindingInput, candidate: source });
+    if (
+      !selectedScope ||
+      !winnerScope ||
+      (Object.keys(selectedScope) as (keyof ProviderAccountSchedulerAffinityScope)[]).some(
+        (key) => selectedScope[key] !== winnerScope[key],
+      )
+    ) {
+      return schedulerBlock('provider account affinity winner route scope changed');
+    }
+    return allowRequestPreparation(source);
+  }
+
+  private selectionMatchesSource(
+    input: ProviderAccountSchedulerInput,
+    selected: RequestPreparationCandidateAuthority,
+  ): boolean {
+    return (
+      isRecord(selected) &&
+      candidateMatchesScope(input.caller, selected) &&
+      selected.accountOwnerKind === (input.caller.supplyMode === 'byok' ? 'tenant' : 'platform') &&
+      !input.scheduling?.attemptedAccountIds?.includes(selected.accountId) &&
+      input.candidates.some((candidate) => sameCandidateIdentity(candidate, selected))
+    );
+  }
+
+  private async bindSelectedCandidate(
+    input: ProviderAccountSchedulerInput,
+    candidate: RequestPreparationCandidateAuthority,
+  ): Promise<ProviderAccountSchedulerAffinityBindDecision> {
+    if (!input.route) return { decision: 'block', reason: 'provider account affinity route scope is invalid' };
+    const scope = affinityScopeFromBinding({
+      caller: input.caller,
+      entitlement: input.entitlement,
+      publicModel: input.publicModel,
+      protocol: input.protocol,
+      context: input.scheduling as RequestPreparationSchedulingContext,
+      route: input.route,
+      candidate,
+    });
+    if (!scope) return { decision: 'block', reason: 'provider account affinity route scope is invalid' };
+    const affinity = this.dependencies.affinity;
+    if (!affinity?.bind) return { decision: 'block', reason: 'provider account affinity storage is unavailable' };
+    const decision = await affinity.bind({
+      context: input.scheduling as RequestPreparationSchedulingContext,
+      scope,
+      accountId: candidate.accountId,
+    });
+    const outcome = affinityDataValue(decision, 'decision');
+    if (outcome === 'allow') return { decision: 'allow' };
+    const reason = affinityDataValue(decision, 'reason');
+    if (outcome !== 'block' || !nonEmpty(reason)) {
+      return { decision: 'block', reason: 'provider account affinity authority returned an invalid decision' };
+    }
+    const contention = affinityDataValue(decision, 'contention');
+    const kind = affinityDataValue(contention, 'kind');
+    const accountId = affinityDataValue(contention, 'accountId');
+    if (
+      isRecord(decision) &&
+      (Object.getPrototypeOf(decision) === Object.prototype || Object.getPrototypeOf(decision) === null) &&
+      Reflect.ownKeys(decision).length === 3 &&
+      isRecord(contention) &&
+      (Object.getPrototypeOf(contention) === Object.prototype || Object.getPrototypeOf(contention) === null) &&
+      Reflect.ownKeys(contention).length === 2 &&
+      kind === 'active_binding' &&
+      nonEmpty(accountId)
+    ) {
+      return { decision: 'block', reason, contention: { kind, accountId } };
+    }
+    return { decision: 'block', reason };
+  }
+
+  private async revalidateAffinityWinner(
+    input: ProviderAccountSchedulerInput,
+    source: RequestPreparationCandidateAuthority,
+  ): Promise<RequestPreparationDecision<RequestPreparationCandidateAuthority>> {
+    const now = this.now();
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      return schedulerBlock('scheduler clock is unavailable');
+    }
+    let pass = await this.collectEligibleCandidates(input, now, [source], {
+      ignoreFailureFeedback: false,
+      ignoreModelCooldown: false,
+      ignoreWindowCost: false,
+    });
+    if (pass.outcome === 'blocked') return schedulerBlock(pass.reason);
+    if (pass.windowCostSkipped.length > 0 && this.dependencies.windowCost) {
+      let state: 'admit' | 'sticky_only' | 'paused';
+      try {
+        state = await this.dependencies.windowCost.resolveWindowCostSchedulability({
+          candidate: source,
+          now,
+          isSticky: true,
+        });
+      } catch {
+        // Match the existing window observation contract; durable authority remains below.
+        state = 'admit';
+      }
+      if (state === 'admit' || state === 'sticky_only') {
+        const fresh = this.now();
+        if (!(fresh instanceof Date) || !Number.isFinite(fresh.getTime())) {
+          return schedulerBlock('scheduler clock is unavailable');
+        }
+        pass = await this.collectEligibleCandidates(input, fresh, [source], {
+          ignoreFailureFeedback: false,
+          ignoreModelCooldown: false,
+          ignoreWindowCost: true,
+        });
+        if (pass.outcome === 'blocked') return schedulerBlock(pass.reason);
+      }
+    }
+    const eligible = pass.eligible.find(({ accountId }) => accountId === source.accountId);
+    if (eligible) {
+      return allowRequestPreparation(eligible.candidate, {
+        strategy: 'affinity',
+        reasons: ['affinity', 'bind-contention'],
+      });
+    }
+    const busy = pass.busySkipped.find((candidate) => candidate.accountId === source.accountId);
+    if (busy && this.stickyWait) {
+      const waited = await this.waitForBusyStickyTarget(input, source.accountId, busy);
+      if (waited !== null) return waited;
+    }
+    if (pass.healthDenied > 0) {
+      return blockRequestPreparation('capability_unavailable', 'no schedulable provider account is available');
+    }
+    if (busy) return rejectRequestPreparation('rate_limited', 'provider account capacity is currently exhausted');
+    return rejectRequestPreparation('account_denied', 'no eligible provider account is available');
+  }
+
+  /**
    * Core-plan 9.2: the bounded wait for a busy sticky target. The re-check
    * loop re-runs the full candidate check chain on `tickMs` sleeps; between
    * ticks NOTHING is held — no database transaction (every port opens its
@@ -1785,9 +2018,9 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         /**
          * Core-plan 9.2: candidates that passed eligibility and health but
          * are at (or over) their concurrency limit — the in-process "busy"
-         * population the bounded sticky wait consults. A hint list only;
-         * these candidates are still skipped from the ranking exactly as
-         * before, so an absent wait seam keeps the selection untouched.
+         * population the bounded sticky wait consults. These candidates stay
+         * out of ranking; an empty set caused by this capacity denial is
+         * rate limited after durable health denial takes precedence.
          */
         readonly busySkipped: RequestPreparationCandidateAuthority[];
         readonly healthDenied: number;
@@ -1903,8 +2136,13 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         caller: input.caller,
         candidate: eligibility.candidate,
         now,
+        clock: this.now,
       });
-      const healthResult = healthValue(health, now, this.maxHealthAgeMs);
+      const healthNow = this.now();
+      if (!(healthNow instanceof Date) || !Number.isFinite(healthNow.getTime())) {
+        return { outcome: 'blocked', reason: 'provider account health clock is unavailable' };
+      }
+      const healthResult = healthValue(health, healthNow, this.maxHealthAgeMs);
       if (healthResult === 'block') {
         return { outcome: 'blocked', reason: 'provider account health authority is unavailable' };
       }
@@ -1933,14 +2171,13 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       if (
         !isRecord(concurrency.value) ||
         !nonNegativeInteger(concurrency.value.inFlight) ||
-        !positiveInteger(concurrency.value.limit) ||
-        concurrency.value.inFlight >= concurrency.value.limit
+        !positiveInteger(concurrency.value.limit)
       ) {
-        if (isRecord(concurrency.value) && concurrency.value.inFlight >= concurrency.value.limit) {
-          busySkipped.push(candidateValue);
-          continue;
-        }
         return { outcome: 'blocked', reason: 'provider account concurrency authority is invalid' };
+      }
+      if (concurrency.value.inFlight >= concurrency.value.limit) {
+        busySkipped.push(candidateValue);
+        continue;
       }
 
       eligible.push({

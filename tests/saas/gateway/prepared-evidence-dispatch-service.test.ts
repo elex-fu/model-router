@@ -19,6 +19,10 @@ import type {
   ProviderAccountRuntimeHealthWriter,
 } from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import type {
+  PreparedEvidenceDispatchObservation,
+  PreparedEvidenceDispatchObserver,
+} from '../../../src/saas/gateway/prepared-evidence-dispatch-observer.js';
+import type {
   PreparedEvidenceClientStream,
   PreparedEvidenceTransportResponse,
 } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
@@ -316,6 +320,7 @@ class FakeEvidence {
 class FakeLeaseProvider implements PreparedEvidenceLeaseProvider {
   readonly calls: string[] = [];
   unavailable = false;
+  acquireFailure: Error | null = null;
   invalidContract = false;
   releaseCount = 0;
   renewCount = 0;
@@ -331,6 +336,7 @@ class FakeLeaseProvider implements PreparedEvidenceLeaseProvider {
     release(): Promise<void>;
   } | null> {
     this.calls.push(input.attemptId);
+    if (this.acquireFailure) throw this.acquireFailure;
     if (this.unavailable) return null;
     return {
       fencingToken: this.fencingToken,
@@ -409,6 +415,7 @@ function service(
   leaseProvider: FakeLeaseProvider,
   transport: PreparedEvidenceTransport,
   runtimeHealthWriter?: ProviderAccountRuntimeHealthWriter,
+  observer?: PreparedEvidenceDispatchObserver,
 ): SaasPreparedEvidenceDispatchService {
   evidenceService.metering = metering;
   return new SaasPreparedEvidenceDispatchService(
@@ -418,8 +425,84 @@ function service(
     transport,
     undefined,
     runtimeHealthWriter,
+    undefined,
+    undefined,
+    observer,
   );
 }
+
+test('dispatch stage diagnostics preserve await order and never expose dispatch identities', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const client = new FakeClientStream();
+  const events: PreparedEvidenceDispatchObservation[] = [];
+  const transport: PreparedEvidenceTransport = {
+    async send() {
+      return { responseStarted: false, resultHttpStatus: 200, body: responseBody([new Uint8Array([1])]) };
+    },
+  };
+  const health: ProviderAccountRuntimeHealthWriter = {
+    async recordRuntimeOutcome() {
+      assert.equal(client.endCount, 1, 'post-response observation follows body delivery');
+      return 'applied';
+    },
+  };
+  const result = await service(proof, metering, lease, transport, health, (event) => {
+    events.push(event);
+    throw new Error('diagnostic sink failed');
+  }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit, client });
+  assert.equal(result.kind, 'sent');
+  assert.equal(lease.releaseCount, 1);
+  assert.deepEqual(
+    events.map(({ stage }) => stage),
+    [
+      'preflight',
+      'attempt-read',
+      'lease-acquire',
+      'claim',
+      'attempt-read',
+      'attempt-transition',
+      'transport-send',
+      'response-delivery',
+      'attempt-transition',
+      'runtime-health',
+      'lease-release',
+    ],
+  );
+  assert.ok(
+    events.every((event) => event.outcome === 'ok' && event.durationMs >= 0 && Number.isFinite(event.durationMs)),
+  );
+  assert.doesNotMatch(JSON.stringify(events), /evidence-1|attempt-1|tenant-1|model-1|account-1|payload/);
+});
+
+test('a failing observed claim retains the original error and releases its lease', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const failure = new Error('original claim rejection');
+  proof.rejectClaim = failure;
+  const events: PreparedEvidenceDispatchObservation[] = [];
+  const transport: PreparedEvidenceTransport = {
+    async send() {
+      throw new Error('must not send');
+    },
+  };
+  await assert.rejects(
+    service(proof, metering, lease, transport, undefined, (event) => {
+      events.push(event);
+      throw new Error('diagnostic failure');
+    }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+    (error) => error === failure,
+  );
+  assert.equal(lease.releaseCount, 1);
+  assert.equal(events.find(({ stage }) => stage === 'claim')?.outcome, 'error');
+  assert.equal(events.at(-1)?.stage, 'lease-release');
+  assert.equal(
+    events.some(({ stage }) => stage === 'transport-send'),
+    false,
+  );
+});
 
 test('dispatch records provider success with the acquired lease fencing token', async () => {
   const proof = new FakeEvidence();
@@ -489,7 +572,7 @@ test('a model-unavailable outcome awaits the durable (account, model) cooldown r
     transport,
     undefined,
     undefined,
-    { recordDispatchOutcome() {} },
+    { isExcluded: () => false, recordDispatchOutcome() {} },
     modelRateLimit,
   );
   await dispatch.dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
@@ -513,6 +596,8 @@ test('a model-unavailable outcome awaits the durable (account, model) cooldown r
 test('a confirmed successful execution with billing reconciliation remains a sent success', async () => {
   const proof = new FakeEvidence();
   const metering = new FakeMetering();
+  const client = new FakeClientStream();
+  const events: PreparedEvidenceDispatchObservation[] = [];
   proof.metering = metering;
   const successAttempt = attempt({
     preparedEvidenceId: 'evidence-1',
@@ -525,6 +610,7 @@ test('a confirmed successful execution with billing reconciliation remains a sen
   });
   const settlement: NormalSuccessSettlementPort = {
     async complete() {
+      assert.equal(client.endCount, 1, 'body delivery completes before settlement starts');
       return { kind: 'reconciliation_pending', attempt: successAttempt };
     },
     async retainUnknown() {
@@ -548,6 +634,9 @@ test('a confirmed successful execution with billing reconciliation remains a sen
           status: 'reported',
           source: 'upstream',
           semanticsVersion: 'v1',
+          billingMode: 'token',
+          units: null,
+          sizeTier: null,
         },
       };
     },
@@ -574,15 +663,25 @@ test('a confirmed successful execution with billing reconciliation remains a sen
     new FakeLeaseProvider(),
     transport,
     settlement,
+    undefined,
+    undefined,
+    undefined,
+    (event) => events.push(event),
   ).dispatch({
     evidenceId: 'evidence-1',
     payloadBytes: payload,
     audit,
     normalSuccessSnapshot: snapshot,
+    client,
   });
 
   assert.equal(result.kind, 'sent');
   assert.equal(result.attempt.resultState, 'succeeded');
+  assert.ok(
+    events.findIndex(({ stage }) => stage === 'response-delivery') <
+      events.findIndex(({ stage }) => stage === 'settlement'),
+  );
+  assert.equal(events.find(({ stage }) => stage === 'settlement')?.outcome, 'ok');
 });
 
 test('dispatch records retryable provider failures and ignores caller errors', async () => {
@@ -1535,7 +1634,10 @@ test('mid-stream upstream abort after a delivered chunk records stream_abort evi
   const metering = new FakeMetering();
   const lease = new FakeLeaseProvider();
   const client = new FakeClientStream();
-  const writes: unknown[] = [];
+  const writes: Array<
+    | { health: Parameters<ProviderAccountRuntimeHealthWriter['recordRuntimeOutcome']>[0] }
+    | { feedback: Parameters<ProviderAccountDispatchFailureFeedbackPort['recordDispatchOutcome']>[0] }
+  > = [];
   const feedback: ProviderAccountDispatchFailureFeedbackPort = {
     isExcluded: () => false,
     recordDispatchOutcome(input) {
@@ -2236,6 +2338,75 @@ test('missing account lease fails closed before dispatching or transport', async
   assert.deepEqual(metering.calls, ['get-attempt']);
   assert.equal(proof.record.status, 'registered');
   assert.equal(metering.current.preparedEvidenceId, null);
+});
+
+test('known PostgreSQL capacity rejection preserves its identity before claim or transport', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const exhausted = new SaasPreparedEvidenceDispatchError('LEASE_CAPACITY_EXHAUSTED', 'fixed capacity denial');
+  lease.acquireFailure = exhausted;
+  const events: PreparedEvidenceDispatchObservation[] = [];
+  let sends = 0;
+  await assert.rejects(
+    service(
+      proof,
+      metering,
+      lease,
+      {
+        async send() {
+          sends++;
+          throw new Error('capacity rejection must not send');
+        },
+      },
+      undefined,
+      (event) => events.push(event),
+    ).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }),
+    (error: unknown) => error === exhausted,
+  );
+  assert.deepEqual(lease.calls, ['attempt-1']);
+  assert.equal(lease.releaseCount, 0, 'no lease was acquired');
+  assert.equal(sends, 0);
+  assert.equal(proof.preflightCalls.length, 1);
+  assert.equal(proof.calls.length, 0);
+  assert.equal(proof.record.status, 'registered');
+  assert.equal(metering.current.preparedEvidenceId, null);
+  assert.deepEqual(metering.calls, ['get-attempt']);
+  assert.deepEqual(
+    events.map(({ stage, outcome }) => ({ stage, outcome })),
+    [
+      { stage: 'preflight', outcome: 'ok' },
+      { stage: 'attempt-read', outcome: 'ok' },
+      { stage: 'lease-acquire', outcome: 'error' },
+    ],
+  );
+});
+
+test('an ordinary acquisition failure remains unavailable instead of a capacity rejection', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  const storage = new Error('synthetic private acquisition failure');
+  lease.acquireFailure = storage;
+  await assert.rejects(
+    service(proof, metering, lease, {
+      async send() {
+        throw new Error('must not send');
+      },
+    }).dispatch({
+      evidenceId: 'evidence-1',
+      payloadBytes: payload,
+      audit,
+    }),
+    (error: unknown) =>
+      error instanceof SaasPreparedEvidenceDispatchError &&
+      error.code === 'LEASE_UNAVAILABLE' &&
+      error.cause === storage,
+  );
+  assert.deepEqual(lease.calls, ['attempt-1']);
+  assert.equal(lease.releaseCount, 0);
+  assert.equal(proof.calls.length, 0);
+  assert.deepEqual(metering.calls, ['get-attempt']);
 });
 
 test('a competing claim invalidates stale preflight without transport or attempt fencing', async () => {

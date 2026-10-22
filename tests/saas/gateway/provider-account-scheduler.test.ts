@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type {
   ProviderAccountSchedulerConcurrencyPort,
   ProviderAccountSchedulerDependencies,
+  ProviderAccountSchedulerEligibilityAllowed,
   ProviderAccountSchedulerEligibilityPort,
   ProviderAccountSchedulerHealthPort,
 } from '../../../src/saas/gateway/provider-account-scheduler.js';
@@ -190,6 +191,671 @@ function scheduler(dependencies: ProviderAccountSchedulerDependencies): Provider
   return new ProviderAccountScheduler(dependencies, { now: () => NOW, maxHealthAgeMs: 60_000 });
 }
 
+function combinedAffinityHarness(
+  options: {
+    readonly hint?: unknown;
+    readonly initialDecision?: unknown;
+    readonly finalDecision?: unknown;
+    readonly finalThrows?: boolean;
+    readonly secondConflict?: boolean;
+    readonly afterContention?: Partial<ProviderAccountSchedulerDependencies>;
+    readonly winner?: RequestPreparationCandidateAuthority;
+    readonly extraCandidates?: readonly RequestPreparationCandidateAuthority[];
+  } = {},
+) {
+  let contended = false;
+  const calls = {
+    resolves: 0,
+    binds: [] as string[],
+    eligibility: [] as string[],
+    health: [] as string[],
+    concurrency: [] as string[],
+  };
+  const source = [options.winner ?? candidate('account-a'), candidate('account-b'), ...(options.extraCandidates ?? [])];
+  const baseEligibility = eligibilityPort(
+    new Map([
+      ['account-a', { priority: 1, weight: 1 }],
+      ['account-b', { priority: 10, weight: 1 }],
+    ]),
+  );
+  const healthy = healthPort();
+  const available = concurrencyPort(new Map());
+  const afterWindow = options.afterContention?.windowCost;
+  const instance = scheduler({
+    eligibility: {
+      async revalidate(input) {
+        calls.eligibility.push(input.candidate.accountId);
+        if (!contended && options.winner)
+          return input.candidate.accountId === 'account-a' ? { decision: 'deny' } : baseEligibility.revalidate(input);
+        return (contended ? (options.afterContention?.eligibility ?? baseEligibility) : baseEligibility).revalidate(
+          input,
+        );
+      },
+    },
+    health: {
+      async get(input) {
+        calls.health.push(input.candidate.accountId);
+        return (contended ? (options.afterContention?.health ?? healthy) : healthy).get(input);
+      },
+    },
+    concurrency: {
+      async get(input) {
+        calls.concurrency.push(input.candidate.accountId);
+        return (contended ? (options.afterContention?.concurrency ?? available) : available).get(input);
+      },
+    },
+    windowCost: afterWindow
+      ? {
+          async resolveWindowCostSchedulability(input) {
+            return contended ? afterWindow.resolveWindowCostSchedulability(input) : 'admit';
+          },
+        }
+      : undefined,
+    affinity: {
+      async resolve() {
+        calls.resolves++;
+        return { decision: 'allow', accountId: null };
+      },
+      async bind(input) {
+        calls.binds.push(input.accountId);
+        if (!contended) {
+          contended = true;
+          if (options.initialDecision !== undefined) return options.initialDecision as never;
+          return {
+            decision: 'block',
+            reason: 'provider account affinity binding conflict',
+            contention: options.hint === undefined ? { kind: 'active_binding', accountId: 'account-a' } : options.hint,
+          } as never;
+        }
+        if (options.finalThrows) throw new Error('private final affinity storage failure');
+        if (options.finalDecision !== undefined) return options.finalDecision as never;
+        return options.secondConflict
+          ? {
+              decision: 'block',
+              reason: 'provider account affinity binding conflict',
+              contention: { kind: 'active_binding', accountId: 'account-b' },
+            }
+          : { decision: 'allow' };
+      },
+    },
+  });
+  return { instance, calls, input: baseInput(source, { sessionId: 'combined-session' }) };
+}
+
+test('combined selection revalidates and binds the one typed winner without resolving affinity again', async () => {
+  const harness = combinedAffinityHarness();
+  const result = await harness.instance.selectAndBindCandidate(harness.input);
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+  assert.equal(harness.calls.resolves, 1);
+  assert.deepEqual(harness.calls.binds, ['account-b', 'account-a']);
+  for (const key of ['eligibility', 'health', 'concurrency'] as const) {
+    assert.deepEqual(harness.calls[key], ['account-a', 'account-b', 'account-a']);
+  }
+});
+
+test('combined uncontended and reference-free selection add no check-chain pass or affinity call', async () => {
+  const events: string[] = [];
+  const base = eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]]));
+  const instance = scheduler({
+    eligibility: {
+      async revalidate(input) {
+        events.push('eligibility');
+        return base.revalidate(input);
+      },
+    },
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+    affinity: {
+      async resolve() {
+        events.push('resolve');
+        return { decision: 'allow', accountId: null };
+      },
+      async bind() {
+        events.push('bind');
+        return { decision: 'allow' };
+      },
+    },
+  });
+  assert.equal(
+    (await instance.selectAndBindCandidate(baseInput([candidate('account-a')], { sessionId: 'combined' }))).decision,
+    'allow',
+  );
+  assert.deepEqual(events, ['eligibility', 'resolve', 'bind']);
+  events.length = 0;
+  assert.equal((await instance.selectAndBindCandidate(baseInput([candidate('account-a')]))).decision, 'allow');
+  assert.deepEqual(events, ['eligibility']);
+});
+
+for (const [name, hint] of [
+  ['string-only block', null],
+  ['unknown kind', { kind: 'other', accountId: 'account-a' }],
+  ['inherited hint', Object.create({ kind: 'active_binding', accountId: 'account-a' })],
+  ['empty winner', { kind: 'active_binding', accountId: '' }],
+  ['same proposal', { kind: 'active_binding', accountId: 'account-b' }],
+  ['outside source', { kind: 'active_binding', accountId: 'account-z' }],
+] as const) {
+  test(`combined binding keeps ${name} fail closed`, async () => {
+    const harness = combinedAffinityHarness({ hint });
+    assert.equal((await harness.instance.selectAndBindCandidate(harness.input)).decision, 'block');
+    assert.deepEqual(harness.calls.binds, ['account-b']);
+    assert.equal(harness.calls.resolves, 1);
+    assert.equal(harness.calls.eligibility.length, 2);
+  });
+}
+
+test('combined binding rejects inherited contention and malformed block reasons', async () => {
+  const contention = { kind: 'active_binding', accountId: 'account-a' };
+  for (const initialDecision of [
+    Object.assign(Object.create({ contention }), { decision: 'block', reason: 'binding conflict' }),
+    { decision: 'block', contention },
+    { decision: 'block', reason: '', contention },
+  ]) {
+    const harness = combinedAffinityHarness({ initialDecision });
+    assert.equal((await harness.instance.selectAndBindCandidate(harness.input)).decision, 'block');
+    assert.deepEqual(harness.calls.binds, ['account-b']);
+    assert.equal(harness.calls.eligibility.length, 2);
+  }
+});
+
+test('combined binding never invokes accessor-backed decision or contention fields', async () => {
+  let getterCalls = 0;
+  const accessor = () => {
+    getterCalls++;
+    throw new Error('private affinity accessor');
+  };
+  const cases = [
+    Object.defineProperty({ decision: 'block', reason: 'binding conflict' }, 'contention', { get: accessor }),
+    Object.defineProperty(
+      { decision: 'block', contention: { kind: 'active_binding', accountId: 'account-a' } },
+      'reason',
+      { get: accessor },
+    ),
+    Object.defineProperty(
+      { reason: 'binding conflict', contention: { kind: 'active_binding', accountId: 'account-a' } },
+      'decision',
+      { get: accessor },
+    ),
+    {
+      decision: 'block',
+      reason: 'binding conflict',
+      contention: Object.defineProperty({ accountId: 'account-a' }, 'kind', { get: accessor }),
+    },
+    {
+      decision: 'block',
+      reason: 'binding conflict',
+      contention: Object.defineProperty({ kind: 'active_binding' }, 'accountId', { get: accessor }),
+    },
+    {
+      decision: 'block',
+      reason: 'binding conflict',
+      contention: { kind: 'active_binding', accountId: 'account-a', extra: true },
+    },
+  ];
+  for (const initialDecision of cases) {
+    const harness = combinedAffinityHarness({ initialDecision });
+    assert.equal((await harness.instance.selectAndBindCandidate(harness.input)).decision, 'block');
+    assert.deepEqual(harness.calls.binds, ['account-b']);
+    assert.equal(harness.calls.eligibility.length, 2);
+  }
+  assert.equal(getterCalls, 0);
+});
+
+test('combined winner cannot cross a binding scope or reuse an attempted account', async () => {
+  const foreign = combinedAffinityHarness({ winner: { ...candidate('account-a'), providerId: 'foreign-provider' } });
+  assert.equal((await foreign.instance.selectAndBindCandidate(foreign.input)).decision, 'block');
+  assert.deepEqual(foreign.calls.binds, ['account-b']);
+  const attempted = combinedAffinityHarness();
+  const result = await attempted.instance.selectAndBindCandidate({
+    ...attempted.input,
+    scheduling: { ...attempted.input.scheduling, attemptedAccountIds: ['account-a'] },
+  });
+  assert.equal(result.decision, 'block');
+  assert.deepEqual(attempted.calls.binds, ['account-b']);
+  assert.deepEqual(attempted.calls.eligibility, ['account-b']);
+});
+
+for (const [name, afterContention, expected] of [
+  [
+    'revoked eligibility',
+    {
+      eligibility: {
+        async revalidate() {
+          return { decision: 'deny' as const };
+        },
+      },
+    },
+    'reject',
+  ],
+  [
+    'unavailable eligibility',
+    {
+      eligibility: {
+        async revalidate() {
+          return { decision: 'block' as const, reason: 'authority unavailable' };
+        },
+      },
+    },
+    'block',
+  ],
+  ['unhealthy winner', { health: healthPort(new Map([['account-a', 'unhealthy']])) }, 'block'],
+  [
+    'unavailable health',
+    {
+      health: {
+        async get() {
+          return { decision: 'block' as const, reason: 'health unavailable' };
+        },
+      },
+    },
+    'block',
+  ],
+  ['busy winner', { concurrency: concurrencyPort(new Map([['account-a', { inFlight: 2, limit: 2 }]])) }, 'reject'],
+  [
+    'unavailable capacity',
+    {
+      concurrency: {
+        async get() {
+          return { decision: 'block' as const, reason: 'capacity unavailable' };
+        },
+      },
+    },
+    'block',
+  ],
+  [
+    'paused window',
+    {
+      windowCost: {
+        async resolveWindowCostSchedulability() {
+          return 'paused' as const;
+        },
+      },
+    },
+    'reject',
+  ],
+] as const) {
+  test(`combined binding rechecks ${name} before its final bind`, async () => {
+    const harness = combinedAffinityHarness({ afterContention });
+    const result = await harness.instance.selectAndBindCandidate(harness.input);
+    assert.equal(result.decision, expected);
+    if (result.decision === 'reject')
+      assert.equal(result.code, name === 'busy winner' ? 'rate_limited' : 'account_denied');
+    assert.deepEqual(harness.calls.binds, ['account-b']);
+    assert.equal(harness.calls.resolves, 1);
+  });
+}
+
+test('combined winner preserves the existing sticky-only window reserve band', async () => {
+  const windowReads: boolean[] = [];
+  const harness = combinedAffinityHarness({
+    afterContention: {
+      windowCost: {
+        async resolveWindowCostSchedulability(input) {
+          windowReads.push(input.isSticky);
+          return 'sticky_only';
+        },
+      },
+    },
+  });
+  const result = await harness.instance.selectAndBindCandidate(harness.input);
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-a');
+  assert.deepEqual(windowReads, [false, true]);
+  assert.deepEqual(harness.calls.binds, ['account-b', 'account-a']);
+  assert.equal(harness.calls.resolves, 1);
+});
+
+test('combined binding rate limits a second authorized winner without another check or bind', async () => {
+  const harness = combinedAffinityHarness({ secondConflict: true });
+  const result = await harness.instance.selectAndBindCandidate(harness.input);
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') assert.equal(result.code, 'rate_limited');
+  assert.equal(Object.hasOwn(result, 'retryAfterSeconds'), false);
+  assert.deepEqual(harness.calls.binds, ['account-b', 'account-a']);
+  assert.equal(harness.calls.resolves, 1);
+  for (const key of ['eligibility', 'health', 'concurrency'] as const) {
+    assert.deepEqual(harness.calls[key], ['account-a', 'account-b', 'account-a']);
+  }
+});
+
+test('a second typed winner may be a third original authorized account without revalidating it', async () => {
+  const harness = combinedAffinityHarness({
+    extraCandidates: [candidate('account-c')],
+    finalDecision: {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention: { kind: 'active_binding', accountId: 'account-c' },
+    },
+  });
+  const result = await harness.instance.selectAndBindCandidate(harness.input);
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') assert.equal(result.code, 'rate_limited');
+  assert.equal(Object.hasOwn(result, 'retryAfterSeconds'), false);
+  assert.deepEqual(harness.calls.binds, ['account-b', 'account-a']);
+  assert.deepEqual(harness.calls.eligibility, ['account-a', 'account-b', 'account-c', 'account-a']);
+  assert.deepEqual(harness.calls.health, ['account-a', 'account-b', 'account-a']);
+  assert.deepEqual(harness.calls.concurrency, ['account-a', 'account-b', 'account-a']);
+  assert.equal(harness.calls.resolves, 1);
+});
+
+test('second contention outside the original unique, unattempted route scope stays blocked', async () => {
+  for (const mode of ['outside', 'attempted', 'scope', 'duplicate'] as const) {
+    const extra =
+      mode === 'scope' ? { ...candidate('account-c'), providerId: 'foreign-provider' } : candidate('account-c');
+    const harness = combinedAffinityHarness({
+      extraCandidates: mode === 'outside' ? [] : mode === 'duplicate' ? [extra, extra] : [extra],
+      finalDecision: {
+        decision: 'block',
+        reason: 'provider account affinity binding conflict',
+        contention: { kind: 'active_binding', accountId: 'account-c' },
+      },
+    });
+    if (mode === 'duplicate')
+      harness.instance.select = async () => ({ decision: 'allow', value: candidate('account-b') });
+    const result = await harness.instance.selectAndBindCandidate({
+      ...harness.input,
+      scheduling: {
+        ...harness.input.scheduling,
+        ...(mode === 'attempted' ? { attemptedAccountIds: ['account-c'] } : {}),
+      },
+    });
+    assert.equal(result.decision, 'block', mode);
+    assert.deepEqual(harness.calls.binds, ['account-b', 'account-a'], mode);
+    assert.equal(harness.calls.eligibility.filter((id) => id === 'account-a').length, mode === 'duplicate' ? 1 : 2);
+    assert.equal(harness.calls.resolves, mode === 'duplicate' ? 0 : 1);
+  }
+});
+
+test('second bind requires a strict own-data plain typed winner rather than a conflict message', async () => {
+  let getterCalls = 0;
+  const accessor = () => {
+    getterCalls++;
+    throw new Error('private final affinity accessor');
+  };
+  const contention = { kind: 'active_binding', accountId: 'account-b' };
+  for (const finalDecision of [
+    { decision: 'block', reason: 'provider account affinity binding conflict' },
+    { decision: 'block', reason: 'affinity insert compare-and-swap failed' },
+    {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention: { kind: 'active_binding', accountId: 'account-a' },
+    },
+    {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention: { kind: 'other', accountId: 'account-b' },
+    },
+    {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention: { ...contention, extra: true },
+    },
+    { decision: 'block', reason: 'provider account affinity binding conflict', contention: Object.create(contention) },
+    Object.assign(Object.create({ contention }), {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+    }),
+    Object.assign(Object.create({ extra: true }), {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention,
+    }),
+    { decision: 'block', reason: 'provider account affinity binding conflict', contention, extra: true },
+    Object.defineProperty({ decision: 'block', reason: 'provider account affinity binding conflict' }, 'contention', {
+      get: accessor,
+    }),
+    {
+      decision: 'block',
+      reason: 'provider account affinity binding conflict',
+      contention: Object.defineProperty({ kind: 'active_binding' }, 'accountId', { get: accessor }),
+    },
+    { decision: 'block', contention },
+  ]) {
+    const harness = combinedAffinityHarness({ finalDecision });
+    const result = await harness.instance.selectAndBindCandidate(harness.input);
+    assert.equal(result.decision, 'block');
+    assert.deepEqual(harness.calls.binds, ['account-b', 'account-a']);
+    assert.equal(harness.calls.resolves, 1);
+    for (const key of ['eligibility', 'health', 'concurrency'] as const) {
+      assert.deepEqual(harness.calls[key], ['account-a', 'account-b', 'account-a']);
+    }
+  }
+  assert.equal(getterCalls, 0);
+});
+
+test('a thrown final bind remains blocked after exactly one winner revalidation', async () => {
+  const harness = combinedAffinityHarness({ finalThrows: true });
+  const result = await harness.instance.selectAndBindCandidate(harness.input);
+  assert.equal(result.decision, 'block');
+  assert.deepEqual(harness.calls.binds, ['account-b', 'account-a']);
+  assert.equal(harness.calls.resolves, 1);
+  for (const key of ['eligibility', 'health', 'concurrency'] as const) {
+    assert.deepEqual(harness.calls[key], ['account-a', 'account-b', 'account-a']);
+  }
+});
+
+for (const decision of [
+  { decision: 'allow', value: { inFlight: 2, limit: 2 } },
+  { decision: 'allow', value: { inFlight: 3, limit: 2 } },
+  { decision: 'deny', reason: 'advisory capacity precheck is full' },
+] as const) {
+  test(`capacity ${JSON.stringify(decision)} rate limits initial selection and a fresh affinity winner`, async () => {
+    let initialReads = 0;
+    const concurrency: ProviderAccountSchedulerConcurrencyPort = {
+      async get() {
+        initialReads++;
+        return decision;
+      },
+    };
+    const initial = await scheduler({
+      eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+      health: healthPort(),
+      concurrency,
+    }).select(baseInput([candidate('account-a')]));
+    assert.equal(initial.decision, 'reject');
+    if (initial.decision === 'reject') assert.equal(initial.code, 'rate_limited');
+    assert.equal(Object.hasOwn(initial, 'retryAfterSeconds'), false);
+    assert.equal(initialReads, 1);
+    const harness = combinedAffinityHarness({ afterContention: { concurrency } });
+    const result = await harness.instance.selectAndBindCandidate(harness.input);
+    assert.equal(result.decision, 'reject');
+    if (result.decision === 'reject') assert.equal(result.code, 'rate_limited');
+    assert.equal(Object.hasOwn(result, 'retryAfterSeconds'), false);
+    assert.deepEqual(harness.calls.binds, ['account-b']);
+    assert.deepEqual(harness.calls.concurrency, ['account-a', 'account-b', 'account-a']);
+    assert.equal(harness.calls.resolves, 1);
+  });
+}
+
+for (const [label, value] of [
+  ['string in-flight', { inFlight: '2', limit: 2 }],
+  ['string limit', { inFlight: 2, limit: '2' }],
+  ['zero limit', { inFlight: 0, limit: 0 }],
+  ['negative limit', { inFlight: 0, limit: -1 }],
+  ['negative in-flight', { inFlight: -1, limit: 2 }],
+  ['fractional in-flight', { inFlight: 2.5, limit: 2 }],
+  ['fractional limit', { inFlight: 3, limit: 2.5 }],
+  ['NaN in-flight', { inFlight: Number.NaN, limit: 2 }],
+  ['NaN limit', { inFlight: 2, limit: Number.NaN }],
+  ['infinite in-flight', { inFlight: Number.POSITIVE_INFINITY, limit: 2 }],
+  ['unsafe in-flight', { inFlight: Number.MAX_SAFE_INTEGER + 1, limit: 2 }],
+  ['unsafe limit', { inFlight: 0, limit: Number.MAX_SAFE_INTEGER + 1 }],
+  ['null snapshot', null],
+] as const) {
+  test(`malformed capacity ${label} blocks initial and fresh winner checks before busy classification`, async () => {
+    const concurrency: ProviderAccountSchedulerConcurrencyPort = {
+      async get() {
+        return { decision: 'allow', value } as never;
+      },
+    };
+    const initial = await scheduler({
+      eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+      health: healthPort(),
+      concurrency,
+    }).select(baseInput([candidate('account-a')]));
+    assert.equal(initial.decision, 'block');
+    const harness = combinedAffinityHarness({ afterContention: { concurrency } });
+    const result = await harness.instance.selectAndBindCandidate(harness.input);
+    assert.equal(result.decision, 'block');
+    assert.deepEqual(harness.calls.binds, ['account-b']);
+    assert.deepEqual(harness.calls.concurrency, ['account-a', 'account-b', 'account-a']);
+  });
+}
+
+test('capacity classification preserves durable health priority and does not reopen denied candidates', async () => {
+  for (const mode of ['health', 'eligibility', 'window'] as const) {
+    const result = await scheduler({
+      eligibility: eligibilityPort(
+        new Map(
+          mode === 'eligibility'
+            ? [['account-a', { priority: 1, weight: 1 }]]
+            : [
+                ['account-a', { priority: 1, weight: 1 }],
+                ['account-b', { priority: 1, weight: 1 }],
+              ],
+        ),
+      ),
+      health: healthPort(new Map(mode === 'health' ? [['account-b', 'unhealthy']] : [])),
+      concurrency: concurrencyPort(new Map([['account-a', { inFlight: 2, limit: 2 }]])),
+      windowCost:
+        mode === 'window'
+          ? {
+              async resolveWindowCostSchedulability(input) {
+                return input.candidate.accountId === 'account-b' ? 'paused' : 'admit';
+              },
+            }
+          : undefined,
+    }).select(baseInput([candidate('account-a'), candidate('account-b')]));
+    assert.equal(result.decision, mode === 'health' ? 'block' : 'reject', mode);
+    if (result.decision === 'reject') assert.equal(result.code, 'rate_limited', mode);
+  }
+});
+
+test('capacity denied only in the transient-hint fallback is still rate limited', async () => {
+  let capacityReads = 0;
+  const result = await scheduler({
+    eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+    health: healthPort(),
+    concurrency: {
+      async get() {
+        capacityReads++;
+        return { decision: 'allow', value: { inFlight: 2, limit: 2 } };
+      },
+    },
+    failureFeedback: { isExcluded: () => true },
+  }).select(baseInput([candidate('account-a')]));
+  assert.equal(result.decision, 'reject');
+  if (result.decision === 'reject') assert.equal(result.code, 'rate_limited');
+  assert.equal(capacityReads, 1);
+});
+
+test('a capacity refusal does not hide another malformed capacity authority', async () => {
+  const result = await scheduler({
+    eligibility: eligibilityPort(
+      new Map([
+        ['account-a', { priority: 1, weight: 1 }],
+        ['account-b', { priority: 1, weight: 1 }],
+      ]),
+    ),
+    health: healthPort(),
+    concurrency: {
+      async get(input) {
+        return input.candidate.accountId === 'account-a'
+          ? { decision: 'deny' }
+          : ({ decision: 'allow', value: { inFlight: '2', limit: 2 } } as never);
+      },
+    },
+  }).select(baseInput([candidate('account-a'), candidate('account-b')]));
+  assert.equal(result.decision, 'block');
+});
+
+test('legacy explicit binding strips the winner hint and does not advertise combined preparation', async () => {
+  const harness = combinedAffinityHarness();
+  const value = harness.input;
+  assert.equal('selectAndBind' in harness.instance, false);
+  const result = await harness.instance.bindAffinity({
+    caller: value.caller,
+    entitlement: value.entitlement,
+    publicModel: value.publicModel,
+    protocol: value.protocol,
+    route: value.route,
+    context: value.scheduling as RequestPreparationSchedulingContext,
+    candidate: candidate('account-b'),
+  });
+  assert.deepEqual(result, { decision: 'block', reason: 'provider account affinity binding conflict' });
+  assert.deepEqual(harness.calls.binds, ['account-b']);
+  assert.equal(harness.calls.resolves, 0);
+});
+
+test('combined selection checks source and attempted identity before its first bind', async () => {
+  for (const selected of [
+    candidate('account-z'),
+    { ...candidate('account-b'), credentialId: 'foreign-credential' },
+    { ...candidate('account-b'), accountOwnerKind: 'tenant' as const },
+    candidate('account-a'),
+  ]) {
+    const harness = combinedAffinityHarness();
+    harness.instance.select = async () => ({
+      decision: 'allow',
+      value: selected as unknown as RequestPreparationCandidateAuthority,
+    });
+    const result = await harness.instance.selectAndBindCandidate({
+      ...harness.input,
+      scheduling: { ...harness.input.scheduling, attemptedAccountIds: ['account-a'] },
+    });
+    assert.equal(result.decision, 'block');
+    assert.deepEqual(harness.calls.binds, []);
+  }
+});
+
+test('native capability follows the trusted route while candidate and rights retain client scope', async () => {
+  const base = eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]]));
+  const input = baseInput([candidate('account-a')]);
+  const bridged = {
+    ...input,
+    route: {
+      ...input.route,
+      providerProtocol: 'anthropic' as const,
+      clientOperation: 'chat.completions',
+      providerOperation: 'messages',
+    },
+  };
+  const native: ProviderAccountSchedulerEligibilityPort = {
+    async revalidate(facts) {
+      assert.equal(facts.protocol, 'openai');
+      assert.equal(facts.candidate.protocol, 'openai');
+      assert.equal(facts.route?.providerProtocol, 'anthropic');
+      assert.equal(facts.route?.providerOperation, 'messages');
+      const result = await base.revalidate(facts);
+      assert.equal(result.decision, 'allow');
+      if (result.decision !== 'allow') return result;
+      return { ...result, capability: { ...result.capability, protocol: 'anthropic' } };
+    },
+  };
+  const result = await scheduler({
+    eligibility: native,
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+  }).select(bridged);
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.protocol, 'openai');
+
+  const wrong = await scheduler({
+    eligibility: base,
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+  }).select(bridged);
+  assert.equal(wrong.decision, 'block', 'a client-shaped capability cannot substitute for native support');
+
+  const legacy = await scheduler({
+    eligibility: base,
+    health: healthPort(),
+    concurrency: concurrencyPort(new Map()),
+  }).select(input);
+  assert.equal(legacy.decision, 'allow', 'absence of a native protocol preserves legacy exact matching');
+});
+
 test('filters stale capability, unhealthy health, and full concurrency before ranking', async () => {
   const candidates = [candidate('account-a'), candidate('account-b'), candidate('account-c')];
   const result = await scheduler({
@@ -254,6 +920,104 @@ test('revalidates Provider rights and fails closed on malformed authority', asyn
     code: 'capability_unavailable',
     message: 'provider eligibility authority returned an invalid candidate',
   });
+});
+
+test('trusted eligibility time checks rights independently of health and scheduling time', async (t) => {
+  for (const offset of [-86_400_000, 86_400_000]) {
+    await t.test(`authority offset ${offset}ms`, async () => {
+      const authorityAt = new Date(NOW.getTime() + offset);
+      const base = eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]]));
+      const result = await scheduler({
+        eligibility: {
+          async revalidate(input) {
+            const value = await base.revalidate(input);
+            assert.equal(value.decision, 'allow');
+            if (value.decision !== 'allow') return value;
+            return {
+              ...value,
+              authorityAt,
+              rights: {
+                ...value.rights,
+                effectiveAt: new Date(authorityAt.getTime() - 1),
+                expiresAt: new Date(authorityAt.getTime() + 1),
+              },
+            };
+          },
+        },
+        health: healthPort(),
+        concurrency: concurrencyPort(new Map()),
+      }).select(baseInput([candidate('account-a')]));
+      assert.equal(result.decision, 'allow', 'rights use authority time while health remains at scheduler NOW');
+    });
+  }
+
+  for (const boundary of ['future', 'expired'] as const) {
+    await t.test(`${boundary} at the authority clock`, async () => {
+      const authorityAt = new Date(NOW.getTime() + (boundary === 'future' ? -100 : 100));
+      const base = eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]]));
+      const result = await scheduler({
+        eligibility: {
+          async revalidate(input) {
+            const value = await base.revalidate(input);
+            assert.equal(value.decision, 'allow');
+            if (value.decision !== 'allow') return value;
+            return {
+              ...value,
+              authorityAt: authorityAt.toISOString(),
+              rights: {
+                ...value.rights,
+                effectiveAt: new Date(NOW.getTime() - 50),
+                expiresAt: new Date(NOW.getTime() + 50),
+              },
+            };
+          },
+        },
+        health: healthPort(),
+        concurrency: concurrencyPort(new Map()),
+      }).select(baseInput([candidate('account-a')]));
+      assert.equal(result.decision, 'block', 'a host-active right cannot waive the authority window');
+    });
+  }
+});
+
+test('only truly absent eligibility authority time preserves the legacy clock', async (t) => {
+  const cases = [
+    { label: 'absent', present: false, inherited: false, value: undefined, allowed: true },
+    { label: 'own undefined', present: true, inherited: false, value: undefined, allowed: false },
+    { label: 'own null', present: true, inherited: false, value: null, allowed: false },
+    { label: 'invalid string', present: true, inherited: false, value: 'not-a-date', allowed: false },
+    { label: 'invalid Date', present: true, inherited: false, value: new Date(Number.NaN), allowed: false },
+    { label: 'inherited valid time', present: false, inherited: true, value: NOW, allowed: false },
+    { label: 'inherited undefined', present: false, inherited: true, value: undefined, allowed: false },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.label, async () => {
+      let healthCalls = 0;
+      const base = eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]]));
+      const result = await scheduler({
+        eligibility: {
+          async revalidate(input) {
+            const value = await base.revalidate(input);
+            assert.equal(value.decision, 'allow');
+            if (value.decision !== 'allow') return value;
+            const changed: Record<string, unknown> = { ...value };
+            if (entry.present) changed.authorityAt = entry.value;
+            if (entry.inherited) Object.setPrototypeOf(changed, { authorityAt: entry.value });
+            return changed as unknown as ProviderAccountSchedulerEligibilityAllowed;
+          },
+        },
+        health: healthPort(new Map(), {
+          async get() {
+            healthCalls += 1;
+            return { decision: 'allow', value: { status: 'healthy', observedAt: NOW } };
+          },
+        }),
+        concurrency: concurrencyPort(new Map()),
+      }).select(baseInput([candidate('account-a')]));
+      assert.equal(result.decision, entry.allowed ? 'allow' : 'block');
+      assert.equal(healthCalls, entry.allowed ? 1 : 0);
+    });
+  }
 });
 
 test('valid affinity is only a preference and cannot bypass health or attempted-account exclusion', async () => {
@@ -430,6 +1194,91 @@ test('health observedAt slightly ahead of now (DB clock dispersion) is clamped, 
     concurrency: concurrencyPort(new Map()),
   }).select(baseInput(candidates));
   assert.equal(beyondTolerance.decision, 'block');
+});
+
+test('health revalidation samples the injected clock after the asynchronous read', async (t) => {
+  for (const [name, observedOffset, cooldownOffset, expected] of [
+    ['a row refreshed while awaiting the read', 0, null, 'allow'],
+    ['the unchanged future tolerance boundary', 250, null, 'allow'],
+    ['a genuinely future row', 251, null, 'block'],
+    ['the unchanged maximum age boundary', -60_000, null, 'allow'],
+    ['an expired observation', -60_001, null, 'block'],
+    ['a live cooldown', 0, 1, 'block'],
+    ['an expired cooldown on a degraded row', 0, -1, 'allow'],
+  ] as const) {
+    await t.test(name, async () => {
+      let current = NOW.getTime();
+      const clock = () => new Date(current);
+      const instance = new ProviderAccountScheduler(
+        {
+          eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+          health: {
+            async get(input) {
+              assert.equal(input.clock, clock);
+              assert.equal(input.now.getTime(), NOW.getTime());
+              await Promise.resolve();
+              current += 1_000;
+              return {
+                decision: 'allow',
+                value: {
+                  status: cooldownOffset === null ? 'healthy' : 'degraded',
+                  observedAt: new Date(current + observedOffset),
+                  cooldownUntil: cooldownOffset === null ? null : new Date(current + cooldownOffset),
+                },
+              };
+            },
+          },
+          concurrency: concurrencyPort(new Map()),
+        },
+        { now: clock, maxHealthAgeMs: 60_000 },
+      );
+      assert.equal((await instance.select(baseInput([candidate('account-a')]))).decision, expected);
+    });
+  }
+});
+
+test('an invalid or throwing final health clock fails closed', async (t) => {
+  for (const failure of ['invalid-date', 'throw'] as const) {
+    await t.test(failure, async () => {
+      let sampled = false;
+      const instance = new ProviderAccountScheduler(
+        {
+          eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+          health: {
+            async get() {
+              await Promise.resolve();
+              sampled = true;
+              return { decision: 'allow', value: { status: 'healthy', observedAt: NOW } };
+            },
+          },
+          concurrency: concurrencyPort(new Map()),
+        },
+        {
+          now() {
+            if (!sampled) return NOW;
+            if (failure === 'throw') throw new Error('test-only clock failure');
+            return new Date(Number.NaN);
+          },
+        },
+      );
+      assert.equal((await instance.select(baseInput([candidate('account-a')]))).decision, 'block');
+    });
+  }
+});
+
+test('the production default health clock is live after an asynchronous read', async () => {
+  const instance = new ProviderAccountScheduler({
+    eligibility: eligibilityPort(new Map([['account-a', { priority: 1, weight: 1 }]])),
+    health: {
+      async get(input) {
+        assert.equal(typeof input.clock, 'function');
+        await Promise.resolve();
+        return { decision: 'allow', value: { status: 'healthy', observedAt: new Date() } };
+      },
+    },
+    concurrency: concurrencyPort(new Map()),
+  });
+  assert.equal((await instance.select(baseInput([candidate('account-a')]))).decision, 'allow');
 });
 
 /* ------------------------------------------------------------------ */
@@ -847,7 +1696,7 @@ function stickyWaitScheduler(
 }
 
 test('sticky wait: a busy target is held and selected when a lease slot frees', async () => {
-  const observedDomains: readonly string[][] = [];
+  const observedDomains: (readonly string[])[] = [];
   let concurrencyCalls = 0;
   const dependencies: ProviderAccountSchedulerDependencies = {
     eligibility: eligibilityPort(
@@ -891,7 +1740,7 @@ test('sticky wait: a busy target is held and selected when a lease slot frees', 
 });
 
 test('sticky wait: an exhausted budget answers 429 with a Retry-After hint', async () => {
-  const observedDomains: readonly string[][] = [];
+  const observedDomains: (readonly string[])[] = [];
   const dependencies: ProviderAccountSchedulerDependencies = {
     eligibility: eligibilityPort(
       new Map([
@@ -928,7 +1777,16 @@ test('sticky wait: an exhausted budget answers 429 with a Retry-After hint', asy
   }
 });
 
-test('sticky wait: a full waiter queue degrades to the ranking chain immediately', async () => {
+test('sticky wait: a full waiter queue degrades to the ranking chain immediately', { timeout: 5_000 }, async () => {
+  let signalFirstRecheck!: () => void;
+  const firstRecheck = new Promise<void>((resolve) => {
+    signalFirstRecheck = resolve;
+  });
+  let releaseFirstRecheck!: () => void;
+  const firstRecheckReleased = new Promise<void>((resolve) => {
+    releaseFirstRecheck = resolve;
+  });
+  let virtualMs = NOW.getTime();
   const dependencies: ProviderAccountSchedulerDependencies = {
     eligibility: eligibilityPort(
       new Map([
@@ -937,16 +1795,18 @@ test('sticky wait: a full waiter queue degrades to the ranking chain immediately
       ]),
     ),
     health: healthPort(),
-    // account-a is saturated FOREVER; the second waiter must not enqueue.
-    // account-b's `get` yields once so the first waiter registers first.
+    // Hold the first waiter's recheck while the second request observes
+    // the occupied queue. No wall-clock delay establishes that ordering.
     concurrency: (() => {
-      let bCalls = 0;
+      let aCalls = 0;
       return {
         async get(input: { candidate: { accountId: string } }) {
           if (input.candidate.accountId !== 'account-a') {
-            bCalls += 1;
-            if (bCalls <= 4) await new Promise<void>((resolve) => setTimeout(resolve, 5));
             return { decision: 'allow', value: { inFlight: 0, limit: 2 } };
+          }
+          if (++aCalls === 2) {
+            signalFirstRecheck();
+            await firstRecheckReleased;
           }
           return { decision: 'deny', reason: 'no free lease slot' };
         },
@@ -958,22 +1818,31 @@ test('sticky wait: a full waiter queue degrades to the ranking chain immediately
       },
     },
   };
-  const instance = stickyWaitScheduler(dependencies, { maxWaitMs: 250, maxQueueLength: 1, tickMs: 5 });
+  const instance = new ProviderAccountScheduler(dependencies, {
+    now: () => new Date(virtualMs),
+    maxHealthAgeMs: 60_000,
+    stickyWait: { maxWaitMs: 250, maxQueueLength: 1, tickMs: 5 },
+  });
   const first = instance.select(
     baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
   );
-  // The first waiter is inside its bounded loop by now; the second must
-  // observe a full queue and degrade without waiting.
-  await new Promise<void>((resolve) => setTimeout(resolve, 40));
-  const second = instance.select(
-    baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
-  );
-  const [firstResult, secondResult] = await Promise.all([first, second]);
-
-  assert.equal(secondResult.decision, 'allow');
-  if (secondResult.decision === 'allow') assert.equal(secondResult.value.accountId, 'account-b');
-  assert.equal(firstResult.decision, 'reject');
-  if (firstResult.decision === 'reject') assert.equal(firstResult.code, 'rate_limited');
+  try {
+    assert.equal(await Promise.race([firstRecheck.then(() => true), first.then(() => false)]), true);
+    const secondResult = await instance.select(
+      baseInput([candidate('account-a'), candidate('account-b')], { sessionId: 'session-sticky-wait' }),
+    );
+    assert.equal(secondResult.decision, 'allow');
+    if (secondResult.decision === 'allow') assert.equal(secondResult.value.accountId, 'account-b');
+    virtualMs += 250;
+    releaseFirstRecheck();
+    const firstResult = await first;
+    assert.equal(firstResult.decision, 'reject');
+    if (firstResult.decision === 'reject') assert.equal(firstResult.code, 'rate_limited');
+  } finally {
+    virtualMs += 250;
+    releaseFirstRecheck();
+    await Promise.allSettled([first]);
+  }
 });
 
 test('sticky wait: a target that died (neither eligible nor busy) still blocks defensively', async () => {

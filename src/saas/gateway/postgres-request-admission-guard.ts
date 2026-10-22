@@ -15,12 +15,13 @@ import type {
 } from '../metering/types.js';
 import { calculatePriceVersion } from '../pricing/calculator.js';
 import { SaasPricingError, SaasPricingService } from '../pricing/index.js';
-import type {
-  PlatformRequestAdmissionHoldEvidence,
-  SaasRequestAdmissionGuard,
-  SaasRequestAdmissionGuardInput,
-  SaasRequestAdmissionGuardResult,
-  SaasRequestAdmissionPlatformPriceHoldFacts,
+import {
+  PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
+  type PlatformRequestAdmissionHoldEvidence,
+  type SaasRequestAdmissionGuard,
+  type SaasRequestAdmissionGuardInput,
+  type SaasRequestAdmissionGuardResult,
+  type SaasRequestAdmissionPlatformPriceHoldFacts,
 } from './admission.js';
 import type { ConservativePriceHold } from './hold-calculator.js';
 import {
@@ -28,6 +29,11 @@ import {
   calculateConservativePriceHold,
   INPUT_BILLING_BUCKETS,
 } from './hold-calculator.js';
+import {
+  observePreparationExecutor,
+  observePreparationPhase,
+  type PostgresPreparationObserver,
+} from './postgres-preparation-observer.js';
 
 type Row = Record<string, unknown>;
 
@@ -67,6 +73,7 @@ export interface PostgresRequestAdmissionGuardOptions {
   readonly pricing?: SaasPricingService;
   /** Injectable only to keep fake-SQL tests on the same service contracts. */
   readonly catalog?: SaasCatalogService;
+  readonly observe?: PostgresPreparationObserver;
 }
 
 function deny(code: Exclude<PostgresRequestAdmissionGuardErrorCode, 'STORAGE_ERROR'>): never {
@@ -235,6 +242,15 @@ function compareAttempt(row: Row, attempt: AttemptRecord): void {
     ['pool_grant_profile_authz_version', attempt.poolGrantProfileAuthzVersion],
     ['pool_grant_pool_authz_version', attempt.poolGrantPoolAuthzVersion],
     ['profile_account_authz_version', attempt.profileAccountAuthzVersion],
+    ...(attempt.providerProtocol === undefined
+      ? []
+      : [['provider_protocol', attempt.providerProtocol] as [string, unknown]]),
+    ...(attempt.clientOperation === undefined
+      ? []
+      : [['client_operation', attempt.clientOperation] as [string, unknown]]),
+    ...(attempt.providerOperation === undefined
+      ? []
+      : [['provider_operation', attempt.providerOperation] as [string, unknown]]),
   ]);
   if (row.binding_state !== 'bound' || row.dispatch_authority_state !== 'bound' || row.dispatch_state !== 'not_sent') {
     deny('AUTHORITY_MISMATCH');
@@ -305,6 +321,10 @@ function requireNewAuthorityShape(request: RequestRecord, candidate: AttemptReco
 }
 
 function validateHoldEvidence(evidence: PlatformRequestAdmissionHoldEvidence): PlatformRequestAdmissionHoldEvidence {
+  const independentBounds = evidence.evidenceKind === PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND;
+  if ('evidenceKind' in evidence && (!Object.hasOwn(evidence, 'evidenceKind') || !independentBounds)) {
+    deny('INVALID_INPUT');
+  }
   const counters = [
     evidence.inputTotal,
     evidence.inputUncached,
@@ -341,11 +361,11 @@ function validateHoldEvidence(evidence: PlatformRequestAdmissionHoldEvidence): P
   ) {
     deny('INVALID_INPUT');
   }
-  if (
-    inputUncached + cacheRead + cacheWrite + cacheWrite5m + cacheWrite1h > inputTotal ||
-    reasoningOutput > outputTotal ||
-    (cacheWrite > 0n && (cacheWrite5m > 0n || cacheWrite1h > 0n))
-  ) {
+  const invalidInputAllocation = independentBounds
+    ? [inputUncached, cacheRead, cacheWrite, cacheWrite5m, cacheWrite1h].some((bound) => bound > inputTotal)
+    : inputUncached + cacheRead + cacheWrite + cacheWrite5m + cacheWrite1h > inputTotal ||
+      (cacheWrite > 0n && (cacheWrite5m > 0n || cacheWrite1h > 0n));
+  if (invalidInputAllocation || reasoningOutput > outputTotal) {
     deny('AUTHORITY_MISMATCH');
   }
   const expiresAt = new Date(evidence.admissionExpiresAt);
@@ -460,7 +480,7 @@ function assertCapabilityRow(row: Row, candidate: AttemptRecord): void {
     row.product_id !== candidate.productId ||
     row.model !== candidate.resolvedModel ||
     row.endpoint !== candidate.endpoint ||
-    row.protocol !== candidate.protocol ||
+    row.protocol !== (candidate.providerProtocol ?? candidate.protocol) ||
     (row.support_level !== 'supported' && row.support_level !== 'limited') ||
     row.validation_state !== 'verified' ||
     typeof row.evidence_version !== 'string' ||
@@ -651,14 +671,15 @@ async function acquireAdmissionFences(
   request: RequestRecord,
   candidate: AttemptRecord,
 ): Promise<void> {
-  // One batched statement takes every shared fence. unnest emits the keys in
-  // array order and pg_advisory_xact_lock_shared holds each lock as the row is
-  // scanned, so the acquisition order is byte-identical to the previous
-  // one-statement-per-key form: layers in their fixed order, each layer's
-  // helper-generated key text sorted, deduplicated globally by first
+  // One batched statement takes every shared fence in explicit input-ordinal
+  // order. PostgreSQL evaluates the scalar volatile lock target after ORDER BY
+  // because that target is not itself a sort/group/distinct expression. There
+  // is no LIMIT or target-list SRF. Keys retain layers in their fixed order,
+  // with each layer's helper-generated text sorted and globally deduplicated by first
   // occurrence. Concurrent admission and authorization changes therefore keep
   // converging on the same lock order, and every post-wait SELECT still uses a
   // fresh READ COMMITTED snapshot (the fence statement reads no table rows).
+  // https://www.postgresql.org/docs/18/sql-select.html#SQL-SELECT-LIST
   const keys: string[] = [];
   for (const [, layerKeys] of admissionFenceLayers(request, candidate)) {
     for (const key of sortAndDedupeAdvisoryKeys(layerKeys)) {
@@ -667,7 +688,10 @@ async function acquireAdmissionFences(
   }
   await rows(
     executor,
-    `/* postgres-request-admission:fence-batch */ SELECT pg_advisory_xact_lock_shared(hashtextextended(fence_key, 0)) FROM unnest($1::text[]) AS fence_key`,
+    `/* postgres-request-admission:fence-batch */
+     SELECT pg_advisory_xact_lock_shared(hashtextextended(fence.fence_key, 0))
+       FROM unnest($1::text[]) WITH ORDINALITY AS fence(fence_key, input_ordinal)
+      ORDER BY fence.input_ordinal`,
     [keys],
   );
 }
@@ -698,19 +722,261 @@ async function databaseClock(executor: SqlExecutor): Promise<Date> {
   return date;
 }
 
+// These authority columns are PostgreSQL int8. Keep their decimal text in
+// JSON as pg does for ordinary SELECT results; JSON numbers cannot represent
+// every valid int8 version. Other projected numeric columns are bounded int4.
+const ADMISSION_AUTHORITY_VERSION_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  project: ['inference_policy_version'],
+  key: ['authz_version', 'entitlement_authz_version', 'supply_profile_authz_version', 'model_scope_version'],
+  entitlement: ['authz_version'],
+  profile: ['authz_version'],
+  route: ['version', 'head_version'],
+  commercial: ['route_version', 'customer_policy_version', 'provider_policy_version'],
+  'customer-policy': ['version', 'head_version'],
+  'provider-policy': ['version', 'head_version'],
+  attestation: ['provider_policy_version'],
+  account: ['authz_version'],
+  credential: ['authz_version'],
+  mapping: ['account_authz_version', 'authz_version'],
+  pool: ['authz_version'],
+  'pool-member': ['account_authz_version', 'authz_version'],
+  'pool-grant': ['profile_authz_version', 'pool_authz_version', 'authz_version'],
+};
+
+// Accounts carry many unrelated provider quota/probe columns. Admission
+// needs identity and lifecycle facts; encrypted credential material is not
+// part of those facts. Project only the consumed columns for these wide
+// rows, retaining every validity/version field used by the guard below.
+const ADMISSION_AUTHORITY_PROJECTIONS: Readonly<Record<string, string>> = {
+  tenant: 'id, status, default_billing_group_id',
+  project: 'tenant_id, id, inference_policy_version, inference_policy_status',
+  'project-policy': 'status',
+  principal: 'disabled_at, anonymized_at',
+  key: `tenant_id, project_id, execution_principal_type, execution_principal_id, principal_user_id,
+    entitlement_id, supply_profile_id, supply_mode, authz_version, entitlement_authz_version,
+    supply_profile_authz_version, model_scope_version, status, revoked_at, model_scopes, expires_at, billing_group_id`,
+  account: `owner_kind, supply_mode, status, validation_state, authz_version, provider_id, product_id,
+    credential_type, region, purpose, rights_id, rights_version`,
+  credential: `owner_kind, supply_mode, account_id, provider_id, product_id, status, validation_state,
+    authz_version, current_version, credential_type, expires_at`,
+  'credential-version': 'owner_kind, supply_mode, account_id, credential_id, version, status, expires_at',
+  'customer-price-identity':
+    'public_model_id, public_model_version, provider_id, product_id, protocol, endpoint, currency',
+  'supplier-cost-identity': `public_model_id, public_model_version, provider_id, product_id,
+    protocol, endpoint, currency, resolved_model`,
+};
+
+/** Request-local facts, loaded only after all authorization fences are held. */
+async function loadAdmissionAuthority(
+  executor: SqlExecutor,
+  request: RequestRecord,
+  candidate: AttemptRecord,
+): Promise<{ one: (stage: string) => Row; many: (stage: string) => Row[] }> {
+  const reads: Array<{ stage: string; sql: string; values: readonly unknown[] }> = [];
+  const select = (stage: string, sql: string, values: readonly unknown[]) => reads.push({ stage, sql, values });
+  const one = (stage: string, table: string, where: string, values: readonly unknown[]) =>
+    select(
+      stage,
+      `SELECT ${ADMISSION_AUTHORITY_PROJECTIONS[stage] ?? '*'} FROM ${table} WHERE ${where} LIMIT 2`,
+      values,
+    );
+  const tenantProject = [request.tenantId, request.projectId];
+  one('tenant', 'saas_tenants', 'id = $1', [request.tenantId]);
+  one('project', 'saas_projects', 'tenant_id = $1 AND id = $2', tenantProject);
+  one(
+    'project-policy',
+    'saas_project_inference_policy_versions',
+    'tenant_id = $1 AND project_id = $2 AND version = $3',
+    [...tenantProject, request.projectPolicyVersion],
+  );
+  if (request.principalKind === 'member') {
+    one('principal', 'saas_users', 'id = $1', [request.principalId]);
+    select('tenant-membership', 'SELECT * FROM saas_memberships WHERE tenant_id = $1 AND user_id = $2', [
+      request.tenantId,
+      request.principalId,
+    ]);
+    select(
+      'project-membership',
+      'SELECT * FROM saas_project_memberships WHERE tenant_id = $1 AND project_id = $2 AND user_id = $3',
+      [...tenantProject, request.principalId],
+    );
+  }
+  one('key', 'saas_api_keys', 'tenant_id = $1 AND project_id = $2 AND id = $3', [...tenantProject, request.proxyKeyId]);
+  one('key-ip-policy', 'saas_api_key_ip_policies', 'tenant_id = $1 AND project_id = $2 AND key_id = $3', [
+    ...tenantProject,
+    request.proxyKeyId,
+  ]);
+  one('entitlement', 'saas_project_entitlements', 'tenant_id = $1 AND project_id = $2 AND id = $3', [
+    ...tenantProject,
+    request.entitlementId,
+  ]);
+  one('profile', 'saas_supply_profiles', 'tenant_id = $1 AND id = $2 AND supply_mode = $3', [
+    request.tenantId,
+    request.supplyProfileId,
+    request.supplyMode,
+  ]);
+  const routeValues = [...tenantProject, request.routeConfigId, request.routeConfigVersion];
+  select(
+    'route',
+    `
+    SELECT rv.*, h.current_version AS head_version, h.status AS head_status,
+           pm.alias AS public_model_alias, pm.status AS public_model_status,
+           pmv.status AS public_model_version_status, pmv.provider_id AS model_provider_id,
+           pmv.product_id AS model_product_id, pmv.model AS public_model_name, pmv.endpoint_scope
+      FROM saas_route_config_versions rv
+      JOIN saas_route_config_heads h
+        ON h.tenant_id = rv.tenant_id AND h.project_id = rv.project_id AND h.route_id = rv.route_id
+      JOIN saas_public_model_versions pmv
+        ON pmv.public_model_id = rv.public_model_id AND pmv.version = rv.public_model_version
+      JOIN saas_public_models pm ON pm.id = pmv.public_model_id
+     WHERE rv.tenant_id = $1 AND rv.project_id = $2 AND rv.route_id = $3 AND rv.version = $4 LIMIT 2`,
+    routeValues,
+  );
+  one(
+    'commercial',
+    'saas_route_config_commercial_authorities',
+    'tenant_id = $1 AND project_id = $2 AND route_id = $3 AND route_version = $4',
+    routeValues,
+  );
+  select(
+    'customer-policy',
+    `
+    SELECT cp.*, ch.current_version AS head_version, ch.status AS head_status
+      FROM saas_customer_metering_policy_versions cp
+      JOIN saas_customer_metering_policy_heads ch
+        ON ch.tenant_id = cp.tenant_id AND ch.project_id = cp.project_id AND ch.policy_id = cp.policy_id
+     WHERE cp.tenant_id = $1 AND cp.project_id = $2 AND cp.policy_id = $3 AND cp.version = $4 LIMIT 2`,
+    [...tenantProject, request.customerMeteringPolicyId, request.customerMeteringPolicyVersion],
+  );
+  select(
+    'provider-policy',
+    `
+    SELECT pp.*, ph.current_version AS head_version, ph.status AS head_status
+      FROM saas_provider_metering_policy_versions pp
+      JOIN saas_provider_metering_policy_heads ph
+        ON ph.tenant_id = pp.tenant_id AND ph.project_id = pp.project_id AND ph.policy_id = pp.policy_id
+     WHERE pp.tenant_id = $1 AND pp.project_id = $2 AND pp.policy_id = $3 AND pp.version = $4 LIMIT 2`,
+    [...tenantProject, request.providerMeteringPolicyId, request.providerMeteringPolicyVersion],
+  );
+  one('attestation', 'saas_contract_test_attestations', 'tenant_id = $1 AND project_id = $2 AND id = $3', [
+    ...tenantProject,
+    request.contractAttestationId,
+  ]);
+  const tenantOwned = candidate.accountOwnerKind === 'tenant';
+  const accountTable = tenantOwned ? 'saas_tenant_provider_accounts' : 'saas_platform_provider_accounts';
+  const accountWhere = tenantOwned ? 'tenant_id = $1 AND id = $2' : 'id = $1';
+  const accountValues = tenantOwned ? [request.tenantId, candidate.accountId] : [candidate.accountId];
+  one('account', accountTable, accountWhere, accountValues);
+  select(
+    'account-rights',
+    `SELECT rights.* FROM saas_provider_rights rights
+    JOIN (SELECT rights_id, rights_version FROM ${accountTable} WHERE ${accountWhere}) account
+      ON rights.rights_id = account.rights_id AND rights.version = account.rights_version LIMIT 2`,
+    accountValues,
+  );
+  one(
+    'credential',
+    tenantOwned ? 'saas_tenant_provider_credentials' : 'saas_platform_provider_credentials',
+    tenantOwned ? 'tenant_id = $1 AND id = $2 AND account_id = $3' : 'id = $1 AND account_id = $2',
+    tenantOwned
+      ? [request.tenantId, candidate.credentialId, candidate.accountId]
+      : [candidate.credentialId, candidate.accountId],
+  );
+  one(
+    'credential-version',
+    tenantOwned ? 'saas_tenant_provider_credential_versions' : 'saas_platform_provider_credential_versions',
+    tenantOwned
+      ? 'tenant_id = $1 AND credential_id = $2 AND account_id = $3 AND version = $4'
+      : 'credential_id = $1 AND account_id = $2 AND version = $3',
+    tenantOwned
+      ? [request.tenantId, candidate.credentialId, candidate.accountId, candidate.credentialVersion]
+      : [candidate.credentialId, candidate.accountId, candidate.credentialVersion],
+  );
+  if (request.supplyMode === 'byok') {
+    one(
+      'mapping',
+      'saas_tenant_provider_supply_profile_accounts',
+      'tenant_id = $1 AND supply_profile_id = $2 AND account_id = $3',
+      [request.tenantId, request.supplyProfileId, candidate.accountId],
+    );
+  } else {
+    one('pool', 'saas_platform_provider_pools', 'id = $1', [candidate.poolId]);
+    select(
+      'pool-rights',
+      `SELECT rights.* FROM saas_provider_rights rights
+      JOIN saas_platform_provider_pools pool
+        ON rights.rights_id = pool.rights_id AND rights.version = pool.rights_version
+     WHERE pool.id = $1 LIMIT 2`,
+      [candidate.poolId],
+    );
+    one('pool-member', 'saas_platform_provider_pool_members', 'pool_id = $1 AND account_id = $2', [
+      candidate.poolId,
+      candidate.accountId,
+    ]);
+    one(
+      'pool-grant',
+      'saas_platform_provider_pool_grants',
+      'pool_id = $1 AND tenant_id = $2 AND supply_profile_id = $3',
+      [candidate.poolId, request.tenantId, request.supplyProfileId],
+    );
+    one('customer-price-identity', 'saas_customer_price_versions', 'id = $1', [request.customerPriceVersion]);
+    one('supplier-cost-identity', 'saas_supplier_cost_versions', 'id = $1', [candidate.supplierCostVersion]);
+  }
+
+  const values: unknown[] = [];
+  const parts = reads.map((read) => {
+    const offset = values.length;
+    values.push(...read.values);
+    const sql = read.sql.replace(/\$(\d+)/g, (_, index: string) => `$${offset + Number(index)}`);
+    const versionColumns = ADMISSION_AUTHORITY_VERSION_COLUMNS[read.stage] ?? [];
+    const versions = versionColumns.flatMap((column) => [`'${column}'`, `fact.${column}::text`]);
+    const json =
+      versions.length === 0 ? 'to_jsonb(fact)' : `to_jsonb(fact) || jsonb_build_object(${versions.join(', ')})`;
+    return `SELECT '${read.stage}' AS stage, COALESCE(jsonb_agg(${json}), '[]'::jsonb) AS facts
+      FROM (/* postgres-request-admission:${read.stage} */ ${sql}) fact`;
+  });
+  // Every authority row is still read from PostgreSQL on every admission.
+  // The shared fences precede this statement and therefore its READ COMMITTED
+  // snapshot. Request/attempt row locks, catalog and price lineage fences,
+  // final DB clocks and every wallet/capacity write remain separate.
+  const result = await rows(
+    executor,
+    `/* postgres-request-admission:authority-batch */ ${parts.join('\nUNION ALL\n')}`,
+    values,
+  );
+  const facts = new Map<string, Row[]>();
+  for (const row of result) {
+    if (
+      typeof row.stage !== 'string' ||
+      facts.has(row.stage) ||
+      !Array.isArray(row.facts) ||
+      row.facts.some((fact) => fact === null || typeof fact !== 'object' || Array.isArray(fact))
+    )
+      storage();
+    facts.set(row.stage, row.facts as Row[]);
+  }
+  if (facts.size !== reads.length || reads.some(({ stage }) => !facts.has(stage))) storage();
+  const many = (stage: string): Row[] => facts.get(stage) ?? storage();
+  return { many, one: (stage) => requiredOne(many(stage)) };
+}
+
 export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard {
   private readonly pricing: SaasPricingService;
   private readonly catalog: SaasCatalogService;
+  private readonly observe: PostgresPreparationObserver | undefined;
 
   constructor(database: SaasDatabase, options: PostgresRequestAdmissionGuardOptions = {}) {
     const now = options.now ?? (() => new Date());
     this.pricing = options.pricing ?? new SaasPricingService(database, { now, idFactory: options.idFactory });
     this.catalog = options.catalog ?? new SaasCatalogService(database, { now });
+    this.observe = options.observe;
   }
 
   async revalidate(input: SaasRequestAdmissionGuardInput): Promise<SaasRequestAdmissionGuardResult> {
     try {
-      return await this.revalidateOnTransaction(input);
+      return await observePreparationPhase('admission-guard', 'revalidate', this.observe, () =>
+        this.revalidateOnTransaction(input),
+      );
     } catch (error) {
       if (isGuardError(error)) throw error;
       if (error instanceof SaasCatalogError) {
@@ -735,7 +1001,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     input: SaasRequestAdmissionGuardInput,
   ): Promise<SaasRequestAdmissionGuardResult> {
     if (!input?.executor || !input.request || !input.candidate) deny('INVALID_INPUT');
-    const executor = input.executor;
+    const executor = observePreparationExecutor(input.executor, 'admission-guard', this.observe);
     const request = input.request;
     const candidate = input.candidate;
     requireNewAuthorityShape(request, candidate);
@@ -751,55 +1017,30 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     // helper-generated key text, so concurrent admission and authorization changes converge on
     // the same lock order and all post-wait SELECTs use a fresh READ COMMITTED snapshot.
     await acquireAdmissionFences(executor, request, candidate);
+    const authority = await loadAdmissionAuthority(executor, request, candidate);
 
-    const tenant = await lockOne(executor, 'tenant', 'saas_tenants', 'id = $1', [request.tenantId], null);
+    const tenant = authority.one('tenant');
     assertActiveStatus(tenant);
-    const project = await lockOne(
-      executor,
-      'project',
-      'saas_projects',
-      'tenant_id = $1 AND id = $2',
-      [request.tenantId, request.projectId],
-      null,
-    );
+    const project = authority.one('project');
     assertMatch(project, [
       ['tenant_id', request.tenantId],
       ['id', request.projectId],
       ['inference_policy_version', request.projectPolicyVersion],
     ]);
     if (project.inference_policy_status !== 'active') deny('AUTHORITY_MISMATCH');
-    const policy = await lockOne(
-      executor,
-      'project-policy',
-      'saas_project_inference_policy_versions',
-      'tenant_id = $1 AND project_id = $2 AND version = $3',
-      [request.tenantId, request.projectId, request.projectPolicyVersion],
-      null,
-    );
+    const policy = authority.one('project-policy');
     if (policy.status !== 'active') deny('AUTHORITY_MISMATCH');
 
     if (request.principalKind === 'member') {
-      const principal = await lockOne(executor, 'principal', 'saas_users', 'id = $1', [request.principalId], null);
+      const principal = authority.one('principal');
       if (principal.disabled_at != null || principal.anonymized_at != null) deny('AUTHORITY_MISMATCH');
-      const tenantMemberships = await rows(
-        executor,
-        '/* postgres-request-admission:tenant-membership */ SELECT * FROM saas_memberships WHERE tenant_id = $1 AND user_id = $2',
-        [request.tenantId, request.principalId],
-      );
+      const tenantMemberships = authority.many('tenant-membership');
       assertMembership(tenantMemberships);
-      const projectMemberships = await rows(
-        executor,
-        '/* postgres-request-admission:project-membership */ SELECT * FROM saas_project_memberships WHERE tenant_id = $1 AND project_id = $2 AND user_id = $3',
-        [request.tenantId, request.projectId, request.principalId],
-      );
+      const projectMemberships = authority.many('project-membership');
       assertMembership(projectMemberships);
     }
 
-    const key = await lockOne(executor, 'key', 'saas_api_keys', 'tenant_id = $1 AND project_id = $2 AND id = $3', [
-      request.tenantId,
-      request.projectId,
-      request.proxyKeyId,
-    ]);
+    const key = authority.one('key');
     assertMatch(key, [
       ['tenant_id', request.tenantId],
       ['project_id', request.projectId],
@@ -827,11 +1068,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     // authoritative policy. A missing head is pre-080 drift and stays disabled;
     // any non-disabled mode fails closed when the trusted client address
     // evidence is absent, unresolved, or outside the policy.
-    const ipPolicies = await rows(
-      executor,
-      '/* postgres-request-admission:key-ip-policy */ SELECT * FROM saas_api_key_ip_policies WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3 LIMIT 2',
-      [request.tenantId, request.projectId, request.proxyKeyId],
-    );
+    const ipPolicies = authority.many('key-ip-policy');
     if (ipPolicies.length > 1) storage();
     const ipPolicy = ipPolicies[0];
     if (ipPolicy && ipPolicy.mode !== 'disabled') {
@@ -870,14 +1107,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       deny('AUTHORITY_MISMATCH');
     }
 
-    const entitlement = await lockOne(
-      executor,
-      'entitlement',
-      'saas_project_entitlements',
-      'tenant_id = $1 AND project_id = $2 AND id = $3',
-      [request.tenantId, request.projectId, request.entitlementId],
-      null,
-    );
+    const entitlement = authority.one('entitlement');
     assertMatch(entitlement, [
       ['tenant_id', request.tenantId],
       ['project_id', request.projectId],
@@ -887,14 +1117,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       ['authz_version', request.entitlementVersion],
     ]);
     if (!containsScope(entitlement, 'model_scopes', request.publicModel)) deny('AUTHORITY_MISMATCH');
-    const profile = await lockOne(
-      executor,
-      'profile',
-      'saas_supply_profiles',
-      'tenant_id = $1 AND id = $2 AND supply_mode = $3',
-      [request.tenantId, request.supplyProfileId, request.supplyMode],
-      null,
-    );
+    const profile = authority.one('profile');
     assertMatch(profile, [
       ['tenant_id', request.tenantId],
       ['id', request.supplyProfileId],
@@ -912,24 +1135,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       deny('AUTHORITY_MISMATCH');
     }
 
-    const routeRows = await rows(
-      executor,
-      `/* postgres-request-admission:route */
-       SELECT rv.*, h.current_version AS head_version, h.status AS head_status,
-              pm.alias AS public_model_alias, pm.status AS public_model_status,
-              pmv.status AS public_model_version_status, pmv.provider_id AS model_provider_id,
-              pmv.product_id AS model_product_id, pmv.model AS public_model_name,
-              pmv.endpoint_scope
-         FROM saas_route_config_versions rv
-         JOIN saas_route_config_heads h
-           ON h.tenant_id = rv.tenant_id AND h.project_id = rv.project_id AND h.route_id = rv.route_id
-         JOIN saas_public_model_versions pmv
-           ON pmv.public_model_id = rv.public_model_id AND pmv.version = rv.public_model_version
-         JOIN saas_public_models pm ON pm.id = pmv.public_model_id
-        WHERE rv.tenant_id = $1 AND rv.project_id = $2 AND rv.route_id = $3 AND rv.version = $4
-        LIMIT 2`,
-      [request.tenantId, request.projectId, request.routeConfigId, request.routeConfigVersion],
-    );
+    const routeRows = authority.many('route');
     const route = requiredOne(routeRows);
     // §4.4 composite: when the request carries a resolved composite decision,
     // the candidate serves on the resolved target platform/model/endpoint, not
@@ -1003,14 +1209,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         deny('AUTHORITY_MISMATCH');
     }
 
-    const commercial = await lockOne(
-      executor,
-      'commercial',
-      'saas_route_config_commercial_authorities',
-      'tenant_id = $1 AND project_id = $2 AND route_id = $3 AND route_version = $4',
-      [request.tenantId, request.projectId, request.routeConfigId, request.routeConfigVersion],
-      null,
-    );
+    const commercial = authority.one('commercial');
     assertMatch(commercial, [
       ['tenant_id', request.tenantId],
       ['project_id', request.projectId],
@@ -1034,32 +1233,8 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         ? ([['supplier_cost_version', candidate.supplierCostVersion]] as [string, unknown][])
         : ([] as [string, unknown][])),
     ]);
-    const customerPolicy = requiredOne(
-      await rows(
-        executor,
-        `/* postgres-request-admission:customer-policy */
-      SELECT cp.*, ch.current_version AS head_version, ch.status AS head_status
-        FROM saas_customer_metering_policy_versions cp
-        JOIN saas_customer_metering_policy_heads ch
-          ON ch.tenant_id = cp.tenant_id AND ch.project_id = cp.project_id AND ch.policy_id = cp.policy_id
-       WHERE cp.tenant_id = $1 AND cp.project_id = $2 AND cp.policy_id = $3 AND cp.version = $4
-       LIMIT 2`,
-        [request.tenantId, request.projectId, request.customerMeteringPolicyId, request.customerMeteringPolicyVersion],
-      ),
-    );
-    const providerPolicy = requiredOne(
-      await rows(
-        executor,
-        `/* postgres-request-admission:provider-policy */
-      SELECT pp.*, ph.current_version AS head_version, ph.status AS head_status
-        FROM saas_provider_metering_policy_versions pp
-        JOIN saas_provider_metering_policy_heads ph
-          ON ph.tenant_id = pp.tenant_id AND ph.project_id = pp.project_id AND ph.policy_id = pp.policy_id
-       WHERE pp.tenant_id = $1 AND pp.project_id = $2 AND pp.policy_id = $3 AND pp.version = $4
-       LIMIT 2`,
-        [request.tenantId, request.projectId, request.providerMeteringPolicyId, request.providerMeteringPolicyVersion],
-      ),
-    );
+    const customerPolicy = requiredOne(authority.many('customer-policy'));
+    const providerPolicy = requiredOne(authority.many('provider-policy'));
     assertMatch(customerPolicy, [
       ['public_model_id', request.routePublicModelId],
       ['public_model_version', request.routePublicModelVersion],
@@ -1106,14 +1281,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       providerPolicy.head_status !== 'active'
     )
       deny('AUTHORITY_MISMATCH');
-    const attestation = await lockOne(
-      executor,
-      'attestation',
-      'saas_contract_test_attestations',
-      'tenant_id = $1 AND project_id = $2 AND id = $3',
-      [request.tenantId, request.projectId, request.contractAttestationId],
-      null,
-    );
+    const attestation = authority.one('attestation');
     assertMatch(attestation, [
       ['provider_policy_id', request.providerMeteringPolicyId],
       ['provider_policy_version', request.providerMeteringPolicyVersion],
@@ -1127,12 +1295,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     ]);
     if (attestation.verification_result !== 'verified') deny('AUTHORITY_MISMATCH');
 
-    const accountTable =
-      candidate.accountOwnerKind === 'tenant' ? 'saas_tenant_provider_accounts' : 'saas_platform_provider_accounts';
-    const accountWhere = candidate.accountOwnerKind === 'tenant' ? 'tenant_id = $1 AND id = $2' : 'id = $1';
-    const accountValues =
-      candidate.accountOwnerKind === 'tenant' ? [request.tenantId, candidate.accountId] : [candidate.accountId];
-    const account = await lockOne(executor, 'account', accountTable, accountWhere, accountValues);
+    const account = authority.one('account');
     const ownerKind =
       candidate.accountOwnerKind === 'tenant'
         ? 'tenant'
@@ -1142,14 +1305,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     assertAccount(account, ownerKind, request.supplyMode, candidate);
     if (account.credential_type == null || account.region == null || account.purpose == null) storage();
 
-    const rights = await lockOne(
-      executor,
-      'account-rights',
-      'saas_provider_rights',
-      'rights_id = $1 AND version = $2',
-      [account.rights_id, account.rights_version],
-      null,
-    );
+    const rights = authority.one('account-rights');
     assertRights(
       rights,
       request.supplyMode,
@@ -1163,40 +1319,12 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         purpose: requiredText(account.purpose),
       },
     );
-    const credentialTable =
-      candidate.accountOwnerKind === 'tenant'
-        ? 'saas_tenant_provider_credentials'
-        : 'saas_platform_provider_credentials';
-    const credentialWhere =
-      candidate.accountOwnerKind === 'tenant'
-        ? 'tenant_id = $1 AND id = $2 AND account_id = $3'
-        : 'id = $1 AND account_id = $2';
-    const credentialValues =
-      candidate.accountOwnerKind === 'tenant'
-        ? [request.tenantId, candidate.credentialId, candidate.accountId]
-        : [candidate.credentialId, candidate.accountId];
-    const credential = await lockOne(executor, 'credential', credentialTable, credentialWhere, credentialValues);
+
+    const credential = authority.one('credential');
     assertCredential(credential, ownerKind, request.supplyMode, candidate);
     if (credential.credential_type !== account.credential_type) deny('AUTHORITY_MISMATCH');
-    const credentialVersionTable =
-      candidate.accountOwnerKind === 'tenant'
-        ? 'saas_tenant_provider_credential_versions'
-        : 'saas_platform_provider_credential_versions';
-    const credentialVersionWhere =
-      candidate.accountOwnerKind === 'tenant'
-        ? 'tenant_id = $1 AND credential_id = $2 AND account_id = $3 AND version = $4'
-        : 'credential_id = $1 AND account_id = $2 AND version = $3';
-    const credentialVersionValues =
-      candidate.accountOwnerKind === 'tenant'
-        ? [request.tenantId, candidate.credentialId, candidate.accountId, candidate.credentialVersion]
-        : [candidate.credentialId, candidate.accountId, candidate.credentialVersion];
-    const credentialVersion = await lockOne(
-      executor,
-      'credential-version',
-      credentialVersionTable,
-      credentialVersionWhere,
-      credentialVersionValues,
-    );
+
+    const credentialVersion = authority.one('credential-version');
     assertCredentialVersion(credentialVersion, ownerKind, request.supplyMode, candidate);
 
     let pool: Row | null = null;
@@ -1205,13 +1333,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     let mapping: Row | null = null;
     let poolRights: Row | null = null;
     if (request.supplyMode === 'byok') {
-      mapping = await lockOne(
-        executor,
-        'mapping',
-        'saas_tenant_provider_supply_profile_accounts',
-        'tenant_id = $1 AND supply_profile_id = $2 AND account_id = $3',
-        [request.tenantId, request.supplyProfileId, candidate.accountId],
-      );
+      mapping = authority.one('mapping');
       if (
         mapping.status !== 'active' ||
         !same(mapping.provider_id, candidate.providerId) ||
@@ -1222,7 +1344,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         deny('AUTHORITY_MISMATCH');
       assertBindingEvidence(mapping);
     } else {
-      pool = await lockOne(executor, 'pool', 'saas_platform_provider_pools', 'id = $1', [candidate.poolId], null);
+      pool = authority.one('pool');
       if (
         pool.status !== 'active' ||
         pool.validation_state !== 'verified' ||
@@ -1239,14 +1361,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         pool.purpose !== account.purpose
       )
         deny('AUTHORITY_MISMATCH');
-      poolRights = await lockOne(
-        executor,
-        'pool-rights',
-        'saas_provider_rights',
-        'rights_id = $1 AND version = $2',
-        [pool.rights_id, pool.rights_version],
-        null,
-      );
+      poolRights = authority.one('pool-rights');
       assertRights(
         poolRights,
         'platform',
@@ -1260,13 +1375,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
           purpose: requiredText(pool.purpose),
         },
       );
-      member = await lockOne(
-        executor,
-        'pool-member',
-        'saas_platform_provider_pool_members',
-        'pool_id = $1 AND account_id = $2',
-        [candidate.poolId, candidate.accountId],
-      );
+      member = authority.one('pool-member');
       if (
         member.status !== 'active' ||
         !same(member.provider_id, candidate.providerId) ||
@@ -1276,13 +1385,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         !same(member.account_authz_version, candidate.accountAuthzVersion)
       )
         deny('AUTHORITY_MISMATCH');
-      grant = await lockOne(
-        executor,
-        'pool-grant',
-        'saas_platform_provider_pool_grants',
-        'pool_id = $1 AND tenant_id = $2 AND supply_profile_id = $3',
-        [candidate.poolId, request.tenantId, request.supplyProfileId],
-      );
+      grant = authority.one('pool-grant');
       if (
         grant.status !== 'active' ||
         grant.supply_mode !== 'platform' ||
@@ -1334,7 +1437,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     }
     if (
       eligibility.decision !== 'allow' ||
-      eligibility.capability.protocol !== candidate.protocol ||
+      eligibility.capability.protocol !== (candidate.providerProtocol ?? candidate.protocol) ||
       String(eligibility.rights.rightsId) !== String(account.rights_id) ||
       String(eligibility.rights.version) !== String(account.rights_version)
     )
@@ -1409,22 +1512,8 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       if (composite === undefined && providerPolicy.supplier_cost_version !== supplierCostVersion) {
         deny('AUTHORITY_MISMATCH');
       }
-      customerIdentityRow = await lockOne(
-        executor,
-        'customer-price-identity',
-        'saas_customer_price_versions',
-        'id = $1',
-        [customerPriceVersion],
-        null,
-      );
-      supplierIdentityRow = await lockOne(
-        executor,
-        'supplier-cost-identity',
-        'saas_supplier_cost_versions',
-        'id = $1',
-        [supplierCostVersion],
-        null,
-      );
+      customerIdentityRow = authority.one('customer-price-identity');
+      supplierIdentityRow = authority.one('supplier-cost-identity');
     }
 
     const finalAt = await databaseClock(executor);
@@ -1594,6 +1683,10 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
               inputUpperBound: evidence.inputTotal,
               outputUpperBound: evidence.outputTotal,
             });
+      // Only the exact max-rate allocation may enter the immutable snapshot.
+      // It is untagged and must obey all realized sum/TTL invariants, even
+      // when its source evidence contained overlapping independent bounds.
+      validateHoldEvidence({ ...conservative.witness, admissionExpiresAt: evidence.admissionExpiresAt });
       // R1: the group multiplier is an exact outer rational multiply on the
       // conservative hold; holds round up so the reservation is never short.
       conservativeHold = applyGroupMultiplierToHold(conservative, composedGroupMultiplier.multiplier);

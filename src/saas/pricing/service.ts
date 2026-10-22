@@ -1164,13 +1164,19 @@ export class SaasPricingService {
   /**
    * A row lock cannot protect a missing lineage: a SELECT ... FOR SHARE that
    * returns no rows leaves a concurrent insert phantom. Both pricing append
-   * writers and effective-version resolvers take this transaction lock first,
-   * using the same canonical identity, so those service paths serialize even
-   * when the lineage has no existing row. This does not coordinate arbitrary
-   * SQL writers that do not take the same advisory lock.
+   * writers take this transaction lock exclusively and effective-version
+   * resolvers take it shared, using the same canonical identity. Readers may
+   * overlap, while appends wait even when the lineage has no existing row.
+   * This does not coordinate arbitrary SQL writers that do not take the same
+   * advisory lock.
    */
-  private async lockPriceLineage(executor: SqlExecutor, lineage: PriceLineage): Promise<void> {
-    await this.query(executor, 'SELECT pg_advisory_xact_lock($1::bigint)', [priceLineageLockKey(lineage)]);
+  private async lockPriceLineage(
+    executor: SqlExecutor,
+    lineage: PriceLineage,
+    mode: 'exclusive' | 'shared' = 'exclusive',
+  ): Promise<void> {
+    const lockFunction = mode === 'shared' ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock';
+    await this.query(executor, `SELECT ${lockFunction}($1::bigint)`, [priceLineageLockKey(lineage)]);
   }
 
   /** Protects absent snapshots as well as immutable replays; read only after this wait. */
@@ -1684,7 +1690,7 @@ export class SaasPricingService {
     const identity = normalizeCustomerIdentity(input);
     const at = normalizeTimestamp(input.at ?? this.currentDate());
     return this.write(options.executor, async (tx) => {
-      await this.lockPriceLineage(tx, { kind: 'customer', identity });
+      await this.lockPriceLineage(tx, { kind: 'customer', identity }, 'shared');
       const rows = await this.query<CustomerPriceRow>(
         tx,
         `SELECT ${CUSTOMER_PRICE_COLUMNS}
@@ -1709,7 +1715,7 @@ export class SaasPricingService {
     const identity = normalizeSupplierIdentity(input);
     const at = normalizeTimestamp(input.at ?? this.currentDate());
     return this.write(options.executor, async (tx) => {
-      await this.lockPriceLineage(tx, { kind: 'supplier', identity });
+      await this.lockPriceLineage(tx, { kind: 'supplier', identity }, 'shared');
       const rows = await this.query<SupplierCostRow>(
         tx,
         `SELECT ${SUPPLIER_COST_COLUMNS}

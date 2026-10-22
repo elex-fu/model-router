@@ -592,3 +592,276 @@ test('mutating billing operations require an explicit executor', async () => {
     (error: unknown) => error instanceof SaasBillingError && error.code === 'EXECUTOR_REQUIRED',
   );
 });
+
+test('wallet summary combines both exact sums at the original reserve observation points', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service, '100');
+  const wallet = database.state.wallets[0];
+  assert.ok(wallet);
+  database.state.refundWalletFreezes.push({
+    refund_order_id: 'refund-summary',
+    tenant_id: tenantId,
+    wallet_id: wallet.id,
+    currency,
+    amount_minor_units: '10',
+  });
+
+  const statements: string[] = [];
+  const observations: Array<{ sql: string; values: readonly unknown[]; rows: readonly unknown[] }> = [];
+  const reserved = await database.transaction((tx) =>
+    service.reserve(
+      {
+        async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+          const statement = sql.replace(/\s+/g, ' ').trim().toLowerCase();
+          statements.push(statement);
+          const result = await tx.query<Row>(sql, values);
+          if (
+            statement.includes('as active_hold_minor_units') &&
+            statement.includes('as active_refund_freeze_minor_units')
+          ) {
+            observations.push({ sql: statement, values: [...values], rows: result.rows });
+          }
+          return result;
+        },
+      },
+      reserveInput(),
+    ),
+  );
+
+  const expectedSql =
+    'select (select coalesce(sum(amount_minor_units), 0)::text from saas_billing_reservations ' +
+    "where tenant_id = $1 and currency = $2 and state in ('reserved', 'reconciliation_pending')) " +
+    'as active_hold_minor_units, (select coalesce(sum(amount_minor_units), 0)::text ' +
+    'from saas_refund_wallet_freezes where tenant_id = $1 and currency = $2 ) as active_refund_freeze_minor_units';
+  assert.deepEqual(observations, [
+    {
+      sql: expectedSql,
+      values: [tenantId, currency],
+      rows: [{ active_hold_minor_units: '0', active_refund_freeze_minor_units: '10' }],
+    },
+    {
+      sql: expectedSql,
+      values: [tenantId, currency],
+      rows: [{ active_hold_minor_units: '40', active_refund_freeze_minor_units: '10' }],
+    },
+  ]);
+  const summaryReads = statements
+    .map((sql, index) => ({ sql, index }))
+    .filter(
+      ({ sql }) => sql.includes('as active_hold_minor_units') || sql.includes('as active_refund_freeze_minor_units'),
+    );
+  assert.equal(summaryReads.length, 2);
+  const walletFence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
+  const freezeRead = statements.findIndex((sql) => sql.includes('from saas_billing_spending_freezes'));
+  const insertAt = statements.findIndex((sql) => sql.startsWith('insert into saas_billing_reservations'));
+  assert.ok(walletFence >= 0 && freezeRead > walletFence);
+  assert.ok((summaryReads[0]?.index ?? -1) > freezeRead);
+  assert.ok(insertAt > (summaryReads[0]?.index ?? -1));
+  assert.ok((summaryReads[1]?.index ?? -1) > insertAt);
+  assert.equal(reserved.walletPostedBalanceMinorUnits, 100n);
+  assert.equal(reserved.activeHoldsMinorUnits, 40n);
+  assert.equal(reserved.availableMinorUnits, 50n);
+  assert.equal(reserved.spendingFrozen, false);
+});
+
+test('combined wallet sums retain tenant, currency, and active reservation state filters', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service, '1000');
+  await reserve(database, service, { amountMinorUnits: '40' });
+  const seed = database.state.reservations[0];
+  const wallet = database.state.wallets[0];
+  assert.ok(seed && wallet);
+  database.state.reservations.push(
+    {
+      ...seed,
+      id: 'pending',
+      state: 'reconciliation_pending',
+      amount_minor_units: '20',
+      expires_at: '2020-01-01T00:00:00.000Z',
+    },
+    { ...seed, id: 'settled', state: 'settled', amount_minor_units: '300' },
+    { ...seed, id: 'released', state: 'released', amount_minor_units: '300' },
+    { ...seed, id: 'foreign-tenant', tenant_id: 'tenant-other', amount_minor_units: '400' },
+    { ...seed, id: 'foreign-currency', currency: 'EUR', amount_minor_units: '400' },
+  );
+  for (const [refundOrderId, refundTenantId, refundCurrency, amount] of [
+    ['refund-a', tenantId, currency, '50'],
+    ['refund-b', tenantId, currency, '70'],
+    ['refund-foreign-tenant', 'tenant-other', currency, '500'],
+    ['refund-foreign-currency', tenantId, 'EUR', '500'],
+  ] as const) {
+    database.state.refundWalletFreezes.push({
+      refund_order_id: refundOrderId,
+      tenant_id: refundTenantId,
+      wallet_id: wallet.id,
+      currency: refundCurrency,
+      amount_minor_units: amount,
+    });
+  }
+  const stateBefore = structuredClone(database.state);
+  const statements: string[] = [];
+  const summary = await database.transaction((tx) =>
+    service.getWallet(observeQueries(tx, statements), tenantId, currency),
+  );
+  assert.equal(summary.postedBalanceMinorUnits, 1000n);
+  assert.equal(summary.activeHoldsMinorUnits, 60n);
+  assert.equal(summary.activeRefundFreezesMinorUnits, 120n);
+  assert.equal(summary.availableMinorUnits, 820n);
+  assert.equal(summary.spendingFrozen, false);
+  assert.equal(summary.spendingFreezeReference, null);
+  assert.equal(statements.filter((sql) => sql.includes('as active_hold_minor_units')).length, 1);
+  assert.equal(statements.filter((sql) => sql.includes('as active_refund_freeze_minor_units')).length, 1);
+  assert.equal(
+    statements.some((sql) => sql.includes('pg_advisory_xact_lock')),
+    false,
+  );
+  assert.deepEqual(database.state, stateBefore);
+});
+
+test('combined wallet sums preserve zero values and integers beyond the JavaScript safe range', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  const maximum = 9_223_372_036_854_775_807n;
+  await fund(database, service, maximum.toString());
+  const empty = await database.transaction((tx) => service.getWallet(tx, tenantId, currency));
+  assert.equal(empty.activeHoldsMinorUnits, 0n);
+  assert.equal(empty.activeRefundFreezesMinorUnits, 0n);
+  assert.equal(empty.availableMinorUnits, maximum);
+
+  const hold = 9_007_199_254_740_993n;
+  const refund = 9_007_199_254_740_995n;
+  const first = await reserve(database, service, { amountMinorUnits: hold.toString() });
+  assert.equal(first.activeHoldsMinorUnits, hold);
+  await reserve(database, service, { requestId: 'request-small', businessKey: 'request-small', amountMinorUnits: '7' });
+  const wallet = database.state.wallets[0];
+  assert.ok(wallet);
+  database.state.refundWalletFreezes.push({
+    refund_order_id: 'large-refund',
+    tenant_id: tenantId,
+    wallet_id: wallet.id,
+    currency,
+    amount_minor_units: refund.toString(),
+  });
+  const summary = await database.transaction((tx) => service.getWallet(tx, tenantId, currency));
+  assert.equal(summary.postedBalanceMinorUnits, maximum);
+  assert.equal(summary.activeHoldsMinorUnits, hold + 7n);
+  assert.equal(summary.activeRefundFreezesMinorUnits, refund);
+  assert.equal(summary.availableMinorUnits, maximum - hold - 7n - refund);
+});
+
+test('combined wallet sums exclude only the fulfilled refund from the post-debit observation', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service, '100');
+  await reserve(database, service, { amountMinorUnits: '40' });
+  const wallet = database.state.wallets[0];
+  assert.ok(wallet);
+  for (const [refundOrderId, amount] of [
+    ['refund-target', '40'],
+    ['refund-other', '20'],
+  ] as const) {
+    database.state.refundWalletFreezes.push({
+      refund_order_id: refundOrderId,
+      tenant_id: tenantId,
+      wallet_id: wallet.id,
+      currency,
+      amount_minor_units: amount,
+    });
+  }
+  const observations: Array<{ values: readonly unknown[]; rows: readonly unknown[]; excluded: boolean }> = [];
+  const posted = await database.transaction((tx) =>
+    service.postVerifiedWalletRefund(
+      {
+        async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+          const result = await tx.query<Row>(sql, values);
+          if (sql.includes('AS active_hold_minor_units') && sql.includes('AS active_refund_freeze_minor_units')) {
+            observations.push({
+              values: [...values],
+              rows: result.rows,
+              excluded: sql.includes('AND refund_order_id <> $3'),
+            });
+          }
+          return result;
+        },
+      },
+      { tenantId, currency, amountMinorUnits: '40', refundOrderId: 'refund-target' },
+    ),
+  );
+  assert.deepEqual(observations, [
+    {
+      values: [tenantId, currency],
+      rows: [{ active_hold_minor_units: '40', active_refund_freeze_minor_units: '60' }],
+      excluded: false,
+    },
+    {
+      values: [tenantId, currency, 'refund-target'],
+      rows: [{ active_hold_minor_units: '40', active_refund_freeze_minor_units: '20' }],
+      excluded: true,
+    },
+  ]);
+  assert.equal(posted.wallet.postedBalanceMinorUnits, 60n);
+  assert.equal(posted.wallet.activeHoldsMinorUnits, 40n);
+  assert.equal(posted.wallet.activeRefundFreezesMinorUnits, 20n);
+  assert.equal(posted.wallet.availableMinorUnits, 0n);
+  assert.equal(database.state.refundWalletFreezes.length, 2);
+});
+
+test('combined wallet sum failures preserve safe billing errors and roll back either observation point', async (t) => {
+  for (const failAt of [1, 2]) {
+    for (const errorKind of ['billing', 'storage']) {
+      await t.test(`${errorKind} error at summary ${failAt}`, async () => {
+        const database = new FakeBillingDatabase();
+        const service = createService();
+        await fund(database, service, '100');
+        const stateBefore = structuredClone(database.state);
+        const injected =
+          errorKind === 'billing'
+            ? new SaasBillingError('BILLING_STORAGE_ERROR')
+            : new Error('private injected storage failure');
+        const statements: string[] = [];
+        let summaryReads = 0;
+        await assert.rejects(
+          database.transaction((tx) =>
+            service.reserve(
+              {
+                async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+                  statements.push(sql.replace(/\s+/g, ' ').trim().toLowerCase());
+                  if (
+                    sql.includes('AS active_hold_minor_units') &&
+                    sql.includes('AS active_refund_freeze_minor_units')
+                  ) {
+                    summaryReads += 1;
+                    if (summaryReads === failAt) throw injected;
+                  }
+                  return tx.query<Row>(sql, values);
+                },
+              },
+              reserveInput(),
+            ),
+          ),
+          (error: unknown) => {
+            assert.ok(error instanceof SaasBillingError);
+            assert.equal(error.code, 'BILLING_STORAGE_ERROR');
+            assert.equal(error.status, 500);
+            if (errorKind === 'billing') assert.strictEqual(error, injected);
+            else {
+              assert.notStrictEqual(error, injected);
+              assert.equal(error.message.includes('private injected'), false);
+            }
+            return true;
+          },
+        );
+        assert.equal(summaryReads, failAt);
+        assert.equal(
+          statements.filter((sql) => sql.startsWith('insert into saas_billing_reservations')).length,
+          failAt - 1,
+        );
+        assert.ok(statements.at(-1)?.includes('as active_hold_minor_units'));
+        assert.ok(statements.at(-1)?.includes('as active_refund_freeze_minor_units'));
+        assert.deepEqual(database.state, stateBefore);
+      });
+    }
+  }
+});

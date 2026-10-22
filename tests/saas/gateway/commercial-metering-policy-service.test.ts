@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
+import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../../../src/saas/db/advisory-lock-keys.js';
 import { COMMERCIAL_METERING_POLICY_AUTHORITY_SAAS_MIGRATION } from '../../../src/saas/db/migrations/023_commercial_metering_policy_authority.js';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import type { PreparedSqlStatement, SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import {
   type ContractTestAttestationInput,
   canonicalContractAttestationPayload,
@@ -70,6 +73,8 @@ class FakeCommercialDatabase implements SaasDatabase {
   readonly advisoryFenceKeys: string[] = [];
   state = emptyState();
   failAudit = false;
+  dispatchable = true;
+  onFence?: (key: string) => void;
 
   async query<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
     const statement = normalize(sql);
@@ -95,8 +100,21 @@ class FakeCommercialDatabase implements SaasDatabase {
   async close(): Promise<void> {}
 
   private execute(statement: string, values: readonly unknown[]): Row[] {
+    if (
+      statement.startsWith('SELECT pg_advisory_xact_lock_shared') &&
+      statement.includes('FROM unnest($1::text[]) WITH ORDINALITY')
+    ) {
+      const keys = values[0];
+      assert.ok(Array.isArray(keys) && keys.every((key) => typeof key === 'string'));
+      for (const key of keys) {
+        this.advisoryFenceKeys.push(key);
+        this.onFence?.(key);
+      }
+      return [];
+    }
     if (statement.startsWith('SELECT pg_advisory_xact_lock')) {
       this.advisoryFenceKeys.push(String(values[0]));
+      this.onFence?.(String(values[0]));
       return [];
     }
     if (statement.startsWith('SELECT policy_id FROM saas_customer_metering_policy_heads')) {
@@ -216,23 +234,29 @@ class FakeCommercialDatabase implements SaasDatabase {
       this.state.authorities.push(row);
       return [row];
     }
+    if (statement.startsWith('SELECT customer_policy_id, provider_policy_id, provider_policy_version')) {
+      return this.state.authorities.filter((row) => this.authorityMatches(row, values));
+    }
     if (
       statement.startsWith('SELECT tenant_id, project_id, route_id, version,') &&
       statement.includes('saas_route_config_dispatchable')
     ) {
-      return this.state.authorities.map((row) => ({
-        tenant_id: row.tenant_id,
-        project_id: row.project_id,
-        route_id: row.route_id,
-        version: row.route_version,
-        customer_policy_id: row.customer_policy_id,
-        customer_policy_version: row.customer_policy_version,
-        provider_policy_id: row.provider_policy_id,
-        provider_policy_version: row.provider_policy_version,
-        contract_attestation_id: row.contract_attestation_id,
-        customer_price_version: row.customer_price_version,
-        supplier_cost_version: row.supplier_cost_version,
-      }));
+      if (!this.dispatchable) return [];
+      return this.state.authorities
+        .filter((row) => this.authorityMatches(row, values))
+        .map((row) => ({
+          tenant_id: row.tenant_id,
+          project_id: row.project_id,
+          route_id: row.route_id,
+          version: row.route_version,
+          customer_policy_id: row.customer_policy_id,
+          customer_policy_version: row.customer_policy_version,
+          provider_policy_id: row.provider_policy_id,
+          provider_policy_version: row.provider_policy_version,
+          contract_attestation_id: row.contract_attestation_id,
+          customer_price_version: row.customer_price_version,
+          supplier_cost_version: row.supplier_cost_version,
+        }));
     }
     if (statement.startsWith('INSERT INTO saas_audit_events')) {
       if (this.failAudit) throw new Error('audit unavailable');
@@ -240,6 +264,12 @@ class FakeCommercialDatabase implements SaasDatabase {
       return [];
     }
     throw new Error(`unexpected SQL: ${statement}`);
+  }
+
+  private authorityMatches(row: Row, values: readonly unknown[]): boolean {
+    return ['tenant_id', 'project_id', 'route_id', 'route_version'].every(
+      (field, index) => String(row[field]) === String(values[index]),
+    );
   }
 
   private headMatches(row: Row, values: readonly unknown[]): boolean {
@@ -472,6 +502,26 @@ async function createPublishedPolicies(database: FakeCommercialDatabase): Promis
   return policies;
 }
 
+async function createBoundRoute(database: FakeCommercialDatabase): Promise<SaasCommercialMeteringPolicyService> {
+  const policies = await createPublishedPolicies(database);
+  await policies.attestProviderContract(attestationInput());
+  await policies.bindRoute({
+    tenantId: 'tenant-a',
+    projectId: 'project-a',
+    routeId: 'route-a',
+    routeVersion: 2,
+    customerPolicyId: 'customer-policy-a',
+    customerPolicyVersion: 2,
+    providerPolicyId: 'provider-policy-a',
+    providerPolicyVersion: 2,
+    contractAttestationId: 'attestation-a',
+    audit,
+  });
+  database.sql.length = 0;
+  database.advisoryFenceKeys.length = 0;
+  return policies;
+}
+
 test('023 is forward-only, immutable, and makes commercial authority a prerequisite for dispatch', () => {
   assert.equal(COMMERCIAL_METERING_POLICY_AUTHORITY_SAAS_MIGRATION.version, 23);
   assert.match(
@@ -633,4 +683,282 @@ test('dispatch readers use shared commercial fences before their final authority
   );
   assert.ok(lastFence >= 0 && finalRouteRead > lastFence);
   assert.ok(database.sql.some((statement) => statement.startsWith('SELECT pg_advisory_xact_lock_shared')));
+  const hintRead = database.sql.findIndex((statement) =>
+    statement.includes('FROM saas_route_config_commercial_authorities'),
+  );
+  assert.ok(hintRead >= 0 && hintRead < lastFence);
+  assert.match(
+    database.sql[hintRead] ?? '',
+    /tenant_id = \$1 AND project_id = \$2 AND route_id = \$3 AND route_version = \$4 LIMIT 2/,
+  );
+  assert.equal(database.sql.filter((statement) => statement.includes('FROM saas_route_config_dispatchable')).length, 1);
+});
+
+test('an immutable binding hint cannot authorize a route missing from the final dispatchable view', async () => {
+  const database = new FakeCommercialDatabase();
+  const policies = await createBoundRoute(database);
+  database.onFence = (key) => {
+    if (key.startsWith('saas-authz:commercial-')) database.dispatchable = false;
+  };
+  assert.equal(await policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2), null);
+  assert.equal(database.sql.filter((statement) => statement.includes('FROM saas_route_config_dispatchable')).length, 1);
+});
+
+test('commercial hints retain complete scoped identity and never reuse a different route or version', async () => {
+  const database = new FakeCommercialDatabase();
+  const policies = await createBoundRoute(database);
+  for (const identity of [
+    ['other-tenant', 'project-a', 'route-a', 2],
+    ['tenant-a', 'other-project', 'route-a', 2],
+    ['tenant-a', 'project-a', 'other-route', 2],
+    ['tenant-a', 'project-a', 'route-a', 3],
+  ] as const) {
+    assert.equal(await policies.resolveDispatchableRoute(identity[0], identity[1], identity[2], identity[3]), null);
+  }
+  assert.equal(database.sql.filter((statement) => statement.includes('FROM saas_route_config_dispatchable')).length, 0);
+});
+
+test('ambiguous hints or final dispatchable rows remain storage failures', async () => {
+  for (const duplicateAt of ['hint', 'final'] as const) {
+    const database = new FakeCommercialDatabase();
+    const policies = await createBoundRoute(database);
+    const duplicate = () => {
+      const authority = database.state.authorities[0];
+      assert.ok(authority);
+      database.state.authorities.push(clone(authority));
+    };
+    if (duplicateAt === 'hint') duplicate();
+    else {
+      database.onFence = (key) => {
+        if (key.startsWith('saas-authz:commercial-') && database.state.authorities.length === 1) duplicate();
+      };
+    }
+    await assert.rejects(
+      policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2),
+      (error: unknown) => error instanceof SaasCommercialMeteringPolicyError && error.code === 'STORAGE_ERROR',
+    );
+  }
+});
+
+test('only the final commercial view uses one frozen prepared descriptor with unchanged SQL and fresh reads', async () => {
+  const database = new FakeCommercialDatabase();
+  const policies = await createBoundRoute(database);
+  const calls: Array<{ statement: PreparedSqlStatement; values: readonly unknown[]; precedingSql: readonly string[] }> =
+    [];
+  const prepared: SqlExecutor = {
+    query: (sql, values) => database.query(sql, values),
+    async queryPrepared(statement, values = []) {
+      calls.push({ statement, values, precedingSql: [...database.sql] });
+      return database.query(statement.text, values);
+    },
+  };
+  database.sql.length = 0;
+  assert.equal(
+    (await policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2, prepared))?.routeVersion,
+    '2',
+  );
+  database.state.authorities.push({ ...database.state.authorities[0], route_id: 'route-b', route_version: '3' });
+  assert.equal(
+    (await policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-b', 3, prepared))?.routeVersion,
+    '3',
+  );
+  database.dispatchable = false;
+  assert.equal(await policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2, prepared), null);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(({ statement }) => statement === calls[0].statement && Object.isFrozen(statement)));
+  assert.equal(new Set(calls.map(({ statement }) => statement.name)).size, 1);
+  const statement = calls[0].statement;
+  assert.equal(
+    createHash('sha256').update(statement.text).digest('hex'),
+    '358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16',
+  );
+  assert.equal(statement.name, `mr_cm-final_${createHash('sha256').update(statement.text).digest('base64url')}`);
+  assert.deepEqual(
+    calls.map(({ values }) => values),
+    [
+      ['tenant-a', 'project-a', 'route-a', '2'],
+      ['tenant-a', 'project-a', 'route-b', '3'],
+      ['tenant-a', 'project-a', 'route-a', '2'],
+    ],
+  );
+  for (const { precedingSql } of calls) {
+    const hint = precedingSql.findLastIndex((sql) => sql.includes('FROM saas_route_config_commercial_authorities'));
+    const fence = precedingSql.findLastIndex((sql) => sql.startsWith('SELECT pg_advisory_xact_lock_shared'));
+    assert.ok(hint >= 0 && fence > hint, 'the scoped hint and all commercial fences precede each prepared read');
+  }
+});
+
+test('commercial native execution errors remain storage failures without an anonymous retry', async () => {
+  const database = new FakeCommercialDatabase();
+  const policies = await createBoundRoute(database);
+  let preparedCalls = 0;
+  const failure = new Error('expected final commercial read failure');
+  database.sql.length = 0;
+  const executor: SqlExecutor = {
+    query: (sql, values) => database.query(sql, values),
+    async queryPrepared() {
+      preparedCalls += 1;
+      throw failure;
+    },
+  };
+  await assert.rejects(
+    policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2, executor),
+    (error) =>
+      error instanceof SaasCommercialMeteringPolicyError && error.code === 'STORAGE_ERROR' && error.cause === failure,
+  );
+  assert.equal(preparedCalls, 1);
+  assert.equal(
+    database.sql.some((sql) => sql.includes('FROM saas_route_config_dispatchable')),
+    false,
+  );
+});
+
+test('reader fence normalization preserves layer order and deduplicates only within a layer', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/saas/gateway/commercial-metering-policy-service.ts'), 'utf8');
+  const helper = source.match(/async function lockDispatchableRouteReadFences\([\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(helper, /const keys = layers\.flatMap\(\(layer\) => sortAndDedupeAdvisoryKeys\(layer\)\);/);
+  assert.match(helper, /await tx\.query\(SHARED_ADVISORY_FENCE_BATCH_SQL, \[keys\]\);/);
+  const layers = [['z', 'a', 'z'], ['z', 'b', 'b'], ['a']];
+  const before = clone(layers);
+  assert.deepEqual(
+    layers.flatMap((layer) => sortAndDedupeAdvisoryKeys(layer)),
+    ['a', 'z', 'b', 'z', 'a'],
+  );
+  assert.deepEqual(layers, before);
+});
+
+test('dispatch reader uses exactly two ordered shared batches around the unchanged authority reads', async () => {
+  const database = new FakeCommercialDatabase();
+  const policies = await createBoundRoute(database);
+  const projectKey = saasAdvisoryKey.project('tenant-a', 'project-a');
+  await database.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))', [projectKey]);
+  database.sql.length = 0;
+  const stateBefore = clone(database.state);
+  const calls: Array<{ kind: 'anonymous' | 'prepared'; sql: string; values: readonly unknown[] }> = [];
+  const executor: SqlExecutor = {
+    async query<RowType>(sql: string, values: readonly unknown[] = []) {
+      calls.push({ kind: 'anonymous', sql: normalize(sql), values: clone(values) });
+      return database.query<RowType>(sql, values);
+    },
+    async queryPrepared<RowType>(statement: PreparedSqlStatement, values: readonly unknown[] = []) {
+      calls.push({ kind: 'prepared', sql: normalize(statement.text), values: clone(values) });
+      return database.query<RowType>(statement.text, values);
+    },
+  };
+  const route = await policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2, executor);
+  const batchSql =
+    'SELECT pg_advisory_xact_lock_shared(hashtextextended(fence.fence_key, 0)) ' +
+    'FROM unnest($1::text[]) WITH ORDINALITY AS fence(fence_key, input_ordinal) ORDER BY fence.input_ordinal';
+  const tenantProject = [saasAdvisoryKey.tenant('tenant-a'), projectKey];
+  const commercial = [
+    saasAdvisoryKey.commercialCustomer('tenant-a', 'customer-policy-a'),
+    saasAdvisoryKey.commercialProvider('provider-a', 'provider-policy-a'),
+    'saas-authz:provider-rights',
+  ].sort();
+  assert.deepEqual(calls, [
+    { kind: 'anonymous', sql: batchSql, values: [tenantProject] },
+    {
+      kind: 'anonymous',
+      sql:
+        'SELECT customer_policy_id, provider_policy_id, provider_policy_version ' +
+        'FROM saas_route_config_commercial_authorities ' +
+        'WHERE tenant_id = $1 AND project_id = $2 AND route_id = $3 AND route_version = $4 LIMIT 2',
+      values: ['tenant-a', 'project-a', 'route-a', '2'],
+    },
+    {
+      kind: 'anonymous',
+      sql:
+        'SELECT * FROM saas_provider_metering_policy_versions ' +
+        'WHERE tenant_id = $1 AND project_id = $2 AND policy_id = $3 AND version = $4 LIMIT 2',
+      values: ['tenant-a', 'project-a', 'provider-policy-a', '2'],
+    },
+    { kind: 'anonymous', sql: batchSql, values: [commercial] },
+    {
+      kind: 'prepared',
+      sql:
+        'SELECT tenant_id, project_id, route_id, version, ' +
+        'customer_policy_id, customer_policy_version, provider_policy_id, provider_policy_version, ' +
+        'contract_attestation_id, customer_price_version, supplier_cost_version ' +
+        'FROM saas_route_config_dispatchable ' +
+        'WHERE tenant_id = $1 AND project_id = $2 AND route_id = $3 AND version = $4 LIMIT 2',
+      values: ['tenant-a', 'project-a', 'route-a', '2'],
+    },
+  ]);
+  assert.deepEqual(database.advisoryFenceKeys, [projectKey, ...tenantProject, ...commercial]);
+  assert.equal(database.advisoryFenceKeys.filter((key) => key === projectKey).length, 2);
+  assert.deepEqual(route, {
+    tenantId: 'tenant-a',
+    projectId: 'project-a',
+    routeId: 'route-a',
+    routeVersion: '2',
+    customerPolicyId: 'customer-policy-a',
+    customerPolicyVersion: '2',
+    providerPolicyId: 'provider-policy-a',
+    providerPolicyVersion: '2',
+    contractAttestationId: 'attestation-a',
+    customerPriceVersion: 'price-v1',
+    supplierCostVersion: 'cost-v1',
+  });
+  assert.deepEqual(database.state, stateBefore);
+});
+
+test('either reader fence batch failure stops before the final read without retries or anonymous fallback', async (t) => {
+  for (const failAt of [1, 2]) {
+    for (const kind of ['storage', 'commercial'] as const) {
+      await t.test(`${kind} failure at batch ${failAt}`, async () => {
+        const database = new FakeCommercialDatabase();
+        const policies = await createBoundRoute(database);
+        const stateBefore = clone(database.state);
+        const failure =
+          kind === 'commercial'
+            ? new SaasCommercialMeteringPolicyError('STORAGE_ERROR', 'expected commercial fence failure')
+            : new Error('expected reader fence failure');
+        const calls: string[] = [];
+        let fenceCalls = 0;
+        let finalCalls = 0;
+        const executor: SqlExecutor = {
+          async query<RowType>(sql: string, values: readonly unknown[] = []) {
+            const statement = normalize(sql);
+            calls.push(statement);
+            if (statement.includes('FROM unnest($1::text[]) WITH ORDINALITY')) {
+              fenceCalls++;
+              if (fenceCalls === failAt) throw failure;
+            }
+            return database.query<RowType>(sql, values);
+          },
+          async queryPrepared<RowType>(statement: PreparedSqlStatement, values: readonly unknown[] = []) {
+            finalCalls++;
+            return database.query<RowType>(statement.text, values);
+          },
+        };
+        await assert.rejects(
+          policies.resolveDispatchableRoute('tenant-a', 'project-a', 'route-a', 2, executor),
+          (error: unknown) => {
+            assert.ok(error instanceof SaasCommercialMeteringPolicyError);
+            assert.equal(error.code, 'STORAGE_ERROR');
+            if (kind === 'commercial') assert.strictEqual(error, failure);
+            else assert.strictEqual(error.cause, failure);
+            return true;
+          },
+        );
+        assert.equal(fenceCalls, failAt);
+        assert.equal(finalCalls, 0);
+        assert.equal(calls.length, failAt === 1 ? 1 : 4);
+        assert.ok(calls.at(-1)?.includes('FROM unnest($1::text[]) WITH ORDINALITY'));
+        assert.equal(
+          calls.some((sql) => sql.includes('FROM saas_route_config_dispatchable')),
+          false,
+        );
+        assert.equal(
+          calls.filter((sql) => sql.includes('FROM saas_route_config_commercial_authorities')).length,
+          failAt - 1,
+        );
+        assert.equal(
+          calls.filter((sql) => sql.includes('FROM saas_provider_metering_policy_versions')).length,
+          failAt - 1,
+        );
+        assert.deepEqual(database.state, stateBefore);
+      });
+    }
+  }
 });
