@@ -1,5 +1,12 @@
 import { type NormalizedUsage, normalizeUsage } from '../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from './dispatch-usage-settlement.js';
+import {
+  anthropicUsageMetadataKeys,
+  type ProviderUsageProfile,
+  type ProviderUsageProfileEvidence,
+  providerUsageProfile,
+  validAnthropicUsageMetadata,
+} from './provider-usage-profile.js';
 
 export const PROVIDER_JSON_USAGE_MAX_BODY_BYTES = 1024 * 1024;
 
@@ -23,18 +30,17 @@ export type ProviderJsonUsageObservation =
        * outcome; null when the body declares none or cannot be parsed.
        */
       readonly observedServiceTier: string | null;
+      readonly observedServiceTierConflict?: boolean;
     }
   | {
       readonly state: 'unknown';
       readonly usage: null;
       readonly reason: ProviderJsonUsageUnknownReason;
       readonly observedServiceTier: string | null;
+      readonly observedServiceTierConflict?: boolean;
     };
 
-export interface ProviderJsonUsageEvidence {
-  readonly providerProtocol?: string;
-  readonly providerOperation?: string;
-}
+export interface ProviderJsonUsageEvidence extends ProviderUsageProfileEvidence {}
 
 /**
  * §4.1 (roadmap batch 4) media usage extraction seam — the point where the
@@ -118,7 +124,11 @@ function token(value: unknown): value is number {
 function selectedProtocol(evidence: ProviderJsonUsageEvidence): JsonProtocol | null {
   if (evidence.providerProtocol === 'openai' && evidence.providerOperation === 'chat.completions') return 'openai';
   if (evidence.providerProtocol === 'anthropic' && evidence.providerOperation === 'messages') return 'anthropic';
-  if (evidence.providerProtocol === 'responses' && evidence.providerOperation === 'responses') return 'responses';
+  if (
+    evidence.providerProtocol === 'responses' &&
+    (evidence.providerOperation === 'responses' || evidence.providerOperation === 'responses.compact')
+  )
+    return 'responses';
   if (evidence.providerProtocol === 'openai' && evidence.providerOperation === 'embeddings') return 'embeddings';
   return null;
 }
@@ -126,8 +136,15 @@ function selectedProtocol(evidence: ProviderJsonUsageEvidence): JsonProtocol | n
 function unknown(
   reason: ProviderJsonUsageUnknownReason,
   observedServiceTier: string | null = null,
+  observedServiceTierConflict = false,
 ): ProviderJsonUsageObservation {
-  return { state: 'unknown', usage: null, reason, observedServiceTier };
+  return {
+    state: 'unknown',
+    usage: null,
+    reason,
+    observedServiceTier,
+    ...(observedServiceTierConflict ? { observedServiceTierConflict: true } : {}),
+  };
 }
 
 const MAX_TIER_TEXT_BYTES = 32;
@@ -139,7 +156,11 @@ const MAX_TIER_TEXT_BYTES = 32;
  * top-level `service_tier` accepted as the same fact. Only short non-empty
  * strings are trusted; anything else is "no declaration" (never a guess).
  */
-function observedTierFromJson(protocol: JsonProtocol | null, body: Fields): string | null {
+function observedTierFromJson(
+  protocol: JsonProtocol | null,
+  body: Fields,
+  profile: ProviderUsageProfile,
+): { readonly observedServiceTier: string | null; readonly observedServiceTierConflict?: boolean } {
   const read = (value: unknown): string | null => {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim().toLowerCase();
@@ -148,9 +169,20 @@ function observedTierFromJson(protocol: JsonProtocol | null, body: Fields): stri
   };
   if (protocol === 'anthropic') {
     const usage = record(body.usage);
-    return read(usage?.speed) ?? read(body.service_tier);
+    if (profile !== null) {
+      const declarations = [
+        ...(usage && Object.hasOwn(usage, 'service_tier') ? [read(usage.service_tier)] : []),
+        ...(usage && Object.hasOwn(usage, 'speed') ? [read(usage.speed)] : []),
+        ...(Object.hasOwn(body, 'service_tier') ? [read(body.service_tier)] : []),
+      ];
+      if (declarations.some((tier) => tier !== declarations[0])) {
+        return { observedServiceTier: null, observedServiceTierConflict: true };
+      }
+      return { observedServiceTier: declarations[0] ?? null };
+    }
+    return { observedServiceTier: read(usage?.speed) ?? read(body.service_tier) };
   }
-  return read(body.service_tier);
+  return { observedServiceTier: read(body.service_tier) };
 }
 
 // JSON.parse accepts duplicate names silently. Reject ambiguous usage/envelope
@@ -192,8 +224,17 @@ function unambiguousJson(text: string): boolean {
   return depth === 0;
 }
 
-function validEnvelope(protocol: JsonProtocol, body: Fields): boolean {
+function validEnvelope(protocol: JsonProtocol, body: Fields, compact = false): boolean {
   if (body.error !== undefined && body.error !== null) return false;
+  if (compact) {
+    return (
+      body.object === 'response.compaction' &&
+      typeof body.id === 'string' &&
+      body.id !== '' &&
+      Array.isArray(body.output) &&
+      body.output.some((item: unknown) => record(item)?.type === 'compaction')
+    );
+  }
   if (protocol === 'openai') {
     return (
       body.object === 'chat.completion' &&
@@ -272,7 +313,11 @@ function embeddingsTrustedUsage(raw: Fields): NormalSuccessObservedUsage | null 
   });
 }
 
-function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObservedUsage | null {
+function trustedUsage(
+  protocol: JsonProtocol,
+  value: unknown,
+  profile: ProviderUsageProfile,
+): NormalSuccessObservedUsage | null {
   const raw = record(value);
   if (!raw) return null;
   if (protocol === 'embeddings') return embeddingsTrustedUsage(raw);
@@ -282,11 +327,15 @@ function trustedUsage(protocol: JsonProtocol, value: unknown): NormalSuccessObse
     details: Record<string, readonly string[]>;
     strings: readonly string[];
   } = counterShapes[protocol];
+  const metadataNames = protocol === 'anthropic' ? anthropicUsageMetadataKeys(profile) : [];
+  if (protocol === 'anthropic' && !validAnthropicUsageMetadata(profile, raw)) return null;
   const scalarNames = [...shape.required, ...shape.optional];
   if (shape.required.some((name) => !Object.hasOwn(raw, name) || !token(raw[name]))) return null;
   for (const [name, counter] of Object.entries(raw)) {
     if (scalarNames.includes(name)) {
       if (!token(counter)) return null;
+    } else if (metadataNames.includes(name)) {
+      // Validated against the exact, provider-bound metadata contract above.
     } else if (shape.strings.includes(name)) {
       // §8.3: the anthropic served-tier declaration rides inside usage; a
       // non-string or oversized value invalidates the report.
@@ -341,6 +390,8 @@ function parseBody(
   bytes: Uint8Array,
   protocol: JsonProtocol | null,
   mediaExtractor: ProviderMediaUsageExtractor | null,
+  compact = false,
+  profile: ProviderUsageProfile = null,
 ): ProviderJsonUsageObservation {
   let body: Fields | null;
   try {
@@ -354,8 +405,10 @@ function parseBody(
   // §8.3: the tier declaration is read from the parsed body even when the
   // envelope or usage is unusable, so tier evidence never depends on the
   // usage outcome.
-  const observedServiceTier = observedTierFromJson(protocol, body);
-  if (protocol !== null && !validEnvelope(protocol, body)) return unknown('malformed_body', observedServiceTier);
+  const tier = observedTierFromJson(protocol, body, profile);
+  const { observedServiceTier, observedServiceTierConflict } = tier;
+  if (protocol !== null && !validEnvelope(protocol, body, compact))
+    return unknown('malformed_body', observedServiceTier, observedServiceTierConflict);
   // §4.1 seam: an operation the token observer does not know goes to the
   // registered media extractor (never silently zero-billed).
   if (protocol === null) {
@@ -366,21 +419,26 @@ function parseBody(
           return {
             state: 'reported',
             usage: Object.freeze({ ...mediaUsage, source: 'upstream' }) as NormalSuccessObservedUsage,
-            observedServiceTier,
+            ...tier,
           };
         }
       } catch {
-        return unknown('invalid_usage', observedServiceTier);
+        return unknown('invalid_usage', observedServiceTier, observedServiceTierConflict);
       }
     }
-    return unknown('unsupported_protocol_operation', observedServiceTier);
+    return unknown('unsupported_protocol_operation', observedServiceTier, observedServiceTierConflict);
   }
-  if (!Object.hasOwn(body, 'usage') || body.usage === null) return unknown('no_usage', observedServiceTier);
+  if (!Object.hasOwn(body, 'usage') || body.usage === null)
+    return unknown('no_usage', observedServiceTier, observedServiceTierConflict);
   try {
-    const usage = trustedUsage(protocol, body.usage);
-    return usage ? { state: 'reported', usage, observedServiceTier } : unknown('invalid_usage', observedServiceTier);
+    if (protocol === 'anthropic' && !validAnthropicUsageMetadata(profile, record(body.usage) ?? {}, body))
+      return unknown('invalid_usage', observedServiceTier, observedServiceTierConflict);
+    const usage = trustedUsage(protocol, body.usage, profile);
+    return usage
+      ? { state: 'reported', usage, ...tier }
+      : unknown('invalid_usage', observedServiceTier, observedServiceTierConflict);
   } catch {
-    return unknown('invalid_usage', observedServiceTier);
+    return unknown('invalid_usage', observedServiceTier, observedServiceTierConflict);
   }
 }
 
@@ -392,6 +450,7 @@ export function observeProviderJsonUsage(
   mediaExtractor: ProviderMediaUsageExtractor | null = null,
 ): ProviderJsonObservedStream {
   const protocol = selectedProtocol(evidence);
+  const profile = providerUsageProfile(evidence);
   const media =
     mediaExtractor !== null &&
     typeof evidence.providerOperation === 'string' &&
@@ -440,7 +499,13 @@ export function observeProviderJsonUsage(
                     : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), null, media)
                 : oversized
                   ? unknown('oversized_body')
-                  : parseBody(buffer?.subarray(0, length) ?? new Uint8Array(), protocol, null),
+                  : parseBody(
+                      buffer?.subarray(0, length) ?? new Uint8Array(),
+                      protocol,
+                      null,
+                      evidence.providerOperation === 'responses.compact',
+                      profile,
+                    ),
             );
             release();
             controller.close();

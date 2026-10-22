@@ -199,6 +199,7 @@ test('request: tools[].function → tools + tool_choice variants', () => {
   const namedTool = b.transformRequest({
     model: 'm',
     messages: [],
+    tools: [{ type: 'function', function: { name: 'foo', parameters: { type: 'object' } } }],
     tool_choice: { type: 'function', function: { name: 'foo' } },
   });
   assert.deepEqual(namedTool.tool_choice, { type: 'tool', name: 'foo' });

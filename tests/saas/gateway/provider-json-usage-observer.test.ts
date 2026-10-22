@@ -325,7 +325,6 @@ test('server-owned protocol/operation selects the observer; unsupported pairs pa
   for (const evidence of [
     {},
     { providerProtocol: 'openai', providerOperation: 'responses' },
-    { providerProtocol: 'responses', providerOperation: 'responses.compact' },
     { providerProtocol: 'gemini', providerOperation: 'generateContent' },
   ]) {
     assert.deepEqual(await observe(envelope(), evidence), {

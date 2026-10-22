@@ -906,7 +906,13 @@ test('custom Anthropic upstream bridges Chat tool IDs, usage and SSE lifecycle',
     assert.equal(firstBody.choices[0].finish_reason, 'tool_calls');
     assert.equal(firstBody.choices[0].message.tool_calls[0].id, 'anth_call_9');
     assert.deepEqual(JSON.parse(firstBody.choices[0].message.tool_calls[0].function.arguments), { k: 9 });
-    assert.deepEqual(firstBody.usage, { prompt_tokens: 40, completion_tokens: 20, total_tokens: 60 });
+    // OpenAI prompt usage includes uncached input, cache reads and cache creation once: 40 + 60 + 10.
+    assert.deepEqual(firstBody.usage, {
+      prompt_tokens: 110,
+      completion_tokens: 20,
+      total_tokens: 130,
+      prompt_tokens_details: { cached_tokens: 60 },
+    });
 
     const second = await send(upstream.base, '/v1/chat/completions', {
       model: 'model',

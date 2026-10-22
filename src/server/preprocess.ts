@@ -64,10 +64,13 @@ export function preprocessRequest(
 /** Remove thinking data without changing cache-control breakpoints. */
 function stripThinking(body: any): void {
   delete body.thinking;
+  delete body.reasoning_effort;
   delete body.output_config;
   delete body.anthropic_beta;
   if (!Array.isArray(body.messages)) return;
   for (const message of body.messages) {
+    delete message.reasoning_content;
+    delete message.anthropic_content;
     if (Array.isArray(message?.content)) {
       message.content = message.content.filter(
         (block: any) => block?.type !== 'thinking' && block?.type !== 'redacted_thinking',

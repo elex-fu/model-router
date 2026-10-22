@@ -8,6 +8,11 @@ import type { KeyLimiter, ReserveResult } from '../limit/limiter.js';
 import { redactSecrets } from '../limit/redact.js';
 import type { LogEntry } from '../logger/types.js';
 import { type Bridge, type Protocol, pickBridge } from '../protocol/bridge.js';
+import {
+  BridgeToolChoiceMismatchError,
+  BridgeToolChoiceSelectionError,
+  supportsOpenAIToAnthropicThinkingHistory,
+} from '../protocol/openai-to-anth.js';
 import { providerProfile } from '../providers/profiles.js';
 import { joinApiUrl } from '../providers/url.js';
 import { normalizeUsage } from '../providers/usage.js';
@@ -996,7 +1001,7 @@ export async function proxyHandler(
       await finishRequest(422, null, null);
       return;
     }
-    const protocolCandidates = candidates.filter(({ upstream }) => {
+    const protocolCandidates = candidates.filter(({ upstream, resolvedModel }) => {
       const profile = providerProfile(
         (upstream as { presetId?: string }).presetId ?? upstream.provider,
         upstream.protocol,
@@ -1010,7 +1015,15 @@ export async function proxyHandler(
       if (clientProto === 'gemini' || upstream.protocol === 'gemini') return true;
       if (
         clientProto !== upstream.protocol &&
-        JSON.stringify(parsedBody).match(/reasoning_content|redacted_thinking|"type":"thinking"/)
+        JSON.stringify(parsedBody).match(/reasoning_content|redacted_thinking|"type":"thinking"/) &&
+        !(
+          clientProto === 'openai' &&
+          upstream.protocol === 'anthropic' &&
+          supportsOpenAIToAnthropicThinkingHistory(parsedBody, {
+            provider: upstream.presetId ?? upstream.provider,
+            model: resolvedModel,
+          })
+        )
       )
         return false;
       return true;
@@ -1038,7 +1051,7 @@ export async function proxyHandler(
         }
         if (capabilities[capability] === 'unsupported') return false;
       }
-      const outputLimit = parsedBody?.max_output_tokens ?? parsedBody?.max_tokens;
+      const outputLimit = parsedBody?.max_output_tokens ?? parsedBody?.max_completion_tokens ?? parsedBody?.max_tokens;
       if (typeof outputLimit === 'number' && capabilities.maxOutputTokens && outputLimit > capabilities.maxOutputTokens)
         return false;
       return true;
@@ -1171,7 +1184,10 @@ export async function proxyHandler(
       for (let i = 0; i < supportedCandidates.length; i++) {
         if (abortController.signal.aborted || performance.now() >= deadline) break;
         const { upstream, resolvedModel } = supportedCandidates[i];
-        const bridge = pickBridge(clientProto, upstream.protocol);
+        const bridge = pickBridge(clientProto, upstream.protocol, {
+          provider: upstream.presetId ?? upstream.provider,
+          model: resolvedModel,
+        });
 
         if (options.circuitBreaker && !options.circuitBreaker.allow(upstream.name)) {
           if (i < supportedCandidates.length - 1) continue;
@@ -1881,7 +1897,14 @@ async function trySingleUpstream(options: {
   if (upstream.copilotOptimized) {
     optimizeCopilotBody(preprocessedBody);
   }
-  const transformedBody = bridge.transformRequest(preprocessedBody);
+  let transformedBody: any;
+  try {
+    transformedBody = bridge.transformRequest(preprocessedBody);
+  } catch (error) {
+    if (!(error instanceof BridgeToolChoiceSelectionError)) throw error;
+    cleanupSignal();
+    return { ok: false, shouldRetry: false, statusCode: 400, errorMessage: error.message };
+  }
   if (transformedBody && typeof transformedBody === 'object') {
     transformedBody.model = resolvedModel;
     if (upstream.protocol === 'openai' && isStreaming && upstream.requestStreamUsage !== undefined) {
@@ -2187,7 +2210,22 @@ async function trySingleUpstream(options: {
       };
     }
     const usage = normalizeUsage(upstream.protocol, upstreamJson);
-    const transformed = bridge.transformResponse(upstreamJson);
+    let transformed: unknown;
+    try {
+      transformed = bridge.transformResponse(upstreamJson);
+    } catch (error) {
+      if (!(error instanceof BridgeToolChoiceMismatchError)) throw error;
+      cleanupSignal();
+      return {
+        ok: false,
+        shouldRetry: false,
+        statusCode: 502,
+        errorMessage: error.message,
+        usage,
+        rawUsage: upstreamJson?.usage ?? upstreamJson?.usageMetadata,
+        firstByteMs,
+      };
+    }
     res.writeHead(upstreamRes.status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(transformed));
     cleanupSignal();

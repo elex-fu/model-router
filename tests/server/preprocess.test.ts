@@ -175,6 +175,35 @@ test('explicit Anthropic policies control thinking and cache preparation indepen
   assert.equal(stripped.messages[0].content[0].cache_control, undefined);
 });
 
+test('explicit strip policy cannot reconstruct thinking from OpenAI history extensions', () => {
+  const output = preprocessRequest(
+    {
+      reasoning_effort: 'none',
+      thinking: { type: 'enabled' },
+      messages: [
+        {
+          role: 'assistant',
+          content: '5',
+          reasoning_content: 'reasoning fixture',
+          anthropic_content: [
+            { type: 'thinking', thinking: 'reasoning fixture', signature: 'fixture-signature' },
+            { type: 'text', text: '5' },
+          ],
+        },
+      ],
+    },
+    'anthropic',
+    'kimi-for-coding',
+    providerProfile('kimi', 'anthropic'),
+    { thinking: 'strip' },
+  );
+  assert.equal(output.thinking, undefined);
+  assert.equal(output.reasoning_effort, undefined);
+  assert.equal(output.messages[0].reasoning_content, undefined);
+  assert.equal(output.messages[0].anthropic_content, undefined);
+  assert.equal(output.messages[0].content, '5');
+});
+
 test('openai upstream: strips thinking and cache_control', () => {
   const body = {
     model: 'gpt-4',

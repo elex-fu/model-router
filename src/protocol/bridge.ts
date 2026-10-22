@@ -62,7 +62,7 @@ import {
 } from '../saas/gateway/responses-bridge/reverse-response.js';
 import { AnthToOpenAIBridge } from './anth-to-openai.js';
 import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
-import { OpenAIToAnthBridge } from './openai-to-anth.js';
+import { OpenAIToAnthBridge, type OpenAIToAnthBridgeOptions } from './openai-to-anth.js';
 import { PassthroughAnthropicBridge } from './passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from './passthrough-openai.js';
 import { AnthToResponsesBridge, OpenAIToResponsesBridge, ResponsesToAnthBridge } from './responses.js';
@@ -314,7 +314,11 @@ class AnthToResponsesBridgeImpl extends AnthToResponsesBridge {}
 class ResponsesToAnthBridgeImpl extends ResponsesToAnthBridge {}
 
 /** Pick the bridge for a given (clientProto, upstreamProto) pair. */
-export function pickBridge(clientProto: Protocol, upstreamProto: Protocol): Bridge {
+export function pickBridge(
+  clientProto: Protocol,
+  upstreamProto: Protocol,
+  options: OpenAIToAnthBridgeOptions = {},
+): Bridge {
   if (clientProto === 'anthropic' && upstreamProto === 'anthropic') {
     return new PassthroughAnthropicBridge();
   }
@@ -331,7 +335,7 @@ export function pickBridge(clientProto: Protocol, upstreamProto: Protocol): Brid
     return new AnthToOpenAIBridge();
   }
   if (clientProto === 'openai' && upstreamProto === 'anthropic') {
-    return new OpenAIToAnthBridge();
+    return new OpenAIToAnthBridge(options);
   }
   if (clientProto === 'responses' && upstreamProto === 'openai') {
     return new ResponsesToOpenAIBridge();

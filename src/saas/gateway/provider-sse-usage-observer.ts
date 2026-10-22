@@ -5,6 +5,13 @@ import type {
   PreparedEvidenceTransportRequest,
   PreparedEvidenceTransportResponse,
 } from './prepared-evidence-dispatch-service.js';
+import {
+  anthropicUsageMetadataKeys,
+  type ProviderUsageProfile,
+  type ProviderUsageProfileEvidence,
+  providerUsageProfile,
+  validAnthropicUsageMetadata,
+} from './provider-usage-profile.js';
 
 export const PROVIDER_SSE_USAGE_MAX_EVENT_BYTES = 32 * 1024;
 
@@ -40,10 +47,7 @@ export type ProviderSseUsageObservation =
       readonly observedServiceTierConflict: boolean;
     };
 
-export interface ProviderSseUsageEvidence {
-  /** Provider-side values from the signed/persisted prepared evidence. */
-  readonly providerProtocol?: string;
-  readonly providerOperation?: string;
+export interface ProviderSseUsageEvidence extends ProviderUsageProfileEvidence {
   /**
    * §4.1 (roadmap batch 4) media observation seam. Media responses are JSON
    * documents, not SSE event streams, so the SSE observer itself never
@@ -179,7 +183,12 @@ interface AnthropicInputUsage {
   readonly cacheWrite1h: number | null;
 }
 
-function parseAnthropicInputUsage(value: UsageRecord, requireInputFields: boolean): Partial<AnthropicInputUsage> {
+function parseAnthropicInputUsage(
+  value: UsageRecord,
+  requireInputFields: boolean,
+  profile: ProviderUsageProfile,
+  envelope: UsageRecord,
+): Partial<AnthropicInputUsage> {
   assertAllowedKeys(value, [
     'input_tokens',
     'output_tokens',
@@ -188,7 +197,9 @@ function parseAnthropicInputUsage(value: UsageRecord, requireInputFields: boolea
     'cache_creation',
     // §8.3: the served-tier declaration rides inside usage as `speed`.
     'speed',
+    ...anthropicUsageMetadataKeys(profile),
   ]);
+  if (!validAnthropicUsageMetadata(profile, value, envelope)) rejectUsage('invalid_usage');
   // A declared `speed` must be a short string; anything else invalidates the
   // usage report (the tier value itself was already merged by the caller).
   if (Object.hasOwn(value, 'speed') && tierText(value.speed) === null) rejectUsage('invalid_usage');
@@ -303,6 +314,7 @@ function unknown(reason: ProviderSseUsageUnknownReason): ProviderSseUsageObserva
 
 class ProviderSseUsageParser {
   private readonly kind: ParserKind | null;
+  private readonly profile: ProviderUsageProfile;
   private readonly lineBuffer = new Uint8Array(PROVIDER_SSE_USAGE_MAX_EVENT_BYTES);
   private lineLength = 0;
   private eventBytes = 0;
@@ -327,6 +339,7 @@ class ProviderSseUsageParser {
   private tierConflict = false;
 
   constructor(evidence: ProviderSseUsageEvidence) {
+    this.profile = providerUsageProfile(evidence);
     this.kind =
       evidence.providerProtocol === 'openai' && evidence.providerOperation === 'chat.completions'
         ? 'openai-chat-completions'
@@ -530,8 +543,9 @@ class ProviderSseUsageParser {
       // §8.3: Anthropic's served-tier declaration (`usage.speed`, with a
       // message-level `service_tier` accepted as the same fact).
       this.observeTier(usage.speed, Object.hasOwn(usage, 'speed'));
+      if (this.profile !== null) this.observeTier(usage.service_tier, Object.hasOwn(usage, 'service_tier'));
       this.observeTier(message.service_tier, Object.hasOwn(message, 'service_tier'));
-      const input = parseAnthropicInputUsage(usage, true);
+      const input = parseAnthropicInputUsage(usage, true, this.profile, message);
       if (input.inputTokens === undefined || input.cacheRead === undefined || input.cacheWrite === undefined) {
         rejectUsage('invalid_usage');
       }
@@ -547,7 +561,11 @@ class ProviderSseUsageParser {
       if (!usage) rejectUsage('invalid_usage');
       // §8.3: a delta-side tier declaration must agree with message_start.
       this.observeTier(usage.speed, Object.hasOwn(usage, 'speed'));
-      const inputUpdate = parseAnthropicInputUsage(usage, false);
+      if (this.profile !== null) {
+        this.observeTier(usage.service_tier, Object.hasOwn(usage, 'service_tier'));
+        this.observeTier(event.service_tier, Object.hasOwn(event, 'service_tier'));
+      }
+      const inputUpdate = parseAnthropicInputUsage(usage, false, this.profile, event);
       const mergedInput = mergeAnthropicInputUsage(this.initialAnthropicInput, inputUpdate);
       const outputTokens = requiredToken(usage, 'output_tokens');
       if (this.anthropicDelta) {
@@ -602,13 +620,7 @@ export function observeProviderSseUsage(
   evidence: ProviderSseUsageEvidence,
 ): ProviderSseObservedStream {
   const selectedKind = parserSelection(evidence);
-  const parser = new ProviderSseUsageParser(
-    selectedKind === null
-      ? {}
-      : selectedKind === 'openai-chat-completions'
-        ? { providerProtocol: 'openai', providerOperation: 'chat.completions' }
-        : { providerProtocol: 'anthropic', providerOperation: 'messages' },
-  );
+  const parser = new ProviderSseUsageParser(selectedKind === null ? {} : evidence);
   const reader = body.getReader();
   let settled = false;
   let cancellationRequested = false;

@@ -101,6 +101,9 @@ export function extractThinkingIntent(body: Record<string, unknown>): {
       return { intent: { enabled: false }, diagnostics: ['thinking.intent.extracted'] };
     }
   }
+  if (body.reasoning_effort === 'none') {
+    return { intent: { enabled: false }, diagnostics: ['thinking.intent.extracted'] };
+  }
   if (typeof body.reasoning_effort === 'string' && LEVELS.includes(body.reasoning_effort as ThinkingIntentLevel)) {
     diagnostics.push('thinking.intent.extracted');
     return { intent: { enabled: true, level: body.reasoning_effort as ThinkingIntentLevel }, diagnostics };
@@ -188,7 +191,9 @@ export function applyThinkingPolicy(input: {
     return { body: stripped, diagnostics };
   }
   if (!intent.enabled) {
-    // An explicit disabled intent strips the provider fields.
+    // Keep an explicit off switch for endpoints which reason by default.
+    // Removing it would silently restore thinking and can invalidate forced
+    // tool selection (Kimi's Anthropic-compatible endpoint).
     const stripped = { ...input.body };
     delete stripped.thinking;
     delete stripped.reasoning_effort;
@@ -196,6 +201,11 @@ export function applyThinkingPolicy(input: {
       const generationConfig = { ...(stripped.generationConfig as Record<string, unknown>) };
       delete generationConfig.thinkingConfig;
       stripped.generationConfig = generationConfig;
+    }
+    if (input.provider === 'anthropic' || input.provider === 'kimi') {
+      stripped.thinking = { type: 'disabled' };
+    } else if (input.provider === 'openai') {
+      stripped.reasoning_effort = 'none';
     }
     return { body: stripped, diagnostics };
   }

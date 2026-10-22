@@ -411,9 +411,14 @@ export function createPinnedProviderHttpTestConnectorFactory(
   }
   const trustedCa = providerHttpTestAddressCapabilities.get(capability)?.ca;
   if (!trustedCa) throw new Error('the local provider HTTP connector requires a test CA');
-  return ({ hostname, address, family }) => {
+  return ({ hostname, address, family, proxy }) => {
     if (!isLoopbackProviderAddress(hostname) || hostname !== address) {
       throw new ProviderHttpAddressPolicyError();
+    }
+    if (proxy !== undefined) {
+      return createEgressProxyDispatcher(proxy, {
+        requestTls: { lookup: createPinnedProviderLookup(hostname, { address, family }), ca: trustedCa },
+      });
     }
     const agent = new Agent({
       connect: {

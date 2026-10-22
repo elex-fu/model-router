@@ -92,14 +92,28 @@ test('G-B6 ③: kimi maps effort with max downgraded to high', () => {
   assert.deepEqual(decision.body?.thinking, { effort: 'high' });
 });
 
-test('G-B6: an explicit disabled intent strips the provider fields', () => {
+test('G-B6: an explicit disabled intent keeps the provider off switch', () => {
   const decision = applyThinkingPolicy({
     body: { model: 'm', thinking: { type: 'disabled' }, reasoning_effort: 'high' },
     model: 'm',
     provider: 'openai',
   });
   assert.equal(decision.body?.thinking, undefined);
-  assert.equal(decision.body?.reasoning_effort, undefined);
+  assert.equal(decision.body?.reasoning_effort, 'none');
+});
+
+test('G-B6: reasoning_effort none preserves disabled thinking on Anthropic and Kimi', () => {
+  assert.deepEqual(extractThinkingIntent({ reasoning_effort: 'none' })?.intent, { enabled: false });
+  for (const provider of ['anthropic', 'kimi'] as const) {
+    const decision = applyThinkingPolicy({
+      body: { model: 'kimi-for-coding', reasoning_effort: 'none', tool_choice: { type: 'tool', name: 'add' } },
+      model: 'kimi-for-coding',
+      provider,
+    });
+    assert.deepEqual(decision.body?.thinking, { type: 'disabled' });
+    assert.equal(decision.body?.reasoning_effort, undefined);
+    assert.deepEqual(decision.body?.tool_choice, { type: 'tool', name: 'add' });
+  }
 });
 
 test('G-B6: the input body is never mutated', () => {
