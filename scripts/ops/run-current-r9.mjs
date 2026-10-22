@@ -39,6 +39,12 @@ assert.ok(!options.requestSamples || (options.diagnostic && options.serialProfil
 const configuredPostgresPreparedStatements = process.env.MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS;
 const postgresPreparedStatements = configuredPostgresPreparedStatements === undefined ? 'off' : configuredPostgresPreparedStatements;
 assert.ok(postgresPreparedStatements === 'off' || postgresPreparedStatements === 'native', 'MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS must be exactly off or native');
+const configuredGatewayMaxHttpInFlight = process.env.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT;
+assert.ok(configuredGatewayMaxHttpInFlight === undefined || configuredGatewayMaxHttpInFlight === '' ||
+  (/^[1-9][0-9]*$/.test(configuredGatewayMaxHttpInFlight) && Number.isSafeInteger(Number(configuredGatewayMaxHttpInFlight))),
+  'MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT must be a positive safe integer');
+// null keeps the gateway default: unset/empty means HTTP ingress backpressure stays off.
+const gatewayMaxHttpInFlight = configuredGatewayMaxHttpInFlight !== undefined && configuredGatewayMaxHttpInFlight !== '' ? Number(configuredGatewayMaxHttpInFlight) : null;
 assert.ok(options.pgBin, 'Set --pg-bin to an installed PostgreSQL 16+ binary directory');
 const pgBin = resolve(options.pgBin);
 for (const executable of ['initdb', 'pg_ctl', 'psql', 'postgres']) assert.ok(existsSync(join(pgBin, executable)), `Missing PostgreSQL binary ${executable}`);
@@ -57,7 +63,7 @@ let interrupted = false;
 const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'current-dist-cli-mock-test-assembly',
   productionKmsVerified: false, builtinAcceptance: false, realProviderCalls: 0, diagnostic: options.diagnostic,
   serialProfile: options.serialProfile, warmupInflight: options.serialProfile ? 1 : 4,
-  postgresPreparedStatements,
+  postgresPreparedStatements, gatewayMaxHttpInFlight,
   mockProtocolPaths: 'native OpenAI and native Anthropic; cross-protocol acceptance is separate',
   buildRequested: !options.noBuild, nodeVersion: process.version, postgresDurability: { fsync: 'on', synchronousCommit: 'on' },
   stages: [], scenes: [], firstFault: null, cleanup: {}, sourceBefore: {}, sourceAfter: {}, distBefore: {}, distAfter: {}, ok: false };
@@ -586,6 +592,7 @@ try {
     const gateway = await launch(`gateway-${index + 1}`, process.execPath, [join(root, 'dist/cli/index.js'), 'start', '--role', 'gateway'], {
       ...kmsEnv, MODEL_ROUTER_DEPLOYMENT_MODE: 'managed-saas', MODEL_ROUTER_SAAS_WORKLOAD_ROLE: 'gateway',
       MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS: postgresPreparedStatements,
+      ...(gatewayMaxHttpInFlight === null ? {} : { MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: configuredGatewayMaxHttpInFlight }),
       MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: roleUrl('model_router_saas_gateway'), MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE: moduleFile,
       SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE: join(root, 'dist/saas/runtime/software-provider-credential-kms.js'),
       MODEL_ROUTER_SAAS_DEPLOYMENT_ID: 'r9-current-test', MODEL_ROUTER_SAAS_ENVIRONMENT_ID: 'test',
