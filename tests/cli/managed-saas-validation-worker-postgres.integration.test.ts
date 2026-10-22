@@ -628,10 +628,11 @@ async function verifyRestorableColumnGrant(migrator: SaasDatabase): Promise<void
     `SELECT relation.relowner = owner.oid
        AND NOT pg_catalog.has_table_privilege(worker.oid, relation.oid, 'SELECT')
        AND pg_catalog.has_column_privilege(worker.oid, relation.oid, attribute.attnum, 'SELECT')
-       AND (SELECT count(*) = 1 FROM pg_catalog.aclexplode(attribute.attacl) AS entry WHERE entry.grantee = worker.oid)
-       AND EXISTS (SELECT 1 FROM pg_catalog.aclexplode(attribute.attacl) AS entry
+       AND pg_catalog.has_column_privilege(worker.oid, relation.oid, attribute.attnum, 'INSERT')
+       AND (SELECT count(*) = 2 FROM pg_catalog.aclexplode(attribute.attacl) AS entry WHERE entry.grantee = worker.oid)
+       AND (SELECT count(*) = 2 FROM pg_catalog.aclexplode(attribute.attacl) AS entry
          WHERE entry.grantee = worker.oid AND entry.grantor = owner.oid
-           AND entry.privilege_type = 'SELECT' AND NOT entry.is_grantable) AS exact_owner_grant
+           AND entry.privilege_type IN ('SELECT', 'INSERT') AND NOT entry.is_grantable) AS exact_owner_grant
      FROM pg_catalog.pg_class AS relation JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
      JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = relation.oid
      JOIN pg_catalog.pg_roles AS owner ON owner.rolname = current_user
@@ -641,7 +642,7 @@ async function verifyRestorableColumnGrant(migrator: SaasDatabase): Promise<void
   );
   check(
     result.rows.length === 1 && result.rows[0]?.exact_owner_grant === true,
-    'privilege negative requires the exact existing owner-issued, non-grantable worker column SELECT; never widen fixture authority',
+    'privilege negative requires the exact existing owner-issued, non-grantable worker column SELECT+INSERT pair; never widen fixture authority',
   );
 }
 async function negativePreflightScope(migrator: SaasDatabase, observer: SaasDatabase): Promise<string> {

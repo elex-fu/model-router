@@ -261,12 +261,30 @@ function makeDatabase(state: FixtureState) {
       rows = [];
     } else if (normalized.startsWith('SELECT pg_advisory_xact_lock')) {
       rows = [];
+    } else if (normalized.startsWith('/* composite-route-store:billing-group */')) {
+      // Commercial routing resolves the effective billing group (and its
+      // composite marker) before route selection. This query joins
+      // saas_api_keys, so it must be matched before the plain api-key lookup
+      // branch; the fixture routes a plain non-composite model and the
+      // seeded default group applies.
+      rows = [{ id: 'default', composite: null }];
     } else if (normalized.includes('FROM saas_api_keys')) {
       rows = values.includes(sha256(KEY)) ? [keyRow] : [];
     } else if (normalized.includes('SELECT clock_timestamp() AS authority_now')) {
       rows = [{ authority_now: new Date().toISOString() }];
     } else if (normalized.includes('FROM saas_route_config_heads h')) {
       rows = [routeRow];
+    } else if (normalized.includes('FROM saas_route_config_commercial_authorities')) {
+      // Commercial routing reads the route's immutable policy binding as an
+      // identity hint before the dispatchable view. It must agree with the
+      // dispatchable row below so the provider policy fences resolve.
+      rows = [
+        {
+          customer_policy_id: 'customer-policy-e2e',
+          provider_policy_id: 'provider-policy-e2e',
+          provider_policy_version: '3',
+        },
+      ];
     } else if (normalized.includes('FROM saas_public_model_versions v')) {
       rows = [
         {
@@ -313,7 +331,9 @@ function makeDatabase(state: FixtureState) {
     } else if (normalized.includes('preparation-authority:platform')) {
       rows = [platformPoolCandidate()];
     } else if (normalized.includes('preparation-authority:account-capability')) {
-      rows = [{ capability_version: '11' }];
+      // The native-protocol scheduler matches account capability rows by
+      // account_id; the row must carry the fixture pool account identity.
+      rows = [{ account_id: 'account-e2e', capability_version: '11' }];
     } else if (normalized.includes('FROM saas_provider_products')) {
       rows = [
         {

@@ -610,3 +610,15 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 **边界**：单真实凭据、夹具价格（客户 2/3、供应商 1/1）、pilot 软件 KMS、PG fsync/synchronous_commit off——不替代生产 KMS、压力或全供应商验收。R1 的 retryReason 遥测改写与 R2 的 refuseRunning fail-closed 均包含在本构建内,其行为随主链一并验证。
 
 **R3→R4**：同一构建产物执行串行性能与 HTTP 背压 off/8 对照（harness 透传已就位）。
+
+## 20. R7 第一批：远端 required CI 四类失败的本地复现与修复（2026-10-23）
+
+推送 c866719 触发的 CI 与此前 ef9e3c9/bb9756c 一样失败。用本地一次性 PG18 集群（initdb + 角色 SQL + 迁移 + worker grants,复刻 `managed-postgres-runtime-privileges.integration.sh` 的 CI 步骤）逐类复现并修复：
+
+1. **worker CLI stdout 非空(真实生产缺陷)**：`managed-saas.ts` 的 egress allowlist 无条件 `console.log`,违反 workload 静默启动契约。改为仅在配置了 allowlist 时输出——严格默认(未配置)恢复字节级静默,操作员放宽配置时仍能看到生效 CIDR。
+2. **`verifyRestorableColumnGrant` 旧基线**：生产已合法授予 worker 对 `saas_provider_capabilities.evidence_sha256` 的 SELECT+INSERT 两条 owner 签发、不可转授的列授权(验证证据写入需要),断言仍要求恰好一条 SELECT。同步为精确两条 {SELECT, INSERT},保留无表级 SELECT 与 grantor/grantee/非转授校验。
+3. **credential-validation 门禁的负向用例失效**:G2(F6 mount)已把该表全部 13 列 SELECT 授予 worker(RETURNING 投影需要),`evidence_ref` 负向不再有判别力。换成持久负向:worker 对迁移账本 `saas_schema_migrations` 的访问必须 42501(与另一根的 ledgerDenied 同款守卫)。
+4. **browser E2E 两个用例 503/403**:managed-saas-gateway 夹具的 fake SQL executor 未同步三处新查询/数据——(a) `composite-route-store:billing-group`(注意其含 `FROM saas_api_keys`,分支必须置于 api-key 查找之前,否则返回空行使 commercial authority 抛错);(b) `saas_route_config_commercial_authorities` hint(返回与 dispatchable 行一致的 policy 身份);(c) account-capability 行缺 `account_id`,native-protocol 调度按账号匹配导致 `fail('account')` → `account_denied`。三处补齐后两个用例 200。
+5. **deploy smoke 作业**：两个步骤写 `set -euo pipefail`(dash 不支持)且用 `$SECONDS`,补 `shell: bash`。
+
+**验证**:worker lifecycle 门禁 3/3、credential-validation 门禁 8/8(新库、CI 顺序执行);E2E gateway spec 2/2(其余 spec 本地因 Playwright 浏览器版本不匹配无法运行,非代码问题,由远端 CI 验证);saas-startup 60/60;unit **6849/6826/0/23(exit 0)**;tsc 干净;改动文件 Biome 零错误。**边界**:隔离门禁矩阵(`Managed SaaS isolated required gate`)此前被跳过,需等推送后远端执行;browser E2E 与 PG15 双版本仍由远端验证,本地仅 PG18。

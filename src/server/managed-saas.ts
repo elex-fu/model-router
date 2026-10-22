@@ -1802,13 +1802,13 @@ export async function startManagedSaasServer(
   // OAuth refresh all share this one parsed value). The effective entries
   // (CIDRs, never credentials) are logged.
   const providerHttpEgressAllowlist = parseProviderEgressAllowlistSettings(environment);
-  console.log(
-    `model-router provider egress allowlist: ${
-      providerHttpEgressAllowlist.entries.length === 0
-        ? 'none (strict global-only provider egress)'
-        : providerHttpEgressAllowlist.entries.join(', ')
-    }`,
-  );
+  if (providerHttpEgressAllowlist.entries.length > 0) {
+    // Log the effective entries (CIDRs, never credentials) only when the
+    // operator actually widened the default posture. The strict default must
+    // keep workload startup byte-quiet: managed CLIs are JSON/no-output
+    // contracts and unconfigured silence is the pre-R9 behavior.
+    console.log(`model-router provider egress allowlist: ${providerHttpEgressAllowlist.entries.join(', ')}`);
+  }
   // R9 §4 P1 composition: an empty allowlist is the pre-R9 strict posture —
   // omit the option entirely so every consumer keeps byte-identical default
   // behavior.

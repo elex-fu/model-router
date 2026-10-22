@@ -523,8 +523,13 @@ test('required real PostgreSQL restricted credential worker validates approved c
         [target.providerId, target.productId, target.model, target.endpoint],
       );
       assert.equal(evidence.rows[0]?.evidence_sha256, target.evidenceSha256);
+      // G2 (F6 mount) widened the worker's capability-table column SELECT to
+      // the full row (RETURNING projections for append-only version writes),
+      // so evidence_ref is legitimately readable now. The durable restriction
+      // this negative proves instead: the validation worker never gains
+      // migration-ledger access.
       await assert.rejects(
-        database.query(`SELECT evidence_ref FROM saas_provider_capabilities LIMIT 1`),
+        database.query(`SELECT version FROM model_router_saas.saas_schema_migrations LIMIT 1`),
         (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === '42501',
       );
     }

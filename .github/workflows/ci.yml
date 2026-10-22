@@ -331,6 +331,7 @@ jobs:
       # drill/track-F gates). Dry-run must exit 0 and print the full step plan
       # without touching the database.
       - name: saas:deploy dry-run asserts the step plan without touching the database
+        shell: bash
         run: |
           set -euo pipefail
           node --import tsx src/cli/index.ts saas:deploy \
@@ -353,6 +354,7 @@ jobs:
       # job-level timeout (locally the whole sequence runs in ~10s; the budget
       # exists for CI queue/slow-runner variance).
       - name: Real saas:deploy plus per-role saas:doctor under the 15-minute budget
+        shell: bash
         run: |
           set -euo pipefail
           start=$SECONDS
