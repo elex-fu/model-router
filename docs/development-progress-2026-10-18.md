@@ -1059,3 +1059,11 @@ PG recovery run-02 真实执行自有 `pg_ctl -m immediate stop` 成功，随后
 生产修复仅在原 database wrapper 中覆盖同一连接生命周期：原生 Pool 构造后立即消费 idle error 通知，不抛出、不记录原 error/client/DSN；checked-out client 从取得到 release 由 owner listener 保留首连接错误，后续普通/预编译 query 直接以同一原错误拒绝，不再发送。原 active query/COMMIT 的 driver promise 拒绝保持，rollback 错误不覆盖原 COMMIT 错误；坏 client 强制 discard，交回 driver listener 后移除 owner，避免监听空窗。没有新增重试、Promise.race、process级吞错、应用重启或金融成功推断。
 
 Astra 对生产文件与新 native-pool test 实际差分复核通过。Luna 新原生 wrapper 测试7项加既有 database15项，共 **22/22**，exact scoped strict通过，owned两文件前后hash一致。测试使用真实wrapper构造与替换native IO，覆盖 idle、checked-out active/gap、prepared、COMMIT/ROLLBACK、无重复发送和 listener handoff；不是实际 PG 恢复证据。新 server build 与完整原 PG profile run-03 仍待执行，600秒 stale recovery、资金及租约断言保持不变。暖缓存撤销证据已独立推送 `a246be9`。
+
+### 29.38 确定撤销的 typed 403 映射
+
+§29.36 真实场景暴露确定授权撤销被报告为503。Astra核对现有契约：prelock已经区分 `authorization_denied` 与 `storage_failure`，ports catch遗漏前者，最终落入通用blocked；HTTP本来就将reject映403、block映503。修复只在该catch精确匹配 `instanceof SaasAdmissionAuthorizationError && code==='authorization_denied'`，返回现 `caller_denied` 和固定通用文案，不披露 tenant/Key 状态或原 error/cause。
+
+typed storage failure、unsupported policy、伪造同名普通对象、SQLSTATE42501和08006继续原blocked路径；不修改HTTP handler、权限锁、缓存、重试或授权策略。暖缓存helper仅把tenant/Key的HTTP期望更新为403 `REQUEST_REJECTED / admission / caller_denied`，保留实际prelock拒绝次数、source无reload、全部金融/派发零变化、正常resume/KeyB与版本/审计断言。entitlement已有403不变。
+
+Astra三文件实际复核通过；Luna ports定向 **21/21**、覆盖ports/unit/commercial与两个helper的exact strict通过，三owned文件前后hash不变。新增六类错误对照在事务中先创建HMAC claim再以原sentinel回滚，并要求meter、billing、capacity及guard均未调用。§29.36 的30/30仍是旧503映射证据，新403的真实PG商业root与新serverbuild在下一冻结批次验证，不互借结果。连接池修复已独立推送 `3a46a53`。

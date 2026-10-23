@@ -152,13 +152,13 @@ export async function proveAuthorizationRevocationHttp(input: {
     const before = await snapshot(), calls = input.upstreamCalls(), authCalls = sourceCount(), denials = denied;
     for (const gateway of input.gateways) {
       const result = await post(gateway, secret);
-      assert.equal(result.response.status, kind === 'prelock' ? 503 : 403);
-      assert.equal(result.body.error?.code, kind === 'prelock' ? 'REQUEST_BLOCKED' : 'REQUEST_REJECTED');
+      assert.equal(result.response.status, 403);
+      assert.equal(result.body.error?.code, 'REQUEST_REJECTED');
       assert.deepEqual({ stage: gateway.failure()?.stage, code: gateway.failure()?.code }, kind === 'entitlement'
-        ? { stage: 'entitlement', code: 'entitlement_denied' } : { stage: 'admission', code: 'storage_failure' });
+        ? { stage: 'entitlement', code: 'entitlement_denied' } : { stage: 'admission', code: 'caller_denied' });
     }
     assert.equal(sourceCount(), authCalls, 'revocation rejection must use the already cached authenticated snapshot');
-    assert.equal(denied - denials, kind === 'prelock' ? 2 : 0, '503 must be the real authorization prelock refusal');
+    assert.equal(denied - denials, kind === 'prelock' ? 2 : 0, 'caller rejection must be the real authorization prelock refusal');
     assert.equal(input.upstreamCalls(), calls, 'revoked authority cannot reach the controlled upstream');
     assert.deepEqual(await snapshot(), before, 'rejected requests cannot create any financial, dispatch or retained lease effect');
   };

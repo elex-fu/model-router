@@ -15,7 +15,7 @@ import {
   type SaasRequestAdmissionGuard,
   SaasRequestAdmissionService,
 } from './admission.js';
-import type { SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
+import { SaasAdmissionAuthorizationError, type SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
 import {
   BillingGroupSpendAdmissionDeniedError,
   type BillingGroupSpendAdmissionPort,
@@ -997,6 +997,9 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
         });
         return allowRequestPreparation(admission);
       } catch (error) {
+        if (error instanceof SaasAdmissionAuthorizationError && error.code === 'authorization_denied') {
+          return rejectRequestPreparation('caller_denied', 'The request is not authorized.');
+        }
         if (safeErrorCode(error) === 'IDEMPOTENCY_CONFLICT') {
           return {
             decision: 'reject',

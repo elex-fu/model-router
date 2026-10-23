@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import { SaasAdmissionAuthorizationError } from '../../../src/saas/gateway/authorization-prelock.js';
 import { PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND } from '../../../src/saas/gateway/admission.js';
 import {
   KeyBudgetAdmissionDeniedError,
@@ -221,7 +222,7 @@ function authority(
 
 function setup(
   mode: Mode = 'platform',
-  fixtureOptions: { insufficientFunds?: boolean; keyBudget?: KeyBudgetAdmissionPort } = {},
+  fixtureOptions: { insufficientFunds?: boolean; keyBudget?: KeyBudgetAdmissionPort; prelockError?: unknown } = {},
 ) {
   const value = caller(mode);
   const ent = entitlement(value);
@@ -532,7 +533,7 @@ function setup(
       };
     },
   };
-  const prelock = { async prelock() {} };
+  const prelock = { async prelock() { if (fixtureOptions.prelockError !== undefined) throw fixtureOptions.prelockError; } };
   const capacity = {
     async reserve(tx: SqlExecutor, input: AnyRow) {
       calls.capacityReserve += 1;
@@ -1163,3 +1164,34 @@ test('keyBudget denial rejects the admission as budget_exceeded', async () => {
     message: 'The API key budget is exhausted.',
   });
 });
+
+
+for (const [label, prelockError, expectedDecision] of [
+  ['typed authorization denial', new SaasAdmissionAuthorizationError('authorization_denied', 'private authorization detail'), 'reject'],
+  ['typed storage failure', new SaasAdmissionAuthorizationError('storage_failure', 'private storage detail'), 'block'],
+  ['typed unsupported policy', new SaasAdmissionAuthorizationError('project_policy_unsupported', 'private policy detail'), 'block'],
+  ['plain forged authorization code', { code: 'authorization_denied' }, 'block'],
+  ['SQL permission failure', Object.assign(new Error('private permission detail'), { code: '42501' }), 'block'],
+  ['SQL connection failure', Object.assign(new Error('private connection detail'), { code: '08006' }), 'block'],
+] as const) {
+  test(`${label} preserves precise admission mapping and rolls back the HMAC claim without financial writes`, async () => {
+    const fixture = setup('platform', { prelockError });
+    const rollback = new Error('owned preparation rollback sentinel');
+    const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
+    await assert.rejects(fixture.database.transaction(async executor => {
+      capture.value = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor });
+      assert.equal(fixture.gatewayIdempotency.size, 1, 'the normal HMAC claim exists before the rejected transaction rolls back');
+      assert.equal(capture.value.decision, expectedDecision);
+      throw rollback;
+    }), error => error === rollback);
+    const captured = capture.value;
+    assert.ok(captured && captured.decision !== 'allow');
+    assert.equal(captured.decision, expectedDecision);
+    assert.equal(captured.code, expectedDecision === 'reject' ? 'caller_denied' : 'storage_failure');
+    if (expectedDecision === 'reject') assert.equal(captured.message, 'The request is not authorized.');
+    assert.equal(fixture.requests.size, 0); assert.equal(fixture.attempts.size, 0);
+    assert.equal(fixture.capacityReservations.size, 0); assert.equal(fixture.gatewayIdempotency.size, 0);
+    assert.equal(fixture.billingRow, null);
+    assert.deepEqual(fixture.calls, { meter: 0, reserve: 0, capacityReserve: 0, capacityRelease: 0, walletRelease: 0, guard: 0 });
+  });
+}
