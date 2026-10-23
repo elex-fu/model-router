@@ -150,3 +150,93 @@ test('G-B4 connection: invalid JSON closes with 1002', async () => {
     assert.equal(code, 1002);
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const nextTurn = () => new Promise<void>(resolve => setImmediate(resolve));
+
+for (const outcome of ['allow', 'deny', 'reject'] as const) {
+  test(`shutdown drains original pending upgrade authentication (${outcome}) after socket closes`, { timeout: 5_000 }, async () => {
+    const authentication = deferred<{ ok: true } | { ok: false; reason: string }>();
+    const entered = deferred<void>();
+    let authCalls = 0, engineCalls = 0, settled = false;
+    const handle = createResponsesWsServer({
+      authenticate: async () => { authCalls++; entered.resolve(); return authentication.promise; },
+      createEngine: () => { engineCalls++; throw new Error('engine must not be created after shutdown'); },
+    });
+    const server = http.createServer();
+    server.on('upgrade', (req, socket, head) => {
+      if (!handle.handleUpgrade(req, socket, head)) socket.destroy();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const { port } = server.address() as AddressInfo;
+    const client = new WebSocket(`ws://127.0.0.1:${port}/v1/responses`);
+    client.on('error', () => {});
+    const disconnected = new Promise<void>(resolve => client.once('close', () => resolve()));
+    try {
+      await entered.promise;
+      const closing = handle.close();
+      assert.equal(handle.close(), closing, 'repeat close shares the original drain promise');
+      void closing.then(() => { settled = true; });
+      await disconnected;
+      await nextTurn();
+      assert.equal(settled, false, 'socket close must not substitute for authentication completion');
+      assert.equal(handle.activeConnections, 0);
+      assert.equal(engineCalls, 0);
+      if (outcome === 'reject') authentication.reject(new Error('synthetic auth rejection'));
+      else authentication.resolve(outcome === 'allow' ? { ok: true } : { ok: false, reason: 'denied' });
+      await closing;
+      assert.equal(engineCalls, 0);
+      assert.equal(handle.activeConnections, 0);
+      const late = new WebSocket(`ws://127.0.0.1:${port}/v1/responses`);
+      late.on('error', () => {});
+      await new Promise<void>(resolve => late.once('close', () => resolve()));
+      assert.equal(authCalls, 1, 'shutdown rejects a new upgrade before authentication');
+    } finally {
+      authentication.resolve({ ok: false, reason: 'cleanup' });
+      client.terminate();
+      await handle.close();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+}
+
+test('shutdown immediately aborts an attached engine but waits for its cleanup', { timeout: 5_000 }, async () => {
+  const cleanup = deferred<void>();
+  let aborted = 0;
+  const engine = {
+    clientDisconnected() { aborted++; },
+    whenIdle() { return cleanup.promise; },
+    bindTransport() {},
+  } as unknown as ResponsesWsEngine;
+  const handle = createResponsesWsServer({ authenticate: async () => ({ ok: true }), createEngine: () => engine });
+  const server = http.createServer();
+  server.on('upgrade', (req, socket, head) => { if (!handle.handleUpgrade(req, socket, head)) socket.destroy(); });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const client = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v1/responses`);
+  client.on('error', () => {});
+  const disconnected = new Promise<void>(resolve => client.once('close', () => resolve()));
+  try {
+    await once(client, 'open');
+    let settled = false;
+    const closing = handle.close();
+    void closing.then(() => { settled = true; });
+    assert.ok(aborted > 0, 'existing WS work is aborted immediately');
+    await disconnected;
+    await nextTurn();
+    assert.equal(settled, false, 'WS transport termination must still wait for engine cleanup');
+    cleanup.resolve();
+    await closing;
+  } finally {
+    cleanup.resolve();
+    client.terminate();
+    await handle.close();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});

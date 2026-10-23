@@ -949,3 +949,11 @@ Astra 在运行前发现 journal 的字面量换行错误并修正，查询现�
 新增仅用于 drill child 的 IPC barrier，在第 2 项真实 `complete()` 返回、写 marker 前通知父进程并保活，由父明确 SIGKILL；恢复 run 不启用 barrier。测试必须观察恰好一个提交后 marker 丢失窗口，第二项恢复必须 `replayed`，后续未执行项才可 `settled`。没有添加任意 sleep、伪造 marker 或修改生产结算。
 
 Luna 最新 scoped strict 与 fresh PG18.6 **1/1** 通过，实际输出 `1 committed before marker`，PG 精确一次与 replay 断言全部执行通过；runner sourceChanges=[]，临时集群停止并删除。此前随机窗口版本的 `0 committed before marker` 已由本次确定性结果取代。此证据限定为真实 PG 提交后应用确认丢失模拟，不冒充 PG 停机、网络 COMMIT ACK 丢失或独立故障域 WAL 恢复。SSE shutdown 修复已推送 `37b23f4`；完整新候选 CI 继续复验。
+
+### 29.27 WS 升级鉴权的原始 promise 关闭边界
+
+修复 WS upgrade 鉴权仍在使用数据库、连接已关闭而 gateway 提前宣告 close 完成的竞态。完整鉴权操作在调用前纳入原始 promise 集合，涵盖拒绝处理与 finally；close 同步停止新鉴权，并保留已连接 WS 的既有立即 abort 语义。鉴权返回后重验 stopped/socket.destroyed，禁止创建新 session；共享 close promise 等待原鉴权、真实 WS server close 与 engine cleanup 后才完成，不以连接计数或 socket 关闭代替。
+
+Astra 源码审查无阻断，Luna 定向真实 socket 测试 **9/9**、scoped strict 通过，覆盖 deferred 鉴权、允许/拒绝/抛错、关闭后不再创建 engine、cleanup 等待和重复 close。未执行 server build、PG 或真实 Codex；不能将其记为 WS 续流或完整托管验收。CP/customer 原 handler 与最终资源关闭的后续修复仍在独立任务中。
+
+结算确定性 barrier 已推送 `cf45917`。历史 [CI #143](https://github.com/elex-fu/model-router/actions/runs/40026002763) 与 `d8f1472` 精确绑定且 completed/success，包括全部 60 个独立门禁；它不包含之后的 SSE、barrier 或本次 WS 改动，不能外推为最新 head 完整通过。最新 `cf45917` 的正式 CI 结果仍待收齐。

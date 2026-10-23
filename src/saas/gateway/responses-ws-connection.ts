@@ -86,6 +86,9 @@ export function createResponsesWsServer(upgrade: ResponsesWsUpgrade): ResponsesW
       : {}),
   });
   const engines = new Set<ResponsesWsEngine>();
+  const pendingUpgradePromises = new Set<Promise<void>>();
+  const pendingSockets = new Set<import('node:stream').Duplex>();
+  let closePromise: Promise<void> | undefined;
   let active = 0;
   let pending = 0;
   let stopped = false;
@@ -93,6 +96,7 @@ export function createResponsesWsServer(upgrade: ResponsesWsUpgrade): ResponsesW
   const shutdown = (): void => {
     stopped = true;
     for (const engine of engines) engine.clientDisconnected();
+    for (const socket of pendingSockets) socket.destroy();
     for (const client of wss.clients) client.terminate();
   };
 
@@ -137,19 +141,23 @@ export function createResponsesWsServer(upgrade: ResponsesWsUpgrade): ResponsesW
     }
 
     pending += 1;
-    void (async () => {
+    pendingSockets.add(socket);
+    const operation = Promise.resolve().then(async () => {
       try {
+        if (stopped || socket.destroyed) return;
         const auth = await upgrade.authenticate(req).catch(() => ({ ok: false as const, reason: 'unavailable' }));
+        // Authentication can outlive the socket and server shutdown. Its
+        // completion never authorizes creating a new engine after the fence.
+        if (stopped || socket.destroyed) {
+          socket.destroy();
+          return;
+        }
         if (!auth.ok) {
           socket.write(
             auth.reason === 'unavailable'
               ? 'HTTP/1.1 503 Service Unavailable\r\n\r\n'
               : 'HTTP/1.1 401 Unauthorized\r\n\r\n',
           );
-          socket.destroy();
-          return;
-        }
-        if (stopped || socket.destroyed) {
           socket.destroy();
           return;
         }
@@ -170,8 +178,14 @@ export function createResponsesWsServer(upgrade: ResponsesWsUpgrade): ResponsesW
         }
       } finally {
         pending -= 1;
+        pendingSockets.delete(socket);
       }
-    })();
+    });
+    pendingUpgradePromises.add(operation);
+    void operation.then(
+      () => pendingUpgradePromises.delete(operation),
+      () => pendingUpgradePromises.delete(operation),
+    );
     return true;
   };
 
@@ -263,20 +277,19 @@ export function createResponsesWsServer(upgrade: ResponsesWsUpgrade): ResponsesW
 
   return {
     handleUpgrade,
-    close: async () => {
+    close: () => {
+      if (closePromise) return closePromise;
+      // Set the fence and abort existing transports synchronously. A closed
+      // socket is not proof that its asynchronous authentication has settled.
       shutdown();
-      await new Promise<void>((resolve) => {
-        const force = setTimeout(() => {
-          for (const client of wss.clients) client.terminate();
-          resolve();
-        }, 2_000);
-        force.unref?.();
-        wss.close(() => {
-          clearTimeout(force);
-          resolve();
+      closePromise = (async () => {
+        await Promise.allSettled([...pendingUpgradePromises]);
+        await new Promise<void>((resolve, reject) => {
+          wss.close((error) => error ? reject(error) : resolve());
         });
-      });
-      await Promise.allSettled([...engines].map((engine) => engine.whenIdle()));
+        await Promise.all([...engines].map((engine) => engine.whenIdle()));
+      })();
+      return closePromise;
     },
     get activeConnections() {
       return active;
