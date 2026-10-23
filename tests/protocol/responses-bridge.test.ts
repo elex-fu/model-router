@@ -90,7 +90,7 @@ describe('openai → responses bridge (F3 real conversion)', () => {
       model: 'grok-4.7',
       status: 'completed',
       output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi there' }] }],
-      usage: { input_tokens: 5, output_tokens: 2 },
+      usage: { input_tokens: 5, output_tokens: 2, input_tokens_details: { cached_tokens: 0 } },
     }) as Record<string, unknown>;
     assert.equal(completion.object, 'chat.completion');
     const choice = (completion.choices as Array<Record<string, unknown>>)[0];
@@ -102,6 +102,15 @@ describe('openai → responses bridge (F3 real conversion)', () => {
       total_tokens: 7,
       prompt_tokens_details: { cached_tokens: 0 },
     });
+  });
+
+  it('leaves absent cached-token details unknown instead of fabricating zero', () => {
+    const completion = new OpenAIToResponsesBridge().transformResponse({
+      id: 'resp_unknown_cache', model: 'grok-4.7', status: 'completed', output: [],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    }) as Record<string, unknown>;
+    assert.deepEqual(completion.usage, { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+    assert.equal('prompt_tokens_details' in (completion.usage as Record<string, unknown>), false);
   });
 
   it('converts Responses SSE to chat.completion.chunk SSE with usage and [DONE]', async () => {

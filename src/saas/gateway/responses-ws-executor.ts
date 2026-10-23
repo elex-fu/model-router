@@ -1,3 +1,5 @@
+import { createCodexNativeWsSessionHandle, closeCodexNativeWsSessionHandle, codexNativeWsSession, CodexNativeWsSessionError } from './codex/native-ws-session.js';
+import { markCodexNativeWsRequest, markCodexNativeWsRemoteReference } from './codex/continuation-metadata.js';
 import { ResponsesContinuationStore } from './responses-continuation.js';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -208,6 +210,7 @@ function samePin(left: ResponsesWsPinnedIdentity, right: ResponsesWsPinnedIdenti
     left.providerId === right.providerId &&
     left.accountId === right.accountId &&
     left.upstreamModel === right.upstreamModel &&
+    left.publicModel === right.publicModel &&
     left.credentialId === right.credentialId &&
     left.credentialVersion === right.credentialVersion &&
     left.credentialAuthzVersion === right.credentialAuthzVersion
@@ -217,6 +220,8 @@ function samePin(left: ResponsesWsPinnedIdentity, right: ResponsesWsPinnedIdenti
 export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptions): ResponsesWsRoundExecutor {
   const rawKey = responsesWsProxyKey(options.request);
   const continuations = new ResponsesContinuationStore(options.maxBodyBytes);
+  const nativeSession = createCodexNativeWsSessionHandle();
+  options.request.socket.once?.('close', () => { void closeCodexNativeWsSessionHandle(nativeSession); });
   const sessionId = `responses-ws:${randomUUID()}`;
   const audit = {
     entryPoint: options.entryPoint,
@@ -235,11 +240,15 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           throw new ResponsesWsRoundError('REQUEST_CANCELLED', 'the request was cancelled', 400);
         const caller = rawKey === null ? null : await options.authenticator.authenticate(rawKey).catch(() => null);
         if (!caller) throw new ResponsesWsRoundError('UNAUTHENTICATED', 'the proxy credential is unavailable', 401);
-        const body: Record<string, unknown> = continuations.resolve({
+        const canonicalBody: Record<string, unknown> = continuations.resolve({
           ...input.body,
           model: input.body.model ?? input.pinned?.publicModel,
           stream: true,
         }, { tenantId: caller.metadata.tenantId, projectId: caller.metadata.projectId, proxyKeyId: caller.metadata.id, pinned: input.pinned });
+        const canUseNativeReference = typeof input.body.previous_response_id === 'string' &&
+          input.pinned?.providerId === 'openai-codex' && codexNativeWsSession(nativeSession).hasCompleted(input.body.previous_response_id);
+        const body = canUseNativeReference ? markCodexNativeWsRemoteReference({ ...input.body, model: canonicalBody.model, stream: true }) : canonicalBody;
+        markCodexNativeWsRequest(body);
         const model = body.model;
         if (typeof model !== 'string' || model.trim() === '' || model.trim() !== model || model.length > 512) {
           throw new ResponsesWsRoundError('INVALID_BODY', 'a model is required', 400);
@@ -318,6 +327,7 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
         input.cancelSignal.addEventListener('abort', onAbort, { once: true });
         try {
           const dispatched = await options.dispatch.dispatch({
+            codexNativeWsSession: nativeSession,
             evidenceId: prepared.evidence.evidenceId,
             payloadBytes: prepared.payloadBytes,
             normalSuccessSnapshot: prepared.normalSuccessSnapshot,
@@ -325,8 +335,10 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
             client: sink,
           });
           if (input.cancelSignal.aborted) return cancelled();
-          if (dispatched.kind !== 'sent')
+          if (dispatched.kind !== 'sent') {
+            if (dispatched.error instanceof CodexNativeWsSessionError && dispatched.error.code !== 'native_ws_busy') throw new ResponsesWsRoundError('full_context_required', 'the native response context changed; resend full context on a new connection', 409);
             throw new ResponsesWsRoundError('DISPATCH_OUTCOME_UNKNOWN', 'the response outcome is unknown', 502);
+          }
           const status = dispatched.transport.resultHttpStatus ?? sink.status;
           if (status < 200 || status >= 300)
             throw new ResponsesWsRoundError('UPSTREAM_REJECTED', 'the upstream response request was rejected', status);
@@ -336,7 +348,7 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
               'the upstream did not complete a response',
               502,
             );
-          continuations.remember(body, sink.terminal, pinned);
+          continuations.remember(canonicalBody, sink.terminal, pinned);
           return {
             pinned: { ...pinned, upstreamSessionId: sink.upstreamResponseId ?? pinned.upstreamSessionId },
             terminal: sink.terminal,

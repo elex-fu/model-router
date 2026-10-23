@@ -6,7 +6,11 @@ import type { PreparedEvidenceTransportRequest } from '../../../src/saas/gateway
 import { createBuiltinProviderEvidenceTransportFactory } from '../../../src/saas/runtime/builtin-provider-transports.js';
 import type { ProviderCredentialDispatchProof } from '../../../src/saas/supply/types.js';
 
-function fixture() {
+function fixture(kind: 'claude' | 'codex' = 'claude') {
+  const providerId = kind === 'codex' ? 'openai-codex' : 'anthropic-claude';
+  const productId = kind === 'codex' ? 'codex-chatgpt' : 'claude-subscription';
+  const protocol = kind === 'codex' ? 'responses' : 'anthropic';
+  const endpoint = kind === 'codex' ? 'codex-responses' : 'claude-messages';
   const owner = { ownerKind: 'tenant', tenantId: 'tenant-a', supplyMode: 'byok' };
   const binding = {
     tenantId: 'tenant-a',
@@ -16,15 +20,15 @@ function fixture() {
     supplyMode: 'byok',
     accountOwnerKind: 'tenant',
     accountId: 'account-a',
-    providerId: 'openai-codex',
-    productId: 'codex-chatgpt',
-    protocol: 'responses',
-    endpoint: 'codex-responses',
+    providerId,
+    productId,
+    protocol,
+    endpoint,
     routeConfigId: 'route-a',
     routeConfigVersion: 1,
     routePublicModelId: 'model-a',
     routePublicModelVersion: 1,
-    routeProtocol: 'responses',
+    routeProtocol: protocol,
     routeTargetMode: 'tenant_account',
     routeUpstreamId: 'upstream-a',
     upstreamId: 'upstream-a',
@@ -68,8 +72,8 @@ function fixture() {
     account: {
       ...owner,
       id: 'account-a',
-      providerId: 'openai-codex',
-      productId: 'codex-chatgpt',
+      providerId,
+      productId,
       credentialType: 'oauth',
       purpose: 'inference',
       status: 'active',
@@ -80,8 +84,8 @@ function fixture() {
       ...owner,
       id: 'credential-a',
       accountId: 'account-a',
-      providerId: 'openai-codex',
-      productId: 'codex-chatgpt',
+      providerId,
+      productId,
       status: 'active',
       validationState: 'verified',
       currentVersion: 1,
@@ -113,8 +117,8 @@ function fixture() {
       supplyProfileId: 'profile-a',
       supplyMode: 'byok',
       accountId: 'account-a',
-      providerId: 'openai-codex',
-      productId: 'codex-chatgpt',
+      providerId,
+      productId,
       accountAuthzVersion: 1,
       status: 'active',
       authzVersion: 1,
@@ -131,7 +135,7 @@ function fixture() {
     },
   } as unknown as ProviderCredentialDispatchProof;
   const body = Buffer.from(
-    JSON.stringify({ model: 'model-a', input: [], instructions: 'Test instructions', stream: true, store: false }),
+    JSON.stringify(kind === 'codex' ? { model: 'model-a', input: [], instructions: 'Test instructions', stream: true, store: false } : { model: 'model-a', messages: [{ role: 'user', content: 'Test' }], max_tokens: 1, stream: true }),
   );
   const request = {
     tenantId: 'tenant-a',
@@ -151,13 +155,13 @@ function fixture() {
       supplyMode: 'byok',
       accountOwnerKind: 'tenant',
       publicModel: 'model-a',
-      protocol: 'responses',
+      protocol,
       resolvedModel: 'model-a',
-      clientProtocol: 'responses',
-      providerProtocol: 'responses',
-      clientOperation: 'responses',
-      providerOperation: 'responses',
-      endpoint: 'codex-responses',
+      clientProtocol: protocol,
+      providerProtocol: protocol,
+      clientOperation: kind === 'codex' ? 'responses' : 'messages',
+      providerOperation: kind === 'codex' ? 'responses' : 'messages',
+      endpoint,
       upstreamId: 'upstream-a',
       accountId: 'account-a',
       credentialId: 'credential-a',
@@ -179,6 +183,8 @@ function fixture() {
   const plaintext = Buffer.from(
     JSON.stringify({
       access_token: accessToken,
+      organization_uuid: '00000000-0000-4000-8000-000000000001',
+      account_uuid: '00000000-0000-4000-8000-000000000002',
       chatgpt_account_id: 'upstream-account-a',
       chatgpt_user_id: 'upstream-user-a',
     }),
@@ -194,14 +200,14 @@ test('built-in native dispatch preserves account egress/TLS and closes its conne
   const buffers: Uint8Array[] = [];
   const factory = createBuiltinProviderEvidenceTransportFactory({
     database: f.database,
-    providerBundles: [{ bundle: 'openai-codex', enabled: true }],
+    providerBundles: [{ bundle: 'anthropic-claude', enabled: true }],
     timeoutMs: 1000,
     fetch: async (url, init) => {
-      assert.equal(url, 'https://chatgpt.com/backend-api/codex/responses');
+      assert.equal(url, 'https://api.anthropic.com/v1/messages');
       assert.equal((init.headers as Record<string, string>).authorization, `Bearer ${f.accessToken}`);
       sent++;
       return new Response(
-        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"response-a","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
         { headers: { 'content-type': 'text/event-stream' } },
       );
     },
@@ -244,7 +250,7 @@ test('built-in native dispatch preserves account egress/TLS and closes its conne
     },
   });
   try {
-    const response = await transports.codexEvidenceTransport?.send(f.request);
+    const response = await transports.claudeEvidenceTransport?.send(f.request);
     assert.ok(response?.body);
     const reader = response.body.getReader();
     while (!(await reader.read()).done) {}
@@ -267,7 +273,7 @@ test('a revoked proof and an unavailable account proxy fail before any provider 
     if (fault === 'revoked-proof') (f.proof.account as { status: string }).status = 'revoked';
     const factory = createBuiltinProviderEvidenceTransportFactory({
       database: f.database,
-      providerBundles: [{ bundle: 'openai-codex', enabled: true }],
+      providerBundles: [{ bundle: 'anthropic-claude', enabled: true }],
       timeoutMs: 1000,
       fetch: async () => {
         sent++;
@@ -294,7 +300,7 @@ test('a revoked proof and an unavailable account proxy fail before any provider 
       resolveEgressProfile: async () => {
         throw new Error('proxy read failed');
       },
-    }).codexEvidenceTransport;
+    }).claudeEvidenceTransport;
     try {
       await assert.rejects(transport?.send(f.request) as Promise<unknown>);
       assert.equal(sent, 0);
@@ -304,4 +310,23 @@ test('a revoked proof and an unavailable account proxy fail before any provider 
       f.plaintext.fill(0);
     }
   }
+});
+
+test('Codex missing reviewed trusted-bound evidence is rejected before credential unseal or egress', async () => {
+  const f = fixture('codex');
+  let unsealed = 0;
+  let sent = 0;
+  const factory = createBuiltinProviderEvidenceTransportFactory({ database: f.database, providerBundles: [{ bundle: 'openai-codex', enabled: true }], timeoutMs: 1000, fetch: async () => { sent++; return new Response(); } });
+  const transport = factory.factory({
+    genericTransport: { async send() { throw new Error('wrong fallback'); } },
+    proofReader: { async readDispatchProof() { return structuredClone(f.proof); } },
+    unsealer: { async withCredential(_input, use) { unsealed++; await use(Buffer.from(f.plaintext)); } },
+    resolveEgressProfile: async () => { throw new Error('must not resolve egress without financial evidence'); },
+  }).codexEvidenceTransport;
+  try {
+    assert.ok(transport);
+    await assert.rejects(transport.send(f.request));
+    assert.equal(unsealed, 0);
+    assert.equal(sent, 0);
+  } finally { factory.close(); f.plaintext.fill(0); }
 });

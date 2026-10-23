@@ -1,4 +1,4 @@
-import { codexContinuationMode } from './codex/continuation-metadata.js';
+import { codexContinuationMode, codexUpstreamTransport } from './codex/continuation-metadata.js';
 import { createHash } from 'node:crypto';
 import { type Bridge, type Protocol, pickBridge } from '../../protocol/bridge.js';
 import { UnsupportedBridgeFeatureError } from '../../protocol/openai-gemini.js';
@@ -134,7 +134,8 @@ export type ProviderModelResolutionSource =
     ) => ModelResolutionProvenance | null | Promise<ModelResolutionProvenance | null>);
 
 export interface ProviderNormalizedRequest {
-  readonly continuationMode?: 'full' | 'canonical-replay';
+  readonly continuationMode?: 'full' | 'canonical-replay' | 'remote-history';
+  readonly upstreamTransport?: 'http' | 'websocket';
   readonly clientProtocol: GatewayProtocol;
   readonly providerProtocol: GatewayProtocol;
   readonly clientOperation: ProviderPayloadOperation;
@@ -194,6 +195,8 @@ export type ProviderUsageEstimatorInput = ProviderUsageUpperBoundEstimatorInput;
  * previous payload bytes.
  */
 export type ProviderRequestTransform = (input: {
+  readonly upstreamTransport?: 'http' | 'websocket';
+  readonly continuationMode?: 'full' | 'canonical-replay' | 'remote-history';
   readonly providerId: string;
   readonly productId: string;
   readonly clientProtocol: GatewayProtocol;
@@ -1159,6 +1162,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
 
       const normalizedRequest: ProviderNormalizedRequest = Object.freeze({
         continuationMode: codexContinuationMode(input.clientRequest),
+        upstreamTransport: codexUpstreamTransport(input.clientRequest),
         clientProtocol: route.clientProtocol,
         providerProtocol: route.providerProtocol,
         clientOperation: route.clientOperation,
@@ -1234,6 +1238,8 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         if (!compactOperation && this.options.providerRequestTransform !== null) {
           if (!isRecord(transformed)) compilerFailure('TRANSFORM_FAILED');
           transformed = this.options.providerRequestTransform({
+            upstreamTransport: normalizedRequest.upstreamTransport,
+            continuationMode: normalizedRequest.continuationMode,
             providerId,
             productId,
             clientProtocol: route.clientProtocol,

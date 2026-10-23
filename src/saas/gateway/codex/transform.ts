@@ -292,15 +292,16 @@ function normalizeContentArrays(result: Record<string, unknown>): void {
  * Non-object input throws `CodexTransformError` so the caller can fail
  * closed. Rules are applied in the order documented on the module.
  */
-export function applyCodexOAuthTransform(body: unknown): unknown {
+export function applyCodexOAuthTransform(body: unknown, options: { readonly allowNativePreviousResponseId?: boolean } = {}): unknown {
   if (!isRecord(body)) throw new CodexTransformError('MALFORMED_BODY');
-  if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
+  if (body.previous_response_id !== undefined && body.previous_response_id !== null && !options.allowNativePreviousResponseId) {
     throw new CodexTransformError('FULL_CONTEXT_REQUIRED');
   }
   const result: Record<string, unknown> = {};
   for (const key of Object.keys(body)) {
     if (CODEX_REQUEST_FIELD_WHITELIST.has(key)) result[key] = body[key];
   }
+  if (options.allowNativePreviousResponseId && typeof body.previous_response_id === 'string') result.previous_response_id = body.previous_response_id;
   result.store = false;
   result.stream = true;
   if (typeof result.model === 'string') {

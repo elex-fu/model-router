@@ -654,7 +654,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
                         },
                       }
                     : input.body;
-          if (input.providerId === 'openai-codex') return applyCodexCompilation(bounded);
+          if (input.providerId === 'openai-codex') return applyCodexCompilation(bounded, { allowNativePreviousResponseId: input.upstreamTransport === 'websocket' && input.continuationMode === 'remote-history' });
           if (input.providerId === 'anthropic-claude')
             return applyClaudeOAuthTransform(bounded, { cliVersion: CLAUDE_CLI_BASELINE_VERSION });
           if (input.providerId === 'google-gemini') return normalizeGeminiToolsForAiStudio(bounded);
@@ -709,6 +709,9 @@ export async function createBuiltinManagedSaasGatewayRuntime(
       },
       get verification() {
         return verification;
+      },
+      get codexWorkflowTransports() {
+        return Object.freeze(transportFactory?.assembled && enabled.some((entry) => entry?.providerId === 'openai-codex') ? ['responses-http-full' as const, 'responses-ws-full' as const, 'responses-ws-continuation' as const, ...(nativeCompact ? ['responses-compact' as const] : [])] : []);
       },
       unavailableUsageBoundProviderIds: Object.freeze(
         enabled.filter((entry) => entry?.providerId === 'openai-codex').map((entry) => entry?.providerId ?? ''),

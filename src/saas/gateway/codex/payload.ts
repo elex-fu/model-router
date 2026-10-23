@@ -119,17 +119,19 @@ export function convertChatCompletionsToResponsesRequest(body: unknown): unknown
  * injection, then the full codex OAuth transform (field whitelist,
  * store/stream forcing, aliasing). Pure; the input is never mutated.
  */
-export function applyCodexCompilation(body: unknown, options: { readonly clientInstructions?: unknown } = {}): unknown {
+export function applyCodexCompilation(body: unknown, options: { readonly clientInstructions?: unknown; readonly allowNativePreviousResponseId?: boolean } = {}): unknown {
   if (!isRecord(body)) return body;
   const withInstructions: Record<string, unknown> = {
     ...body,
     instructions: resolveCodexInstructions(options.clientInstructions ?? body.instructions),
   };
-  return applyCodexOAuthTransform(withInstructions);
+  return applyCodexOAuthTransform(withInstructions, options);
 }
 
 /** Context the compiler hook receives for one outbound provider body. */
 export interface CodexProviderRequestTransformInput {
+  readonly upstreamTransport?: 'http' | 'websocket';
+  readonly continuationMode?: 'full' | 'canonical-replay' | 'remote-history';
   readonly providerId: string;
   readonly productId: string;
   readonly clientProtocol: GatewayProtocol;
@@ -149,7 +151,7 @@ export function codexProviderRequestTransform(input: CodexProviderRequestTransfo
     input.clientProtocol === 'openai' && input.providerProtocol === 'responses'
       ? (convertChatCompletionsToResponsesRequest(input.body) as Record<string, unknown>)
       : input.body;
-  return applyCodexCompilation(bridgeBody);
+  return applyCodexCompilation(bridgeBody, { allowNativePreviousResponseId: input.upstreamTransport === 'websocket' && input.continuationMode === 'remote-history' });
 }
 
 /** Alias kept for composition wiring symmetry with the transport factory. */

@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import WebSocket from 'ws';
+import { CodexNativeWsSessionError } from '../../../src/saas/gateway/codex/native-ws-session.js';
 import type { PreparedEvidenceDispatchResult } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type {
   RequestPreparationInput,
@@ -392,4 +393,18 @@ test('real WS cancellation keeps the provider response id across created, cancel
     await handle.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('native generation mismatch returns explicit full_context_required without refunding unknown dispatch', async () => {
+  const f = fixture();
+  const executor = createResponsesWsRoundExecutor({ ...f.options, dispatch: { async dispatch() { return { kind: 'unknown', error: new CodexNativeWsSessionError('full_context_required') } as PreparedEvidenceDispatchResult; } } });
+  await assert.rejects(executor.executeRound({ requestId: 'native-mismatch', body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal }), (error) => error instanceof ResponsesWsRoundError && error.code === 'full_context_required' && error.status === 409);
+});
+
+test('a public-model alias change cannot reuse the original native identity even with the same resolved model', async () => {
+  const f = fixture();
+  const first = await f.executor.executeRound({ requestId: 'alias-first', body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+  await assert.rejects(f.executor.executeRound({ requestId: 'alias-second', body: { model: 'different-public-alias', input: 'complete replacement context' }, pinned: first.pinned, cancelSignal: new AbortController().signal }), (error) => error instanceof ResponsesWsRoundError && error.code === 'SESSION_BINDING_CHANGED' && error.status === 409);
+  assert.equal(f.state.dispatched, 1);
+  assert.equal(f.state.compensation, 1, 'changed identity is rejected before the prepared request is dispatched');
 });

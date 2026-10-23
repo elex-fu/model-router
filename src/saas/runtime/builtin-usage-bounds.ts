@@ -165,11 +165,11 @@ export function createBuiltinUsageUpperBoundEstimator(options: {
         // Only this exact backend contract may admit Codex; SIWC/API limits do not apply here.
         const compact = normalizedRequest.providerOperation === 'responses.compact';
         const trusted = resolveCodexTrustedBoundProfile({
-          endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : CODEX_RESPONSES_ENDPOINT,
+          endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : normalizedRequest.upstreamTransport === 'websocket' ? CODEX_RESPONSES_ENDPOINT.replace('https:', 'wss:') : CODEX_RESPONSES_ENDPOINT,
           productId: normalizedRequest.productId,
           model: normalizedRequest.resolvedModel,
           operation: normalizedRequest.providerOperation,
-          transport: 'http',
+          transport: normalizedRequest.upstreamTransport ?? 'http',
           continuationMode: compact ? 'compact' : normalizedRequest.continuationMode ?? 'full',
         });
         if (!trusted) return unavailable();

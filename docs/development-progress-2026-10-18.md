@@ -829,3 +829,11 @@ trace、数据库包装、provider HTTP 和标准部署诊断定向测试已通�
 history loader 的启动检查、TTL 维护及关闭已接入标准 gateway/combined，HTTP/WS 消费接线仍按 §29.9 独立推进。诊断配置默认关闭，启用后固定投影与队列异步输出。doctor 分别报告 schema/grants、配置/凭据、history KMS canary 和外部证据边界，不把文件存在当作真实支付或收费 GO。
 
 本轮发现环境对象全量枚举会触发无关 metadata Proxy 错误，改为固定 history 键读取；doctor 假 SQL 匹配过宽会吞掉角色探针，已精确修正。Luna doctor/部署/就绪/角色联合批次 **184/184**、服务端编译通过；新的 CI 两组严格测试源码编译亦通过。真实商户与生产 KMS 尚未配置验收。P09 诊断基础已推送 `37cdc64`。
+
+### 29.12 Codex 原生上游 WS 与结算事实
+
+实现原生上游 WS 的 session/connector/transport：服务端 opaque handle 绑定 tenant/project/key、供应商产品、账号/凭据版本、公开及实际模型、端点、出站配置和 generation；每轮仍重新准备、预留、claim 和 lease。空闲连接不持有执行 lease，连接内只允许已观察到的完成引用；写出后断线/取消保持 unknown，不自动重发或改走 HTTP。Undici 公共 dispatcher 复用 DNS pin/proxy/TLS，应用层消息与队列有界，不宣称重组前的底层内存硬上限。
+
+Astra 审阅发现并修复两项恢复缺口：secret 包装器吞掉安全的 session 类型错误，造成 full-context 指引丢失；连接 pin 漏比公开模型别名。补安全错误透传、秘密异常脱敏/字节清零、别名变化与失效连接回归。另发现结算 `replayed` 可能仍为 reconciliation_pending：dispatch 现显式返回服务端 settlementOutcome，history 准入和诊断 settled marker 只接受明确 `settled`，不据 `sent/replayed` 推断财务终态。
+
+Luna 原生批次 **29/29**、修后精确批次 **25/25**、结算三状态批次 **55/55** 通过。真实本地 TLS/WS **1/1** 使用合成 CA、严格证书/SAN、固定 host/path/headers，证明两轮 socket 复用、terminal usage 和第三轮断线不重发；它不证明实际 Codex backend、生产 DNS/proxy 或计量契约。HTTP/WS 持久消费端接线继续进行，期间的缺 helper 编译错误按共享依赖修复，不回写为本次原生测试失败。trusted-bound registry 仍为空，Codex 收费 admission 拒绝，M1/M2/M3 未关闭。P06 已推送 `9e4ed14`。

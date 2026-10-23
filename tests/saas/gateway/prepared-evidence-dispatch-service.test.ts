@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
+import { RequestDiagnosticTrace, withRequestDiagnosticTrace } from '../../../src/saas/gateway/request-diagnostic-trace.js';
 import type { ModelResolutionProvenance } from '../../../src/saas/gateway/contracts.js';
 import type {
   NormalSuccessSettlementPort,
@@ -593,7 +594,8 @@ test('a model-unavailable outcome awaits the durable (account, model) cooldown r
   ]);
 });
 
-test('a confirmed successful execution with billing reconciliation remains a sent success', async () => {
+for (const settlementKind of ['settled', 'replayed', 'reconciliation_pending'] as const) {
+test(`successful execution exposes server completion ${settlementKind} without inferring settlement from sent`, async () => {
   const proof = new FakeEvidence();
   const metering = new FakeMetering();
   const client = new FakeClientStream();
@@ -611,7 +613,7 @@ test('a confirmed successful execution with billing reconciliation remains a sen
   const settlement: NormalSuccessSettlementPort = {
     async complete() {
       assert.equal(client.endCount, 1, 'body delivery completes before settlement starts');
-      return { kind: 'reconciliation_pending', attempt: successAttempt };
+      return { kind: settlementKind, attempt: successAttempt };
     },
     async retainUnknown() {
       throw new Error('verified execution must not be reclassified as unknown');
@@ -657,7 +659,8 @@ test('a confirmed successful execution with billing reconciliation remains a sen
     usageEstimatorVersion: 'estimator-v1',
   };
 
-  const result = await new SaasPreparedEvidenceDispatchService(
+  const trace = new RequestDiagnosticTrace();
+  const result = await withRequestDiagnosticTrace(trace, () => new SaasPreparedEvidenceDispatchService(
     proof,
     metering,
     new FakeLeaseProvider(),
@@ -673,9 +676,13 @@ test('a confirmed successful execution with billing reconciliation remains a sen
     audit,
     normalSuccessSnapshot: snapshot,
     client,
-  });
+  }));
 
   assert.equal(result.kind, 'sent');
+  assert.ok(result.kind === 'sent');
+  assert.equal(result.settlementOutcome, settlementKind);
+  assert.equal(typeof trace.snapshot().markers.settled === 'number', settlementKind === 'settled');
+  assert.equal(trace.snapshot().pendingSpans, 0);
   assert.equal(result.attempt.resultState, 'succeeded');
   assert.ok(
     events.findIndex(({ stage }) => stage === 'response-delivery') <
@@ -683,6 +690,7 @@ test('a confirmed successful execution with billing reconciliation remains a sen
   );
   assert.equal(events.find(({ stage }) => stage === 'settlement')?.outcome, 'ok');
 });
+}
 
 test('dispatch records retryable provider failures and ignores caller errors', async () => {
   const writes: unknown[] = [];

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
+import type { CodexNativeWsSessionHandle } from './codex/native-ws-session.js';
 import type { ReadableStreamReadResult } from 'node:stream/web';
 import type { KnownNonSuccessHttpResponseInput } from '../metering/service.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../metering/types.js';
@@ -38,6 +40,8 @@ export interface PreparedEvidenceMeteringPort {
 }
 
 export interface PreparedEvidenceTransportRequest {
+  /** Opaque server-owned connection authority; never read from client JSON or headers. */
+  readonly codexNativeWsSession?: CodexNativeWsSessionHandle;
   readonly tenantId: string;
   readonly projectId: string;
   readonly requestId: string;
@@ -115,6 +119,8 @@ export interface PreparedEvidenceLeaseProvider {
 }
 
 export interface PreparedEvidenceDispatchInput {
+  /** Opaque handle created by the downstream WS executor. */
+  readonly codexNativeWsSession?: CodexNativeWsSessionHandle;
   readonly evidenceId: string;
   readonly payloadBytes: Uint8Array;
   readonly audit: PreparedRequestEvidenceAudit;
@@ -135,6 +141,9 @@ export interface PreparedEvidenceClientStream {
 
 export interface PreparedEvidenceDispatchSent {
   readonly kind: 'sent';
+  /** Server-owned completion fact. Only `settled` proves this completion durably settled.
+   * `replayed` may replay reconciliation-pending financial state. */
+  readonly settlementOutcome?: 'settled' | 'replayed' | 'reconciliation_pending';
   readonly evidence: PreparedRequestEvidenceRecord;
   readonly attempt: AttemptRecord;
   readonly transport: PreparedEvidenceTransportResponse;
@@ -783,7 +792,10 @@ export class SaasPreparedEvidenceDispatchService {
   ) {}
 
   private observe<T>(stage: PreparedEvidenceDispatchStage, work: () => Promise<T>): Promise<T> {
-    return observePreparedEvidenceDispatchStage(stage, this.observer, work);
+    const trace = currentRequestDiagnosticTrace();
+    if (stage !== 'settlement' || !trace) return observePreparedEvidenceDispatchStage(stage, this.observer, work);
+    const finish = trace.begin('settle');
+    return observePreparedEvidenceDispatchStage(stage, this.observer, work).finally(finish);
   }
 
   async dispatch(input: PreparedEvidenceDispatchInput): Promise<PreparedEvidenceDispatchResult> {
@@ -930,6 +942,7 @@ export class SaasPreparedEvidenceDispatchService {
         transportResult = requireTransportResponse(
           await this.observe('transport-send', () =>
             this.transport.send({
+              ...(input.codexNativeWsSession ? { codexNativeWsSession: input.codexNativeWsSession } : {}),
               tenantId: evidence.tenantId,
               projectId: evidence.projectId,
               requestId: evidence.requestId,
@@ -1116,7 +1129,13 @@ export class SaasPreparedEvidenceDispatchService {
                     }),
                   );
                   reconciliationPersisted = completion.kind === 'reconciliation_pending';
-                  outcome = { kind: 'sent', evidence, attempt: completion.attempt, transport: transportResult };
+                  if (completion.kind === 'settled') {
+                    currentRequestDiagnosticTrace()?.mark('settled');
+                  }
+                  outcome = {
+                    kind: 'sent', settlementOutcome: completion.kind,
+                    evidence, attempt: completion.attempt, transport: transportResult,
+                  };
                 } else {
                   const attempt = await this.normalSuccessSettlement.retainUnknown({
                     tenantId: evidence.tenantId,
