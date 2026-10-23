@@ -10,6 +10,7 @@ import { ConfigStore } from '../../src/config/store.js';
 import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
 import { proxyHandler } from '../../src/server/proxy.js';
+import { parseSseStream } from '../../src/protocol/sse.js';
 
 interface MockCall {
   method: string;
@@ -187,7 +188,8 @@ test('proxies anthropic client to gemini upstream (streaming)', async () => {
     body:
       'data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}\n\n' +
       'data: {"candidates":[{"content":{"parts":[{"text":" world"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}\n\n' +
-      'data: [DONE]\n\n',
+      // Gemini terminates with a candidate finishReason, not OpenAI's [DONE].
+      'data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}\n\n',
   }));
   const proxy = await startProxy(
     baseConfig([
@@ -214,12 +216,30 @@ test('proxies anthropic client to gemini upstream (streaming)', async () => {
       }),
     });
     assert.equal(res.status, 200);
-    const body = await res.text();
-    const lines = body.split('\n').filter(Boolean);
-    assert.ok(lines.length > 0);
-    const firstEvent = JSON.parse(lines[0].slice(6)); // strip "data: "
-    assert.equal(firstEvent.type, 'content_block_delta');
-    assert.equal(firstEvent.delta.text, 'hello');
+    assert.ok(res.body);
+    const events: any[] = [];
+    for await (const frame of parseSseStream(res.body)) {
+      assert.ok(frame.data && frame.data !== '[DONE]', 'Anthropic frames carry JSON events');
+      const event = JSON.parse(frame.data);
+      assert.equal(frame.event, event.type, 'SSE event names must match the Anthropic payload type');
+      events.push(event);
+    }
+    assert.deepEqual(events.map(event => event.type), [
+      'message_start',
+      'content_block_start', 'content_block_delta', 'content_block_stop',
+      'content_block_start', 'content_block_delta', 'content_block_stop',
+      'message_delta', 'message_stop',
+    ]);
+    assert.equal(events[0].message.role, 'assistant');
+    const deltas = events.filter(event => event.type === 'content_block_delta');
+    assert.equal(deltas[0].delta.text, 'hello');
+    assert.equal(deltas.map(event => event.delta.text).join(''), 'hello world');
+    assert.deepEqual(events.filter(event => event.type === 'content_block_start').map(event => event.index), [0, 1]);
+    assert.deepEqual(events.filter(event => event.type === 'content_block_stop').map(event => event.index), [0, 1]);
+    const terminal = events[events.length - 2];
+    assert.equal(terminal.delta.stop_reason, 'end_turn');
+    assert.deepEqual(terminal.usage, { input_tokens: 3, output_tokens: 2 });
+
   } finally {
     await proxy.close();
     await upstream.close();

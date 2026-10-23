@@ -899,3 +899,9 @@ Luna R9 定向 **32/32**、两个 runner 语法检查通过，未执行真实负
 Luna 真实 PG18 058 **11/11**、054 **4/4**、FIN057 **5/5**；按原 CI 同库前置顺序 authorization **13/13**、商业网关 HTTP **27/27**、055 **12/12**、056 **8/8**；lease 最新 **10/10**，对应严格编译与服务端构建通过。最初 055/056 省略 HTTP fixture 的运行记录为无效前置观察，未当作回归。冻结生产源码 `e87c7fa` 的规范 unit **7,027 条 / 7,004 pass / 0 fail / 23 skip**；最终 integration、两组 CI strict 和最新远程候选继续复核。
 
 过程中还发现独立的 061 requeue 候选 gate 先要求当前 registry、再要求账本恰好 through061；061 明确未注册，且该候选不在当前 required CI 集合。未通过注册旧候选、删除检查或宽松计数使其假通过；撤回本轮对该候选的修改，记录为另行集成待办，不声称其业务验收成功。R9 诊断入口已推送 `e87c7fa`。
+
+### 29.21 最终离线 integration 的 Gemini fixture 修正
+
+完整 integration 暴露旧测试把 SSE 的 `event: message_start` 也当成 JSON data；新桥按 Anthropic 规范发完整事件后触发解析失败。fixture 改为按 SSE frame.data 读取并核 event 与 payload.type 一致，保留正文断言并补全生命周期和 usage；mock 终帧也改为 Gemini 原生 finishReason STOP，不能用 OpenAI `[DONE]` 冒充 Gemini 成功终态。未修改生产桥行为。
+
+Luna 单文件 **5/5**，完整 integration 修后 **360 条 / 255 pass / 0 fail / 105 skip**；未配置的 PG/外部门禁跳过项不计通过。两组 CI strict 再次通过；unit 与 server 结果见 §29.20。权限修复已推送 `f9a91fd`。该远程候选 PG15/18 后续发现商户 gate 与既有 legacy 测试订单共享数据库的冲突，正调整测试隔离，生产无归属历史单的启用拒绝保持不变。
