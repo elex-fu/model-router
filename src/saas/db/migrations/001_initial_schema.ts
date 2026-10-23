@@ -1,4 +1,5 @@
 import { PROJECT_AUTHORIZATION_SAAS_MIGRATION } from './002_project_authorization.js';
+import { REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION } from './138_redis_quota_writeback.js';
 import { PROJECT_MEMBERSHIP_BACKFILL_SAAS_MIGRATION } from './003_project_membership_backfill.js';
 import { API_KEYS_SAAS_MIGRATION } from './004_api_keys.js';
 import { SUPPLY_PROFILES_AND_ENTITLEMENTS_SAAS_MIGRATION } from './005_supply_profiles_and_entitlements.js';
@@ -789,4 +790,5 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
   OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION,
   PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION,
+  REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION,
 ];

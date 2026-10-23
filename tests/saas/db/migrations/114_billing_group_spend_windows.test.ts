@@ -12,7 +12,7 @@ test('114 registers as the applied head after the 113 group rate counters', () =
   assert.equal(migration.name, 'billing_group_spend_windows');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(registered.at(-1), 137);
+  assert.equal(registered.at(-1), 138);
   assert.equal(SAAS_MIGRATIONS[registered.indexOf(114)], migration);
 });
 
