@@ -104,7 +104,7 @@ type PaymentRoute =
   | { readonly route: 'readServicePlanOrder'; readonly tenantId: string; readonly orderId: string }
   | { readonly route: 'retryServicePlanOrder'; readonly tenantId: string; readonly orderId: string }
   | { readonly route: 'refreshServicePlanOrderCheckout'; readonly tenantId: string; readonly orderId: string }
-  | { readonly route: 'webhook'; readonly providerKey: string };
+  | { readonly route: 'webhook'; readonly providerKey: string; readonly bindingId?: string };
 
 type JsonObject = Record<string, unknown>;
 
@@ -315,8 +315,8 @@ function findRoute(path: string): PaymentRoute | undefined {
       orderId: pathIdentifier(checkout[2], 'order'),
     };
   }
-  const webhook = new RegExp(`^${WEBHOOK_PREFIX}/([^/]+)$`).exec(path);
-  if (webhook) return { route: 'webhook', providerKey: pathIdentifier(webhook[1], 'provider') };
+  const webhook = new RegExp(`^${WEBHOOK_PREFIX}/([^/]+)(?:/([^/]+))?$`).exec(path);
+  if (webhook) return { route: 'webhook', providerKey: pathIdentifier(webhook[1], 'provider'), ...(webhook[2] ? { bindingId: pathIdentifier(webhook[2], 'binding') } : {}) };
   return undefined;
 }
 
@@ -557,8 +557,15 @@ export function createSaasPaymentHandler(options: SaasPaymentHttpOptions): SaasP
           req.resume();
           throw new HttpError(404, 'NOT_FOUND', 'The requested resource was not found');
         }
-        const result = await options.paymentService.handleWebhook(req.headers, await readRawBody(req));
-        sendJson(res, webhookStatus(result), requestId, result);
+        const result = await options.paymentService.handleWebhook(req.headers, await readRawBody(req), match.bindingId);
+        if (match.providerKey === 'alipay' && result.outcome !== 'rejected') {
+          res.statusCode = 200;
+          res.setHeader('content-type', 'text/plain; charset=utf-8');
+          res.setHeader('cache-control', 'no-store');
+          res.end('success');
+        } else {
+          sendJson(res, webhookStatus(result), requestId, result);
+        }
         return true;
       }
 

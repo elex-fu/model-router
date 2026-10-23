@@ -1349,7 +1349,9 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
     }
   }
 
-  async createOrder(context: TenantContext, input: CreateServicePlanOrderInput): Promise<ServicePlanOrderRecord> {
+  async createOrder(context: TenantContext, input: CreateServicePlanOrderInput,
+    paymentAdmission?: (executor: SqlExecutor, input: { readonly orderId: string; readonly currency: string }) => Promise<{ readonly bindingId: string; readonly providerKey: string; readonly merchantId: string }>,
+  ): Promise<ServicePlanOrderRecord> {
     assertContext(context, true);
     const planVersionId = id(input?.planVersionId);
     const clientRequestId = text(input?.clientRequestId, MAX_CLIENT_REQUEST_LENGTH);
@@ -1359,110 +1361,129 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
     if (requestedOperation === 'renewal' && previousId === null) fail('INVALID_INPUT');
     if (requestedOperation === 'activation' && previousId !== null) fail('INVALID_INPUT');
 
-    return this.transaction(async (executor) => {
-      const existing = await this.findOrderByClientRequest(executor, context.tenantId, clientRequestId, true);
-      if (existing) {
-        const mapped = mapOrder(existing.order, existing.snapshot);
-        this.assertOrderReplay(mapped, {
-          planVersionId,
-          operation: requestedOperation,
-          previousId,
+    try {
+      return await this.transaction(async (executor) => {
+        if (paymentAdmission) await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, [JSON.stringify(['payment_service_plan_order', context.tenantId, clientRequestId])]);
+        const existing = await this.findOrderByClientRequest(executor, context.tenantId, clientRequestId, true);
+        if (existing) {
+          const mapped = mapOrder(existing.order, existing.snapshot);
+          this.assertOrderReplay(mapped, {
+            planVersionId,
+            operation: requestedOperation,
+            previousId,
+          });
+          if (mapped.projectId !== context.projectId) fail('ORDER_CONFLICT');
+          return mapped;
+        }
+
+        const planVersion = await this.findPlanVersion(executor, planVersionId, true);
+        if (!planVersion) fail('PLAN_VERSION_UNAVAILABLE');
+
+        if (requestedOperation === 'renewal' && previousId !== null) {
+          const previous = await this.findSubscriptionRow(executor, context, previousId, true);
+          if (!previous || (previous.status !== 'active' && previous.status !== 'expired')) {
+            fail('SUBSCRIPTION_STATE_CONFLICT');
+          }
+        }
+
+        const active = await this.findActiveSubscription(executor, context, true);
+        if (active && requestedOperation === 'activation') fail('ACTIVE_SUBSCRIPTION_EXISTS');
+        if (active && requestedOperation === 'renewal' && active.id !== previousId) {
+          fail('ACTIVE_SUBSCRIPTION_EXISTS');
+        }
+
+        const now = currentDate(this.now);
+        const orderId = id(this.idFactory());
+        const snapshotId = id(this.idFactory());
+        const createdAt = now.toISOString();
+        const snapshotDigest = digestSnapshot({
+          planVersionId: planVersion.id,
+          planId: planVersion.planId,
+          planVersion: planVersion.version,
+          allowedProviderIds: planVersion.allowedProviderIds,
+          allowedModels: planVersion.allowedModels,
+          supplyMode: planVersion.supplyMode,
+          supplyProfileId: planVersion.supplyProfileId,
+          priceVersion: planVersion.priceVersion,
+          priceMinorUnits: planVersion.priceMinorUnits,
+          currency: planVersion.currency,
+          termDays: planVersion.termDays,
+          policyVersion: planVersion.policyVersion,
         });
-        if (mapped.projectId !== context.projectId) fail('ORDER_CONFLICT');
-        return mapped;
-      }
+        const payment = paymentAdmission ? await paymentAdmission(executor, { orderId, currency: planVersion.currency }) : null;
+        const orderResult = await this.query<OrderRow>(
+          executor,
+          `INSERT INTO saas_service_plan_orders
+             (id, tenant_id, project_id, plan_version_id, operation,
+              renewal_of_subscription_id, client_request_id, state, created_at, updated_at,
+              binding_id, provider_key, merchant_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $8, $9, $10, $11)
+           RETURNING ${ORDER_COLUMNS}`,
+          [
+            orderId,
+            context.tenantId,
+            context.projectId,
+            planVersion.id,
+            requestedOperation,
+            previousId,
+            clientRequestId,
+            createdAt,
+            payment?.bindingId ?? null,
+            payment?.providerKey ?? null,
+            payment?.merchantId ?? null,
+          ],
+          'ORDER_CONFLICT',
+        );
+        const order = orderResult.rows[0];
+        if (!order) fail('STORAGE_ERROR');
 
-      const planVersion = await this.findPlanVersion(executor, planVersionId, true);
-      if (!planVersion) fail('PLAN_VERSION_UNAVAILABLE');
-
-      if (requestedOperation === 'renewal' && previousId !== null) {
-        const previous = await this.findSubscriptionRow(executor, context, previousId, true);
-        if (!previous || (previous.status !== 'active' && previous.status !== 'expired')) {
-          fail('SUBSCRIPTION_STATE_CONFLICT');
+        const snapshotResult = await this.query<SnapshotRow>(
+          executor,
+          `INSERT INTO saas_service_plan_snapshots
+             (id, tenant_id, order_id, plan_version_id, plan_id, plan_version,
+              allowed_provider_ids, allowed_models, supply_mode, supply_profile_id,
+              price_version, price_minor_units, currency, term_days, policy_version,
+              snapshot_digest, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+           RETURNING ${SNAPSHOT_COLUMNS}`,
+          [
+            snapshotId,
+            context.tenantId,
+            orderId,
+            planVersion.id,
+            planVersion.planId,
+            planVersion.version,
+            planVersion.allowedProviderIds,
+            planVersion.allowedModels,
+            planVersion.supplyMode,
+            planVersion.supplyProfileId,
+            planVersion.priceVersion,
+            planVersion.priceMinorUnits,
+            planVersion.currency,
+            planVersion.termDays,
+            planVersion.policyVersion,
+            snapshotDigest,
+            createdAt,
+          ],
+        );
+        const snapshotRow = snapshotResult.rows[0];
+        if (!snapshotRow) fail('STORAGE_ERROR');
+        const snapshot = mapSnapshot(snapshotRow);
+        await this.audit(executor, context.tenantId, context.userId, 'service_plan.order_created', orderId, createdAt);
+        return mapOrder(order, snapshot);
+      });
+    } catch (error) {
+      if (isServicePlanError(error) && error.code === 'ORDER_CONFLICT') {
+        const winner = await this.findOrderByClientRequest(this.database, context.tenantId, clientRequestId, false);
+        if (winner) {
+          const mapped = mapOrder(winner.order, winner.snapshot);
+          this.assertOrderReplay(mapped, { planVersionId, operation: requestedOperation, previousId });
+          if (mapped.projectId !== context.projectId) fail('ORDER_CONFLICT');
+          return mapped;
         }
       }
-
-      const active = await this.findActiveSubscription(executor, context, true);
-      if (active && requestedOperation === 'activation') fail('ACTIVE_SUBSCRIPTION_EXISTS');
-      if (active && requestedOperation === 'renewal' && active.id !== previousId) {
-        fail('ACTIVE_SUBSCRIPTION_EXISTS');
-      }
-
-      const now = currentDate(this.now);
-      const orderId = id(this.idFactory());
-      const snapshotId = id(this.idFactory());
-      const createdAt = now.toISOString();
-      const snapshotDigest = digestSnapshot({
-        planVersionId: planVersion.id,
-        planId: planVersion.planId,
-        planVersion: planVersion.version,
-        allowedProviderIds: planVersion.allowedProviderIds,
-        allowedModels: planVersion.allowedModels,
-        supplyMode: planVersion.supplyMode,
-        supplyProfileId: planVersion.supplyProfileId,
-        priceVersion: planVersion.priceVersion,
-        priceMinorUnits: planVersion.priceMinorUnits,
-        currency: planVersion.currency,
-        termDays: planVersion.termDays,
-        policyVersion: planVersion.policyVersion,
-      });
-      const orderResult = await this.query<OrderRow>(
-        executor,
-        `INSERT INTO saas_service_plan_orders
-           (id, tenant_id, project_id, plan_version_id, operation,
-            renewal_of_subscription_id, client_request_id, state, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $8)
-         RETURNING ${ORDER_COLUMNS}`,
-        [
-          orderId,
-          context.tenantId,
-          context.projectId,
-          planVersion.id,
-          requestedOperation,
-          previousId,
-          clientRequestId,
-          createdAt,
-        ],
-        'ORDER_CONFLICT',
-      );
-      const order = orderResult.rows[0];
-      if (!order) fail('STORAGE_ERROR');
-
-      const snapshotResult = await this.query<SnapshotRow>(
-        executor,
-        `INSERT INTO saas_service_plan_snapshots
-           (id, tenant_id, order_id, plan_version_id, plan_id, plan_version,
-            allowed_provider_ids, allowed_models, supply_mode, supply_profile_id,
-            price_version, price_minor_units, currency, term_days, policy_version,
-            snapshot_digest, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-         RETURNING ${SNAPSHOT_COLUMNS}`,
-        [
-          snapshotId,
-          context.tenantId,
-          orderId,
-          planVersion.id,
-          planVersion.planId,
-          planVersion.version,
-          planVersion.allowedProviderIds,
-          planVersion.allowedModels,
-          planVersion.supplyMode,
-          planVersion.supplyProfileId,
-          planVersion.priceVersion,
-          planVersion.priceMinorUnits,
-          planVersion.currency,
-          planVersion.termDays,
-          planVersion.policyVersion,
-          snapshotDigest,
-          createdAt,
-        ],
-      );
-      const snapshotRow = snapshotResult.rows[0];
-      if (!snapshotRow) fail('STORAGE_ERROR');
-      const snapshot = mapSnapshot(snapshotRow);
-      await this.audit(executor, context.tenantId, context.userId, 'service_plan.order_created', orderId, createdAt);
-      return mapOrder(order, snapshot);
-    });
+      throw error;
+    }
   }
 
   async getOrder(context: TenantContext, orderId: string): Promise<ServicePlanOrderRecord | null> {

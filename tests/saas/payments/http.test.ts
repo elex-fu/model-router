@@ -56,6 +56,8 @@ async function createTestServer(
   topUpPolicyEnabled = true,
   refundQueryServiceEnabled = true,
   paymentOrderQueryServiceEnabled = true,
+  providerKey = 'fake-psp',
+  webhookError?: Error,
 ) {
   const calls: {
     create?: unknown;
@@ -67,7 +69,7 @@ async function createTestServer(
   } = {};
   let durableOrder = order();
   const paymentService = {
-    providerKey: 'fake-psp',
+    providerKey,
     createWalletTopUp: async (input: unknown) => {
       calls.create = input;
       return durableOrder;
@@ -92,6 +94,7 @@ async function createTestServer(
       };
     },
     handleWebhook: async (_headers: unknown, body: Buffer): Promise<PaymentWebhookResult> => {
+      if (webhookError) throw webhookError;
       calls.webhook = body;
       return {
         outcome: 'accepted',
@@ -787,4 +790,20 @@ test('payment order history validates query parameters and returns unavailable w
   assert.equal(unavailable.status, 503);
   const body = (await unavailable.json()) as { error: { code: string } };
   assert.equal(body.error.code, 'PAYMENT_ORDER_HISTORY_UNAVAILABLE');
+});
+
+
+test('Alipay acknowledges a durable inbox acceptance with exact plaintext success', async () => {
+  const app = await createTestServer('owner', false, true, true, true, 'alipay');
+  const response = await fetch(`${app.origin}/payments/webhooks/alipay/binding-old`, { method: 'POST', body: 'signed-provider-body' });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type') ?? '', /^text\/plain/);
+  assert.equal(await response.text(), 'success');
+});
+
+test('Alipay never acknowledges a failed verification or inbox transaction', async () => {
+  const app = await createTestServer('owner', false, true, true, true, 'alipay', new Error('inbox transaction unavailable'));
+  const response = await fetch(`${app.origin}/payments/webhooks/alipay/binding-old`, { method: 'POST', body: 'signed-provider-body' });
+  assert.equal(response.status, 500);
+  assert.notEqual(await response.text(), 'success');
 });

@@ -201,6 +201,7 @@ export type PaymentInboxOutcome = 'accepted' | 'fulfilled' | 'replayed' | 'recon
 
 /** Public order representation; amounts stay decimal strings to preserve integer precision over JSON. */
 export interface PaymentOrderRecord {
+  readonly bindingId?: string | null;
   readonly id: string;
   readonly tenantId: string;
   readonly orderType: PaymentOrderType;
@@ -311,6 +312,7 @@ export type RetryServicePlanPaymentInput = ReadServicePlanPaymentInput;
 
 /** Public payment view of the immutable BYOK service-plan order snapshot. */
 export interface ServicePlanPaymentOrderRecord extends ServicePlanOrderRecord {
+  readonly bindingId?: string | null;
   readonly orderType: 'byok_service_plan';
   readonly providerKey: string;
   readonly merchantId: string;
@@ -322,7 +324,9 @@ export interface ServicePlanPaymentOrderRecord extends ServicePlanOrderRecord {
 
 /** The payment domain may only fulfill through this narrow existing plan-domain seam. */
 export interface ServicePlanPaymentService {
-  createOrder(context: TenantContext, input: CreateServicePlanOrderInput): Promise<ServicePlanOrderRecord>;
+  createOrder(context: TenantContext, input: CreateServicePlanOrderInput,
+    paymentAdmission?: (executor: SqlExecutor, input: { readonly orderId: string; readonly currency: string }) => Promise<{ readonly bindingId: string; readonly providerKey: string; readonly merchantId: string }>,
+  ): Promise<ServicePlanOrderRecord>;
   getOrder(context: TenantContext, orderId: string): Promise<ServicePlanOrderRecord | null>;
   fulfillVerified(input: VerifiedServicePlanFulfillmentInput): Promise<FulfilledServicePlanResult>;
 }
@@ -461,8 +465,8 @@ export interface PaymentWalletFundingLedger {
 }
 
 export interface PaymentServiceOptions {
-  readonly providerKey: string;
-  readonly merchantId: string;
+  readonly providerKey?: string;
+  readonly merchantId?: string;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
   readonly walletFundingLedger?: PaymentWalletFundingLedger;

@@ -9,6 +9,7 @@ import {
 } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
 import { ByokServicePlanService } from '../plans/service.js';
+import { isPaymentBindingResolver, type PaymentBindingResolver } from './merchant-binding.js';
 import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import type { PaymentProviderRefundAdapter } from './adapter.js';
 import { PaymentError } from './errors.js';
@@ -41,6 +42,7 @@ type StoredTimestamp = string | Date;
 type StoredMinorUnits = string | number | bigint;
 
 interface RefundRow {
+  readonly binding_id?: string | null;
   readonly id: string;
   readonly tenant_id: string;
   readonly refund_type: string;
@@ -76,6 +78,7 @@ interface RefundRow {
 }
 
 interface WalletTopUpRow {
+  readonly binding_id?: string | null;
   readonly id: string;
   readonly tenant_id: string;
   readonly order_type: string;
@@ -91,6 +94,7 @@ interface WalletTopUpRow {
 }
 
 interface ServicePlanOrderRow {
+  readonly binding_id?: string | null;
   readonly id: string;
   readonly tenant_id: string;
   readonly project_id: string;
@@ -134,8 +138,8 @@ interface RefundCreation {
 }
 
 export interface PaymentRefundServiceOptions {
-  readonly providerKey: string;
-  readonly merchantId: string;
+  readonly providerKey?: string;
+  readonly merchantId?: string;
   readonly operations: PaymentRefundOperationsPort;
   readonly walletRefundLedger?: PaymentWalletRefundLedger;
   /** F3: optional customer webhook producer; when absent no events are emitted. */
@@ -330,7 +334,7 @@ function refundColumns(): string {
     authorization_ref, reason_code, amount_minor_units, currency, state, provider_refund_id,
     failure_code, blocked_code, wallet_refund_transaction_id, provider_attempts, lease_action,
     service_plan_effect_ref, lease_token, lease_expires_at, next_reconcile_at, created_at,
-    updated_at, completed_at`;
+    updated_at, completed_at, binding_id`;
 }
 
 /**
@@ -338,6 +342,8 @@ function refundColumns(): string {
  * submit/query calls always happen after the transaction and locks have ended.
  */
 export class PaymentRefundService {
+  private readonly provider: PaymentProviderRefundAdapter | null;
+  private readonly bindingResolver: PaymentBindingResolver | null;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
   private readonly walletRefundLedger: PaymentWalletRefundLedger;
@@ -348,12 +354,15 @@ export class PaymentRefundService {
 
   constructor(
     private readonly database: PaymentDatabase,
-    private readonly provider: PaymentProviderRefundAdapter,
+    provider: PaymentProviderRefundAdapter | PaymentBindingResolver,
     private readonly options: PaymentRefundServiceOptions,
   ) {
-    this.providerKey = normalizeText(options.providerKey);
-    this.merchantId = normalizeText(options.merchantId);
-    if (provider.providerKey !== this.providerKey || provider.merchantId !== this.merchantId) {
+    this.bindingResolver = isPaymentBindingResolver(provider) ? provider : null;
+    this.provider = isPaymentBindingResolver(provider) ? null : provider;
+    if (this.bindingResolver && (options.providerKey !== undefined || options.merchantId !== undefined)) throw new TypeError('Binding resolver and legacy merchant configuration cannot be mixed');
+    this.providerKey = this.bindingResolver ? 'alipay' : normalizeText(options.providerKey);
+    this.merchantId = this.bindingResolver ? '' : normalizeText(options.merchantId);
+    if (this.provider && (this.provider.providerKey !== this.providerKey || this.provider.merchantId !== this.merchantId)) {
       throw new TypeError('Refund provider identity must match the configured provider and merchant');
     }
     this.now = options.now ?? (() => new Date());
@@ -562,13 +571,13 @@ export class PaymentRefundService {
 
     const inserted = await executor.query<RefundRow>(
       `INSERT INTO saas_refund_orders
-        (id, tenant_id, refund_type, wallet_topup_order_id, service_plan_order_id,
+        (binding_id, id, tenant_id, refund_type, wallet_topup_order_id, service_plan_order_id,
          original_funding_transaction_id, wallet_id, provider_key, merchant_id, provider_order_id,
          original_local_order_ref, idempotency_namespace, client_request_id, requested_by_user_id,
          authorization_ref, reason_code, amount_minor_units, currency, state, blocked_code,
          service_plan_effect_ref, provider_attempts, lease_action, lease_token,
          lease_expires_at, next_reconcile_at, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+       VALUES ($26, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
          $17, $18, $19, NULL, $20, $21, 'submit', $22, $23, $24, $25, $25)
        RETURNING ${refundColumns()}`,
       [
@@ -579,8 +588,8 @@ export class PaymentRefundService {
         request.refundType === 'byok_service_plan' ? request.orderId : null,
         fundingTransactionId,
         wallet?.id ?? null,
-        this.providerKey,
-        this.merchantId,
+        source.provider_key,
+        source.merchant_id,
         providerOrderId,
         originalLocalOrderRef,
         REFUND_IDEMPOTENCY_NAMESPACE,
@@ -597,6 +606,7 @@ export class PaymentRefundService {
         addMs(createdAt, this.leaseTtlMs),
         createdAt.toISOString(),
         createdAt.toISOString(),
+        source.binding_id ?? null,
       ],
     );
     if (!rowsHaveOne(inserted)) throw new PaymentError('PAYMENT_STORAGE_ERROR');
@@ -662,7 +672,7 @@ export class PaymentRefundService {
   private async lockWalletTopUp(executor: SqlExecutor, tenantId: string, orderId: string): Promise<WalletTopUpRow> {
     const result = await executor.query<WalletTopUpRow>(
       `SELECT id, tenant_id, order_type, state, provider_key, merchant_id, provider_order_id,
-              local_order_ref, funding_reference, amount_minor_units, currency, funding_transaction_id
+              local_order_ref, funding_reference, amount_minor_units, currency, funding_transaction_id, binding_id
        FROM saas_payment_orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
       [tenantId, orderId],
     );
@@ -681,7 +691,7 @@ export class PaymentRefundService {
               o.verified_provider_key, o.verified_merchant_id, o.verified_amount_minor_units,
               o.verified_currency, s.price_minor_units AS snapshot_price_minor_units,
               s.currency AS snapshot_currency, s.policy_version AS snapshot_policy_version,
-              o.id AS local_order_ref
+              o.id AS local_order_ref, o.binding_id
        FROM saas_service_plan_orders o
        JOIN saas_service_plan_snapshots s ON s.tenant_id = o.tenant_id AND s.order_id = o.id
        WHERE o.tenant_id = $1 AND o.id = $2 FOR UPDATE OF o`,
@@ -694,12 +704,24 @@ export class PaymentRefundService {
   private assertOriginalPaymentIdentity(source: WalletTopUpRow | ServicePlanOrderRow, tenantId: string): void {
     if (
       source.tenant_id !== tenantId ||
-      source.provider_key !== this.providerKey ||
-      source.merchant_id !== this.merchantId ||
+      (!this.bindingResolver && (source.provider_key !== this.providerKey || source.merchant_id !== this.merchantId)) ||
+      source.provider_key === null || source.merchant_id === null ||
       !source.provider_order_id
     ) {
       throw new PaymentError('ORDER_STATE_CONFLICT');
     }
+    this.adapterFor(source);
+  }
+
+  private adapterFor(row: { readonly binding_id?: string | null; readonly provider_key: string | null; readonly merchant_id: string | null; readonly currency?: string; readonly snapshot_currency?: string }): PaymentProviderRefundAdapter {
+    if (this.bindingResolver) {
+      if (!row.binding_id) throw new PaymentError('PAYMENT_BINDING_UNAVAILABLE');
+      const loaded = this.bindingResolver.require(row.binding_id);
+      if (loaded.binding.providerKey !== row.provider_key || loaded.binding.merchantId !== row.merchant_id || loaded.binding.currency !== (row.currency ?? row.snapshot_currency)) throw new PaymentError('REFUND_STATE_CONFLICT');
+      return loaded.refundAdapter;
+    }
+    if (!this.provider || row.provider_key !== this.providerKey || row.merchant_id !== this.merchantId) throw new PaymentError('REFUND_STATE_CONFLICT');
+    return this.provider;
   }
 
   private assertWalletTopUpSource(row: WalletTopUpRow): bigint {
@@ -908,7 +930,7 @@ export class PaymentRefundService {
     const input = this.providerInput(row);
     let providerResult: PaymentProviderRefundResult;
     try {
-      providerResult = await this.provider.submitRefund(input);
+      providerResult = await this.adapterFor(row).submitRefund(input);
     } catch (error) {
       const status: PaymentRefundStatus = isDefinitiveNonAcceptance(error) ? 'failed' : 'unknown';
       const code = status === 'failed' ? 'PROVIDER_REFUND_NOT_ACCEPTED' : 'PROVIDER_REFUND_OUTCOME_UNKNOWN';
@@ -957,7 +979,7 @@ export class PaymentRefundService {
     const input = this.providerInput(claim.row);
     let result: PaymentProviderRefundQueryResult | null = null;
     try {
-      result = await this.provider.queryRefund(input);
+      result = await this.adapterFor(claim.row).queryRefund(input);
     } catch {
       // A failed lookup says nothing about whether the provider accepted the refund.
     }

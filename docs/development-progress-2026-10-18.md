@@ -749,7 +749,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | P04 | Chat↔Gemini、Responses↔Gemini 直接转换，注册及明确不支持字段 | 四个直接桥及定向验证完成；真实 CLI/builtin 工作流待验 |
 | P05 | Codex 终态用量完整性、WS 上下文续接、精确端点可信上界门禁与诊断 | 开发中；真实计量契约仍为外部阻塞 |
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 开发中 |
-| P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 开发中；迁移由同一 schema writer 顺序追加 |
+| P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
 | P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算的可解释观测 | 开发中；不修改原性能门槛 |
 | P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | P11 基础配置及静态解析完成；实际环境验收与新增 CI 门禁验证中 |
@@ -793,3 +793,11 @@ Luna 最近 Codex executor/continuation/持久 history/profile 定向批次 **15
 真实 PG18.6 受限角色验证中发现并修复三类装配问题：CP 缺少正式商业 policy/head/attestation/route 的精确列授权；授权生成器跳过了 dispatchable view；输入维度校验需要执行一个纯函数。现按 manifest 授权列与只读 view，仅允许精确签名的 immutable、非 security-definer、boolean 校验函数，其他函数/default grants 的拒绝继续保留。角色脚本可先于迁移执行，迁移后启动探针再要求该函数存在且可执行。
 
 Luna 已用全链迁移后的临时 PG18.6 跑通开户 **1/1**、商户绑定 **5/5**、密文 history **1/1**；临时库已清理。开户新增静态财务就绪检查亦已通过 unit **3/3**，最后一次新 PG **1/1** 包含实际 CP 启动权限探针。这些结果不包含 PG15、真实 PSP 或 Codex backend。完整规范 unit 为 **6,989 条 / 6,963 pass / 3 fail / 23 skip**，剩余 CI 离线跳过守卫、权限脚本测试正则和 metadata proxy 错误类型已分别定位修复，相关定向批次 **184/184**、服务端编译通过，完整回归待重跑。Codex 基础实现已推送 `f61afec`。
+
+### 29.7 P07 商户绑定、原单恢复与支付控制
+
+商户描述不可变，PG singleton 保存唯一 mode、active binding 和 CAS revision；钱包与套餐在各自原事务内锁定控制记录再接新单。先查原幂等请求再读取当前商户，切换或排空后仍返回原单、原商户；现有 inbox/refund 队列 claim 后按记录的 binding 分发，历史回调、查询、履约和退款保持归属。管理员控制接口复用当前 MFA 会话、数据库角色复核、Origin/CSRF 与事务审计。
+
+定位中补齐两个实际正确性缺口：支付宝回调仅在耐久收件成功后返回原生 `text/plain success`；原支付创建指纹纳入规范化 promo，省略或更换 promo 返回 409，等价大小写/空白仍找回原单。正式 resolver 遇到缺少原指纹或商户归属的历史记录时拒绝推测，需要人工明确归属。
+
+Luna 商户控制真实 PG18.6 **5/5** 验证了接单锁/CAS、双 CP 同版本竞争、切换重放、draining 下历史回调与退款只入账一次、排队变更时角色撤销；适配器为本地替身。promo 最新单文件 **7/7**，支付 HTTP 与管理员 handler 定向检查通过，完整 unit 中本模块无剩余失败。真实 precreate、扫码、回调域名和全/部分退款仍属 B0/B1，尚未执行。P02 迁移与权限已推送 `a1c71e2`。

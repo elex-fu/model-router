@@ -1,4 +1,9 @@
 export type PaymentErrorCode =
+  | 'PAYMENT_CONTROL_FORBIDDEN'
+  | 'PAYMENT_CONTROL_CONFLICT'
+  | 'PAYMENT_BINDING_UNAVAILABLE'
+  | 'PAYMENTS_UNAVAILABLE'
+  | 'PAYMENT_CURRENCY_UNSUPPORTED'
   | 'INVALID_INPUT'
   | 'IDEMPOTENCY_CONFLICT'
   | 'ORDER_NOT_FOUND'
@@ -20,6 +25,11 @@ export type PaymentErrorCode =
   | 'SERVICE_PLAN_REFUND_BLOCKED';
 
 const SAFE_MESSAGES: Record<PaymentErrorCode, string> = {
+  PAYMENT_CONTROL_FORBIDDEN: 'The operation is not permitted.',
+  PAYMENT_CONTROL_CONFLICT: 'The payment configuration changed concurrently.',
+  PAYMENT_BINDING_UNAVAILABLE: 'The original payment binding is unavailable.',
+  PAYMENTS_UNAVAILABLE: 'New payment orders are unavailable.',
+  PAYMENT_CURRENCY_UNSUPPORTED: 'The payment currency is unsupported.',
   INVALID_INPUT: 'The payment request contains invalid data.',
   IDEMPOTENCY_CONFLICT: 'The payment request conflicts with an existing order.',
   ORDER_NOT_FOUND: 'The payment order was not found.',
@@ -42,6 +52,11 @@ const SAFE_MESSAGES: Record<PaymentErrorCode, string> = {
 };
 
 const ERROR_STATUS: Record<PaymentErrorCode, number> = {
+  PAYMENT_CONTROL_FORBIDDEN: 403,
+  PAYMENT_CONTROL_CONFLICT: 409,
+  PAYMENT_BINDING_UNAVAILABLE: 503,
+  PAYMENTS_UNAVAILABLE: 503,
+  PAYMENT_CURRENCY_UNSUPPORTED: 409,
   INVALID_INPUT: 400,
   IDEMPOTENCY_CONFLICT: 409,
   ORDER_NOT_FOUND: 404,

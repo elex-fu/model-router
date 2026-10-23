@@ -13,6 +13,8 @@ import type {
 } from '../../../src/saas/payments/types.js';
 
 export interface FakePaymentOrder {
+  create_request_fingerprint?: string | null;
+  binding_id?: string | null;
   id: string;
   tenant_id: string;
   order_type: 'wallet_topup';
@@ -43,6 +45,7 @@ export interface FakePaymentOrder {
 }
 
 export interface FakeServicePlanOrder {
+  binding_id?: string | null;
   id: string;
   tenant_id: string;
   project_id: string;
@@ -79,6 +82,7 @@ export interface FakeServicePlanOrder {
 }
 
 export interface FakePaymentInbox {
+  binding_id?: string | null;
   id: string;
   provider_key: string;
   merchant_id: string;
@@ -203,6 +207,8 @@ export class FakePaymentDatabase {
       const existing = this.state.orders.find((row) => row.tenant_id === b && row.client_request_id === e);
       if (existing) return result<Row>();
       const order: FakePaymentOrder = {
+        create_request_fingerprint: values[10] === undefined || values[10] === null ? null : text(values[10]),
+        binding_id: values[9] === undefined || values[9] === null ? null : text(values[9]),
         id: text(a),
         tenant_id: text(b),
         order_type: 'wallet_topup',
@@ -429,6 +435,7 @@ export class FakePaymentDatabase {
       );
       if (existing) return result<Row>();
       const inbox: FakePaymentInbox = {
+        binding_id: values[14] === undefined || values[14] === null ? null : text(values[14]),
         id: text(a),
         provider_key: text(b),
         merchant_id: text(c),

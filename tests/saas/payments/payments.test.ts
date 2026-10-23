@@ -391,6 +391,7 @@ test('does not disclose a raw provider payload through the persisted inbox shape
   assert.deepEqual(Object.keys(fixture.database.state.inbox[0] ?? {}).sort(), [
     'amount_minor_units',
     'attempt_count',
+    'binding_id',
     'currency',
     'event_status',
     'event_tenant_id',

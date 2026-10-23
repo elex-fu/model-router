@@ -231,13 +231,17 @@ test('client-request replay returns the frozen snapshot and never re-prices', as
 
   // Replay compares the customer's original input, not the frozen snapshot.
   await assert.rejects(topUp(fixture, { promoCode: 'SAVE-25', amountMinorUnits: '7500' }), isIdempotencyConflict);
-  // A replay without the promo code but with the same original amount hits the
-  // same frozen snapshot: the comparison key is the original amount only.
-  const codeless = await topUp(fixture, { amountMinorUnits: '10000' });
-  assert.equal(codeless.id, first.id);
-  assert.equal(codeless.amountMinorUnits, '7500');
+  // The original commercial payload includes the normalized promo identity.
+  await assert.rejects(topUp(fixture, { amountMinorUnits: '10000' }), isIdempotencyConflict);
+  await assert.rejects(topUp(fixture, { amountMinorUnits: '10000', promoCode: 'SAVE-50' }), isIdempotencyConflict);
+  const equivalent = await topUp(fixture, { amountMinorUnits: '10000', promoCode: ' save-25 ' });
+  assert.equal(equivalent.id, first.id);
+  assert.equal(equivalent.amountMinorUnits, '7500');
+  assert.equal(fixture.database.state.orders[0]?.original_amount_minor_units, '10000');
   assert.equal(fixture.evaluatorCalls(), 1);
+  assert.equal(fixture.database.state.orders.length, 1);
   assert.equal(fixture.database.promoUsages.length, 1);
+  assert.equal(fixture.provider.calls.length, 1);
 });
 
 test('a promo code without the configured port fails closed with PROMO_UNAVAILABLE', async () => {

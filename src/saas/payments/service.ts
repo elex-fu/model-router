@@ -9,6 +9,7 @@ import { isServicePlanError } from '../plans/errors.js';
 import type { ServicePlanOrderRecord } from '../plans/types.js';
 import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import type { PaymentProviderAdapter } from './adapter.js';
+import { admitPaymentBinding, isPaymentBindingResolver, type PaymentBindingResolver, type LoadedPaymentBinding } from './merchant-binding.js';
 import {
   checkoutActionColumns,
   checkoutViewFromStored,
@@ -61,6 +62,8 @@ type StoredTimestamp = string | Date;
 type StoredMinorUnits = string | number | bigint;
 
 interface PaymentOrderRow {
+  binding_id?: string | null;
+  create_request_fingerprint?: string | null;
   id: string;
   tenant_id: string;
   order_type: string;
@@ -91,6 +94,7 @@ interface PaymentOrderRow {
 }
 
 interface PaymentInboxRow {
+  binding_id?: string | null;
   id: string;
   provider_key: string;
   merchant_id: string;
@@ -118,6 +122,7 @@ interface PaymentInboxRow {
 }
 
 interface ServicePlanPaymentRow {
+  binding_id?: string | null;
   id: string;
   tenant_id: string;
   project_id: string;
@@ -161,6 +166,7 @@ type MappedServicePlanPaymentRow = ServicePlanPaymentRow & {
 };
 
 interface NormalizedEvent {
+  readonly bindingId: string | null;
   readonly providerKey: string;
   readonly providerEventId: string;
   readonly eventType: string;
@@ -185,7 +191,7 @@ interface ServicePlanProviderAttemptClaim {
   readonly leaseToken: string | null;
 }
 
-type PaymentOrderEntity = Omit<PaymentOrderRecord, 'checkout'> &
+type PaymentOrderEntity = { readonly createRequestFingerprint: string | null } & Omit<PaymentOrderRecord, 'checkout'> &
   StoredCheckoutFields & {
     readonly providerSubmissionState: string;
     readonly providerSubmissionLeaseToken: string | null;
@@ -328,6 +334,8 @@ function mapOrderRow(row: PaymentOrderRow): PaymentOrderEntity {
   return {
     id: normalizeText(row.id),
     tenantId: normalizeText(row.tenant_id),
+    bindingId: row.binding_id ?? null,
+    createRequestFingerprint: row.create_request_fingerprint ?? null,
     orderType: 'wallet_topup',
     providerKey: normalizeText(row.provider_key),
     merchantId: normalizeText(row.merchant_id),
@@ -412,12 +420,12 @@ const ORDER_COLUMNS = `id, tenant_id, order_type, provider_key, merchant_id, cli
   provider_attempts, provider_failure_code, funding_transaction_id, created_at, updated_at, paid_at, fulfilled_at,
   checkout_kind, checkout_url, checkout_text, checkout_expires_at,
   provider_submission_state, provider_submission_lease_token, provider_submission_lease_expires_at,
-  original_amount_minor_units`;
+  original_amount_minor_units, binding_id, create_request_fingerprint`;
 
 const INBOX_COLUMNS = `id, provider_key, merchant_id, provider_event_id, event_type, provider_order_id,
   event_tenant_id, tenant_id, local_order_id, event_status, amount_minor_units, currency, occurred_at,
   processing_outcome, outcome_code, processing_state, attempt_count, next_attempt_at,
-  lease_token, lease_expires_at, processed_at, last_error_code, updated_at`;
+  lease_token, lease_expires_at, processed_at, last_error_code, updated_at, binding_id`;
 
 const SERVICE_PLAN_PAYMENT_COLUMNS = `o.id, o.tenant_id, o.project_id, o.plan_version_id,
   o.operation, o.renewal_of_subscription_id, o.client_request_id, o.state, o.subscription_id,
@@ -427,12 +435,14 @@ const SERVICE_PLAN_PAYMENT_COLUMNS = `o.id, o.tenant_id, o.project_id, o.plan_ve
   o.created_at, o.updated_at, o.paid_at, o.fulfilled_at,
   o.checkout_kind, o.checkout_url, o.checkout_text, o.checkout_expires_at,
   o.provider_submission_state, o.provider_submission_lease_token, o.provider_submission_lease_expires_at,
-  snap.price_minor_units AS snapshot_price_minor_units, snap.currency AS snapshot_currency`;
+  snap.price_minor_units AS snapshot_price_minor_units, snap.currency AS snapshot_currency, o.binding_id`;
 
 export class PaymentFulfillmentService {
   readonly providerKey: string;
   readonly merchantId: string;
 
+  private readonly provider: PaymentProviderAdapter | null;
+  private readonly bindingResolver: PaymentBindingResolver | null;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
   private readonly walletFundingLedger: PaymentServiceOptions['walletFundingLedger'];
@@ -448,12 +458,17 @@ export class PaymentFulfillmentService {
 
   constructor(
     private readonly database: PaymentDatabase,
-    private readonly provider: PaymentProviderAdapter,
+    provider: PaymentProviderAdapter | PaymentBindingResolver,
     options: PaymentServiceOptions,
   ) {
-    this.providerKey = normalizeText(options.providerKey);
-    this.merchantId = normalizeText(options.merchantId);
-    if (provider.providerKey !== this.providerKey) throw new TypeError('provider.providerKey must match providerKey');
+    this.bindingResolver = isPaymentBindingResolver(provider) ? provider : null;
+    this.provider = isPaymentBindingResolver(provider) ? null : provider;
+    if (this.bindingResolver && (options.providerKey !== undefined || options.merchantId !== undefined)) {
+      throw new TypeError('Binding resolver and legacy merchant configuration cannot be mixed');
+    }
+    this.providerKey = this.bindingResolver ? 'alipay' : normalizeText(options.providerKey);
+    this.merchantId = this.bindingResolver ? '' : normalizeText(options.merchantId);
+    if (this.provider && this.provider.providerKey !== this.providerKey) throw new TypeError('provider.providerKey must match providerKey');
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
     this.walletFundingLedger =
@@ -522,6 +537,10 @@ export class PaymentFulfillmentService {
     const orderId = normalizeText(this.idFactory());
     const createdAt = this.currentDate().toISOString();
     const inserted = await this.runTransaction(async (executor) => {
+      if (this.bindingResolver) await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, [JSON.stringify(['payment_wallet_order', normalized.tenantId, normalized.clientRequestId])]);
+      const winner = await this.findOrderByClientRequest(normalized.tenantId, normalized.clientRequestId, executor);
+      if (winner) { this.assertCreateReplay(winner, normalized); return winner; }
+      const loaded = this.bindingResolver ? await admitPaymentBinding(executor, this.bindingResolver, normalized.currency) : null;
       // R1: a promo code is priced inside the order transaction (locked code
       // row + usage insert + discounted amount), never after the fact.
       let amountMinorUnits = normalized.amountMinorUnits;
@@ -546,6 +565,8 @@ export class PaymentFulfillmentService {
         currency: normalized.currency,
         createdAt,
         originalAmountMinorUnits,
+        createRequestFingerprint: this.createRequestFingerprint(normalized),
+        ...(loaded ? { binding: loaded.binding } : {}),
       });
     });
     if (inserted) return this.submitProviderOrder(inserted, false);
@@ -570,7 +591,16 @@ export class PaymentFulfillmentService {
   ): Promise<ServicePlanPaymentOrderRecord> {
     const servicePlan = this.requireServicePlanService();
     const normalizedInput = this.normalizeServicePlanInput(input);
-    const order = await servicePlan.createOrder(context, normalizedInput);
+    let admissionError: unknown;
+    let order: ServicePlanOrderRecord;
+    try {
+      order = await servicePlan.createOrder(context, normalizedInput, this.bindingResolver ? async (executor, input) => {
+        try {
+          const { binding } = await admitPaymentBinding(executor, this.bindingResolver!, input.currency);
+          return { bindingId: binding.id, providerKey: binding.providerKey, merchantId: binding.merchantId };
+        } catch (error) { admissionError = error; throw error; }
+      } : undefined);
+    } catch (error) { throw admissionError ?? error; }
     return this.submitServicePlanProviderOrder(order, false);
   }
 
@@ -693,14 +723,15 @@ export class PaymentFulfillmentService {
     const current = this.publicWalletOrder(order);
     if (current.checkout.status === 'closed' || current.checkout.status === 'ready') return current;
     this.assertProviderSnapshot(order);
-    const refreshCheckout = this.provider.refreshCheckout ?? this.provider.refreshOrderCheckout;
+    const provider = this.adapterFor(order.bindingId, order.providerKey, order.merchantId, order.currency);
+    const refreshCheckout = provider.refreshCheckout ?? provider.refreshOrderCheckout;
     if (order.providerOrderId === null || typeof refreshCheckout !== 'function') {
       return this.publicWalletOrder(order, unavailableCheckout());
     }
 
     let result: Awaited<ReturnType<NonNullable<PaymentProviderAdapter['refreshCheckout']>>>;
     try {
-      result = await refreshCheckout.call(this.provider, {
+      result = await refreshCheckout.call(provider, {
         localOrderId: order.id,
         tenantId: order.tenantId,
         providerOrderId: order.providerOrderId,
@@ -774,16 +805,17 @@ export class PaymentFulfillmentService {
     const current = this.mapServicePlanPaymentOrder(order, row);
     if (current.checkout.status === 'closed' || current.checkout.status === 'ready') return current;
     const merchantId = row.merchant_id;
-    this.assertProviderSnapshotValues(row.provider_key, merchantId);
+    this.adapterFor(row.binding_id, row.provider_key, merchantId, row.snapshot_currency);
     if (merchantId === null) throw new PaymentError('PAYMENT_STORAGE_ERROR');
-    const refreshCheckout = this.provider.refreshCheckout ?? this.provider.refreshOrderCheckout;
+    const provider = this.adapterFor(row.binding_id, row.provider_key, row.merchant_id, row.snapshot_currency);
+    const refreshCheckout = provider.refreshCheckout ?? provider.refreshOrderCheckout;
     if (row.provider_order_id === null || typeof refreshCheckout !== 'function') {
       return { ...current, checkout: unavailableCheckout() };
     }
 
     let result: Awaited<ReturnType<NonNullable<PaymentProviderAdapter['refreshCheckout']>>>;
     try {
-      result = await refreshCheckout.call(this.provider, {
+      result = await refreshCheckout.call(provider, {
         localOrderId: row.id,
         tenantId: row.tenant_id,
         providerOrderId: row.provider_order_id,
@@ -853,24 +885,31 @@ export class PaymentFulfillmentService {
     });
   }
 
-  async handleWebhook(headers: PaymentWebhookHeaders, rawBody: Buffer): Promise<PaymentWebhookResult> {
+  async handleWebhook(headers: PaymentWebhookHeaders, rawBody: Buffer, bindingId?: string): Promise<PaymentWebhookResult> {
     if (!Buffer.isBuffer(rawBody) || rawBody.length === 0 || rawBody.length > MAX_EVENT_BODY_BYTES) {
       throw new PaymentError('WEBHOOK_INVALID');
     }
 
+    const loaded = this.bindingResolver ? this.bindingResolver.require(normalizeText(bindingId, 'WEBHOOK_REJECTED')) : null;
+    if (!this.bindingResolver && bindingId !== undefined) throw new PaymentError('WEBHOOK_REJECTED');
+    const merchantId = loaded?.binding.merchantId ?? this.merchantId;
+    const providerKey = loaded?.binding.providerKey ?? this.providerKey;
+    const provider = loaded?.adapter ?? this.provider;
+    if (!provider) throw new PaymentError('WEBHOOK_REJECTED');
     let verified: Awaited<ReturnType<PaymentProviderAdapter['verifyWebhook']>>;
     try {
-      verified = await this.provider.verifyWebhook({ headers, rawBody, merchantId: this.merchantId });
+      verified = await provider.verifyWebhook({ headers, rawBody, merchantId });
     } catch {
       throw new PaymentError('WEBHOOK_REJECTED');
     }
-    if (verified.providerKey !== this.providerKey || verified.merchantId !== this.merchantId) {
+    if (verified.providerKey !== providerKey || verified.merchantId !== merchantId) {
       throw new PaymentError('WEBHOOK_REJECTED');
     }
 
     let event: NormalizedEvent;
     try {
-      event = this.normalizeEvent(this.provider.normalizeEvent(verified));
+      event = this.normalizeEvent(provider.normalizeEvent(verified), providerKey, merchantId, loaded?.binding.id ?? null);
+      if (loaded && event.currency !== loaded.binding.currency) throw new PaymentError('WEBHOOK_REJECTED');
     } catch (error) {
       if (isPaymentError(error) && error.code === 'WEBHOOK_REJECTED') throw error;
       throw new PaymentError('WEBHOOK_INVALID');
@@ -911,6 +950,17 @@ export class PaymentFulfillmentService {
     return { claimed: claimed.length, processed, retrying, exhausted };
   }
 
+  private adapterFor(bindingId: string | null | undefined, providerKey: string | null, merchantId: string | null, currency: string): PaymentProviderAdapter {
+    if (this.bindingResolver) {
+      if (!bindingId) throw new PaymentError('PAYMENT_BINDING_UNAVAILABLE');
+      const loaded = this.bindingResolver.require(bindingId);
+      if (loaded.binding.providerKey !== providerKey || loaded.binding.merchantId !== merchantId || loaded.binding.currency !== currency) throw new PaymentError('ORDER_STATE_CONFLICT');
+      return loaded.adapter;
+    }
+    if (!this.provider || providerKey !== this.providerKey || merchantId !== this.merchantId) throw new PaymentError('ORDER_STATE_CONFLICT');
+    return this.provider;
+  }
+
   private requireServicePlanService(): NonNullable<PaymentServiceOptions['servicePlanService']> {
     if (!this.servicePlanService) throw new PaymentError('PAYMENT_STORAGE_ERROR');
     return this.servicePlanService;
@@ -949,8 +999,10 @@ export class PaymentFulfillmentService {
       providerSubmissionState,
       providerSubmissionLeaseToken,
       providerSubmissionLeaseExpiresAt,
+      createRequestFingerprint,
       ...publicFields
     } = order;
+    void createRequestFingerprint;
     void providerSubmissionLeaseToken;
     void providerSubmissionLeaseExpiresAt;
     return {
@@ -989,6 +1041,7 @@ export class PaymentFulfillmentService {
     }
     return {
       ...order,
+      bindingId: row.binding_id ?? null,
       orderType: 'byok_service_plan',
       providerKey: normalizeText(providerKey, 'PAYMENT_STORAGE_ERROR'),
       merchantId: normalizeText(merchantId, 'PAYMENT_STORAGE_ERROR'),
@@ -1076,13 +1129,14 @@ export class PaymentFulfillmentService {
     if (!claim.claimed) return this.mapServicePlanPaymentOrder(order, claim.order);
 
     const merchantId = claim.order.merchant_id;
-    if (claim.order.provider_key !== this.providerKey || merchantId === null || merchantId !== this.merchantId) {
+    if (merchantId === null) {
       return this.recordServicePlanProviderUnknown(order, claim.order, claim.leaseToken);
     }
 
+    const provider = this.adapterFor(claim.order.binding_id, claim.order.provider_key, claim.order.merchant_id, claim.order.snapshot_currency);
     let providerResult: Awaited<ReturnType<PaymentProviderAdapter['createOrder']>>;
     try {
-      providerResult = await this.provider.createOrder({
+      providerResult = await provider.createOrder({
         localOrderId: claim.order.id,
         tenantId: claim.order.tenant_id,
         amountMinorUnits: claim.order.snapshot_price_minor_units.toString(),
@@ -1141,10 +1195,9 @@ export class PaymentFulfillmentService {
   ): Promise<ServicePlanProviderAttemptClaim> {
     const current = await this.findServicePlanPaymentById(executor, order.tenantId, order.projectId, order.id, true);
     if (!current) throw new PaymentError('ORDER_NOT_FOUND');
-    if (
-      (current.provider_key !== null && current.provider_key !== this.providerKey) ||
-      (current.merchant_id !== null && current.merchant_id !== this.merchantId)
-    ) {
+    if (this.bindingResolver) this.adapterFor(current.binding_id, current.provider_key, current.merchant_id, current.snapshot_currency);
+    else if ((current.provider_key !== null && current.provider_key !== this.providerKey) ||
+             (current.merchant_id !== null && current.merchant_id !== this.merchantId)) {
       return { claimed: false, order: current, leaseToken: null };
     }
     if (current.state !== 'pending' || current.provider_order_id !== null) {
@@ -1203,8 +1256,8 @@ export class PaymentFulfillmentService {
         [
           order.tenantId,
           order.projectId,
-          this.providerKey,
-          this.merchantId,
+          current.provider_key ?? this.providerKey,
+          current.merchant_id ?? this.merchantId,
           this.currentDate().toISOString(),
           order.id,
           leaseToken,
@@ -1283,15 +1336,16 @@ export class PaymentFulfillmentService {
     current: MappedServicePlanPaymentRow,
     leaseToken: string | null,
   ): Promise<ServicePlanPaymentOrderRecord> {
-    if (current.provider_key !== this.providerKey || current.merchant_id !== this.merchantId) {
+    const provider = this.adapterFor(current.binding_id, current.provider_key, current.merchant_id, current.snapshot_currency);
+    if (current.merchant_id === null) {
       return this.recordServicePlanProviderUnknown(order, current, leaseToken);
     }
-    if (!this.provider.recoverOrder || leaseToken === null) {
+    if (!provider.recoverOrder || leaseToken === null) {
       return this.recordServicePlanProviderUnknown(order, current, leaseToken);
     }
     let recovered: Awaited<ReturnType<NonNullable<PaymentProviderAdapter['recoverOrder']>>>;
     try {
-      recovered = await this.provider.recoverOrder({
+      recovered = await provider.recoverOrder({
         localOrderId: current.id,
         tenantId: current.tenant_id,
         amountMinorUnits: current.snapshot_price_minor_units.toString(),
@@ -1391,17 +1445,12 @@ export class PaymentFulfillmentService {
   }
 
   private providerSnapshotMatches(order: PaymentOrderEntity): boolean {
-    return order.providerKey === this.providerKey && order.merchantId === this.merchantId;
+    this.adapterFor(order.bindingId, order.providerKey, order.merchantId, order.currency);
+    return true;
   }
 
   private assertProviderSnapshot(order: PaymentOrderEntity): void {
-    this.assertProviderSnapshotValues(order.providerKey, order.merchantId);
-  }
-
-  private assertProviderSnapshotValues(providerKey: string | null, merchantId: string | null): void {
-    if (providerKey !== this.providerKey || merchantId !== this.merchantId) {
-      throw new PaymentError('ORDER_STATE_CONFLICT');
-    }
+    this.adapterFor(order.bindingId, order.providerKey, order.merchantId, order.currency);
   }
 
   private retryCooldownElapsed(updatedAt: string | Date): boolean {
@@ -1428,14 +1477,14 @@ export class PaymentFulfillmentService {
       clientRequestId: normalizeText(input?.clientRequestId),
       amountMinorUnits: parseMinorUnits(input?.amountMinorUnits),
       currency: normalizeCurrency(input?.currency),
-      promoCode: input?.promoCode === undefined ? undefined : normalizeText(input.promoCode),
+      promoCode: input?.promoCode === undefined ? undefined : normalizeText(input.promoCode).toUpperCase(),
     };
   }
 
-  private normalizeEvent(input: NormalizedPaymentProviderEvent): NormalizedEvent {
+  private normalizeEvent(input: NormalizedPaymentProviderEvent, providerKey: string, expectedMerchantId: string, bindingId: string | null): NormalizedEvent {
     if (!input || typeof input !== 'object') throw new PaymentError('WEBHOOK_INVALID');
     const merchantId = normalizeText(input.merchantId);
-    if (merchantId !== this.merchantId) throw new PaymentError('WEBHOOK_REJECTED');
+    if (merchantId !== expectedMerchantId) throw new PaymentError('WEBHOOK_REJECTED');
     if (
       input.status !== 'pending' &&
       input.status !== 'succeeded' &&
@@ -1445,7 +1494,8 @@ export class PaymentFulfillmentService {
       throw new PaymentError('WEBHOOK_INVALID');
     }
     return {
-      providerKey: this.providerKey,
+      bindingId,
+      providerKey,
       providerEventId: normalizeText(input.providerEventId),
       eventType: normalizeText(input.eventType),
       providerOrderId: normalizeText(input.providerOrderId),
@@ -1458,6 +1508,10 @@ export class PaymentFulfillmentService {
     };
   }
 
+  private createRequestFingerprint(input: { readonly tenantId: string; readonly clientRequestId: string; readonly amountMinorUnits: bigint; readonly currency: string; readonly promoCode?: string | undefined }): string {
+    return createHash('sha256').update(JSON.stringify(['wallet_topup', input.tenantId, input.clientRequestId, input.amountMinorUnits.toString(), input.currency, input.promoCode ?? null])).digest('hex');
+  }
+
   private assertCreateReplay(
     order: PaymentOrderEntity,
     input: {
@@ -1465,13 +1519,16 @@ export class PaymentFulfillmentService {
       readonly clientRequestId: string;
       readonly amountMinorUnits: bigint;
       readonly currency: string;
+      readonly promoCode?: string | undefined;
     },
   ): void {
     if (
+      (order.createRequestFingerprint !== null
+        ? order.createRequestFingerprint !== this.createRequestFingerprint(input)
+        : this.bindingResolver !== null || input.promoCode !== undefined || order.originalAmountMinorUnits !== null) ||
       order.tenantId !== input.tenantId ||
       order.clientRequestId !== input.clientRequestId ||
-      order.providerKey !== this.providerKey ||
-      order.merchantId !== this.merchantId ||
+      (!this.bindingResolver && (order.providerKey !== this.providerKey || order.merchantId !== this.merchantId)) ||
       order.currency !== input.currency ||
       // Promo orders freeze the discounted amount on the row; replay compares
       // the customer's original (pre-discount) input amount.
@@ -1484,9 +1541,10 @@ export class PaymentFulfillmentService {
   private async findOrderByClientRequest(
     tenantId: string,
     clientRequestId: string,
+    executor: SqlExecutor = this.database,
   ): Promise<PaymentOrderEntity | null> {
     try {
-      const result = await this.database.query<PaymentOrderRow>(
+      const result = await executor.query<PaymentOrderRow>(
         `SELECT ${ORDER_COLUMNS}
          FROM saas_payment_orders
          WHERE tenant_id = $1 AND client_request_id = $2`,
@@ -1529,6 +1587,8 @@ export class PaymentFulfillmentService {
       readonly currency: string;
       readonly createdAt: string;
       readonly originalAmountMinorUnits?: string | null;
+      readonly createRequestFingerprint: string;
+      readonly binding?: LoadedPaymentBinding['binding'];
     },
   ): Promise<PaymentOrderEntity | null> {
     try {
@@ -1536,20 +1596,22 @@ export class PaymentFulfillmentService {
         `INSERT INTO saas_payment_orders
           (id, tenant_id, order_type, provider_key, merchant_id, client_request_id,
            local_order_ref, funding_reference, amount_minor_units, currency, state,
-           provider_attempts, created_at, updated_at, original_amount_minor_units)
-         VALUES ($1::uuid, $2, 'wallet_topup', $3, $4, $5, $1, $1, $6, $7, 'created', 0, $8, $8, $9)
+           provider_attempts, created_at, updated_at, original_amount_minor_units, binding_id, create_request_fingerprint)
+         VALUES ($1::uuid, $2, 'wallet_topup', $3, $4, $5, $1, $1, $6, $7, 'created', 0, $8, $8, $9, $10, $11)
          ON CONFLICT (tenant_id, client_request_id) DO NOTHING
          RETURNING ${ORDER_COLUMNS}`,
         [
           input.id,
           input.tenantId,
-          this.providerKey,
-          this.merchantId,
+          input.binding?.providerKey ?? this.providerKey,
+          input.binding?.merchantId ?? this.merchantId,
           input.clientRequestId,
           input.amountMinorUnits.toString(),
           input.currency,
           input.createdAt,
           input.originalAmountMinorUnits ?? null,
+          input.binding?.id ?? null,
+          input.createRequestFingerprint,
         ],
       );
       return rowsHaveOne(result) && result.rows[0] ? mapOrderRow(result.rows[0]) : null;
@@ -1568,9 +1630,10 @@ export class PaymentFulfillmentService {
       return this.recordProviderUnknown(claim.order, claim.leaseToken);
     }
 
+    const provider = this.adapterFor(claim.order.bindingId, claim.order.providerKey, claim.order.merchantId, claim.order.currency);
     let providerResult: Awaited<ReturnType<PaymentProviderAdapter['createOrder']>>;
     try {
-      providerResult = await this.provider.createOrder({
+      providerResult = await provider.createOrder({
         localOrderId: claim.order.id,
         tenantId: claim.order.tenantId,
         amountMinorUnits: claim.order.amountMinorUnits,
@@ -1733,10 +1796,11 @@ export class PaymentFulfillmentService {
     order: PaymentOrderEntity,
     leaseToken: string | null,
   ): Promise<PaymentOrderRecord> {
-    if (!this.provider.recoverOrder || leaseToken === null) return this.recordProviderUnknown(order, leaseToken);
+    const provider = this.adapterFor(order.bindingId, order.providerKey, order.merchantId, order.currency);
+    if (!provider.recoverOrder || leaseToken === null) return this.recordProviderUnknown(order, leaseToken);
     let recovered: Awaited<ReturnType<NonNullable<PaymentProviderAdapter['recoverOrder']>>>;
     try {
-      recovered = await this.provider.recoverOrder({
+      recovered = await provider.recoverOrder({
         localOrderId: order.id,
         tenantId: order.tenantId,
         amountMinorUnits: order.amountMinorUnits,
@@ -1949,6 +2013,8 @@ export class PaymentFulfillmentService {
           event.providerOrderId,
           true,
         );
+    if (this.bindingResolver && order && (order.bindingId !== event.bindingId || order.tenantId !== event.tenantId || order.currency !== event.currency || BigInt(order.amountMinorUnits) !== event.amountMinorUnits)) throw new PaymentError('WEBHOOK_REJECTED');
+    if (this.bindingResolver && servicePlanOrder && (servicePlanOrder.binding_id !== event.bindingId || servicePlanOrder.tenant_id !== event.tenantId || servicePlanOrder.snapshot_currency !== event.currency || BigInt(servicePlanOrder.snapshot_price_minor_units) !== event.amountMinorUnits)) throw new PaymentError('WEBHOOK_REJECTED');
     const inboxId = normalizeText(this.idFactory());
     const inserted = await this.insertInbox(executor, inboxId, event, order ?? servicePlanOrder);
     if (!inserted) {
@@ -1985,9 +2051,10 @@ export class PaymentFulfillmentService {
     event: NormalizedEvent,
     order: PaymentProviderEventOrderFacts,
   ): Promise<string | null> {
-    const confirmEvent = this.provider.confirmEvent;
+    const provider = this.adapterFor(event.bindingId, event.providerKey, event.merchantId, event.currency);
+    const confirmEvent = provider.confirmEvent;
     if (typeof confirmEvent !== 'function') return null;
-    const confirmation = await confirmEvent.call(this.provider, {
+    const confirmation = await confirmEvent.call(provider, {
       event: {
         providerEventId: event.providerEventId,
         eventType: event.eventType,
@@ -2041,6 +2108,7 @@ export class PaymentFulfillmentService {
         return this.finishInbox(executor, claimed, 'reconciliation', 'ORDER_NOT_FOUND');
       }
       if (
+        (this.bindingResolver !== null && order.bindingId !== event.bindingId) ||
         order.providerKey !== event.providerKey ||
         order.merchantId !== event.merchantId ||
         order.tenantId !== event.tenantId ||
@@ -2159,6 +2227,7 @@ export class PaymentFulfillmentService {
 
   private eventFromInbox(row: PaymentInboxRow): NormalizedEvent {
     return {
+      bindingId: row.binding_id ?? null,
       providerKey: normalizeText(row.provider_key, 'PAYMENT_STORAGE_ERROR'),
       providerEventId: normalizeText(row.provider_event_id, 'PAYMENT_STORAGE_ERROR'),
       eventType: normalizeText(row.event_type, 'PAYMENT_STORAGE_ERROR'),
@@ -2180,6 +2249,7 @@ export class PaymentFulfillmentService {
   ): Promise<ProcessedWebhook> {
     const orderId = order.id;
     if (
+      (this.bindingResolver !== null && order.binding_id !== event.bindingId) ||
       order.provider_key !== event.providerKey ||
       order.merchant_id !== event.merchantId ||
       order.tenant_id !== event.tenantId ||
@@ -2473,10 +2543,10 @@ export class PaymentFulfillmentService {
     try {
       const result = await executor.query<PaymentInboxRow>(
         `INSERT INTO saas_payment_inbox
-          (id, provider_key, merchant_id, provider_event_id, event_type, provider_order_id,
+          (binding_id, id, provider_key, merchant_id, provider_event_id, event_type, provider_order_id,
            event_tenant_id, tenant_id, local_order_id, event_status, amount_minor_units, currency,
            occurred_at, received_at, next_attempt_at, updated_at, processing_outcome, outcome_code)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14, $14, 'accepted', NULL)
+         VALUES ($15, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14, $14, 'accepted', NULL)
          ON CONFLICT (provider_key, merchant_id, provider_event_id) DO NOTHING
          RETURNING ${INBOX_COLUMNS}`,
         [
@@ -2494,6 +2564,7 @@ export class PaymentFulfillmentService {
           event.currency,
           event.occurredAt,
           this.currentDate().toISOString(),
+          event.bindingId,
         ],
       );
       return rowsHaveOne(result) && result.rows[0] ? result.rows[0] : null;
@@ -2506,6 +2577,7 @@ export class PaymentFulfillmentService {
 
   private assertInboxReplay(row: PaymentInboxRow, event: NormalizedEvent): void {
     if (
+      (this.bindingResolver !== null && row.binding_id !== event.bindingId) ||
       row.provider_key !== event.providerKey ||
       row.merchant_id !== event.merchantId ||
       row.provider_event_id !== event.providerEventId ||
