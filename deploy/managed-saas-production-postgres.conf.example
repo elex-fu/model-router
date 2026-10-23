@@ -1,0 +1,13 @@
+# Operator-reviewed PRIMARY config fragment; not auto-installed.
+# pg_sync_a must be a TLS-authenticated standby in an independent failure domain.
+# Configure standby application_name=pg_sync_a and physical replication via the
+# provider's existing HA procedure. No automatic async fallback is permitted.
+wal_level = replica
+fsync = on
+full_page_writes = on
+synchronous_commit = on
+synchronous_standby_names = 'FIRST 1 (pg_sync_a)'
+# Size these using measured WAL volume and outage budget; replication slots
+# require disk/WAL retention monitoring. Never disable sync to clear backlog.
+max_wal_senders = 10
+max_replication_slots = 10

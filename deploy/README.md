@@ -316,3 +316,7 @@ Wrapped blobs are self-describing (`MRSKMS1` magic, format version, key id, IV, 
 ## Managed SaaS role supervisors and workload IAM (2026-10-11)
 
 Role-specific supervisor manifests now exist under `deploy/systemd/managed-saas/` (control-plane, gateway, credential-validation-worker, plus a grouping target) with per-role env-file separation and the fail-closed startup contract documented (startup readiness/ACL/KMS gates are the probe; `Restart=on-failure` must not be relaxed). Workload-level IAM and network policy templates live in `deploy/managed-saas-iam.md`, with an executable posture check at `scripts/check-managed-saas-deployment.mjs` (unit hardening, env-file permissions, cross-role DSN isolation, installed-unit drift; it never prints secret values). These manifests remain operator-deployed artifacts: the software KMS module stays pilot-only, and cloud KMS/IAM acceptance stays with the M3 decision gate.
+
+## Charging production operations (P11)
+
+Use [the production deployment and recovery procedure](managed-saas-production.md) for synchronous PostgreSQL configuration, read-only preflight, fencing and last acknowledged financial commit recovery evidence. The single-PG Compose stack is pilot only; external KMS, real PSP and provider recovery receipts remain external prerequisites.

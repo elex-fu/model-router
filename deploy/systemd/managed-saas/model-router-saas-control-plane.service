@@ -23,6 +23,10 @@ WorkingDirectory=/opt/model-router
 #                                       and any control-plane-only modules
 EnvironmentFile=/etc/model-router-saas/common.env
 EnvironmentFile=/etc/model-router-saas/control-plane.env
+# Optional CP-only PSP credentials. Enable with reviewed descriptor basenames;
+# source files must be private and versioned; retain old keys for historical orders.
+# LoadCredential=alipay-merchant-private-key-v1:/etc/model-router-saas/payment-credentials/alipay-merchant-private-key-v1
+# LoadCredential=alipay-public-key-v1:/etc/model-router-saas/payment-credentials/alipay-public-key-v1
 Environment=NODE_ENV=production
 Environment=MODEL_ROUTER_DEPLOYMENT_MODE=managed-saas
 ExecStart=/usr/bin/node /opt/model-router/dist/cli/index.js start --role control-plane

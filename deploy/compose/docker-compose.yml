@@ -12,8 +12,8 @@
 # so each workload service receives exactly the variables its role permits —
 # the compose equivalent of the per-role env files under /etc/model-router-saas.
 #
-# Redis is cache/coordination only (control-plane auth rate limiting, gateway
-# sticky-session fast path); PostgreSQL remains the sole authoritative ledger.
+# Redis owns shared non-financial soft-quota admission and derived affinity.
+# PostgreSQL remains the sole financial/cumulative-budget authority.
 # See deploy/compose/README.md for the full bring-up sequence (roles template
 # -> saas:migrate -> re-apply templates).
 #
@@ -71,10 +71,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # Cache/coordination only (control-plane auth rate limiting, gateway
-    # sticky-session fast path); nothing here is authoritative, so no
-    # persistence is configured.
-    command: ["redis-server", "--appendonly", "no"]
+    # Non-financial quota updates have a bounded asynchronous loss window.
+    # Never evict live quota/journal keys; exhaustion rejects admissions.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "${REDIS_MAXMEMORY:-512mb}", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -105,6 +106,10 @@ services:
       MODEL_ROUTER_SAAS_WORKLOAD_ROLE: control-plane
       MODEL_ROUTER_SAAS_DEPLOYMENT_ID: ${MODEL_ROUTER_SAAS_DEPLOYMENT_ID:?set MODEL_ROUTER_SAAS_DEPLOYMENT_ID in deploy/compose/.env}
       MODEL_ROUTER_SAAS_ENVIRONMENT_ID: ${MODEL_ROUTER_SAAS_ENVIRONMENT_ID:?set MODEL_ROUTER_SAAS_ENVIRONMENT_ID in deploy/compose/.env}
+      # Optional PSP wiring: enable these together with CP-only read-only mounts.
+      # Never add payment credentials to gateway or worker environments.
+      # MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE: /etc/model-router-payments/payments.json
+      # MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY: /run/secrets/model-router-payments
       MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL: postgresql://model_router_saas_control_plane:${POSTGRES_CONTROL_PLANE_PASSWORD}@postgres:5432/${POSTGRES_DB:-model_router_saas}
       MODEL_ROUTER_SAAS_REDIS_URL: ${MODEL_ROUTER_SAAS_REDIS_URL:-redis://redis:6379}
       MODEL_ROUTER_SAAS_REDIS_PROVIDER: ${MODEL_ROUTER_SAAS_REDIS_PROVIDER:-./dist/saas/runtime/redis-rate-limit-provider.js}
@@ -175,8 +180,8 @@ services:
       MODEL_ROUTER_SAAS_GATEWAY_BIND_ADDRESS: ${MODEL_ROUTER_SAAS_GATEWAY_BIND_ADDRESS:-0.0.0.0}
       MODEL_ROUTER_SAAS_GATEWAY_PORT: ${MODEL_ROUTER_SAAS_GATEWAY_PORT:-15007}
       MODEL_ROUTER_SAAS_GATEWAY_ORIGIN: ${MODEL_ROUTER_SAAS_GATEWAY_ORIGIN:?set MODEL_ROUTER_SAAS_GATEWAY_ORIGIN (https) in deploy/compose/.env}
-      # Gateway-scoped Redis (sticky-session fast path only; PG affinity
-      # stays authoritative and every Redis error fails open). The dedicated
+      # Gateway-scoped Redis (soft quota admission + sticky-session fast path;
+      # quota failures reject admission, affinity retains PG fallback). The dedicated
       # gateway spelling keeps the control-plane REDIS_URL/REDIS_PROVIDER
       # pair rejected for this role. Comment this entry out for a pure-PG
       # gateway (no Redis dependency); an explicitly EMPTY value fails
@@ -265,4 +270,5 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
   tls-fingerprint-socket:

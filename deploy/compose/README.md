@@ -15,10 +15,10 @@
 
 ## 红线(与 systemd 部署完全一致)
 
-1. **PostgreSQL 是唯一权威**:容量、租约、健康、affinity、计费全部以 PG 为准;
-   Redis 只做 control-plane 认证限流/缓存 + gateway 粘性会话快路径
-   (专属 `MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL`,滑动 1h TTL,PG affinity 仍权威,
-   任何 Redis 故障 fail-open;`appendonly no`,丢数据无害)。
+1. **金融与累计预算以 PostgreSQL 为权威**；共享 Redis 承担非金融软配额
+   RPM/TPM/并发、异步写回 journal、认证限流与 affinity 快路径。
+   quota Redis 故障、PG 健康过期或 journal 积压拒绝新准入；affinity 独立保留 PG fallback。
+   本 Compose 是单故障域 pilot，不能作为收费生产 HA 或最后确认金融提交恢复证明。
 2. **启动即探针,fail-closed**:每个角色绑定监听器/首次 claim 前依次通过
    PG ping → schema 校验 → 角色最小权限 ACL 核验(仅 `NODE_ENV=production`)
    → KMS readiness;任一失败进程非零退出。`restart: on-failure` 故意不用
@@ -117,10 +117,24 @@ docker compose up -d --scale gateway=1
 
 副本数受宿主端口范围约束:`GATEWAY_HOST_PORT_START`–`GATEWAY_HOST_PORT_END`
 (默认 15007–15009,即最多 3 副本;更多副本请扩大范围或改用 LB/反向代理)。
-`deploy.replicas` 也可经 `.env` 的 `GATEWAY_REPLICAS` 固定。多实例下 PG 仍是
-容量/租约/affinity 的唯一权威;Redis 仅承担 control-plane 认证限流 + gateway
-粘性快路径(经 `MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL`,默认指向栈内 redis;
-注释掉 compose 中该行即回到纯 PG 路径)。
+`deploy.replicas` 也可经 `.env` 的 `GATEWAY_REPLICAS` 固定。所有 gateway 必须一致
+使用同一 Redis/PG；切换配额模式先 drain/停止全部 gateway，不混跑 Redis/PG capacity。
+
+## Redis 容量与恢复
+
+Redis 使用 `redis-data:/data`、AOF `appendfsync everysec`、`noeviction`。
+`REDIS_MAXMEMORY` 默认 512mb，按实际 quota/journal 峰值调整，并为 AOF rewrite、
+复制缓冲与进程开销预留宿主内存；maxmemory 不是容器 RSS 上限。
+监控 used_memory/maxmemory（建议 70% 告警、85% 紧急）、OOM/rejected commands、
+AOF write/rewrite 状态、磁盘余量及 journal backlog（10,000 触发准入拒绝）。
+不要通过 eviction、删除 journal 或关闭 AOF 消除告警；暂停准入后扩容/修复。
+
+重启会 fence Redis generation，并从 PG 已确认的 quota snapshot 恢复；旧 AOF 不能
+证明未写回计数已恢复。everysec 在崩溃时可能丢约一秒 AOF，quota 异步 PG 写回另有
+丢失窗口，实际窗口必须由恢复演练记录，不能承诺零丢失。仅非金融短期计数接受此窗口；
+资金、累计预算、hold、dispatch/unknown 与关联证据仍由 PG 持久事务保护。
+禁止 `docker compose down -v` 用于恢复；它会同时删除 PG 与 Redis 卷。
+收费生产使用 [同步 PG 与恢复门禁](../managed-saas-production.md)，独立备份沿用下述 runbook。
 
 ## 备份
 
@@ -180,3 +194,20 @@ docker compose exec -T postgres pg_restore -U postgres --clean --if-exists \
 | `.env.example` | 全量变量与占位符(以 `src/saas/deployment.ts` 为权威契约) |
 | `verify.sh` | `docker compose config` 校验 + 最小栈健康探测 |
 | `modules/`(运行时创建) | operator 侧可信模块挂载点(`.gitignore` 范围外,勿提交) |
+
+## 可选 CP 专用 PSP 配置
+
+只在 control-plane 启用 Compose 中注释的 `MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE`
+与 `MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY`，并为该服务单独增加只读 mounts：
+
+```yaml
+    volumes:
+      - ./modules:/opt/model-router-modules:ro
+      - /etc/model-router-saas/payments.json:/etc/model-router-payments/payments.json:ro
+      - /etc/model-router-saas/payment-credentials:/run/secrets/model-router-payments:ro
+```
+
+保留可信模块 mount（service volumes 覆盖共享 anchor）；密钥目录必须私有且不在仓库。
+descriptor 的 `merchantPrivateKeyCredential` / `alipayPublicKeyCredential` 使用版本化
+文件 basename，例如 `alipay-merchant-private-key-v1` / `alipay-public-key-v1`。
+gateway/worker 不添加这两个 env 或任何 PSP mount。真实商户/KMS/恢复验收仍按生产门禁。

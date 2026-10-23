@@ -137,3 +137,7 @@ No command in this delivery performs production rollback, database replacement, 
 ## Local acceptance scope
 
 Run `SAAS_BACKUP_ACCEPTANCE=1 node --import tsx --test tests/cli/saas-backup.integration.test.ts` with PostgreSQL tools on PATH. It creates and stops its own temporary cluster, provisions the current migration registry and representative data, performs real `pg_dump`/`pg_restore`, rejects a corrupt offsite download before target creation, and proves the source survives and the owned restore target is removed. S3 and KMS are explicit protocol doubles in this acceptance test; it does not claim a live cloud upload, provider PITR restoration or recovery-role IAM validation. Production rollout still requires one real offsite upload/download/restore drill and the deployment-specific KMS/provider checks above.
+
+## Synchronous financial commit prerequisite
+
+Charging production additionally follows [managed-saas-production.md](managed-saas-production.md). Independent synchronous durable WAL acknowledgement, failover fencing and actual recovery of the last acknowledged financial commit are mandatory. Offsite/PITR receipts and a 15-minute pilot RPO do not substitute for that boundary. Technical receipts continue to carry `productionAdmissionApproved: false`; missing financial evidence keeps charging closed and original uncertain requests unknown until reconciliation.

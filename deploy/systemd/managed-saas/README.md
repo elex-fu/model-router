@@ -67,3 +67,7 @@ systemctl enable --now model-router-saas-control-plane.service \
 `saas:migrate` / `saas:bootstrap-admin` / `saas:migration-audit` /
 `saas:platform-mfa-enroll` 以 `MODEL_ROUTER_SAAS_DATABASE_URL`（迁移/管理连接）
 手工显式执行，绝不配置为开机自启服务。
+
+## 收费生产
+
+按 [同步 PostgreSQL 与恢复门禁](../../managed-saas-production.md) 部署独立故障域同步副本；单 PG、软件 KMS 和本地文件不能证明收费 GO。PSP descriptor 及 LoadCredential 只配置 control-plane，gateway/worker 不持有商户密钥；示例 unit 的可选 LoadCredential 名称须与 descriptor 版本名一致。生产角色文件删除软件 KMS 主密钥配置并安装外部 KMS workload identity。

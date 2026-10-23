@@ -752,7 +752,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 开发中；迁移由同一 schema writer 顺序追加 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
 | P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算的可解释观测 | 开发中；不修改原性能门槛 |
-| P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | 部署配置开发中；实际环境验收待执行 |
+| P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | P11 基础配置及静态解析完成；实际环境验收与新增 CI 门禁验证中 |
 
 本轮定位补充：Codex 缺失 input/output 用量不能补零作为完整证据，incomplete/failed 终态用量需保留；WS 的 previous_response_id 不能只影响调度后被 HTTP payload 静默丢弃。新项目默认 inference policy 为 suspended，正式开户最终事务还必须原子激活项目策略并保留已配置容量，不能仅激活 entitlement。以上已进入实现范围，当前尚未据此声称测试或真实调用通过。
 
@@ -769,3 +769,9 @@ Luna 已执行 workspace 依赖安装及 lock 同步（`--ignore-scripts`），w
 Luna 协议定向批次 **40/40** 通过；首次失败是旧测试仍期待新 pair 不支持，已改为四方向注册断言，并保留非法协议和不支持字段的拒绝测试。当前合并工作树 `build:server` 已通过。编译器支持 pair 和结构化错误接线由 Codex/runtime 同一 writer 完成，随其后续任务提交。
 
 这只关闭直接桥代码及本地定向验证；现有 Gemini↔Anthropic 桥的历史保真不足未因此自动修复，标准 builtin 仍按实际 provider/product/model/operation/workflow 证据准入，未凭注册数放开全部供给，也未执行真实 CLI 或模型调用。P08 已推送 `2ad45cf`。
+
+### 29.4 P11 标准 Redis 与生产恢复部署配置
+
+Compose Redis 已改为 AOF everysec、noeviction、持久卷和可调容量，修正 cache-only/fail-open 的旧说明；仍明确允许非金融软计数的短暂丢失窗口。新增收费 PostgreSQL 同步持久配置示例、只读 preflight 和 fencing/最后已确认 commit 恢复步骤，复用原异地 backup/PITR 与 KMS runbook。CP 专用 PSP 配置及凭据挂载与 gateway 权限分离。
+
+Luna 使用独立 `docker-compose ... config --quiet` 解析通过；本地单 PG Compose 仅是 pilot，未当作收费高可用部署。本任务未连接生产云 KMS、未执行实际故障切换或异地恢复，C2 仍需外部证据。正式 PG15/18 CI 的新增 P0 业务门禁另行接线验证，未借配置解析关闭业务验收。P04 已推送 `09b875f`。
