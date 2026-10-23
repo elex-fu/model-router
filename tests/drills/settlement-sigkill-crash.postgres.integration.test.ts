@@ -4,8 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { verifySaasRuntimeDatabasePrivileges } from '../../src/saas/db/index.js';
+import { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } from '../../src/saas/db/index.js';
 import type { SqlExecutor } from '../../src/saas/db/types.js';
+import { PlatformWalletLedgerService } from '../../src/saas/billing/service.js';
+import { SaasMeteringService } from '../../src/saas/metering/service.js';
+import { DurableNormalSuccessSettlementPort } from '../../src/saas/metering/conditional-settlement-port.js';
+import { startPgCommitAckLossProxy } from './helpers/pg-commit-ack-loss-proxy.js';
 import {
   anyRoleConfigured,
   FIN057_FIXTURE_HMAC_HEX,
@@ -263,4 +267,100 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
   assert.equal(runTwo[1]!.kind, 'replayed', 'the commit paused before its marker must replay');
   for (const marker of runTwo.slice(2)) assert.equal(marker.kind, 'settled', 'inputs after the paused commit first settle in recovery');
   t.diagnostic(`kill window: ${crashedAt.length}/${REQUESTS} observed committed; ${committedWithoutMarker} committed before marker`);
+});
+
+async function commitAckSnapshot(executor: SqlExecutor, tenantId: string) {
+  const rows = async (sql: string) => (await executor.query<Record<string, unknown>>(sql, [tenantId])).rows;
+  const [requests, attempts, evidence, holds, usage, settlements, wallets, ledger, entries, leases, idempotency, capacity] = await Promise.all([
+    rows('SELECT id,execution_state,reconciliation_state,financial_status,state_version FROM saas_requests WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT id,request_id,dispatch_state,result_state,response_started,state_version FROM saas_attempts WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT id,request_id,attempt_id,status,claimed_attempt_id,statement_sha256 FROM saas_prepared_request_evidence WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT * FROM saas_billing_reservations WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT * FROM saas_usage_events WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT * FROM saas_usage_settlements WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT id,currency,posted_balance_minor_units::text AS balance FROM saas_wallets WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT * FROM saas_ledger_transactions WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT * FROM saas_ledger_entries WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT id,attempt_id,status,fencing_token,lease_expires_at,released_at FROM saas_provider_account_leases WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT id,request_id,kind,key_digest,request_fingerprint FROM saas_idempotency_records WHERE tenant_id=$1 ORDER BY id'),
+    rows('SELECT * FROM saas_gateway_capacity_reservations WHERE tenant_id=$1 ORDER BY request_id'),
+  ]);
+  return { requests, attempts, evidence, holds, usage, settlements, wallets, ledger, entries, leases, idempotency, capacity };
+}
+
+test('FIN-01 wire COMMIT ACK loss rejects the original native transaction while independent PG facts commit and exact-input replay writes nothing', {
+  skip: process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured ? `set ${REQUIRED_FLAG}=1 and three disposable local/CI role URLs` : false,
+  timeout: 120000, concurrency: false,
+}, async t => {
+  const urls = roleUrls();
+  const target = new URL(urls[2]);
+  const migrator = observedDatabase(urls[0]);
+  const gateway = observedDatabase(urls[2]);
+  let proxy: Awaited<ReturnType<typeof startPgCommitAckLossProxy>> | undefined;
+  let interrupted: ReturnType<typeof createSaasDatabase> | undefined;
+  let restarted: ReturnType<typeof createSaasDatabase> | undefined;
+  t.after(async () => {
+    try {
+      await proxy?.close();
+    } finally {
+      await boundedExit(Promise.allSettled([interrupted?.close(), restarted?.close(), gateway.database.close(), migrator.database.close()]), 15000);
+    }
+  });
+  await migrator.database.verifySchema();
+  await verifySaasRuntimeDatabasePrivileges(gateway.database, 'gateway');
+  // Independent finance scope: never add this request to the SIGKILL marker
+  // fixture above. Its dispatch is SQL-prepared, not a live provider call.
+  const fixture = await seedFixture(migrator.database, gateway.database, 'platform');
+  const observe = () => migrator.database.transaction(async tx => {
+    await tx.query('SET TRANSACTION READ ONLY');
+    return commitAckSnapshot(tx, fixture.tenantId);
+  });
+  const before = await observe();
+  assert.equal(before.wallets.length, 1); assert.equal(before.wallets[0]!.balance, '100');
+  assert.equal(before.holds.length, 1); assert.equal(before.holds[0]!.state, 'reserved');
+  assert.equal(String(before.holds[0]!.amount_minor_units), '50');
+  assert.equal(before.usage.length, 0); assert.equal(before.settlements.length, 0);
+  assert.equal(before.entries.length, 2); assert.equal(before.leases.length, 0);
+  proxy = await startPgCommitAckLossProxy({ host: target.hostname, port: Number(target.port), database: decodeURIComponent(target.pathname.slice(1)) });
+  const proxied = new URL(urls[2]);
+  proxied.hostname = proxy.host; proxied.port = String(proxy.port); proxied.searchParams.set('sslmode', 'disable');
+  interrupted = createSaasDatabase({ connectionString: proxied.toString(), max: 1, connectionTimeoutMillis: 5000 });
+  const port = (database: ReturnType<typeof createSaasDatabase>) => new DurableNormalSuccessSettlementPort(database, {
+    metering: new SaasMeteringService(database, { idempotencyHmacSecret: Uint8Array.from(Buffer.from(FIN057_FIXTURE_HMAC_HEX, 'hex')) }),
+    billing: new PlatformWalletLedgerService(),
+  });
+  let nativeCommitRejected = false;
+  await assert.rejects(boundedExit(port(interrupted).complete(fixture.input), 30000), error => {
+    // Accept a real native transport failure, never a timeout/sentinel or a
+    // resolved domain result such as reconciliation_pending.
+    const socketError = error instanceof Error && (
+      error.message === 'Connection terminated unexpectedly' || error.message === 'Connection terminated' ||
+      ['ECONNRESET', 'EPIPE'].includes(String((error as NodeJS.ErrnoException).code))
+    );
+    nativeCommitRejected = socketError;
+    return socketError;
+  });
+  assert.equal(nativeCommitRejected, true);
+  assert.deepEqual(proxy.evidence(), { frontendCommitForwarded: true, serverCommitObserved: true, backendCommitForwarded: false, connectionCut: true });
+  // This direct read-only connection is not the failed client and never
+  // passes the wire proxy. PostgreSQL must prove that COMMIT really won.
+  await assertSettledOnce(migrator.database, fixture.tenantId);
+  const committed = await observe();
+  assert.equal(committed.requests[0]!.execution_state, 'succeeded');
+  assert.equal(committed.requests[0]!.financial_status, 'settled');
+  assert.equal(committed.attempts[0]!.id, fixture.input.attemptId);
+  assert.equal(committed.attempts[0]!.result_state, 'succeeded');
+  assert.equal(committed.holds[0]!.id, fixture.input.reservationId);
+  assert.equal(committed.holds[0]!.state, 'settled');
+  assert.equal(String(committed.holds[0]!.settlement_amount_minor_units), '12');
+  assert.ok(committed.holds[0]!.ledger_transaction_id);
+  assert.equal(committed.wallets[0]!.balance, '88');
+  assert.deepEqual(committed.evidence, before.evidence);
+  assert.deepEqual(committed.leases, before.leases);
+  restarted = createSaasDatabase({ connectionString: urls[2], max: 1, connectionTimeoutMillis: 5000 });
+  const replay = await boundedExit(port(restarted).complete(fixture.input), 30000);
+  assert.equal(replay.kind, 'replayed'); assert.equal(replay.attempt.id, fixture.input.attemptId);
+  await assertSettledOnce(migrator.database, fixture.tenantId);
+  assert.deepEqual(await observe(), committed, 'replay adds or mutates no financial, attempt, evidence, lease, capacity or idempotency fact');
+  t.diagnostic(JSON.stringify({ boundary: 'owned-test-PG-wire-ACK-loss; SQL-prepared-dispatch; no live upstream or occupied-lease fault', nativeCommitRejected, ...proxy.evidence(), directObserverCommitted: true, exactInputReplayed: true, snapshotUnchanged: true }));
 });

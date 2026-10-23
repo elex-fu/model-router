@@ -1067,3 +1067,17 @@ Astra 对生产文件与新 native-pool test 实际差分复核通过。Luna 新
 typed storage failure、unsupported policy、伪造同名普通对象、SQLSTATE42501和08006继续原blocked路径；不修改HTTP handler、权限锁、缓存、重试或授权策略。暖缓存helper仅把tenant/Key的HTTP期望更新为403 `REQUEST_REJECTED / admission / caller_denied`，保留实际prelock拒绝次数、source无reload、全部金融/派发零变化、正常resume/KeyB与版本/审计断言。entitlement已有403不变。
 
 Astra三文件实际复核通过；Luna ports定向 **21/21**、覆盖ports/unit/commercial与两个helper的exact strict通过，三owned文件前后hash不变。新增六类错误对照在事务中先创建HMAC claim再以原sentinel回滚，并要求meter、billing、capacity及guard均未调用。§29.36 的30/30仍是旧503映射证据，新403的真实PG商业root与新serverbuild在下一冻结批次验证，不互借结果。连接池修复已独立推送 `3a46a53`。
+
+后续冻结 `7e4fd2852876671672688e7fcdf5a91704f8c640` 新 `build:server` 已通过：789个src文件前后无变化，仅7个生成输出变化，新pool与ports实现确已进入dist，13项harness hash保持一致。Luna随后fresh PG18.6完整commercial **30/30**：三个撤销场景两实例均403，tenant/Key为admission/caller_denied、entitlement仍entitlement/entitlement_denied；所有原prelock次数、暖cache/source不重验、11表零变化、resume/B与版本审计断言通过。sourceChanges=[]、集群停止删除。证据 `/private/tmp/model-router-commercial-postgres-authrev-20261024-run-03`，构建完整清单 `/private/tmp/model-router-build-provenance-20261024-{before,after,comparison}.json`。这份新映射证据取代旧503预期的当前结论，历史运行保留。
+
+### 29.39 真实 PostgreSQL wire COMMIT ACK 丢失与原输入重放
+
+Astra审计确认原 `cf45917` 是客户端已收到COMMIT成功、应用marker随后丢失，现有after_commit fake fault也先await真实query成功，均不能证明网络层COMMIT回包丢失。新增独立tenant的top-level settlement drill，保留原SIGKILL/REQUESTS/child/barrier/marker与金融强断言。唯一目标gateway连接经过自有单连接PG协议代理；原样转发COMMIT，只有观察到完整backend `CommandComplete(COMMIT)` 后才扣留该frame及同包后续ReadyForQuery并断开socket，观察与重放始终独立直连。
+
+实现处理分帧/合帧与长度边界，不记录SQL、参数或凭据。沿用原三role URL同endpoint/database校验；proxy仅监听127.0.0.1，upstream仅允许原本地测试目标或精确CI tuple `postgres:5432/model_router_saas_ci`，不伪造CI标记、不加skip、不放宽required runner。初审发现的loopback-only会使正式PG15/18用例必失败的问题在实际运行前修正，并增加允许/拒绝目标的负向测试。
+
+Astra实际差分复核通过；Luna proxy纯unit **5/5**、三roots exact strict通过。随后fresh PG18.6完整settlement root **2/2**通过，正常全迁移/角色、无临时grant。原SIGKILL仍观察`1/4 committed`且`1 committed before marker`；新ACK场景原生COMMIT确以socket连接错误拒绝，同时四证据严格为forwarded=true、serverCommitObserved=true、backendCommitForwarded=false、connectionCut=true。
+
+独立只读PG确认原request succeeded/settled、原attempt/reservation ID不变、hold settled12、钱包最小单位 **100→88**、唯一结算/关联账本及平衡分录。新直连用完全相同原输入返回replayed/同attempt ID，selected request/attempt/hold/usage/settlement/ledger/wallet/evidence/lease/capacity/idempotency快照完全相等，不新增金融效果。这里没有真实上游、PSP或占用中provider lease，不将其外推为该类故障证明。
+
+证据 `/private/tmp/model-router-settlement-ack-postgres-20261024-run-01`，所有runner阶段exit0、sourceChanges=[]，集群停止删除。日志保留一条非fatal的pg未来版本并发query弃用提示，实际断言全部通过。此项补足本地真实wire ACK窗口，不代表独立故障域/WAL/PITR恢复；PG immediate stop/start的完整scanner/600秒自然恢复仍由下一独立profile验收。
