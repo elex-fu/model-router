@@ -977,3 +977,11 @@ WS 鉴权关闭修复已推送 `64ac766`。此前 [CI #145](https://github.com/e
 Astra 实际源码审查通过；Luna worker **24/24**、combined strict 通过。正常 PG18 复测已通过 scanner/operator_required、原 hold 身份/金额/价格/引用不变、真实 MFA、权限拒绝及 list/detail；完整 root **25/27**，仍在人工 resolve POST 返回 503。脱敏服务端日志明确首拒绝关系为 `saas_billing_group_spend_reservations`、SQLSTATE 42501，发现 CP 的既有 group-spend release 权限缺口，作为下一独立任务处理；未将本次部分通过记作完整人工闭环。
 
 上述运行均保持正常迁移/受限角色、sourceChanges=[] 并清理临时集群。父计数放在 operator helper 后导致次生 3/4 的测试可观测性问题已分开修正，保留原四场景全部金融断言及 helper 原异常。资源关闭修复已推送 `c8e36d3`，其 [CI #147](https://github.com/elex-fu/model-router/actions/runs/40028090019) 已 **64/64 全过**；本节 worker 修复与后续人工处理、扩展故障 CI 仍按各自新候选验证。
+
+### 29.30 两项进程故障演练接入 PG15/18 必需 CI
+
+复用现有 isolated required matrix 新增 `payment-worker-sigkill`、`managed-saas-sigterm` 两个 selector，均 `httpFixture:false`。退款 drill 自建独立身份与商户 control，SSE parent 自行 fork 既有商业 child fixture，不重复预置 HTTP；保持净化环境、三受限角色、current/session principal、safe-role、全注册迁移、runtime privilege probe 与 virgin 数据库检查。
+
+strict 清单显式加入两个 root 和退款 child；validator 为两 root 增加精确 prerequisite 与缺项负向检查，未放宽其他 root 的 `seedX` 规则。退款 test 原硬性 PG18 限制改为允许现正式矩阵的 PG15/18，标题和证据记录实际 server major；仅改变允许执行的版本范围，未改退款业务或 child。
+
+Astra 四文件审查无阻断；Luna wiring **20/20**、isolated runner strict、两 drill/退款 child/merchant root strict 均通过。新增四个矩阵任务仍需本次新候选在远程实际执行成功，尚不能称 PG15 退款或 SSE 演练通过。原 PG18 本地证据见 §29.24–25。scanner 原引用修复已推送 `ab9fd83`；人工 resolve 的 billing-group 最小权限及非空 group release 证据在独立任务中继续推进，完整闭环仍未关闭。

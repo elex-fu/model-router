@@ -15,7 +15,7 @@ import type { PaymentProviderRefundInput, NormalizedPaymentProviderEvent } from 
 import { anyRoleConfigured, REQUIRED_FLAG, roleUrls } from '../saas/metering/normal-success-postgres-fixture.js';
 import { crashRefundBinding, type CrashRefundInputs } from './helpers/payment-worker-sigkill-child.js';
 
-// Real PG18, restricted production CP service and worker, real process signals.
+// Real PG15/18, restricted production CP service and worker, real process signals.
 // The loopback PSP is synthetic: this proves no real Alipay merchant contract.
 // The caller owns creation/drop of the dedicated disposable database; this
 // test closes its pools/children/listener and restores control without deleting
@@ -70,8 +70,8 @@ async function snapshot(database: SaasDatabase, tenantId: string) {
   return { financial, refunds, inbox };
 }
 
-test('P10 PG18: submit service SIGKILL after durable PSP acceptance, then refund worker SIGKILL during query recovers original refund once', {
-  skip: process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured ? `set ${REQUIRED_FLAG}=1 and three isolated disposable PG18 role URLs` : false,
+test('P10 PG15/18: submit service SIGKILL after durable PSP acceptance, then refund worker SIGKILL during query recovers original refund once', {
+  skip: process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured ? `set ${REQUIRED_FLAG}=1 and three isolated disposable PG15/18 role URLs` : false,
   timeout: 180000, concurrency: false,
 }, async t => {
   const urls = roleUrls();
@@ -137,7 +137,8 @@ test('P10 PG18: submit service SIGKILL after durable PSP acceptance, then refund
   await cp.verifySchema();
   await verifySaasRuntimeDatabasePrivileges(cp, 'control_plane');
   const version = (await migrator.query<{ version: string }>(`SELECT current_setting('server_version_num') AS version`)).rows[0]!.version;
-  assert.equal(Math.floor(Number(version) / 10000), 18, 'this isolated drill requires real PG18');
+  const postgresMajor = Math.floor(Number(version) / 10000);
+  assert.ok([15, 18].includes(postgresMajor), 'this isolated drill requires real PG15 or PG18');
   await within(new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListen); }), 5000, 'PSP listen deadline');
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const tenantId = randomUUID(), actorId = randomUUID(), sessionId = randomUUID(), credentialId = randomUUID(), namespace = randomUUID();
@@ -219,8 +220,8 @@ test('P10 PG18: submit service SIGKILL after durable PSP acceptance, then refund
   const facts = readFileSync(journal, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { kind: string; bindingId: string; input: PaymentProviderRefundInput });
   assert.equal(facts.filter(fact => fact.kind === 'accepted').length, 1); assert.equal(submitCalls, 1); assert.equal(queryCalls, 2);
   assert.ok(facts.every(fact => fact.bindingId === binding.id && fact.input.localRefundId === refundId && fact.input.idempotencyReference === refundId));
-  const evidence = { boundary: 'synthetic-loopback-PSP; real PG18/restricted CP/SIGKILL; no live Alipay acceptance', signals: [submitExit.signal, workerExit.signal], submitCalls, queryCalls, funded, submitted, querying, completed };
+  const evidence = { boundary: `synthetic-loopback-PSP; real PG${postgresMajor}/restricted CP/SIGKILL; no live Alipay acceptance`, postgresMajor, signals: [submitExit.signal, workerExit.signal], submitCalls, queryCalls, funded, submitted, querying, completed };
   const evidencePath = process.env.MODEL_ROUTER_PAYMENT_CRASH_EVIDENCE_FILE;
   if (evidencePath) writeFileSync(evidencePath, JSON.stringify(evidence, null, 2), { mode: 0o600 });
-  t.diagnostic(JSON.stringify({ boundary: evidence.boundary, signals: evidence.signals, submitCalls, queryCalls, refundTransactions: completed.financial.refunds }));
+  t.diagnostic(JSON.stringify({ boundary: evidence.boundary, postgresMajor: evidence.postgresMajor, signals: evidence.signals, submitCalls, queryCalls, refundTransactions: completed.financial.refunds }));
 });

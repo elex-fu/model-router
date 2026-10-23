@@ -118,6 +118,14 @@ const gates = {
     root: 'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts',
     httpFixture: false,
   },
+  'payment-worker-sigkill': {
+    root: 'tests/drills/payment-worker-sigkill.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'managed-saas-sigterm': {
+    root: 'tests/saas/gateway/managed-saas-sigterm.postgres.integration.test.ts',
+    httpFixture: false,
+  },
 } as const;
 const databaseUrls = {
   migrator: 'postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci',

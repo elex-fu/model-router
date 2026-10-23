@@ -59,6 +59,8 @@ const isolatedGates = [
   ['affinity-bind-race', 'tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts', false],
   ['dispatch-proof-fence-batch', 'tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts', false],
   ['payment-merchant-binding', 'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts', false],
+  ['payment-worker-sigkill', 'tests/drills/payment-worker-sigkill.postgres.integration.test.ts', false],
+  ['managed-saas-sigterm', 'tests/saas/gateway/managed-saas-sigterm.postgres.integration.test.ts', false],
 ] as const;
 const cancellationFixture = 'tests/saas/gateway/pre-dispatch-postgres-fixture.ts';
 const terminalReplayFixture = 'tests/saas/metering/normal-success-postgres-fixture.ts';
@@ -66,6 +68,7 @@ const kimiCommercialFixture = 'scripts/ops/verify-commercial-kimi.ts';
 const runtimeHealthClockFixture = 'tests/saas/gateway/runtime-health-clock-postgres-fixture.ts';
 const isolatedStrictRoots = [
   ...isolatedGates.map(([, root]) => root),
+  'tests/drills/helpers/payment-worker-sigkill-child.ts',
   'src/types/busboy.d.ts',
   cancellationFixture,
   terminalReplayFixture,
@@ -782,6 +785,33 @@ function validateRuntimeHealthClockSource(source: string, fixture: string): void
   }
 }
 
+function validatePaymentWorkerSigkillSource(source: string): void {
+  for (const required of [
+    "const urls = roleUrls();", "const CHILD = 'tests/drills/helpers/payment-worker-sigkill-child.ts';",
+    'const tenantId = randomUUID(), actorId = randomUUID()',
+    'INSERT INTO saas_users(id,email)', 'INSERT INTO saas_tenants(id,name,slug)',
+    'await registerPaymentBindings(cp, resolver);', 'await cp.verifySchema();',
+    "await verifySaasRuntimeDatabasePrivileges(cp, 'control_plane');",
+    "assert.equal(initial.mode, 'disabled'", 'await restoreControl?.();',
+    '[15, 18].includes(postgresMajor)', 'postgresMajor: evidence.postgresMajor',
+    "signalOwned(submitChild, 'SIGKILL');", "signalOwned(firstWorker, 'SIGKILL');",
+    "assert.equal(submitExit.signal, 'SIGKILL');", "assert.equal(workerExit.signal, 'SIGKILL');",
+  ]) assert.ok(source.includes(required), `payment SIGKILL prerequisite missing: ${required}`);
+  assert.doesNotMatch(source, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+}
+
+function validateManagedSaasSigtermSource(source: string): void {
+  for (const required of [
+    "fork(resolve('tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts')",
+    "MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: '1'", "MODEL_ROUTER_MANAGED_SIGTERM_DRILL: '1'",
+    "message.event === 'first_frame'", "child.kill('SIGTERM')", "message.event === 'draining'",
+    "child.send({ event: 'release_terminal' })", "message.event === 'financial_converged'",
+    'assert.equal(firstFrame, true', 'assert.equal(draining, true', 'assert.equal(converged, true',
+    'assert.equal(result.signal, null)', 'assert.equal(result.code, 0)',
+  ]) assert.ok(source.includes(required), `managed SIGTERM prerequisite missing: ${required}`);
+  assert.doesNotMatch(source, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+}
+
 test('actual source prerequisites preserve successful-HTTP dependencies and each isolated root own fixture', () => {
   const cancellation = read(cancellationFixture);
   assert.match(cancellation, /ci = host === 'postgres' && port === 5432 && database === 'model_router_saas_ci'/);
@@ -811,6 +841,10 @@ test('actual source prerequisites preserve successful-HTTP dependencies and each
       assert.ok(source.includes('await restoreControl();'));
       assert.match(source, /const urls = roleUrls\(\)/);
       assert.doesNotMatch(source, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
+    } else if (selector === 'payment-worker-sigkill') {
+      validatePaymentWorkerSigkillSource(source);
+    } else if (selector === 'managed-saas-sigterm') {
+      validateManagedSaasSigtermSource(source);
     } else if (selector === 'runtime-health-clock') {
       validateRuntimeHealthClockSource(source, read(runtimeHealthClockFixture));
     } else if (selector === 'dispatch-proof-fence-batch') {
@@ -1033,4 +1067,23 @@ test('merchant binding PG gate runs only in a fresh isolated service without fin
   assert.equal(managedJob(workflow).steps.filter(step => step.run === `node --import tsx --test ${root}`).length, 0);
   strictCompiler(managedJob(workflow), [root]);
   strictCompiler(managedJob(workflow, ISOLATED_JOB), [root]);
+});
+
+
+test('isolated signal drills retain independent fixtures and real signal/convergence prerequisites', () => {
+  const payment = isolatedGates.find(([selector]) => selector === 'payment-worker-sigkill');
+  const managed = isolatedGates.find(([selector]) => selector === 'managed-saas-sigterm');
+  assert.ok(payment && managed);
+  assert.equal(payment[2], false);
+  assert.equal(managed[2], false, 'SIGTERM child owns its one fresh HTTP bootstrap');
+  const paymentSource = read(payment[1]);
+  const managedSource = read(managed[1]);
+  validatePaymentWorkerSigkillSource(paymentSource);
+  validateManagedSaasSigtermSource(managedSource);
+  for (const required of ['await registerPaymentBindings(cp, resolver);', "assert.equal(initial.mode, 'disabled'", "signalOwned(submitChild, 'SIGKILL');", '[15, 18].includes(postgresMajor)']) {
+    assert.throws(() => validatePaymentWorkerSigkillSource(paymentSource.replace(required, 'removed prerequisite')));
+  }
+  for (const required of ["MODEL_ROUTER_MANAGED_SIGTERM_DRILL: '1'", "child.kill('SIGTERM')", "child.send({ event: 'release_terminal' })", 'assert.equal(converged, true', 'assert.equal(result.code, 0)']) {
+    assert.throws(() => validateManagedSaasSigtermSource(managedSource.replace(required, 'removed prerequisite')));
+  }
 });

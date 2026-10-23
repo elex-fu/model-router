@@ -237,7 +237,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
-        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding", "payment-worker-sigkill", "managed-saas-sigterm"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
@@ -303,6 +303,9 @@ jobs:
           tests/saas/metering/normal-success-postgres-fixture.ts
           tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
           tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts
+          tests/drills/payment-worker-sigkill.postgres.integration.test.ts
+          tests/drills/helpers/payment-worker-sigkill-child.ts
+          tests/saas/gateway/managed-saas-sigterm.postgres.integration.test.ts
           tests/ci/managed-saas-isolated-required-gates.ts
           tests/ci/managed-saas-required-gates.test.ts
       - name: Provision fresh CI service and execute the fixed required root
