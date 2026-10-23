@@ -1125,6 +1125,43 @@ test('postgres resolution terminally cancels never-dispatched attempts alongside
   assert.ok(crashedDispatch);
   assert.match(crashedDispatch.sql, /SET dispatch_state = 'unknown'/);
   assert.equal(crashedDispatch.values[3], 'operator_resolution_not_executed');
+  const auditIndex = calls.findIndex(call => call.sql.includes('INSERT INTO saas_audit_events'));
+  assert.ok(auditIndex >= 0);
+  const auditId = calls[auditIndex]!.values[0];
+  assert.equal(typeof auditId, 'string');
+  const observations = calls.filter(call => call.sql.includes('INSERT INTO saas_unknown_outcome_reconciliation_observations') && call.sql.includes("'operator_resolution'"));
+  assert.equal(observations.length, input.coverage.length);
+  for (const observation of observations) {
+    // Bind the actual INSERT columns to its VALUES tokens. Inspecting only
+    // the parameter array misses a literal/placeholder positional swap.
+    const insert = /INSERT INTO saas_unknown_outcome_reconciliation_observations\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*)\)\s*$/u.exec(observation.sql);
+    assert.ok(insert);
+    const columns = insert[1]!.split(',').map(column => column.trim());
+    const tokens = insert[2]!.split(',').map(token => token.trim());
+    assert.equal(columns.length, tokens.length);
+    const bound = Object.fromEntries(columns.map((column, index) => {
+      const token = tokens[index]!;
+      const parameter = /^\$(\d+)$/u.exec(token);
+      const literal = /^'([^']*)'$/u.exec(token);
+      assert.ok(parameter || literal || token === 'clock_timestamp()', 'unexpected SQL value token');
+      return [column, parameter ? observation.values[Number(parameter[1]) - 1] : literal ? literal[1] : token];
+    }));
+    const coverage = input.coverage.find(item => item.attemptId === bound.attempt_id);
+    assert.ok(coverage);
+    assert.deepEqual(Object.fromEntries(columns.slice(-9).map(column => [column, bound[column]])), {
+      resolved_model: 'model-a',
+      attempt_unknown_reason: null,
+      evidence_reference: coverage.evidenceReference,
+      operator_outcome: 'not_executed',
+      actor_user_id: input.actorUserId,
+      reason: input.reason,
+      audit_event_id: auditId,
+      support_ticket_ref: input.supportTicketRef,
+      observed_at: 'clock_timestamp()',
+    });
+    assert.ok(auditIndex < calls.indexOf(observation), 'audit FK exists before its observation');
+    assert.ok(calls.indexOf(observation) < calls.findIndex(call => call.sql.includes('UPDATE saas_unknown_outcome_reconciliation_cases')), 'case resolution follows its observations');
+  }
 });
 
 test('postgres resolution rechecks authorization on its transaction executor before request locks', async () => {

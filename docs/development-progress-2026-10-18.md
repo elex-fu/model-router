@@ -1003,3 +1003,11 @@ Astra 五文件审查无阻断；Luna privilege unit **110/110**、exact strict 
 Astra 五文件差分审查通过；Luna privilege unit **112/112**、combined strict 通过。非空 PG18 复测已抵达真实上游、正常 admission/scanner 与人工 resolve，未再次出现旧权限拒绝；完整 root **25/27**。首个事务错误转为观察记录的 `23514 / saas_unknown_outcome_observations_kind_shape`，Astra 已确认 operator observation INSERT 将 evidence reference 与 literal outcome 的位置写反，下一任务只修 producer，不改旧约束或迁移。
 
 该 resolve 的钱包、group、request/attempt、audit 都属于同一事务；观察记录约束失败使整笔事务回滚，不能把其中临时释放当成已提交的 80→0，也未宣称 replay 通过。CP 权限修复已推送 `ddba2c4`。此前 `d4c1755` 的 [CI #149](https://github.com/elex-fu/model-router/actions/runs/40030304456) 最终 **68/68 全过**（4 main、64 isolated），仍不替代后续权限与 operator 新候选结果。
+
+### 29.33 operator observation 的列值顺序修复
+
+真实 PG 的 `23514` 来自 producer：INSERT 声明的 `evidence_reference, operator_outcome` 对应值写成 `'not_executed', $18`，将证据引用与 outcome 互换。现仅交换两值的位置，保留参数数组、同一事务内的写入顺序、历史迁移及原 shape 约束；不以放宽数据库约束接受错误记录。
+
+回归测试解析实际 INSERT 的列与 VALUES token 并检查末尾九列的真实绑定，同时要求 audit 先于 observation、case 更新后于 observation；旧 SQL 必然失败，不能仅检查正确但未正确绑定的参数数组。Astra 实际差分审查通过，Luna worker **24/24**、worker/commercial/helper combined strict 通过。
+
+随后 fresh PG18.6 正常迁移与受限角色下的非空 group commercial/operator root **27/27、零失败、零跳过**，完成真实 resolve 提交及重放；没有临时 grant、SQL seed 或 sourceChanges，集群已停止并删除。完整 HTTP/资金证据随下一独立 fixture 任务记录。GW 三项精确权限已推送 `69125a1`；其远程 CI #151 尚在执行，不将这次本地结果外推为新候选远程全过。

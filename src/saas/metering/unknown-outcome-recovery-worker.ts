@@ -1663,8 +1663,8 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
               evidence_reference, operator_outcome, actor_user_id,
               reason, audit_event_id, support_ticket_ref, observed_at)
            VALUES ($1, $2, $3, $4, $5, 'operator_resolution', $6, $7, $8, $9,
-                   $10, $11, $12, $13, $14, $15, $16, $17, 'not_executed',
-                   $18, $19, $20, $21, $22, clock_timestamp())`,
+                   $10, $11, $12, $13, $14, $15, $16, $17, $18,
+                   'not_executed', $19, $20, $21, $22, clock_timestamp())`,
           [
             this.idFactory(),
             input.tenantId,
