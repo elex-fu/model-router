@@ -1011,3 +1011,15 @@ Astra 五文件差分审查通过；Luna privilege unit **112/112**、combined s
 回归测试解析实际 INSERT 的列与 VALUES token 并检查末尾九列的真实绑定，同时要求 audit 先于 observation、case 更新后于 observation；旧 SQL 必然失败，不能仅检查正确但未正确绑定的参数数组。Astra 实际差分审查通过，Luna worker **24/24**、worker/commercial/helper combined strict 通过。
 
 随后 fresh PG18.6 正常迁移与受限角色下的非空 group commercial/operator root **27/27、零失败、零跳过**，完成真实 resolve 提交及重放；没有临时 grant、SQL seed 或 sourceChanges，集群已停止并删除。完整 HTTP/资金证据随下一独立 fixture 任务记录。GW 三项精确权限已推送 `69125a1`；其远程 CI #151 尚在执行，不将这次本地结果外推为新候选远程全过。
+
+### 29.34 人工 unknown 的真实 HTTP、非空 group 与审计闭环
+
+在既有商业 HTTP root 的受控 `platform / before_headers_cancel` 场景加入真实 operator 子流程。独立 key 在首次鉴权前通过正常服务创建并绑定 daily billing group；真实准入生成 **80 个最小货币单位（USD 0.80）** 的 group reservation，不 SQL seed 金融记录。原受控上游在收到请求后按约定等待取消且未执行；receipt/网络 abort 本身不作为真实 Provider 未执行证明，人工 evidence reference 只绑定这次 test-only 分支和原 attempt。
+
+正常 scanner 必须先把原 unknown 收敛到 operator_required，并保持原 hold 的身份、金额、币种、价格和 reconciliation reference，以及原 group window/outstanding。管理员通过真实 bootstrap、MFA enrollment 和下一自然 TOTP step 登录，使用实际 HTTP list/detail/resolve；无 session、Origin/CSRF 缺失、跨 tenant、空或重复 coverage 均拒绝，且每次前后 financial/recovery snapshot 不变。
+
+实际 resolve 提交后原 request/attempt failed、case resolved、钱包 hold released，group outstanding **80→0**、reservation released/settled_amount=0，`charge_settled` 保持 0。case 与 observation 指向同一不可变 `saas_audit_events`，actor、tenant、request、reason、ticket 和 evidence digest 一致；没有另造镜像审计表。相同请求重放返回 replayed 且全部快照不变，冲突内容返回 409，不新增 usage、settlement、账本扣费或上游 dispatch。
+
+Luna latest fresh PG18.6 完整 root **27/27**、scoped strict 通过，原四种 HTTP fault 的金融断言全部保留。过程中的父计数次生失败和提前 HTTP 响应诊断已修，诊断仅输出允许的状态/code/SQLSTATE/关系或约束标识，不输出 SQL、原错误 message、凭据或请求体。runner init、完整迁移、正常角色、测试和 stop 均 exit 0，sourceChanges=[]，集群停止并删除。此处证明本地真实 PG、受限 CP/GW 与受控 loopback 上游闭环，不代表真实 Provider 人工证据契约或生产故障域恢复。producer 修复已独立推送 `687a3c9`。
+
+此前 `69125a15b83e60c2d5ba2ef08aee9ed7e5efa993` 的 [CI #151](https://github.com/elex-fu/model-router/actions/runs/40032356820) 已终态 **68/68 success**（4 main、64 isolated），含 shared PG15/18、build/offline/browser、PG16 smoke 和新增四项进程故障门禁；早一候选 `ddba2c4` 的 #150 亦已成功。两者均早于本节及 producer 修复，最新候选仍按新 revision 收齐远程结果。

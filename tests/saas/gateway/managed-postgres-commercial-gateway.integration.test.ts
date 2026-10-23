@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
@@ -15,6 +15,8 @@ const shutdownDrill = process.env.MODEL_ROUTER_MANAGED_SIGTERM_DRILL === '1' && 
 let releaseShutdownTerminal: (() => void) | undefined;
 const shutdownTerminal = shutdownDrill ? new Promise<void>((resolve) => { releaseShutdownTerminal = resolve; }) : undefined;
 import { fetch as undiciFetch } from 'undici';
+import { diagnoseEarlyRecoveryHttp, observeOperatorRecoveryWorkflow, proveOperatorRecoveryHttp } from './operator-recovery-http-postgres-fixture.js';
+import { SaasBillingGroupsService } from '../../../src/saas/billing/groups/service.js';
 import { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import { SaasCatalogService } from '../../../src/saas/catalog/service.js';
 import {
@@ -1218,11 +1220,12 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
 
     const identity = new SaasIdentityService(seedDatabase);
     const bootstrap = await identity.issueBootstrapToken();
+    const administratorPassword = `e2e-${randomUUID()}-Strong-Password!`;
     const administrator = await identity.bootstrapPlatformAdmin({
       token: bootstrap.token,
       email: `gateway-e2e-${ids.label}@example.test`,
       displayName: 'Gateway E2E Administrator',
-      password: `e2e-${randomUUID()}-Strong-Password!`,
+      password: administratorPassword,
     });
     audit.actorUserId = administrator.id;
     const tenant = await identity.createTenant(administrator.id, {
@@ -2349,6 +2352,19 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       const scopedKey = await keyService.create(context, { name: label, modelScopes: [publicModel], supplyMode: mode });
       assert.equal(scopedKey.entitlementId, scopedEntitlementId);
       assert.equal(scopedKey.supplyProfileId, scopedProfileId);
+      let recoveryBillingGroupId: string | undefined;
+      if (mode === 'platform' && kind === 'before_headers_cancel') {
+        recoveryBillingGroupId = `p10-recovery-${randomUUID()}`;
+        const groups = new SaasBillingGroupsService(database);
+        await groups.createBillingGroup({ id: recoveryBillingGroupId, displayName: label,
+          rateMultiplier: { numerator: 1n, denominator: 1n }, topupMultiplier: { numerator: 1n, denominator: 1n },
+          dailyLimitMinorUnits: 1000n, weeklyLimitMinorUnits: null, monthlyLimitMinorUnits: null,
+          peakEnabled: false, peakStart: null, peakEnd: null, peakMultiplier: null, modelPricing: null,
+          rpmLimit: null, profitMinMargin: null, profitSafetyBuffer: null, claudeCodeOnly: false,
+          fallbackGroupId: null, supportedModelScopes: null, composite: false, status: 'active' });
+        await groups.setKeyBillingGroup({ tenantId: scopedTenant.id, projectId: scopedProject.id,
+          keyId: scopedKey.id, billingGroupId: recoveryBillingGroupId });
+      }
       // Set previously absent limits once, to one concurrent request per
       // independent scope. Never increase capacity to admit a retained hold.
       await database.query(
@@ -2391,6 +2407,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
         key: scopedKey,
         entitlementId: scopedEntitlementId,
         profileId: scopedProfileId,
+        recoveryBillingGroupId,
       };
     }
     const financialFaultScopes: Array<
@@ -2623,9 +2640,12 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
     controlPlaneRuntime = await startManagedSaasServer(controlPlaneDeployment, {
       environment: controlPlaneEnvironment,
       loadProviders: async () => providers,
+      createUnknownOutcomeRecoveryWorkflow: observeOperatorRecoveryWorkflow(code => t.diagnostic(`operator_recovery_${code}`)),
       installSignalHandlers: false,
     });
-    const controlPlaneUser = await controlPlaneRuntime.database.query<{ current_user: string }>('SELECT current_user');
+    assert.ok(controlPlaneRuntime, 'operator recovery requires the successfully started control-plane runtime');
+    const operatorRecoveryDatabase = controlPlaneRuntime.database;
+    const controlPlaneUser = await operatorRecoveryDatabase.query<{ current_user: string }>('SELECT current_user');
     assert.equal(controlPlaneUser.rows[0]?.current_user, 'model_router_saas_control_plane');
     assert.deepEqual(Object.keys(controlPlaneRuntime.listeners).sort(), ['customer', 'platform']);
 
@@ -3779,7 +3799,17 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
           );
           let requestId: string;
           try {
-            await network.waitFor('receipt');
+            let receiptObserved = false;
+            const receipt = network.waitFor('receipt').then(() => { receiptObserved = true; });
+            if (scope.mode === 'platform' && scope.kind === 'before_headers_cancel') {
+              await Promise.race([receipt, http.then(async result => {
+                if (receiptObserved) return; // A later deliberate client abort is not an early response.
+                await diagnoseEarlyRecoveryHttp({ ...(result.kind === 'response' ? { response: result.response } : {}),
+                  observation: observationDatabase, tenantId: scope.context.tenantId, projectId: scope.context.projectId,
+                  keyId: scope.key.id, diagnostic: safe => t.diagnostic(`operator_recovery_early_http=${safe}`) });
+                throw new Error('operator recovery request completed before the required controlled-upstream receipt');
+              })]).finally(() => { receiptObserved = true; });
+            } else await receipt;
             requestId = dispatchCompletions.requestIdSince(checkpoint);
             assert.equal(network.snapshot().receipts, 1);
             if (scope.kind === 'before_headers_cancel') {
@@ -3948,7 +3978,30 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
             after,
             'unknown replay must preserve hold, capacity, idempotency, usage, lease, health and all ledger facts',
           );
-          completedFaultScenes += 1;
+          completedFaultScenes += 1; // All original HTTP fault financial assertions above completed.
+          if (scope.mode === 'platform' && scope.kind === 'before_headers_cancel') {
+            // Test-only operator review of this exact controlled upstream branch.
+            // Receipt/cancel alone is not real Provider proof of non-execution.
+            assert.ok(scope.recoveryBillingGroupId, 'the operator recovery request must reserve nonempty group spend');
+            const reviewedRecord = Object.freeze({ requestId, attemptId: facts.attempt_id, branch: scope.kind, ...wire });
+            const evidenceReference = `test-only:controlled-no-execution:${requestId}:${facts.attempt_id}:${createHash('sha256').update(JSON.stringify(reviewedRecord)).digest('hex')}`;
+            await proveOperatorRecoveryHttp({
+              diagnostic: stage => t.diagnostic(`operator_recovery_stage=${stage}`),
+              database: operatorRecoveryDatabase, observation: observationDatabase,
+              origin: `http://127.0.0.1:${platformPort}`, keys: providers.credentialKeyProvider,
+              email: `gateway-e2e-${ids.label}@example.test`, password: administratorPassword,
+              actorId: administrator.id, tenantId: scope.context.tenantId, wrongTenantId: tenant.id,
+              requestId, attemptId: facts.attempt_id, evidenceReference, billingGroupId: scope.recoveryBillingGroupId,
+              snapshot: async () => ({ facts: await readFinancialFaultFacts(scope, requestId), effects: await gatewayEffectSnapshot(observationDatabase, scope.context.tenantId) }),
+              assertResolved: async () => {
+                const resolved = await readFinancialFaultFacts(scope, requestId);
+                assert.deepEqual(resolved, { ...facts, execution_state: 'failed', reconciliation_state: 'resolved', financial_status: 'released', result_state: 'failed', reservation_state: 'released' });
+                assert.deepEqual(await gatewayEffectSnapshot(observationDatabase, scope.context.tenantId), { ...after, effects: { ...after.effects, active_hold: '0' } }, 'operator resolution only releases the hold; no charge, usage, lease or dispatch is created');
+                assert.equal(upstreamCallCount, callsBefore + 1);
+                assert.deepEqual(network.snapshot(), wire);
+              },
+            });
+          }
         }),
       );
     }
