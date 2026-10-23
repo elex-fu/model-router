@@ -1619,6 +1619,7 @@ async function startCredentialValidationWorkerRuntime(
 
     worker = startWorker(database, kms, {
       ...options.credentialValidationWorkerOptions,
+      ...(deployment.validationWorkerMaxAttempts === undefined ? {} : { maxAttempts: deployment.validationWorkerMaxAttempts }),
       approvedTargets,
       transportTestOptions: options.credentialValidationWorkerTestTransport,
       deployment: deployment.deploymentId,

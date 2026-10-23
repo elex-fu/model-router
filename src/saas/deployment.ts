@@ -9,6 +9,7 @@ import { isIP } from 'node:net';
 
 export const MODEL_ROUTER_DEPLOYMENT_MODE = 'MODEL_ROUTER_DEPLOYMENT_MODE' as const;
 export const MODEL_ROUTER_SAAS_WORKLOAD_ROLE = 'MODEL_ROUTER_SAAS_WORKLOAD_ROLE' as const;
+export const MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS = 'MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS' as const;
 export const MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE = 'MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE' as const;
 export const MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY = 'MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY' as const;
 export const MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE = 'MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE' as const;
@@ -88,6 +89,7 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
   mode: MODEL_ROUTER_DEPLOYMENT_MODE,
   saas: {
     workloadRole: MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
+    validationWorkerMaxAttempts: MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS,
     paymentsConfigFile: MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE,
     commercialAttestationTrustFile: MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE,
     databaseUrl: MODEL_ROUTER_SAAS_DATABASE_URL,
@@ -167,6 +169,7 @@ export function managedSaasListenerNames(role: ManagedSaasWorkloadRole): readonl
 /** All SaaS-specific settings that make an implicit local choice unsafe. */
 export const SAAS_DEPLOYMENT_ENV_NAMES = deepFreeze([
   MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
+  MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS,
   MODEL_ROUTER_SAAS_DATABASE_URL,
   MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
   MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
@@ -228,6 +231,7 @@ export interface LocalDeploymentConfig {
 export interface ManagedSaasDeploymentConfig {
   readonly mode: 'managed-saas';
   readonly workloadRole: ManagedSaasWorkloadRole;
+  readonly validationWorkerMaxAttempts?: number;
   readonly paymentsConfigFile?: string;
   readonly postgresUrl: string;
   readonly redisUrl?: string;
@@ -743,6 +747,14 @@ function validateListenerRelationships(
 
 function parseManagedSaasDeployment(environment: DeploymentEnvironment): ManagedSaasDeploymentConfig {
   const workloadRole = resolveWorkloadRole(environment);
+  const validationAttemptsRaw = environment[MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS];
+  let validationWorkerMaxAttempts: number | undefined;
+  if (validationAttemptsRaw !== undefined) {
+    if (workloadRole !== 'credential-validation-worker' || typeof validationAttemptsRaw !== 'string' || !/^[1-9]\d?$/u.test(validationAttemptsRaw) || Number(validationAttemptsRaw) > 20) {
+      invalid('INVALID_PROVIDER_MODULE', 'Validation worker max attempts must be an integer from 1 to 20 on the credential-validation-worker role.', MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS);
+    }
+    validationWorkerMaxAttempts = Number(validationAttemptsRaw);
+  }
   const historyMode = environment.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE;
   // Read only this feature's declared settings. Enumerating the whole object
   // invokes unrelated Proxy descriptor traps before their safe parsers run.
@@ -1119,6 +1131,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
   return deepFreeze({
     mode: 'managed-saas',
     workloadRole,
+    ...(validationWorkerMaxAttempts === undefined ? {} : { validationWorkerMaxAttempts }),
     ...(paymentsConfigFile === undefined ? {} : { paymentsConfigFile }),
     postgresUrl,
     ...(redisUrl === undefined ? {} : { redisUrl }),

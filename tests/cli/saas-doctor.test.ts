@@ -451,6 +451,15 @@ test('commercial provisioning checks the effective parsed CP pool maximum', asyn
   assert.equal(check(result, 'commercial-attestation-trust').level, 'pass');
 });
 
+test('doctor validates validation-worker-only bounded max attempts without provider calls', async () => {
+  for (const value of ['1', '20', '0', '21']) {
+    const { result } = await runDoctor({ role: 'credential-validation-worker' }, baseDependencies({ env: { MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL: WORKER_URL, [MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE]: './fixture-worker-kms.js', MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: value }, createPool: () => fakePool({ probeRow: WORKER_PROBE_PASS_ROW }), loadValidationWorkerKms: readyKmsLoader() }));
+    assert.equal(check(result, 'validation-worker-attempts').level, ['1', '20'].includes(value) ? 'pass' : 'fail');
+  }
+  const { result } = await runDoctor({}, baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: '1' } }));
+  assert.equal(check(result, 'validation-worker-attempts').level, 'fail');
+});
+
 test('history doctor keeps pilot explicitly nonproduction and rejects CP secret access', async () => {
   const file = resolve(trustDirectory, 'pilot-history-keyring.json');
   writeFileSync(file, JSON.stringify({ version: 1, currentKeyId: 'pilot-v1', keys: { 'pilot-v1': 'a'.repeat(64) } }), { mode: 0o600 });

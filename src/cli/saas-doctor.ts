@@ -67,6 +67,7 @@ export type SaasDoctorCheckId =
   | 'commercial-attestation-trust'
   | 'request-diagnostics'
   | 'responses-history'
+  | 'validation-worker-attempts'
   | 'redis-contract'
   | 'gateway-capabilities'
   | 'stuck-executions'
@@ -181,6 +182,7 @@ const PROBE_HINTS: Readonly<Record<SaasDoctorCheckId, string>> = Object.freeze({
   'commercial-attestation-trust': 'probe: bounded public verification key and suite digest file loading',
   'request-diagnostics': 'probe: sampling configuration only; no request or log emission',
   'responses-history': 'probe: schema and SELECT/INSERT/DELETE privilege checks plus production KMS canary; no history row write or purge',
+  'validation-worker-attempts': 'probe: role and bounded retry configuration only; no provider request',
   'redis-contract': 'probe: RedisRespClient RESP2 connect + PING within REDIS_RESP_BOUNDS',
   'gateway-capabilities':
     'probe: bounded GET /readyz on the configured running gateway; sanitized provider capability facts',
@@ -1150,6 +1152,10 @@ export async function saasDoctor(
   const checks: SaasDoctorCheckResult[] = [];
   let gatewayCapabilities: GatewayCapabilityStatus | undefined;
   try {
+    const validationAttempts = env.MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS;
+    if (validationAttempts !== undefined) {
+      checks.push(role === 'credential-validation-worker' && /^[1-9]\d?$/u.test(validationAttempts) && Number(validationAttempts) <= 20 ? pass('validation-worker-attempts', `Credential validation worker max attempts=${Number(validationAttempts)} per job; this does not cap all worker/provider traffic`) : fail('validation-worker-attempts', 'VALIDATION_WORKER_MAX_ATTEMPTS_INVALID', 'Configure an integer from 1 to 20 only on the credential-validation-worker role'));
+    }
     const historyMode = env.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE;
     if (historyMode !== undefined && historyMode !== 'disabled') {
       try {

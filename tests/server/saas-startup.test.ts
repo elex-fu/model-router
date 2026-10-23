@@ -2270,6 +2270,7 @@ test('validation startup supplies an immutable operator registry explicitly; gen
   const environment = {
     [MODEL_ROUTER_DEPLOYMENT_MODE]: 'managed-saas',
     NODE_ENV: 'production',
+    MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: '1',
     [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'credential-validation-worker',
     [DEPLOYMENT_ENV_VARS.saas.validationWorkerDatabaseUrl]: 'postgresql://validation-worker:fixture@db.example/saas',
     [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: 'trusted-worker-kms',
@@ -2287,7 +2288,7 @@ test('validation startup supplies an immutable operator registry explicitly; gen
       events.push('kms-close');
     },
   };
-  const rawTuning = { pollIntervalMs: 100, approvedTargets: undefined, transportTestOptions: undefined };
+  const rawTuning = { maxAttempts: 20, pollIntervalMs: 100, approvedTargets: undefined, transportTestOptions: undefined };
   const runtime = await startManagedSaasServer(
     deploymentFrom(environment),
     managedOptions(events, {
@@ -2298,6 +2299,7 @@ test('validation startup supplies an immutable operator registry explicitly; gen
       startCredentialValidationWorker: (_database, loadedKms, options) => {
         assert.equal(loadedKms, kms);
         assert.equal(options.pollIntervalMs, 100);
+        assert.equal(options.maxAttempts, 1);
         assert.ok(options.approvedTargets);
         const binding = resolveApprovedCredentialValidationTarget(options.approvedTargets, customJob(target));
         assert.ok(binding);

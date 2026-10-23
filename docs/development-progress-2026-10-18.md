@@ -747,7 +747,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 |---|---|---|
 | P01/P02a/P03 | 正式平台权益开通、独占资源 journal、最终激活事务、管理员接口与受限权限 | 开户工程实现、受限 PG18 和管理页本地浏览器通过；标准新客 builtin 全链待验 |
 | P04 | Chat↔Gemini、Responses↔Gemini、既有 Gemini↔Anthropic 的直接转换与准入 | 新四桥与旧两桥修复均定向通过；真实 CLI/builtin 工作流待验 |
-| P05 | Codex 终态用量完整性、WS 上下文续接、精确端点可信上界门禁与诊断 | 开发中；真实计量契约仍为外部阻塞 |
+| P05 | Codex 终态用量、原生 WS、HTTP/WS 持久上下文、精确可信上界门禁 | 工程实现及定向验证完成；真实 backend/KMS/计量契约与部署全链待验 |
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 标准装配、精确角色隔离和 doctor 实现通过本地检查；实际商户/生产 KMS 待验 |
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
@@ -867,3 +867,9 @@ HTTP 和 WS 已实际调用 persistent resolver，而非只注入 port。显式 
 HTTP 对实际上游 Content-Type 选择 SSE/JSON parser，先结算和尝试保存，再发布终态/JSON；非终态继续发送，超限仅停历史记录，不中止原推理。延迟发布错误会 abort 释放下游。WS 配置持久 resolver 后每次引用都查持久权威，不让连接内缓存绕过 TTL 或删除；失败写入不保留可续接的内存副本。原生上游引用仍只用于当前 session 已确认的 ID，跨连接使用完整 canonical replay。
 
 Astra 指出的实际 Codex 强制 SSE、连接缓存绕过过期、延迟发布失败释放问题均已修复。Luna 最新 HTTP **10/10**、WS/helper **24/24** 和服务端编译通过；测试包含实际 resolver/cipher 调用、跨连接、scope 隔离、身份补偿、终态发布顺序和失败路径。它们结合既有真实 PG18 密文 **1/1** 分别证明工程环节，尚不代表真实 backend、生产 KMS 或部署多实例全链。Codex 可信计量 registry 仍为空，财务准入和 M3 继续阻塞。CI 任务已推送 `c025d74`，远程 PG15/18 新发现的 058 权限测试例外正在修复。
+
+### 29.17 标准验证 worker 的重试上限
+
+A0 脚本审阅发现仅观察 `attempt_count<=1` 不能限制发送次数，worker 默认可重试五次。新增正式 `MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS`：仅 credential-validation-worker 角色接受，整数 1–20，配置后真实传入 worker，未配置保持原默认 5；doctor 显示每 job 上限，不称作全局流量上限。A0 将其设为 1，业务首请求仍只发一次。
+
+Luna 部署单文件 **31/31**、服务端编译通过，此前同批 doctor/startup 均通过；新增测试的安全错误文案预期已修。未改变核心重试算法、未知派发处理或资金规则，也未执行实际 Kimi 调用。HTTP/WS 持久消费已推送 `72b7b97`。
