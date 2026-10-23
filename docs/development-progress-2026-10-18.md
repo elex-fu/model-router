@@ -820,7 +820,7 @@ loader/KMS 定向测试与当前服务端构建通过，真实受限 PG18 histor
 
 新增有界 ALS trace，记录真实 pool acquire/release、SQL、事务、上游 send/首字节/正常 EOF 的时间；按 span 区间并集计算 exclusive 时间，避免嵌套累计。未采样请求保持原 pool.query 路径，采样请求显式 acquire，并保留连接错误监听和 release 语义。取消或错误不标正常 EOF，结算 marker 仅在已确认 settled/replayed 时记录。
 
-trace、数据库包装、provider HTTP 和标准部署诊断定向测试已通过，服务端编译通过。标准组合根与 dispatch marker 接线随其依赖任务提交。诊断队列有界、采样默认关闭、固定数值投影不含 payload，不增加持久写等待；未执行新性能测量，原 30/10 ms、200 successful rps 及对照门槛保持开放。进一步源码审阅发现 `replayed` 也可能仍待金融对账，后续 marker 和 history 准入改为只接受明确 `settled`，不能从 `sent` 或 `replayed` 推断。history loader 已推送 `39a0c9d`。
+trace、数据库包装、provider HTTP 和标准部署诊断定向测试已通过，服务端编译通过。标准组合根与 dispatch marker 接线随其依赖任务提交。诊断队列有界、采样默认关闭、固定数值投影不含 payload，不增加持久写等待；未执行新性能测量，原 30/10 ms、HTTP 200 成功吞吐及 1→3 实例比 ≥2.7 等门槛保持开放，未新增最低 200 rps 的门槛。进一步源码审阅发现 `replayed` 也可能仍待金融对账，后续 marker 和 history 准入改为只接受明确 `settled`，不能从 `sent` 或 `replayed` 推断。history loader 已推送 `39a0c9d`。
 
 ### 29.11 P06 标准支付与开户运行时装配
 
@@ -859,3 +859,11 @@ PG15/18 CI 增加 P01、密文 history、商户绑定三个 required root 及严
 历史 fixture 的随机 schema 与既有 canonical schema 迁移冲突，改为隔离随机数据库；老 Key 数据补齐既有 principal/creator/authz snapshot 条件。018 用例按其原目的先验历史 017–022，再完整升级到142并比较身份、派发及成本快照，禁止为历史记录回填 commercial/prepared authority，未派发历史 attempt 继续被拒。最后发现新 fixture 只 hash SQL，实际规范为 `SHA256(name + NUL + 原始 SQL)`，已修独立期望，旧 SQL/checksum 未变。
 
 Luna 最新真实 PG18 历史 suite **31/31**、CI wiring **19/19**、两组严格测试源码编译通过；018 单独亦 **1/1**，临时库与集群清理完毕。完整离线回归结果见 §29.14，后续新改动继续复验。远程当前候选 PG15/18 与全部 CI 状态仍待取得，未沿用历史 green 关闭本轮门禁。Gemini 桥修复已推送 `9b14151`。
+
+### 29.16 C2 HTTP/WS 持久续接实际消费完成
+
+HTTP 和 WS 已实际调用 persistent resolver，而非只注入 port。显式 `conversation_id` 与认证 tenant/project/key 形成引用 namespace；prepare 前保留 canonical 原对象，prepare 后核对完整 provider/account/credential/models 身份，不符时先补偿未派发资源再返回 full-context 409。普通响应保存完整 output，compact 保存完整替换窗口；只有明确 `settlementOutcome=settled` 才新增历史，存储失败不重发、不退款、不承诺可续接。
+
+HTTP 对实际上游 Content-Type 选择 SSE/JSON parser，先结算和尝试保存，再发布终态/JSON；非终态继续发送，超限仅停历史记录，不中止原推理。延迟发布错误会 abort 释放下游。WS 配置持久 resolver 后每次引用都查持久权威，不让连接内缓存绕过 TTL 或删除；失败写入不保留可续接的内存副本。原生上游引用仍只用于当前 session 已确认的 ID，跨连接使用完整 canonical replay。
+
+Astra 指出的实际 Codex 强制 SSE、连接缓存绕过过期、延迟发布失败释放问题均已修复。Luna 最新 HTTP **10/10**、WS/helper **24/24** 和服务端编译通过；测试包含实际 resolver/cipher 调用、跨连接、scope 隔离、身份补偿、终态发布顺序和失败路径。它们结合既有真实 PG18 密文 **1/1** 分别证明工程环节，尚不代表真实 backend、生产 KMS 或部署多实例全链。Codex 可信计量 registry 仍为空，财务准入和 M3 继续阻塞。CI 任务已推送 `c025d74`，远程 PG15/18 新发现的 058 权限测试例外正在修复。

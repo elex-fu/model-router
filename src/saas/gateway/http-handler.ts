@@ -1,3 +1,5 @@
+import type { PersistentResponsesContinuationResolver, ResolvedResponsesHistory } from './responses-continuation-resolver.js';
+import { normalizeResponsesHistoryConversationId, type ResponsesHistoryIdentity } from './responses-continuation-history.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
@@ -490,6 +492,7 @@ export interface SaasGatewayReadinessProvider {
 }
 
 export interface SaasGatewayHttpOptions {
+  readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   /**
    * G-B4: the Responses WebSocket surface. When present, an upgrade
    * request on GET /v1/responses hands the socket to this handle (the
@@ -914,6 +917,98 @@ async function readJsonBody(req: IncomingMessage, maxBodyBytes: number): Promise
   }
   if (!isRecord(parsed)) throw new GatewayHttpError(400, 'INVALID_BODY');
   return parsed;
+}
+
+/** A bounded best-effort capture. Overflow disables history without affecting inference delivery. */
+class ResponsesHistoryHttpCapture implements PreparedEvidenceClientStream {
+  private chunks: Uint8Array[] = [];
+  private size = 0;
+  private complete = false;
+  private overflow = false;
+  private status: number | null = null;
+  private headers: Readonly<Record<string,string>> = {};
+  private started = false;
+  private finished = false;
+  private readonly decoder = new TextDecoder();
+  private readonly encoder = new TextEncoder();
+  private pending = '';
+  private held = '';
+  private terminal = false;
+  private streaming = false;
+  constructor(private readonly inner: NodePreparedEvidenceClientStream | JsonKeepaliveClientStream) {}
+  get signal(): AbortSignal { return this.inner.signal; }
+  async start(status: number | null, headers: Readonly<Record<string,string>>): Promise<void> {
+    this.status = status; this.headers = headers;
+    const contentType = Object.entries(headers).find(([name])=>name.toLowerCase()==='content-type')?.[1];
+    this.streaming = typeof contentType === 'string' && contentType.split(';',1)[0].trim().toLowerCase()==='text/event-stream';
+    if (this.streaming) { await this.inner.start(status,headers); this.started = true; }
+  }
+  private async sendText(text: string): Promise<void> { if (text) await this.inner.write(this.encoder.encode(text)); }
+  async write(chunk: Uint8Array): Promise<void> {
+    if (!this.overflow && chunk.byteLength > 16*1024*1024-this.size) {
+      this.overflow = true;
+      if (!this.streaming) {
+        if (!this.started) { await this.inner.start(this.status,this.headers); this.started = true; }
+        for (const old of this.chunks) await this.inner.write(old);
+      }
+      this.clear();
+    }
+    if (!this.overflow) { this.chunks.push(new Uint8Array(chunk)); this.size += chunk.byteLength; }
+    if (!this.streaming) { if (this.overflow) await this.inner.write(chunk); return; }
+    const text = this.decoder.decode(chunk,{stream:true});
+    if (this.overflow) { await this.sendText(this.held+this.pending+text); this.held=''; this.pending=''; return; }
+    this.pending += text;
+    let boundary: RegExpExecArray | null;
+    while ((boundary = /\r\n\r\n|\n\n|\r\r/.exec(this.pending))) {
+      const block = this.pending.slice(0,boundary.index+boundary[0].length); this.pending=this.pending.slice(block.length);
+      if (!this.terminal) {
+        const data = block.split(/\r\n|\n|\r/).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).replace(/^ /,'')).join('\n');
+        try { const event: unknown = data && data !== '[DONE]' ? JSON.parse(data) : null; if (isRecord(event) && ['response.completed','response.incomplete','response.failed','response.cancelled','error'].includes(String(event.type))) this.terminal=true; } catch { /* malformed upstream bytes remain verbatim */ }
+      }
+      if (this.terminal) this.held+=block; else await this.sendText(block);
+    }
+  }
+  async end(): Promise<void> { if (this.streaming) this.pending+=this.decoder.decode(); this.complete=true; }
+  async finish(): Promise<void> {
+    if (this.finished || this.signal.aborted) { this.clear(); return; } this.finished=true;
+    try {
+      if (!this.started) { await this.inner.start(this.status,this.headers); this.started=true; }
+      if (this.streaming) await this.sendText(this.held+this.pending);
+      else if (!this.overflow) for (const chunk of this.chunks) await this.inner.write(chunk);
+      await this.inner.end();
+    } finally { this.held=''; this.pending=''; this.clear(); }
+  }
+  async abort(error?: unknown): Promise<void> { this.complete=false; this.held=''; this.pending=''; this.clear(); await this.inner.abort(error); }
+  dispose(): void { this.inner.dispose(); }
+  clear(): void { for (const chunk of this.chunks) chunk.fill(0); this.chunks=[]; this.size=0; }
+  response(compact: boolean): {id: string; output: readonly unknown[]} | null {
+    if (!this.complete || this.overflow || this.signal.aborted || this.status === null || this.status < 200 || this.status >= 300) return null;
+    let bytes: Buffer | undefined;
+    try {
+      bytes=Buffer.concat(this.chunks); const text=new TextDecoder('utf8',{fatal:true}).decode(bytes);
+      let response: unknown;
+      if (!this.streaming) response=JSON.parse(text);
+      else {
+        for (const block of text.split(/\r\n\r\n|\n\n|\r\r/)) {
+          const data=block.split(/\r\n|\n|\r/).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).replace(/^ /,'')).join('\n');
+          if (!data || data==='[DONE]') continue;
+          const event: unknown=JSON.parse(data);
+          if (isRecord(event) && ['response.completed','response.incomplete'].includes(String(event.type))) { if (response!==undefined) return null; response=event.response; }
+          if (isRecord(event) && ['response.failed','response.cancelled','error'].includes(String(event.type))) return null;
+        }
+      }
+      if (!isRecord(response) || typeof response.id!=='string' || response.id.length<1 || response.id.length>512 || !Array.isArray(response.output) || response.error) return null;
+      if (!compact && response.status!=='completed' && response.status!=='incomplete') return null;
+      return {id:response.id,output:response.output};
+    } catch { return null; } finally { bytes?.fill(0); }
+  }
+}
+function responsesHistoryPreparedIdentity(prepared: RequestPreparationPreparedResult, conversationId: string, caller: AuthenticatedApiKey): ResponsesHistoryIdentity | null {
+  const e = prepared.evidenceInput;
+  if (!e || e.tenantId !== caller.metadata.tenantId || e.projectId !== caller.metadata.projectId || e.proxyKeyId !== caller.metadata.id) return null;
+  const identity = {tenantId:e.tenantId,projectId:e.projectId,proxyKeyId:e.proxyKeyId,conversationId,providerId:e.providerId,productId:e.productId,accountId:e.accountId,credentialId:e.credentialId,credentialVersion:String(e.credentialVersion),credentialAuthzVersion:String(e.credentialAuthzVersion),publicModel:e.publicModel,resolvedModel:e.resolvedModel};
+  if (Object.values(identity).some(value=>typeof value !== 'string' || value.length < 1) || !/^[1-9][0-9]*$/.test(identity.credentialVersion) || !/^[1-9][0-9]*$/.test(identity.credentialAuthzVersion)) return null;
+  return identity;
 }
 
 function clientAuthorityField(body: Record<string, unknown>): boolean {
@@ -2226,6 +2321,25 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       return true;
     }
 
+    const historyOperation = path === '/v1/responses' || path === '/v1/responses/compact';
+    const historyResolver = historyOperation ? options.continuationHistoryResolver : undefined;
+    let historyConversation: string | undefined;
+    let resolvedHistory: ResolvedResponsesHistory | undefined;
+    if (historyOperation) {
+      try {
+        historyConversation = normalizeResponsesHistoryConversationId(req.headers.conversation_id, body.conversation_id);
+        if (body.previous_response_id !== undefined) {
+          if (!historyResolver || !historyConversation || typeof body.previous_response_id !== 'string' || body.previous_response_id.length < 1 || body.previous_response_id.length > 512) throw new Error('context unavailable');
+          resolvedHistory = await historyResolver.resolve({tenantId:authenticatedCaller.metadata.tenantId,projectId:authenticatedCaller.metadata.projectId,proxyKeyId:authenticatedCaller.metadata.id,conversationId:historyConversation,responseId:body.previous_response_id},body);
+          // This exact server-marked object must reach prepare; do not clone it.
+          body = resolvedHistory.body;
+        }
+      } catch {
+        writeJsonError(res,409,'full_context_required',requestId,'the response context is unavailable; resend full context');
+        return true;
+      }
+    }
+
     let model: string;
     try {
       // R2 §7.2: native Gemini requests carry the public model in the path
@@ -2391,6 +2505,18 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     }
 
     const preparedRequest = prepared;
+    const historyIdentity = historyConversation ? responsesHistoryPreparedIdentity(preparedRequest,historyConversation,authenticatedCaller) : null;
+    if (resolvedHistory) {
+      try {
+        if (!historyIdentity) throw new Error('context identity unavailable');
+        historyResolver?.assertPreparedIdentity(resolvedHistory,historyIdentity);
+      } catch {
+        // Preparation may own a hold already. Release through its authority before reporting the mismatch.
+        await options.preDispatchCompensation?.compensate({prepared:preparedRequest,cause:'dispatch_failed',responseMayHaveStarted:false}).catch(()=>undefined);
+        writeJsonError(res,409,'full_context_required',requestId,'the response context is unavailable; resend full context');
+        return true;
+      }
+    }
 
     /*
      * §4.2 (task #16) async image submission: once the request is prepared,
@@ -2533,10 +2659,11 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
      * bounded recording so the upstream request id can be extracted after
      * dispatch; the client sees the upstream JSON verbatim either way.
      */
+    const historyCapture = historyResolver && historyIdentity ? new ResponsesHistoryHttpCapture(innerClient) : undefined;
     const client =
       videoCreatePort !== undefined
         ? new TeeRecordingClientStream(innerClient, { maxRecordedBytes: bodyLimits.videos })
-        : innerClient;
+        : historyCapture ?? innerClient;
     const compensate = async (cause: 'client_cancelled' | 'dispatch_failed') => {
       try {
         return await options.preDispatchCompensation?.compensate({
@@ -2629,14 +2756,30 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         requestId,
       );
       client.dispose();
+      historyCapture?.clear();
       return true;
     }
-    client.dispose();
+    if (!historyCapture) client.dispose();
 
     if (!isRecord(dispatched) || (dispatched.kind !== 'sent' && dispatched.kind !== 'unknown')) {
       await compensate('dispatch_failed');
+      await historyCapture?.abort(); historyCapture?.dispose();
       sendHttpError(res, new GatewayHttpError(502, 'DISPATCH_FAILED'), requestId);
       return true;
+    }
+    if (historyCapture && historyResolver && historyIdentity) {
+      // 'sent' can still require financial reconciliation. Only an authoritative settled disposition permits persistence.
+      if (dispatched.kind === 'sent' && dispatched.settlementOutcome === 'settled') {
+        const response = historyCapture.response(path === '/v1/responses/compact');
+        if (response) {
+          await historyResolver.remember({identity:historyIdentity,responseId:response.id,request:body,output:response.output,operation:path === '/v1/responses/compact' ? 'responses.compact' : 'responses'}).catch(()=>false);
+        }
+      }
+      try { await historyCapture.finish(); } catch {
+        // Delivery failed after committed settlement: release the client without compensating or retrying inference.
+        await historyCapture.abort().catch(()=>undefined);
+        if (!res.writableEnded && !res.destroyed) { try { res.destroy(); } catch { /* socket already unavailable */ } }
+      } finally { historyCapture.dispose(); }
     }
     if (dispatched.kind === 'unknown' && !res.headersSent && !res.destroyed) {
       sendHttpError(res, new GatewayHttpError(502, 'DISPATCH_OUTCOME_UNKNOWN'), requestId);

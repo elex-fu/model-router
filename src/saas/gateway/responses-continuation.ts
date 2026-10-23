@@ -13,22 +13,26 @@ function required(): never {
 interface SavedContext {
   readonly body: Record<string, unknown>;
   readonly pin: ResponsesWsPinnedIdentity;
+  readonly conversationId?: string;
 }
 /** Connection-local, bounded canonical history; references never cross a connection or identity. */
 export class ResponsesContinuationStore {
   private readonly contexts = new Map<string, SavedContext>();
   constructor(private readonly maxBytes: number) {}
 
+  forget(responseId: string): void { this.contexts.delete(responseId); }
+
   resolve(body: Record<string, unknown>, identity: {
     readonly tenantId: string;
     readonly projectId?: string;
     readonly proxyKeyId: string;
+    readonly conversationId?: string;
     readonly pinned: ResponsesWsPinnedIdentity | null;
   }): Record<string, unknown> {
     if (body.previous_response_id === undefined || body.previous_response_id === null) return body;
     const saved = typeof body.previous_response_id === 'string' ? this.contexts.get(body.previous_response_id) : undefined;
     const pin = identity.pinned;
-    if (!saved || !pin || saved.pin.tenantId !== identity.tenantId || saved.pin.projectId !== identity.projectId || saved.pin.proxyKeyId !== identity.proxyKeyId) required();
+    if (!saved || !pin || saved.pin.tenantId !== identity.tenantId || saved.pin.projectId !== identity.projectId || saved.pin.proxyKeyId !== identity.proxyKeyId || saved.conversationId !== identity.conversationId) required();
     for (const field of ['providerId', 'accountId', 'upstreamModel', 'credentialId', 'credentialVersion', 'credentialAuthzVersion'] as const) {
       if (saved.pin[field] !== pin[field]) required();
     }
@@ -42,7 +46,7 @@ export class ResponsesContinuationStore {
     return markCodexCanonicalReplay(resolved);
   }
 
-  remember(body: Record<string, unknown>, terminal: ResponsesWsEvent, pin: ResponsesWsPinnedIdentity): void {
+  remember(body: Record<string, unknown>, terminal: ResponsesWsEvent, pin: ResponsesWsPinnedIdentity, conversationId?: string): void {
     // Only a complete terminal output array proves what the next request must replay.
     const response = record(terminal.response) ? terminal.response : null;
     if (!response || typeof response.id !== 'string' || !Array.isArray(response.output)) return;
@@ -54,6 +58,6 @@ export class ResponsesContinuationStore {
     const bytes = Buffer.byteLength(JSON.stringify(canonical));
     if (bytes > this.maxBytes) return;
     this.contexts.clear();
-    this.contexts.set(response.id, { body: structuredClone(canonical), pin: { ...pin } });
+    this.contexts.set(response.id, { body: structuredClone(canonical), pin: { ...pin }, conversationId });
   }
 }

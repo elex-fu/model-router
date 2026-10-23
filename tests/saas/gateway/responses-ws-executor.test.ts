@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import WebSocket from 'ws';
-import { CodexNativeWsSessionError } from '../../../src/saas/gateway/codex/native-ws-session.js';
+import { CodexNativeWsSessionError, codexNativeWsSession } from '../../../src/saas/gateway/codex/native-ws-session.js';
 import type { PreparedEvidenceDispatchResult } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type {
   RequestPreparationInput,
@@ -18,11 +18,15 @@ import {
   ResponsesWsRoundError,
 } from '../../../src/saas/gateway/responses-ws-engine.js';
 import { createResponsesWsRoundExecutor } from '../../../src/saas/gateway/responses-ws-executor.js';
+import { PersistentResponsesContinuationResolver } from '../../../src/saas/gateway/responses-continuation-resolver.js';
+import { AesGcmResponsesHistoryCipher } from '../../../src/saas/gateway/responses-continuation-cipher.js';
+import type { ResponsesContinuationHistoryPort, ResponsesHistoryRecord, ResponsesHistoryReference } from '../../../src/saas/gateway/responses-continuation-history.js';
+import { codexContinuationMode } from '../../../src/saas/gateway/codex/continuation-metadata.js';
 import type { AuthenticatedApiKey } from '../../../src/saas/keys/types.js';
 
 const encoder = new TextEncoder();
 const clientRequest = {
-  headers: { authorization: 'Bearer local-proxy-fixture' },
+  headers: { authorization: 'Bearer local-proxy-fixture', conversation_id: 'conversation-a' },
   socket: { remoteAddress: '127.0.0.1' },
 } as IncomingMessage;
 
@@ -36,6 +40,7 @@ function fixture(request = clientRequest) {
     cancelDispatch: false,
     cancelDispatchError: false,
     settled: 0,
+    nativeMock: false,
     dispatched: 0,
     compensation: 0,
     preparations: [] as RequestPreparationInput[],
@@ -75,7 +80,9 @@ function fixture(request = clientRequest) {
             tenantId: 'tenant-a',
             projectId: 'project-a',
             proxyKeyId: 'key-a',
-            providerId: 'provider-a',
+            providerId: state.nativeMock ? 'openai-codex' : 'provider-a',
+            productId: 'product-a',
+            publicModel: input.publicModel,
             accountId: state.account,
             credentialId: 'credential-a',
             credentialVersion: '1',
@@ -107,9 +114,10 @@ function fixture(request = clientRequest) {
           ),
         );
         await input.client.end();
+        if (state.nativeMock && input.codexNativeWsSession) codexNativeWsSession(input.codexNativeWsSession).finish('response-a');
         state.settled += 1;
         state.order.push('settled');
-        return { kind: 'sent', transport: { resultHttpStatus: 200 } } as PreparedEvidenceDispatchResult;
+        return { kind: 'sent', settlementOutcome: 'settled', transport: { resultHttpStatus: 200 } } as PreparedEvidenceDispatchResult;
       },
     },
     compensation: {
@@ -310,7 +318,7 @@ test('real WS upgrade binds its proxy key to the built-in executor and releases 
   await once(server, 'listening');
   const port = (server.address() as AddressInfo).port;
   const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/responses`, {
-    headers: { authorization: 'Bearer local-proxy-fixture' },
+    headers: { authorization: 'Bearer local-proxy-fixture', conversation_id: 'conversation-a' },
   });
   try {
     await once(ws, 'open');
@@ -364,7 +372,7 @@ test('real WS cancellation keeps the provider response id across created, cancel
   await once(server, 'listening');
   const port = (server.address() as AddressInfo).port;
   const ws = new WebSocket(`ws://127.0.0.1:${port}/v1/responses`, {
-    headers: { authorization: 'Bearer local-proxy-fixture' },
+    headers: { authorization: 'Bearer local-proxy-fixture', conversation_id: 'conversation-a' },
   });
   try {
     await once(ws, 'open');
@@ -408,3 +416,120 @@ test('a public-model alias change cannot reuse the original native identity even
   assert.equal(f.state.dispatched, 1);
   assert.equal(f.state.compensation, 1, 'changed identity is rejected before the prepared request is dispatched');
 });
+
+function persistentHistoryFixture() {
+  const records = new Map<string, ResponsesHistoryRecord>();
+  let writes = 0, reads = 0, failWrites = false, now = 100;
+  const key = (r: ResponsesHistoryReference) => [r.tenantId, r.projectId, r.proxyKeyId, r.conversationId, r.responseId].join('/');
+  const history: ResponsesContinuationHistoryPort = {
+    async find(reference, now) { reads++; const saved = records.get(key(reference)); return saved && saved.expiresAtMs > now ? saved : null; },
+    async insert(saved) { writes++; if (failWrites) return 'conflict'; const prior = records.get(key(saved)); if (prior) return prior.canonicalContextDigest === saved.canonicalContextDigest ? 'identical' : 'conflict'; records.set(key(saved), saved); return 'inserted'; },
+    async delete(reference) { records.delete(key(reference)); }, async purgeExpired() { return 0; },
+  };
+  const cipher = new AesGcmResponsesHistoryCipher('test-history', new Map([['test-history', new Uint8Array(32).fill(13)]]));
+  const resolver = new PersistentResponsesContinuationResolver({ history, cipher, maxBytes: 10000, ttlMs: 1000, nowMs: () => now });
+  return { resolver, cipher, clear() { records.clear(); }, advance(milliseconds: number) { now += milliseconds; }, get writes() { return writes; }, get reads() { return reads; }, set failWrites(value: boolean) { failWrites = value; } };
+}
+
+test('WS executor actually persists settled output and restores canonical context on a new connection', async () => {
+  const history = persistentHistoryFixture();
+  try {
+    const first = fixture();
+    const writer = createResponsesWsRoundExecutor({ ...first.options, continuationHistoryResolver: history.resolver });
+    await writer.executeRound({ requestId: 'persistent-first', body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+    assert.equal(history.writes, 1);
+    const second = fixture();
+    const reader = createResponsesWsRoundExecutor({ ...second.options, continuationHistoryResolver: history.resolver });
+    await reader.executeRound({ requestId: 'persistent-second', body: { previous_response_id: 'response-a', input: 'next' }, pinned: null, cancelSignal: new AbortController().signal });
+    assert.equal(history.reads, 1);
+    assert.equal(second.state.dispatched, 1);
+    const body = second.state.preparations[0]!.clientRequest as Record<string, unknown>;
+    assert.equal(body.previous_response_id, undefined);
+    assert.equal(codexContinuationMode(body), 'canonical-replay');
+    assert.deepEqual(body.input, [{ role: 'user', content: 'first' }, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] }, { role: 'user', content: 'next' }]);
+  } finally { history.cipher.close(); }
+});
+
+test('persistent WS lookup rejects another conversation and prepared account changes before dispatch', async () => {
+  const history = persistentHistoryFixture();
+  try {
+    const first = fixture();
+    await createResponsesWsRoundExecutor({ ...first.options, continuationHistoryResolver: history.resolver }).executeRound({ requestId: 'scope-first', body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+    const other = fixture();
+    const request = { ...other.options.request, headers: { ...other.options.request.headers, conversation_id: 'other-conversation' } } as IncomingMessage;
+    await assert.rejects(createResponsesWsRoundExecutor({ ...other.options, request, continuationHistoryResolver: history.resolver }).executeRound({ requestId: 'other-conversation', body: { previous_response_id: 'response-a', input: 'next' }, pinned: null, cancelSignal: new AbortController().signal }), (error) => error instanceof ResponsesWsRoundError && error.code === 'full_context_required' && error.status === 409);
+    assert.equal(other.state.preparations.length, 0);
+    for (const changedField of ['tenantId', 'id'] as const) {
+      const scoped = fixture();
+      const authenticator = { async authenticate(raw: string) { const caller = await scoped.options.authenticator.authenticate(raw); return caller ? { ...caller, metadata: { ...caller.metadata, [changedField]: 'other-scope' } } : null; } };
+      await assert.rejects(createResponsesWsRoundExecutor({ ...scoped.options, authenticator, continuationHistoryResolver: history.resolver }).executeRound({ requestId: `other-${changedField}`, body: { previous_response_id: 'response-a', input: 'next' }, pinned: null, cancelSignal: new AbortController().signal }), /resend full context/);
+      assert.equal(scoped.state.preparations.length, 0);
+    }
+    const changed = fixture(); changed.state.account = 'changed-account';
+    await assert.rejects(createResponsesWsRoundExecutor({ ...changed.options, continuationHistoryResolver: history.resolver }).executeRound({ requestId: 'changed-account', body: { previous_response_id: 'response-a', input: 'next' }, pinned: null, cancelSignal: new AbortController().signal }), (error) => error instanceof ResponsesWsRoundError && error.code === 'full_context_required');
+    assert.equal(changed.state.dispatched, 0);
+    assert.equal(changed.state.compensation, 1);
+  } finally { history.cipher.close(); }
+});
+
+for (const outcome of ['replayed', 'reconciliation_pending', undefined] as const) {
+  test(`WS ${String(outcome)} settlement never creates persistent or local continuation`, async () => {
+    const history = persistentHistoryFixture();
+    try {
+      const f = fixture();
+      const executor = createResponsesWsRoundExecutor({ ...f.options, continuationHistoryResolver: history.resolver, dispatch: { async dispatch(input) { const result = await f.options.dispatch.dispatch(input); return result.kind === 'sent' ? { ...result, settlementOutcome: outcome } : result; } } });
+      const first = await executor.executeRound({ requestId: `not-settled-${String(outcome)}`, body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+      assert.equal(history.writes, 0);
+      await assert.rejects(executor.executeRound({ requestId: 'not-settled-next', body: { previous_response_id: 'response-a', input: 'next' }, pinned: first.pinned, cancelSignal: new AbortController().signal }), /resend full context/);
+      assert.equal(f.state.dispatched, 1);
+    } finally { history.cipher.close(); }
+  });
+}
+
+test('WS history write failure cannot refund settled inference or promise a local continuation', async () => {
+  const history = persistentHistoryFixture(); history.failWrites = true;
+  try {
+    const f = fixture(); const executor = createResponsesWsRoundExecutor({ ...f.options, continuationHistoryResolver: history.resolver });
+    const first = await executor.executeRound({ requestId: 'failed-history', body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+    assert.equal(first.terminal.type, 'response.completed'); assert.equal(f.state.settled, 1); assert.equal(f.state.compensation, 0);
+    await assert.rejects(executor.executeRound({ requestId: 'failed-history-next', body: { previous_response_id: 'response-a', input: 'next' }, pinned: first.pinned, cancelSignal: new AbortController().signal }), /resend full context/);
+    assert.equal(f.state.dispatched, 1);
+  } finally { history.cipher.close(); }
+});
+
+test('WS without explicit conversation runs full context but cannot persist or continue by response ID', async () => {
+  const history = persistentHistoryFixture();
+  try {
+    const f = fixture();
+    const request = { ...f.options.request, headers: { authorization: f.options.request.headers.authorization } } as IncomingMessage;
+    const executor = createResponsesWsRoundExecutor({ ...f.options, request, continuationHistoryResolver: history.resolver });
+    const first = await executor.executeRound({ requestId: 'no-conversation', body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+    assert.equal(history.writes, 0);
+    await assert.rejects(executor.executeRound({ requestId: 'missing-conversation-next', body: { previous_response_id: 'response-a', input: 'next' }, pinned: first.pinned, cancelSignal: new AbortController().signal }), (error) => error instanceof ResponsesWsRoundError && error.code === 'full_context_required' && error.status === 409);
+    assert.equal(history.reads, 0); assert.equal(f.state.dispatched, 1);
+  } finally { history.cipher.close(); }
+});
+
+test('native same-generation continuation keeps canonical tools and instructions while sending only the new input', async () => {
+  const f = fixture(); f.state.nativeMock = true;
+  const tools = [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }];
+  const first = await f.executor.executeRound({ requestId: 'native-config-first', body: { model: 'public-model', input: 'first', instructions: 'retain these instructions', tools }, pinned: null, cancelSignal: new AbortController().signal });
+  await f.executor.executeRound({ requestId: 'native-config-second', body: { previous_response_id: 'response-a', input: 'next' }, pinned: first.pinned, cancelSignal: new AbortController().signal });
+  const body = f.state.preparations[1]!.clientRequest as Record<string, unknown>;
+  assert.equal(body.previous_response_id, 'response-a'); assert.equal(body.input, 'next');
+  assert.equal(body.instructions, 'retain these instructions'); assert.deepEqual(body.tools, tools);
+  assert.equal(codexContinuationMode(body), 'remote-history');
+});
+
+for (const invalidation of ['expiry', 'deletion'] as const) {
+  test(`a long-lived WS cannot bypass persistent history ${invalidation}`, async () => {
+    const history = persistentHistoryFixture();
+    try {
+      const f = fixture(); const executor = createResponsesWsRoundExecutor({ ...f.options, continuationHistoryResolver: history.resolver });
+      const first = await executor.executeRound({ requestId: `authoritative-${invalidation}`, body: { model: 'public-model', input: 'first' }, pinned: null, cancelSignal: new AbortController().signal });
+      if (invalidation === 'expiry') history.advance(1001); else history.clear();
+      await assert.rejects(executor.executeRound({ requestId: 'expired-next', body: { previous_response_id: 'response-a', input: 'next' }, pinned: first.pinned, cancelSignal: new AbortController().signal }), /resend full context/);
+      assert.equal(history.reads, 1); assert.equal(f.state.preparations.length, 1); assert.equal(f.state.dispatched, 1);
+    } finally { history.cipher.close(); }
+  });
+}

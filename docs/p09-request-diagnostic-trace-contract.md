@@ -15,7 +15,7 @@ Transport/runtime owner wiring:
 
 - Mark `upstream-send` immediately before the transport starts network send; begin `upstream-send` then finish at response headers. Mark `first-byte` at the first actual response body byte, not header arrival or first parsed text token. Begin `upstream-body` after headers and finish at EOF/error/cancel.
 - Mark `eof` only on normal provider body exhaustion. Cancellation/error is not EOF. Do not infer financial settlement from EOF.
-- Begin `settle` at financial settlement entry; finish in finally. Mark `settled` only after the financial authority acknowledges settlement success. Unknown outcome and failures leave it absent.
+- Begin `settle` at financial settlement entry; finish in finally. Mark `settled` only after the financial authority returns `kind: 'settled'`. Unknown outcome and failures leave it absent. `kind: 'replayed'` can replay reconciliation-pending financial state, so it does not set this marker or permit new durable continuation history. Dispatch exposes the server-owned `settlementOutcome` unchanged; only its `settled` value is a positive settlement fact.
 
 All marker values are milliseconds relative to request trace start. Missing markers stay absent. Repeated marks keep the first occurrence, so this minimal trace is for one upstream attempt; retries need separate attempt trace instances. Span finish is idempotent. Snapshot includes only completed spans and explicitly reports pending and dropped spans; incomplete/truncated traces cannot establish a complete breakdown.
 

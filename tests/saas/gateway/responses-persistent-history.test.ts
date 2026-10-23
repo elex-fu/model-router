@@ -4,7 +4,14 @@ import { AesGcmResponsesHistoryCipher } from '../../../src/saas/gateway/response
 import { PersistentResponsesContinuationResolver } from '../../../src/saas/gateway/responses-continuation-resolver.js';
 import { codexContinuationMode } from '../../../src/saas/gateway/codex/continuation-metadata.js';
 import type { ResponsesContinuationHistoryPort, ResponsesHistoryIdentity, ResponsesHistoryRecord } from '../../../src/saas/gateway/responses-continuation-history.js';
+import { normalizeResponsesHistoryConversationId } from '../../../src/saas/gateway/responses-continuation-history.js';
 const identity: ResponsesHistoryIdentity = { tenantId: 'tenant', projectId: 'project', proxyKeyId: 'key', conversationId: 'conversation', providerId: 'openai-codex', productId: 'codex-chatgpt', accountId: 'account', credentialId: 'credential', credentialVersion: '1', credentialAuthzVersion: '1', publicModel: 'model', resolvedModel: 'model' };
+test('history namespace is explicit, bounded and consistent between header and body', () => {
+  assert.equal(normalizeResponsesHistoryConversationId(undefined, undefined), undefined);
+  assert.equal(normalizeResponsesHistoryConversationId('conversation', 'conversation'), 'conversation');
+  assert.throws(() => normalizeResponsesHistoryConversationId('one', 'other'), /must match/);
+  for (const value of ['', null, ['duplicate'], 'a\nb', 'x'.repeat(513)]) assert.throws(() => normalizeResponsesHistoryConversationId(value, undefined), /valid stable conversation_id/);
+});
 function fixture() {
   let saved: ResponsesHistoryRecord | null = null;
   const history: ResponsesContinuationHistoryPort = {

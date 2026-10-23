@@ -1,3 +1,22 @@
+import { ResponsesWsRoundError } from './responses-ws-engine.js';
+
+/** A stable client namespace is scoped again by authenticated tenant/project/key in every lookup. */
+export function normalizeResponsesHistoryConversationId(header: unknown, body: unknown): string | undefined {
+  const parse = (value: unknown): string | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || value === '' || value.trim() !== value || Buffer.byteLength(value) > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new ResponsesWsRoundError('full_context_required', 'a valid stable conversation_id is required for response history', 409);
+    }
+    return value;
+  };
+  const fromHeader = parse(header);
+  const fromBody = parse(body);
+  if (fromHeader !== undefined && fromBody !== undefined && fromHeader !== fromBody) {
+    throw new ResponsesWsRoundError('full_context_required', 'conversation_id header and body must match', 409);
+  }
+  return fromHeader ?? fromBody;
+}
+
 /** Persistence contract shared by HTTP and WS; implementations store only authenticated ciphertext. */
 export interface ResponsesHistoryIdentity {
   readonly tenantId: string;

@@ -10,6 +10,10 @@
 
 `readiness` 是安全边界标签：`production-kms` 或 `pilot-file-keyring`，不是生产上线验收凭据。生产模式启动验证精确 schema、SELECT/INSERT/DELETE 三项数据库权限和真实 GenerateDataKey→本地 AEAD→Decrypt roundtrip；失败关闭适配器并拒绝启用。没有加载云配置时不会执行云调用。
 
+HTTP 接线只接受既有 `conversation_id` header/body，二者同时出现须完全一致；来源值经共同 helper 的 UTF8 字节/控制字符检查，权限始终来自已认证 tenant/project/key。无 conversation 的 full-context 请求仍可执行但不保存；带 previous reference 而无 scope/记录/解密能力时在 prepare 前 409。`/v1/responses` 可由历史恢复 model；`/v1/responses/compact` 的原有早期授权入口仍要求显式 model。
+
+HTTP 专用 bounded sink 继续发送 SSE 非终态事件，暂存终态及后继 `[DONE]`；非流式 JSON 在本地结束前暂存。sink 的 `end()` 只标记观察完成，不等待 dispatch。dispatch 返回明确 `settlementOutcome=settled` 后才 `remember`，之后 caller 发布终态/JSON 并结束下游，实现可运营的 read-after-write 顺序。`sent`、`replayed`、`reconciliation_pending`、无 disposition 都不足以新增历史；replayed 可能仍处金融对账状态。超过 16 MiB 只禁用记录、释放缓冲并按原响应传输，不能因持久化记录上限中止已派发推理。
+
 reference 必须由认证后的 tenant/project/proxy key、服务端归一化 conversation ID 和 response ID 构成。`resolve(reference, delta)` 返回的 `body` 带服务端 WeakSet provenance，必须把该原对象直接交给 prepare；不能 spread/JSON clone。prepare 后对完整 tenant/project/proxy key/conversation/provider/product/account/credential/version/authz version/public model/resolved model 执行 `assertPreparedIdentity`。不符时先补偿该次准备的 hold，再返回 409 `full_context_required`。
 
 只有 durable dispatch/settlement 后才可调用 `remember({identity,responseId,request,output,operation})`。普通 response 保存完整 canonical input 和完整 output；compact 以完整 returned output 替换旧 input。返回 false 表示本次 continuation 未持久成功，不能因此自动退款、重发推理或宣称该 response 可续接。客户端应保留 full context；数据库/KMS/expiry/identity 不匹配统一要求重新发送 full context。
