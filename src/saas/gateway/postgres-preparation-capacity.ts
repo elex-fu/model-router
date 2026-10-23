@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { SqlExecutor } from '../db/types.js';
+import type { RedisPreparationCapacity } from './redis-preparation-capacity.js';
 import type {
   PostgresPreparationCapacityPort,
   PostgresPreparationCapacityReservation,
@@ -378,6 +379,10 @@ function sameIdentity(row: ReservationRow, input: Parameters<PostgresPreparation
  * admission counter — capacity-side rate evidence, never billing state.
  */
 export class PostgresPreparationCapacityAdapter implements PostgresPreparationCapacityPort {
+  readonly cachedReservation?: (requestId: string) => Promise<Record<string, unknown> | null>;
+  constructor(private readonly redis?: RedisPreparationCapacity) {
+    this.cachedReservation = redis ? (requestId) => redis.find(requestId) : undefined;
+  }
   async reserve(
     executor: SqlExecutor,
     input: Parameters<PostgresPreparationCapacityPort['reserve']>[1],
@@ -407,17 +412,19 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
     try {
       /* Per-request replay check, then per-scope authority: both run OUTSIDE
          the exclusive fence (see takeScopeLock for the proof). */
-      const existingRows = await queryRows<ReservationRow>(
-        executor,
-        `SELECT tenant_id, project_id, proxy_key_id, request_id, supply_mode,
+      const existingRows = this.redis
+        ? []
+        : await queryRows<ReservationRow>(
+            executor,
+            `SELECT tenant_id, project_id, proxy_key_id, request_id, supply_mode,
                 project_policy_version, key_authz_version, idempotency_scope_key,
                 request_fingerprint, request_fingerprint_version, token_units,
                 quota_reservation_id, rate_reservation_id, state
            FROM saas_gateway_capacity_reservations
           WHERE tenant_id = $1 AND request_id = $2
           LIMIT 2`,
-        [input.tenantId, input.requestId],
-      );
+            [input.tenantId, input.requestId],
+          );
       if (existingRows.length > 1) return blockRequestPreparation('storage_failure', SAFE_CAPACITY_FAILURE);
       if (existingRows.length === 1) {
         const existing = existingRows[0];
@@ -425,6 +432,14 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
           return rejectRequestPreparation('idempotency_conflict', SAFE_CAPACITY_FAILURE);
         }
         const replay = capacityValue(existing);
+        if (replay && this.redis)
+          await this.redis.receipt(
+            executor,
+            input.tenantId,
+            input.requestId,
+            replay.quotaReservation.reference,
+            replay.rateReservation.reference,
+          );
         return replay
           ? allowRequestPreparation(replay)
           : blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
@@ -531,6 +546,9 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
         }
         groupRateTerms = terms;
       }
+
+      if (this.redis)
+        return this.redis.reserve(executor, input, limits, policyVersion, keyAuthzVersion, groupRateTerms, tokenUnits);
 
       /* R9 P4/P16: the exclusive tenant-scope fence starts HERE. Everything
          above is per-request or protected by the caller's shared authz
@@ -758,6 +776,34 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
         [input.tenantId, input.requestId, input.attemptId],
       );
       const attempt = oneRow(attemptRows);
+      if (this.redis) {
+        const reservation = await this.redis.find(input.requestId);
+        if (
+          !reservation ||
+          reservation.tenant_id !== input.tenantId ||
+          reservation.project_id !== input.projectId ||
+          reservation.quota_reservation_id !== input.quotaReservation.reference ||
+          reservation.rate_reservation_id !== input.rateReservation.reference
+        )
+          return retained;
+        if (reservation.state === 'released') return { quotaReservation: 'released', rateReservation: 'released' };
+        if (
+          !attempt ||
+          attempt.project_id !== input.projectId ||
+          attempt.proxy_key_id !== reservation.proxy_key_id ||
+          attempt.dispatch_state !== 'not_sent' ||
+          attempt.result_state !== 'pending' ||
+          attempt.response_started !== false ||
+          attempt.execution_state !== 'pending' ||
+          attempt.reconciliation_state !== 'none' ||
+          attempt.any_attempt_dispatched !== false
+        )
+          return retained;
+        // PG cancellation must commit before the Redis reservation is freed.
+        // The HTTP completion hook/recovery worker observes that terminal row;
+        // rolling this transaction back therefore cannot release live capacity.
+        return { quotaReservation: 'released', rateReservation: 'released' };
+      }
       const reservationRows = await queryRows<ReservationRow>(
         executor,
         `SELECT tenant_id, project_id, proxy_key_id, request_id, supply_mode,
@@ -825,6 +871,8 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
   }
 }
 
-export function createPostgresPreparationCapacityPort(): PostgresPreparationCapacityPort {
-  return new PostgresPreparationCapacityAdapter();
+export function createPostgresPreparationCapacityPort(
+  redis?: RedisPreparationCapacity,
+): PostgresPreparationCapacityPort {
+  return new PostgresPreparationCapacityAdapter(redis);
 }

@@ -1,0 +1,98 @@
+{
+  "at": "2026-10-23T17:06:46.919Z",
+  "deployment": "self-hosted",
+  "source": {
+    "commit": "ab293e01ddc56d6eb5caf6c0130f925a04bd18c0",
+    "includesWorkingTreeEdits": true,
+    "artifactSha256": "b0b3bc366644e2e04fdadea7a4caea5e4e04018af69984ac896dff120025b7e9",
+    "verifiedFiles": 4945,
+    "allDeployedHashesMatch": true
+  },
+  "runtime": {
+    "node": "v22.22.0",
+    "cpus": 1,
+    "totalMemoryMiB": 1817,
+    "load": [
+      0.01,
+      0.04,
+      0.07
+    ]
+  },
+  "redis": {
+    "config": {
+      "bind": "127.0.0.1",
+      "appendfsync": "everysec",
+      "maxmemory-policy": "noeviction",
+      "appendonly": "yes",
+      "port": "16379"
+    },
+    "usedMemoryBytes": 1309080,
+    "pending": 0,
+    "healthy": true,
+    "matchesCacheDatabase": true,
+    "persistedPeriodCount": 1
+  },
+  "quota": {
+    "periodTotals": {
+      "reportedUsed": 2414,
+      "estimatedUsed": 0,
+      "reserved": 0
+    },
+    "reservations": [
+      {
+        "state": "settled",
+        "n": 71
+      }
+    ],
+    "usageJournalRows": 0
+  },
+  "telemetry": {
+    "requests": [
+      {
+        "state": "completed",
+        "status": 200,
+        "n": 71
+      },
+      {
+        "state": "rejected",
+        "status": 401,
+        "n": 1
+      }
+    ],
+    "attempts": [
+      {
+        "outcome": "completed",
+        "status": 200,
+        "n": 71
+      }
+    ]
+  },
+  "services": {
+    "router": {
+      "NRestarts": "0",
+      "MemoryCurrent": "123543552",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled"
+    },
+    "redis": {
+      "NRestarts": "0",
+      "MemoryCurrent": "7557120",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled"
+    },
+    "nginx": {
+      "NRestarts": "0",
+      "MemoryCurrent": "2772992",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled"
+    }
+  },
+  "rollback": {
+    "application": "/opt/model-router-previous-20261023T170314Z",
+    "data": "/var/backups/model-router/redis-quota-20261023T170314Z",
+    "initialPackagingFailureRolledBack": true
+  }
+}

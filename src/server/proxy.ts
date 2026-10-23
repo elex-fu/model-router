@@ -63,7 +63,7 @@ export interface ProxyHandlerOptions {
   getRuntimeSnapshot?: () => RoutingSnapshot;
   telemetryStore?: Pick<SQLiteTelemetryStore, 'upsertRequest' | 'upsertAttempt'>;
   quotaLedger?: Pick<SQLiteQuotaLedger, 'admit' | 'markAttemptSent' | 'settle'> &
-    Partial<Pick<SQLiteQuotaLedger, 'topUp'>>;
+    Partial<Pick<SQLiteQuotaLedger, 'topUp' | 'recordAttemptUsage'>>;
   quotaReserveTokens?: number;
   quotaTimezone?: string;
   quotaTimezoneVersions?: Pick<QuotaTimezoneVersions, 'resolveForAdmission'>;
@@ -488,9 +488,9 @@ export async function proxyHandler(
       }
     }
     const recorderOk = options.recorderHealthy?.() ?? true;
-    const status = dbOk && recorderOk ? 200 : 503;
+    const status = dbOk ? 200 : 503;
     const body = {
-      status: dbOk && recorderOk ? 'ok' : 'degraded',
+      status: dbOk ? 'ok' : 'degraded',
       db: dbOk ? 'ok' : 'error',
       telemetryRecorder: recorderOk ? 'ok' : 'degraded',
     };
@@ -591,9 +591,25 @@ export async function proxyHandler(
         upstreams: config.upstreams.filter((item): item is typeof item & { id: string } => !!item.id),
       }
     : options.getRuntimeSnapshot?.();
+  // Observation failures never change admission, retries, delivery, or settlement. Snapshot now:
+  // the request/attempt objects continue changing while the worker batches these events.
+  const observeRequest = (record: RequestRecord): void => {
+    try {
+      void options.telemetryStore?.upsertRequest(structuredClone(record)).catch(() => {});
+    } catch {
+      /* the recorder exposes loss/degradation separately */
+    }
+  };
+  const observeAttempt = (record: AttemptRecord): void => {
+    try {
+      void options.telemetryStore?.upsertAttempt(structuredClone(record)).catch(() => {});
+    } catch {
+      /* a synchronous recorder failure is also isolated */
+    }
+  };
   const recordEarlyRejection = async (status: number, proxyKeyId: string | null) => {
     const endedAtMs = Date.now();
-    await options.telemetryStore?.upsertRequest({
+    observeRequest({
       id: requestId,
       proxyKeyId,
       source,
@@ -718,7 +734,8 @@ export async function proxyHandler(
     finalUpstreamId: null,
   };
   let quotaSettled = false;
-  let finalPersisted = false;
+  let quotaNeedsSettlement = false;
+  let finalQueued = false;
   let reportedAttemptTokens = 0;
   let hasReportedAttemptTokens = false;
   let sentAttempts = 0;
@@ -744,7 +761,7 @@ export async function proxyHandler(
       finalUpstreamId = upstreamId;
     }
     const errors: unknown[] = [];
-    if (options.quotaLedger && !quotaSettled) {
+    if (options.quotaLedger && quotaNeedsSettlement && !quotaSettled) {
       try {
         await options.quotaLedger?.settle(
           requestId,
@@ -756,15 +773,15 @@ export async function proxyHandler(
         errors.push(error);
       }
     }
-    if (!finalPersisted) {
+    if (!finalQueued) {
       try {
-        await options.telemetryStore?.upsertRequest(requestRecord);
-        finalPersisted = true;
+        observeRequest(requestRecord);
+        finalQueued = true;
       } catch (error) {
         errors.push(error);
       }
     }
-    if (finalPersisted && requestRecord.endedAtMs !== null) {
+    if (finalQueued && requestRecord.endedAtMs !== null) {
       publishCompletion(
         requestRecord.finalHttpStatus ?? status,
         requestRecord.state,
@@ -775,7 +792,7 @@ export async function proxyHandler(
   };
 
   try {
-    await options.telemetryStore?.upsertRequest(requestRecord);
+    observeRequest(requestRecord);
 
     if (playground && (playground.signal.aborted || requestRecord.routeId !== playground.routeId)) {
       const status = playground.signal.aborted ? 499 : 409;
@@ -1110,8 +1127,10 @@ export async function proxyHandler(
       const admissionAtMs = Date.now();
       const versionedPeriod = options.quotaTimezoneVersions?.resolveForAdmission(admissionAtMs);
       const period = versionedPeriod ?? quotaPeriod(admissionAtMs, options.quotaTimezone ?? 'UTC');
+      quotaNeedsSettlement = true;
       const decision = await options.quotaLedger.admit({
         requestId,
+        newRequest: true,
         proxyKeyId: requestRecord.proxyKeyId!,
         atMs: admissionAtMs,
         periodId: period.id,
@@ -1125,14 +1144,9 @@ export async function proxyHandler(
         missingUsagePolicy: options.missingUsagePolicy,
       });
       if (!decision.allowed) {
-        if (decision.reason === 'recorder_degraded') {
-          writeProtocolError(
-            res,
-            clientProto,
-            503,
-            'service_unavailable',
-            'Telemetry recorder is degraded; retry later',
-          );
+        quotaNeedsSettlement = false;
+        if (decision.reason === 'recorder_degraded' || decision.reason === 'quota_unavailable') {
+          writeProtocolError(res, clientProto, 503, 'service_unavailable', 'Quota ledger is unavailable; retry later');
           await finishRequest(503, null, null);
           return;
         }
@@ -1142,7 +1156,7 @@ export async function proxyHandler(
       }
     }
     requestRecord.state = 'admitted';
-    await options.telemetryStore?.upsertRequest(requestRecord);
+    observeRequest(requestRecord);
 
     const isStreaming = parsedBody?.stream === true;
     const runtimeTimeouts = config.server as Config['server'] &
@@ -1287,13 +1301,13 @@ export async function proxyHandler(
             );
             if (!topUp.allowed) {
               options.circuitBreaker?.neutralRelease(upstream.name);
-              if (topUp.reason === 'recorder_degraded') {
+              if (topUp.reason === 'recorder_degraded' || topUp.reason === 'quota_unavailable') {
                 writeProtocolError(
                   res,
                   clientProto,
                   503,
                   'service_unavailable',
-                  'Telemetry recorder is degraded; retry later',
+                  'Quota ledger is unavailable; retry later',
                 );
                 await finishRequest(503, null, null);
                 return;
@@ -1329,7 +1343,7 @@ export async function proxyHandler(
             costMicros: null,
             currency: null,
           };
-          await options.telemetryStore?.upsertAttempt(attemptRecord);
+          observeAttempt(attemptRecord);
           lastAttemptRecord = attemptRecord;
           const result = await trySingleUpstream({
             req,
@@ -1367,7 +1381,7 @@ export async function proxyHandler(
             elapsedMs: elapsedLatencyMs,
             oauthResolver: options.oauthResolver,
             onAttemptSent: async () => {
-              await options.quotaLedger?.markAttemptSent(requestId);
+              await options.quotaLedger?.markAttemptSent(requestId, attemptRecord.id);
               sentAttempts++;
             },
           });
@@ -1435,8 +1449,9 @@ export async function proxyHandler(
             reportedAttemptTokens += charged;
             hasReportedAttemptTokens = true;
             reportedAttempts++;
+            await options.quotaLedger?.recordAttemptUsage?.(requestId, attemptRecord.id, charged);
           }
-          await options.telemetryStore?.upsertAttempt(attemptRecord);
+          observeAttempt(attemptRecord);
 
           if (requestRecord.firstByteMs === null && result.firstByteMs !== undefined)
             requestRecord.firstByteMs = result.firstByteMs;
@@ -1605,7 +1620,7 @@ export async function proxyHandler(
             // 504 timeout the client actually receives; the attempt's own status
             // (e.g. 503) is preserved on the same record.
             lastAttemptRecord.retryReason = 'total_request_timeout';
-            await options.telemetryStore?.upsertAttempt(lastAttemptRecord);
+            observeAttempt(lastAttemptRecord);
           }
           writeProtocolError(
             res,

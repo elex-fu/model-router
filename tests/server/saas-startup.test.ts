@@ -1913,9 +1913,13 @@ test('standard startServer forwards HTTP cap env, preserves explicit typed prior
         }),
       });
       assert.ok(runtime?.gateway);
+      let callCount = 0;
       const makeCall = () => {
         const request = makeGatewayRequest('/v1/chat/completions', {
-          headers: { authorization: `Bearer mr_live_${'a'.repeat(43)}`, 'content-type': 'application/json' },
+          headers: {
+            authorization: `Bearer mr_live_${'a'.repeat(42)}${callCount++}`,
+            'content-type': 'application/json',
+          },
         });
         const response = makeGatewayResponse();
         Object.assign(response.response, {
@@ -1978,9 +1982,9 @@ test('standard startServer rejects malformed HTTP cap env before database startu
   }
 });
 
-test('gateway workload wires its scoped Redis sticky cache and closes it after the gateway', async () => {
-  // A minimal RESP peer: any received command answers +PONG, which satisfies
-  // both the RESP protocol and the provider's PING readiness probe.
+test('gateway rejects a PING-only Redis peer and closes its acquired resources', async () => {
+  // PING alone is insufficient now that shared quota admission requires Redis
+  // hash/Lua support. The real three-process runtime acceptance covers success.
   const sockets = new Set<Socket>();
   const pong = createTcpServer((socket) => {
     sockets.add(socket);
@@ -2002,31 +2006,31 @@ test('gateway workload wires its scoped Redis sticky cache and closes it after t
       ...gatewayEnvironment({ customer: 45_131, platform: 45_132, gateway: 45_133 }),
       [DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl]: `redis://127.0.0.1:${pongAddress.port}`,
     };
-    await startServer(undefined, '/unused/local-config.json', {
-      environment,
-      managedSaas: managedOptions(events, {
+    await assert.rejects(
+      startServer(undefined, '/unused/local-config.json', {
         environment,
-        loadProviders: async () => {
-          assert.fail('gateway workload must not load control-plane providers, Redis or TOTP KMS');
-        },
-        gatewayRuntimeModuleImporter: async () => fakeGatewayRuntimeModule(events),
-        gatewayProviderCredentialKmsImporter: async () => fakeGatewayKmsModule(events),
-        createListener: (name, handler) => {
-          events.push(`listener:${name}`);
-          listeners.set(name, handler);
-          return inertListener();
-        },
-        onReady: (value) => {
-          runtime = value;
-          events.push('ready');
-        },
+        managedSaas: managedOptions(events, {
+          environment,
+          loadProviders: async () => {
+            assert.fail('gateway workload must not load control-plane providers, Redis or TOTP KMS');
+          },
+          gatewayRuntimeModuleImporter: async () => fakeGatewayRuntimeModule(events),
+          gatewayProviderCredentialKmsImporter: async () => fakeGatewayKmsModule(events),
+          createListener: (name, handler) => {
+            events.push(`listener:${name}`);
+            listeners.set(name, handler);
+            return inertListener();
+          },
+          onReady: (value) => {
+            runtime = value;
+            events.push('ready');
+          },
+        }),
       }),
-    });
-    assert.ok(runtime);
-    assert.ok(runtime.gateway);
-    assert.deepEqual([...listeners.keys()], ['gateway']);
-    assert.ok(sockets.size >= 1, 'the gateway Redis provider must hold its RESP connection');
-    await runtime.close();
+      /Shared quota store unavailable/,
+    );
+    assert.equal(runtime, undefined);
+    assert.deepEqual([...listeners.keys()], []);
     // The server side of the RESP socket observes the close a tick after the
     // awaited client-side close, so poll briefly for it instead of racing.
     const redisClosed = await new Promise<boolean>((resolve) => {

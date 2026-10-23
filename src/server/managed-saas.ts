@@ -41,6 +41,11 @@ import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgr
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
 import { createPostgresPreparationCapacityPort } from '../saas/gateway/postgres-preparation-capacity.js';
+import {
+  PostgresCapacityStatePersistence,
+  RedisPreparationCapacity,
+} from '../saas/gateway/redis-preparation-capacity.js';
+import { RedisQuotaState } from '../quota/redis-state.js';
 import { createPostgresPreparationPorts } from '../saas/gateway/postgres-preparation-ports.js';
 import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provider-account-affinity.js';
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
@@ -1940,6 +1945,7 @@ export async function startManagedSaasServer(
   // Gateway-scoped Redis (optional MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL):
   // one core-owned RESP connection for the sticky-session hot path.
   let gatewayRedis: RedisProvider | undefined;
+  let gatewayQuota: RedisPreparationCapacity | undefined;
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
@@ -1985,7 +1991,10 @@ export async function startManagedSaasServer(
         announcementFanoutWorker,
         refundWorker,
         database,
-        closeDatabase,
+        async (closingDatabase) => {
+          await gatewayQuota?.close();
+          await closeDatabase(closingDatabase);
+        },
       );
       // The gateway composition closes first; its Redis connection follows.
       if (gatewayRedis) await Promise.allSettled([gatewayRedis.close()]);
@@ -2063,8 +2072,8 @@ export async function startManagedSaasServer(
       // Optional gateway-scoped Redis (deployment contract change, roadmap
       // batch 2 §2.0): a configured-but-unreachable Redis fails startup
       // closed, mirroring the control-plane provider readiness posture.
-      // Once loaded it only accelerates the sticky-session fast path — PG
-      // affinity stays authoritative and every cache error fails open.
+      // Sticky affinity keeps its PG fallback. Shared quota admission below
+      // requires Redis and fails closed if quota state or writeback is unhealthy.
       if (deployment.gatewayRedisUrl !== undefined) {
         try {
           gatewayRedis = await createRedisProvider({
@@ -2104,7 +2113,21 @@ export async function startManagedSaasServer(
 
       const metering = new SaasMeteringService(database);
       const billingLedger = new PlatformWalletLedgerService();
-      const capacityPort = createPostgresPreparationCapacityPort();
+      if (deployment.gatewayRedisUrl !== undefined) {
+        const namespace = 'managed-saas-capacity';
+        const persistence = new PostgresCapacityStatePersistence(database, namespace);
+        gatewayQuota = new RedisPreparationCapacity(
+          await RedisQuotaState.open({
+            url: deployment.gatewayRedisUrl,
+            namespace,
+            persistence,
+          }),
+          database,
+          namespace,
+        );
+        gatewayQuota.startRecovery();
+      }
+      const capacityPort = createPostgresPreparationCapacityPort(gatewayQuota);
       const gatewayClock = () => new Date();
       const observePreparation = createPostgresPreparationMetricsObserver();
       const observeDispatch = createPreparedEvidenceDispatchMetricsObserver();
@@ -2243,6 +2266,7 @@ export async function startManagedSaasServer(
         caller: preparationPorts.caller,
         entitlement: preparationPorts.entitlement,
         admission: preparationPorts.admission,
+        ...(gatewayQuota ? { capacityCompletion: (requestId: string) => gatewayQuota!.complete(requestId) } : {}),
         attempt: preparationPorts.attempt,
         // KEY-BUD (contract C-4): same port shape as preparationPorts.compensation
         // plus the budget release hook; shares the capacity/billing instances.

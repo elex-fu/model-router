@@ -185,6 +185,7 @@ import {
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
+import { CachedKeyAuthenticator } from '../saas/keys/cached-authenticator.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
 import {
   DurableConditionalSettlementPort,
@@ -337,6 +338,7 @@ export interface ManagedSaasGatewayCompositionDependencies {
   /** Fresh commercial advertisement authority; absent closes customer model lists with 503. */
   readonly capabilityReadiness?: () => Promise<GatewayCapabilityReadiness>;
   readonly authenticator: ProxyKeyAuthenticator;
+  readonly capacityCompletion?: (requestId: string) => Promise<void>;
   readonly preparation: ManagedSaasGatewayPreparationDependencies;
   readonly preparationFailureObserver?: PreparationFailureObserver;
   readonly preparationOptions: {
@@ -797,7 +799,14 @@ export function createManagedSaasGatewayComposition(
             maxBodyBytes: dependencies.maxBodyBytes,
             trustedProxyCidrs: dependencies.trustedProxyCidrs,
             contentModeration: dependencies.contentModeration,
-            runWithRequestId: (roundRequestId, work) => requestIdContext.run(roundRequestId, work),
+            runWithRequestId: (roundRequestId, work) =>
+              requestIdContext.run(roundRequestId, async () => {
+                try {
+                  return await work();
+                } finally {
+                  await dependencies.capacityCompletion?.(roundRequestId).catch(() => {});
+                }
+              }),
           }),
         send: () => {},
         close: () => {},
@@ -869,7 +878,11 @@ export function createManagedSaasGatewayComposition(
     }
     let pending: Promise<boolean>;
     try {
-      pending = requestIdContext.run(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId }));
+      pending = requestIdContext
+        .run(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId }))
+        .finally(async () => {
+          await dependencies.capacityCompletion?.(currentRequestId).catch(() => {});
+        });
     } catch (error) {
       if (limited) httpInFlight -= 1;
       throw error;
@@ -933,6 +946,7 @@ export interface ManagedSaasProviderPayloadOptions {
 }
 
 export interface ManagedSaasGatewayProductionOptions {
+  readonly capacityCompletion?: (requestId: string) => Promise<void>;
   /** Optional process-local inference cap; unset disables early HTTP backpressure. */
   readonly maxHttpInFlight?: number;
   readonly preparationObserver?: PostgresPreparationObserver;
@@ -2423,7 +2437,8 @@ export function createManagedSaasGatewayProductionComposition(
   });
 
   return createManagedSaasGatewayComposition({
-    authenticator: keyService,
+    authenticator: new CachedKeyAuthenticator(keyService),
+    ...(options.capacityCompletion ? { capacityCompletion: options.capacityCompletion } : {}),
     capabilityReadiness,
     ...(options.preparationFailureObserver ? { preparationFailureObserver: options.preparationFailureObserver } : {}),
     preparation: {

@@ -1,0 +1,123 @@
+{
+  "tool": "bench-gateway",
+  "startedAt": "2026-10-23T16:58:29.360Z",
+  "config": {
+    "protocol": "openai",
+    "model": "r9-openai-model",
+    "maxTokens": 64,
+    "requests": 10,
+    "streamSamples": 10,
+    "warmupInflight": 4,
+    "sseMinutes": 10,
+    "sseConcurrency": 20,
+    "sseChunks": 64,
+    "sseChunkDelayMs": 0,
+    "inflight": 4,
+    "concurrencySeconds": 5,
+    "accountLimit": 64,
+    "precisionAccounts": "r9-openai-account-1,r9-openai-account-2,r9-openai-account-3,r9-openai-account-4",
+    "precisionInflight": 4,
+    "scalingSeconds": 60,
+    "scalingInflight": 200,
+    "baselineReport": null,
+    "p99OverheadMs": 30,
+    "ttfbOverheadMs": 10,
+    "sseMaxCorruptStreams": 0,
+    "maxTransportErrors": 0,
+    "maxUnexpected5xx": 0,
+    "scalingMinRatio": 2.7,
+    "requestTimeoutMs": 60000,
+    "out": "/private/tmp/model-router-redis-quota-r9-20261024-final/diagnostic-current-3cli.json",
+    "noFail": false,
+    "gatewayUrls": [
+      "http://127.0.0.1:62585",
+      "http://127.0.0.1:62586",
+      "http://127.0.0.1:62587"
+    ],
+    "instanceCount": 3
+  },
+  "scenarios": {
+    "latency": {
+      "direct": {
+        "n": 10,
+        "p50": 4.66,
+        "p90": 33.58,
+        "p99": 33.58,
+        "max": 33.58
+      },
+      "gateway": {
+        "n": 10,
+        "p50": 324.48,
+        "p90": 831.17,
+        "p99": 831.17,
+        "max": 831.17
+      },
+      "p99OverheadMs": 797.59
+    },
+    "ttfb": {
+      "direct": {
+        "n": 10,
+        "p50": 4.54,
+        "p90": 7.35,
+        "p99": 7.35,
+        "max": 7.35
+      },
+      "gateway": {
+        "n": 10,
+        "p50": 167.03,
+        "p90": 214.58,
+        "p99": 214.58,
+        "max": 214.58
+      },
+      "gatewayErrors": 0,
+      "ttfbOverheadMs": 207.23
+    },
+    "concurrency": {
+      "inflight": 4,
+      "seconds": 5.1,
+      "statuses": {
+        "200": 65
+      },
+      "transportErrors": 0,
+      "errors": {},
+      "perUrl": [
+        {
+          "url": "http://127.0.0.1:62585",
+          "requests": 22
+        },
+        {
+          "url": "http://127.0.0.1:62586",
+          "requests": 22
+        },
+        {
+          "url": "http://127.0.0.1:62587",
+          "requests": 21
+        }
+      ],
+      "latency": {
+        "n": 65,
+        "p50": 304.99,
+        "p90": 411.85,
+        "p99": 536.09,
+        "max": 536.09
+      },
+      "throughputRps": 12.68
+    }
+  },
+  "violations": [
+    {
+      "scenario": "latency",
+      "metric": "p99 overhead",
+      "value": 797.59,
+      "threshold": 30,
+      "unit": "ms"
+    },
+    {
+      "scenario": "ttfb",
+      "metric": "ttfb overhead",
+      "value": 207.23,
+      "threshold": 10,
+      "unit": "ms"
+    }
+  ]
+}

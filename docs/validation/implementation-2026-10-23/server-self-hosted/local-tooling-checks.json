@@ -1,0 +1,22 @@
+{
+  "nodeSyntax": "pass",
+  "gitDiffCheck": "pass",
+  "npmPackageExclusionTest": {
+    "pass": 1,
+    "fail": 0
+  },
+  "ipVerifierRecheck": {
+    "health": 200,
+    "unauthenticatedModels": 401,
+    "authenticatedModels": 200
+  },
+  "sensitiveFiles": {
+    "mode": "600",
+    "gitIgnored": true,
+    "gitTracked": false
+  },
+  "credentialLiteralScan": {
+    "filesChecked": 19,
+    "matches": 0
+  }
+}

@@ -9226,6 +9226,8 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
 ];
 
 export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[] = [
+  { table: 'saas_redis_quota_metadata' },
+  { table: 'saas_redis_quota_state' },
   {
     table: 'saas_tenants',
   },
@@ -9508,6 +9510,7 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
+  { tables: ['saas_redis_quota_metadata', 'saas_redis_quota_state'] },
   {
     tables: ['saas_tenants', 'saas_projects', 'saas_project_inference_policy_versions'],
   },
@@ -9673,7 +9676,29 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
   },
 ];
 
+const REDIS_QUOTA_GATEWAY_COLUMNS = [
+  { table: 'saas_redis_quota_metadata', privilege: 'INSERT', columns: ['namespace', 'identity'] },
+  { table: 'saas_redis_quota_metadata', privilege: 'UPDATE', columns: ['generation'] },
+  {
+    table: 'saas_redis_quota_state',
+    privilege: 'INSERT',
+    columns: ['namespace', 'key', 'generation', 'version', 'value', 'projection_pending'],
+  },
+  {
+    table: 'saas_redis_quota_state',
+    privilege: 'UPDATE',
+    columns: ['generation', 'version', 'value', 'projection_pending'],
+  },
+  {
+    table: 'saas_requests',
+    privilege: 'UPDATE',
+    columns: ['capacity_backend', 'redis_quota_reservation_id', 'redis_rate_reservation_id'],
+  },
+  { table: 'saas_gateway_capacity_reservations', privilege: 'INSERT', columns: ['state', 'reserved_at'] },
+] as const;
+
 export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[] = [
+  ...REDIS_QUOTA_GATEWAY_COLUMNS.map((group) => ({ ...group, tsStyle: 'map-callback' as const })),
   {
     tsComment: ['Startup schema verification reads only the registered migration identity and checksum.'],
     table: 'saas_schema_migrations',
@@ -10837,6 +10862,9 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
 ];
 
 export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlEntry[] = [
+  ...REDIS_QUOTA_GATEWAY_COLUMNS.flatMap((group) =>
+    group.columns.map((column) => ({ table: group.table, column, privilege: group.privilege })),
+  ),
   {
     table: 'saas_schema_migrations',
     column: 'version',

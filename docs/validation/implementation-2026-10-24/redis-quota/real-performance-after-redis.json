@@ -1,0 +1,1081 @@
+{
+  "startedAt": "2026-10-23T17:04:07.431Z",
+  "assembly": "deployed-self-hosted-systemd-redis-quota-real-kimi",
+  "model": "kimi-k2.6",
+  "stream": true,
+  "maxTokens": 32,
+  "host": {
+    "cpus": 1,
+    "totalMemoryMiB": 1817,
+    "loadAtStart": [
+      0.12,
+      0.08,
+      0.09
+    ],
+    "loadAtEnd": [
+      0.09,
+      0.08,
+      0.09
+    ]
+  },
+  "artifact": "ab293e01ddc56d6eb5caf6c0130f925a04bd18c0",
+  "artifactSha256": "b0b3bc366644e2e04fdadea7a4caea5e4e04018af69984ac896dff120025b7e9",
+  "scope": "40 bounded real requests plus 2 warmups; local load client shares host; direct/provider timing includes internet and generation; not managed-SaaS R4/R9 acceptance",
+  "samples": [
+    {
+      "leg": "direct",
+      "index": -1,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 633.878571,
+      "firstByteMs": 634.249467,
+      "firstTextMs": 634.52708,
+      "totalMs": 650.492196,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 23,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": -1,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 640.922264,
+      "firstByteMs": 641.072766,
+      "firstTextMs": 641.1477480000001,
+      "totalMs": 668.658201,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 0,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 608.457766,
+      "firstByteMs": 608.560099,
+      "firstTextMs": 608.6177070000001,
+      "totalMs": 634.945266,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 1,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 1080.213777,
+      "firstByteMs": 1080.3162000000002,
+      "firstTextMs": 1080.3657320000002,
+      "totalMs": 1099.7219049999999,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 2,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 596.8255260000001,
+      "firstByteMs": 596.9373460000002,
+      "firstTextMs": 596.9936820000003,
+      "totalMs": 613.9657310000002,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 3,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 543.9996669999996,
+      "firstByteMs": 544.1739940000002,
+      "firstTextMs": 544.2291090000003,
+      "totalMs": 576.9528619999996,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 4,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 555.8000139999995,
+      "firstByteMs": 556.0258789999998,
+      "firstTextMs": 556.0820049999993,
+      "totalMs": 575.9605889999993,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 5,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 536.8891080000003,
+      "firstByteMs": 536.9891070000003,
+      "firstTextMs": 537.1356720000003,
+      "totalMs": 556.7845340000003,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 6,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 568.6232230000005,
+      "firstByteMs": 568.7528760000005,
+      "firstTextMs": 568.8109260000001,
+      "totalMs": 589.3794470000003,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 7,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 532.4075939999993,
+      "firstByteMs": 532.4956889999994,
+      "firstTextMs": 532.5448109999998,
+      "totalMs": 567.4440759999998,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 8,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 550.974671,
+      "firstByteMs": 551.049892,
+      "firstTextMs": 551.0954590000001,
+      "totalMs": 572.8938410000001,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "direct",
+      "index": 9,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 537.9031559999994,
+      "firstByteMs": 537.9869639999997,
+      "firstTextMs": 538.0381299999999,
+      "totalMs": 558.4018859999996,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 0,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 569.0253900000007,
+      "firstByteMs": 569.1614960000006,
+      "firstTextMs": 569.2227609999991,
+      "totalMs": 584.8592389999994,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 1,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 625.2614089999988,
+      "firstByteMs": 625.3939389999996,
+      "firstTextMs": 625.4579589999994,
+      "totalMs": 646.983048,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 2,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 557.2630939999999,
+      "firstByteMs": 557.3558979999998,
+      "firstTextMs": 557.3965759999992,
+      "totalMs": 578.7554920000002,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 3,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 554.8530740000006,
+      "firstByteMs": 554.9717470000014,
+      "firstTextMs": 555.0230040000006,
+      "totalMs": 578.1789690000005,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 4,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 559.0740800000003,
+      "firstByteMs": 559.1491210000004,
+      "firstTextMs": 559.189026,
+      "totalMs": 579.601845000001,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 5,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 580.5223449999994,
+      "firstByteMs": 580.5968950000006,
+      "firstTextMs": 580.639423999999,
+      "totalMs": 599.128326,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 6,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 597.6341049999992,
+      "firstByteMs": 597.7101289999991,
+      "firstTextMs": 597.7498729999988,
+      "totalMs": 618.4565349999993,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 7,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 580.5972939999992,
+      "firstByteMs": 580.679388999999,
+      "firstTextMs": 580.7259059999997,
+      "totalMs": 601.390206,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 8,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 541.8045820000007,
+      "firstByteMs": 541.880204000001,
+      "firstTextMs": 541.9251280000008,
+      "totalMs": 563.8108059999995,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 9,
+      "concurrency": 1,
+      "status": 200,
+      "headersMs": 560.5025729999998,
+      "firstByteMs": 560.6070199999995,
+      "firstTextMs": 560.6552709999996,
+      "totalMs": 580.3790430000008,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 0,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 591.5170170000001,
+      "firstByteMs": 591.595494000001,
+      "firstTextMs": 591.6346880000001,
+      "totalMs": 615.238295000001,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 1,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 698.5531460000002,
+      "firstByteMs": 698.6237590000001,
+      "firstTextMs": 698.663242999999,
+      "totalMs": 718.6256039999989,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 2,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 666.8847839999999,
+      "firstByteMs": 666.9683609999993,
+      "firstTextMs": 667.005932,
+      "totalMs": 690.7702509999999,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 3,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 586.8766800000012,
+      "firstByteMs": 586.9534540000004,
+      "firstTextMs": 586.9940310000002,
+      "totalMs": 607.5229580000014,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 5,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 535.7331649999996,
+      "firstByteMs": 535.8140170000006,
+      "firstTextMs": 535.8532809999997,
+      "totalMs": 557.8989889999993,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 4,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 723.467756,
+      "firstByteMs": 723.5503710000012,
+      "firstTextMs": 723.5895049999999,
+      "totalMs": 748.0286130000004,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 6,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 570.7049969999989,
+      "firstByteMs": 570.8360329999996,
+      "firstTextMs": 570.8839520000001,
+      "totalMs": 590.0099419999988,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 7,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 567.1642899999988,
+      "firstByteMs": 567.2387089999993,
+      "firstTextMs": 567.2783139999992,
+      "totalMs": 589.8620840000003,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 8,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 590.0391069999987,
+      "firstByteMs": 590.1313099999988,
+      "firstTextMs": 590.1688210000011,
+      "totalMs": 609.6684819999991,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 9,
+      "concurrency": 2,
+      "status": 200,
+      "headersMs": 528.1227489999983,
+      "firstByteMs": 528.1994320000013,
+      "firstTextMs": 528.2360509999999,
+      "totalMs": 566.5112430000008,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 1,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 570.7466249999998,
+      "firstByteMs": 570.8233689999979,
+      "firstTextMs": 570.8624019999988,
+      "totalMs": 633.5586279999989,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 4,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 683.5013650000001,
+      "firstByteMs": 683.5747540000011,
+      "firstTextMs": 683.6133360000022,
+      "totalMs": 705.3623270000026,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 3,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 691.6398880000015,
+      "firstByteMs": 691.6978259999996,
+      "firstTextMs": 691.7306380000009,
+      "totalMs": 715.8147190000018,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 2,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 695.4814389999992,
+      "firstByteMs": 695.5313829999977,
+      "firstTextMs": 695.5568700000003,
+      "totalMs": 728.1267459999981,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 0,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 717.2637519999989,
+      "firstByteMs": 717.3188850000006,
+      "firstTextMs": 717.3671570000006,
+      "totalMs": 735.1664410000012,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 5,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 581.7138049999994,
+      "firstByteMs": 581.7830149999972,
+      "firstTextMs": 581.821097,
+      "totalMs": 601.8148069999988,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 9,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 551.8310720000009,
+      "firstByteMs": 551.8992400000025,
+      "firstTextMs": 551.9363300000005,
+      "totalMs": 571.1868930000019,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 6,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 592.6850630000008,
+      "firstByteMs": 592.7358879999992,
+      "firstTextMs": 592.7659839999978,
+      "totalMs": 621.0509129999991,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 7,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 596.7186860000002,
+      "firstByteMs": 596.7932550000005,
+      "firstTextMs": 596.8226009999998,
+      "totalMs": 618.9780550000032,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    },
+    {
+      "leg": "gateway",
+      "index": 8,
+      "concurrency": 5,
+      "status": 200,
+      "headersMs": 668.1907500000016,
+      "firstByteMs": 668.268546000003,
+      "firstTextMs": 668.3089620000028,
+      "totalMs": 687.5411110000023,
+      "terminal": true,
+      "textChars": 2,
+      "usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 23,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null,
+      "ok": true
+    }
+  ],
+  "batches": [
+    {
+      "label": "direct-c1",
+      "leg": "direct",
+      "n": 10,
+      "concurrency": 1,
+      "success": 10,
+      "failed": 0,
+      "statuses": {
+        "200": 10
+      },
+      "elapsedMs": 6346.666181,
+      "throughputRps": 1.5756303726729757,
+      "firstByteMs": {
+        "p50": 551.05,
+        "p95": 1080.32
+      },
+      "firstTextMs": {
+        "p50": 551.1,
+        "p95": 1080.37
+      },
+      "totalMs": {
+        "p50": 575.96,
+        "p95": 1099.72
+      },
+      "routerCpuPercent": 1.2605042981383805,
+      "routerRssMaxMiB": 152.7578125,
+      "loadAfter": [
+        0.1,
+        0.08,
+        0.09
+      ]
+    },
+    {
+      "label": "gateway-c1",
+      "leg": "gateway",
+      "n": 10,
+      "concurrency": 1,
+      "success": 10,
+      "failed": 0,
+      "statuses": {
+        "200": 10
+      },
+      "elapsedMs": 5931.630091,
+      "throughputRps": 1.685877211927442,
+      "firstByteMs": {
+        "p50": 560.61,
+        "p95": 625.39
+      },
+      "firstTextMs": {
+        "p50": 560.66,
+        "p95": 625.46
+      },
+      "totalMs": {
+        "p50": 580.38,
+        "p95": 646.98
+      },
+      "routerCpuPercent": 3.371754423854885,
+      "routerRssMaxMiB": 158.38671875,
+      "loadAfter": [
+        0.1,
+        0.08,
+        0.09
+      ]
+    },
+    {
+      "label": "gateway-c2",
+      "leg": "gateway",
+      "n": 10,
+      "concurrency": 2,
+      "success": 10,
+      "failed": 0,
+      "statuses": {
+        "200": 10
+      },
+      "elapsedMs": 3210.4852779999983,
+      "throughputRps": 3.114793912473442,
+      "firstByteMs": {
+        "p50": 586.95,
+        "p95": 723.55
+      },
+      "firstTextMs": {
+        "p50": 586.99,
+        "p95": 723.59
+      },
+      "totalMs": {
+        "p50": 607.52,
+        "p95": 748.03
+      },
+      "routerCpuPercent": 3.426273303720786,
+      "routerRssMaxMiB": 164.31640625,
+      "loadAfter": [
+        0.09,
+        0.08,
+        0.09
+      ]
+    },
+    {
+      "label": "gateway-c5",
+      "leg": "gateway",
+      "n": 10,
+      "concurrency": 5,
+      "success": 10,
+      "failed": 0,
+      "statuses": {
+        "200": 10
+      },
+      "elapsedMs": 1416.1700410000012,
+      "throughputRps": 7.061298933381399,
+      "firstByteMs": {
+        "p50": 596.79,
+        "p95": 717.32
+      },
+      "firstTextMs": {
+        "p50": 596.82,
+        "p95": 717.37
+      },
+      "totalMs": {
+        "p50": 633.56,
+        "p95": 735.17
+      },
+      "routerCpuPercent": 8.473558720057678,
+      "routerRssMaxMiB": 165.60546875,
+      "loadAfter": [
+        0.09,
+        0.08,
+        0.09
+      ]
+    }
+  ],
+  "finishedAt": "2026-10-23T17:04:25.667Z"
+}

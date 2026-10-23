@@ -1,0 +1,3 @@
+{"kind":"telemetry-write-perf","batchSize":1,"queueMs":[250.69],"workerAckMs":[1.57],"enqueueToCommitMs":[252.26]}
+{"kind":"telemetry-write-perf","batchSize":1,"queueMs":[250.57],"workerAckMs":[0.87],"enqueueToCommitMs":[251.44]}
+{"kind":"telemetry-write-perf","batchSize":1,"queueMs":[250.28],"workerAckMs":[1.02],"enqueueToCommitMs":[251.3]}

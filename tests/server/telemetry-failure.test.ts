@@ -21,8 +21,8 @@ async function listen(handler: http.RequestListener) {
 }
 
 type Faults = {
-  request?: (record: RequestRecord) => void;
-  attempt?: (record: AttemptRecord) => void;
+  request?: (record: RequestRecord) => void | Promise<void>;
+  attempt?: (record: AttemptRecord) => void | Promise<void>;
   admit?: () => void;
   settle?: () => void;
   sent?: () => void;
@@ -84,11 +84,11 @@ async function harness(faults: Faults = {}, streaming = false) {
   };
   const telemetryStore: NonNullable<ProxyHandlerOptions['telemetryStore']> = {
     upsertRequest: async (record) => {
-      faults.request?.(record);
+      await faults.request?.(record);
       requests.push(structuredClone(record));
     },
     upsertAttempt: async (record) => {
-      faults.attempt?.(record);
+      await faults.attempt?.(record);
       attempts.push(structuredClone(record));
     },
   };
@@ -135,7 +135,7 @@ async function harness(faults: Faults = {}, streaming = false) {
   };
 }
 
-test('initial request write failure fails closed before admission and persists terminal state on retry', async () => {
+test('initial observation failure does not block quota admission or outbound', async () => {
   let failed = false;
   const h = await harness({
     request: (record) => {
@@ -147,16 +147,17 @@ test('initial request write failure fails closed before admission and persists t
   });
   try {
     const response = await h.post();
-    assert.equal(response.status, 503);
-    assert.equal(h.outbound, 0);
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(h.outbound, 1);
     assert.equal(h.active.size, 0);
-    assert.equal(h.requests.at(-1)?.state, 'failed');
+    assert.equal(h.requests.at(-1)?.state, 'completed');
   } finally {
     await h.close();
   }
 });
 
-test('admitted request write failure releases reservation and returns 503 before outbound', async () => {
+test('admitted observation failure preserves the request and quota settlement', async () => {
   const h = await harness({
     request: (record) => {
       if (record.state === 'admitted') throw new Error('injected admitted write failure');
@@ -164,17 +165,18 @@ test('admitted request write failure releases reservation and returns 503 before
   });
   try {
     const response = await h.post();
-    assert.equal(response.status, 503);
-    assert.equal(h.outbound, 0);
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(h.outbound, 1);
     assert.equal(h.active.size, 0);
-    assert.equal(h.requests.at(-1)?.state, 'failed');
-    assert.equal(h.requests.at(-1)?.finalHttpStatus, 503);
+    assert.equal(h.requests.at(-1)?.state, 'completed');
+    assert.equal(h.requests.at(-1)?.finalHttpStatus, 200);
   } finally {
     await h.close();
   }
 });
 
-test('admission uncertainty and started-attempt write failure release reservations', async () => {
+test('quota admission uncertainty blocks forwarding while attempt observation failure does not', async () => {
   const admission = await harness({
     admit: () => {
       throw new Error('after commit');
@@ -194,10 +196,12 @@ test('admission uncertainty and started-attempt write failure release reservatio
     },
   });
   try {
-    assert.equal((await attempt.post()).status, 503);
-    assert.equal(attempt.outbound, 0);
+    const response=await attempt.post();
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(attempt.outbound, 1);
     assert.equal(attempt.active.size, 0);
-    assert.equal(attempt.requests.at(-1)?.state, 'failed');
+    assert.equal(attempt.requests.at(-1)?.state, 'completed');
   } finally {
     await attempt.close();
   }
@@ -244,7 +248,7 @@ test('settle failure does not skip terminal persistence or send a second stream 
   }
 });
 
-test('terminal write failure retries persistence without altering delivered status', async () => {
+test('terminal observation failure does not retry in the request path or mutate earlier snapshots', async () => {
   let failures = 0;
   const h = await harness({
     request: (record) => {
@@ -254,12 +258,28 @@ test('terminal write failure retries persistence without altering delivered stat
   try {
     const response = await h.post();
     assert.equal(response.status, 200);
+    await response.text();
     assert.equal(h.active.size, 0);
-    assert.equal(h.requests.at(-1)?.state, 'completed');
-    assert.equal(failures, 2);
+    assert.equal(h.requests.at(-1)?.state, 'admitted');
+    assert.equal(h.requests[0]?.state, 'received');
+    assert.equal(failures, 1);
   } finally {
     await h.close();
   }
+});
+
+test('blocked observation promises do not delay the upstream request or streaming response', async()=>{
+  let release!:()=>void;
+  const blocked=new Promise<void>(resolve=>{release=resolve;});
+  const h=await harness({request:()=>blocked,attempt:()=>blocked},true);
+  try {
+    const response=await Promise.race([h.post(),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('observation blocked request')),1000))]);
+    assert.equal(response.status,200);
+    assert.match(await response.text(),/data: \[DONE\]/);
+    assert.equal(h.outbound,1);
+    assert.equal(h.active.size,0);
+    assert.equal(h.requests.length,0);
+  } finally { release(); await h.close(); }
 });
 
 test('persistent settle failure still writes terminal state and preserves the delivered response', async () => {

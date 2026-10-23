@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import Database from 'better-sqlite3';
 import { SQLiteQuotaLedger } from '../../src/quota/ledger.js';
+import { initializeQuotaStore } from '../../src/quota/store.js';
+import { QuotaWriteClient } from '../../src/quota/write-client.js';
 import { SQLiteTelemetryStore } from '../../src/storage/telemetry-store.js';
 import { TelemetryWriteClient, TelemetryWriteQueueFullError } from '../../src/storage/telemetry-write-client.js';
 import type { RequestRecord } from '../../src/telemetry/types.js';
@@ -80,7 +83,7 @@ test('writer batches events atomically, retains a failed batch, and resolves onl
   }
 });
 
-test('queue overflow marks recorder degraded, refuses new writes/admission, and close drains accepted work', async () => {
+test('queue overflow counts dropped observations and resumes accepting writes after drain', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-telemetry-overflow-'));
   const dbPath = path.join(dir, 'logs.sqlite');
   const client = await TelemetryWriteClient.open(dbPath, { maxPending: 1 });
@@ -89,13 +92,14 @@ test('queue overflow marks recorder degraded, refuses new writes/admission, and 
     const first = client.upsertRequest(request('accepted'));
     await assert.rejects(client.upsertRequest(request('overflow')), TelemetryWriteQueueFullError);
     assert.equal(client.getStatus().degraded, true);
-    assert.deepEqual(await client.admit(admission('blocked')), { allowed: false, reason: 'recorder_degraded' });
-    await assert.rejects(client.upsertRequest(request('later')));
+    assert.equal(client.getStatus().droppedEvents,1);
     await first;
+    await client.upsertRequest(request('later'));
     reader = new SQLiteTelemetryStore(dbPath);
     await reader.init();
     assert.ok(await reader.getRequest('accepted'));
     assert.equal(await reader.getRequest('overflow'), null);
+    assert.ok(await reader.getRequest('later'));
   } finally {
     await client.close();
     await reader?.close();
@@ -103,20 +107,27 @@ test('queue overflow marks recorder degraded, refuses new writes/admission, and 
   }
 });
 
-test('quota admission, attempt sent marker and settlement follow committed telemetry in worker order', async () => {
+test('failed observation batches cannot block the independent business ledger or usage recovery', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-telemetry-quota-rpc-'));
   const dbPath = path.join(dir, 'logs.sqlite');
   const store = new SQLiteTelemetryStore(dbPath);
+  const business=new Database(path.join(dir,'control.sqlite'));
+  business.pragma('journal_mode=WAL');
+  initializeQuotaStore(business);
+  const quota=await QuotaWriteClient.open(business.name);
   let client: TelemetryWriteClient | undefined;
   try {
     await store.init();
-    client = await TelemetryWriteClient.open(dbPath);
-    await client.upsertRequest(request('quota-request'));
-    assert.ok(await store.getRequest('quota-request'), 'request commit must precede the admission RPC');
-    assert.deepEqual(await client.admit(admission('quota-request')), { allowed: true });
-    await client.markAttemptSent('quota-request');
-    await client.settle('quota-request', 37, 0);
-    const balance = await new SQLiteQuotaLedger(store).balance('key-1', 'current-test-period');
+    store.connection.exec("CREATE TRIGGER fail_logs BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT,'injected log failure'); END");
+    client = await TelemetryWriteClient.open(dbPath,{flushIntervalMs:10});
+    const logged=client.upsertRequest(request('quota-request'));
+    await waitFor(()=>client!.getStatus().degraded);
+    assert.deepEqual(await quota.admit(admission('quota-request')), { allowed: true });
+    await quota.markAttemptSent('quota-request','attempt');
+    await quota.recordAttemptUsage('quota-request','attempt',37);
+    const ledger=new SQLiteQuotaLedger({connection:business});
+    assert.equal(await ledger.recoverInterrupted(),1);
+    const balance = await ledger.balance('key-1', 'current-test-period');
     assert.deepEqual(balance, {
       reportedUsed: 37,
       estimatedUsed: 0,
@@ -124,8 +135,13 @@ test('quota admission, attempt sent marker and settlement follow committed telem
       adjustmentTokens: 0,
       activeRequests: 0,
     });
+    assert.equal(await store.getRequest('quota-request'),null);
+    store.connection.exec('DROP TRIGGER fail_logs');
+    await logged;
   } finally {
     await client?.close();
+    await quota.close();
+    business.close();
     await store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }

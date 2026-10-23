@@ -151,15 +151,6 @@ test('legacy log batches coexist with concurrent telemetry writes under transien
         startedAtMs: 10_000 + i,
       }),
     );
-    const quotaAdmission = telemetry.admit({
-      requestId: 'quota-during-contention',
-      proxyKeyId: 'key-1',
-      atMs: 10_000,
-      periodId: 'test-period',
-      periodStartMs: 0,
-      periodEndMs: 60_000,
-      reserveTokens: 10,
-    });
     for (let batch = 0; batch < 20; batch++) {
       await legacy.insertBatch(
         Array.from({ length: 5 }, (_, i) => ({
@@ -184,7 +175,6 @@ test('legacy log batches coexist with concurrent telemetry writes under transien
       );
     }
     await Promise.all(telemetryWrites);
-    assert.equal((await quotaAdmission).allowed, true);
     assert.equal(telemetry.getStatus().degraded, false);
     assert.equal(verify.prepare('SELECT COUNT(*) AS count FROM request_logs').get().count, 100);
     assert.equal(verify.prepare('SELECT COUNT(*) AS count FROM requests').get().count, 100);

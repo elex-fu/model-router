@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
 import type { SecretSource } from '../config/v2-schema.js';
 import { ControlError, type ControlService } from '../control/service.js';
-import type { SQLiteQuotaLedger } from '../quota/ledger.js';
+import type { QuotaAdminLedger } from '../quota/ledger.js';
 import { quotaPeriod } from '../quota/period.js';
 import type { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
 import type { RequestFilter, SQLiteTelemetryStore } from '../storage/telemetry-store.js';
@@ -372,7 +372,7 @@ function attemptView(attempt: AttemptRecord, secrets: ReadonlySet<string>, resol
 export function telemetryAdapters(
   store: SQLiteTelemetryStore,
   control: ControlService,
-  ledger?: SQLiteQuotaLedger,
+  ledger?: QuotaAdminLedger,
   runtime?: AdminRuntimeBridge,
   quotaTimezoneVersions?: QuotaTimezoneVersions,
 ): AdminAdapters {
@@ -888,7 +888,7 @@ export function telemetryAdapters(
       const key = config.proxyKeys.find((item) => item.id === keyId);
       if (!key) throw new ControlError(404, 'NOT_FOUND', 'Key not found');
       const now = Date.now();
-      const period = store.connection
+      const period = ledger.connection
         .prepare(`SELECT p.period_id AS periodId,p.start_ms AS startMs,p.end_ms AS endMs,v.timezone AS timezone
         FROM quota_periods p LEFT JOIN quota_timezone_versions v ON v.version_id=p.timezone_version_id
         WHERE p.proxy_key_id=? AND p.start_ms<=? AND p.end_ms>? ORDER BY p.start_ms DESC LIMIT 1`)
@@ -908,7 +908,7 @@ export function telemetryAdapters(
         ? await ledger.balance(keyId, period.periodId)
         : { reportedUsed: 0, estimatedUsed: 0, reserved: 0, adjustmentTokens: 0, activeRequests: 0 };
       const rpmUsed = (
-        store.connection
+        ledger.connection
           .prepare(`SELECT COUNT(*) AS n FROM quota_admissions WHERE proxy_key_id=? AND admitted_at_ms>?`)
           .get(keyId, Date.now() - 60_000) as { n: number }
       ).n;
@@ -942,7 +942,7 @@ export function telemetryAdapters(
       const id = input.idempotencyKey;
       const currentPeriod =
         input.periodId === undefined
-          ? (store.connection
+          ? (ledger.connection
               .prepare(`SELECT period_id FROM quota_periods
         WHERE proxy_key_id=? AND start_ms<=? AND end_ms>? ORDER BY start_ms DESC LIMIT 1`)
               .get(keyId, Date.now(), Date.now()) as { period_id: string } | undefined)
@@ -965,8 +965,8 @@ export function telemetryAdapters(
           'INVALID_ADJUSTMENT',
           'idempotencyKey, periodId, integer deltaTokens and reason are required',
         );
-      const existing = store.connection
-        .prepare('SELECT proxy_key_id,period_id,delta_tokens,reason FROM quota_adjustments WHERE id=?')
+      const existing = ledger.connection
+        .prepare('SELECT proxy_key_id,period_id,delta_tokens,reason FROM quota_ledger_adjustments WHERE id=?')
         .get(id) as { proxy_key_id: string; period_id: string; delta_tokens: number; reason: string } | undefined;
       if (
         existing &&
@@ -976,7 +976,7 @@ export function telemetryAdapters(
           existing.reason !== reason)
       )
         throw new ControlError(409, 'IDEMPOTENCY_CONFLICT', 'Idempotency key has different parameters');
-      const period = store.connection
+      const period = ledger.connection
         .prepare('SELECT 1 FROM quota_periods WHERE proxy_key_id=? AND period_id=?')
         .get(keyId, periodId);
       if (!period) throw new ControlError(404, 'PERIOD_NOT_FOUND', 'Quota period not found');

@@ -1,0 +1,54 @@
+{
+  "at": "2026-10-23T04:05:15.519Z",
+  "checks": [
+    {
+      "path": "/healthz",
+      "authenticated": false,
+      "status": 200
+    },
+    {
+      "path": "/v1/models",
+      "authenticated": false,
+      "status": 401
+    },
+    {
+      "path": "/v1/models",
+      "authenticated": true,
+      "status": 200
+    },
+    {
+      "protocol": "anthropic",
+      "status": 200,
+      "headersMs": 1589.662158,
+      "totalMs": 1589.957934,
+      "hasText": true,
+      "finish": "end_turn",
+      "usage": {
+        "input_tokens": 23,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 11,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      },
+      "error": null
+    },
+    {
+      "protocol": "openai",
+      "status": 200,
+      "headersMs": 1378.4911720000002,
+      "totalMs": 1378.895091,
+      "hasText": true,
+      "finish": "stop",
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 11,
+        "total_tokens": 34,
+        "prompt_tokens_details": {
+          "cached_tokens": 23
+        }
+      },
+      "error": null
+    }
+  ]
+}

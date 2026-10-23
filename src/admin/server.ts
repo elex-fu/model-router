@@ -13,7 +13,7 @@ import type { ConfigV2, UpstreamDefinition } from '../config/v2-schema.js';
 import type { ConfigDiff } from '../control/service.js';
 import { ConfigConflictError, ConfigValidationError, ControlError, ControlService } from '../control/service.js';
 import { ControlStore } from '../control/store.js';
-import type { SQLiteQuotaLedger } from '../quota/ledger.js';
+import type { QuotaAdminLedger } from '../quota/ledger.js';
 import type { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
 import { injectBrandAppConfig, type PublicBrandSnapshot } from '../saas/platform/brand/snapshot.js';
 import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
@@ -165,7 +165,7 @@ export interface AdminServerOptions {
   applyConfig?: (next: ConfigV2, changes: ConfigDiff[]) => Promise<number>;
   telemetryStore?: SQLiteTelemetryStore;
   recorderStatus?: () => TelemetryWriterStatus;
-  quotaLedger?: SQLiteQuotaLedger;
+  quotaLedger?: QuotaAdminLedger;
   quotaTimezoneVersions?: QuotaTimezoneVersions;
   webDistPath?: string;
   /** Live health/circuit objects owned by the proxy process. */

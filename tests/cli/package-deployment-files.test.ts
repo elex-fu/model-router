@@ -26,6 +26,10 @@ test('npm deployment package includes examples and excludes operator connection 
     await writeFile(join(deploy, '.npmignore'), await readFile(join(root, 'deploy/.npmignore')));
     const localFiles = [
       'remote-server.env',
+      'remote-server.local.env',
+      'remote-server.staging.env',
+      'remote-client.local.env',
+      'remote-server-ip-ca.local.pem',
       'compose/.env',
       'compose/.env.local',
       'systemd/worker.env',

@@ -1,0 +1,238 @@
+{
+  "startedAt": "2026-10-23T17:15:44.395Z",
+  "finishedAt": "2026-10-23T17:16:59.701Z",
+  "artifactSha256": "b0b3bc366644e2e04fdadea7a4caea5e4e04018af69984ac896dff120025b7e9",
+  "design": {
+    "rounds": 5,
+    "pairsPerRound": 10,
+    "formalPerLeg": 50,
+    "warmupPerLeg": 2,
+    "concurrency": 1,
+    "order": "Alternate direct-gateway and gateway-direct pairs, exactly five of each order per round",
+    "gapBetweenRoundsMs": 3000,
+    "retries": 0,
+    "excludeOutliers": false
+  },
+  "success": 100,
+  "failures": 0,
+  "exactOkResponses": 100,
+  "aggregate": {
+    "direct": {
+      "samples": 50,
+      "success": 50,
+      "failed": 0,
+      "headersMs": {
+        "n": 50,
+        "mean": 585.49,
+        "p50": 568.73,
+        "p95": 681.16,
+        "min": 498.53,
+        "max": 936.38,
+        "sampleSd": 73.2
+      },
+      "firstByteMs": {
+        "n": 50,
+        "mean": 585.58,
+        "p50": 568.8,
+        "p95": 681.24,
+        "min": 498.66,
+        "max": 936.46,
+        "sampleSd": 73.21
+      },
+      "firstTextMs": {
+        "n": 50,
+        "mean": 585.65,
+        "p50": 568.85,
+        "p95": 681.29,
+        "min": 498.71,
+        "max": 936.5,
+        "sampleSd": 73.2
+      },
+      "totalMs": {
+        "n": 50,
+        "mean": 607.03,
+        "p50": 596.04,
+        "p95": 696.33,
+        "min": 520.41,
+        "max": 958.5,
+        "sampleSd": 73.18
+      },
+      "outputTokens": {
+        "n": 50,
+        "mean": 11,
+        "p50": 11,
+        "p95": 11,
+        "min": 11,
+        "max": 11,
+        "sampleSd": 0
+      },
+      "statuses": {
+        "200": 50
+      }
+    },
+    "gateway": {
+      "samples": 50,
+      "success": 50,
+      "failed": 0,
+      "headersMs": {
+        "n": 50,
+        "mean": 583.79,
+        "p50": 569.47,
+        "p95": 668.36,
+        "min": 518.03,
+        "max": 773.2,
+        "sampleSd": 47.1
+      },
+      "firstByteMs": {
+        "n": 50,
+        "mean": 583.87,
+        "p50": 569.54,
+        "p95": 668.45,
+        "min": 518.16,
+        "max": 773.28,
+        "sampleSd": 47.1
+      },
+      "firstTextMs": {
+        "n": 50,
+        "mean": 583.91,
+        "p50": 569.57,
+        "p95": 668.49,
+        "min": 518.22,
+        "max": 773.31,
+        "sampleSd": 47.09
+      },
+      "totalMs": {
+        "n": 50,
+        "mean": 606.18,
+        "p50": 596.29,
+        "p95": 690.68,
+        "min": 537.05,
+        "max": 806.24,
+        "sampleSd": 47.82
+      },
+      "outputTokens": {
+        "n": 50,
+        "mean": 11,
+        "p50": 11,
+        "p95": 11,
+        "min": 11,
+        "max": 11,
+        "sampleSd": 0
+      },
+      "statuses": {
+        "200": 50
+      }
+    },
+    "pairedGatewayMinusDirectMs": {
+      "headersMs": {
+        "n": 50,
+        "mean": -1.7,
+        "p50": 8.48,
+        "p95": 109.13,
+        "min": -375.75,
+        "max": 215.45,
+        "sampleSd": 94.71
+      },
+      "firstByteMs": {
+        "n": 50,
+        "mean": -1.7,
+        "p50": 8.47,
+        "p95": 109.12,
+        "min": -375.76,
+        "max": 215.44,
+        "sampleSd": 94.71
+      },
+      "firstTextMs": {
+        "n": 50,
+        "mean": -1.73,
+        "p50": 8.46,
+        "p95": 109.11,
+        "min": -375.76,
+        "max": 215.43,
+        "sampleSd": 94.71
+      },
+      "totalMs": {
+        "n": 50,
+        "mean": -0.85,
+        "p50": 8.87,
+        "p95": 112.48,
+        "min": -377.32,
+        "max": 232.75,
+        "sampleSd": 95.26
+      }
+    },
+    "gatewayMeanTotalChangePercent": -0.14
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "directMeanTotalMs": 620.05,
+      "gatewayMeanTotalMs": 579.33,
+      "meanPairedDifferenceMs": -40.71,
+      "meanTotalChangePercent": -6.57
+    },
+    {
+      "round": 2,
+      "directMeanTotalMs": 624.93,
+      "gatewayMeanTotalMs": 639.08,
+      "meanPairedDifferenceMs": 14.15,
+      "meanTotalChangePercent": 2.26
+    },
+    {
+      "round": 3,
+      "directMeanTotalMs": 599.01,
+      "gatewayMeanTotalMs": 605.88,
+      "meanPairedDifferenceMs": 6.87,
+      "meanTotalChangePercent": 1.15
+    },
+    {
+      "round": 4,
+      "directMeanTotalMs": 599.32,
+      "gatewayMeanTotalMs": 613.7,
+      "meanPairedDifferenceMs": 14.38,
+      "meanTotalChangePercent": 2.4
+    },
+    {
+      "round": 5,
+      "directMeanTotalMs": 591.82,
+      "gatewayMeanTotalMs": 592.89,
+      "meanPairedDifferenceMs": 1.07,
+      "meanTotalChangePercent": 0.18
+    }
+  ],
+  "orderSensitivity": {
+    "directFirst": {
+      "pairs": 25,
+      "meanPairedDifferenceMs": -0.03
+    },
+    "gatewayFirst": {
+      "pairs": 25,
+      "meanPairedDifferenceMs": -1.67
+    }
+  },
+  "hostCpuBusyRangePercent": [
+    3.71,
+    4.97
+  ],
+  "routerCpuRangePercent": [
+    1.32,
+    1.69
+  ],
+  "routerRssMaxMiB": 172.88,
+  "sameRouterProcess": true,
+  "usageValues": {
+    "input_tokens": [
+      0
+    ],
+    "output_tokens": [
+      11
+    ],
+    "cache_read_input_tokens": [
+      23
+    ],
+    "cache_creation_input_tokens": [
+      0
+    ]
+  },
+  "interpretation": "Observed averages are effectively equal; negative differences do not establish acceleration. Independent real-upstream responses vary and pair observations may be time-correlated. This measures a warm loopback gateway on the deployed self-hosted path, not pure router overhead, public client latency, cold starts, long generations, or multi-instance SaaS acceptance."
+}

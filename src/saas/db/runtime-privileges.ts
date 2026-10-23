@@ -4057,6 +4057,8 @@ SELECT
  * new columns remain inaccessible until the template is reconciled again.
  */
 export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
+  'saas_redis_quota_metadata',
+  'saas_redis_quota_state',
   'saas_tenants',
   'saas_projects',
   'saas_project_inference_policy_versions',
@@ -4174,6 +4176,24 @@ export type SaasGatewayColumnGrant = readonly [
 
 /** Column DML used by gateway request preparation, compensation, evidence and settlement. */
 export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant[] = [
+  ...(['namespace', 'identity'] as const).map(
+    (column) => ['saas_redis_quota_metadata', column, 'INSERT'] as const,
+  ),
+  ...(['generation'] as const).map(
+    (column) => ['saas_redis_quota_metadata', column, 'UPDATE'] as const,
+  ),
+  ...(['namespace', 'key', 'generation', 'version', 'value', 'projection_pending'] as const).map(
+    (column) => ['saas_redis_quota_state', column, 'INSERT'] as const,
+  ),
+  ...(['generation', 'version', 'value', 'projection_pending'] as const).map(
+    (column) => ['saas_redis_quota_state', column, 'UPDATE'] as const,
+  ),
+  ...(['capacity_backend', 'redis_quota_reservation_id', 'redis_rate_reservation_id'] as const).map(
+    (column) => ['saas_requests', column, 'UPDATE'] as const,
+  ),
+  ...(['state', 'reserved_at'] as const).map(
+    (column) => ['saas_gateway_capacity_reservations', column, 'INSERT'] as const,
+  ),
   // Startup schema verification reads only the registered migration identity and checksum.
   ['saas_schema_migrations', 'version', 'SELECT'],
   ['saas_schema_migrations', 'name', 'SELECT'],

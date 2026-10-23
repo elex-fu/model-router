@@ -1,0 +1,56 @@
+{
+  "baselineStartedAt": "2026-10-23T04:08:24.922Z",
+  "optimizedStartedAt": "2026-10-23T17:04:07.431Z",
+  "optimizedFinishedAt": "2026-10-23T17:04:25.667Z",
+  "artifactSha256": "b0b3bc366644e2e04fdadea7a4caea5e4e04018af69984ac896dff120025b7e9",
+  "comparison": "same model/prompt/token limit and host; sequential real-provider samples at different times, not a paired controlled estimate of pure router overhead",
+  "formalSuccess": 40,
+  "formalSamples": 40,
+  "warmups": 2,
+  "batches": [
+    {
+      "label": "direct-c1",
+      "samplesEach": 10,
+      "beforeTotalP50Ms": 642.37,
+      "afterTotalP50Ms": 575.96,
+      "p50ReductionPercent": 10.34,
+      "beforeThroughputRps": 1.5027932944942417,
+      "afterThroughputRps": 1.5756303726729757,
+      "afterSuccess": 10,
+      "afterFailed": 0
+    },
+    {
+      "label": "gateway-c1",
+      "samplesEach": 10,
+      "beforeTotalP50Ms": 1376.17,
+      "afterTotalP50Ms": 580.38,
+      "p50ReductionPercent": 57.83,
+      "beforeThroughputRps": 0.731994977530653,
+      "afterThroughputRps": 1.685877211927442,
+      "afterSuccess": 10,
+      "afterFailed": 0
+    },
+    {
+      "label": "gateway-c2",
+      "samplesEach": 10,
+      "beforeTotalP50Ms": 1374.14,
+      "afterTotalP50Ms": 607.52,
+      "p50ReductionPercent": 55.79,
+      "beforeThroughputRps": 1.4707494052048198,
+      "afterThroughputRps": 3.114793912473442,
+      "afterSuccess": 10,
+      "afterFailed": 0
+    },
+    {
+      "label": "gateway-c5",
+      "samplesEach": 10,
+      "beforeTotalP50Ms": 1372.32,
+      "afterTotalP50Ms": 633.56,
+      "p50ReductionPercent": 53.83,
+      "beforeThroughputRps": 3.5036467621484473,
+      "afterThroughputRps": 7.061298933381399,
+      "afterSuccess": 10,
+      "afterFailed": 0
+    }
+  ]
+}

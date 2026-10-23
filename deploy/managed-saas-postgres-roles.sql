@@ -1184,6 +1184,7 @@ BEGIN
   FOR v_table IN
     SELECT read_relation.table_name
     FROM (VALUES
+      ('saas_redis_quota_metadata'), ('saas_redis_quota_state'),
       ('saas_tenants'), ('saas_projects'), ('saas_project_inference_policy_versions'),
       ('saas_users'), ('saas_memberships'), ('saas_project_memberships'), ('saas_api_keys'),
       ('saas_api_key_ip_policies'),
@@ -1271,6 +1272,24 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.array_agg(manifest.column_name ORDER BY manifest.column_name) AS column_names
     FROM (VALUES
+      ('saas_redis_quota_metadata', 'namespace', 'INSERT'),
+      ('saas_redis_quota_metadata', 'identity', 'INSERT'),
+      ('saas_redis_quota_metadata', 'generation', 'UPDATE'),
+      ('saas_redis_quota_state', 'namespace', 'INSERT'),
+      ('saas_redis_quota_state', 'key', 'INSERT'),
+      ('saas_redis_quota_state', 'generation', 'INSERT'),
+      ('saas_redis_quota_state', 'version', 'INSERT'),
+      ('saas_redis_quota_state', 'value', 'INSERT'),
+      ('saas_redis_quota_state', 'projection_pending', 'INSERT'),
+      ('saas_redis_quota_state', 'generation', 'UPDATE'),
+      ('saas_redis_quota_state', 'version', 'UPDATE'),
+      ('saas_redis_quota_state', 'value', 'UPDATE'),
+      ('saas_redis_quota_state', 'projection_pending', 'UPDATE'),
+      ('saas_requests', 'capacity_backend', 'UPDATE'),
+      ('saas_requests', 'redis_quota_reservation_id', 'UPDATE'),
+      ('saas_requests', 'redis_rate_reservation_id', 'UPDATE'),
+      ('saas_gateway_capacity_reservations', 'state', 'INSERT'),
+      ('saas_gateway_capacity_reservations', 'reserved_at', 'INSERT'),
       ('saas_schema_migrations', 'version', 'SELECT'),
       ('saas_schema_migrations', 'name', 'SELECT'),
       ('saas_schema_migrations', 'checksum', 'SELECT'),

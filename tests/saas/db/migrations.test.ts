@@ -627,6 +627,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     135,
     136,
     137,
+    138,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -636,7 +637,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     pool.applied.map(({ version }) => version),
     versions,
   );
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 118);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 119);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -713,9 +714,10 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
       'kimi_coding_quota_snapshots',
       'ops_media_requeue_requests',
       'platform_credential_validation_requeue',
+      'redis_quota_writeback',
     ],
   );
-  assert.equal(pool.applied.length, 118);
+  assert.equal(pool.applied.length, 119);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -896,6 +898,7 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       135,
       136,
       137,
+      138,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );

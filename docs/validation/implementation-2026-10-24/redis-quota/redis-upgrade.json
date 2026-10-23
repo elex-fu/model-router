@@ -1,0 +1,17 @@
+{
+  "at": "2026-10-23T17:03:15.675Z",
+  "artifactSha256": "b0b3bc366644e2e04fdadea7a4caea5e4e04018af69984ac896dff120025b7e9",
+  "quotaStoreVersion": 1,
+  "tables": {
+    "quota_periods": 1,
+    "quota_reservations": 37,
+    "quota_cache_metadata": 1,
+    "quota_attempt_usage": 0
+  },
+  "redisStates": [
+    {
+      "pending": 0,
+      "healthy": true
+    }
+  ]
+}

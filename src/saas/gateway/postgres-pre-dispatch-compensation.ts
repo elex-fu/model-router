@@ -157,14 +157,18 @@ export class PostgresPreDispatchCompensation implements RequestPreparationCompen
         throw new Error(SAFE_FAILURE);
       }
     }
-    const capacity = await exactlyOne(
-      tx,
-      `SELECT project_id, proxy_key_id, request_id, attempt_id, supply_mode, idempotency_scope_key,
+    const deferredCapacity = this.options.capacity.cachedReservation !== undefined;
+    const capacity = deferredCapacity
+      ? await this.options.capacity.cachedReservation!(input.requestId)
+      : await exactlyOne(
+          tx,
+          `SELECT project_id, proxy_key_id, request_id, attempt_id, supply_mode, idempotency_scope_key,
               request_fingerprint, request_fingerprint_version, quota_reservation_id, rate_reservation_id, state
          FROM saas_gateway_capacity_reservations WHERE tenant_id = $1 AND request_id = $2 FOR UPDATE`,
-      [input.tenantId, input.requestId],
-    );
+          [input.tenantId, input.requestId],
+        );
     if (
+      !capacity ||
       capacity.project_id !== binding.projectId ||
       capacity.proxy_key_id !== binding.proxyKeyId ||
       capacity.attempt_id !== input.attemptId ||
@@ -202,7 +206,7 @@ export class PostgresPreDispatchCompensation implements RequestPreparationCompen
       request.reconciliation_state === 'none' &&
       request.financial_status === (request.supply_mode === 'byok' ? 'not_applicable' : 'released') &&
       idem.state === 'completed' &&
-      capacity.state === 'released'
+      (capacity.state === 'released' || (deferredCapacity && capacity.state === 'reserved'))
     ) {
       if (request.supply_mode === 'platform') await this.assertHold(tx, input, true);
       else if (input.admission.holdReservation !== null) throw new Error(SAFE_FAILURE);
@@ -225,7 +229,7 @@ export class PostgresPreDispatchCompensation implements RequestPreparationCompen
       idem.state === 'in_progress' &&
       capacity.state === 'reserved';
     if (!safe) {
-      if (capacity.state === 'reserved') {
+      if (capacity.state === 'reserved' && !deferredCapacity) {
         await exactlyOne(
           tx,
           `UPDATE saas_gateway_capacity_reservations SET state = 'retained_for_reconciliation', updated_at = clock_timestamp()
