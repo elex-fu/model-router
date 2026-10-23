@@ -76,6 +76,28 @@ const COMMERCIAL_PRICE_VERSION_COLUMNS = [
  * remain SELECT-only even where source SQL still asks for a row lock.
  */
 export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlaneColumnGrant[] = [
+  ...columnGrants('saas_billing_group_spend_reservations', 'SELECT', [
+    'tenant_id',
+    'request_id',
+    'billing_group_id',
+    'window_kind',
+    'window_start',
+    'amount_minor_units',
+    'charge_currency',
+    'state',
+  ]),
+  ...columnGrants('saas_billing_group_spend_reservations', 'UPDATE', [
+    'state',
+    'settled_amount_minor_units',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_billing_group_spend_counters', 'SELECT', [
+    'billing_group_id',
+    'window_kind',
+    'window_start',
+    'charge_outstanding_reserved',
+  ]),
+  ...columnGrants('saas_billing_group_spend_counters', 'UPDATE', ['charge_outstanding_reserved', 'updated_at']),
   ...columnGrants('saas_customer_metering_policy_heads', 'SELECT', [
     'tenant_id',
     'project_id',

@@ -716,6 +716,10 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.string_to_array(manifest.column_names, ' ') AS column_names
     FROM (VALUES
+      ('saas_billing_group_spend_reservations', 'SELECT', 'tenant_id request_id billing_group_id window_kind window_start amount_minor_units charge_currency state'),
+      ('saas_billing_group_spend_reservations', 'UPDATE', 'state settled_amount_minor_units updated_at'),
+      ('saas_billing_group_spend_counters', 'SELECT', 'billing_group_id window_kind window_start charge_outstanding_reserved'),
+      ('saas_billing_group_spend_counters', 'UPDATE', 'charge_outstanding_reserved updated_at'),
       ('saas_customer_metering_policy_heads', 'SELECT', 'tenant_id project_id policy_id current_version status changed_by_user_id created_at updated_at'),
       ('saas_customer_metering_policy_heads', 'INSERT', 'tenant_id project_id policy_id current_version status changed_by_user_id created_at updated_at'),
       ('saas_customer_metering_policy_heads', 'UPDATE', 'current_version status changed_by_user_id updated_at'),

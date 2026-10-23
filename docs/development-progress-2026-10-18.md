@@ -985,3 +985,13 @@ Astra 实际源码审查通过；Luna worker **24/24**、combined strict 通过�
 strict 清单显式加入两个 root 和退款 child；validator 为两 root 增加精确 prerequisite 与缺项负向检查，未放宽其他 root 的 `seedX` 规则。退款 test 原硬性 PG18 限制改为允许现正式矩阵的 PG15/18，标题和证据记录实际 server major；仅改变允许执行的版本范围，未改退款业务或 child。
 
 Astra 四文件审查无阻断；Luna wiring **20/20**、isolated runner strict、两 drill/退款 child/merchant root strict 均通过。新增四个矩阵任务仍需本次新候选在远程实际执行成功，尚不能称 PG15 退款或 SSE 演练通过。原 PG18 本地证据见 §29.24–25。scanner 原引用修复已推送 `ab9fd83`；人工 resolve 的 billing-group 最小权限及非空 group release 证据在独立任务中继续推进，完整闭环仍未关闭。
+
+### 29.31 CP billing-group release 的最小权限
+
+人工 resolve 通过正常 workflow 调用 group-spend release，即使原请求无 group reservation，查询也必须具备权限。根据服务端 42501 关系标识及实际 release SQL，唯一 manifest 源新增 reservations/counters 的四组 **17 项列权限**，正式生成器同步 runtime 与部署角色 SQL。仅覆盖精确 SELECT 和 release UPDATE，不增加表级、INSERT、DELETE、EXECUTE 或 counter `charge_settled` 写权限；不删除 group release 来绕过失败。
+
+Astra 五文件审查无阻断；Luna privilege unit **110/110**、exact strict 通过，正常 PG18 迁移、角色及启动阶段亦通过。为验证实际非空扣减，目标独立 key 在首 HTTP 前通过正常服务创建和绑定 daily group，未 SQL 插入 financial counter/reservation；该新增路径在抵达上游前失败，原 hold release 与 replay 尚未完成，不能据声明/probe 宣称整个闭环通过。
+
+留存日志显示另一 `42501 / saas_billing_group_spend_counters`，未带请求子阶段。Astra 静态核对确认 GW 的真实 reserve upsert 还缺 `charge_currency/updated_at` UPDATE，reservation 还缺 `updated_at`，这是独立的精确权限缺口，下一任务修复；未将 WAIT_TIMEOUT 猜作配置错误或撤销非空验证。
+
+新增进程故障 CI 已推送 `d4c1755`，[#149](https://github.com/elex-fu/model-router/actions/runs/40030304456) 的 refund SIGKILL、managed SIGTERM 在 **PG15/18 四项均实际通过**，全部 68 jobs 的终态仍待收齐。最新权限与 operator 流程继续按新候选验收。

@@ -122,6 +122,12 @@ export interface SaasWorkerGrantStatement {
 }
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColumnGroup[] = [
+  // Control-plane unknown-outcome non-execution resolution releases existing
+  // group holds only; it cannot reserve, settle usage, or rewrite charge_settled.
+  { table: 'saas_billing_group_spend_reservations', privilege: 'SELECT', columns: ['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units', 'charge_currency', 'state'] },
+  { table: 'saas_billing_group_spend_reservations', privilege: 'UPDATE', columns: ['state', 'settled_amount_minor_units', 'updated_at'] },
+  { table: 'saas_billing_group_spend_counters', privilege: 'SELECT', columns: ['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'] },
+  { table: 'saas_billing_group_spend_counters', privilege: 'UPDATE', columns: ['charge_outstanding_reserved', 'updated_at'] },
   { table: 'saas_customer_metering_policy_heads', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
   { table: 'saas_customer_metering_policy_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
   { table: 'saas_customer_metering_policy_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
@@ -4761,6 +4767,12 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
+  // Control-plane unknown-outcome non-execution resolution releases existing
+  // group holds only; it cannot reserve, settle usage, or rewrite charge_settled.
+  { table: 'saas_billing_group_spend_reservations', privilege: 'SELECT', columns: ['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units', 'charge_currency', 'state'] },
+  { table: 'saas_billing_group_spend_reservations', privilege: 'UPDATE', columns: ['state', 'settled_amount_minor_units', 'updated_at'] },
+  { table: 'saas_billing_group_spend_counters', privilege: 'SELECT', columns: ['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'] },
+  { table: 'saas_billing_group_spend_counters', privilege: 'UPDATE', columns: ['charge_outstanding_reserved', 'updated_at'] },
   { table: 'saas_customer_metering_policy_heads', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
   { table: 'saas_customer_metering_policy_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
   { table: 'saas_customer_metering_policy_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },

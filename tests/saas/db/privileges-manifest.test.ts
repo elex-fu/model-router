@@ -60,6 +60,24 @@ test('manifest control-plane views encode the same column grants in both mirrors
   );
 });
 
+test('control-plane group-spend grants permit only releasing existing holds in both generated views', () => {
+  const tables = ['saas_billing_group_spend_reservations', 'saas_billing_group_spend_counters'];
+  const expected = [
+    ...['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units', 'charge_currency', 'state'].map(column => toGrant(tables[0]!, column, 'SELECT')),
+    ...['state', 'settled_amount_minor_units', 'updated_at'].map(column => toGrant(tables[0]!, column, 'UPDATE')),
+    ...['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'].map(column => toGrant(tables[1]!, column, 'SELECT')),
+    ...['charge_outstanding_reserved', 'updated_at'].map(column => toGrant(tables[1]!, column, 'UPDATE')),
+  ];
+  for (const view of [MANIFEST_CONTROL_PLANE_COLUMN_GROUPS, MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS]) {
+    const grants = view.filter(group => tables.includes(group.table)).flatMap(group => group.columns.map(column => toGrant(group.table, column, group.privilege)));
+    assert.deepEqual(sorted(grants), sorted(expected));
+    assert.equal(grants.some(grant => grant.endsWith(' INSERT') || grant.endsWith(' DELETE')), false);
+    assert.equal(grants.includes(toGrant(tables[1]!, 'charge_settled', 'UPDATE')), false);
+  }
+  assert.equal(MANIFEST_CONTROL_PLANE_TABLE_GRANTS.some(grant => tables.includes(grant.table)), false);
+  assert.equal(MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS.some(grant => tables.includes(grant.table)), false);
+});
+
 test('manifest gateway views encode the same read tables and column grants in both mirrors', () => {
   assert.deepEqual(
     sorted(MANIFEST_GATEWAY_READ_TABLES.map((entry) => entry.table)),

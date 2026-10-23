@@ -60,6 +60,25 @@ function databaseReturning(row: unknown) {
   };
 }
 
+test('control-plane runtime permits exact group hold release columns without granting reservation or settlement authority', () => {
+  const reservations = 'saas_billing_group_spend_reservations';
+  const counters = 'saas_billing_group_spend_counters';
+  const expected = [
+    ...['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units', 'charge_currency', 'state'].map(column => `${reservations}\t${column}\tSELECT`),
+    ...['state', 'settled_amount_minor_units', 'updated_at'].map(column => `${reservations}\t${column}\tUPDATE`),
+    ...['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'].map(column => `${counters}\t${column}\tSELECT`),
+    ...['charge_outstanding_reserved', 'updated_at'].map(column => `${counters}\t${column}\tUPDATE`),
+  ].sort();
+  const actual = SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === reservations || table === counters);
+  assert.deepEqual(actual.map(grant => grant.join('\t')).sort(), expected);
+  assert.equal(SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([table]) => table === reservations || table === counters), false);
+  for (const [table, column, privilege] of actual) {
+    assert.ok(privilege === 'SELECT' || privilege === 'UPDATE');
+    assert.notEqual(column, 'charge_settled');
+    assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', '${privilege}')`), 'startup probe includes every release grant');
+  }
+});
+
 function safeGatewayRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     role_exists: true,
