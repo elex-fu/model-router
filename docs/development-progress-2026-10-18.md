@@ -1099,4 +1099,14 @@ Astra实际差分复核通过；Luna三syntax、PG6+原Redis5共 **11/11**，sou
 
 run-01/02/03证据目录均为 `/private/tmp/model-router-p10-postgres-recovery-20261024-run-XX`。当前完整PG恢复是明确的本地待授权项，不能全部归为生产外部资源阻塞；实际Provider/PSP、生产KMS/独立同步故障域/PITR、Codex契约和R9性能仍各自开放，M1/M2/M3均未关闭。
 
-本节工程checkpoint为 `5448f32`，与最终方案状态同步分开提交；这不代表已完成本节实际PG恢复。当前已取得完整68/68的最新证据为ACK候选 `7361160`；新profile及文档最终HEAD的CI结果另行记录。
+本节工程checkpoint为 `5448f32`，与方案状态同步分开提交，并已纳入工程候选 `701761eb1ea6adf318ada6665e8569d3c1f07d18`。该确切候选的 [CI #159](https://github.com/elex-fu/model-router/actions/runs/40039329176) 已完整 **68/68 success**；这不代表本节完整实际PG恢复已通过。后续仅Markdown状态收口，runtime/source/harness保持该工程候选，不把其绿色转记为文档子commit已有CI。
+
+### 29.41 工程候选冻结与最终文档交付边界
+
+当前工程候选为 `701761eb1ea6adf318ada6665e8569d3c1f07d18`，包含 `5448f32` PG恢复profile及此前独立任务。只读收集 [CI #159](https://github.com/elex-fu/model-router/actions/runs/40039329176) 终态：API total_count=68、returned=68，**4 main + 64 isolated全部completed/success**，含PG15/18 settlement任务。此前§29.39中736候选的wire ACK逐日志证据保留，不互换revision。
+
+本次后续收口只修改本进度与P0技术方案两个Markdown文件，工程源码和恢复脚本保持701，server源码保持7e同src。文档单独提交、推送到当前任务分支，不宣称其子commit已有CI，也不为持续改写文档触发新的本地验证。
+
+已完成工程与已有分层证据见§29.34–40：人工unknown/非空group释放、Redis旧快照恢复、两实例暖缓存撤销typed403、PG连接池错误生命周期、真实wire COMMIT ACK丢失重放，以及PG急停恢复profile。profile的完整自然600秒恢复仍未通过；run-01/02真实失败、run-03 sandbox EPERM和run-04自动审批拒绝均保留。因早先“不要测试验证了”的限制，已请求直接用户授权，答复前不再本地测试、构建或通过其他执行入口绕过。
+
+M1/M2/M3继续开放。下一处理顺序为：取得本地PG急停恢复的直接授权后执行原profile；取得有效供给引用完成A0真实首请求与指定CLI流程；补齐真实PSP、生产KMS/IAM、独立同步故障域/PITR、Codex可信计量/后端契约及受控R9窗口。候选CI通过与本地受控证据不构成运营发布验收。
