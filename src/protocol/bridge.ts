@@ -67,6 +67,8 @@ import { PassthroughAnthropicBridge } from './passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from './passthrough-openai.js';
 import { AnthToResponsesBridge, OpenAIToResponsesBridge, ResponsesToAnthBridge } from './responses.js';
 import { parseSseStream } from './sse.js';
+import { OpenAIToGeminiBridge, GeminiToOpenAIBridge } from './openai-gemini.js';
+import { ResponsesToGeminiBridge, GeminiToResponsesBridge } from './responses-gemini.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -355,5 +357,9 @@ export function pickBridge(
   if (clientProto === 'responses' && upstreamProto === 'anthropic') {
     return new ResponsesToAnthBridgeImpl();
   }
+  if (clientProto === 'openai' && upstreamProto === 'gemini') return new OpenAIToGeminiBridge();
+  if (clientProto === 'gemini' && upstreamProto === 'openai') return new GeminiToOpenAIBridge();
+  if (clientProto === 'responses' && upstreamProto === 'gemini') return new ResponsesToGeminiBridge();
+  if (clientProto === 'gemini' && upstreamProto === 'responses') return new GeminiToResponsesBridge();
   throw new Error(`Unsupported bridge: ${clientProto} -> ${upstreamProto}`);
 }

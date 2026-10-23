@@ -746,7 +746,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | 主任务 | 当前执行范围 | 状态 |
 |---|---|---|
 | P01/P02a/P03 | 正式平台权益开通、独占资源 journal、最终激活事务、管理员接口与受限权限 | 开发中 |
-| P04 | Chat↔Gemini、Responses↔Gemini 直接转换，注册及明确不支持字段 | 开发中，两位 Sol 分工 |
+| P04 | Chat↔Gemini、Responses↔Gemini 直接转换，注册及明确不支持字段 | 四个直接桥及定向验证完成；真实 CLI/builtin 工作流待验 |
 | P05 | Codex 终态用量完整性、WS 上下文续接、精确端点可信上界门禁与诊断 | 开发中；真实计量契约仍为外部阻塞 |
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 开发中 |
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 开发中；迁移由同一 schema writer 顺序追加 |
@@ -761,3 +761,11 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 钱包与套餐购买页已改为本地 SVG 二维码（`qrcode.react@4.2.0`），显示服务端订单金额、币种、订单及到期信息；补齐订单轮询退避、后台暂停和恢复。创建响应丢失时保留原 POST 的幂等键和 payload，找回原单后查询服务端最新状态；不得因超时或商户切换自动换键。退款 unknown 明确为人工核对中。
 
 Luna 已执行 workspace 依赖安装及 lock 同步（`--ignore-scripts`），web 定向用例、`npm run typecheck -w web`、`npm run build -w web` 通过。本结论仅覆盖前端实现与本地构建；支付宝实际扫码、回调到账和退款仍在 B0/B1 gate，未执行真实 PSP 交易。P0 设计与实施分工基线已推送 `139c45a`，本节随 P08 任务独立提交。
+
+### 29.3 P04 四个 Gemini 直接桥交付
+
+新增 Chat↔Gemini、Responses↔Gemini 直接请求、响应与 SSE 转换，统一注册四个 pair；工具调用 ID 稳定，支持明确 ID 的同名并行工具结果关联，保留缺失用量为未知，处理 UTF-8 分块、终态和取消。修复 Gemini `usageMetadata` 被 `body.usage` 前置检查阻断的问题。对尚未保真的媒体、原生搜索、opaque reasoning/continuation、多 candidate 等语义返回明确安全错误，不静默删除字段。
+
+Luna 协议定向批次 **40/40** 通过；首次失败是旧测试仍期待新 pair 不支持，已改为四方向注册断言，并保留非法协议和不支持字段的拒绝测试。当前合并工作树 `build:server` 已通过。编译器支持 pair 和结构化错误接线由 Codex/runtime 同一 writer 完成，随其后续任务提交。
+
+这只关闭直接桥代码及本地定向验证；现有 Gemini↔Anthropic 桥的历史保真不足未因此自动修复，标准 builtin 仍按实际 provider/product/model/operation/workflow 证据准入，未凭注册数放开全部供给，也未执行真实 CLI 或模型调用。P08 已推送 `2ad45cf`。
