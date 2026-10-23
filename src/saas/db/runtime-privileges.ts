@@ -4816,6 +4816,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_billing_group_spend_counters', 'charge_currency', 'INSERT'],
   ['saas_billing_group_spend_counters', 'charge_outstanding_reserved', 'UPDATE'],
   ['saas_billing_group_spend_counters', 'charge_settled', 'UPDATE'],
+  ['saas_billing_group_spend_counters', 'charge_currency', 'UPDATE'],
+  ['saas_billing_group_spend_counters', 'updated_at', 'UPDATE'],
   ['saas_billing_group_spend_reservations', 'tenant_id', 'SELECT'],
   ['saas_billing_group_spend_reservations', 'request_id', 'SELECT'],
   ['saas_billing_group_spend_reservations', 'billing_group_id', 'SELECT'],
@@ -4834,6 +4836,7 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_billing_group_spend_reservations', 'state', 'INSERT'],
   ['saas_billing_group_spend_reservations', 'settled_amount_minor_units', 'UPDATE'],
   ['saas_billing_group_spend_reservations', 'state', 'UPDATE'],
+  ['saas_billing_group_spend_reservations', 'updated_at', 'UPDATE'],
   // Affinity resolution reads only its scoped key and target state; inserts create the full
   // immutable identity, while UPDATE is limited to binding/lifecycle fields.
   ...(

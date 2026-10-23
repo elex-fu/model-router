@@ -92,6 +92,21 @@ test('manifest gateway views encode the same read tables and column grants in bo
   assert.deepEqual(sorted(tsGrants), sorted(sqlGrants));
 });
 
+test('gateway group-spend updates cover reserve upsert and release timestamps without widening identity writes', () => {
+  const counters = 'saas_billing_group_spend_counters';
+  const reservations = 'saas_billing_group_spend_reservations';
+  const expected = [
+    ...['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'].map(column => toGrant(counters, column, 'UPDATE')),
+    ...['settled_amount_minor_units', 'state', 'updated_at'].map(column => toGrant(reservations, column, 'UPDATE')),
+  ];
+  const groups = MANIFEST_GATEWAY_COLUMN_GROUPS.filter(group => [counters, reservations].includes(group.table) && group.privilege === 'UPDATE').flatMap(group => group.columns.map(column => toGrant(group.table, column, group.privilege)));
+  const sql = MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES.filter(entry => [counters, reservations].includes(entry.table) && entry.privilege === 'UPDATE').map(entry => toGrant(entry.table, entry.column, entry.privilege));
+  assert.deepEqual(sorted(groups), sorted(expected));
+  assert.deepEqual(sorted(sql), sorted(expected));
+  assert.equal(MANIFEST_GATEWAY_AUXILIARY.fullInsertTables.some(table => [counters, reservations].includes(table)), false);
+  assert.equal(MANIFEST_GATEWAY_AUXILIARY.deleteTables.some(table => [counters, reservations].includes(table)), false);
+});
+
 test('manifest worker views encode the same column grants in probe and grant script', () => {
   const probeGrants = MANIFEST_WORKER_PROBE_GRANTS.map((grant) => toGrant(grant.table, grant.column, grant.privilege));
   const statementGrants = MANIFEST_WORKER_GRANT_STATEMENTS.flatMap((statement) =>

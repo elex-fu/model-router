@@ -995,3 +995,11 @@ Astra 五文件审查无阻断；Luna privilege unit **110/110**、exact strict 
 留存日志显示另一 `42501 / saas_billing_group_spend_counters`，未带请求子阶段。Astra 静态核对确认 GW 的真实 reserve upsert 还缺 `charge_currency/updated_at` UPDATE，reservation 还缺 `updated_at`，这是独立的精确权限缺口，下一任务修复；未将 WAIT_TIMEOUT 猜作配置错误或撤销非空验证。
 
 新增进程故障 CI 已推送 `d4c1755`，[#149](https://github.com/elex-fu/model-router/actions/runs/40030304456) 的 refund SIGKILL、managed SIGTERM 在 **PG15/18 四项均实际通过**，全部 68 jobs 的终态仍待收齐。最新权限与 operator 流程继续按新候选验收。
+
+### 29.32 GW 非空 group 准入的写列权限
+
+根据真实 reserve upsert 及 release/settle SQL，GW manifest 精确增加 counters 的 `charge_currency/updated_at` UPDATE，以及 reservations 的 `updated_at` UPDATE，共三项。正式生成器同步两个输出；CP 的 17 项权限保持不变，不新增表级、INSERT、DELETE 或 EXECUTE。保留新 group 与真实准入，不用删除配置绕过这条此前未完成的非空路径。
+
+Astra 五文件差分审查通过；Luna privilege unit **112/112**、combined strict 通过。非空 PG18 复测已抵达真实上游、正常 admission/scanner 与人工 resolve，未再次出现旧权限拒绝；完整 root **25/27**。首个事务错误转为观察记录的 `23514 / saas_unknown_outcome_observations_kind_shape`，Astra 已确认 operator observation INSERT 将 evidence reference 与 literal outcome 的位置写反，下一任务只修 producer，不改旧约束或迁移。
+
+该 resolve 的钱包、group、request/attempt、audit 都属于同一事务；观察记录约束失败使整笔事务回滚，不能把其中临时释放当成已提交的 80→0，也未宣称 replay 通过。CP 权限修复已推送 `ddba2c4`。此前 `d4c1755` 的 [CI #149](https://github.com/elex-fu/model-router/actions/runs/40030304456) 最终 **68/68 全过**（4 main、64 isolated），仍不替代后续权限与 operator 新候选结果。

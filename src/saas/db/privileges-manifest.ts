@@ -10058,7 +10058,7 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
   {
     table: 'saas_billing_group_spend_counters',
     privilege: 'UPDATE',
-    columns: ['charge_outstanding_reserved', 'charge_settled'],
+    columns: ['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'],
     tsStyle: 'inline',
   },
   {
@@ -10094,7 +10094,7 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
   {
     table: 'saas_billing_group_spend_reservations',
     privilege: 'UPDATE',
-    columns: ['settled_amount_minor_units', 'state'],
+    columns: ['settled_amount_minor_units', 'state', 'updated_at'],
     tsStyle: 'inline',
   },
   {
@@ -11793,6 +11793,16 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
     privilege: 'UPDATE',
   },
   {
+    table: 'saas_billing_group_spend_counters',
+    column: 'charge_currency',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_billing_group_spend_counters',
+    column: 'updated_at',
+    privilege: 'UPDATE',
+  },
+  {
     table: 'saas_billing_group_spend_reservations',
     column: 'tenant_id',
     privilege: 'SELECT',
@@ -11880,6 +11890,11 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   {
     table: 'saas_billing_group_spend_reservations',
     column: 'state',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_billing_group_spend_reservations',
+    column: 'updated_at',
     privilege: 'UPDATE',
   },
   {

@@ -79,6 +79,21 @@ test('control-plane runtime permits exact group hold release columns without gra
   }
 });
 
+test('gateway group-spend UPDATE grants match reserve upsert and normal release/settle SQL exactly', () => {
+  const counters = 'saas_billing_group_spend_counters';
+  const reservations = 'saas_billing_group_spend_reservations';
+  const expected = [
+    ...['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'].map(column => `${counters}\t${column}\tUPDATE`),
+    ...['settled_amount_minor_units', 'state', 'updated_at'].map(column => `${reservations}\t${column}\tUPDATE`),
+  ].sort();
+  const actual = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([table, , privilege]) => [counters, reservations].includes(table) && privilege === 'UPDATE');
+  assert.deepEqual(actual.map(grant => grant.join('\t')).sort(), expected);
+  for (const [table, column, privilege] of actual) {
+    assert.ok(SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', '${privilege}')`));
+    assert.equal(['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units'].includes(column), false);
+  }
+});
+
 function safeGatewayRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     role_exists: true,
