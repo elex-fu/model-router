@@ -1,0 +1,920 @@
+{
+  "format": "saas-backup-receipt-v1",
+  "id": "225e2773-ebc7-4a65-8644-cf9a196a41a2",
+  "sourceId": "disposable-backup-fixture",
+  "sourceIdentitySha256": "9d00fc86bcef26ea7a6466173be1d6c6d828fa25c7a3c3483cbb225eb587c0b1",
+  "policySha256": "ba4331b69e307ae5ce5678293db817c5ae746ec5ca3e9694b631b2162b33b184",
+  "mode": "pg-dump",
+  "startedAt": "2026-10-23T01:45:32.116Z",
+  "completedAt": "2026-10-23T01:45:33.757Z",
+  "recoveryPointAt": "2026-10-23T01:45:32.118Z",
+  "kms": {
+    "format": "saas-backup-kms-recovery-v1",
+    "challenge": "c9ba2ba6-c590-42e0-acc6-ed22fd286e33",
+    "verifiedAt": "2026-10-23T01:45:32.117Z",
+    "recoveredKeyIds": [
+      "fixture-recovery-key"
+    ],
+    "evidenceSha256": "d66e0235e6a94674ace84a3774186436149456bdc62c43b54a5ca6826a7ab54d"
+  },
+  "archive": {
+    "fileName": "225e2773-ebc7-4a65-8644-cf9a196a41a2.dump",
+    "versionId": "fixture-version-0",
+    "sha256": "234ee0530534541b39447d34dfd78926aae0ac795a462fccae34e027bc954078",
+    "bytes": 1446147,
+    "objectKey": "fixture-backups/disposable-backup-fixture/225e2773-ebc7-4a65-8644-cf9a196a41a2.dump",
+    "retainUntil": "2026-11-22T01:45:33.752Z",
+    "encryptionKeyId": "fixture-recovery-key",
+    "fingerprint": {
+      "tables": [
+        {
+          "name": "backup_acceptance_payload",
+          "rows": "1",
+          "digestA": "-7944183393606371028",
+          "digestB": "-5764351244114885635"
+        },
+        {
+          "name": "saas_api_key_budget_counters",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_api_key_budget_policies",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_api_key_budget_reservations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_api_key_ip_policies",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_api_keys",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_attempt_supplier_cost_snapshots",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_attempt_supplier_costs",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_attempts",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_audit_events",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_billing_group_account_pools",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_billing_group_rate_counters",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_billing_group_spend_counters",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_billing_group_spend_reservations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_billing_groups",
+          "rows": "1",
+          "digestA": "119263208530854523",
+          "digestB": "1595591763250026690"
+        },
+        {
+          "name": "saas_billing_reservations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_billing_spending_freezes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_bootstrap_tokens",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_capacity_policy_audit_details",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_composite_model_routes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_content_moderation_flagged_hashes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_content_moderation_logs",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_contract_test_attestations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_metering_policy_heads",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_metering_policy_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_passkey_ceremonies",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_price_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_deliveries",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_delivery_attempts",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_endpoint_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_endpoints",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_events",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_signing_secrets",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_tenant_policies",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_customer_webhook_tenant_usage",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_egress_proxies",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_email_action_tokens",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_email_verification_codes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_gateway_capacity_reservations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_gateway_provider_account_affinity",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_gateway_request_idempotency_keys",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_idempotency_records",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_image_tasks",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_invitations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_ledger_entries",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_ledger_transactions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_affiliate_attributions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_affiliate_policies",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_affiliate_rewards",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_announcement_reads",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_announcements",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_promo_codes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_promo_usages",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_redeem_codes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_marketing_redeem_redemptions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_memberships",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_mfa_credentials",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_alert_events",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_alert_rules",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_alert_silences",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_channel_metrics_1m",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_channel_metrics_hourly",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_channel_metrics_watermark",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_obs_report_state",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_ops_media_requeue_requests",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_payment_inbox",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_payment_orders",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_credential_validation_requeue_requests",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_mfa_enrollment_tokens",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_mfa_setup_tokens",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_account_capabilities",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_accounts",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_credential_validation_jobs",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_credential_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_credential_wrappings",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_credentials",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_pool_grants",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_pool_members",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_provider_pools",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_role_assignments",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_sessions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_settings",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_settings_audit_details",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_platform_state",
+          "rows": "1",
+          "digestA": "2548282030861936605",
+          "digestB": "-2551771196041720596"
+        },
+        {
+          "name": "saas_plugin_bindings",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_plugin_installations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_plugin_kv",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_policy_acceptances",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_policy_documents",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_prepared_request_evidence",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_probe_monitors",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_probe_runs",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_project_entitlements",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_project_inference_policy_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_project_memberships",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_project_policy_invalidation_outbox",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_projects",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_account_leases",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_account_model_cooldowns",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_account_rate_counters",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_account_runtime_health",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_capabilities",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_metering_policy_heads",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_metering_policy_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_products",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_rights",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_provider_rights_events",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_public_brand_settings",
+          "rows": "1",
+          "digestA": "-7180691734769343006",
+          "digestB": "1100851642394489778"
+        },
+        {
+          "name": "saas_public_model_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_public_models",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_refund_orders",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_refund_service_plan_effects",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_refund_wallet_freezes",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_request_admission_outbox",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_request_customer_price_snapshots",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_requests",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_risk_control_config",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_route_config_commercial_authorities",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_route_config_heads",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_route_config_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_schema_migrations",
+          "rows": "118",
+          "digestA": "20524413654118738637",
+          "digestB": "-115981244039497859756"
+        },
+        {
+          "name": "saas_service_plan_orders",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_service_plan_snapshots",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_service_plan_subscriptions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_service_plan_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_service_plans",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_sessions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_supplier_cost_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_supply_profiles",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_account_capabilities",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_accounts",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_credential_validation_jobs",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_credential_versions",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_credential_wrappings",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_credentials",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenant_provider_supply_profile_accounts",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tenants",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_tls_fingerprint_profiles",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_unknown_outcome_reconciliation_cases",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_unknown_outcome_reconciliation_observations",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_usage_correction_events",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_usage_events",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_usage_settlements",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_users",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_video_tasks",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "saas_wallets",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        },
+        {
+          "name": "tenant_oauth_identities",
+          "rows": "0",
+          "digestA": "0",
+          "digestB": "0"
+        }
+      ],
+      "ledgerHash": "bd410b68c121fb3eb54caa179040c99e4e0860d313df30f1fabfc2226a8f440a",
+      "ledgerCount": 118,
+      "registryHead": 137,
+      "sha256": "b1d699d0e360c77c7ebc589e8e373818eb2e82383130bb4131f4bbb93196e6e9"
+    }
+  },
+  "pitr": null
+}

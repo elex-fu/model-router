@@ -1,0 +1,16 @@
+
+== latency: 100 direct + 100 gateway (serial, zero-latency mock) ==
+  direct  : {"n":100,"p50":2.78,"p90":6.51,"p99":26.91,"max":26.91}
+  gateway : {"n":100,"p50":125.16,"p90":203.81,"p99":451.46,"max":451.46}
+  p99 overhead: 424.55ms (threshold 30ms)
+VIOLATION [latency] p99 overhead: 424.55ms (threshold 30ms)
+
+== ttfb: 100 direct + 100 gateway streaming first-byte ==
+  direct  : {"n":100,"p50":4.48,"p90":6.11,"p99":11.07,"max":11.07}
+  gateway : {"n":100,"p50":102.68,"p90":153.41,"p99":278.22,"max":278.22} (errors: 0)
+  ttfb overhead: 267.15ms (threshold 10ms)
+VIOLATION [ttfb] ttfb overhead: 267.15ms (threshold 10ms)
+
+report written: /private/tmp/model-router-local-validation-20261023.o46TbY/r4-serial-cap-off/serial-profile-current-3cli.json
+
+2 violation(s).

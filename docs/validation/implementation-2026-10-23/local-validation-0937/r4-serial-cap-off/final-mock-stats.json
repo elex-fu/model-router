@@ -1,0 +1,56 @@
+{
+  "uptimeMs": 35979,
+  "currentTokenIssued": false,
+  "tokenEndpoint": {
+    "requests": 0,
+    "byGrant": {}
+  },
+  "accounts": {
+    "r9-openai-account-1": {
+      "requests": 234,
+      "byStatus": {
+        "200": 234
+      },
+      "currentInFlight": 0,
+      "maxInFlight": 1,
+      "streams": 126,
+      "sseChunks": 8064,
+      "abortedStreams": 0,
+      "lastRequestAt": 1792720158355
+    },
+    "r9-anthropic-account-3": {
+      "requests": 1,
+      "byStatus": {
+        "200": 1
+      },
+      "currentInFlight": 0,
+      "maxInFlight": 1,
+      "streams": 0,
+      "sseChunks": 0,
+      "abortedStreams": 0,
+      "lastRequestAt": 1792720126038
+    },
+    "(anonymous)": {
+      "requests": 200,
+      "byStatus": {
+        "200": 200
+      },
+      "currentInFlight": 0,
+      "maxInFlight": 1,
+      "streams": 100,
+      "sseChunks": 6400,
+      "abortedStreams": 0,
+      "lastRequestAt": 1792720147358
+    }
+  },
+  "shape": {
+    "chunks": 64,
+    "chunkDelayMs": 0,
+    "content": "bench-chunk"
+  },
+  "firstByteDelayMs": 0,
+  "faults": {
+    "global": null,
+    "perAccount": []
+  }
+}

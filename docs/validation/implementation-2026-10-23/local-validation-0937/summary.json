@@ -1,0 +1,244 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-10-23T01:54:21.334Z",
+  "timezone": "Asia/Shanghai",
+  "sourceHead": "a1441872e718f17badf2a7947bb210fa44de4439",
+  "nodeVersion": "v24.18.0",
+  "scope": "Local source regression, current dist CLI mock assembly, and native disposable PostgreSQL backup/restore",
+  "functionalChecksPassed": true,
+  "performanceAcceptancePassed": false,
+  "releaseApproval": false,
+  "integrity": {
+    "source": {
+      "files": 750,
+      "beforeSha256": "69ce5b227c3aca5a020cbcf8dca5d9e2dcd22c8eb94c704989bcb2bc426309ba",
+      "afterSha256": "69ce5b227c3aca5a020cbcf8dca5d9e2dcd22c8eb94c704989bcb2bc426309ba",
+      "changed": []
+    },
+    "dist": {
+      "files": 2996,
+      "beforeSha256": "ad6de6d7d9d3011901d29fb3830ad196d286e33bcd66599f34562752aa582830",
+      "afterSha256": "ad6de6d7d9d3011901d29fb3830ad196d286e33bcd66599f34562752aa582830",
+      "changed": []
+    },
+    "tests": {
+      "files": 931,
+      "beforeSha256": "e9dd3e844d4a93e3a11e9ee371cb4247c8c978f4b23fa5bd355bc3ec80bd1c97",
+      "afterSha256": "e9dd3e844d4a93e3a11e9ee371cb4247c8c978f4b23fa5bd355bc3ec80bd1c97",
+      "changed": []
+    },
+    "scripts": {
+      "files": 37,
+      "beforeSha256": "2ff12ca05d626e90a409f5954ab54351f0f80bfeee667a2b4a5f2b52cf2f7377",
+      "afterSha256": "2ff12ca05d626e90a409f5954ab54351f0f80bfeee667a2b4a5f2b52cf2f7377",
+      "changed": []
+    }
+  },
+  "runs": {
+    "focusedSandboxAttempt": {
+      "exitCode": 1,
+      "tests": 41,
+      "pass": 35,
+      "fail": 6,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0,
+      "duration_ms": 3301.427292,
+      "classification": "sandbox denied loopback listen (EPERM); rerun with local network access",
+      "log": "focused.log"
+    },
+    "focused": {
+      "exitCode": 0,
+      "tests": 41,
+      "pass": 41,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0,
+      "duration_ms": 8432.959459,
+      "concurrency": 1,
+      "log": "focused-local-network.log"
+    },
+    "serverBuild": {
+      "command": "npm run build:server",
+      "exitCode": 0,
+      "log": "build-server.log"
+    },
+    "unit": {
+      "exitCode": 0,
+      "tests": 6870,
+      "pass": 6847,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 23,
+      "todo": 0,
+      "duration_ms": 138685.089916,
+      "concurrency": 2,
+      "log": "unit-concurrency-2.log"
+    },
+    "integration": {
+      "exitCode": 0,
+      "tests": 349,
+      "pass": 255,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 94,
+      "todo": 0,
+      "duration_ms": 56488.169208,
+      "concurrency": 2,
+      "cleanEnvironment": true,
+      "log": "integration-concurrency-2.log"
+    },
+    "backupLocaleAttempt": {
+      "exitCode": 1,
+      "tests": 1,
+      "pass": 0,
+      "fail": 1,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0,
+      "duration_ms": 2454.959459,
+      "classification": "PostgreSQL startup rejected absent locale; FATAL postmaster became multithreaded during startup; HINT set LC_ALL",
+      "log": "postgres18-backup-restore.log"
+    },
+    "backup": {
+      "exitCode": 0,
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0,
+      "duration_ms": 7738.665459,
+      "environmentCorrection": {
+        "LC_ALL": "C",
+        "LANG": "C"
+      },
+      "postgresVersion": "18.6 (Homebrew)",
+      "nativePostgresBackupRestore": true,
+      "cloudObjectStoreAndKms": "test-double",
+      "sourceDatabaseOwnedByThisTest": true,
+      "disposableRestoreDatabaseDropped": true,
+      "corruptArchiveRejected": true,
+      "log": "postgres18-backup-restore-locale-c.log"
+    }
+  },
+  "r4": {
+    "exitCode": 1,
+    "startedAt": "2026-10-23T01:48:37.272Z",
+    "finishedAt": "2026-10-23T01:49:19.970Z",
+    "assembly": "current-dist-cli-mock-test-assembly",
+    "postgresVersion": "postgres (PostgreSQL) 18.6 (Homebrew)",
+    "redisVersion": "Redis server v=8.10.2 sha=00000000:1 malloc=libc bits=64 build=764b3e45065a66fb",
+    "postgresPreparedStatements": "native",
+    "gatewayMaxHttpInFlight": null,
+    "postgresDurability": {
+      "fsync": "on",
+      "synchronousCommit": "on"
+    },
+    "realProviderCalls": 0,
+    "builtinAcceptance": false,
+    "productionKmsVerified": false,
+    "scenesExecuted": [
+      "latency",
+      "ttfb"
+    ],
+    "cliSmoke": [
+      {
+        "scene": "current-cli-smoke",
+        "protocol": "openai",
+        "httpStatus": 200,
+        "requestId": "eec0cb31-a2d2-417d-8f7c-0f77807a3b39",
+        "settled": true
+      },
+      {
+        "scene": "current-cli-smoke",
+        "protocol": "anthropic",
+        "httpStatus": 200,
+        "requestId": "d08fb316-ef85-4e57-bf35-54777e351ef5",
+        "settled": true
+      }
+    ],
+    "serialSampleCounts": {
+      "latency:direct": 100,
+      "latency:gateway": 100,
+      "ttfb:direct": 100,
+      "ttfb:gateway": 100
+    },
+    "statusCounts": {
+      "200": 400
+    },
+    "streamErrors": 0,
+    "requestIdCorrelationComplete": true,
+    "sampleObservationOk": true,
+    "latencyP99OverheadMs": 424.55,
+    "ttfbOverheadMs": 267.15,
+    "violations": [
+      {
+        "scenario": "latency",
+        "metric": "p99 overhead",
+        "value": 424.55,
+        "threshold": 30,
+        "unit": "ms"
+      },
+      {
+        "scenario": "ttfb",
+        "metric": "ttfb overhead",
+        "value": 267.15,
+        "threshold": 10,
+        "unit": "ms"
+      }
+    ],
+    "serialProfileChecks": {
+      "onlySerialScenarios": true,
+      "expectedConfiguration": true,
+      "completeLatency": true,
+      "completeTtfb": true,
+      "unchangedThresholds": true,
+      "finiteOverheads": true
+    },
+    "environment": {
+      "controlledPerformanceWindow": false,
+      "screeningLoad1Threshold": 8,
+      "preflight": {
+        "samples": 13,
+        "start": "2026-10-23T01:46:43.516Z",
+        "end": "2026-10-23T01:47:43.555Z",
+        "logicalCpus": 10,
+        "load1Min": 8.302734375,
+        "load1Max": 11.8466796875,
+        "cpuBusyMeanPercent": 58.316526098562754
+      },
+      "duringHarness": {
+        "samples": 9,
+        "start": "2026-10-23T01:48:38.595Z",
+        "end": "2026-10-23T01:49:18.704Z",
+        "logicalCpus": 10,
+        "load1Min": 7.76513671875,
+        "load1Max": 9.22802734375,
+        "cpuBusyMeanPercent": 83.54182456874983
+      },
+      "externalProcessesObserved": [
+        "rustc",
+        "fseventsd",
+        "WindowServer",
+        "Chrome"
+      ],
+      "reason": "Preflight did not reach the documented quiet-machine screen; unrelated Rust compilation remained active. Results retain the original threshold failures and do not establish a regression, optimization gain, or exclusive CPU root cause."
+    },
+    "cleanup": {
+      "processesStopped": true,
+      "postgresStopped": true,
+      "runtimeRemoved": true
+    },
+    "report": "r4-serial-cap-off/serial-profile-current-3cli.json",
+    "manifest": "r4-serial-cap-off/summary.json"
+  },
+  "remaining": [
+    "R4: controlled serial measurement and same-build HTTP cap off/8 c200/60s comparison",
+    "R5: controlled tail-latency and unexpected-error attribution",
+    "R6: complete R9 workloads, ten-minute SSE and valid scaling comparison",
+    "R7: live production KMS, offsite cloud storage and PITR; local S3/KMS doubles are not cloud acceptance",
+    "R8 and provider smoke: real Claude/Gemini/Codex/Grok OAuth and Codex billable bounds were not exercised"
+  ]
+}

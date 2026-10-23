@@ -1,0 +1,15 @@
+  359     1  92.2 16.5 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+18254 12776  91.3  2.8 /Users/lex/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+13850     1  58.8  0.4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+ 2251  2242  43.7  0.4 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/152.0.7977.75/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
+24786 24680  26.0  1.9 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)
+31512 31322  22.8  1.3 /Users/lex/Library/Application Support/ai.opencode.desktop/cli/2.0.32-arm64/opencode-cli
+64860  2242  18.5  0.6 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/152.0.7977.75/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)
+  423     1  12.3  0.0 /usr/libexec/corebrightnessd
+24761 24680  11.4  0.3 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)
+24788 24680   9.6  0.7 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+14150     1   8.8  0.1 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+71778  6680   6.8  0.3 claude
+65523 65474   6.1  0.8 claude
+24680     1   6.0  0.6 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+ 6669     1   5.7  0.4 /Applications/Warp.app/Contents/MacOS/stable

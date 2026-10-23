@@ -1,0 +1,4 @@
+model-router provider egress allowlist: 127.0.0.1/32
+(node:18757) [MODEL_ROUTER_SOFTWARE_KMS_PILOT_ONLY] Warning: Software provider-credential KMS is pilot-only: master keys are static environment values. It must not serve a charging production environment (cloud KMS upgrade is the M3 decision gate).
+(Use `node --trace-warnings ...` to show where the warning was created)
+model-router managed gateway listening on 127.0.0.1:51975

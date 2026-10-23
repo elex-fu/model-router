@@ -1,0 +1,10 @@
+✔ self-owned PostgreSQL backup downloads its offsite version and restores only a new disposable database (6830.922125ms)
+ℹ PostgreSQL 18.6 (Homebrew); registry 118; tables 147; backup 225e2773-ebc7-4a65-8644-cf9a196a41a2; restore ee618fcc-cc20-462b-be3c-dce6675cf8d8; no shared cluster or database touched
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7738.665459

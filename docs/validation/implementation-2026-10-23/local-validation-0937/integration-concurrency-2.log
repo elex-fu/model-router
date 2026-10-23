@@ -1,0 +1,360 @@
+Running 132 integration test files with concurrency 2.
+✔ configured upstream discovery and bounded test run use real HTTP and durable jobs (574.777459ms)
+✔ backup fails closed without telemetry and creates no falsely full manifest (207.626125ms)
+✔ config import previews replace and stable-ID merge, protects secrets, and commits with CAS (575.576583ms)
+✔ provider preset API advertises the native custom Responses preset (225.558833ms)
+✔ worker uses file-backed read-only SQLite and preserves CSV escaping and permissions (120.922ms)
+✔ 10k row and 5 MB limits fail without leaving output files (1280.655917ms)
+✔ query failure after opening output removes the partial file (119.305209ms)
+✔ abort and timeout wait for worker exit and remove partial files (20.121083ms)
+✔ AdminExports records actor and audit while job runs worker (87.631875ms)
+✔ memory-backed telemetry fails export explicitly without a main-thread query (3.071958ms)
+✔ job.progress reports queued, running and terminal transitions without job output (54.50075ms)
+✔ cancellation is scoped, idempotent and cannot rewrite a completed job (33.856834ms)
+✔ OpenAPI 3.1 is generated from shared Zod contracts and contains no credential values (5.34525ms)
+✔ covered contract method/path set is unique and runtime parser enforces its documented Zod schema (7.430125ms)
+✔ OpenAPI method/path manifest exactly matches admin dispatch routes (1.530584ms)
+✔ non-JSON response media types and accepted job statuses are accurate (0.683584ms)
+✔ telemetry operations document only their supported query parameters and parser bounds (0.682375ms)
+✔ playground, redacted export, runtime bridge, maintenance and pricing APIs (1166.577ms)
+✔ playground resolves the versioned quota period once and passes its fixed identity to admission (68.794125ms)
+✔ playground retains the configured timezone fallback without a version resolver (21.108042ms)
+✔ management request limiter admits within the window and resets after expiry (0.610167ms)
+✔ management API limit responds with the documented 429 error and Retry-After (502.563708ms)
+✔ aggregate computes on independent worker connection and preserves result shape (326.849833ms)
+✔ abort waits for worker exit and leaves no rollup writes after telemetry closes (24.844709ms)
+✔ AdminJobs.cancel and close abort running aggregate workers before writeback (21.3475ms)
+✔ purge archives native and legacy separately; later aggregate preserves frozen history (240.5755ms)
+✔ purge refuses active old requests and cross-boundary attempts without deleting detail (9.921875ms)
+✔ read-only route preview helpers preserve failover state and identify bridge/circuit states (7.736125ms)
+✔ runtime route preview applies configured order and Key policy without provider calls or secret disclosure (110.944708ms)
+✔ admin responses, logs, exports, audit and HTML do not disclose a configured secret (972.0175ms)
+✔ admin close drains a disconnected telemetry handler through success (642.215208ms)
+✔ admin close drains a disconnected telemetry handler through failure (333.151416ms)
+✔ bootstrap, session, CSRF, CAS, Ollama upstream and proxy key (698.957792ms)
+✔ system reports safe database diagnostics and listener configured versus actual ports (147.473166ms)
+✔ OAuth account routes return safe DTOs and pass supported PATCH fields (213.44125ms)
+✔ account credential and device flow routes forward allowlisted bodies with server actor (162.389625ms)
+✔ account credential and device flow routes report unavailable without adapters (197.658042ms)
+✔ admin static assets, SPA fallback and traversal boundary (146.45675ms)
+✔ overview uses completed / ended admitted production requests on detail and live paths (778.995709ms)
+✔ live minute buckets subtract late attempt/request contributions and preserve retry identity (860.516625ms)
+✔ aggregate body and exact edge tails form a non-overlapping half-open range (199.308875ms)
+✔ live first-event histogram merges minutes, exact tails, upserts, deletes, and rebuilds (666.753666ms)
+✔ live first-event P95 does not understate samples above 1,000,000 ms (392.223625ms)
+✔ opening a legacy database without the first-event table invalidates live coverage (43.546542ms)
+✔ empty legacy metadata table after archive permits covered live reads without rewriting frozen days (574.394292ms)
+✔ overview/summary worker reflects late updates, separates retries, and flags unknown usage (471.586666ms)
+✔ injected telemetry backs overview, usage and request chain (1115.785917ms)
+✔ breakdown preserves currencies and marks missing prices as partial (147.517958ms)
+✔ usage breakdown supports source grouping and safe labels across all dimensions (59.153208ms)
+✔ upstream breakdown separates final request ownership from actual fallback attempts (57.792375ms)
+✔ parseSemver strips v-prefixes and -suffixes and tolerates short forms (1.758792ms)
+✔ compareSemver orders three-segment versions (0.185875ms)
+✔ validateUpdateDownloadUrl accepts only GitHub hosts over HTTPS (0.362458ms)
+✔ validateUpdateDownloadUrl rejects the SSRF negative cases (0.131458ms)
+✔ parseChecksumFile reads sha256 lines and ignores junk (0.37575ms)
+✔ verifySha256Checksum verifies a real file (42.301ms)
+✔ extractBinaryFromTarGz extracts only the target entry and rejects traversal (14.347083ms)
+✔ extractBinaryFromTarGz enforces the size caps (0.348667ms)
+✔ swapInNewBinary reports the backup path on success (0.174708ms)
+✔ swapInNewBinary restores the backup when the second rename fails (0.188583ms)
+✔ swapInNewBinary surfaces a distinct failure when the restore also fails (0.126917ms)
+✔ swapInNewBinary fails before touching anything when the backup rename fails (0.082417ms)
+✔ swapInNewBinary succeeds against the real filesystem (17.417833ms)
+✔ checkUpdate serves the 20-minute cache and bypasses it on force (1.414167ms)
+✔ checkUpdate falls back to cached data when GitHub fails (0.853166ms)
+✔ checkUpdate reports the unconfigured-repository warning (0.082083ms)
+✔ performUpdate downloads, verifies, extracts and atomically swaps (15.932041ms)
+✔ performUpdate refuses when already up to date (8.843459ms)
+✔ performUpdate rejects an untrusted asset URL (SSRF fence at the service level) (3.000834ms)
+✔ performUpdate fails closed on a checksum mismatch (11.190583ms)
+✔ performUpdate fails closed when checksums.txt omits the asset (2.806667ms)
+✔ performUpdate rejects a traversal archive and leaves the target intact (5.397291ms)
+✔ a source build never matches release assets (2.025542ms)
+✔ performUpdate reports NO_COMPATIBLE_ASSET when no platform archive exists (2.009167ms)
+✔ listRollbackVersions returns the three newest stable versions strictly older than current (0.3205ms)
+✔ rollbackToVersion accepts only whitelisted versions (7.601ms)
+✔ UpdateOperationGuard requires a key, refuses concurrency and replays results (0.564292ms)
+✔ UpdateOperationGuard keeps keys independent (0.390875ms)
+✔ scheduleProcessRestart exits once after the delay and collapses repeats (2.681834ms)
+✔ resolveRuntimeVersion prefers the env override and falls back to package.json (0.144875ms)
+✔ updateHttpError maps update failures onto admin ControlErrors (0.112292ms)
+✔ custom-header uses the resolved credential for discovery, test and generation (42.018125ms)
+✔ reserved custom headers fail before any outbound request (1.022375ms)
+✔ none remains usable and unsupported authentication modes fail explicitly (1.114375ms)
+✔ redirects are never followed for discovery, test or generation (2.143625ms)
+✔ provider errors cannot echo the resolved credential into action results (8.607375ms)
+﹣ standard production CLI: native metadata/decrypt-only KMS and restricted real PostgreSQL worker lifecycle (0.531125ms) # offline: set MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED=1 and both explicit validation E2E role URLs for the required real CLI gate
+﹣ self-owned PostgreSQL backup downloads its offsite version and restores only a new disposable database (0.447167ms) # set SAAS_BACKUP_ACCEPTANCE=1 with PostgreSQL tools on PATH
+﹣ saas:deploy integration: empty database to three green probes, idempotent rerun, P15b fault injection (0.478333ms) # set MODEL_ROUTER_SAAS_DEPLOY_IT_REQUIRED=1 and MODEL_ROUTER_SAAS_DEPLOY_IT_ADMIN_URL (disposable cluster administrator URL) to run the saas:deploy integration test
+✔ persisted config reports degraded runtime when apply callback fails (95.966125ms)
+✔ legacy migration records only V2 history and an idempotent commit audit (83.200833ms)
+✔ pre-rename migration failure is aborted and safely retried (57.606167ms)
+✔ post-rename migration crash is finalized by startup recovery (30.53925ms)
+✔ legacy checksum conflict refuses migration retry (33.339083ms)
+✔ pre-rename failure leaves JSON unchanged and startup aborts prepared row (48.913292ms)
+✔ prepared record is aborted when disk still matches its base (44.49ms)
+✔ post-rename recovery repairs history and audit idempotently (51.283083ms)
+✔ startup recovery removes an orphaned generated secret after a pre-commit crash (31.440875ms)
+✔ offline recovery retains secrets referenced by current and historical configs (45.356584ms)
+✔ orphan collection preserves backup, OAuth, and unknown secret namespaces (26.045541ms)
+✔ malformed history fails closed without deleting generated secrets (28.741666ms)
+✔ checksum conflict refuses startup recovery without changing JSON (45.571167ms)
+✔ runtime apply failure is durably degraded (55.428208ms)
+✔ concurrent same-revision commits have one CAS winner and owned journal/audit rows (74.700459ms)
+✔ startup finalizes degraded candidate after successful runtime snapshot build (50.25925ms)
+✔ external edit observation writes a committed journal and audit after reconciliation (31.070375ms)
+✔ external observation finalizes durable metadata before the runtime swap and retries idempotently (33.496666ms)
+✔ external journal or history failure prevents runtime swap (32.948416ms)
+✔ startup recovers an external prepared record after a crash before finalization (34.432458ms)
+✔ external content change without revision advance is rejected before runtime swap (45.954ms)
+✔ degraded commit is resolved only through a complete later committed checksum chain (78.377166ms)
+✔ degraded row with a revision gap remains fail-closed (88.733792ms)
+✔ offline commit reconciles unresolved prepared journal before creating a new commit (59.37575ms)
+✔ legacy plaintext key migrates to encrypted store and plaintext backup is secured (96.232292ms)
+✔ legacy pricing profiles migrate additively into immutable explicit versions (227.373542ms)
+✔ console highlights definite match overlaps only for shared client protocols (1.906875ms)
+✔ console protocol labels distinguish native, bridge, experimental and unsupported (0.146458ms)
+✔ route preview prioritizes exact matches and reports protocol rejection without calling upstream (0.443333ms)
+✔ upstream.changed follows successful commits and is absent for failed config commits (132.566917ms)
+✔ SSE event allowlists strip unexpected secrets, config and result fields (33.186709ms)
+﹣ OPS-01 I3: backup/restore preserves ledger and rows; corrupt or foreign dumps are refused fail-fast (0.487417ms) # set MODEL_ROUTER_SAAS_DRILL_BACKUP_REQUIRED=1, MODEL_ROUTER_SAAS_DRILL_ADMIN_URL (drill-scoped cluster administrator URL) and MODEL_ROUTER_SAAS_DRILL_MIGRATOR_URL (drill-scoped migrator role URL) to require the backup drill
+﹣ OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL lease authority exact (1.879042ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require the failover drill
+﹣ FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to exactly-once (0.490083ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require the crash drill
+﹣ OPS-01 upgrade drill: real migration upgrade, roles-step failure stops safely, rerun heals, rollback refuses down-migration (0.569166ms) # set MODEL_ROUTER_SAAS_DRILL_UPGRADE_REQUIRED=1 and MODEL_ROUTER_SAAS_DRILL_ADMIN_URL (drill-scoped cluster administrator URL) to require the upgrade drill
+✔ management listener serves SPA under /admin without swallowing API paths (286.887666ms)
+✔ console cookies support a browser mutation from /console (96.245917ms)
+✔ local mode does not mount the SaaS console without a database handler (45.31475ms)
+✔ cookie jar applies legacy API-only CSRF deletion before one live console cookie (0.3915ms)
+✔ live same-name cookies on distinct paths remain duplicated in the request header (0.116583ms)
+✔ cookie deletion and replacement apply only to the same name and path identity (0.089417ms)
+✔ valid Max-Age wins over conflicting Expires in either attribute order (0.125583ms)
+✔ invalid Max-Age falls back to Expires and expiry is checked without resetting receipt time (0.057333ms)
+✔ empty session-cookie value without expiry is not silently treated as deletion (0.065709ms)
+✔ default cookie path is response-relative and unsupported domain scope is not silently collapsed (0.3055ms)
+✔ proxies anthropic client to gemini upstream (non-streaming) (163.986125ms)
+✔ proxies anthropic client to gemini upstream (streaming) (33.370542ms)
+✔ transforms request body to gemini format (26.083708ms)
+✔ sends x-goog-api-key header for gemini upstream (26.036083ms)
+✔ sends x-goog-api-key header when authMode is google (13.487709ms)
+▶ V2 routed Kimi bridge sends explicit thinking controls and replays automatic/forced tool history in JSON/SSE
+  ✔ JSON auto (102.73825ms)
+  ✔ JSON native-disabled (55.930541ms)
+  ✔ JSON effort-none (77.887959ms)
+  ✔ SSE auto (41.837833ms)
+  ✔ SSE native-disabled (26.899333ms)
+  ✔ SSE effort-none (28.991625ms)
+✔ V2 routed Kimi bridge sends explicit thinking controls and replays automatic/forced tool history in JSON/SSE (338.841667ms)
+✔ V2 Kimi named function must be declared before any upstream request is sent (10.204958ms)
+✔ commercial settlement observer reads the same request until held lease count changes from one to zero (110.969292ms)
+✔ commercial settlement observer only accepts a fully settled row with zero held leases (5.79925ms)
+✔ commercial settlement observer does not hide terminal unknown states behind held leases or a reserved hold (43.818542ms)
+✔ commercial settlement observer validates all financial, usage and identity assertions before waiting for cleanup (13.89525ms)
+✔ commercial settlement observer validates native cache usage before waiting for lease cleanup (0.502292ms)
+✔ commercial settlement observer rejects malformed lease counts rather than waiting (0.51375ms)
+✔ commercial settlement observer never passes a continuously held lease at the existing bounded wait deadline (103.102291ms)
+﹣ synthetic Kimi builtin preparation preserves independent cache bounds through commercial admission (1.120458ms) # Disposable PostgreSQL role URLs are required
+✔ Kimi commercial CLI environment defaults to explicit prepared statements off (0.54775ms)
+✔ Kimi commercial CLI environment propagates only the resolved off or native mode (0.096ms)
+✔ Kimi commercial CLI environment rejects unrecognized prepared statement modes without coercion (0.427542ms)
+✔ Kimi commercial fixture rejects an invalid database mode before URL checks or fixture resources (0.855125ms)
+﹣ platform operations browser: real CLI pages and audited video requeue (1.514375ms) # requires the isolated PostgreSQL runner with --worker-role
+✔ Kimi Platform: strict URL, authentication, request fields and nonstream usage (55.135291ms)
+✔ DeepSeek Chat: strict URL, authentication, request fields and nonstream usage (9.224167ms)
+✔ custom OpenAI: strict URL, authentication, request fields and nonstream usage (8.528667ms)
+✔ Kimi Code: strict URL, authentication, request fields and nonstream usage (7.308791ms)
+✔ DeepSeek Messages: strict URL, authentication, request fields and nonstream usage (7.993833ms)
+✔ custom Anthropic: strict URL, authentication, request fields and nonstream usage (5.763042ms)
+✔ custom Responses: strict URL, authentication, request fields and nonstream usage (7.714709ms)
+✔ Kimi Code: native tool IDs and SSE lifecycle are preserved (16.703ms)
+✔ DeepSeek Messages: native tool IDs and SSE lifecycle are preserved (8.253958ms)
+✔ custom Anthropic: native tool IDs and SSE lifecycle are preserved (11.633ms)
+✔ DeepSeek reasoning_content survives a real two-turn proxy exchange (7.366708ms)
+✔ custom-openai Responses compact is rejected without an explicit endpoint (4.723834ms)
+✔ openai-compatible Responses compact is rejected without an explicit endpoint (7.382583ms)
+✔ native Responses compact uses its explicitly configured endpoint (9.499958ms)
+✔ Kimi Platform: SSE terminates and tail usage is measured (7.464125ms)
+✔ DeepSeek Chat: SSE terminates and tail usage is measured (8.692958ms)
+✔ custom OpenAI: SSE terminates and tail usage is measured (5.84675ms)
+✔ custom Responses native tool call ID and SSE completion usage survive unchanged (11.214625ms)
+✔ Kimi Platform OpenAI upstream bridges Messages tool IDs, usage and SSE lifecycle (19.20525ms)
+✔ custom OpenAI upstream bridges Messages tool IDs, usage and SSE lifecycle (13.815708ms)
+✔ custom Anthropic upstream bridges Chat tool IDs, usage and SSE lifecycle (11.303459ms)
+✔ Kimi Platform: OpenAI tool call ID survives assistant/tool continuation (7.103292ms)
+✔ DeepSeek Chat: OpenAI tool call ID survives assistant/tool continuation (11.378791ms)
+✔ custom OpenAI: OpenAI tool call ID survives assistant/tool continuation (8.494959ms)
+✔ configured upstream request policies affect Anthropic and streaming OpenAI requests (67.788417ms)
+✔ custom OpenAI /v1 prefix supports explicit no-auth, nonstream and optional usage (37.1525ms)
+✔ custom OpenAI no-auth stream forwards chunks and leaves missing usage unknown (43.954125ms)
+✔ native Responses continuation stays bound to its credential and fails closed when unavailable (66.308459ms)
+✔ quota admission precedes upstream and telemetry records one request and one attempt (39.698417ms)
+✔ V2 exact routes beat earlier globs, then use explicit endpoint (10.415ms)
+✔ V2 protocol-incompatible exact route returns 422 without falling back to a glob (7.723792ms)
+✔ DeepSeek profile rotates a rejected credential without changing reasoning history (94.548459ms)
+✔ integration: 404 for unknown path (6.124792ms)
+✔ integration: 401 anthropic envelope on bad auth (/v1/messages) (12.6295ms)
+✔ integration: 401 openai envelope on bad auth (/v1/chat/completions) (6.560666ms)
+✔ integration: default authMode sends Authorization Bearer header (14.111417ms)
+✔ integration: authMode x-api-key sends x-api-key header (9.102375ms)
+✔ integration: 404 with anthropic envelope when no upstream matches model (7.356792ms)
+✔ integration: anth→anth pass-through non-streaming, body.model rewritten (19.259666ms)
+✔ integration: openai→openai pass-through non-streaming (19.575167ms)
+✔ integration: anth→openai non-streaming — body shape converted (10.303459ms)
+✔ integration: openai→anth non-streaming — body shape converted (19.841291ms)
+✔ integration: failover — first upstream 503, second succeeds (60.101834ms)
+✔ integration: upstream 4xx is forwarded as bridge-wrapped error, no retry (14.036167ms)
+✔ integration: key with allowedUpstreams blocks non-whitelisted upstream → 404 (8.174417ms)
+✔ integration: key with allowedModels blocks non-whitelisted model → 404 (7.054958ms)
+✔ integration: key with allowedModels hit reaches upstream → 200 (8.927542ms)
+✔ integration: expired key → 401 authentication_error (7.455541ms)
+✔ integration: key with future expiresAt still authenticates (10.186625ms)
+✔ integration: rpm exceeded → 429 rate_limit_error + Retry-After header (12.027208ms)
+✔ integration: dailyTokens exhausted → 429 rate_limit_error (3.331584ms)
+✔ integration: successful request records usage to limiter (7.293584ms)
+✔ integration: body over max-body-size → 413 (4.592959ms)
+✔ integration: error_message redacts upstream sk- key fragments (6.649333ms)
+✔ integration: multi-key — first key 500, second key succeeds (118.464334ms)
+✔ integration: stable credential reconciliation preserves cooldown; legacy credentials still work (6.0675ms)
+✔ integration: duplicate credential keys retain exact identity through cooldown and telemetry (12.294917ms)
+✔ integration: legacy upstream key is never persisted in attempt telemetry (18.460291ms)
+✔ integration: multi-key — 4xx does not retry next key (13.825375ms)
+✔ integration: multi-key — both keys 500, upstream-level failover (335.602333ms)
+✔ integration: /v1/responses routes as openai protocol (12.441375ms)
+✔ integration: /v1/responses/compact uses the configured native Responses endpoint (11.529375ms)
+✔ integration: passThroughAuth forwards client Authorization header (6.209709ms)
+✔ integration: passThroughAuth with x-api-key authMode strips Bearer prefix (30.417ms)
+✔ integration: maxRetries limits total attempts across upstreams and keys (90.887334ms)
+✔ integration: requestTimeoutMs aborts slow upstreams (75.261667ms)
+✔ integration: oauth config resolves token dynamically (12.322458ms)
+✔ integration: /v1/embeddings passes through to an OpenAI-protocol upstream as /v1/embeddings (8.905292ms)
+✔ integration: /v1/embeddings fails closed with 422 for a non-OpenAI upstream without forwarding (6.596416ms)
+﹣ group spend lifecycle enforces, settles, releases, and corrects exactly (0.658666ms) # set SAAS_GROUP_SPEND_TEST_DATABASE_URL
+﹣ the rolling 5h/7d key windows sum actual settled and outstanding charges exactly (0.10575ms) # set SAAS_GROUP_SPEND_TEST_DATABASE_URL
+﹣ FIN-01: bounded real PostgreSQL wallet financial invariants under restricted workload identities (0.564625ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require FIN-01
+﹣ wallet advisory fence: no tuple lock while fenced, mutual exclusion under concurrency, freeze gate intact (0.798833ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to run the wallet fence gate
+﹣ G5 restricted CP request axes and privacy contract on real PostgreSQL (0.4275ms) # SKIP
+﹣ legacy-main-112-to-129 compat plan live acceptance (three real databases + fault injection) (0.394791ms) # set LEGACY_112_COMPAT_ACCEPTANCE=1 (and have initdb on PATH) to run the live acceptance
+﹣ 054: restricted-role trigger-only execution, real fences, deferred balance and immutable ledger (4.526ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three managed E2E role URLs
+﹣ 055: real restricted-role prepared INSERT optional dates, matching writers and post-wait expiry (0.545125ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three managed E2E role URLs
+﹣ 056 real restricted-role CHECK equivalence, MFA fencing and zero callable application functions (0.471292ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three managed E2E role URLs
+﹣ 058 real restricted CP invalidation, immutable guards and unchanged ACL/catalog (0.710958ms) # set all three exact gateway E2E role URLs, or MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 to require them
+﹣ 059 actual restricted PostgreSQL terminal cancellation and redispatch guard (1.033792ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and disposable E2E URLs
+﹣ normal registered 060 real restricted PostgreSQL generated-account claim regression (0.78675ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable gateway E2E role URLs
+﹣ 112 frozen enforcement columns exist nullable and the gateway mirror holds on live PostgreSQL (0.906167ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ 121 composite route registry, group marker and evidence column hold on live PostgreSQL (0.426375ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ 122 multimodal billing dimensions hold on live PostgreSQL (columns, CHECKs, immutability, chain) (0.537458ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ 123 image task registry holds on live PostgreSQL with the gateway-only grants (0.433125ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ 123 the image task service runs the full lifecycle against the live gateway role (0.233167ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+✔ 123 the in-memory store enforces the same contract for unit wiring (4.716875ms)
+﹣ 125 risk control tables, grants and stores hold on live PostgreSQL (0.675125ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ 126 public brand snapshot table, grants and materializer hold on live PostgreSQL (0.807875ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ 127 alert silences and report state hold on live PostgreSQL (0.447167ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 with the disposable role-template database
+﹣ installed compact provenance CHECKs accept only native compact pairs and preserve generation pairs (0.42025ms) # requires the disposable managed SaaS migration database
+﹣ migration 034 enforces provider product write fencing in isolated PostgreSQL (0.422291ms) # MODEL_ROUTER_TEST_DATABASE_URL is not configured; PostgreSQL integration assertions skipped without opening a connection
+﹣ dedicated production-like PostgreSQL role passes and unsafe search_path order fails the live probe (5.591792ms) # set MODEL_ROUTER_SAAS_RUNTIME_PRIVILEGE_TEST_URL for a disposable role-template database
+﹣ admission statement budget: one fresh platform member admission stays within the round-trip budget (0.822625ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to run the admission statement budget
+﹣ restricted PostgreSQL combined affinity binding reconciles two committed empty affinity reads (0.834459ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable role URLs
+﹣ restricted PostgreSQL combined affinity binding reconciles after real capacity-driven stale clear (0.684208ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable role URLs
+﹣ restricted PostgreSQL terminal second affinity contention is rate limited without a third bind (0.169708ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable role URLs
+﹣ restricted PostgreSQL fresh affinity winner capacity is rate limited without a second bind (0.126917ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable role URLs
+﹣ restricted PostgreSQL initially full candidate capacity is rate limited without any bind (0.221333ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable role URLs
+﹣ restricted PostgreSQL prelock fences concurrent authorization changes on the disposable E2E target (0.747833ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable E2E role URLs to require this gate
+﹣ real PG immutable hints retain final dispatchability and committed revocation fences in both supply modes (0.43225ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the three disposable gateway E2E role URLs
+﹣ composite admission freezes the resolved supply identity and the nominal customer identity (0.448333ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to run the composite supply identity gate
+﹣ dispatch account capacity uses real PG leases and fully compensated 429 on restricted PG15/18 (0.988417ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all disposable E2E role URLs
+﹣ restricted gateway role writes EMA health scores and admits single half-open probes (0.493ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable gateway E2E role URLs to require this gate
+﹣ restricted gateway role faces 42501 on identity mutation and row removal, 23514 on score range (0.122917ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable gateway E2E role URLs to require this gate
+﹣ real PostgreSQL commercial gateway E2E launches managed control-plane and gateway runtimes and pins local HTTPS upstream (0.560959ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the three role URLs to require the live PostgreSQL gate
+﹣ the plaza aggregates live groups and resolves display prices through the same chain under the gateway role (0.464958ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable gateway E2E role URLs to require this gate
+﹣ FIN pre-dispatch cancellation uses restricted gateway transactions on real PG15/18 (0.468334ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all disposable E2E role URLs
+﹣ FIN wallet compensation lock order uses real settlement and fresh compensation transactions (0.065583ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all disposable E2E role URLs
+✔ evidence fixture refuses invalid signed TTLs before touching a database (5.264708ms)
+﹣ restricted PG dispatch authority batches retain exact reads, claim effects and both revocation fence directions (0.125209ms) # disposable E2E role URLs not configured
+✔ concurrent-claim fixture excludes the shared local PostgreSQL port (0.777209ms)
+﹣ two real restricted-gateway transactions claim one signed evidence exactly once on PG15/18 (0.127042ms) # offline: no disposable E2E role URLs and REQUIRED=0
+﹣ owned restricted PostgreSQL executes three real business statements with optional native preparation (0.74475ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable gateway E2E role URLs
+﹣ restricted PostgreSQL account fences serialize lease acquisition without account UPDATE or application EXECUTE (1.250375ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable gateway E2E role URLs to require this gate
+﹣ durable model cooldowns are cross-instance, GREATEST-merged, and bounded by cooled_until (0.436875ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the disposable gateway E2E role URLs to require this gate
+﹣ R6 account rate counters drive admission-fed scheduling eligibility on real PG (restricted gateway role) (1.087917ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all disposable E2E role URLs
+﹣ runtime health writes sample the database clock after the actual conflict row lock under restricted roles (0.4965ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable gateway E2E role URLs to require this gate
+﹣ restricted PostgreSQL scheduler separates native Anthropic capability from OpenAI client scope (0.463708ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three designated disposable role URLs
+﹣ R-dormant scheduling-threshold pause drives selection eligibility on real PG (restricted gateway role) (0.445167ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all disposable E2E role URLs
+﹣ customer passkeys: actual PG restricted control-plane ceremonies, counter and ledger guards (0.69025ms) # offline skip: set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the disposable MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs
+﹣ tenant member directory: real customer HTTP sessions and restricted PG15/18 authorization (0.493792ms) # offline skip: set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs
+﹣ tenant member directory: actual PG15/18 restricted control-plane SELECT and fresh paginated authority (0.447667ms) # offline skip: set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three disposable MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs
+﹣ member management: actual PG restricted control-plane role change, removal cascade, transfer and owner invariant (0.645333ms) # offline skip: set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the disposable MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs
+﹣ KEY081: real persistent key budget CAS and guarded counter flows under restricted roles (0.436958ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require KEY081
+﹣ KEY080: real persistent key IP policy CAS and guard admission under restricted roles (0.485167ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require KEY080
+﹣ R2 marketing affiliate runs end-to-end under the restricted control-plane role with real ledger posting (0.369916ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require R2-091
+﹣ G4 marketing announcements run end-to-end under the restricted control-plane role (0.370958ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require G4-092
+﹣ R1 marketing promo codes run end-to-end under the restricted control-plane role with a frozen checkout snapshot (0.38925ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require R1-090
+﹣ G1 marketing redeem codes run end-to-end under the restricted control-plane role with real ledger posting (0.39675ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require G1-089
+﹣ PostgreSQL attempt time remains monotonic under a behind service clock and preserves version CAS (0.456875ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the three disposable role URLs
+﹣ FIN057: real persistent normal-success evidence and terminal replay under restricted gateway (0.41475ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require FIN057
+﹣ FIN063: real persistent usage corrections, replay, concurrency and reconciliation fence (0.430667ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require FIN063
+﹣ operations projections and audited status-poll requeue work under the restricted PostgreSQL control plane (0.7925ms) # requires the isolated managed PostgreSQL runner
+﹣ migration 037 creates refund storage and wallet_refund ledger checks in an isolated PostgreSQL schema (0.414083ms) # MODEL_ROUTER_TEST_DATABASE_URL is not configured; PostgreSQL integration assertions skipped without opening a connection
+﹣ RUN-01/UI-OPS: real PG15/18 restricted-control-plane MFA issuance audit and enrollment/login proof (0.636791ms) # offline: set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require the MFA gate
+﹣ PostgreSQL role revocation serializes MFA enrollment and login (0.37475ms) # SKIP
+﹣ required real PostgreSQL platform validation retry preserves authority, audit, idempotence and atomic rollback (0.455334ms) # Set the required disposable gateway E2E role URLs
+✔ mock plugin walks install → enable → forward → drain end to end (991.436291ms)
+﹣ PostgresPluginStore holds the CAS/binding/KV contract on live PostgreSQL (0.382375ms) # set MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED=1 and MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL for the plugin-store real-PG gate
+﹣ the dedicated plugin-host role passes its fail-closed probe and holds exactly its access contract (0.057625ms) # set MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED=1 and MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL for the plugin-store real-PG gate
+﹣ real PG price readers overlap while same-lineage appends retain the exclusive fence (0.407875ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the three disposable gateway E2E role URLs
+﹣ RUN-01 required owned local Redis executes the original Lua and restricted module (0.449959ms) # set MODEL_ROUTER_SAAS_REDIS_LOCAL_REQUIRED=1 for owned native Redis; no discovery dial
+▶ RUN-01 owned verified TLS and hostname checks with synthetic RESP only
+  ✔ verified (498.928166ms)
+  ✔ wrong-san (161.774667ms)
+  ✔ unknown-ca (154.5425ms)
+  ✔ uncertain-eval (2238.498083ms)
+✔ RUN-01 owned verified TLS and hostname checks with synthetic RESP only (3185.129166ms)
+﹣ R5 credential quarantine runs end-to-end under the restricted worker role with real unsealing (0.596333ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1, all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs, MODEL_ROUTER_SAAS_GATEWAY_E2E_VALIDATION_WORKER_URL and MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY to require R5-097
+﹣ required four-role schema061 audited requeue persists cycle/history and bounds the ACTUAL worker (0.501084ms) # set MODEL_ROUTER_SAAS_REQUEUE_E2E_REQUIRED=1 and every requeue E2E role URL
+﹣ Kimi quota snapshots keep successful freshness through claims/failures and recover on a reset under restricted roles (0.448083ms) # requires disposable PostgreSQL gate role URLs
+﹣ required current-schema four-role CP invalidation fences actual validation-worker lease completion (0.442ms) # set MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED=1 and all four validation E2E role URLs
+﹣ restricted PostgreSQL worker accepts fixed native/legacy protocol aliases without relaxing authority (0.479ms) # requires the disposable PostgreSQL runner and --worker-role
+﹣ PostgreSQL worker claims once, reclaims expired leases with a fence, rejects stale completion, and records only health state (0.70375ms) # MODEL_ROUTER_TEST_DATABASE_URL is not configured; the isolated PostgreSQL worker test is skipped without opening a connection
+﹣ restricted PG dispatch proof batches preserve ordered shared fences and normal CP revocation (0.726125ms) # disposable E2E role URLs not configured
+﹣ required real PostgreSQL restricted credential worker validates approved custom targets without granting catalog or rights authority (0.525458ms) # set MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED=1 and both validation E2E role URLs for the required real-PG gate
+﹣ required real PostgreSQL restricted worker claims and settles platform-queue validation jobs (0.45575ms) # set MODEL_ROUTER_SAAS_VALIDATION_E2E_REQUIRED=1 and both validation E2E role URLs for the required real-PG gate
+﹣ #18a OAuth credential onboarding persists and inherits the refresh schedule under real roles (0.415583ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1, the three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs and MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY to require #18a
+﹣ R4 OAuth token refresh runs end-to-end on the control-plane role with real unsealing (0.412167ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1, all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs, MODEL_ROUTER_SAAS_GATEWAY_E2E_VALIDATION_WORKER_URL and MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY to require R4-094
+﹣ control-plane pool relationships preserve read-only authority and use PostgreSQL grant time (0.70225ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and the three disposable role URLs
+﹣ D4 quota sync snapshots run end-to-end under the restricted worker role with real unsealing (0.406292ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs plus MODEL_ROUTER_SAAS_GATEWAY_E2E_VALIDATION_WORKER_URL to require D4-093
+﹣ G4.5 announcement fan-out runs end-to-end under the restricted control-plane role (0.878958ms) # set MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED=1 and all three MODEL_ROUTER_SAAS_GATEWAY_E2E role URLs to require G4.5-095
+﹣ track F customer webhook evidence on the restricted control-plane role (0.503333ms) # set MODEL_ROUTER_SAAS_RUNTIME_PRIVILEGE_TEST_URL and MODEL_ROUTER_SAAS_TEST_ADMIN_URL for a disposable role-template database
+✔ abort: client disconnect propagates to upstream (4558.963167ms)
+✔ abort: SSE idle timeout closes stalled stream (296.90125ms)
+✔ auth blocking: blocks IP after N failed auth attempts (43.714ms)
+✔ auth blocking: blocked IP also rejected for valid keys (pre-auth gate) (9.340083ms)
+✔ auth blocking: successful auth clears prior failures from same IP (10.737459ms)
+✔ auth blocking: 429 response is not logged (pre-auth gate) (8.69425ms)
+✔ external timezone reconciliation fails before journal finalization and runtime apply follows journaling (0.937459ms)
+✔ real CLI runtime reports listening proxy/admin sockets and safe database diagnostics (2365.941083ms)
+✔ imports bounded batches once, maps names, and never imports later V2 log copies (16.4695ms)
+✔ resumes after a failed batch without duplicating committed rows or expanding cutoff (12.936875ms)
+✔ old narrow request_logs schema preserves unknown fields (7.628792ms)
+✔ fresh database records a completed zero-row marker before V2 creates request_logs (14.059083ms)
+✔ refuses first import when native V2 requests predate its marker (16.897542ms)
+✔ response ownership binds key and upstream across store instances (16.51675ms)
+✔ 4.2: presignGetObjectUrl matches the AWS S3 developer-guide GET-object vector (2.7285ms)
+✔ 4.2: presign honors path-style addressing and custom expiry (0.386333ms)
+✔ 4.2: objectUrlForDownload prefers the public base URL when configured (0.576792ms)
+✔ 4.2: putObject signs the payload hash and reports upstream failures (20.614625ms)
+✔ 4.2: configuration fails closed on invalid inputs (0.268ms)
+✔ old database needs explicit worker migration; frozen archive purge preserves covered watermark (188.07275ms)
+✔ native write watermark advances transactionally on late updates and ignores terminal replay (19.064042ms)
+✔ request/attempt upsert is idempotent, paginates ties, and coexists with legacy logs (22.386875ms)
+✔ legacy log batches coexist with concurrent telemetry writes under transient SQLite writer contention (368.821708ms)
+✔ writer batches events atomically, retains a failed batch, and resolves only after recovery commit (453.270791ms)
+✔ queue overflow marks recorder degraded, refuses new writes/admission, and close drains accepted work (336.26575ms)
+✔ quota admission, attempt sent marker and settlement follow committed telemetry in worker order (346.143083ms)
+ℹ tests 349
+ℹ suites 0
+ℹ pass 255
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 94
+ℹ todo 0
+ℹ duration_ms 56488.169208

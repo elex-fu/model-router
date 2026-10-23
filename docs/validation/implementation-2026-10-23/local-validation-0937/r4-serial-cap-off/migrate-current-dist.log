@@ -1,0 +1,1 @@
+SaaS database migrations applied successfully. Server startup never runs migrations; run model-router saas:migrate explicitly.

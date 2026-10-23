@@ -666,3 +666,17 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 **验证**:tsc 干净;startup 62/62、composition 23/23、claude-registration 9/9、claude/gemini-oauth 全部 10 个模块测试文件 55/55;改动文件 Biome 零诊断;deadcode 严格改善(unused files 858→850——两套模块因挂载转为已使用,零新增)。完整 unit 6870/6845/2 fail:两处失败(backup-restore、http-images keepalive)与本次改动无关,隔离与重跑均通过,属高负载(1 分钟负载 ~20)时序 flake,如实记录不作为通过声明。
 
 **边界**:与 §24 相同——无真实 Claude/Gemini OAuth 凭据,未做真实上游 smoke;provider catalog 注册(claude-registration 的 applier)需操作员/部署流程调用后才解除 sink 失败关闭;真实"导入→验证→调度"smoke 待有凭据时执行。
+
+## 26. 本地复验：当前构建回归通过，R4 串行诊断仍未通过性能门槛（2026-10-23）
+
+在 `a1441872e718f17badf2a7947bb210fa44de4439` 上重新执行 `build:server`，随后串行安排本地验证，不与本轮自建构建/测试并行压测。source、dist、tests、scripts 及选定构建输入前后散列一致。完整证据见 [本地验证记录](validation/implementation-2026-10-23/local-validation-0937/README.md) 与 [机器可读汇总](validation/implementation-2026-10-23/local-validation-0937/summary.json)。
+
+- 最小四文件：**41/41**，含 §25 的 backup-restore、http-images keepalive 与 R9 harness。
+- 完整 unit（文件并发 2）：**6870 / 6847 pass / 0 fail / 23 skipped**，约 139 秒；这是本次低并发回归通过，不将 §25 的历史失败改写为通过。
+- integration（文件并发 2、精简环境）：**349 / 255 pass / 0 fail / 94 skipped**，约 56 秒；显式依赖环境的跳过项不计通过。
+- 一次性 PG18.6 原生备份恢复：**1/1**，覆盖 **118 条迁移、147 张表**，指纹一致、损坏归档拒绝、自有恢复目标清理。首次 PG 启动因 locale 缺失失败，设置 `LC_ALL=C LANG=C` 后通过；两次日志均保留。S3/KMS 为协议替身，不关闭生产云恢复。
+- 当前 dist 的三 CLI mock 装配：OpenAI/Anthropic 两条 smoke 均 **200 + settled**；PG fsync/synchronous_commit 开启，prepared statements 为 native，HTTP cap 关闭。
+
+**R4 串行诊断（北京时间 09:48:37—09:49:19）**：四腿各 100 样本，**400 个 HTTP 200、流错误 0、请求 ID 关联完整**；p99 latency 开销 **424.55 ms > 30 ms**，TTFB 开销 **267.15 ms > 10 ms**，原报告仍为 **exit 1 / 两项 violation**。测试前一分钟观察负载 **8.30–11.85**，本轮之外的 Rust 编译仍在；harness 期间采样负载 **7.77–9.23**。未形成受控窗口，不能据此关闭性能门禁、认定回归/优化收益或将全部耗时归因于 CPU。
+
+**后续边界**：本次未执行 off/8 c200/60s 对照、R5 受控归因或完整 R6 R9；这三项仍开放。未调用真实供应商进行 OAuth 或 Codex 可售验收。R4 自建进程、PG 与运行时目录均已清理。下一次先取得安静窗口，再对同一候选构建执行有效串行测量和 off/8 对照。

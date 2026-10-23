@@ -1,0 +1,4 @@
+Self-owned current-build R9 test assembly evidence: /private/tmp/model-router-local-validation-20261023.o46TbY/r4-serial-cap-off
+(node:18648) [MODEL_ROUTER_SOFTWARE_KMS_PILOT_ONLY] Warning: Software provider-credential KMS is pilot-only: master keys are static environment values. It must not serve a charging production environment (cloud KMS upgrade is the M3 decision gate).
+(Use `node --trace-warnings ...` to show where the warning was created)
+R9 serial profile summary: /private/tmp/model-router-local-validation-20261023.o46TbY/r4-serial-cap-off/summary.json (ok=false)

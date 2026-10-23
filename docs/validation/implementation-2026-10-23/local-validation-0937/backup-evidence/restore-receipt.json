@@ -1,0 +1,26 @@
+{
+  "format": "saas-restore-receipt-v1",
+  "id": "ee618fcc-cc20-462b-be3c-dce6675cf8d8",
+  "backupId": "225e2773-ebc7-4a65-8644-cf9a196a41a2",
+  "sourceId": "disposable-backup-fixture",
+  "sourceIdentitySha256": "9d00fc86bcef26ea7a6466173be1d6c6d828fa25c7a3c3483cbb225eb587c0b1",
+  "policySha256": "ba4331b69e307ae5ce5678293db817c5ae746ec5ca3e9694b631b2162b33b184",
+  "startedAt": "2026-10-23T01:45:33.821Z",
+  "completedAt": "2026-10-23T01:45:35.301Z",
+  "durationMs": 1480,
+  "recoveryPointAt": "2026-10-23T01:45:32.118Z",
+  "targetDatabase": "model_router_test_backup_ee618fcccc20462bbe3cdce6675cf8d8",
+  "archiveSha256": "234ee0530534541b39447d34dfd78926aae0ac795a462fccae34e027bc954078",
+  "fingerprintSha256": "b1d699d0e360c77c7ebc589e8e373818eb2e82383130bb4131f4bbb93196e6e9",
+  "kms": {
+    "format": "saas-backup-kms-recovery-v1",
+    "challenge": "e429d72d-3e76-4eef-8331-a911a1ed89a6",
+    "verifiedAt": "2026-10-23T01:45:35.064Z",
+    "recoveredKeyIds": [
+      "fixture-recovery-key"
+    ],
+    "evidenceSha256": "d66e0235e6a94674ace84a3774186436149456bdc62c43b54a5ca6826a7ab54d"
+  },
+  "cleanup": "dropped-owned-database",
+  "productionAdmissionApproved": false
+}

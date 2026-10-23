@@ -1,0 +1,129 @@
+✖ offline restore reinstates config, key and both SQLite databases (6.569792ms)
+✖ tampered backup or stale CAS refuses without changing current state (2.12575ms)
+✖ matching checksums cannot hide undecryptable backup secrets (0.258417ms)
+✖ responding configured listener refuses offline restore (0.253458ms)
+✖ interrupted restore journal rolls back from verified safety snapshot before retry (0.264584ms)
+✔ request samples require diagnostic serial mode before supervisor output/resources (162.715292ms)
+✔ bench accepts only the bounded unchanged serial sample configuration without network (480.099042ms)
+✔ disabled observation never reads headers or allocates sample objects; default report stays unchanged (27.80475ms)
+✔ sample header states redact invalid raw values, enforce cap, and contain observation exceptions (33.954209ms)
+✔ chosen quantile indices mirror the unchanged floor algorithm, including n100 p99=max (9.081125ms)
+✔ TTFB preserves metric/read/cancel ordering and records only after cancellation (8.129292ms)
+✖ actual measured HTTP helpers retain chosen gateway and exclude warmup requests (5.33375ms)
+✔ latency observes only after body drain and preserves the original drain failure (6.463ms)
+✔ client journal is a new mode0600 artifact and never overwrites an existing result (18.172208ms)
+✔ state projection separates missing, pending, multiplicity and the bounded 201 sentinel (13.851959ms)
+✔ state export uses static tenant/UUID projection after read-only setup and writes safe new artifacts (25.365333ms)
+✔ partial/invalid sample IDs remain explicit, unavailable IDs skip SQL, and SQL failures expose only fixed stage/state (13.277875ms)
+✔ supervisor export occurs after all measurements and before the unchanged owned cleanup (0.659792ms)
+✔ J7 exact status counts produce the existing zero-5xx violation despite some success (28.13975ms)
+✔ scaling preserves drains/status inclusion and counts fetch/body failures as transport errors (11.977583ms)
+✔ 429 and other 4xx remain counted without a new rate threshold; chosen budgets remain honored (28.666625ms)
+✔ concurrency retains the same transport/5xx gates and 429 policy (7.982625ms)
+✔ no-fail can keep exit zero but cannot erase scaling violations (13.778125ms)
+✔ baseline errors are rechecked against current budgets, not its own permissive config (9.935ms)
+✔ fatal, failed, missing and malformed baseline evidence never produces a valid ratio (94.9915ms)
+✔ current report failures also invalidate comparison; healthy 2.7 boundary is unchanged (23.964958ms)
+✔ load-counter validation rejects malformed or conflicting counts (7.739708ms)
+✔ supervisor rejects observed scaling/concurrency failures even with exit-zero/empty-violation reports (8.896292ms)
+✔ supervisor requires expected load scenes and consistent positive observed counts (5.987458ms)
+✔ failed baseline stops all subsequent load and returns normally to statistics/metrics/cleanup (5.927166ms)
+✔ failed full child stops later protocols; a healthy sequence preserves baseline path and load arguments (60.864792ms)
+✔ actual supervisor keeps final collection after the controlled sequence and cleanup in finally (1.470958ms)
+✔ 4.2: /v1/images/generations is registered with the images.generations operation override (8.809833ms)
+✔ 4.2: the async submit path answers 202 + Location + Retry-After before dispatch settles (6.151875ms)
+✔ 4.2: async submit without the media port fails closed with 503 (0.426416ms)
+✔ 4.2: a background dispatch failure settles the task failed without breaking the 202 (0.810417ms)
+✔ 4.2: a task-store failure before dispatch compensates and returns 503 (0.290917ms)
+✔ 4.2: the recording ceiling fails the task when the upstream exceeds the family bound (1.7785ms)
+✔ 4.2: the JSON keepalive stream writes whitespace heartbeats and passes late errors through (37.567416ms)
+✔ 4.2: without a heartbeat the keepalive stream forwards the real status untouched (0.405ms)
+✔ 4.2: the sync images path stays byte-identical when keepalive is disabled (0.4735ms)
+ℹ tests 41
+ℹ suites 0
+ℹ pass 35
+ℹ fail 6
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3301.427292
+
+✖ failing tests:
+
+test at tests/cli/backup-restore.test.ts:2:3134
+✖ offline restore reinstates config, key and both SQLite databases (6.569792ms)
+  Error: listen EPERM: operation not permitted 127.0.0.1
+      at Server.setupListenHandle [as _listen2] (node:net:1987:21)
+      at listenInCluster (node:net:2066:12)
+      at node:net:2275:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+    code: 'EPERM',
+    errno: -1,
+    syscall: 'listen',
+    address: '127.0.0.1'
+  }
+
+test at tests/cli/backup-restore.test.ts:2:5201
+✖ tampered backup or stale CAS refuses without changing current state (2.12575ms)
+  Error: listen EPERM: operation not permitted 127.0.0.1
+      at Server.setupListenHandle [as _listen2] (node:net:1987:21)
+      at listenInCluster (node:net:2066:12)
+      at node:net:2275:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+    code: 'EPERM',
+    errno: -1,
+    syscall: 'listen',
+    address: '127.0.0.1'
+  }
+
+test at tests/cli/backup-restore.test.ts:2:6138
+✖ matching checksums cannot hide undecryptable backup secrets (0.258417ms)
+  Error: listen EPERM: operation not permitted 127.0.0.1
+      at Server.setupListenHandle [as _listen2] (node:net:1987:21)
+      at listenInCluster (node:net:2066:12)
+      at node:net:2275:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+    code: 'EPERM',
+    errno: -1,
+    syscall: 'listen',
+    address: '127.0.0.1'
+  }
+
+test at tests/cli/backup-restore.test.ts:3:997
+✖ responding configured listener refuses offline restore (0.253458ms)
+  Error: listen EPERM: operation not permitted 127.0.0.1
+      at Server.setupListenHandle [as _listen2] (node:net:1987:21)
+      at listenInCluster (node:net:2066:12)
+      at node:net:2275:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+    code: 'EPERM',
+    errno: -1,
+    syscall: 'listen',
+    address: '127.0.0.1'
+  }
+
+test at tests/cli/backup-restore.test.ts:3:1766
+✖ interrupted restore journal rolls back from verified safety snapshot before retry (0.264584ms)
+  Error: listen EPERM: operation not permitted 127.0.0.1
+      at Server.setupListenHandle [as _listen2] (node:net:1987:21)
+      at listenInCluster (node:net:2066:12)
+      at node:net:2275:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+    code: 'EPERM',
+    errno: -1,
+    syscall: 'listen',
+    address: '127.0.0.1'
+  }
+
+test at tests/ops/r9-request-samples.test.ts:4:3379
+✖ actual measured HTTP helpers retain chosen gateway and exclude warmup requests (5.33375ms)
+  Error: listen EPERM: operation not permitted 127.0.0.1
+      at Server.setupListenHandle [as _listen2] (node:net:1987:21)
+      at listenInCluster (node:net:2066:12)
+      at node:net:2275:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+    code: 'EPERM',
+    errno: -1,
+    syscall: 'listen',
+    address: '127.0.0.1'
+  }

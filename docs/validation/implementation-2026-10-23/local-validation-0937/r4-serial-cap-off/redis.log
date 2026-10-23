@@ -1,0 +1,12 @@
+18725:C 23 Oct 2026 09:48:41.984 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+18725:C 23 Oct 2026 09:48:41.984 * Redis version=8.10.2, bits=64, commit=00000000, modified=1, pid=18725, just started
+18725:C 23 Oct 2026 09:48:41.984 * Configuration loaded
+18725:M 23 Oct 2026 09:48:41.985 * monotonic clock: ARM CNTVCT @ 24 ticks/us
+18725:M 23 Oct 2026 09:48:41.987 * Running mode=standalone, port=51970.
+18725:M 23 Oct 2026 09:48:41.987 # WARNING: The TCP backlog setting of 511 cannot be enforced because kern.ipc.somaxconn is set to the lower value of 128.
+18725:M 23 Oct 2026 09:48:41.988 * Server initialized
+18725:M 23 Oct 2026 09:48:41.988 * Ready to accept connections tcp
+18725:M 23 Oct 2026 09:48:41.988 # WARNING: Redis does not require authentication. Redis will accept connections from any local client.
+18725:signal-handler (1792720158) Received SIGTERM scheduling shutdown...
+18725:M 23 Oct 2026 09:49:18.522 * User requested shutdown...
+18725:M 23 Oct 2026 09:49:18.522 # Redis is now ready to exit, bye bye...

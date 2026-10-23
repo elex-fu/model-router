@@ -1,0 +1,8 @@
+{
+  "postgresVersion": "18.6 (Homebrew)",
+  "nativePostgresBackupRestore": true,
+  "cloudObjectStoreAndKms": "test-double",
+  "sourceDatabaseOwnedByThisTest": true,
+  "disposableRestoreDatabaseDropped": true,
+  "corruptArchiveRejected": true
+}

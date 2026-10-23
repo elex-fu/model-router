@@ -1,0 +1,38 @@
+✖ self-owned PostgreSQL backup downloads its offsite version and restores only a new disposable database (1705.598041ms)
+ℹ 2026-10-23 09:44:47.583 CST [16006] LOG:  starting PostgreSQL 18.6 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.3.34.2), 64-bit
+2026-10-23 09:44:47.583 CST [16006] LOG:  listening on IPv4 address "127.0.0.1", port 51464
+2026-10-23 09:44:47.584 CST [16006] LOG:  listening on Unix socket "/private/tmp/mr-backup-Le47YN/socket/.s.PGSQL.51464"
+2026-10-23 09:44:47.585 CST [16006] FATAL:  postmaster became multithreaded during startup
+2026-10-23 09:44:47.585 CST [16006] HINT:  Set the LC_ALL environment variable to a valid locale.
+2026-10-23 09:44:47.586 CST [16006] LOG:  database system is shut down
+
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2454.959459
+
+✖ failing tests:
+
+test at tests/cli/saas-backup.integration.test.ts:2:2137
+✖ self-owned PostgreSQL backup downloads its offsite version and restores only a new disposable database (1705.598041ms)
+  Error: Command failed: pg_ctl --pgdata /private/tmp/mr-backup-Le47YN/cluster --log /private/tmp/mr-backup-Le47YN/postgres.log --options -h 127.0.0.1 -p 51464 -k /private/tmp/mr-backup-Le47YN/socket --wait start
+  pg_ctl: 无法启动服务器进程
+  检查日志输出.
+  
+      at genericNodeError (node:internal/errors:985:15)
+      at wrappedFn (node:internal/errors:539:14)
+      at ChildProcess.exithandler (node:child_process:417:12)
+      at ChildProcess.emit (node:events:509:28)
+      at maybeClose (node:internal/child_process:1124:16)
+      at ChildProcess._handle.onexit (node:internal/child_process:306:5) {
+    code: 1,
+    killed: false,
+    signal: null,
+    cmd: 'pg_ctl --pgdata /private/tmp/mr-backup-Le47YN/cluster --log /private/tmp/mr-backup-Le47YN/postgres.log --options -h 127.0.0.1 -p 51464 -k /private/tmp/mr-backup-Le47YN/socket --wait start',
+    stdout: '等待服务器进程启动 .... 已停止等待\n',
+    stderr: 'pg_ctl: 无法启动服务器进程\n检查日志输出.\n'
+  }
