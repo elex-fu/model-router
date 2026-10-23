@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { PlatformWalletLedgerService } from '../billing/service.js';
+import { normalizeCurrency, parseStoredMinorUnits } from '../billing/money.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { sha256Hex } from './digest.js';
 import { PostgresUnknownOutcomeOperatorAuthorizationAdapter } from './postgres-unknown-outcome-operator-authorization.js';
@@ -1159,17 +1160,64 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
         if (requestFinancial !== 'pending' && requestFinancial !== 'reconciliation_pending') {
           financialError = 'PLATFORM_FINANCIAL_STATE_CONFLICT';
         } else {
+          const businessKey = `saas-request-admission:${claim.tenantId}:${claim.requestId}`;
+          // Observe the original admission identity without a reservation row
+          // lock. Billing still owns wallet-fence -> reservation locking and
+          // re-reads the row before validating the strict evidence reference.
+          const original = await tx.query<Record<string, unknown>>(
+            `SELECT id, tenant_id, request_id, idempotency_namespace, business_key,
+                    wallet_id, currency, amount_minor_units::text, price_snapshot_ref,
+                    state, reconciliation_reference
+               FROM saas_billing_reservations
+              WHERE tenant_id = $1 AND request_id = $2
+                AND idempotency_namespace = $3 AND business_key = $4`,
+            [claim.tenantId, claim.requestId, BILLING_RESERVATION_NAMESPACE, businessKey],
+          );
+          if (original.rows.length !== 1) throw new Error('Unknown-outcome admission reservation is missing or ambiguous');
+          const row = original.rows[0]!;
+          const identity = {
+            id: databaseText(row.id, 'reservation.id'),
+            tenantId: databaseText(row.tenant_id, 'reservation.tenant_id'),
+            requestId: databaseText(row.request_id, 'reservation.request_id'),
+            idempotencyNamespace: databaseText(row.idempotency_namespace, 'reservation.idempotency_namespace'),
+            businessKey: databaseText(row.business_key, 'reservation.business_key'),
+            walletId: databaseText(row.wallet_id, 'reservation.wallet_id'),
+            currency: normalizeCurrency(row.currency),
+            amountMinorUnits: parseStoredMinorUnits(row.amount_minor_units),
+            priceSnapshotRef: databaseText(row.price_snapshot_ref, 'reservation.price_snapshot_ref'),
+          };
+          if (identity.tenantId !== claim.tenantId || identity.requestId !== claim.requestId ||
+              identity.idempotencyNamespace !== BILLING_RESERVATION_NAMESPACE || identity.businessKey !== businessKey) {
+            throw new Error('Unknown-outcome admission reservation identity changed');
+          }
+          const reservationState = databaseText(row.state, 'reservation.state');
+          let evidenceRef: string;
+          if (reservationState === 'reconciliation_pending') {
+            evidenceRef = databaseText(row.reconciliation_reference, 'reservation.reconciliation_reference');
+            if (evidenceRef.trim() !== evidenceRef || /[\u0000-\u001f\u007f]/u.test(evidenceRef)) {
+              throw new Error('Unknown-outcome admission reservation reference is invalid');
+            }
+          } else if (reservationState === 'reserved' && row.reconciliation_reference === null) {
+            evidenceRef = `unknown-outcome-case:${claim.caseId}`;
+          } else {
+            throw new Error('Unknown-outcome admission reservation state changed');
+          }
           const pending = await this.billing.markReconciliationPending(tx, {
             supplyMode: 'platform',
             tenantId: claim.tenantId,
             requestId: claim.requestId,
-            evidenceRef: `unknown-outcome-case:${claim.caseId}`,
-            businessKey: `saas-request-admission:${claim.tenantId}:${claim.requestId}`,
+            evidenceRef,
+            businessKey,
             idempotencyNamespace: BILLING_RESERVATION_NAMESPACE,
           });
-          if (pending.state !== 'reconciliation_pending') {
-            financialError = 'PLATFORM_RESERVATION_STATE_CONFLICT';
-          } else if (requestFinancial === 'pending') {
+          if (pending.state !== 'reconciliation_pending' || pending.reconciliationReference !== evidenceRef ||
+              pending.id !== identity.id || pending.tenantId !== identity.tenantId || pending.requestId !== identity.requestId ||
+              pending.idempotencyNamespace !== identity.idempotencyNamespace || pending.businessKey !== identity.businessKey ||
+              pending.walletId !== identity.walletId || pending.currency !== identity.currency ||
+              parseStoredMinorUnits(pending.amountMinorUnits) !== identity.amountMinorUnits || pending.priceSnapshotRef !== identity.priceSnapshotRef) {
+            throw new Error('Unknown-outcome admission reservation changed during reconciliation');
+          }
+          if (requestFinancial === 'pending') {
             const updated = await tx.query<{ readonly financial_status: unknown; readonly state_version: unknown }>(
               `UPDATE saas_requests
                   SET financial_status = 'reconciliation_pending',

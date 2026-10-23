@@ -967,3 +967,13 @@ Astra 独立源码复核通过；Luna shutdown helper **11/11**、实际 runtime
 WS 鉴权关闭修复已推送 `64ac766`。此前 [CI #145](https://github.com/elex-fu/model-router/actions/runs/40026833443) 对 `cf45917` **64/64 jobs 全过**：四个 shared（含 offline/build/browser、PG15/18、PG16）与 60 个 isolated，确定性结算及目录/商户在两个版本均通过。它仍早于 WS 和本节资源关闭修复，最新 head 按各自 revision 复验。
 
 人工 unknown 处理的真实 HTTP/PG 子场景已接入现商业 root，等待首次实际运行：使用正常 MFA、scanner、原受控上游证据、case/observation 与不可变 audit 双向引用，不造 session、case lease 或金融事实。源码审阅发现 HTTP 和 scanner 可能使用不同 reconciliation reference，保留严格 billing 比较并准备窄修设计，须先取得正常 PG 失败证据；未将该闭环标为通过。
+
+### 29.29 修复正常 scanner 的原 hold 引用冲突
+
+首次真实 PG18 人工处理运行确认：case 连续扫描 5 次仍 open，`lastErrorCode=IDEMPOTENCY_CONFLICT`。HTTP 已使用 `normal-success-unknown:…` 将 hold 标为 reconciliation_pending，scanner 又传 `unknown-outcome-case:…`，因此正确触发 billing 的严格引用比较。
+
+现仅在 worker 的 platform capture 分支精确读取原 admission reservation，不提前加行锁：已 pending 必须有合法原持久引用并原样传入现 billing；reserved/null 保留原 case 引用路径。仍执行 billing 的钱包 fence、reservation 重读和状态检查，随后再次核对完整身份、币种、BigInt 金额、价格、状态及引用。没有跳过 billing、放宽其幂等比较或修改金融事实。异常事务回滚，不升级 case。
+
+Astra 实际源码审查通过；Luna worker **24/24**、combined strict 通过。正常 PG18 复测已通过 scanner/operator_required、原 hold 身份/金额/价格/引用不变、真实 MFA、权限拒绝及 list/detail；完整 root **25/27**，仍在人工 resolve POST 返回 503。脱敏服务端日志明确首拒绝关系为 `saas_billing_group_spend_reservations`、SQLSTATE 42501，发现 CP 的既有 group-spend release 权限缺口，作为下一独立任务处理；未将本次部分通过记作完整人工闭环。
+
+上述运行均保持正常迁移/受限角色、sourceChanges=[] 并清理临时集群。父计数放在 operator helper 后导致次生 3/4 的测试可观测性问题已分开修正，保留原四场景全部金融断言及 helper 原异常。资源关闭修复已推送 `c8e36d3`，其 [CI #147](https://github.com/elex-fu/model-router/actions/runs/40028090019) 已 **64/64 全过**；本节 worker 修复与后续人工处理、扩展故障 CI 仍按各自新候选验证。
