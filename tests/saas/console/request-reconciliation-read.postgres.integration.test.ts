@@ -199,6 +199,7 @@ const forbiddenMetadataKeys = [
   'accountId',
   'evidenceRef',
   'fingerprint',
+  'supplyProfileId',
   'prompt',
   'responseBody',
 ] as const;
@@ -355,19 +356,32 @@ async function acl(tx: SqlExecutor): Promise<void> {
     read_columns: string[];
     table_read: boolean;
     insert_allowed: boolean;
-    update_allowed: boolean;
+    table_update: boolean;
+    update_columns: string[];
+    schema_create: boolean;
     delete_allowed: boolean;
     execute_count: number;
+    validator_execute: number;
   }>(
     `SELECT ARRAY(SELECT a.attname::text FROM pg_catalog.pg_attribute a
         WHERE a.attrelid = 'model_router_saas.saas_requests'::regclass AND a.attnum > 0 AND NOT a.attisdropped
           AND pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'SELECT') ORDER BY a.attname) AS read_columns,
       pg_catalog.has_table_privilege(current_user, 'model_router_saas.saas_requests', 'SELECT') AS table_read,
       pg_catalog.has_any_column_privilege(current_user, 'model_router_saas.saas_requests', 'INSERT') AS insert_allowed,
-      pg_catalog.has_any_column_privilege(current_user, 'model_router_saas.saas_requests', 'UPDATE') AS update_allowed,
+      pg_catalog.has_table_privilege(current_user, 'model_router_saas.saas_requests', 'UPDATE') AS table_update,
+      ARRAY(SELECT a.attname::text FROM pg_catalog.pg_attribute a
+        WHERE a.attrelid = 'model_router_saas.saas_requests'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+          AND pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'UPDATE') ORDER BY a.attname) AS update_columns,
+      pg_catalog.has_schema_privilege(current_user, 'model_router_saas', 'CREATE') AS schema_create,
       pg_catalog.has_table_privilege(current_user, 'model_router_saas.saas_requests', 'DELETE') AS delete_allowed,
       (SELECT count(*)::integer FROM pg_catalog.pg_proc p
-        WHERE p.pronamespace = 'model_router_saas'::regnamespace AND pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')) AS execute_count`,
+        WHERE p.pronamespace = 'model_router_saas'::regnamespace AND pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')) AS execute_count,
+      (SELECT count(*)::integer FROM pg_catalog.pg_proc validator
+        WHERE validator.oid = pg_catalog.to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+          AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+          AND validator.prorettype = 'boolean'::regtype
+          AND validator.proowner = 'model_router_saas_migrator'::regrole
+          AND pg_catalog.has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator_execute`,
   );
   assert.equal(result.rows.length, 1);
   const row = result.rows[0];
@@ -381,6 +395,9 @@ async function acl(tx: SqlExecutor): Promise<void> {
       'public_model',
       'protocol',
       'supply_mode',
+      'endpoint',
+      'supply_profile_id',
+      'state_version',
       'execution_state',
       'financial_status',
       'reconciliation_state',
@@ -390,9 +407,16 @@ async function acl(tx: SqlExecutor): Promise<void> {
   );
   assert.equal(row.table_read, false);
   assert.equal(row.insert_allowed, false);
-  assert.equal(row.update_allowed, false);
+  assert.equal(row.table_update, false);
+  // These existing column grants serve the worker/invoker triggers. Exact
+  // enumeration proves every other request column remains non-updatable;
+  // this query root still executes only READ ONLY transactions.
+  assert.deepEqual(row.update_columns,
+    ['execution_state', 'reconciliation_state', 'financial_status', 'updated_at', 'state_version'].sort());
+  assert.equal(row.schema_create, false);
   assert.equal(row.delete_allowed, false);
-  assert.equal(row.execute_count, 0);
+  assert.equal(row.execute_count, 1);
+  assert.equal(row.validator_execute, 1);
 }
 
 async function unchanged(tx: SqlExecutor, tenantId: string): Promise<unknown> {
@@ -525,14 +549,22 @@ test('G5 restricted CP request axes and privacy contract on real PostgreSQL', {
       t,
       diagnostic,
       'denial',
-      'actual CP star/whole-row/internal-field/helper reads each fail with 42501',
+      'worker-required profile read is allowed while ungranted fields and helpers fail with 42501',
       async () => {
         const request = f.requests[0];
         assert.ok(request);
+        // The existing worker/invoker grant permits this field at the DB layer;
+        // publicDetailProjection above independently excludes it from the DTO.
+        const permitted = await bounded(control, (tx) => tx.query(
+          'SELECT supply_profile_id FROM saas_requests WHERE tenant_id=$1::uuid AND id=$2::uuid',
+          [f.tenantId, request.id],
+        ));
+        assert.equal(permitted.rows.length, 1);
+        assert.deepEqual(Object.keys(permitted.rows[0] as object), ['supply_profile_id']);
         const statements = [
           'SELECT * FROM saas_requests WHERE tenant_id=$1::uuid AND id=$2::uuid',
           'SELECT to_jsonb(r) FROM saas_requests r WHERE tenant_id=$1::uuid AND id=$2::uuid',
-          ...['proxy_key_id', 'principal_id', 'entitlement_id', 'supply_profile_id', 'request_fingerprint'].map(
+          ...['proxy_key_id', 'principal_id', 'entitlement_id', 'request_fingerprint'].map(
             (column) => `SELECT ${column} FROM saas_requests WHERE tenant_id=$1::uuid AND id=$2::uuid`,
           ),
         ];

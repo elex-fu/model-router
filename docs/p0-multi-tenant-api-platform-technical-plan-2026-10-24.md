@@ -297,8 +297,7 @@ pool checkout 必须由客户端 acquire/release 测量，PG wait event 不能�
 
 ### 6.4 标准部署与收费前置
 
-`deploy/compose/docker-compose.yml:77` 仍配置 Redis no AOF；compose README 的 cache-only 注释与最新软配额用途冲突。
-C 轨修复为每秒 AOF 与 noeviction，并更新持久卷、恢复和容量告警说明；这仍不承诺软配额零丢失。
+初始设计基线中的 Redis no AOF/cache-only 配置已修复：标准 Compose 已采用每秒 AOF、noeviction及持久卷，恢复与容量告警说明同步更新并通过配置解析。这仍不承诺软配额零丢失，不能替代下述金融持久保证。
 金融 PG 保持 durability，生产 KMS、角色 IAM、凭据轮换和告警复用现有 runbook。
 `deploy/README.md:299` 明确软件 KMS 为 pilot-only，不能用于收费 production。
 收费生产选定策略：PG 的关键金融提交由独立故障域的同步持久副本确认，钱包/ledger、hold、dispatch/unknown 及其关联证据均须覆盖。
@@ -312,7 +311,7 @@ PSP 无法重建模型扣费、hold、dispatch 和 unknown；同 PG 内的账本
 RPO ≤15 分钟只作为非金融或非收费 pilot 的初始设计目标；RTO ≤60 分钟、保留 30 天亦待实际演练确认。
 非金融 quota 的短暂计数丢失窗口独立记录，不冒充金融 RPO 或归档恢复保证。
 收费 GO 还必须取得生产 KMS/IAM、异地 backup/PITR 回执、告警及运营签收。
-发布候选 commit 必须通过仓库正式必需 CI 门槛，并绑定确切 revision/build；历史绿色结果不能替代。本轮未运行 CI。
+发布候选必须通过正式必需 CI，并绑定确切 revision/build。[远程 #141](https://github.com/elex-fu/model-router/actions/runs/40021778110) 对应已推送 `8da5687`：shared PG15/18、PG16、build与browser通过；isolated 60项中56通过、4失败，均为目录测试的旧ACL前提。修后fresh PG18的HTTP directory8/8、non-HTTP directory7/7及console6/6通过（前置commercial HTTP27/27），scoped strict检查通过；本次修后候选仍待远程完整复验，不能将#141通过项转记为新head全绿。
 
 ## 7. 数据迁移与回滚设计
 
@@ -337,16 +336,16 @@ operation 完成与 entitlement 激活约束必须防止 completed 但无有效�
 | ID | 文件/模块责任 | 依赖 | 当前证据与剩余出口 | 状态 |
 |---|---|---|---|---|
 | P01 | 正式平台权益开通与服务端 admission readiness | P02a/已有商业服务 | PG18开通/续做/激活/禁用1/1，静态准入unit3/3+新PG1/1；A0正式HTTP/live-Kimi harness已实现`7b978f6`，strict/local2/2通过并记录group SIGTERM实验；当前缺有效凭据，真实首请求未验 | 已实现并定向验证；A0真实供给凭据阻塞 |
-| P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | PG18开户1/1、merchant5/5、history1/1；required顺序054 4/4、FIN057 5/5、authorization13/13、commercial HTTP27/27、055 12/12、056 8/8、058修后11/11通过；provider lease精确两列ACL修复与远程新head CI待收 | 已实现；PG18分段通过；正式完整CI待验 |
+| P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | provider lease精确两列ACL已修；`8da5687`的#141 shared PG15/18、PG16通过，isolated60=56过/4目录旧ACL失败；修后fresh PG18 HTTP目录8/8、非HTTP7/7、console6/6及scoped strict通过；新候选远程完整复验待收 | 已实现；历史候选与修后本地证据分开；新候选CI待验 |
 | P03 | 管理员 supply API/UI、操作与状态查询 | P01/P02a | 新访问/收银browser4/4真实Chrome+local API，既有审计2/2；正式用户/供给的真实首请求仍按A0验收 | 已实现；本地浏览器通过；真实工作流待验 |
 | P04 | Gemini直接桥、旧Gemini↔Anth P1修复及compiler/窄错误 | P01 契约 | 全bridge56/56通过，`9b14151`已推送；真实CLI/builtin两轮工具/thinking/取消待验，不凭pair数放开供给 | 已实现并定向验证；真实工作流待验 |
 | P05 | Codex usage/continuation/history/native WS/profile/readiness | 精确后端计量/enforcement 契约 | 基础15/15、native相关29/29+本地TLS1/1、history真PG18 1/1、nativeP2后25/25；HTTP实际10/10+WS24/24+server编译通过，`72b7b97`已推送；registry仍空 | 消费入口工程已交付；真实后端/多实例KMS验收开放 |
 | P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | 最终deployment/doctor/startup132/132；worker正式MAX_ATTEMPTS范围1..20、默认5，`a755301`已推送；真实支付凭据/merchant及运营验收待齐备 | 已实现并定向验证；真实PSP/生产证据开放 |
-| P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | merchant真 PG18 5/5；原POST/promo重入修复7/7；真实商户切换/回调/退款待验 | 已实现并定向验证；真实 PSP 阻塞 |
+| P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | 商户binding在#141的PG15/18均通过；原POST/promo重入修复7/7；修后新候选完整远程CI及真实商户切换/回调/退款待验 | 已实现并定向验证；候选复验/真实PSP开放 |
 | P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build；新访问/收银browser4/4真实Chrome+local API及既有审计2/2通过；真实PSP待验 | 已实现；本地前端/浏览器通过；真实PSP开放 |
 | P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | trace UUID与cap profile c=200/60s工程`e87c7fa`已推送，ops32/32及JScheck通过；未执行负载，serial→cap A/B→完整R9未关闭 | 工程已实现并定向验证；负载/性能验收未执行 |
-| P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | 保留既有恢复机制；本轮完整收费故障矩阵、人工unknown与最终快照需逐项实测 | 待验收 |
-| P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | AOF/noeviction及Compose解析通过；PG15/18 required jobs已接但完整结果待收；生产KMS/同步恢复/PITR待外证 | 基础实现已交付；CI/生产证据开放 |
+| P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | 真实payment/refund worker SIGKILL与lease恢复、Redis旧快照恢复联合SaaS PG金融/累计预算/lease快照，两项可本地推进，正在设计；完整故障矩阵及人工unknown待实测 | 本地工程/演练待推进；生产恢复外证另列 |
+| P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | AOF/noeviction及Compose解析通过；#141(`8da5687`) shared PG15/18、PG16、build/browser通过，isolated4项目录失败已本地修复；新候选完整远程结果待收；生产KMS/同步恢复/PITR待外证 | 基础实现已交付；候选复验/生产证据开放 |
 | P12 | 本方案与进度 §29 gate | P01–P11 | 分层记录源码、fixture、真PG18、本地TLS和外证；M1/M2/M3不关闭 | 持续记录；待最终验收 |
 
 可并行四 lane：A 供给 P01/P03；B 协议 P04/P05；C 支付 P06/P07/P08；D 性能/运维 P09/P10/P11。
@@ -377,7 +376,9 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 ## 10. 工程余项与外部前置
 
-工程余项：完成provider lease精确两列ACL修复，按新head重跑远程必需CI并收齐PG15/18完整结果；保留最新候选的build/源码对应关系。A0正式HTTP/live-Kimi、UUID trace与c=200/60s cap profile工具已实现，本地/静态检查不能替代实际首请求、serial、A/B和R9负载；获得有效凭据与受控资源窗口后执行，不再将这些工具列为待开发。HTTP/WS持久消费入口已交付，标准部署、多实例/KMS及真实恢复另行验收。
+工程余项：provider lease精确两列ACL已修，目录旧ACL前提的修复已在fresh PG18验证HTTP8/8、非HTTP7/7、console6/6，前置commercial HTTP27/27与scoped strict亦通过；按修后新候选重跑完整远程必需CI，保留build/源码对应关系，不能以#141的历史通过项代替。目录console没有新增生产grant：14项SELECT/5项UPDATE属于`44b0eb7`既有基线；纯validator仅允许唯一精确签名，不扩成通用函数执行权限。
+
+P10两项不依赖生产外证、可继续本地推进：真实payment/refund worker SIGKILL与lease恢复；Redis旧快照恢复联合SaaS PG金融、累计预算和lease快照核验。两项正在设计，尚未完成对应演练，不能全部归为外部阻塞。A0正式HTTP/live-Kimi、UUID trace与c=200/60s cap profile工具已实现，本地/静态检查不替代实际首请求、serial、A/B和R9负载；获得有效凭据与受控资源窗口后执行。HTTP/WS持久消费入口已交付，标准部署、多实例/KMS及真实恢复另行验收。
 
 外部证据：当前A0缺有效供给凭据；Codex reviewed registry仍空，须取得精确后端计量/enforcement及真实CLI工作流证据；真实Alipay商户/交易、生产KMS/IAM、同步金融恢复/PITR和运营签收尚未完成。工程检查通过不能关闭这些证据门槛，M1/M2/M3继续开放。
 
@@ -388,6 +389,6 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 5. 专用性能 runner、同版本依赖和压测资源窗口何时可用？资源污染不得据此修改 R9 门槛。
 6. 生产 KMS/IAM、独立故障域同步 PG 副本、金融提交等待/fencing、异地备份及演练责任人是否落实？软件 KMS 和异步归档不能替代。
 7. 金融 GO 必须演练最后已确认 commit 的独立持久恢复；15 分钟 RPO 仅非金融/非收费 pilot，RTO/保留目标待确认。
-8. 发布候选 commit 的正式必需 CI 与 build 证据由发布 owner 收集；PG18 定向通过不替代 PG15/18 完整 required jobs，历史绿色不能替代新候选。
+8. 发布候选CI/build由发布owner收集。#141与`8da5687`精确绑定，shared通过与isolated失败分别记录；修后本地通过不等于新候选远程全绿，须收齐新revision的完整必需jobs。
 
-下一步收口精确ACL与新head正式CI，再执行有凭据的A0/指定CLI、R9负载及真实PSP/生产恢复验收；已授权的本轮开发验证继续执行，生产变更仍依对应明确授权。
+下一步收齐修后新候选正式CI，推进P10两项本地故障/恢复演练，再执行有凭据的A0/指定CLI、R9负载及真实PSP/生产恢复验收。M1/M2/M3保持开放；已授权的本轮开发验证继续执行，生产变更仍依对应明确授权。

@@ -238,7 +238,7 @@ async function principal(executor: SqlExecutor, role: string, database: string):
 }
 
 async function aclEvidence(control: SaasDatabase) {
-  const result = await control.query<{ minimum_select: boolean; direct_execute: number; schema_create: boolean }>(
+  const result = await control.query<{ minimum_select: boolean; direct_execute: number; validator_execute: number; schema_create: boolean }>(
     `WITH needed(relation_name, column_name) AS (VALUES
        ('saas_tenants', 'id'), ('saas_tenants', 'status'),
        ('saas_memberships', 'tenant_id'), ('saas_memberships', 'user_id'),
@@ -248,12 +248,18 @@ async function aclEvidence(control: SaasDatabase) {
      SELECT (SELECT bool_and(pg_catalog.has_column_privilege(current_user, relation_name, column_name, 'SELECT')) FROM needed) AS minimum_select,
        (SELECT count(*)::integer FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'model_router_saas' AND pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')) AS direct_execute,
+       (SELECT count(*)::integer FROM pg_catalog.pg_proc validator
+        WHERE validator.oid = pg_catalog.to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+          AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+          AND validator.prorettype = 'boolean'::regtype
+          AND validator.proowner = 'model_router_saas_migrator'::regrole
+          AND pg_catalog.has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator_execute,
        pg_catalog.has_schema_privilege(current_user, 'model_router_saas', 'CREATE') AS schema_create`,
   );
   assert.deepEqual(
     result.rows,
-    [{ minimum_select: true, direct_execute: 0, schema_create: false }],
-    'existing restricted CP SELECT must suffice without helper EXECUTE/schema CREATE',
+    [{ minimum_select: true, direct_execute: 1, validator_execute: 1, schema_create: false }],
+    'restricted CP SELECT plus only the exact pure metering validator; no trusted-helper EXECUTE/schema CREATE',
   );
   return result.rows[0]!;
 }

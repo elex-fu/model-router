@@ -729,11 +729,11 @@ P0 聚焦三个主线：
 2. **单支付通道收款与退款闭环**：拟以支付宝 precreate/CNY 为首条链，补标准启动配置、PSP 专用凭据、二维码及订单状态交互、历史商户版本绑定和原队列内的正确分发，复用原财务事务及履约/退款状态机。
 3. **托管性能与可恢复运营**：保留已有 Redis 额度和异步日志优化，完善同请求诊断、过载与资金终态检查，按原 R9 门槛逐级验收；将生产 KMS、异地备份/恢复及常驻 worker 的部署证据纳入收费运营出口。
 
-源码盘点新增确认的断点：`createTenant` 只创建身份和默认项目；当前平台权益的可用演示仍依赖验收 seed，不能作为正式新客开通。支付 provider 已有实际代码，但标准 CLI 未组装支付选项，现支付页仅显示二维码内容文本；商户配置切换还需保证历史订单回调、查单与退款归属不变。这些属于 P0 实施任务，尚未标为解决。
+初始设计盘点确认的断点包括：`createTenant` 只创建身份和默认项目，平台权益演示依赖验收 seed；标准 CLI 尚未组装支付选项，支付页只显示二维码内容文本，历史订单还缺独立商户版本分派。对应工程实现已在 §29.2–22 分批交付；正式新客真实请求、PSP 与生产恢复仍按独立 gate 验收。
 
 Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_output_tokens` 字段存在、操作员配置或一次成功请求替代 backend 强制语义与 opaque/compact 输入范围证据；可先交付选定供给的运营闭环，不能据此宣称 Codex/compact/WS 对齐或全部 P0 完成。
 
-方案评审补充的问题和处理设计（均待实施）：
+初始方案评审补充的问题和处理设计（最新实施结果见后续各节）：
 
 - **开户写入顺序**：现有外键要求先有 profile。开通操作在短事务内先创建独占 profile，再创建 disabled entitlement 和审计；各服务分阶段装配后，最后事务才激活权益。
 - **支付创建响应丢失**：现有查询入口依赖 orderId。客户端以原 POST、原幂等键和原 payload 重入取得原单；服务先解析既有幂等记录及原商户 binding，再为真正新单选择 active generation，避免切商户后重复创建。
@@ -749,10 +749,10 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | P04 | Chat↔Gemini、Responses↔Gemini、既有 Gemini↔Anthropic 的直接转换与准入 | 新四桥与旧两桥修复均定向通过；真实 CLI/builtin 工作流待验 |
 | P05 | Codex 终态用量、原生 WS、HTTP/WS 持久上下文、精确可信上界门禁 | 工程实现及定向验证完成；真实 backend/KMS/计量契约与部署全链待验 |
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 标准装配、精确角色隔离和 doctor 实现通过本地检查；实际商户/生产 KMS 待验 |
-| P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
+| P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 真实 PG18 5/5 及远程独立 PG15/18 门禁通过；真实 PSP 交易待验 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
 | P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算观测，serial/cap 诊断入口 | 工程实现及定向通过；实际性能诊断与原 R9 验收待执行 |
-| P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | P11 基础配置及静态解析完成；实际环境验收与新增 CI 门禁验证中 |
+| P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | P11 配置、远程 shared PG15/18、PG16 与 build/browser 通过；目录 ACL 修后候选 CI 待验；P10 两项本地恢复证据继续开发，生产恢复待外证 |
 
 本轮定位补充：Codex 缺失 input/output 用量不能补零作为完整证据，incomplete/failed 终态用量需保留；WS 的 previous_response_id 不能只影响调度后被 HTTP payload 静默丢弃。新项目默认 inference policy 为 suspended，正式开户最终事务还必须原子激活项目策略并保留已配置容量，不能仅激活 entitlement。以上已进入实现范围，当前尚未据此声称测试或真实调用通过。
 
@@ -911,3 +911,15 @@ Luna 单文件 **5/5**，完整 integration 修后 **360 条 / 255 pass / 0 fail
 Astra 确认共享 CI 财务 fixture 创建了无 binding 的历史支付/退款记录，商户 gate 的首次 enable 因全库 legacy 检查而正确拒绝；换 tenant 无法隔离全局 control。现将 merchant 执行移入既有 isolated required 矩阵，每个 PG15/18 job 使用独立 service/数据库，`httpFixture:false`；保留 shared 与 isolated 两组 strict、REQUIRED=1、三角色 URL、正常迁移及权限探针。未清理或猜测旧金融事实，未放松生产启用门槛。
 
 Luna CI wiring **19/19**、两组严格编译通过，按相同正常 provision 顺序的 fresh PG18 商户 **5/5**、CP runtime probe **1/1** 通过。固定 isolated runner 明确只允许真实 GitHub 环境与其 service DNS，本地未伪造 CI 标志绕过；因此这仍需新候选的远程 PG15/18 实际确认。完整离线回归与代码构建见 §29.20–21。Gemini fixture 已推送 `7acecc2`。
+
+### 29.23 目录与控制台精确 ACL，以及候选 CI 结果
+
+商户隔离已推送 `8da5687`。[该候选 CI #141](https://github.com/elex-fu/model-router/actions/runs/40021778110) 的 shared PG15/18、PG16 deploy smoke、离线构建与浏览器 E2E 均通过；60 个独立门禁中 56 通过，4 个失败均为两个版本的 member-directory / member-directory-http 旧 EXECUTE 总数断言。独立商户门禁在 PG15/18 均实际通过。该 run 总结论仍为 failure，不能记录成完整候选通过。
+
+两个目录 root 现要求 CP 总 EXECUTE=1，且唯一可执行函数必须是确切签名、migrator owner、immutable、非 security-definer、boolean 返回的纯维度 validator；保留最小 SELECT、禁止 schema CREATE 和前后 ACL 一致。Luna fresh PG18 HTTP 目录 **8/8**、非 HTTP 目录 **7/7** 通过。
+
+同类盘点发现 console reconciliation 的旧测试误要求 CP 仅 SELECT 11 列且无任何 UPDATE。Astra 对照初始 `44b0eb7` 和当前角色模板确认：既有 worker/invoker 依赖的授权一直是精确 SELECT 14 列、UPDATE 5 列。测试现枚举完整列集合，仍拒绝表级 SELECT/UPDATE、任何列 INSERT、DELETE 与 schema CREATE；不修改生产 grant。`supply_profile_id` 在数据库层合法可读，不能再断言其 42501；公开 DTO 仍严格禁止该字段，未获准的内部列、whole-row、星号读取及 helper EXECUTE 继续要求 42501。
+
+Luna 在同一 fresh PG18 数据库先跑真实本地 commercial HTTPS 前置 **27/27**，再跑 console root **6/6** 和 scoped strict，均通过；只读事务、金融/请求前后快照和跨 tenant/project 隔离断言保留，临时库与集群已清理。本次修正候选仍需完整远程 PG15/18 复验，不沿用 #141 的部分绿色代替。
+
+P10 审计还确认两项可本地继续推进的证据缺口：真实 payment/refund worker SIGKILL 后原退款恢复，以及旧 Redis snapshot 恢复与真实 SaaS PG 金融/累计预算/hold/lease 联验。已由 Astra 细化设计、Sol 分别实现；不将它们全部归为外部阻塞。独立故障域 PG 同步恢复、真实 PSP、生产 KMS 和 Codex 计量契约仍另行待验，M1/M2/M3 均未关闭。
