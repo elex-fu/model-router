@@ -1110,3 +1110,11 @@ run-01/02/03证据目录均为 `/private/tmp/model-router-p10-postgres-recovery-
 已完成工程与已有分层证据见§29.34–40：人工unknown/非空group释放、Redis旧快照恢复、两实例暖缓存撤销typed403、PG连接池错误生命周期、真实wire COMMIT ACK丢失重放，以及PG急停恢复profile。profile的完整自然600秒恢复仍未通过；run-01/02真实失败、run-03 sandbox EPERM和run-04自动审批拒绝均保留。因早先“不要测试验证了”的限制，已请求直接用户授权，答复前不再本地测试、构建或通过其他执行入口绕过。
 
 M1/M2/M3继续开放。下一处理顺序为：取得本地PG急停恢复的直接授权后执行原profile；取得有效供给引用完成A0真实首请求与指定CLI流程；补齐真实PSP、生产KMS/IAM、独立同步故障域/PITR、Codex可信计量/后端契约及受控R9窗口。候选CI通过与本地受控证据不构成运营发布验收。
+
+### 29.42 Codex 准入与发送重验的 compiler version 一致性
+
+续轮以`3f9e1c789a97ed16c04a2caaeae5bf32e947e28c`为当前源码进行只读审计，发现一项不依赖真实后端合同的确定接线错误：builtin runtime准入使用`builtin-gateway-payload/v1`，但实际transport在凭据使用前重验cb1时传入通用`provider-payload-compiler/v1`。两者进入同一内容寻址版本公式，因版本不同，未来同一reviewed profile也无法通过；当前空registry掩盖这条运行路径，不能据此认为未来接纳profile即可自动工作。
+
+Astra给出最小设计、Sol仅改三个生产文件：新增无imports叶子`src/saas/runtime/builtin-payload-compiler-version.ts`，导出原有builtin版本；runtime编译参数与transport发送重验统一引用该常量。没有反向依赖runtime，不引入循环。通用compiler默认版本、cb1摘要算法、claimed DB/proof比较、profile精确scope/过期/撤销检查和空registry硬拒绝保持。
+
+Astra对实际三文件差分源码复核通过；未添加或运行测试、构建、类型检查、语法检查或服务，不借用701的旧CI作为新代码验证。此项按独立任务提交远程，后续代码需要新的验证证据；真实Codex计量/enforcement合同、HTTP/WS/compact/remote-history工作流与多实例KMS验收继续开放。此前PG演练的直接授权请求未获答复，仍不重试或绕过。

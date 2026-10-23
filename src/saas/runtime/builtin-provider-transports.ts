@@ -10,7 +10,7 @@ import { CODEX_NATIVE_WS_BETA, CODEX_NATIVE_WS_ENDPOINT, prepareCodexNativeWsCon
 import { CodexNativeWsSessionError } from '../gateway/codex/native-ws-session.js';
 import { CodexNativeWsPreparedEvidenceTransport } from '../gateway/codex/native-ws-transport.js';
 import { CODEX_RESPONSES_ENDPOINT, CodexPreparedEvidenceTransport } from '../gateway/codex/transport.js';
-import { PROVIDER_PAYLOAD_COMPILER_VERSION } from '../gateway/provider-payload-compiler.js';
+import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
 import { resolveCodexBoundSendProfile } from './codex-trusted-bound-profiles.js';
 import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { GeminiPreparedEvidenceTransport } from '../gateway/gemini/transport.js';
@@ -235,7 +235,7 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
             if (proof.evidence.providerId !== evidence.providerId || proof.evidence.productId !== evidence.productId || proof.evidence.resolvedModel !== evidence.resolvedModel || rows.rows[0]?.payload_compiler_version !== evidence.payloadCompilerVersion) return unavailable();
             const native = input.codexNativeWsSession !== undefined;
             const compact = operation === 'responses.compact';
-            const profile = resolveCodexBoundSendProfile(evidence.payloadCompilerVersion ?? '', PROVIDER_PAYLOAD_COMPILER_VERSION, {
+            const profile = resolveCodexBoundSendProfile(evidence.payloadCompilerVersion ?? '', BUILTIN_PAYLOAD_COMPILER_VERSION, {
               endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : native ? CODEX_NATIVE_WS_ENDPOINT : CODEX_RESPONSES_ENDPOINT,
               productId: proof.evidence.productId,
               model: evidence.resolvedModel ?? '',

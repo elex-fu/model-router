@@ -28,6 +28,7 @@ import type { TenantContext } from '../identity/types.js';
 import { PostgresSupplyProfileResolver } from '../keys/resolver.js';
 import { ByokServicePlanService } from '../plans/service.js';
 import { createBuiltinProviderEvidenceTransportFactory } from './builtin-provider-transports.js';
+import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
 import { createBuiltinUsageUpperBoundEstimator } from './builtin-usage-bounds.js';
 import type { GatewayCapabilityReadiness, GatewayCapabilityVerificationLevel } from './gateway-capability-readiness.js';
 import { assertGatewayCapabilityAssembly, projectGatewayCapabilityReadiness } from './gateway-capability-readiness.js';
@@ -661,7 +662,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
           return bounded;
         },
         maxPayloadBytes: maxBodyBytes,
-        compilerVersion: 'builtin-gateway-payload/v1',
+        compilerVersion: BUILTIN_PAYLOAD_COMPILER_VERSION,
       },
       evidenceSigner,
       evidenceVerifierKeyId: verifierKeyId,
