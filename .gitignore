@@ -7,3 +7,6 @@ dist/
 /kimi-validation.config.json
 secrets.local.md
 /deploy/remote-server.env
+/deploy/remote-server*.env
+/deploy/remote-client.local.env
+/deploy/remote-server-ip-ca.local.pem
