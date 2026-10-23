@@ -923,3 +923,13 @@ Luna CI wiring **19/19**、两组严格编译通过，按相同正常 provision 
 Luna 在同一 fresh PG18 数据库先跑真实本地 commercial HTTPS 前置 **27/27**，再跑 console root **6/6** 和 scoped strict，均通过；只读事务、金融/请求前后快照和跨 tenant/project 隔离断言保留，临时库与集群已清理。本次修正候选仍需完整远程 PG15/18 复验，不沿用 #141 的部分绿色代替。
 
 P10 审计还确认两项可本地继续推进的证据缺口：真实 payment/refund worker SIGKILL 后原退款恢复，以及旧 Redis snapshot 恢复与真实 SaaS PG 金融/累计预算/hold/lease 联验。已由 Astra 细化设计、Sol 分别实现；不将它们全部归为外部阻塞。独立故障域 PG 同步恢复、真实 PSP、生产 KMS 和 Codex 计量契约仍另行待验，M1/M2/M3 均未关闭。
+
+### 29.24 P10 原退款的真实进程崩溃恢复
+
+新增独立 PG18 drill 和专用 child helper，使用真实受限 CP 服务/worker、正常完整迁移与 loopback synthetic PSP。首次提交属于正式 `requestPlatformWalletTopUpRefund` 服务调用，退款 worker 只负责查询恢复：PSP 将原退款受理事实 append 并 fsync 后挂起 ACK，先 SIGKILL 提交服务子进程；submit lease 自然到期后真实 worker 查询原退款，查询 ACK 再挂起并 SIGKILL 该 worker；第二次自然到期后新 worker 查询原 ID 完成。未重写金融事实、回拨 lease 时间或重新提交退款。
+
+Luna scoped strict 与 fresh PG18 **1/1** 通过。充值与退款均为 **125 个最小货币单位（CNY 1.25）**；两次崩溃期间余额与退款冻结保留，最终余额 0、冻结和 lease 清空。PSP submit=1、query=2、持久受理事实=1；funding/refund 各一条账本交易，分录平衡，inbox 不变；原退款键重放与再跑 worker 均不新增金融效果。无模型 hold/dispatch 的场景显式断言为零，不能据此宣称模型推理故障矩阵通过。
+
+Astra 在运行前发现 journal 的字面量换行错误并修正，查询现从 fsync 文件重读原受理事实，避免只写磁盘、实际仍靠内存 Map 恢复。演练使用真实 SIGKILL、自然 TTL、进程组和临时材料清理；runner 确认 sourceChanges=0、临时集群已停止并删除。证据为真实 PG 与持久 synthetic PSP，未调用真实支付宝或验收其商户契约。
+
+目录/console 修正已推送 `0d3b286`。其候选 #142 已确认两个 PG 版本的非 HTTP 目录通过，后续发现结算 SIGKILL root 错把提交后的文本 marker 当成金融提交权威，正在修正并复验；该候选完整 CI 尚未通过。另已确认标准 runtime 关闭 listener 时过早 `closeAllConnections()` 可能截断在途 SSE，修复与真实 SIGTERM 演练由独立任务继续进行。
