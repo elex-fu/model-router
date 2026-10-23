@@ -72,6 +72,8 @@ export interface PostgresPreparationCapacityReservation {
  * transaction executor and make reserve idempotent by tenant/request ID.
  */
 export interface PostgresPreparationCapacityPort {
+  /** Redis mode supplies immutable reservation facts before their SQL projection arrives. */
+  cachedReservation?: (requestId: string) => Promise<Record<string, unknown> | null>;
   reserve(
     executor: SqlExecutor,
     input: {
@@ -79,6 +81,7 @@ export interface PostgresPreparationCapacityPort {
       readonly projectId: string;
       readonly proxyKeyId: string;
       readonly requestId: string;
+      readonly newRequest?: boolean;
       readonly attemptId: string;
       readonly supplyMode: 'byok' | 'platform';
       readonly payloadBounds: RequestPreparationPayloadBounds;
@@ -931,6 +934,7 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
               proxyKeyId: resolvedCaller.proxyKeyId,
               requestId: canonicalRequestId,
               attemptId: input.attemptId,
+              newRequest: result.kind === 'created',
               supplyMode: resolvedCaller.supplyMode,
               payloadBounds: input.payloadBounds,
               idempotencyScopeKey,
