@@ -68,10 +68,14 @@ export interface ResponsesWsRoundExecutor {
 /** The pinned identity from the first successful round (new-api lock shape). */
 export interface ResponsesWsPinnedIdentity {
   readonly tenantId: string;
+  readonly projectId?: string;
   readonly proxyKeyId: string;
   readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModel: string;
+  readonly credentialId?: string;
+  readonly credentialVersion?: string;
+  readonly credentialAuthzVersion?: string;
   readonly publicModel?: string;
   /** The opaque upstream session/response id chain, when the upstream has one. */
   readonly upstreamSessionId: string | null;

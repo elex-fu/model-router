@@ -21,7 +21,7 @@
  *   suffix stripping).
  */
 
-export type CodexTransformErrorCode = 'MALFORMED_BODY';
+export type CodexTransformErrorCode = 'MALFORMED_BODY' | 'FULL_CONTEXT_REQUIRED';
 
 export class CodexTransformError extends Error {
   constructor(readonly code: CodexTransformErrorCode) {
@@ -294,6 +294,9 @@ function normalizeContentArrays(result: Record<string, unknown>): void {
  */
 export function applyCodexOAuthTransform(body: unknown): unknown {
   if (!isRecord(body)) throw new CodexTransformError('MALFORMED_BODY');
+  if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
+    throw new CodexTransformError('FULL_CONTEXT_REQUIRED');
+  }
   const result: Record<string, unknown> = {};
   for (const key of Object.keys(body)) {
     if (CODEX_REQUEST_FIELD_WHITELIST.has(key)) result[key] = body[key];

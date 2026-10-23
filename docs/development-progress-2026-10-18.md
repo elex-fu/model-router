@@ -775,3 +775,13 @@ Luna 协议定向批次 **40/40** 通过；首次失败是旧测试仍期待新 
 Compose Redis 已改为 AOF everysec、noeviction、持久卷和可调容量，修正 cache-only/fail-open 的旧说明；仍明确允许非金融软计数的短暂丢失窗口。新增收费 PostgreSQL 同步持久配置示例、只读 preflight 和 fencing/最后已确认 commit 恢复步骤，复用原异地 backup/PITR 与 KMS runbook。CP 专用 PSP 配置及凭据挂载与 gateway 权限分离。
 
 Luna 使用独立 `docker-compose ... config --quiet` 解析通过；本地单 PG Compose 仅是 pilot，未当作收费高可用部署。本任务未连接生产云 KMS、未执行实际故障切换或异地恢复，C2 仍需外部证据。正式 PG15/18 CI 的新增 P0 业务门禁另行接线验证，未借配置解析关闭业务验收。P04 已推送 `09b875f`。
+
+### 29.5 Codex C1–C4 基础实现与尚未放行的边界
+
+Codex transport 已将 completed/incomplete/failed 的执行终态与用量完整性分开，缺失 input/output/cache 计数不再伪装零值；新增 WS canonical replay、连接/项目/凭据绑定和未知引用 409，transform 不再静默丢弃未解析 previous_response_id。新增密文持久 history 的 DTO、PG adapter、AEAD cipher 和 resolver，数据库时间控制 TTL，完整 compact 返回窗口保留；标准 loader/HTTP/WS 持久接线作为后续独立任务继续实现。
+
+可信上界采用精确 endpoint/product/model/operation/transport/continuation scope，内容寻址摘要以 47 字符 cb1 版本进入既有 prepared 签名链，实际 send 前重验 proof、scope、有效期与撤销；受信 registry 默认空，普通部署 JSON 不能自证。能力报告区分 transport assembled、credential verified、financial admissible、workflow verified。编译器同步四个 Gemini pair 和安全不支持字段错误映射。
+
+Luna 最近 Codex executor/continuation/持久 history/profile 定向批次 **15/15** 通过，当前服务端编译通过；这不是所有 Codex 任务验收。原生上游 WS transport、标准持久 history/KMS 全链接线和真实 backend 计量/工作流证据继续推进，Codex 收费 admission 仍保持拒绝。方案 §4.1/4.2/4.4 已同步实际开户与 Codex 工程合同。P11 已推送 `7280e97`。
+
+完整离线 unit 首轮为 **6,953 条 / 6,904 pass / 26 fail / 23 skip**；已按真实失败分派修复，尚未宣告全绿。部分为新增检查/迁移的旧预期，部分为实际实现错误，均须分别重跑；新增真实 PG、CI 和后续源码不能借上述历史定向通过数作为完成证明。

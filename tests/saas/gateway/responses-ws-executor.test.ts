@@ -41,7 +41,7 @@ function fixture(request = clientRequest) {
     order: [] as string[],
   };
   const caller = {
-    metadata: { tenantId: 'tenant-a', principalUserId: 'user-a', id: 'key-a', name: 'fixture' },
+    metadata: { tenantId: 'tenant-a', projectId: 'project-a', principalUserId: 'user-a', id: 'key-a', name: 'fixture' },
     authorization: { principalId: 'user-a' },
   } as AuthenticatedApiKey;
   const options: Parameters<typeof createResponsesWsRoundExecutor>[0] = {
@@ -72,9 +72,13 @@ function fixture(request = clientRequest) {
           evidence: { evidenceId: `${requestId}-evidence` },
           evidenceInput: {
             tenantId: 'tenant-a',
+            projectId: 'project-a',
             proxyKeyId: 'key-a',
             providerId: 'provider-a',
             accountId: state.account,
+            credentialId: 'credential-a',
+            credentialVersion: '1',
+            credentialAuthzVersion: '1',
             resolvedModel: 'upstream-model',
           },
           normalSuccessSnapshot: {},
@@ -98,7 +102,7 @@ function fixture(request = clientRequest) {
         await input.client.write(encoder.encode('data: {"type":"response.output_text.delta","delta":"hello"}\n\n'));
         await input.client.write(
           encoder.encode(
-            'data: {"type":"response.completed","response":{"id":"response-a","usage":{"input_tokens":3,"output_tokens":1}}}\n\n',
+            'data: {"type":"response.completed","response":{"id":"response-a","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":1}}}\n\n',
           ),
         );
         await input.client.end();
@@ -138,6 +142,9 @@ test('WS default executor authenticates and admits every round, streams with bac
   assert.equal(f.state.settled, 2);
   assert.equal(f.state.compensation, 0);
   assert.equal(f.state.preparations[1]?.publicModel, 'public-model');
+  const canonical = f.state.preparations[1]?.clientRequest as Record<string, unknown>;
+  assert.equal(canonical.previous_response_id, undefined);
+  assert.deepEqual(canonical.input, [{ role: 'user', content: 'first' }, { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] }, { role: 'user', content: 'next' }]);
   assert.equal(f.state.preparations[1]?.scheduling?.previousResponseId, 'response-a');
   assert.equal(f.state.preparations[0]?.scheduling?.sessionId, f.state.preparations[1]?.scheduling?.sessionId);
   assert.deepEqual(f.state.order.slice(0, 4), [

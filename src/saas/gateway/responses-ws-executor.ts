@@ -1,3 +1,4 @@
+import { ResponsesContinuationStore } from './responses-continuation.js';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { resolveClientAddress } from './client-address.js';
@@ -186,11 +187,15 @@ function pinFromPrepared(prepared: RequestPreparationPreparedResult, model: stri
   const evidence = prepared.evidenceInput;
   return {
     tenantId: evidence.tenantId,
+    projectId: evidence.projectId,
     proxyKeyId: evidence.proxyKeyId,
     providerId: evidence.providerId,
     accountId: evidence.accountId,
     upstreamModel: evidence.resolvedModel ?? '',
     publicModel: model,
+    credentialId: evidence.credentialId,
+    credentialVersion: String(evidence.credentialVersion),
+    credentialAuthzVersion: String(evidence.credentialAuthzVersion),
     upstreamSessionId: null,
   };
 }
@@ -198,15 +203,20 @@ function pinFromPrepared(prepared: RequestPreparationPreparedResult, model: stri
 function samePin(left: ResponsesWsPinnedIdentity, right: ResponsesWsPinnedIdentity): boolean {
   return (
     left.tenantId === right.tenantId &&
+    left.projectId === right.projectId &&
     left.proxyKeyId === right.proxyKeyId &&
     left.providerId === right.providerId &&
     left.accountId === right.accountId &&
-    left.upstreamModel === right.upstreamModel
+    left.upstreamModel === right.upstreamModel &&
+    left.credentialId === right.credentialId &&
+    left.credentialVersion === right.credentialVersion &&
+    left.credentialAuthzVersion === right.credentialAuthzVersion
   );
 }
 
 export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptions): ResponsesWsRoundExecutor {
   const rawKey = responsesWsProxyKey(options.request);
+  const continuations = new ResponsesContinuationStore(options.maxBodyBytes);
   const sessionId = `responses-ws:${randomUUID()}`;
   const audit = {
     entryPoint: options.entryPoint,
@@ -225,11 +235,11 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           throw new ResponsesWsRoundError('REQUEST_CANCELLED', 'the request was cancelled', 400);
         const caller = rawKey === null ? null : await options.authenticator.authenticate(rawKey).catch(() => null);
         if (!caller) throw new ResponsesWsRoundError('UNAUTHENTICATED', 'the proxy credential is unavailable', 401);
-        const body: Record<string, unknown> = {
+        const body: Record<string, unknown> = continuations.resolve({
           ...input.body,
           model: input.body.model ?? input.pinned?.publicModel,
           stream: true,
-        };
+        }, { tenantId: caller.metadata.tenantId, projectId: caller.metadata.projectId, proxyKeyId: caller.metadata.id, pinned: input.pinned });
         const model = body.model;
         if (typeof model !== 'string' || model.trim() === '' || model.trim() !== model || model.length > 512) {
           throw new ResponsesWsRoundError('INVALID_BODY', 'a model is required', 400);
@@ -265,7 +275,7 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           clientAddress,
           scheduling: {
             sessionId,
-            ...(typeof body.previous_response_id === 'string' ? { previousResponseId: body.previous_response_id } : {}),
+            ...(typeof input.body.previous_response_id === 'string' ? { previousResponseId: input.body.previous_response_id } : {}),
           },
         });
         if (prepared.outcome !== 'prepared') throw preparationFailure(prepared);
@@ -326,6 +336,7 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
               'the upstream did not complete a response',
               502,
             );
+          continuations.remember(body, sink.terminal, pinned);
           return {
             pinned: { ...pinned, upstreamSessionId: sink.upstreamResponseId ?? pinned.upstreamSessionId },
             terminal: sink.terminal,

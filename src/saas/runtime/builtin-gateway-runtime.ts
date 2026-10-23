@@ -359,6 +359,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         ...extensions.providerBundles
           .filter((bundle) => bundle.enabled)
           .map((bundle) => `provider-bundle:${bundle.bundle}`),
+        ...(extensions.providerBundles.some((bundle) => bundle.bundle === 'openai-codex' && bundle.enabled) ? ['responses-http-full', 'responses-ws-full', 'responses-ws-continuation', 'responses-compact'].map((workflow) => `codex-workflow:${workflow}`) : []),
         ...(extensions.media ? [`media:${extensions.media.storage}`] : []),
         ...(extensions.tlsFingerprint ? [`tls-fingerprint:${extensions.tlsFingerprint.profile}`] : []),
       ]);

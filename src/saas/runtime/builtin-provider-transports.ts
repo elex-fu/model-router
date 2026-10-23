@@ -5,7 +5,9 @@ import { BedrockPreparedEvidenceTransport, parseBedrockCredentialMaterial } from
 import { ClaudePreparedEvidenceTransport } from '../gateway/claude/transport.js';
 import { CnProvidersPreparedEvidenceTransport } from '../gateway/cn-providers/transport.js';
 import { buildCanonicalIdentity } from '../gateway/codex/identity.js';
-import { CodexPreparedEvidenceTransport } from '../gateway/codex/transport.js';
+import { CODEX_RESPONSES_ENDPOINT, CodexPreparedEvidenceTransport } from '../gateway/codex/transport.js';
+import { PROVIDER_PAYLOAD_COMPILER_VERSION } from '../gateway/provider-payload-compiler.js';
+import { resolveCodexBoundSendProfile } from './codex-trusted-bound-profiles.js';
 import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { GeminiPreparedEvidenceTransport } from '../gateway/gemini/transport.js';
 import { parseGrokApiKeyMaterial, parseGrokOAuthCredentialMaterial } from '../gateway/grok/identity.js';
@@ -210,13 +212,28 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
         async send(input) {
           if (closed) throw new Error('Built-in provider transports are closed');
           const [rows, proof] = await Promise.all([
-            options.database.query<{ proxy_key_id: string }>(
-              "SELECT proxy_key_id FROM saas_prepared_request_evidence WHERE id=$1 AND tenant_id=$2 AND status='claimed' AND claimed_attempt_id=$3 LIMIT 2",
+            options.database.query<{ proxy_key_id: string; payload_compiler_version: string }>(
+              "SELECT proxy_key_id,payload_compiler_version FROM saas_prepared_request_evidence WHERE id=$1 AND tenant_id=$2 AND status='claimed' AND claimed_attempt_id=$3 LIMIT 2",
               [input.evidence.evidenceId, input.tenantId, input.attemptId],
             ),
             core.proofReader.readDispatchProof(input.evidence.evidenceId),
           ]);
           if (rows.rows.length !== 1 || !proof) return unavailable();
+          if (input.evidence.providerId === 'openai-codex' || proof.evidence.providerId === 'openai-codex') {
+            const evidence = input.evidence;
+            const operation = evidence.providerOperation;
+            if (evidence.providerProtocol !== 'responses' || (operation !== 'responses' && operation !== 'responses.compact')) return unavailable();
+            if (proof.evidence.providerId !== evidence.providerId || proof.evidence.productId !== evidence.productId || proof.evidence.resolvedModel !== evidence.resolvedModel || rows.rows[0]?.payload_compiler_version !== evidence.payloadCompilerVersion) return unavailable();
+            const compact = operation === 'responses.compact';
+            const profile = resolveCodexBoundSendProfile(evidence.payloadCompilerVersion ?? '', PROVIDER_PAYLOAD_COMPILER_VERSION, {
+              endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : CODEX_RESPONSES_ENDPOINT,
+              productId: proof.evidence.productId,
+              model: evidence.resolvedModel ?? '',
+              operation,
+              transport: 'http',
+            });
+            if (!profile) return unavailable();
+          }
           return requests.run(
             {
               ...input,

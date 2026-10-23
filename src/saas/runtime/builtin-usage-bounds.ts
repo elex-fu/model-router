@@ -1,3 +1,5 @@
+import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
+import { resolveCodexTrustedBoundProfile } from './codex-trusted-bound-profiles.js';
 import type { ProviderUsageUpperBoundEstimator } from '../gateway/provider-payload-compiler.js';
 
 const FRAMING_TOKEN_ALLOWANCE = 4096;
@@ -159,13 +161,24 @@ export function createBuiltinUsageUpperBoundEstimator(options: {
         return unavailable();
       }
       if (!record(body)) return unavailable();
+      if (normalizedRequest.providerId === 'openai-codex') {
+        // Only this exact backend contract may admit Codex; SIWC/API limits do not apply here.
+        const compact = normalizedRequest.providerOperation === 'responses.compact';
+        const trusted = resolveCodexTrustedBoundProfile({
+          endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : CODEX_RESPONSES_ENDPOINT,
+          productId: normalizedRequest.productId,
+          model: normalizedRequest.resolvedModel,
+          operation: normalizedRequest.providerOperation,
+          transport: 'http',
+          continuationMode: compact ? 'compact' : normalizedRequest.continuationMode ?? 'full',
+        });
+        if (!trusted) return unavailable();
+        return { bounds: trusted.profile.bounds, trustedBoundEvidenceDigest: trusted.digest };
+      }
       assertLocalTools(body, normalizedRequest.providerProtocol);
       assertLocalTextContext(body);
       const conservativeInput = compiledPayloadBytes.byteLength * 2 + FRAMING_TOKEN_ALLOWANCE;
       if (!Number.isSafeInteger(conservativeInput) || conservativeInput > options.maxInputTokens) return unavailable();
-      // The Codex transform preserves max_output_tokens, but enforcement by
-      // the actual endpoint and complete physical token bounds remain unproven.
-      if (normalizedRequest.providerId === 'openai-codex') return unavailable();
       const generation = record(body.generationConfig) ? body.generationConfig : {};
       const outputCandidates =
         normalizedRequest.providerProtocol === 'anthropic'

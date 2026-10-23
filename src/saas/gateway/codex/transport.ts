@@ -24,6 +24,7 @@ import {
   createUsageEvidence,
   type NormalizedUsageEvidence,
   type TransportServiceTierEvidence,
+  type UsageEvidenceCompleteness,
 } from '../usage-evidence.js';
 import { type CodexUpstreamErrorClassification, classifyUpstreamError, shouldFailover } from './health.js';
 import {
@@ -148,6 +149,7 @@ export interface CodexTransportStreamResult {
   readonly body: ReadableStream<Uint8Array> | null;
   /** Settles with the usage from the terminal response.completed event. */
   readonly usage: Promise<CodexResponsesUsage | null>;
+  readonly usageCompleteness?: UsageEvidenceCompleteness;
   /**
    * R3 §8.2/§8.3: the tier the terminal event declared. Resolves only after
    * the stream (or its post-disconnect drain) finished — read lazily like
@@ -212,9 +214,11 @@ function isPassthroughHeaderName(name: string): boolean {
 
 /** Normalized Responses usage → the gateway's observed-usage contract. */
 export function codexUsageToObservedUsage(usage: CodexResponsesUsage): NormalSuccessObservedUsage | null {
+  if (usage.inputTokens === null || usage.outputTokens === null) return null;
+  if ((usage.cachedTokens ?? 0) > usage.inputTokens || (usage.reasoningTokens ?? 0) > usage.outputTokens) return null;
   const raw = {
-    input_tokens: usage.inputTokens ?? 0,
-    output_tokens: usage.outputTokens ?? 0,
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
     ...(usage.cachedTokens === null ? {} : { input_tokens_details: { cached_tokens: usage.cachedTokens } }),
     ...(usage.reasoningTokens === null ? {} : { output_tokens_details: { reasoning_tokens: usage.reasoningTokens } }),
   };
@@ -229,8 +233,11 @@ export function codexUsageToObservedUsage(usage: CodexResponsesUsage): NormalSuc
  * Incremental SSE data-frame watcher: extracts the `usage` object from the
  * terminal `response.completed` event without buffering whole events.
  */
-class ResponsesUsageWatcher {
+export class ResponsesUsageWatcher {
   private buffer = '';
+  private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+  private terminalSeen = false;
+  private invalid = false;
   private usage: CodexResponsesUsage | null = null;
   /**
    * R3 §8.3: the served tier the terminal event declares. Recorded for
@@ -242,19 +249,14 @@ class ResponsesUsageWatcher {
   private tier: string | null = null;
 
   feed(chunk: Uint8Array): void {
-    if (this.usage !== null) return;
-    this.buffer += new TextDecoder('utf-8', { fatal: false }).decode(chunk, { stream: true });
+    this.buffer += this.decoder.decode(chunk, { stream: true });
     for (let boundary = findEventBoundary(this.buffer); boundary !== null; boundary = findEventBoundary(this.buffer)) {
       const block = this.buffer.slice(0, boundary.index);
       this.buffer = this.buffer.slice(boundary.index + boundary.length);
       this.acceptBlock(block);
-      if (this.usage !== null) {
-        this.buffer = '';
-        return;
-      }
     }
     // Bound the buffer so a malformed stream cannot grow it unbounded.
-    if (this.buffer.length > 1_048_576) this.buffer = '';
+    if (this.buffer.length > 1_048_576) { this.buffer = ''; this.invalid = true; }
   }
 
   private acceptBlock(block: string): void {
@@ -270,9 +272,12 @@ class ResponsesUsageWatcher {
     try {
       parsed = JSON.parse(data);
     } catch {
+      this.invalid = true;
       return;
     }
-    if (isRecord(parsed) && parsed.type === 'response.completed') {
+    if (isRecord(parsed) && ['response.completed', 'response.incomplete', 'response.failed'].includes(String(parsed.type))) {
+      if (this.terminalSeen) this.invalid = true;
+      this.terminalSeen = true;
       const response = isRecord(parsed.response) ? parsed.response : null;
       const usage = response === null ? null : parseResponsesUsage(response.usage);
       if (usage !== null) this.usage = usage;
@@ -286,7 +291,13 @@ class ResponsesUsageWatcher {
   }
 
   get observed(): CodexResponsesUsage | null {
-    return this.usage;
+    return this.invalid ? null : this.usage;
+  }
+
+  get completeness(): UsageEvidenceCompleteness {
+    if (this.invalid) return 'incomplete-malformed';
+    if (!this.terminalSeen || this.buffer.trim() !== '') return 'incomplete-truncated';
+    return this.usage !== null && codexUsageToObservedUsage(this.usage) !== null ? 'complete' : 'incomplete-missing';
   }
 
   get serviceTier(): string | null {
@@ -577,6 +588,7 @@ export class CodexHttpTransport {
       headers: responseHeaders,
       body: relay.stream,
       usage: relay.usage,
+      get usageCompleteness(): UsageEvidenceCompleteness { return watcher.completeness; },
       // Lazy: the watcher's tier is only complete after the drain finished.
       get serviceTier(): string | null {
         return watcher.serviceTier;
@@ -777,7 +789,7 @@ export class CodexPreparedEvidenceTransport implements PreparedEvidenceTransport
           serviceTier: { requested: null, observed: result.serviceTier },
           model: evidence.resolvedModel ?? null,
           operation: evidence.providerOperation ?? null,
-          completeness: observedUsage === null ? 'incomplete-missing' : 'complete',
+          completeness: result.usageCompleteness ?? (observedUsage === null || codexUsageToObservedUsage(observedUsage) === null ? 'incomplete-missing' : 'complete'),
           adapterVersion: evidence.payloadCompilerVersion ?? null,
         });
       },

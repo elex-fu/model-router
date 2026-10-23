@@ -24,6 +24,7 @@
  * ids and TLS profile ids — all bounded extension ids validated by the loader.
  */
 
+import { codexTrustedBoundReadiness } from './codex-trusted-bound-profiles.js';
 import type { GatewayRuntimeModuleExtensionsV2, ProviderBundleConfiguration } from './gateway-runtime-module.js';
 import { type ProviderBundleManifest, providerBundleManifest } from './provider-bundles.js';
 
@@ -100,6 +101,8 @@ export interface GatewayCapabilityFacts {
   readonly verification: Readonly<Record<string, GatewayCapabilityVerificationLevel>>;
   /** Provider faces with no proven admission usage bound for this standard runtime. */
   readonly unavailableUsageBoundProviderIds?: readonly string[];
+  /** Explicit mounted workflow facts; an HTTP endpoint alone does not prove WS mounting. */
+  readonly codexWorkflowTransports?: readonly CodexWorkflowReadiness['workflow'][];
 }
 
 export interface GatewayCapabilityProjection {
@@ -121,8 +124,16 @@ export interface GatewayCapabilityProjection {
   readonly unavailableEndpointScopes: readonly string[];
 }
 
+export interface CodexWorkflowReadiness {
+  readonly workflow: 'responses-http-full' | 'responses-ws-full' | 'responses-ws-continuation' | 'responses-compact';
+  readonly transportAssembled: boolean;
+  readonly credentialVerified: boolean;
+  readonly financiallyAdmissible: boolean;
+  readonly workflowVerified: boolean;
+}
 export interface GatewayCapabilityReadiness {
   readonly configurationValid: boolean;
+  readonly codexWorkflows?: readonly CodexWorkflowReadiness[];
   /** Fatal reason codes present in this report, deduplicated in canonical order. */
   readonly fatalReasonCodes: readonly GatewayCapabilityFatalReasonCode[];
   readonly capabilities: readonly GatewayCapabilityProjection[];
@@ -341,6 +352,15 @@ export function projectGatewayCapabilityReadiness(input: GatewayCapabilityReadin
     configurationValid: fatalReasonCodes.length === 0,
     fatalReasonCodes: Object.freeze(fatalReasonCodes),
     capabilities: Object.freeze(capabilities),
+    ...(capabilities.some((capability) => capability.providerId === 'openai-codex') ? {
+      codexWorkflows: Object.freeze((['responses-http-full', 'responses-ws-full', 'responses-ws-continuation', 'responses-compact'] as const).map((workflow) => Object.freeze({
+        workflow,
+        transportAssembled: (facts.codexWorkflowTransports ?? []).includes(workflow) || (workflow === 'responses-http-full' && facts.dispatch.routedEndpointScopes.includes('codex-responses')),
+        credentialVerified: facts.bundles.credentialProviderIds.includes('openai-codex'),
+        financiallyAdmissible: codexTrustedBoundReadiness().admittedProfileCount > 0 && !(facts.unavailableUsageBoundProviderIds ?? []).includes('openai-codex'),
+        workflowVerified: facts.verification[`codex-workflow:${workflow}`] === 'live',
+      }))),
+    } : {}),
   });
 }
 

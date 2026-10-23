@@ -1,5 +1,7 @@
+import { codexContinuationMode } from './codex/continuation-metadata.js';
 import { createHash } from 'node:crypto';
 import { type Bridge, type Protocol, pickBridge } from '../../protocol/bridge.js';
+import { UnsupportedBridgeFeatureError } from '../../protocol/openai-gemini.js';
 import { BridgeToolChoiceSelectionError } from '../../protocol/openai-to-anth.js';
 import { ttsBillingRunes } from './audio/tts.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from './contracts.js';
@@ -132,6 +134,7 @@ export type ProviderModelResolutionSource =
     ) => ModelResolutionProvenance | null | Promise<ModelResolutionProvenance | null>);
 
 export interface ProviderNormalizedRequest {
+  readonly continuationMode?: 'full' | 'canonical-replay';
   readonly clientProtocol: GatewayProtocol;
   readonly providerProtocol: GatewayProtocol;
   readonly clientOperation: ProviderPayloadOperation;
@@ -162,6 +165,8 @@ export type ProviderUsageUpperBoundEstimate =
   | PreparedRequestUsageEnvelope
   | {
       readonly usage?: PreparedRequestUsageEnvelope;
+      /** SHA-256 of the complete immutable reviewed bound profile, never an operator profile ID. */
+      readonly trustedBoundEvidenceDigest?: string;
       readonly bounds?: PreparedRequestUsageEnvelope;
       readonly version?: string;
       readonly providerId?: string;
@@ -248,6 +253,7 @@ export interface ProviderCompiledPayload extends RequestPreparationCompiledPaylo
   readonly providerProtocol: GatewayProtocol;
   readonly providerOperation: ProviderPayloadOperation;
   readonly estimatorVersion: string;
+  readonly trustedBoundEvidenceDigest?: string;
   readonly modelResolution: ModelResolutionProvenance;
   readonly requestedModel: string;
   readonly mappedModel: string;
@@ -267,6 +273,7 @@ export type ProviderPayloadCompilerFailureCode =
   | 'ESTIMATOR_UNAVAILABLE'
   | 'USAGE_BOUND_INVALID'
   | 'PAYLOAD_TOO_LARGE'
+  | 'UNSUPPORTED_BRIDGE_FEATURE'
   | 'TRANSFORM_FAILED'
   | 'SERIALIZATION_FAILED';
 
@@ -279,6 +286,7 @@ const SAFE_FAILURE_MESSAGES: Readonly<Record<ProviderPayloadCompilerFailureCode,
   ESTIMATOR_UNAVAILABLE: 'Provider usage upper-bound estimator is unavailable',
   USAGE_BOUND_INVALID: 'Provider usage upper bounds are invalid',
   PAYLOAD_TOO_LARGE: 'Provider payload exceeds the configured size limit',
+  UNSUPPORTED_BRIDGE_FEATURE: 'The provider bridge does not support the requested feature',
   TRANSFORM_FAILED: 'Provider request transformation failed',
   SERIALIZATION_FAILED: 'Provider payload serialization failed',
 });
@@ -334,6 +342,10 @@ const SUPPORTED_BRIDGE_PAIRS = new Set<string>([
   'anthropic->anthropic',
   'openai->openai',
   'gemini->gemini',
+  'openai->gemini',
+  'gemini->openai',
+  'responses->gemini',
+  'gemini->responses',
   'responses->responses',
   'anthropic->openai',
   'openai->anthropic',
@@ -1005,7 +1017,7 @@ async function estimateUsage(
   estimator: ProviderUsageUpperBoundEstimator | null,
   normalizedRequest: ProviderNormalizedRequest,
   compiledPayloadBytes: Uint8Array,
-): Promise<{ readonly usage: PreparedRequestUsageEnvelope; readonly version: string }> {
+): Promise<{ readonly usage: PreparedRequestUsageEnvelope; readonly version: string; readonly trustedBoundEvidenceDigest?: string }> {
   if (
     estimator === null ||
     !isObjectLike(estimator) ||
@@ -1039,7 +1051,9 @@ async function estimateUsage(
       normalizedRequest.resolvedModel,
     ),
   );
-  return { usage, version };
+  const trustedBoundEvidenceDigest = isRecord(result) ? result.trustedBoundEvidenceDigest : undefined;
+  if (trustedBoundEvidenceDigest !== undefined && (typeof trustedBoundEvidenceDigest !== 'string' || !SHA256.test(trustedBoundEvidenceDigest))) compilerFailure('USAGE_BOUND_INVALID');
+  return { usage, version, ...(typeof trustedBoundEvidenceDigest === 'string' ? { trustedBoundEvidenceDigest } : {}) };
 }
 
 function safeDecision(error: ProviderPayloadCompilerError): RequestPreparationDecision<ProviderCompiledPayload> {
@@ -1048,7 +1062,7 @@ function safeDecision(error: ProviderPayloadCompilerError): RequestPreparationDe
       ? 'payload_bounds_unavailable'
       : error.code === 'CAPABILITY_UNSUPPORTED'
         ? 'capability_unsupported'
-        : error.code === 'UNSUPPORTED_OPERATION' || error.code === 'MODEL_INCOMPATIBLE'
+        : error.code === 'UNSUPPORTED_OPERATION' || error.code === 'MODEL_INCOMPATIBLE' || error.code === 'UNSUPPORTED_BRIDGE_FEATURE'
           ? 'capability_unavailable'
           : 'payload_invalid';
   return blockRequestPreparation(payloadCode, error.message);
@@ -1144,6 +1158,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       }
 
       const normalizedRequest: ProviderNormalizedRequest = Object.freeze({
+        continuationMode: codexContinuationMode(input.clientRequest),
         clientProtocol: route.clientProtocol,
         providerProtocol: route.providerProtocol,
         clientOperation: route.clientOperation,
@@ -1229,6 +1244,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         }
       } catch (error) {
         if (error instanceof ProviderPayloadCompilerError) throw error;
+        if (error instanceof UnsupportedBridgeFeatureError) compilerFailure('UNSUPPORTED_BRIDGE_FEATURE');
         if (error instanceof BridgeToolChoiceSelectionError) compilerFailure('INVALID_INPUT');
         compilerFailure('TRANSFORM_FAILED');
       }
@@ -1239,14 +1255,16 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       }
 
       const estimated = await estimateUsage(this.options.estimator, normalizedRequest, payloadBytes);
+      const boundCompilerVersion = estimated.trustedBoundEvidenceDigest === undefined ? this.options.compilerVersion : `cb1:${createHash('sha256').update(JSON.stringify({ compilerVersion: this.options.compilerVersion, trustedBoundEvidenceDigest: estimated.trustedBoundEvidenceDigest })).digest('base64url')}`;
       const requestFingerprint = createHash('sha256').update(payloadBytes).digest('hex');
       if (!SHA256.test(requestFingerprint)) compilerFailure('SERIALIZATION_FAILED');
       return allowRequestPreparation({
         payloadBytes: new Uint8Array(payloadBytes),
         requestFingerprint,
-        requestFingerprintVersion: this.options.compilerVersion,
+        requestFingerprintVersion: boundCompilerVersion,
         usage: estimated.usage,
-        compilerVersion: this.options.compilerVersion,
+        compilerVersion: boundCompilerVersion,
+        ...(estimated.trustedBoundEvidenceDigest ? { trustedBoundEvidenceDigest: estimated.trustedBoundEvidenceDigest } : {}),
         providerProtocol: route.providerProtocol,
         providerOperation: route.providerOperation,
         estimatorVersion: estimated.version,

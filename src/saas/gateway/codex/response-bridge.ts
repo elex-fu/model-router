@@ -103,43 +103,34 @@ function createdTimestamp(nowMs: () => number): number {
 }
 
 export interface ChatCompletionsUsageChunkUsage {
-  readonly prompt_tokens: number;
-  readonly completion_tokens: number;
-  readonly total_tokens: number;
-  readonly prompt_tokens_details: { readonly cached_tokens: number };
+  readonly prompt_tokens?: number;
+  readonly completion_tokens?: number;
+  readonly total_tokens?: number;
+  readonly prompt_tokens_details?: { readonly cached_tokens: number };
 }
 
-/** chat.completions usage payload built from normalized Responses usage. */
+/** Missing upstream counters remain absent, including in compatibility output. */
 export function chatCompletionsUsage(usage: CodexResponsesUsage): ChatCompletionsUsageChunkUsage {
-  const inputTokens = usage.inputTokens ?? 0;
-  const outputTokens = usage.outputTokens ?? 0;
   return {
-    prompt_tokens: inputTokens,
-    completion_tokens: outputTokens,
-    total_tokens: inputTokens + outputTokens,
-    prompt_tokens_details: { cached_tokens: usage.cachedTokens ?? 0 },
+    ...(usage.inputTokens === null ? {} : { prompt_tokens: usage.inputTokens }),
+    ...(usage.outputTokens === null ? {} : { completion_tokens: usage.outputTokens }),
+    ...(usage.inputTokens === null || usage.outputTokens === null ? {} : { total_tokens: usage.inputTokens + usage.outputTokens }),
+    ...(usage.cachedTokens === null ? {} : { prompt_tokens_details: { cached_tokens: usage.cachedTokens } }),
   };
 }
 
-/**
- * Anthropic usage mapping: `input_tokens` counts uncached prompt tokens
- * (upstream `input_tokens` minus cached), and cached tokens become
- * `cache_read_input_tokens`; the gateway never creates cache writes on the
- * codex path.
- */
+/** Anthropic input is uncached input; it requires both reported counters. */
 export function anthropicUsageFields(usage: CodexResponsesUsage): {
-  readonly input_tokens: number;
-  readonly cache_read_input_tokens: number;
+  readonly input_tokens?: number;
+  readonly cache_read_input_tokens?: number;
   readonly cache_creation_input_tokens: number;
-  readonly output_tokens: number;
+  readonly output_tokens?: number;
 } {
-  const inputTokens = usage.inputTokens ?? 0;
-  const cached = usage.cachedTokens ?? 0;
   return {
-    input_tokens: Math.max(0, inputTokens - cached),
-    cache_read_input_tokens: cached,
+    ...(usage.inputTokens === null || usage.cachedTokens === null ? {} : { input_tokens: Math.max(0, usage.inputTokens - usage.cachedTokens) }),
+    ...(usage.cachedTokens === null ? {} : { cache_read_input_tokens: usage.cachedTokens }),
     cache_creation_input_tokens: 0,
-    output_tokens: usage.outputTokens ?? 0,
+    ...(usage.outputTokens === null ? {} : { output_tokens: usage.outputTokens }),
   };
 }
 
@@ -262,6 +253,8 @@ export class ResponsesToChatCompletionsStream {
         );
         return chunks;
       }
+      case 'response.failed':
+      case 'response.incomplete':
       case 'response.completed': {
         const facts = terminalFacts(restored);
         if (facts.responseId !== null) this.responseId = facts.responseId;
@@ -404,6 +397,8 @@ export function aggregateResponsesToChatCompletion(
         if (last !== undefined && typeof restored.delta === 'string') last.function.arguments += restored.delta;
         break;
       }
+      case 'response.failed':
+      case 'response.incomplete':
       case 'response.completed': {
         const facts = terminalFacts(restored);
         if (facts.responseId !== null) responseId = facts.responseId;
@@ -451,7 +446,7 @@ export class ResponsesToAnthropicMessagesStream {
   private activeToolBlock: AnthropicToolBlock | null = null;
   private toolBlocksSeen = false;
   private inputUsage: CodexResponsesUsage | null = null;
-  private outputTokens = 0;
+  private outputTokens: number | null = null;
   private finished = false;
 
   /** The usage observed so far (authoritative after response.completed). */
@@ -583,13 +578,15 @@ export class ResponsesToAnthropicMessagesStream {
         }
         return events;
       }
+      case 'response.failed':
+      case 'response.incomplete':
       case 'response.completed': {
         const facts = terminalFacts(restored);
         if (facts.responseId !== null) this.responseId = facts.responseId;
         if (facts.model !== null) this.model = facts.model;
         if (facts.usage !== null) {
           this.inputUsage = facts.usage;
-          this.outputTokens = facts.usage.outputTokens ?? 0;
+          this.outputTokens = facts.usage.outputTokens;
         }
         if (!this.messageStarted) emit('message_start', this.emitMessageStart());
         if (this.textBlockIndex !== null) {
@@ -604,7 +601,7 @@ export class ResponsesToAnthropicMessagesStream {
         emit('message_delta', {
           type: 'message_delta',
           delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { output_tokens: this.outputTokens },
+          usage: this.outputTokens === null ? {} : { output_tokens: this.outputTokens },
         });
         emit('message_stop', { type: 'message_stop' });
         this.finished = true;
@@ -637,7 +634,7 @@ export class ResponsesToAnthropicMessagesStream {
       data: {
         type: 'message_delta',
         delta: { stop_reason: 'end_turn', stop_sequence: null },
-        usage: { output_tokens: this.outputTokens },
+        usage: this.outputTokens === null ? {} : { output_tokens: this.outputTokens },
       },
     });
     events.push({ event: 'message_stop', data: { type: 'message_stop' } });
@@ -747,7 +744,7 @@ export function aggregateResponsesToAnthropicMessage(
         break;
     }
   }
-  const terminal = events.find((event) => isRecord(event) && event.type === 'response.completed');
+  const terminal = events.find((event) => isRecord(event) && ['response.completed', 'response.incomplete', 'response.failed'].includes(String(event.type)));
   const facts = terminal !== undefined && isRecord(terminal) ? terminalFacts(terminal) : null;
   const stopReason = mapAnthropicStopReason(
     facts?.status ?? null,
@@ -766,6 +763,6 @@ export function aggregateResponsesToAnthropicMessage(
     content,
     stop_reason: stopReason,
     stop_sequence: null,
-    ...(usage === null ? {} : { usage: { ...anthropicUsageFields(usage), output_tokens: usage.outputTokens ?? 0 } }),
+    ...(usage === null ? {} : { usage: anthropicUsageFields(usage) }),
   };
 }

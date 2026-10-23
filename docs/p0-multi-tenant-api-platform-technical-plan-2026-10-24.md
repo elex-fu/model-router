@@ -90,61 +90,49 @@ validation-worker 保持当前账户验证职责，不能因支付接入扩大�
 
 ## 4. A 轨：正式平台供给入口
 
-### 4.1 窄服务与最小 API（拟新增）
+### 4.1 窄服务与最小 API（本轮实现）
 
-拟新增 `PlatformInferenceAccessProvisioningService`，只协调已有 catalog、pricing、pool、route、commercial policy、capacity services。
-不建立 offer/recipe 市场，不重新定义价格和供给模型。
-资源引用必须指向已有发布记录，附 expected versions；操作保存不可变请求摘要与资源快照。
+`PlatformInferenceAccessProvisioningService` 协调已有 pool、route、commercial policy 与 capacity services；不新增 offer/recipe 市场。实际 DTO 以 `src/saas/supply/platform-inference-access-provisioning.ts` 为准，版本字段全部为 decimal string：
 
 ```ts
-// 拟新增 DTO，字段名在实现评审时冻结。
-type ProvisionPlatformAccessInput = {
+type ProvisionPlatformInferenceAccessInput = {
   operationKey: string;
   tenantId: string;
   projectId: string;
-  catalogProductRef: string;
-  poolRef: string;
-  customerPriceVersionRef: string;
-  meteringPolicyVersionRef: string;
-  capacityVersionRef: string;
-  allowedModels: string[];
-  expectedProjectAuthzVersion: number;
+  pool: { id: string; expectedAuthzVersion: string; evidenceReference: string; evidenceSha256: string; expiresAt?: string | Date };
+  capacity: {
+    tenantExpectedRevision: string;
+    projectExpectedRevision: string;
+    tenantLimits?: CapacityPolicyLimits;
+    projectLimits: CapacityPolicyLimits;
+  };
+  routes: Array<{
+    routeId: string;
+    definition: RouteConfigDefinition;
+    customerPolicy: { policyId: string; definition: CustomerMeteringPolicyDefinition };
+    providerPolicy: { policyId: string; definition: ProviderMeteringPolicyDefinition };
+    attestation: Omit<ContractTestAttestationInput, 'tenantId' | 'projectId' | 'audit'>;
+  }>;
 };
 ```
 
-DTO 不要求新 profile 尚未生成的 routeConfigVersionRef；operation 调用已有 route 服务创建该 profile 的配置，持久化生成的 route version，并在激活前核验。
-所需路由输入使用现有服务契约及已发布策略，不引入泛化模板平台。
+`projectExpectedRevision` 比较真实 `saas_projects.inference_policy_version`，不存在 `expectedProjectAuthzVersion` 字段。路由输入沿用 `RouteConfigDefinition`，新 profile 的 route version 由操作创建并记录。嵌套 DTO 严格解析，tenant/project/audit 只能由服务端身份注入。商业 attestation 的独立公钥与 suite test-vector digest 信任配置缺失时不能准入。
 
-拟新增管理员 API：`POST /api/platform/projects/:projectId/platform-access-operations`。
-拟新增查询 API：`GET /api/platform/platform-access-operations/:operationId`。
-拟新增禁用 API：`POST /api/platform/projects/:projectId/platform-access/disable`，携带 expected entitlement/authz version 和理由。
-具体挂载前缀复用现有 platform admin router；必须使用现有管理员鉴权、CSRF 与审计链。
-POST 返回 operationId、阶段、已创建资源 refs、可重试错误码，不返回凭据。
-同 operationKey + 相同请求摘要返回原操作；不同摘要返回冲突。
-project/tenant 跨界、未发布价格、币种不一致、能力不兼容和过期证据必须在创建前拒绝。
+现有管理员 router 前缀为 `/admin/api/v1`：`POST /supply/platform-access/operations` 创建或续做操作，`GET /supply/platform-access/operations/:id` 查询，`POST /supply/platform-access/disable` 携带 `operationId/expectedEntitlementVersion/reason`。使用已有管理员鉴权、CSRF 与审计链；不返回凭据。同 operationKey 同摘要返回原操作，不同摘要冲突。tenant/project 跨界、未发布价格、币种、能力及证据期限均须核验。
 
-### 4.2 持久阶段与失败恢复
+### 4.2 持久阶段与失败恢复（本轮实现，待验收）
 
-拟新增 operation journal，阶段可为 `accepted/assembling/recheck/activating/completed/failed`。
-这不是 entitlement status；现有 schema 005 只有 `active/disabled`，不得把 pending/prepared 塞入权益状态。
-operation 保存 actor、request hash、资源 ID、expected versions、阶段输出、重试信息和 ownership。
-每阶段使用确定的资源 ID 或持久映射及幂等键，操作重入不能重复 grant 或重复创建权益。
-已有 services 各自提交事务，整个编排不是单一 PG 原子事务。
+operation journal 实际阶段为 `assembling/recheck/completed/failed/disabled`，与 entitlement `active/disabled` 独立。journal 保存 actor、摘要、资源 refs、阶段 receipts、runner 和错误码；既有子服务各自提交事务，整体不是单一原子事务。
 
-1. 锁定项目授权范围，检查无 active 平台权益；已有 active 权益返回版本冲突，走独立显式替换流程。
-2. 预分配该 operation 独占的 profile/entitlement ID；在一个短事务中先创建新 active profile，再创建 disabled entitlement（`disabled_at` 有值），同时保存 operation 阶段/资源关联并追加审计。schema 005 的即时 FK 要求 profile 先存在。
-3. active profile 只归本 operation 所有，disabled entitlement 尚不授权；不复用已有 active profile 放宽旧 Key。
-4. 调用已有 pool grant、route、policy、价格与 capacity 服务，逐步记录结果。
-5. 失败写 journal，不自动删除不属本 operation 的资源，不撤销其他操作的 grant。
-6. 查询后可按阶段幂等续做；权限或版本变化时停在 failed，要求重新确认资源版本。
-7. 最终重验 tenant/project 权限、供给健康、能力、价格版本、币种和容量，获取现有授权锁。
-8. 在单一 PG 事务中激活 entitlement、清除 disabled_at、追加审计并将 operation 标记 completed。
+1. 固定 G→tenant→project→actor 授权锁顺序，拒绝已有 active 平台权益的隐式替换。
+2. 短事务先创建 operation 专属 active profile，再创建 disabled entitlement（带 disabled_at），同时写 journal/资源关联及 profile、entitlement 审计；满足 schema005 即时 FK。
+3. 贯穿本次 run 的独立 operation advisory guard 防止在途执行与接管竞态；子服务独立事务，不跨子调用持有 authority/row 锁。control-plane pool 至少两个连接。runner_until 仅诊断，不作为自动接管依据。
+4. 幂等执行 pool grant、route 和 customer/provider policy create1/publish2、signed v2 attestation、bind、capacity，逐步记录 receipts。失败保留 journal，不删其他操作资源。
+5. 最终重新检查 route.resolve、commercial authority、价格/币种/有效期、每条 route 的 pool provider/product 与 capability/credential/rights、tenant/project capacity revisions。
+6. 若 project inference policy 原为 suspended，追加 next active policy，复制原三项限额并 CAS 当前 `inference_policy_version`；与 entitlement active/authz+1、审计和 operation completed 在同事务提交。版本或授权变化不得完成。
+7. cancel/disable 仅作用于该 operation 权益，不 suspend 共享 project、不影响既有 BYOK。约5秒 auth cache 的撤销窗口仍需真实验收。
 
-profile 与 entitlement 创建/变更必须补齐现有审计惯例。
-激活事务与并发 disable/revoke 使用一致锁顺序；失去权限或 expected version 不符时不得完成。
-不自动发 Key、不自动充值；Key 继续由现有明确入口创建，余额通过现有钱包流程提供。
-禁用复用授权版本失效机制，覆盖约 5 秒 auth cache 的既有边界；验收记录实际撤销生效窗口。
-显式替换旧权益必须独立授权、展示影响 Key 和模型集合，本轮初版可拒绝替换并保留后续任务。
+不自动发 Key 或充值；余额与 Key 仍走已有明确入口。显式替换旧权益需独立展示影响并授权，初版可拒绝。以上是本轮代码合同，不表示 PG 并发、受限角色、真实供给或正式 provision 工作流已经验收。
 
 ### 4.3 协议准入与 CLI 工作流
 
@@ -165,15 +153,30 @@ provider adapter、OAuth、sink、refresh、WS、compact 已有接线，P0 补�
 “HTTP 200”不足以证明两轮工具或 compact 工作流成功；需保留脱敏事件序列和最终账务快照。
 重连不能默认重放已派发请求；沿用现有幂等/unknown 语义，按操作契约处理。
 
-### 4.4 Codex 可信计费上界
+### 4.4 Codex 托管工作流与可信计费上界
 
-`max_output_tokens` 被保留不证明后端强制执行该上限。
-opaque/encrypted compact 与 remote history 的完整 billable 输入、reasoning 输出必须有可信上界。
-拟新增 trusted bound profile，作为现有 capabilities 的受信证据扩展，绑定 endpoint、model、backend revision、操作和有效期。
-profile 必须引用实际后端契约、可验证限制及维护责任；operator JSON 单方断言不能成为可信上界。
-实际用量超过预留或后端 revision 改变时停止新 admission，保留原派发与结算证据，进入人工对账。
-没有契约或可验证证据时继续 `unavailable`，不得用虚构模型 context 或经验倍率解锁。
-外部任务是取得供应商 enforcement/计量口径说明并完成受控真实请求，不是写配置绕过拒绝。
+完整目标保留 native HTTP、WS、compact 和 remote history；不能用诊断就绪或单个 SSE 成功替代完整托管验收。
+当前供给是 `codex-chatgpt` / `chatgpt.com/backend-api/codex`。它与官方 `api.openai.com/v1` SIWC 是不同契约；SIWC preview 对 `max_output_tokens`、HTTP `previous_response_id` 的限制不能外推为本后端支持或 enforcement 证据。
+
+| 范围 | 当前实现事实 | 完成门槛 / 依赖 |
+| --- | --- | --- |
+| HTTP `/responses` 完整上下文 | 已有专用 OAuth HTTP transport 和 SSE usage observer；本轮修复终态完整性 | endpoint/model/backend revision 的完整输入、reasoning 和输出上界证据；真实 CLI 工作流 |
+| 客户端 `/v1/responses` WS full | 逐轮 preparation/admission/dispatch/settlement；当前上游仍走 HTTP SSE relay | 区分客户端 WS 已装配与上游 native WS；native transport 及其明确端点/契约独立验收 |
+| WS `previous_response_id` continuation | 本轮在 preparation 前展开 connection-local canonical input；绑定 tenant/key/provider/account/credential versions/model | 未知、跨连接、身份变化返回 `409 full_context_required`；持久 history 接线后才覆盖跨实例/重连 |
+| `/responses/compact` | 已有独立 HTTP passthrough；整份 `output` 都属于后续上下文 | compact 真实 CLI 请求、加密项和普通输出完整回放、compact 单独 trusted profile |
+| HTTP remote history / 重连 | 不能依赖调度 affinity 或静默删除 previous ID | 加密持久 history port、PG/权限/TTL、HTTP resolver 与统一 identity 比较、真实恢复验收 |
+
+C1：execution status 与 usage completeness 独立。`response.completed/incomplete/failed` 的终态 usage 都保留；缺失 input/output 不补成零，显式零仍可报告。重复冲突终态、坏帧、截断及超限不得形成 complete evidence。usage 不完整保留 unknown/reconciliation 路径。客户端协议 bridge 的结束状态与用量映射也覆盖 incomplete/failed；待针对测试与真实失败流验收。
+
+C2：`previous_response_id` 不是普通可丢弃字段。WS 在编译、签名和预留前构造完整 canonical request，保存完整 `response.output`，包括 compact 普通输出与加密项；transform 对未解析 reference 显式拒绝。当前 connection-local map 不宣称 HTTP 或跨实例持久历史。持久 port DTO 为 `responses-continuation-history.ts`：tenant/key/conversation/response scoped reference，provider/product/account/credential id+version+authz version/public+resolved model 完整绑定，canonical digest 和 expiry 纳入 AEAD associated data；PG 仅保存 ciphertext envelope 与 key id，project 绑定复合 tenant/project/key FK，禁止用户上下文明文进入数据库或日志。密钥由受控 secret/cipher port 提供，TTL bounded purge、tenant/key 删除回收和 immutable insert conflict 均是验收要求。迁移141和 ciphertext PG adapter、专用 AEAD cipher、persistent resolver 本轮已落盘，尚待受限角色/PG 验收与标准 HTTP/WS loader 接线；加密与角色合同仍须复核。
+
+C3：`max_output_tokens` 被保留不证明后端强制执行。新增代码审阅的 trusted-bound registry，默认空，无 operator JSON 注册信任入口。profile 精确绑定 endpoint、product、model、operation、实际上游 transport、continuation mode、backend revision、evidence version/reference、完整 billable bounds 与有效期。完整 profile canonical SHA-256 与 compiler version 生成47字符 `cb1:`内容寻址版本，复用现有 signed `payloadCompilerVersion` 和 request fingerprint version，避免越过 metering 64字符限制。每次实际 send（包括重试、HTTP/WS逐轮、compact）在 credential 使用前对 proof/evidence 与实际 scope 重验，过期/撤销/旧version均拒绝。当前没有任何已接纳的 ChatGPT 后端证据，保持 hard reject，代码实现不代表财务准入完成。
+
+C4：readiness 分别记录 transport assembled、credential verified、financial admissible、workflow verified 四事实；HTTP full、WS full、WS continuation、compact 分行。HTTP mount 不能自动证明 WS mount，provider credential 验证不能自动证明 workflow live。workflow 只有独立 live evidence record 才为 true；空 trusted registry 财务项为 false。
+
+C5：新开户只创建账户和明确 entitlement，不 seed 模型、余额、供给或可信 profile。演示与正式供给按单独 provision 合同执行，不能由 Codex 配置自证解锁。
+
+执行顺序：① C1 targeted tests 和失败流；② connection canonical continuation + credential pin 测试；③ history schema/cipher/TTL/role 与 HTTP resolver、compact 完整上下文；④ native upstream WS 传输及逐轮恢复；⑤ trusted profile 的供应商 enforcement/完整计量合同；⑥ 精确 endpoint/model/revision 受控真实 CLI 工作流并保存四事实证据。当前外部阻塞是⑤；③④属于仍需开发的工程任务，不能归为供应商阻塞。超过预留、revision 变化或证据撤销时停止新 admission，保留派发/结算证据进入人工对账。
 
 ## 5. B 轨：单 PSP 收款与退款
 

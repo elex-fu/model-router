@@ -27,6 +27,7 @@
 import type { SqlExecutor } from '../db/types.js';
 import type {
   GatewayCapabilityDispatchFacts,
+  CodexWorkflowReadiness,
   GatewayCapabilityFacts,
   GatewayCapabilityVerificationLevel,
   ProviderBundleReadinessFacts,
@@ -40,6 +41,7 @@ export interface GatewayCapabilityDeploymentFacts {
   /** Live verification records keyed by capability id. */
   readonly verification: Readonly<Record<string, GatewayCapabilityVerificationLevel>>;
   readonly unavailableUsageBoundProviderIds?: readonly string[];
+  readonly codexWorkflowTransports?: readonly CodexWorkflowReadiness['workflow'][];
 }
 
 interface ProviderRow {
@@ -202,6 +204,7 @@ export async function collectGatewayCapabilityFacts(
     mediaStorages: Object.freeze([...deployment.mediaStorages]),
     tlsFingerprintProfiles: Object.freeze([...deployment.tlsFingerprintProfiles]),
     verification: Object.freeze({ ...deployment.verification }),
+    ...(deployment.codexWorkflowTransports ? { codexWorkflowTransports: Object.freeze([...deployment.codexWorkflowTransports]) } : {}),
     ...(deployment.unavailableUsageBoundProviderIds
       ? { unavailableUsageBoundProviderIds: Object.freeze([...deployment.unavailableUsageBoundProviderIds]) }
       : {}),
