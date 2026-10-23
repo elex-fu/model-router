@@ -24,7 +24,8 @@
  * ids and TLS profile ids — all bounded extension ids validated by the loader.
  */
 
-import { codexTrustedBoundReadiness } from './codex-trusted-bound-profiles.js';
+import type { CodexFinancialCatalogScope, CodexWorkflowFinancialReadiness } from './codex-workflow-financial-readiness.js';
+import { declaredCodexFinancialWorkflows } from './codex-workflow-financial-readiness.js';
 import type { GatewayRuntimeModuleExtensionsV2, ProviderBundleConfiguration } from './gateway-runtime-module.js';
 import { type ProviderBundleManifest, providerBundleManifest } from './provider-bundles.js';
 
@@ -67,6 +68,8 @@ export interface GatewayCapabilityDispatchFacts {
 }
 
 export interface ProviderBundleReadinessFacts {
+  /** All eligible active Codex catalog versions; null preserves malformed observations. */
+  readonly codexFinancialCatalogScopes?: readonly (CodexFinancialCatalogScope | null)[];
   /** Providers whose catalog registration rows exist. */
   readonly catalogProviderIds: readonly string[];
   /**
@@ -103,6 +106,7 @@ export interface GatewayCapabilityFacts {
   readonly unavailableUsageBoundProviderIds?: readonly string[];
   /** Explicit mounted workflow facts; an HTTP endpoint alone does not prove WS mounting. */
   readonly codexWorkflowTransports?: readonly CodexWorkflowReadiness['workflow'][];
+  readonly codexWorkflowFinancialReadiness?: CodexWorkflowFinancialReadiness;
 }
 
 export interface GatewayCapabilityProjection {
@@ -238,7 +242,10 @@ function projectBundle(
   if (config.enabled && !priced) pushReason(reasonCodes, 'SUPPLIER_PRICE_MISSING');
   const credentials = config.enabled && includes(facts.bundles.credentialProviderIds, manifest.providerId);
   if (config.enabled && !credentials) pushReason(reasonCodes, 'CREDENTIALS_NOT_PROVISIONED');
-  const usageBoundAvailable = !(facts.unavailableUsageBoundProviderIds ?? []).includes(manifest.providerId);
+  const declaredCodexWorkflows = declaredCodexFinancialWorkflows(config.parameters?.nativeCompact === true);
+  const usageBoundAvailable = !(facts.unavailableUsageBoundProviderIds ?? []).includes(manifest.providerId) &&
+    (manifest.providerId !== 'openai-codex' || (declaredCodexWorkflows.length > 0 &&
+      declaredCodexWorkflows.every((workflow) => facts.codexWorkflowFinancialReadiness?.[workflow] === true)));
   if (config.enabled && !usageBoundAvailable) pushReason(reasonCodes, 'USAGE_BOUNDS_UNAVAILABLE');
 
   const verified = level === 'live';
@@ -357,7 +364,7 @@ export function projectGatewayCapabilityReadiness(input: GatewayCapabilityReadin
         workflow,
         transportAssembled: (facts.codexWorkflowTransports ?? []).includes(workflow) || (workflow === 'responses-http-full' && facts.dispatch.routedEndpointScopes.includes('codex-responses')),
         credentialVerified: facts.bundles.credentialProviderIds.includes('openai-codex'),
-        financiallyAdmissible: codexTrustedBoundReadiness().admittedProfileCount > 0 && !(facts.unavailableUsageBoundProviderIds ?? []).includes('openai-codex'),
+        financiallyAdmissible: facts.codexWorkflowFinancialReadiness?.[workflow] === true,
         workflowVerified: facts.verification[`codex-workflow:${workflow}`] === 'live',
       }))),
     } : {}),

@@ -1126,3 +1126,15 @@ Astra从`CodexHttpTransport.send`的真实draining relay追到`ResponsesUsageWat
 Sol仅改`src/saas/gateway/codex/transport.ts`中的该class：每个完整block在`acceptBlock`/JSON解析前以`Buffer.byteLength(block,'utf8')`检查原1_048_576上限，超限置现有sticky invalid并跳过；未完整残余buffer也按UTF-8字节限长。分隔符不计正文、每事件恰好上限仍允许，同chunk多个合法小事件不因总量而拒绝。超限前后再出现合法terminal也不能恢复observed或complete，仍走既有incomplete-malformed证据。decoder、边界查找、终态重复规则、relay和native WS frame fence均未改。
 
 Astra只读实际差分复核通过；按用户既有要求未添加或运行测试、构建、类型检查、语法检查或服务。源码回归规格留待获准后执行：完整/跨chunk超大事件、多字节超限、合法终态前后sticky invalid、多小帧总量超限但各自合法，以及精确上限边界。本任务与§29.42编译器版本修复分commit交付；这些源码修复没有新运行证据，不能继承701/旧消费端测试绿色，M1/M2/M3仍开放。
+
+### 29.44 Codex 按精确 catalog scope 计算逐工作流财务就绪
+
+继§29.42的版本接线修复后，Astra进一步确认C4仍有可在真实合同前完成的代码：builtin固定将Codex标记为usage unavailable，使未来合法profile也不能反映就绪；projection又以全局profile count判断四行，若只移除固定项就会误将HTTP覆盖抬升为WS/compact可用。因此同时修正事实来源与逐行投影，不能只删除保守拒绝。
+
+Sol实现四个runtime文件：新增`codex-workflow-financial-readiness.ts`；collector在原provider聚合之外保留eligible Codex catalog精确tuple；runtime基于当前tuple计算financial map；projection逐行只读取自身显式true。模型取`saas_public_model_versions.model`而非public alias，保留所有active版本以覆盖旧route pin；active product/public model/version、endpoint_scope及最新capability共同限定候选。capability先按原四元组取最新version，再判supported/verified/responses，不能回退到旧的成功版本。坏观测保留null，空集、未知或坏tuple均全部false，不静默过滤后证明剩余子集。
+
+同一次收集以同一now调用现production trusted-profile resolver：HTTP full、WS full、compact分别精确endpoint/operation/transport/mode；WS continuation同时要求canonical-replay与remote-history。每行要求非空候选集合全部覆盖，bundle按runtime原声明的三项及可选compact全部覆盖汇总，不能用some或全局count提升整体。financial map复制并freeze；transport装配、credential verified与独立live workflow证据互不抬升。实际send/provision/计量compiler/registry/proof不改，registry仍空，默认四行false。这只是已知catalog范围的静态覆盖，不证明tenant entitlement/价格/任意composite route已准入。
+
+Astra实际四文件差分复核通过；另一Astra独立核对008 schema、正式角色模板与runtime privilege manifest，确认新SQL字段/关系存在、CP/GW既有SELECT足够，无迁移、manifest或grant变更。既有collector fixture仅新增对该SQL的精确分发（旧fixture返回空候选），严格查询次数4→5；原四路分发和其他断言保留，不新增用例。未运行测试、构建、类型检查、语法检查、DB或服务；源码复核不能替代运行验收。
+
+此前两个独立修复已推送`92f477a`（§29.42）和`7718c49`（§29.43）；本项另独立提交。PG急停恢复授权、真实Codex计量合同/工作流、多实例KMS及M1/M2/M3全部继续开放。后续如读取自动push CI，只按确切SHA记录，不以旧基线绿色替代新源码证据，也不主动dispatch或重跑验证。

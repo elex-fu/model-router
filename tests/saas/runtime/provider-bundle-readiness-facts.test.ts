@@ -27,7 +27,9 @@ class FakeDatabase implements SqlExecutor {
 
   async query<Row>(sql: string): Promise<SqlResult<Row>> {
     this.queries.push(sql);
-    const rows = sql.includes('FROM saas_provider_products')
+    const rows = sql === PROVIDER_BUNDLE_READINESS_SQL.codexFinancialCatalogScopes
+      ? []
+      : sql.includes('FROM saas_provider_products')
       ? this.rows.providers
       : sql.includes('FROM saas_provider_capabilities')
         ? this.rows.catalogScopes
@@ -88,7 +90,7 @@ test('collector deduplicates provider ids and groups endpoint scopes per provide
     openrouter: ['openrouter-api'],
   });
   assert.deepEqual(facts.credentialProviderIds, ['anthropic-claude']);
-  assert.equal(database.queries.length, 4, 'one bounded query per readiness observation');
+  assert.equal(database.queries.length, 5, 'one bounded query per readiness observation');
   assert.equal(Object.isFrozen(facts), true);
   assert.equal(Object.isFrozen(facts.catalogProviderIds), true);
   assert.equal(Object.isFrozen(facts.credentialProviderIds), true);

@@ -25,6 +25,7 @@
  */
 
 import type { SqlExecutor } from '../db/types.js';
+import type { CodexFinancialCatalogScope, CodexWorkflowFinancialReadiness } from './codex-workflow-financial-readiness.js';
 import type {
   GatewayCapabilityDispatchFacts,
   CodexWorkflowReadiness,
@@ -42,6 +43,46 @@ export interface GatewayCapabilityDeploymentFacts {
   readonly verification: Readonly<Record<string, GatewayCapabilityVerificationLevel>>;
   readonly unavailableUsageBoundProviderIds?: readonly string[];
   readonly codexWorkflowTransports?: readonly CodexWorkflowReadiness['workflow'][];
+  readonly codexWorkflowFinancialReadiness?: CodexWorkflowFinancialReadiness;
+}
+
+interface CodexCatalogScopeRow extends ProviderScopeRow {
+  readonly product_id?: unknown;
+  readonly model?: unknown;
+  readonly protocol?: unknown;
+}
+
+// Every active version is relevant: routes can pin an older still-active version.
+const CODEX_FINANCIAL_CATALOG_SQL = `
+  SELECT model.provider_id, model.product_id, model.model, latest.endpoint, latest.protocol
+    FROM saas_public_models AS public_model
+    JOIN saas_public_model_versions AS model ON model.public_model_id = public_model.id
+    JOIN saas_provider_products AS product
+      ON product.provider_id = model.provider_id AND product.product_id = model.product_id
+    JOIN LATERAL (
+      SELECT capability.endpoint, capability.protocol, capability.support_level, capability.validation_state
+        FROM saas_provider_capabilities AS capability
+       WHERE capability.provider_id = model.provider_id
+         AND capability.product_id = model.product_id
+         AND capability.model = model.model AND capability.endpoint = 'codex-responses'
+       ORDER BY capability.version DESC LIMIT 1
+    ) AS latest ON TRUE
+   WHERE public_model.status = 'active' AND model.status = 'active' AND product.status = 'active'
+     AND model.provider_id = 'openai-codex' AND model.product_id = 'codex-chatgpt'
+     AND 'codex-responses' = ANY(model.endpoint_scope)
+     AND latest.support_level = 'supported' AND latest.validation_state = 'verified'
+     AND latest.protocol = 'responses'
+   ORDER BY model.public_model_id, model.version
+`;
+
+function codexCatalogScopes(rows: readonly CodexCatalogScopeRow[]): readonly (CodexFinancialCatalogScope | null)[] {
+  return Object.freeze(rows.map((row): CodexFinancialCatalogScope | null => {
+    if (row.provider_id !== 'openai-codex' || row.product_id !== 'codex-chatgpt' ||
+      row.endpoint !== 'codex-responses' || row.protocol !== 'responses' ||
+      typeof row.model !== 'string' || !/\S/.test(row.model)) return null;
+    return Object.freeze({ providerId: row.provider_id, productId: row.product_id,
+      resolvedModel: row.model, catalogEndpoint: row.endpoint, protocol: row.protocol });
+  }));
 }
 
 interface ProviderRow {
@@ -166,11 +207,12 @@ export async function collectProviderBundleReadinessFacts(
     throw new TypeError('collectProviderBundleReadinessFacts requires a SQL executor');
   }
 
-  const [providers, catalogScopes, pricedScopes, credentials] = await Promise.all([
+  const [providers, catalogScopes, pricedScopes, credentials, codexScopes] = await Promise.all([
     database.query<ProviderRow>(CATALOG_PROVIDER_SQL),
     database.query<ProviderScopeRow>(CATALOG_ENDPOINT_SQL),
     database.query<ProviderScopeRow>(PRICED_ENDPOINT_SQL),
     database.query<ProviderRow>(VERIFIED_CREDENTIAL_PROVIDER_SQL),
+    database.query<CodexCatalogScopeRow>(CODEX_FINANCIAL_CATALOG_SQL),
   ]);
 
   return Object.freeze({
@@ -178,6 +220,7 @@ export async function collectProviderBundleReadinessFacts(
     catalogEndpointScopesByProvider: groupedScopes(catalogScopes.rows),
     pricedEndpointScopesByProvider: groupedScopes(pricedScopes.rows),
     credentialProviderIds: sortedProviderIds(credentials.rows),
+    codexFinancialCatalogScopes: codexCatalogScopes(codexScopes.rows),
   });
 }
 
@@ -205,6 +248,7 @@ export async function collectGatewayCapabilityFacts(
     tlsFingerprintProfiles: Object.freeze([...deployment.tlsFingerprintProfiles]),
     verification: Object.freeze({ ...deployment.verification }),
     ...(deployment.codexWorkflowTransports ? { codexWorkflowTransports: Object.freeze([...deployment.codexWorkflowTransports]) } : {}),
+    ...(deployment.codexWorkflowFinancialReadiness ? { codexWorkflowFinancialReadiness: Object.freeze({ ...deployment.codexWorkflowFinancialReadiness }) } : {}),
     ...(deployment.unavailableUsageBoundProviderIds
       ? { unavailableUsageBoundProviderIds: Object.freeze([...deployment.unavailableUsageBoundProviderIds]) }
       : {}),
@@ -217,4 +261,5 @@ export const PROVIDER_BUNDLE_READINESS_SQL = Object.freeze({
   catalogEndpoints: CATALOG_ENDPOINT_SQL,
   pricedEndpoints: PRICED_ENDPOINT_SQL,
   verifiedCredentialProviders: VERIFIED_CREDENTIAL_PROVIDER_SQL,
+  codexFinancialCatalogScopes: CODEX_FINANCIAL_CATALOG_SQL,
 });

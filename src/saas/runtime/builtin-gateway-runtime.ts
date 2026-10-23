@@ -30,6 +30,7 @@ import { ByokServicePlanService } from '../plans/service.js';
 import { createBuiltinProviderEvidenceTransportFactory } from './builtin-provider-transports.js';
 import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
 import { createBuiltinUsageUpperBoundEstimator } from './builtin-usage-bounds.js';
+import { collectCodexWorkflowFinancialReadiness, declaredCodexFinancialWorkflows } from './codex-workflow-financial-readiness.js';
 import type { GatewayCapabilityReadiness, GatewayCapabilityVerificationLevel } from './gateway-capability-readiness.js';
 import { assertGatewayCapabilityAssembly, projectGatewayCapabilityReadiness } from './gateway-capability-readiness.js';
 import type {
@@ -689,6 +690,8 @@ export async function createBuiltinManagedSaasGatewayRuntime(
     const mountedScopes = Object.freeze(
       enabled.filter((entry) => entry?.dispatch !== 'generic').flatMap((entry) => entry?.endpointScopes ?? []),
     );
+    const codexDeclaredWorkflows = enabled.some((entry) => entry?.providerId === 'openai-codex')
+      ? declaredCodexFinancialWorkflows(nativeCompact) : Object.freeze([]);
     const deploymentFacts: GatewayCapabilityDeploymentFacts = Object.freeze({
       get dispatch() {
         return Object.freeze({
@@ -712,11 +715,8 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         return verification;
       },
       get codexWorkflowTransports() {
-        return Object.freeze(transportFactory?.assembled && enabled.some((entry) => entry?.providerId === 'openai-codex') ? ['responses-http-full' as const, 'responses-ws-full' as const, 'responses-ws-continuation' as const, ...(nativeCompact ? ['responses-compact' as const] : [])] : []);
+        return transportFactory?.assembled ? codexDeclaredWorkflows : Object.freeze([]);
       },
-      unavailableUsageBoundProviderIds: Object.freeze(
-        enabled.filter((entry) => entry?.providerId === 'openai-codex').map((entry) => entry?.providerId ?? ''),
-      ),
     });
     async function collectCurrentFacts() {
       if (closed) throw new Error('Built-in gateway runtime is closed');
@@ -730,7 +730,17 @@ export async function createBuiltinManagedSaasGatewayRuntime(
           tlsReachable = false;
         }
       }
-      return collectGatewayCapabilityFacts(options.database, deploymentFacts);
+      const facts = await collectGatewayCapabilityFacts(options.database, deploymentFacts);
+      const financial = collectCodexWorkflowFinancialReadiness(facts.bundles.codexFinancialCatalogScopes);
+      const unavailable = (facts.unavailableUsageBoundProviderIds ?? []).filter((providerId) => providerId !== 'openai-codex');
+      if (enabled.some((entry) => entry?.providerId === 'openai-codex') &&
+        !(codexDeclaredWorkflows.length > 0 && codexDeclaredWorkflows.every((workflow) => financial[workflow] === true))) {
+        unavailable.push('openai-codex');
+      }
+      return Object.freeze({ ...facts,
+        codexWorkflowFinancialReadiness: financial,
+        unavailableUsageBoundProviderIds: Object.freeze(unavailable),
+      });
     }
     return Object.freeze({
       dependencies,
