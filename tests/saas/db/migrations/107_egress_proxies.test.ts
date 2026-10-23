@@ -15,6 +15,7 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   assert.equal(migration.name, 'egress_proxies');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
+  assert.deepEqual(registered.slice(-5), [138, 139, 140, 141, 142]);
   const index = registered.indexOf(107);
   assert.ok(index > 0, '107 is registered');
   assert.equal(registered[index - 1], 106, '107 lands directly after the 106 head');
@@ -24,8 +25,8 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   // 133 durable model cooldowns (core-plan 9.1).
   assert.equal(
     registered.at(-1),
-    138,
-    'the batch-4/5 tails and the K2 durable fault classification follow the 108 head',
+    142,
+    'the append-only registry ends at payment create-request fingerprint 142',
   );
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));
   assert.equal(SAAS_MIGRATIONS[index], migration);

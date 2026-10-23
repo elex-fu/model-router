@@ -122,6 +122,48 @@ export interface SaasWorkerGrantStatement {
 }
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColumnGroup[] = [
+  { table: 'saas_customer_metering_policy_heads', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_customer_metering_policy_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_customer_metering_policy_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
+  { table: 'saas_provider_metering_policy_heads', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_provider_metering_policy_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_provider_metering_policy_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
+  { table: 'saas_customer_metering_policy_versions', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'customer_price_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_customer_metering_policy_versions', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'customer_price_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_provider_metering_policy_versions', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'provider_id', 'product_id', 'resolved_model', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'supplier_cost_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_provider_metering_policy_versions', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'provider_id', 'product_id', 'resolved_model', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'supplier_cost_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_contract_test_attestations', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'id', 'provider_policy_id', 'provider_policy_version', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'contract_digest', 'suite_version', 'test_vector_digest', 'verifier_key_id', 'signature_base64', 'verification_result', 'verified_at', 'created_at'] },
+  { table: 'saas_contract_test_attestations', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'id', 'provider_policy_id', 'provider_policy_version', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'contract_digest', 'suite_version', 'test_vector_digest', 'verifier_key_id', 'signature_base64', 'verification_result', 'verified_at', 'created_at'] },
+  { table: 'saas_route_config_commercial_authorities', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'route_id', 'route_version', 'customer_policy_id', 'customer_policy_version', 'provider_policy_id', 'provider_policy_version', 'contract_attestation_id', 'customer_price_version', 'supplier_cost_version', 'created_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_commercial_authorities', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'route_id', 'route_version', 'customer_policy_id', 'customer_policy_version', 'provider_policy_id', 'provider_policy_version', 'contract_attestation_id', 'customer_price_version', 'supplier_cost_version', 'created_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'route_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_route_config_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
+  { table: 'saas_route_config_versions', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'route_id', 'version', 'status', 'public_model_id', 'public_model_version', 'protocol', 'supply_mode', 'target_mode', 'upstream_id', 'endpoint', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_versions', privilege: 'SELECT', columns: ['protocol', 'target_mode', 'upstream_id', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_dispatchable', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'route_id', 'version', 'customer_policy_id', 'customer_policy_version', 'provider_policy_id', 'provider_policy_version', 'contract_attestation_id', 'customer_price_version', 'supplier_cost_version'] },
+  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['create_request_fingerprint'] },
+  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['create_request_fingerprint'] },
+  { table: 'saas_platform_inference_access_operations', privilege: 'SELECT', columns: ['id', 'tenant_id', 'project_id', 'operation_key', 'request_hash', 'request_payload', 'profile_id', 'entitlement_id', 'actor_user_id', 'phase', 'receipts', 'last_error_code', 'runner_id', 'runner_until', 'created_at', 'updated_at'] },
+  { table: 'saas_platform_inference_access_operations', privilege: 'INSERT', columns: ['id', 'tenant_id', 'project_id', 'operation_key', 'request_hash', 'request_payload', 'profile_id', 'entitlement_id', 'actor_user_id', 'phase', 'receipts', 'last_error_code', 'runner_id', 'runner_until', 'created_at', 'updated_at'] },
+  { table: 'saas_platform_inference_access_operations', privilege: 'UPDATE', columns: ['phase', 'receipts', 'last_error_code', 'runner_id', 'runner_until', 'updated_at'] },
+  { table: 'saas_supply_profiles', privilege: 'INSERT', columns: ['tenant_id', 'id', 'supply_mode', 'status', 'model_scopes'] },
+  { table: 'saas_payment_merchant_bindings', privilege: 'SELECT', columns: ['id', 'provider_key', 'merchant_id', 'seller_id', 'currency', 'descriptor_digest', 'created_at'] },
+  { table: 'saas_payment_merchant_bindings', privilege: 'INSERT', columns: ['id', 'provider_key', 'merchant_id', 'seller_id', 'currency', 'descriptor_digest', 'created_at'] },
+  { table: 'saas_payment_control', privilege: 'SELECT', columns: ['singleton', 'currency', 'purpose', 'mode', 'active_binding_id', 'revision', 'updated_by_user_id', 'updated_at'] },
+  { table: 'saas_payment_control', privilege: 'UPDATE', columns: ['mode', 'active_binding_id', 'revision', 'updated_by_user_id', 'updated_at'] },
+  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_payment_orders', privilege: 'UPDATE', columns: ['binding_id'] },
+  { table: 'saas_service_plan_orders', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_service_plan_orders', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_service_plan_orders', privilege: 'UPDATE', columns: ['binding_id'] },
+  { table: 'saas_payment_inbox', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_payment_inbox', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_payment_inbox', privilege: 'UPDATE', columns: ['binding_id'] },
+  { table: 'saas_refund_orders', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_refund_orders', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_refund_orders', privilege: 'UPDATE', columns: ['binding_id'] },
+
   {
     table: 'saas_provider_account_runtime_health',
     privilege: 'SELECT',
@@ -4719,6 +4761,48 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
+  { table: 'saas_customer_metering_policy_heads', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_customer_metering_policy_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_customer_metering_policy_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
+  { table: 'saas_provider_metering_policy_heads', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_provider_metering_policy_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_provider_metering_policy_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
+  { table: 'saas_customer_metering_policy_versions', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'customer_price_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_customer_metering_policy_versions', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'customer_price_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_provider_metering_policy_versions', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'provider_id', 'product_id', 'resolved_model', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'supplier_cost_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_provider_metering_policy_versions', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'policy_id', 'version', 'status', 'public_model_id', 'public_model_version', 'provider_id', 'product_id', 'resolved_model', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'supplier_cost_version', 'usage_dimensions', 'token_source', 'rounding_version', 'rounding_mode', 'rounding_boundary', 'commercial_policy_version', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_contract_test_attestations', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'id', 'provider_policy_id', 'provider_policy_version', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'contract_digest', 'suite_version', 'test_vector_digest', 'verifier_key_id', 'signature_base64', 'verification_result', 'verified_at', 'created_at'] },
+  { table: 'saas_contract_test_attestations', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'id', 'provider_policy_id', 'provider_policy_version', 'public_model_id', 'public_model_version', 'protocol', 'endpoint', 'supply_mode', 'target_mode', 'contract_digest', 'suite_version', 'test_vector_digest', 'verifier_key_id', 'signature_base64', 'verification_result', 'verified_at', 'created_at'] },
+  { table: 'saas_route_config_commercial_authorities', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'route_id', 'route_version', 'customer_policy_id', 'customer_policy_version', 'provider_policy_id', 'provider_policy_version', 'contract_attestation_id', 'customer_price_version', 'supplier_cost_version', 'created_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_commercial_authorities', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'route_id', 'route_version', 'customer_policy_id', 'customer_policy_version', 'provider_policy_id', 'provider_policy_version', 'contract_attestation_id', 'customer_price_version', 'supplier_cost_version', 'created_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_heads', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'route_id', 'current_version', 'status', 'changed_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_route_config_heads', privilege: 'UPDATE', columns: ['current_version', 'status', 'changed_by_user_id', 'updated_at'] },
+  { table: 'saas_route_config_versions', privilege: 'INSERT', columns: ['tenant_id', 'project_id', 'route_id', 'version', 'status', 'public_model_id', 'public_model_version', 'protocol', 'supply_mode', 'target_mode', 'upstream_id', 'endpoint', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_versions', privilege: 'SELECT', columns: ['protocol', 'target_mode', 'upstream_id', 'changed_by_user_id', 'created_at'] },
+  { table: 'saas_route_config_dispatchable', privilege: 'SELECT', columns: ['tenant_id', 'project_id', 'route_id', 'version', 'customer_policy_id', 'customer_policy_version', 'provider_policy_id', 'provider_policy_version', 'contract_attestation_id', 'customer_price_version', 'supplier_cost_version'] },
+  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['create_request_fingerprint'] },
+  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['create_request_fingerprint'] },
+  { table: 'saas_platform_inference_access_operations', privilege: 'SELECT', columns: ['id', 'tenant_id', 'project_id', 'operation_key', 'request_hash', 'request_payload', 'profile_id', 'entitlement_id', 'actor_user_id', 'phase', 'receipts', 'last_error_code', 'runner_id', 'runner_until', 'created_at', 'updated_at'] },
+  { table: 'saas_platform_inference_access_operations', privilege: 'INSERT', columns: ['id', 'tenant_id', 'project_id', 'operation_key', 'request_hash', 'request_payload', 'profile_id', 'entitlement_id', 'actor_user_id', 'phase', 'receipts', 'last_error_code', 'runner_id', 'runner_until', 'created_at', 'updated_at'] },
+  { table: 'saas_platform_inference_access_operations', privilege: 'UPDATE', columns: ['phase', 'receipts', 'last_error_code', 'runner_id', 'runner_until', 'updated_at'] },
+  { table: 'saas_supply_profiles', privilege: 'INSERT', columns: ['tenant_id', 'id', 'supply_mode', 'status', 'model_scopes'] },
+  { table: 'saas_payment_merchant_bindings', privilege: 'SELECT', columns: ['id', 'provider_key', 'merchant_id', 'seller_id', 'currency', 'descriptor_digest', 'created_at'] },
+  { table: 'saas_payment_merchant_bindings', privilege: 'INSERT', columns: ['id', 'provider_key', 'merchant_id', 'seller_id', 'currency', 'descriptor_digest', 'created_at'] },
+  { table: 'saas_payment_control', privilege: 'SELECT', columns: ['singleton', 'currency', 'purpose', 'mode', 'active_binding_id', 'revision', 'updated_by_user_id', 'updated_at'] },
+  { table: 'saas_payment_control', privilege: 'UPDATE', columns: ['mode', 'active_binding_id', 'revision', 'updated_by_user_id', 'updated_at'] },
+  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_payment_orders', privilege: 'UPDATE', columns: ['binding_id'] },
+  { table: 'saas_service_plan_orders', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_service_plan_orders', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_service_plan_orders', privilege: 'UPDATE', columns: ['binding_id'] },
+  { table: 'saas_payment_inbox', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_payment_inbox', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_payment_inbox', privilege: 'UPDATE', columns: ['binding_id'] },
+  { table: 'saas_refund_orders', privilege: 'SELECT', columns: ['binding_id'] },
+  { table: 'saas_refund_orders', privilege: 'INSERT', columns: ['binding_id'] },
+  { table: 'saas_refund_orders', privilege: 'UPDATE', columns: ['binding_id'] },
+
   {
     table: 'saas_provider_account_runtime_health',
     privilege: 'SELECT',
@@ -9226,6 +9310,7 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
 ];
 
 export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[] = [
+  { table: 'saas_responses_continuation_contexts' },
   { table: 'saas_redis_quota_metadata' },
   { table: 'saas_redis_quota_state' },
   {
@@ -9510,6 +9595,7 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
+  { tables: ['saas_responses_continuation_contexts'] },
   { tables: ['saas_redis_quota_metadata', 'saas_redis_quota_state'] },
   {
     tables: ['saas_tenants', 'saas_projects', 'saas_project_inference_policy_versions'],
@@ -9698,6 +9784,7 @@ const REDIS_QUOTA_GATEWAY_COLUMNS = [
 ] as const;
 
 export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[] = [
+  { table: 'saas_responses_continuation_contexts', privilege: 'INSERT', columns: ['tenant_id','project_id','proxy_key_id','conversation_id','response_id','provider_id','product_id','account_id','credential_id','credential_version','credential_authz_version','public_model','resolved_model','canonical_context_digest','encryption_key_id','encrypted_context','created_at','expires_at'], tsStyle: 'inline' },
   ...REDIS_QUOTA_GATEWAY_COLUMNS.map((group) => ({ ...group, tsStyle: 'map-callback' as const })),
   {
     tsComment: ['Startup schema verification reads only the registered migration identity and checksum.'],
@@ -10862,6 +10949,25 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
 ];
 
 export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlEntry[] = [
+  { table: 'saas_responses_continuation_contexts', column: 'tenant_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'project_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'proxy_key_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'conversation_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'response_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'provider_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'product_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'account_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'credential_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'credential_version', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'credential_authz_version', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'public_model', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'resolved_model', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'canonical_context_digest', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'encryption_key_id', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'encrypted_context', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'created_at', privilege: 'INSERT' },
+  { table: 'saas_responses_continuation_contexts', column: 'expires_at', privilege: 'INSERT' },
+
   ...REDIS_QUOTA_GATEWAY_COLUMNS.flatMap((group) =>
     group.columns.map((column) => ({ table: group.table, column, privilege: group.privilege })),
   ),
@@ -14537,7 +14643,7 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
 
 export const MANIFEST_GATEWAY_AUXILIARY: SaasGatewayAuxiliaryGrants = {
   fullInsertTables: ['saas_prepared_request_evidence'],
-  deleteTables: ['saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks'],
+  deleteTables: ['saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks', 'saas_responses_continuation_contexts'],
   usageSequence: 'saas_provider_account_lease_fencing_seq',
 };
 

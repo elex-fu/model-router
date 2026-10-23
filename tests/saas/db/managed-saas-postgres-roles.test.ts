@@ -53,8 +53,29 @@ test('managed PostgreSQL role template creates distinct least-privilege principa
   );
   assert.match(
     roleTemplate,
-    /has_table_privilege\(v_gateway_oid, relation\.oid, 'DELETE'\)[\s\S]+relation\.relname NOT IN \('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks'\)/,
+    /has_table_privilege\(v_gateway_oid, relation\.oid, 'DELETE'\)[\s\S]+relation\.relname NOT IN \('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks', 'saas_responses_continuation_contexts'\)/,
   );
+});
+
+test('gateway table DELETE allowlist is exactly spending freezes, media tasks and continuation expiry cleanup', () => {
+  const expected = [
+    'saas_billing_spending_freezes',
+    'saas_image_tasks',
+    'saas_video_tasks',
+    'saas_responses_continuation_contexts',
+  ];
+  const guards = [...roleTemplate.matchAll(/relation\.relname NOT IN \(([^)]+)\)/g)]
+    .map(match => [...match[1].matchAll(/'([^']+)'/g)].map(item => item[1]));
+  assert.equal(guards.length, 2, 'both table privilege guards carry the exact DELETE exceptions');
+  for (const allowlist of guards) assert.deepEqual(allowlist, expected);
+
+  const gatewayBlock = roleTemplate.match(/DO \$gateway_runtime_grants\$([\s\S]*?)\$gateway_runtime_grants\$/)?.[1];
+  assert.ok(gatewayBlock);
+  const granted = [...gatewayBlock.matchAll(/GRANT DELETE ON TABLE model_router_saas\.([a-z_]+) TO model_router_saas_gateway/g)]
+    .map(match => match[1]).sort();
+  assert.deepEqual(granted, [...expected].sort());
+  assert.doesNotMatch(gatewayBlock, /\('saas_responses_continuation_contexts', '[^']+', 'UPDATE'\)/);
+  assert.doesNotMatch(gatewayBlock, /GRANT (?:UPDATE|TRUNCATE|ALL(?: PRIVILEGES)?) ON TABLE model_router_saas\.saas_responses_continuation_contexts/);
 });
 
 test('control-plane grants mirror the source-backed column, table and sequence manifests', () => {
@@ -185,10 +206,9 @@ test('control-plane grants mirror the source-backed column, table and sequence m
     roleTemplate,
     /GRANT\s+(?:USAGE|SELECT|UPDATE)\s+ON\s+(?:ALL\s+)?SEQUENCES?[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
-  assert.doesNotMatch(
-    roleTemplate,
-    /GRANT\s+EXECUTE\s+ON\s+(?:ALL\s+)?FUNCTIONS?[^;]*TO\s+model_router_saas_control_plane\b/is,
-  );
+  const cpFunctionGrants=[...roleTemplate.matchAll(/GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+([^;]+?)\s+TO\s+model_router_saas_control_plane\s*;/gis)].map(match=>match[1].trim());
+  assert.deepEqual(cpFunctionGrants,['model_router_saas.saas_metering_valid_dimensions(text[])']);
+  assert.doesNotMatch(roleTemplate,/GRANT\s+EXECUTE\s+ON\s+ALL\s+FUNCTIONS[^;]*TO\s+model_router_saas_control_plane\b/is);
   assert.match(roleTemplate, /out-of-schema routines/);
   assert.match(roleTemplate, /ALTER DEFAULT PRIVILEGES FOR ROLE model_router_saas_migrator/);
 });
@@ -508,7 +528,8 @@ test('customer request read template is the CP projection plus the recovery work
       source,
       /GRANT\s+(?:ALL(?:\s+PRIVILEGES)?|SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)\s+ON\s+(?:TABLE\s+)?model_router_saas\.saas_requests\s+TO\s+model_router_saas_control_plane\b/i,
     );
-    assert.doesNotMatch(source, /GRANT\s+EXECUTE\s+ON\s+[^;]*TO\s+model_router_saas_control_plane\b/i);
+    const withoutPureValidator=source.replace(/GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+model_router_saas\.saas_metering_valid_dimensions\(text\[\]\)\s+TO\s+model_router_saas_control_plane\s*;/gi,'');
+    assert.doesNotMatch(withoutPureValidator, /GRANT\s+EXECUTE\s+ON\s+[^;]*TO\s+model_router_saas_control_plane\b/i);
   };
   validate(roleTemplate);
   const readList = 'execution_state financial_status reconciliation_state created_at';

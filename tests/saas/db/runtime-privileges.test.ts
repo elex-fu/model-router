@@ -686,8 +686,14 @@ test('role template mirrors the control-plane manifest and grants no broad table
     sql,
     /GRANT\s+(?:USAGE|SELECT|UPDATE)\s+ON\s+(?:ALL\s+)?SEQUENCES?[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
-  assert.doesNotMatch(sql, /GRANT\s+EXECUTE\s+ON\s+(?:ALL\s+)?FUNCTIONS?[^;]*TO\s+model_router_saas_control_plane\b/is);
-  assert.doesNotMatch(sql, /ALTER DEFAULT PRIVILEGES[\s\S]*?\bGRANT\b[^;]*TO\s+model_router_saas_control_plane\b/is);
+  const functionGrants=[...sql.matchAll(/GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+([^;]+?)\s+TO\s+model_router_saas_control_plane\s*;/gis)].map(match=>match[1].trim());
+  assert.deepEqual(functionGrants,['model_router_saas.saas_metering_valid_dimensions(text[])']);
+  assert.doesNotMatch(sql,/GRANT\s+EXECUTE\s+ON\s+ALL\s+FUNCTIONS[^;]*TO\s+model_router_saas_control_plane\b/is);
+  assert.match(sql,/routine\.provolatile = 'i' AND NOT routine\.prosecdef/);
+  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL,/validator\.provolatile = 'i' AND NOT validator\.prosecdef/);
+  // Bound the assertion to one SQL statement: an earlier comment mentions
+  // ALTER DEFAULT PRIVILEGES and must not capture a later explicit pure-validator grant.
+  assert.doesNotMatch(sql, /ALTER DEFAULT PRIVILEGES\b[^;]*\bGRANT\b[^;]*TO\s+model_router_saas_control_plane\b/is);
 });
 
 test('gateway manifest contains no capacity-policy writes', () => {

@@ -97,6 +97,10 @@ import { KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION } from '../../../src/saas/db
 import { OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/136_ops_media_requeue_requests.js';
 import { PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION } from '../../../src/saas/db/migrations/137_platform_credential_validation_requeue.js';
 import { REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION } from '../../../src/saas/db/migrations/138_redis_quota_writeback.js';
+import { PLATFORM_INFERENCE_ACCESS_OPERATIONS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/139_platform_inference_access_operations.js';
+import { PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/140_payment_merchant_bindings.js';
+import { RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/141_responses_continuation_contexts.js';
+import { PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION } from '../../../src/saas/db/migrations/142_payment_create_request_fingerprint.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -234,6 +238,10 @@ test('SaaS migration registry keeps a stable append order with only documented g
       136,
       137,
       138,
+      139,
+      140,
+      141,
+      142,
     ],
   );
 });
@@ -297,7 +305,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 119);
+  assert.equal(SAAS_MIGRATIONS.length, 123);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -378,6 +386,10 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'ops_media_requeue_requests',
       'platform_credential_validation_requeue',
       'redis_quota_writeback',
+      'platform_inference_access_operations',
+      'payment_merchant_bindings',
+      'responses_continuation_contexts',
+      'payment_create_request_fingerprint',
     ],
   );
   assert.deepEqual(
@@ -480,10 +492,14 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       136,
       137,
       138,
+      139,
+      140,
+      141,
+      142,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 119);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 119);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 123);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 123);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -573,7 +589,7 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
 });
 
 test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 119);
+  assert.equal(SAAS_MIGRATIONS.length, 123);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -640,6 +656,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION,
     PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION,
     REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION,
+    PLATFORM_INFERENCE_ACCESS_OPERATIONS_SAAS_MIGRATION,
+    PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION,
+    RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION,
+    PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -839,13 +859,17 @@ test('migrations 029-033 preserve append order without constraining later migrat
   assert.ok(SAAS_MIGRATIONS.slice(33).every(({ version }) => version > 33));
 });
 
-test('134-138 are the exact runtime and operations forwards after the frozen 133 tail', () => {
+test('134-142 are the exact runtime, operations and P0 forwards after the frozen 133 tail', () => {
   assert.deepEqual(SAAS_MIGRATIONS.slice(114), [
     RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION,
     KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
     OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION,
     PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION,
     REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION,
+    PLATFORM_INFERENCE_ACCESS_OPERATIONS_SAAS_MIGRATION,
+    PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION,
+    RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION,
+    PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION,
   ]);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(114).map(({ version, name }) => [version, name]),
@@ -855,6 +879,10 @@ test('134-138 are the exact runtime and operations forwards after the frozen 133
       [136, 'ops_media_requeue_requests'],
       [137, 'platform_credential_validation_requeue'],
       [138, 'redis_quota_writeback'],
+      [139, 'platform_inference_access_operations'],
+      [140, 'payment_merchant_bindings'],
+      [141, 'responses_continuation_contexts'],
+      [142, 'payment_create_request_fingerprint'],
     ],
   );
   assert.equal(

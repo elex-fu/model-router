@@ -13,6 +13,7 @@ test('096 registers after 095 with the documented gaps; 103 is the current forwa
   assert.equal(migration.name, 'customer_webhook_maintenance_payload_rewrite');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
+  assert.deepEqual(registered.slice(-5), [138, 139, 140, 141, 142]);
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
@@ -20,7 +21,7 @@ test('096 registers after 095 with the documented gaps; 103 is the current forwa
   // admission) and 108 (R5b OpenCode Go scheduling) follow at the tail.
   // K2: 129 (provider_account_durable_fault_classification, renumbered
   // from main's 112 in this merge) is the new head.
-  assert.equal(registered.at(-1), 138);
+  assert.equal(registered.at(-1), 142);
   assert.equal(SAAS_MIGRATIONS[76], migration);
 });
 

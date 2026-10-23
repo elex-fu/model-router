@@ -785,3 +785,11 @@ Codex transport 已将 completed/incomplete/failed 的执行终态与用量完�
 Luna 最近 Codex executor/continuation/持久 history/profile 定向批次 **15/15** 通过，当前服务端编译通过；这不是所有 Codex 任务验收。原生上游 WS transport、标准持久 history/KMS 全链接线和真实 backend 计量/工作流证据继续推进，Codex 收费 admission 仍保持拒绝。方案 §4.1/4.2/4.4 已同步实际开户与 Codex 工程合同。P11 已推送 `7280e97`。
 
 完整离线 unit 首轮为 **6,953 条 / 6,904 pass / 26 fail / 23 skip**；已按真实失败分派修复，尚未宣告全绿。部分为新增检查/迁移的旧预期，部分为实际实现错误，均须分别重跑；新增真实 PG、CI 和后续源码不能借上述历史定向通过数作为完成证明。
+
+### 29.6 P02 数据迁移与最小角色授权
+
+唯一注册链追加迁移 **139–142**，当前共 **123 条、head 142**：开户 operation journal、支付商户 binding 与 PG 控制版本、密文 Responses history、原支付创建请求指纹。旧迁移 SQL 与 checksum 保持原值。history 使用 tenant/project/key 复合约束、密文不可变记录、数据库时间 TTL 和有界删除；支付指纹不可变，不把历史空值猜作新请求。
+
+真实 PG18.6 受限角色验证中发现并修复三类装配问题：CP 缺少正式商业 policy/head/attestation/route 的精确列授权；授权生成器跳过了 dispatchable view；输入维度校验需要执行一个纯函数。现按 manifest 授权列与只读 view，仅允许精确签名的 immutable、非 security-definer、boolean 校验函数，其他函数/default grants 的拒绝继续保留。角色脚本可先于迁移执行，迁移后启动探针再要求该函数存在且可执行。
+
+Luna 已用全链迁移后的临时 PG18.6 跑通开户 **1/1**、商户绑定 **5/5**、密文 history **1/1**；临时库已清理。开户新增静态财务就绪检查亦已通过 unit **3/3**，最后一次新 PG **1/1** 包含实际 CP 启动权限探针。这些结果不包含 PG15、真实 PSP 或 Codex backend。完整规范 unit 为 **6,989 条 / 6,963 pass / 3 fail / 23 skip**，剩余 CI 离线跳过守卫、权限脚本测试正则和 metadata proxy 错误类型已分别定位修复，相关定向批次 **184/184**、服务端编译通过，完整回归待重跑。Codex 基础实现已推送 `f61afec`。

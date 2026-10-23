@@ -93,6 +93,10 @@ test('migration 036 is registered immediately before subsequent append-only migr
       136,
       137,
       138,
+      139,
+      140,
+      141,
+      142,
     ],
   );
 });

@@ -327,7 +327,7 @@ BEGIN
           OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
           OR (
             pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-            AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks')
+            AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks', 'saas_responses_continuation_contexts')
           )
         )
       )
@@ -350,7 +350,7 @@ BEGIN
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'UPDATE')
         OR (
           pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'DELETE')
-          AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks')
+          AND relation.relname NOT IN ('saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks', 'saas_responses_continuation_contexts')
         )
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'TRUNCATE')
         OR pg_catalog.has_table_privilege(v_gateway_oid, relation.oid, 'REFERENCES')
@@ -716,6 +716,47 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.string_to_array(manifest.column_names, ' ') AS column_names
     FROM (VALUES
+      ('saas_customer_metering_policy_heads', 'SELECT', 'tenant_id project_id policy_id current_version status changed_by_user_id created_at updated_at'),
+      ('saas_customer_metering_policy_heads', 'INSERT', 'tenant_id project_id policy_id current_version status changed_by_user_id created_at updated_at'),
+      ('saas_customer_metering_policy_heads', 'UPDATE', 'current_version status changed_by_user_id updated_at'),
+      ('saas_provider_metering_policy_heads', 'SELECT', 'tenant_id project_id policy_id current_version status changed_by_user_id created_at updated_at'),
+      ('saas_provider_metering_policy_heads', 'INSERT', 'tenant_id project_id policy_id current_version status changed_by_user_id created_at updated_at'),
+      ('saas_provider_metering_policy_heads', 'UPDATE', 'current_version status changed_by_user_id updated_at'),
+      ('saas_customer_metering_policy_versions', 'SELECT', 'tenant_id project_id policy_id version status public_model_id public_model_version protocol endpoint supply_mode target_mode customer_price_version usage_dimensions token_source rounding_version rounding_mode rounding_boundary commercial_policy_version changed_by_user_id created_at'),
+      ('saas_customer_metering_policy_versions', 'INSERT', 'tenant_id project_id policy_id version status public_model_id public_model_version protocol endpoint supply_mode target_mode customer_price_version usage_dimensions token_source rounding_version rounding_mode rounding_boundary commercial_policy_version changed_by_user_id created_at'),
+      ('saas_provider_metering_policy_versions', 'SELECT', 'tenant_id project_id policy_id version status public_model_id public_model_version provider_id product_id resolved_model protocol endpoint supply_mode target_mode supplier_cost_version usage_dimensions token_source rounding_version rounding_mode rounding_boundary commercial_policy_version changed_by_user_id created_at'),
+      ('saas_provider_metering_policy_versions', 'INSERT', 'tenant_id project_id policy_id version status public_model_id public_model_version provider_id product_id resolved_model protocol endpoint supply_mode target_mode supplier_cost_version usage_dimensions token_source rounding_version rounding_mode rounding_boundary commercial_policy_version changed_by_user_id created_at'),
+      ('saas_contract_test_attestations', 'SELECT', 'tenant_id project_id id provider_policy_id provider_policy_version public_model_id public_model_version protocol endpoint supply_mode target_mode contract_digest suite_version test_vector_digest verifier_key_id signature_base64 verification_result verified_at created_at'),
+      ('saas_contract_test_attestations', 'INSERT', 'tenant_id project_id id provider_policy_id provider_policy_version public_model_id public_model_version protocol endpoint supply_mode target_mode contract_digest suite_version test_vector_digest verifier_key_id signature_base64 verification_result verified_at created_at'),
+      ('saas_route_config_commercial_authorities', 'SELECT', 'tenant_id project_id route_id route_version customer_policy_id customer_policy_version provider_policy_id provider_policy_version contract_attestation_id customer_price_version supplier_cost_version created_by_user_id created_at'),
+      ('saas_route_config_commercial_authorities', 'INSERT', 'tenant_id project_id route_id route_version customer_policy_id customer_policy_version provider_policy_id provider_policy_version contract_attestation_id customer_price_version supplier_cost_version created_by_user_id created_at'),
+      ('saas_route_config_heads', 'INSERT', 'tenant_id project_id route_id current_version status changed_by_user_id created_at updated_at'),
+      ('saas_route_config_heads', 'UPDATE', 'current_version status changed_by_user_id updated_at'),
+      ('saas_route_config_versions', 'INSERT', 'tenant_id project_id route_id version status public_model_id public_model_version protocol supply_mode target_mode upstream_id endpoint changed_by_user_id created_at'),
+      ('saas_route_config_versions', 'SELECT', 'protocol target_mode upstream_id changed_by_user_id created_at'),
+      ('saas_route_config_dispatchable', 'SELECT', 'tenant_id project_id route_id version customer_policy_id customer_policy_version provider_policy_id provider_policy_version contract_attestation_id customer_price_version supplier_cost_version'),
+      ('saas_payment_orders', 'SELECT', 'create_request_fingerprint'),
+      ('saas_payment_orders', 'INSERT', 'create_request_fingerprint'),
+      ('saas_platform_inference_access_operations', 'SELECT', 'id tenant_id project_id operation_key request_hash request_payload profile_id entitlement_id actor_user_id phase receipts last_error_code runner_id runner_until created_at updated_at'),
+      ('saas_platform_inference_access_operations', 'INSERT', 'id tenant_id project_id operation_key request_hash request_payload profile_id entitlement_id actor_user_id phase receipts last_error_code runner_id runner_until created_at updated_at'),
+      ('saas_platform_inference_access_operations', 'UPDATE', 'phase receipts last_error_code runner_id runner_until updated_at'),
+      ('saas_supply_profiles', 'INSERT', 'tenant_id id supply_mode status model_scopes'),
+      ('saas_payment_merchant_bindings', 'SELECT', 'id provider_key merchant_id seller_id currency descriptor_digest created_at'),
+      ('saas_payment_merchant_bindings', 'INSERT', 'id provider_key merchant_id seller_id currency descriptor_digest created_at'),
+      ('saas_payment_control', 'SELECT', 'singleton currency purpose mode active_binding_id revision updated_by_user_id updated_at'),
+      ('saas_payment_control', 'UPDATE', 'mode active_binding_id revision updated_by_user_id updated_at'),
+      ('saas_payment_orders', 'SELECT', 'binding_id'),
+      ('saas_payment_orders', 'INSERT', 'binding_id'),
+      ('saas_payment_orders', 'UPDATE', 'binding_id'),
+      ('saas_service_plan_orders', 'SELECT', 'binding_id'),
+      ('saas_service_plan_orders', 'INSERT', 'binding_id'),
+      ('saas_service_plan_orders', 'UPDATE', 'binding_id'),
+      ('saas_payment_inbox', 'SELECT', 'binding_id'),
+      ('saas_payment_inbox', 'INSERT', 'binding_id'),
+      ('saas_payment_inbox', 'UPDATE', 'binding_id'),
+      ('saas_refund_orders', 'SELECT', 'binding_id'),
+      ('saas_refund_orders', 'INSERT', 'binding_id'),
+      ('saas_refund_orders', 'UPDATE', 'binding_id'),
       ('saas_provider_account_runtime_health', 'SELECT', 'account_id last_outcome'),
       ('saas_attempt_supplier_costs', 'SELECT', 'tenant_id attempt_id amount_minor_units created_at'),
       ('saas_schema_migrations', 'SELECT', 'version name checksum'),
@@ -1085,7 +1126,8 @@ BEGIN
     JOIN pg_catalog.pg_attribute AS attribute
       ON attribute.attrelid = relation.oid AND attribute.attname = expected.column_name
     WHERE namespace.nspname = 'model_router_saas'
-      AND relation.relkind IN ('r', 'p')
+      AND (relation.relkind IN ('r', 'p') OR (relation.relkind = 'v'
+        AND relation.relname = 'saas_route_config_dispatchable' AND v_grant.privilege_type = 'SELECT'))
       AND attribute.attnum > 0 AND NOT attribute.attisdropped;
     IF v_columns IS NOT NULL THEN
       EXECUTE pg_catalog.format(
@@ -1168,6 +1210,33 @@ BEGIN
 END;
 $control_plane_runtime_grants$;
 
+-- P01: metering-policy CHECK constraints run this one pure validator as the
+-- inserting control-plane role. Keep every trigger routine and all SECURITY
+-- DEFINER routines non-callable; no gateway EXECUTE grant is added.
+DO $control_plane_metering_validator$
+BEGIN
+  -- The same template bootstraps roles before migrations and reconciles ACLs
+  -- afterwards. Missing on an empty schema is expected; startup still fails
+  -- closed until migrations and the post-migration reconciliation complete.
+  IF pg_catalog.to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])') IS NULL THEN
+    RETURN;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_proc AS routine
+    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = routine.pronamespace
+    WHERE namespace.nspname = 'model_router_saas'
+      AND routine.proname = 'saas_metering_valid_dimensions'
+      AND pg_catalog.pg_get_function_identity_arguments(routine.oid) = 'dimensions text[]'
+      AND routine.provolatile = 'i' AND NOT routine.prosecdef
+      AND routine.prorettype = 'boolean'::regtype
+  ) THEN
+    RAISE EXCEPTION 'Required pure metering dimension validator is unavailable';
+  END IF;
+  GRANT EXECUTE ON FUNCTION model_router_saas.saas_metering_valid_dimensions(text[])
+    TO model_router_saas_control_plane;
+END;
+$control_plane_metering_validator$;
+
 -- SELECT is column-scoped to this fixed relation allowlist. Several adapter
 -- statements intentionally read complete immutable authority snapshots; the
 -- encrypted credential envelope is readable, but no credential/admin relation
@@ -1184,6 +1253,7 @@ BEGIN
   FOR v_table IN
     SELECT read_relation.table_name
     FROM (VALUES
+      ('saas_responses_continuation_contexts'),
       ('saas_redis_quota_metadata'), ('saas_redis_quota_state'),
       ('saas_tenants'), ('saas_projects'), ('saas_project_inference_policy_versions'),
       ('saas_users'), ('saas_memberships'), ('saas_project_memberships'), ('saas_api_keys'),
@@ -1272,6 +1342,24 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.array_agg(manifest.column_name ORDER BY manifest.column_name) AS column_names
     FROM (VALUES
+      ('saas_responses_continuation_contexts', 'tenant_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'project_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'proxy_key_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'conversation_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'response_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'provider_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'product_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'account_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'credential_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'credential_version', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'credential_authz_version', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'public_model', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'resolved_model', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'canonical_context_digest', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'encryption_key_id', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'encrypted_context', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'created_at', 'INSERT'),
+      ('saas_responses_continuation_contexts', 'expires_at', 'INSERT'),
       ('saas_redis_quota_metadata', 'namespace', 'INSERT'),
       ('saas_redis_quota_metadata', 'identity', 'INSERT'),
       ('saas_redis_quota_metadata', 'generation', 'UPDATE'),
@@ -1969,6 +2057,9 @@ BEGIN
   IF pg_catalog.to_regclass('model_router_saas.saas_video_tasks') IS NOT NULL THEN
     EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_video_tasks TO model_router_saas_gateway';
   END IF;
+  IF pg_catalog.to_regclass('model_router_saas.saas_responses_continuation_contexts') IS NOT NULL THEN
+    EXECUTE 'GRANT DELETE ON TABLE model_router_saas.saas_responses_continuation_contexts TO model_router_saas_gateway';
+  END IF;
   IF pg_catalog.to_regclass('model_router_saas.saas_provider_account_lease_fencing_seq') IS NOT NULL THEN
     EXECUTE 'GRANT USAGE ON SEQUENCE model_router_saas.saas_provider_account_lease_fencing_seq TO model_router_saas_gateway';
   END IF;
@@ -2003,5 +2094,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE model_router_saas_migrator
 
 -- No runtime privileges are granted automatically to future objects. Review
 -- each new control-plane requirement and add its exact columns explicitly.
+
+
 
 COMMIT;

@@ -14,6 +14,7 @@ test('111 registers directly after 110 as the applied head (the slot 110 documen
   assert.equal(migration.name, 'provider_account_gemini_scheduling');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
+  assert.deepEqual(registered.slice(-5), [138, 139, 140, 141, 142]);
   const index = registered.indexOf(111);
   assert.ok(index > 0, '111 is registered');
   assert.equal(registered[index - 1], 110, '111 lands directly after 110');
@@ -22,7 +23,7 @@ test('111 registers directly after 110 as the applied head (the slot 110 documen
   // K2: 129 (provider_account_durable_fault_classification, renumbered from
   // main's 112 in this merge) is the applied head; 111 still lands directly
   // after 110 (the direct-predecessor contract above).
-  assert.equal(registered.at(-1), 138, 'the K2 durable fault classification tail is the applied head');
+  assert.equal(registered.at(-1), 142, 'the immutable payment create-request fingerprint is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 111).length, 1);
