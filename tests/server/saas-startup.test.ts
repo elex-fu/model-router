@@ -954,6 +954,139 @@ function inertListener(): Server {
   return server as unknown as Server;
 }
 
+for (const ending of ['eof', 'abort'] as const) {
+  test(`managed customer shutdown tracks original application cleanup after client ${ending}`, async () => {
+    const ports = await threeFreePorts();
+    const environment = managedEnvironment(ports);
+    const events: string[] = [];
+    let release!: () => void;
+    const cleanup = new Promise<void>((resolve) => { release = resolve; });
+    const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+      paymentHandler: async (_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.write('data: accepted\n\n');
+        if (ending === 'eof') response.end();
+        await cleanup;
+        assert.equal(events.includes('database-close'), false);
+        return true;
+      },
+    }));
+    try {
+      const response = await fetch(`${origin(runtimeListener(runtime, 'customer'))}/deferred-cleanup`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (ending === 'eof') await response.text();
+      else await response.body!.cancel();
+      const closing = runtime.close();
+      assert.equal(runtime.close(), closing, 'repeat close returns the same original lifecycle promise');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(events.includes('providers-close'), false);
+      assert.equal(events.includes('database-close'), false);
+      release();
+      await closing;
+      assert.equal(events.filter((event) => event === 'providers-close').length, 1);
+      assert.equal(events.filter((event) => event === 'database-close').length, 1);
+    } finally {
+      release();
+      await runtime.close();
+    }
+  });
+}
+
+test('managed provider close failure remains rejected while settled owners receive one cleanup attempt', async () => {
+  const events: string[] = [];
+  const environment = managedEnvironment({ customer: 45121, platform: 45122, gateway: 45123 });
+  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    createListener: () => inertListener(),
+    loadProviders: async () => ({ ...fakeProviders(events), close: async () => {
+      events.push('providers-close');
+      throw new Error('synthetic private cleanup error');
+    } }),
+  }));
+  const closing = runtime.close();
+  assert.equal(runtime.close(), closing);
+  await assert.rejects(closing, /^Error: MANAGED_SAAS_SHUTDOWN_RESOURCE_FAILED$/);
+  assert.equal(runtime.close(), closing);
+  await assert.rejects(runtime.close(), /MANAGED_SAAS_SHUTDOWN_RESOURCE_FAILED/);
+  assert.equal(events.filter((event) => event === 'providers-close').length, 1);
+  assert.equal(events.filter((event) => event === 'database-close').length, 1);
+});
+
+test('managed hung provider close is bounded and prevents dependent database close', async () => {
+  const events: string[] = [];
+  const environment = managedEnvironment({ customer: 45121, platform: 45122, gateway: 45123 });
+  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    createListener: () => inertListener(),
+    shutdownCleanupMs: 10,
+    loadProviders: async () => ({ ...fakeProviders(events), close: async () => {
+      events.push('providers-close');
+      await new Promise<void>(() => {});
+    } }),
+  }));
+  const closing = runtime.close();
+  assert.equal(runtime.close(), closing);
+  await assert.rejects(closing, /MANAGED_SAAS_SHUTDOWN_RESOURCE_TIMEOUT/);
+  assert.equal(events.filter((event) => event === 'providers-close').length, 1);
+  assert.equal(events.includes('database-close'), false);
+});
+
+test('managed forced customer socket close still waits for its original cleanup', async () => {
+  const ports = await threeFreePorts();
+  const environment = managedEnvironment(ports);
+  const events: string[] = [];
+  let release!: () => void;
+  const cleanup = new Promise<void>((resolve) => { release = resolve; });
+  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    shutdownGraceMs: 10,
+    shutdownCleanupMs: 1000,
+    paymentHandler: async (_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.write('data: accepted\n\n');
+      response.once('close', () => setTimeout(release, 5));
+      await cleanup;
+      assert.equal(events.includes('database-close'), false);
+      return true;
+    },
+  }));
+  try {
+    const response = await fetch(`${origin(runtimeListener(runtime, 'customer'))}/deferred-cleanup`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const reader = response.body!.getReader();
+    assert.equal((await reader.read()).done, false);
+    await runtime.close();
+    assert.equal(events.filter((event) => event === 'database-close').length, 1);
+    await assert.rejects(reader.read());
+  } finally {
+    release();
+    await runtime.close();
+  }
+});
+
+test('managed never completed customer handler times out without closing its database', async () => {
+  const ports = await threeFreePorts();
+  const environment = managedEnvironment(ports);
+  const events: string[] = [];
+  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
+    shutdownGraceMs: 5,
+    shutdownCleanupMs: 5,
+    paymentHandler: async (_request, response) => {
+      response.end('accepted');
+      await new Promise<void>(() => {});
+      return true;
+    },
+  }));
+  const response = await fetch(`${origin(runtimeListener(runtime, 'customer'))}/deferred-cleanup`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  await response.text();
+  const closing = runtime.close();
+  assert.equal(runtime.close(), closing);
+  await assert.rejects(closing, /MANAGED_SAAS_SHUTDOWN_TIMEOUT/);
+  assert.equal(events.includes('database-close'), false);
+  assert.equal(events.includes('providers-close'), false);
+});
+
 async function startCapturedGateway(): Promise<{
   handler: RequestListener;
   runtime: ManagedSaasRuntime;

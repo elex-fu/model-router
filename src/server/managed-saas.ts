@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Socket } from 'node:net';
-import { drainManagedSaasShutdown } from './managed-saas-shutdown.js';
+import { closeManagedSaasResources, drainManagedSaasShutdown, ManagedSaasRequestTracker } from './managed-saas-shutdown.js';
 import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
@@ -924,6 +924,8 @@ function safeHandlerError(res: ServerResponse): void {
   sendJsonError(res, 500, 'INTERNAL_ERROR', 'The request could not be completed');
 }
 
+type ManagedSaasRequestHandler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+
 function createCustomerHandler(
   keyHandler: SaasKeyHttpHandler,
   identityHandler: ReturnType<typeof createSaasIdentityHandler>,
@@ -939,9 +941,9 @@ function createCustomerHandler(
   paymentHandler: SaasPaymentHttpHandler | undefined,
   webDistPath: string | undefined,
   brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
-): RequestListener {
+): ManagedSaasRequestHandler {
   return (req, res) => {
-    void (async () => {
+    return (async () => {
       const pathname = requestPath(req);
       if (!pathname) {
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
@@ -1041,9 +1043,9 @@ function createPlatformHandler(
   readHandler: PlatformAdminReadHttpHandler,
   webDistPath: string | undefined,
   brandReader?: Pick<CachedBrandSnapshotReader, 'read'>,
-): RequestListener {
+): ManagedSaasRequestHandler {
   return (req, res) => {
-    void (async () => {
+    return (async () => {
       const pathname = requestPath(req);
       if (!pathname) {
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
@@ -1102,9 +1104,9 @@ function createPlatformHandler(
 export function createGatewayHandler(
   gatewayHandler?: SaasGatewayHttpHandler,
   publicBrandHandler?: PublicBrandSettingsHttpHandler,
-): RequestListener {
+): ManagedSaasRequestHandler {
   return (req, res) => {
-    void (async () => {
+    return (async () => {
       const pathname = requestPath(req);
       if (!pathname) {
         sendJsonError(res, 400, 'INVALID_PATH', 'The request path is invalid');
@@ -1425,9 +1427,6 @@ async function closeAllResources(
   shutdownGraceMs: number | undefined,
   shutdownCleanupMs: number | undefined,
   gateway: ManagedSaasGatewayComposition | undefined,
-  gatewayKms: LoadedProviderCredentialUnsealingKms | undefined,
-  gatewayRuntimeModule: LoadedManagedSaasGatewayRuntimeModule | undefined,
-  providers: ManagedSaasProviders | undefined,
   unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined,
   paymentWorker: PaymentWebhookWorkerHandle | undefined,
   oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined,
@@ -1436,8 +1435,6 @@ async function closeAllResources(
   customerWebhookPruner: CustomerWebhookRetentionPrunerHandle | undefined,
   announcementFanoutWorker: AnnouncementFanoutWorkerHandle | undefined,
   refundWorker: PaymentRefundWorkerHandle | undefined,
-  database: ManagedSaasDatabase | undefined,
-  closeDatabase: (database: ManagedSaasDatabase) => Promise<void>,
 ): Promise<void> {
   const workerStops: Promise<void>[] = [];
   if (unknownOutcomeScanner) workerStops.push(unknownOutcomeScanner.stop());
@@ -1452,10 +1449,6 @@ async function closeAllResources(
     [...listenerDrains, ...additionalDrains, ...workerStops, ...(gateway ? [gateway.close()] : [])],
     forceConnectionsClosed, shutdownGraceMs, shutdownCleanupMs,
   );
-  if (!gateway && gatewayKms) await Promise.allSettled([gatewayKms.close()]);
-  if (gatewayRuntimeModule) await Promise.allSettled([gatewayRuntimeModule.close()]);
-  if (providers) await Promise.allSettled([providers.close()]);
-  if (database) await Promise.allSettled([closeDatabase(database)]);
 }
 
 function installSignals(runtime: ManagedSaasRuntime): () => void {
@@ -2031,11 +2024,12 @@ export async function startManagedSaasServer(
   let responsesHistoryExpiryRun: Promise<void> | undefined;
   const listeners = new Map<ListenerName, Server>();
   const ownedSockets = new Set<Socket>();
+  const originalHandlers = new ManagedSaasRequestTracker();
   let draining = false;
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
 
-  const close = async (): Promise<void> => {
+  const close = (): Promise<void> => {
     draining = true;
     closePromise ??= (async () => {
       // Stop accepts before awaiting workers or allowing another admission.
@@ -2044,6 +2038,7 @@ export async function startManagedSaasServer(
       removeSignals = undefined;
       if (responsesHistoryExpiryTimer) clearInterval(responsesHistoryExpiryTimer);
       const additionalDrains = [
+        originalHandlers.drain(),
         ...(responsesHistoryExpiryRun ? [responsesHistoryExpiryRun] : []),
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
@@ -2062,9 +2057,6 @@ export async function startManagedSaasServer(
         options.shutdownGraceMs,
         options.shutdownCleanupMs,
         gateway,
-        gatewayKms,
-        gatewayRuntimeModule,
-        providers,
         unknownOutcomeScanner,
         paymentWorker,
         oauthRefreshWorker,
@@ -2073,18 +2065,30 @@ export async function startManagedSaasServer(
         customerWebhookPruner,
         announcementFanoutWorker,
         refundWorker,
-        database,
-        async (closingDatabase) => {
-          await gatewayQuota?.close();
-          await closeDatabase(closingDatabase);
-        },
       );
-      // The gateway composition closes first; its Redis connection follows.
-      if (gatewayRedis) await Promise.allSettled([gatewayRedis.close()]);
-      if (paymentDeployment) await Promise.allSettled([paymentDeployment.close()]);
-      if (responsesHistoryDeployment) await Promise.allSettled([responsesHistoryDeployment.close()]);
+      // All original handlers and worker owners have settled before this phase.
+      // One shared budget prevents a series of slow closes exceeding systemd's deadline.
+      const closingGatewayKms = gatewayKms;
+      const closingGatewayRuntimeModule = gatewayRuntimeModule;
+      const closingProviders = providers;
+      const closingGatewayQuota = gatewayQuota;
+      const closingDatabase = database;
+      const closingGatewayRedis = gatewayRedis;
+      const closingPaymentDeployment = paymentDeployment;
+      const closingResponsesHistoryDeployment = responsesHistoryDeployment;
+      await closeManagedSaasResources([
+        ...(!gateway && closingGatewayKms ? [() => closingGatewayKms.close()] : []),
+        ...(closingGatewayRuntimeModule ? [() => closingGatewayRuntimeModule.close()] : []),
+        ...(closingProviders ? [() => closingProviders.close()] : []),
+        ...(closingGatewayQuota ? [() => closingGatewayQuota.close()] : []),
+        ...(closingDatabase ? [() => closeDatabase(closingDatabase)] : []),
+        ...(closingGatewayRedis ? [() => closingGatewayRedis.close()] : []),
+        ...(closingPaymentDeployment ? [() => closingPaymentDeployment.close()] : []),
+        ...(closingResponsesHistoryDeployment ? [() => closingResponsesHistoryDeployment.close()] : []),
+      ], options.shutdownCleanupMs);
+
     })();
-    await closePromise;
+    return closePromise;
   };
 
   try {
@@ -2434,7 +2438,7 @@ export async function startManagedSaasServer(
         .catch((error) => console.error('model-router public brand snapshot eager refresh failed', error));
     };
 
-    const handlers: Partial<Record<ListenerName, RequestListener>> = {};
+    const handlers: Partial<Record<ListenerName, ManagedSaasRequestHandler>> = {};
     if (controlPlaneEnabled) {
       if (!providers) throw new Error('Managed SaaS control-plane providers are unavailable');
 
@@ -3432,7 +3436,7 @@ export async function startManagedSaasServer(
           response.end('Service unavailable');
           return;
         }
-        handler(request, response);
+        originalHandlers.track(handler(request, response));
       });
       listeners.set(name, listener);
       listener.on('connection', (socket: Socket) => {

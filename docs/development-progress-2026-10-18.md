@@ -957,3 +957,13 @@ Luna 最新 scoped strict 与 fresh PG18.6 **1/1** 通过，实际输出 `1 comm
 Astra 源码审查无阻断，Luna 定向真实 socket 测试 **9/9**、scoped strict 通过，覆盖 deferred 鉴权、允许/拒绝/抛错、关闭后不再创建 engine、cleanup 等待和重复 close。未执行 server build、PG 或真实 Codex；不能将其记为 WS 续流或完整托管验收。CP/customer 原 handler 与最终资源关闭的后续修复仍在独立任务中。
 
 结算确定性 barrier 已推送 `cf45917`。历史 [CI #143](https://github.com/elex-fu/model-router/actions/runs/40026002763) 与 `d8f1472` 精确绑定且 completed/success，包括全部 60 个独立门禁；它不包含之后的 SSE、barrier 或本次 WS 改动，不能外推为最新 head 完整通过。最新 `cf45917` 的正式 CI 结果仍待收齐。
+
+### 29.28 控制台原 handler 与有界资源关闭
+
+CP、customer 和 gateway wrapper 现返回真实异步 promise，由 listener 唯一入口跟踪到 settle。客户端 EOF、abort 或强关 socket 后仍等待原 handler 清理，不把 HTTP 连接结束当作业务完成。所有原业务、gateway 与 worker drain 完成后才进入最终资源关闭，保持依赖顺序；该阶段共享 5 秒预算，已结束但失败的 cleanup 最终返回脱敏拒绝，悬挂超时不再启动其后的 DB 关闭。重复 close 返回同一个缓存 promise。
+
+Astra 独立源码复核通过；Luna shutdown helper **11/11**、实际 runtime 新增定向子集 **6/6** 通过。strict 首轮发现 provider close 允许同步 void、helper 却只接受 Promise，已仅修 callback 类型为 `void | PromiseLike<void>`，运行时仍统一 Promise 归一；scoped strict 重验通过。当前批次的新 server build、实际 Redis profile 与后续候选完整 CI 尚待执行，不能沿用 §29.25 旧版本的 PG SIGTERM 结果作为本批全链证明。
+
+WS 鉴权关闭修复已推送 `64ac766`。此前 [CI #145](https://github.com/elex-fu/model-router/actions/runs/40026833443) 对 `cf45917` **64/64 jobs 全过**：四个 shared（含 offline/build/browser、PG15/18、PG16）与 60 个 isolated，确定性结算及目录/商户在两个版本均通过。它仍早于 WS 和本节资源关闭修复，最新 head 按各自 revision 复验。
+
+人工 unknown 处理的真实 HTTP/PG 子场景已接入现商业 root，等待首次实际运行：使用正常 MFA、scanner、原受控上游证据、case/observation 与不可变 audit 双向引用，不造 session、case lease 或金融事实。源码审阅发现 HTTP 和 scanner 可能使用不同 reconciliation reference，保留严格 billing 比较并准备窄修设计，须先取得正常 PG 失败证据；未将该闭环标为通过。
