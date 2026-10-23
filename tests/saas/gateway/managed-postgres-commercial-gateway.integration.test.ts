@@ -9,6 +9,11 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+
+// Dedicated parent launches this existing real commercial fixture in an IPC child.
+const shutdownDrill = process.env.MODEL_ROUTER_MANAGED_SIGTERM_DRILL === '1' && process.send !== undefined;
+let releaseShutdownTerminal: (() => void) | undefined;
+const shutdownTerminal = shutdownDrill ? new Promise<void>((resolve) => { releaseShutdownTerminal = resolve; }) : undefined;
 import { fetch as undiciFetch } from 'undici';
 import { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import { SaasCatalogService } from '../../../src/saas/catalog/service.js';
@@ -1153,7 +1158,11 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
         if (financialFaults.handle(request, response, payload)) return;
         if (payload.stream) {
           response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
-          response.end(upstreamResponse);
+          if (shutdownDrill && upstreamAuthorization === `Bearer ${PLATFORM_PROVIDER_SECRET}`) {
+            const boundary = upstreamResponse.indexOf('\n\n') + 2;
+            response.write(upstreamResponse.slice(0, boundary));
+            void shutdownTerminal?.then(() => response.end(upstreamResponse.slice(boundary)));
+          } else response.end(upstreamResponse);
         } else {
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
           response.end(
@@ -2867,7 +2876,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
 
     gatewayRuntime = await startManagedSaasServer(gatewayDeployment, {
       environment: gatewayEnvironment,
-      installSignalHandlers: false,
+      installSignalHandlers: shutdownDrill,
       gatewayRuntimeModuleImporter: async () => ({
         createManagedSaasGatewayRuntime: async (options: ManagedSaasGatewayRuntimeModuleOptions) => ({
           dependencies: createRuntimeDependencies(options.database),
@@ -2883,6 +2892,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
         }),
       }),
     });
+    if (shutdownDrill) process.once('SIGTERM', () => process.send?.({ event: 'draining' }));
     const gatewayUser = await gatewayRuntime.database.query<{ current_user: string }>('SELECT current_user');
     assert.equal(gatewayUser.rows[0]?.current_user, 'model_router_saas_gateway');
     assert.deepEqual(Object.keys(gatewayRuntime.listeners), ['gateway']);
@@ -3056,7 +3066,41 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       }),
       signal: AbortSignal.timeout(30_000),
     });
-    const platformBody = await platformResponse.text();
+    let platformBody: string;
+    if (shutdownDrill) {
+      const reader = platformResponse.body?.getReader();
+      assert.ok(reader);
+      const first = await reader.read();
+      assert.equal(first.done, false);
+      const release = new Promise<void>((resolve) => {
+        process.on('message', function onMessage(message: unknown) {
+          if (message && typeof message === 'object' && 'event' in message && message.event === 'release_terminal') {
+            process.off('message', onMessage);
+            resolve();
+          }
+        });
+      });
+      process.send?.({ event: 'first_frame' });
+      await release;
+      // Signal handler has synchronously closed admission before this probe.
+      try {
+        const rejected = await fetch(`http://127.0.0.1:${gatewayPort}${ENDPOINT}`, {
+          method: 'POST', body: '{}', signal: AbortSignal.timeout(2000),
+        });
+        assert.equal(rejected.status, 503);
+        await rejected.text();
+      } catch (error) {
+        assert.ok(error instanceof TypeError && error.message === 'fetch failed', 'new TCP must be refused or receive 503');
+      }
+      releaseShutdownTerminal?.();
+      const chunks = [Buffer.from(first.value ?? [])];
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        chunks.push(Buffer.from(chunk.value));
+      }
+      platformBody = Buffer.concat(chunks).toString('utf8');
+    } else platformBody = await platformResponse.text();
     const platformResponseDiagnostic = reportHttpResponseDiagnostic(
       'platform',
       platformResponse.status,
@@ -3211,6 +3255,23 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       ledger_transactions: '2',
       ledger_entries: '4',
     });
+
+    if (shutdownDrill) {
+      await gatewayRuntime.close();
+      const convergence = await seedDatabase.query<{ attempts: string; usage: string; held_leases: string }>(
+        `SELECT (SELECT count(*)::text FROM saas_attempts WHERE tenant_id = $1 AND request_id = $2) AS attempts,
+                (SELECT count(*)::text FROM saas_usage_events WHERE tenant_id = $1 AND request_id = $2) AS usage,
+                (SELECT count(*)::text FROM saas_provider_account_leases l JOIN saas_attempts a ON a.id::text = l.attempt_id
+                  WHERE a.tenant_id = $1 AND a.request_id = $2 AND l.status = 'held') AS held_leases`,
+        [tenant.id, platformRecord.request_id],
+      );
+      assert.equal(convergence.rows[0]?.attempts, '1');
+      assert.equal(convergence.rows[0]?.usage, '1');
+      assert.equal(convergence.rows[0]?.held_leases, '0');
+      process.send?.({ event: 'financial_converged' });
+      process.disconnect?.();
+      return;
+    }
 
     // FIN-01 HTTP extension starts only after the original streaming BYOK and
     // platform happy paths, including their exact 1000 -> 988 assertions.

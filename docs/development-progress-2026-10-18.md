@@ -933,3 +933,11 @@ Luna scoped strict 与 fresh PG18 **1/1** 通过。充值与退款均为 **125 �
 Astra 在运行前发现 journal 的字面量换行错误并修正，查询现从 fsync 文件重读原受理事实，避免只写磁盘、实际仍靠内存 Map 恢复。演练使用真实 SIGKILL、自然 TTL、进程组和临时材料清理；runner 确认 sourceChanges=0、临时集群已停止并删除。证据为真实 PG 与持久 synthetic PSP，未调用真实支付宝或验收其商户契约。
 
 目录/console 修正已推送 `0d3b286`。其候选 #142 已确认两个 PG 版本的非 HTTP 目录通过，后续发现结算 SIGKILL root 错把提交后的文本 marker 当成金融提交权威，正在修正并复验；该候选完整 CI 尚未通过。另已确认标准 runtime 关闭 listener 时过早 `closeAllConnections()` 可能截断在途 SSE，修复与真实 SIGTERM 演练由独立任务继续进行。
+
+### 29.25 P10 已接受 SSE 的真实 SIGTERM drain
+
+修复标准 managed runtime 在 shutdown 开始时强关所有 HTTP 连接的问题：同步进入 draining 并停止 listener 接受新连接，拒绝后续 HTTP/upgrade；等待已接受 gateway 原始 handler、listener 与 worker，保留 DB/KMS/Redis 直至金融处理和 capacity cleanup 完成。默认 30 秒期限后才强关自有 socket，再给 5 秒清理；仍未完成则 close 拒绝，信号退出码为 1，不能报告正常 drain 或擅自释放 unknown hold。
+
+新增 shutdown helper 与 **5/5** 定向单元测试，Luna `build:server`、scoped strict 通过；fresh PG18.6 完整迁移、正常受限角色及 loopback HTTPS 的真实 managed 子进程 SIGTERM drill **1/1** 通过。父进程观察平台 SSE 首帧后发 SIGTERM，客户端仍收到完整终帧，随后核一次 attempt/usage/settlement、钱包最小单位 **1000→988**、账本平衡、hold settled 和无 held provider lease，最后正常退出。runner sourceChanges=[]，临时集群停止并删除；未执行实际 provider 或性能请求。
+
+本次只证明已接受 HTTP/SSE 的 drain。Astra 第二眼发现另有 pending WS upgrade 鉴权未纳入关闭等待、CP/customer 原始异步 handler 未跟踪、最终资源关闭错误被吞及无界等待，已分配后续最小修复；WS 当前沿用立即 abort 语义，不能声称其有 30 秒续流保证。退款演练已推送 `d8f1472`；#142 最终为 shared 四项全过、isolated **59/60**，仅 PG18 结算 SIGKILL marker 断言失败，四个目录及两个商户门禁均已通过。

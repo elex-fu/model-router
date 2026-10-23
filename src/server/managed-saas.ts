@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import type { Socket } from 'node:net';
+import { drainManagedSaasShutdown } from './managed-saas-shutdown.js';
 import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
@@ -706,6 +708,9 @@ export interface ManagedSaasStartOptions {
   paymentHandler?: SaasPaymentHttpHandler;
   /** Injectable listener seam for deterministic bind and cleanup tests. */
   createListener?: (name: ListenerName, handler: RequestListener) => Server;
+  /** SDK lifecycle seams; production defaults fit the systemd stop deadline. */
+  shutdownGraceMs?: number;
+  shutdownCleanupMs?: number;
   /** Combined-mode compatibility injection. Dedicated gateway workloads use their trusted runtime module. */
   gateway?: ManagedSaasGatewayProductionOptions;
   /** Disable process signal registration for direct unit tests. */
@@ -1219,11 +1224,6 @@ async function bindListener(server: Server, listener: DeploymentListenerConfig):
 }
 
 async function closeListener(server: Server): Promise<void> {
-  try {
-    server.closeAllConnections();
-  } catch {
-    // The server may be a deterministic test double without closeAllConnections.
-  }
   if (!server.listening) return;
   await new Promise<void>((resolve) => {
     server.close(() => resolve());
@@ -1419,7 +1419,11 @@ function startCustomerWebhookRetentionPruner(
 }
 
 async function closeAllResources(
-  listeners: Iterable<Server>,
+  listenerDrains: readonly Promise<void>[],
+  additionalDrains: readonly Promise<unknown>[],
+  forceConnectionsClosed: () => void,
+  shutdownGraceMs: number | undefined,
+  shutdownCleanupMs: number | undefined,
   gateway: ManagedSaasGatewayComposition | undefined,
   gatewayKms: LoadedProviderCredentialUnsealingKms | undefined,
   gatewayRuntimeModule: LoadedManagedSaasGatewayRuntimeModule | undefined,
@@ -1444,10 +1448,11 @@ async function closeAllResources(
   if (customerWebhookPruner) workerStops.push(customerWebhookPruner.stop());
   if (announcementFanoutWorker) workerStops.push(announcementFanoutWorker.close());
   if (refundWorker) workerStops.push(refundWorker.stop());
-  await Promise.allSettled(workerStops);
-  await Promise.allSettled([...listeners].map((listener) => closeListener(listener)));
-  if (gateway) await Promise.allSettled([gateway.close()]);
-  else if (gatewayKms) await Promise.allSettled([gatewayKms.close()]);
+  await drainManagedSaasShutdown(
+    [...listenerDrains, ...additionalDrains, ...workerStops, ...(gateway ? [gateway.close()] : [])],
+    forceConnectionsClosed, shutdownGraceMs, shutdownCleanupMs,
+  );
+  if (!gateway && gatewayKms) await Promise.allSettled([gatewayKms.close()]);
   if (gatewayRuntimeModule) await Promise.allSettled([gatewayRuntimeModule.close()]);
   if (providers) await Promise.allSettled([providers.close()]);
   if (database) await Promise.allSettled([closeDatabase(database)]);
@@ -1458,7 +1463,11 @@ function installSignals(runtime: ManagedSaasRuntime): () => void {
   const onSignal = () => {
     if (closed) return;
     closed = true;
-    void runtime.close();
+    void runtime.close().catch(() => {
+      console.error('model-router managed shutdown failed');
+      // A handler still owns live resources; fail rather than report a clean drain.
+      process.exit(1);
+    });
   };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
@@ -2021,25 +2030,37 @@ export async function startManagedSaasServer(
   let responsesHistoryExpiryTimer: ReturnType<typeof setInterval> | undefined;
   let responsesHistoryExpiryRun: Promise<void> | undefined;
   const listeners = new Map<ListenerName, Server>();
+  const ownedSockets = new Set<Socket>();
+  let draining = false;
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
 
   const close = async (): Promise<void> => {
+    draining = true;
     closePromise ??= (async () => {
+      // Stop accepts before awaiting workers or allowing another admission.
+      const listenerDrains = [...listeners.values()].map(closeListener);
       removeSignals?.();
       removeSignals = undefined;
       if (responsesHistoryExpiryTimer) clearInterval(responsesHistoryExpiryTimer);
-      await responsesHistoryExpiryRun;
-      await Promise.allSettled([
+      const additionalDrains = [
+        ...(responsesHistoryExpiryRun ? [responsesHistoryExpiryRun] : []),
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
         ...(reportSchedulerWorker ? [reportSchedulerWorker.close()] : []),
         ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
         ...(riskControlRetentionWorker ? [riskControlRetentionWorker.close()] : []),
         ...(publicBrandSnapshotWorker ? [publicBrandSnapshotWorker.close()] : []),
-      ]);
+      ];
       await closeAllResources(
-        listeners.values(),
+        listenerDrains,
+        additionalDrains,
+        () => {
+          for (const listener of listeners.values()) listener.closeAllConnections?.();
+          for (const socket of ownedSockets) socket.destroy();
+        },
+        options.shutdownGraceMs,
+        options.shutdownCleanupMs,
         gateway,
         gatewayKms,
         gatewayRuntimeModule,
@@ -3405,11 +3426,23 @@ export async function startManagedSaasServer(
     for (const name of listenerNames) {
       const handler = handlers[name];
       if (!handler) throw new Error(`Managed SaaS ${name} handler is not configured for this workload`);
-      const listener = createListener(name, handler);
+      const listener = createListener(name, (request, response) => {
+        if (draining) {
+          response.writeHead(503, { connection: 'close', 'content-type': 'text/plain' });
+          response.end('Service unavailable');
+          return;
+        }
+        handler(request, response);
+      });
       listeners.set(name, listener);
+      listener.on('connection', (socket: Socket) => {
+        ownedSockets.add(socket);
+        socket.once('close', () => ownedSockets.delete(socket));
+      });
       if (name === 'gateway' && gateway) {
         const gatewayComposition = gateway;
         listener.on('upgrade', (request, socket, head) => {
+          if (draining) { socket.destroy(); return; }
           try {
             if (!gatewayComposition.handleUpgrade(request, socket, head)) socket.destroy();
           } catch {
