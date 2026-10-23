@@ -887,6 +887,9 @@ export class PlatformCapacityPolicyService {
       ensureChanged(beforeRecord.limits, write.limits);
       const afterRevision = nextRevision(currentVersion);
 
+      // The existing head was verified as the unique maximum under the project
+      // writer fence. RETURNING subqueries use the statement snapshot and cannot
+      // see this INSERT's new row; use the actual inserted version as the new maximum.
       const inserted = await tx.query<ProjectPolicyRow>(
         `INSERT INTO saas_project_inference_policy_versions
            (tenant_id, project_id, version, status, changed_by_user_id, created_at,
@@ -897,10 +900,7 @@ export class PlatformCapacityPolicyService {
           WHERE source.tenant_id = $1 AND source.project_id = $2 AND source.version = $3
          RETURNING tenant_id, project_id, version, status, requests_per_minute,
                    tokens_per_minute, max_concurrent_requests,
-                   (SELECT MAX(history.version)
-                      FROM saas_project_inference_policy_versions AS history
-                     WHERE history.tenant_id = saas_project_inference_policy_versions.tenant_id
-                       AND history.project_id = saas_project_inference_policy_versions.project_id) AS latest_version`,
+                   version AS latest_version`,
         [
           tenantId,
           projectId,

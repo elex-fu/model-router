@@ -1,3 +1,4 @@
+import { PlatformInferenceAccessError, type PlatformInferenceAccessProvisioningService, type ProvisionPlatformInferenceAccessInput, type DisablePlatformInferenceAccessInput } from '../../supply/platform-inference-access-provisioning.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
@@ -230,6 +231,7 @@ export interface PlatformAdminReadHandlerOptions {
   readonly pricing?: PlatformAdminPricingService;
   /** Omitted until startup wires the transactional platform-supply service. */
   readonly supply?: PlatformAdminSupplyService;
+  readonly platformInferenceAccess?: Pick<PlatformInferenceAccessProvisioningService, 'provision' | 'getOperation' | 'disable'>;
   /** Omitted until startup wires the audited bounded-capacity policy service. */
   readonly capacityPolicies?: PlatformAdminCapacityPolicyService;
   /** Omitted until startup wires the restricted, identifier-only target selectors. */
@@ -300,6 +302,9 @@ type WriteRoute =
 /** F4 platform-side customer webhook tenant quota provisioning. */
 type WebhookPolicyRoute = 'webhookTenantPolicy';
 type Route =
+  | 'platformAccessProvision'
+  | 'platformAccessOperation'
+  | 'platformAccessDisable'
   | ReadRoute
   | SupplyRoute
   | WriteRoute
@@ -656,6 +661,9 @@ function strictBodyObject(value: unknown, allowedKeys: readonly string[]): Recor
 }
 
 function routeForPath(path: string): Route | undefined {
+  if (/^\/admin\/api\/v1\/supply\/platform-access\/operations\/[^/]+$/.test(path)) return 'platformAccessOperation';
+  if (path === `${PLATFORM_ADMIN_READ_PREFIX}/supply/platform-access/operations`) return 'platformAccessProvision';
+  if (path === `${PLATFORM_ADMIN_READ_PREFIX}/supply/platform-access/disable`) return 'platformAccessDisable';
   const governance = governanceRoute(path);
   if (governance) return governance;
   const webhookPolicyPrefix = `${PLATFORM_ADMIN_READ_PREFIX}/webhooks/tenant-policies/`;
@@ -1958,6 +1966,7 @@ function methodNotAllowed(res: ServerResponse, requestId: string, allow: string)
 }
 
 function allowedMethods(route: Route): readonly string[] {
+  if (route === 'platformAccessProvision' || route === 'platformAccessDisable') return ['POST'];
   if (route === 'webhookTenantPolicy') return ['PUT'];
   if (route === 'tenantCapacityPolicy' || route === 'projectCapacityPolicy' || route === 'apiKeyCapacityPolicy') {
     return ['GET', 'PUT'];
@@ -2260,6 +2269,31 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
       if (isCapacityPolicySelectorRoute(route) && !hasPlatformRole(actor, ['operations'])) throw forbidden();
       if (isCapacityPolicySelectorRoute(route) && !options.capacityPolicyTargets) {
         throw capacityPolicyTargetsUnavailable();
+      }
+
+      if (route === 'platformAccessProvision' || route === 'platformAccessOperation' || route === 'platformAccessDisable') {
+        if (!hasPlatformRole(actor, ['operations'])) throw forbidden();
+        const service = options.platformInferenceAccess;
+        if (!service) throw writeUnavailable();
+        if (queryValues(url, []).size !== 0) invalidQuery();
+        try {
+          if (route === 'platformAccessOperation') {
+            const id = url.pathname.split('/').at(-1) as string;
+            sendJson(res, 200, requestId, await service.getOperation(id, actor));
+          } else {
+            const body = await readJson(req);
+            const context = { actor, audit: requestAuditContext(req, actor, requestId) };
+            const result = route === 'platformAccessProvision'
+              ? await service.provision(body as ProvisionPlatformInferenceAccessInput, context)
+              : await service.disable(body as DisablePlatformInferenceAccessInput, context);
+            sendJson(res, route === 'platformAccessProvision' ? 201 : 200, requestId, result);
+          }
+        } catch (error) {
+          if (!(error instanceof PlatformInferenceAccessError)) throw error;
+          const status = (error.code === 'INVALID_INPUT' || error.code === 'WORKFLOW_UNSUPPORTED') ? 400 : error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : (error.code === 'VERSION_CONFLICT' || error.code === 'OPERATION_BUSY') ? 409 : 503;
+          throw new HttpError(status, `PLATFORM_ACCESS_${error.code}`, error.message);
+        }
+        return true;
       }
 
       if (route === 'me') {
@@ -2739,3 +2773,5 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
     }
   };
 }
+
+export { createPaymentsControlHttpHandler, type PaymentsControlHttpOptions, type PaymentsControlHttpHandler } from '../payments-control-http.js';

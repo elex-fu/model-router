@@ -745,7 +745,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 
 | 主任务 | 当前执行范围 | 状态 |
 |---|---|---|
-| P01/P02a/P03 | 正式平台权益开通、独占资源 journal、最终激活事务、管理员接口与受限权限 | 开发中 |
+| P01/P02a/P03 | 正式平台权益开通、独占资源 journal、最终激活事务、管理员接口与受限权限 | 开户工程实现、受限 PG18 和管理页本地浏览器通过；标准新客 builtin 全链待验 |
 | P04 | Chat↔Gemini、Responses↔Gemini 直接转换，注册及明确不支持字段 | 四个直接桥及定向验证完成；真实 CLI/builtin 工作流待验 |
 | P05 | Codex 终态用量完整性、WS 上下文续接、精确端点可信上界门禁与诊断 | 开发中；真实计量契约仍为外部阻塞 |
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 开发中 |
@@ -801,3 +801,11 @@ Luna 已用全链迁移后的临时 PG18.6 跑通开户 **1/1**、商户绑定 *
 定位中补齐两个实际正确性缺口：支付宝回调仅在耐久收件成功后返回原生 `text/plain success`；原支付创建指纹纳入规范化 promo，省略或更换 promo 返回 409，等价大小写/空白仍找回原单。正式 resolver 遇到缺少原指纹或商户归属的历史记录时拒绝推测，需要人工明确归属。
 
 Luna 商户控制真实 PG18.6 **5/5** 验证了接单锁/CAS、双 CP 同版本竞争、切换重放、draining 下历史回调与退款只入账一次、排队变更时角色撤销；适配器为本地替身。promo 最新单文件 **7/7**，支付 HTTP 与管理员 handler 定向检查通过，完整 unit 中本模块无剩余失败。真实 precreate、扫码、回调域名和全/部分退款仍属 B0/B1，尚未执行。P02 迁移与权限已推送 `a1c71e2`。
+
+### 29.8 P01 正式平台权益开通与恢复
+
+新增窄开通服务与管理员 POST/GET/disable 接口，严格限制嵌套 DTO，由服务端确定 tenant/project/actor。独占 profile、disabled entitlement 与 operation 先持久化，再复用现有价格、policy、签名 attestation、route、pool grant 和容量服务；阶段成功但 journal 写入失败可按既有资源继续。最终短事务复核版本、当前权限、账号产品与权利范围、精确静态财务准入，原子激活项目策略和 entitlement 并写审计。项目策略从 suspended 激活时保留已设置容量；不自动发 Key 或加余额。
+
+定位并修复：嵌套对象覆盖服务端 scope 的风险；runner lease 过期后旧执行者继续写的问题（operation guard 与同一 disable guard）；pool ID 与调度 upstream ID 不一致；新 capacity version 的 RETURNING 子查询看不到本语句插入行。CP pool 至少两个连接，启动与 doctor 按解析后的有效值检查，避免 `01` 或空白形式绕过。Codex 开通在创建前及最终激活前检查 reviewed profile 的精确 scope，缺少端口或可信上界时明确拒绝，不能先发可用权益再等待请求失败。
+
+Luna 新就绪检查 unit **3/3**、服务端编译通过；最新真实 PG18.6 **1/1** 包含受限 CP 启动探针、阶段写入故障续做、最终审计失败回滚、容量及策略 v1→v2→v3、原操作幂等/冲突/停用/会话撤销，以及最终 readiness 失效后保持 disabled。尚未据此关闭 A0/M1：从标准新客 HTTP、正式管理员开通、手工发 Key 到当前 dist builtin 真实供给请求，仍需独立端到端证据。P07 已推送 `05fc4bd`。

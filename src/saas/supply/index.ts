@@ -29,3 +29,7 @@ export type {
 } from './service.js';
 export { ProviderSupplyService } from './service.js';
 export type * from './types.js';
+
+export * from './platform-inference-access-provisioning.js';
+
+export * from './platform-inference-access-admission-readiness.js';
