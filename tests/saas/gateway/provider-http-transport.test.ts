@@ -4,6 +4,7 @@ import type { LookupOptions } from 'node:dns';
 import { test } from 'node:test';
 import type { Dispatcher, HeadersInit } from 'undici';
 import { Agent } from 'undici';
+import { RequestDiagnosticTrace, withRequestDiagnosticTrace } from '../../../src/saas/gateway/request-diagnostic-trace.js';
 import type { PreparedEvidenceTransportRequest } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import {
@@ -30,6 +31,39 @@ const fakeConnectorFactory: ProviderHttpPinnedConnectorFactory = () => ({
   dispatcher: TEST_DISPATCHER,
   close: async () => {},
   destroy: async () => {},
+});
+
+test('request diagnostics record body byte and EOF separately from financial settlement', async () => {
+  const trace = new RequestDiagnosticTrace();
+  await withRequestDiagnosticTrace(trace, async () => {
+    const response = await transport(async () => new Response(streamFromChunks([encoder.encode('x')]), {
+      headers: { 'content-type': 'text/plain' },
+    })).send(request());
+    assert.ok(response.body);
+    await drain(response.body);
+  });
+  const snapshot = trace.snapshot();
+  assert.equal(typeof snapshot.markers['upstream-send'], 'number');
+  assert.equal(typeof snapshot.markers['first-byte'], 'number');
+  assert.equal(typeof snapshot.markers.eof, 'number');
+  assert.equal(snapshot.markers.settled, undefined);
+  assert.equal(snapshot.pendingSpans, 0);
+});
+
+test('request diagnostics do not infer provider EOF from body cancellation', async () => {
+  const trace = new RequestDiagnosticTrace();
+  await withRequestDiagnosticTrace(trace, async () => {
+    const response = await transport(async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(encoder.encode('x')); },
+    }), { headers: { 'content-type': 'text/plain' } })).send(request());
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    await reader.read();
+    await reader.cancel();
+  });
+  assert.equal(trace.snapshot().markers.eof, undefined);
+  assert.equal(trace.snapshot().markers.settled, undefined);
+  assert.equal(trace.snapshot().pendingSpans, 0);
 });
 
 function evidence(overrides: Partial<PreparedRequestEvidenceRecord> = {}): PreparedRequestEvidenceRecord {

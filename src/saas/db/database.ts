@@ -1,4 +1,5 @@
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
+import { currentRequestDiagnosticTrace } from '../gateway/request-diagnostic-trace.js';
 import { runSaasMigrations, verifySaasMigrations, verifyUnknownOutcomeSaasMigrations } from './migrate.js';
 import type {
   PreparedSqlStatement,
@@ -179,18 +180,38 @@ function asSqlResult<Row>(result: QueryResult): SqlResult<Row> {
 class NodePostgresClient implements SaasDatabaseClient {
   constructor(private readonly client: PoolClient) {}
 
+  private async diagnosticQuery<T>(work: () => Promise<T>): Promise<T> {
+    const trace = currentRequestDiagnosticTrace();
+    if (!trace) return work();
+    const finish = trace.begin('query');
+    let onError: ((error: Error) => void) | undefined;
+    const connectionError = new Promise<never>((_resolve, reject) => {
+      onError = reject;
+      this.client.once('error', onError);
+    });
+    try { return await Promise.race([work(), connectionError]); }
+    finally {
+      if (onError) this.client.removeListener('error', onError);
+      finish();
+    }
+  }
+
   async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
-    const result = await this.client.query(sql, values ? [...values] : undefined);
-    return asSqlResult<Row>(result);
+    return this.diagnosticQuery(async () => {
+      const result = await this.client.query(sql, values ? [...values] : undefined);
+      return asSqlResult<Row>(result);
+    });
   }
 
   async queryPrepared<Row>(statement: PreparedSqlStatement, values?: readonly unknown[]): Promise<SqlResult<Row>> {
-    const result = await this.client.query({
-      name: statement.name,
-      text: statement.text,
-      values: values ? [...values] : undefined,
+    return this.diagnosticQuery(async () => {
+      const result = await this.client.query({
+        name: statement.name,
+        text: statement.text,
+        values: values ? [...values] : undefined,
+      });
+      return asSqlResult<Row>(result);
     });
-    return asSqlResult<Row>(result);
   }
 
   release(error?: Error | boolean): void {
@@ -206,11 +227,29 @@ class NodePostgresPool implements SaasDatabasePool {
   }
 
   async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+    if (currentRequestDiagnosticTrace()) {
+      const client = await this.connect();
+      let discard = true;
+      try {
+        const result = await client.query<Row>(sql, values);
+        discard = false;
+        return result;
+      } finally { client.release(discard); }
+    }
     const result = await this.pool.query(sql, values ? [...values] : undefined);
     return asSqlResult<Row>(result);
   }
 
   async queryPrepared<Row>(statement: PreparedSqlStatement, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+    if (currentRequestDiagnosticTrace()) {
+      const client = await this.connect();
+      let discard = true;
+      try {
+        const result = await client.queryPrepared!<Row>(statement, values);
+        discard = false;
+        return result;
+      } finally { client.release(discard); }
+    }
     const result = await this.pool.query({
       name: statement.name,
       text: statement.text,
@@ -220,7 +259,9 @@ class NodePostgresPool implements SaasDatabasePool {
   }
 
   async connect(): Promise<SaasDatabaseClient> {
-    return new NodePostgresClient(await this.pool.connect());
+    const finish = currentRequestDiagnosticTrace()?.begin('pool-checkout');
+    try { return new NodePostgresClient(await this.pool.connect()); }
+    finally { finish?.(); }
   }
 
   async end(): Promise<void> {
@@ -259,6 +300,7 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
     ...executor,
     async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
       const client = await pool.connect();
+      const finishTransaction = currentRequestDiagnosticTrace()?.begin('transaction');
       let transactionStarted = false;
       let discardClient = false;
 
@@ -282,7 +324,8 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
         }
         throw error;
       } finally {
-        client.release(discardClient);
+        try { client.release(discardClient); }
+        finally { finishTransaction?.(); }
       }
     },
     async migrate(): Promise<void> {

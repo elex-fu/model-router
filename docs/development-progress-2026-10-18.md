@@ -751,7 +751,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 开发中 |
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
-| P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算的可解释观测 | 开发中；不修改原性能门槛 |
+| P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算的可解释观测 | 有界 trace/PG/HTTP 观测实现及定向通过；标准组合根接线分步提交，性能待验 |
 | P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | P11 基础配置及静态解析完成；实际环境验收与新增 CI 门禁验证中 |
 
 本轮定位补充：Codex 缺失 input/output 用量不能补零作为完整证据，incomplete/failed 终态用量需保留；WS 的 previous_response_id 不能只影响调度后被 HTTP payload 静默丢弃。新项目默认 inference policy 为 suspended，正式开户最终事务还必须原子激活项目策略并保留已配置容量，不能仅激活 entitlement。以上已进入实现范围，当前尚未据此声称测试或真实调用通过。
@@ -815,3 +815,9 @@ Luna 新就绪检查 unit **3/3**、服务端编译通过；最新真实 PG18.6 
 实现 history 专用运行时 loader、production KMS port 和内置 AWS SigV4 adapter：固定 region/HTTPS endpoint、每记录新 DEK、完整身份与过期信息 AEAD 绑定、短期凭据文件轮换、旧 key ARN 白名单、敏感错误脱敏与 close 清理；pilot 文件 keyring 始终单列为 pilot。标准诊断明确 `external_evidence_required`，本地测试不替代真实 IAM/KMS 或恢复验收。部署合同见 [history 配置](responses-continuation-history-deployment-2026-10-24.md)。
 
 loader/KMS 定向测试与当前服务端构建通过，真实受限 PG18 history **1/1** 证明密文存储、不可变约束和数据库时间过期。尚无实际 AWS 调用。源码检查同时发现组合根只传入 resolver，HTTP/WS 消费端尚未执行持久 resolve/remember；已继续分派实际链路接线及测试，不能把 loader 或 connection map 当作跨请求/跨实例续接完成。P01 已推送 `4a236f4`。
+
+### 29.10 P09 同请求诊断基础
+
+新增有界 ALS trace，记录真实 pool acquire/release、SQL、事务、上游 send/首字节/正常 EOF 的时间；按 span 区间并集计算 exclusive 时间，避免嵌套累计。未采样请求保持原 pool.query 路径，采样请求显式 acquire，并保留连接错误监听和 release 语义。取消或错误不标正常 EOF，结算 marker 仅在已确认 settled/replayed 时记录。
+
+trace、数据库包装、provider HTTP 和标准部署诊断定向测试已通过，服务端编译通过。标准组合根与 dispatch marker 接线随其依赖任务提交。诊断队列有界、采样默认关闭、固定数值投影不含 payload，不增加持久写等待；未执行新性能测量，原 30/10 ms、200 successful rps 及对照门槛保持开放。history loader 已推送 `39a0c9d`。

@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
 import { isIP } from 'node:net';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
 import { OpenAIToAnthBridge } from '../../protocol/openai-to-anth.js';
@@ -913,12 +914,15 @@ function asError(reason: unknown): Error {
 }
 
 function managedResponseBody(body: ReadableStream<Uint8Array>, context: RequestContext): ReadableStream<Uint8Array> {
+  const trace = currentRequestDiagnosticTrace();
+  const finishBody = trace?.begin('upstream-body');
   const reader = body.getReader();
   let cleaned = false;
   let cancelled: Promise<void> | undefined;
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
+    finishBody?.();
     context.signal.removeEventListener('abort', onAbort);
     context.cleanup();
   };
@@ -942,6 +946,7 @@ function managedResponseBody(body: ReadableStream<Uint8Array>, context: RequestC
         const next = await reader.read();
         assertActive(context);
         if (next.done) {
+          trace?.mark('eof');
           await context.disposeConnector();
           cleanup();
           reader.releaseLock();
@@ -954,6 +959,7 @@ function managedResponseBody(body: ReadableStream<Uint8Array>, context: RequestC
             'provider HTTP response body returned an invalid chunk',
           );
         }
+        if (next.value.byteLength > 0) trace?.mark('first-byte');
         controller.enqueue(next.value);
       } catch (error) {
         const normalized = normalizeStreamError(context, error);
@@ -1316,6 +1322,9 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
     assertActive(context);
     let response: Response;
     const finishFetch = beginPreparedEvidenceDispatchStage('transport-fetch-headers', this.options.observe);
+    const diagnosticTrace = currentRequestDiagnosticTrace();
+    diagnosticTrace?.mark('upstream-send');
+    const finishDiagnosticSend = diagnosticTrace?.begin('upstream-send');
     try {
       response = await this.options.fetch(target.url, {
         method: 'POST',
@@ -1333,6 +1342,7 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
       if (error instanceof ProviderHttpTransportError) throw error;
       fail('NETWORK_ERROR', 'provider HTTP request failed');
     } finally {
+      finishDiagnosticSend?.();
       finishFetch('error');
     }
     assertActive(context);
