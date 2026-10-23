@@ -1051,3 +1051,11 @@ Astra 实际差分复核通过。Luna exact scoped strict 通过，随后 fresh 
 每次拒绝的11张 tenant-scoped request/attempt/reservation/usage/settlement/ledger/wallet/lease/capacity/idempotency 全行快照与上游 dispatch 计数均不变；各正常 mutation 的不可变审计分别+1，P01 action 精确为 `platform_inference_access.disabled.risk_control`。503 为当前授权错误映射的实际观察，必须结合真实 prelock 拒绝原因，不能把任意503当作撤销通过。原 FIN、operator 与 SIGTERM early return 保留，子场景失败会原样抛首错并还原 observer，避免共享 tenant 级联失败。
 
 本轮证据目录 `/private/tmp/model-router-commercial-postgres-authrev-20261024-run-02`；runner 所有阶段 exit0、sourceChanges=[]，集群停止并删除。Redis 候选 `f14b6f5a593a72e2309014202433ff3e1bf8842c` 的 [CI #154](https://github.com/elex-fu/model-router/actions/runs/40034010137) 已 **68/68 success**，含64 isolated、shared PG15/18、四项进程故障和 browser E2E；该远程候选早于本节测试及后续连接池修复，最新 revision 继续单独验收。
+
+### 29.37 PG 断连时原生 Pool 与 checked-out client 的错误边界
+
+PG recovery run-02 真实执行自有 `pg_ctl -m immediate stop` 成功，随后 gateway-1 exit1：pg8.23.0 / pg-pool3.14.0 的 idleListener 在剔除坏连接后发出 Pool `error`，数据库封装未监听，EventEmitter 将 `Connection terminated unexpectedly` 变成进程级未处理错误。该轮未完成三路 fail-closed、scanner 或恢复，不能记录为 PG 恢复通过；artifact `/private/tmp/model-router-p10-postgres-recovery-20261024-run-02`，cleanup全true、source/dist/harnessChanged全false。
+
+生产修复仅在原 database wrapper 中覆盖同一连接生命周期：原生 Pool 构造后立即消费 idle error 通知，不抛出、不记录原 error/client/DSN；checked-out client 从取得到 release 由 owner listener 保留首连接错误，后续普通/预编译 query 直接以同一原错误拒绝，不再发送。原 active query/COMMIT 的 driver promise 拒绝保持，rollback 错误不覆盖原 COMMIT 错误；坏 client 强制 discard，交回 driver listener 后移除 owner，避免监听空窗。没有新增重试、Promise.race、process级吞错、应用重启或金融成功推断。
+
+Astra 对生产文件与新 native-pool test 实际差分复核通过。Luna 新原生 wrapper 测试7项加既有 database15项，共 **22/22**，exact scoped strict通过，owned两文件前后hash一致。测试使用真实wrapper构造与替换native IO，覆盖 idle、checked-out active/gap、prepared、COMMIT/ROLLBACK、无重复发送和 listener handoff；不是实际 PG 恢复证据。新 server build 与完整原 PG profile run-03 仍待执行，600秒 stale recovery、资金及租约断言保持不变。暖缓存撤销证据已独立推送 `a246be9`。

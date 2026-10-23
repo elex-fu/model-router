@@ -178,9 +178,19 @@ function asSqlResult<Row>(result: QueryResult): SqlResult<Row> {
 }
 
 class NodePostgresClient implements SaasDatabaseClient {
-  constructor(private readonly client: PoolClient) {}
+  private connectionFailure?: Error;
+  private readonly onConnectionError = (error: Error): void => {
+    this.connectionFailure ??= error;
+  };
+
+  constructor(private readonly client: PoolClient) {
+    // pg-pool removes its idle listener on checkout. Own errors for the whole
+    // checkout, including gaps between statements; pg still rejects active queries.
+    this.client.on('error', this.onConnectionError);
+  }
 
   private async diagnosticQuery<T>(work: () => Promise<T>): Promise<T> {
+    if (this.connectionFailure) throw this.connectionFailure;
     const trace = currentRequestDiagnosticTrace();
     if (!trace) return work();
     const finish = trace.begin('query');
@@ -215,7 +225,13 @@ class NodePostgresClient implements SaasDatabaseClient {
   }
 
   release(error?: Error | boolean): void {
-    this.client.release(error);
+    try {
+      // A disconnected checkout cannot be returned as reusable. pg-pool installs
+      // its idle listener synchronously during release before we relinquish ownership.
+      this.client.release(this.connectionFailure ? true : error);
+    } finally {
+      this.client.removeListener('error', this.onConnectionError);
+    }
   }
 }
 
@@ -224,6 +240,11 @@ class NodePostgresPool implements SaasDatabasePool {
 
   constructor(config: PoolConfig) {
     this.pool = new Pool(config);
+    this.pool.on('error', () => {
+      // pg-pool already removed the failed idle client before emitting this event.
+      // Keep the process alive; explicit operations still reject normally. Neither
+      // the error nor its attached client/connection details are safe to log here.
+    });
   }
 
   async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
