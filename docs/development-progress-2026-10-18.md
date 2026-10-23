@@ -851,3 +851,11 @@ Astra 源码对照发现旧 Gemini→Anthropic 仍 passthrough，反方向会丢
 现改为双向直接转换普通文本、JSON function 声明/调用/结果、稳定调用 ID 与并行关联；流式用完整 parser、单 reader、完整 message/block 事件、明确 terminal、usage 和取消传播。opaque thinking/signature、无法保真媒体及 cache-write 映射仍明确拒绝，不复制竞品 dummy signature 或静默清除字段。编译器增加 reverse pair 只代表转换代码存在，标准 builtin 仍按已证明的 provider/product/model/workflow 准入。
 
 Luna 包括六组 Gemini/共享桥的定向批次 **56/56**，不包含真实 CLI/provider。规范离线 unit 最近 **7,014 条 / 6,991 pass / 0 fail / 23 skip**；integration 最近 **360 条 / 255 pass / 0 fail / 105 skip**，所需外部配置跳过项不计通过，后续 C2 与 A0 新修改继续单独验证。管理页面已推送 `df86876`。
+
+### 29.15 P12 必需 PG 门禁与历史迁移回归
+
+PG15/18 CI 增加 P01、密文 history、商户绑定三个 required root 及严格测试源码编译；按原空队列 worker→既有财务→P01→history→merchant 顺序执行，历史迁移另由显式 test admin 创建随机测试库，受限 migrator 执行完整迁移。正式 migrator 不获得 CREATEDB。缺少 required/部分角色配置必须失败，仅未要求且完全未配置 PG 的离线 history 才可跳过。
+
+历史 fixture 的随机 schema 与既有 canonical schema 迁移冲突，改为隔离随机数据库；老 Key 数据补齐既有 principal/creator/authz snapshot 条件。018 用例按其原目的先验历史 017–022，再完整升级到142并比较身份、派发及成本快照，禁止为历史记录回填 commercial/prepared authority，未派发历史 attempt 继续被拒。最后发现新 fixture 只 hash SQL，实际规范为 `SHA256(name + NUL + 原始 SQL)`，已修独立期望，旧 SQL/checksum 未变。
+
+Luna 最新真实 PG18 历史 suite **31/31**、CI wiring **19/19**、两组严格测试源码编译通过；018 单独亦 **1/1**，临时库与集群清理完毕。完整离线回归结果见 §29.14，后续新改动继续复验。远程当前候选 PG15/18 与全部 CI 状态仍待取得，未沿用历史 green 关闭本轮门禁。Gemini 桥修复已推送 `9b14151`。

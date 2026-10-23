@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { test } from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { Pool as PgPool, type PoolClient } from 'pg';
 import { runSaasMigrations } from '../../../src/saas/db/migrate.js';
 import { SAAS_MIGRATIONS, type SaasMigration } from '../../../src/saas/db/migrations/001_initial_schema.js';
@@ -190,21 +192,60 @@ class ScopedPostgresPool implements SaasDatabasePool {
 
 const realPostgresUrl = process.env.SAAS_TEST_DATABASE_URL;
 
-async function withScopedPostgresSchema<T>(work: (pool: ScopedPostgresPool) => Promise<T>): Promise<T> {
+/**
+ * Historical migration 050 inspects the canonical schema by name. Isolate the
+ * entire database so legacy slices and their subsequent full-chain upgrade see
+ * their own canonical 044 function, never a different test's upgraded function.
+ * The configured disposable-cluster administrator must own CREATEDB. Role
+ * bootstrap is test-only; this fixture never grants the migrator CREATEDB.
+ */
+async function withIsolatedPostgresDatabase<T>(work: (pool: ScopedPostgresPool) => Promise<T>): Promise<T> {
   if (!realPostgresUrl) throw new Error('SAAS_TEST_DATABASE_URL is required');
-
-  const pool = new PgPool({ connectionString: realPostgresUrl, max: 4 });
-  const schema = `saas_migration_test_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  let schemaCreated = false;
+  if (!process.env.SAAS_TEST_DATABASE_ADMIN_URL) throw new Error('SAAS_TEST_DATABASE_ADMIN_URL is required for isolated migration fixture provisioning');
+  const administratorUrl = new URL(process.env.SAAS_TEST_DATABASE_ADMIN_URL);
+  const migratorUrl = new URL(realPostgresUrl);
+  if (decodeURIComponent(migratorUrl.username) !== 'model_router_saas_migrator') throw new Error('SAAS_TEST_DATABASE_URL must authenticate as the non-superuser model_router_saas_migrator test login');
+  if (administratorUrl.hostname !== migratorUrl.hostname || (administratorUrl.port || '5432') !== (migratorUrl.port || '5432')) throw new Error('Migration fixture administrator and migrator URLs must target the same test PostgreSQL instance');
+  const maintenanceUrl = new URL(administratorUrl);
+  maintenanceUrl.pathname = '/postgres';
+  const databaseName = `model_router_test_migrations_${randomUUID().replaceAll('-', '')}`;
+  // Both SQL identifiers are generated locally and contain only [a-z0-9_].
+  const schema = 'model_router_saas';
+  const administrator = new PgPool({ connectionString: maintenanceUrl.toString(), max: 1 });
+  let created = false;
+  let fixturePool: PgPool | undefined;
   try {
-    await pool.query(`CREATE SCHEMA "${schema}"`);
-    schemaCreated = true;
-    return await work(new ScopedPostgresPool(pool, schema));
+    try {
+      await administrator.query(`CREATE DATABASE "${databaseName}"`);
+      created = true;
+    } catch {
+      throw new Error('Migration fixture setup requires a PostgreSQL test administrator with CREATEDB; configure SAAS_TEST_DATABASE_ADMIN_URL (or SAAS_TEST_DATABASE_URL) accordingly');
+    }
+    const setupUrl = new URL(administratorUrl);
+    setupUrl.pathname = `/${databaseName}`;
+    const setup = new PgPool({ connectionString: setupUrl.toString(), max: 1 });
+    try {
+      // Bootstrap ACLs in this fresh database; per-database grants do not inherit
+      // from the maintenance database. The template never grants CREATEDB.
+      const rolesSql = await readFile(resolve('deploy/managed-saas-postgres-roles.sql'), 'utf8');
+      await setup.query(rolesSql);
+    } finally {
+      await setup.end();
+    }
+    const fixtureUrl = new URL(migratorUrl);
+    fixtureUrl.pathname = `/${databaseName}`;
+    fixturePool = new PgPool({ connectionString: fixtureUrl.toString(), max: 4 });
+    return await work(new ScopedPostgresPool(fixturePool, schema));
   } finally {
     try {
-      if (schemaCreated) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      // Close all clients before deleting only the database created by this call.
+      try {
+        await fixturePool?.end();
+      } finally {
+        if (created) await administrator.query(`DROP DATABASE "${databaseName}"`);
+      }
     } finally {
-      await pool.end();
+      await administrator.end();
     }
   }
 }
@@ -628,6 +669,10 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     136,
     137,
     138,
+    139,
+    140,
+    141,
+    142,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -637,7 +682,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     pool.applied.map(({ version }) => version),
     versions,
   );
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 119);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 123);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -715,9 +760,13 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
       'ops_media_requeue_requests',
       'platform_credential_validation_requeue',
       'redis_quota_writeback',
+      'platform_inference_access_operations',
+      'payment_merchant_bindings',
+      'responses_continuation_contexts',
+      'payment_create_request_fingerprint',
     ],
   );
-  assert.equal(pool.applied.length, 119);
+  assert.equal(pool.applied.length, 123);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -899,6 +948,10 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       136,
       137,
       138,
+      139,
+      140,
+      141,
+      142,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );
@@ -1327,8 +1380,9 @@ test('migration 018 enforces account ownership and lets 017 join the exact platf
 }, async () => {
   const ids = ATTEMPT_BINDING_FIXTURE;
 
-  await withScopedPostgresSchema(async (pool) => {
-    await runSaasMigrations(pool, SAAS_MIGRATIONS);
+  await withIsolatedPostgresDatabase(async (pool) => {
+    // Exercise 017/018 at the final pre-commercial-authority schema boundary.
+    await runSaasMigrations(pool, SAAS_MIGRATIONS.filter(({ version }) => version <= 22));
     await seedAttemptBindingFixture(pool, true);
 
     const insertAttempt = async (input: {
@@ -1644,6 +1698,48 @@ test('migration 018 enforces account ownership and lets 017 join the exact platf
         return pgError.code === '23514' && pgError.message?.includes('not joined') === true;
       },
     );
+    const requestStateSql = `SELECT id, tenant_id, project_id, proxy_key_id, entitlement_id,
+      supply_profile_id, supply_mode, request_fingerprint, financial_status
+      FROM saas_requests WHERE tenant_id = $1 ORDER BY id`;
+    const attemptStateSql = `SELECT id, tenant_id, request_id, ordinal, dispatch_state, state_version,
+      binding_state, dispatch_authority_state, account_owner_kind, account_id,
+      tenant_account_id, platform_account_id, credential_id, dispatch_profile_id, supplier_cost_version
+      FROM saas_attempts WHERE tenant_id = $1 ORDER BY id`;
+    const supplierStateSql = `SELECT id, tenant_id, request_id, attempt_id, supplier_cost_version,
+      platform_account_id, snapshot_digest FROM saas_attempt_supplier_cost_snapshots ORDER BY id`;
+    const beforeUpgrade = {
+      requests: (await pool.query(requestStateSql, [ids.tenantOne])).rows,
+      attempts: (await pool.query(attemptStateSql, [ids.tenantOne])).rows,
+      supplier: (await pool.query(supplierStateSql)).rows,
+    };
+    await runSaasMigrations(pool, SAAS_MIGRATIONS);
+    assert.deepEqual({
+      requests: (await pool.query(requestStateSql, [ids.tenantOne])).rows,
+      attempts: (await pool.query(attemptStateSql, [ids.tenantOne])).rows,
+      supplier: (await pool.query(supplierStateSql)).rows,
+    }, beforeUpgrade);
+    for (const table of ['saas_requests', 'saas_attempts']) {
+      const authorities = await pool.query<any>(`SELECT customer_metering_policy_id,
+        customer_metering_policy_version, provider_metering_policy_id,
+        provider_metering_policy_version, contract_attestation_id FROM ${table} WHERE tenant_id = $1`, [ids.tenantOne]);
+      assert.ok(authorities.rows.length > 0);
+      assert.ok(authorities.rows.every(row => Object.values(row).every(value => value === null)));
+    }
+    const prepared = await pool.query<{ prepared_evidence_id: string | null }>(
+      'SELECT prepared_evidence_id FROM saas_attempts WHERE tenant_id = $1', [ids.tenantOne]);
+    assert.ok(prepared.rows.every(row => row.prepared_evidence_id === null));
+    const migrationHistory = await pool.query<{ version: number; name: string; checksum: string }>(
+      'SELECT version, name, checksum FROM saas_schema_migrations ORDER BY version');
+    assert.deepEqual(migrationHistory.rows, SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
+      version, name, checksum: createHash('sha256').update(name).update('\0').update(sql).digest('hex'),
+    })));
+    await assert.rejects(pool.query(`UPDATE saas_attempts SET dispatch_state = 'dispatching',
+      state_version = state_version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2`,
+      [ids.tenantOne, ids.attemptByok]), (error: unknown) => {
+        const pgError = error as { code?: string; message?: string };
+        return pgError.code === '55000' && pgError.message === 'SaaS attempt has no current dispatchable commercial authority';
+      });
+    assert.deepEqual((await pool.query(attemptStateSql, [ids.tenantOne])).rows, beforeUpgrade.attempts);
   });
 });
 
@@ -1652,7 +1748,7 @@ test('migrations 018-019 leave historical and authority-less attempts non-dispat
 }, async () => {
   const ids = ATTEMPT_BINDING_FIXTURE;
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS.slice(0, 18));
     await seedAttemptBindingFixture(pool);
     await pool.query(
@@ -1716,6 +1812,14 @@ test('migrations 018-019 leave historical and authority-less attempts non-dispat
       dispatch_profile_id: null,
     });
 
+    const unchangedSql = `SELECT id, dispatch_state, state_version, binding_state, dispatch_authority_state,
+      account_owner_kind, account_id, tenant_account_id, platform_account_id,
+      credential_id, dispatch_profile_id FROM saas_attempts
+      WHERE tenant_id = $1 AND id = ANY($2::uuid[]) ORDER BY id`;
+    const unchangedValues = [ids.tenantOne, [ids.legacyAttempt, ids.authoritylessAttempt]];
+    const beforeRejectedDispatch = await pool.query(unchangedSql, unchangedValues);
+    assert.ok(beforeRejectedDispatch.rows.every((row: any) => row.dispatch_state === 'not_sent'));
+
     await assert.rejects(
       pool.query(
         `UPDATE saas_attempts
@@ -1725,7 +1829,7 @@ test('migrations 018-019 leave historical and authority-less attempts non-dispat
       ),
       (error: unknown) => {
         const pgError = error as { code?: string; message?: string };
-        return pgError.code === '55000' && pgError.message?.includes('non-dispatchable') === true;
+        return pgError.code === '55000' && pgError.message === 'SaaS attempt has no current dispatchable commercial authority';
       },
     );
     await assert.rejects(
@@ -1737,9 +1841,12 @@ test('migrations 018-019 leave historical and authority-less attempts non-dispat
       ),
       (error: unknown) => {
         const pgError = error as { code?: string; message?: string };
-        return pgError.code === '55000' && pgError.message?.includes('non-dispatchable') === true;
+        return pgError.code === '55000' && pgError.message === 'SaaS attempt has no current dispatchable commercial authority';
       },
     );
+    const afterRejectedDispatch = await pool.query(unchangedSql, unchangedValues);
+    assert.deepEqual(afterRejectedDispatch.rows, beforeRejectedDispatch.rows);
+
   });
 });
 
@@ -1904,7 +2011,7 @@ test('migration 005/006 upgrades legacy API keys without entitlements and enforc
   const legacyKeyId = '00000000-0000-0000-0000-000000000431';
   const newKeyId = '00000000-0000-0000-0000-000000000432';
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS.slice(0, 4));
     await pool.query(
       `INSERT INTO saas_users (id, email)
@@ -1991,9 +2098,9 @@ test('migration 005/006 upgrades legacy API keys without entitlements and enforc
       pool.query(
         `INSERT INTO saas_api_keys
            (id, tenant_id, project_id, principal_user_id, entitlement_id, supply_profile_id, supply_mode,
-            name, prefix, key_hash, model_scopes)
+            name, prefix, key_hash, model_scopes, execution_principal_type, execution_principal_id, created_by_user_id, model_scope_version, entitlement_authz_version, supply_profile_authz_version)
          VALUES ($1, $2, $3, $4, $5, 'newly-unmapped-profile', 'byok',
-                 'New invalid profile key', 'mr_live_newkey01', $6, ARRAY['model-a'])`,
+                 'New invalid profile key', 'mr_live_newkey01', $6, ARRAY['model-a'], 'member', $4, $4, 1, 1, 1)`,
         [newKeyId, tenantId, projectId, userId, '00000000-0000-0000-0000-000000000499', '2'.repeat(64)],
       ),
       (error: unknown) => {
@@ -2016,7 +2123,7 @@ test('migration 006 enforces the complete project-entitlement/profile/mode bindi
   const nullKeyId = '00000000-0000-0000-0000-000000000542';
   const wrongKeyId = '00000000-0000-0000-0000-000000000543';
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS);
     await pool.query(`INSERT INTO saas_users (id, email) VALUES ($1, 'binding-owner@example.com')`, [userId]);
     await pool.query(`INSERT INTO saas_tenants (id, name, slug) VALUES ($1, 'Binding tenant', 'binding-tenant')`, [
@@ -2050,9 +2157,9 @@ test('migration 006 enforces the complete project-entitlement/profile/mode bindi
     await pool.query(
       `INSERT INTO saas_api_keys
          (id, tenant_id, project_id, principal_user_id, entitlement_id, supply_profile_id, supply_mode,
-          name, prefix, key_hash, model_scopes)
+          name, prefix, key_hash, model_scopes, execution_principal_type, execution_principal_id, created_by_user_id, model_scope_version, entitlement_authz_version, supply_profile_authz_version)
        VALUES ($1, $2, $3, $4, $5, 'binding-platform', 'platform',
-               'Bound key', 'mr_live_binding01', $6, ARRAY['model-a'])`,
+               'Bound key', 'mr_live_binding01', $6, ARRAY['model-a'], 'member', $4, $4, 1, 1, 1)`,
       [validKeyId, tenantId, projectId, userId, entitlementId, 'a'.repeat(64)],
     );
     const stored = await pool.query<{
@@ -2076,9 +2183,9 @@ test('migration 006 enforces the complete project-entitlement/profile/mode bindi
       pool.query(
         `INSERT INTO saas_api_keys
            (id, tenant_id, project_id, principal_user_id, entitlement_id, supply_profile_id, supply_mode,
-            name, prefix, key_hash, model_scopes)
+            name, prefix, key_hash, model_scopes, execution_principal_type, execution_principal_id, created_by_user_id, model_scope_version, entitlement_authz_version, supply_profile_authz_version)
          VALUES ($1, $2, $3, $4, NULL, 'binding-platform', 'platform',
-                 'Null binding', 'mr_live_binding02', $5, ARRAY['model-a'])`,
+                 'Null binding', 'mr_live_binding02', $5, ARRAY['model-a'], 'member', $4, $4, 1, 1, 1)`,
         [nullKeyId, tenantId, projectId, userId, 'b'.repeat(64)],
       ),
       (error: unknown) => (error as { code?: string }).code === '23514',
@@ -2088,9 +2195,9 @@ test('migration 006 enforces the complete project-entitlement/profile/mode bindi
       pool.query(
         `INSERT INTO saas_api_keys
            (id, tenant_id, project_id, principal_user_id, entitlement_id, supply_profile_id, supply_mode,
-            name, prefix, key_hash, model_scopes)
+            name, prefix, key_hash, model_scopes, execution_principal_type, execution_principal_id, created_by_user_id, model_scope_version, entitlement_authz_version, supply_profile_authz_version)
          VALUES ($1, $2, $3, $4, $5, 'binding-platform', 'platform',
-                 'Wrong binding', 'mr_live_binding03', $6, ARRAY['model-a'])`,
+                 'Wrong binding', 'mr_live_binding03', $6, ARRAY['model-a'], 'member', $4, $4, 1, 1, 1)`,
         [wrongKeyId, tenantId, projectId, userId, wrongEntitlementId, 'c'.repeat(64)],
       ),
       (error: unknown) => {
@@ -2121,7 +2228,7 @@ test('migration 005 enforces supply mode, scope, status, version, and tenant/pro
   const entitlementWrongMode = '00000000-0000-0000-0000-000000000324';
   const entitlementByok = '00000000-0000-0000-0000-000000000325';
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS);
     await pool.query(
       `INSERT INTO saas_tenants (id, name, slug)
@@ -2259,7 +2366,7 @@ test('migration 004 enforces digest, scope, and project-member constraints in Po
   const keyWrongProfileMode = '00000000-0000-0000-0000-000000000237';
   const keyDisabledProfile = '00000000-0000-0000-0000-000000000238';
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS.slice(0, 5));
     await pool.query(`INSERT INTO saas_users (id, email) VALUES ($1, $2), ($3, $4)`, [
       userOne,
@@ -2402,7 +2509,7 @@ test('project membership migrations satisfy PostgreSQL backfill, status, and com
   const projectFour = '00000000-0000-0000-0000-000000000104';
   const projectFive = '00000000-0000-0000-0000-000000000105';
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS);
     const history = await pool.query<{ version: number }>(
       'SELECT version FROM saas_schema_migrations ORDER BY version',
@@ -2417,7 +2524,7 @@ test('project membership migrations satisfy PostgreSQL backfill, status, and com
     assert.equal(projectMembershipTable.rows[0]?.table_name, 'saas_project_memberships');
   });
 
-  await withScopedPostgresSchema(async (pool) => {
+  await withIsolatedPostgresDatabase(async (pool) => {
     await runSaasMigrations(pool, SAAS_MIGRATIONS.slice(0, 2));
 
     await pool.query(

@@ -86,12 +86,17 @@ const gatewayRoots = [
   'tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts',
   'tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts',
   'tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts',
+  'tests/saas/supply/platform-inference-access.postgres.integration.test.ts',
+  'tests/saas/gateway/responses-continuation.postgres.integration.test.ts',
+  'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts',
 ] as const;
 const standaloneRoots = [
   'tests/saas/db/migrations/050_prepared_evidence_authorization_advisory_fences.test.ts',
   'tests/saas/db/migrations/051_unknown_outcome_support_ticket.test.ts',
 ] as const;
 const strictRoots = [
+  terminalReplayFixture,
+  'tests/saas/db/migrations.test.ts',
   ...gatewayRoots,
   'src/types/busboy.d.ts',
   CLI,
@@ -911,4 +916,106 @@ test('prepared statement gate uses the real source APIs and the disposable comme
     'the custom suite must execute the complete chosen root with the native TAP reporter',
   );
   assert.match(runner, /counts\.tests > 0 && counts\.pass === counts\.tests/);
+});
+
+
+test('P0 platform provisioning remains a complete required restricted-role PG gate after financial fixtures', () => {
+  validateWorkflow(workflow);
+  const root = 'tests/saas/supply/platform-inference-access.postgres.integration.test.ts';
+  const source = read(root);
+  assert.match(source, /REQUIRED_FLAG.*roleUrls.*seedFixture/);
+  assert.match(source, /process\.env\[REQUIRED_FLAG\] !== '1' && !anyRoleConfigured/);
+  assert.match(source, /seedFixture\(migrator,\s*gateway,\s*'platform'\)/);
+  const job = managedJob(workflow);
+  before(job, rootStep(job, WORKER), rootStep(job, root));
+  before(job, rootStep(job, 'tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts'), rootStep(job, root));
+});
+
+
+test('historical full migration chains use only a test administrator and isolated temporary databases', () => {
+  const root = 'tests/saas/db/migrations.test.ts';
+  const job = managedJob(workflow);
+  const step = rootStep(job, root);
+  assert.deepEqual(step.env, {
+    SAAS_TEST_DATABASE_URL: ciUrl('model_router_saas_migrator'),
+    SAAS_TEST_DATABASE_ADMIN_URL: ciUrl('postgres'),
+  });
+  before(job, rootStep(job, WORKER), step);
+  const source = read(root);
+  assert.ok(source.includes("if (!process.env.SAAS_TEST_DATABASE_ADMIN_URL) throw new Error('SAAS_TEST_DATABASE_ADMIN_URL is required for isolated migration fixture provisioning');"));
+  assert.ok(source.includes('const administratorUrl = new URL(process.env.SAAS_TEST_DATABASE_ADMIN_URL);'));
+  assert.ok(source.includes('const migratorUrl = new URL(realPostgresUrl);'));
+  assert.ok(source.includes("if (decodeURIComponent(migratorUrl.username) !== 'model_router_saas_migrator') throw new Error('SAAS_TEST_DATABASE_URL must authenticate as the non-superuser model_router_saas_migrator test login');"));
+  assert.ok(source.includes("if (administratorUrl.hostname !== migratorUrl.hostname || (administratorUrl.port || '5432') !== (migratorUrl.port || '5432')) throw new Error('Migration fixture administrator and migrator URLs must target the same test PostgreSQL instance');"));
+  assert.ok(source.includes('const fixtureUrl = new URL(migratorUrl);'));
+  assert.ok(source.includes('fixtureUrl.pathname = `/${databaseName}`;'));
+  assert.ok(source.includes('await administrator.query(`CREATE DATABASE "${databaseName}"`);'));
+  assert.ok(source.includes('if (created) await administrator.query(`DROP DATABASE "${databaseName}"`);'));
+  assert.ok(source.includes("const databaseName = `model_router_test_migrations_${randomUUID().replaceAll('-', '')}`;"));
+  assert.ok(source.includes("const rolesSql = await readFile(resolve('deploy/managed-saas-postgres-roles.sql'), 'utf8');"));
+  assert.ok(source.includes('await setup.query(rolesSql);'));
+  assert.match(source, /model_router_test_migrations_/);
+  assert.match(source, /CREATE DATABASE/);
+  assert.match(source, /DROP DATABASE/);
+  assert.doesNotMatch(source, /ALTER ROLE[^;]*CREATEDB/);
+  for (const key of ['SAAS_TEST_DATABASE_URL', 'SAAS_TEST_DATABASE_ADMIN_URL']) {
+    assert.throws(() => {
+      const expectedRole = key === 'SAAS_TEST_DATABASE_URL' ? 'model_router_saas_migrator' : 'postgres';
+      const invalid = workflow.replace(`          ${key}: ${ciUrl(expectedRole)}\n`, '');
+      const configured = rootStep(managedJob(invalid), root);
+      assert.deepEqual(configured.env, step.env);
+    });
+  }
+});
+
+
+test('encrypted Responses history permits only unconfigured offline skip and keeps required PG fail-closed', () => {
+  const root = 'tests/saas/gateway/responses-continuation.postgres.integration.test.ts';
+  const job = validateWorkflow(workflow);
+  const source = read(root);
+  before(job, rootStep(job, WORKER), rootStep(job, root));
+  before(job, rootStep(job, 'tests/saas/supply/platform-inference-access.postgres.integration.test.ts'), rootStep(job, root));
+  assert.match(source, /const urls = roleUrls\(\)/);
+  assert.match(source, /seedFixture\(migrator,\s*gateway,\s*'platform'\)/);
+  assert.match(source, /new PostgresResponsesContinuationHistory\(gateway\)/);
+  assert.match(source, /await gateway\.verifySchema\(\)/);
+  assert.match(source, /history\.insert\(saved\)/);
+  assert.match(source, /history\.purgeExpired\(/);
+  const offlineSkip = "skip: process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured ? `set ${REQUIRED_FLAG}=1 and disposable role URLs` : false";
+  const validateSkip = (candidate: string): void => {
+    assert.equal(candidate.split(offlineSkip).length - 1, 1, 'only the exact unconfigured offline skip is permitted');
+    assert.doesNotMatch(candidate.replace(offlineSkip, ''), /\bskip\s*:|\bt\.skip\(|\btest\.skip\(/);
+    assert.match(candidate, /const urls = roleUrls\(\)/);
+  };
+  validateSkip(source);
+  exactEnv(rootStep(job, root), gatewayEnv);
+  for (const replacement of [
+    'skip: true',
+    "skip: process.env[REQUIRED_FLAG] !== '1'",
+    "skip: !anyRoleConfigured",
+    "skip: process.env[REQUIRED_FLAG] !== '1' || !anyRoleConfigured",
+  ]) assert.throws(() => validateSkip(source.replace(offlineSkip, replacement)));
+  assert.throws(() => validateSkip(`${source}\ntest.skip('disabled gate', () => {});`));
+});
+
+
+test('P0 roots share the fail-closed disposable restricted-role URL contract', () => {
+  const source = read(terminalReplayFixture);
+  assert.match(source, /export function roleUrls\(\)/);
+  assert.match(source, /assert\.ok\(value, `\$\{name\} is required/);
+  assert.match(source, /assert\.ok\(username === role/);
+  assert.match(source, /assert\.ok\(url\.search === ''/);
+  assert.match(source, /assert\.ok\(ci \|\| local/);
+  assert.match(source, /assert\.ok\(identity === target/);
+});
+
+
+test('merchant binding PG gate follows the complete financial fixture with required role URLs', () => {
+  const root = 'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts';
+  const job = validateWorkflow(workflow);
+  exactEnv(rootStep(job, root), gatewayEnv);
+  before(job, rootStep(job, 'tests/saas/gateway/responses-continuation.postgres.integration.test.ts'), rootStep(job, root));
+  // The root owns UUID business rows and restores its temporary global control
+  // snapshot. It must run sequentially after all earlier financial roots.
+  before(job, rootStep(job, 'tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts'), rootStep(job, root));
 });
