@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ConfigV2 } from '../config/v2-schema.js';
 import { ControlError, type ControlService } from '../control/service.js';
 import type { ControlStore } from '../control/store.js';
-import type { SQLiteQuotaLedger } from '../quota/ledger.js';
+import type { QuotaAdminLedger } from '../quota/ledger.js';
 import { quotaPeriod } from '../quota/period.js';
 import type { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
 import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
@@ -45,7 +45,7 @@ export class PlaygroundRuns {
     private readonly store: ControlStore,
     private readonly actions: UpstreamActions,
     private readonly telemetry?: SQLiteTelemetryStore,
-    private readonly ledger?: SQLiteQuotaLedger,
+    private readonly ledger?: QuotaAdminLedger,
     private readonly execute?: PlaygroundExecutor,
     private readonly quotaTimezoneVersions?: Pick<QuotaTimezoneVersions, 'resolveForAdmission'>,
   ) {

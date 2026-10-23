@@ -162,7 +162,7 @@ test('playground quota denial blocks upstream and stale target is rejected', asy
     const denied = await f.executor(f.input);
     assert.equal(denied.status, 429);
     assert.equal(sent, 0);
-    assert.deepEqual(f.calls, ['admit', 'settle']);
+    assert.deepEqual(f.calls, ['admit']);
     const stale = await f.executor({ ...f.input, target: { upstreamId: 'up_other', model: 'actual-model' } });
     assert.equal(stale.status, 409);
     assert.equal(sent, 0);
@@ -184,7 +184,7 @@ test('playground explicitly rejects pass-through auth without a recoverable toke
     assert.equal(result.status, 422);
     assert.match(result.error ?? '', /pass-through upstream/);
     assert.equal(sent, 0);
-    assert.deepEqual(f.calls, ['settle']);
+    assert.deepEqual(f.calls, []);
     assert.equal(f.requests.at(-1)?.source, 'playground');
   } finally {
     await mock.close();

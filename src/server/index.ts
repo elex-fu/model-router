@@ -2,7 +2,6 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { AdminRollups, UTC_DAY_MS } from '../admin/rollups.js';
 import { previewRuntimeRoute } from '../admin/runtime.js';
 import { createAdminServer } from '../admin/server.js';
 import { compileRuntimeConfig, RuntimeConfigStore } from '../config/v2-runtime.js';
@@ -12,11 +11,15 @@ import { ControlStore } from '../control/store.js';
 import { HealthMonitor } from '../health/monitor.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { SQLiteQuotaLedger } from '../quota/ledger.js';
+import { initializeQuotaStore } from '../quota/store.js';
+import { QuotaWriteClient } from '../quota/write-client.js';
+import { RedisQuotaLedger } from '../quota/redis-ledger.js';
+import { RedisQuotaState } from '../quota/redis-state.js';
 import { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
 import type { DeploymentEnvironment } from '../saas/deployment.js';
 import { parseDeploymentConfig } from '../saas/deployment.js';
 import { readLocalBrandSnapshot } from '../saas/platform/brand/local.js';
-import { importLegacyRequestLogs, UnsafeLegacyImportError } from '../storage/legacy-import.js';
+import { importLegacyRequestLogs } from '../storage/legacy-import.js';
 import { ResponseOwnershipStore } from '../storage/response-ownership.js';
 import { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
 import { TelemetryWriteClient } from '../storage/telemetry-write-client.js';
@@ -137,15 +140,30 @@ async function startLocalServer(
       JSON.stringify(next.storage) !== listenerSettings.storage ? 'storage' : null,
     ].filter((field): field is string => field !== null);
 
-  const { LogQueue } = await import('../logger/queue.js');
   const { SQLiteLogStore } = await import('../logger/store.js');
 
   const logDbPath = path.join(dataDir, 'logs.sqlite');
+  const businessStore = { connection: controlStore.db };
+  try {
+    initializeQuotaStore(controlStore.db, logDbPath);
+  } catch (error) {
+    controlStore.close();
+    throw error;
+  }
+  const quotaLedger = new SQLiteQuotaLedger(businessStore);
   const logStore = new SQLiteLogStore(logDbPath);
-  await logStore.init();
   const telemetryStore = new SQLiteTelemetryStore(logDbPath);
-  await telemetryStore.init();
-  const quotaTimezoneVersions = new QuotaTimezoneVersions(telemetryStore);
+  let telemetryAvailable = false;
+  try {
+    await logStore.init();
+    await telemetryStore.init();
+    telemetryAvailable = true;
+  } catch {
+    await logStore.close().catch(() => {});
+    await telemetryStore.close().catch(() => {});
+    console.warn('Observation database unavailable; requests continue using the independent business ledger');
+  }
+  const quotaTimezoneVersions = new QuotaTimezoneVersions(businessStore);
   quotaTimezoneVersions.initialize(effectiveRaw.quota.timezone, Date.now(), effectiveRaw.revision);
   const reconcileQuotaTimezone = (timezone: string, revision: number) => {
     const versions = quotaTimezoneVersions.list();
@@ -166,58 +184,99 @@ async function startLocalServer(
   };
   reconcileQuotaTimezone(effectiveRaw.quota.timezone, effectiveRaw.revision);
   let telemetryWriteClient: TelemetryWriteClient | undefined;
+  let quotaWriteClient: QuotaWriteClient | undefined;
+  let sharedQuotaLedger: RedisQuotaLedger | undefined;
   try {
-    const legacyImport = await importLegacyRequestLogs(telemetryStore, {
-      proxyKeyIdsByName: new Map(effectiveRaw.proxyKeys.map((key) => [key.name, key.id])),
-      upstreamIdsByName: new Map(effectiveRaw.upstreams.map((upstream) => [upstream.name, upstream.id])),
-    });
-    if (!legacyImport.alreadyCompleted && legacyImport.importedRows > 0)
+    const legacyImport = telemetryAvailable
+      ? await importLegacyRequestLogs(telemetryStore, {
+          proxyKeyIdsByName: new Map(effectiveRaw.proxyKeys.map((key) => [key.name, key.id])),
+          upstreamIdsByName: new Map(effectiveRaw.upstreams.map((upstream) => [upstream.name, upstream.id])),
+        })
+      : null;
+    if (legacyImport && !legacyImport.alreadyCompleted && legacyImport.importedRows > 0)
       console.log(`Imported ${legacyImport.importedRows} legacy log rows as separately marked historical measurements`);
-  } catch (error) {
-    if (!(error instanceof UnsafeLegacyImportError)) throw error;
-    console.warn(`Legacy log import skipped safely: ${error.message}`);
+  } catch {
+    console.warn('Legacy observation import unavailable; business state migration is independent');
   }
-  let startupLogQueue: import('../logger/queue.js').LogQueue | undefined;
   let startupHealthMonitor: HealthMonitor | undefined;
   let startupProxyServer: http.Server | undefined;
   let startupAdmin: ReturnType<typeof createAdminServer> | null = null;
   let startupPurgeTimer: NodeJS.Timeout | undefined;
   let startupConfigWatch = false;
   try {
-    const telemetryWriter = await TelemetryWriteClient.open(logDbPath);
+    const quotaRedisUrl = process.env.MODEL_ROUTER_QUOTA_REDIS_URL;
+    const quotaNamespace = process.env.MODEL_ROUTER_QUOTA_NAMESPACE ?? 'model-router';
+    if (!quotaRedisUrl) await quotaLedger.recoverInterrupted();
+    const quotaPersistence = await QuotaWriteClient.open(controlStore.db.name, quotaNamespace);
+    quotaWriteClient = quotaPersistence;
+    if (quotaRedisUrl) {
+      sharedQuotaLedger = new RedisQuotaLedger(
+        await RedisQuotaState.open({
+          url: quotaRedisUrl,
+          namespace: quotaNamespace,
+          persistence: quotaPersistence,
+        }),
+        quotaPersistence,
+      );
+      sharedQuotaLedger.startRecovery();
+    }
+    const quotaWriter = sharedQuotaLedger ?? quotaPersistence;
+    const quotaReads = sharedQuotaLedger ?? quotaLedger;
+    const adminQuotaLedger = {
+      connection: quotaLedger.connection,
+      admit: quotaWriter.admit.bind(quotaWriter),
+      topUp: quotaWriter.topUp.bind(quotaWriter),
+      markAttemptSent: quotaWriter.markAttemptSent.bind(quotaWriter),
+      recordAttemptUsage: quotaWriter.recordAttemptUsage.bind(quotaWriter),
+      settle: quotaWriter.settle.bind(quotaWriter),
+      balance: quotaReads.balance.bind(quotaReads),
+      adjust: quotaReads.adjust.bind(quotaReads),
+    };
+    const telemetryWriter = await TelemetryWriteClient.open(logDbPath, {
+      flushIntervalMs: config.server.logFlushIntervalMs,
+      batchSize: config.server.logBatchSize,
+    }).catch(() => {
+      console.warn('Observation worker unavailable; requests continue without logs');
+      return undefined;
+    });
     telemetryWriteClient = telemetryWriter;
-    const quotaLedger = new SQLiteQuotaLedger(telemetryStore);
-    await quotaLedger.recoverInterrupted();
-    const responseOwnership = new ResponseOwnershipStore(telemetryStore);
-    const logQueue = new LogQueue(logStore, config.server.logFlushIntervalMs, config.server.logBatchSize);
-    logQueue.start();
-    startupLogQueue = logQueue;
+    let unavailableDroppedEvents = 0;
+    const recorderStatus = () =>
+      telemetryWriter?.getStatus() ?? {
+        degraded: true,
+        reason: 'worker_unavailable',
+        pendingEvents: 0,
+        retainedEvents: 0,
+        droppedEvents: unavailableDroppedEvents,
+        pendingBytes: 0,
+      };
+    const observationSink = telemetryWriter ?? {
+      upsertRequest: async () => {
+        unavailableDroppedEvents++;
+      },
+      upsertAttempt: async () => {
+        unavailableDroppedEvents++;
+      },
+    };
+    const responseOwnership = new ResponseOwnershipStore(businessStore);
 
     let shuttingDown = false;
     let purgeInFlight: Promise<void> = Promise.resolve();
     let purgeTimer: NodeJS.Timeout | undefined;
     const retentionDays = config.server.logRetentionDays;
-    if (retentionDays && retentionDays > 0) {
-      const rollups = new AdminRollups(telemetryStore.connection);
+    if (retentionDays && retentionDays > 0 && telemetryWriter) {
       const runPurge = async () => {
         try {
-          const deleted = await logStore.purgeOlderThan(retentionDays);
-          if (deleted > 0) console.log(`Purged ${deleted} log rows older than ${retentionDays} days`);
-        } catch {
-          console.error('Compatibility log purge failed; data retained');
-        }
-        try {
-          const result = rollups.archiveAndPurge(Date.now() - retentionDays * UTC_DAY_MS);
+          const result = await telemetryWriter.purge(retentionDays);
           if (result.requests > 0) {
             controlStore.audit('system', 'telemetry.auto_archive_purge', result);
             console.log(`Archived and purged ${result.requests} V2 request details`);
           }
         } catch {
-          console.warn('V2 telemetry archive/purge deferred; detail retained for review');
+          console.warn('Observation archive/purge deferred; request processing remains available');
         }
       };
       purgeInFlight = runPurge();
-      await purgeInFlight;
       const schedulePurge = () => {
         if (shuttingDown) return;
         const next = new Date();
@@ -321,11 +380,14 @@ async function startLocalServer(
       void reloadExternalConfig();
     });
     startupConfigWatch = true;
-    const enqueueLog = (entry: Parameters<typeof logQueue.enqueue>[0]) => logQueue.enqueue(entry);
+    const enqueueLog = (entry: Parameters<TelemetryWriteClient['enqueueLegacy']>[0]) => {
+      if (telemetryWriter) telemetryWriter.enqueueLegacy(entry);
+      else unavailableDroppedEvents++;
+    };
     const makeProxyOptions = () => ({
       publishEvent: (type: 'request.completed', data: Record<string, unknown>) => control.publishEvent(type, data),
-      telemetryStore: telemetryWriter,
-      quotaLedger: telemetryWriter,
+      telemetryStore: observationSink,
+      quotaLedger: quotaWriter,
       quotaTimezoneVersions,
       responseOwnership,
       quotaTimezone: effectiveRaw.quota.timezone,
@@ -384,10 +446,10 @@ async function startLocalServer(
       firstByteTimeoutMs: effectiveRaw.server.firstByteTimeoutMs,
       streamIdleTimeoutMs: effectiveRaw.server.streamIdleTimeoutMs,
       healthCheck: async () => {
-        await logStore.ping();
+        await quotaWriter.ping();
         return true;
       },
-      recorderHealthy: () => !telemetryWriter.getStatus().degraded,
+      recorderHealthy: () => !recorderStatus().degraded,
     });
     const bootstrapToken = controlStore.hasAdmin() ? undefined : randomBytes(24).toString('base64url');
     const admin = effectiveRaw.admin.enabled
@@ -395,10 +457,10 @@ async function startLocalServer(
           configPath,
           controlStore,
           controlService: control,
-          telemetryStore,
-          quotaLedger,
+          telemetryStore: telemetryAvailable ? telemetryStore : undefined,
+          quotaLedger: adminQuotaLedger,
           quotaTimezoneVersions,
-          recorderStatus: () => telemetryWriter.getStatus(),
+          recorderStatus,
           adapters: createOAuthAccountAdminAdapters(oauthAccounts, controlStore),
           playgroundExecutor: (input) => createPlaygroundExecutor(store, enqueueLog, makeProxyOptions())(input),
           runtime: {
@@ -525,7 +587,7 @@ async function startLocalServer(
         server.close((error) => (error ? reject(error) : resolve()));
       });
       const closeAdmin = admin?.close() ?? Promise.resolve();
-      const drained = Promise.allSettled([closeProxy, closeAdmin, purgeInFlight]).then(async (results) => {
+      const drained = Promise.allSettled([closeProxy, closeAdmin]).then(async (results) => {
         for (const result of results)
           if (result.status === 'rejected') console.error('Listener close failed:', result.reason);
         await Promise.allSettled([...activeProxyRequests]);
@@ -554,12 +616,22 @@ async function startLocalServer(
       }
       let shutdownError: unknown;
       try {
-        await logQueue.stop();
         await telemetryWriteClient?.close(5_000);
-        await logStore.close?.();
-        await telemetryStore.close();
+      } catch {
+        console.warn('Observation drain incomplete; pending logs were dropped');
+      }
+      await purgeInFlight;
+      await logStore.close().catch(() => {});
+      await telemetryStore.close().catch(() => {});
+      try {
+        await sharedQuotaLedger?.close();
       } catch (error) {
         shutdownError = error;
+      }
+      try {
+        await quotaWriteClient?.close(5_000);
+      } catch (error) {
+        shutdownError ??= error;
       }
       try {
         controlStore.close();
@@ -597,11 +669,6 @@ async function startLocalServer(
       await new Promise<void>((resolve) => proxyServer.close(() => resolve()));
     }
     try {
-      await startupLogQueue?.stop();
-    } catch {
-      /* preserve the original startup error */
-    }
-    try {
       await telemetryWriteClient?.close(5_000);
     } catch {
       /* preserve the original startup error */
@@ -613,6 +680,16 @@ async function startLocalServer(
     }
     try {
       await logStore.close?.();
+    } catch {
+      /* preserve the original startup error */
+    }
+    try {
+      await sharedQuotaLedger?.close();
+    } catch {
+      /* preserve the original startup error */
+    }
+    try {
+      await quotaWriteClient?.close(5_000);
     } catch {
       /* preserve the original startup error */
     }

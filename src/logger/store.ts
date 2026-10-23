@@ -34,6 +34,36 @@ export interface DailyRollup {
   avgFirstTokenMs: number;
 }
 
+/** Caller owns the transaction; also used by the observation worker's mixed log batches. */
+export function insertLogBatch(db: Database.Database, entries: LogEntry[]): void {
+  const stmt = db.prepare(`INSERT INTO request_logs (
+    proxy_key_name,client_ip,client_protocol,upstream_protocol,request_model,actual_model,upstream_name,
+    status_code,error_message,request_tokens,response_tokens,total_tokens,cache_read_tokens,cache_creation_tokens,
+    first_token_ms,duration_ms,is_streaming,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  for (const row of entries) {
+    stmt.run(
+      row.proxy_key_name,
+      row.client_ip,
+      row.client_protocol,
+      row.upstream_protocol,
+      row.request_model,
+      row.actual_model,
+      row.upstream_name,
+      row.status_code,
+      row.error_message,
+      row.request_tokens,
+      row.response_tokens,
+      row.total_tokens,
+      row.cache_read_tokens,
+      row.cache_creation_tokens,
+      row.first_token_ms,
+      row.duration_ms,
+      row.is_streaming ? 1 : 0,
+      row.created_at ?? new Date().toISOString(),
+    );
+  }
+}
+
 export class SQLiteLogStore implements LogStore {
   private db?: Database.Database;
 
@@ -93,40 +123,7 @@ export class SQLiteLogStore implements LogStore {
 
   async insertBatch(entries: LogEntry[]): Promise<void> {
     if (!this.db || entries.length === 0) return;
-    const stmt = this.db.prepare(`
-      INSERT INTO request_logs (
-        proxy_key_name, client_ip, client_protocol, upstream_protocol,
-        request_model, actual_model, upstream_name,
-        status_code, error_message, request_tokens, response_tokens, total_tokens,
-        cache_read_tokens, cache_creation_tokens, first_token_ms,
-        duration_ms, is_streaming, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertMany = this.db.transaction((rows: LogEntry[]) => {
-      for (const row of rows) {
-        stmt.run(
-          row.proxy_key_name,
-          row.client_ip,
-          row.client_protocol,
-          row.upstream_protocol,
-          row.request_model,
-          row.actual_model,
-          row.upstream_name,
-          row.status_code,
-          row.error_message,
-          row.request_tokens,
-          row.response_tokens,
-          row.total_tokens,
-          row.cache_read_tokens,
-          row.cache_creation_tokens,
-          row.first_token_ms,
-          row.duration_ms,
-          row.is_streaming ? 1 : 0,
-          row.created_at ?? new Date().toISOString(),
-        );
-      }
-    });
-    insertMany(entries);
+    this.db.transaction(() => insertLogBatch(this.db!, entries))();
   }
 
   async queryLogs(

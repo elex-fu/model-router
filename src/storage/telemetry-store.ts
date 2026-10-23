@@ -1,9 +1,16 @@
 import { join } from 'node:path';
 import { isMainThread, Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
+import { insertLogBatch } from '../logger/store.js';
+import type { LogEntry } from '../logger/types.js';
 import type { AttemptRecord, RequestRecord, RequestState, TrafficSource } from '../telemetry/types.js';
 import type { NormalizedUsage } from '../telemetry/usage.js';
 import { DEFAULT_DB_PATH } from '../utils/paths.js';
+
+export type TelemetryWriteEvent =
+  | { operation: 'request'; record: RequestRecord }
+  | { operation: 'attempt'; record: AttemptRecord }
+  | { operation: 'legacy'; entry: LogEntry };
 
 export interface RequestFilter {
   fromMs?: number;
@@ -620,17 +627,23 @@ export class SQLiteTelemetryStore {
     this.connection.transaction(() => this.upsertAttemptSync(a))();
   }
 
-  async upsertBatch(
-    events: Array<{ operation: 'request'; record: RequestRecord } | { operation: 'attempt'; record: AttemptRecord }>,
-  ): Promise<void> {
-    if (!events.length) return;
+  async upsertBatch(events: TelemetryWriteEvent[], dropOrphans = false): Promise<number> {
+    if (!events.length) return 0;
     if (events.length > 100) throw new RangeError('telemetry batch exceeds 100 events');
-    this.connection
+    return this.connection
       .transaction(() => {
+        let dropped = 0;
         for (const event of events) {
           if (event.operation === 'request') this.upsertRequestSync(event.record);
+          else if (event.operation === 'legacy') insertLogBatch(this.connection, [event.entry]);
+          else if (
+            dropOrphans &&
+            !this.connection.prepare('SELECT 1 FROM requests WHERE id=?').get(event.record.requestId)
+          )
+            dropped++;
           else this.upsertAttemptSync(event.record);
         }
+        return dropped;
       })
       .immediate();
   }

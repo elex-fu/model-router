@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
+import type { QuotaStore } from './store.js';
 import { type QuotaPeriod, quotaPeriod } from './period.js';
 
 export type QuotaTimezoneVersionState = 'active' | 'scheduled' | 'superseded';
@@ -47,11 +47,11 @@ function assertTimezone(timezone: string, atMs: number): void {
 }
 
 /**
- * Persistent quota-cycle timezone schedule. Call initialize after SQLiteTelemetryStore.init().
+ * Persistent quota-cycle timezone schedule. Initialize the business store before use.
  * Startup only creates the initial active version; it never activates a due scheduled version.
  */
 export class QuotaTimezoneVersions {
-  constructor(private readonly store: SQLiteTelemetryStore) {}
+  constructor(private readonly store: QuotaStore) {}
 
   /** Initialize the first active version, or return the existing version state unchanged. */
   initialize(timezone: string, nowMs = Date.now(), configRevision: number | null = null): QuotaTimezoneVersion {

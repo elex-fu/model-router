@@ -1,4 +1,4 @@
-import type { SQLiteTelemetryStore } from './telemetry-store.js';
+import type { QuotaStore } from '../quota/store.js';
 
 export interface ResponseOwnership {
   responseId: string;
@@ -10,7 +10,7 @@ export interface ResponseOwnership {
 
 /** Persists only response identifiers and routing ownership, never conversation content. */
 export class ResponseOwnershipStore {
-  constructor(private readonly telemetry: SQLiteTelemetryStore) {
+  constructor(private readonly telemetry: QuotaStore) {
     telemetry.connection.exec(`CREATE TABLE IF NOT EXISTS response_ownership (
       response_id TEXT PRIMARY KEY, proxy_key_id TEXT NOT NULL, upstream_id TEXT NOT NULL,
       credential_id TEXT, expires_at_ms INTEGER NOT NULL

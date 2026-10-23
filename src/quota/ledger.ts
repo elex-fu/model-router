@@ -1,7 +1,9 @@
-import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
+import type { QuotaStore } from './store.js';
 
 export interface QuotaAdmission {
   requestId: string;
+  /** Only the server's fresh UUID factory may set this; replays must omit it. */
+  newRequest?: boolean;
   proxyKeyId: string;
   atMs: number;
   periodId: string;
@@ -16,7 +18,12 @@ export interface QuotaAdmission {
 }
 export interface QuotaDecision {
   allowed: boolean;
-  reason?: 'rpm_exceeded' | 'daily_tokens_exceeded' | 'concurrency_exceeded' | 'recorder_degraded';
+  reason?:
+    | 'rpm_exceeded'
+    | 'daily_tokens_exceeded'
+    | 'concurrency_exceeded'
+    | 'recorder_degraded'
+    | 'quota_unavailable';
   retryAfterMs?: number;
 }
 export interface QuotaBalance {
@@ -27,19 +34,63 @@ export interface QuotaBalance {
   activeRequests: number;
 }
 
+export type QuotaAdminLedger = Pick<
+  SQLiteQuotaLedger,
+  'connection' | 'admit' | 'topUp' | 'markAttemptSent' | 'recordAttemptUsage' | 'settle' | 'balance' | 'adjust'
+>;
+
 function nonnegative(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new RangeError('token count must be a nonnegative safe integer');
 }
 
 /** One SQLite transaction owns admission checks and reservation writes. */
 export class SQLiteQuotaLedger {
-  constructor(private readonly store: SQLiteTelemetryStore) {
+  constructor(private readonly store: QuotaStore) {
     const db = store.connection;
+    db.exec(`CREATE TABLE IF NOT EXISTS quota_attempt_usage (
+      request_id TEXT NOT NULL, attempt_id TEXT NOT NULL, reported_tokens INTEGER NOT NULL CHECK(reported_tokens>=0),
+      PRIMARY KEY(request_id,attempt_id)
+    ); CREATE TABLE IF NOT EXISTS quota_attempt_dispatch (
+      request_id TEXT NOT NULL, attempt_id TEXT NOT NULL, PRIMARY KEY(request_id,attempt_id)
+    ); CREATE TABLE IF NOT EXISTS quota_ledger_adjustments (
+      id TEXT PRIMARY KEY, proxy_key_id TEXT NOT NULL, period_id TEXT NOT NULL,
+      delta_tokens INTEGER NOT NULL, reason TEXT NOT NULL, created_at_ms INTEGER NOT NULL
+    )`);
+    // Compatibility for standalone callers using the historical telemetry store. The control
+    // store has a different, older quota_adjustments schema and is migrated explicitly at startup.
+    const adjustmentColumns = db.prepare('PRAGMA table_info(quota_adjustments)').all() as Array<{ name: string }>;
+    if (adjustmentColumns.some((column) => column.name === 'delta_tokens'))
+      db.exec(`INSERT OR IGNORE INTO quota_ledger_adjustments
+        SELECT id,proxy_key_id,period_id,delta_tokens,reason,created_at_ms FROM quota_adjustments`);
     const columns = db.prepare('PRAGMA table_info(quota_reservations)').all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === 'attempt_reserve_tokens'))
       db.exec('ALTER TABLE quota_reservations ADD COLUMN attempt_reserve_tokens INTEGER NOT NULL DEFAULT 0');
     if (!columns.some((column) => column.name === 'missing_usage_policy'))
       db.exec("ALTER TABLE quota_reservations ADD COLUMN missing_usage_policy TEXT NOT NULL DEFAULT 'estimate'");
+  }
+
+  get connection(): QuotaStore['connection'] {
+    return this.store.connection;
+  }
+
+  /** Persist confirmed usage independently of lossy telemetry, before retrying or settling. */
+  async recordAttemptUsage(requestId: string, attemptId: string, reportedTokens: number): Promise<void> {
+    nonnegative(reportedTokens);
+    const db = this.store.connection;
+    db.transaction(() => {
+      const reservation = db.prepare('SELECT state FROM quota_reservations WHERE request_id=?').get(requestId) as
+        | { state: string }
+        | undefined;
+      if (!reservation) throw new Error('Quota reservation not found');
+      if (reservation.state !== 'active') return;
+      const previous = db
+        .prepare('SELECT reported_tokens FROM quota_attempt_usage WHERE request_id=? AND attempt_id=?')
+        .get(requestId, attemptId) as { reported_tokens: number } | undefined;
+      if (previous && previous.reported_tokens !== reportedTokens) throw new Error('Conflicting quota attempt usage');
+      db.prepare(
+        'INSERT OR IGNORE INTO quota_attempt_usage (request_id,attempt_id,reported_tokens) VALUES (?,?,?)',
+      ).run(requestId, attemptId, reportedTokens);
+    }).immediate();
   }
 
   private expireRetained(nowMs: number): void {
@@ -117,7 +168,7 @@ export class SQLiteQuotaLedger {
         WHERE proxy_key_id=? AND period_id=?`)
           .get(a.proxyKeyId, a.periodId) as any;
         const adjustment = db
-          .prepare(`SELECT COALESCE(SUM(delta_tokens), 0) AS n FROM quota_adjustments
+          .prepare(`SELECT COALESCE(SUM(delta_tokens), 0) AS n FROM quota_ledger_adjustments
         WHERE proxy_key_id=? AND period_id=?`)
           .get(a.proxyKeyId, a.periodId) as { n: number };
         if (
@@ -180,7 +231,7 @@ export class SQLiteQuotaLedger {
         WHERE proxy_key_id=? AND period_id=?`)
           .get(r.proxy_key_id, r.period_id) as any;
         const adjustment = db
-          .prepare(`SELECT COALESCE(SUM(delta_tokens), 0) AS n FROM quota_adjustments
+          .prepare(`SELECT COALESCE(SUM(delta_tokens), 0) AS n FROM quota_ledger_adjustments
         WHERE proxy_key_id=? AND period_id=?`)
           .get(r.proxy_key_id, r.period_id) as { n: number };
         const knownOverflow = Math.max(0, reportedTokensSoFar - r.reserved_tokens);
@@ -203,11 +254,21 @@ export class SQLiteQuotaLedger {
       .immediate();
   }
 
-  async markAttemptSent(requestId: string): Promise<void> {
-    this.store.connection
-      .prepare(`UPDATE quota_reservations SET attempt_sent=attempt_sent+1
-      WHERE request_id=? AND state='active'`)
-      .run(requestId);
+  async markAttemptSent(requestId: string, attemptId?: string): Promise<void> {
+    const db = this.store.connection;
+    db.transaction(() => {
+      if (!db.prepare("SELECT 1 FROM quota_reservations WHERE request_id=? AND state='active'").get(requestId)) return;
+      if (
+        attemptId &&
+        !db
+          .prepare('INSERT OR IGNORE INTO quota_attempt_dispatch(request_id,attempt_id) VALUES (?,?)')
+          .run(requestId, attemptId).changes
+      )
+        return;
+      db.prepare("UPDATE quota_reservations SET attempt_sent=attempt_sent+1 WHERE request_id=? AND state='active'").run(
+        requestId,
+      );
+    }).immediate();
   }
 
   /** Known attempts are charged once; unknown sent attempts retain at most their per-attempt reserve. */
@@ -242,6 +303,8 @@ export class SQLiteQuotaLedger {
         retained ? 'retained' : estimated ? 'estimated' : unknown ? 'released_unknown' : 'settled',
         requestId,
       );
+      db.prepare('DELETE FROM quota_attempt_usage WHERE request_id=?').run(requestId);
+      db.prepare('DELETE FROM quota_attempt_dispatch WHERE request_id=?').run(requestId);
       this.expireRetained(Date.now());
     }).immediate();
   }
@@ -253,24 +316,18 @@ export class SQLiteQuotaLedger {
       request_id: string;
     }>;
     for (const row of rows) {
-      const attempts = db
-        .prepare(`SELECT usage_json FROM attempts WHERE request_id=? AND outcome!='started'`)
-        .all(row.request_id) as Array<{ usage_json: string | null }>;
-      let known = 0;
-      let reported = 0;
-      for (const attempt of attempts) {
-        const usage = attempt.usage_json
-          ? (JSON.parse(attempt.usage_json) as { inputTotal?: number | null; outputTotal?: number | null })
-          : null;
-        if (usage?.inputTotal != null && usage.outputTotal != null) {
-          known += usage.inputTotal + usage.outputTotal;
-          reported++;
-        }
-      }
+      const usage = db
+        .prepare(`SELECT COALESCE(SUM(reported_tokens),0) AS known,COUNT(*) AS reported
+        FROM quota_attempt_usage WHERE request_id=?`)
+        .get(row.request_id) as { known: number; reported: number };
       const sent = db.prepare('SELECT attempt_sent FROM quota_reservations WHERE request_id=?').get(row.request_id) as {
         attempt_sent: number;
       };
-      await this.settle(row.request_id, reported ? known : null, Math.max(0, sent.attempt_sent - reported));
+      await this.settle(
+        row.request_id,
+        usage.reported ? usage.known : null,
+        Math.max(0, sent.attempt_sent - usage.reported),
+      );
     }
     return rows.length;
   }
@@ -287,7 +344,7 @@ export class SQLiteQuotaLedger {
       AND state='active'`)
       .get(proxyKeyId) as { n: number };
     const adjustment = db
-      .prepare(`SELECT COALESCE(SUM(delta_tokens), 0) AS n FROM quota_adjustments
+      .prepare(`SELECT COALESCE(SUM(delta_tokens), 0) AS n FROM quota_ledger_adjustments
       WHERE proxy_key_id=? AND period_id=?`)
       .get(proxyKeyId, periodId) as { n: number };
     return {
@@ -303,7 +360,7 @@ export class SQLiteQuotaLedger {
     if (!Number.isSafeInteger(deltaTokens) || !reason.trim()) throw new RangeError('invalid adjustment');
     const db = this.store.connection;
     db.transaction(() => {
-      db.prepare(`INSERT OR IGNORE INTO quota_adjustments
+      db.prepare(`INSERT OR IGNORE INTO quota_ledger_adjustments
         (id, proxy_key_id, period_id, delta_tokens, reason, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)`).run(
         id,
         proxyKeyId,
