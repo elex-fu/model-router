@@ -809,3 +809,9 @@ Luna 商户控制真实 PG18.6 **5/5** 验证了接单锁/CAS、双 CP 同版本
 定位并修复：嵌套对象覆盖服务端 scope 的风险；runner lease 过期后旧执行者继续写的问题（operation guard 与同一 disable guard）；pool ID 与调度 upstream ID 不一致；新 capacity version 的 RETURNING 子查询看不到本语句插入行。CP pool 至少两个连接，启动与 doctor 按解析后的有效值检查，避免 `01` 或空白形式绕过。Codex 开通在创建前及最终激活前检查 reviewed profile 的精确 scope，缺少端口或可信上界时明确拒绝，不能先发可用权益再等待请求失败。
 
 Luna 新就绪检查 unit **3/3**、服务端编译通过；最新真实 PG18.6 **1/1** 包含受限 CP 启动探针、阶段写入故障续做、最终审计失败回滚、容量及策略 v1→v2→v3、原操作幂等/冲突/停用/会话撤销，以及最终 readiness 失效后保持 disabled。尚未据此关闭 A0/M1：从标准新客 HTTP、正式管理员开通、手工发 Key 到当前 dist builtin 真实供给请求，仍需独立端到端证据。P07 已推送 `05fc4bd`。
+
+### 29.9 C2 持久 history 的标准 loader 与独立 KMS
+
+实现 history 专用运行时 loader、production KMS port 和内置 AWS SigV4 adapter：固定 region/HTTPS endpoint、每记录新 DEK、完整身份与过期信息 AEAD 绑定、短期凭据文件轮换、旧 key ARN 白名单、敏感错误脱敏与 close 清理；pilot 文件 keyring 始终单列为 pilot。标准诊断明确 `external_evidence_required`，本地测试不替代真实 IAM/KMS 或恢复验收。部署合同见 [history 配置](responses-continuation-history-deployment-2026-10-24.md)。
+
+loader/KMS 定向测试与当前服务端构建通过，真实受限 PG18 history **1/1** 证明密文存储、不可变约束和数据库时间过期。尚无实际 AWS 调用。源码检查同时发现组合根只传入 resolver，HTTP/WS 消费端尚未执行持久 resolve/remember；已继续分派实际链路接线及测试，不能把 loader 或 connection map 当作跨请求/跨实例续接完成。P01 已推送 `4a236f4`。
