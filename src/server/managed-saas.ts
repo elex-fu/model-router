@@ -197,6 +197,15 @@ import {
 } from '../saas/platform/brand/store.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
+import {
+  ClaudeOAuthBindingService,
+  InMemoryBindingSessionStore as InMemoryClaudeBindingSessionStore,
+} from '../saas/platform/claude-oauth/binding-service.js';
+import { type ClaudeOauthHttpHandler, createClaudeOauthHttpHandler } from '../saas/platform/claude-oauth/http.js';
+import {
+  createPostgresClaudeCatalogBindingResolver,
+  createProviderSupplyClaudeCredentialSink,
+} from '../saas/platform/claude-oauth/supply-sink.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
 import { type CodexOauthHttpHandler, createCodexOauthHttpHandler } from '../saas/platform/codex-oauth/http.js';
 import {
@@ -221,6 +230,15 @@ import {
   createPostgresEgressProxyAuditWriter,
   type EgressProxiesHttpHandler,
 } from '../saas/platform/egress-proxies-http.js';
+import {
+  GeminiOAuthBindingService,
+  InMemoryBindingSessionStore as InMemoryGeminiBindingSessionStore,
+} from '../saas/platform/gemini-oauth/binding-service.js';
+import { createGeminiOauthHttpHandler, type GeminiOauthHttpHandler } from '../saas/platform/gemini-oauth/http.js';
+import {
+  createPostgresGeminiCatalogBindingResolver,
+  createProviderSupplyGeminiCredentialSink,
+} from '../saas/platform/gemini-oauth/supply-sink.js';
 import {
   PlatformOperatorManagementService,
   PlatformTenantLifecycleService,
@@ -965,12 +983,22 @@ async function resolveCustomerRefundTenantContext(
   };
 }
 
+/**
+ * T02c adapter for the claude/gemini OAuth sink resolvers: their query
+ * executor contract still types `rowCount` as a concrete number, while the
+ * managed database's SqlResult carries `number | null` (the codex/grok sinks
+ * already accept both). The mount adapts locally instead of editing the
+ * platform modules; the resolvers only issue SELECTs, whose row counts are
+ * always concrete, so a null count maps to the truthful rows.length.
+ */
 function createPlatformHandler(
   authHandler: PlatformAdminAuthHttpHandler,
   refundHandler: PlatformRefundHttpHandler | undefined,
   rewrapHandler: PlatformCredentialRewrapHttpHandler | undefined,
   codexOauthHandler: CodexOauthHttpHandler | undefined,
   grokOauthHandler: GrokOauthHttpHandler | undefined,
+  claudeOauthHandler: ClaudeOauthHttpHandler | undefined,
+  geminiOauthHandler: GeminiOauthHttpHandler | undefined,
   accountProbeHandler: AccountProbeHttpHandler | undefined,
   platformSettingsHandler: PlatformSettingsHttpHandler,
   billingGroupsHandler: BillingGroupsHttpHandler | undefined,
@@ -1011,6 +1039,8 @@ function createPlatformHandler(
         if (rewrapHandler && (await rewrapHandler(req, res))) return;
         if (codexOauthHandler && (await codexOauthHandler(req, res))) return;
         if (grokOauthHandler && (await grokOauthHandler(req, res))) return;
+        if (claudeOauthHandler && (await claudeOauthHandler(req, res))) return;
+        if (geminiOauthHandler && (await geminiOauthHandler(req, res))) return;
         if (accountProbeHandler && (await accountProbeHandler(req, res))) return;
         if (await platformSettingsHandler(req, res)) return;
         if (billingGroupsHandler && (await billingGroupsHandler(req, res))) return;
@@ -2710,6 +2740,43 @@ export async function startManagedSaasServer(
             publicOrigin: deploymentListener(deployment, 'platform').origin,
           })
         : undefined;
+      // T02c Claude OAuth account binding surface (R5 mount): available
+      // exactly when the supply service (sealing + audited account/credential
+      // creation) is wired, mirroring the codex/grok mounts. The sink resolves
+      // the anthropic-claude catalog binding from the control-plane database
+      // and fails closed until the provider is registered
+      // (saas/catalog/claude-registration.ts).
+      const claudeOauthHandler = providerSupplyService
+        ? createClaudeOauthHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            service: new ClaudeOAuthBindingService({ sessionStore: new InMemoryClaudeBindingSessionStore() }),
+            sink: createProviderSupplyClaudeCredentialSink({
+              supply: providerSupplyService,
+              resolveCatalogBinding: createPostgresClaudeCatalogBindingResolver(database),
+            }),
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+          })
+        : undefined;
+      // T02c Gemini OAuth account binding surface (F4 mount): available
+      // exactly when the supply service is wired, mirroring the codex/grok
+      // mounts. The sink resolves the google-gemini catalog binding from the
+      // control-plane database and fails closed until the provider is
+      // registered (saas/catalog/gemini-registration.ts). The Code Assist
+      // client secret resolves from the environment inside the binding
+      // service; a missing secret fails each binding request, never startup.
+      const geminiOauthHandler = providerSupplyService
+        ? createGeminiOauthHttpHandler({
+            access: platformAccessService,
+            authService: platformAuthService,
+            service: new GeminiOAuthBindingService({ sessionStore: new InMemoryGeminiBindingSessionStore() }),
+            sink: createProviderSupplyGeminiCredentialSink({
+              supply: providerSupplyService,
+              resolveCatalogBinding: createPostgresGeminiCatalogBindingResolver(database),
+            }),
+            publicOrigin: deploymentListener(deployment, 'platform').origin,
+          })
+        : undefined;
       // R6a active probing admin surface: the trigger/list endpoints run on
       // the control-plane role (monitor registry CRUD). The probe itself
       // executes asynchronously in the probe monitor worker on the
@@ -3165,6 +3232,8 @@ export async function startManagedSaasServer(
         platformCredentialRewrapHandler,
         codexOauthHandler,
         grokOauthHandler,
+        claudeOauthHandler,
+        geminiOauthHandler,
         accountProbeHandler,
         platformSettingsAdminHandler,
         billingGroupsAdminHandler,

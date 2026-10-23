@@ -61,7 +61,7 @@ interface GeminiSinkQueryExecutor {
     values?: readonly unknown[],
   ): Promise<{
     readonly rows: readonly Row[];
-    readonly rowCount: number;
+    readonly rowCount: number | null;
   }>;
 }
 

@@ -1257,6 +1257,98 @@ test('control-plane workload binds only customer/platform listeners and does not
   }
 });
 
+test('control-plane mounts every OAuth account binding surface exactly when the supply service is wired', async () => {
+  const sqlStatements: string[] = [];
+  const handlers = new Map<string, RequestListener>();
+  let runtime: ManagedSaasRuntime | undefined;
+  const environment = {
+    ...managedEnvironment({ customer: 45_124, platform: 45_125, gateway: 45_126 }),
+    [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'control-plane',
+  } satisfies DeploymentEnvironment;
+
+  try {
+    runtime = await startManagedSaasServer(
+      deploymentFrom(environment),
+      managedOptions([], {
+        environment,
+        loadValidationWorkerKms: async () => {
+          assert.fail('control-plane workload must not load the validation-worker KMS adapter');
+        },
+        startCredentialValidationWorker: () => {
+          assert.fail('control-plane workload must not start the credential-validation loop');
+        },
+        createDatabase: () => platformReadDatabase(() => ['superadmin'], sqlStatements),
+        createListener: (name, handler) => {
+          handlers.set(name, handler);
+          return inertListener();
+        },
+      }),
+    );
+
+    const platformHandler = handlers.get('platform');
+    assert.ok(platformHandler);
+    // A mounted binding surface rejects the wrong method (405) before any
+    // session or database work — the request provably reached the OAuth
+    // handler instead of falling through to the platform 404.
+    for (const category of ['codex-oauth', 'grok-oauth', 'claude-oauth', 'gemini-oauth']) {
+      const response = await invokeManagedHandler(platformHandler, `/admin/api/v1/${category}/start`);
+      assert.equal(response.status, 405, `the ${category} binding surface must be mounted`);
+      assert.equal((JSON.parse(response.body) as { error?: { code?: string } }).error?.code, 'METHOD_NOT_ALLOWED');
+    }
+  } finally {
+    await runtime?.close();
+  }
+});
+
+test('control-plane leaves every OAuth account binding surface unmounted without the provider supply service', async () => {
+  const sqlStatements: string[] = [];
+  const handlers = new Map<string, RequestListener>();
+  let runtime: ManagedSaasRuntime | undefined;
+  const environment = {
+    ...managedEnvironment({ customer: 45_127, platform: 45_128, gateway: 45_129 }),
+    [DEPLOYMENT_ENV_VARS.saas.workloadRole]: 'control-plane',
+    // Without the sealing KMS key id (and module — the parser requires both
+    // or neither) the provider supply service stays unwired, so no OAuth
+    // binding surface may exist.
+    [SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE]: undefined,
+    [DEPLOYMENT_ENV_VARS.saas.providerCredentialKmsKeyId]: undefined,
+  } satisfies DeploymentEnvironment;
+
+  try {
+    runtime = await startManagedSaasServer(
+      deploymentFrom(environment),
+      managedOptions([], {
+        environment,
+        loadValidationWorkerKms: async () => {
+          assert.fail('control-plane workload must not load the validation-worker KMS adapter');
+        },
+        startCredentialValidationWorker: () => {
+          assert.fail('control-plane workload must not start the credential-validation loop');
+        },
+        createDatabase: () => platformReadDatabase(() => ['superadmin'], sqlStatements),
+        createListener: (name, handler) => {
+          handlers.set(name, handler);
+          return inertListener();
+        },
+      }),
+    );
+
+    const platformHandler = handlers.get('platform');
+    assert.ok(platformHandler);
+    for (const category of ['codex-oauth', 'grok-oauth', 'claude-oauth', 'gemini-oauth']) {
+      const response = await invokeManagedHandler(platformHandler, `/admin/api/v1/${category}/start`);
+      assert.equal(
+        response.status,
+        404,
+        `the ${category} binding surface must stay unmounted without the supply service`,
+      );
+      assert.equal((JSON.parse(response.body) as { error?: { code?: string } }).error?.code, 'NOT_FOUND');
+    }
+  } finally {
+    await runtime?.close();
+  }
+});
+
 test('control-plane mounts tenant-scoped unknown-outcome reads and stops its scanner on close', async () => {
   const events: string[] = [];
   const sqlStatements: string[] = [];

@@ -653,3 +653,16 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 4. **测试**:+332 行,7 个新用例覆盖固定 URL/headers(含 claude metadata 派生与 gemini wrap)、挑战成功/错误/非数字/缺失、密封材料失败关闭(0 次请求)、401 分类、4KiB~64KiB 接受与超限拒绝、20s deadline、OAuth 适配器排除。
 
 **验证**:adapters 55/55、probe-service 17/17、worker 73/73、tsc 干净、四文件 Biome 零错误(2 个既有 useOptionalChain 告警保留)、deadcode 与基线一致。**边界**:无真实 Claude/Gemini OAuth 凭据,未做上游 smoke(与 §14 Codex/Grok 同款限制);sink 未挂载,标准部署尚不会产生这两个类别的验证任务;egress proxy 已随 worker 的 withAccountOutbound 生效(§23)。
+
+## 25. T02c 完成：Claude/Gemini OAuth sink 挂载到标准部署（2026-10-23）
+
+§14/§24 之后的最后一块：claude-oauth/gemini-oauth 模块此前完整存在但组合根零导入("sink 未挂载")。本轮按 codex/grok 的既有模式完成挂载,"OAuth 导入 → pending 账号 → 自动验证(§24 适配器)→ 调度可用"全链路对 Claude/Gemini 就绪:
+
+1. **组合根(managed-saas.ts,+69 纯加法)**:导入两套三件套(binding service + InMemory session store、HTTP handler、supply sink + catalog binding resolver);`createPlatformHandler` 增加 `claudeOauthHandler`/`geminiOauthHandler` 可选参数与分派(排在 grok 之后);按 `providerSupplyService ? ... : undefined` 条件装配,五件套(access/authService/binding/sink/publicOrigin)与 grok 逐项对齐;claude 注释如实记录 catalog 绑定自 control-plane 库解析、未注册时失败关闭。
+2. **新建 catalog/claude-registration.ts**(gemini/grok 模板):provider/capability/platform-rights/占位供应商成本四组输入 + `registerClaudeProviderCatalog` 一键 applier;claude 为单 OAuth 产品,输入列表各恰一项(注释说明与 grok 双产品/gemini tier 的差异)。配套 9 个用例。
+3. **类型对齐**:两个新 sink 的本地 executor `rowCount` 原声明 `number`(codex/grok 已是 `number | null`),直接传真实 SaasDatabase 会 TS2345——已把两处声明对齐为 `number | null`(子代理的临时适配器随之删除,组合根保持直传 database);`rowCount !== 1` 校验在 null 时仍失败关闭。
+4. **启动测试(+92)**:① 四个 OAuth 面板(codex/grok/claude/gemini)`/admin/api/v1/<cat>/start` GET → 405,证明路由真实分派且在 auth/DB 之前;② sealing KMS 未配置(supply service 未装配)→ 404,证明条件装配失败关闭。
+
+**验证**:tsc 干净;startup 62/62、composition 23/23、claude-registration 9/9、claude/gemini-oauth 全部 10 个模块测试文件 55/55;改动文件 Biome 零诊断;deadcode 严格改善(unused files 858→850——两套模块因挂载转为已使用,零新增)。完整 unit 6870/6845/2 fail:两处失败(backup-restore、http-images keepalive)与本次改动无关,隔离与重跑均通过,属高负载(1 分钟负载 ~20)时序 flake,如实记录不作为通过声明。
+
+**边界**:与 §24 相同——无真实 Claude/Gemini OAuth 凭据,未做真实上游 smoke;provider catalog 注册(claude-registration 的 applier)需操作员/部署流程调用后才解除 sink 失败关闭;真实"导入→验证→调度"smoke 待有凭据时执行。
