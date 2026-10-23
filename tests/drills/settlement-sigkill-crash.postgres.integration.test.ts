@@ -49,11 +49,11 @@ interface ChildExit {
   readonly signal: NodeJS.Signals | null;
 }
 
-function spawnChild(root: string, gatewayUrl: string, inputsPath: string, progressPath: string, runId: string) {
+function spawnChild(root: string, gatewayUrl: string, inputsPath: string, progressPath: string, runId: string, pauseBeforeMarker = false) {
   // Fixed minimal env: no inherited credentials, PG overrides or user config.
   const child = spawn(
     process.execPath,
-    ['--import', 'tsx', CHILD, '--inputs', inputsPath, '--progress', progressPath, '--run-id', runId],
+    ['--import', 'tsx', CHILD, '--inputs', inputsPath, '--progress', progressPath, '--run-id', runId, ...(pauseBeforeMarker ? ['--pause-before-marker', '2'] : [])],
     {
       cwd: root,
       env: {
@@ -61,7 +61,7 @@ function spawnChild(root: string, gatewayUrl: string, inputsPath: string, progre
         NODE_ENV: 'test',
         MODEL_ROUTER_SAAS_DRILL_GATEWAY_URL: gatewayUrl,
       },
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     },
   );
   // The child never prints URLs/secrets by contract; drain stderr regardless.
@@ -69,7 +69,8 @@ function spawnChild(root: string, gatewayUrl: string, inputsPath: string, progre
   const exit = new Promise<ChildExit>((resolveExit) => {
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
-  return { child, exit };
+  const barrier = new Promise<unknown>(resolveBarrier => child.once('message', resolveBarrier));
+  return { child, exit, barrier };
 }
 
 async function untilMarkers(progressPath: string, count: number, childExit: Promise<ChildExit>): Promise<Marker[]> {
@@ -88,7 +89,7 @@ async function untilMarkers(progressPath: string, count: number, childExit: Prom
   }
 }
 
-async function boundedExit(exit: Promise<ChildExit>, timeoutMs: number): Promise<ChildExit> {
+async function boundedExit<T>(exit: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -194,13 +195,16 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
     }),
   );
 
-  // Run 1: kill the child after at least one settlement has committed, so the
-  // kill lands inside the in-flight window of a later request.
-  const first = spawnChild(root, urls[2], inputsPath, progressPath, 'run-1');
+  // Run 1: observe the first marker, then kill at input 2's explicit
+  // post-COMMIT/pre-marker IPC barrier.
+  const first = spawnChild(root, urls[2], inputsPath, progressPath, 'run-1', true);
   t.after(() => {
     if (first.child.exitCode === null && first.child.signalCode === null) first.child.kill('SIGKILL');
   });
   const crashedAt = await untilMarkers(progressPath, 1, first.exit);
+  // Child pauses only after input 2 really commits, before its financial marker.
+  const barrier = await boundedExit(Promise.race([first.barrier, first.exit.then(() => { throw new Error('child exited before commit-to-marker barrier'); })]), 60_000);
+  assert.deepEqual(barrier, { kind: 'before-marker', runId: 'run-1', sequence: 2, requestId: fixtures[1]!.input.requestId, resultKind: 'settled' });
   first.child.kill('SIGKILL');
   const crash = await boundedExit(first.exit, 15_000);
   assert.equal(crash.signal, 'SIGKILL', 'the drill child must die by the real signal, not gracefully');
@@ -215,18 +219,48 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
   assert.equal(recovered.signal, null);
   assert.equal(recovered.code, 0, 'recovery child must complete every input without an error');
 
-  const all = markers(progressPath);
-  const byRequest = new Map<string, Marker[]>();
-  for (const marker of all) {
-    byRequest.set(marker.requestId, [...(byRequest.get(marker.requestId) ?? []), marker]);
-  }
-  assert.equal(byRequest.size, REQUESTS, 'every request reached a terminal marker');
-  for (const [requestId, entries] of byRequest) {
-    const settled = entries.filter((entry) => entry.kind === 'settled');
-    assert.equal(settled.length, 1, `request ${requestId} settled exactly once across the crash`);
-    for (const entry of entries) assert.ok(['settled', 'replayed'].includes(entry.kind));
-  }
-  t.diagnostic(`kill window: ${crashedAt.length}/${REQUESTS} committed before SIGKILL`);
-
+  // PostgreSQL is the authority: SIGKILL may land after COMMIT but before
+  // the child appends its marker. Prove exact financial effects before
+  // classifying that unobserved-ack window as a legitimate replay.
   for (const fixture of fixtures) await assertSettledOnce(migrator.database, fixture.tenantId);
+
+  const all = markers(progressPath);
+  const runOne = all.filter(marker => marker.runId === 'run-1');
+  const runTwo = all.filter(marker => marker.runId === 'run-2');
+  assert.equal(all.length, runOne.length + runTwo.length, 'only the two owned child runs may append markers');
+  assert.deepEqual(all.slice(0, runOne.length), runOne, 'first-run prefix must precede every recovery marker');
+  assert.ok(runOne.length >= 1 && runOne.length <= REQUESTS, 'the killed run records a nonempty committed prefix');
+  assert.equal(runTwo.length, REQUESTS, 'recovery must report exactly one terminal result per input');
+  for (const [index, marker] of runOne.entries()) {
+    assert.equal(marker.sequence, index + 1, 'killed-run markers form a contiguous prefix');
+    assert.equal(marker.requestId, fixtures[index]!.input.requestId);
+    assert.equal(marker.kind, 'settled', 'the first attempt cannot replay a fresh request');
+  }
+  let committedWithoutMarker = 0;
+  for (const [index, fixture] of fixtures.entries()) {
+    const requestId = fixture.input.requestId;
+    const recovery = runTwo[index]!;
+    assert.equal(recovery.sequence, index + 1);
+    assert.equal(recovery.requestId, requestId, 'recovery reports the exact original input in order');
+    assert.ok(['settled', 'replayed'].includes(recovery.kind));
+    const firstMarkers = runOne.filter(marker => marker.requestId === requestId);
+    assert.ok(firstMarkers.length <= 1, 'the first run reports each input at most once');
+    const settledCount = all.filter(marker => marker.requestId === requestId && marker.kind === 'settled').length;
+    assert.ok(settledCount <= 1, `request ${requestId} has at most one observed settlement acknowledgement`);
+    if (firstMarkers.length === 1) {
+      assert.equal(recovery.kind, 'replayed', 'an acknowledged first-run commit must replay');
+      assert.equal(settledCount, 1);
+    } else if (recovery.kind === 'settled') {
+      assert.equal(settledCount, 1, 'an uncommitted input settles once in recovery');
+    } else {
+      assert.equal(settledCount, 0, 'a replay without a first marker is the COMMIT-to-marker crash window');
+      committedWithoutMarker += 1;
+    }
+  }
+  // The serial child can have only one committed input awaiting its marker.
+  assert.equal(committedWithoutMarker, 1, 'the barrier must exercise exactly one committed input without a marker');
+  assert.equal(runOne.length, 1);
+  assert.equal(runTwo[1]!.kind, 'replayed', 'the commit paused before its marker must replay');
+  for (const marker of runTwo.slice(2)) assert.equal(marker.kind, 'settled', 'inputs after the paused commit first settle in recovery');
+  t.diagnostic(`kill window: ${crashedAt.length}/${REQUESTS} observed committed; ${committedWithoutMarker} committed before marker`);
 });

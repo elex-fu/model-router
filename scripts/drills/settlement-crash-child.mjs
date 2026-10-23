@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // FIN-01 crash-drill child (A3 / Track I shared base). Reads settlement inputs
 // from a JSON file, completes each through the real conditional settlement
-// port against the restricted gateway role, and appends one fsync'd JSONL
+// port against the restricted gateway role, and synchronously appends one JSONL
 // marker per finished request. The parent drill SIGKILLs this process
 // mid-flight; a later run re-attempts every input so terminal replay proves
 // exactly-once financial effect. No output contains URLs or key material.
@@ -15,6 +15,8 @@ function arg(name) {
 const inputsPath = arg('inputs');
 const progressPath = arg('progress');
 const runId = arg('run-id');
+const pauseBeforeMarker = arg('pause-before-marker');
+if (pauseBeforeMarker !== undefined && (pauseBeforeMarker !== '2' || runId !== 'run-1' || !process.send)) throw new Error('invalid test-only barrier');
 // The restricted role URL arrives via env (never argv/process list), matching
 // the CI runner's fixed-env contract. It carries no password (trust auth).
 const gatewayUrl = process.env.MODEL_ROUTER_SAAS_DRILL_GATEWAY_URL;
@@ -47,7 +49,14 @@ try {
   for (const input of payload.inputs) {
     const result = await port.complete(input);
     sequence += 1;
-    // Synchronous append: a SIGKILL after this line cannot lose the marker.
+    if (pauseBeforeMarker === String(sequence)) {
+      // IPC listener keeps the child alive until the parent kills this exact window.
+      process.on('message', () => {});
+      process.send({ kind: 'before-marker', runId, sequence, requestId: input.requestId, resultKind: result.kind });
+      await new Promise(() => {});
+    }
+    // COMMIT and this local marker are not atomic: SIGKILL between complete()
+    // and append can leave a committed request whose recovery result is replayed.
     appendFileSync(progressPath, `${JSON.stringify({ runId, sequence, requestId: input.requestId, kind: result.kind })}\n`);
   }
 } catch {

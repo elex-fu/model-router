@@ -941,3 +941,11 @@ Astra 在运行前发现 journal 的字面量换行错误并修正，查询现�
 新增 shutdown helper 与 **5/5** 定向单元测试，Luna `build:server`、scoped strict 通过；fresh PG18.6 完整迁移、正常受限角色及 loopback HTTPS 的真实 managed 子进程 SIGTERM drill **1/1** 通过。父进程观察平台 SSE 首帧后发 SIGTERM，客户端仍收到完整终帧，随后核一次 attempt/usage/settlement、钱包最小单位 **1000→988**、账本平衡、hold settled 和无 held provider lease，最后正常退出。runner sourceChanges=[]，临时集群停止并删除；未执行实际 provider 或性能请求。
 
 本次只证明已接受 HTTP/SSE 的 drain。Astra 第二眼发现另有 pending WS upgrade 鉴权未纳入关闭等待、CP/customer 原始异步 handler 未跟踪、最终资源关闭错误被吞及无界等待，已分配后续最小修复；WS 当前沿用立即 abort 语义，不能声称其有 30 秒续流保证。退款演练已推送 `d8f1472`；#142 最终为 shared 四项全过、isolated **59/60**，仅 PG18 结算 SIGKILL marker 断言失败，四个目录及两个商户门禁均已通过。
+
+### 29.26 结算 COMMIT 后 marker 丢失的确定性恢复证明
+
+`#142` 的 SIGKILL 首错来自观测竞态：child 先等待真实结算 COMMIT，再 append `settled` marker；两者之间被杀时，首次无 marker、恢复正确 `replayed`，旧测试却按文本要求恰一次 `settled`。现先执行全部真实 PG usage/settlement/账本/余额与平衡分录的精确一次检查，再严格验证原请求集合、run ID、sequence、首次合法 prefix 与恢复完整终态；不将日志缺失当作未提交，也不放宽数据库资金合同。
+
+新增仅用于 drill child 的 IPC barrier，在第 2 项真实 `complete()` 返回、写 marker 前通知父进程并保活，由父明确 SIGKILL；恢复 run 不启用 barrier。测试必须观察恰好一个提交后 marker 丢失窗口，第二项恢复必须 `replayed`，后续未执行项才可 `settled`。没有添加任意 sleep、伪造 marker 或修改生产结算。
+
+Luna 最新 scoped strict 与 fresh PG18.6 **1/1** 通过，实际输出 `1 committed before marker`，PG 精确一次与 replay 断言全部执行通过；runner sourceChanges=[]，临时集群停止并删除。此前随机窗口版本的 `0 committed before marker` 已由本次确定性结果取代。此证据限定为真实 PG 提交后应用确认丢失模拟，不冒充 PG 停机、网络 COMMIT ACK 丢失或独立故障域 WAL 恢复。SSE shutdown 修复已推送 `37b23f4`；完整新候选 CI 继续复验。
