@@ -748,7 +748,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | P01/P02a/P03 | 正式平台权益开通、独占资源 journal、最终激活事务、管理员接口与受限权限 | 开户工程实现、受限 PG18 和管理页本地浏览器通过；标准新客 builtin 全链待验 |
 | P04 | Chat↔Gemini、Responses↔Gemini 直接转换，注册及明确不支持字段 | 四个直接桥及定向验证完成；真实 CLI/builtin 工作流待验 |
 | P05 | Codex 终态用量完整性、WS 上下文续接、精确端点可信上界门禁与诊断 | 开发中；真实计量契约仍为外部阻塞 |
-| P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 开发中 |
+| P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 标准装配、精确角色隔离和 doctor 实现通过本地检查；实际商户/生产 KMS 待验 |
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
 | P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算的可解释观测 | 有界 trace/PG/HTTP 观测实现及定向通过；标准组合根接线分步提交，性能待验 |
@@ -820,4 +820,12 @@ loader/KMS 定向测试与当前服务端构建通过，真实受限 PG18 histor
 
 新增有界 ALS trace，记录真实 pool acquire/release、SQL、事务、上游 send/首字节/正常 EOF 的时间；按 span 区间并集计算 exclusive 时间，避免嵌套累计。未采样请求保持原 pool.query 路径，采样请求显式 acquire，并保留连接错误监听和 release 语义。取消或错误不标正常 EOF，结算 marker 仅在已确认 settled/replayed 时记录。
 
-trace、数据库包装、provider HTTP 和标准部署诊断定向测试已通过，服务端编译通过。标准组合根与 dispatch marker 接线随其依赖任务提交。诊断队列有界、采样默认关闭、固定数值投影不含 payload，不增加持久写等待；未执行新性能测量，原 30/10 ms、200 successful rps 及对照门槛保持开放。history loader 已推送 `39a0c9d`。
+trace、数据库包装、provider HTTP 和标准部署诊断定向测试已通过，服务端编译通过。标准组合根与 dispatch marker 接线随其依赖任务提交。诊断队列有界、采样默认关闭、固定数值投影不含 payload，不增加持久写等待；未执行新性能测量，原 30/10 ms、200 successful rps 及对照门槛保持开放。进一步源码审阅发现 `replayed` 也可能仍待金融对账，后续 marker 和 history 准入改为只接受明确 `settled`，不能从 `sent` 或 `replayed` 推断。history loader 已推送 `39a0c9d`。
+
+### 29.11 P06 标准支付与开户运行时装配
+
+标准启动加载 CP 专用支付配置、受控 basename 凭据引用和固定 Alipay 端点，注册并核对不可变商户 binding，装配同一队列服务、退款与管理员控制入口；配置文件不携带 mode/active authority。gateway/worker 不加载 CP 的支付 secret。正式开户只在 CP 供给服务、商业 attestation 信任文件和足够连接池均满足时挂载；信任文件只含受控 Ed25519 公钥与 suite 摘要，不能解锁 Codex 可信上界。
+
+history loader 的启动检查、TTL 维护及关闭已接入标准 gateway/combined，HTTP/WS 消费接线仍按 §29.9 独立推进。诊断配置默认关闭，启用后固定投影与队列异步输出。doctor 分别报告 schema/grants、配置/凭据、history KMS canary 和外部证据边界，不把文件存在当作真实支付或收费 GO。
+
+本轮发现环境对象全量枚举会触发无关 metadata Proxy 错误，改为固定 history 键读取；doctor 假 SQL 匹配过宽会吞掉角色探针，已精确修正。Luna doctor/部署/就绪/角色联合批次 **184/184**、服务端编译通过；新的 CI 两组严格测试源码编译亦通过。真实商户与生产 KMS 尚未配置验收。P09 诊断基础已推送 `37cdc64`。

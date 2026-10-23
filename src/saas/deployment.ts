@@ -9,6 +9,9 @@ import { isIP } from 'node:net';
 
 export const MODEL_ROUTER_DEPLOYMENT_MODE = 'MODEL_ROUTER_DEPLOYMENT_MODE' as const;
 export const MODEL_ROUTER_SAAS_WORKLOAD_ROLE = 'MODEL_ROUTER_SAAS_WORKLOAD_ROLE' as const;
+export const MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE = 'MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE' as const;
+export const MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY = 'MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY' as const;
+export const MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE = 'MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE' as const;
 export const MODEL_ROUTER_SAAS_DATABASE_URL = 'MODEL_ROUTER_SAAS_DATABASE_URL' as const;
 export const MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL = 'MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL' as const;
 export const MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL = 'MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL' as const;
@@ -85,6 +88,8 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
   mode: MODEL_ROUTER_DEPLOYMENT_MODE,
   saas: {
     workloadRole: MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
+    paymentsConfigFile: MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE,
+    commercialAttestationTrustFile: MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE,
     databaseUrl: MODEL_ROUTER_SAAS_DATABASE_URL,
     controlPlaneDatabaseUrl: MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
     gatewayDatabaseUrl: MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL,
@@ -223,6 +228,7 @@ export interface LocalDeploymentConfig {
 export interface ManagedSaasDeploymentConfig {
   readonly mode: 'managed-saas';
   readonly workloadRole: ManagedSaasWorkloadRole;
+  readonly paymentsConfigFile?: string;
   readonly postgresUrl: string;
   readonly redisUrl?: string;
   /**
@@ -737,6 +743,29 @@ function validateListenerRelationships(
 
 function parseManagedSaasDeployment(environment: DeploymentEnvironment): ManagedSaasDeploymentConfig {
   const workloadRole = resolveWorkloadRole(environment);
+  const historyMode = environment.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE;
+  // Read only this feature's declared settings. Enumerating the whole object
+  // invokes unrelated Proxy descriptor traps before their safe parsers run.
+  const historyConfigured = ['SAAS_RESPONSES_HISTORY_KMS_MODULE', ...['KMS_KEY_ID', 'KEYRING_FILE', 'TTL_MS', 'MAX_BYTES', 'AWS_REGION', 'AWS_CREDENTIALS_FILE', 'KMS_PREVIOUS_KEY_IDS'].map(suffix => `MODEL_ROUTER_SAAS_RESPONSES_HISTORY_${suffix}`)].some(key => environment[key] !== undefined);
+  if (historyMode !== undefined && !['disabled', 'production-kms', 'pilot-file-keyring'].includes(historyMode) || (historyMode !== undefined && historyMode !== 'disabled' || historyConfigured) && workloadRole !== 'gateway' && workloadRole !== 'combined') {
+    invalid('INVALID_PROVIDER_MODULE', 'Responses history configuration is invalid for this role.', 'MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE');
+  }
+  const commercialTrustFile = environment[MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE];
+  if (commercialTrustFile !== undefined && (workloadRole !== 'combined' && workloadRole !== 'control-plane' || commercialTrustFile.length < 1 || commercialTrustFile.length > 4096 || commercialTrustFile.trim() !== commercialTrustFile || /[\u0000-\u001f]/u.test(commercialTrustFile))) {
+    invalid('INVALID_PROVIDER_MODULE', 'Commercial attestation trust configuration is invalid for this role.', MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE);
+  }
+  const paymentsConfigFile = environment[MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE];
+  if (environment[MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY] !== undefined && workloadRole !== 'combined' && workloadRole !== 'control-plane') {
+    invalid('INVALID_PROVIDER_MODULE', 'Payment credentials are restricted to control-plane workloads.', MODEL_ROUTER_SAAS_PAYMENTS_CREDENTIALS_DIRECTORY);
+  }
+  if (paymentsConfigFile !== undefined) {
+    if (workloadRole !== 'combined' && workloadRole !== 'control-plane') {
+      invalid('INVALID_PROVIDER_MODULE', 'Payments configuration is restricted to control-plane workloads.', MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE);
+    }
+    if (paymentsConfigFile.length === 0 || paymentsConfigFile.length > 4096 || paymentsConfigFile.trim() !== paymentsConfigFile || /[\u0000-\u001f]/u.test(paymentsConfigFile)) {
+      invalid('INVALID_PROVIDER_MODULE', 'Payments configuration file path is invalid.', MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE);
+    }
+  }
   const postgresUrlName = postgresUrlEnvironmentName(workloadRole);
   const listenerNames = managedSaasListenerNames(workloadRole);
   const validationWorker = workloadRole === 'credential-validation-worker';
@@ -1090,6 +1119,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
   return deepFreeze({
     mode: 'managed-saas',
     workloadRole,
+    ...(paymentsConfigFile === undefined ? {} : { paymentsConfigFile }),
     postgresUrl,
     ...(redisUrl === undefined ? {} : { redisUrl }),
     ...(gatewayRedisUrl === undefined ? {} : { gatewayRedisUrl }),

@@ -13,6 +13,7 @@ import { SaasCatalogService } from '../saas/catalog/index.js';
 import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/console/http.js';
 import { SaasConsoleUsageQueryService } from '../saas/console/index.js';
 import { verifyCredentialValidationWorkerSchemaReadiness } from '../saas/db/credential-validation-worker-schema-readiness.js';
+import { resolveSaasDatabasePoolSettings } from '../saas/db/database.js';
 import {
   closeSaasDatabase,
   createSaasDatabase,
@@ -157,6 +158,8 @@ import {
 import { type PaymentRefundWorkerHandle, startPaymentRefundWorker } from '../saas/payments/refund-worker.js';
 import { PaymentRefundService } from '../saas/payments/refunds.js';
 import { PaymentFulfillmentService } from '../saas/payments/service.js';
+import { assertPaymentBindingsReady, registerPaymentBindings, type PaymentBindingResolver } from '../saas/payments/merchant-binding.js';
+import { loadPaymentDeployment, type LoadedPaymentDeployment } from '../saas/runtime/payment-deployment.js';
 import type {
   PaymentCheckoutOptions,
   PaymentCheckoutRedirectPolicy,
@@ -201,6 +204,14 @@ import {
   startPublicBrandSnapshotWorker,
 } from '../saas/platform/brand/store.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
+import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
+import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
+import { PlatformInferenceAccessProvisioningService } from '../saas/supply/platform-inference-access-provisioning.js';
+import { createBuiltinPlatformInferenceAccessAdmissionReadiness } from '../saas/supply/platform-inference-access-admission-readiness.js';
+import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
+import { loadResponsesContinuationDeployment, type LoadedResponsesContinuationDeployment } from '../saas/runtime/responses-continuation-deployment.js';
+import { createPaymentsControlHttpHandler } from '../saas/platform/payments-control-http.js';
+import { REQUEST_DIAGNOSTIC_PHASES, type RequestDiagnosticTrace } from '../saas/gateway/request-diagnostic-trace.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import {
   ClaudeOAuthBindingService,
@@ -474,11 +485,11 @@ export interface ManagedSaasRuntime {
 }
 
 export interface ManagedSaasPaymentsOptions {
-  readonly adapter: PaymentProviderAdapter;
+  readonly adapter: PaymentProviderAdapter | PaymentBindingResolver;
   /** Omitted keeps platform refund routes and reconciliation worker disabled. */
-  readonly refundAdapter?: PaymentProviderRefundAdapter;
-  readonly providerKey: string;
-  readonly merchantId: string;
+  readonly refundAdapter?: PaymentProviderRefundAdapter | PaymentBindingResolver;
+  readonly providerKey?: string;
+  readonly merchantId?: string;
   /** Explicit action policy; absent redirect policy means no redirect action is exposed. */
   readonly checkout?: PaymentCheckoutOptions;
   /** Compatibility alias for direct provider redirect policy configuration. */
@@ -1796,11 +1807,52 @@ function operatorTenantId(input: { readonly tenantId: string | null }): string {
  * separate from migrations: server startup may prove readiness but never
  * changes the database schema.
  */
+/** Deployment opt-in only. Samples are bounded and enqueued after handler completion. */
+export function createDeploymentRequestDiagnostics(environment: Readonly<Record<string, string | undefined>>, sink: (line: string, done: () => void) => void = (line, done) => {
+  if (process.stderr.writableLength > 65536) { done(); return; }
+  process.stderr.write(line, () => done());
+}) {
+  const setting = environment.MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY;
+  if (setting === undefined) return undefined;
+  if (!/^[1-9]\d{0,8}$/u.test(setting)) throw new TypeError('REQUEST_DIAGNOSTICS_CONFIG_INVALID');
+  const every = Number(setting);
+  let count = 0;
+  const queue: string[] = [];
+  let writing = false;
+  const drain = (): void => {
+    const next = queue.shift();
+    if (next === undefined) { writing = false; return; }
+    try { sink(next, () => { setImmediate(drain); }); }
+    catch { setImmediate(drain); }
+  };
+  const number = (value: number): number => Number.isFinite(value) && value >= 0 ? Math.min(value, 1e12) : 0;
+  return Object.freeze({
+    select: (_requestId: string): boolean => { count = (count + 1) % every; return count === 0; },
+    observe: (sample: { readonly requestId: string; readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']> }): void => {
+      if (queue.length >= 32) return;
+      const trace = sample.trace;
+      const markers = Object.fromEntries((['upstream-send', 'first-byte', 'eof', 'settled'] as const).filter(key => trace.markers[key] !== undefined).map(key => [key, number(trace.markers[key]!)]));
+      const phases = REQUEST_DIAGNOSTIC_PHASES.map(phase => { const value = trace.phases.find(item => item.phase === phase); return { phase, inclusiveMs: number(value?.inclusiveMs ?? 0), exclusiveMs: number(value?.exclusiveMs ?? 0) }; });
+      const line = JSON.stringify({ kind: 'request-diagnostic-v1', requestId: /^[A-Za-z0-9_.:-]{1,128}$/u.test(sample.requestId) ? sample.requestId : 'invalid', elapsedMs: number(trace.elapsedMs), observedExclusiveMs: number(trace.observedExclusiveMs), pendingSpans: number(trace.pendingSpans), droppedSpans: number(trace.droppedSpans), markers, phases });
+      if (line.length > 4096) return;
+      queue.push(`${line}\n`);
+      if (!writing) { writing = true; setImmediate(drain); }
+    },
+  });
+}
+
 export async function startManagedSaasServer(
   deployment: ManagedSaasDeploymentConfig,
   options: ManagedSaasStartOptions = {},
 ): Promise<ManagedSaasRuntime> {
   if (deployment.mode !== 'managed-saas') throw new TypeError('managed SaaS deployment configuration is required');
+  if (deployment.paymentsConfigFile && deployment.workloadRole !== 'combined' && deployment.workloadRole !== 'control-plane') {
+    throw new TypeError('PAYMENT_ROLE_FORBIDDEN');
+  }
+  const configuredHistoryMode = (options.environment ?? process.env).MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE ?? 'disabled';
+  if (configuredHistoryMode !== 'disabled' && deployment.workloadRole !== 'gateway' && deployment.workloadRole !== 'combined') {
+    throw new TypeError('RESPONSES_HISTORY_ROLE_FORBIDDEN');
+  }
   assertCustomerMfaDeploymentConfiguration(deployment, options.environment ?? process.env);
   assertCustomerPasskeyDeploymentConfiguration(deployment, options.environment ?? process.env);
   if (options.customerWebhooks?.enabled) {
@@ -1822,6 +1874,9 @@ export async function startManagedSaasServer(
   }
 
   const environment = options.environment ?? process.env;
+  const commercialTrust = await loadCommercialAttestationTrust(deployment, environment);
+  const effectiveControlPlanePoolMax = resolveSaasDatabasePoolSettings({}, environment).max;
+  const requestDiagnostics = createDeploymentRequestDiagnostics(environment);
   const httpInFlightRaw = environment.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT;
   let maxHttpInFlight: number | undefined;
   if (httpInFlightRaw !== undefined && httpInFlightRaw !== '') {
@@ -1960,6 +2015,10 @@ export async function startManagedSaasServer(
   let customerWebhookPruner: CustomerWebhookRetentionPrunerHandle | undefined;
   let announcementFanoutWorker: AnnouncementFanoutWorkerHandle | undefined;
   let refundWorker: PaymentRefundWorkerHandle | undefined;
+  let paymentDeployment: LoadedPaymentDeployment | undefined;
+  let responsesHistoryDeployment: LoadedResponsesContinuationDeployment | undefined;
+  let responsesHistoryExpiryTimer: ReturnType<typeof setInterval> | undefined;
+  let responsesHistoryExpiryRun: Promise<void> | undefined;
   const listeners = new Map<ListenerName, Server>();
   let closePromise: Promise<void> | undefined;
   let removeSignals: (() => void) | undefined;
@@ -1968,6 +2027,8 @@ export async function startManagedSaasServer(
     closePromise ??= (async () => {
       removeSignals?.();
       removeSignals = undefined;
+      if (responsesHistoryExpiryTimer) clearInterval(responsesHistoryExpiryTimer);
+      await responsesHistoryExpiryRun;
       await Promise.allSettled([
         ...(channelStatusWorker ? [channelStatusWorker.close()] : []),
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
@@ -1998,12 +2059,34 @@ export async function startManagedSaasServer(
       );
       // The gateway composition closes first; its Redis connection follows.
       if (gatewayRedis) await Promise.allSettled([gatewayRedis.close()]);
+      if (paymentDeployment) await Promise.allSettled([paymentDeployment.close()]);
+      if (responsesHistoryDeployment) await Promise.allSettled([responsesHistoryDeployment.close()]);
     })();
     await closePromise;
   };
 
   try {
     database = createDatabase({ connectionString: deployment.postgresUrl });
+    const historyMode = environment.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE ?? 'disabled';
+    if (!gatewayEnabled && historyMode !== 'disabled') throw new TypeError('RESPONSES_HISTORY_ROLE_FORBIDDEN');
+    if (gatewayEnabled) responsesHistoryDeployment = await loadResponsesContinuationDeployment({ database, env: environment });
+    if (responsesHistoryDeployment) {
+      const history = responsesHistoryDeployment;
+      responsesHistoryExpiryTimer = setInterval(() => {
+        if (responsesHistoryExpiryRun) return;
+        responsesHistoryExpiryRun = history.purgeExpired(100).then(() => {}, () => { console.error('model-router responses history expiry failed'); }).finally(() => { responsesHistoryExpiryRun = undefined; });
+      }, 60000);
+      responsesHistoryExpiryTimer.unref();
+    }
+    if (deployment.paymentsConfigFile) {
+      if (options.payments || options.paymentHandler) throw new TypeError('PAYMENT_CONFIG_CONFLICT');
+      paymentDeployment = await loadPaymentDeployment(deployment, { environment });
+      if (!paymentDeployment) throw new TypeError('PAYMENT_CONFIG_INVALID');
+      await registerPaymentBindings(database, paymentDeployment.resolver);
+      await assertPaymentBindingsReady(database, paymentDeployment.resolver);
+      options = { ...options, payments: { adapter: paymentDeployment.resolver, refundAdapter: paymentDeployment.resolver, walletTopUpPolicy: paymentDeployment.walletTopUpPolicy } };
+    }
+
     try {
       await pingDatabase(database);
     } catch {
@@ -2208,6 +2291,8 @@ export async function startManagedSaasServer(
       gateway = createManagedSaasGatewayProductionComposition(database, {
         riskControl: { emailSender: riskControlEmailSender },
         ...runtimeGatewayOptions,
+        ...(requestDiagnostics ? { requestDiagnostics } : {}),
+        ...(responsesHistoryDeployment ? { continuationHistoryResolver: responsesHistoryDeployment.resolver } : {}),
         ...(maxHttpInFlight === undefined ? {} : { maxHttpInFlight }),
         preparationObserver: observePreparation,
         dispatchObserver: observeDispatch,
@@ -2302,6 +2387,8 @@ export async function startManagedSaasServer(
       }
       gateway = createManagedSaasGatewayProductionComposition(database, {
         ...options.gateway,
+        ...(requestDiagnostics ? { requestDiagnostics } : {}),
+        ...(responsesHistoryDeployment ? { continuationHistoryResolver: responsesHistoryDeployment.resolver } : {}),
         ...(options.gateway.maxHttpInFlight === undefined && maxHttpInFlight !== undefined ? { maxHttpInFlight } : {}),
       });
     }
@@ -2675,8 +2762,8 @@ export async function startManagedSaasServer(
         // (FULFILLMENT_RETRYABLE) — never a silent discount skip.
         const billingGroupsService = new SaasBillingGroupsService(database);
         const paymentService = new PaymentFulfillmentService(database, options.payments.adapter, {
-          providerKey: options.payments.providerKey,
-          merchantId: options.payments.merchantId,
+          ...(options.payments.providerKey === undefined ? {} : { providerKey: options.payments.providerKey }),
+          ...(options.payments.merchantId === undefined ? {} : { merchantId: options.payments.merchantId }),
           checkout: options.payments.checkout,
           checkoutRedirectPolicies: options.payments.checkoutRedirectPolicies,
           submissionLeaseTtlMs: options.payments.submissionLeaseTtlMs,
@@ -2909,8 +2996,8 @@ export async function startManagedSaasServer(
       let platformRefundHandler: PlatformRefundHttpHandler | undefined;
       if (options.payments?.refundAdapter) {
         const refundService = new PaymentRefundService(database, options.payments.refundAdapter, {
-          providerKey: options.payments.providerKey,
-          merchantId: options.payments.merchantId,
+          ...(options.payments.providerKey === undefined ? {} : { providerKey: options.payments.providerKey }),
+          ...(options.payments.merchantId === undefined ? {} : { merchantId: options.payments.merchantId }),
           operations: createPlatformPaymentRefundOperations(),
           ...(webhookEventProducer ? { webhookEvents: webhookEventProducer } : {}),
         });
@@ -3019,6 +3106,13 @@ export async function startManagedSaasServer(
         audit: platformAuditService,
         pricing: platformPricingService,
         supply: providerSupplyService,
+        ...(providerSupplyService && commercialTrust && effectiveControlPlanePoolMax >= 2 ? { platformInferenceAccess: new PlatformInferenceAccessProvisioningService(database, {
+          supply: providerSupplyService,
+          routes: new SaasRouteConfigService(database),
+          commercial: new SaasCommercialMeteringPolicyService(database, commercialTrust),
+          admissionReadiness: createBuiltinPlatformInferenceAccessAdmissionReadiness(),
+          capacity: platformCapacityPolicyService,
+        }) } : {}),
         capacityPolicies: platformCapacityPolicyService,
         capacityPolicyTargets: platformCapacityPolicyTargets,
         governance: {
@@ -3276,6 +3370,7 @@ export async function startManagedSaasServer(
         observabilityHandler,
         alertSilencesHandler,
         [
+          ...(paymentDeployment ? [createPaymentsControlHttpHandler({ database, resolver: paymentDeployment.resolver, access: platformAccessService, authService: platformAuthService, publicOrigin: deploymentListener(deployment, 'platform').origin })] : []),
           createOperationsActionHttpHandler({
             access: platformAccessService,
             authService: platformAuthService,

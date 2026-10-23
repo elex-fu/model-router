@@ -94,6 +94,10 @@ import {
 } from '../saas/gateway/preparation-failure-observer.js';
 import type { PreparedEvidenceDispatchObserver } from '../saas/gateway/prepared-evidence-dispatch-observer.js';
 import {
+  RequestDiagnosticTrace,
+  withRequestDiagnosticTrace,
+} from '../saas/gateway/request-diagnostic-trace.js';
+import {
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
   type PreparedEvidenceTransport,
@@ -169,6 +173,7 @@ import { createNativeResponsesCompactRoutingTransport } from '../saas/gateway/re
 import { createResponsesWsServer } from '../saas/gateway/responses-ws-connection.js';
 import { ResponsesWsEngine } from '../saas/gateway/responses-ws-engine.js';
 import { createResponsesWsRoundExecutor, responsesWsProxyKey } from '../saas/gateway/responses-ws-executor.js';
+import type { PersistentResponsesContinuationResolver } from '../saas/gateway/responses-continuation-resolver.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
 import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
@@ -321,6 +326,12 @@ export interface SaasGatewayImageMediaOptions {
 }
 
 export interface ManagedSaasGatewayCompositionDependencies {
+  readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
+  /** Opt-in diagnostic sampling. Observer must enqueue without blocking or awaiting persistence. */
+  readonly requestDiagnostics?: {
+    readonly select: (requestId: string) => boolean;
+    readonly observe: (sample: { readonly requestId: string; readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']> }) => void;
+  };
   /**
    * Override the built-in per-connection Responses round executor. The
    * default refreshes authentication and runs preparation, admission,
@@ -718,6 +729,20 @@ export function createManagedSaasGatewayComposition(
 ): ManagedSaasGatewayComposition {
   validateCompositionDependencies(dependencies);
   const requestIdContext = new AsyncLocalStorage<string>();
+  const runWithDiagnostics = <T>(id: string, work: () => Promise<T>): Promise<T> => {
+    let selected = false;
+    try { selected = dependencies.requestDiagnostics?.select(id) === true; } catch { /* Diagnostic only. */ }
+    if (!selected) return work();
+    const trace = new RequestDiagnosticTrace();
+    return withRequestDiagnosticTrace(trace, async () => {
+      try { return await work(); }
+      finally {
+        // No await, queue flush, or persistent write in the request path.
+        try { dependencies.requestDiagnostics?.observe({ requestId: id, trace: trace.snapshot() }); }
+        catch { /* Diagnostic failure cannot change a financial outcome. */ }
+      }
+    });
+  };
   const configuredIdFactory = dependencies.preparationOptions.idFactory;
   const requestId = (): string => {
     try {
@@ -790,6 +815,7 @@ export function createManagedSaasGatewayComposition(
         executor:
           dependencies.responsesWsRoundExecutor ??
           createResponsesWsRoundExecutor({
+            ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
             request: upgradeRequest,
             authenticator: dependencies.authenticator,
             preparation,
@@ -800,13 +826,13 @@ export function createManagedSaasGatewayComposition(
             trustedProxyCidrs: dependencies.trustedProxyCidrs,
             contentModeration: dependencies.contentModeration,
             runWithRequestId: (roundRequestId, work) =>
-              requestIdContext.run(roundRequestId, async () => {
+              requestIdContext.run(roundRequestId, () => runWithDiagnostics(roundRequestId, async () => {
                 try {
                   return await work();
                 } finally {
                   await dependencies.capacityCompletion?.(roundRequestId).catch(() => {});
                 }
-              }),
+              })),
           }),
         send: () => {},
         close: () => {},
@@ -815,6 +841,7 @@ export function createManagedSaasGatewayComposition(
     ...(dependencies.responsesWsLimits ? { limits: dependencies.responsesWsLimits } : {}),
   });
   const httpHandler = createSaasGatewayHandler({
+    ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
     authenticator: dependencies.authenticator,
     preparation,
     dispatch,
@@ -879,7 +906,7 @@ export function createManagedSaasGatewayComposition(
     let pending: Promise<boolean>;
     try {
       pending = requestIdContext
-        .run(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId }))
+        .run(currentRequestId, () => runWithDiagnostics(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId })))
         .finally(async () => {
           await dependencies.capacityCompletion?.(currentRequestId).catch(() => {});
         });
@@ -946,6 +973,8 @@ export interface ManagedSaasProviderPayloadOptions {
 }
 
 export interface ManagedSaasGatewayProductionOptions {
+  readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
+  readonly requestDiagnostics?: ManagedSaasGatewayCompositionDependencies['requestDiagnostics'];
   readonly capacityCompletion?: (requestId: string) => Promise<void>;
   /** Optional process-local inference cap; unset disables early HTTP backpressure. */
   readonly maxHttpInFlight?: number;
@@ -2437,6 +2466,8 @@ export function createManagedSaasGatewayProductionComposition(
   });
 
   return createManagedSaasGatewayComposition({
+    ...(options.continuationHistoryResolver ? { continuationHistoryResolver: options.continuationHistoryResolver } : {}),
+    ...(options.requestDiagnostics ? { requestDiagnostics: options.requestDiagnostics } : {}),
     authenticator: new CachedKeyAuthenticator(keyService),
     ...(options.capacityCompletion ? { capacityCompletion: options.capacityCompletion } : {}),
     capabilityReadiness,
