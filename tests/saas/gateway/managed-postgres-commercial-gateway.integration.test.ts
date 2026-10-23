@@ -15,6 +15,7 @@ const shutdownDrill = process.env.MODEL_ROUTER_MANAGED_SIGTERM_DRILL === '1' && 
 let releaseShutdownTerminal: (() => void) | undefined;
 const shutdownTerminal = shutdownDrill ? new Promise<void>((resolve) => { releaseShutdownTerminal = resolve; }) : undefined;
 import { fetch as undiciFetch } from 'undici';
+import { proveAuthorizationRevocationHttp } from './authorization-revocation-http-postgres-fixture.js';
 import { diagnoseEarlyRecoveryHttp, observeOperatorRecoveryWorkflow, proveOperatorRecoveryHttp } from './operator-recovery-http-postgres-fixture.js';
 import { SaasBillingGroupsService } from '../../../src/saas/billing/groups/service.js';
 import { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
@@ -1025,6 +1026,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
   let upstream: HttpsServer | undefined;
   let controlPlaneRuntime: ManagedSaasRuntime | undefined;
   let gatewayRuntime: ManagedSaasRuntime | undefined;
+  let authorizationGatewayRuntime: ManagedSaasRuntime | undefined;
   let seedDatabase: ReturnType<typeof createSaasDatabase> | undefined;
   let controlPlaneProbe: ReturnType<typeof createSaasDatabase> | undefined;
   let gatewayProbe: ReturnType<typeof createSaasDatabase> | undefined;
@@ -2712,6 +2714,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
     assert.equal(gatewayDeployment.mode, 'managed-saas');
     if (gatewayDeployment.mode !== 'managed-saas') throw new Error('gateway deployment did not parse');
 
+    const authorizationContexts: Array<typeof tenantContext> = [];
     const createRuntimeDependencies = (
       database: ManagedSaasGatewayRuntimeModuleOptions['database'],
     ): ManagedSaasGatewayRuntimeDependencies => {
@@ -2727,7 +2730,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       const entitlementResolver: RequestPreparationEntitlementPort = {
         async resolve({ caller, publicModel: requestedModel, protocol }) {
           // Only explicitly provisioned, server-resolved fixture principals.
-          const callerContext = [tenantContext, ...registeredFinancialFaultScopes.map((scope) => scope.context)].find(
+          const callerContext = [tenantContext, ...registeredFinancialFaultScopes.map((scope) => scope.context), ...authorizationContexts].find(
             (context) =>
               caller.tenantId === context.tenantId &&
               caller.projectId === context.projectId &&
@@ -4631,6 +4634,30 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       16,
       'all eight variants in both modes must reach every financial assertion',
     );
+    const authorizationGatewayPort = await freeLocalPort(usedPorts);
+    const authorizationEnvironment = { ...gatewayEnvironment, ...listenerEnvironment('gateway', authorizationGatewayPort) };
+    const authorizationDeployment = parseDeploymentConfig(authorizationEnvironment);
+    assert.equal(authorizationDeployment.mode, 'managed-saas');
+    if (authorizationDeployment.mode !== 'managed-saas') throw new Error('authorization gateway deployment did not parse');
+    authorizationGatewayRuntime = await startManagedSaasServer(authorizationDeployment, {
+      environment: authorizationEnvironment, installSignalHandlers: false,
+      gatewayRuntimeModuleImporter: async () => ({ createManagedSaasGatewayRuntime: async (options: ManagedSaasGatewayRuntimeModuleOptions) => ({
+        dependencies: createRuntimeDependencies(options.database), checkReady: async () => {}, close: async () => {} }) }),
+      gatewayProviderCredentialKmsImporter: async () => ({ createGatewayProviderCredentialUnsealingKms: () => ({
+        decryptDataKey: async () => Uint8Array.from(DEK), checkReady: async () => {}, close: async () => {} }) }),
+    });
+    const authorizationDiagnostic = observePreparationFailures(authorizationGatewayRuntime,
+      diagnostic => t.diagnostic(`authorization_gateway_preparation ${JSON.stringify(diagnostic)}`), cleanup => t.after(cleanup), () => {});
+    await proveAuthorizationRevocationHttp({
+      control: operatorRecoveryDatabase, observation: observationDatabase, administratorId: administrator.id,
+      poolId: platformPoolId, deploymentId, environmentId, publicModel, endpoint: ENDPOINT,
+      customer: platformCustomerDefinition, provider: platformProviderDefinition,
+      verifierKeyId: contractKeyId, publicKey: contractKeyPair.publicKey, privateKey: contractKeyPair.privateKey, testVectorDigest,
+      registerContext: context => authorizationContexts.push(context), upstreamCalls: () => upstreamCallCount,
+      gateways: [{ origin: `http://127.0.0.1:${gatewayPort}`, failure: preparationDiagnostic },
+        { origin: `http://127.0.0.1:${authorizationGatewayPort}`, failure: authorizationDiagnostic }],
+      scenario: (name, work) => t.test(`authorization revocation: ${name}`, work),
+    });
   } catch (error) {
     dispatchCompletions.notePrimaryFailure();
     throw error;
@@ -4640,6 +4667,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
         try {
           const closeTasks: Promise<unknown>[] = [];
           if (gatewayRuntime) closeTasks.push(gatewayRuntime.close());
+          if (authorizationGatewayRuntime) closeTasks.push(authorizationGatewayRuntime.close());
           if (controlPlaneRuntime) closeTasks.push(controlPlaneRuntime.close());
           const faultCleanup = financialFaults.dispose().then(
             () => true,

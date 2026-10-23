@@ -1035,3 +1035,19 @@ U 保持一个原 unknown attempt、无 usage/settlement，provider lease releas
 原秒级软配额 bucket 已写回部分保持 `(1 request,8192 token)` 与 `(3 requests,24576 token)`，C 正常新增 bucket。此场景没有注入未刷写 mutation 丢失，`unflushedMutationLossTested=false / generalZeroLossClaim=false`；不能据此宣称普遍零 RPO、生产 HA、真实 Provider、KMS 或完整 R9 通过。cap unset、诊断采样关闭，performance/builtin/production-KMS acceptance 均 false。
 
 脱敏证据：`/private/tmp/model-router-p10-redis-recovery-20261024-run-01/redis-saas-recovery.json` 与 `summary.json`。cleanup 确认所有自有进程停止、PG 停止、私有 runtime 删除。人工 HTTP 闭环已推送 `62b98a5`；真实 PG immediate stop/start 是下一独立工程/演练任务，仍须自然等待生产 stale recovery 时间，不把本节 Redis 恢复替代 PG 故障证据。
+
+### 29.36 两实例暖缓存下的授权撤销闭环
+
+在既有 required commercial root 加入一个正常 P01 provision 的独立 platform scope、两把 Key、两个正常 managed gateway 和三个串行场景。保留默认 5 秒正向缓存，透明统计真实 `KeyService.authenticate` 调用并观察原 prelock 拒绝，不注入缓存、不改 TTL。此处证明旧缓存仍命中时由 PG 权威拒绝新准入，不证明主动清除缓存或新增 tenant/entitlement fence 竞态；已有 prelock 竞态门禁仍独立保留。
+
+首次 strict 发现 attestation 版本类型不符，按原 canonical 合同将其规范为字符串。首次真实 PG 在 P01 setup 返回 INVALID_INPUT：原 provider 定义展开 customer 定义夹带 `customerPriceVersion`，同时 P01 的 decimal 版本字段要求字符串。新 helper 改为显式合法 provider DTO，并将 route/customer/provider 版本规范为字符串，保留原商业 fixture 与生产 exact/decimal 校验。没有以放宽生产校验、手工 entitlement 或假 operation 绕过。
+
+Astra 实际差分复核通过。Luna exact scoped strict 通过，随后 fresh PG18.6 完整 commercial root **30/30、零失败/跳过**，正常完整迁移与三受限角色。三个场景结果：
+
+- Tenant suspend 后两个暖 gateway 均503 `REQUEST_BLOCKED / admission / storage_failure`，实际 prelock `SaasAdmissionAuthorizationError` 恰好两次；source authenticate 不增加。正常 resume 后两个实例重新成功结算。
+- Key A revoke 后状态 revoked、authz version 精确+1；两个暖实例同样在真实 prelock 拒绝，Key B 在两实例继续成功。
+- 原 P01 operation 正常 disable 后 phase=disabled、entitlement disabled/version精确+1，project policy仍 active；两个暖实例均403 `REQUEST_REJECTED / entitlement / entitlement_denied`，source authenticate不增加。
+
+每次拒绝的11张 tenant-scoped request/attempt/reservation/usage/settlement/ledger/wallet/lease/capacity/idempotency 全行快照与上游 dispatch 计数均不变；各正常 mutation 的不可变审计分别+1，P01 action 精确为 `platform_inference_access.disabled.risk_control`。503 为当前授权错误映射的实际观察，必须结合真实 prelock 拒绝原因，不能把任意503当作撤销通过。原 FIN、operator 与 SIGTERM early return 保留，子场景失败会原样抛首错并还原 observer，避免共享 tenant 级联失败。
+
+本轮证据目录 `/private/tmp/model-router-commercial-postgres-authrev-20261024-run-02`；runner 所有阶段 exit0、sourceChanges=[]，集群停止并删除。Redis 候选 `f14b6f5a593a72e2309014202433ff3e1bf8842c` 的 [CI #154](https://github.com/elex-fu/model-router/actions/runs/40034010137) 已 **68/68 success**，含64 isolated、shared PG15/18、四项进程故障和 browser E2E；该远程候选早于本节测试及后续连接池修复，最新 revision 继续单独验收。
