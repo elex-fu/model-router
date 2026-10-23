@@ -2,6 +2,14 @@ import { randomInt } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import {
+  CLAUDE_CREDENTIAL_TYPE,
+  CLAUDE_ENDPOINT,
+  CLAUDE_MESSAGES_ENDPOINT,
+  CLAUDE_PRODUCT_ID,
+  CLAUDE_PROTOCOL,
+  CLAUDE_PROVIDER_ID,
+} from '../gateway/claude/catalog-identity.js';
+import {
   MINIMAX_MODELS_URL,
   ZHIPU_CODING_MODELS_URL,
   ZHIPU_PAYG_MODELS_URL,
@@ -14,6 +22,14 @@ import {
   CODEX_PROVIDER_ID,
 } from '../gateway/codex/catalog-identity.js';
 import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
+import {
+  GEMINI_CLI_BASE_URL,
+  GEMINI_CREDENTIAL_TYPE,
+  GEMINI_ENDPOINT,
+  GEMINI_PRODUCT_ID,
+  GEMINI_PROTOCOL,
+  GEMINI_PROVIDER_ID,
+} from '../gateway/gemini/catalog-identity.js';
 import {
   GROK_CREDENTIAL_TYPE_OAUTH,
   GROK_ENDPOINT,
@@ -33,9 +49,13 @@ import {
 } from '../gateway/openrouter/catalog-identity.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
 import {
+  buildClaudeOAuthProbeRequest,
   buildCodexOAuthProbeRequest,
+  buildGeminiOAuthProbeRequest,
   buildGrokOAuthProbeRequest,
   challengeMatches,
+  firstAnthropicText,
+  firstGeminiText,
   firstResponsesText,
   oauthValidationChallengePrompt,
 } from './oauth-probe-builders.js';
@@ -57,8 +77,8 @@ export const KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
 /**
  * OAuth onboarding probes are real model dispatches, not metadata reads.
  * They keep the same bounded posture but need a longer deadline and a larger
- * envelope budget than metadata probes; the challenge must survive a
- * normal Responses envelope with usage accounting.
+ * envelope budget than metadata probes; the challenge must survive a normal
+ * Responses/Messages/Code Assist envelope with usage accounting.
  *
  * Keep this below the worker's 30s default lease TTL: the completion write
  * still has to land before another worker may reclaim an expired lease.
@@ -66,9 +86,23 @@ export const KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
 export const PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS = 20_000;
 export const PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
 
-export type CredentialValidationProbeKind = 'models' | 'key' | 'messages' | 'chat' | 'oauth-responses';
+export type CredentialValidationProbeKind =
+  | 'models'
+  | 'key'
+  | 'messages'
+  | 'chat'
+  | 'oauth-responses'
+  | 'oauth-anthropic'
+  | 'oauth-gemini';
 
-export type OAuthValidationProvider = 'codex' | 'grok';
+export type OAuthValidationProvider = 'codex' | 'grok' | 'claude' | 'gemini';
+
+/** The three OAuth onboarding probe kinds share builders, budgets and challenge semantics. */
+function isOAuthProbeKind(
+  kind: CredentialValidationProbeKind,
+): kind is Extract<CredentialValidationProbeKind, 'oauth-responses' | 'oauth-anthropic' | 'oauth-gemini'> {
+  return kind === 'oauth-responses' || kind === 'oauth-anthropic' || kind === 'oauth-gemini';
+}
 
 export type ProviderCredentialValidationErrorCode =
   | 'adapter_unsupported'
@@ -346,6 +380,40 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
     probe: 'oauth-responses',
     oauthProvider: 'grok',
   }),
+  Object.freeze({
+    // T02a OAuth onboarding for the Claude Code subscription. The supply
+    // sink is not mounted in the standard deployment yet — mounting remains
+    // the precondition — but the request/response surface is complete here
+    // so onboarding works the moment the sink lands. The probe dispatches
+    // the account probe's exact full-mimicry `/v1/messages?beta=true`
+    // request (oauth-probe-builders.ts reuses gateway/claude/** read-only);
+    // a bare bearer call would not prove the subscription's dispatch path.
+    providerId: CLAUDE_PROVIDER_ID,
+    productId: CLAUDE_PRODUCT_ID,
+    credentialType: CLAUDE_CREDENTIAL_TYPE,
+    capabilityEndpoint: CLAUDE_ENDPOINT,
+    capabilityProtocol: CLAUDE_PROTOCOL,
+    adapterId: 'anthropic-claude-oauth-probe-v1',
+    url: `${CLAUDE_MESSAGES_ENDPOINT}?beta=true`,
+    probe: 'oauth-anthropic',
+    oauthProvider: 'claude',
+  }),
+  Object.freeze({
+    // T02a OAuth onboarding for the Gemini CLI (Cloud Code Assist)
+    // subscription. Same posture as the Claude entry: the sink mounting is
+    // still the precondition; the probe dispatches the pinned CLI
+    // `v1internal:generateContent` request with the exact CLI user agent and
+    // `{model, project, request}` dispatch wrap.
+    providerId: GEMINI_PROVIDER_ID,
+    productId: GEMINI_PRODUCT_ID,
+    credentialType: GEMINI_CREDENTIAL_TYPE,
+    capabilityEndpoint: GEMINI_ENDPOINT,
+    capabilityProtocol: GEMINI_PROTOCOL,
+    adapterId: 'google-gemini-oauth-probe-v1',
+    url: `${GEMINI_CLI_BASE_URL}/v1internal:generateContent`,
+    probe: 'oauth-gemini',
+    oauthProvider: 'gemini',
+  }),
 ]);
 
 function failed(
@@ -358,7 +426,11 @@ function failed(
   return { state: 'failed', errorCode, retryable, adapterId, httpStatus, durationMs };
 }
 
-function canonicalAdapterUrl(value: string): URL | null {
+function canonicalAdapterUrl(value: string, options?: { readonly allowFixedQuery?: boolean }): URL | null {
+  // OAuth onboarding adapters may carry a protocol-owned fixed query (the
+  // Claude CLI's `?beta=true`); it is part of the frozen adapter constant,
+  // never caller input, so it is not a query-injection surface.
+  const allowFixedQuery = options?.allowFixedQuery === true;
   try {
     const url = new URL(value);
     if (
@@ -366,7 +438,7 @@ function canonicalAdapterUrl(value: string): URL | null {
       url.username !== '' ||
       url.password !== '' ||
       url.port !== '' ||
-      url.search !== '' ||
+      (!allowFixedQuery && url.search !== '') ||
       url.hash !== '' ||
       url.href !== value
     ) {
@@ -450,9 +522,9 @@ export function resolveFixedCredentialProbeEndpoint(input: {
       // This resolver backs the API-key account-probe path only. OAuth
       // categories have dedicated probe categories with their own secret
       // material and must never be sent through a bearer api-key probe.
-      candidate.probe !== 'oauth-responses',
+      !isOAuthProbeKind(candidate.probe),
   );
-  if (adapter === undefined || adapter.probe === 'oauth-responses') return null;
+  if (adapter === undefined || isOAuthProbeKind(adapter.probe)) return null;
   return { adapterId: adapter.adapterId, url: adapter.url, probe: adapter.probe };
 }
 
@@ -667,12 +739,52 @@ function validOAuthResponsesResponse(
   }
 }
 
+function validOAuthAnthropicResponse(
+  response: ProviderCredentialValidationResponse,
+  bytes: Uint8Array,
+  challenge: string,
+): boolean {
+  if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return false;
+  try {
+    const body: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return challengeMatches(challenge, firstAnthropicText(body)) === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+function validOAuthGeminiResponse(
+  response: ProviderCredentialValidationResponse,
+  bytes: Uint8Array,
+  challenge: string,
+): boolean {
+  if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return false;
+  try {
+    const body: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return challengeMatches(challenge, firstGeminiText(body)) === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+/** Dispatches the per-provider OAuth challenge parser; a probe without a challenge never verifies. */
+function validOAuthChallengeResponse(
+  probe: CredentialValidationProbe,
+  response: ProviderCredentialValidationResponse,
+  bytes: Uint8Array,
+): boolean {
+  if (probe.challenge === undefined) return false;
+  if (probe.kind === 'oauth-anthropic') return validOAuthAnthropicResponse(response, bytes, probe.challenge);
+  if (probe.kind === 'oauth-gemini') return validOAuthGeminiResponse(response, bytes, probe.challenge);
+  return validOAuthResponsesResponse(response, bytes, probe.challenge);
+}
+
 /** Protocol-owned allowlist; never merges job/operator/client supplied headers. */
 export function createCredentialValidationProbeRequest(
   probe: CredentialValidationProbe,
   secret: Buffer,
 ): CredentialValidationProbeRequest | null {
-  if (probe.kind === 'oauth-responses') {
+  if (isOAuthProbeKind(probe.kind)) {
     if (!probe.oauthProvider || !probe.challenge) return null;
     const material = parseOAuthSecret(secret);
     if (!material) return null;
@@ -692,8 +804,40 @@ export function createCredentialValidationProbeRequest(
       });
       return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
     }
-    const built = buildGrokOAuthProbeRequest({ accessToken, model: probe.model, challengePrompt });
-    return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
+    if (probe.oauthProvider === 'grok') {
+      const built = buildGrokOAuthProbeRequest({ accessToken, model: probe.model, challengePrompt });
+      return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
+    }
+    if (probe.oauthProvider === 'claude') {
+      const rawAccountUuid = material.account_uuid;
+      const accountUuid =
+        rawAccountUuid === undefined || rawAccountUuid === null ? null : oauthMaterialText(rawAccountUuid);
+      if (rawAccountUuid !== undefined && rawAccountUuid !== null && accountUuid === null) return null;
+      // The Claude builder runs the gateway's full OAuth body transform, which
+      // can reject malformed coordinates; any transform rejection is a format
+      // failure, never a request.
+      try {
+        const built = buildClaudeOAuthProbeRequest({
+          accessToken,
+          accountUuid,
+          model: probe.model,
+          challengePrompt,
+        });
+        return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
+      } catch {
+        return null;
+      }
+    }
+    const projectId = oauthMaterialText(material.project_id);
+    if (projectId === null) return null;
+    // Same fail-closed posture as the Claude branch: the Code Assist
+    // transform validates the project id and model id and throws on garbage.
+    try {
+      const built = buildGeminiOAuthProbeRequest({ accessToken, projectId, model: probe.model, challengePrompt });
+      return { method: built.method, headers: built.headers, body: built.body, redirect: 'manual' };
+    } catch {
+      return null;
+    }
   }
   const token = asciiCredential(secret);
   if (token === null) return null;
@@ -774,8 +918,7 @@ export async function readCredentialValidationProbeResponse(
           ? validMessageResponse(response, bodyResult.bytes, probe.custom)
           : probe.kind === 'chat'
             ? validChatResponse(response, bodyResult.bytes)
-            : probe.challenge !== undefined &&
-              validOAuthResponsesResponse(response, bodyResult.bytes, probe.challenge)))
+            : validOAuthChallengeResponse(probe, response, bodyResult.bytes)))
     ) {
       return failed('provider_response_invalid', false, probe.adapterId, response.status, completedDurationMs);
     }
@@ -807,9 +950,9 @@ export async function validateProviderCredential(
   const adapter = resolveAdapter(job);
   if (!adapter) return failed('adapter_unsupported', false, null, null, 0);
 
-  const url = canonicalAdapterUrl(adapter.url);
+  const url = canonicalAdapterUrl(adapter.url, { allowFixedQuery: isOAuthProbeKind(adapter.probe) });
   if (!url) return failed('adapter_unsupported', false, adapter.adapterId, null, 0);
-  const oauth = adapter.probe === 'oauth-responses';
+  const oauth = isOAuthProbeKind(adapter.probe);
   // Only protocol-owned fixed adapters select an expanded budget. Custom
   // targets retain the default bounds in their separately pinned transport.
   const limits =

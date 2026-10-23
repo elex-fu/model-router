@@ -13,20 +13,8 @@ import { BEDROCK_DEFAULT_REGION } from '../gateway/bedrock/constants.js';
 import { signBedrockRequest } from '../gateway/bedrock/sigv4.js';
 import { buildBedrockInvokeUrl, prepareBedrockRequestBody, resolveBedrockModel } from '../gateway/bedrock/transform.js';
 import { parseBedrockCredentialMaterial } from '../gateway/bedrock/transport.js';
-import { CLAUDE_MESSAGES_ENDPOINT } from '../gateway/claude/catalog-identity.js';
-import {
-  CLAUDE_ANTHROPIC_VERSION,
-  CLAUDE_CLIENT_IDENTITY_HEADERS,
-  CLAUDE_CODE_MIMICRY_BETA_HEADER,
-  CLAUDE_STAINLESS_HEADERS,
-} from '../gateway/claude/constants.js';
-import { buildClaudeUserAgent, resolveClaudeCliVersionFromEnv } from '../gateway/claude/identity.js';
-import { applyClaudeOAuthTransform } from '../gateway/claude/transform.js';
-import { claudeMetadataUserId } from '../gateway/claude/transport.js';
-import { GEMINI_CLI_BASE_URL } from '../gateway/gemini/catalog-identity.js';
-import { GEMINI_CLI_USER_AGENT } from '../gateway/gemini/constants.js';
+import { CLAUDE_ANTHROPIC_VERSION } from '../gateway/claude/constants.js';
 import { normalizeGeminiTierId } from '../gateway/gemini/identity.js';
-import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../gateway/opencode-go/catalog-identity.js';
 import { OPENCODE_GO_TEST_MODEL } from '../gateway/opencode-go/model-catalog.js';
 import { OPENROUTER_KEY_URL } from '../gateway/openrouter/catalog-identity.js';
@@ -46,9 +34,13 @@ import { type AccountOutboundFetch, withAccountOutbound } from './account-outbou
 import { resolveFixedCredentialProbeEndpoint } from './credential-validation-adapters.js';
 import type { EgressProxyOwnerKind } from './egress-proxy-lookup.js';
 import {
+  buildClaudeOAuthProbeRequest,
   buildCodexOAuthProbeRequest,
+  buildGeminiOAuthProbeRequest,
   buildGrokOAuthProbeRequest,
   challengeMatches,
+  firstAnthropicText,
+  firstGeminiText,
   firstResponsesText,
 } from './oauth-probe-builders.js';
 import { parseRetryAfterMs } from './opencode-go-usage-worker.js';
@@ -189,7 +181,6 @@ const DEFAULT_GEMINI_PROBE_MODEL = 'gemini-2.5-flash';
 const DEFAULT_GROK_PROBE_MODEL = 'grok-4.6';
 const DEFAULT_BEDROCK_PROBE_MODEL = 'us.anthropic.claude-haiku-4-5-v1:0';
 const DEFAULT_VERTEX_PROBE_MODEL = 'claude-haiku-4-5';
-const PROBE_PROXY_KEY_ID = 'probe';
 
 const ACCOUNT_TABLES = Object.freeze({
   tenant: 'saas_tenant_provider_accounts',
@@ -362,32 +353,11 @@ function usageTokens(body: unknown): AccountProbeUsage | null {
   return null;
 }
 
-function firstAnthropicText(body: unknown): string | null {
-  if (!isRecord(body) || !Array.isArray(body.content)) return null;
-  for (const block of body.content) {
-    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') return block.text;
-  }
-  return null;
-}
-
 function firstChatText(body: unknown): string | null {
   if (!isRecord(body) || !Array.isArray(body.choices) || !isRecord(body.choices[0])) return null;
   const message = body.choices[0].message;
   if (!isRecord(message) || typeof message.content !== 'string') return null;
   return message.content;
-}
-
-/** Gemini native text: candidates[0].content.parts[].text (unwrapped when wrapped). */
-function firstGeminiText(body: unknown): string | null {
-  if (!isRecord(body)) return null;
-  const inner = isRecord(body.response) ? (body.response as Record<string, unknown>) : body;
-  if (!isRecord(inner) || !Array.isArray(inner.candidates) || !isRecord(inner.candidates[0])) return null;
-  const content = (inner.candidates[0] as Record<string, unknown>).content;
-  if (!isRecord(content) || !Array.isArray(content.parts)) return null;
-  for (const part of content.parts) {
-    if (isRecord(part) && typeof part.text === 'string' && part.text.trim() !== '') return part.text;
-  }
-  return null;
 }
 
 function modelsListLooksValid(body: unknown): boolean {
@@ -651,33 +621,13 @@ export function createAccountProbeService(
     accessToken: string,
     accountUuid: string | null,
   ): BuiltProbeRequest {
-    const cliVersion = resolveClaudeCliVersionFromEnv();
-    const body = applyClaudeOAuthTransform(
-      {
-        model: claudeProbeModel,
-        max_tokens: 16,
-        stream: false,
-        messages: [{ role: 'user', content: request.challengePrompt }],
-      },
-      {
-        cliVersion,
-        metadataUserId: accountUuid === null ? null : claudeMetadataUserId(PROBE_PROXY_KEY_ID, accountUuid),
-      },
-    );
     return {
-      url: `${CLAUDE_MESSAGES_ENDPOINT}?beta=true`,
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        'anthropic-version': CLAUDE_ANTHROPIC_VERSION,
-        'anthropic-beta': CLAUDE_CODE_MIMICRY_BETA_HEADER,
-        'user-agent': buildClaudeUserAgent(cliVersion),
-        accept: 'application/json',
-        'content-type': 'application/json',
-        ...CLAUDE_STAINLESS_HEADERS,
-        ...CLAUDE_CLIENT_IDENTITY_HEADERS,
-      },
-      body: JSON.stringify(body),
+      ...buildClaudeOAuthProbeRequest({
+        accessToken,
+        accountUuid,
+        model: claudeProbeModel,
+        challengePrompt: request.challengePrompt,
+      }),
       responseKind: 'claude',
     };
   }
@@ -704,24 +654,13 @@ export function createAccountProbeService(
     projectId: string,
     _tierId: string | null,
   ): BuiltProbeRequest {
-    const { body } = applyGeminiCodeAssistTransform(
-      {
-        model: geminiProbeModel,
-        contents: [{ role: 'user', parts: [{ text: request.challengePrompt }] }],
-        generationConfig: { maxOutputTokens: 512 },
-      },
-      { projectId },
-    );
     return {
-      url: `${GEMINI_CLI_BASE_URL}/v1internal:generateContent`,
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        'content-type': 'application/json',
-        accept: 'application/json',
-        'user-agent': GEMINI_CLI_USER_AGENT,
-      },
-      body: JSON.stringify(body),
+      ...buildGeminiOAuthProbeRequest({
+        accessToken,
+        projectId,
+        model: geminiProbeModel,
+        challengePrompt: request.challengePrompt,
+      }),
       responseKind: 'gemini',
     };
   }

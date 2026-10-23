@@ -642,3 +642,14 @@ Sub2API 热路径参考：`backend/internal/service/scheduler_snapshot_service.g
 ## 23. T02b 核销：OAuth 探针的 egress proxy 接线已完成（2026-10-23 复核）
 
 §14 记录的限制"OAuth onboarding 探针与既有 API-key 固定适配器一样走 worker 的固定 fetch,不使用账号级 egress proxy"**已过时**:`2dd157f`(§16"quota 与出站"行,2026-10-22)把 worker 的全部探针派发包进 `withAccountOutbound`——固定适配器探针(含 OAuth onboarding)经 `outbound.fetch` 使用账号绑定 egress proxy(代理存在时建立 SOCKS5h 连接,失败拒绝直连回退),custom target 另经 `transport.prepare(..., outbound.proxy)`。测试覆盖:`credential-validation-worker.test.ts` 的"fixed Kimi validation uses its account proxy and refuses a direct fallback when the proxy fails",以及 `account-outbound.test.ts` 的真实 CONNECT 代理遍历/失败不回退/dispatcher 生命周期三用例。无需新代码。
+
+## 24. T02a 完成：Claude/Gemini OAuth onboarding 探针请求/响应面（2026-10-23）
+
+按 §14 "下一步" 与共用构造器文件头的明确要求补齐(Codex/Grok 模式的同款扩展,sink 挂载仍是 onboarding 前置,但探针面已就绪):
+
+1. **`oauth-probe-builders.ts`**:新增 `buildClaudeOAuthProbeRequest`(逐字节保持既有 `buildClaudeProbe` 行为:OAuth transform、metadata user_id、`?beta=true`、pinned CLI 身份头,`PROBE_PROXY_KEY_ID` 移入)与 `buildGeminiOAuthProbeRequest`(Code Assist transform、v1internal 端点、CLI UA);`firstAnthropicText`/`firstGeminiText` 移入共享。`account-probe-service` 改为复用(−95/+13),17 个既有探针用例原样通过。
+2. **`credential-validation-adapters.ts`**:`OAuthValidationProvider` 扩为四家;新增 `'oauth-anthropic'`/`'oauth-gemini'` 探针 kind 与两个冻结适配器(`anthropic-claude-oauth-probe-v1`、`google-gemini-oauth-probe-v1`,catalog 常量自各自 catalog-identity 导入);claude 材料 access_token 必需 + account_uuid 可选(存在即须可打印),gemini 材料 access_token + project_id 均必需;builder 调用包 try/catch(transform 对非法 model/project 抛出统一失败关闭为 `credential_format_invalid`);`validOAuthAnthropic/GeminiResponse` 挑战校验(六位数字严格匹配);三种 OAuth kind 统一 20s/64KiB 边界与 randomInt 挑战;API-key resolver 排除面扩至全部 OAuth kind。
+3. **两处必要偏离**(已复核):`canonicalAdapterUrl` 增加 `allowFixedQuery` 选项——Claude 固定端点的 `?beta=true` 是冻结协议常量非调用方输入,仅 OAuth kind 放开;既有用例"unmounted Claude/Gemini categories remain fail-closed"与本任务直接矛盾,以等价守卫用例(API-key resolver 排除面)替换。
+4. **测试**:+332 行,7 个新用例覆盖固定 URL/headers(含 claude metadata 派生与 gemini wrap)、挑战成功/错误/非数字/缺失、密封材料失败关闭(0 次请求)、401 分类、4KiB~64KiB 接受与超限拒绝、20s deadline、OAuth 适配器排除。
+
+**验证**:adapters 55/55、probe-service 17/17、worker 73/73、tsc 干净、四文件 Biome 零错误(2 个既有 useOptionalChain 告警保留)、deadcode 与基线一致。**边界**:无真实 Claude/Gemini OAuth 凭据,未做上游 smoke(与 §14 Codex/Grok 同款限制);sink 未挂载,标准部署尚不会产生这两个类别的验证任务;egress proxy 已随 worker 的 withAccountOutbound 生效(§23)。

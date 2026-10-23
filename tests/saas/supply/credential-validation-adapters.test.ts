@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { CLAUDE_CODE_MIMICRY_BETA_HEADER } from '../../../src/saas/gateway/claude/constants.js';
 import { buildCanonicalIdentity } from '../../../src/saas/gateway/codex/identity.js';
 import { grokCliIdentityHeaders } from '../../../src/saas/gateway/grok/constants.js';
 import {
@@ -13,6 +14,7 @@ import {
   PROVIDER_INFERENCE_VALIDATION_TIMEOUT_MS,
   PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES,
   PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS,
+  resolveFixedCredentialProbeEndpoint,
   validateProviderCredential,
 } from '../../../src/saas/supply/credential-validation-adapters.js';
 import type { ProviderCredentialValidationJobRecord } from '../../../src/saas/supply/types.js';
@@ -1205,39 +1207,305 @@ test('fixed probe deadlines follow metadata, inference, Kimi Code and OAuth budg
   }
 });
 
-test('unmounted Claude/Gemini OAuth categories remain fail-closed', async () => {
-  const candidates = [
-    job({
-      providerId: 'anthropic-claude',
-      productId: 'claude-subscription',
-      credentialType: 'oauth',
-      allowedModels: ['claude-sonnet-4-5'],
-      target: { model: 'claude-sonnet-4-5', endpoint: 'claude-messages', version: 1 },
-    }),
-    job({
-      providerId: 'google-gemini',
-      productId: 'gemini-subscription',
-      credentialType: 'oauth',
-      allowedModels: ['gemini-2.5-pro'],
-      target: { model: 'gemini-2.5-pro', endpoint: 'gemini-generate-content', version: 1 },
-    }),
-  ];
-  let calls = 0;
-  for (const candidate of candidates) {
-    assert.equal(isSupportedCredentialValidationTarget(candidate), false);
-    assert.equal(credentialValidationCapabilityProtocol(candidate), null);
-    const result = await validateProviderCredential(candidate, Buffer.from('{}'), async () => {
-      calls += 1;
-      return new Response(null, { status: 200 });
-    });
-    assert.deepEqual(result, {
-      state: 'failed',
-      errorCode: 'adapter_unsupported',
-      retryable: false,
-      adapterId: null,
-      httpStatus: null,
-      durationMs: 0,
+/* ------------------------------------------------------------------ */
+/* T02a: Claude/Gemini OAuth onboarding probes (request/response face) */
+/* ------------------------------------------------------------------ */
+
+const subscriptionOauthTargets = [
+  {
+    provider: 'claude',
+    providerId: 'anthropic-claude',
+    productId: 'claude-subscription',
+    model: 'claude-haiku-4-5',
+    endpoint: 'claude-messages',
+    url: 'https://api.anthropic.com/v1/messages?beta=true',
+    adapterId: 'anthropic-claude-oauth-probe-v1',
+    protocol: 'anthropic',
+  },
+  {
+    provider: 'gemini',
+    providerId: 'google-gemini',
+    productId: 'gemini-subscription',
+    model: 'gemini-2.5-flash',
+    endpoint: 'gemini-generate-content',
+    url: 'https://cloudcode-pa.googleapis.com/v1internal:generateContent',
+    adapterId: 'google-gemini-oauth-probe-v1',
+    protocol: 'gemini',
+  },
+] as const;
+
+function subscriptionOauthJob(
+  fixture: (typeof subscriptionOauthTargets)[number],
+): ProviderCredentialValidationJobRecord {
+  return job({
+    providerId: fixture.providerId,
+    productId: fixture.productId,
+    credentialType: 'oauth',
+    allowedModels: [fixture.model],
+    target: { model: fixture.model, endpoint: fixture.endpoint, version: 1 },
+  });
+}
+
+function subscriptionOauthSecret(provider: 'claude' | 'gemini'): Buffer {
+  const material =
+    provider === 'claude'
+      ? {
+          access_token: 'claude-access-token',
+          refresh_token: 'claude-refresh-token',
+          token_type: 'Bearer',
+          client_id: 'claude-client',
+          organization_uuid: 'org-uuid-1',
+          account_uuid: 'account-uuid-1',
+        }
+      : {
+          access_token: 'gemini-access-token',
+          refresh_token: 'gemini-refresh-token',
+          token_type: 'Bearer',
+          client_id: 'gemini-client',
+          project_id: 'project-1',
+        };
+  return Buffer.from(JSON.stringify(material));
+}
+
+function anthropicEnvelope(text: string): unknown {
+  return {
+    id: 'msg_local_test',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-haiku-4-5-20251001',
+    content: [{ type: 'text', text }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 1 },
+  };
+}
+
+function geminiEnvelope(text: string): unknown {
+  return {
+    candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
+    usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 2 },
+  };
+}
+
+function subscriptionChallengeFrom(provider: 'claude' | 'gemini', requestBody: string): string {
+  const body = JSON.parse(requestBody) as {
+    messages?: Array<{ content?: unknown }>;
+    request?: { contents?: Array<{ parts?: Array<{ text?: unknown }> }> };
+  };
+  const prompt = provider === 'claude' ? body.messages?.[0]?.content : body.request?.contents?.[0]?.parts?.[0]?.text;
+  if (typeof prompt !== 'string') throw new Error('expected a challenge prompt');
+  const match = /([0-9]{6})/.exec(prompt);
+  if (!match?.[1]) throw new Error('expected a six-digit challenge');
+  return match[1];
+}
+
+test('Claude and Gemini OAuth onboarding probes dispatch the canonical CLI request and verify the challenge', async (t) => {
+  for (const fixture of subscriptionOauthTargets) {
+    await t.test(fixture.provider, async () => {
+      const candidate = subscriptionOauthJob(fixture);
+      assert.equal(isSupportedCredentialValidationTarget(candidate), true);
+      assert.equal(credentialValidationCapabilityProtocol(candidate), fixture.protocol);
+      let calls = 0;
+      const result = await validateProviderCredential(
+        candidate,
+        subscriptionOauthSecret(fixture.provider),
+        async (url, init) => {
+          calls += 1;
+          assert.equal(url.href, fixture.url);
+          assert.equal(init.method, 'POST');
+          assert.equal(init.redirect, 'manual');
+          const headers = new Headers(init.headers);
+          assert.equal(headers.get('authorization'), `Bearer ${fixture.provider}-access-token`);
+          assert.equal(headers.get('accept'), 'application/json');
+          assert.equal(headers.get('content-type'), 'application/json');
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const challenge = subscriptionChallengeFrom(fixture.provider, String(init.body));
+          if (fixture.provider === 'claude') {
+            assert.match(String(headers.get('user-agent')), /^claude-cli\//, 'pinned Claude CLI user agent');
+            assert.equal(headers.get('anthropic-version'), '2023-06-01');
+            assert.equal(headers.get('anthropic-beta'), CLAUDE_CODE_MIMICRY_BETA_HEADER);
+            assert.equal(headers.get('x-stainless-lang'), 'js');
+            assert.equal(headers.get('x-app'), 'cli');
+            assert.equal(body.model, 'claude-haiku-4-5-20251001');
+            assert.equal(body.stream, false);
+            assert.ok(
+              Array.isArray(body.system) && body.system.length >= 2,
+              'the Claude Code system blocks are injected',
+            );
+            const metadata = body.metadata as Record<string, unknown> | undefined;
+            assert.equal(typeof metadata?.user_id, 'string', 'per-account metadata user id is derived');
+            assert.notEqual(metadata?.user_id, 'account-uuid-1');
+            return jsonResponse(anthropicEnvelope(challenge));
+          }
+          assert.equal(headers.get('user-agent'), 'GeminiCLI/0.1.5 (Windows; AMD64)', 'pinned Gemini CLI user agent');
+          assert.equal(body.model, 'gemini-2.5-flash');
+          assert.equal(body.project, 'project-1');
+          const inner = body.request as Record<string, unknown>;
+          assert.ok(Array.isArray(inner.contents), 'the v1internal {model, project, request} dispatch wrap');
+          return jsonResponse(geminiEnvelope(challenge));
+        },
+      );
+      assert.equal(calls, 1);
+      assert.deepEqual(result, {
+        state: 'verified',
+        adapterId: fixture.adapterId,
+        httpStatus: 200,
+        durationMs: result.durationMs,
+      });
+      assert.equal(JSON.stringify(result).includes('access-token'), false);
     });
   }
-  assert.equal(calls, 0);
+});
+
+test('Claude and Gemini OAuth probes verify only an exact numeric challenge answer', async () => {
+  for (const fixture of subscriptionOauthTargets) {
+    const candidate = subscriptionOauthJob(fixture);
+    const envelopes =
+      fixture.provider === 'claude'
+        ? ['000000', 'OK', ''].map((answer) => anthropicEnvelope(answer))
+        : ['000000', 'OK', ''].map((answer) => geminiEnvelope(answer));
+    envelopes.push(
+      // Missing text entirely: no content block / no candidate part to read.
+      fixture.provider === 'claude' ? { ...anthropicEnvelope('123456'), content: [] } : { candidates: [] },
+    );
+    for (const envelope of envelopes) {
+      const result = await validateProviderCredential(candidate, subscriptionOauthSecret(fixture.provider), async () =>
+        jsonResponse(envelope),
+      );
+      assert.equal(result.state, 'failed');
+      if (result.state !== 'failed') throw new Error('expected challenge failure');
+      assert.equal(result.errorCode, 'provider_response_invalid');
+      assert.equal(result.retryable, false);
+      assert.equal(result.adapterId, fixture.adapterId);
+    }
+  }
+});
+
+test('Claude and Gemini OAuth probes fail closed on malformed sealed material before transport', async () => {
+  const invalidSecrets = {
+    claude: [
+      Buffer.from('plain-token'),
+      Buffer.from('{'),
+      Buffer.from(JSON.stringify({ refresh_token: 'claude-refresh-token' })),
+      Buffer.from(JSON.stringify({ access_token: 'claude-access-token', account_uuid: 'bad id' })),
+    ],
+    gemini: [
+      Buffer.from('plain-token'),
+      Buffer.from('{'),
+      Buffer.from(JSON.stringify({ refresh_token: 'gemini-refresh-token' })),
+      Buffer.from(JSON.stringify({ access_token: 'gemini-access-token' })),
+    ],
+  } as const;
+  for (const fixture of subscriptionOauthTargets) {
+    let calls = 0;
+    for (const secret of invalidSecrets[fixture.provider]) {
+      const result = await validateProviderCredential(subscriptionOauthJob(fixture), secret, async () => {
+        calls += 1;
+        return jsonResponse(anthropicEnvelope('123456'));
+      });
+      assert.equal(result.state, 'failed');
+      if (result.state !== 'failed') throw new Error('expected format failure');
+      assert.equal(result.errorCode, 'credential_format_invalid');
+    }
+    assert.equal(calls, 0);
+  }
+});
+
+test('Claude and Gemini OAuth probes classify upstream rejection as credential rejection', async () => {
+  for (const fixture of subscriptionOauthTargets) {
+    const result = await validateProviderCredential(
+      subscriptionOauthJob(fixture),
+      subscriptionOauthSecret(fixture.provider),
+      async () => new Response(null, { status: 401 }),
+    );
+    assert.equal(result.state, 'failed');
+    if (result.state !== 'failed') throw new Error('expected rejection');
+    assert.equal(result.errorCode, 'credential_rejected');
+    assert.equal(result.retryable, false);
+    assert.equal(result.adapterId, fixture.adapterId);
+  }
+});
+
+test('Claude and Gemini OAuth probes keep the OAuth bounded budget and reject oversize bodies', async () => {
+  for (const fixture of subscriptionOauthTargets) {
+    const candidate = subscriptionOauthJob(fixture);
+    let paddedBytes = 0;
+    const accepted = await validateProviderCredential(
+      candidate,
+      subscriptionOauthSecret(fixture.provider),
+      async (_url, init) => {
+        const challenge = subscriptionChallengeFrom(fixture.provider, String(init.body));
+        const envelope = fixture.provider === 'claude' ? anthropicEnvelope(challenge) : geminiEnvelope(challenge);
+        const padded = JSON.stringify({
+          ...envelope,
+          padding: 'x'.repeat(PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES),
+        });
+        paddedBytes = Buffer.byteLength(padded);
+        return new Response(padded, { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    );
+    assert.ok(paddedBytes > PROVIDER_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES);
+    assert.ok(paddedBytes < PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES);
+    assert.equal(accepted.state, 'verified');
+
+    let oversizedCancelled = false;
+    const oversized = await validateProviderCredential(
+      candidate,
+      subscriptionOauthSecret(fixture.provider),
+      async () => {
+        const body = new ReadableStream<Uint8Array>({
+          cancel() {
+            oversizedCancelled = true;
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-length': String(PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES + 1) },
+        });
+      },
+    );
+    assert.equal(oversized.state, 'failed');
+    if (oversized.state !== 'failed') throw new Error('expected oversize failure');
+    assert.equal(oversized.errorCode, 'provider_response_too_large');
+    assert.equal(oversizedCancelled, true);
+  }
+});
+
+test('Claude and Gemini OAuth probes use the 20s OAuth deadline', async (t) => {
+  for (const fixture of subscriptionOauthTargets) {
+    await t.test(fixture.provider, async (t) => {
+      const deadline = new AbortController();
+      t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+        assert.equal(milliseconds, PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS);
+        return deadline.signal;
+      });
+      const result = await validateProviderCredential(
+        subscriptionOauthJob(fixture),
+        subscriptionOauthSecret(fixture.provider),
+        async () => {
+          deadline.abort();
+          throw deadline.signal.reason;
+        },
+      );
+      assert.equal(result.state, 'failed');
+      if (result.state !== 'failed') throw new Error('expected deadline failure');
+      assert.equal(result.errorCode, 'provider_timeout');
+      assert.equal(result.retryable, true);
+    });
+  }
+});
+
+test('Claude/Gemini OAuth adapters stay excluded from the API-key fixed probe resolver', () => {
+  for (const fixture of subscriptionOauthTargets) {
+    assert.equal(
+      resolveFixedCredentialProbeEndpoint({
+        providerId: fixture.providerId,
+        productId: fixture.productId,
+        credentialType: 'oauth',
+        capabilityEndpoint: fixture.endpoint,
+      }),
+      null,
+      'the API-key account-probe path must never dial an OAuth endpoint',
+    );
+  }
 });
