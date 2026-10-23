@@ -1118,3 +1118,11 @@ M1/M2/M3继续开放。下一处理顺序为：取得本地PG急停恢复的直�
 Astra给出最小设计、Sol仅改三个生产文件：新增无imports叶子`src/saas/runtime/builtin-payload-compiler-version.ts`，导出原有builtin版本；runtime编译参数与transport发送重验统一引用该常量。没有反向依赖runtime，不引入循环。通用compiler默认版本、cb1摘要算法、claimed DB/proof比较、profile精确scope/过期/撤销检查和空registry硬拒绝保持。
 
 Astra对实际三文件差分源码复核通过；未添加或运行测试、构建、类型检查、语法检查或服务，不借用701的旧CI作为新代码验证。此项按独立任务提交远程，后续代码需要新的验证证据；真实Codex计量/enforcement合同、HTTP/WS/compact/remote-history工作流与多实例KMS验收继续开放。此前PG演练的直接授权请求未获答复，仍不重试或绕过。
+
+### 29.43 Codex SSE 完整事件的 UTF-8 字节上限
+
+Astra从`CodexHttpTransport.send`的真实draining relay追到`ResponsesUsageWatcher`及prepared adapter的usage evidence消费，确认旧`feed`先消费并解析完整事件，再检查剩余buffer长度。单chunk内超过1MiB的完整terminal可使buffer清空，既绕过上限又形成complete evidence；JS string.length对多字节正文也不能表达字节上限。这是生产用量证据缺口，不依赖真实后端合同即可修复。
+
+Sol仅改`src/saas/gateway/codex/transport.ts`中的该class：每个完整block在`acceptBlock`/JSON解析前以`Buffer.byteLength(block,'utf8')`检查原1_048_576上限，超限置现有sticky invalid并跳过；未完整残余buffer也按UTF-8字节限长。分隔符不计正文、每事件恰好上限仍允许，同chunk多个合法小事件不因总量而拒绝。超限前后再出现合法terminal也不能恢复observed或complete，仍走既有incomplete-malformed证据。decoder、边界查找、终态重复规则、relay和native WS frame fence均未改。
+
+Astra只读实际差分复核通过；按用户既有要求未添加或运行测试、构建、类型检查、语法检查或服务。源码回归规格留待获准后执行：完整/跨chunk超大事件、多字节超限、合法终态前后sticky invalid、多小帧总量超限但各自合法，以及精确上限边界。本任务与§29.42编译器版本修复分commit交付；这些源码修复没有新运行证据，不能继承701/旧消费端测试绿色，M1/M2/M3仍开放。

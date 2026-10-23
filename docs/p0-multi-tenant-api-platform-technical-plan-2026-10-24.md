@@ -1,6 +1,6 @@
 # 可运营多租户模型 API 平台：P0 技术方案
 
-> 日期：2026-10-24。状态：实施中；完整CI基线为`701761eb1ea6adf318ada6665e8569d3c1f07d18`（含PG profile工程checkpoint `5448f32`），#159完整68/68成功，随后`3f9e1c7`仅更新文档。本轮另完成Codex编译器版本一致性源码窄修（进度§29.42），未运行新测试/构建，不能沿用基线CI证明该修复。完整本地PG恢复待直接人类授权，M1/M2/M3仍开放。
+> 日期：2026-10-24。状态：实施中；完整CI基线为`701761eb1ea6adf318ada6665e8569d3c1f07d18`（含PG profile工程checkpoint `5448f32`），#159完整68/68成功，随后`3f9e1c7`仅更新文档。本轮另完成Codex编译器版本一致性及SSE逐事件字节限长源码窄修（进度§29.42–43），未运行新测试/构建，不能沿用基线CI证明这些修复。完整本地PG恢复待直接人类授权，M1/M2/M3仍开放。
 > 初始设计基线：model-router `44b0eb7`；Codex C1–C4 基础 checkpoint `f61afec`，后续改动按独立任务继续交付；只读对标基线：CLIProxyAPI `911f49c`、Sub2API `a3eb7ef`、New API `6549a17`。
 > “拟新增”保留初始设计语境；当前实现与证据以各节明确状态及开发进度 §29 为准，源码交付不等同运营可用。
 > 状态区分已实现、定向验证、待验收、外部证据阻塞；工程候选701完整CI已取得，真实 A0/Kimi、PSP、Codex 后端与生产恢复证据仍未齐备。
@@ -169,6 +169,8 @@ provider adapter、OAuth、sink、refresh、WS、compact 已有接线，P0 补�
 | HTTP remote history / 重连 | HTTP实际消费端10/10、WS消费端24/24与服务端编译通过，统一identity/namespace；`72b7b97`已推送 | 真实后端、多实例/KMS及标准部署恢复验收 |
 
 C1：execution status 与 usage completeness 独立。`response.completed/incomplete/failed` 的终态 usage 都保留；缺失 input/output 不补成零，显式零仍可报告。重复冲突终态、坏帧、截断及超限不得形成 complete evidence。usage 不完整保留 unknown/reconciliation 路径。客户端协议 bridge 的结束状态与用量映射也覆盖 incomplete/failed；待针对测试与真实失败流验收。
+
+后续源码审计发现`ResponsesUsageWatcher.feed`只检查解析后的残余buffer，完整超大事件可在同一chunk内先被解析并清空，绕过1MiB上限。现每个完整事件在JSON解析前按UTF-8字节限长，残余片段使用相同字节上限；分隔符不计入正文，同chunk多个各自合法事件不按总量拒绝。超限保留sticky invalid，后续合法终态不能恢复complete usage。Astra实际差分复核通过；未添加或运行新测试/构建，实际运行验收仍开放，详见进度§29.43。
 
 C2：`previous_response_id` 不是普通可丢弃字段。WS 在编译、签名和预留前构造完整 canonical request，保存完整 `response.output`，包括 compact 普通输出与加密项；transform 对未解析 HTTP reference 显式拒绝。native WS 仅在服务端确认同一 socket generation 的已完成 ID 后签 remote-history 请求，并保留 canonical tools/instructions，仅发送本轮 input；否则使用已验证 canonical replay 或返回409。持久 namespace 只取显式 `conversation_id` header/body（均有时必须一致），不用 WS 随机 session ID；缺 namespace 可执行完整请求但不存，引用请求则409。配置 resolver 后每次引用均 durable lookup，不用本地明文 cache 绕过 TTL/删除；prepare 后完整 identity 不符先补偿再409。仅金融 `settlementOutcome==='settled'` 后保存；replayed 可能仍 reconciliation_pending，不作为保存凭据；写失败不撤销已发生计费。
 
@@ -353,7 +355,7 @@ operation 完成与 entitlement 激活约束必须防止 completed 但无有效�
 | P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | provider lease精确两列及CP/GW billing group最小权限已修；历史#141四目录失败保留；#149、#151各68/68成功；fresh PG18.6 commercial/operator27/27通过，fixture已推`62b98a5`；#153/`62b98a5`亦已68/68成功 | 已实现并分层验证；工程候选701完整CI通过 |
 | P03 | 管理员 supply API/UI、操作与状态查询 | P01/P02a | 新访问/收银browser4/4真实Chrome+local API，既有审计2/2；正式用户/供给的真实首请求仍按A0验收 | 已实现；本地浏览器通过；真实工作流待验 |
 | P04 | Gemini直接桥、旧Gemini↔Anth P1修复及compiler/窄错误 | P01 契约 | 全bridge56/56通过，`9b14151`已推送；真实CLI/builtin两轮工具/thinking/取消待验，不凭pair数放开供给 | 已实现并定向验证；真实工作流待验 |
-| P05 | Codex usage/continuation/history/native WS/profile/readiness | 精确后端计量/enforcement 契约 | 基础15/15、native相关29/29+本地TLS1/1、history真PG18 1/1、nativeP2后25/25；HTTP实际10/10+WS24/24+server编译通过，`72b7b97`已推送；后续builtin compiler version一致性窄修仅经源码复核、未新验证；registry仍空 | 消费入口工程已交付；后续源码修复验证、真实后端/多实例KMS验收开放 |
+| P05 | Codex usage/continuation/history/native WS/profile/readiness | 精确后端计量/enforcement 契约 | 基础15/15、native相关29/29+本地TLS1/1、history真PG18 1/1、nativeP2后25/25；HTTP实际10/10+WS24/24+server编译通过，`72b7b97`已推送；后续builtin compiler version一致性与C1逐事件字节限长窄修仅经源码复核、未新验证；registry仍空 | 消费入口工程已交付；后续源码修复验证、真实后端/多实例KMS验收开放 |
 | P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | 最终deployment/doctor/startup132/132；worker正式MAX_ATTEMPTS范围1..20、默认5，`a755301`已推送；真实支付凭据/merchant及运营验收待齐备 | 已实现并定向验证；真实PSP/生产证据开放 |
 | P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | 商户binding历史PG15/18均过，POST/promo重入7/7；producer列值窄修`687a3c9`已推，worker24/24+combined strict+最新PG27/27通过；#151/`69125a1`68/68成功，#153/`62b98a5`68/68成功；真实商户切换/回调/退款未验 | 已实现并定向/真PG验证；工程候选701 CI通过，真实PSP开放 |
 | P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build；新访问/收银browser4/4真实Chrome+local API及既有审计2/2通过；真实PSP待验 | 已实现；本地前端/浏览器通过；真实PSP开放 |

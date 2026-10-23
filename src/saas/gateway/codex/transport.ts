@@ -253,10 +253,14 @@ export class ResponsesUsageWatcher {
     for (let boundary = findEventBoundary(this.buffer); boundary !== null; boundary = findEventBoundary(this.buffer)) {
       const block = this.buffer.slice(0, boundary.index);
       this.buffer = this.buffer.slice(boundary.index + boundary.length);
+      if (Buffer.byteLength(block, 'utf8') > 1_048_576) {
+        this.invalid = true;
+        continue;
+      }
       this.acceptBlock(block);
     }
     // Bound the buffer so a malformed stream cannot grow it unbounded.
-    if (this.buffer.length > 1_048_576) { this.buffer = ''; this.invalid = true; }
+    if (Buffer.byteLength(this.buffer, 'utf8') > 1_048_576) { this.buffer = ''; this.invalid = true; }
   }
 
   private acceptBlock(block: string): void {
