@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { test } from 'node:test';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
@@ -123,6 +124,68 @@ function completeJournal(): Journal {
     ),
   };
 }
+
+test('R9 diagnostic tracing is explicit and forbidden in performance acceptance mode', () => {
+  const api = loadHelpers<{ requestDiagnosticsConfiguration(setting: string | undefined, options: Record<string, boolean>): { enabled: boolean; sampleEvery: number | null } }>(
+    supervisorFile, ['requestDiagnosticsConfiguration'],
+  );
+  assert.equal(api.requestDiagnosticsConfiguration(undefined, {}).enabled, false);
+  const diagnostic = { diagnostic: true, serialProfile: true, requestSamples: true };
+  assert.equal(api.requestDiagnosticsConfiguration('1', diagnostic).sampleEvery, 1);
+  for (const setting of ['', '0', 'off', ' 1', '1.2', '1000000000']) assert.throws(() => api.requestDiagnosticsConfiguration(setting, diagnostic));
+  for (const options of [{}, { diagnostic: true }, { diagnostic: true, serialProfile: true }] as Record<string, boolean>[]) {
+    assert.throws(() => api.requestDiagnosticsConfiguration('1', options), /acceptance runs must not enable tracing/);
+  }
+  const source = readFileSync(supervisorFile, 'utf8');
+  assert.match(source, /requestDiagnostics\.enabled \? \{ MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY: String\(requestDiagnostics\.sampleEvery\) \}/);
+  assert.ok(source.lastIndexOf('await closeOwned();') < source.lastIndexOf('manifest.requestDiagnostics.export = await exportRequestDiagnosticTraces('));
+});
+
+test('R9 trace export joins original 200 gateway samples and projects only fixed diagnostic fields', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'r9-traces-'));
+  try {
+    const observed = completeJournal();
+    const input = path.join(directory, 'samples.json');
+    const output = path.join(directory, 'traces.json');
+    await writeFile(input, JSON.stringify(observed));
+    const phases = ['pool-checkout', 'query', 'transaction', 'settle', 'upstream-send', 'upstream-body'];
+    const lines = [[], [], []] as string[][];
+    for (const entry of observed.samples.filter((entry) => entry.leg === 'gateway')) {
+      lines[entry.gatewayIndex!].push(JSON.stringify({ kind: 'request-diagnostic-v1', requestId: entry.requestId,
+        elapsedMs: 20, observedExclusiveMs: 10, pendingSpans: 0, droppedSpans: 0,
+        markers: { eof: 10, settled: 19, secret: 'never-export' },
+        phases: phases.map((phase) => ({ phase, inclusiveMs: 1, exclusiveMs: 1, payload: 'never-export' })),
+        payload: 'never-export' }));
+    }
+    lines[0].push(JSON.stringify({ ...JSON.parse(lines[0][0]), requestId: randomUUID() }));
+    for (let index = 0; index < 3; index++) await writeFile(path.join(directory, `gateway-${index + 1}.log`), `${lines[index].join('\n')}\n`);
+    const api = loadHelpers<{ exportRequestDiagnosticTraces(input: string, directory: string, output: string): Promise<{ observationOk: boolean; sampleCount: number; missingTraces: number; duplicateTraces: number }> }>(
+      supervisorFile, ['REQUEST_SAMPLE_UUID', 'projectRequestDiagnostic', 'validateRequestSampleJournal', 'exportRequestDiagnosticTraces'],
+      { readFile, writeFile, existsSync, createReadStream, createInterface, join: path.join },
+    );
+    const result = await api.exportRequestDiagnosticTraces(input, directory, output);
+    assert.equal(result.observationOk, true);
+    assert.equal(result.sampleCount, 200);
+    const bytes = await readFile(output, 'utf8');
+    assert.ok(!bytes.includes('never-export'));
+    assert.equal(statSync(output).mode & 0o777, 0o600);
+    const document = JSON.parse(bytes);
+    assert.equal(document.performanceAcceptance, false);
+    assert.equal(document.sinkLossCountersAvailable, false);
+    assert.equal(document.rows[0].requestId, observed.samples.find((sample) => sample.leg === 'gateway')!.requestId);
+    // Missing and duplicate logs must stay visible, never be called a complete trace.
+    lines[0].shift();
+    lines[1].push(lines[1][0]);
+    lines[2].push('{"kind":"request-diagnostic-v1","requestId":"secret-invalid"}');
+    for (let index = 0; index < 3; index++) await writeFile(path.join(directory, `gateway-${index + 1}.log`), `${lines[index].join('\n')}\n`);
+    const incomplete = await api.exportRequestDiagnosticTraces(input, directory, path.join(directory, 'incomplete.json'));
+    assert.equal(incomplete.observationOk, false);
+    assert.equal(incomplete.missingTraces, 1);
+    assert.equal(incomplete.duplicateTraces, 1);
+    assert.ok(!(await readFile(path.join(directory, 'incomplete.json'), 'utf8')).includes('secret-invalid'));
+    await assert.rejects(api.exportRequestDiagnosticTraces(input, directory, output));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 function benchHelpers(globals: Record<string, unknown>, extraNames: string[] = []): BenchApi {
   return loadHelpers<BenchApi>(benchFile, [...observerNames, ...extraNames], {
     requestSampleWriteAttempted: false,

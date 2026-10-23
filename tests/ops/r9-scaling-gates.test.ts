@@ -49,6 +49,11 @@ interface Scaling {
   throughputRps: number;
   statuses: Record<string, number>;
   latency: { n: number };
+  acceptedLatency?: { n: number; measurement: string };
+  successfulRps?: number;
+  rejected429?: number;
+  rejected429Ratio?: number;
+  successfulSampleSufficiency?: { minimum: number; observed: number; sufficient: boolean };
   ratio?: number | null;
   invalidComparisonReason?: string;
 }
@@ -83,6 +88,70 @@ const benchNames = [
   'violationsExit',
 ];
 const zeroBudget: Budget = { maxTransportErrors: 0, maxUnexpected5xx: 0 };
+
+test('cap profile requires frozen diagnostic runs and only unset versus eight', () => {
+  const api = helpers<{ validateCapProfile(options: Record<string, boolean>, cap: number | null): void }>(
+    supervisorFile, ['validateCapProfile'], { assert },
+  );
+  const options = { capProfile: true, diagnostic: true, noBuild: true, serialProfile: false, requestSamples: false };
+  api.validateCapProfile(options, null);
+  api.validateCapProfile(options, 8);
+  for (const cap of [0, 4, 16]) assert.throws(() => api.validateCapProfile(options, cap));
+  for (const changed of [{ diagnostic: false }, { noBuild: false }, { serialProfile: true }, { requestSamples: true }]) {
+    assert.throws(() => api.validateCapProfile({ ...options, ...changed }, 8));
+  }
+  api.validateCapProfile({}, 16);
+  const source = readFileSync(supervisorFile, 'utf8');
+  assert.match(source, /\['--scenario','concurrency','--inflight','200','--concurrency-seconds','60'\]/);
+});
+
+test('cap evidence separates accepted throughput and rejection without declaring a capacity answer', () => {
+  interface CapEvidence {
+    performanceAcceptance: boolean; configurationUnchanged: boolean; successfulRequests: number;
+    rejected429: number; rejected429Ratio: number; unexpected5xx: number; transportErrors: number;
+    successfulSampleSufficiency: { sufficient: boolean }; capacityRecommendation: null;
+  }
+  const api = helpers<{ capProfileEvidence(report: unknown): CapEvidence }>(supervisorFile, ['capProfileEvidence']);
+  const configuration = { inflight: 200, concurrencySeconds: 60, p99OverheadMs: 30, ttfbOverheadMs: 10, noFail: false };
+  const result = api.capProfileEvidence({ config: configuration, scenarios: { concurrency: {
+    statuses: { '200': 100, '429': 890, '502': 5 }, transportErrors: 5, throughputRps: 1.6,
+    latency: { n: 100 }, acceptedLatency: { n: 100 },
+  } } });
+  assert.equal(result.configurationUnchanged, true);
+  assert.equal(result.performanceAcceptance, false);
+  assert.equal(result.successfulRequests, 100);
+  assert.equal(result.rejected429Ratio, 0.89);
+  assert.equal(result.unexpected5xx, 5);
+  assert.equal(result.transportErrors, 5);
+  assert.equal(result.successfulSampleSufficiency.sufficient, true);
+  assert.equal(result.capacityRecommendation, null);
+  const rejected = api.capProfileEvidence({ config: configuration, scenarios: { concurrency: {
+    statuses: { '429': 1000 }, transportErrors: 0, throughputRps: 0,
+  } } });
+  assert.equal(rejected.successfulSampleSufficiency.sufficient, false);
+  assert.equal(rejected.successfulRequests, 0);
+  assert.equal(rejected.rejected429Ratio, 1);
+});
+
+test('cap resource sampling is bounded and makes the unobserved process IO boundary explicit', () => {
+  let tick: (() => void) | undefined;
+  let cleared = false;
+  const api = helpers<{ startCapProfileResources(): { stop(): { samples: unknown[]; droppedSamples: number; processCpuAndIoObserved: boolean } } }>(
+    supervisorFile, ['startCapProfileResources'], {
+      cpus: () => [{ times: { user: 1, nice: 0, sys: 1, idle: 10, irq: 0 } }],
+      loadavg: () => [1, 1, 1], freemem: () => 10, totalmem: () => 20,
+      setInterval(callback: () => void) { tick = callback; return { unref() {} }; },
+      clearInterval() { cleared = true; },
+    },
+  );
+  const sampler = api.startCapProfileResources();
+  for (let index = 0; index < 40; index++) tick!();
+  const result = sampler.stop();
+  assert.equal(cleared, true);
+  assert.equal(result.samples.length, 32);
+  assert.equal(result.droppedSamples, 10);
+  assert.equal(result.processCpuAndIoObserved, false);
+});
 function cleanReport(): Report {
   return {
     tool: 'bench-gateway',
@@ -213,6 +282,11 @@ test('concurrency retains the same transport/5xx gates and 429 policy', async ()
   assert.equal(report.scenarios.concurrency?.transportErrors, 2);
   assert.equal(report.scenarios.concurrency?.statuses['429'], 1);
   assert.equal(report.scenarios.concurrency?.latency.n, 1);
+  assert.equal(report.scenarios.concurrency?.acceptedLatency?.n, 1);
+  assert.equal(report.scenarios.concurrency?.acceptedLatency?.measurement, 'request-start-through-response-body');
+  assert.equal(report.scenarios.concurrency?.rejected429, 1);
+  assert.equal(report.scenarios.concurrency?.rejected429Ratio, 1 / 5);
+  assert.equal(report.scenarios.concurrency?.successfulSampleSufficiency?.sufficient, false);
   assert.deepEqual(
     report.violations.map((entry) => [entry.scenario, entry.metric, entry.value]),
     [

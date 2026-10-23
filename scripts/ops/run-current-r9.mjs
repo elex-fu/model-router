@@ -12,30 +12,40 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createConnection, createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { cpus, freemem, loadavg, tmpdir, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
-const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, noBuild: false, requestSamples: false };
+const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, noBuild: false, requestSamples: false };
 for (let index = 0; index < args.length; index += 1) {
   const argument = args[index];
   if (argument === '--diagnostic') options.diagnostic = true;
   else if (argument === '--serial-profile') options.serialProfile = true;
+  else if (argument === '--cap-profile') options.capProfile = true;
   else if (argument === '--request-samples') options.requestSamples = true;
   else if (argument === '--no-build') options.noBuild = true;
   else if (['--pg-bin', '--redis-bin', '--output-dir'].includes(argument) && args[index + 1]) {
     const key = { '--pg-bin': 'pgBin', '--redis-bin': 'redisBin', '--output-dir': 'outputDir' }[argument];
     options[key] = args[++index];
-  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples]]] [--no-build]');
+  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build]] [--no-build]');
 }
 assert.ok(!options.serialProfile || options.diagnostic, '--serial-profile requires --diagnostic');
 assert.ok(!options.requestSamples || (options.diagnostic && options.serialProfile), '--request-samples requires --diagnostic --serial-profile');
+function requestDiagnosticsConfiguration(setting, configuration) {
+  if (setting === undefined) return { enabled: false, sampleEvery: null };
+  assert.ok(/^[1-9]\d{0,8}$/.test(setting), 'MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY must be a positive integer with at most 9 digits');
+  assert.ok(configuration.diagnostic && configuration.serialProfile && configuration.requestSamples,
+    'Request diagnostics requires --diagnostic --serial-profile --request-samples; acceptance runs must not enable tracing');
+  return { enabled: true, sampleEvery: Number(setting) };
+}
+const requestDiagnostics = requestDiagnosticsConfiguration(process.env.MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY, options);
 const configuredPostgresPreparedStatements = process.env.MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS;
 const postgresPreparedStatements = configuredPostgresPreparedStatements === undefined ? 'off' : configuredPostgresPreparedStatements;
 assert.ok(postgresPreparedStatements === 'off' || postgresPreparedStatements === 'native', 'MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS must be exactly off or native');
@@ -45,6 +55,13 @@ assert.ok(configuredGatewayMaxHttpInFlight === undefined || configuredGatewayMax
   'MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT must be a positive safe integer');
 // null keeps the gateway default: unset/empty means HTTP ingress backpressure stays off.
 const gatewayMaxHttpInFlight = configuredGatewayMaxHttpInFlight !== undefined && configuredGatewayMaxHttpInFlight !== '' ? Number(configuredGatewayMaxHttpInFlight) : null;
+function validateCapProfile(configuration, cap) {
+  if (!configuration.capProfile) return;
+  assert.ok(configuration.diagnostic && configuration.noBuild && !configuration.serialProfile && !configuration.requestSamples,
+    '--cap-profile requires --diagnostic --no-build and excludes serial/request samples');
+  assert.ok(cap === null || cap === 8, '--cap-profile requires cap unset/empty or exactly 8');
+}
+validateCapProfile(options, gatewayMaxHttpInFlight);
 assert.ok(options.pgBin, 'Set --pg-bin to an installed PostgreSQL 16+ binary directory');
 const pgBin = resolve(options.pgBin);
 for (const executable of ['initdb', 'pg_ctl', 'psql', 'postgres']) assert.ok(existsSync(join(pgBin, executable)), `Missing PostgreSQL binary ${executable}`);
@@ -63,7 +80,10 @@ let interrupted = false;
 const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'current-dist-cli-mock-test-assembly',
   productionKmsVerified: false, builtinAcceptance: false, realProviderCalls: 0, diagnostic: options.diagnostic,
   serialProfile: options.serialProfile, warmupInflight: options.serialProfile ? 1 : 4,
+  capProfile: options.capProfile ? { diagnosticOnly: true, performanceAcceptance: false, cap: gatewayMaxHttpInFlight,
+    inflight: 200, requestedSeconds: 60, minimumSuccessfulSamples: 100, pairedComparisonRequired: true } : null,
   postgresPreparedStatements, gatewayMaxHttpInFlight,
+  requestDiagnostics: { ...requestDiagnostics, performanceAcceptance: false },
   mockProtocolPaths: 'native OpenAI and native Anthropic; cross-protocol acceptance is separate',
   buildRequested: !options.noBuild, nodeVersion: process.version, postgresDurability: { fsync: 'on', synchronousCommit: 'on' },
   stages: [], scenes: [], firstFault: null, cleanup: {}, sourceBefore: {}, sourceAfter: {}, distBefore: {}, distAfter: {}, ok: false };
@@ -71,6 +91,71 @@ const baseEnvironment = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR
   LC_ALL: 'C', LANG: 'C', NODE_ENV: 'test' };
 
 const REQUEST_SAMPLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function projectRequestDiagnostic(source) {
+  const phases = ['pool-checkout', 'query', 'transaction', 'settle', 'upstream-send', 'upstream-body'];
+  const number = (value) => Number.isFinite(value) && value >= 0 && value <= 1e12;
+  assert.ok(source?.kind === 'request-diagnostic-v1' && typeof source.requestId === 'string' && REQUEST_SAMPLE_UUID.test(source.requestId));
+  for (const key of ['elapsedMs', 'observedExclusiveMs', 'pendingSpans', 'droppedSpans']) assert.ok(number(source[key]));
+  assert.ok(Number.isSafeInteger(source.pendingSpans) && Number.isSafeInteger(source.droppedSpans));
+  assert.ok(source.markers && typeof source.markers === 'object' && !Array.isArray(source.markers));
+  const markers = {};
+  for (const key of ['upstream-send', 'first-byte', 'eof', 'settled']) {
+    if (source.markers[key] !== undefined) { assert.ok(number(source.markers[key])); markers[key] = source.markers[key]; }
+  }
+  assert.ok(Array.isArray(source.phases) && source.phases.length === phases.length);
+  const projectedPhases = phases.map((phase) => {
+    const matches = source.phases.filter((entry) => entry?.phase === phase);
+    assert.ok(matches.length === 1 && number(matches[0].inclusiveMs) && number(matches[0].exclusiveMs));
+    return { phase, inclusiveMs: matches[0].inclusiveMs, exclusiveMs: matches[0].exclusiveMs };
+  });
+  return { requestId: source.requestId.toLowerCase(), elapsedMs: source.elapsedMs, observedExclusiveMs: source.observedExclusiveMs,
+    pendingSpans: source.pendingSpans, droppedSpans: source.droppedSpans, markers, phases: projectedPhases };
+}
+
+async function exportRequestDiagnosticTraces(samplesFile, directory, artifactFile) {
+  const journal = JSON.parse(await readFile(samplesFile, 'utf8'));
+  const facts = validateRequestSampleJournal(journal);
+  const samples = journal.samples.filter((sample) => sample.leg === 'gateway');
+  const expected = new Map(samples.filter((sample) => sample.requestIdState === 'valid').map((sample) => [sample.requestId.toLowerCase(), sample.gatewayIndex]));
+  const traces = new Map();
+  const duplicates = new Set();
+  const counters = { malformedRecords: 0, unrelatedRecords: 0, wrongGatewayRecords: 0, missingLogs: 0 };
+  for (let gatewayIndex = 0; gatewayIndex < 3; gatewayIndex++) {
+    const file = join(directory, `gateway-${gatewayIndex + 1}.log`);
+    if (!existsSync(file)) { counters.missingLogs++; continue; }
+    const input = createReadStream(file, { encoding: 'utf8' });
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (!line.startsWith('{"kind":"request-diagnostic-v1"')) continue;
+        let trace;
+        try { assert.ok(line.length <= 4096); trace = projectRequestDiagnostic(JSON.parse(line)); }
+        catch { counters.malformedRecords++; continue; }
+        if (!expected.has(trace.requestId)) { counters.unrelatedRecords++; continue; }
+        if (expected.get(trace.requestId) !== gatewayIndex) { counters.wrongGatewayRecords++; continue; }
+        if (traces.has(trace.requestId)) { duplicates.add(trace.requestId); continue; }
+        traces.set(trace.requestId, trace);
+      }
+    } finally { lines.close(); input.destroy(); }
+  }
+  const rows = samples.map((sample) => {
+    const id = sample.requestId?.toLowerCase();
+    const trace = traces.get(id);
+    return { scenario: sample.scenario, index: sample.index, gatewayIndex: sample.gatewayIndex, requestId: sample.requestId,
+      status: sample.status, outcome: sample.outcome, includedInSummary: sample.includedInSummary,
+      traceState: duplicates.has(id) ? 'duplicate' : trace ? 'observed' : 'missing', trace: trace ?? null };
+  });
+  const missingTraces = rows.filter((row) => row.traceState === 'missing').length;
+  const incompleteTraces = rows.filter((row) => row.trace && (row.trace.pendingSpans > 0 || row.trace.droppedSpans > 0)).length;
+  const document = { schema: 1, diagnosticOnly: true, performanceAcceptance: false, sinkLossCountersAvailable: false,
+    // Sink backpressure drops are not reported by the existing logger; never call missing records zero loss.
+    missingReason: 'unsampled_or_sink_drop_or_incomplete_handler', cap: 200, sampleCount: rows.length,
+    missingTraces, duplicateTraces: duplicates.size, incompleteTraces, ...counters,
+    observationOk: facts.complete && facts.correlationComplete && rows.length === 200 && missingTraces === 0 && duplicates.size === 0 && incompleteTraces === 0 && counters.malformedRecords === 0 && counters.wrongGatewayRecords === 0 && counters.missingLogs === 0, rows };
+  await writeFile(artifactFile, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  return { file: artifactFile, observationOk: document.observationOk, sampleCount: rows.length, missingTraces,
+    duplicateTraces: duplicates.size, incompleteTraces, ...counters };
+}
 const REQUEST_STATES_SQL = `SELECT r.id::text AS request_id,
        r.execution_state, r.financial_status, r.reconciliation_state,
        r.created_at::text AS request_created_at,
@@ -289,6 +374,49 @@ function validObservedLoadCounters(report, requestedScenario) {
         !Number.isFinite(measured.throughputRps) || measured.throughputRps <= 0) return false;
   }
   return true;
+}
+
+function capProfileEvidence(report) {
+  const measured = report?.scenarios?.concurrency;
+  const statuses = measured?.statuses ?? {};
+  const successfulRequests = statuses['200'] ?? 0;
+  const rejected429 = statuses['429'] ?? 0;
+  const httpResponses = Object.values(statuses).reduce((sum, count) => sum + count, 0);
+  const transportErrors = measured?.transportErrors ?? null;
+  const attempts = httpResponses + (transportErrors ?? 0);
+  return { diagnosticOnly: true, performanceAcceptance: false,
+    configurationUnchanged: report?.config?.inflight === 200 && report?.config?.concurrencySeconds === 60 &&
+      report?.config?.p99OverheadMs === 30 && report?.config?.ttfbOverheadMs === 10 && report?.config?.noFail === false,
+    successfulRequests, successfulRps: measured?.throughputRps ?? null,
+    acceptedLatency: measured?.acceptedLatency ?? null, acceptedHeaderLatency: measured?.latency ?? null,
+    rejected429, rejected429Ratio: attempts > 0 ? rejected429 / attempts : null,
+    unexpected5xx: Object.entries(statuses).filter(([status]) => /^5\d\d$/.test(status)).reduce((sum, [, count]) => sum + count, 0),
+    transportErrors, statuses,
+    successfulSampleSufficiency: { minimum: 100, observed: successfulRequests, sufficient: successfulRequests >= 100 },
+    capacityRecommendation: null };
+}
+
+function startCapProfileResources() {
+  const samples = [];
+  let droppedSamples = 0;
+  const sample = () => {
+    if (samples.length >= 32) { droppedSamples++; return; }
+    const processors = cpus();
+    const cpuTimeMs = processors.reduce((sum, cpu) => {
+      for (const key of ['user', 'nice', 'sys', 'idle', 'irq']) sum[key] += cpu.times[key];
+      return sum;
+    }, { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 });
+    samples.push({ at: new Date().toISOString(), cpuCount: processors.length, cpuTimeMs,
+      loadAverage: loadavg(), freeMemoryBytes: freemem(), totalMemoryBytes: totalmem() });
+  };
+  sample();
+  const timer = setInterval(sample, 5000);
+  timer.unref();
+  return { stop() {
+    clearInterval(timer); sample();
+    return { scope: 'host-cumulative-cpu-load-memory', intervalMs: 5000, cap: 32, droppedSamples,
+      processCpuAndIoObserved: false, resourceContentionConclusion: null, samples };
+  } };
 }
 
 async function runFullR9Benchmarks(inventory, gatewayUrls, benchmark) {
@@ -592,6 +720,7 @@ try {
     const gateway = await launch(`gateway-${index + 1}`, process.execPath, [join(root, 'dist/cli/index.js'), 'start', '--role', 'gateway'], {
       ...kmsEnv, MODEL_ROUTER_DEPLOYMENT_MODE: 'managed-saas', MODEL_ROUTER_SAAS_WORKLOAD_ROLE: 'gateway',
       MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS: postgresPreparedStatements,
+      ...(requestDiagnostics.enabled ? { MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY: String(requestDiagnostics.sampleEvery) } : {}),
       ...(gatewayMaxHttpInFlight === null ? {} : { MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: configuredGatewayMaxHttpInFlight }),
       MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: roleUrl('model_router_saas_gateway'), MODEL_ROUTER_SAAS_GATEWAY_RUNTIME_MODULE: moduleFile,
       SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE: join(root, 'dist/saas/runtime/software-provider-credential-kms.js'),
@@ -629,6 +758,7 @@ try {
     const result = await run(name, process.execPath, [join(root, 'scripts/ops/bench-gateway.mjs'), '--protocol', route.protocol, '--model', route.publicModel,
       '--account-limit','64','--precision-accounts',route.accountIds.join(','),'--out',reportFile,...commandArgs,...observationArgs], { ...benchEnv, GATEWAY_URLS: urls.join(',') }, 45 * 60000);
     const report = existsSync(reportFile) ? JSON.parse(await readFile(reportFile, 'utf8')) : undefined;
+    if (options.capProfile) manifest.capProfile.result = capProfileEvidence(report);
     const validLatencySamples = !report?.scenarios.latency || (report.scenarios.latency.direct.n === report.config.requests && report.scenarios.latency.gateway.n === report.config.requests);
     const observedTraffic = (!report?.scenarios.precision || Object.values(report.scenarios.precision.perAccount).some((account) => account.requests > 0)) &&
       (!report?.scenarios.concurrency || Number(report.scenarios.concurrency.statuses['200'] ?? 0) > 0) &&
@@ -645,11 +775,16 @@ try {
       finiteOverheads: Number.isFinite(report?.scenarios.latency?.p99OverheadMs) && Number.isFinite(report?.scenarios.ttfb?.ttfbOverheadMs),
     } : undefined;
     const validSerialProfile = serialProfileChecks === undefined || Object.values(serialProfileChecks).every(Boolean);
-    const ok = result.code === 0 && Boolean(report) && report.violations.length === 0 && validLatencySamples && observedTraffic && validScalingComparison && validSerialProfile && validLoadCounters;
+    const validCapProfile = !options.capProfile || (manifest.capProfile.result.configurationUnchanged &&
+      manifest.capProfile.result.successfulSampleSufficiency.sufficient &&
+      manifest.capProfile.result.acceptedLatency?.n === manifest.capProfile.result.successfulRequests);
+    const ok = result.code === 0 && Boolean(report) && report.violations.length === 0 && validLatencySamples && observedTraffic && validScalingComparison && validSerialProfile && validLoadCounters && validCapProfile;
     manifest.scenes.push({ scene: name, ...result, report: reportFile, ok, validLatencySamples, observedTraffic, validScalingComparison,
+      ...(options.capProfile ? { validCapProfile } : {}),
       ...(report?.scenarios.scaling || report?.scenarios.concurrency ? { validObservedLoadCounters: validLoadCounters } : {}),
       ...(serialProfileChecks === undefined ? {} : { serialProfileChecks }), violations: report?.violations });
     if (!ok) firstFault(name, !validLatencySamples ? 'Legacy driver discarded unsuccessful latency samples; required sample count missing' :
+      !validCapProfile ? 'Cap diagnostic requires unchanged c200/60s, body-complete accepted latency and at least 100 successful samples' :
       !validSerialProfile ? 'Serial profile requires only latency/TTFB, 100 complete samples per leg, zero stream errors and unchanged thresholds' :
       !validLoadCounters ? 'Scaling/concurrency observed counters are invalid or exceed the chosen zero transport/5xx budgets' :
       !observedTraffic ? 'Benchmark did not observe successful dispatched traffic' :
@@ -657,7 +792,16 @@ try {
     return { reportFile, ok };
   }
   if (options.diagnostic) {
-    if (options.serialProfile) {
+    if (options.capProfile) {
+      const resources = startCapProfileResources();
+      try {
+        await benchmark(`cap-${gatewayMaxHttpInFlight ?? 'unset'}-current-3cli`, gatewayUrls,
+          ['--scenario','concurrency','--inflight','200','--concurrency-seconds','60'], seed.inventory[0]);
+      } finally {
+        manifest.capProfile.resources = resources.stop();
+        await writeFile(join(outputDir, 'cap-profile-resources.json'), `${JSON.stringify(manifest.capProfile.resources, null, 2)}\n`, { mode: 0o600 });
+      }
+    } else if (options.serialProfile) {
       await benchmark('serial-profile-current-3cli', gatewayUrls, ['--scenario','latency,ttfb','--requests','100','--stream-samples','100','--warmup-inflight','1'], seed.inventory[0]);
     } else {
       await benchmark('diagnostic-current-3cli', gatewayUrls, ['--scenario','latency,ttfb,concurrency','--requests','10','--stream-samples','10','--inflight','4','--concurrency-seconds','5'], seed.inventory[0]);
@@ -692,6 +836,14 @@ try {
     }
   }
   await closeOwned();
+  if (requestDiagnostics.enabled) {
+    try {
+      manifest.requestDiagnostics.export = await exportRequestDiagnosticTraces(requestSamplesFile, outputDir,
+        join(outputDir, 'serial-profile-request-traces.json'));
+    } catch {
+      manifest.requestDiagnostics.export = { observationOk: false, failure: 'request_traces_export' };
+    }
+  }
   manifest.sourceAfter = await hashTree(join(root, 'src'));
   manifest.distAfter = await hashTree(join(root, 'dist'));
   manifest.harnessAfter = await hashHarness();

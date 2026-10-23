@@ -751,7 +751,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 标准装配、精确角色隔离和 doctor 实现通过本地检查；实际商户/生产 KMS 待验 |
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
 | P08 | 本地 QR、订单查询与超时恢复、钱包/套餐收银交互 | 前端实现及定向验证完成，真实 PSP 闭环待验 |
-| P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算的可解释观测 | 有界 trace/PG/HTTP 观测实现及定向通过；标准组合根接线分步提交，性能待验 |
+| P09 | 同请求连接池等待、SQL/事务、首字节/EOF/结算观测，serial/cap 诊断入口 | 工程实现及定向通过；实际性能诊断与原 R9 验收待执行 |
 | P10/P11/P12 | 故障不变量、标准 Redis 持久配置、同步金融恢复与分级验收记录 | P11 基础配置及静态解析完成；实际环境验收与新增 CI 门禁验证中 |
 
 本轮定位补充：Codex 缺失 input/output 用量不能补零作为完整证据，incomplete/failed 终态用量需保留；WS 的 previous_response_id 不能只影响调度后被 HTTP payload 静默丢弃。新项目默认 inference policy 为 suspended，正式开户最终事务还必须原子激活项目策略并保留已配置容量，不能仅激活 entitlement。以上已进入实现范围，当前尚未据此声称测试或真实调用通过。
@@ -881,3 +881,11 @@ Luna 部署单文件 **31/31**、服务端编译通过，此前同批 doctor/sta
 Astra 审阅后修复新 suite 名含连字符导致非法库名、观察尝试次数不能限制发送、强制中断可能遗留进程与临时签名材料三项问题。新 suite 使用独立 owned process group、幂等信号清理和 runner 兜底删除专用 runtime 目录；验证 worker 每 job 最多一次尝试，业务请求不自动重发。PG durability 开启，source/dist 前后 provenance 保留。
 
 Luna 严格 helper/test 编译、runner 语法检查通过，无 live 授权拒绝和真实本地子进程/材料清理测试 **2/2**；另用实际 detached node test group 验证 SIGTERM 到达 worker。尚未执行真实请求：当前进程缺少 Kimi Code 凭据，本地配置的环境引用亦未加载，已请求现有环境文件路径/部署引用。所需 secret 只在进程环境注入，不进 argv、日志或 Git，A0/M1 保持待验。worker 上限已推送 `a755301`；最终 P06 联合批次 **132/132** 与 server build 通过。
+
+### 29.19 P09 R9 诊断与 cap 对照入口
+
+Astra 发现标准 CLI 虽已有 trace sink，R9 子进程白名单却丢弃采样配置；原 request-samples 只有客户端 UUID 和结束后 PG 查询，不能当作分阶段证据。现显式校验/透传诊断采样，只在 diagnostic serial/request-samples 模式启用；结束后读取已关闭的 gateway 日志，按原 200 个 gateway measured UUID 与实例关联。缺失、重复、pending、span 丢弃和坏记录均保留，sink 未提供的丢弃计数标 unknown，不拿预热补数。
+
+另补 `--diagnostic --cap-profile --no-build`，固定 c=200/60 秒，cap unset/empty 和 8 分别独立运行；输出 HTTP 200 完成延迟/成功吞吐、429 比例、错误、至少 100 成功样本的充分性及有界 host 资源采样。两臂仍须核相同 source/dist/harness 与资源，未自动选择容量；未观测的进程 CPU/IO 明示缺失。原四腿 30/10ms、完整 R9 的扩展比与 SSE 等门槛保持不变，诊断不冒充完整 acceptance。
+
+Luna R9 定向 **32/32**、两个 runner 语法检查通过，未执行真实负载。实际诊断按方案等待 A0 首请求及候选冻结后进行，性能 gate 仍开放；没有据入口完成宣布优化收益。A0 验收脚本已推送 `7b978f6`。

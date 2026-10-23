@@ -849,6 +849,7 @@ async function scenarioConcurrency() {
   const perUrl = env.gatewayUrls.map((u) => ({ url: u, requests: 0 }));
   const statuses = {};
   const latencies = [];
+  const acceptedCompletionLatencies = [];
   let transportErrors = 0;
   const errors = {};
   const t0 = performance.now();
@@ -857,11 +858,15 @@ async function scenarioConcurrency() {
     const idx = rrCounter.i++ % env.gatewayUrls.length;
     perUrl[idx].requests += 1;
     const url = env.gatewayUrls[idx];
+    const requestStarted = performance.now();
     try {
       const { response, elapsedMs } = await gatewayRequest(false, url);
       await response.text();
       statusBump(statuses, response.status);
-      if (response.status === 200) latencies.push(elapsedMs);
+      if (response.status === 200) {
+        latencies.push(elapsedMs);
+        acceptedCompletionLatencies.push(performance.now() - requestStarted);
+      }
     } catch (error) {
       transportErrors += 1;
       const key = String(error.cause?.code ?? error.name).slice(0, 40);
@@ -884,6 +889,12 @@ async function scenarioConcurrency() {
     errors,
     perUrl,
     latency: summary,
+    acceptedLatency: { measurement: 'request-start-through-response-body', ...latencySummary(acceptedCompletionLatencies) },
+    successfulRequests: loadCounts.successfulRequests,
+    successfulRps: Number(rps.toFixed(2)),
+    rejected429: statuses['429'] ?? 0,
+    rejected429Ratio: (statuses['429'] ?? 0) / Math.max(1, Object.values(statuses).reduce((sum, count) => sum + count, 0) + transportErrors),
+    successfulSampleSufficiency: { minimum: 100, observed: latencies.length, sufficient: latencies.length >= 100 },
     throughputRps: Number(rps.toFixed(2)),
   };
   applyLoadErrorBudgets('concurrency', loadCounts);
