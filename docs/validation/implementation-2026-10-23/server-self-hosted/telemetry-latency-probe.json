@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-23T04:16:19.851Z",
+  "kind": "isolated-production-recorder-probe",
+  "writes": [
+    {
+      "stage": "received",
+      "awaitMs": 253.09587
+    },
+    {
+      "stage": "admitted",
+      "awaitMs": 251.54631799999999
+    },
+    {
+      "stage": "attempt-started",
+      "awaitMs": 251.44410500000004
+    }
+  ],
+  "totalMs": 756.346613,
+  "note": "Same deployed TelemetryWriteClient and three awaited pre-dispatch writes; separate temporary SQLite DB, no production records or settings changed."
+}

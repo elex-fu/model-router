@@ -1,0 +1,49 @@
+{
+  "fullRegression": {
+    "unit": {
+      "tests": 6880,
+      "pass": 6857,
+      "fail": 0,
+      "skipped": 23
+    },
+    "integration": {
+      "tests": 356,
+      "pass": 255,
+      "fail": 0,
+      "skipped": 101
+    },
+    "note": "Full run preceded the final Redis process-identity recovery fence; final affected behavior was then revalidated below."
+  },
+  "finalFocused": {
+    "tests": 76,
+    "pass": 76,
+    "fail": 0,
+    "skipped": 0
+  },
+  "realRedis": {
+    "tests": 8,
+    "pass": 8,
+    "fail": 0,
+    "skipped": 0,
+    "scenarios": [
+      "two instances share a budget; asynchronous SQL",
+      "DB outage and lost commit acknowledgement",
+      "bounded backlog; warmed admission while DB writer waits",
+      "Redis key loss and generation fence",
+      "Redis process restart from older disk snapshot",
+      "different durable store identity rejected",
+      "legacy interrupted usage recovery independent of logs",
+      "SaaS multi-scope capacity and cancellation after SQL commit"
+    ]
+  },
+  "buildServer": {
+    "exitCode": 0
+  },
+  "privilegesGeneratedCheck": {
+    "exitCode": 0
+  },
+  "boundaries": [
+    "Opt-in/live/external-resource tests skipped by the normal suite are not acceptance passes.",
+    "Local tests use owned Redis and SQLite/PG dependencies; public provider and production KMS acceptance is separate."
+  ]
+}

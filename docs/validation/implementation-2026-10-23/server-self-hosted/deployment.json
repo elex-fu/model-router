@@ -1,0 +1,56 @@
+{
+  "at": "2026-10-23T04:17:05.952Z",
+  "deployment": "self-hosted",
+  "supervisor": "systemd",
+  "applicationDirectory": "/opt/model-router",
+  "runtimeConfig": "/var/lib/model-router/current/config.json",
+  "previousConfigPreserved": "/etc/model-router/config.json",
+  "backupDirectory": "/opt/model-router/operations",
+  "source": {
+    "commit": "ab293e01ddc56d6eb5caf6c0130f925a04bd18c0",
+    "branch": "main",
+    "includesWorkingTreeEdits": true,
+    "builtLocally": true,
+    "verifiedFiles": 4969,
+    "manifestSha256": "322926c8bda71ef9187f3c44898157b23613d97a37a2712e22ad5706283fea2a",
+    "archiveSha256": "3975fee2b79ef4785aee4dc08ab2e1a1d2b3ad44584607da1f736077fb6fd8d6"
+  },
+  "runtime": {
+    "node": "v22.22.0",
+    "cpus": 1,
+    "totalMemoryMiB": 1817,
+    "availableMemoryMiB": 1311,
+    "availableDiskGiB": 11.302433013916016,
+    "load": [
+      0.05,
+      0.17,
+      0.33
+    ]
+  },
+  "services": {
+    "router": {
+      "MainPID": "2972644",
+      "NRestarts": "0",
+      "MemoryCurrent": "88584192",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled"
+    },
+    "nginx": {
+      "MainPID": "2972982",
+      "NRestarts": "0",
+      "MemoryCurrent": "2387968",
+      "ActiveState": "active",
+      "SubState": "running",
+      "UnitFileState": "enabled"
+    }
+  },
+  "cleanup": {
+    "pipCacheRemovedGiB": 3,
+    "archivedJournalRemovedGiB": 3.7,
+    "journalRetentionDays": 14,
+    "rootFreeBeforeHuman": "4.6G",
+    "rootFreeAfterHuman": "12G",
+    "applicationDataPreserved": true
+  }
+}

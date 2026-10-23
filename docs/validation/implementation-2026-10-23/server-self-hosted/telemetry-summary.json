@@ -1,0 +1,36 @@
+{
+  "at": "2026-10-23T04:13:39.520Z",
+  "states": [
+    {
+      "state": "completed",
+      "status": 200,
+      "count": 37
+    },
+    {
+      "state": "rejected",
+      "status": 401,
+      "count": 1
+    }
+  ],
+  "attempts": [
+    {
+      "outcome": "completed",
+      "status": 200,
+      "count": 37
+    }
+  ],
+  "timing": {
+    "samples": 37,
+    "avgRequestToAttemptRecordMs": 478.27,
+    "minRequestToAttemptRecordMs": 387,
+    "maxRequestToAttemptRecordMs": 510,
+    "avgFirstByteMs": 1349.22,
+    "avgDurationMs": 1591.22
+  },
+  "reservationStates": [
+    {
+      "state": "settled",
+      "count": 37
+    }
+  ]
+}
