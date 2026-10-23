@@ -41,7 +41,7 @@ export function mapSseStream(
   const usage = new Promise<BridgeUsage>(r => { resolve = r; });
   const settle = () => { if (!settled) { settled = true; resolve(observed); } };
   const queue: Uint8Array[] = [];
-  const emit = (events: any[]) => { for (const e of events) queue.push(encoder.encode(e === '[DONE]' ? 'data: [DONE]\n\n' : `${typeof e?.type === 'string' && e.type.startsWith('response.') ? `event: ${e.type}\n` : ''}data: ${JSON.stringify(e)}\n\n`)); };
+  const emit = (events: any[]) => { for (const e of events) queue.push(encoder.encode(e === '[DONE]' ? 'data: [DONE]\n\n' : `${typeof e?.type === 'string' ? `event: ${e.type}\n` : ''}data: ${JSON.stringify(e)}\n\n`)); };
   const block = (raw: string) => {
     const data = raw.split(/\r\n|\r|\n/).filter(l => l.startsWith('data:')).map(l => l.slice(5).replace(/^ /, '')).join('\n');
     if (!data || data === '[DONE]') return;

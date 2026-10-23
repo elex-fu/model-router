@@ -746,7 +746,7 @@ Codex 的可信完整计费用量上界仍为明确阻塞。不得用 `max_outpu
 | 主任务 | 当前执行范围 | 状态 |
 |---|---|---|
 | P01/P02a/P03 | 正式平台权益开通、独占资源 journal、最终激活事务、管理员接口与受限权限 | 开户工程实现、受限 PG18 和管理页本地浏览器通过；标准新客 builtin 全链待验 |
-| P04 | Chat↔Gemini、Responses↔Gemini 直接转换，注册及明确不支持字段 | 四个直接桥及定向验证完成；真实 CLI/builtin 工作流待验 |
+| P04 | Chat↔Gemini、Responses↔Gemini、既有 Gemini↔Anthropic 的直接转换与准入 | 新四桥与旧两桥修复均定向通过；真实 CLI/builtin 工作流待验 |
 | P05 | Codex 终态用量完整性、WS 上下文续接、精确端点可信上界门禁与诊断 | 开发中；真实计量契约仍为外部阻塞 |
 | P06 | 支付配置/专用凭据 loader、标准 CLI/组合根与 doctor | 标准装配、精确角色隔离和 doctor 实现通过本地检查；实际商户/生产 KMS 待验 |
 | P02b/P07 | 商户 binding/CAS、原单幂等恢复、历史商户回调及退款 | 代码及真实 PG18 5/5 完成；真实 PSP 交易待验 |
@@ -843,3 +843,11 @@ Luna 原生批次 **29/29**、修后精确批次 **25/25**、结算三状态批�
 平台管理新增正式供给开通与支付控制页。开通页导入已审核 artifact，展示价格及 tenant/project 选择，原 operationKey/payload 创建、恢复查询、显式停用；不自动发 Key 或加余额。支付页只提交 mode/binding/revision 的封闭 CAS，409 后刷新快照；敏感配置与 secret 不进入页面。按现有 operations/superadmin 权限显示入口，受限角色直达路由亦不能变更。
 
 Luna 前端定向 **30/30**、web typecheck/build 通过；系统 Chrome 本地 API 替身下新增浏览器流程 **4/4**，既有审计流程 **2/2**。首轮三个超时来自包装 label 包含 option 文本导致 exact selector 失配，改为 combobox 名称前缀后完整重跑通过，未改变产品行为。覆盖创建原意图、故障恢复/重试、显式停用、支付 CAS/冲突刷新和角色拦截；不冒充真实后端全链、PSP 或模型工作流。Codex 原生 WS checkpoint 已推送 `55415d5`。
+
+### 29.14 P04 既有 Gemini↔Anthropic 桥的实际缺口修复
+
+Astra 源码对照发现旧 Gemini→Anthropic 仍 passthrough，反方向会丢工具历史、按 chunk 拆 SSE 导致碎片丢失、逐事件随机工具 ID、缺消息生命周期和错误结束原因。这些会影响常用两轮工具工作流，不能凭已注册 pair 宣称可运营。
+
+现改为双向直接转换普通文本、JSON function 声明/调用/结果、稳定调用 ID 与并行关联；流式用完整 parser、单 reader、完整 message/block 事件、明确 terminal、usage 和取消传播。opaque thinking/signature、无法保真媒体及 cache-write 映射仍明确拒绝，不复制竞品 dummy signature 或静默清除字段。编译器增加 reverse pair 只代表转换代码存在，标准 builtin 仍按已证明的 provider/product/model/workflow 准入。
+
+Luna 包括六组 Gemini/共享桥的定向批次 **56/56**，不包含真实 CLI/provider。规范离线 unit 最近 **7,014 条 / 6,991 pass / 0 fail / 23 skip**；integration 最近 **360 条 / 255 pass / 0 fail / 105 skip**，所需外部配置跳过项不计通过，后续 C2 与 A0 新修改继续单独验证。管理页面已推送 `df86876`。

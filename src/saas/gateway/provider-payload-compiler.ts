@@ -353,6 +353,7 @@ const SUPPORTED_BRIDGE_PAIRS = new Set<string>([
   'anthropic->openai',
   'openai->anthropic',
   'anthropic->gemini',
+  'gemini->anthropic',
   'anthropic->responses',
   // F3: chat.completions and Anthropic Messages clients against a Responses
   // provider. Both compile through the real generic Responses conversion
