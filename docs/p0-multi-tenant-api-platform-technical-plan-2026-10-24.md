@@ -145,9 +145,9 @@ provider adapter、OAuth、sink、refresh、WS、compact 已有接线，P0 补�
 
 | 工作流 | P0 实现/证明内容 | 出口与状态 |
 |---|---|---|
-| Chat↔Gemini | 请求、工具、usage、流式增量、错误和取消的直接转换 | 已实现；计入协议40/40定向验证；真实CLI待验 |
-| Responses↔Gemini | response/item/tool IDs、状态、usage 和流式事件直接映射 | 已实现；计入协议40/40定向验证；真实CLI待验 |
-| 现有 Anthropic/OpenAI/Responses pairs | 审视已有 capability 与 runtime 默认拒绝；仅开放有证据的路径 | 保持实际准入；未因新增pair自动放开所有供给 |
+| Chat↔Gemini | 请求、工具、usage、流式增量、错误和取消的直接转换 | 已实现；计入全bridge56/56定向验证；真实CLI待验 |
+| Responses↔Gemini | response/item/tool IDs、状态、usage 和流式事件直接映射 | 已实现；计入全bridge56/56定向验证；真实CLI待验 |
+| 现有 Anthropic/OpenAI/Responses pairs | 旧Gemini↔Anth P1已修；审视capability与runtime默认拒绝 | 全bridge56/56、`9b14151`已推送；未因注册自动放开供给 |
 | 真实 CLI 两轮工具调用 | 实际 CLI 版本、精确模型、两轮 tool result、thinking 保真/限制、取消、重连、usage | 待验收 |
 | Codex compact/WS/remote history | endpoint/model/backend revision、完整 billable input 和 reasoning output 上界 | 代码/本地TLS/PG18分层验证；真实计量契约外部阻塞 |
 
@@ -166,13 +166,13 @@ provider adapter、OAuth、sink、refresh、WS、compact 已有接线，P0 补�
 | 客户端 `/v1/responses` WS full | 逐轮 preparation/admission/dispatch/settlement；本轮新增 fixed-wss native adapter、opaque session 与专用 scope，raw JSON 转 SSE 复用原结算链 | native adapter 逻辑/装配与真实后端 workflow 分开；须受限角色、连接断开、两轮工具及精确端点/契约独立验收 |
 | WS `previous_response_id` continuation | 持久部署在 preparation 前逐引用执行 durable resolve，绑定 tenant/project/key/conversation/provider/account/credential versions/public+resolved model；同代 native 引用仍独立校验 | 消费端24/24通过，含跨连接恢复/身份变化补偿/TTL删除；真实CLI/后端及标准部署全链待验 |
 | `/responses/compact` | 已有独立 HTTP passthrough；整份 `output` 都属于后续上下文 | compact 真实 CLI 请求、加密项和普通输出完整回放、compact 单独 trusted profile |
-| HTTP remote history / 重连 | ciphertext port/PG adapter/resolver已有PG18证据；WS消费端已实接，不能由loader/port存在外推HTTP消费端 | HTTP消费接线独立任务、统一identity/namespace、标准部署及真实恢复验收 |
+| HTTP remote history / 重连 | HTTP实际消费端10/10、WS消费端24/24与服务端编译通过，统一identity/namespace；`72b7b97`已推送 | 真实后端、多实例/KMS及标准部署恢复验收 |
 
 C1：execution status 与 usage completeness 独立。`response.completed/incomplete/failed` 的终态 usage 都保留；缺失 input/output 不补成零，显式零仍可报告。重复冲突终态、坏帧、截断及超限不得形成 complete evidence。usage 不完整保留 unknown/reconciliation 路径。客户端协议 bridge 的结束状态与用量映射也覆盖 incomplete/failed；待针对测试与真实失败流验收。
 
 C2：`previous_response_id` 不是普通可丢弃字段。WS 在编译、签名和预留前构造完整 canonical request，保存完整 `response.output`，包括 compact 普通输出与加密项；transform 对未解析 HTTP reference 显式拒绝。native WS 仅在服务端确认同一 socket generation 的已完成 ID 后签 remote-history 请求，并保留 canonical tools/instructions，仅发送本轮 input；否则使用已验证 canonical replay 或返回409。持久 namespace 只取显式 `conversation_id` header/body（均有时必须一致），不用 WS 随机 session ID；缺 namespace 可执行完整请求但不存，引用请求则409。配置 resolver 后每次引用均 durable lookup，不用本地明文 cache 绕过 TTL/删除；prepare 后完整 identity 不符先补偿再409。仅金融 `settlementOutcome==='settled'` 后保存；replayed 可能仍 reconciliation_pending，不作为保存凭据；写失败不撤销已发生计费。
 
-持久 DTO 为 `responses-continuation-history.ts`：tenant/project/key/conversation/response scoped reference，provider/product/account/credential id+version+authz version/public+resolved model 完整绑定，canonical digest 和 expiry 纳入 AEAD associated data；PG 仅存 ciphertext envelope 与 key id，复合 tenant/project/key FK，禁止用户上下文明文进入数据库或日志。数据库时间 TTL、有界清理、tenant/key 回收和 immutable insert conflict 均是验收要求。迁移141、PG adapter、AEAD cipher、resolver 已实现，真实 PG18.6 受限 gateway history1/1通过；WS实际消费端24/24及服务端编译通过，覆盖新连接恢复、scope隔离、身份补偿、pending/replayed拒存、写失败与长连接TTL/删除。HTTP消费端及标准 loader/KMS 全链另按独立任务验收，不能由这些结果外推全部入口。
+持久 DTO 为 `responses-continuation-history.ts`：tenant/project/key/conversation/response scoped reference，provider/product/account/credential id+version+authz version/public+resolved model 完整绑定，canonical digest 和 expiry 纳入 AEAD associated data；PG 仅存 ciphertext envelope 与 key id，复合 tenant/project/key FK，禁止用户上下文明文进入数据库或日志。数据库时间 TTL、有界清理、tenant/key 回收和 immutable insert conflict 均是验收要求。迁移141、PG adapter、AEAD cipher、resolver 已实现，真实 PG18.6 受限 gateway history1/1通过；WS实际消费端24/24覆盖新连接恢复、scope隔离、身份补偿、pending/replayed拒存、写失败与长连接TTL/删除。HTTP实际消费端10/10包含按实际Content-Type捕获与finish/abort边界，服务端编译通过，消费端交付已随`72b7b97`推送。真实后端、多实例/KMS与标准部署恢复仍待验，不能由本地消费端结果外推生产全链。
 
 C3：`max_output_tokens` 被保留不证明后端强制执行。新增代码审阅的 trusted-bound registry，默认空，无 operator JSON 注册信任入口。profile 精确绑定 endpoint、product、model、operation、实际上游 transport、continuation mode、backend revision、evidence version/reference、完整 billable bounds 与有效期。完整 profile canonical SHA-256 与 compiler version 生成47字符 `cb1:`内容寻址版本，复用现有 signed `payloadCompilerVersion` 和 request fingerprint version，避免越过 metering 64字符限制。每次实际 send（包括重试、HTTP/WS逐轮、compact）在 credential 使用前对 proof/evidence 与实际 scope 重验，过期/撤销/旧version均拒绝。当前没有任何已接纳的 ChatGPT 后端证据，保持 hard reject，代码实现不代表财务准入完成。
 
@@ -182,7 +182,7 @@ C5：新开户只创建账户和明确 entitlement，不 seed 模型、余额、
 
 当前证据：基础 Codex/continuation/profile 定向15/15、native及相关定向29/29和服务端编译通过；真实本地 TLS I/O 1/1验证固定 hostname/CA、两轮 socket 复用、SSE/terminal usage、写后断线不重发和连接清理。该本地测试用受控 connector DI，仅连接合成服务器，不代表生产 DNS/proxy 或真实 ChatGPT 后端。最终审查发现的 safe session error/public alias pin 两项P2已修，Luna 后续 helper/native TLS/transport/executor 定向25/25及服务端编译通过。
 
-剩余顺序：①HTTP消费端、标准 history loader/KMS 全链及 compact 完整窗口验收；②真实后端 native WS/逐轮恢复工作流；③供应商 enforcement/完整计量合同；④精确 endpoint/model/revision 真实 CLI 验收并保存四事实证据。最终native P2及WS TTL P2已有对应回归；registry仍空，外部计量契约缺失保持 hard reject。入口集成与真实工作流各有独立出口，不能全部归为供应商阻塞。超过预留、revision 变化或证据撤销时停止新 admission，保留派发/结算证据进入人工对账。
+剩余顺序：①标准部署、多实例/KMS与compact完整窗口验收；②真实后端native WS/逐轮恢复工作流；③供应商enforcement/完整计量合同；④精确endpoint/model/revision真实CLI验收并保存四事实证据。HTTP/WS消费入口工程已交付，最终native P2及WS TTL P2已有回归；registry仍空，外部计量契约缺失保持hard reject。部署集成验证与真实工作流各有独立出口，不能全部归为供应商阻塞。超过预留、revision变化或证据撤销时停止新admission，保留派发/结算证据进入人工对账。
 
 ## 5. B 轨：单 PSP 收款与退款
 
@@ -336,15 +336,15 @@ operation 完成与 entitlement 激活约束必须防止 completed 但无有效�
 
 | ID | 文件/模块责任 | 依赖 | 当前证据与剩余出口 | 状态 |
 |---|---|---|---|---|
-| P01 | 正式平台权益开通与服务端 admission readiness | P02a/已有商业服务 | 真实 PG18 受限角色开通/续做/激活/禁用1/1；静态准入 unit3/3+新 PG1/1；正式指定供给首请求待验 | 已实现并定向验证；正式工作流待验 |
-| P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | 开户1/1、merchant5/5、history1/1真实 PG18.6；PG15及完整候选 required CI 待验证 | 已实现；PG18定向通过；完整 CI 待验 |
-| P03 | 管理员 supply API/UI、操作与状态查询 | P01/P02a | 正式 DTO/router 已接；新入口→手工 Key→首请求的指定浏览器/真实流程待验 | 已实现；端到端待验 |
-| P04 | 四个 Gemini 直接桥及 compiler pair/窄错误映射 | P01 契约 | 协议定向40/40、服务端编译通过；真实 CLI/builtin 两轮工具/thinking/取消待验 | 已实现并定向验证；真实工作流待验 |
-| P05 | Codex usage/continuation/history/native WS/profile/readiness | 精确后端计量/enforcement 契约 | 基础15/15、native相关29/29+本地 TLS1/1、history真 PG18 1/1、nativeP2后25/25；WS消费端含TTL P2后24/24+服务端编译；HTTP/标准部署全链待验，registry仍空 | 主要工程已实现/分层验证；剩余入口集成/真实后端外部阻塞 |
-| P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | doctor38/38、服务端编译及配置解析通过；真实支付凭据/merchant及角色运营验收待齐备 | 已实现并定向验证；生产验收待证据 |
+| P01 | 正式平台权益开通与服务端 admission readiness | P02a/已有商业服务 | PG18开通/续做/激活/禁用1/1，静态准入unit3/3+新PG1/1；A0正式HTTP/live-Kimi harness已实现`7b978f6`，strict/local2/2通过并记录group SIGTERM实验；当前缺有效凭据，真实首请求未验 | 已实现并定向验证；A0真实供给凭据阻塞 |
+| P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | PG18开户1/1、merchant5/5、history1/1；required顺序054 4/4、FIN057 5/5、authorization13/13、commercial HTTP27/27、055 12/12、056 8/8、058修后11/11通过；provider lease精确两列ACL修复与远程新head CI待收 | 已实现；PG18分段通过；正式完整CI待验 |
+| P03 | 管理员 supply API/UI、操作与状态查询 | P01/P02a | 新访问/收银browser4/4真实Chrome+local API，既有审计2/2；正式用户/供给的真实首请求仍按A0验收 | 已实现；本地浏览器通过；真实工作流待验 |
+| P04 | Gemini直接桥、旧Gemini↔Anth P1修复及compiler/窄错误 | P01 契约 | 全bridge56/56通过，`9b14151`已推送；真实CLI/builtin两轮工具/thinking/取消待验，不凭pair数放开供给 | 已实现并定向验证；真实工作流待验 |
+| P05 | Codex usage/continuation/history/native WS/profile/readiness | 精确后端计量/enforcement 契约 | 基础15/15、native相关29/29+本地TLS1/1、history真PG18 1/1、nativeP2后25/25；HTTP实际10/10+WS24/24+server编译通过，`72b7b97`已推送；registry仍空 | 消费入口工程已交付；真实后端/多实例KMS验收开放 |
+| P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | 最终deployment/doctor/startup132/132；worker正式MAX_ATTEMPTS范围1..20、默认5，`a755301`已推送；真实支付凭据/merchant及运营验收待齐备 | 已实现并定向验证；真实PSP/生产证据开放 |
 | P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | merchant真 PG18 5/5；原POST/promo重入修复7/7；真实商户切换/回调/退款待验 | 已实现并定向验证；真实 PSP 阻塞 |
-| P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build通过；既有审计浏览器2/2，新收银/开户flow与真实 PSP 待验 | 已实现；前端验证通过；业务验收待证据 |
-| P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | 同请求观测代码与定向验证已交付；正式首请求→serial→cap A/B→完整R9未关闭 | 已实现；性能验收开放 |
+| P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build；新访问/收银browser4/4真实Chrome+local API及既有审计2/2通过；真实PSP待验 | 已实现；本地前端/浏览器通过；真实PSP开放 |
+| P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | trace UUID与cap profile c=200/60s工程`e87c7fa`已推送，ops32/32及JScheck通过；未执行负载，serial→cap A/B→完整R9未关闭 | 工程已实现并定向验证；负载/性能验收未执行 |
 | P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | 保留既有恢复机制；本轮完整收费故障矩阵、人工unknown与最终快照需逐项实测 | 待验收 |
 | P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | AOF/noeviction及Compose解析通过；PG15/18 required jobs已接但完整结果待收；生产KMS/同步恢复/PITR待外证 | 基础实现已交付；CI/生产证据开放 |
 | P12 | 本方案与进度 §29 gate | P01–P11 | 分层记录源码、fixture、真PG18、本地TLS和外证；M1/M2/M3不关闭 | 持续记录；待最终验收 |
@@ -361,7 +361,7 @@ P02a 依赖 P01 契约先行，P03 只等待开户批；P02b 在 P06/P07 接口�
 
 | Gate | 验收范围 | 通过证据 | 阻塞时处理 |
 |---|---|---|---|
-| A0 | 新租户正式平台供给 | 管理入口 operation→有效权益→Key→指定请求，含禁用/版本冲突 | 不允许 seed 替代 |
+| A0 | 新租户正式平台供给 | 管理入口operation→有效权益→Key→指定请求，含禁用/版本冲突；正式HTTP/live-Kimi harness `7b978f6`已有strict/local2/2与group SIGTERM实验，真实运行因缺有效凭据待验 | 不允许seed或local API替代真实供给闭环 |
 | A1 | 指定 CLI 协议工作流 | 两轮工具、thinking 限制、取消/重连、usage 与模型 revision | pair 继续拒绝 |
 | A2 | Codex 完整能力 | 后端 enforcement、opaque/remote input、reasoning 上界与真实 compact/WS | unavailable；M3 阻塞 |
 | B0 | 单 Alipay/CNY | 实际 precreate、丢响应原 POST 重入、回调、到账、查询、全/部分退款及乱序 | M2 阻塞 |
@@ -375,7 +375,11 @@ P02a 依赖 P01 契约先行，P03 只等待开户批；P02b 在 P06/P07 接口�
 M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 和完整 P0 协议矩阵。
 旧报告只能作为历史基线，不能作为本轮实现通过证明。
 
-## 10. 实施前待决问题与外部前置
+## 10. 工程余项与外部前置
+
+工程余项：完成provider lease精确两列ACL修复，按新head重跑远程必需CI并收齐PG15/18完整结果；保留最新候选的build/源码对应关系。A0正式HTTP/live-Kimi、UUID trace与c=200/60s cap profile工具已实现，本地/静态检查不能替代实际首请求、serial、A/B和R9负载；获得有效凭据与受控资源窗口后执行，不再将这些工具列为待开发。HTTP/WS持久消费入口已交付，标准部署、多实例/KMS及真实恢复另行验收。
+
+外部证据：当前A0缺有效供给凭据；Codex reviewed registry仍空，须取得精确后端计量/enforcement及真实CLI工作流证据；真实Alipay商户/交易、生产KMS/IAM、同步金融恢复/PITR和运营签收尚未完成。工程检查通过不能关闭这些证据门槛，M1/M2/M3继续开放。
 
 1. 哪个已发布非 Codex 产品/模型和真实 CLI 版本作为第一条正式 provision 演示？需绑定现有 pool/price/capacity refs。
 2. Alipay 真实商户主体、CNY 钱包/计划发布、回调域名、验签材料与受控退款额度由谁提供？当前待外部配置。
@@ -386,4 +390,4 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 7. 金融 GO 必须演练最后已确认 commit 的独立持久恢复；15 分钟 RPO 仅非金融/非收费 pilot，RTO/保留目标待确认。
 8. 发布候选 commit 的正式必需 CI 与 build 证据由发布 owner 收集；PG18 定向通过不替代 PG15/18 完整 required jobs，历史绿色不能替代新候选。
 
-下一步收口剩余入口全链、指定供给/CLI、PG15/18正式CI与真实PSP/R9/生产恢复证据；已授权的本轮开发验证继续执行，生产变更仍依对应明确授权。
+下一步收口精确ACL与新head正式CI，再执行有凭据的A0/指定CLI、R9负载及真实PSP/生产恢复验收；已授权的本轮开发验证继续执行，生产变更仍依对应明确授权。

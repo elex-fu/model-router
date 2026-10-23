@@ -265,6 +265,7 @@ async function acl(executor: SqlExecutor, role: 'model_router_saas_gateway' | 'm
       deleteSettlement: boolean;
       schemaCreate: boolean;
       functionExecute: string;
+      validatorExecute: number;
     }>(`SELECT current_user AS role,
        NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls) AS "safeRole",
        has_column_privilege(current_user, 'model_router_saas.saas_usage_settlements', 'normal_success_evidence_ref', 'INSERT') AS "refInsert",
@@ -273,7 +274,13 @@ async function acl(executor: SqlExecutor, role: 'model_router_saas_gateway' | 'm
        has_table_privilege(current_user, 'model_router_saas.saas_usage_settlements', 'DELETE') AS "deleteSettlement",
        has_schema_privilege(current_user, 'model_router_saas', 'CREATE') AS "schemaCreate",
        (SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'model_router_saas' AND has_function_privilege(current_user, p.oid, 'EXECUTE')) AS "functionExecute"
+         WHERE n.nspname = 'model_router_saas' AND has_function_privilege(current_user, p.oid, 'EXECUTE')) AS "functionExecute",
+       (SELECT count(*)::int FROM pg_proc validator
+             WHERE validator.oid = to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+               AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+               AND validator.prorettype = 'boolean'::regtype
+               AND validator.proowner = 'model_router_saas_migrator'::regrole
+               AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS "validatorExecute"
        FROM pg_roles r WHERE r.rolname = current_user`);
     assert.equal(result.rows.length, 1);
     const row = result.rows[0]!;
@@ -282,7 +289,8 @@ async function acl(executor: SqlExecutor, role: 'model_router_saas_gateway' | 'm
     assert.equal(row.refUpdate, false);
     assert.equal(row.deleteSettlement, false);
     assert.equal(row.schemaCreate, false);
-    assert.equal(row.functionExecute, '0');
+    assert.equal(row.functionExecute, role === 'model_router_saas_control_plane' ? '1' : '0');
+    assert.equal(row.validatorExecute, role === 'model_router_saas_control_plane' ? 1 : 0);
     if (role === 'model_router_saas_gateway') {
       assert.equal(row.refInsert, true);
       assert.equal(row.refSelect, true);

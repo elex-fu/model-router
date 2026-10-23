@@ -889,3 +889,13 @@ Astra 发现标准 CLI 虽已有 trace sink，R9 子进程白名单却丢弃采�
 另补 `--diagnostic --cap-profile --no-build`，固定 c=200/60 秒，cap unset/empty 和 8 分别独立运行；输出 HTTP 200 完成延迟/成功吞吐、429 比例、错误、至少 100 成功样本的充分性及有界 host 资源采样。两臂仍须核相同 source/dist/harness 与资源，未自动选择容量；未观测的进程 CPU/IO 明示缺失。原四腿 30/10ms、完整 R9 的扩展比与 SSE 等门槛保持不变，诊断不冒充完整 acceptance。
 
 Luna R9 定向 **32/32**、两个 runner 语法检查通过，未执行真实负载。实际诊断按方案等待 A0 首请求及候选冻结后进行，性能 gate 仍开放；没有据入口完成宣布优化收益。A0 验收脚本已推送 `7b978f6`。
+
+### 29.20 远程权限门禁修复与冻结回归
+
+远程 PG15/18 在 `c025d74` 复现 058 的 schema 函数执行总数旧预期：CP 现仅合法执行一个纯维度校验函数，测试仍要求总数零。相关六个正式测试现严格核总数 CP=1、GW=0，并要求唯一可执行函数的确签 OID、owner、immutable、非 security-definer 和 boolean 返回；原 helper、job 和授权写入拒绝全部保留，未扩大生产 grant。
+
+另一个账户 lease 测试误以为 GW 对账号无任何 UPDATE；设计基线 `44b0eb7` 已允许调度器更新两列 threshold pause。现枚举全部实际可写列并核恰好两列，拒绝表级 UPDATE/INSERT/DELETE，敏感身份/供给/权利/授权列仍实测 42501。PostgreSQL 因列 UPDATE 允许空结果行锁，不能继续把 FOR UPDATE 当作权限拒绝证据。
+
+Luna 真实 PG18 058 **11/11**、054 **4/4**、FIN057 **5/5**；按原 CI 同库前置顺序 authorization **13/13**、商业网关 HTTP **27/27**、055 **12/12**、056 **8/8**；lease 最新 **10/10**，对应严格编译与服务端构建通过。最初 055/056 省略 HTTP fixture 的运行记录为无效前置观察，未当作回归。冻结生产源码 `e87c7fa` 的规范 unit **7,027 条 / 7,004 pass / 0 fail / 23 skip**；最终 integration、两组 CI strict 和最新远程候选继续复核。
+
+过程中还发现独立的 061 requeue 候选 gate 先要求当前 registry、再要求账本恰好 through061；061 明确未注册，且该候选不在当前 required CI 集合。未通过注册旧候选、删除检查或宽松计数使其假通过；撤回本轮对该候选的修改，记录为另行集成待办，不声称其业务验收成功。R9 诊断入口已推送 `e87c7fa`。

@@ -272,17 +272,25 @@ test('054: restricted-role trigger-only execution, real fences, deferred balance
         for (const db of [control, gateway]) {
           const count = await db.query<{
             callable: string;
+            validator: number;
             api_key_update: boolean;
             schema_create: boolean;
             trigger_create: boolean;
           }>(
             `SELECT (SELECT count(*)::text FROM pg_proc WHERE pronamespace = 'model_router_saas'::regnamespace
                      AND has_function_privilege(current_user, oid, 'EXECUTE')) AS callable,
+                  (SELECT count(*)::int FROM pg_proc validator
+             WHERE validator.oid = to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+               AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+               AND validator.prorettype = 'boolean'::regtype
+               AND validator.proowner = 'model_router_saas_migrator'::regrole
+               AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator,
                   has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS api_key_update,
                   has_schema_privilege(current_user, 'model_router_saas', 'CREATE') AS schema_create,
                   has_table_privilege(current_user, 'saas_api_keys', 'TRIGGER') AS trigger_create`,
           );
-          assert.equal(count.rows[0]?.callable, '0');
+          assert.equal(count.rows[0]?.callable, db === control ? '1' : '0');
+          assert.equal(count.rows[0]?.validator, db === control ? 1 : 0);
           assert.equal(count.rows[0]?.schema_create, false);
           assert.equal(count.rows[0]?.trigger_create, false);
           if (db === gateway) assert.equal(count.rows[0]?.api_key_update, false);

@@ -637,12 +637,19 @@ test('055: real restricted-role prepared INSERT optional dates, matching writers
           binding: true,
         });
         for (const db of [control, gateway]) {
-          const acl = await db.query<{ executable: string; key_update: boolean }>(
+          const acl = await db.query<{ executable: string; validator: number; key_update: boolean }>(
             `SELECT (SELECT count(*)::text FROM pg_proc WHERE pronamespace = 'model_router_saas'::regnamespace
             AND has_function_privilege(current_user, oid, 'EXECUTE')) AS executable,
+            (SELECT count(*)::int FROM pg_proc validator
+             WHERE validator.oid = to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+               AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+               AND validator.prorettype = 'boolean'::regtype
+               AND validator.proowner = 'model_router_saas_migrator'::regrole
+               AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator,
             has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS key_update`,
           );
-          assert.equal(acl.rows[0]?.executable, '0');
+          assert.equal(acl.rows[0]?.executable, db === control ? '1' : '0');
+          assert.equal(acl.rows[0]?.validator, db === control ? 1 : 0);
           if (db === gateway) assert.equal(acl.rows[0]?.key_update, false);
           await assert.rejects(db.query('SELECT saas_prepared_request_evidence_guard()'), (error: unknown) => {
             assert.ok(error !== null && typeof error === 'object' && 'code' in error);

@@ -474,26 +474,46 @@ test('restricted PostgreSQL account fences serialize lease acquisition without a
   await verifySaasRuntimeDatabasePrivileges(control, 'control_plane');
   for (const gateway of gateways) await verifySaasRuntimeDatabasePrivileges(gateway, 'gateway');
 
-  await t.test('gateway account authority stays SELECT-only and schema helpers stay non-callable', async () => {
+  await t.test('gateway only updates exact scheduling pause columns; account authority and helpers stay protected', async () => {
     for (const table of ['saas_tenant_provider_accounts', 'saas_platform_provider_accounts']) {
-      const acl = await gatewayA.query<{ reads: boolean; updates: boolean }>(
+      const acl = await gatewayA.query<{
+        reads: boolean; table_update: boolean; inserts: boolean; deletes: boolean; update_columns: string[];
+      }>(
         `SELECT has_column_privilege(current_user, $1::text, 'id', 'SELECT') AS reads,
-                has_any_column_privilege(current_user, $1::text, 'UPDATE') AS updates`,
+          has_table_privilege(current_user, $1::text, 'UPDATE') AS table_update,
+          has_table_privilege(current_user, $1::text, 'INSERT') AS inserts,
+          has_table_privilege(current_user, $1::text, 'DELETE') AS deletes,
+          ARRAY(SELECT a.attname::text FROM pg_attribute a
+            WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped
+              AND has_column_privilege(current_user, a.attrelid, a.attnum, 'UPDATE')
+            ORDER BY a.attname) AS update_columns`,
         [table],
       );
-      assert.deepEqual(acl.rows, [{ reads: true, updates: false }]);
-      await assert.rejects(gatewayA.query(`SELECT id FROM ${table} WHERE FALSE FOR UPDATE`), assertPermissionDenied);
-      await assert.rejects(
-        gatewayA.query(`UPDATE ${table} SET status = 'disabled' WHERE FALSE`),
-        assertPermissionDenied,
-      );
+      assert.deepEqual(acl.rows, [{ reads: true, table_update: false, inserts: false, deletes: false,
+        update_columns: ['scheduling_threshold_pause_reason', 'scheduling_threshold_pause_until'] }]);
+      // PostgreSQL permits a row lock when any column is UPDATE-capable. The
+      // scheduler's approved pause-column grants therefore permit this empty
+      // lock probe, while the authority-column mutations below remain denied.
+      const lock = await gatewayA.query(`SELECT id FROM ${table} WHERE FALSE FOR UPDATE`);
+      assert.equal(lock.rows.length, 0);
+      for (const column of ['id', 'authz_version', 'status', 'provider_id', 'product_id', 'rights_id']) {
+        await assert.rejects(
+          gatewayA.query(`UPDATE ${table} SET ${column} = ${column} WHERE FALSE`),
+          assertPermissionDenied,
+        );
+      }
     }
     for (const database of [gatewayA, control]) {
-      const functions = await database.query<{ executable: string }>(
-        `SELECT count(p.oid)::text AS executable FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      const functions = await database.query<{ executable: string; validator: number }>(
+        `SELECT (SELECT count(*)::int FROM pg_proc validator
+             WHERE validator.oid = to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+               AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+               AND validator.prorettype = 'boolean'::regtype
+               AND validator.proowner = 'model_router_saas_migrator'::regrole
+               AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator, count(p.oid)::text AS executable FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
           WHERE n.nspname = 'model_router_saas' AND has_function_privilege(current_user, p.oid, 'EXECUTE')`,
       );
-      assert.deepEqual(functions.rows, [{ executable: '0' }]);
+      assert.deepEqual(functions.rows, [{ executable: database === control ? '1' : '0', validator: database === control ? 1 : 0 }]);
       await assert.rejects(
         database.query('SELECT saas_prepared_evidence_writer_lock_layer(ARRAY[]::text[])'),
         assertPermissionDenied,

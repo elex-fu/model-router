@@ -472,11 +472,17 @@ test('056 real restricted-role CHECK equivalence, MFA fencing and zero callable 
       );
       assert.deepEqual(check.rows, [{ validated: true, helpers: '0' }]);
       for (const database of [control, gateway]) {
-        const executable = await database.query<{ count: string }>(
-          `SELECT count(*)::text AS count FROM pg_proc WHERE pronamespace = 'model_router_saas'::regnamespace
+        const executable = await database.query<{ count: string; validator: number }>(
+          `SELECT (SELECT count(*)::int FROM pg_proc validator
+             WHERE validator.oid = to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+               AND validator.prokind = 'f' AND validator.provolatile = 'i' AND NOT validator.prosecdef
+               AND validator.prorettype = 'boolean'::regtype
+               AND validator.proowner = 'model_router_saas_migrator'::regrole
+               AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator, count(*)::text AS count FROM pg_proc WHERE pronamespace = 'model_router_saas'::regnamespace
            AND has_function_privilege(current_user, oid, 'EXECUTE')`,
         );
-        assert.equal(executable.rows[0]?.count, '0');
+        assert.equal(executable.rows[0]?.count, database === control ? '1' : '0');
+        assert.equal(executable.rows[0]?.validator, database === control ? 1 : 0);
         for (const statement of [
           "SELECT saas_prepared_evidence_valid_input_buckets(ARRAY['input']::text[])",
           'SELECT saas_platform_authorization_fence_users(ARRAY[]::uuid[])',
