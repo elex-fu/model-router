@@ -1082,7 +1082,7 @@ Astra实际差分复核通过；Luna proxy纯unit **5/5**、三roots exact stric
 
 证据 `/private/tmp/model-router-settlement-ack-postgres-20261024-run-01`，所有runner阶段exit0、sourceChanges=[]，集群停止删除。日志保留一条非fatal的pg未来版本并发query弃用提示，实际断言全部通过。此项补足本地真实wire ACK窗口，不代表独立故障域/WAL/PITR恢复；PG immediate stop/start的完整scanner/600秒自然恢复仍由下一独立profile验收。
 
-随后 `73611600cdced47a2baae9dfe37cc3b0281233c4` 的正式 [CI #158](https://github.com/elex-fu/model-router/actions/runs/40038151848) 中，PG15/18两个settlement job均实际执行原SIGKILL和新wireACK，逐日志核各 **2/2、0 fail、0 skip**。原marker窗口及nativeCommitRejected=true、backendCommitForwarded=false、connectionCut=true、snapshotUnchanged=true均通过。全部68 jobs终态仍收集中；不以这两项成功宣称完整候选已绿。
+随后 `73611600cdced47a2baae9dfe37cc3b0281233c4` 的正式 [CI #158](https://github.com/elex-fu/model-router/actions/runs/40038151848) 中，PG15/18两个settlement job均实际执行原SIGKILL和新wireACK，逐日志核各 **2/2、0 fail、0 skip**。原marker窗口及nativeCommitRejected=true、backendCommitForwarded=false、connectionCut=true、snapshotUnchanged=true均通过。该run随后终态 **68/68 success**（4 main、64 isolated），零失败/取消/跳过；后续profile与最终文档候选仍按各自revision收齐CI，不借用736的绿色。
 
 ### 29.40 自有 PG immediate-stop profile 的工程交付与待授权验证
 
@@ -1098,3 +1098,5 @@ Astra实际差分复核通过；Luna三syntax、PG6+原Redis5共 **11/11**，sou
 - run-04的require_escalated启动被自动审批拒绝，理由是早先“不要测试验证了”仍被视为有效，缺直接用户对PG急停恢复的授权。服务未启动、目录和工件未创建。已向用户请求一次仅自有临时环境的直接授权；答复前不重试、不通过其他工具或CI绕过。继续整理文档与已有交付。
 
 run-01/02/03证据目录均为 `/private/tmp/model-router-p10-postgres-recovery-20261024-run-XX`。当前完整PG恢复是明确的本地待授权项，不能全部归为生产外部资源阻塞；实际Provider/PSP、生产KMS/独立同步故障域/PITR、Codex契约和R9性能仍各自开放，M1/M2/M3均未关闭。
+
+本节工程checkpoint为 `5448f32`，与最终方案状态同步分开提交；这不代表已完成本节实际PG恢复。当前已取得完整68/68的最新证据为ACK候选 `7361160`；新profile及文档最终HEAD的CI结果另行记录。

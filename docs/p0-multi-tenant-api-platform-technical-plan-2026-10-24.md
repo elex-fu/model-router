@@ -1,9 +1,9 @@
 # 可运营多租户模型 API 平台：P0 技术方案
 
-> 日期：2026-10-24。状态：实施中；本轮已有定向测试、服务端/Web 构建、真实 PG18 受限角色与本地 TLS I/O 证据，尚未关闭 M1/M2/M3。
+> 日期：2026-10-24。状态：实施中；工程checkpoint为`5448f32`（PG profile与进度§29.40，PG profile与方案分commit交付；server源码仍为7e同src，完整CI以最终推送HEAD为准，待收结果）。已推送`73611600cdced47a2baae9dfe37cc3b0281233c4`的#158已68/68成功，PG15/18 settlement各2/2、0skip，含原SIGKILL与真wire ACK；后续5448/最终HEAD完整CI待验。PG完整恢复待直接人类授权，M1/M2/M3仍开放。
 > 初始设计基线：model-router `44b0eb7`；Codex C1–C4 基础 checkpoint `f61afec`，后续改动按独立任务继续交付；只读对标基线：CLIProxyAPI `911f49c`、Sub2API `a3eb7ef`、New API `6549a17`。
 > “拟新增”保留初始设计语境；当前实现与证据以各节明确状态及开发进度 §29 为准，源码交付不等同运营可用。
-> 状态区分已实现、定向验证、待验收、外部证据阻塞；真实 PSP、Codex 后端、完整候选 CI 与生产恢复证据仍未齐备。
+> 状态区分已实现、定向验证、待验收、外部证据阻塞；最新候选完整 CI、真实 A0/Kimi、PSP、Codex 后端与生产恢复证据仍未齐备。
 
 ## 1. 目标、范围与交付边界
 
@@ -132,7 +132,7 @@ operation journal 实际阶段为 `assembling/recheck/completed/failed/disabled`
 4. 幂等执行 pool grant、route 和 customer/provider policy create1/publish2、signed v2 attestation、bind、capacity，逐步记录 receipts。失败保留 journal，不删其他操作资源。
 5. 最终重新检查 route.resolve、commercial authority、价格/币种/有效期、每条 route 的 pool provider/product 与 capability/credential/rights、tenant/project capacity revisions。
 6. 若 project inference policy 原为 suspended，追加 next active policy，复制原三项限额并 CAS 当前 `inference_policy_version`；与 entitlement active/authz+1、审计和 operation completed 在同事务提交。版本或授权变化不得完成。
-7. cancel/disable 仅作用于该 operation 权益，不 suspend 共享 project、不影响既有 BYOK。约5秒 auth cache 的撤销窗口仍需真实验收。
+7. cancel/disable 仅作用于该 operation 权益，不 suspend 共享 project、不影响既有 BYOK。warm cached-auth下tenant/Key/entitlement撤销的inference HTTP补证已完成：fresh PG18 commercial run03共30/30，三类撤销在两实例warm cache下全部返回typed403。源码无reload、无主动cache clear；真实prelock2/11表零变、resume B与版本审计均验证，依靠PG权威fail-closed，不声称其他实例的进程内Map cache被清除，亦未新增fence竞态。
 
 不自动发 Key 或充值；余额与 Key 仍走已有明确入口。显式替换旧权益需独立展示影响并授权，初版可拒绝。以上是本轮代码合同，不表示 PG 并发、受限角色、真实供给或正式 provision 工作流已经验收。
 
@@ -295,6 +295,16 @@ pool checkout 必须由客户端 acquire/release 测量，PG wait event 不能�
 复用现有 recovery，不以“进程重新启动成功”代替资金与租约收敛证明。
 人工处理必须明确操作者、证据与决议，秘密和完整用户 payload 不进入 Git。
 
+本轮已捕获的故障/人工处置证据：
+
+- 历史CI #149（`d4c1755`）68/68通过，其中refund worker真实SIGKILL/lease恢复和managed SSE真实SIGTERM各有PG15/18检查，共四项；不能据此宣布完整故障矩阵通过。SSE drain保证已接受HTTP流与原handler/结算收敛，WS仍采用现有主动关闭策略，不承诺继续输出到终帧。
+- 最新本地fresh PG18.6 commercial/operator root完整27/27通过：正常创建、绑定非空daily billing group；保留原80 minor units（USD）hold和scanner原reconciliation reference；覆盖MFA/权限拒绝与resolve；人工决议同事务释放钱包、Key、group的80→0，留下不可变audit与observation/case双向关联；原idempotency replay不增加charge或dispatch。CP/GW billing group最小权限已修。该结果是本地真实PG/受限角色证据，不是实际上游故障或生产恢复证明。
+- 另一producer的SQL `evidence_reference/outcome`列值错位已窄修，worker24/24、combined strict及上述PG27/27通过。producer窄修已独立推送`687a3c9`，operator fixture已独立推送`62b98a5`；后者#153已自然终态success，4 main+64 isolated共68/68通过，含四新增PG15/18 drill。
+- Redis旧快照联合PG金融、累计预算与lease快照的profile已有静态/单元5/5及审查证据，并已完成一次真实本地执行（开发进度§29.35）：fresh build `62b98a50b95a3fa0080ddf8faac0b104bed8ddae`，Node24.18.0/PG18.6/Redis8.10.2；artifact `/private/tmp/model-router-p10-redis-recovery-20261024-run-01/redis-saas-recovery.json`为`ok=true, phase=complete`。SIGKILL Redis后恢复旧RDB，generation1→2，原三个CLI实例存活；U保留原unknown/hold/budget，S/C各12token+28charge只结算一次；U/S跨实例replay分别202/200、返回原canonicalId、无新dispatch且所有PG快照不变。`sourceChanged/distChanged/harnessChanged`均false，cleanup三项均true。`unflushedMutationLossTested=false`、`generalZeroLossClaim=false`，perf/builtin/prodKMS均false；不外推零丢失、性能、真实builtin供给或生产KMS。Redis四文件及进度§29.35已推送`f14b6f5a593a72e2309014202433ff3e1bf8842c`，其#154已68/68成功，实际执行范围仍按上述flags限定。
+- PG immediate stop/start profile已实现、审查通过且unit11/11，使用自然600s horizon、不伪造TTL；实际run01因错误的CP `/readyz`探针失败，尚未stop，后改正式CP双TCP探针；run02真实PG stop成功，但idle pool error杀死gateway，未完成恢复。随后pool idle+checked-out生命周期窄修22/22+strict通过，源码已推`3a46a53`；新build已具备。profile工程及进度§29.40的工程checkpoint为`5448f32`，PG profile与方案分commit交付；该checkpoint保留review/11条纯测试及已有新build，不代表完整恢复通过。run03未真正启动PG，被默认sandbox的listen EPERM拦截：`/private/tmp/model-router-p10-postgres-recovery-20261024-run-03/summary.json`记录changed=false、cleanup三项true，无scene。run04拟直接require_escalated，但自动审批拒绝：认为此前用户“不要测试验证了”仍有效，具体授权来自assistant context而非人类；不得绕过。run04未启动、目录和工件均未创建。root已请求用户对自有临时PG急停/恢复的直接授权，未获答前不再本地验证。完整PG恢复不能计通过，也不能归为纯外部生产资源阻塞。
+- warm cached-auth撤销HTTP已完成fresh PG18 commercial run03共30/30：tenant/Key/entitlement三类、两实例warm cache全部typed403，真实prelock2/11表零变、resume B/version audit通过；无source reload、主动cache clear或新增fence竞态。保留`a246be9`此前30条旧503证据；typed403 exact21/21+strict及源码`7e4fd2852876671672688e7fcdf5a91704f8c640`已推。该revision fresh build通过，789项src/tree摘要（`d75e26…`）不变，3152项dist仅7个generated文件变化，新pool/ports已进入dist，13项harness不变；这不是跨实例Map cache已被清除的证明。
+- wire COMMIT ACK窄drill已实现并验证：proxy5/5+strict、fresh PG18 settlement root2/2（保留原SIGKILL原断言，新增独立wire ACK场景）通过。真实native COMMIT连接报错，但独立PG查询证明已commit、钱包100→88、hold settled12；四个boolean证明完整frame被扣留且没有ACK透传，新direct连接按完全原input replay后快照不变。测试已推`7361160`，CI仅支持精确`postgres:5432/model_router_saas_ci`目标，runner/skip/角色护栏未放宽；该revision的#158已68/68成功，PG15/18 settlement日志各2/2、0skip，包含原SIGKILL与真wire ACK；不替代后续5448/最终HEAD的完整CI。
+
 ### 6.4 标准部署与收费前置
 
 初始设计基线中的 Redis no AOF/cache-only 配置已修复：标准 Compose 已采用每秒 AOF、noeviction及持久卷，恢复与容量告警说明同步更新并通过配置解析。这仍不承诺软配额零丢失，不能替代下述金融持久保证。
@@ -311,7 +321,7 @@ PSP 无法重建模型扣费、hold、dispatch 和 unknown；同 PG 内的账本
 RPO ≤15 分钟只作为非金融或非收费 pilot 的初始设计目标；RTO ≤60 分钟、保留 30 天亦待实际演练确认。
 非金融 quota 的短暂计数丢失窗口独立记录，不冒充金融 RPO 或归档恢复保证。
 收费 GO 还必须取得生产 KMS/IAM、异地 backup/PITR 回执、告警及运营签收。
-发布候选必须通过正式必需 CI，并绑定确切 revision/build。[远程 #141](https://github.com/elex-fu/model-router/actions/runs/40021778110) 对应已推送 `8da5687`：shared PG15/18、PG16、build与browser通过；isolated 60项中56通过、4失败，均为目录测试的旧ACL前提。修后fresh PG18的HTTP directory8/8、non-HTTP directory7/7及console6/6通过（前置commercial HTTP27/27），scoped strict检查通过；本次修后候选仍待远程完整复验，不能将#141通过项转记为新head全绿。
+发布候选必须通过正式必需CI并绑定确切revision/build。历史[远程#141](https://github.com/elex-fu/model-router/actions/runs/40021778110)（`8da5687`）shared PG15/18、PG16、build/browser通过，isolated60=56通过/4目录旧ACL前提失败，保留该失败记录。后续#149（`d4c1755`）及[远程#151](https://github.com/elex-fu/model-router/actions/runs/40032356820)（`69125a1`）均已68/68成功；其中历史#149包含refund SIGKILL与managed SSE SIGTERM在PG15/18的四项正式检查。producer修复已推送`687a3c9`，operator fixture已推送`62b98a5`，[远程#153](https://github.com/elex-fu/model-router/actions/runs/40033365495)（`62b98a50b95a3fa0080ddf8faac0b104bed8ddae`）已自然终态success，4 main+64 isolated共68/68通过，含四新增PG15/18 drill。最新Redis四文件及进度§29.35已推送`f14b6f5a593a72e2309014202433ff3e1bf8842c`，#154已68/68成功。后续pool修复`3a46a53`、typed403修复`7e4fd2852876671672688e7fcdf5a91704f8c640`与ACK测试`7361160`已推送；[远程#157](https://github.com/elex-fu/model-router/actions/runs/40037445612)（`7e4fd2852876671672688e7fcdf5a91704f8c640`）已用per_page100核实total_count=68、returned=68，4 main+64 isolated全部success，零fail/cancel/skip/active；其中旧settlement SIGKILL PG15/18不包含新增wire ACK。[远程#158](https://github.com/elex-fu/model-router/actions/runs/40038151848)（`73611600cdced47a2baae9dfe37cc3b0281233c4`）已终态success，4 main+64 isolated共68/68，0fail/cancel/skip；PG15/18 settlement日志已核各2/2、0skip，含原SIGKILL与真wire ACK。PG profile工程及进度§29.40的工程checkpoint为`5448f32`，PG profile与方案分commit交付；server源码仍为7e同src，后续5448及最终HEAD的完整CI待验。收集jobs须获取全部68项，不能把API默认第一页30项当作完整结果。不同revision的绿色不得混记。
 
 ## 7. 数据迁移与回滚设计
 
@@ -335,17 +345,17 @@ operation 完成与 entitlement 激活约束必须防止 completed 但无有效�
 
 | ID | 文件/模块责任 | 依赖 | 当前证据与剩余出口 | 状态 |
 |---|---|---|---|---|
-| P01 | 正式平台权益开通与服务端 admission readiness | P02a/已有商业服务 | PG18开通/续做/激活/禁用1/1，静态准入unit3/3+新PG1/1；A0正式HTTP/live-Kimi harness已实现`7b978f6`，strict/local2/2通过并记录group SIGTERM实验；当前缺有效凭据，真实首请求未验 | 已实现并定向验证；A0真实供给凭据阻塞 |
-| P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | provider lease精确两列ACL已修；`8da5687`的#141 shared PG15/18、PG16通过，isolated60=56过/4目录旧ACL失败；修后fresh PG18 HTTP目录8/8、非HTTP7/7、console6/6及scoped strict通过；新候选远程完整复验待收 | 已实现；历史候选与修后本地证据分开；新候选CI待验 |
+| P01 | 正式平台权益开通与服务端 admission readiness | P02a/已有商业服务 | 原开通/禁用PG及静态准入已过；warm cached-auth撤销fresh PG18 run03 30/30，三类两实例均typed403、PG权威fail-closed；A0正式HTTP/live-Kimi harness已有strict/local2/2，但有效凭据缺失，真实指定供给首请求未验 | 已实现并定向验证；A0真实供给/CLI仍开放 |
+| P02 | 单一 schema writer 的139–142迁移与精确角色授权 | P01/P06/P07/history 合同 | provider lease精确两列及CP/GW billing group最小权限已修；历史#141四目录失败保留；#149、#151各68/68成功；fresh PG18.6 commercial/operator27/27通过，fixture已推`62b98a5`；#153/`62b98a5`亦已68/68成功 | 已实现并分层验证；最新revision完整CI待结论 |
 | P03 | 管理员 supply API/UI、操作与状态查询 | P01/P02a | 新访问/收银browser4/4真实Chrome+local API，既有审计2/2；正式用户/供给的真实首请求仍按A0验收 | 已实现；本地浏览器通过；真实工作流待验 |
 | P04 | Gemini直接桥、旧Gemini↔Anth P1修复及compiler/窄错误 | P01 契约 | 全bridge56/56通过，`9b14151`已推送；真实CLI/builtin两轮工具/thinking/取消待验，不凭pair数放开供给 | 已实现并定向验证；真实工作流待验 |
 | P05 | Codex usage/continuation/history/native WS/profile/readiness | 精确后端计量/enforcement 契约 | 基础15/15、native相关29/29+本地TLS1/1、history真PG18 1/1、nativeP2后25/25；HTTP实际10/10+WS24/24+server编译通过，`72b7b97`已推送；registry仍空 | 消费入口工程已交付；真实后端/多实例KMS验收开放 |
 | P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | 最终deployment/doctor/startup132/132；worker正式MAX_ATTEMPTS范围1..20、默认5，`a755301`已推送；真实支付凭据/merchant及运营验收待齐备 | 已实现并定向验证；真实PSP/生产证据开放 |
-| P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | 商户binding在#141的PG15/18均通过；原POST/promo重入修复7/7；修后新候选完整远程CI及真实商户切换/回调/退款待验 | 已实现并定向验证；候选复验/真实PSP开放 |
+| P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | 商户binding历史PG15/18均过，POST/promo重入7/7；producer列值窄修`687a3c9`已推，worker24/24+combined strict+最新PG27/27通过；#151/`69125a1`68/68成功，#153/`62b98a5`68/68成功；真实商户切换/回调/退款未验 | 已实现并定向/真PG验证；最新候选CI与真实PSP开放 |
 | P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build；新访问/收银browser4/4真实Chrome+local API及既有审计2/2通过；真实PSP待验 | 已实现；本地前端/浏览器通过；真实PSP开放 |
 | P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | trace UUID与cap profile c=200/60s工程`e87c7fa`已推送，ops32/32及JScheck通过；未执行负载，serial→cap A/B→完整R9未关闭 | 工程已实现并定向验证；负载/性能验收未执行 |
-| P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | 真实payment/refund worker SIGKILL与lease恢复、Redis旧快照恢复联合SaaS PG金融/累计预算/lease快照，两项可本地推进，正在设计；完整故障矩阵及人工unknown待实测 | 本地工程/演练待推进；生产恢复外证另列 |
-| P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | AOF/noeviction及Compose解析通过；#141(`8da5687`) shared PG15/18、PG16、build/browser通过，isolated4项目录失败已本地修复；新候选完整远程结果待收；生产KMS/同步恢复/PITR待外证 | 基础实现已交付；候选复验/生产证据开放 |
+| P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | refund SIGKILL/SSE SIGTERM、operator27/27、Redis实际恢复已过；warm cache撤销HTTP run03 30/30 typed403；wire ACK proxy5/5+strict+真PG18 settlement2/2已过；PG profile实现/review/unit11/11，run01探针失败/run02 stop后idlepool crash保留，pool22/22修复与新build已具备，profile工程checkpoint `5448f32`与方案分commit交付；run03 sandbox EPERM无scene，run04审批拒绝未启动，完整恢复待直接人类授权 | 部分真实本地演练已过；PG完整恢复待授权/实测，最新CI及完整矩阵开放 |
+| P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | AOF/noeviction/Compose及Redis实际恢复已过；#154/f14已68/68成功；generalZeroLossClaim=false、unflushedMutationLossTested=false；pool22/22、typed403 exact21/21与strict过，新build入dist且harness不变；#157/7e已68/68成功（旧settlement无新增ACK）；#158/736已68/68成功，PG15/18 settlement各2/2、0skip；5448/最终HEAD CI待验 | 基础工程/部分恢复已验证；PG完整恢复授权/实测、最新CI与生产外证开放 |
 | P12 | 本方案与进度 §29 gate | P01–P11 | 分层记录源码、fixture、真PG18、本地TLS和外证；M1/M2/M3不关闭 | 持续记录；待最终验收 |
 
 可并行四 lane：A 供给 P01/P03；B 协议 P04/P05；C 支付 P06/P07/P08；D 性能/运维 P09/P10/P11。
@@ -376,9 +386,11 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 ## 10. 工程余项与外部前置
 
-工程余项：provider lease精确两列ACL已修，目录旧ACL前提的修复已在fresh PG18验证HTTP8/8、非HTTP7/7、console6/6，前置commercial HTTP27/27与scoped strict亦通过；按修后新候选重跑完整远程必需CI，保留build/源码对应关系，不能以#141的历史通过项代替。目录console没有新增生产grant：14项SELECT/5项UPDATE属于`44b0eb7`既有基线；纯validator仅允许唯一精确签名，不扩成通用函数执行权限。
+工程现状与候选余项：provider lease精确两列ACL、目录旧ACL前提及CP/GW billing group最小权限均已修。历史#141四失败保留，#149（`d4c1755`）及#151（`69125a1`）均68/68成功。producer窄修已独立推`687a3c9`，operator fixture已独立推`62b98a5`；最新fresh PG18.6 commercial/operator27/27、producer worker24/24及combined strict通过，#153/`62b98a5`已自然终态success，4 main+64 isolated共68/68通过，含四新增PG15/18 drill。最新Redis工程/进度已推`f14b6f5a593a72e2309014202433ff3e1bf8842c`，#154已68/68成功；后续已推pool `3a46a53`、typed403 `7e4fd2852876671672688e7fcdf5a91704f8c640`及ACK `7361160`，#157/7e已per_page100核实68/68成功（4 main+64 isolated，零失败/取消/跳过/运行中，旧settlement无新增ACK）；#158/736已68/68 success（4 main+64 isolated，0fail/cancel/skip），PG15/18 settlement各2/2、0skip；PG profile工程及§29.40的工程checkpoint为`5448f32`，PG profile与方案分commit交付，server源码仍为7e同src，后续5448/最终HEAD完整CI待验，不能借绿。目录console没有新增生产grant：14项SELECT/5项UPDATE属于`44b0eb7`既有基线；纯validator仅允许唯一精确签名，不扩成通用函数执行权限。
 
-P10两项不依赖生产外证、可继续本地推进：真实payment/refund worker SIGKILL与lease恢复；Redis旧快照恢复联合SaaS PG金融、累计预算和lease快照核验。两项正在设计，尚未完成对应演练，不能全部归为外部阻塞。A0正式HTTP/live-Kimi、UUID trace与c=200/60s cap profile工具已实现，本地/静态检查不替代实际首请求、serial、A/B和R9负载；获得有效凭据与受控资源窗口后执行。HTTP/WS持久消费入口已交付，标准部署、多实例/KMS及真实恢复另行验收。
+P10已完成部分本地工程/演练：refund SIGKILL/lease恢复、managed SSE SIGTERM、commercial/operator27/27和Redis旧RDB恢复的真实本地执行，详见§6.3与进度§29.35。Redis执行绑定`62b98a5` fresh build：原三个CLI存活，generation1→2，U原unknown/hold/budget保留，S/C各12token+28charge只结算一次；U/S跨实例202/200 replay保留canonicalId、无新dispatch且PG快照不变，source/dist/harness未变化、cleanup均成功。该范围未注入unflushed loss，generalZeroLossClaim/perf/builtin/prodKMS均false；人工resolve也不意味着unknown hold可自动释放。warm cached-auth撤销HTTP已完成30/30 typed403真实PG验证，wire ACK已完成proxy5/5+strict及真实PG18 settlement2/2，详见§6.3，不能再列待开发。PG immediate stop/start profile已实现/review/unit11/11；run01探针失败、run02 PG stop后idle pool error导致gateway死亡的历史保留，pool生命周期22/22修复、11条纯测试/review与新build已具备，PG profile工程及§29.40的工程checkpoint为`5448f32`，PG profile与方案分commit交付，完整CI以最终推送HEAD为准，待收结果。run03未真正启动PG，被默认sandbox listen EPERM拦截（summary changed=false、cleanup三项true、无scene）；run04直接提请require_escalated遭自动审批拒绝，理由是此前人类“不要测试验证了”仍有效、具体授权仅来自assistant context，未启动且无目录/工件。root已请求一次自有临时PG急停/恢复的直接授权；未获答前不再本地验证，不绕过审批。完整自然600s恢复待用户明确授权及实测，不能记通过，亦非纯外部生产资源阻塞。仍不宣称跨实例Map cache被主动清除。
+
+A0正式HTTP/live-Kimi、UUID trace与c=200/60s cap profile工具已实现，本地/静态检查不替代实际首请求、serial、A/B和R9负载；获得有效凭据与受控资源窗口后执行。HTTP/WS持久消费入口已交付，Codex可信计量registry仍空且paid admission继续拒绝，标准部署、多实例/KMS及真实后端恢复另行验收。
 
 外部证据：当前A0缺有效供给凭据；Codex reviewed registry仍空，须取得精确后端计量/enforcement及真实CLI工作流证据；真实Alipay商户/交易、生产KMS/IAM、同步金融恢复/PITR和运营签收尚未完成。工程检查通过不能关闭这些证据门槛，M1/M2/M3继续开放。
 
@@ -389,6 +401,6 @@ P10两项不依赖生产外证、可继续本地推进：真实payment/refund wo
 5. 专用性能 runner、同版本依赖和压测资源窗口何时可用？资源污染不得据此修改 R9 门槛。
 6. 生产 KMS/IAM、独立故障域同步 PG 副本、金融提交等待/fencing、异地备份及演练责任人是否落实？软件 KMS 和异步归档不能替代。
 7. 金融 GO 必须演练最后已确认 commit 的独立持久恢复；15 分钟 RPO 仅非金融/非收费 pilot，RTO/保留目标待确认。
-8. 发布候选CI/build由发布owner收集。#141与`8da5687`精确绑定，shared通过与isolated失败分别记录；修后本地通过不等于新候选远程全绿，须收齐新revision的完整必需jobs。
+8. 发布候选CI/build由发布owner收集。保留#141历史失败与#149/#151各68/68成功；#153/`62b98a5`亦已68/68成功；#154/`f14b6f5`亦已68/68成功；#157/7e已per_page100核实68/68成功，但其旧settlement不含新增ACK；#158/736已终态68/68 success（4 main+64 isolated，0fail/cancel/skip），PG15/18 settlement各2/2、0skip，含原SIGKILL与真wire ACK；后续5448及最终推送HEAD完整CI待收结果，不互借绿色。
 
-下一步收齐修后新候选正式CI，推进P10两项本地故障/恢复演练，再执行有凭据的A0/指定CLI、R9负载及真实PSP/生产恢复验收。M1/M2/M3保持开放；已授权的本轮开发验证继续执行，生产变更仍依对应明确授权。
+下一步先等待用户对自有临时PG急停/恢复的直接授权，获准后再安排完整自然600s profile实测；同时以工程checkpoint5448与方案分commit交付后的最终推送HEAD收齐完整CI结果，不能借用736的绿色，再执行有凭据的A0/指定CLI、R9负载及真实PSP/生产恢复验收。M1/M2/M3保持开放；未获明确授权前不再本地验证，仅更新文档与已有交付，生产变更仍依对应明确授权。
