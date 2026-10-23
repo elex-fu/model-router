@@ -697,7 +697,7 @@ export interface ReadRequestOptions {
 }
 
 interface RequestOptions extends ReadRequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   bearerToken?: string;
   idempotencyKey?: string;

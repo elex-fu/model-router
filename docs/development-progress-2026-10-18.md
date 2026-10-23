@@ -837,3 +837,9 @@ history loader 的启动检查、TTL 维护及关闭已接入标准 gateway/comb
 Astra 审阅发现并修复两项恢复缺口：secret 包装器吞掉安全的 session 类型错误，造成 full-context 指引丢失；连接 pin 漏比公开模型别名。补安全错误透传、秘密异常脱敏/字节清零、别名变化与失效连接回归。另发现结算 `replayed` 可能仍为 reconciliation_pending：dispatch 现显式返回服务端 settlementOutcome，history 准入和诊断 settled marker 只接受明确 `settled`，不据 `sent/replayed` 推断财务终态。
 
 Luna 原生批次 **29/29**、修后精确批次 **25/25**、结算三状态批次 **55/55** 通过。真实本地 TLS/WS **1/1** 使用合成 CA、严格证书/SAN、固定 host/path/headers，证明两轮 socket 复用、terminal usage 和第三轮断线不重发；它不证明实际 Codex backend、生产 DNS/proxy 或计量契约。HTTP/WS 持久消费端接线继续进行，期间的缺 helper 编译错误按共享依赖修复，不回写为本次原生测试失败。trusted-bound registry 仍为空，Codex 收费 admission 拒绝，M1/M2/M3 未关闭。P06 已推送 `9e4ed14`。
+
+### 29.13 P03/P07 管理页面与浏览器流程
+
+平台管理新增正式供给开通与支付控制页。开通页导入已审核 artifact，展示价格及 tenant/project 选择，原 operationKey/payload 创建、恢复查询、显式停用；不自动发 Key 或加余额。支付页只提交 mode/binding/revision 的封闭 CAS，409 后刷新快照；敏感配置与 secret 不进入页面。按现有 operations/superadmin 权限显示入口，受限角色直达路由亦不能变更。
+
+Luna 前端定向 **30/30**、web typecheck/build 通过；系统 Chrome 本地 API 替身下新增浏览器流程 **4/4**，既有审计流程 **2/2**。首轮三个超时来自包装 label 包含 option 文本导致 exact selector 失配，改为 combobox 名称前缀后完整重跑通过，未改变产品行为。覆盖创建原意图、故障恢复/重试、显式停用、支付 CAS/冲突刷新和角色拦截；不冒充真实后端全链、PSP 或模型工作流。Codex 原生 WS checkpoint 已推送 `55415d5`。
