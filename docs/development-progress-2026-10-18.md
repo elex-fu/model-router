@@ -1023,3 +1023,15 @@ Astra 五文件差分审查通过；Luna privilege unit **112/112**、combined s
 Luna latest fresh PG18.6 完整 root **27/27**、scoped strict 通过，原四种 HTTP fault 的金融断言全部保留。过程中的父计数次生失败和提前 HTTP 响应诊断已修，诊断仅输出允许的状态/code/SQLSTATE/关系或约束标识，不输出 SQL、原错误 message、凭据或请求体。runner init、完整迁移、正常角色、测试和 stop 均 exit 0，sourceChanges=[]，集群停止并删除。此处证明本地真实 PG、受限 CP/GW 与受控 loopback 上游闭环，不代表真实 Provider 人工证据契约或生产故障域恢复。producer 修复已独立推送 `687a3c9`。
 
 此前 `69125a15b83e60c2d5ba2ef08aee9ed7e5efa993` 的 [CI #151](https://github.com/elex-fu/model-router/actions/runs/40032356820) 已终态 **68/68 success**（4 main、64 isolated），含 shared PG15/18、build/offline/browser、PG16 smoke 和新增四项进程故障门禁；早一候选 `ddba2c4` 的 #150 亦已成功。两者均早于本节及 producer 修复，最新候选仍按新 revision 收齐远程结果。
+
+### 29.35 Redis 旧快照恢复与真实 SaaS PG 权威联验
+
+新增互斥的 `--diagnostic --recovery-profile --no-build`，复用自有 PG、Redis、三个标准 dist CLI gateway 和 loopback HTTPS 上游，不运行 benchmark。真实 U 断流后保留 unknown/financial reconciliation_pending、原 hold 与累计预算；S 在 dispatching/持有 lease 时将容量写回 PG 并保存旧 RDB，随后正常结算。仅 SIGKILL 自有 Redis，再在同目录同端口恢复旧 RDB，原三个 CLI 持续存活。恢复后新 C 请求触发真实 PG hydration，并在其他实例重放 U/S。
+
+Astra 实际差分审查通过；Luna 语法检查与纯单元 **5/5** 通过，随后在 `62b98a50b95a3fa0080ddf8faac0b104bed8ddae` 新构建 `build:server`，执行一次真实 profile。Node24.18.0、PG18.6、Redis8.10.2；artifact `ok=true / phase=complete`。旧 snapshot generation=1、pendingPersistence=0，实际 SIGKILL 后 Redis run ID 改变、共享 PG generation=2；source/dist/harness 前后 hash 全部一致，三项 changed 均 false。
+
+U 保持一个原 unknown attempt、无 usage/settlement，provider lease released，capacity 保留8192 token，budget outstanding8192 token/20480 charge，原 hold reconciliation_pending20480。S/C 各一个成功 attempt、8 input+4 output，daily/lifetime settled delta 各 **+12 token/+28 charge**、钱包各扣28，结算账本分录平衡。最终累计行包括正常 smoke 基线，不能只按 S/C 两项之和解释。恢复前后 PG 金融快照相等；跨实例 U/S 重放分别202 unknown/200 completed，canonical ID 不变、不重复派发，重放前后全部请求、预算、hold、lease、usage、settlement 和账本快照相等；最终仅 U active。
+
+原秒级软配额 bucket 已写回部分保持 `(1 request,8192 token)` 与 `(3 requests,24576 token)`，C 正常新增 bucket。此场景没有注入未刷写 mutation 丢失，`unflushedMutationLossTested=false / generalZeroLossClaim=false`；不能据此宣称普遍零 RPO、生产 HA、真实 Provider、KMS 或完整 R9 通过。cap unset、诊断采样关闭，performance/builtin/production-KMS acceptance 均 false。
+
+脱敏证据：`/private/tmp/model-router-p10-redis-recovery-20261024-run-01/redis-saas-recovery.json` 与 `summary.json`。cleanup 确认所有自有进程停止、PG 停止、私有 runtime 删除。人工 HTTP 闭环已推送 `62b98a5`；真实 PG immediate stop/start 是下一独立工程/演练任务，仍须自然等待生产 stale recovery 时间，不把本节 Redis 恢复替代 PG 故障证据。

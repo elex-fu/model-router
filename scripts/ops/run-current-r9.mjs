@@ -20,21 +20,23 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runRedisSaasRecoveryProfile, validateRecoveryProfile } from './redis-saas-recovery-profile.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
-const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, noBuild: false, requestSamples: false };
+const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, recoveryProfile: false, noBuild: false, requestSamples: false };
 for (let index = 0; index < args.length; index += 1) {
   const argument = args[index];
   if (argument === '--diagnostic') options.diagnostic = true;
   else if (argument === '--serial-profile') options.serialProfile = true;
   else if (argument === '--cap-profile') options.capProfile = true;
+  else if (argument === '--recovery-profile') options.recoveryProfile = true;
   else if (argument === '--request-samples') options.requestSamples = true;
   else if (argument === '--no-build') options.noBuild = true;
   else if (['--pg-bin', '--redis-bin', '--output-dir'].includes(argument) && args[index + 1]) {
     const key = { '--pg-bin': 'pgBin', '--redis-bin': 'redisBin', '--output-dir': 'outputDir' }[argument];
     options[key] = args[++index];
-  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build]] [--no-build]');
+  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build | --recovery-profile --no-build]] [--no-build]');
 }
 assert.ok(!options.serialProfile || options.diagnostic, '--serial-profile requires --diagnostic');
 assert.ok(!options.requestSamples || (options.diagnostic && options.serialProfile), '--request-samples requires --diagnostic --serial-profile');
@@ -62,6 +64,7 @@ function validateCapProfile(configuration, cap) {
   assert.ok(cap === null || cap === 8, '--cap-profile requires cap unset/empty or exactly 8');
 }
 validateCapProfile(options, gatewayMaxHttpInFlight);
+validateRecoveryProfile(options, requestDiagnostics.enabled, gatewayMaxHttpInFlight);
 assert.ok(options.pgBin, 'Set --pg-bin to an installed PostgreSQL 16+ binary directory');
 const pgBin = resolve(options.pgBin);
 for (const executable of ['initdb', 'pg_ctl', 'psql', 'postgres']) assert.ok(existsSync(join(pgBin, executable)), `Missing PostgreSQL binary ${executable}`);
@@ -77,8 +80,10 @@ let requestSamplesTenantId;
 let requestSamplesFile;
 let pgStarted = false;
 let interrupted = false;
+const recoveryAbort = new AbortController();
 const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'current-dist-cli-mock-test-assembly',
   productionKmsVerified: false, builtinAcceptance: false, realProviderCalls: 0, diagnostic: options.diagnostic,
+  ...(options.recoveryProfile ? { recoveryProfile: true, performanceAcceptance: false } : {}),
   serialProfile: options.serialProfile, warmupInflight: options.serialProfile ? 1 : 4,
   capProfile: options.capProfile ? { diagnosticOnly: true, performanceAcceptance: false, cap: gatewayMaxHttpInFlight,
     inflight: 200, requestedSeconds: 60, minimumSuccessfulSamples: 100, pairedComparisonRequired: true } : null,
@@ -339,6 +344,7 @@ async function hashTree(directory) {
 }
 async function hashHarness() {
   const files = ['scripts/ops/run-current-r9.mjs', 'scripts/ops/bench-gateway.mjs', 'deploy/compose/mock-upstream.mjs',
+    'scripts/ops/redis-saas-recovery-profile.mjs',
     'deploy/managed-saas-postgres-roles.sql', 'package-lock.json'];
   return Object.fromEntries(await Promise.all(files.map(async (file) => [file, createHash('sha256').update(await readFile(join(root, file))).digest('hex')])));
 }
@@ -483,7 +489,7 @@ async function closeOwned() {
     manifest.cleanup.runtimeRemoved = true;
   }
 }
-const onInterrupt = () => { interrupted = true; for (const child of activeRuns) child.kill('SIGTERM'); };
+const onInterrupt = () => { interrupted = true; recoveryAbort.abort(new Error('Owned recovery interrupted')); for (const child of activeRuns) child.kill('SIGTERM'); };
 process.once('SIGINT', onInterrupt);
 process.once('SIGTERM', onInterrupt);
 async function freePort() {
@@ -686,7 +692,9 @@ try {
   await requireRun('roles-before', join(pgBin, 'psql'), [...psql(databaseName), '-f', join(root, 'deploy/managed-saas-postgres-roles.sql')]);
   await requireRun('migrate-current-dist', process.execPath, [join(root, 'dist/cli/index.js'), 'saas:migrate'], { ...baseEnvironment, MODEL_ROUTER_SAAS_DATABASE_URL: roleUrl('model_router_saas_migrator') });
   await requireRun('roles-after', join(pgBin, 'psql'), [...psql(databaseName), '-f', join(root, 'deploy/managed-saas-postgres-roles.sql')]);
-  const redis = await launch('redis', options.redisBin, ['--bind','127.0.0.1','--port',String(redisPort),'--dir',runtimeDir,'--save','','--appendonly','no','--daemonize','no'], baseEnvironment);
+  const redisArguments = ['--bind','127.0.0.1','--port',String(redisPort),'--dir',runtimeDir,'--save','','--appendonly','no','--daemonize','no',
+    ...(options.recoveryProfile ? ['--dbfilename','dump.rdb'] : [])];
+  const redis = await launch('redis', options.redisBin, redisArguments, baseEnvironment);
   await waitFor('redis', async () => {
     assert.equal(redis.exitCode, null, 'Owned Redis exited before readiness');
     return new Promise((resolvePing) => { const socket = createConnection({ host: '127.0.0.1', port: redisPort });
@@ -792,7 +800,12 @@ try {
     return { reportFile, ok };
   }
   if (options.diagnostic) {
-    if (options.capProfile) {
+    if (options.recoveryProfile) {
+      manifest.recovery = await runRedisSaasRecoveryProfile({ database, seed, gatewayUrls,
+        controlUrl: `http://127.0.0.1:${controlPort}`, redisUrl: `redis://127.0.0.1:${redisPort}`, redisProcess: redis,
+        runtimeDir, outputDir, signal: recoveryAbort.signal,
+        launchRedis: () => launch('redis-restored', options.redisBin, redisArguments, baseEnvironment) });
+    } else if (options.capProfile) {
       const resources = startCapProfileResources();
       try {
         await benchmark(`cap-${gatewayMaxHttpInFlight ?? 'unset'}-current-3cli`, gatewayUrls,
