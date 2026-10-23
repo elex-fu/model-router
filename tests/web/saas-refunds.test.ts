@@ -228,7 +228,8 @@ test('refund history renders allowlisted types, exact money, non-final status cl
   assert.match(markup, /最小货币单位/);
   assert.match(markup, /退款处理中 · 尚未完成/);
   assert.match(markup, /当前状态不是最终结果/);
-  assert.match(markup, /状态未知 · 尚未确认/);
+  assert.match(markup, /状态未知 · 尚未确认 · 人工处理中/);
+  assert.match(markup, /平台正在人工核对/);
   assert.match(markup, /尚未确认最终结果/);
   assert.match(markup, /原订单 ID/);
   assert.match(markup, /创建时间/);

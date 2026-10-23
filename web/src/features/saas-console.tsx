@@ -1565,9 +1565,9 @@ const customerRefundStatusPresentation: Record<
   succeeded: { label: '退款已完成', tone: 'good' },
   failed: { label: '退款失败', tone: 'bad' },
   unknown: {
-    label: '状态未知 · 尚未确认',
+    label: '状态未知 · 尚未确认 · 人工处理中',
     tone: 'warn',
-    hint: '服务端尚未确认最终结果；请等待状态更新，请勿重复发起。',
+    hint: '服务端尚未确认最终结果，平台正在人工核对；请等待状态更新或联系客服，请勿重复发起。',
   },
   blocked: {
     label: '需要平台处理',

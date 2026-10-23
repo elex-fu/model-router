@@ -1,3 +1,4 @@
+import { QRCodeSVG } from 'qrcode.react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   SaasApiError,
@@ -83,7 +84,9 @@ export function shouldPollServicePlanOrder(order: ServicePlanOrder, visible: boo
     visible &&
     pollsUsed < SERVICE_PLAN_POLL_LIMIT &&
     !isServicePlanOrderTerminal(order) &&
-    order.providerFailureCode == null
+    order.providerFailureCode == null &&
+    !(order.state === 'pending' && order.checkout.status === 'ready' && Date.parse(order.checkout.action.expiresAt) <= Date.now()) &&
+    order.checkout.status !== 'expired'
   );
 }
 
@@ -223,6 +226,7 @@ export function PaymentCheckoutActionView({
       <div className="checkout-state" role="status" aria-live="polite">
         <strong>{checkoutStatusLabel(status)}</strong>
         <span>点击下方按钮打开支付页面；返回浏览器不会直接改变订单成功状态。</span>
+        <small>有效期至 {new Date(action.expiresAt).toLocaleString('zh-CN')}</small>
         <a className="button-link primary" {...checkoutRedirectAttributes(action)}>
           打开支付页面
         </a>
@@ -251,8 +255,10 @@ function QrCheckoutText({ action }: { action: Extract<PaymentCheckoutAction, { k
 
   return (
     <div className="checkout-state" role="status" aria-live="polite">
-      <strong>结账方式已准备 · QR payload</strong>
-      <span>当前环境没有二维码渲染器；请复制此有限长度的支付文本到你的支付工具。</span>
+      <strong>扫码支付</strong>
+      <QRCodeSVG value={action.text} size={256} marginSize={4} level="M" title="支付二维码" style={{ maxWidth: '100%', height: 'auto', background: '#fff' }} />
+      <span>请使用支付应用扫码，支付结果以订单状态为准。</span>
+      <small>有效期至 {new Date(action.expiresAt).toLocaleString('zh-CN')}</small>
       <textarea aria-label="支付二维码文本" className="checkout-qr-text" readOnly rows={4} value={action.text} />
       <div className="actions">
         <button type="button" onClick={() => void copy()}>
@@ -294,9 +300,10 @@ export function ServicePlanOrderSurface({
         </div>
         <Badge tone={presentation.tone}>{presentation.label}</Badge>
       </div>
+      {order.snapshot && <p>订单金额：{order.snapshot.currency} {order.snapshot.priceMinorUnits}（最小货币单位）</p>}
       <p className="muted">{presentation.message}</p>
       {presentation.kind === 'failure' && order.providerFailureCode && (
-        <p className="form-error">支付服务状态：{order.providerFailureCode}</p>
+        <p className="form-error">支付暂时不可用，请稍后重试或联系客服。</p>
       )}
       {showCheckout && (
         <PaymentCheckoutActionView checkout={order.checkout} onRefresh={onRefreshCheckout} />
@@ -372,7 +379,11 @@ export function ServicePlanPurchase({
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
-    const updateVisibility = () => setVisible(document.visibilityState === 'visible');
+    const updateVisibility = () => {
+      const nextVisible = document.visibilityState === 'visible';
+      setVisible(nextVisible);
+      if (nextVisible) setPollsUsed(0);
+    };
     document.addEventListener('visibilitychange', updateVisibility);
     return () => document.removeEventListener('visibilitychange', updateVisibility);
   }, []);
@@ -406,7 +417,7 @@ export function ServicePlanPurchase({
           if (disposed) return;
           setPollsUsed(value => value + 1);
         });
-    });
+    }, Math.min(SERVICE_PLAN_POLL_INTERVAL_MS * 2 ** Math.floor(pollsUsed / 3), 30_000));
     return () => {
       disposed = true;
       cancel();
@@ -430,6 +441,8 @@ export function ServicePlanPurchase({
       saveIntent({ ...purchaseIntent, orderId: created.id });
       setOrder(created);
       setPollsUsed(0);
+      // Replayed POST recovers the original ID; GET supplies the latest server state.
+      setOrder(await saasClient.getServicePlanOrder(tenantId, created.id));
     } catch (purchaseError) {
       const preserved = servicePlanOrderFromError(purchaseError, tenantId);
       if (preserved) {
@@ -532,7 +545,7 @@ export function ServicePlanPurchase({
       {order.state === 'cancelled' && (
         <div className="actions">
           <button className="primary" type="button" onClick={() => void startPurchase()} disabled={busy}>
-            重新开始 activation 购买
+            重新购买
           </button>
         </div>
       )}

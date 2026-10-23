@@ -196,7 +196,7 @@ test('checkout states distinguish unavailable, expired, and ready without implyi
   );
 });
 
-test('redirect checkout is an explicit safe new-tab click and QR payload stays local text', async () => {
+test('redirect checkout is an explicit safe new-tab click and QR renders a local scannable SVG', async () => {
   reactGlobal.React = React;
   const { renderToStaticMarkup } = await import('react-dom/server');
   const { PaymentCheckoutActionView } = await import('../../web/src/features/service-plan-purchase.tsx');
@@ -214,6 +214,10 @@ test('redirect checkout is an explicit safe new-tab click and QR payload stays l
     }),
   );
   assert.match(qr, /local-qr-payload/);
+  assert.match(qr, /<svg/);
+  assert.match(qr, /支付二维码/);
+  assert.match(qr, /<path/);
+  assert.match(qr, /有效期至/);
   assert.doesNotMatch(qr, /<img|dangerouslySetInnerHTML/);
 });
 
@@ -224,6 +228,8 @@ test('bounded order polling stops when hidden, terminal, exhausted, or provider-
   const validOrder = parseServicePlanOrder(order()) as ServicePlanOrder;
   assert.equal(shouldPollServicePlanOrder(validOrder, true, 0), true);
   assert.equal(shouldPollServicePlanOrder(validOrder, false, 0), false);
+  assert.equal(shouldPollServicePlanOrder({ ...validOrder, checkout: { status: 'expired', action: null } }, true, 0), false);
+  assert.equal(shouldPollServicePlanOrder({ ...validOrder, checkout: { status: 'ready', action: { kind: 'qr', text: 'expired', expiresAt: '2000-01-01T00:00:00Z' } } }, true, 0), false);
   assert.equal(shouldPollServicePlanOrder({ ...validOrder, state: 'fulfilled' }, true, 0), false);
   assert.equal(
     shouldPollServicePlanOrder({ ...validOrder, providerFailureCode: 'PROVIDER_CREATE_FAILED' }, true, 0),

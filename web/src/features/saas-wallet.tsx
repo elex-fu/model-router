@@ -11,6 +11,7 @@ import {
   saasWalletClient,
 } from '../api/saas-wallet-client';
 import { Badge, Panel } from '../components/ui';
+import { PaymentCheckoutActionView } from './service-plan-purchase';
 
 const tenantsKey = ['saas-console', 'tenants'] as const;
 const walletQueryKey = (tenantId: string, currency: string, cursor: string | undefined) =>
@@ -184,7 +185,7 @@ function BalanceContent({ wallet }: { wallet: SaasWalletData['wallet'] }) {
         </div>
       </div>
 
-      <p className="muted">金额以最小货币单位展示，避免舍入。此页面只读，不会创建充值订单或登记入账。</p>
+      <p className="muted">金额以最小货币单位展示，避免舍入。余额及账本以服务端确认结果为准。</p>
     </>
   );
 }
@@ -328,8 +329,14 @@ export function SaasWalletPage({ onLogout }: { onLogout: () => Promise<void> }) 
       return saasWalletClient.getWalletTopUp(selectedTenant, storedTopUp.orderId, signal);
     },
     enabled: Boolean(selectedTenant && storedTopUp?.orderId),
-    refetchInterval: (query) =>
-      query.state.data?.status === 'pending' || query.state.data?.status === 'unknown' ? 5_000 : false,
+    refetchInterval: (query) => {
+      const order = query.state.data;
+      if (!order || (order.status !== 'pending' && order.status !== 'unknown')) return false;
+      if (order.checkout.status === 'expired' || (order.checkout.status === 'ready' && Date.parse(order.checkout.action.expiresAt) <= Date.now())) return false;
+      return Math.min(5_000 * 2 ** Math.floor(query.state.dataUpdateCount / 3), 30_000);
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
     retry: false,
   });
 
@@ -354,7 +361,12 @@ export function SaasWalletPage({ onLogout }: { onLogout: () => Promise<void> }) 
     void queryClient.invalidateQueries({ queryKey: ['saas-wallet', 'wallet', tenantId] });
   }, [queryClient, tenantId, trackedTopUpOrder.data?.id, trackedTopUpOrder.data?.currency, trackedTopUpOrder.data?.status]);
 
-  const configuredTopUpPolicy = topUpPolicy.data?.available ? topUpPolicy.data : undefined;
+  const recoveringTopUp = storedTopUp?.idempotencyKey && !storedTopUp.orderId && storedTopUp.amountMinorUnits && storedTopUp.currency
+    ? storedTopUp : undefined;
+  // Replay a lost response with the original payload even if the current merchant policy changed.
+  const configuredTopUpPolicy = recoveringTopUp
+    ? { available: true, currency: recoveringTopUp.currency!, minAmountMinorUnits: recoveringTopUp.amountMinorUnits!, maxAmountMinorUnits: recoveringTopUp.amountMinorUnits! }
+    : topUpPolicy.data?.available ? topUpPolicy.data : undefined;
 
   async function createTopUp(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -379,8 +391,13 @@ export function SaasWalletPage({ onLogout }: { onLogout: () => Promise<void> }) 
       return;
     }
 
+    if (storedTopUp?.orderId && trackedTopUpOrder.data?.status !== 'paid') {
+      setTopUpError(new Error('请先确认当前充值订单结果，或刷新现有订单的支付指引。'));
+      return;
+    }
+
     const reuseKey =
-      storedTopUp?.idempotencyKey &&
+      !storedTopUp?.orderId && storedTopUp?.idempotencyKey &&
       storedTopUp.amountMinorUnits === amount &&
       storedTopUp.currency === configuredTopUpPolicy.currency
         ? storedTopUp.idempotencyKey
@@ -407,7 +424,7 @@ export function SaasWalletPage({ onLogout }: { onLogout: () => Promise<void> }) 
         currency: configuredTopUpPolicy.currency ?? '',
         idempotencyKey,
       });
-      const recovered: StoredTopUp = { orderId: order.id, amountMinorUnits: amount, currency: order.currency };
+      const recovered: StoredTopUp = { ...attempt, orderId: order.id, currency: order.currency };
       writeStoredTopUp(tenantId, recovered);
       setStoredTopUp(recovered);
       queryClient.setQueryData(topUpOrderQueryKey(tenantId, order.id), order);
@@ -593,7 +610,7 @@ export function SaasWalletPage({ onLogout }: { onLogout: () => Promise<void> }) 
             {topUpPolicy.data?.available === false && (
               <div className="notice" role="status">
                 <strong>充值暂不可用</strong>
-                <span>服务端尚未配置可用的支付 adapter、币种及金额范围；本页不会创建订单或推测到账。</span>
+                <span>当前暂不支持在线充值，请稍后重试或联系客服。</span>
                 <RetryButton onClick={() => void topUpPolicy.refetch()} />
               </div>
             )}
@@ -686,26 +703,9 @@ export function SaasWalletPage({ onLogout }: { onLogout: () => Promise<void> }) 
                           当前没有可用的支付指引；订单仍以服务端状态为准，请刷新状态或支付指引，不要重复付款。
                         </p>
                       )}
-                    {trackedTopUpOrder.data.checkout.status === 'ready' &&
-                      trackedTopUpOrder.data.status === 'pending' &&
-                      (trackedTopUpOrder.data.checkout.action.kind === 'redirect' ? (
-                        <p>
-                          <a
-                            href={trackedTopUpOrder.data.checkout.action.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            打开支付页面
-                          </a>
-                          <span className="muted">；返回后刷新订单状态，跳转本身不代表到账。</span>
-                        </p>
-                      ) : (
-                        <div className="field">
-                          <span>支付二维码内容（复制到支付应用）</span>
-                          <textarea readOnly value={trackedTopUpOrder.data.checkout.action.text} rows={3} />
-                          <small>支付后刷新订单状态；以服务端钱包履约状态为准。</small>
-                        </div>
-                      ))}
+                    {trackedTopUpOrder.data.status === 'pending' && (
+                      <PaymentCheckoutActionView checkout={trackedTopUpOrder.data.checkout} onRefresh={() => void refreshTopUpCheckout()} />
+                    )}
                     <div className="actions">
                       <button type="button" onClick={() => void trackedTopUpOrder.refetch()}>
                         {trackedTopUpOrder.isFetching ? '正在刷新…' : '刷新订单状态'}
