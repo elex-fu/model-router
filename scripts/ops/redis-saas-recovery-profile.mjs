@@ -62,6 +62,9 @@ async function authority(database, tenantId) {
   return row;
 }
 
+// Shared read-only observation only; PostgreSQL recovery keeps its own lease/unknown assertions.
+export { authority as readSaasRecoveryAuthority };
+
 function requestFact(snapshot, id) { return snapshot.requests.find((row) => row.id === id); }
 function holdFact(snapshot, id) { return snapshot.holds.find((row) => row.requestId === id); }
 function scopeField(tenantId) { return JSON.stringify(['capacityScope', 'tenant', tenantId]); }

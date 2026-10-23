@@ -1081,3 +1081,20 @@ Astra实际差分复核通过；Luna proxy纯unit **5/5**、三roots exact stric
 独立只读PG确认原request succeeded/settled、原attempt/reservation ID不变、hold settled12、钱包最小单位 **100→88**、唯一结算/关联账本及平衡分录。新直连用完全相同原输入返回replayed/同attempt ID，selected request/attempt/hold/usage/settlement/ledger/wallet/evidence/lease/capacity/idempotency快照完全相等，不新增金融效果。这里没有真实上游、PSP或占用中provider lease，不将其外推为该类故障证明。
 
 证据 `/private/tmp/model-router-settlement-ack-postgres-20261024-run-01`，所有runner阶段exit0、sourceChanges=[]，集群停止删除。日志保留一条非fatal的pg未来版本并发query弃用提示，实际断言全部通过。此项补足本地真实wire ACK窗口，不代表独立故障域/WAL/PITR恢复；PG immediate stop/start的完整scanner/600秒自然恢复仍由下一独立profile验收。
+
+随后 `73611600cdced47a2baae9dfe37cc3b0281233c4` 的正式 [CI #158](https://github.com/elex-fu/model-router/actions/runs/40038151848) 中，PG15/18两个settlement job均实际执行原SIGKILL和新wireACK，逐日志核各 **2/2、0 fail、0 skip**。原marker窗口及nativeCommitRejected=true、backendCommitForwarded=false、connectionCut=true、snapshotUnchanged=true均通过。全部68 jobs终态仍收集中；不以这两项成功宣称完整候选已绿。
+
+### 29.40 自有 PG immediate-stop profile 的工程交付与待授权验证
+
+新增互斥 `--diagnostic --postgres-recovery-profile --no-build`，复用自有R9的PG、Redis、三标准gateway和loopback上游，额外启动标准control-plane原恢复扫描器。保持原600000ms stale horizon、5秒cadence及15分钟观察期限：首帧后核原dispatching/hold/live lease，仅停自有PG，待上游自然归零，三实例新请求fail closed且不增派发；同目录同端口restart后核DB身份/重启时间/fsync/synchronous_commit和原资金快照；正常scanner/operator_required、原unknown/hold/预算精确保留、过期held lease的liveHeld=0、跨实例202原canonical重放、新C精确一次结算均须实际通过。只读观察、有界超时、信号中断和自有进程清理保留，不改生产TTL、时间或金融SQL；不运行benchmark。
+
+Astra实际差分复核通过；Luna三syntax、PG6+原Redis5共 **11/11**，source/dist/harness冻结，新7e serverbuild已具备。最小复用仅为Redis helper导出readonly authority别名，原Redis断言和原serial/cap/full性能门槛未改。工程实现与方案已可审阅；完整实际PG恢复门禁尚未通过。
+
+真实尝试及处理方式：
+
+- run-01误用CP platform `/readyz`导致就绪超时，尚未stop；对照正式Compose改为双owned TCP+child存活，后续scanner证明仍强制。
+- run-02真实immediate stop后gateway因idle pool未处理error退出；§29.37已修Pool/checked-out生命周期并完成22项检查，新build已包含。该轮没有完成恢复断言。
+- run-03默认sandbox在loopback监听处EPERM，未到PGsetup。`summary.json`记录source/dist/harnessChanged=false，cleanup三项true，不能计作应用或恢复通过。
+- run-04的require_escalated启动被自动审批拒绝，理由是早先“不要测试验证了”仍被视为有效，缺直接用户对PG急停恢复的授权。服务未启动、目录和工件未创建。已向用户请求一次仅自有临时环境的直接授权；答复前不重试、不通过其他工具或CI绕过。继续整理文档与已有交付。
+
+run-01/02/03证据目录均为 `/private/tmp/model-router-p10-postgres-recovery-20261024-run-XX`。当前完整PG恢复是明确的本地待授权项，不能全部归为生产外部资源阻塞；实际Provider/PSP、生产KMS/独立同步故障域/PITR、Codex契约和R9性能仍各自开放，M1/M2/M3均未关闭。

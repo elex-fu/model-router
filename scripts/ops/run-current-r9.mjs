@@ -21,22 +21,24 @@ import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runRedisSaasRecoveryProfile, validateRecoveryProfile } from './redis-saas-recovery-profile.mjs';
+import { runPostgresSaasRecoveryProfile, validatePostgresRecoveryProfile } from './postgres-saas-recovery-profile.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
-const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, recoveryProfile: false, noBuild: false, requestSamples: false };
+const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, recoveryProfile: false, postgresRecoveryProfile: false, noBuild: false, requestSamples: false };
 for (let index = 0; index < args.length; index += 1) {
   const argument = args[index];
   if (argument === '--diagnostic') options.diagnostic = true;
   else if (argument === '--serial-profile') options.serialProfile = true;
   else if (argument === '--cap-profile') options.capProfile = true;
   else if (argument === '--recovery-profile') options.recoveryProfile = true;
+  else if (argument === '--postgres-recovery-profile') options.postgresRecoveryProfile = true;
   else if (argument === '--request-samples') options.requestSamples = true;
   else if (argument === '--no-build') options.noBuild = true;
   else if (['--pg-bin', '--redis-bin', '--output-dir'].includes(argument) && args[index + 1]) {
     const key = { '--pg-bin': 'pgBin', '--redis-bin': 'redisBin', '--output-dir': 'outputDir' }[argument];
     options[key] = args[++index];
-  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build | --recovery-profile --no-build]] [--no-build]');
+  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build | --recovery-profile --no-build | --postgres-recovery-profile --no-build]] [--no-build]');
 }
 assert.ok(!options.serialProfile || options.diagnostic, '--serial-profile requires --diagnostic');
 assert.ok(!options.requestSamples || (options.diagnostic && options.serialProfile), '--request-samples requires --diagnostic --serial-profile');
@@ -65,6 +67,7 @@ function validateCapProfile(configuration, cap) {
 }
 validateCapProfile(options, gatewayMaxHttpInFlight);
 validateRecoveryProfile(options, requestDiagnostics.enabled, gatewayMaxHttpInFlight);
+validatePostgresRecoveryProfile(options, requestDiagnostics.enabled, gatewayMaxHttpInFlight);
 assert.ok(options.pgBin, 'Set --pg-bin to an installed PostgreSQL 16+ binary directory');
 const pgBin = resolve(options.pgBin);
 for (const executable of ['initdb', 'pg_ctl', 'psql', 'postgres']) assert.ok(existsSync(join(pgBin, executable)), `Missing PostgreSQL binary ${executable}`);
@@ -84,6 +87,7 @@ const recoveryAbort = new AbortController();
 const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'current-dist-cli-mock-test-assembly',
   productionKmsVerified: false, builtinAcceptance: false, realProviderCalls: 0, diagnostic: options.diagnostic,
   ...(options.recoveryProfile ? { recoveryProfile: true, performanceAcceptance: false } : {}),
+  ...(options.postgresRecoveryProfile ? { postgresRecoveryProfile: true, performanceAcceptance: false } : {}),
   serialProfile: options.serialProfile, warmupInflight: options.serialProfile ? 1 : 4,
   capProfile: options.capProfile ? { diagnosticOnly: true, performanceAcceptance: false, cap: gatewayMaxHttpInFlight,
     inflight: 200, requestedSeconds: 60, minimumSuccessfulSamples: 100, pairedComparisonRequired: true } : null,
@@ -345,6 +349,7 @@ async function hashTree(directory) {
 async function hashHarness() {
   const files = ['scripts/ops/run-current-r9.mjs', 'scripts/ops/bench-gateway.mjs', 'deploy/compose/mock-upstream.mjs',
     'scripts/ops/redis-saas-recovery-profile.mjs',
+    'scripts/ops/postgres-saas-recovery-profile.mjs',
     'deploy/managed-saas-postgres-roles.sql', 'package-lock.json'];
   return Object.fromEntries(await Promise.all(files.map(async (file) => [file, createHash('sha256').update(await readFile(join(root, file))).digest('hex')])));
 }
@@ -509,6 +514,30 @@ async function waitFor(label, action, timeoutMs = 30000) {
   } while (Date.now() < deadline);
   firstFault(label, 'Readiness deadline expired');
   throw new Error(`${label} readiness deadline expired`);
+}
+
+// The standard control-plane contract is two bound TCP listeners, not a gateway /readyz route.
+async function ownedControlPlaneListenersReady(child, ports) {
+  assert.equal(child.exitCode, null, 'Owned standard control-plane CLI exited');
+  assert.equal(child.signalCode, null, 'Owned standard control-plane CLI was signalled');
+  assert.ok(ports.length === 2 && new Set(ports).size === 2 &&
+    ports.every((port) => Number.isInteger(port) && port > 0 && port <= 65535));
+  const connected = await Promise.all(ports.map((port) => new Promise((resolveConnected) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let finished = false;
+    const finish = (ready) => {
+      if (finished) return;
+      finished = true; socket.destroy(); resolveConnected(ready);
+    };
+    socket.setTimeout(1000);
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.once('timeout', () => finish(false));
+    socket.once('close', () => finish(false));
+  })));
+  assert.equal(child.exitCode, null, 'Owned standard control-plane CLI exited during listener readiness');
+  assert.equal(child.signalCode, null, 'Owned standard control-plane CLI was signalled during listener readiness');
+  return connected.every(Boolean);
 }
 
 // Serialized into a temporary reviewed operator module. It imports the CURRENT
@@ -742,6 +771,32 @@ try {
       try { const response = await fetch(`http://127.0.0.1:${port}/readyz`, { signal: AbortSignal.timeout(1000) }); await response.body?.cancel(); return response.status === 200; } catch { return false; } });
     gatewayUrls.push(`http://127.0.0.1:${port}`);
   }
+  if (options.postgresRecoveryProfile) {
+    const customerPort = await freePort(); const platformPort = await freePort();
+    const totpModule = join(runtimeDir, 'pg-recovery-totp-provider.mjs');
+    await writeFile(totpModule, `export async function createCredentialKeyProvider({env,purpose}) {
+      if(purpose!=='platform-totp') throw new Error('Invalid local recovery provider purpose');
+      const key=Buffer.from(env.R9_RECOVERY_TOTP_KEY??'','hex');
+      if(key.length!==32) throw new Error('Missing local recovery TOTP key');
+      return {getCurrentKey(){return {keyId:'pg-recovery-local-totp',key:new Uint8Array(key)}},
+        getKey(id){return id==='pg-recovery-local-totp'?new Uint8Array(key):undefined},
+        async checkReady(){},async close(){key.fill(0)}};
+    }`, { mode: 0o600 });
+    const cp = await launch('postgres-recovery-control-plane', process.execPath, [join(root, 'dist/cli/index.js'), 'start', '--role', 'control-plane'], {
+      ...kmsEnv, MODEL_ROUTER_DEPLOYMENT_MODE: 'managed-saas', MODEL_ROUTER_SAAS_WORKLOAD_ROLE: 'control-plane',
+      MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL: roleUrl('model_router_saas_control_plane'),
+      MODEL_ROUTER_SAAS_DEPLOYMENT_ID: 'r9-current-test', MODEL_ROUTER_SAAS_ENVIRONMENT_ID: 'test',
+      MODEL_ROUTER_SAAS_KMS_PROVIDER: totpModule, R9_RECOVERY_TOTP_KEY: randomBytes(32).toString('hex'),
+      MODEL_ROUTER_SAAS_REDIS_PROVIDER: join(root, 'dist/saas/runtime/redis-rate-limit-provider.js'),
+      MODEL_ROUTER_SAAS_REDIS_URL: `redis://127.0.0.1:${redisPort}`,
+      MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS: '127.0.0.1', MODEL_ROUTER_SAAS_CUSTOMER_PORT: String(customerPort),
+      MODEL_ROUTER_SAAS_CUSTOMER_ORIGIN: `http://127.0.0.1:${customerPort}`,
+      MODEL_ROUTER_SAAS_PLATFORM_BIND_ADDRESS: '127.0.0.1', MODEL_ROUTER_SAAS_PLATFORM_PORT: String(platformPort),
+      MODEL_ROUTER_SAAS_PLATFORM_ORIGIN: `http://127.0.0.1:${platformPort}`,
+    });
+    manifest.ports.controlPlane = { customer: customerPort, platform: platformPort };
+    await waitFor('postgres-recovery-control-plane', () => ownedControlPlaneListenersReady(cp, [customerPort, platformPort]));
+  }
   for (const route of seed.inventory) {
     const response = await fetch(`${gatewayUrls[0]}${route.endpoint}`, { method: 'POST', signal: AbortSignal.timeout(60000),
       headers: { authorization: `Bearer ${seed.key}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
@@ -800,7 +855,32 @@ try {
     return { reportFile, ok };
   }
   if (options.diagnostic) {
-    if (options.recoveryProfile) {
+    if (options.postgresRecoveryProfile) {
+      manifest.postgresRecovery = await runPostgresSaasRecoveryProfile({ getDatabase: () => database, seed, gatewayUrls,
+        controlUrl: `http://127.0.0.1:${controlPort}`, outputDir, signal: recoveryAbort.signal,
+        assertOtherProcessesAlive: () => {
+          for (const { stage, child } of children) {
+            assert.equal(child.exitCode, null, `Owned ${stage} exited during PostgreSQL recovery`);
+            assert.equal(child.signalCode, null, `Owned ${stage} was signalled during PostgreSQL recovery`);
+          }
+        },
+        stopOwnedPostgres: async () => {
+          recoveryAbort.signal.throwIfAborted();
+          // The observation pool is disposable; original gateway/control-plane pools must survive the outage.
+          await database.close(); recoveryAbort.signal.throwIfAborted();
+          await requireRun('postgres-recovery-immediate-stop', join(pgBin, 'pg_ctl'), ['-D', dataDir, '-w', '-m', 'immediate', 'stop'], baseEnvironment, 30000);
+          pgStarted = false;
+        },
+        restartOwnedPostgres: async () => {
+          recoveryAbort.signal.throwIfAborted();
+          // Startup can succeed just as the command is interrupted; cleanup must still own a possible server.
+          pgStarted = true;
+          await requireRun('postgres-recovery-same-directory-start', join(pgBin, 'pg_ctl'), ['-D', dataDir, '-l', join(outputDir, 'postgres.log'), '-w', '-o', `-h 127.0.0.1 -p ${pgPort} -c unix_socket_directories=`, 'start'], baseEnvironment, 30000);
+          const { createSaasDatabase } = await import(pathToFileURL(join(root, 'dist/saas/db/index.js')).href);
+          database = createSaasDatabase({ connectionString: roleUrl('model_router_saas_migrator'), max: 2 });
+        },
+      });
+    } else if (options.recoveryProfile) {
       manifest.recovery = await runRedisSaasRecoveryProfile({ database, seed, gatewayUrls,
         controlUrl: `http://127.0.0.1:${controlPort}`, redisUrl: `redis://127.0.0.1:${redisPort}`, redisProcess: redis,
         runtimeDir, outputDir, signal: recoveryAbort.signal,
