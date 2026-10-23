@@ -58,6 +58,7 @@ const isolatedGates = [
   ['dispatch-capacity', 'tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts', true],
   ['affinity-bind-race', 'tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts', false],
   ['dispatch-proof-fence-batch', 'tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts', false],
+  ['payment-merchant-binding', 'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts', false],
 ] as const;
 const cancellationFixture = 'tests/saas/gateway/pre-dispatch-postgres-fixture.ts';
 const terminalReplayFixture = 'tests/saas/metering/normal-success-postgres-fixture.ts';
@@ -88,13 +89,13 @@ const gatewayRoots = [
   'tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts',
   'tests/saas/supply/platform-inference-access.postgres.integration.test.ts',
   'tests/saas/gateway/responses-continuation.postgres.integration.test.ts',
-  'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts',
 ] as const;
 const standaloneRoots = [
   'tests/saas/db/migrations/050_prepared_evidence_authorization_advisory_fences.test.ts',
   'tests/saas/db/migrations/051_unknown_outcome_support_ticket.test.ts',
 ] as const;
 const strictRoots = [
+  'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts',
   terminalReplayFixture,
   'tests/saas/db/migrations.test.ts',
   ...gatewayRoots,
@@ -801,6 +802,15 @@ test('actual source prerequisites preserve successful-HTTP dependencies and each
       const fixture = read(kimiCommercialFixture);
       assert.match(fixture, /await identity\.issueBootstrapToken\(/);
       assert.match(fixture, /await identity\.bootstrapPlatformAdmin\(/);
+    } else if (selector === 'payment-merchant-binding') {
+      assert.ok(source.includes('const tenantId = randomUUID();'));
+      assert.ok(source.includes('const actorId = randomUUID();'));
+      assert.ok(source.includes('INSERT INTO saas_users(id,email)'));
+      assert.ok(source.includes('INSERT INTO saas_tenants(id,name,slug)'));
+      assert.ok(source.includes('await registerPaymentBindings(cpA, resolver);'));
+      assert.ok(source.includes('await restoreControl();'));
+      assert.match(source, /const urls = roleUrls\(\)/);
+      assert.doesNotMatch(source, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
     } else if (selector === 'runtime-health-clock') {
       validateRuntimeHealthClockSource(source, read(runtimeHealthClockFixture));
     } else if (selector === 'dispatch-proof-fence-batch') {
@@ -1010,12 +1020,17 @@ test('P0 roots share the fail-closed disposable restricted-role URL contract', (
 });
 
 
-test('merchant binding PG gate follows the complete financial fixture with required role URLs', () => {
+test('merchant binding PG gate runs only in a fresh isolated service without financial HTTP fixtures', () => {
+  validateWorkflow(workflow);
+  validateIsolatedWorkflow(workflow);
+  validateIsolatedRunner(isolatedRunner);
   const root = 'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts';
-  const job = validateWorkflow(workflow);
-  exactEnv(rootStep(job, root), gatewayEnv);
-  before(job, rootStep(job, 'tests/saas/gateway/responses-continuation.postgres.integration.test.ts'), rootStep(job, root));
-  // The root owns UUID business rows and restores its temporary global control
-  // snapshot. It must run sequentially after all earlier financial roots.
-  before(job, rootStep(job, 'tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts'), rootStep(job, root));
+  const entry = isolatedGates.find(([selector]) => selector === 'payment-merchant-binding');
+  assert.ok(entry);
+  assert.equal(entry[1], root);
+  assert.equal(entry[2], false, 'legacy financial orders intentionally block merchant admission');
+  assert.equal(managedJob(workflow).steps.filter(step => step.run.includes(root)).length, 1, 'shared job only compiles merchant source');
+  assert.equal(managedJob(workflow).steps.filter(step => step.run === `node --import tsx --test ${root}`).length, 0);
+  strictCompiler(managedJob(workflow), [root]);
+  strictCompiler(managedJob(workflow, ISOLATED_JOB), [root]);
 });

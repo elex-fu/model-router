@@ -214,14 +214,6 @@ jobs:
           MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
         run: node --import tsx --test tests/saas/gateway/responses-continuation.postgres.integration.test.ts
-      - name: Run required real PostgreSQL merchant binding callback refund and concurrency gate
-        env:
-          NODE_ENV: test
-          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
-          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
-          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
-          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
-        run: node --import tsx --test tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts
       # Test administrator only: each historical slice owns a random temporary
       # database. Production migrator never receives CREATEDB or this URL.
       - name: Run required real PostgreSQL isolated historical migration chains
@@ -245,7 +237,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
-        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
@@ -310,6 +302,7 @@ jobs:
           tests/saas/gateway/pre-dispatch-postgres-fixture.ts
           tests/saas/metering/normal-success-postgres-fixture.ts
           tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
+          tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts
           tests/ci/managed-saas-isolated-required-gates.ts
           tests/ci/managed-saas-required-gates.test.ts
       - name: Provision fresh CI service and execute the fixed required root

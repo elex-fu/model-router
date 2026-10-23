@@ -905,3 +905,9 @@ Luna 真实 PG18 058 **11/11**、054 **4/4**、FIN057 **5/5**；按原 CI 同库
 完整 integration 暴露旧测试把 SSE 的 `event: message_start` 也当成 JSON data；新桥按 Anthropic 规范发完整事件后触发解析失败。fixture 改为按 SSE frame.data 读取并核 event 与 payload.type 一致，保留正文断言并补全生命周期和 usage；mock 终帧也改为 Gemini 原生 finishReason STOP，不能用 OpenAI `[DONE]` 冒充 Gemini 成功终态。未修改生产桥行为。
 
 Luna 单文件 **5/5**，完整 integration 修后 **360 条 / 255 pass / 0 fail / 105 skip**；未配置的 PG/外部门禁跳过项不计通过。两组 CI strict 再次通过；unit 与 server 结果见 §29.20。权限修复已推送 `f9a91fd`。该远程候选 PG15/18 后续发现商户 gate 与既有 legacy 测试订单共享数据库的冲突，正调整测试隔离，生产无归属历史单的启用拒绝保持不变。
+
+### 29.22 P07 商户 required gate 的独立数据库
+
+Astra 确认共享 CI 财务 fixture 创建了无 binding 的历史支付/退款记录，商户 gate 的首次 enable 因全库 legacy 检查而正确拒绝；换 tenant 无法隔离全局 control。现将 merchant 执行移入既有 isolated required 矩阵，每个 PG15/18 job 使用独立 service/数据库，`httpFixture:false`；保留 shared 与 isolated 两组 strict、REQUIRED=1、三角色 URL、正常迁移及权限探针。未清理或猜测旧金融事实，未放松生产启用门槛。
+
+Luna CI wiring **19/19**、两组严格编译通过，按相同正常 provision 顺序的 fresh PG18 商户 **5/5**、CP runtime probe **1/1** 通过。固定 isolated runner 明确只允许真实 GitHub 环境与其 service DNS，本地未伪造 CI 标志绕过；因此这仍需新候选的远程 PG15/18 实际确认。完整离线回归与代码构建见 §29.20–21。Gemini fixture 已推送 `7acecc2`。

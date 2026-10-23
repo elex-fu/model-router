@@ -114,6 +114,10 @@ const gates = {
     root: 'tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts',
     httpFixture: false,
   },
+  'payment-merchant-binding': {
+    root: 'tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts',
+    httpFixture: false,
+  },
 } as const;
 const databaseUrls = {
   migrator: 'postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci',
