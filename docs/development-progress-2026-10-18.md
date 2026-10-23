@@ -873,3 +873,11 @@ Astra 指出的实际 Codex 强制 SSE、连接缓存绕过过期、延迟发布
 A0 脚本审阅发现仅观察 `attempt_count<=1` 不能限制发送次数，worker 默认可重试五次。新增正式 `MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS`：仅 credential-validation-worker 角色接受，整数 1–20，配置后真实传入 worker，未配置保持原默认 5；doctor 显示每 job 上限，不称作全局流量上限。A0 将其设为 1，业务首请求仍只发一次。
 
 Luna 部署单文件 **31/31**、服务端编译通过，此前同批 doctor/startup 均通过；新增测试的安全错误文案预期已修。未改变核心重试算法、未知派发处理或资金规则，也未执行实际 Kimi 调用。HTTP/WS 持久消费已推送 `72b7b97`。
+
+### 29.18 A0/M1 正式新客首请求验收脚本
+
+新增 `scripts/ops/verify-platform-access-first-request.ts`、独立 live test 与 disposable PG runner 的 `platform-access` suite。平台 catalog/价格/加密供给可预配置；待验客户必须通过正式注册、赠金码兑换、管理员 P01 HTTP、客户明确创建 Key，再由 current dist 标准 CLI builtin 完成短 Kimi 请求。未用 SQL seed 客户权益、路由、grant、余额或登录 session。MFA 使用真实 enrollment/login；资金门禁核原生 usage、精确价格/成本版本、账本平衡、余额扣减、hold/lease 释放。赠金不代表 PSP 支付验收。
+
+Astra 审阅后修复新 suite 名含连字符导致非法库名、观察尝试次数不能限制发送、强制中断可能遗留进程与临时签名材料三项问题。新 suite 使用独立 owned process group、幂等信号清理和 runner 兜底删除专用 runtime 目录；验证 worker 每 job 最多一次尝试，业务请求不自动重发。PG durability 开启，source/dist 前后 provenance 保留。
+
+Luna 严格 helper/test 编译、runner 语法检查通过，无 live 授权拒绝和真实本地子进程/材料清理测试 **2/2**；另用实际 detached node test group 验证 SIGTERM 到达 worker。尚未执行真实请求：当前进程缺少 Kimi Code 凭据，本地配置的环境引用亦未加载，已请求现有环境文件路径/部署引用。所需 secret 只在进程环境注入，不进 argv、日志或 Git，A0/M1 保持待验。worker 上限已推送 `a755301`；最终 P06 联合批次 **132/132** 与 server build 通过。

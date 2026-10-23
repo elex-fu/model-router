@@ -2,14 +2,14 @@
 // Owns a new initdb cluster OR a new Docker container, and fresh test DBs only.
 // Usage: node scripts/run-commercial-postgres-gate.mjs
 //        (--pg-bin /path/to/bin | --docker-image postgres:15-alpine)
-//        [--suite commercial|composite|all|kimi] [--output-dir /new/evidence/dir]
+//        [--suite commercial|composite|all|kimi|platform-access] [--output-dir /new/evidence/dir]
 // Or:    ... --test-file tests/path.postgres.integration.test.ts [--worker-role]
 // `all` runs the two deterministic gates. `kimi` requires the separate live
 // opt-in and credential; this runner never discovers or supplies credentials.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -20,6 +20,7 @@ const suites = {
   commercial: 'tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts',
   composite: 'tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts',
   kimi: 'tests/integration/kimi-commercial-live.test.ts',
+  'platform-access': 'tests/integration/platform-access-first-request-live.test.ts',
 };
 const options = { pgBin: undefined, dockerImage: undefined, suite: 'commercial', outputDir: undefined,
   testFile: undefined, workerRole: false };
@@ -35,7 +36,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
   const key = { '--pg-bin': 'pgBin', '--docker-image': 'dockerImage', '--suite': 'suite', '--output-dir': 'outputDir',
     '--test-file': 'testFile' }[name];
   if (!key || (!inlineValue && !argumentsList[index + 1])) {
-    throw new Error('usage: --pg-bin /path/to/bin OR --docker-image postgres:15-alpine; --suite commercial|composite|all|kimi');
+    throw new Error('usage: --pg-bin /path/to/bin OR --docker-image postgres:15-alpine; --suite commercial|composite|all|kimi|platform-access');
   }
   options[key] = inlineValue ?? argumentsList[++index];
 }
@@ -56,6 +57,11 @@ if (Boolean(options.pgBin) === Boolean(options.dockerImage) || !Object.hasOwn(su
 if (options.suite === 'kimi' && (process.env.RUN_KIMI_COMMERCIAL_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
   throw new Error('the Kimi suite requires explicit RUN_KIMI_COMMERCIAL_LIVE=1 and KIMI_CODE_API_KEY');
 }
+if (options.suite === 'platform-access' && (process.env.RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
+  throw new Error('platform-access requires explicit RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
+}
+const firstRequestLive = options.suite === 'platform-access';
+if (firstRequestLive && !existsSync(resolve(root, 'dist/cli/index.js'))) throw new Error('build the current server before platform-access acceptance');
 const docker = Boolean(options.dockerImage);
 if (docker && !/^postgres:(?:1[5-9]|[2-9][0-9])(?:\.\d+)*(?:-alpine)?$/.test(options.dockerImage)) {
   throw new Error('Docker mode accepts only an explicit PostgreSQL 15+ official image tag');
@@ -65,7 +71,7 @@ if (pgBin) for (const binary of ['initdb', 'pg_ctl', 'psql', 'postgres']) {
   if (!existsSync(join(pgBin, binary))) throw new Error(`missing PostgreSQL binary: ${binary}`);
 }
 const selectedSuites = options.suite === 'all' ? ['commercial', 'composite'] : [options.suite];
-const needsWorker = options.workerRole || selectedSuites.includes('kimi');
+const needsWorker = options.workerRole || selectedSuites.includes('kimi') || firstRequestLive;
 const outputDir = options.outputDir
   ? resolve(options.outputDir)
   : await mkdtemp(join(tmpdir(), 'model-router-commercial-postgres-'));
@@ -97,7 +103,7 @@ async function sourceSnapshot() {
     resolve(root, 'deploy/managed-saas-postgres-roles.sql'),
     ...(needsWorker ? [resolve(root, 'deploy/managed-saas-validation-worker-role-grants.sql')] : []),
     resolve(root, 'package-lock.json'),
-    ...(selectedSuites.includes('kimi') && existsSync(resolve(root, 'dist/cli/index.js'))
+    ...((selectedSuites.includes('kimi') || firstRequestLive) && existsSync(resolve(root, 'dist/cli/index.js'))
       ? [resolve(root, 'dist/cli/index.js')] : []),
   ];
   const hashes = {};
@@ -118,6 +124,19 @@ async function sourceSnapshot() {
       if (target) pending.push(target);
     }
   }
+  return Object.fromEntries(Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+async function distSnapshot() {
+  const hashes = {};
+  async function visit(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) hashes[relative(root, path)] = createHash('sha256').update(await readFile(path)).digest('hex');
+    }
+  }
+  await visit(resolve(root, 'dist'));
   return Object.fromEntries(Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)));
 }
 
@@ -142,6 +161,11 @@ const summary = {
   sourceScope: 'literal relative import closure, runner, role manifest, package-lock.json',
   sourceBefore: await sourceSnapshot(),
   sourceAfter: null,
+  distScope: firstRequestLive ? 'complete current dist artifact tree; supervisor must build current candidate before run' : null,
+  distBefore: firstRequestLive ? await distSnapshot() : null,
+  distAfter: null,
+  distChanged: false,
+  durability: firstRequestLive ? 'fsync=on;synchronous_commit=on' : 'existing deterministic disposable fixture settings',
   sourceChanges: [],
   port: await freePort(),
   roles: ['model_router_saas_migrator', 'model_router_saas_control_plane', 'model_router_saas_gateway'],
@@ -153,10 +177,32 @@ const summary = {
 let clusterStarted = false;
 let interrupted = false;
 let activeChild;
+let activeOwnedTestGroup = false;
+let activeGroupKillTimer;
+function terminateActiveChild() {
+  if (activeOwnedTestGroup && activeChild?.pid) {
+    const pid = activeChild.pid;
+    try { process.kill(-pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    activeGroupKillTimer ??= setTimeout(() => {
+      try { process.kill(-pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }, 10_000);
+  } else activeChild?.kill('SIGTERM');
+}
+async function drainOwnedTestGroup(pid) {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try { process.kill(-pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
+    if (Date.now() >= deadline) {
+      try { process.kill(-pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      return;
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 100));
+  }
+}
 if (needsWorker) summary.roles.push('model_router_saas_validation_worker');
 const interrupt = () => {
   interrupted = true;
-  activeChild?.kill('SIGTERM');
+  terminateActiveChild();
 };
 process.once('SIGINT', interrupt);
 process.once('SIGTERM', interrupt);
@@ -169,17 +215,29 @@ async function run(stage, command, args, env = process.env, timeoutMs = 180_000)
   let result;
   try {
     result = await new Promise((resolveRun, reject) => {
-      const child = spawn(command, args, { cwd: root, env, stdio: ['ignore', log.fd, log.fd] });
+      const ownedTestGroup = firstRequestLive && stage === 'platform-access-test';
+      const child = spawn(command, args, { cwd: root, env, detached: ownedTestGroup, stdio: ['ignore', log.fd, log.fd] });
       activeChild = child;
-      const timeout = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+      activeOwnedTestGroup = ownedTestGroup;
+      const timeout = setTimeout(() => terminateActiveChild(), timeoutMs);
       child.once('error', (error) => {
         clearTimeout(timeout);
         reject(error);
       });
-      child.once('close', (code, signal) => {
+      child.once('close', async (code, signal) => {
         clearTimeout(timeout);
-        activeChild = undefined;
-        resolveRun({ code, signal });
+        try {
+          // Only our detached A0 group; never signal arbitrary process names or old suites.
+          if (ownedTestGroup && child.pid) {
+            try { process.kill(-child.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+            await drainOwnedTestGroup(child.pid);
+          }
+          clearTimeout(activeGroupKillTimer);
+          activeGroupKillTimer = undefined;
+          activeChild = undefined;
+          activeOwnedTestGroup = false;
+          resolveRun({ code, signal });
+        } catch (error) { reject(error); }
       });
     });
   } finally {
@@ -255,7 +313,7 @@ try {
     const name = `model-router-commercial-pg-${randomUUID()}`;
     await requireStage('create-container', 'docker', ['create', '--pull=never', '--name', name,
       '--label', 'model-router.disposable-commercial-gate=true', '--publish', `127.0.0.1:${summary.port}:5432`,
-      '--env', 'POSTGRES_HOST_AUTH_METHOD=trust', options.dockerImage, '-c', 'fsync=off', '-c', 'synchronous_commit=off']);
+      '--env', 'POSTGRES_HOST_AUTH_METHOD=trust', options.dockerImage, '-c', firstRequestLive ? 'fsync=on' : 'fsync=off', '-c', firstRequestLive ? 'synchronous_commit=on' : 'synchronous_commit=off']);
     const id = (await readFile(join(outputDir, 'create-container.log'), 'utf8')).trim();
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Docker did not return an owned container ID');
     summary.containerId = id;
@@ -272,12 +330,12 @@ try {
     ]);
     await requireStage('start-cluster', join(pgBin, 'pg_ctl'), [
       '-D', dataDir, '-l', join(outputDir, 'postgres.log'), '-w', '-o',
-      `-h 127.0.0.1 -p ${summary.port} -c unix_socket_directories= -c fsync=off -c synchronous_commit=off -c log_error_verbosity=verbose`, 'start',
+      `-h 127.0.0.1 -p ${summary.port} -c unix_socket_directories= -c fsync=${firstRequestLive ? 'on' : 'off'} -c synchronous_commit=${firstRequestLive ? 'on' : 'off'} -c log_error_verbosity=verbose`, 'start',
     ]);
   }
   clusterStarted = true;
   for (const suite of selectedSuites) {
-    const database = `model_router_test_${suite}_${randomUUID().replaceAll('-', '')}`;
+    const database = `model_router_test_${suite.replaceAll('-', '_')}_${randomUUID().replaceAll('-', '')}`;
     roleUrl('postgres', database); // Validate before embedding the identifier in CREATE DATABASE.
     const env = {
       ...process.env,
@@ -293,6 +351,7 @@ try {
         MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL: roleUrl('model_router_saas_migrator', database),
         MODEL_ROUTER_SAAS_VALIDATION_E2E_WORKER_URL: roleUrl('model_router_saas_validation_worker', database),
       } : {}),
+      ...(suite === 'platform-access' ? { PLATFORM_FIRST_REQUEST_RUNTIME_PARENT: join(outputDir, 'platform-access-runtime') } : {}),
       ...(suite === 'kimi' ? {
         KIMI_COMMERCIAL_EVIDENCE_DIR: join(outputDir, 'kimi-evidence'),
       } : {}),
@@ -344,13 +403,18 @@ try {
     summary.cleanup.clusterRemoved = true;
   }
   if (docker && summary.cleanup.clusterRemoved) await rm(clusterDir, { recursive: true, force: true });
+  if (firstRequestLive) await rm(join(outputDir, 'platform-access-runtime'), { recursive: true, force: true });
   summary.sourceAfter = await sourceSnapshot();
+  if (firstRequestLive) {
+    summary.distAfter = await distSnapshot();
+    summary.distChanged = JSON.stringify(summary.distBefore) !== JSON.stringify(summary.distAfter);
+  }
   summary.sourceChanges = [...new Set([
     ...Object.keys(summary.sourceBefore), ...Object.keys(summary.sourceAfter),
   ])].filter((path) => summary.sourceBefore[path] !== summary.sourceAfter[path]);
   summary.finishedAt = new Date().toISOString();
   summary.ok = !summary.error && !interrupted && summary.suites.length === selectedSuites.length &&
-    summary.suites.every((suite) => suite.ok) && summary.sourceChanges.length === 0 &&
+    summary.suites.every((suite) => suite.ok) && summary.sourceChanges.length === 0 && !summary.distChanged &&
     summary.cleanup.clusterStopped && summary.cleanup.clusterRemoved;
   await writeFile(join(outputDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
   console.log(`Summary: ${join(outputDir, 'summary.json')} (ok=${summary.ok}, source changes=${summary.sourceChanges.length})`);
