@@ -404,8 +404,8 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 | 优先级/任务 | 暂停状态 | 恢复后的处理方式与出口 |
 |---|---|---|
-| P0 / A1o真实CLI有限互通 | **已通过（run07/run08）**：run08绑定干净候选`e988644`+fresh build，真实Claude Code 2.1.216经观察器→GW→真实Kimi完成两轮Read+三轮generation，3笔native usage逐笔结算（4573+4873+4996=14442）、wallet 985558、hold 0、ledger 4/8、4 leases释放；`f27f06c` CI 68/68 success，`e988644` CI待收 | 收集`e988644` CI结果完成候选绑定；thinkingModeProven/backendRevisionProven/providerHardLimitProven/productionGo保持false边界；A1o不关闭A1a、完整A1或M1 |
-| P0 / C0首瓶颈定位 | serial完整样本已失败；trace wrapper仅未审草稿，从未执行 | 先审草稿与资源条件，再独占执行同四腿100、request-samples、sampleEvery=1；核200个GW UUID及trace完整性，按markers和exclusive阶段定位，trace成绩不作性能验收 |
+| P0 / A1o真实CLI有限互通 | **已通过并完成候选绑定**：run08绑定干净候选`e988644`+fresh build，真实Claude Code 2.1.216经观察器→GW→真实Kimi完成两轮Read+三轮generation，3笔native usage逐笔结算（4573+4873+4996=14442）、wallet 985558、hold 0、ledger 4/8、4 leases释放；`f27f06c`与`e988644`（CI #40089334882）均68/68 success | thinkingModeProven/backendRevisionProven/providerHardLimitProven/productionGo保持false边界；A1o不关闭A1a、完整A1或M1 |
+| P0 / C0首瓶颈定位 | **已完成trace诊断**：wrapper静态审阅通过后独占执行，200/200样本trace完整（observationOk=true、零missing/duplicate/incomplete）；exclusive归因锁定`query`阶段独占p50 173/157ms、p99 382/383ms，占请求elapsed约87%；upstream-send marker在~173ms（provider TTFB仅+7ms、结算不占TTFB） | 静态枚举pre-dispatch查询路径（auth→admission→prelock→preparation→dispatch）确定每请求SQL往返构成，产出窄修候选清单；trace结果仅作诊断不作验收 |
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
 | P0 / A1完整指定范围 | A1o不证明thinking已关闭/开启；A1a disabled、thinking enabled、cancel/resume及可获得的模型版本证据开放 | 分场景捕获原始协议事实并实跑；无法取得backend revision时明确未知，不用CLI版本替代，不把有限互通观察写成M1通过 |
 | P0 / B0、B1真实支付 | binding/退款/收银工程已有本地与PG证据，真实PSP未验 | 补真实Alipay主体、CNY钱包/计划、回调验签配置及受控退款额度；验证原POST重入、回调到账、全/部分退款、旧binding回调退款与歧义reconciliation |

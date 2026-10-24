@@ -1352,9 +1352,26 @@ A1o保留max_tokens≤512、最多3次generation/两次真实Read回传/第三�
 
 **诊断改进**（随根因发现而加）：first-request失败诊断透传观察器安全固定类别投影（此前errorCode null不可定位）；观察器新增结构-only历史对比（块类型+有界长度，零内容字节）。fixture并发容量2→4（A0单请求形态→A1o设计形态probe+3 generation，异步结算重叠为实测事实；观察器合同禁止429重试故须容量覆盖）。
 
-**验收绑定**：`f27f06c`（GW x-api-key修复）CI 68/68 success；`e988644`（usage观察器+观察器合同修复）CI运行中待收。run08绑定干净`e988644`+fresh build，全程sourceChanges=0、distChanged=false、cleanup完整。完整健康栈通过：tsc exit0、全套件7143测试（images keepalive心跳测试为预存在时序flake，隔离运行2×9/9通过，与本次改动域无关）、改动文件lint零错误（仓库预存在243个错误位于admin/protocol等未触碰文件）。A1o完成诊断边界保持：thinkingModeProven=false、backendRevisionProven=false、providerHardLimitProven=false、productionGo=false。A1o关闭自身有限互通观察，不关闭A1a、完整A1或M1。
+**验收绑定**：`f27f06c`（GW x-api-key修复）CI 68/68 success；`e988644`（usage观察器+观察器合同修复）**CI #40089334882 completed/success 68/68**。run08绑定干净`e988644`+fresh build，全程sourceChanges=0、distChanged=false、cleanup完整。完整健康栈通过：tsc exit0、全套件7143测试（images keepalive心跳测试为预存在时序flake，隔离运行2×9/9通过，与本次改动域无关）、改动文件lint零错误（仓库预存在243个错误位于admin/protocol等未触碰文件）。A1o完成诊断边界保持：thinkingModeProven=false、backendRevisionProven=false、providerHardLimitProven=false、productionGo=false。A1o关闭自身有限互通观察，不关闭A1a、完整A1或M1。
 
 证据目录：`/private/tmp/model-router-a1o-live-run0{1..8}-20261024/`（run01复用原wrapper输出目录）。
+
+### 29.62 C0 trace 诊断执行：瓶颈定位于pre-dispatch DB查询阶段
+
+按29.55设计的诊断路径，经静态审阅（wrapper可直接执行、预期exit 1、判定看observationOk而非退出码）后在独占窗口执行trace wrapper一轮：同四腿各100（latency/TTFB×direct/gateway）、request-samples、`MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY=1`、`--no-build`、prepared statements off、PG18 fsync/synchronous_commit=on。运行基于当前`e988644` dist（含GW认证/usage观察器修复，不触及热路径）。
+
+**trace观察完整性**：`observationOk=true`——200/200 gateway腿样本全observed，missing/duplicate/incomplete/malformed/wrong-gateway/missing-logs全0；44条unrelated记录为未采样请求（冒烟等），符合导出器合同。sink丢弃不可计数（serial inflight=1，实际丢行概率极小）。
+
+**exclusive阶段归因（每请求墙钟，union合并重叠）**：
+
+| 场景 | elapsed p50/p99 | query独占 p50/p99 | transaction独占 | settle独占 | pool-checkout | upstream-send独占 | upstream-body |
+|---|---|---|---|---|---|---|---|
+| latency | 199.8/442.3ms | **173.1/382.2ms** | 10.5/35.5ms | 0.3/4.6ms | 0.7/5.4ms | 4.4/31.9ms | 0.6/7.2ms |
+| ttfb | 182.3/457ms | **156.8/382.9ms** | 8.4/45.8ms | 0.2/2.5ms | 0.8/5.1ms | 4.3/51.3ms | 1.2/4.7ms |
+
+markers：latency腿 upstream-send p50=172.9ms、first-byte=179.8、eof=179.9、settled=196.5——provider在请求进入~173ms后才被调用，其后TTFB仅+7ms、结算仅+17ms。**`query`阶段独占占elapsed约87%，为gateway overhead的绝对主导**；settlement从未被计入TTFB（markers已证）。本轮绝对值低于29.55失败轮（442 vs 731ms p99），但阶段占比结构一致，归因结论不受影响；trace结果仅作诊断，不构成性能验收。
+
+下一动作：静态枚举pre-dispatch查询路径（auth→admission→prelock→preparation→dispatch）以确定每请求SQL往返构成与窄修候选；之后按原顺序窄修→有效serial→cap A/B→完整R9，门槛不变。证据：`/private/tmp/model-router-c0-serial-trace-20261024-run-01/`（含`serial-profile-request-traces.json`、`serial-profile-request-samples.json`、gateway日志）与wrapper目录。
 
 ### 29.60 恢复开发首轮：run04 capture首次通过，A1o事实合同闭合
 
