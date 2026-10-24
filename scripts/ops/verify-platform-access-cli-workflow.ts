@@ -415,7 +415,21 @@ export async function runPlatformAccessCliThinkingObservationWorkflow(context:Pl
   return executeCli({kind:'real',context,scene:'enabled-observation'}) as Promise<PlatformFirstRequestCliResult>;
 }
 
-async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:WorkflowScene}|{kind:'real';context:PlatformFirstRequestCliContext;scene:WorkflowScene}):Promise<CliCaptureEvidence|PlatformFirstRequestCliResult> {
+/**
+ * Client-cancel observation: the observer terminates the CLI (user-abort
+ * shape) mid-stream during the first generation after a fixed number of
+ * observed upstream SSE events, then fails closed with a redacted error. The
+ * parent's failure-observation readback asserts the platform cancel
+ * contract: no duplicate dispatch, honest hold/lease state. A bounded
+ * settle wait lets the gateway's abort/compensation path land before the
+ * readback. Never claims settlement of a cancelled generation.
+ */
+export async function runPlatformAccessCliCancelObservationWorkflow(context:PlatformFirstRequestCliContext):Promise<PlatformFirstRequestCliResult>{
+  return executeCli({kind:'real',context,scene:'omitted-observation',cancel:{afterEvents:3}}) as Promise<PlatformFirstRequestCliResult>;
+}
+
+type CliWorkflowCancelPlan={afterEvents:number;initiated:boolean;eventCount:number};
+async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:WorkflowScene}|{kind:'real';context:PlatformFirstRequestCliContext;scene:WorkflowScene;cancel?:{afterEvents:number}}):Promise<CliCaptureEvidence|PlatformFirstRequestCliResult> {
   const options=mode.kind==='real'?mode.context:mode.options;
   const scene=mode.kind==='real'?mode.scene:(mode.scene ?? 'thinking-disabled');
   const gateway=mode.kind==='real'?new URL(mode.context.gatewayOrigin):undefined;
@@ -432,6 +446,7 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:Wor
   const answer=randomBytes(24).toString('hex');
   const publicModel=mode.kind==='real'?mode.context.publicModel:'capture-only-public-model';
   const state=new CliWorkflowObserverState({publicModel,readFiles:files,answer,scene});
+  const cancel:CliWorkflowCancelPlan|undefined=mode.kind==='real'&&mode.cancel?{afterEvents:mode.cancel.afterEvents,initiated:false,eventCount:0}:undefined;
   const aux=new CliWorkflowRootHeadObserver();let cliPhase:'version'|'workflow'='version';
   const pending=new Set<Promise<void>>();
   const server=createServer((req,res)=>{const requestCliPhase=cliPhase;let stage:CliWorkflowDiagnosticStage='transport-contract';let body:unknown;let bodyBytes:number|undefined;const operation=(async()=>{
@@ -462,7 +477,7 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:Wor
     const index=state.attemptCount-1;
     // Fixed fixture destination and original request bytes. No fallback provider,
     // endpoint rewrite, generation retry, payload normalization or fake count_tokens.
-    stage='forward';await forward(req,res,bytes,gateway!,controller.signal,index,state);
+    stage='forward';await forward(req,res,bytes,gateway!,controller.signal,index,state,cancel,cli,()=>{cancel!.initiated=true;},abort);
   })().catch(error=>{failure=retainCliWorkflowFailure(failure,error,{mode:mode.kind,stage,attemptCount:state.attemptCount,method:req.method ?? '',path:req.url ?? '',body,publicModel,contentType:req.headers['content-type'],contentEncoding:req.headers['content-encoding'],bodyBytes,cliPhase:requestCliPhase,...(mode.kind==='real'&&body!==undefined?{historyCompare:{expected:state.historyStructure(),actual:describeCliWorkflowMessages(body)}}:{})});if(!res.destroyed&&!res.headersSent){res.writeHead(403,{'content-type':'application/json'});res.end('{"error":{"type":"permission_error","message":"workflow rejected"}}');}abort();});pending.add(operation);void operation.then(()=>pending.delete(operation),()=>pending.delete(operation));});
   server.on('connection',socket=>{sockets.add(socket);socket.once('close',()=>sockets.delete(socket));});
   try{
@@ -479,6 +494,13 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:Wor
     cli=spawn('claude',['-p','--output-format','stream-json','--verbose','--model',publicModel,'--tools','Read','--allowedTools','Read','--disable-slash-commands','--no-session-persistence','--strict-mcp-config','--mcp-config',mcpPath,'--setting-sources','',prompt],{cwd:directory,env,detached:true,stdio:['ignore','pipe','pipe']});
     register(cli);cli.stdout?.resume();cli.stderr?.resume();
     const exit=await new Promise<{code:number|null;signal:NodeJS.Signals|null}>((yes,no)=>{cli!.once('error',()=>no(new Error('Required local CLI could not start')));cli!.once('exit',(code,signal)=>yes({code,signal}));});
+    if(cancel?.initiated){
+      // Bounded settle wait: the gateway's client-abort compensation and
+      // reconciliation run in its own process; give them time to land before
+      // the parent's failure-observation readback. Diagnostic-only delay.
+      await new Promise<void>(resolveWait=>{const settle=setTimeout(resolveWait,6_000);settle.unref?.();});
+      throw new Error('CLI client stream cancelled by observer; details redacted');
+    }
     if(failure)throw failure;
     if(mode.kind==='capture'){if(!capture)fail();return {...capture,aux:aux.facts()};}
     if(exit.code!==0||exit.signal!==null)fail();
@@ -490,16 +512,27 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:Wor
   }
 }
 
-async function forward(req:IncomingMessage,res:ServerResponse,bytes:Buffer,gateway:URL,signal:AbortSignal,index:number,state:CliWorkflowObserverState):Promise<void>{
+async function forward(req:IncomingMessage,res:ServerResponse,bytes:Buffer,gateway:URL,signal:AbortSignal,index:number,state:CliWorkflowObserverState,cancel:CliWorkflowCancelPlan|undefined,cli:ChildProcess|undefined,initiateCancel:()=>void,abort:()=>void):Promise<void>{
   await new Promise<void>((resolveForward,reject)=>{
     const upstream=httpRequest({hostname:gateway.hostname,port:gateway.port,method:req.method,path:req.url,headers:{...req.headers,host:gateway.host},signal},response=>{
       void (async()=>{
         if(response.statusCode!==200||!String(response.headers['content-type']).startsWith('text/event-stream'))fail();
         const id=response.headers['x-request-id'];if(typeof id!=='string')fail();state.noteRequestId(index,id);
-        const parser=createCliWorkflowSseObserver(event=>state.observeUpstreamEvent(index,event));
+        const parser=createCliWorkflowSseObserver(event=>{
+          state.observeUpstreamEvent(index,event);
+          if(cancel&&index===0&&!cancel.initiated&&++cancel.eventCount>=cancel.afterEvents){
+            // User-abort shape: terminate the CLI client mid-generation, then
+            // break every observer connection so the gateway observes the
+            // client stream cancellation. The CLI's non-zero exit is expected.
+            initiateCancel();
+            if(cli)void stopChild(cli);
+            res.destroy();
+            abort();
+          }
+        });
         res.writeHead(response.statusCode,response.headers);
-        for await(const raw of response){const chunk=Buffer.from(raw);parser.push(chunk);if(!res.write(chunk))await waitDrain(res,signal);}
-        parser.end();res.end();resolveForward();
+        for await(const raw of response){const chunk=Buffer.from(raw);parser.push(chunk);if(!res.destroyed&&!res.write(chunk))await waitDrain(res,signal);}
+        parser.end();if(!res.destroyed)res.end();resolveForward();
       })().catch(reject);
     });
     upstream.once('error',reject);upstream.end(bytes);

@@ -27,6 +27,7 @@ const suites = {
   'platform-cli': 'tests/integration/platform-access-cli-workflow-live.test.ts',
   'platform-cli-observation': 'tests/integration/platform-access-cli-observation-live.test.ts',
   'platform-cli-thinking': 'tests/integration/platform-access-cli-thinking-live.test.ts',
+  'platform-cli-cancel': 'tests/integration/platform-access-cli-cancel-live.test.ts',
 };
 const options = { pgBin: undefined, dockerImage: undefined, suite: 'commercial', outputDir: undefined,
   testFile: undefined, workerRole: false };
@@ -72,10 +73,13 @@ if (options.suite === 'platform-cli' && (process.env.RUN_PLATFORM_ACCESS_CLI_WOR
 if (options.suite === 'platform-cli-observation' && (process.env.RUN_PLATFORM_ACCESS_CLI_OBSERVATION_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
   throw new Error('platform-cli-observation requires explicit RUN_PLATFORM_ACCESS_CLI_OBSERVATION_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
 }
+if (options.suite === 'platform-cli-cancel' && (process.env.RUN_PLATFORM_ACCESS_CLI_CANCEL_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
+  throw new Error('platform-cli-cancel requires explicit RUN_PLATFORM_ACCESS_CLI_CANCEL_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
+}
 if (options.suite === 'platform-cli-thinking' && (process.env.RUN_PLATFORM_ACCESS_CLI_THINKING_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
   throw new Error('platform-cli-thinking requires explicit RUN_PLATFORM_ACCESS_CLI_THINKING_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
 }
-const cliLive = options.suite === 'platform-cli' || options.suite === 'platform-cli-observation' || options.suite === 'platform-cli-thinking';
+const cliLive = options.suite === 'platform-cli' || options.suite === 'platform-cli-observation' || options.suite === 'platform-cli-thinking' || options.suite === 'platform-cli-cancel';
 const firstRequestLive = options.suite === 'platform-access' || cliLive;
 if (firstRequestLive && !existsSync(resolve(root, 'dist/cli/index.js'))) throw new Error('build the current server before platform-access acceptance');
 const docker = Boolean(options.dockerImage);
@@ -360,7 +364,7 @@ try {
     const database = `model_router_test_${suite.replaceAll('-', '_')}_${randomUUID().replaceAll('-', '')}`;
     roleUrl('postgres', database); // Validate before embedding the identifier in CREATE DATABASE.
     const env = {
-      ...(suite === 'kimi' || suite === 'platform-access' || suite === 'platform-cli' || suite === 'platform-cli-observation' || suite === 'platform-cli-thinking' ? process.env : nonSuiteChildEnv),
+      ...(suite === 'kimi' || suite === 'platform-access' || suite === 'platform-cli' || suite === 'platform-cli-observation' || suite === 'platform-cli-thinking' || suite === 'platform-cli-cancel' ? process.env : nonSuiteChildEnv),
       NODE_ENV: 'test',
       PGSSLMODE: 'disable',
       MODEL_ROUTER_SAAS_DATABASE_URL: roleUrl('model_router_saas_migrator', database),
@@ -373,9 +377,9 @@ try {
         MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL: roleUrl('model_router_saas_migrator', database),
         MODEL_ROUTER_SAAS_VALIDATION_E2E_WORKER_URL: roleUrl('model_router_saas_validation_worker', database),
       } : {}),
-      ...(suite === 'platform-access' || suite === 'platform-cli' || suite === 'platform-cli-observation' || suite === 'platform-cli-thinking'
+      ...(suite === 'platform-access' || suite === 'platform-cli' || suite === 'platform-cli-observation' || suite === 'platform-cli-thinking' || suite === 'platform-cli-cancel'
         ? { PLATFORM_FIRST_REQUEST_RUNTIME_PARENT: join(outputDir, 'platform-access-runtime') } : {}),
-      ...(suite === 'platform-cli' || suite === 'platform-cli-observation' || suite === 'platform-cli-thinking' ? {
+      ...(suite === 'platform-cli' || suite === 'platform-cli-observation' || suite === 'platform-cli-thinking' || suite === 'platform-cli-cancel' ? {
         RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE: '1',
         PLATFORM_ACCESS_CLI_WORKFLOW_RUNNER: suite,
       } : {}),
