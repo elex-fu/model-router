@@ -409,7 +409,7 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
 | P0 / A1完整指定范围 | **代码侧全部完成**：两轮工具✓（A1o）、thinking✓（enabled场景`580d408`）、取消✓（cancel场景`b1ae489` CI success：requests=1/attempts=1无重复派发、hold如实保留、取消的generation永不结算）、真实usage✓（三场景逐笔结算）、重连以取消后状态一致性+独立后续请求为可获得证据形态；backend revision保持unknown | **M1最终关闭仅剩A1a方案决策**：显式disabled为CLI结构不可满足负结论——gate修订为omitted/adaptive或接受unavailable，由方案层裁定后M1可收口 |
 | P0 / B0、B1真实支付 | binding/退款/收银工程已有本地与PG证据，真实PSP未验 | 补真实Alipay主体、CNY钱包/计划、回调验签配置及受控退款额度；验证原POST重入、回调到账、全/部分退款、旧binding回调退款与歧义reconciliation |
-| P0 / C2收费生产 | KMS/IAM、独立同步PG/WAL/fencing与异地backup/PITR证据未齐 | 演练最后已确认金融commit的独立持久恢复，再验异地恢复、告警和运营签收；软件KMS/异步归档及本地stop/start不替代这些证据 |
+| P0 / C2收费生产 | **独立同步持久恢复演练已通过**（`9523b64`：standby演练run01——同步复制注册、确认commit经standby重放deep-equal、主库immediate崩溃+promote、最后确认金融commit从独立副本完整恢复、清理完整）；KMS/IAM、异地backup/PITR、告警与运营签收未齐 | 异地恢复、告警、运营签收按原顺序补证；软件KMS/异步归档及本地stop/start仍不替代剩余证据；演练不声称PITR/异步零丢失/HA自动化 |
 | P0 / A2 Codex完整托管 | 可信计量registry仍空，正向后端合同与真实compact/WS未验 | 获得精确endpoint/backend计量、输出enforcement、opaque/remote history合同后再登记可信profile；缺证保持unavailable，不能补造正向profile |
 | 发布收口 | M1/M2/M3均未关闭；整合点`9f43335`/`89b31fd`均skip ci、无任何CI运行，ae/9d历史绿不外推 | 对最终确切候选收齐必需CI（整合后须有非skip ci的自动或已收齐运行）、相应真实工作流/支付/性能/恢复及签收；各gate分别记录结果 |
 
