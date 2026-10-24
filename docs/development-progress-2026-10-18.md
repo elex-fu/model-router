@@ -1150,3 +1150,13 @@ Luna只读跟踪自动push产生的 [CI #161](https://github.com/elex-fu/model-r
 本次后续状态收口仅修改P0技术方案与本进度两个Markdown，runtime/source/harness冻结在87候选；文档单独提交推送，不将87的CI转记为文档子commit已有CI，不为持续记录文档本身制造验证循环。本地dist没有在本轮重新构建，不能当作87的运行产物。
 
 剩余处理保持原范围：本地PG immediate-stop/start的自然600秒恢复及新的专项验证须先获直接用户授权；A0仍须有效供给引用及真实正式首请求；真实Alipay交易/回调/退款、生产KMS/IAM、独立同步PG故障域及PITR、Codex精确后端合同/真实CLI和受控R9窗口尚缺证据。自动审批此前因“不要测试验证了”拒绝PG演练的边界仍有效，授权问题尚未获答；不重试、不改用其它入口绕过。M1/M2/M3和可收费运营GO均未关闭，完整P0不能标记完成。
+
+### 29.46 A0 正式 Kimi 首请求脚本的 P01 DTO 窄修
+
+用户提供现有凭据配置引用`/Users/lex/.model-router/config.json`后，先只读核对正常loader与A0入口，发现可在任何真实模型调用前修复的确定障碍：`scripts/ops/verify-platform-access-first-request.ts`的customer/provider/route publicModelVersion使用数字，而P01要求十进制字符串；provider policy又展开customer policy，夹带exact DTO不允许的customerPriceVersion。原流程在P01之前先运行真实credential onboarding probe，直接执行会先产生一次真实探针再遭本地INVALID_INPUT。
+
+Astra核对现P01及已修暖缓存fixture后设计，Sol仅改原A0脚本：三处模型版本使用`'1'`，provider policy显式投影12个公共policy字段及4个provider字段。pricing服务允许的数字版本、attestation原字符串版本与签名输入、pool/capacity revision、worker→verified→pool member→P01→显式创建Key→真实请求的正常链路保持。没有放宽生产exact/decimal校验、seed entitlement、另建preflight框架或重排需要已验证账户的流程。
+
+Astra实际源码差分复核通过；本项未新增或运行测试、构建、类型检查、服务、探针或真实生成，仅修复已证本地DTO障碍，不能记作A0通过。正式入口仍是`run-commercial-postgres-gate.mjs --suite platform-access`，需隔离PG及当前server dist；预期一次max_tokens=8 onboarding probe和一次max_tokens=32短生成，真实执行尚未发生。
+
+配置脱敏核对确认schemaVersion=2、两个enabled Kimi credential均为`{type:'env',name:'KIMI_CODE_API_KEY'}`，JSON保存引用而非inline材料。本轮当前进程及launchd均未加载该变量；没有读取其它secret、构造会写库的ControlStore、猜credential ID或打印凭据。已向用户询问该变量的实际环境文件/服务引用；继续处理独立源码任务，真实A0门禁仍开放。用户另明确授权的一次PG故障验证及结果单独记录，不外推为其它本地测试或生产动作授权。

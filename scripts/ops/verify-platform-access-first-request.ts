@@ -185,8 +185,13 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     const common={publicModelId,publicModelVersion:1,providerId:'kimi',productId:'kimi-code',protocol,endpoint,currency:'USD',commercialPolicyVersion,calculatorVersion:'local-test-calculator-v1',roundingVersion:'local-test-rounding-v1',roundingMode:'half_up' as const,roundingBoundary:'total' as const,effectiveAt};
     const price=await pricing.appendCustomerPriceVersion({...common,rates:rateFields(2,3),idempotencyKey:`price-${label}`});
     const cost=await pricing.appendSupplierCostVersion({...common,resolvedModel:model,rates:rateFields(1,1),idempotencyKey:`cost-${label}`});
-    const customerDefinition:CustomerMeteringPolicyDefinition={publicModelId,publicModelVersion:1,protocol,endpoint,supplyMode:'platform',targetMode:'platform_pool',customerPriceVersion:price.id,usageDimensions:KIMI_NATIVE_USAGE_DIMENSIONS,tokenSource:'upstream',roundingVersion:common.roundingVersion,roundingMode:'half_up',roundingBoundary:'total',commercialPolicyVersion};
-    const providerDefinition:ProviderMeteringPolicyDefinition={...customerDefinition,providerId:'kimi',productId:'kimi-code',resolvedModel:model,supplierCostVersion:cost.id};
+    const customerDefinition:CustomerMeteringPolicyDefinition={publicModelId,publicModelVersion:'1',protocol,endpoint,supplyMode:'platform',targetMode:'platform_pool',customerPriceVersion:price.id,usageDimensions:KIMI_NATIVE_USAGE_DIMENSIONS,tokenSource:'upstream',roundingVersion:common.roundingVersion,roundingMode:'half_up',roundingBoundary:'total',commercialPolicyVersion};
+    const providerDefinition:ProviderMeteringPolicyDefinition={
+      publicModelId,publicModelVersion:'1',protocol,endpoint,supplyMode:'platform',targetMode:'platform_pool',
+      usageDimensions:KIMI_NATIVE_USAGE_DIMENSIONS,tokenSource:'upstream',roundingVersion:common.roundingVersion,
+      roundingMode:'half_up',roundingBoundary:'total',commercialPolicyVersion,
+      providerId:'kimi',productId:'kimi-code',resolvedModel:model,supplierCostVersion:cost.id,
+    };
     const privateKeyFile = join(tempDirectory, 'signing.pem');
     const publicKeyFile = join(tempDirectory, 'public.pem');
     const affinityKeyFile = join(tempDirectory, 'affinity.key');
@@ -304,7 +309,7 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     const input:ProvisionPlatformInferenceAccessInput={operationKey:`platform-first-${label}`,tenantId,projectId,
       pool:{id:poolId,expectedAuthzVersion:String(pool.authzVersion),evidenceReference:`disposable-first-request-${label}`,evidenceSha256:'e'.repeat(64)},
       capacity:{tenantExpectedRevision:tenantCapacity.revision,projectExpectedRevision:projectCapacity.revision,tenantLimits:limits,projectLimits:limits},
-      routes:[{routeId:`platform-first-route-${label}`,definition:{publicModelId,publicModelVersion:1,protocol,supplyMode:'platform',targetMode:'platform_pool',upstreamId:poolId,endpoint},
+      routes:[{routeId:`platform-first-route-${label}`,definition:{publicModelId,publicModelVersion:'1',protocol,supplyMode:'platform',targetMode:'platform_pool',upstreamId:poolId,endpoint},
         customerPolicy:{policyId:`platform-first-customer-${label}`,definition:customerDefinition},providerPolicy:{policyId:providerPolicyId,definition:providerDefinition},
         attestation:{...contract,id:`platform-first-attestation-${label}`,verifierKeyId,signatureBase64:sign(null,Buffer.from(canonicalContractAttestationPayload(contract)),signing.privateKey).toString('base64')}}]};
     const operation=await ops.request('/admin/api/v1/supply/platform-access/operations','POST',input,201);assert.equal(operation.phase,'completed');
