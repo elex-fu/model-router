@@ -651,24 +651,25 @@ test('enabled-observation output bound rises to the scene contract and still fai
     ids[0], { output_tokens: 1537 }));
 });
 
-test('enabled-observation requires replay of the observed thinking sequence byte-exact', () => {
+test('enabled-observation accepts the observed thinking replay omission and byte-matches any replay', () => {
+  // Observed CLI fact (enabled-scene live run02, 2026-10-24): even with a
+  // positive adaptive-thinking budget Claude Code 2.1.216 does not replay
+  // provider thinking blocks — the same omission as the omitted scene.
   const replayed = enabled();
   replayed.observeRequest(request(enabledBody()));
   response(replayed, 0, undefined, ids[0], undefined, true);
-  // The replaying client must send the thinking block back (unlike the
-  // omitted scene, omission is not an accepted fact here).
   replayed.observeRequest(request(enabledObservationBody(1)));
   assert.throws(() => replayed.finish());
 
+  // Omission is accepted (observed CLI fact, both observation scenes).
   const omitted = enabled();
   omitted.observeRequest(request(enabledBody()));
   response(omitted, 0, undefined, ids[0], undefined, true);
   const next = enabledObservationBody(1);
   const messages = next.messages as { role: string; content: unknown }[];
   messages[1]!.content = (messages[1]!.content as Record<string, unknown>[]).filter(block => block.type !== 'thinking');
-  let rejected: unknown;
-  try { omitted.observeRequest(request(next)); } catch (error) { rejected = error; }
-  assert.ok(rejected instanceof Error);
+  omitted.observeRequest(request(next));
+  assert.throws(() => omitted.finish());
 
   const mutated = enabled();
   mutated.observeRequest(request(enabledBody()));

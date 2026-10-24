@@ -51,6 +51,7 @@ import { DispatchUsageSettlementCoordinator } from '../../../src/saas/gateway/di
 import { PostgresProviderAccountRuntimeHealthStore } from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import { PostgresProviderAccountScheduler } from '../../../src/saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresRequestPreparationAuthorityAdapter } from '../../../src/saas/gateway/postgres-request-preparation-authority-adapter.js';
+import { CachedRequestPreparationAuthority } from '../../../src/saas/gateway/cached-request-preparation-authority.js';
 import {
   type PreparedEvidenceDispatchErrorCode,
   type PreparedEvidenceLeaseProvider,
@@ -329,7 +330,12 @@ function observePreparationFailures(
     assertProtocolAuthority(authority, 'OpenCode Go protocol authority');
     const cnAuthority = authority.underlyingAuthority;
     assertProtocolAuthority(cnAuthority, 'CN protocol authority');
-    const concreteAuthority: unknown = cnAuthority.underlyingAuthority;
+    // Production composes the version-keyed authority cache between the CN
+    // protocol decorator and the PostgreSQL adapter (C0 §29.65; the admission
+    // guard still revalidates every authority fact inside the transaction).
+    const cacheAuthority: unknown = cnAuthority.underlyingAuthority;
+    assert.ok(cacheAuthority instanceof CachedRequestPreparationAuthority);
+    const concreteAuthority: unknown = cacheAuthority.underlyingAuthority;
     assert.ok(concreteAuthority instanceof PostgresRequestPreparationAuthorityAdapter);
     assert.equal(Object.getOwnPropertyDescriptor(concreteAuthority, 'underlyingAuthority'), undefined);
     assert.ok(scheduler instanceof PostgresProviderAccountScheduler);

@@ -55,10 +55,14 @@ export class CachedRequestPreparationAuthority implements RequestPreparationAuth
   private readonly entries = new Map<string, { until: number; value: RequestPreparationAuthority }>();
   private readonly pending = new Map<string, Promise<AuthorityDecision>>();
 
+  /** The wrapped PostgreSQL adapter; public read-only like the protocol decorators. */
+  readonly underlyingAuthority: RequestPreparationAuthorityPort;
+
   constructor(
-    private readonly source: RequestPreparationAuthorityPort,
+    source: RequestPreparationAuthorityPort,
     options: CachedRequestPreparationAuthorityOptions = {},
   ) {
+    this.underlyingAuthority = source;
     this.ttlMs = options.ttlMs ?? 5000;
     this.maxEntries = options.maxEntries ?? 4096;
     this.now = options.now ?? Date.now;
@@ -81,10 +85,10 @@ export class CachedRequestPreparationAuthority implements RequestPreparationAuth
     if (inFlight) return structuredClone(await inFlight);
     if (this.pending.size >= this.maxEntries) {
       // Cache pressure must never fail a request: bypass single-flight.
-      return this.source.resolve(input);
+      return this.underlyingAuthority.resolve(input);
     }
     const observedAt = this.now();
-    const operation = this.source
+    const operation = this.underlyingAuthority
       .resolve(input)
       .then((decision) => {
         if (decision.decision === 'allow') this.store(key, observedAt + this.ttlMs, decision.value);

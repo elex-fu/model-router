@@ -253,17 +253,16 @@ export class CliWorkflowObserverState {
   private verifyHistory(actual:unknown,expected:Array<Record<string,any>>):void {
     if(!Array.isArray(actual))fail();
     /*
-     * Observed CLI contract (Claude Code 2.1.216 with MAX_THINKING_TOKENS=0,
-     * A1o live run04): the client does not replay provider thinking blocks
-     * in subsequent assistant history. Omission is accepted as that observed
-     * fact in the omitted-observation scene; the enabled-observation scene is
-     * the observed counterpart — a thinking-enabled client must replay the
-     * thinking sequence byte-exact. Any replayed thinking must byte-match the
-     * observed upstream values in order, and thinking blocks may only precede
-     * the replayable text/tool_use sequence. Thinking bytes are never retained
+     * Observed CLI contract (Claude Code 2.1.216, A1o live run04 and the
+     * enabled-scene live run02 2026-10-24): the client does not replay
+     * provider thinking blocks in subsequent assistant history — in the
+     * omitted scene AND with a positive adaptive-thinking budget alike.
+     * Omission is accepted as that observed fact in both observation
+     * scenes; any replayed thinking must still byte-match the observed
+     * upstream values in order, and thinking blocks may only precede the
+     * replayable text/tool_use sequence. Thinking bytes are never retained
      * as evidence.
      */
-    const requiredThinking=this.options.scene==='enabled-observation';
     const expectedThinking=expected.filter(block=>block.type==='thinking');
     const replayable=expected.filter(block=>block.type!=='thinking');
     const actualThinking:unknown[]=[];const actualReplayable:unknown[]=[];let replayableStarted=false;
@@ -273,7 +272,6 @@ export class CliWorkflowObserverState {
         actualThinking.push(block);
       }else{replayableStarted=true;actualReplayable.push(block);}
     }
-    if(requiredThinking&&actualThinking.length!==expectedThinking.length)fail();
     if(actualThinking.length>0){
       if(actualThinking.length!==expectedThinking.length)fail();
       for(let i=0;i<actualThinking.length;i++){

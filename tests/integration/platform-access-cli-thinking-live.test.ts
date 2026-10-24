@@ -41,5 +41,5 @@ test('enabled-thinking CLI capture and optional controlled two-Read accounting o
     cliWorkflow: { kind: 'claude-two-read-thinking-enabled-observation', run: runPlatformAccessCliThinkingObservationWorkflow },
   });
   t.diagnostic(JSON.stringify({ phase: 'cli-enabled-thinking-complete', scope: 'two-Read/native-numeric/accounting-observation',
-    thinkingModeProven: true, thinkingReplayRequired: true, backendRevisionProven: false, providerHardLimitProven: false, productionGo: false }));
+    thinkingModeProven: true, thinkingReplayObserved: false, backendRevisionProven: false, providerHardLimitProven: false, productionGo: false }));
 });

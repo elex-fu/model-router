@@ -59,7 +59,12 @@ export interface PlatformFirstRequestOptions {
     readonly run:(context:PlatformFirstRequestCliContext)=>Promise<PlatformFirstRequestCliResult>;
   };
 }
-const FUNDING = 1_000_000n;
+// The thinking-enabled scene raises the output ceiling to 1536, which raises
+// the per-request hold upper bound (~3x); concurrent settlement overlap can
+// hold all three reservations at once, so the funded wallet scales with the
+// scene. The A0/omitted scenes keep the original 1,000,000 minor-unit shape.
+const THINKING_ENABLED_KIND = 'claude-two-read-thinking-enabled-observation' as const;
+const fundingFor=(kind?:string):bigint=>kind===THINKING_ENABLED_KIND?3_000_000n:1_000_000n;
 const SUITE = 'platform-first-request-local-suite-v1';
 
 /** Only explicit opt-in and runner-owned loopback role URLs; never discover credentials. */
@@ -308,7 +313,10 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       // A signed thinking-history envelope can exceed 13 KiB on turn two;
       // this is a real bounded history ceiling, not a reduced estimator.
       idempotencyKeyFile, limits: { timeoutMs: 60_000, maxConcurrency: 2, leaseTtlMs: 90_000, maxBodyBytes: 1024 * 1024,
-        maxInputTokens: KIMI_COMMERCIAL_WINDOW_CAPACITY.maxInputTokens, maxOutputTokens: KIMI_COMMERCIAL_WINDOW_CAPACITY.maxOutputTokens } }), { mode: 0o600 });
+        maxInputTokens: KIMI_COMMERCIAL_WINDOW_CAPACITY.maxInputTokens,
+        // The thinking-enabled scene requests the documented 1536 output
+        // ceiling; every other scene keeps the frozen commercial capacity.
+        maxOutputTokens: options.cliWorkflow?.kind===THINKING_ENABLED_KIND?1536:KIMI_COMMERCIAL_WINDOW_CAPACITY.maxOutputTokens } }), { mode: 0o600 });
     const kmsModule = resolve('dist/saas/runtime/software-provider-credential-kms.js');
     const gatewayPort = await port();
     const workerEnvironment = { ...kmsEnvironment, MODEL_ROUTER_SAAS_WORKLOAD_ROLE: 'credential-validation-worker',
@@ -409,6 +417,7 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     const projects=await customer.request(`/console/api/v1/tenants/${tenantId}/projects`);assert.ok(Array.isArray(projects)&&projects.length===1,'Fresh tenant must have a default project');projectId=projects[0].id;
     const empty=await database.query(`SELECT id FROM saas_project_entitlements WHERE tenant_id=$1`,[tenantId]);assert.equal(empty.rows.length,0,'No customer entitlement may be seeded');
     setStage('formal-marketing-funding');
+    const FUNDING=fundingFor(options.cliWorkflow?.kind);
     const codes=await ops.request('/admin/api/v1/marketing/redeem-codes','POST',{kind:'balance',count:1,amountMinorUnits:FUNDING.toString(),currency:'USD'},201);
     assert.ok(Array.isArray(codes.codes)&&codes.codes.length===1,'Expected one balance code');
     const redeemed=await customer.request(`/console/api/v1/tenants/${tenantId}/redeem`,'POST',{code:codes.codes[0]});assert.equal(redeemed.kind,'balance');
