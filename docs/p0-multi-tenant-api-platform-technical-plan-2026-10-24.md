@@ -1,6 +1,6 @@
 # 可运营多租户模型 API 平台：P0 技术方案
 
-> 日期：2026-10-24。状态：实施中；历史工程基线`87cc8b4154e8b0edacf35b605ae38d9e434cc5ee`的自动CI #162为68/68 success，仅覆盖该revision。用户授权的一次PG故障run05已使用一次fresh build（791 src/3160 dist/13 harness）执行自然600s恢复，但canonical replay全authority比较失败，完整profile未通过。纯诊断补丁已审查；新的early-canonical/授权core补丁冻结待Astra审查、未build/test。没有第二次故障授权或运行；M1/M2/M3仍开放。
+> 日期：2026-10-24。状态：实施中；历史工程基线`87cc8b4154e8b0edacf35b605ae38d9e434cc5ee`的自动CI #162为68/68 success，仅覆盖该revision。用户授权的一次PG故障run05已使用一次fresh build（791 src/3160 dist/13 harness）执行自然600s恢复，但canonical replay全authority比较失败，完整profile未通过。纯诊断补丁`4858757`及A0凭据隔离`5743b9c`已分任务推送；新的early-canonical/授权core补丁已通过两路Astra源码审查、未build/test。没有第二次故障授权或运行；M1/M2/M3仍开放。
 > 初始设计基线：model-router `44b0eb7`；Codex C1–C4 基础 checkpoint `f61afec`，后续改动按独立任务继续交付；只读对标基线：CLIProxyAPI `911f49c`、Sub2API `a3eb7ef`、New API `6549a17`。
 > “拟新增”保留初始设计语境；当前实现与证据以各节明确状态及开发进度 §29 为准，源码交付不等同运营可用。
 > 状态区分已实现、定向验证、待验收、外部证据阻塞；工程候选87完整CI已取得，真实 A0/Kimi、PSP、Codex 后端与生产恢复证据仍未齐备。
@@ -331,7 +331,7 @@ RPO ≤15 分钟只作为非金融或非收费 pilot 的初始设计目标；RTO
 收费 GO 还必须取得生产 KMS/IAM、异地 backup/PITR 回执、告警及运营签收。
 发布候选绑定确切revision/build。[历史工程基线#162](https://github.com/elex-fu/model-router/actions/runs/40042216960)（`87cc8b4154e8b0edacf35b605ae38d9e434cc5ee`）已终态68/68 completed/success：per_page100 API total_count=returned=68，4 main+64 isolated全部success，无fail/skip/cancel，PG15/18 settlement均success。该候选包含C3版本一致性`92f477a`、C1逐事件字节限长`7718c49`与C4逐workflow静态财务覆盖`87cc8b4`。该CI是历史基线；run05随后对source87完成一次fresh build并执行，不能覆盖新的冻结补丁。
 
-[历史#161](https://github.com/elex-fu/model-router/actions/runs/40041486469)（`7718c49aa3d61be003dc75dfba2928b044f96f84`）亦68/68成功；#159/701、#158/736及更早候选与失败详见开发进度§29，保留历史而不借绿。#158的PG15/18 settlement各2/2、0skip包含原SIGKILL与真wire ACK。最新early-canonical/授权core补丁冻结待Astra审查，尚未build/test；纯诊断patch已审且未重跑。PG run05完成自然600s但replay严格比较失败，完整恢复、真实后端/PSP/KMS及R9均未通过；不借历史CI关闭这些gate。
+[历史#161](https://github.com/elex-fu/model-router/actions/runs/40041486469)（`7718c49aa3d61be003dc75dfba2928b044f96f84`）亦68/68成功；#159/701、#158/736及更早候选与失败详见开发进度§29，保留历史而不借绿。#158的PG15/18 settlement各2/2、0skip包含原SIGKILL与真wire ACK。最新early-canonical/授权core补丁已通过两路Astra源码审查，尚未build/test；纯诊断patch已审且未重跑。PG run05完成自然600s但replay严格比较失败，完整恢复、真实后端/PSP/KMS及R9均未通过；不借历史CI关闭这些gate。
 
 ## 7. 数据迁移与回滚设计
 
@@ -396,7 +396,9 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 ## 10. 工程余项与外部前置
 
-工程基线87的#162为68/68 success，仅为历史baseline。C1/C3/C4已交付，不列为待开发；run05一次fresh build绑定791 src/3160 dist/13 harness。其PG stop/start、outage三503/零新增mock/零inFlight、自然600s与scanner恰1 operator_required已观察，但canonical协议检查之后的全authority比较失败，完整恢复未通过，详见§6.3与进度§29.47。run01探针、run02 idlepool crash、run03 EPERM及run04审批拒绝均保留；run05获直接人类授权不追溯改变这些历史。cleanup全true且source/dist/harness不变。纯诊断patch提前保存安全事实、保留全部严格断言，不能补回run05缺失的afterReplay证据，也未重跑。新的early-canonical/授权core补丁冻结待Astra审查，未build/test；旧87 CI不覆盖它。
+工程基线87的#162为68/68 success，仅为历史baseline。C1/C3/C4已交付，不列为待开发；run05一次fresh build绑定791 src/3160 dist/13 harness。其PG stop/start、outage三503/零新增mock/零inFlight、自然600s与scanner恰1 operator_required已观察，但canonical协议检查之后的全authority比较失败，完整恢复未通过，详见§6.3与进度§29.47。run01探针、run02 idlepool crash、run03 EPERM及run04审批拒绝均保留；run05获直接人类授权不追溯改变这些历史。cleanup全true且source/dist/harness不变。纯诊断patch提前保存安全事实、保留全部严格断言，不能补回run05缺失的afterReplay证据，也未重跑。新的early-canonical/授权core补丁已通过两路Astra源码审查，未build/test；旧87 CI不覆盖它。
+
+共享准备链修复见进度§29.49：显式key在scheduler前以同READ COMMITTED事务进行prelock、数据库now下的fresh entitlement及scoped IP检查，再HMAC只读取得canonical首attempt编译上下文，用当前已授权候选和真实compiler生成原FP/version后返回既有canonical。真正miss继续原新请求链；损坏命中失败关闭，真实指纹冲突保持409。早期最终lookup及两处late-existing在等待结束后均重授权，原financial guard保留。无旧account授权复活、claim/租约写入或probe过滤；新增读取成本及行为仍待实际验证，不能视为run05严格恢复已过。
 
 Redis旧RDB恢复、operator27/27、warm cached-auth typed403、wire ACK等既有分层结果仍按§6.3限定，不外推完整故障矩阵、生产恢复或零丢失。无第二次PG故障授权/运行；完整自然600s profile仍未通过，不是纯外部资源阻塞。
 
@@ -413,4 +415,4 @@ A0 DTO修复`e1adeb6`已推送。用户已在指定config的`secret.name`提供K
 7. 金融 GO 必须演练最后已确认 commit 的独立持久恢复；15 分钟 RPO 仅非金融/非收费 pilot，RTO/保留目标待确认。
 8. 历史87绑定#162完整68/68成功，早期CI与失败见进度§29；不能覆盖更新的冻结源码或文档，更不能关闭实际恢复失败。
 
-下一步先完成冻结canonical/授权core审查并分任务提交；A0 env隔离补丁已获源码审查。用户提供凭据对应的A0仅按一次探针和一次短生成范围推进，不能扩成其它测试或第二次PG故障运行。指定CLI、R9、真实PSP和生产恢复仍待各自证据；M1/M2/M3保持开放。
+下一步分任务提交已获源码审查的canonical/授权core补丁；A0 env隔离已推送`5743b9c`。用户提供凭据对应的A0仅按一次探针和一次短生成范围推进，不能扩成其它测试或第二次PG故障运行。指定CLI、R9、真实PSP和生产恢复仍待各自证据；M1/M2/M3保持开放。

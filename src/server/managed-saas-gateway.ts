@@ -1369,6 +1369,49 @@ function createProductionIdempotencyAdmission(
   store: GatewayRequestIdempotencyStore,
 ): RequestPreparationAdmissionPort {
   return {
+    async revalidateAuthorization(input, sqlOptions) {
+      if (!admission.revalidateAuthorization) {
+        return blockRequestPreparation('capability_unavailable', 'Transactional replay authorization is unavailable.');
+      }
+      return admission.revalidateAuthorization(input, sqlOptions);
+    },
+    async readCanonicalCompilation(input, sqlOptions) {
+      if (!admission.revalidateAuthorization) {
+        return blockRequestPreparation('capability_unavailable', 'Transactional replay authorization is unavailable.');
+      }
+      const authorized = await admission.revalidateAuthorization(input, sqlOptions);
+      if (authorized.decision !== 'allow') return authorized;
+      try {
+        return allowRequestPreparation(await store.readCanonicalCompilation(sqlOptions.executor, {
+          tenantId: input.caller.tenantId, projectId: input.caller.projectId, proxyKeyId: input.caller.proxyKeyId,
+          clientKey: input.clientKey,
+        }));
+      } catch {
+        return blockRequestPreparation('storage_failure', 'The canonical compilation identity is unavailable.');
+      }
+    },
+    async lookupExisting(input, sqlOptions) {
+      if (!admission.revalidateAuthorization) {
+        return blockRequestPreparation('capability_unavailable', 'Transactional replay authorization is unavailable.');
+      }
+      const authorized = await admission.revalidateAuthorization(input, sqlOptions);
+      if (authorized.decision !== 'allow') return authorized;
+      try {
+        const existing = await store.lookupExisting(sqlOptions.executor, {
+          tenantId: input.caller.tenantId, projectId: input.caller.projectId, proxyKeyId: input.caller.proxyKeyId,
+          clientKey: input.clientKey, requestId: input.requestId,
+          requestFingerprint: input.requestFingerprint, requestFingerprintVersion: input.requestFingerprintVersion,
+        });
+        if (existing.kind === 'missing') return blockRequestPreparation('storage_failure', 'The canonical idempotency binding disappeared.');
+        if (existing.kind === 'fingerprint_conflict') {
+          return rejectRequestPreparation('idempotency_conflict', 'The idempotency key is already bound to a different request fingerprint.');
+        }
+        return rejectRequestPreparation('idempotency_replay', 'The existing canonical request is returned without replaying its response.',
+          { requestId: existing.canonicalRequestId, status: existing.canonicalRequestStatus });
+      } catch {
+        return blockRequestPreparation('storage_failure', 'The canonical idempotency binding is unavailable.');
+      }
+    },
     async authorizeAndReserve(input, sqlOptions) {
       const executor = sqlOptions?.executor;
       if (!executor) {
@@ -1377,6 +1420,13 @@ function createProductionIdempotencyAdmission(
           'Persistent request idempotency requires the admission transaction.',
         );
       }
+      if (!admission.revalidateAuthorization) {
+        return blockRequestPreparation('capability_unavailable', 'Transactional admission authorization is unavailable.');
+      }
+      const authorized = await admission.revalidateAuthorization({ caller: input.caller, entitlement: input.entitlement,
+        publicModel: input.authority.route.publicModel, protocol: input.authority.route.protocol,
+        clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+      if (authorized.decision !== 'allow') return authorized;
       let claim: GatewayRequestIdempotencyClaimResult;
       try {
         claim = await store.claim(executor, {
@@ -1398,6 +1448,10 @@ function createProductionIdempotencyAdmission(
         );
       }
       if (claim.kind === 'existing') {
+        const freshAuthorization = await admission.revalidateAuthorization({ caller: input.caller, entitlement: input.entitlement,
+          publicModel: input.authority.route.publicModel, protocol: input.authority.route.protocol,
+          clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+        if (freshAuthorization.decision !== 'allow') return freshAuthorization;
         return rejectRequestPreparation(
           'idempotency_replay',
           'The existing canonical request is returned without replaying its response.',

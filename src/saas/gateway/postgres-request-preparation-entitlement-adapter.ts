@@ -7,6 +7,7 @@ import {
   type RequestPreparationDecision,
   type RequestPreparationEntitlement,
   type RequestPreparationEntitlementPort,
+  type RequestPreparationSqlOptions,
   rejectRequestPreparation,
 } from './request-preparation-service.js';
 
@@ -67,8 +68,8 @@ export class PostgresRequestPreparationEntitlementAdapter implements RequestPrep
     readonly caller: RequestPreparationCaller;
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
-  }): Promise<RequestPreparationDecision<RequestPreparationEntitlement>> {
-    const delegated = await this.delegate.resolve(input);
+  }, options?: RequestPreparationSqlOptions): Promise<RequestPreparationDecision<RequestPreparationEntitlement>> {
+    const delegated = await this.delegate.resolve(input, options);
     if (delegated.decision !== 'allow' || input.caller.supplyMode !== 'byok') return delegated;
 
     let resolved: EffectiveByokEntitlement | null;
@@ -76,6 +77,7 @@ export class PostgresRequestPreparationEntitlementAdapter implements RequestPrep
       resolved = await this.plans.resolveBoundForRequest(
         { tenantId: input.caller.tenantId, projectId: input.caller.projectId },
         input.caller.entitlementId,
+        options,
       );
     } catch {
       return blockRequestPreparation('storage_failure', STORAGE_UNAVAILABLE);

@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.48**：A0 的 P01 DTO 修复已推送，runner 非测试子进程凭据隔离已获源码审查；真实 A0 尚未执行。用户授权的一次自有 PG 恢复 run05 到达原 600 秒 scanner，随后 canonical replay 全租约快照比较失败；失败证据捕获修复已独立推送 `4858757`，没有重跑。生产准备链的无副作用重放及授权修复另行收敛；`87cc8b4` 的历史 CI 不覆盖新补丁。M1/M2/M3 与运营发布 GO 均未关闭。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.49**：scheduler 前的只读 canonical 重放、当前授权重验及 late-existing 等待边界已完成源码修复，Astra 两路实际差分复核通过，尚未构建或运行验证。A0 DTO `e1adeb6`、PG失败证据捕获 `4858757` 与临时凭据隔离 `5743b9c` 已分任务推送。用户提供的 Kimi 材料尚未用于真实 A0；PG run05 的严格恢复失败仍未关闭，没有重跑。历史 `87cc8b4` CI 不覆盖新补丁，M1/M2/M3 与运营发布 GO 均开放。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1186,3 +1186,15 @@ Sol仅改 `scripts/run-commercial-postgres-gate.mjs`：从原环境复制非suit
 调用预算由源码路径推导：单新账户、validation worker `MAX_ATTEMPTS=1`、验证job要求attempt_count恰1，探针只调用一次fetch且max_tokens=8；生成只有一次post，capacity retryBudget=0/remainingAttempts=1、transport无内置重发，max_tokens=32。名义上最多两次模型HTTP调用，输出上限合计40 tokens，不包含输入或供应商实际费用；`providerInferenceCallsExpected=2`只是诊断字段，并非实际网络计数器。任何失败都不得自动重新执行已消耗的探针或生成。
 
 本项只做源码修改与只读审阅，未新增或运行测试、构建、服务或供应商调用。A0须待当前生产源码冻结并审查完成后，按用户提供材料对应的一次探针和一次短生成范围推进；必要当前构建与真实结果另记，不扩大成其它回归、PG故障周期或生产操作。PG诊断修复 `4858757` 已独立推送，严格恢复门槛及M1/M2/M3状态不变。
+
+### 29.49 scheduler 前的 canonical 只读重放与同事务当前授权
+
+§29.47定位的生产顺序问题已实现通用修复。显式idempotency key在当前caller/entitlement/authority解析后、任何scheduler/probe/affinity/lease副作用前，进入READ COMMITTED只读准备事务：沿用14字段authorization prelock，读取同executor数据库时钟并重新解析有效entitlement/supply profile/project policy，再检查当前tenant/project/Key作用域IP policy。只读lookup miss结束事务后继续原新请求scheduler→compile→admission路径；命中也不创建claim、attempt、hold、capacity或租约，不把既有unknown状态推断为生成成功。
+
+HMAC store新增两只读API，复用原domain、四段带长度作用域及key校验，不向SQL或日志传原始client key。mapping为根LEFT JOIN canonical request与ordinal=1 attempt，核对scope、三份fingerprint/version、route snapshot及编译上下文；真正不存在才返回miss，orphan/缺attempt/损坏或缺少可用编译上下文失败关闭。历史元数据只用于确定待核验的编译身份，不复活旧account/credential/授权。当前已授权异构候选先按provider/product/resolved model及route facts筛选，再使用当前authority的原mapping真实compile/validate/规范化fingerprint，交原lookupExisting合同判断一致或409冲突；不以默认候选、原始JSON或历史版本强等代替真实编译。
+
+授权基础仅抽出可复用的14字段prelock输入与作用域IP只读判定；原完整financial guard继续执行。fresh entitlement的executor及数据库now贯穿builtin/BYOK resolver、bound plans、supply profile与project查询。早期最终lookup前再次检查当前授权；生产wrapper与底层ports均在late claim前检查，claim-existing若因并发等待返回，还须在同executor返回canonical前再次重验，以覆盖锁不能阻止的自然过期。确定撤销/entitlement/IP拒绝保留既有403，真实fingerprint/version冲突保留409，存储/不支持策略或损坏编译上下文继续失败关闭。
+
+Astra分别审查store/异构编译及授权/late race实际差分，发现两处阻断并由Sol窄修：删除把历史compiler/estimator版本变化提前映成503的检查，交原FP/version合同返回409；补两处late-existing等待后的重授权。两路最终源码复读均无未解决阻断。未新增迁移、权限、retry、租约分类或恢复例外，PG profile的全authority/lease严格比较不变；run05四条租约的来源缺证也没有因此被追溯证明。
+
+本项未新增或运行测试、类型检查、构建、DB或服务，不能记为PG恢复/撤销专项已通过；旧CI及run05 build不覆盖本补丁。显式key miss新增只读事务及重授权读成本，延迟影响尚未测量。下一步仅按有界A0范围构建当前源码并执行真实正式首请求；新的PG故障周期及其它专项回归仍需对应授权。runner隔离任务 `5743b9c` 已独立推送，本项与脚本任务分commit交付。

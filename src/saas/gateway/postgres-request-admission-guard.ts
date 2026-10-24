@@ -6,7 +6,6 @@ import type { ProviderEligibilityResult } from '../catalog/index.js';
 import { SaasCatalogError, SaasCatalogService } from '../catalog/index.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
-import { isIpAllowed } from '../keys/ip-policy.js';
 import type {
   AttemptRecord,
   AuthorizationBindingInput,
@@ -24,6 +23,7 @@ import {
   type SaasRequestAdmissionPlatformPriceHoldFacts,
 } from './admission.js';
 import type { ConservativePriceHold } from './hold-calculator.js';
+import { validateRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 import {
   applyGroupMultiplierToHold,
   calculateConservativePriceHold,
@@ -1068,16 +1068,9 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     // authoritative policy. A missing head is pre-080 drift and stays disabled;
     // any non-disabled mode fails closed when the trusted client address
     // evidence is absent, unresolved, or outside the policy.
-    const ipPolicies = authority.many('key-ip-policy');
-    if (ipPolicies.length > 1) storage();
-    const ipPolicy = ipPolicies[0];
-    if (ipPolicy && ipPolicy.mode !== 'disabled') {
-      const resolution = input.clientAddress;
-      const address = resolution && resolution.status === 'resolved' ? resolution.address : null;
-      if (address === null || !isIpAllowed(address, { mode: ipPolicy.mode, rules: ipPolicy.rules })) {
-        deny('CALLER_DENIED');
-      }
-    }
+    const ipPolicy = validateRequestAdmissionIpPolicy(authority.many('key-ip-policy'), input.clientAddress);
+    if (ipPolicy === 'storage_failure') storage();
+    if (ipPolicy === 'caller_denied') deny('CALLER_DENIED');
 
     const persistedRequest = await lockOne(
       executor,

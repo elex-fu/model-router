@@ -16,6 +16,7 @@ import {
   SaasRequestAdmissionService,
 } from './admission.js';
 import { SaasAdmissionAuthorizationError, type SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
+import { readRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 import {
   BillingGroupSpendAdmissionDeniedError,
   type BillingGroupSpendAdmissionPort,
@@ -582,10 +583,10 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
   };
 
   const entitlement: RequestPreparationEntitlementPort = {
-    async resolve(input) {
+    async resolve(input, sqlOptions) {
       let decision: RequestPreparationDecision<RequestPreparationEntitlement>;
       try {
-        decision = await options.entitlement.resolve(input);
+        decision = await options.entitlement.resolve(input, sqlOptions);
       } catch {
         return blockRequestPreparation('storage_failure', 'Project entitlement could not be revalidated.');
       }
@@ -604,11 +605,69 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
     },
   };
 
+  const revalidateAuthorization: NonNullable<RequestPreparationAdmissionPort['revalidateAuthorization']> = async (input, sqlOptions) => {
+    const caller = input.caller;
+    try {
+      await options.authorizationPrelock.prelock({
+        executor: sqlOptions.executor,
+        request: {
+          tenantId: caller.tenantId, projectId: caller.projectId, proxyKeyId: caller.proxyKeyId,
+          projectPolicyVersion: input.entitlement.projectPolicyVersion,
+          entitlementId: caller.entitlementId, supplyProfileId: caller.supplyProfileId, supplyMode: caller.supplyMode,
+          principalKind: caller.principalKind, principalId: caller.principalId,
+          authzVersion: caller.authzVersion, entitlementVersion: caller.entitlementVersion,
+          supplyProfileVersion: caller.supplyProfileVersion, modelScopeVersion: caller.modelScopeVersion,
+          publicModel: input.publicModel,
+        },
+        authenticatedKey: { authorization: {
+          keyId: caller.proxyKeyId, tenantId: caller.tenantId, projectId: caller.projectId,
+          principalKind: caller.principalKind, principalId: caller.principalId,
+          entitlementId: caller.entitlementId, supplyProfileId: caller.supplyProfileId, supplyMode: caller.supplyMode,
+          modelScopes: [...caller.modelScopes], authzVersion: Number(caller.authzVersion),
+          modelScopeVersion: Number(caller.modelScopeVersion), entitlementAuthzVersion: Number(caller.entitlementVersion),
+          supplyProfileAuthzVersion: Number(caller.supplyProfileVersion),
+        } },
+      });
+      const clock = await sqlOptions.executor.query<{ observed_at: Date | string }>('SELECT clock_timestamp() AS observed_at');
+      const observedAt = clock.rows[0]?.observed_at;
+      const lockedNow = observedAt instanceof Date ? observedAt : new Date(typeof observedAt === 'string' ? observedAt : NaN);
+      if (clock.rows.length !== 1 || !Number.isFinite(lockedNow.getTime())) {
+        return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
+      }
+      const fresh = await entitlement.resolve({ caller, publicModel: input.publicModel, protocol: input.protocol },
+        { executor: sqlOptions.executor, now: lockedNow });
+      if (fresh.decision !== 'allow') return fresh;
+      if (!entitlementMatchesCaller(caller, fresh.value, input.publicModel) ||
+        exactVersion(fresh.value.projectPolicyVersion) !== exactVersion(input.entitlement.projectPolicyVersion)) {
+        return rejectRequestPreparation('entitlement_denied', 'The current entitlement does not authorize this request.');
+      }
+      const ip = await readRequestAdmissionIpPolicy(sqlOptions.executor, {
+        tenantId: caller.tenantId, projectId: caller.projectId, proxyKeyId: caller.proxyKeyId,
+      }, input.clientAddress);
+      if (ip === 'caller_denied') return rejectRequestPreparation('caller_denied', 'The client address is not permitted for this API key.');
+      if (ip !== 'allow') return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
+      return fresh;
+    } catch (error) {
+      if (error instanceof SaasAdmissionAuthorizationError && error.code === 'authorization_denied') {
+        return rejectRequestPreparation('caller_denied', 'The request is not authorized.');
+      }
+      if (error instanceof SaasAdmissionAuthorizationError && error.code === 'project_policy_unsupported') {
+        return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
+      }
+      return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
+    }
+  };
+
   const admission: RequestPreparationAdmissionPort = {
+    revalidateAuthorization,
     async authorizeAndReserve(input, sqlOptions?: RequestPreparationSqlOptions) {
       if (!sqlOptions?.executor) return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
       const executor = observePreparationExecutor(sqlOptions.executor, 'admission', options.observe);
       const { caller: resolvedCaller, entitlement: resolvedEntitlement, authority } = input;
+      const lockedAuthorization = await revalidateAuthorization({ caller: resolvedCaller, entitlement: resolvedEntitlement,
+        publicModel: authority.route.publicModel, protocol: authority.route.protocol, clientAddress: input.clientAddress,
+        clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+      if (lockedAuthorization.decision !== 'allow') return lockedAuthorization;
       if (
         !entitlementMatchesCaller(resolvedCaller, resolvedEntitlement, authority.route.publicModel) ||
         authority.route.tenantId !== resolvedCaller.tenantId ||
@@ -672,6 +731,10 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           };
         }
         if (claimResult.kind === 'existing') {
+          const freshAuthorization = await revalidateAuthorization({ caller: resolvedCaller, entitlement: resolvedEntitlement,
+            publicModel: authority.route.publicModel, protocol: authority.route.protocol, clientAddress: input.clientAddress,
+            clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+          if (freshAuthorization.decision !== 'allow') return freshAuthorization;
           return rejectRequestPreparation(
             'idempotency_replay',
             'The existing canonical request is returned without replaying its response.',

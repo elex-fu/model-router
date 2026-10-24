@@ -155,14 +155,14 @@ export function createBuiltinGatewayEntitlementResolver(database: SaasDatabase):
   const profiles = new PostgresSupplyProfileResolver(database);
   const plans = new ByokServicePlanService(database);
   return {
-    async resolve({ caller, publicModel }) {
+    async resolve({ caller, publicModel }, options) {
       try {
         const resolved = await profiles.resolve(
           { tenantId: caller.tenantId, projectId: caller.projectId } as TenantContext,
           caller.supplyMode,
-          { entitlementId: caller.entitlementId },
+          { entitlementId: caller.entitlementId, ...(options ? { executor: options.executor } : {}) },
         );
-        const projects = await database.query<{
+        const projects = await (options?.executor ?? database).query<{
           inference_policy_status: string;
           inference_policy_version: string | number;
         }>(
@@ -191,6 +191,7 @@ export function createBuiltinGatewayEntitlementResolver(database: SaasDatabase):
           const bound = await plans.resolveBoundForRequest(
             { tenantId: caller.tenantId, projectId: caller.projectId },
             caller.entitlementId,
+            options,
           );
           if (
             !bound?.modelScopes.includes(publicModel) ||

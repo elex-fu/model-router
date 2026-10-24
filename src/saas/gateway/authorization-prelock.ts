@@ -9,9 +9,27 @@ import type { CreateRequestInput } from '../metering/types.js';
  */
 export type SaasRequestAdmissionAuthenticatedKey = Pick<AuthenticatedApiKey, 'authorization'>;
 
+/** The authorization prelock needs no financial, route, payload or attempt facts. */
+export type SaasRequestAdmissionAuthorizationRequest = Pick<CreateRequestInput,
+  | 'tenantId'
+  | 'projectId'
+  | 'projectPolicyVersion'
+  | 'proxyKeyId'
+  | 'entitlementId'
+  | 'supplyProfileId'
+  | 'supplyMode'
+  | 'principalKind'
+  | 'principalId'
+  | 'authzVersion'
+  | 'entitlementVersion'
+  | 'supplyProfileVersion'
+  | 'modelScopeVersion'
+  | 'publicModel'
+>;
+
 export interface SaasRequestAdmissionAuthorizationPrelockInput {
   readonly executor: SqlExecutor;
-  readonly request: CreateRequestInput;
+  readonly request: SaasRequestAdmissionAuthorizationRequest;
   readonly authenticatedKey: SaasRequestAdmissionAuthenticatedKey;
 }
 
@@ -205,7 +223,7 @@ interface AuthorityFacts {
 export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasRequestAdmissionAuthorizationPrelock {
   async prelock(input: SaasRequestAdmissionAuthorizationPrelockInput): Promise<void> {
     try {
-      const request = requireRecord(input?.request, 'request') as unknown as CreateRequestInput;
+      const request = requireRecord(input?.request, 'request') as unknown as SaasRequestAdmissionAuthorizationRequest;
       const authenticatedKey = requireRecord(input?.authenticatedKey, 'authenticatedKey');
       const authorization = requireRecord(
         authenticatedKey.authorization,
@@ -254,7 +272,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     }
   }
 
-  private assertSnapshotMatchesRequest(request: CreateRequestInput, authorization: ApiKeyAuthorizationSnapshot): void {
+  private assertSnapshotMatchesRequest(request: SaasRequestAdmissionAuthorizationRequest, authorization: ApiKeyAuthorizationSnapshot): void {
     sameText(request.tenantId, authorization.tenantId, 'tenantId');
     sameText(request.projectId, authorization.projectId, 'projectId');
     requireVersion(request.projectPolicyVersion, 'projectPolicyVersion');
@@ -310,7 +328,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
    */
   private async readAuthorityFacts(
     executor: SqlExecutor,
-    request: CreateRequestInput,
+    request: SaasRequestAdmissionAuthorizationRequest,
     authorization: ApiKeyAuthorizationSnapshot,
   ): Promise<AuthorityFacts> {
     const requestedVersion = requireVersion(request.projectPolicyVersion, 'projectPolicyVersion');
@@ -397,7 +415,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     return { key: { row: key, scopes: key.model_scopes as string[] }, now: facts.now };
   }
 
-  private validateApiKeyRow(row: Row, request: CreateRequestInput, authorization: ApiKeyAuthorizationSnapshot): Row {
+  private validateApiKeyRow(row: Row, request: SaasRequestAdmissionAuthorizationRequest, authorization: ApiKeyAuthorizationSnapshot): Row {
     sameText(row.id, authorization.keyId, 'key.id');
     sameText(row.tenant_id, authorization.tenantId, 'key.tenant_id');
     sameText(row.project_id, authorization.projectId, 'key.project_id');
@@ -425,7 +443,7 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     return { ...row, model_scopes: scopes };
   }
 
-  private assertCurrentKey(key: LockedKey, request: CreateRequestInput, now: number): void {
+  private assertCurrentKey(key: LockedKey, request: SaasRequestAdmissionAuthorizationRequest, now: number): void {
     const keyExpiresAt = nullableTimestampMillis(key.row.expires_at, 'key.expires_at');
     if (keyExpiresAt !== null && keyExpiresAt <= now) deny('SaaS API key is expired');
     if (!key.scopes.includes(request.publicModel)) {

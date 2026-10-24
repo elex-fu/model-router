@@ -25,7 +25,7 @@ import type {
   ProviderAccountSchedulerPort,
   ProviderAccountSchedulerSelectionTrace,
 } from './provider-account-scheduler.js';
-import type { GatewayRequestIdempotencyClaimed } from './request-idempotency.js';
+import type { GatewayRequestCanonicalCompilation, GatewayRequestIdempotencyClaimed } from './request-idempotency.js';
 import type { CustomerSaleBillingIdentity, ResolvedSupplyBillingIdentity } from './resolved-supply-billing-identity.js';
 
 /** Exact integers are kept at the orchestration boundary; no floating point is accepted. */
@@ -231,7 +231,7 @@ export interface RequestPreparationEntitlementPort {
     readonly caller: RequestPreparationCaller;
     readonly publicModel: string;
     readonly protocol: GatewayProtocol;
-  }): Promise<RequestPreparationDecision<RequestPreparationEntitlement>>;
+  }, options?: RequestPreparationSqlOptions): Promise<RequestPreparationDecision<RequestPreparationEntitlement>>;
 }
 
 /** Route identity is server-owned; it cannot be selected by the client body. */
@@ -419,7 +419,30 @@ export interface RequestPreparationAdmission {
   readonly usageBudget: RequestPreparationTokenBudget | null;
 }
 
+export interface RequestPreparationReplayLookupInput {
+  readonly caller: RequestPreparationCaller;
+  readonly entitlement: RequestPreparationEntitlement;
+  readonly publicModel: string;
+  readonly protocol: GatewayProtocol;
+  readonly clientAddress?: ClientAddressResolution;
+  readonly clientKey: string;
+  readonly requestId: string;
+}
+
 export interface RequestPreparationAdmissionPort {
+  /** Shared lock/fresh entitlement/IP gate, before either read-only lookup or a late claim. */
+  revalidateAuthorization?(
+    input: RequestPreparationReplayLookupInput,
+    options: RequestPreparationSqlOptions,
+  ): Promise<RequestPreparationDecision<RequestPreparationEntitlement>>;
+  readCanonicalCompilation?(
+    input: RequestPreparationReplayLookupInput,
+    options: RequestPreparationSqlOptions,
+  ): Promise<RequestPreparationDecision<GatewayRequestCanonicalCompilation | null>>;
+  lookupExisting?(
+    input: RequestPreparationReplayLookupInput & { readonly requestFingerprint: string; readonly requestFingerprintVersion: string },
+    options: RequestPreparationSqlOptions,
+  ): Promise<RequestPreparationDecision<null>>;
   authorizeAndReserve(
     input: {
       readonly requestId: string;
@@ -447,6 +470,7 @@ export interface RequestPreparationAdmissionPort {
 /** The one transaction executor shared by every durable preparation write. */
 export interface RequestPreparationSqlOptions {
   readonly executor: SqlExecutor;
+  readonly now?: Date;
 }
 
 /** Production preparation must be given a caller-owned outer transaction. */
@@ -2076,6 +2100,78 @@ export class SaasRequestPreparationService {
     }
     if (ids.requestId === '' || ids.attemptId === '') return adapterFailure('admission');
 
+    // A canonical replay is a read-only authorized lookup, never an account selection.
+    // The store's first attempt is compilation context only, not historical credentials.
+    if (input.idempotencyKey !== undefined) {
+      const transaction = this.dependencies.transaction;
+      const readCanonical = this.dependencies.admission.readCanonicalCompilation;
+      const lookupExisting = this.dependencies.admission.lookupExisting;
+      if (!transaction || !readCanonical || !lookupExisting) {
+        return failure('blocked', 'admission', 'capability_unavailable', 'Transactional canonical replay lookup is unavailable', ids);
+      }
+      const replayInput: RequestPreparationReplayLookupInput = {
+        caller, entitlement, publicModel: input.publicModel, protocol: input.protocol,
+        clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: ids.requestId,
+      };
+      try {
+        const replay = await transaction.transaction(async (executor): Promise<RequestPreparationResult | null> => {
+          await executor.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+          const canonicalDecision = await this.invokeDecision('admission', () =>
+            readCanonical.call(this.dependencies.admission, replayInput, { executor }), 'storage_failure');
+          if (canonicalDecision.decision !== 'allow') return decisionFailure('admission', canonicalDecision, ids);
+          const canonical = canonicalDecision.value;
+          if (canonical === null) return null;
+          let compatible: { authority: RequestPreparationAuthority; facts: RequestPreparationPayloadFacts } | undefined;
+          for (const candidate of authority.candidates ?? [authority.candidate]) {
+            if (candidate.providerId !== canonical.providerId || candidate.productId !== canonical.productId ||
+              candidate.resolvedModel !== canonical.resolvedModel) continue;
+            const current = authorityForCandidate(authority, candidate);
+            const route = routeFacts(current, input.protocol, input.clientOperation);
+            if (current.route.endpoint !== canonical.endpoint || input.publicModel !== canonical.publicModel ||
+              route.clientProtocol !== canonical.clientProtocol || route.providerProtocol !== canonical.providerProtocol ||
+              route.clientOperation !== canonical.clientOperation || route.providerOperation !== canonical.providerOperation) continue;
+            const currentIssue = validateAuthority(current, caller, entitlement, input.publicModel, input.protocol);
+            if (currentIssue) return failure('blocked', 'authority', currentIssue.code, currentIssue.message, ids);
+            const resolution = modelResolutionFor(input.publicModel, candidate.resolvedModel, current);
+            if ('code' in resolution) return failure('blocked', 'authority', resolution.code, resolution.message, ids);
+            if (candidate.providerId === canonical.providerId && candidate.productId === canonical.productId &&
+              candidate.resolvedModel === canonical.resolvedModel && current.route.endpoint === canonical.endpoint &&
+              input.publicModel === canonical.publicModel && route.clientProtocol === canonical.clientProtocol &&
+              route.providerProtocol === canonical.providerProtocol && route.clientOperation === canonical.clientOperation &&
+              route.providerOperation === canonical.providerOperation &&
+              resolution.requestedModel === canonical.modelResolution.requestedModel &&
+              resolution.mappedModel === canonical.modelResolution.mappedModel &&
+              resolution.resolvedModel === canonical.modelResolution.resolvedModel &&
+              resolution.mappingSource === canonical.modelResolution.mappingSource &&
+              resolution.mappingVersion === canonical.modelResolution.mappingVersion) {
+              compatible = { authority: current, facts: { ...route, modelResolution: resolution } };
+              break;
+            }
+          }
+          if (!compatible) return failure('blocked', 'authority', 'capability_unavailable',
+            'No currently authorized candidate has the canonical compilation identity', ids);
+          const selected = compatible;
+          const compiled = await this.invokeDecision('payload', () => this.dependencies.payload.compile({
+            caller, entitlement, authority: selected.authority, clientRequest: input.clientRequest,
+            ...selected.facts,
+          }));
+          if (compiled.decision !== 'allow') return decisionFailure('payload', compiled, ids);
+          const payloadIssue = validatePayload(compiled.value, selected.facts);
+          if (payloadIssue) return failure('blocked', 'payload', payloadIssue.code, payloadIssue.message, ids);
+          const existing = await this.invokeDecision('admission', () => lookupExisting.call(this.dependencies.admission, {
+            ...replayInput,
+            requestFingerprint: normalizePreparedFingerprint(compiled.value.requestFingerprint, compiled.value.requestFingerprintVersion),
+            requestFingerprintVersion: compiled.value.requestFingerprintVersion.trim(),
+          }, { executor }), 'storage_failure');
+          if (existing.decision !== 'allow') return decisionFailure('admission', existing, ids);
+          return failure('blocked', 'admission', 'storage_failure', 'Canonical lookup did not return a bound request', ids);
+        });
+        if (replay !== null) return replay;
+      } catch {
+        return failure('blocked', 'admission', 'storage_failure', 'Canonical replay lookup failed closed', ids);
+      }
+    }
+
     const scheduler = this.dependencies.scheduler;
     if (scheduler !== undefined) {
       const candidates = authority.candidates ?? [authority.candidate];
@@ -2254,6 +2350,7 @@ export class SaasRequestPreparationService {
     }
 
     const durableWork = async (executor: SqlExecutor): Promise<RequestPreparationResult> => {
+      await executor.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
       const compensateAndFail = (
         stage: RequestPreparationStage,
         code: RequestPreparationFailureCode,
