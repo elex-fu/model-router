@@ -1429,3 +1429,11 @@ run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）
 **A1剩余**：cancel/resume场景（任务#9）为M1指定范围最后缺口。证据目录：`/private/tmp/model-router-a1t-live-run0{1..4}-20261024/`、`/private/tmp/model-router-a1-thinking-capture-run01-20261024/`、`/private/tmp/model-router-cache-repro*-20261024/`。
 
 **A1 cancel场景设计定稿（待实施，任务#9）**：新场景`claude-two-read-client-cancel-observation`——观察器在第1轮GW流的第N个SSE事件后销毁CLI连接（模拟用户中断），executeCli以redacted错误终止，复用first-request既有failure-observation只读durable回读断言取消合同：无重复派发（attempts与requests一致或如实计数）、hold如实（pre-dispatch补偿`client_cancelled`或reconciliation_pending诚实unknown）、lease释放或如实；CLI对连接中断的退避重试行为为同轮观察事实（MAX_MESSAGES内如实计数）。平台侧合同已具备：`pre-dispatch-compensation-service`（client_cancelled cause）与`dispatch-service` CLIENT_STREAM_ABORTED路径（:648-745）。M1指定范围仅剩此缺口（A1a disabled为结构不可满足负结论待方案决策）。
+
+### 29.67 A1 cancel场景闭环：M1指定范围代码侧全部完成
+
+按29.66定稿设计实施`claude-two-read-client-cancel-observation`场景：观察器在第1轮GW流的第3个SSE事件后终止CLI（用户中断形态）并断开全部观察器连接，经6秒有界settle等待后以redacted错误fail-closed；parent复用既有failure-observation只读durable回读断言平台取消合同。新增独立gate套件`platform-cli-cancel`（live需`RUN_PLATFORM_ACCESS_CLI_CANCEL_LIVE=1`+Kimi凭据）。
+
+**验收（run01首跑通过 + run02干净候选`b1ae489`复验）**：取消合同全部不变量成立——`requests=1`、`attempts=1`（**取消的generation从不重新派发**）、hold 263,680如实保留+1个reconciliation snapshot、`settlements=0`（取消的generation永不结算，诚实unknown合同）、执行状态如实分类。sourceChanges=0、distChanged=false、cleanup完整。CI #40100621848首次失败为CI环境flake（saas-startup端口冲突，隔离2×68/68+本地全套件通过诊断后重跑success，改动域无关）；重跑结论如实记录，不隐藏首次失败。
+
+**M1状态（A1指定范围代码侧收口）**：两轮工具✓（A1o）、thinking✓（thinking-enabled场景thinkingModeProven=true）、取消✓（本场景）、真实usage✓（三场景逐笔结算）、重连——CLI 2.1.216 -p模式经SIGTERM终止后无进程内重连可观察，"重连"维度以取消后平台状态一致性（hold/lease如实、无重复派发）+独立后续请求（各场景run均在新fixture上成功）为可获得的证据形态；backend revision保持unknown。**A1a显式disabled为CLI结构不可满足负结论（29.66），M1最终关闭需方案层决策该门槛（gate修订为omitted/adaptive或接受unavailable）**。证据目录：`/private/tmp/model-router-a1c-live-run0{1,2}-20261024/`。
