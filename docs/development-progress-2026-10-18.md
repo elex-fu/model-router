@@ -1427,3 +1427,5 @@ run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）
 **A1a disabled实验（负结论，loopback探针）**：CLI 2.1.216在MAX_THINKING_TOKENS unset时发送`{type:'adaptive'}`（默认即adaptive！）、=0时omitted、无任何环境组合产出显式`{type:'disabled'}`——A1a"实际显式disabled"门槛在本CLI版本结构上不可满足，升级为方案层决策项（建议：A1a gate修订为omitted/adaptive二选一观察，或接受该维度unavailable）。
 
 **A1剩余**：cancel/resume场景（任务#9）为M1指定范围最后缺口。证据目录：`/private/tmp/model-router-a1t-live-run0{1..4}-20261024/`、`/private/tmp/model-router-a1-thinking-capture-run01-20261024/`、`/private/tmp/model-router-cache-repro*-20261024/`。
+
+**A1 cancel场景设计定稿（待实施，任务#9）**：新场景`claude-two-read-client-cancel-observation`——观察器在第1轮GW流的第N个SSE事件后销毁CLI连接（模拟用户中断），executeCli以redacted错误终止，复用first-request既有failure-observation只读durable回读断言取消合同：无重复派发（attempts与requests一致或如实计数）、hold如实（pre-dispatch补偿`client_cancelled`或reconciliation_pending诚实unknown）、lease释放或如实；CLI对连接中断的退避重试行为为同轮观察事实（MAX_MESSAGES内如实计数）。平台侧合同已具备：`pre-dispatch-compensation-service`（client_cancelled cause）与`dispatch-service` CLIENT_STREAM_ABORTED路径（:648-745）。M1指定范围仅剩此缺口（A1a disabled为结构不可满足负结论待方案决策）。
