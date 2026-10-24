@@ -28,9 +28,37 @@ import type { ProvisionPlatformInferenceAccessInput } from '../../src/saas/suppl
 import { assertDisposableRoleUrl, KIMI_COMMERCIAL_URLS, kimiCommercialCliEnvironment, KIMI_NATIVE_USAGE_DIMENSIONS,
   KIMI_COMMERCIAL_WINDOW_CAPACITY, startBuiltCli, waitCredentialVerified, waitGatewayReady, waitUntil,
   waitKimiSettled, kimiFinancialSnapshot, readKimiJsonResponse, postKimi,
+  readDurableKimiRequest, classifyKimiSettlementObservation, assertKimiNativeUsageMatchesDurable, projectDurableKimiSettlement,
   type KimiCommercialFixture } from './verify-commercial-kimi.js';
 
 export const PLATFORM_FIRST_REQUEST_REQUIRED = 'RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE';
+export interface PlatformFirstRequestCliContext {
+  readonly gatewayOrigin:string;
+  readonly customerKey:string;
+  readonly publicModel:string;
+  readonly signal:AbortSignal;
+  readonly tempDirectory:string;
+  registerChild(child:ChildProcess):void;
+}
+export interface PlatformFirstRequestCliUsage {
+  readonly input_tokens:number;
+  readonly output_tokens:number;
+  readonly cache_read_input_tokens:number;
+  readonly cache_creation_input_tokens:number;
+}
+export interface PlatformFirstRequestCliRequest {
+  readonly requestId:string;
+  readonly usage:PlatformFirstRequestCliUsage;
+}
+export interface PlatformFirstRequestCliResult {
+  readonly requests:readonly[PlatformFirstRequestCliRequest,PlatformFirstRequestCliRequest,PlatformFirstRequestCliRequest];
+}
+export interface PlatformFirstRequestOptions {
+  readonly cliWorkflow?:{
+    readonly kind:'claude-two-read-thinking-disabled'|'claude-two-read-thinking-omitted-observation';
+    readonly run:(context:PlatformFirstRequestCliContext)=>Promise<PlatformFirstRequestCliResult>;
+  };
+}
 const FUNDING = 1_000_000n;
 const SUITE = 'platform-first-request-local-suite-v1';
 
@@ -124,7 +152,50 @@ class BrowserSession {
   }
 }
 
-export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown)=>void=()=>{}):Promise<void>{
+/** Read-only failure evidence for this fixture/key, never an outcome repair. */
+async function readCliObservationFailure(fixture:KimiCommercialFixture,keyId:string){
+  const id=(value:unknown)=>typeof value==='string'&&/^(?:(?:gateway|managed)_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)?value:null;
+  const decimal=(value:unknown)=>typeof value==='string'&&/^(?:0|[1-9][0-9]{0,29})$/u.test(value)?value:null;
+  const known=(value:unknown,allowed:readonly string[])=>typeof value==='string'&&allowed.includes(value)?value:null;
+  if(!id(fixture.tenantId)||!id(fixture.projectId)||!id(keyId))throw new Error('Observation scope is unavailable');
+  return fixture.database.transaction(async tx=>{
+    await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await tx.query("SET LOCAL statement_timeout = '2000ms'");
+    // Existing read-only projections share this observer transaction. No
+    // response, fake usage, or financial producer is manufactured here.
+    const observer:KimiCommercialFixture={...fixture,database:{...fixture.database,
+      query<Row>(sql:string,values?:readonly unknown[]){return tx.query<Row>(sql,values);}}};
+    const scoped=await tx.query<Record<string,unknown>>(`SELECT id::text AS request_id,execution_state,reconciliation_state,financial_status
+      FROM saas_requests WHERE tenant_id=$1 AND project_id=$2 AND proxy_key_id=$3 ORDER BY created_at,id LIMIT 4`,
+      [fixture.tenantId,fixture.projectId,keyId]);
+    const requests=[];
+    for(const request of scoped.rows){
+      const requestId=id(request.request_id);if(!requestId)throw new Error('Observation request identity is invalid');
+      const durable=await readDurableKimiRequest(observer,requestId);
+      const hold=await tx.query<Record<string,unknown>>(`SELECT state,amount_minor_units::text AS amount
+        FROM saas_billing_reservations WHERE tenant_id=$1 AND request_id=$2
+        AND idempotency_namespace='saas.billing.reservation' AND business_key=$3`,
+        [fixture.tenantId,requestId,`saas-request-admission:${fixture.tenantId}:${requestId}`]);
+      if(hold.rows.length>1)throw new Error('Observation hold identity is ambiguous');
+      requests.push({requestId,
+        executionState:known(request.execution_state,['pending','succeeded','failed','unknown']),
+        reconciliationState:known(request.reconciliation_state,['none','pending','resolved']),
+        financialStatus:known(request.financial_status,['not_applicable','pending','settled','released','reconciliation_pending']),
+        settlement:projectDurableKimiSettlement(durable),
+        hold:{found:hold.rows.length===1,state:known(hold.rows[0]?.state,['reserved','settled','released','reconciliation_pending']),amountMinorUnits:decimal(hold.rows[0]?.amount)}});
+    }
+    const snapshot=await kimiFinancialSnapshot(observer);
+    const financial=Object.fromEntries(Object.entries(snapshot).map(([field,value])=>[field,decimal(value)]));
+    return {available:true,requestScope:'fixture-tenant-project-explicit-key',financialScope:'fixture-tenant',
+      observedCount:requests.length,truncated:scoped.rows.length===4,requests,financial};
+  });
+}
+
+export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown)=>void=()=>{},options:PlatformFirstRequestOptions={}):Promise<void>{
+  if(options.cliWorkflow!==undefined){
+    assert.ok(options.cliWorkflow.kind==='claude-two-read-thinking-disabled'||options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation','Unsupported first-request CLI workflow');
+    assert.equal(typeof options.cliWorkflow.run,'function','CLI workflow callback is required');
+  }
   requirePlatformFirstRequestEnvironment();
   const credential=process.env.KIMI_CODE_API_KEY!;
   const {postgresPreparedStatements,environment:baseEnvironment}=kimiCommercialCliEnvironment();
@@ -139,6 +210,8 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
   const spawnErrors=new WeakMap<ChildProcess,string>();
   let ownedRedis:ChildProcess|undefined,ownedControlPlane:ChildProcess|undefined;
   const readiness={redisConnected:false,platformConnected:false,customerConnected:false};
+  let observationFixture:KimiCommercialFixture|undefined,observationKeyId:string|undefined;
+  let observationCallbackStarted=false;
   const childObservations=()=>({redis:ownedChildObservation(ownedRedis,ownedRedis?spawnErrors.get(ownedRedis)??null:null),
     controlPlane:ownedChildObservation(ownedControlPlane,ownedControlPlane?spawnErrors.get(ownedControlPlane)??null:null)});
   const assertOwnedRunning=(child:ChildProcess,role:'redis'|'controlPlane')=>{
@@ -254,6 +327,7 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       accountId,credentialId,publicModel,gatewayOrigin:`http://127.0.0.1:${gatewayPort}`,tempDirectory,
       prices:{anthropic:price.id,openai:price.id},supplierCosts:{anthropic:cost.id,openai:cost.id},
       workerEnvironment,gatewayEnvironment,started,close};
+    observationFixture=fixture;
     // Isolated local pilot TOTP provider uses a key passed only in child environment.
     // No prebuilt MFA credential/session is inserted; enrollment and login are real.
     const totpKey=randomBytes(32),totpKeyId='first-request-local-totp';
@@ -361,13 +435,54 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     setStage('explicit-customer-key-create');
     const key=await customer.request(`/console/api/v1/tenants/${tenantId}/projects/${projectId}/keys`,'POST',{name:'Explicit first request key',modelScopes:[publicModel],supplyMode:'platform'},201);
     assert.ok(typeof key.secret==='string'&&key.secret.length>0,'Explicit customer action must issue a key');customerKey=key.secret;
+    observationKeyId=key.id;
     const keyCapacityPath=`/admin/api/v1/capacity/tenants/${tenantId}/projects/${projectId}/api-keys/${key.id}`;
     const keyCapacity=await ops.request(keyCapacityPath);
     await ops.request(keyCapacityPath,'PUT',{expectedRevision:keyCapacity.revision,limits,reason:'initial_provisioning'});
     const gateway=startBuiltCli(fixture,'gateway');await waitGatewayReady(fixture,gateway);
-    setStage('real-builtin-first-short-generation');
+    setStage(options.cliWorkflow?.kind==='claude-two-read-thinking-omitted-observation'?'real-claude-cli-two-read-thinking-omitted-observation':options.cliWorkflow?'real-claude-cli-two-read-thinking-disabled':'real-builtin-first-short-generation');
     const before=await kimiFinancialSnapshot(fixture);
     assert.equal(before.requests,'0');assert.equal(before.attempts,'0');assert.equal(before.hold,'0');
+    if(options.cliWorkflow){
+      assert.equal(before.usage,'0');assert.equal(before.settlements,'0');assert.equal(before.wallet,FUNDING.toString());
+      observationCallbackStarted=options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation';
+      const result=await options.cliWorkflow.run(Object.freeze({
+        gatewayOrigin:fixture.gatewayOrigin,customerKey,publicModel,signal:lifecycle.signal,tempDirectory,
+        registerChild:(child:ChildProcess)=>{started.push(child);},
+      }));
+      lifecycle.assertRunning();
+      assert.ok(Array.isArray(result.requests)&&result.requests.length===3,'CLI workflow must complete exactly three requests');
+      const requestIds=result.requests.map(request=>request.requestId);
+      assert.ok(requestIds.every(requestId=>typeof requestId==='string'&&/^(?:(?:gateway|managed)_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requestId)),'CLI requests require valid durable gateway IDs');
+      assert.equal(new Set(requestIds).size,3,'CLI workflow must identify three distinct requests');
+      const settledRequests=[];
+      let totalCharge=0n;
+      for(const request of result.requests){
+        lifecycle.assertRunning();
+        // This external CLI observed the actual native SSE counters. Supply
+        // them directly to the same classifier instead of manufacturing a
+        // Response to populate the default fetch path's private diagnostics.
+        const settled=await waitUntil('CLI request durable usage settlement',async()=>{
+          lifecycle.assertRunning();
+          const row=await readDurableKimiRequest(fixture,request.requestId);
+          return classifyKimiSettlementObservation(fixture,request.requestId,'anthropic',row,[{...request.usage}]);
+        });
+        assertKimiNativeUsageMatchesDurable(settled,[{...request.usage}]);
+        assert.equal(settled.request_id,request.requestId);assert.equal(settled.held_leases,'0');
+        totalCharge+=BigInt(settled.settlement_amount!);
+        settledRequests.push({requestId:request.requestId,executionState:settled.execution_state,
+          amountMinorUnits:settled.settlement_amount,inputTokens:settled.input_total,outputTokens:settled.output_total,heldLeases:settled.held_leases});
+      }
+      const after=await kimiFinancialSnapshot(fixture);
+      assert.equal(after.wallet,(BigInt(before.wallet)-totalCharge).toString());
+      assert.equal(after.hold,'0');assert.equal(after.requests,'3');assert.equal(after.attempts,'3');assert.equal(after.usage,'3');assert.equal(after.settlements,'3');
+      assert.equal(BigInt(after.ledger_transactions),BigInt(before.ledger_transactions)+3n);
+      assert.equal(BigInt(after.ledger_entries),BigInt(before.ledger_entries)+6n);
+      diagnostic({scope:options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation'?'formal-http-new-customer-claude-cli-two-read-thinking-omitted-observation':'formal-http-new-customer-claude-cli-two-read-thinking-disabled',runtime:'current-dist-cli-builtin',
+        kms:'pilot-only-software-kms',providerInferenceCallsExpected:4,operationId:operation.id,requests:settledRequests,
+        totalAmountMinorUnits:totalCharge.toString(),walletMinorUnits:after.wallet,holdMinorUnits:after.hold,financialSnapshot:after,productionGo:false});
+      return;
+    }
     const response=await postKimi(fixture,'anthropic',{model:publicModel,max_tokens:32,thinking:{type:'disabled'},messages:[{role:'user',content:'Reply with the single word OK.'}]},`platform-first-${randomUUID()}`,AbortSignal.any([lifecycle.signal,AbortSignal.timeout(65000)]));
     const body=await readKimiJsonResponse(fixture,response);assert.ok(Array.isArray(body.content)&&body.content.length>0,'Real native response must contain content');
     const requestId=response.headers.get('x-request-id');assert.ok(requestId,'Expected durable request ID');
@@ -380,7 +495,19 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       walletMinorUnits:after.wallet,holdMinorUnits:after.hold,heldLeases:settled.held_leases,financialSnapshot:after,productionGo:false});
   }catch(error){
     const code=error && typeof error==='object' && 'code' in error && typeof error.code==='string' && /^(?:[0-9A-Z]{5}|ERR_ASSERTION|[A-Z_]{1,80})$/.test(error.code)?error.code:null;
-    diagnostic({failedStage:stage,errorCode:code,readiness:{...readiness},children:childObservations(),productionGo:false});
+    const failureDiagnostic={failedStage:stage,errorCode:code,readiness:{...readiness},children:childObservations(),productionGo:false};
+    if(observationCallbackStarted){
+      try{diagnostic(failureDiagnostic);}catch{/* Preserve the failure and its scoped readback even if reporting fails. */}
+    }else diagnostic(failureDiagnostic);
+    if(observationCallbackStarted&&observationFixture&&observationKeyId){
+      let durable:unknown;
+      try{durable=await readCliObservationFailure(observationFixture,observationKeyId);}
+      catch{durable={available:false,reason:'SCOPED_DURABLE_READBACK_UNAVAILABLE'};}
+      // Observation does not release, refund, redispatch or relabel a committed
+      // result as unknown. Missing amounts stay null rather than invented zero.
+      try{diagnostic({scope:'claude-two-read-thinking-omitted-failure-observation',failedStage:stage,durable,productionGo:false});}
+      catch{/* A diagnostic consumer cannot replace the original workflow failure. */}
+    }
     // Safe fixed stage only: arbitrary HTTP responses, provider text and crypto material never escape.
     throw new Error(`Platform first-request acceptance failed at ${stage}`);
   }finally{await close();}
