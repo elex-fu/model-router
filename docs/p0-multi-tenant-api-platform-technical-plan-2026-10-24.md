@@ -1,9 +1,9 @@
 # 可运营多租户模型 API 平台：P0 技术方案
 
-> 日期：2026-10-24。状态：按用户要求暂停开发，全部在途任务已冻结。主任务分支最新工程`ae911346280c3ea00e3b43c2a248cfe1026aefaa`已fresh build、C0定向21/21、CI #171全68/68通过；其OpenAI mock串行四腿各100已执行，但P99/TTFB额外开销722.38/481.10ms未达30/10ms原门槛。真实Kimi A0及PG原600秒恢复的通过证据仍绑定9d。CLI在途源码以WIP `cf5008b`保存于独立远程分支，尚未真实工具验收；M1/M2/M3均未关闭。
+> 日期：2026-10-24。状态：开发继续暂停；按用户后续指令，主任务`6cc79da`与CLI WIP `cf5008b`已整合到main，代码合并点`9f43335`，合并后尚未验证。最近已验证工程基线`ae911346280c3ea00e3b43c2a248cfe1026aefaa`已fresh build、C0定向21/21、CI #171全68/68通过；其OpenAI mock串行四腿各100的P99/TTFB额外开销722.38/481.10ms未达30/10ms原门槛。真实Kimi A0及PG原600秒恢复的通过证据仍绑定9d；CLI真实工具验收及M1/M2/M3均未关闭。
 > 初始设计基线：model-router `44b0eb7`；Codex C1–C4 基础 checkpoint `f61afec`，后续改动按独立任务继续交付；只读对标基线：CLIProxyAPI `911f49c`、Sub2API `a3eb7ef`、New API `6549a17`。
 > “拟新增”保留初始设计语境；当前实现与证据以各节明确状态及开发进度 §29 为准，源码交付不等同运营可用。
-> 状态区分源码、定向检查、真实供给、本地受控故障和生产验收；9d完整验收见开发进度§29.53，C0门禁/实际失败及CLI暂停交接见§29.54–57。历史失败与旧CI保留，不能替代当前revision。恢复开发前不执行下列剩余动作。
+> 状态区分源码、定向检查、真实供给、本地受控故障和生产验收；9d完整验收见开发进度§29.53，C0门禁/实际失败、暂停交接及main整合见§29.54–58。历史失败与旧CI保留，不能替代当前revision。恢复开发前不执行下列剩余动作。
 
 ## 1. 目标、范围与交付边界
 
@@ -396,7 +396,7 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 ## 10. 暂停点、工程余项与外部前置
 
-用户于2026-10-24明确要求暂停开发、收敛在途并更新文档。本轮所有owner已停止源码修改和验证，无新的trace/capture/build/load继续运行。主任务分支`codex/p0-managed-platform-2026-10-24`工程为ae；CLI六文件WIP以`cf5008bfc79aa344fca479b104dc973601fa0487`保存于独立远程分支`codex/p0-cli-workflow-2026-10-24`，工作树`/private/tmp/model-router-p0-cli-workflow-20261024`保留。该WIP未合并主任务分支，不能借用ae/9d的CI与真实验收。
+用户于2026-10-24明确要求暂停开发、收敛在途并更新文档，所有owner已停止源码修改和验证。随后用户明确要求提交远程并合并main：主任务分支`codex/p0-managed-platform-2026-10-24`的`6cc79da`及CLI六文件WIP `cf5008bfc79aa344fca479b104dc973601fa0487`已整合，代码合并点为main `9f433356be0847a05f7a655a4b46dedd63309584`。独立远程分支`codex/p0-cli-workflow-2026-10-24`及工作树`/private/tmp/model-router-p0-cli-workflow-20261024`保留。当前整合版本仍待验证，不能借用ae/9d的CI与真实验收；合并未恢复trace/capture/build/load。
 
 9d的正式Kimi A0、完整offline和PG600秒恢复证据继续有效于原范围；ae只新增C0样本门禁及其构建/CI和实际serial诊断。Redis旧RDB、operator、warm cached-auth typed403、wire ACK等保持各自证据边界。用户指定Kimi材料已有成功A0，不再作为待提供凭据项；文档不保存密钥。
 
@@ -404,7 +404,7 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 | 优先级/任务 | 暂停状态 | 恢复后的处理方式与出口 |
 |---|---|---|
-| P0 / A1o真实CLI有限互通 | 独立WIP已保存并完成静态审阅；HEAD/A1o最终源码未执行检查，真实工具调用为0 | 先scoped strict、runner语法和27组纯测试，再仅capture；实际omitted/model/stream/Read/max_tokens≤512齐全后，绑定确切整合候选fresh build，再正常P01/probe及最多3次generation，逐笔usage/钱包/账本/hold核对 |
+| P0 / A1o真实CLI有限互通 | cf已整合main并保留独立分支；HEAD/A1o最终源码仅静态审阅、未执行检查，真实工具调用为0 | 先scoped strict、runner语法和27组纯测试，再仅capture；实际omitted/model/stream/Read/max_tokens≤512齐全后，绑定确切整合候选fresh build，再正常P01/probe及最多3次generation，逐笔usage/钱包/账本/hold核对 |
 | P0 / C0首瓶颈定位 | serial完整样本已失败；trace wrapper仅未审草稿，从未执行 | 先审草稿与资源条件，再独占执行同四腿100、request-samples、sampleEvery=1；核200个GW UUID及trace完整性，按markers和exclusive阶段定位，trace成绩不作性能验收 |
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
 | P0 / A1完整指定范围 | A1o不证明thinking已关闭/开启；A1a disabled、thinking enabled、cancel/resume及可获得的模型版本证据开放 | 分场景捕获原始协议事实并实跑；无法取得backend revision时明确未知，不用CLI版本替代，不把有限互通观察写成M1通过 |
@@ -444,4 +444,4 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 
 ### 11.4 保存位置与恢复验证边界
 
-六文件WIP已独立提交推送`cf5008b`，最终Astra静态审查通过。最后实际检查仍属于HEAD/A1o修复之前的run03：scoped strict/runner语法通过、三roots共23项（21pass/2skip），随后的capture在HEAD首错；这些结果不覆盖当前WIP的27组测试源码。恢复后从当前确切源码重新检查/capture，不重用旧绿色。成功A1o也不关闭A1a、完整A1或M1。
+六文件WIP已独立提交推送`cf5008b`，并按后续用户授权整合至main `9f43335`，最终Astra静态审查通过。最后实际检查仍属于HEAD/A1o修复之前的run03：scoped strict/runner语法通过、三roots共23项（21pass/2skip），随后的capture在HEAD首错；这些结果不覆盖当前整合版本的27组测试源码。恢复后从当前确切源码重新检查/capture，不重用旧绿色。成功A1o也不关闭A1a、完整A1或M1。
