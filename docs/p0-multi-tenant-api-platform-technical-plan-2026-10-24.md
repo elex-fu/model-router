@@ -405,7 +405,7 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 | 优先级/任务 | 暂停状态 | 恢复后的处理方式与出口 |
 |---|---|---|
 | P0 / A1o真实CLI有限互通 | **已通过并完成候选绑定**：run08绑定干净候选`e988644`+fresh build，真实Claude Code 2.1.216经观察器→GW→真实Kimi完成两轮Read+三轮generation，3笔native usage逐笔结算（4573+4873+4996=14442）、wallet 985558、hold 0、ledger 4/8、4 leases释放；`f27f06c`与`e988644`（CI #40089334882）均68/68 success | thinkingModeProven/backendRevisionProven/providerHardLimitProven/productionGo保持false边界；A1o不关闭A1a、完整A1或M1 |
-| P0 / C0首瓶颈定位 | **已完成trace诊断**：wrapper静态审阅通过后独占执行，200/200样本trace完整（observationOk=true、零missing/duplicate/incomplete）；exclusive归因锁定`query`阶段独占p50 173/157ms、p99 382/383ms，占请求elapsed约87%；upstream-send marker在~173ms（provider TTFB仅+7ms、结算不占TTFB） | 静态枚举pre-dispatch查询路径（auth→admission→prelock→preparation→dispatch）确定每请求SQL往返构成，产出窄修候选清单；trace结果仅作诊断不作验收 |
+| P0 / C0首瓶颈定位 | **已完成**：trace诊断（200/200完整、query阶段独占~87%）+全路径静态枚举——pre-send≈150条语句+5次fsync，173ms p50≈1.15ms/条（prepared-off逐条parse/plan），~1/3为重复重验证读，p99尾部为O(增长)聚合扫描；窄修路线图已定（去重重验证~45-60ms为首选，冗余SET已移除） | 窄修①（去重重复重验证）→受控serial复测trace对照→cap A/B→完整R9；**核算提示：10ms TTFB与30ms门槛需架构级改造**（admission缓存/工作后移/流水线化），窄修不可及，需方案层预算决策；native prepared statements属部署配置（生产默认off），不用于改门槛语义 |
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
 | P0 / A1完整指定范围 | A1o不证明thinking已关闭/开启；A1a disabled、thinking enabled、cancel/resume及可获得的模型版本证据开放 | 分场景捕获原始协议事实并实跑；无法取得backend revision时明确未知，不用CLI版本替代，不把有限互通观察写成M1通过 |
 | P0 / B0、B1真实支付 | binding/退款/收银工程已有本地与PG证据，真实PSP未验 | 补真实Alipay主体、CNY钱包/计划、回调验签配置及受控退款额度；验证原POST重入、回调到账、全/部分退款、旧binding回调退款与歧义reconciliation |

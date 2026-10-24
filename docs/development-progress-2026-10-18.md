@@ -1375,6 +1375,24 @@ markers：latency腿 upstream-send p50=172.9ms、first-byte=179.8、eof=179.9、
 
 另：同日A1a capture-only探针（loopback、无供应商，`/private/tmp/model-router-a1a-capture-run01-20261024/`）确认CLI 2.1.216在现环境合同下模型POST仍为`thinking:"omitted"`（capture 1/1 pass、upstream未接触）。A1a"实际显式disabled"门槛在本CLI版本+配置下不可满足的现状由直接证据固定；A1a、thinking enabled、cancel/resume场景继续开放，等待CLI侧能力或方案修订，不以A1o替代。
 
+### 29.63 C0静态枚举：pre-dispatch查询构成与窄修路线图
+
+对单条anthropic `/v1/messages` happy path（无Idempotency-Key、platform模式、单候选账号）完成全路径静态枚举（含四路并行探查+核心文件通读，结论含file:line引用）：
+
+**pre-send查询总量**：≈150条语句（读≈125/写行≈27）+ **5次fsync提交**（调度器审计单语句自动提交、admission主事务COMMIT、lease-acquire、claim、dispatching迁移）。构成：密钥认证（5s TTL缓存命中时0条SQL）→entitlement 2条→authority只读事务~16条（REPEATABLE READ真实需求）→调度器9条（8读+1审计写）→**admission主事务~90条**（读~70/写~20，含prelock×3、revalidateAuthorization×2、幂等INSERT、requests/attempts INSERT、admission guard ~23条、rate/outbox/审计INSERT、钱包hold含reservations SUM、KEY-BUD、capacity计数聚合+排他tenant fence、evidence registrar authority复读+INSERT）→dispatch pre-send ~35条（preflight只读、lease/claim/dispatching三写事务、readDispatchProof大join）。
+
+**耗时归因**：173ms p50 ≈ 150条×~1.15ms/条——**首要嫌疑=语句数量×prepared-off逐条parse/plan**（大查询单条规划2-10ms）；**~1/3为重复重验证读**（prelock×3、revalidateAuthorization×2、authority事实包×3+、dispatch preflight/claim重复、getAttempt复读×2）≈40-50条冗余往返≈45-60ms；fsync×5贡献5-50ms；**p99=382ms尾部指向O(累计行数)增长聚合扫描**（capacity `saas_requests⋈saas_attempts`计数、钱包hold/refund SUM、rate窗口SUM）——独占串行窗口已排除锁争用、advisory fence与幂等INSERT均非主因、key认证已缓存。
+
+**窄修路线图（按嫌疑排序，门槛不变）**：
+1. **去重重复重验证**（~45-60ms，中低风险）：prelock 3→1（保留metering前一次以维持fence-先于-metering语义）；revalidateAuthorization 2→1；guard与registrar的authority事实包复用同事务已读事实；dispatch preflight并入claim；getAttempt复读×2去除。不变量：每个fence获取后至少一次读取（现fence在事务首句一次性取得，满足）。
+2. **native prepared statements**：`MODEL_ROUTER_SAAS_DB_PREPARED_STATEMENTS=native`开关已存在（db/database.ts:98-109，**生产默认=off**）。C0基线配置与生产默认一致——在压测中开启属部署配置变更而非代码窄修，是否用于门槛需方案层决策，不擅自改门槛语义。
+3. **p99尾巴：capacity计数与钱包SUM改维护式投影**（收敛382→接近173ms，高金融一致性风险需保守设计：宁可少放行，与reservation行锁同事务维护+对账安全网）。
+4. 调度器审计INSERT并入admission事务（省1 fsync，低风险）；⑤冗余SET语句（零风险，**已实施**：request-preparation-service.ts两处`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`在`BEGIN ISOLATION LEVEL READ COMMITTED`包装内为纯冗余往返，已移除，50/50测试+tsc通过）；⑥claim与dispatching合并（中风险）；⑦settle后runtime-health/lease-release合并/异步化。
+
+**门槛差距现实核算**：即使窄修①+④+⑤全落地（~150→~90条），pre-dispatch仍≈90×1.15ms+fsync≈104ms+，远超TTFB 10ms门槛——**10ms TTFB门槛需要架构级改造**（如admission结果跨请求缓存、非关键工作后移、查询流水线化），非窄修可及；30ms latency门槛同样需要①+③+架构项叠加。此核算提交方案层决策：窄修路线先行验证增益，门槛达标路径需明确架构预算。
+
+C0后续顺序维持：窄修①→受控serial复测（trace对照）→有效后cap关闭/8候选A/B→完整R9。本节为诊断记录，不构成任何性能验收。
+
 ### 29.60 恢复开发首轮：run04 capture首次通过，A1o事实合同闭合
 
 用户以明确指令恢复开发（按技术方案开发、最大化并行、聚焦核心能力）。恢复后执行通道立即重跑A1o capture-only preflight（run04）：`RUN_PLATFORM_ACCESS_CLI_OBSERVATION_CAPTURE=1 node --import tsx --test tests/integration/platform-access-cli-observation-live.test.ts`，在整合main工作树（源码与`89b31fd`一致）执行。真实Claude Code 2.1.216在HEAD `/`修复后首次通过observer推进到模型POST，返回的安全投影为`messageObserved=true`、`upstreamContacted=false`、`maxTokens=512`、`thinking=omitted`、`stream=true`、`toolCount=1`；测试1/1 pass、0 fail/0 skip、单测时长约0.67s。日志`/private/tmp/model-router-a1o-capture-run04-20261024/capture-run04.log`。

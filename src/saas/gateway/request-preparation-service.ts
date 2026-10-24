@@ -2115,7 +2115,8 @@ export class SaasRequestPreparationService {
       };
       try {
         const replay = await transaction.transaction(async (executor): Promise<RequestPreparationResult | null> => {
-          await executor.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+          // Isolation is already READ COMMITTED from BEGIN ISOLATION LEVEL in
+          // the transaction wrapper; no redundant SET round-trip here.
           const canonicalDecision = await this.invokeDecision('admission', () =>
             readCanonical.call(this.dependencies.admission, replayInput, { executor }), 'storage_failure');
           if (canonicalDecision.decision !== 'allow') return decisionFailure('admission', canonicalDecision, ids);
@@ -2350,7 +2351,8 @@ export class SaasRequestPreparationService {
     }
 
     const durableWork = async (executor: SqlExecutor): Promise<RequestPreparationResult> => {
-      await executor.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+      // Isolation is already READ COMMITTED from BEGIN ISOLATION LEVEL in the
+      // transaction wrapper; no redundant SET round-trip here.
       const compensateAndFail = (
         stage: RequestPreparationStage,
         code: RequestPreparationFailureCode,
