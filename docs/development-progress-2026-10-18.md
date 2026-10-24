@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；§16.4 的单测失败已在后续章节修复，旧计数仅代表当时截点。可运营多租户模型 API 平台的 P0 方案及最新实施见 **§29**。当前按任务并行开发并执行针对性验证；标准平台开户/支付装配、托管性能及生产恢复等出口仍需分别完成，历史通过不代替发布 GO。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.45**：Codex三项源码修复已分任务推送，工程候选`87cc8b4`的自动CI完整68/68通过。本轮只读收集既有CI，按此前要求未启动本地测试/构建；真实供给、PSP、Codex合同、性能和生产恢复仍待验收，M1/M2/M3均未关闭，历史通过不代替发布GO。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1138,3 +1138,15 @@ Sol实现四个runtime文件：新增`codex-workflow-financial-readiness.ts`；c
 Astra实际四文件差分复核通过；另一Astra独立核对008 schema、正式角色模板与runtime privilege manifest，确认新SQL字段/关系存在、CP/GW既有SELECT足够，无迁移、manifest或grant变更。既有collector fixture仅新增对该SQL的精确分发（旧fixture返回空候选），严格查询次数4→5；原四路分发和其他断言保留，不新增用例。未运行测试、构建、类型检查、语法检查、DB或服务；源码复核不能替代运行验收。
 
 此前两个独立修复已推送`92f477a`（§29.42）和`7718c49`（§29.43）；本项另独立提交。PG急停恢复授权、真实Codex计量合同/工作流、多实例KMS及M1/M2/M3全部继续开放。后续如读取自动push CI，只按确切SHA记录，不以旧基线绿色替代新源码证据，也不主动dispatch或重跑验证。
+
+### 29.45 Codex 三项交付的确切候选 CI 与剩余门禁
+
+§29.42–44三项分别已提交并推送当前任务分支：`92f477a`统一builtin准入/发送的compiler version，`7718c49`修复SSE完整事件的UTF-8字节上限，`87cc8b4`实现精确catalog scope的逐工作流财务就绪。源码设计与修改分别由Astra/Sol完成，Astra实际差分及schema/既有权限复核均通过。
+
+Luna只读跟踪自动push产生的 [CI #161](https://github.com/elex-fu/model-router/actions/runs/40041486469)，确切SHA `7718c49aa3d61be003dc75dfba2928b044f96f84` 最终 **68/68 success**，覆盖前两项。随后同样只读跟踪 [CI #162](https://github.com/elex-fu/model-router/actions/runs/40042216960)，确切工程候选 `87cc8b4154e8b0edacf35b605ae38d9e434cc5ee` 最终 **68/68 completed/success**：API per_page=100、total_count=68、returned=68，4 main+64 isolated全部通过，无失败、跳过或取消，PG15/18 settlement SIGKILL均success。没有dispatch、rerun、cancel或本地验证，不把早期4项主job快照当成完整矩阵。
+
+这份新候选CI取代§29.42–44交付时“只有源码复核、尚无新CI”的当前状态，原时间点记录保留。它证明现有必需CI在该revision通过；本轮未新增§29.43所列专项用例，也未取得这些规格逐项通过的独立记录，没有接纳任何真实Codex正向profile，不能据此宣称真实ChatGPT计量/enforcement、HTTP/WS/compact/remote-history工作流或多实例KMS已验收。registry仍为空、财务缺证继续拒绝。
+
+本次后续状态收口仅修改P0技术方案与本进度两个Markdown，runtime/source/harness冻结在87候选；文档单独提交推送，不将87的CI转记为文档子commit已有CI，不为持续记录文档本身制造验证循环。本地dist没有在本轮重新构建，不能当作87的运行产物。
+
+剩余处理保持原范围：本地PG immediate-stop/start的自然600秒恢复及新的专项验证须先获直接用户授权；A0仍须有效供给引用及真实正式首请求；真实Alipay交易/回调/退款、生产KMS/IAM、独立同步PG故障域及PITR、Codex精确后端合同/真实CLI和受控R9窗口尚缺证据。自动审批此前因“不要测试验证了”拒绝PG演练的边界仍有效，授权问题尚未获答；不重试、不改用其它入口绕过。M1/M2/M3和可收费运营GO均未关闭，完整P0不能标记完成。
