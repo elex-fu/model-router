@@ -495,7 +495,13 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       walletMinorUnits:after.wallet,holdMinorUnits:after.hold,heldLeases:settled.held_leases,financialSnapshot:after,productionGo:false});
   }catch(error){
     const code=error && typeof error==='object' && 'code' in error && typeof error.code==='string' && /^(?:[0-9A-Z]{5}|ERR_ASSERTION|[A-Z_]{1,80})$/.test(error.code)?error.code:null;
-    const failureDiagnostic={failedStage:stage,errorCode:code,readiness:{...readiness},children:childObservations(),productionGo:false};
+    // The CLI workflow's retainCliWorkflowFailure replaces the original error
+    // with a safe fixed-category projection message. Surface that projection
+    // verbatim; it is the designed-safe diagnostic and carries no body bytes.
+    const cliProjection=error instanceof Error && error.message.startsWith('CLI workflow rejected ')
+      ?(()=>{try{return JSON.parse(error.message.slice('CLI workflow rejected '.length));}catch{return undefined;}})()
+      :undefined;
+    const failureDiagnostic={failedStage:stage,errorCode:code,...(cliProjection===undefined?{}:{cliWorkflow:cliProjection}),readiness:{...readiness},children:childObservations(),productionGo:false};
     if(observationCallbackStarted){
       try{diagnostic(failureDiagnostic);}catch{/* Preserve the failure and its scoped readback even if reporting fails. */}
     }else diagnostic(failureDiagnostic);

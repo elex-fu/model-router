@@ -702,6 +702,31 @@ test('accepts only Bearer authorization and never exposes the raw secret in erro
   assert.equal(JSON.stringify(resolverFailure.response.endBody).includes('test-secret'), false);
 });
 
+test('authenticates native Anthropic x-api-key clients with the same key material', async () => {
+  const apiKeyOnly = harness();
+  delete apiKeyOnly.request.headers.authorization;
+  apiKeyOnly.request.headers['x-api-key'] = 'test-secret';
+  await apiKeyOnly.handler(asRequest(apiKeyOnly.request), asResponse(apiKeyOnly.response));
+  assert.notEqual(apiKeyOnly.response.writeHeadCalls[0]?.status, 401);
+  assert.equal(apiKeyOnly.keys[0], 'test-secret');
+
+  // A present-but-malformed authorization header stays authoritative and
+  // fails closed even when a plausible x-api-key accompanies it.
+  const basicWithApiKey = harness();
+  basicWithApiKey.request.headers.authorization = 'Basic test-secret';
+  basicWithApiKey.request.headers['x-api-key'] = 'test-secret';
+  await basicWithApiKey.handler(asRequest(basicWithApiKey.request), asResponse(basicWithApiKey.response));
+  assert.equal(basicWithApiKey.response.writeHeadCalls[0]?.status, 401);
+  assert.equal(basicWithApiKey.keys.length, 0);
+
+  const blankApiKey = harness();
+  delete blankApiKey.request.headers.authorization;
+  blankApiKey.request.headers['x-api-key'] = '   ';
+  await blankApiKey.handler(asRequest(blankApiKey.request), asResponse(blankApiKey.response));
+  assert.equal(blankApiKey.response.writeHeadCalls[0]?.status, 401);
+  assert.equal(blankApiKey.keys.length, 0);
+});
+
 test('rejects client authority fields and never dispatches a blocked preparation result', async () => {
   const authority = harness();
   authority.request.chunks = [

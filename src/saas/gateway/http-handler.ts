@@ -1034,6 +1034,26 @@ function bearerKey(req: IncomingMessage): string | undefined {
 }
 
 /*
+ * Native Anthropic clients (Claude Code, the Anthropic SDKs) present the API
+ * key in x-api-key rather than a Bearer authorization header. The gateway
+ * accepts the same key material through either presentation: when an
+ * authorization header is present it remains authoritative (malformed values
+ * still fail closed), otherwise a bounded non-empty x-api-key value is used.
+ * The single authenticator and its trust model are unchanged.
+ */
+function apiKeyHeader(req: IncomingMessage): string | undefined {
+  const header = oneHeader(req, 'x-api-key');
+  if (header === undefined) return undefined;
+  const value = header.trim();
+  if (value.length === 0 || value.length > MAX_AUTHORIZATION_LENGTH) return undefined;
+  return value;
+}
+
+function callerKey(req: IncomingMessage): string | undefined {
+  return oneHeader(req, 'authorization') !== undefined ? bearerKey(req) : apiKeyHeader(req);
+}
+
+/*
  * Model plaza (task #22): the console session cookie value, for the plaza's
  * session tier. The gateway boundary only parses the bounded cookie pair it
  * knows by name; validation belongs to the plaza port's session authority.
@@ -1058,7 +1078,7 @@ async function authenticateCaller(
   req: IncomingMessage,
   authenticator: ProxyKeyAuthenticator,
 ): Promise<AuthenticatedApiKey> {
-  const key = bearerKey(req);
+  const key = callerKey(req);
   if (key === undefined) throw new GatewayHttpError(401, 'UNAUTHENTICATED');
 
   try {
