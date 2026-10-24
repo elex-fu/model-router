@@ -450,6 +450,14 @@ export interface RequestPreparationAdmissionPort {
       readonly idempotencyKey: string;
       /** Set by a trusted wrapper only after a fresh HMAC claim on this executor. */
       readonly idempotencyClaim?: GatewayRequestIdempotencyClaimed;
+      /**
+       * Set by a trusted wrapper after revalidateAuthorization already
+       * succeeded earlier in this same transaction/executor (fences held,
+       * fresh entitlement read). Admission then skips the redundant entry
+       * revalidation; the authorization-fence-before-idempotency-claim
+       * ordering is preserved by the wrapper's earlier call.
+       */
+      readonly prevalidatedAuthorization?: RequestPreparationEntitlement;
       readonly tenantId: string;
       readonly projectId: string;
       readonly proxyKeyId: string;

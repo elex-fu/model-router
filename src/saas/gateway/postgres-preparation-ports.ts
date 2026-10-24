@@ -664,9 +664,14 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
       if (!sqlOptions?.executor) return blockRequestPreparation('capability_unavailable', SAFE_ADMISSION_FAILURE);
       const executor = observePreparationExecutor(sqlOptions.executor, 'admission', options.observe);
       const { caller: resolvedCaller, entitlement: resolvedEntitlement, authority } = input;
-      const lockedAuthorization = await revalidateAuthorization({ caller: resolvedCaller, entitlement: resolvedEntitlement,
-        publicModel: authority.route.publicModel, protocol: authority.route.protocol, clientAddress: input.clientAddress,
-        clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+      // A trusted wrapper already ran revalidateAuthorization earlier in this
+      // same transaction (fences held, claim ordered after the fence), so the
+      // entry revalidation would repeat identical reads on the same snapshot.
+      const lockedAuthorization = input.prevalidatedAuthorization === undefined
+        ? await revalidateAuthorization({ caller: resolvedCaller, entitlement: resolvedEntitlement,
+          publicModel: authority.route.publicModel, protocol: authority.route.protocol, clientAddress: input.clientAddress,
+          clientKey: input.idempotencyKey, requestId: input.requestId }, { executor })
+        : allowRequestPreparation(input.prevalidatedAuthorization);
       if (lockedAuthorization.decision !== 'allow') return lockedAuthorization;
       if (
         !entitlementMatchesCaller(resolvedCaller, resolvedEntitlement, authority.route.publicModel) ||

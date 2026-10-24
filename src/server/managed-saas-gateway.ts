@@ -1461,7 +1461,14 @@ function createProductionIdempotencyAdmission(
       if (claim.canonicalRequestId !== input.requestId) {
         return rejectRequestPreparation('binding_mismatch', 'SaaS request admission could not be authorized.');
       }
-      const admitted = await admission.authorizeAndReserve({ ...input, idempotencyClaim: claim }, sqlOptions);
+      const admitted = await admission.authorizeAndReserve({
+        ...input,
+        idempotencyClaim: claim,
+        // revalidateAuthorization above already ran on this executor in this
+        // transaction (fence before claim); pass its fresh result so admission
+        // skips the redundant entry revalidation.
+        prevalidatedAuthorization: authorized.value,
+      }, sqlOptions);
       if (admitted.decision !== 'allow') return admitted;
       const binding = admitted.value.idempotencyBinding;
       if (
