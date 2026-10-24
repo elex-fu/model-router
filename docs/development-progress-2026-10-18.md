@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.45**：Codex三项源码修复已分任务推送，工程候选`87cc8b4`的自动CI完整68/68通过。本轮只读收集既有CI，按此前要求未启动本地测试/构建；真实供给、PSP、Codex合同、性能和生产恢复仍待验收，M1/M2/M3均未关闭，历史通过不代替发布GO。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.47**：A0 的 P01 DTO 修复已推送；用户明确授权的一次自有 PG 急停恢复 run05 完成原 600 秒等待并到达 scanner，随后 canonical replay 的全租约快照断言失败。失败证据捕获已窄修，生产准备链的无副作用重放及授权修复另行收敛；未重跑故障周期。`87cc8b4` 的 CI 68/68 仅覆盖该历史候选，后续新代码未继承其绿色。Kimi 材料现已提供，A0 尚未执行；M1/M2/M3 与运营发布 GO 均未关闭。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1160,3 +1160,19 @@ Astra核对现P01及已修暖缓存fixture后设计，Sol仅改原A0脚本：三
 Astra实际源码差分复核通过；本项未新增或运行测试、构建、类型检查、服务、探针或真实生成，仅修复已证本地DTO障碍，不能记作A0通过。正式入口仍是`run-commercial-postgres-gate.mjs --suite platform-access`，需隔离PG及当前server dist；预期一次max_tokens=8 onboarding probe和一次max_tokens=32短生成，真实执行尚未发生。
 
 配置脱敏核对确认schemaVersion=2、两个enabled Kimi credential均为`{type:'env',name:'KIMI_CODE_API_KEY'}`，JSON保存引用而非inline材料。本轮当前进程及launchd均未加载该变量；没有读取其它secret、构造会写库的ControlStore、猜credential ID或打印凭据。已向用户询问该变量的实际环境文件/服务引用；继续处理独立源码任务，真实A0门禁仍开放。用户另明确授权的一次PG故障验证及结果单独记录，不外推为其它本地测试或生产动作授权。
+
+后续用户直接回复“`KIMI_CODE_API_KEY` 已填写”，再次脱敏读取所指配置发现材料已填入 `secret.name`，该字段原合同表示环境变量名。当前判断更新为材料已提供、尚未验证有效性；不再以初次引用未加载的快照作为当前阻塞。既有配置不改写，后续仅从指定文件读取并临时注入有界 A0 runner/测试父进程，不输出或保存明文、不放入命令参数；迁移及其它非测试子进程的环境隔离单独修复并审阅。真实探针、短生成及 A0 正常运营链仍须实际执行，不能把提供材料视为验收通过。
+
+### 29.47 获直接授权的 PG run05：自然恢复已达 scanner，重放租约断言失败
+
+用户直接答复“明确允许这次本地故障验证”，解除此前针对该动作的审批阻塞。本次仅启动自有临时PG/Redis/网关/标准CP及loopback受控上游，不接触生产或真实供应商。Luna先执行一次必要的fresh server build，HEAD为`ed886a3c4c369d125b59e26722012fdd344a87e2`、server源码与工程87相同；src 791文件、dist 3160文件及13项harness的前后精确hash均稳定。构建记录为`/private/tmp/model-router-p10-postgres-recovery-20261024-run-05-build-provenance.json`，不能用后续源码修复继承这份构建结果。
+
+唯一run05的原session为47884，实际完成自有PG immediate stop及同目录/同端口restart；原请求自然断流，未由client deadline中断。停机期三实例新请求均503、mock新增请求0且in-flight=0；PG数据库/地址/端口/18.6版本、fsync=on和synchronous_commit=on保持，postmaster start time改变。自然等待原600000ms及扫描cadence后，正常scanner生成恰好一个operator_required case、lastError=null。没有缩短生产TTL或改金融SQL。
+
+约603秒后在canonical-replay阶段退出1：原canonical202/header/body的前置断言已过，随后全authority严格快照比较失败。diff显示原lease（fence19）由stored held变为expired，并新增四条released lease（fence35/37/39/41）；新增attempt ID不在已记录的业务attempt集合中。工件只有lease id/fence/status/attemptId，缺owner/account及health fencing关联，不能把这四行直接认定为probe。旧代码在比较之后才赋afterReplay/mock计数证据，因此完整afterReplay未落盘、mock零新增比较尚未执行；fresh C也未执行。此轮不能记为完整重放、完整金融恢复或PG门禁通过。
+
+Astra源码定位发现prepare先scheduler.select/selectAndBind、后admission幂等claim；stale调度探针会生成独立UUID、获取/释放租约并记录probe_success，不调用provider transport、也不创建业务attempt。这能解释一类差异，但不能补齐run05具体行的缺失来源证据。另发现旧late-existing分支早于authorization prelock及IP检查返回，作为共享准备链的真实代码问题继续处理。当前通用修复设计是在scheduler前经同事务prelock、新鲜entitlement/IP及HMAC只读lookup，以当前已授权候选真实重编译并核验完整指纹后返回canonical；晚期claim竞争也须复用同一授权合同。实现、源码审阅及后续验证另记，不能以同构候选shortcut或放宽租约断言替代。
+
+先独立修复失败可观测性：PG profile在任何replay比较前记录安全canonical固定字段、actual afterReplay authority及同一次mock totals，finally保留首错事实。Astra实际单文件差分复核通过；202/原ID/完整JSON/全authority含lease深比较及mock新增0的原断言均保留，无classifier、租约过滤、过期例外、新SQL或权限变更。此补丁不能追补run05丢失的事实，修改后尚未重跑。没有执行第二次PG故障周期或其它本地测试。
+
+run05的summary/recovery/progress位于`/private/tmp/model-router-p10-postgres-recovery-20261024-run-05/`。cleanup三项均true：所有自有进程停止、PG停止、私有runtime删除；source/dist/harnessChanged全部false，最终精确manifest与fresh build一致。P10完整恢复仍失败，M1/M2/M3及生产故障域/PITR等验收继续开放。后续先完成保持原严格门槛的生产源码修复，再明确后续回归和新增故障周期的授权范围。

@@ -218,11 +218,33 @@ export async function runPostgresSaasRecoveryProfile({ getDatabase, seed, gatewa
     evidence.afterScanner = recovered; evidence.scannerDetails = recoveredDetails;
     await progress('canonical-replay');
     const callsBeforeReplay = await mockCalls();
-    const replay = await send(1, originalKey, true); assert.equal(replay.status, 202);
-    assert.equal(replay.headers.get('x-canonical-request-id'), requestId);
-    assert.deepEqual(await replay.json(), { object: 'request_status', id: requestId, status: 'unknown', response_replayed: false });
-    const afterReplay = await snapshot(); assert.deepEqual(afterReplay, recovered);
-    assert.equal(await mockCalls(), callsBeforeReplay);
+    const replay = await send(1, originalKey, true);
+    const canonicalHeader = replay.headers.get('x-canonical-request-id');
+    let replayBody;
+    let replayJsonFailed = false;
+    try { replayBody = await replay.json(); } catch { replayJsonFailed = true; }
+    const uuid = (value) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+    const body = replayBody !== null && typeof replayBody === 'object' && !Array.isArray(replayBody) ? replayBody : null;
+    evidence.canonicalReplay = { statusCode: replay.status, canonicalRequestId: uuid(canonicalHeader) ? canonicalHeader : null,
+      canonicalRequestIdState: canonicalHeader === null ? 'missing' : uuid(canonicalHeader) ? 'valid' : 'invalid',
+      jsonParsed: !replayJsonFailed, body: {
+        object: body?.object === 'request_status' ? 'request_status' : 'unrecognized',
+        id: uuid(body?.id) ? body.id : null,
+        status: ['pending', 'unknown', 'completed', 'failed'].includes(body?.status) ? body.status : 'unrecognized',
+        response_replayed: typeof body?.response_replayed === 'boolean' ? body.response_replayed : null,
+      } };
+    evidence.replayMockTotals = { before: { requests: callsBeforeReplay } };
+    const afterReplay = await snapshot(); evidence.afterReplay = afterReplay;
+    const replayMockActivity = await mockActivity(); evidence.replayMockTotals.after = replayMockActivity;
+    // Record actual safe observations first so the existing finally writer also
+    // retains a strict replay mismatch, rather than only the pre-replay state.
+    assert.equal(replay.status, 202, 'Canonical replay must return the expected HTTP status');
+    assert.equal(canonicalHeader, requestId, 'Canonical replay must retain the original request ID');
+    if (replayJsonFailed) throw new Error('Canonical replay JSON decoding failed');
+    assert.deepEqual(replayBody, { object: 'request_status', id: requestId, status: 'unknown', response_replayed: false },
+      'Canonical replay body must match the original request status contract');
+    assert.deepEqual(afterReplay, recovered);
+    assert.equal(replayMockActivity.requests, callsBeforeReplay);
     const leaseBeforeProbe = (await details(requestId)).leases;
     await control('shape', { chunks: 4, chunkDelayMs: 0 });
     await progress('fresh-request-settles-once');
