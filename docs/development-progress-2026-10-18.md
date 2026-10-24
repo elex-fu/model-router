@@ -1412,3 +1412,18 @@ run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）
 受控serial trace复测（独占窗口、同四腿各100、SAMPLE_EVERY=1、observationOk=true 200/200、`c8e4e4e`源码+fresh build）：latency腿query独占p50 173.1→164.0ms（-9ms，与~10条×1.15ms预测吻合）、elapsed 199.8→188.5ms；ttfb腿p50持平（156.8→159.8）、p99 382.9→570.5为轮间机器方差（同一尾部机制：O(增长)聚合扫描）。窄修①+⑤合计约-10ms p50（~5%）；诊断对照再次确认30/10ms门槛需架构级改造。admission测试85/85、全套件0失败；`c8e4e4e` CI运行中。
 
 **架构级候选设计（下个工作块实施入口）**：admission authority解析（B3，~16条/请求，REPEATABLE READ只读事务）与调度器重复解析改**版本键缓存**——缓存键含全部版本元组（authzVersion/entitlementVersion/supplyProfileVersion/modelScopeVersion/projectPolicyVersion/route合同版本），命中即复用解析结果；版本契约保证版本不变则事实不变，版本并发变更→新键未命中→重新解析；admission事务内guard的fresh读取仍为最终fail-closed防线（版本不匹配即拒绝）。预期省~16-24条/请求（~20-30ms）。cap A/B与完整R9维持"受控serial有效后"前置，不提前执行。
+
+### 29.66 双通道并行：thinking-enabled场景闭环 + authority版本键缓存落地
+
+**通道A（A1 thinking-enabled，M1维度）**：实施方案§11.2的"正数thinking预算1024/output1536"候选设计，经三轮实测迭代后闭环：
+
+- **场景与套件**：新增`enabled-observation`场景（`scripts/ops/verify-platform-access-cli-workflow.ts`场景合同表：maxTokens/output上界1536、cliEnv MAX_THINKING_TOKENS=1024）与独立gate套件`platform-cli-thinking`（独立证据边界，live需`RUN_PLATFORM_ACCESS_CLI_THINKING_LIVE=1`+Kimi凭据）。first-request注册新kind`claude-two-read-thinking-enabled-observation`（含failure-observation scope）。
+- **实测CLI事实（capture+live三轮迭代）**：(a) 正预算下CLI 2.1.216以`thinking:{type:'adaptive'}`请求（capture实证，非enabled+budget形状）——观察合同按实测修正为adaptive（可选有界`max_thinking_tokens`）；(b) **CLI在正预算下同样不回放provider thinking块**（live run02结构诊断：round 1 Kimi返回thinking+signature、round 2历史仅tool_use）——与A1o省略事实合并为统一实测合同：回放可选、一旦回放须逐字节一致且前缀有序；(c) fixture输出上限512拒绝1536请求（GW usage bounds按customer合同拒绝）、3×~769K并发hold超1M钱包——场景感知输出上界1536与资金3M。
+- **验收（run03脏树/run04干净候选`580d408`+fresh build+CI #40099149399 68/68 success）**：真实Kimi三轮generation逐笔结算（run04: 4656+4887+5008=14551）、wallet 2,985,449（3M-14551）、hold 0、ledger 4/8、4 leases释放。边界诚实：thinkingModeProven=true（adaptive请求+provider thinking观察）、thinkingReplayObserved=false、backendRevisionProven/providerHardLimitProven/productionGo=false。纯测试31/31、全套件0失败（images keepalive为预存在flake，同轮复跑通过）。
+
+**通道B（C0 authority版本键缓存，agent实施+主线把关）**：`CachedRequestPreparationAuthority`装饰器（allow-only、TTL 5s、4096条LRU近似、single-flight压力旁路、structuredClone隔离、版本键=caller/entitlement全部版本元组+模型/协议/操作，仅id字段无密钥材料；kill switch `MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE=0`）。安全前提经书面核实：admission guard事务内UNION ALL批量fresh重读全部授权事实并按冻结版本逐一校验（AUTHORITY_MISMATCH fail-closed），缓存命中不可能绕过最终防线。68/68适配器测试。
+- **CI #40096690161（1442fa9）失败复盘**：commercial E2E组合护栏测试断言精确装饰器链（OpenCode→CN→`instanceof PostgresAdapter`），缓存层破坏形状→拦截器内断言失败→preparation 503。修正：护栏更新为OpenCode→CN→`instanceof CachedRequestPreparationAuthority`→adapter，缓存`source`重命名为公开`underlyingAuthority`（对齐装饰器命名惯例）。本地commercial 30/30复验通过，修正后CI 68/68。**根因为护栏形状而非缓存运行时缺陷**。
+
+**A1a disabled实验（负结论，loopback探针）**：CLI 2.1.216在MAX_THINKING_TOKENS unset时发送`{type:'adaptive'}`（默认即adaptive！）、=0时omitted、无任何环境组合产出显式`{type:'disabled'}`——A1a"实际显式disabled"门槛在本CLI版本结构上不可满足，升级为方案层决策项（建议：A1a gate修订为omitted/adaptive二选一观察，或接受该维度unavailable）。
+
+**A1剩余**：cancel/resume场景（任务#9）为M1指定范围最后缺口。证据目录：`/private/tmp/model-router-a1t-live-run0{1..4}-20261024/`、`/private/tmp/model-router-a1-thinking-capture-run01-20261024/`、`/private/tmp/model-router-cache-repro*-20261024/`。
