@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.51**：核心`1c963b9`旧fixture的36个离线失败已同步，新增早期重放/过期拒绝/store回归与原10文件共138/138通过，scoped strict通过。A0 CP就绪修复已源码审查，尚待真实重跑，供应商预算仍未消耗。用户已允许按需全部验证；分任务提交后构建冻结版本，再并行A0与原600秒PG恢复。旧run05仍失败、旧CI不代替新候选，M1/M2/M3与运营GO均开放。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.52**：fixture同步与关键回归已推送`d45b221`，138/138及scoped strict通过；A0 CP就绪与安全子阶段诊断窄修已审查，分任务交付后进入新冻结候选验证。此前A0供应商调用为零，PG run05仍严格失败。用户已允许按需全部验证，下一批安排fresh build、A0、完整offline及原600秒PG恢复；M1/M2/M3与运营GO均开放。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1220,3 +1220,11 @@ Sol按明确文件ownership并行同步上述10个测试文件，Astra实际差�
 首轮Luna10文件138/138通过；另一Luna的scoped strict发现三个触及测试文件四个问题。Astra用git show确认它们在1c基线已存在：一个缺type import、三处给readonly URL赋值。Sol仅补正确类型导入并改为构造时传入相同URL，保留readonly、请求体/路径及所有断言，无any cast或关闭strict。
 
 修正后原精确10文件再次 **138/138、0 fail/skip**，证据`/private/tmp/model-router-targeted10-rerun.WbDOQa`。src/scripts/tests及所选root配置共1720项、完整dist3164项在测试前后精确一致，HEAD保持1c；不称为全仓快照。scoped strict同一精确12输入（A0 script、10 test文件及busboy声明）退出0、前后hash一致，日志`/private/tmp/model-router-luna-strict-20261024/recheck.log`。本轮未build或启动PG/真实供给；下一次fresh build绑定分任务提交后的确切候选，实际A0与PG恢复另记。CI #167的已知offline失败保留为历史，不把这138项记作该旧run已转绿。
+
+### 29.52 A0按正式CP监听合同等待就绪并保留安全子阶段
+
+Sol仅改原A0脚本，移除CP-only平台端口不支持的`/readyz=200`等待，改为并行连接其自有platform/customer两个127.0.0.1端口，且在poll前后确认CP和Redis子进程均存活。每TCP连接500ms后destroy，整体仍原30秒期限及原cadence；后续正式HTTP/MFA/业务断言继续证明服务能力，TCP可连本身不视为完整A0就绪。
+
+原Redis/CP大阶段拆成固定spawn、Redis TCP及CP双监听子阶段。spawn显式等待spawn/error事件，只有安全errno白名单及固定错误；诊断仅有限signal、数值exit、connected布尔值及正式HTTP状态，不输出原error/stderr、URL、headers、body、环境或凭据。自有进程cleanup保留。没有推断首轮实际404/503，也不能恢复其已删除的runtime日志。
+
+Astra实际单文件差分复核通过，Luna上述scoped strict已覆盖此脚本。MFA→注册/资金→worker onboarding→verified→P01→显式Key→真实短生成顺序、一次max_tokens=8探针和一次max_tokens=32生成参数均保持，未新增重试或供应商调用。首轮正式A0在probe前失败，预算仍0；新完整执行、usage/settlement和cleanup结果另记。本项独立于已推送`d45b221`的fixture/回归任务提交，后续fresh build绑定全部交付后的确切SHA。

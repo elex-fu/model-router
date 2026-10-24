@@ -88,15 +88,33 @@ async function stop(child:ChildProcess):Promise<void>{
   const closed=once(child,'close');child.kill('SIGTERM');const timer=setTimeout(()=>child.kill('SIGKILL'),5000);
   timer.unref();try{await closed;}finally{clearTimeout(timer);}
 }
+async function ownedTcpConnected(value:number):Promise<boolean>{
+  return new Promise(resolve=>{
+    const socket=createConnection({host:'127.0.0.1',port:value});
+    let done=false;
+    const finish=(connected:boolean)=>{if(done)return;done=true;socket.destroy();resolve(connected);};
+    socket.setTimeout(500);
+    socket.once('connect',()=>finish(true));
+    socket.once('error',()=>finish(false));
+    socket.once('timeout',()=>finish(false));
+  });
+}
+const SAFE_SPAWN_ERRORS=new Set(['ENOENT','EACCES','EMFILE','ENFILE','EAGAIN','ENOMEM']);
+function ownedChildObservation(child:ChildProcess|undefined,spawnError:string|null){
+  const signal=child?.signalCode;
+  return {pidAllocated:typeof child?.pid==='number',exitCode:typeof child?.exitCode==='number'?child.exitCode:null,
+    signalCode:signal===null||signal===undefined?null:['SIGTERM','SIGKILL','SIGINT'].includes(signal)?signal:'UNKNOWN',spawnErrorCode:spawnError};
+}
 class BrowserSession {
   private cookies=new Map<string,string>();
-  constructor(readonly origin:string,readonly abortSignal:AbortSignal){}
+  constructor(readonly origin:string,readonly abortSignal:AbortSignal,readonly observeStatus?:(status:number,expectedStatus:number)=>void){}
   async request(path:string, method='GET', body?:unknown, expected=200):Promise<any>{
     const cookie=[...this.cookies].map(([k,v])=>`${k}=${v}`).join('; ');
     const csrf=[...this.cookies].find(([k])=>/csrf/i.test(k))?.[1];
     const response=await fetch(this.origin+path,{method,headers:{origin:this.origin,cookie,
       ...(csrf?{'x-csrf-token':decodeURIComponent(csrf)}:{}),...(body===undefined?{}:{'content-type':'application/json'})},
       ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.any([this.abortSignal,AbortSignal.timeout(90000)])});
+    this.observeStatus?.(response.status,expected);
     for(const value of response.headers.getSetCookie()){
       const pair=value.split(';',1)[0];const at=pair.indexOf('=');this.cookies.set(pair.slice(0,at),pair.slice(at+1));
     }
@@ -118,13 +136,23 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
   await mkdir(runtimeParent,{recursive:true,mode:0o700});
   const tempDirectory=await mkdtemp(join(runtimeParent,'model-router-platform-first-'));
   let stage='platform-foundation';
+  const spawnErrors=new WeakMap<ChildProcess,string>();
+  let ownedRedis:ChildProcess|undefined,ownedControlPlane:ChildProcess|undefined;
+  const readiness={redisConnected:false,platformConnected:false,customerConnected:false};
+  const childObservations=()=>({redis:ownedChildObservation(ownedRedis,ownedRedis?spawnErrors.get(ownedRedis)??null:null),
+    controlPlane:ownedChildObservation(ownedControlPlane,ownedControlPlane?spawnErrors.get(ownedControlPlane)??null:null)});
+  const assertOwnedRunning=(child:ChildProcess,role:'redis'|'controlPlane')=>{
+    const error=spawnErrors.get(child);
+    if(error)throw Object.assign(new Error('Owned acceptance child spawn failed'),{code:error});
+    assert.ok(typeof child.pid==='number'&&child.exitCode===null&&child.signalCode===null,`${role} child must remain alive`);
+  };
   const lifecycle=createOwnedAcceptanceLifecycle(async()=>{
     await Promise.allSettled(started.map(stop));
     await Promise.allSettled([database.close(),controlPlaneDatabase.close()]);
     await rm(tempDirectory,{recursive:true,force:true});
   });
   const close=lifecycle.close;
-  const setStage=(value:string)=>{lifecycle.assertRunning();stage=value;};
+  const setStage=(value:string)=>{lifecycle.assertRunning();stage=value;diagnostic({stage,event:'entered',productionGo:false});};
   try{
     await database.verifySchema();
     const version=await database.query<{server_version_num:string}>('SHOW server_version_num');
@@ -245,20 +273,28 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     await writeFile(trustFile,JSON.stringify({version:1,keys:[{keyId:verifierKeyId,publicKeyPem:signing.publicKey.export({format:'pem',type:'spki'})}],testVectorDigests:[{suiteVersion:SUITE,sha256:'c'.repeat(64)}]}),{mode:0o600});
     const platformPort=await port(),customerPort=await port(),redisPort=await port();
     const platformOrigin=`http://127.0.0.1:${platformPort}`,customerOrigin=`http://127.0.0.1:${customerPort}`;
-    const start=(command:string,args:string[],env:NodeJS.ProcessEnv)=>{
+    const start=async(command:string,args:string[],env:NodeJS.ProcessEnv,role:'redis'|'controlPlane')=>{
       lifecycle.assertRunning();
       const child=spawn(command,args,{cwd:resolve('.'),env,stdio:'ignore'});started.push(child);
-      child.on('error',()=>{});return child;
+      if(role==='redis')ownedRedis=child;else ownedControlPlane=child;
+      child.on('error',error=>{const code=(error as NodeJS.ErrnoException).code;spawnErrors.set(child,typeof code==='string'&&SAFE_SPAWN_ERRORS.has(code)?code:'UNKNOWN');});
+      await new Promise<void>((resolveSpawn,reject)=>{
+        const failed=()=>reject(Object.assign(new Error('Owned acceptance child spawn failed'),{code:spawnErrors.get(child)??'UNKNOWN'}));
+        child.once('error',failed);
+        child.once('spawn',()=>{child.removeListener('error',failed);resolveSpawn();});
+      });
+      return child;
     };
-    setStage('owned-redis-and-standard-control-plane');
-    const redis=start(process.env.MODEL_ROUTER_TEST_REDIS_BIN??'redis-server',[
-      '--bind','127.0.0.1','--port',String(redisPort),'--save','','--appendonly','yes','--appendfsync','everysec','--maxmemory-policy','noeviction','--dir',tempDirectory],{PATH:process.env.PATH});
+    setStage('owned-redis-spawn');
+    const redis=await start(process.env.MODEL_ROUTER_TEST_REDIS_BIN??'redis-server',[
+      '--bind','127.0.0.1','--port',String(redisPort),'--save','','--appendonly','yes','--appendfsync','everysec','--maxmemory-policy','noeviction','--dir',tempDirectory],{PATH:process.env.PATH},'redis');
+    setStage('owned-redis-tcp');
     await waitUntil('owned Redis TCP listener',async()=>{
-      assert.equal(redis.exitCode,null,'Owned Redis exited');
-      return new Promise<true|undefined>(resolve=>{const socket=createConnection({host:'127.0.0.1',port:redisPort});
-        socket.setTimeout(500);socket.once('connect',()=>{socket.destroy();resolve(true)});
-        socket.once('error',()=>{socket.destroy();resolve(undefined)});socket.once('timeout',()=>{socket.destroy();resolve(undefined)});});
+      lifecycle.assertRunning();assertOwnedRunning(redis,'redis');
+      readiness.redisConnected=await ownedTcpConnected(redisPort);
+      return readiness.redisConnected?true:undefined;
     });
+    diagnostic({stage,event:'ready',readiness:{...readiness},children:childObservations(),productionGo:false});
     // The production Redis adapter's readiness below proves this listener is usable.
     const cpEnv:NodeJS.ProcessEnv={...kmsEnvironment,MODEL_ROUTER_SAAS_WORKLOAD_ROLE:'control-plane',
       MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL:process.env[KIMI_COMMERCIAL_URLS.controlPlane],
@@ -270,13 +306,21 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS:'127.0.0.1',MODEL_ROUTER_SAAS_CUSTOMER_PORT:String(customerPort),MODEL_ROUTER_SAAS_CUSTOMER_ORIGIN:customerOrigin,
       MODEL_ROUTER_SAAS_REGISTRATION_MODE:'open',MODEL_ROUTER_SAAS_REGISTRATION_EMAIL_VERIFICATION:'false',MODEL_ROUTER_SAAS_REGISTRATION_TURNSTILE_ENABLED:'false'};
     // Both platform secret envs are deliberately absent from gateway; no CP upstream decrypt permission.
-    const cp=start(process.execPath,[resolve('dist/cli/index.js'),'start','--role','control-plane'],cpEnv);
-    await waitUntil('standard control-plane readiness',async()=>{
-      assert.equal(cp.exitCode,null,'Control plane exited');assert.equal(redis.exitCode,null,'Owned Redis exited');
-      try{const response=await fetch(platformOrigin+'/readyz',{signal:AbortSignal.timeout(1000)});await response.body?.cancel();return response.status===200?true:undefined;}catch{return undefined;}
+    setStage('standard-control-plane-spawn');
+    const cp=await start(process.execPath,[resolve('dist/cli/index.js'),'start','--role','control-plane'],cpEnv,'controlPlane');
+    setStage('standard-control-plane-owned-listeners');
+    await waitUntil('standard control-plane owned listeners',async()=>{
+      lifecycle.assertRunning();assertOwnedRunning(cp,'controlPlane');assertOwnedRunning(redis,'redis');
+      [readiness.platformConnected,readiness.customerConnected]=await Promise.all([ownedTcpConnected(platformPort),ownedTcpConnected(customerPort)]);
+      assertOwnedRunning(cp,'controlPlane');assertOwnedRunning(redis,'redis');
+      return readiness.platformConnected&&readiness.customerConnected?true:undefined;
     });
+    // CP-only has no gateway /readyz route. Its standard assembly must bind
+    // both owned listeners; the unchanged formal MFA/HTTP chain proves the
+    // business surface next. TCP success alone is not product acceptance.
+    diagnostic({stage,event:'ready',readiness:{...readiness},children:childObservations(),productionGo:false});
     setStage('formal-platform-mfa-and-login');
-    const ops=new BrowserSession(platformOrigin,lifecycle.signal),customer=new BrowserSession(customerOrigin,lifecycle.signal);
+    const ops=new BrowserSession(platformOrigin,lifecycle.signal,(status,expectedStatus)=>diagnostic({stage,event:'http-response',surface:'platform',status,expectedStatus,productionGo:false})),customer=new BrowserSession(customerOrigin,lifecycle.signal,(status,expectedStatus)=>diagnostic({stage,event:'http-response',surface:'customer',status,expectedStatus,productionGo:false}));
     const setup=await ops.request('/admin/api/v1/auth/mfa/enrollment/start','POST',{token:enrollment.token,issuer:'Disposable first request'});
     const secret=new URL(setup.otpauthUri).searchParams.get('secret');assert.ok(secret,'MFA setup must provide an enrollment URI');
     await ops.request('/admin/api/v1/auth/mfa/enrollment/confirm','POST',{confirmationToken:setup.confirmationToken,code:totpCode(secret)});
@@ -336,7 +380,7 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       walletMinorUnits:after.wallet,holdMinorUnits:after.hold,heldLeases:settled.held_leases,financialSnapshot:after,productionGo:false});
   }catch(error){
     const code=error && typeof error==='object' && 'code' in error && typeof error.code==='string' && /^(?:[0-9A-Z]{5}|ERR_ASSERTION|[A-Z_]{1,80})$/.test(error.code)?error.code:null;
-    diagnostic({failedStage:stage,errorCode:code,productionGo:false});
+    diagnostic({failedStage:stage,errorCode:code,readiness:{...readiness},children:childObservations(),productionGo:false});
     // Safe fixed stage only: arbitrary HTTP responses, provider text and crypto material never escape.
     throw new Error(`Platform first-request acceptance failed at ${stage}`);
   }finally{await close();}
