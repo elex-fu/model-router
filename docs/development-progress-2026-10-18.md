@@ -1318,3 +1318,21 @@ A1o保留max_tokens≤512、最多3次generation/两次真实Read回传/第三�
 用户随后明确要求“提交改动到远程，合并到主分支main分支”。刷新origin后，远程main为`44b0eb7`，主任务分支`6cc79da`领先55个提交且无main侧新增分叉；独立CLI分支只有`cf5008b`一个额外提交。先将主任务快进至main，再以merge commit `9f433356be0847a05f7a655a4b46dedd63309584`整合CLI六文件，过程无冲突，保留两条任务分支与原提交历史。
 
 本次操作仅整合已有提交并同步文档，没有新增实现或运行编译、测试、探针、CLI/PG服务与负载。CLI最终27组测试源码及真实工具流程仍待验证，C0性能失败和外部运营前置保持原状态，M1/M2/M3均开放；ae/9d的历史绿色不自动覆盖整合版本。合并及文档提交带skip ci，开发暂停状态继续生效。原`.claude/worktrees/`、独立CLI工作树及其未跟踪node_modules symlink保留。
+
+### 29.59 暂停期间核对确认：整合main的静态与纯测试证据
+
+按用户要求“结合文档和代码确认，更新技术方案剩余任务”，在不改变暂停状态、不修改任何源码的前提下完成一轮只读核对加一次纯fixture测试执行：
+
+- **仓库状态**：main HEAD `89b31fd`与origin/main一致，`9f43335`之后仅该条skip ci文档提交，无源码变化；六个CLI文件在HEAD与WIP `cf5008b`逐文件`git diff --stat`为空（字节一致）；`observedSampleSufficiency`（`scripts/ops/run-current-r9.mjs`及其`r9-scaling-gates.test.ts`）与A1o/A1a两个live opt-in测试文件均在HEAD源码中。CI方面整合点`9f43335`/`89b31fd`无任何运行，最新仍是已取消的#172（`cf5008b`）。
+- **实际执行**：五个TS文件scoped strict typecheck（`tsc --noEmit --strict --skipLibCheck --module nodenext --target es2023`，exit0）；`run-commercial-postgres-gate.mjs`与trace wrapper草稿`node --check`语法通过；27组纯测试在整合HEAD实跑 **27/27 pass、0 fail/0 skip**（duration约0.48s）。
+- **边界**：未运行capture/live、真实CLI模型请求、fresh build、CI dispatch、PG或任何负载；trace wrapper草稿（`/private/tmp/model-router-c0-serial-trace-wrapper-3bz7npj6/run-once.mjs`）内容审阅与执行状态不变，语法通过不构成审阅；CLI工作树`/private/tmp/model-router-p0-cli-workflow-20261024`仍在`cf5008b`。这些结果不构成A1o live、gate通过或里程碑关闭。
+
+技术方案§10–11剩余任务表已同步：A1o恢复路径首个动作由“scoped strict/runner语法/27组纯测试再capture”推进为“仅capture”，整合候选的CI绑定明确列入剩余任务。
+
+### 29.60 恢复开发首轮：run04 capture首次通过，A1o事实合同闭合
+
+用户以明确指令恢复开发（按技术方案开发、最大化并行、聚焦核心能力）。恢复后执行通道立即重跑A1o capture-only preflight（run04）：`RUN_PLATFORM_ACCESS_CLI_OBSERVATION_CAPTURE=1 node --import tsx --test tests/integration/platform-access-cli-observation-live.test.ts`，在整合main工作树（源码与`89b31fd`一致）执行。真实Claude Code 2.1.216在HEAD `/`修复后首次通过observer推进到模型POST，返回的安全投影为`messageObserved=true`、`upstreamContacted=false`、`maxTokens=512`、`thinking=omitted`、`stream=true`、`toolCount=1`；测试1/1 pass、0 fail/0 skip、单测时长约0.67s。日志`/private/tmp/model-router-a1o-capture-run04-20261024/capture-run04.log`。
+
+run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）的历史失败至此由修复闭环解决：run04证明修复后的observer接受CLI的version/workflow根HEAD并在空body、限额内返回404，CLI随后发出可解析的模型POST。capture仍是loopback+dummy key，`upstreamContacted=false`保持；不构成A1o live、thinking禁用/启用证明或M1关闭。
+
+下一步按§10顺序：绑定确切候选fresh build并补该候选CI（非skip ci提交），随后经LIVE wrapper启动正常P01/probe、显式Key与至多3次generation逐笔对账；C0 trace wrapper静态审阅并行进行，其独占诊断排在CLI执行窗口之后。Kimi凭据经wrapper合同确认可用（inline、sk-shaped，未打印值）。

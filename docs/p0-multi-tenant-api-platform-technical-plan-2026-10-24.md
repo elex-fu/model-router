@@ -404,16 +404,20 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 | 优先级/任务 | 暂停状态 | 恢复后的处理方式与出口 |
 |---|---|---|
-| P0 / A1o真实CLI有限互通 | cf已整合main并保留独立分支；HEAD/A1o最终源码仅静态审阅、未执行检查，真实工具调用为0 | 先scoped strict、runner语法和27组纯测试，再仅capture；实际omitted/model/stream/Read/max_tokens≤512齐全后，绑定确切整合候选fresh build，再正常P01/probe及最多3次generation，逐笔usage/钱包/账本/hold核对 |
+| P0 / A1o真实CLI有限互通 | cf已整合main；27组纯测试27/27及六文件scoped strict已过（`89b31fd`）；**run04 capture已通过**——真实CLI模型POST事实齐全（omitted/maxTokens=512/stream/toolCount=1、upstream未接触），真实工具调用仍为0 | 绑定确切候选fresh build并补该候选CI，再正常P01/probe及最多3次generation，逐笔usage/钱包/账本/hold核对 |
 | P0 / C0首瓶颈定位 | serial完整样本已失败；trace wrapper仅未审草稿，从未执行 | 先审草稿与资源条件，再独占执行同四腿100、request-samples、sampleEvery=1；核200个GW UUID及trace完整性，按markers和exclusive阶段定位，trace成绩不作性能验收 |
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
 | P0 / A1完整指定范围 | A1o不证明thinking已关闭/开启；A1a disabled、thinking enabled、cancel/resume及可获得的模型版本证据开放 | 分场景捕获原始协议事实并实跑；无法取得backend revision时明确未知，不用CLI版本替代，不把有限互通观察写成M1通过 |
 | P0 / B0、B1真实支付 | binding/退款/收银工程已有本地与PG证据，真实PSP未验 | 补真实Alipay主体、CNY钱包/计划、回调验签配置及受控退款额度；验证原POST重入、回调到账、全/部分退款、旧binding回调退款与歧义reconciliation |
 | P0 / C2收费生产 | KMS/IAM、独立同步PG/WAL/fencing与异地backup/PITR证据未齐 | 演练最后已确认金融commit的独立持久恢复，再验异地恢复、告警和运营签收；软件KMS/异步归档及本地stop/start不替代这些证据 |
 | P0 / A2 Codex完整托管 | 可信计量registry仍空，正向后端合同与真实compact/WS未验 | 获得精确endpoint/backend计量、输出enforcement、opaque/remote history合同后再登记可信profile；缺证保持unavailable，不能补造正向profile |
-| 发布收口 | M1/M2/M3均未关闭 | 对最终确切候选收齐必需CI、相应真实工作流/支付/性能/恢复及签收；各gate分别记录结果 |
+| 发布收口 | M1/M2/M3均未关闭；整合点`9f43335`/`89b31fd`均skip ci、无任何CI运行，ae/9d历史绿不外推 | 对最终确切候选收齐必需CI（整合后须有非skip ci的自动或已收齐运行）、相应真实工作流/支付/性能/恢复及签收；各gate分别记录结果 |
 
 本机资源队列内，性能采样与CLI/check/build互斥；源码静态工作可按原ownership并行。恢复顺序不意味着现在已获执行GO：本次暂停期间只保存改动、收尾与文档交接。
+
+2026-10-24同日追加一轮文档与代码核对确认（不改变暂停状态）：main HEAD为`89b31fd`（`9f43335`合并后仅一条skip ci文档提交，无任何源码变化），六个CLI文件在HEAD与WIP `cf5008b`逐文件字节一致；`observedSampleSufficiency` C0门禁、A1o/A1a两处live opt-in测试文件均在HEAD源码中；整合点`9f43335`及其后没有任何CI运行（最新仍为已取消的#172/`cf5008b`）。该确认轮实际执行：六文件scoped strict typecheck（tsc --noEmit --strict，五个TS文件exit0）、`run-commercial-postgres-gate.mjs`与trace wrapper草稿`node --check`（均语法通过）、以及27组纯测试（27/27 pass、0 fail/0 skip、约0.48s）。未运行capture/live、真实CLI/PG/负载、fresh build或任何CI；trace wrapper草稿内容审阅与执行状态不变（仍从未执行）。因此A1o恢复路径的首个动作由"静态检查+27组纯测试"推进为"仅capture"；整合候选的CI绑定仍缺失，属剩余任务。上述确认不构成A1o live、任何gate通过或M里程碑关闭。
+
+2026-10-24晚些时候用户以明确指令恢复开发（聚焦核心能力、最大化并行）。恢复后首轮执行run04 capture：在整合main工作树以`RUN_PLATFORM_ACCESS_CLI_OBSERVATION_CAPTURE=1`运行A1o观察套件，真实Claude Code 2.1.216在HEAD `/`修复后首次推进到模型POST——capture安全投影为`messageObserved=true`、`upstreamContacted=false`、`maxTokens=512`、`thinking=omitted`、`stream=true`、`toolCount=1`，1/1 pass、0 fail/0 skip。A1o capture前置事实全部合格，进入绑定确切候选fresh build与CI、再live P01/probe/至多3次generation逐笔对账阶段；C0 trace wrapper审阅与独占诊断按互斥队列继续排队。
 
 ## 11. A1a / A1o：真实CLI工作流暂停交接
 
@@ -430,7 +434,7 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 | 场景 | 入口与合同 | 暂停时证据 |
 |---|---|---|
 | A1a / `claude-two-read-thinking-disabled` | suite `platform-cli`；live必须capture真实thinking=disabled，omitted不放行 | 源码已实现，尚未观察到模型POST；不能宣告disabled |
-| A1o / `claude-two-read-thinking-omitted-observation` | suite `platform-cli-observation`；独立LIVE/CAPTURE opt-in，实际thinking omitted且max_tokens≤512、stream、唯一Read、公开model匹配后才P01/probe | 新源码静态审查通过，27组纯测试源码已冻结；最终版本未typecheck/pure/capture/live |
+| A1o / `claude-two-read-thinking-omitted-observation` | suite `platform-cli-observation`；独立LIVE/CAPTURE opt-in，实际thinking omitted且max_tokens≤512、stream、唯一Read、公开model匹配后才P01/probe | 新源码静态审查通过；2026-10-24确认轮在整合main `89b31fd`实际完成六文件scoped strict与27组纯测试（27/27 pass），capture/live仍未执行 |
 
 官方[环境变量说明](https://code.claude.com/docs/en/env-vars)明确第三方provider下MAX_THINKING_TOKENS=0会省略thinking；省略不等于Kimi禁用。A1o只做有限互通观察，不声称enabled/disabled、供应商硬计费保证、backend revision或生产GO。正数thinking预算1024/output1536仅完成另一候选设计，未实施，不更改当前512上限。
 
@@ -444,4 +448,4 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 
 ### 11.4 保存位置与恢复验证边界
 
-六文件WIP已独立提交推送`cf5008b`，并按后续用户授权整合至main `9f43335`，最终Astra静态审查通过。最后实际检查仍属于HEAD/A1o修复之前的run03：scoped strict/runner语法通过、三roots共23项（21pass/2skip），随后的capture在HEAD首错；这些结果不覆盖当前整合版本的27组测试源码。恢复后从当前确切源码重新检查/capture，不重用旧绿色。成功A1o也不关闭A1a、完整A1或M1。
+六文件WIP已独立提交推送`cf5008b`，并按后续用户授权整合至main `9f43335`，最终Astra静态审查通过。最后实际检查仍属于HEAD/A1o修复之前的run03：scoped strict/runner语法通过、三roots共23项（21pass/2skip），随后的capture在HEAD首错；这些结果不覆盖当前整合版本的27组测试源码。2026-10-24确认轮已在整合main `89b31fd`（六文件与`cf5008b`字节一致）实际重跑六文件scoped strict与27组纯测试并全部通过（27/27、0 fail/0 skip），构成当前整合版本的直接证据；capture/live与整合候选CI绑定仍需从当前确切源码执行，不重用旧绿色。成功A1o也不关闭A1a、完整A1或M1。
