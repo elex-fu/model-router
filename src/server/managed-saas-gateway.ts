@@ -5,6 +5,7 @@ import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
+import { CachedRequestPreparationAuthority } from '../saas/gateway/cached-request-preparation-authority.js';
 import { CLAUDE_ENDPOINT, CLAUDE_MESSAGES_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
 import {
   MINIMAX_ENDPOINT,
@@ -1599,6 +1600,18 @@ export function applyOpenCodeGoProtocolRouting(
 }
 
 /**
+ * C0 §29.65: the version-keyed preparation authority cache is ON by default
+ * (the CachedKeyAuthenticator precedent — admission still revalidates
+ * authorization versions, so a bounded cache cannot fail open). The
+ * MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE kill switch ('0' / 'false') is an
+ * emergency escape hatch, not an opt-in.
+ */
+function preparationAuthorityCacheDisabled(): boolean {
+  const setting = process.env.MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE;
+  return setting === '0' || setting === 'false';
+}
+
+/**
  * R5b-2 OpenCode Go adaptive protocol routing, authority layer: the resolved
  * protocol is written into `authority.route.providerProtocol` — the field the
  * preparation service's route facts, `validatePayload` and the signed
@@ -2129,7 +2142,16 @@ export function createManagedSaasGatewayProductionComposition(
     // decorator (the provider sets are disjoint, so the two decorators
     // commute; non-CN-provider decisions pass through unchanged).
     createCnProvidersProtocolRoutingAuthority(
-      new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
+      // C0 §29.65: version-keyed, allow-only cache around the PostgreSQL
+      // authority adapter. The key is the complete caller/entitlement
+      // version tuple; the admission guard still re-reads and revalidates
+      // every authority fact inside the admission transaction (fail-closed),
+      // so the cache can never bypass the final defense line. The pure
+      // in-memory protocol-routing decorators stay outside the cache and run
+      // per request. Disable with MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE=0.
+      preparationAuthorityCacheDisabled()
+        ? new PostgresRequestPreparationAuthorityAdapter(authorityDependencies)
+        : new CachedRequestPreparationAuthority(new PostgresRequestPreparationAuthorityAdapter(authorityDependencies)),
       options.cnProvidersProtocolRouting,
     ),
     openCodeGoProtocolRules,

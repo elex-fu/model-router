@@ -55,7 +55,7 @@ export interface PlatformFirstRequestCliResult {
 }
 export interface PlatformFirstRequestOptions {
   readonly cliWorkflow?:{
-    readonly kind:'claude-two-read-thinking-disabled'|'claude-two-read-thinking-omitted-observation';
+    readonly kind:'claude-two-read-thinking-disabled'|'claude-two-read-thinking-omitted-observation'|'claude-two-read-thinking-enabled-observation';
     readonly run:(context:PlatformFirstRequestCliContext)=>Promise<PlatformFirstRequestCliResult>;
   };
 }
@@ -193,7 +193,7 @@ async function readCliObservationFailure(fixture:KimiCommercialFixture,keyId:str
 
 export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown)=>void=()=>{},options:PlatformFirstRequestOptions={}):Promise<void>{
   if(options.cliWorkflow!==undefined){
-    assert.ok(options.cliWorkflow.kind==='claude-two-read-thinking-disabled'||options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation','Unsupported first-request CLI workflow');
+    assert.ok(options.cliWorkflow.kind==='claude-two-read-thinking-disabled'||options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation'||options.cliWorkflow.kind==='claude-two-read-thinking-enabled-observation','Unsupported first-request CLI workflow');
     assert.equal(typeof options.cliWorkflow.run,'function','CLI workflow callback is required');
   }
   requirePlatformFirstRequestEnvironment();
@@ -445,12 +445,12 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     const keyCapacity=await ops.request(keyCapacityPath);
     await ops.request(keyCapacityPath,'PUT',{expectedRevision:keyCapacity.revision,limits,reason:'initial_provisioning'});
     const gateway=startBuiltCli(fixture,'gateway');await waitGatewayReady(fixture,gateway);
-    setStage(options.cliWorkflow?.kind==='claude-two-read-thinking-omitted-observation'?'real-claude-cli-two-read-thinking-omitted-observation':options.cliWorkflow?'real-claude-cli-two-read-thinking-disabled':'real-builtin-first-short-generation');
+    setStage(options.cliWorkflow?.kind==='claude-two-read-thinking-omitted-observation'?'real-claude-cli-two-read-thinking-omitted-observation':options.cliWorkflow?.kind==='claude-two-read-thinking-enabled-observation'?'real-claude-cli-two-read-thinking-enabled-observation':options.cliWorkflow?'real-claude-cli-two-read-thinking-disabled':'real-builtin-first-short-generation');
     const before=await kimiFinancialSnapshot(fixture);
     assert.equal(before.requests,'0');assert.equal(before.attempts,'0');assert.equal(before.hold,'0');
     if(options.cliWorkflow){
       assert.equal(before.usage,'0');assert.equal(before.settlements,'0');assert.equal(before.wallet,FUNDING.toString());
-      observationCallbackStarted=options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation';
+      observationCallbackStarted=options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation'||options.cliWorkflow.kind==='claude-two-read-thinking-enabled-observation';
       const result=await options.cliWorkflow.run(Object.freeze({
         gatewayOrigin:fixture.gatewayOrigin,customerKey,publicModel,signal:lifecycle.signal,tempDirectory,
         registerChild:(child:ChildProcess)=>{started.push(child);},
@@ -483,7 +483,7 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       assert.equal(after.hold,'0');assert.equal(after.requests,'3');assert.equal(after.attempts,'3');assert.equal(after.usage,'3');assert.equal(after.settlements,'3');
       assert.equal(BigInt(after.ledger_transactions),BigInt(before.ledger_transactions)+3n);
       assert.equal(BigInt(after.ledger_entries),BigInt(before.ledger_entries)+6n);
-      diagnostic({scope:options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation'?'formal-http-new-customer-claude-cli-two-read-thinking-omitted-observation':'formal-http-new-customer-claude-cli-two-read-thinking-disabled',runtime:'current-dist-cli-builtin',
+      diagnostic({scope:options.cliWorkflow.kind==='claude-two-read-thinking-omitted-observation'?'formal-http-new-customer-claude-cli-two-read-thinking-omitted-observation':options.cliWorkflow.kind==='claude-two-read-thinking-enabled-observation'?'formal-http-new-customer-claude-cli-two-read-thinking-enabled-observation':'formal-http-new-customer-claude-cli-two-read-thinking-disabled',runtime:'current-dist-cli-builtin',
         kms:'pilot-only-software-kms',providerInferenceCallsExpected:4,operationId:operation.id,requests:settledRequests,
         totalAmountMinorUnits:totalCharge.toString(),walletMinorUnits:after.wallet,holdMinorUnits:after.hold,financialSnapshot:after,productionGo:false});
       return;
@@ -516,7 +516,7 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
       catch{durable={available:false,reason:'SCOPED_DURABLE_READBACK_UNAVAILABLE'};}
       // Observation does not release, refund, redispatch or relabel a committed
       // result as unknown. Missing amounts stay null rather than invented zero.
-      try{diagnostic({scope:'claude-two-read-thinking-omitted-failure-observation',failedStage:stage,durable,productionGo:false});}
+      try{diagnostic({scope:options.cliWorkflow?.kind==='claude-two-read-thinking-enabled-observation'?'claude-two-read-thinking-enabled-failure-observation':'claude-two-read-thinking-omitted-failure-observation',failedStage:stage,durable,productionGo:false});}
       catch{/* A diagnostic consumer cannot replace the original workflow failure. */}
     }
     // Safe fixed stage only: arbitrary HTTP responses, provider text and crypto material never escape.

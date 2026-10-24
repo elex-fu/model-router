@@ -589,3 +589,94 @@ test('observation bounds retained thinking across otherwise individually valid e
   assert.throws(() => state.observeUpstreamEvent(0, delta));
   assert.throws(() => state.finish());
 });
+
+// ---------------------------------------------------------------------------
+// Enabled-observation scene: the positive-thinking-budget counterpart.
+// ---------------------------------------------------------------------------
+const enabledBody = (round = 0): Record<string, unknown> => {
+  const value = body(round);
+  value.max_tokens = 1536;
+  // Observed CLI shape (capture 2026-10-24): adaptive thinking.
+  value.thinking = { type: 'adaptive' };
+  return value;
+};
+const enabledObservationBody = (round = 0): Record<string, unknown> => {
+  const value = enabledBody(round);
+  const messages = value.messages as { role: string; content: unknown }[];
+  let index = 0;
+  for (const message of messages) {
+    if (message.role === 'assistant') message.content = [thinkingBlock(index++), ...(message.content as unknown[])];
+  }
+  return value;
+};
+const enabled = () => new CliWorkflowObserverState({ publicModel, readFiles, answer, scene: 'enabled-observation' });
+
+test('enabled-observation request contract requires thinking enabled with a bounded budget', () => {
+  const facts = validateCliWorkflowRequest({ ...request(enabledBody()), publicModel, scene: 'enabled-observation' });
+  assert.equal(facts.thinking, 'adaptive');
+  assert.equal(facts.maxTokens, 1536);
+  // A bounded optional max_thinking_tokens stays within the observed contract.
+  const bounded = enabledBody();
+  bounded.thinking = { type: 'adaptive', max_thinking_tokens: 1024 };
+  assert.equal(validateCliWorkflowRequest({ ...request(bounded), publicModel, scene: 'enabled-observation' }).thinking, 'adaptive');
+  for (const mutation of ['missing', 'disabled', 'enabled-budget', 'zero-budget', 'oversized-budget', 'extra-key', 'string-budget'] as const) {
+    const value = enabledBody();
+    if (mutation === 'missing') delete value.thinking;
+    if (mutation === 'disabled') value.thinking = { type: 'disabled' };
+    if (mutation === 'enabled-budget') value.thinking = { type: 'enabled', budget_tokens: 1024 };
+    if (mutation === 'zero-budget') value.thinking = { type: 'adaptive', max_thinking_tokens: 0 };
+    if (mutation === 'oversized-budget') value.thinking = { type: 'adaptive', max_thinking_tokens: 1025 };
+    if (mutation === 'extra-key') value.thinking = { type: 'adaptive', other: 1 };
+    if (mutation === 'string-budget') value.thinking = { type: 'adaptive', max_thinking_tokens: '1024' };
+    let rejected: unknown;
+    try { validateCliWorkflowRequest({ ...request(value), publicModel, scene: 'enabled-observation' }); }
+    catch (error) { rejected = error; }
+    assert.ok(rejected instanceof Error, mutation);
+  }
+  const oversized = enabledBody();
+  oversized.max_tokens = 1537;
+  assert.throws(() => validateCliWorkflowRequest({ ...request(oversized), publicModel, scene: 'enabled-observation' }));
+});
+
+test('enabled-observation output bound rises to the scene contract and still fails closed above it', () => {
+  const state = enabled();
+  state.observeRequest(request(enabledBody()));
+  response(state, 0, { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    ids[0], { output_tokens: 1536 });
+  assert.equal(state.attemptCount, 1);
+  const exceeded = enabled();
+  exceeded.observeRequest(request(enabledBody()));
+  assert.throws(() => response(exceeded, 0,
+    { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    ids[0], { output_tokens: 1537 }));
+});
+
+test('enabled-observation requires replay of the observed thinking sequence byte-exact', () => {
+  const replayed = enabled();
+  replayed.observeRequest(request(enabledBody()));
+  response(replayed, 0, undefined, ids[0], undefined, true);
+  // The replaying client must send the thinking block back (unlike the
+  // omitted scene, omission is not an accepted fact here).
+  replayed.observeRequest(request(enabledObservationBody(1)));
+  assert.throws(() => replayed.finish());
+
+  const omitted = enabled();
+  omitted.observeRequest(request(enabledBody()));
+  response(omitted, 0, undefined, ids[0], undefined, true);
+  const next = enabledObservationBody(1);
+  const messages = next.messages as { role: string; content: unknown }[];
+  messages[1]!.content = (messages[1]!.content as Record<string, unknown>[]).filter(block => block.type !== 'thinking');
+  let rejected: unknown;
+  try { omitted.observeRequest(request(next)); } catch (error) { rejected = error; }
+  assert.ok(rejected instanceof Error);
+
+  const mutated = enabled();
+  mutated.observeRequest(request(enabledBody()));
+  response(mutated, 0, undefined, ids[0], undefined, true);
+  const tampered = enabledObservationBody(1);
+  const tamperedMessages = tampered.messages as { role: string; content: unknown }[];
+  (tamperedMessages[1]!.content as Record<string, unknown>[])[0] = { type: 'thinking', thinking: 'PRIVATE_CHANGED', signature: signature(0) };
+  let rejectedMutation: unknown;
+  try { mutated.observeRequest(request(tampered)); } catch (error) { rejectedMutation = error; }
+  assert.ok(rejectedMutation instanceof Error);
+});

@@ -13,11 +13,29 @@ const MAX_MESSAGES = 3;
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const USAGE_FIELDS = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'] as const;
 type NativeUsage = { [K in typeof USAGE_FIELDS[number]]: number };
-export interface CliWorkflowRequestFacts { maxTokens: number; thinking:'omitted'|'disabled'; stream: true; toolCount: number }
+export interface CliWorkflowRequestFacts { maxTokens: number; thinking:'omitted'|'disabled'|'adaptive'; stream: true; toolCount: number }
 type CliWorkflowContractCode = 'CONTRACT_REJECTED' | 'METHOD_NOT_POST' | 'PATH_NOT_ALLOWED' |
   'BODY_NOT_OBJECT' | 'MODEL_MISMATCH' | 'STREAM_REQUIRED' | 'MAX_TOKENS_INVALID' |
   'THINKING_NOT_DISABLED' | 'MESSAGES_SHAPE' | 'TOOLS_COUNT' | 'READ_TOOL_SCHEMA' |
-  'BODY_LIMIT' | 'JSON_INVALID' | 'AUTH_MISMATCH' | 'ROOT_HEAD_LIMIT' | 'ROOT_HEAD_BODY' | 'THINKING_NOT_OMITTED' | 'OUTPUT_BOUND_EXCEEDED';
+  'BODY_LIMIT' | 'JSON_INVALID' | 'AUTH_MISMATCH' | 'ROOT_HEAD_LIMIT' | 'ROOT_HEAD_BODY' | 'THINKING_NOT_OMITTED' | 'THINKING_NOT_ENABLED' | 'OUTPUT_BOUND_EXCEEDED';
+type WorkflowScene='thinking-disabled'|'omitted-observation'|'enabled-observation';
+/**
+ * Per-scene CLI contract bounds. The enabled-observation scene implements the
+ * documented positive-thinking candidate design (plan §11.2): budget 1024,
+ * output/max_tokens bound 1536, and thinking history replay is REQUIRED — the
+ * observed counterpart of the omitted scene's replay-omission fact.
+ */
+interface WorkflowSceneContract {
+  readonly maxTokensBound:number; readonly outputTokensBound:number;
+  readonly maxThinkingTokens:string; readonly maxOutputTokens:string;
+}
+function sceneContract(scene:WorkflowScene):WorkflowSceneContract {
+  return scene==='enabled-observation'
+    ? {maxTokensBound:1536,outputTokensBound:1536,maxThinkingTokens:'1024',maxOutputTokens:'1536'}
+    : {maxTokensBound:512,outputTokensBound:512,maxThinkingTokens:'0',maxOutputTokens:'512'};
+}
+/** Scenes that may observe and relay provider thinking blocks (never the disabled gate). */
+function sceneAllowsThinking(scene:WorkflowScene):boolean {return scene!=='thinking-disabled';}
 class CliWorkflowContractError extends Error {
   constructor(readonly code:CliWorkflowContractCode){super(`CLI workflow contract rejected: ${code}`);this.name='CliWorkflowContractError';}
 }
@@ -31,20 +49,27 @@ function requireCliWorkflowEndpoint(method:string,path:string):void {
 }
 
 /** Safe projection only. The observer forwards the original bytes, never this object. */
-export function validateCliWorkflowRequest(input: {method: string; path: string; body: unknown; publicModel: string}): CliWorkflowRequestFacts {
+export function validateCliWorkflowRequest(input: {method: string; path: string; body: unknown; publicModel: string; scene?:WorkflowScene}): CliWorkflowRequestFacts {
   requireCliWorkflowEndpoint(input.method,input.path);
+  const scene=input.scene ?? 'thinking-disabled';
   const b=input.body;
   if(!record(b))fail('BODY_NOT_OBJECT');
   if(b.model!==input.publicModel)fail('MODEL_MISMATCH');
   if(b.stream!==true)fail('STREAM_REQUIRED');
-  if(!count(b.max_tokens)||b.max_tokens<1||b.max_tokens>512)fail('MAX_TOKENS_INVALID');
-  if(b.thinking!==undefined&&(!record(b.thinking)||b.thinking.type!=='disabled'||Object.keys(b.thinking).some(k=>k!=='type')))fail('THINKING_NOT_DISABLED');
+  if(!count(b.max_tokens)||b.max_tokens<1||b.max_tokens>sceneContract(scene).maxTokensBound)fail('MAX_TOKENS_INVALID');
+  if(scene==='enabled-observation'){
+    // Observed CLI fact (Claude Code 2.1.216, capture run 2026-10-24): a
+    // positive MAX_THINKING_TOKENS budget is represented as adaptive thinking
+    // — exactly {type:'adaptive'}, optionally with a bounded max_thinking_tokens.
+    if(!record(b.thinking)||b.thinking.type!=='adaptive'||Object.keys(b.thinking).some(k=>!['type','max_thinking_tokens'].includes(k))||
+      (b.thinking.max_thinking_tokens!==undefined&&(!count(b.thinking.max_thinking_tokens)||b.thinking.max_thinking_tokens<1||b.thinking.max_thinking_tokens>1024)))fail('THINKING_NOT_ENABLED');
+  }else if(b.thinking!==undefined&&(!record(b.thinking)||b.thinking.type!=='disabled'||Object.keys(b.thinking).some(k=>k!=='type')))fail('THINKING_NOT_DISABLED');
   if(!Array.isArray(b.messages)||b.messages.length===0)fail('MESSAGES_SHAPE');
   if(!Array.isArray(b.tools)||b.tools.length!==1)fail('TOOLS_COUNT');
   const tool=b.tools[0];
   if(!record(tool)||tool.name!=='Read'||!record(tool.input_schema)||tool.input_schema.type!=='object'||
     tool.input_schema.properties?.file_path?.type!=='string'||!Array.isArray(tool.input_schema.required)||!tool.input_schema.required.includes('file_path'))fail('READ_TOOL_SCHEMA');
-  return {maxTokens:b.max_tokens,thinking:b.thinking===undefined?'omitted':'disabled',stream:true,toolCount:b.tools.length};
+  return {maxTokens:b.max_tokens,thinking:scene==='enabled-observation'?'adaptive':b.thinking===undefined?'omitted':'disabled',stream:true,toolCount:b.tools.length};
 }
 
 export interface CliWorkflowRequestShape {
@@ -150,7 +175,6 @@ export function retainCliWorkflowFailure(previous:Error|undefined,error:unknown,
   const safe=new Error(`CLI workflow rejected ${JSON.stringify(projection)}`);safe.stack=safe.message;return safe;
 }
 
-type WorkflowScene='thinking-disabled'|'omitted-observation';
 interface ObservedBlock {
   type:string;id?:string;name?:string;input?:unknown;json:string;text:string;
   thinking:string;signature?:string;signatureStarted:boolean;
@@ -181,11 +205,11 @@ export class CliWorkflowObserverState {
   observeRequest(input:{method:string;path:string;body:unknown}):CliWorkflowRequestFacts {
     this.attempts++;
     if(this.attempts>MAX_MESSAGES)fail();
-    const facts=validateCliWorkflowRequest({...input,publicModel:this.options.publicModel});
+    const facts=validateCliWorkflowRequest({...input,publicModel:this.options.publicModel,scene:this.options.scene});
     if(this.options.scene==='omitted-observation'&&facts.thinking!=='omitted')fail('THINKING_NOT_OMITTED');
     const index=this.attempts-1;
     const messages=(input.body as Record<string,any>).messages;
-    if(this.options.scene==='omitted-observation'){
+    if(this.options.scene==='omitted-observation'||this.options.scene==='enabled-observation'){
       const assistant=messages.filter((message:any)=>message.role==='assistant');
       if(assistant.length!==index)fail();
       for(let previous=0;previous<index;previous++)this.verifyHistory(assistant[previous].content,this.rounds[previous].history);
@@ -218,7 +242,7 @@ export class CliWorkflowObserverState {
         if(block.type==='tool_use')actualHistory.push(block.id);
         else if(block.type==='tool_result')actualHistory.push(block.tool_use_id);
         else if(block.type==='thinking'){
-          if(this.options.scene!=='omitted-observation'||message.role!=='assistant')fail();
+          if(!sceneAllowsThinking(this.options.scene ?? 'thinking-disabled')||message.role!=='assistant')fail();
           if(typeof block.thinking!=='string'||(block.signature!==undefined&&typeof block.signature!=='string')||Object.keys(block).some(k=>!['type','thinking','signature'].includes(k)))fail();
         }else if(block.type!=='text')fail();
       }
@@ -232,10 +256,14 @@ export class CliWorkflowObserverState {
      * Observed CLI contract (Claude Code 2.1.216 with MAX_THINKING_TOKENS=0,
      * A1o live run04): the client does not replay provider thinking blocks
      * in subsequent assistant history. Omission is accepted as that observed
-     * fact; any replayed thinking must still byte-match the observed upstream
-     * values in order, and thinking blocks may only precede the replayable
-     * text/tool_use sequence. Thinking bytes are never retained as evidence.
+     * fact in the omitted-observation scene; the enabled-observation scene is
+     * the observed counterpart — a thinking-enabled client must replay the
+     * thinking sequence byte-exact. Any replayed thinking must byte-match the
+     * observed upstream values in order, and thinking blocks may only precede
+     * the replayable text/tool_use sequence. Thinking bytes are never retained
+     * as evidence.
      */
+    const requiredThinking=this.options.scene==='enabled-observation';
     const expectedThinking=expected.filter(block=>block.type==='thinking');
     const replayable=expected.filter(block=>block.type!=='thinking');
     const actualThinking:unknown[]=[];const actualReplayable:unknown[]=[];let replayableStarted=false;
@@ -245,6 +273,7 @@ export class CliWorkflowObserverState {
         actualThinking.push(block);
       }else{replayableStarted=true;actualReplayable.push(block);}
     }
+    if(requiredThinking&&actualThinking.length!==expectedThinking.length)fail();
     if(actualThinking.length>0){
       if(actualThinking.length!==expectedThinking.length)fail();
       for(let i=0;i<actualThinking.length;i++){
@@ -274,8 +303,8 @@ export class CliWorkflowObserverState {
     if(event.type==='content_block_start'){
       const b=event.content_block;
       if(!count(event.index)||!record(b)||r.blocks.has(event.index))fail();
-      if(!['text','tool_use'].includes(b.type)&&!(this.options.scene==='omitted-observation'&&b.type==='thinking'))fail();
-      if(this.options.scene==='omitted-observation'&&(r.blocks.size||event.index!==r.nextBlockIndex))fail();
+      if(!['text','tool_use'].includes(b.type)&&!(sceneAllowsThinking(this.options.scene ?? 'thinking-disabled')&&b.type==='thinking'))fail();
+      if(sceneAllowsThinking(this.options.scene ?? 'thinking-disabled')&&(r.blocks.size||event.index!==r.nextBlockIndex))fail();
       if(b.type==='tool_use'&&(b.name!=='Read'||typeof b.id!=='string'||!b.id))fail();
       if(b.type==='thinking'&&(typeof b.thinking!=='string'||(b.signature!==undefined&&typeof b.signature!=='string')||Object.keys(b).some(k=>!['type','thinking','signature'].includes(k))))fail();
       if(b.type==='text'&&(typeof b.text!=='string'||Object.keys(b).some(k=>!['type','text'].includes(k))))fail();
@@ -293,8 +322,8 @@ export class CliWorkflowObserverState {
       const allowed=fields[event.delta.type];if(!allowed||Object.keys(event.delta).some(key=>!allowed.includes(key)))fail();
       if(event.delta.type==='text_delta'&&b.type==='text'&&typeof event.delta.text==='string'){this.retain(event.delta.text);b.text+=event.delta.text;}
       else if(event.delta.type==='input_json_delta'&&b.type==='tool_use'&&typeof event.delta.partial_json==='string'){this.retain(event.delta.partial_json);b.json+=event.delta.partial_json;}
-      else if(this.options.scene==='omitted-observation'&&b.type==='thinking'&&event.delta.type==='thinking_delta'&&typeof event.delta.thinking==='string'&&!b.signatureStarted){this.retain(event.delta.thinking);b.thinking+=event.delta.thinking;}
-      else if(this.options.scene==='omitted-observation'&&b.type==='thinking'&&event.delta.type==='signature_delta'&&typeof event.delta.signature==='string'){this.retain(event.delta.signature);b.signature=(b.signature ?? '')+event.delta.signature;b.signatureStarted=true;}
+      else if(sceneAllowsThinking(this.options.scene ?? 'thinking-disabled')&&b.type==='thinking'&&event.delta.type==='thinking_delta'&&typeof event.delta.thinking==='string'&&!b.signatureStarted){this.retain(event.delta.thinking);b.thinking+=event.delta.thinking;}
+      else if(sceneAllowsThinking(this.options.scene ?? 'thinking-disabled')&&b.type==='thinking'&&event.delta.type==='signature_delta'&&typeof event.delta.signature==='string'){this.retain(event.delta.signature);b.signature=(b.signature ?? '')+event.delta.signature;b.signatureStarted=true;}
       else fail();
     }else if(event.type==='content_block_stop'){
       const b=r.blocks.get(event.index);if(!b)fail();
@@ -308,7 +337,7 @@ export class CliWorkflowObserverState {
       r.blocks.delete(event.index);
     }else if(event.type==='message_delta'){
       if(!record(event.delta)||r.blocks.size||!record(event.usage)||!count(event.usage.output_tokens))fail();
-      if(event.usage.output_tokens>512)fail('OUTPUT_BOUND_EXCEEDED');
+      if(event.usage.output_tokens>sceneContract(this.options.scene ?? 'thinking-disabled').outputTokensBound)fail('OUTPUT_BOUND_EXCEEDED');
       merge(event.usage);if(USAGE_FIELDS.some(field=>!count(r.usage[field])))fail();r.stopReason=event.delta.stop_reason;
     }else if(event.type==='message_stop'){
       const text=r.history.filter(b=>b.type==='text').map(b=>b.text).join('');
@@ -317,7 +346,7 @@ export class CliWorkflowObserverState {
   }
   finish():PlatformFirstRequestCliResult {
     if(this.attempts!==3)fail();
-    const requests=this.rounds.map(r=>{if(!r.stopped||!r.requestId||USAGE_FIELDS.some(field=>!count(r.usage[field]))||r.usage.output_tokens! >512)fail();return {requestId:r.requestId,usage:{...r.usage} as NativeUsage};});
+    const requests=this.rounds.map(r=>{if(!r.stopped||!r.requestId||USAGE_FIELDS.some(field=>!count(r.usage[field]))||r.usage.output_tokens! >sceneContract(this.options.scene ?? 'thinking-disabled').outputTokensBound)fail();return {requestId:r.requestId,usage:{...r.usage} as NativeUsage};});
     return {requests:requests as unknown as PlatformFirstRequestCliResult['requests']};
   }
   /** Structure-only projection of the retained upstream history; no content bytes. */
@@ -328,15 +357,16 @@ export class CliWorkflowObserverState {
 
 export interface CliCaptureEvidence {
   cliVersion:typeof CLI_VERSION; messageObserved:true; upstreamContacted:false; request:CliWorkflowRequestFacts;
-  flags:{isolatedConfig:true;readOnlyTools:true;maxOutputCandidate:true;thinkingDisabledCandidate:true};
+  flags:{isolatedConfig:true;readOnlyTools:true;maxOutputCandidate:true;thinkingDisabledCandidate?:true;thinkingEnabledCandidate?:true};
   aux:CliWorkflowAuxFacts;
 }
 interface CaptureOptions {signal?:AbortSignal;tempDirectory?:string;registerChild?:(child:ChildProcess)=>void}
-function cliEnv(directory:string,origin:string,key:string):NodeJS.ProcessEnv {
+function cliEnv(directory:string,origin:string,key:string,scene:WorkflowScene='thinking-disabled'):NodeJS.ProcessEnv {
+  const contract=sceneContract(scene);
   return {PATH:process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',...(process.env.HOME===undefined?{}:{HOME:process.env.HOME}),TMPDIR:directory,
     CLAUDE_CONFIG_DIR:join(directory,'config'),ANTHROPIC_BASE_URL:origin,ANTHROPIC_API_KEY:key,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_AUTOUPDATER:'1',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',
-    CLAUDE_CODE_MAX_OUTPUT_TOKENS:'512',MAX_THINKING_TOKENS:'0'};
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS:contract.maxOutputTokens,MAX_THINKING_TOKENS:contract.maxThinkingTokens};
 }
 async function stopChild(child:ChildProcess):Promise<void>{
   if(child.exitCode!==null||child.signalCode!==null||!child.pid)return;
@@ -369,6 +399,10 @@ export function createCliWorkflowSseObserver(onEvent:(event:unknown)=>void){
 export async function capturePlatformAccessCliWorkflow(options:CaptureOptions={}):Promise<CliCaptureEvidence>{
   return executeCli({kind:'capture',options}) as Promise<CliCaptureEvidence>;
 }
+/** Provider-free capture preflight for the thinking-enabled observation contract. */
+export async function capturePlatformAccessCliThinkingWorkflow(options:CaptureOptions={}):Promise<CliCaptureEvidence>{
+  return executeCli({kind:'capture',options,scene:'enabled-observation'}) as Promise<CliCaptureEvidence>;
+}
 export async function runPlatformAccessCliWorkflow(context:PlatformFirstRequestCliContext):Promise<PlatformFirstRequestCliResult>{
   return executeCli({kind:'real',context,scene:'thinking-disabled'}) as Promise<PlatformFirstRequestCliResult>;
 }
@@ -378,8 +412,14 @@ export async function runPlatformAccessCliObservationWorkflow(context:PlatformFi
   return executeCli({kind:'real',context,scene:'omitted-observation'}) as Promise<PlatformFirstRequestCliResult>;
 }
 
-async function executeCli(mode:{kind:'capture';options:CaptureOptions}|{kind:'real';context:PlatformFirstRequestCliContext;scene:WorkflowScene}):Promise<CliCaptureEvidence|PlatformFirstRequestCliResult>{
+/** Thinking-enabled observation: the positive-budget counterpart scene. */
+export async function runPlatformAccessCliThinkingObservationWorkflow(context:PlatformFirstRequestCliContext):Promise<PlatformFirstRequestCliResult>{
+  return executeCli({kind:'real',context,scene:'enabled-observation'}) as Promise<PlatformFirstRequestCliResult>;
+}
+
+async function executeCli(mode:{kind:'capture';options:CaptureOptions;scene?:WorkflowScene}|{kind:'real';context:PlatformFirstRequestCliContext;scene:WorkflowScene}):Promise<CliCaptureEvidence|PlatformFirstRequestCliResult> {
   const options=mode.kind==='real'?mode.context:mode.options;
+  const scene=mode.kind==='real'?mode.scene:(mode.scene ?? 'thinking-disabled');
   const gateway=mode.kind==='real'?new URL(mode.context.gatewayOrigin):undefined;
   if(gateway&&(gateway.protocol!=='http:'||gateway.hostname!=='127.0.0.1'||!gateway.port||gateway.pathname!=='/'||gateway.search||gateway.hash||gateway.username||gateway.password))fail();
   const directory=await mkdtemp(join(options.tempDirectory ?? tmpdir(),'platform-cli-'));
@@ -393,7 +433,7 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions}|{kind:'re
   const files=[join(directory,`first-${randomUUID()}.txt`),join(directory,`second-${randomUUID()}.txt`)] as const;
   const answer=randomBytes(24).toString('hex');
   const publicModel=mode.kind==='real'?mode.context.publicModel:'capture-only-public-model';
-  const state=new CliWorkflowObserverState({publicModel,readFiles:files,answer,scene:mode.kind==='real'?mode.scene:'thinking-disabled'});
+  const state=new CliWorkflowObserverState({publicModel,readFiles:files,answer,scene});
   const aux=new CliWorkflowRootHeadObserver();let cliPhase:'version'|'workflow'='version';
   const pending=new Set<Promise<void>>();
   const server=createServer((req,res)=>{const requestCliPhase=cliPhase;let stage:CliWorkflowDiagnosticStage='transport-contract';let body:unknown;let bodyBytes:number|undefined;const operation=(async()=>{
@@ -410,14 +450,14 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions}|{kind:'re
     stage='request-contract';const facts=state.observeRequest({method:req.method ?? '',path:req.url ?? '',body});
     // Omission is an observed fact, not proof of a disabled provider default.
     // Capture may report it, but no paid/live request can cross this boundary.
-    if(mode.kind==='real'&&facts.thinking!==(mode.scene==='omitted-observation'?'omitted':'disabled'))fail(mode.scene==='omitted-observation'?'THINKING_NOT_OMITTED':'THINKING_NOT_DISABLED');
+    if(mode.kind==='real'&&facts.thinking!==(scene==='omitted-observation'?'omitted':scene==='enabled-observation'?'adaptive':'disabled'))fail(scene==='omitted-observation'?'THINKING_NOT_OMITTED':scene==='enabled-observation'?'THINKING_NOT_ENABLED':'THINKING_NOT_DISABLED');
     stage='auth';const expectedKey=mode.kind==='real'?mode.context.customerKey:'capture-only-dummy-key';
     if((req.headers['x-api-key']!==undefined&&req.headers['x-api-key']!==expectedKey)||
        (req.headers.authorization!==undefined&&req.headers.authorization!==`Bearer ${expectedKey}`)||
        (req.headers['x-api-key']!==expectedKey&&req.headers.authorization!==`Bearer ${expectedKey}`))fail('AUTH_MISMATCH');
     if(mode.kind==='capture'){
       capture={cliVersion:CLI_VERSION,messageObserved:true,upstreamContacted:false,request:facts,
-        flags:{isolatedConfig:true,readOnlyTools:true,maxOutputCandidate:true,thinkingDisabledCandidate:true},aux:aux.facts()};
+        flags:{isolatedConfig:true,readOnlyTools:true,maxOutputCandidate:true,...(scene==='enabled-observation'?{thinkingEnabledCandidate:true}:{thinkingDisabledCandidate:true})},aux:aux.facts()};
       res.writeHead(403,{'content-type':'application/json'});res.end('{"error":{"type":"permission_error","message":"capture complete"}}');
       stage='capture-stop';if(cli)await stopChild(cli);return;
     }
@@ -433,7 +473,7 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions}|{kind:'re
     await writeFile(files[0],basename(files[1]),{mode:0o600});await writeFile(files[1],answer,{mode:0o600});
     const mcpPath=join(directory,'empty-mcp.json');await writeFile(mcpPath,JSON.stringify({mcpServers:{}}),{mode:0o600});
     server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')fail();
-    const env=cliEnv(directory,`http://127.0.0.1:${address.port}`,mode.kind==='real'?mode.context.customerKey:'capture-only-dummy-key');
+    const env=cliEnv(directory,`http://127.0.0.1:${address.port}`,mode.kind==='real'?mode.context.customerKey:'capture-only-dummy-key',scene);
     await versionCheck(env,register);
     if(options.signal?.aborted||controller.signal.aborted)fail();
     const prompt=`Use Read to read ${files[0]}. That file names a second file in the same directory. Read the second file using Read, then return exactly its contents. Do not use any other tool or guess the second filename.`;

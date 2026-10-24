@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { ProviderEligibilityResult } from '../../../src/saas/catalog/types.js';
 import type { PreparedSqlStatement, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import { CachedRequestPreparationAuthority } from '../../../src/saas/gateway/cached-request-preparation-authority.js';
 import type { RouteCommercialAuthorityRecord } from '../../../src/saas/gateway/commercial-metering-policy-service.js';
 import type { PostgresPreparationObservation } from '../../../src/saas/gateway/postgres-preparation-observer.js';
 import {
@@ -1433,3 +1434,155 @@ for (const mode of ['byok', 'platform'] as const) {
     );
   });
 }
+
+/*
+ * C0 §29.65: the version-keyed, allow-only cache around the authority
+ * adapter (CachedRequestPreparationAuthority). The admission guard remains
+ * the fail-closed defense line; these tests pin the cache contract itself.
+ */
+
+function cachedInput(
+  mode: Mode,
+  fixture: Fixture,
+  callerOverrides: Partial<RequestPreparationCaller> = {},
+  entitlementOverrides: Partial<RequestPreparationEntitlement> = {},
+): {
+  readonly caller: RequestPreparationCaller;
+  readonly entitlement: RequestPreparationEntitlement;
+  readonly publicModel: string;
+  readonly protocol: 'openai';
+} {
+  return {
+    caller: { ...caller(mode), ...callerOverrides },
+    entitlement: { ...entitlement(mode, fixture.providerScope), ...entitlementOverrides },
+    publicModel: 'public-model',
+    protocol: 'openai',
+  };
+}
+
+test('version-keyed authority cache reuses the allow decision while the version tuple is unchanged', async () => {
+  const fixture = baseFixture('platform');
+  const cached = new CachedRequestPreparationAuthority(adapter(fixture));
+  const first = await cached.resolve(cachedInput('platform', fixture));
+  assert.equal(first.decision, 'allow');
+  if (first.decision !== 'allow') return;
+  const statementsAfterFirst = fixture.statements.length;
+  // Fresh, structurally equal caller/entitlement objects (the production
+  // path re-resolves caller and entitlement per request): the key is
+  // content-based, not identity-based.
+  const second = await cached.resolve(cachedInput('platform', fixture));
+  assert.equal(second.decision, 'allow');
+  assert.equal(fixture.statements.length, statementsAfterFirst, 'a cache hit must not touch PostgreSQL');
+  assert.equal(fixture.eligibilityCalls, 1, 'a cache hit must not re-read catalog eligibility');
+  assert.deepEqual(second, first);
+  // Concurrent identical resolutions collapse into one underlying resolve.
+  const [third, fourth] = await Promise.all([
+    cached.resolve(cachedInput('platform', fixture)),
+    cached.resolve(cachedInput('platform', fixture)),
+  ]);
+  assert.equal(third.decision, 'allow');
+  assert.equal(fourth.decision, 'allow');
+  assert.equal(fixture.statements.length, statementsAfterFirst, 'single-flight must not re-resolve');
+  // Cross-request isolation: mutating a returned decision must not poison the cache.
+  (fourth as { value: { candidate: { accountId: string } } }).value.candidate.accountId = 'mutated';
+  const fifth = await cached.resolve(cachedInput('platform', fixture));
+  assert.equal(fifth.decision, 'allow');
+  if (fifth.decision !== 'allow') return;
+  assert.equal(fifth.value.candidate.accountId, 'platform-account-a');
+  assert.equal(fixture.statements.length, statementsAfterFirst);
+});
+
+test('any version change in the cache key tuple forces a fresh authority resolution', async (t) => {
+  await t.test('caller authz version (proxy key epoch)', async () => {
+    const fixture = baseFixture('platform');
+    const cached = new CachedRequestPreparationAuthority(adapter(fixture));
+    const first = await cached.resolve(cachedInput('platform', fixture));
+    assert.equal(first.decision, 'allow');
+    const second = await cached.resolve(cachedInput('platform', fixture, { authzVersion: 40 }));
+    assert.equal(second.decision, 'allow');
+    assert.equal(fixture.eligibilityCalls, 2, 'the bumped version key must miss and re-resolve');
+  });
+  await t.test('entitlement project policy version', async () => {
+    const fixture = baseFixture('byok');
+    const cached = new CachedRequestPreparationAuthority(adapter(fixture));
+    const first = await cached.resolve(cachedInput('byok', fixture));
+    assert.equal(first.decision, 'allow');
+    const second = await cached.resolve(cachedInput('byok', fixture, {}, { projectPolicyVersion: 30 }));
+    assert.equal(second.decision, 'allow');
+    assert.equal(fixture.eligibilityCalls, 2, 'the bumped version key must miss and re-resolve');
+  });
+  await t.test('supply profile version (caller and entitlement in lockstep, facts moved)', async () => {
+    const fixture = baseFixture('platform');
+    const cached = new CachedRequestPreparationAuthority(adapter(fixture));
+    const first = await cached.resolve(cachedInput('platform', fixture));
+    assert.equal(first.decision, 'allow');
+    // The control plane bumps the supply profile epoch; the new version key
+    // must miss and observe the moved facts.
+    fixture.profile = { ...fixture.profile, authz_version: '60' };
+    fixture.platformRows = [platformCandidate({ grant_profile_authz_version: '60' })];
+    const second = await cached.resolve(
+      cachedInput('platform', fixture, { supplyProfileVersion: 60 }, { supplyProfileVersion: 60 }),
+    );
+    assert.equal(second.decision, 'allow');
+    assert.equal(fixture.eligibilityCalls, 2, 'the bumped version key must miss and re-resolve');
+  });
+});
+
+test('an expired authority cache entry re-resolves from PostgreSQL', async () => {
+  let clock = 1_000_000;
+  const fixture = baseFixture('byok');
+  const cached = new CachedRequestPreparationAuthority(adapter(fixture), { ttlMs: 5000, now: () => clock });
+  const first = await cached.resolve(cachedInput('byok', fixture));
+  assert.equal(first.decision, 'allow');
+  const statementsAfterFirst = fixture.statements.length;
+  clock += 5000; // at the boundary the entry is already expired
+  const second = await cached.resolve(cachedInput('byok', fixture));
+  assert.equal(second.decision, 'allow');
+  assert.ok(fixture.statements.length > statementsAfterFirst, 'an expired entry must re-resolve');
+  assert.equal(fixture.eligibilityCalls, 2);
+});
+
+test('rejected authority decisions are never cached', async () => {
+  const fixture = baseFixture('platform');
+  fixture.platformRows = [];
+  const cached = new CachedRequestPreparationAuthority(adapter(fixture));
+  const denial = {
+    decision: 'reject',
+    code: 'account_denied',
+    message: 'A unique active upstream authority could not be established.',
+  } as const;
+  const first = await cached.resolve(cachedInput('platform', fixture));
+  assert.deepEqual(first, denial);
+  const statementsAfterFirst = fixture.statements.length;
+  const second = await cached.resolve(cachedInput('platform', fixture));
+  assert.deepEqual(second, denial, 'a rejection must never be served from cache');
+  assert.ok(fixture.statements.length > statementsAfterFirst, 'a rejection must be re-resolved every time');
+  // Once the underlying facts allow again, the same input resolves live.
+  fixture.platformRows = [platformCandidate()];
+  const third = await cached.resolve(cachedInput('platform', fixture));
+  assert.equal(third.decision, 'allow');
+  const statementsAfterThird = fixture.statements.length;
+  const fourth = await cached.resolve(cachedInput('platform', fixture));
+  assert.equal(fourth.decision, 'allow');
+  assert.equal(fixture.statements.length, statementsAfterThird, 'the allow decision is now cached');
+});
+
+test('the authority cache evicts the least recently used entry at its size bound', async () => {
+  const fixture = baseFixture('platform');
+  const cached = new CachedRequestPreparationAuthority(adapter(fixture), { maxEntries: 2 });
+  const inputFor = (authzVersion: number) => cachedInput('platform', fixture, { authzVersion });
+  assert.equal((await cached.resolve(inputFor(4))).decision, 'allow');
+  assert.equal((await cached.resolve(inputFor(40))).decision, 'allow');
+  assert.equal(fixture.eligibilityCalls, 2);
+  assert.equal((await cached.resolve(inputFor(400))).decision, 'allow');
+  assert.equal(fixture.eligibilityCalls, 3, 'the third distinct key evicts the least recently used entry');
+  // authzVersion 4 was the least recently used and was evicted; 400 is the
+  // most recent and must still be a hit.
+  const fourth = await cached.resolve(inputFor(400));
+  assert.equal(fourth.decision, 'allow');
+  assert.equal(fixture.eligibilityCalls, 3, 'the most recently used entry must still be a cache hit');
+  // The evicted key misses and re-resolves (evicting 40 in turn).
+  const fifth = await cached.resolve(inputFor(4));
+  assert.equal(fifth.decision, 'allow');
+  assert.equal(fixture.eligibilityCalls, 4, 'an evicted key must miss and re-resolve');
+});
