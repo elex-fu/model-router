@@ -16,6 +16,9 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// Provider plaintext belongs only to the selected suite test process.
+const nonSuiteChildEnv = { ...process.env };
+delete nonSuiteChildEnv.KIMI_CODE_API_KEY;
 const suites = {
   commercial: 'tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts',
   composite: 'tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts',
@@ -152,12 +155,12 @@ function tapCounts(output) {
 const summary = {
   startedAt: new Date().toISOString(),
   finishedAt: null,
-  commit: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim(),
+  commit: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', env: nonSuiteChildEnv }).stdout.trim(),
   backend: docker ? 'disposable-docker-container' : 'disposable-initdb-cluster',
   dockerImage: options.dockerImage ?? null,
   dockerImageId: null,
   containerId: null,
-  postgresVersion: pgBin ? spawnSync(join(pgBin, 'postgres'), ['--version'], { encoding: 'utf8' }).stdout.trim() : null,
+  postgresVersion: pgBin ? spawnSync(join(pgBin, 'postgres'), ['--version'], { encoding: 'utf8', env: nonSuiteChildEnv }).stdout.trim() : null,
   sourceScope: 'literal relative import closure, runner, role manifest, package-lock.json',
   sourceBefore: await sourceSnapshot(),
   sourceAfter: null,
@@ -207,7 +210,7 @@ const interrupt = () => {
 process.once('SIGINT', interrupt);
 process.once('SIGTERM', interrupt);
 
-async function run(stage, command, args, env = process.env, timeoutMs = 180_000) {
+async function run(stage, command, args, env = nonSuiteChildEnv, timeoutMs = 180_000) {
   if (interrupted && stage !== 'stop-cluster' && !stage.startsWith('cleanup-')) throw new Error('interrupted');
   const logPath = join(outputDir, `${stage}.log`);
   const log = await open(logPath, 'w', 0o600);
@@ -365,7 +368,11 @@ try {
     await requireStage(`${suite}-create-db`, ...psqlCommand('postgres', ['-c', `CREATE DATABASE ${database}`]));
     const roles = psqlCommand(database, ['-f', docker ? '/tmp/commercial-roles.sql' : resolve(root, 'deploy/managed-saas-postgres-roles.sql')]);
     await requireStage(`${suite}-roles-before`, ...roles);
-    await requireStage(`${suite}-migrate`, process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'saas:migrate'], env);
+    // Only the suite test imports the live credential into its sealed envelope.
+    // Schema migration has no provider credential dependency.
+    const migrationEnv = { ...env };
+    delete migrationEnv.KIMI_CODE_API_KEY;
+    await requireStage(`${suite}-migrate`, process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'saas:migrate'], migrationEnv);
     await requireStage(`${suite}-roles-after`, ...roles);
     if (needsWorker) await requireStage(`${suite}-worker-roles`, ...psqlCommand(database, ['-f',
       docker ? '/tmp/commercial-worker-roles.sql' : resolve(root, 'deploy/managed-saas-validation-worker-role-grants.sql')]));

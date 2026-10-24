@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.47**：A0 的 P01 DTO 修复已推送；用户明确授权的一次自有 PG 急停恢复 run05 完成原 600 秒等待并到达 scanner，随后 canonical replay 的全租约快照断言失败。失败证据捕获已窄修，生产准备链的无副作用重放及授权修复另行收敛；未重跑故障周期。`87cc8b4` 的 CI 68/68 仅覆盖该历史候选，后续新代码未继承其绿色。Kimi 材料现已提供，A0 尚未执行；M1/M2/M3 与运营发布 GO 均未关闭。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.48**：A0 的 P01 DTO 修复已推送，runner 非测试子进程凭据隔离已获源码审查；真实 A0 尚未执行。用户授权的一次自有 PG 恢复 run05 到达原 600 秒 scanner，随后 canonical replay 全租约快照比较失败；失败证据捕获修复已独立推送 `4858757`，没有重跑。生产准备链的无副作用重放及授权修复另行收敛；`87cc8b4` 的历史 CI 不覆盖新补丁。M1/M2/M3 与运营发布 GO 均未关闭。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1176,3 +1176,13 @@ Astra源码定位发现prepare先scheduler.select/selectAndBind、后admission�
 先独立修复失败可观测性：PG profile在任何replay比较前记录安全canonical固定字段、actual afterReplay authority及同一次mock totals，finally保留首错事实。Astra实际单文件差分复核通过；202/原ID/完整JSON/全authority含lease深比较及mock新增0的原断言均保留，无classifier、租约过滤、过期例外、新SQL或权限变更。此补丁不能追补run05丢失的事实，修改后尚未重跑。没有执行第二次PG故障周期或其它本地测试。
 
 run05的summary/recovery/progress位于`/private/tmp/model-router-p10-postgres-recovery-20261024-run-05/`。cleanup三项均true：所有自有进程停止、PG停止、私有runtime删除；source/dist/harnessChanged全部false，最终精确manifest与fresh build一致。P10完整恢复仍失败，M1/M2/M3及生产故障域/PITR等验收继续开放。后续先完成保持原严格门槛的生产源码修复，再明确后续回归和新增故障周期的授权范围。
+
+### 29.48 A0 runner 的临时凭据作用域与有界调用路径
+
+用户已提供指定配置材料，A0 DTO 修复 `e1adeb6` 已推送。Luna仅只读核对正式 `--suite platform-access` 入口及真实调用路径，发现runner原将整个环境传给迁移CLI，默认PG工具与两处版本查询也会继承临时 `KIMI_CODE_API_KEY`，这些进程均不需要供应商凭据。
+
+Sol仅改 `scripts/run-commercial-postgres-gate.mjs`：从原环境复制非suite子进程环境并仅移除该变量，作为 `run` 默认值及两个 `spawnSync` 的显式环境；迁移仍复制suite环境并显式移除变量。suite测试父进程继续保留临时变量，正常fixture封装数据库凭据及built CLI白名单环境路径不改。Astra全文件核对一个 `spawn`、两个 `spawnSync` 及所有显式环境调用，未遗漏runner直接启动的非suite子进程；没有新增明文参数、文件或日志。此结论限于已审源码，不能泛称任意测试下游进程均自动安全。
+
+调用预算由源码路径推导：单新账户、validation worker `MAX_ATTEMPTS=1`、验证job要求attempt_count恰1，探针只调用一次fetch且max_tokens=8；生成只有一次post，capacity retryBudget=0/remainingAttempts=1、transport无内置重发，max_tokens=32。名义上最多两次模型HTTP调用，输出上限合计40 tokens，不包含输入或供应商实际费用；`providerInferenceCallsExpected=2`只是诊断字段，并非实际网络计数器。任何失败都不得自动重新执行已消耗的探针或生成。
+
+本项只做源码修改与只读审阅，未新增或运行测试、构建、服务或供应商调用。A0须待当前生产源码冻结并审查完成后，按用户提供材料对应的一次探针和一次短生成范围推进；必要当前构建与真实结果另记，不扩大成其它回归、PG故障周期或生产操作。PG诊断修复 `4858757` 已独立推送，严格恢复门槛及M1/M2/M3状态不变。
