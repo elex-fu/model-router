@@ -1329,6 +1329,33 @@ A1o保留max_tokens≤512、最多3次generation/两次真实Read回传/第三�
 
 技术方案§10–11剩余任务表已同步：A1o恢复路径首个动作由“scoped strict/runner语法/27组纯测试再capture”推进为“仅capture”，整合候选的CI绑定明确列入剩余任务。
 
+### 29.61 恢复开发：A1o真实CLI完整工作流通过（run02–run08三根因闭环）
+
+恢复开发后连续执行八轮A1o live，前三轮暴露三个真实根因，全部以实测证据修复，run07/run08端到端通过：
+
+| 轮次 | 结果 | 关键事实 |
+|---|---|---|
+| run01 | 失败于CLI观察阶段（errorCode null） | P01供给全链路通过；观察器失败投影被first-request包装丢弃，无法定位 |
+| run02 | 同上，但投影已透传 | stage=forward/code=CONTRACT_REJECTED、attempt=1、pathCategory=messages-beta、请求形状全部合格 |
+| run03 | 失败于第2轮request-contract | **GW修复生效**：第1轮真实Kimi generation成功（durable request、hold 263680、snapshot、response started）；第2轮被观察器历史核验拒绝 |
+| run04 | 同上，新增结构诊断 | **根因#2实证**：Kimi第1轮返回thinking(20字符+signature)+tool_use，CLI第2轮历史只回放tool_use——Claude Code 2.1.216在MAX_THINKING_TOKENS=0下不回放provider thinking块 |
+| run05 | 失败于第3轮forward | thinking省略规则生效：第1、2轮全部成功；第3轮被GW 429（并发） |
+| run06 | 失败于settlement等待 | 3轮全部受理执行（3 requests/attempts、hold 791040=3×263680、3 snapshots）；usage结算缺失（usage_missing） |
+| run07 | **通过（exit=0, ok=true, 1/1）** | usage观察器修复后端到端通过：3笔settled（4623+4882+5005=14510）、wallet 985490、hold 0、ledger 4/8、4 leases释放 |
+| run08 | **通过（干净候选e988644）** | 复验绑定：3笔settled（4573+4873+4996=14442）、wallet 985558、hold 0、ledger 4/8、4 leases释放；sourceChanges=0、distChanged=false、cleanup完整 |
+
+**根因#1（run02）**：managed-saas GW只接受`authorization: Bearer`，而Claude Code原生发送`x-api-key`→GW 401→观察器forward非合同200。修复`authenticateCaller`接受同一密钥材料的双通道呈现（authorization存在时仍权威且畸形即fail-closed；否则接受有界非空x-api-key），经典proxy本就双通道。新增http-handler测试覆盖（49/49）。这是平台对Claude Code客户端的核心互通缺口，非观察器问题。
+
+**根因#2（run04）**：观察器历史核验假定thinking块完整往返，与实测CLI行为不符。直连CN端点探针（2026-10-24）实证：流式message_delta usage含`output_tokens_details:{thinking_tokens:33}`（33/49、31/47为output子集；thinking disabled时无该字段）。A0当年通过正因显式disabled。修正观察器合同：thinking省略=接受（实测CLI事实）；一旦回放须与观察值逐字节一致且前缀有序；text/tool_use仍严格往返。纯测试28/28（新增CLI省略正向用例）。
+
+**根因#3（run06）**：SSE/JSON usage观察器把`output_tokens_details.thinking_tokens`按未建模维度fail-closed拒绝（invalid_usage→usage_missing→reconciliation hold），故任何含thinking的流式请求永远无法结算。修复：将该字段建模为Kimi profile的provider-bound验证性details（镜像cache_creation先例）：thinking_tokens为output_tokens的非加性信息子计数，结算仍以output_tokens为权威；畸形/未知/不一致分解仍fail-closed。usage观察器相关测试138/138（新增分解正向+5类负向）。
+
+**诊断改进**（随根因发现而加）：first-request失败诊断透传观察器安全固定类别投影（此前errorCode null不可定位）；观察器新增结构-only历史对比（块类型+有界长度，零内容字节）。fixture并发容量2→4（A0单请求形态→A1o设计形态probe+3 generation，异步结算重叠为实测事实；观察器合同禁止429重试故须容量覆盖）。
+
+**验收绑定**：`f27f06c`（GW x-api-key修复）CI 68/68 success；`e988644`（usage观察器+观察器合同修复）CI运行中待收。run08绑定干净`e988644`+fresh build，全程sourceChanges=0、distChanged=false、cleanup完整。完整健康栈通过：tsc exit0、全套件7143测试（images keepalive心跳测试为预存在时序flake，隔离运行2×9/9通过，与本次改动域无关）、改动文件lint零错误（仓库预存在243个错误位于admin/protocol等未触碰文件）。A1o完成诊断边界保持：thinkingModeProven=false、backendRevisionProven=false、providerHardLimitProven=false、productionGo=false。A1o关闭自身有限互通观察，不关闭A1a、完整A1或M1。
+
+证据目录：`/private/tmp/model-router-a1o-live-run0{1..8}-20261024/`（run01复用原wrapper输出目录）。
+
 ### 29.60 恢复开发首轮：run04 capture首次通过，A1o事实合同闭合
 
 用户以明确指令恢复开发（按技术方案开发、最大化并行、聚焦核心能力）。恢复后执行通道立即重跑A1o capture-only preflight（run04）：`RUN_PLATFORM_ACCESS_CLI_OBSERVATION_CAPTURE=1 node --import tsx --test tests/integration/platform-access-cli-observation-live.test.ts`，在整合main工作树（源码与`89b31fd`一致）执行。真实Claude Code 2.1.216在HEAD `/`修复后首次通过observer推进到模型POST，返回的安全投影为`messageObserved=true`、`upstreamContacted=false`、`maxTokens=512`、`thinking=omitted`、`stream=true`、`toolCount=1`；测试1/1 pass、0 fail/0 skip、单测时长约0.67s。日志`/private/tmp/model-router-a1o-capture-run04-20261024/capture-run04.log`。

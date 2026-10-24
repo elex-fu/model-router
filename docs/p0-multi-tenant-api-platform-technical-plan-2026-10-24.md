@@ -404,7 +404,7 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 
 | 优先级/任务 | 暂停状态 | 恢复后的处理方式与出口 |
 |---|---|---|
-| P0 / A1o真实CLI有限互通 | cf已整合main；27组纯测试27/27及六文件scoped strict已过（`89b31fd`）；**run04 capture已通过**——真实CLI模型POST事实齐全（omitted/maxTokens=512/stream/toolCount=1、upstream未接触），真实工具调用仍为0 | 绑定确切候选fresh build并补该候选CI，再正常P01/probe及最多3次generation，逐笔usage/钱包/账本/hold核对 |
+| P0 / A1o真实CLI有限互通 | **已通过（run07/run08）**：run08绑定干净候选`e988644`+fresh build，真实Claude Code 2.1.216经观察器→GW→真实Kimi完成两轮Read+三轮generation，3笔native usage逐笔结算（4573+4873+4996=14442）、wallet 985558、hold 0、ledger 4/8、4 leases释放；`f27f06c` CI 68/68 success，`e988644` CI待收 | 收集`e988644` CI结果完成候选绑定；thinkingModeProven/backendRevisionProven/providerHardLimitProven/productionGo保持false边界；A1o不关闭A1a、完整A1或M1 |
 | P0 / C0首瓶颈定位 | serial完整样本已失败；trace wrapper仅未审草稿，从未执行 | 先审草稿与资源条件，再独占执行同四腿100、request-samples、sampleEvery=1；核200个GW UUID及trace完整性，按markers和exclusive阶段定位，trace成绩不作性能验收 |
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
 | P0 / A1完整指定范围 | A1o不证明thinking已关闭/开启；A1a disabled、thinking enabled、cancel/resume及可获得的模型版本证据开放 | 分场景捕获原始协议事实并实跑；无法取得backend revision时明确未知，不用CLI版本替代，不把有限互通观察写成M1通过 |
@@ -434,7 +434,7 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 | 场景 | 入口与合同 | 暂停时证据 |
 |---|---|---|
 | A1a / `claude-two-read-thinking-disabled` | suite `platform-cli`；live必须capture真实thinking=disabled，omitted不放行 | 源码已实现，尚未观察到模型POST；不能宣告disabled |
-| A1o / `claude-two-read-thinking-omitted-observation` | suite `platform-cli-observation`；独立LIVE/CAPTURE opt-in，实际thinking omitted且max_tokens≤512、stream、唯一Read、公开model匹配后才P01/probe | 新源码静态审查通过；2026-10-24确认轮在整合main `89b31fd`实际完成六文件scoped strict与27组纯测试（27/27 pass），capture/live仍未执行 |
+| A1o / `claude-two-read-thinking-omitted-observation` | suite `platform-cli-observation`；独立LIVE/CAPTURE opt-in，实际thinking omitted且max_tokens≤512、stream、唯一Read、公开model匹配后才P01/probe | **2026-10-24恢复后通过**（run07脏树/run08干净候选`e988644`）：capture+live全链路，3笔generation逐笔结算、hold 0、账务合同满足；GW x-api-key认证、Kimi thinking usage分解、CLI thinking省略回放三根因已修复（详见进度文档29.61） |
 
 官方[环境变量说明](https://code.claude.com/docs/en/env-vars)明确第三方provider下MAX_THINKING_TOKENS=0会省略thinking；省略不等于Kimi禁用。A1o只做有限互通观察，不声称enabled/disabled、供应商硬计费保证、backend revision或生产GO。正数thinking预算1024/output1536仅完成另一候选设计，未实施，不更改当前512上限。
 
@@ -442,7 +442,7 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 
 两个场景均复用正常MFA/注册/资金→真实worker probe→verified/P01→显式客户Key→GW，默认A0单fetch不变。driver上下文只有客户Key/origin/public model/生命周期，无SQL、完整fixture或上游Key。私有第一文件指向随机第二文件，第二文件保存opaque答案；两次真实Read/tool_result后第三个message返回答案，最多3次generation，失败尝试/重试同样计数，保持原body/headers/SSE字节。
 
-仅A1o允许非opaque thinking/signature原样经过，在内存有界核对后续assistant历史的完整值与顺序；redacted/opaque、缺失/篡改/重排拒绝，不输出或持久化思考内容。四个native usage字段必须实际存在且合法；terminal output>512立即使观察失败并阻止后续message，但不能倒转已发生的结算。
+仅A1o允许非opaque thinking/signature原样经过，在内存有界核对后续assistant历史的完整值与顺序；redacted/opaque、缺失/篡改/重排拒绝，不输出或持久化思考内容。四个native usage字段必须实际存在且合法；terminal output>512立即使观察失败并阻止后续message，但不能倒转已发生的结算。**2026-10-24实测修正**：Claude Code 2.1.216在MAX_THINKING_TOKENS=0下不回放provider thinking块（run04结构诊断实证）——thinking省略现为接受的实测CLI事实；一旦回放仍须与观察值逐字节一致且前缀有序；text/tool_use历史往返保持严格。GW侧配套事实：Claude Code原生`x-api-key`认证已被managed-saas GW接受（与Bearer同一密钥材料、同一authenticator）；Kimi含thinking响应的usage携带`output_tokens_details.thinking_tokens`（output_tokens的非加性子计数，2026-10-24直连探针+A1o实证），已建模为provider-bound验证性details，结算仍以output_tokens为权威。
 
 成功仍严格核对三条request/attempt/usage/settlement、三账本事务/六entries、钱包总额及hold0。失败在cleanup前按fixture tenant/project/显式Key读取有限durable/资金快照，真实状态可能是settled、unknown或pending；不伪造unknown、不退款/释放/重派、不补0，诊断consumer异常也不得覆盖首错。请求上限与事后观察不包装为供应商事前硬保证。
 
